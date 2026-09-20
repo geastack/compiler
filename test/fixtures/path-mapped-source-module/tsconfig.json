@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "target": "ES2022",
+    "types": [],
+    "paths": {
+      "node:events": ["./runtime-events.ts"]
+    }
+  },
+  "files": ["main.ts", "ambient-node.d.ts"]
+}

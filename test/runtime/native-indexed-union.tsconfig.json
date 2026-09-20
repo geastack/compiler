@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noUncheckedIndexedAccess": true, "types": [] },
+  "files": ["native-indexed-union.ts"]
+}

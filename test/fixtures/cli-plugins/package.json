@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "name": "cli-plugin-fixtures",
+  "type": "module",
+  "exports": {
+    "./host": "./host.mjs"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noUncheckedIndexedAccess": false,
+    "types": []
+  },
+  "files": ["inferred-array-index-absence.ts"]
+}

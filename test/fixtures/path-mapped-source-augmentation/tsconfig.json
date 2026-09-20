@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "target": "ES2022",
+    "types": [],
+    "paths": {
+      "gea:tags": ["./runtime-tags.ts"]
+    }
+  },
+  "files": ["main.ts", "augments-tags.d.ts"]
+}

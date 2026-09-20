@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "strict": true,
+    "types": [],
+    "lib": ["ES2022"]
+  },
+  "files": ["cli-plugin-entry.ts"]
+}

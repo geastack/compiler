@@ -1,0 +1,108 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - src/**
+      - scripts/**
+      - package.json
+      - package-lock.json
+      - tsconfig.json
+      - .github/workflows/**
+  workflow_dispatch:
+    inputs:
+      node-compat-ref:
+        description: The geastack/node-compat commit to build against.
+        type: string
+        default: main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# This job was a reusable workflow in geastack/pipelines. A public repository
+# cannot call a reusable workflow that lives in a private one, so the job and
+# the shell it runs now live here, under scripts/ci/.
+jobs:
+  hono-hello:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      NODE_COMPAT_REF: ${{ inputs.node-compat-ref || 'main' }}
+
+    steps:
+      - name: Check out the compiler under test, where node-compat's build driver expects it
+        uses: actions/checkout@v7
+        with:
+          path: compiler
+
+      # GEA_CI_TOKEN is only needed while these repositories are private; once
+      # they are readable without it the default job token is enough.
+      - name: Check out geastack/apple, which the compiler depends on by local path
+        uses: actions/checkout@v7
+        with:
+          repository: geastack/apple
+          token: ${{ secrets.GEA_CI_TOKEN || github.token }}
+          path: apple
+
+      - name: Check out geastack/core, which the compiler depends on by local path
+        uses: actions/checkout@v7
+        with:
+          repository: geastack/core
+          token: ${{ secrets.GEA_CI_TOKEN || github.token }}
+          path: core
+
+      - name: Check out node-compat, which holds the app and the runtime
+        uses: actions/checkout@v7
+        with:
+          repository: geastack/node-compat
+          ref: ${{ env.NODE_COMPAT_REF }}
+          token: ${{ secrets.GEA_CI_TOKEN || github.token }}
+          path: node-compat
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            compiler/package-lock.json
+            node-compat/apps/hono-hello/package-lock.json
+
+      - name: Report the toolchain
+        run: compiler/scripts/ci/shared/report-toolchain.sh
+
+      - name: Build the compiler (npm install until its lockfile is synced with the local-path dependencies)
+        run: compiler/scripts/ci/shared/npm-build.sh compiler
+
+      - name: Install the unmodified hono package from npm
+        run: compiler/scripts/ci/node-compat/hono-hello/install.sh
+
+      - name: Transpile hono-hello to C++ and link it with clang++
+        run: compiler/scripts/ci/node-compat/hono-hello/build.sh
+
+      - name: Start the binary and verify both routes byte for byte
+        run: compiler/scripts/ci/node-compat/hono-hello/verify.sh
+
+      - name: Summarize which commits were built
+        if: always()
+        env:
+          COMPILER_REF: ${{ github.sha }}
+          JOB_STATUS: ${{ job.status }}
+        run: compiler/scripts/ci/shared/summarize.sh hono-hello
+
+      - name: Report the result to Slack, when a webhook is configured
+        if: always() && env.SLACK_WEBHOOK_URL != ''
+        uses: slackapi/slack-github-action@v4
+        with:
+          webhook: ${{ env.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "hono-hello *${{ job.status }}* | compiler `${{ github.sha }}` | node-compat `${{ env.NODE_COMPAT_REF }}`\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }

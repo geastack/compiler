@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noImplicitAny": false },
+  "files": ["stored-listener-native-flow.js"]
+}

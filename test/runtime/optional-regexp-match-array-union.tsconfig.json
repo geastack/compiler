@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noUncheckedIndexedAccess": false,
+    "types": []
+  },
+  "files": ["optional-regexp-match-array-union.ts"]
+}

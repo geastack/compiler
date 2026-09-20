@@ -1,0 +1,4 @@
+{
+  "extends": "./inferred-return-union.tsconfig.json",
+  "files": ["native-primitive-brand-guard.runtime.js"]
+}

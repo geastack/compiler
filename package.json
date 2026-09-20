@@ -1,0 +1,95 @@
+{
+  "name": "@geastack/compiler",
+  "version": "1.0.15",
+  "description": "The geastack TypeScript-to-C++ compiler: one semantic spine, no source-shaped authority, no boxing of statically typed values.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/geastack/compiler.git"
+  },
+  "engines": {
+    "node": ">=20.19"
+  },
+  "type": "module",
+  "bin": {
+    "geatsc": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/compiler.d.ts",
+      "import": "./dist/compiler.js"
+    },
+    "./package.json": "./package.json",
+    "./plugin": {
+      "types": "./dist/plugins/model.d.ts",
+      "import": "./dist/plugins/model.js"
+    },
+    "./preparation": {
+      "types": "./dist/project-preparation.d.ts",
+      "import": "./dist/project-preparation.js"
+    },
+    "./dist/*": "./dist/*",
+    "./src/*": "./src/*"
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "src/targets/cpp/runtime/*.h",
+    "src/targets/cpp/runtime/gea_runtime_builtins.cpp",
+    "!dist/**/*.test.js",
+    "!dist/**/*.test.d.ts"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "test:cli-plugins": "node --test test/cli-plugins.mjs",
+    "test:allocation-runtime": "node test/allocation-runtime.mjs",
+    "test:stored-listener-native-flow": "node test/stored-listener-native-flow.mjs",
+    "test:native-typed-field-read": "node test/native-typed-field-read.mjs",
+    "test:native-method-overrides": "node test/native-method-overrides.mjs",
+    "architecture": "node scripts/architecture.mjs && node scripts/refusal-keys.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:commonjs": "node --test test/commonjs-module-record.mjs",
+    "test:global-host-mutations": "node --test dist/semantics/global-this-host-bindings.test.js && node --test dist/semantics/normalize/deferred-intrinsic-protocols.test.js",
+    "test:binding-composition": "node --test dist/semantics/normalize/binding-composition.test.js",
+    "test:dynamic-value-metadata": "node test/dynamic-value-metadata.mjs",
+    "test:native-field-descriptors": "node test/native-field-descriptors.mjs",
+    "test:declaration-overlays": "node --test dist/semantics/declaration-overlay-transform.test.js",
+    "test:recursive-native-carriers": "node test/recursive-native-carriers.mjs",
+    "test:hot-path-shapes": "node test/hot-path-shapes.mjs",
+    "build": "npm run architecture && tsc -p tsconfig.json && node scripts/mark-bins-executable.mjs && npm run test:binding-composition && npm run test:global-host-mutations && node scripts/check-runtime-header.mjs && npm run test:recursive-native-carriers && npm run test:dynamic-value-metadata && node test/compiler-value-contracts.mjs && npm run test:declaration-overlays && npm run test:hot-path-shapes",
+    "gate": "node scripts/emitted-gate.mjs",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "check": "npm run architecture && npm run typecheck && npm run format:check",
+    "check:contracts": "npm run build && node test/contracts.mjs"
+  },
+  "dependencies": {
+    "@geastack/node-compat": "^1.0.11",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "fastify": "^5.0.0",
+    "find-my-way": "9.6.0",
+    "prettier": "^3.8.3"
+  },
+  "peerDependencies": {
+    "@geastack/apple": ">=0.2.8",
+    "@geastack/geatsc-plugin-apple-native": ">=0.1.3",
+    "@geastack/geatsc-plugin-gea": ">=0.1.6"
+  },
+  "peerDependenciesMeta": {
+    "@geastack/apple": {
+      "optional": true
+    },
+    "@geastack/geatsc-plugin-apple-native": {
+      "optional": true
+    },
+    "@geastack/geatsc-plugin-gea": {
+      "optional": true
+    }
+  }
+}

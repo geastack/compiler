@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noImplicitAny": false },
+  "files": ["closed-literal-absent-key-push.runtime.js"]
+}

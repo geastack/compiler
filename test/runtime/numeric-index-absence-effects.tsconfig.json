@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noImplicitAny": false
+  },
+  "files": ["numeric-index-absence-effects.runtime.js"]
+}

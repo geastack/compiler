@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noUncheckedIndexedAccess": false, "types": [] },
+  "files": ["dictionary-named-absence.ts"]
+}
