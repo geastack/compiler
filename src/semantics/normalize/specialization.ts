@@ -1900,9 +1900,7 @@ export const censusSpecializations = (
             .filter((index) => stored.has(index))
             .some((index) =>
               written.some((left) =>
-                written.some(
-                  (right) => left[index] !== right[index] && !openFilling(left[index]) && !openFilling(right[index])
-                )
+                written.some((right) => left[index] !== right[index] && !openFilling(left[index]) && !openFilling(right[index]))
               )
             )
         )
@@ -2006,10 +2004,7 @@ export const censusSpecializations = (
               stored.has(index) &&
               fillings.some(
                 (other, at) =>
-                  minted[at] === true &&
-                  other[index] !== candidate[index] &&
-                  !openFilling(other[index]) &&
-                  !openFilling(candidate[index])
+                  minted[at] === true && other[index] !== candidate[index] && !openFilling(other[index]) && !openFilling(candidate[index])
               )
           )
         // The chosen layout must be one the program actually builds.

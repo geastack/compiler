@@ -68,4 +68,4 @@ console.log(app.fetch('/'))
 console.log(app.fetch('/missing'))
 //! expect: smart(regex) /json#2
 //! expect: smart(regex) /#1
-//! expect: smart(regex) 
+//! expect: smart(regex)

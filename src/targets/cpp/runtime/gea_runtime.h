@@ -5649,6 +5649,7 @@ class TypedArray {
    */
   void setHostBrand(const void* brand) { hostBrand_ = brand; }
   bool hasHostBrand(const void* brand) const { return brand != nullptr && hostBrand_ == brand; }
+  const void* hostBrand() const { return hostBrand_; }
 
   /**
    * ECMA-262 23.2.3.26 `%TypedArray%.prototype.set`, over a source view of any
@@ -5832,6 +5833,41 @@ class TypedArray {
   std::size_t length_ = 0;
   const void* hostBrand_ = nullptr;
 };
+
+/**
+ * What a host brand's views answer to ToString.
+ *
+ * A brand is identity only (see `setHostBrand`), which is enough while the
+ * view's type is known: `buffer.toString()` lowers to the host's own function.
+ * Behind a box it is not. `body + chunk` in a `'data'` listener -- where Node
+ * declares `chunk` as `any` and hands out a Buffer -- is ToPrimitive over an
+ * erased byte view, and the generic answer for a byte view (23.2.3.32, the
+ * comma-joined elements) is not Buffer's, which decodes the bytes as UTF-8.
+ * The host that minted the brand is the only party that knows that, so it
+ * states it here once, keyed by the same opaque address.
+ *
+ * `GEA_HOST_VIEW_TO_STRING` lets a host header register only when this runtime
+ * has the table, so it still builds against a runtime that predates it.
+ */
+#define GEA_HOST_VIEW_TO_STRING 1
+namespace detail {
+using HostViewToString = std::string (*)(const TypedArray<std::uint8_t>&);
+inline std::vector<std::pair<const void*, HostViewToString>>& hostViewToStrings() {
+  static std::vector<std::pair<const void*, HostViewToString>> table;
+  return table;
+}
+inline bool registerHostViewToString(const void* brand, HostViewToString render) {
+  hostViewToStrings().emplace_back(brand, render);
+  return true;
+}
+inline HostViewToString hostViewToStringFor(const void* brand) {
+  if (brand == nullptr) return nullptr;
+  for (const auto& [known, render] : hostViewToStrings()) {
+    if (known == brand) return render;
+  }
+  return nullptr;
+}
+}  // namespace detail
 
 namespace runtime::atomics {
 
@@ -6544,6 +6580,32 @@ struct MaxAlignOf<T, Rest...> {
   static constexpr std::size_t value = alignof(T) > MaxAlignOf<Rest...>::value ? alignof(T) : MaxAlignOf<Rest...>::value;
 };
 
+/**
+ * Whether an arm may be the one a default-constructed union holds.
+ *
+ * A default-constructed `TaggedUnion` has to hold SOMETHING, and which arm it
+ * picks is arbitrary -- the emitter only ever produces one to declare an SSA
+ * slot that is assigned before it is read. Arm 0 is not always a legal choice:
+ * `FunctionValue` deliberately has no default (a Function arm holding a
+ * non-function is the bug its constructors exist to catch), so picking it
+ * aborts a program that has done nothing wrong. Arms opt out here and the
+ * default walks past them.
+ */
+template <typename Arm>
+struct UnionDefaultArm : std::true_type {};
+
+/** The first arm that may be default-constructed; 0 when none opts in. */
+template <typename... Arms>
+struct DefaultUnionArmIndex {
+  static constexpr std::size_t value = [] {
+    constexpr bool allowed[] = {UnionDefaultArm<Arms>::value...};
+    for (std::size_t index = 0; index < sizeof...(Arms); ++index) {
+      if (allowed[index]) return index;
+    }
+    return static_cast<std::size_t>(0);
+  }();
+};
+
 /** Lifetime dispatch over a closed arm set, by index: a raw byte buffer holds whichever arm is live, so construct/copy/move/destroy need a hand-written vtable-by-recursion in place of what the language generates for a real union of non-trivial arms. */
 template <typename... Arms>
 struct TaggedUnionOps;
@@ -6588,7 +6650,9 @@ class TaggedUnion {
     }(std::index_sequence_for<Arms...>{});
   }
 
-  TaggedUnion() : index_(0) { detail::TaggedUnionOps<Arms...>::defaultConstruct(0, &storage_); }
+  TaggedUnion() : index_(detail::DefaultUnionArmIndex<Arms...>::value) {
+    detail::TaggedUnionOps<Arms...>::defaultConstruct(index_, &storage_);
+  }
 
   TaggedUnion(const TaggedUnion& other) : index_(other.index_) {
     detail::TaggedUnionOps<Arms...>::copyConstruct(index_, &storage_, &other.storage_);
@@ -10020,6 +10084,19 @@ class FunctionValue : public Value {
     }
   }
 };
+
+namespace detail {
+/**
+ * Never the arm a default-constructed union holds.
+ *
+ * `FunctionValue()` aborts on purpose, so a union with a Function arm first
+ * could not be declared at all: `gea_union_N v1;` -- the ordinary way the
+ * emitter opens an SSA slot it assigns further down -- killed the process
+ * before the assignment ran. `node:net`'s `Socket.pipe` is one such union.
+ */
+template <>
+struct UnionDefaultArm<FunctionValue> : std::false_type {};
+}
 
 namespace runtime {
 namespace string {
@@ -14682,6 +14759,50 @@ inline const Ref<DynamicObject>& Value::functionProperties() const {
 
 Value dynamicFunctionPrototypeGet(const PropertyKey& key);
 
+namespace detail {
+/**
+ * The own, non-method surface of a boxed typed array: `length`, `byteLength`,
+ * `byteOffset` and the element at a canonical numeric index (ECMA-262 10.4.5,
+ * 23.2.3).
+ *
+ * A typed array reaches a box wherever a library types it `any` -- Node's
+ * `'data'` chunk is the measured case, and `total += chunk.length` is what a
+ * byte-counting handler does with it. The payload type names the element type
+ * exactly, so these four are answerable from the box with no table. Every other
+ * key keeps the refusal below: a method (`slice`, `toString`) needs a callable
+ * this runtime does not mint for an erased view, and answering `undefined`
+ * would be the plausible wrong answer.
+ */
+template <typename Element>
+inline bool boxedTypedArrayOwnAs(const Value& value, const PropertyKey& key, Value& out) {
+  using Handle = gea::Ref<TypedArray<Element>>;
+  if (value.payloadType() != payloadTypeTagFor<Handle>()) return false;
+  const Handle& view = value.as<Handle>();
+  if (!view || key.isSymbol()) return false;
+  std::size_t index = 0;
+  if (arrayIndexOfKey(key, index)) {
+    // 10.4.5.15: an index past the end reads `undefined`, never the prototype.
+    out = index < view->size() ? Value::box(Value::Tag::Number, static_cast<double>((*view)[index])) : Value();
+    return true;
+  }
+  if (key.isNumericSource()) return false;
+  const std::string& name = key.text();
+  if (name == "length") out = Value::box(Value::Tag::Number, static_cast<double>(view->size()));
+  else if (name == "byteLength") out = Value::box(Value::Tag::Number, view->byteLength());
+  else if (name == "byteOffset") out = Value::box(Value::Tag::Number, view->byteOffset());
+  else return false;
+  return true;
+}
+
+inline bool boxedTypedArrayOwn(const Value& value, const PropertyKey& key, Value& out) {
+  return boxedTypedArrayOwnAs<std::uint8_t>(value, key, out) || boxedTypedArrayOwnAs<std::int8_t>(value, key, out) ||
+         boxedTypedArrayOwnAs<ClampedUint8>(value, key, out) || boxedTypedArrayOwnAs<std::int16_t>(value, key, out) ||
+         boxedTypedArrayOwnAs<std::uint16_t>(value, key, out) || boxedTypedArrayOwnAs<std::int32_t>(value, key, out) ||
+         boxedTypedArrayOwnAs<std::uint32_t>(value, key, out) || boxedTypedArrayOwnAs<float>(value, key, out) ||
+         boxedTypedArrayOwnAs<double>(value, key, out);
+}
+}  // namespace detail
+
 inline Value Value::getProperty(const PropertyKey& key) const {
   return getProperty(key, *this);
 }
@@ -14739,6 +14860,8 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
   if (tag_ == Tag::Object) {
     Value method;
     if (detail::boxedPromiseMethod(*this, key, method)) return method;
+    Value own;
+    if (detail::boxedTypedArrayOwn(*this, key, own)) return own;
   }
   if (tag_ == Tag::Object || tag_ == Tag::Function) detail::refuseOpaquePropertyAccess("a property read", key);
   // Every remaining box is a primitive, whose properties all live on a

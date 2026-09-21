@@ -236,6 +236,55 @@ const patternMethods: ReadonlySet<string> = new Set(['test', 'exec', 'toString']
  */
 const resultDataMembers: ReadonlySet<string> = new Set(['index', 'input', 'length', 'groups'])
 
+/**
+ * What each of those members PHYSICALLY holds, per role.
+ *
+ * Stated here because nothing else can state it. These two structs are
+ * compiler-owned native layouts: `representation/derive.ts` deliberately does
+ * NOT seal a record layout for `RegExpExecArray`/`RegExpMatchArray` -- see its
+ * own comment on why sealing "a plausible-looking struct" for them would emit
+ * a program that compiles and is not a regular expression -- so
+ * `recordFieldsOfShape` answers nothing for their shape id and the generic
+ * `narrowedFieldReadText` has no declared carrier to reconcile against. It
+ * therefore returned the bare member load for every read, which is right only
+ * while the read is NOT narrowed.
+ *
+ * It is wrong the moment it is. `if (m.groups !== undefined) m.groups['id']`
+ * publishes the payload while the field stores the optional, and the bare load
+ * emitted `Optional<Ref<Dictionary<std::string>>>` where a
+ * `Ref<Dictionary<std::string>>` was wanted -- `->has` then resolved on
+ * `gea::Ref`, which has no such member, and every program that read a named
+ * capture group by key failed to compile (node-compat's `apps/http-parity`
+ * router was the first). The narrowing obligation the `narrow` parameter
+ * documents was being honoured at the call and dropped inside it, for want of
+ * this table.
+ *
+ * The three optionals are the two interfaces' own `?`, and they differ by
+ * role on purpose: `RegExpExecArray` declares `index`/`input` REQUIRED and
+ * `RegExpMatchArray` declares them optional, because a global pattern's match
+ * really does answer an array with neither. `length` is `double` on an exec
+ * result and the inherited `ArrayObject::length()` on a match result; neither
+ * is optional. Keep this in step with `ExecResult`/`MatchResult` in
+ * `runtime/gea_runtime.h` -- they are the same two facts, and clang checks
+ * only one of them.
+ */
+const namedGroupsStorage: Representation = {
+  kind: 'optional',
+  payload: { kind: 'dictionary', key: 'string', value: { kind: 'string' }, ownership: 'shared-refcount' },
+  absence: 'undefined'
+}
+const numberStorage: Representation = { kind: 'scalar', domain: 'number' }
+const stringStorage: Representation = { kind: 'string' }
+const optionalOf = (payload: Representation): Representation => ({ kind: 'optional', payload, absence: 'undefined' })
+
+const resultDataMemberStorage = (role: RegExpDeclarationKind, key: string): Representation | null => {
+  if (key === 'groups') return namedGroupsStorage
+  if (key === 'length') return numberStorage
+  if (key === 'index') return role === 'match-result' ? optionalOf(numberStorage) : numberStorage
+  if (key === 'input') return role === 'match-result' ? optionalOf(stringStorage) : stringStorage
+  return null
+}
+
 /** Whether `text` is a canonical array index -- a run of digits with no sign, point, or leading zero. */
 const canonicalCaptureSlot = (text: string): boolean => {
   if (text.length === 0) return false
@@ -347,7 +396,12 @@ export const regexpMemberText = (
   // fails to assign. The capture reads below do NOT go through it: they choose
   // between `capture` and `capturedOrAbsent` on the published carrier already,
   // and are not fields at all.
-  narrow: (fieldName: string, storage: string) => string
+  //
+  // `declared` is what the member physically holds. The caller cannot look it
+  // up for these two receivers -- their layout is never sealed -- so this
+  // supplies it from `resultDataMemberStorage`, and passing `null` (a RegExp
+  // pattern member) leaves the caller on its own lookup exactly as before.
+  narrow: (fieldName: string, storage: string, declared: Representation | null) => string
 ): string | null => {
   const role = regexpRoleOf(receiver.representation)
   if (role === null) return null
@@ -388,7 +442,7 @@ export const regexpMemberText = (
         site
       )
     }
-    if (patternDataMembers.has(staticKey)) return narrow(staticKey, `${receiverText}->${staticKey}`)
+    if (patternDataMembers.has(staticKey)) return narrow(staticKey, `${receiverText}->${staticKey}`, null)
     if (deferredRegexpMethodClaim(ctx.staticKeyTexts, receiver, key) !== null) {
       if (result === null) {
         throw createCppEmitBlockedError(
@@ -418,7 +472,7 @@ export const regexpMemberText = (
     // `MatchResult`; one spelling for both compiled the exec result's read as
     // a call on a `double`.
     const member = staticKey === 'length' && role === 'match-result' ? 'length()' : staticKey
-    return narrow(staticKey, `${receiverText}->${member}`)
+    return narrow(staticKey, `${receiverText}->${member}`, resultDataMemberStorage(role, staticKey))
   }
   if (canonicalCaptureSlot(staticKey)) return captureReadText(role, receiverText, staticKey, resultRepresentation)
   // An `Array.prototype` member reached through `extends Array<string>`.

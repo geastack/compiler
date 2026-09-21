@@ -105,7 +105,10 @@ test('field initialization requires presence and payload from one storage contra
   assert.ok(Array.isArray(statements))
   assert.match(statements.join('\n'), /gea_present_.* = true/)
   assert.equal((statements.join('\n').match(/\(self\)/g) ?? []).length, 1, 'initializer is evaluated once')
-  assert.doesNotMatch(cppFieldInitializerStatements(site, owner, [field], 'self', () => ({ value, required: true })).join('\n'), /gea_present_/)
+  assert.doesNotMatch(
+    cppFieldInitializerStatements(site, owner, [field], 'self', () => ({ value, required: true })).join('\n'),
+    /gea_present_/
+  )
   assert.equal(site.printerDrift.length, 0, 'a same-carrier store asks the census nothing')
 })
 

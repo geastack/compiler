@@ -691,8 +691,13 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
   // `re->test`, which is a clang error naming a member instead of a refusal
   // naming the method.
   const regexpMember =
-    regexpMemberText(ctx, operation.receiver, operation.key, operation.result.id, operation.result.representation, (fieldName, storage) =>
-      narrowedFieldReadText(ctx, operation, fieldName, storage)
+    regexpMemberText(
+      ctx,
+      operation.receiver,
+      operation.key,
+      operation.result.id,
+      operation.result.representation,
+      (fieldName, storage, declared) => narrowedFieldReadText(ctx, operation, fieldName, storage, null, declared)
     ) ?? stringObjectMemberText(ctx, operation.receiver, operation.key, operation.result.representation)
   if (regexpMember !== null) {
     // An empty rendering is a deferred RegExp.prototype method read -- see
@@ -1017,9 +1022,19 @@ const narrowedFieldReadText = (
   operation: GetOperation,
   fieldName: string,
   storage: string,
-  presence: string | null = null
+  presence: string | null = null,
+  /**
+   * The member's physical carrier, supplied by a caller that HAS it where the
+   * lookup below cannot. A compiler-owned native layout
+   * (`ExecResult`/`MatchResult`) never gets a sealed record layout, so
+   * `declaredFieldRepresentation` answers null for its members and this
+   * function would hand back the bare load -- correct until the read is
+   * narrowed, and a type error the moment it is. The caller that knows the
+   * struct says so instead of this function guessing.
+   */
+  declaredStorage: Representation | null = null
 ): string => {
-  const declared = declaredFieldRepresentation(ctx, operation.receiver, fieldName)
+  const declared = declaredStorage ?? declaredFieldRepresentation(ctx, operation.receiver, fieldName)
   if (declared === null) return storage
   const published = operation.result.representation
   const present = (() => {

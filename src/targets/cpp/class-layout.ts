@@ -9,6 +9,7 @@ import { classFamilyOverridesOf } from '../../projection/dispatch.js'
 export { classFamilyOverridesOf }
 import { classMemberOf, classStaticMemberOf, type ClassMemberSite } from '../../projection/fields.js'
 export { classMemberOf, classStaticMemberOf, type ClassMemberSite }
+import type { ConstantLiteral } from '../../semantics/model/operands.js'
 import { representationKey, type RecordField, type Representation } from '../../representation/model.js'
 import { alignedValueText, type ConversionSite } from './emit-narrowing.js'
 import { cppBodyName, cppClassName, cppRecordFieldName, cppRecordFieldPresenceName, cppRecordStructName } from './types.js'
@@ -71,6 +72,33 @@ export const cppFieldInitializerStatements = (
       return `field "${field.key}" initializer has no complete physical storage contract`
     }
     const stored = storage.value
+    // A field whose initializer writes the value its storage ALREADY holds.
+    //
+    // `makeRef<T>()` value-initializes -- these structs have no user-provided
+    // constructor, so `T()` zero-initializes and then default-constructs every
+    // member: a `std::string` field is `""` and a `bool` field is `false`
+    // before any statement here runs. `statusMessage = ''` then calls the
+    // field's initializer thunk and assigns its result, and for a
+    // `std::string` that assignment is an out-of-line libstdc++ `_M_replace`
+    // -- per field, per construction. `node:http`'s `ServerResponse` alone
+    // declares five, and it is built once per request.
+    //
+    // Only the store is dropped, and only where dropping it is invisible:
+    // the initializer must BE one constant (`censusConstantFieldInitializers`
+    // proved the thunk is a single `constant` and a `return` of it, so it has
+    // no side effect to lose), its representation must already be the
+    // storage's (no conversion to skip), the field must be required (an
+    // optional's presence bit is `false` by declaration and would still need
+    // setting), and the constant must be the carrier's own value-initialized
+    // value.
+    const constant = constantFieldInitializerOf(site.classes, classDeclaration, field.key)
+    if (
+      constant !== null &&
+      storage.required &&
+      representationKey(field.representation) === representationKey(stored) &&
+      storesTheValueInitializedDefault(stored, constant)
+    )
+      continue
     const markPresent = !storage.required ? ` ${receiver}->${cppRecordFieldPresenceName(field.key)} = true;` : ''
     // A widening may inspect a tagged union's live arm and therefore name its
     // input more than once. A field initializer runs exactly once, so bind its
@@ -316,6 +344,116 @@ export const lazyCalleeReadsOf = (ctx: EmitContext, body: IrBody): ReadonlySet<I
       if (callee.kind === 'function' && callee.functionId !== field.plan.body) continue
       if (ctx.abiOfCallable(field.plan.body) === null) continue
       result.add(id)
+    }
+  }
+  return result
+}
+
+/**
+ * A class field initializer that is one constant and nothing else.
+ *
+ * Carried as the constant's own `text`/`literal` rather than as a decided
+ * boolean because the question "is this redundant" cannot be answered here:
+ * it depends on the PHYSICAL storage the field was given, which
+ * `cppFieldInitializerStatements` learns from its `storedFieldOf` and this
+ * census never sees. This says what the initializer is; that site says what
+ * the storage is; the two together decide.
+ */
+export interface ConstantFieldInitializer {
+  readonly text: string
+  readonly literal: ConstantLiteral
+}
+
+const constantFieldInitializerSidecar = new WeakMap<
+  ReadonlyMap<DeclarationId, ClassLayout>,
+  ReadonlyMap<DeclarationId, ReadonlyMap<string, ConstantFieldInitializer>>
+>()
+
+/** Publishes one compile's constant-field-initializer census. Called once, before any body renders -- mirrors `publishLazyArrowFieldPlans`. */
+export const publishConstantFieldInitializers = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  constants: ReadonlyMap<DeclarationId, ReadonlyMap<string, ConstantFieldInitializer>>
+): void => {
+  constantFieldInitializerSidecar.set(classes, constants)
+}
+
+/** The single constant one class field's initializer evaluates to, or `null` when it is anything else (including in a compile that published no census). */
+export const constantFieldInitializerOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  declaration: DeclarationId,
+  key: string
+): ConstantFieldInitializer | null => constantFieldInitializerSidecar.get(classes)?.get(declaration)?.get(key) ?? null
+
+/**
+ * Whether `storage` value-initializes to exactly what `constant` spells.
+ *
+ * Deliberately only the two carriers whose C++ value-initialized state is a
+ * single known value: `std::string()` is empty and a scalar is zero. Anything
+ * else -- an optional, a union, a `Ref`, a record -- either has a presence or
+ * tag byte the caller must still write or a default this cannot state, and
+ * gets no answer rather than a guessed one.
+ *
+ * `-0` is refused although `Number('-0') === 0`: a value-initialized `double`
+ * is `+0.0`, and the two differ under `Object.is` and `1 / x`. Any negative
+ * spelling that reaches here is one of that family, so the sign test is the
+ * whole check.
+ */
+const storesTheValueInitializedDefault = (storage: Representation, constant: ConstantFieldInitializer): boolean => {
+  if (storage.kind === 'string') return constant.literal === 'string' && constant.text === ''
+  if (storage.kind !== 'scalar') return false
+  if (storage.domain === 'boolean') return constant.literal === 'boolean' && constant.text === 'false'
+  if (storage.domain === 'bigint') return false
+  return constant.literal === 'number' && !constant.text.startsWith('-') && Number(constant.text) === 0
+}
+
+/**
+ * Every class field whose initializer is a single constant.
+ *
+ * The shape admitted is the narrowest one that proves "evaluating this thunk
+ * does nothing but produce this value": one block, one operation in it, that
+ * operation a `constant`, and the block returning that constant's own result.
+ * A thunk with two operations may have computed something; one that returns a
+ * different value than it built is not what it looks like. Neither gets in.
+ *
+ * A REACTIVE field is refused. Its storage is `Cell<T>`, not `T`
+ * (`records.ts`'s `fieldStorageType`), so the assignment runs the cell's own
+ * `operator=` and what a value-initialized cell holds is the cell's business,
+ * not this function's. The refusal reads the plugin's own per-class statement
+ * (`ReactiveCellPlan.fields`) rather than `cell`: gea names a cell spelling in
+ * every compile, reactive or not, so testing `cell !== null` would switch the
+ * census off for every program. It also cannot wait for the settled
+ * `celledFields`, which `cppRecordDeclarations` produces only after this
+ * census has to be published -- but that set is derived from these same
+ * `fields`, so refusing all of them refuses a superset.
+ */
+export const censusConstantFieldInitializers = (
+  bodies: readonly IrBody[],
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  reactiveFields: ReadonlyMap<DeclarationId, ReadonlySet<string>>
+): ReadonlyMap<DeclarationId, ReadonlyMap<string, ConstantFieldInitializer>> => {
+  const result = new Map<DeclarationId, Map<string, ConstantFieldInitializer>>()
+  const bodyBySourceOwner = new Map<FunctionId | RegionId, IrBody>()
+  for (const body of bodies) bodyBySourceOwner.set(body.sourceOwner, body)
+
+  for (const [declaration, layout] of classes) {
+    for (const field of layout.fields) {
+      if (field.initializer === null) continue
+      if (reactiveFields.get(declaration)?.has(field.key)) continue
+      const thunkBody = bodyBySourceOwner.get(field.initializer)
+      if (!thunkBody || thunkBody.blocks.size !== 1) continue
+      const block = [...thunkBody.blocks.values()][0]
+      if (!block || block.operations.length !== 1) continue
+      const only = block.operations[0]
+      if (!only || only.kind !== 'constant') continue
+      const terminator = block.terminator
+      if (terminator.kind !== 'return' || terminator.value === null) continue
+      if (terminator.value.value !== only.result.id) continue
+      let byKey = result.get(declaration)
+      if (!byKey) {
+        byKey = new Map()
+        result.set(declaration, byKey)
+      }
+      byKey.set(field.key, { text: only.text, literal: only.literal })
     }
   }
   return result

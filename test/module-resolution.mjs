@@ -405,31 +405,41 @@ const installed = [
   ['three/src/math/Vector3.js', apps && join(apps, 'apps/three-angle-metal/index.tsx'), /\/three\/src\/math\/Vector3\.js$/]
 ]
 for (const [specifier, entry, expected] of installed) {
-  test(`installed ${specifier}: actual implementation resolves without package-specific mappings`, { skip: entry ? false : 'corpus checkout not configured (GEA_APPS_ROOT / GEA_NODE_COMPAT_ROOT)' }, () => {
-    const file = resolve(compiler, entry)
-    assert.ok(existsSync(file), `Required installed-package test entry is missing: ${file}`)
-    const result = createModuleResolver(ts.sys, options).resolve(specifier, file, ts.ModuleKind.ESNext)
-    assert.match(selected(result) ?? '', expected)
-  })
+  test(
+    `installed ${specifier}: actual implementation resolves without package-specific mappings`,
+    { skip: entry ? false : 'corpus checkout not configured (GEA_APPS_ROOT / GEA_NODE_COMPAT_ROOT)' },
+    () => {
+      const file = resolve(compiler, entry)
+      assert.ok(existsSync(file), `Required installed-package test entry is missing: ${file}`)
+      const result = createModuleResolver(ts.sys, options).resolve(specifier, file, ts.ModuleKind.ESNext)
+      assert.match(selected(result) ?? '', expected)
+    }
+  )
 }
 for (const [specifier, entry, expected] of installed.filter(([specifier]) => ['fastify', 'hono', 'mongodb', 'three'].includes(specifier))) {
-  test(`installed ${specifier}: application loading traverses the implementation graph`, (context) => {
-    const root = resolve(compiler, entry)
-    const result = createProgram({
-      rootFileNames: [root],
-      options,
-      projectFileName: null,
-      dynamicFallback: true,
-      sourceOverlay: new Map([[root, `import * as library from '${specifier}'; console.log(library)`]])
-    })
-    assert.ok(
-      result.sourceFiles.some((file) => expected.test(file.fileName)),
-      `Missing ${specifier} implementation`
-    )
-    const js = result.sourceFiles.filter((file) => /\.(?:js|mjs|cjs)$/.test(file.fileName)).length
-    assert.ok(js > 0)
-    context.diagnostic(
-      `${js} JavaScript implementation files loaded; ${result.diagnostics.length} checker diagnostics (not an end-to-end compilation pass)`
-    )
-  })
+  test(
+    `installed ${specifier}: application loading traverses the implementation graph`,
+    {
+      skip: entry ? false : 'corpus checkout not configured (GEA_APPS_ROOT / GEA_NODE_COMPAT_ROOT)'
+    },
+    (context) => {
+      const root = resolve(compiler, entry)
+      const result = createProgram({
+        rootFileNames: [root],
+        options,
+        projectFileName: null,
+        dynamicFallback: true,
+        sourceOverlay: new Map([[root, `import * as library from '${specifier}'; console.log(library)`]])
+      })
+      assert.ok(
+        result.sourceFiles.some((file) => expected.test(file.fileName)),
+        `Missing ${specifier} implementation`
+      )
+      const js = result.sourceFiles.filter((file) => /\.(?:js|mjs|cjs)$/.test(file.fileName)).length
+      assert.ok(js > 0)
+      context.diagnostic(
+        `${js} JavaScript implementation files loaded; ${result.diagnostics.length} checker diagnostics (not an end-to-end compilation pass)`
+      )
+    }
+  )
 }

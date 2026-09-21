@@ -1550,9 +1550,9 @@ const renderFieldDispatcher = (
         definesByKey,
         lazyPlan !== undefined
           ? `    if (gea_name == ${literal}) { ${materializeText(lazyPlan, access.member)}; return gea::applyNativeFieldDescriptor(` +
-            `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, gea::Value::Tag::${access.tag}); }`
+              `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, gea::Value::Tag::${access.tag}); }`
           : `    if (gea_name == ${literal}) return gea::applyNativeFieldDescriptor(` +
-            `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, gea::Value::Tag::${access.tag});`
+              `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, gea::Value::Tag::${access.tag});`
       )
     } else {
       record(writes, writesByKey, `    if (gea_name == ${literal}) ${refuseFieldText(structName, access.key)}`)

@@ -1734,7 +1734,8 @@ const recastFieldCrossesDynamic = (from: Representation, to: Representation, see
   const target = to.kind === 'optional' ? to.payload : to
   if (representationKey(source) === representationKey(target)) return false
   if ((source.kind === 'dynamic') !== (target.kind === 'dynamic')) return true
-  if (source.kind === 'array-object' && target.kind === 'array-object') return recastFieldCrossesDynamic(source.element, target.element, seen)
+  if (source.kind === 'array-object' && target.kind === 'array-object')
+    return recastFieldCrossesDynamic(source.element, target.element, seen)
   if (source.kind === 'dictionary' && target.kind === 'dictionary') return recastFieldCrossesDynamic(source.value, target.value, seen)
   return recastCrossesDynamicIn(source, target, seen)
 }
@@ -4000,6 +4001,12 @@ const ownsItsStorage = (carrier: Representation): boolean => {
   if (carrier.kind === 'string') return true
   if (carrier.kind === 'class-ref') return carrier.ownership === 'shared-refcount'
   if (carrier.kind === 'optional') return ownsItsStorage(carrier.payload)
+  // A sum owns whatever its live arm owns. `gea::TaggedUnion` has a real move
+  // constructor (`TaggedUnionOps::moveConstruct`), so a dying union hands its
+  // string or reference over instead of `copyConstruct`ing it and then
+  // destroying the original -- per header value, per request, in node-compat's
+  // `writeHead`, where this was three heap copies of one content-type string.
+  if (carrier.kind === 'tagged-union') return carrier.arms.some((arm) => ownsItsStorage(arm.value))
   return false
 }
 

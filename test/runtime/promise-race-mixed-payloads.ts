@@ -13,8 +13,7 @@
 // thenable is already its own resolution. The third is the reason the function
 // is called `readWithoutBlocking` at all -- a first element that never settles
 // must not stall the race, which is exactly what reading its value would do.
-const readOrGiveUp = async (read: Promise<string>, giveUp: Promise<undefined>): Promise<string | undefined> =>
-  Promise.race([read, giveUp])
+const readOrGiveUp = async (read: Promise<string>, giveUp: Promise<undefined>): Promise<string | undefined> => Promise.race([read, giveUp])
 
 const raceWithPlainValue = async (read: Promise<string>): Promise<string> => Promise.race([read, 'literal'])
 

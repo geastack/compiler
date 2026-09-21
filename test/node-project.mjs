@@ -256,74 +256,82 @@ for (const [name, directory, specifier, suffix] of [
     assert.equal(result.implementation?.resolvedFileName, `${packageRoot}${suffix}`)
   })
 // Compiles against the node-compat runtime, which is a separate checkout.
-test('bare geatsc discovers, compiles, links, and runs a Node project', { skip: nodeCompatRoot() ? false : 'set GEA_NODE_COMPAT_ROOT to a checkout of geastack/node-compat' }, () => {
-  const project = resolve(compiler, 'test/fixtures/node-project')
-  const defaultBuild = spawnSync(resolve(compiler, 'dist/cli.js'), [], {
-    cwd: project,
-    encoding: 'utf8',
-    timeout: 120000,
-    maxBuffer: 64 * 1024 * 1024
-  })
-  assert.equal(defaultBuild.status, 0, defaultBuild.stderr)
-  assert.doesNotMatch(defaultBuild.stderr, /\[build\] .* -std=c\+\+20 /)
-  const out = join(project, 'dist/.geatsc/automatic-node-project')
-  const executable = join(project, 'dist/automatic-node-project')
-  const report = JSON.parse(readFileSync(join(out, 'report.json'), 'utf8'))
-  const generatedProject = JSON.parse(readFileSync(join(out, 'tsconfig.json'), 'utf8'))
-  assert.equal(report.linked, true)
-  assert.ok(report.certificate)
-  assert.equal(report.layout, 'single')
-  assert.deepEqual(report.generatedFiles, ['automatic-node-project.cpp'])
-  assert.ok(existsSync(join(out, 'automatic-node-project.cpp')))
-  for (const legacy of ['server.cpp', 'main.cpp', 'gea_runtime.h', 'gea_dynamic_proxy.h', 'gea_eval.h']) {
-    assert.equal(existsSync(join(out, legacy)), false, `${legacy} should not be copied or generated`)
+test(
+  'bare geatsc discovers, compiles, links, and runs a Node project',
+  { skip: nodeCompatRoot() ? false : 'set GEA_NODE_COMPAT_ROOT to a checkout of geastack/node-compat' },
+  () => {
+    const project = resolve(compiler, 'test/fixtures/node-project')
+    const defaultBuild = spawnSync(resolve(compiler, 'dist/cli.js'), [], {
+      cwd: project,
+      encoding: 'utf8',
+      timeout: 120000,
+      maxBuffer: 64 * 1024 * 1024
+    })
+    assert.equal(defaultBuild.status, 0, defaultBuild.stderr)
+    assert.doesNotMatch(defaultBuild.stderr, /\[build\] .* -std=c\+\+20 /)
+    const out = join(project, 'dist/.geatsc/automatic-node-project')
+    const executable = join(project, 'dist/automatic-node-project')
+    const report = JSON.parse(readFileSync(join(out, 'report.json'), 'utf8'))
+    const generatedProject = JSON.parse(readFileSync(join(out, 'tsconfig.json'), 'utf8'))
+    assert.equal(report.linked, true)
+    assert.ok(report.certificate)
+    assert.equal(report.layout, 'single')
+    assert.deepEqual(report.generatedFiles, ['automatic-node-project.cpp'])
+    assert.ok(existsSync(join(out, 'automatic-node-project.cpp')))
+    for (const legacy of ['server.cpp', 'main.cpp', 'gea_runtime.h', 'gea_dynamic_proxy.h', 'gea_eval.h']) {
+      assert.equal(existsSync(join(out, legacy)), false, `${legacy} should not be copied or generated`)
+    }
+    const singleSource = readFileSync(join(out, 'automatic-node-project.cpp'), 'utf8')
+    assert.match(singleSource, /run_compiled_program\(argc, argv, __gea_top_level\)/)
+    assert.deepEqual(Object.keys(generatedProject.compilerOptions.paths), ['@app/*', 'node:process'])
+    if (process.platform === 'darwin') assert.equal(existsSync(`${executable}.dSYM`), false)
+    assert.equal(execFileSync(executable, { encoding: 'utf8' }).trim(), '42')
+
+    const verboseBuild = spawnSync(resolve(compiler, 'dist/cli.js'), ['--verbose'], {
+      cwd: project,
+      encoding: 'utf8',
+      timeout: 120000,
+      maxBuffer: 64 * 1024 * 1024
+    })
+    assert.equal(verboseBuild.status, 0, verboseBuild.stderr)
+    assert.match(verboseBuild.stderr, /\[build\] .* -std=c\+\+20 /)
+
+    const perFileBuild = spawnSync(resolve(compiler, 'dist/cli.js'), ['--translation-units', 'per-file'], {
+      cwd: project,
+      encoding: 'utf8',
+      timeout: 120000,
+      maxBuffer: 64 * 1024 * 1024
+    })
+    assert.equal(perFileBuild.status, 0, perFileBuild.stderr)
+    const perFileReport = JSON.parse(readFileSync(join(out, 'report.json'), 'utf8'))
+    assert.equal(perFileReport.layout, 'per-file')
+    assert.deepEqual(
+      perFileReport.units
+        .filter((unit) => unit.role === 'module')
+        .map((unit) => unit.sourceFile)
+        .sort(),
+      // Exactly the application's two modules and the one builtin it imports.
+      // node-compat roots `whatwg-streams.ts` and `abort-events.ts` in every
+      // program; a unit for either here means an unused class hierarchy
+      // survived pruning (`reachability.ts`, `heritageIsInert`).
+      [join(project, 'src/index.ts'), join(project, 'src/value.ts'), resolve(nodeCompatRoot(), 'runtime/node/process.ts')].sort()
+    )
+    assert.ok(perFileReport.units.some((unit) => unit.role === 'program' && unit.fileName === 'automatic-node-project.cpp'))
+    assert.equal(execFileSync(executable, { encoding: 'utf8' }).trim(), '42')
+
+    const singleEmit = spawnSync(resolve(compiler, 'dist/cli.js'), ['--emit-only'], {
+      cwd: project,
+      encoding: 'utf8',
+      timeout: 120000,
+      maxBuffer: 64 * 1024 * 1024
+    })
+    assert.equal(singleEmit.status, 0, singleEmit.stderr)
+    assert.deepEqual(JSON.parse(readFileSync(join(out, 'report.json'), 'utf8')).generatedFiles, ['automatic-node-project.cpp'])
+    for (const unit of perFileReport.units.filter((unit) => unit.fileName !== 'automatic-node-project.cpp')) {
+      assert.equal(existsSync(join(out, unit.fileName)), false, `${unit.fileName} should be removed when changing layouts`)
+    }
   }
-  const singleSource = readFileSync(join(out, 'automatic-node-project.cpp'), 'utf8')
-  assert.match(singleSource, /run_compiled_program\(argc, argv, __gea_top_level\)/)
-  assert.deepEqual(Object.keys(generatedProject.compilerOptions.paths), ['@app/*', 'node:process'])
-  if (process.platform === 'darwin') assert.equal(existsSync(`${executable}.dSYM`), false)
-  assert.equal(execFileSync(executable, { encoding: 'utf8' }).trim(), '42')
-
-  const verboseBuild = spawnSync(resolve(compiler, 'dist/cli.js'), ['--verbose'], {
-    cwd: project,
-    encoding: 'utf8',
-    timeout: 120000,
-    maxBuffer: 64 * 1024 * 1024
-  })
-  assert.equal(verboseBuild.status, 0, verboseBuild.stderr)
-  assert.match(verboseBuild.stderr, /\[build\] .* -std=c\+\+20 /)
-
-  const perFileBuild = spawnSync(resolve(compiler, 'dist/cli.js'), ['--translation-units', 'per-file'], {
-    cwd: project,
-    encoding: 'utf8',
-    timeout: 120000,
-    maxBuffer: 64 * 1024 * 1024
-  })
-  assert.equal(perFileBuild.status, 0, perFileBuild.stderr)
-  const perFileReport = JSON.parse(readFileSync(join(out, 'report.json'), 'utf8'))
-  assert.equal(perFileReport.layout, 'per-file')
-  assert.deepEqual(
-    perFileReport.units
-      .filter((unit) => unit.role === 'module')
-      .map((unit) => unit.sourceFile)
-      .sort(),
-    [join(project, 'src/index.ts'), join(project, 'src/value.ts'), resolve(nodeCompatRoot(), 'runtime/node/process.ts')].sort()
-  )
-  assert.ok(perFileReport.units.some((unit) => unit.role === 'program' && unit.fileName === 'automatic-node-project.cpp'))
-  assert.equal(execFileSync(executable, { encoding: 'utf8' }).trim(), '42')
-
-  const singleEmit = spawnSync(resolve(compiler, 'dist/cli.js'), ['--emit-only'], {
-    cwd: project,
-    encoding: 'utf8',
-    timeout: 120000,
-    maxBuffer: 64 * 1024 * 1024
-  })
-  assert.equal(singleEmit.status, 0, singleEmit.stderr)
-  assert.deepEqual(JSON.parse(readFileSync(join(out, 'report.json'), 'utf8')).generatedFiles, ['automatic-node-project.cpp'])
-  for (const unit of perFileReport.units.filter((unit) => unit.fileName !== 'automatic-node-project.cpp')) {
-    assert.equal(existsSync(join(out, unit.fileName)), false, `${unit.fileName} should be removed when changing layouts`)
-  }
-})
+)
 
 const preparationFixture = () => {
   const data = new Map([

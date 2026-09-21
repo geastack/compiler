@@ -5534,9 +5534,7 @@ const closedMemberCallableUses = (
       )
       if (origins !== null) {
         const privateDeclarations =
-          ts.isPropertyAccessExpression(callee) && ts.isPrivateIdentifier(callee.name)
-            ? privateMemberDeclarationsOf(callee.name)
-            : null
+          ts.isPropertyAccessExpression(callee) && ts.isPrivateIdentifier(callee.name) ? privateMemberDeclarationsOf(callee.name) : null
         const selected = new Set<ts.SignatureDeclaration>()
         for (const owner of origins.classes) {
           const slotDeclarations =
@@ -7372,7 +7370,8 @@ const spelledLiteralKeysOf = (expression: ts.Expression): ReadonlySet<string> | 
  * refused again as an unexplained use of the receiver.
  */
 /** Every static arm of a computed key's type is numeric: the key can name no identifier-spelled member. */
-const numericKeyType = (type: ts.Type): boolean => (type.isUnion() ? type.types : [type]).every((arm) => (arm.flags & ts.TypeFlags.NumberLike) !== 0)
+const numericKeyType = (type: ts.Type): boolean =>
+  (type.isUnion() ? type.types : [type]).every((arm) => (arm.flags & ts.TypeFlags.NumberLike) !== 0)
 
 const computedKeyMayBeMember = (checker: ts.TypeChecker, argument: ts.Expression, key: string): boolean => {
   const type = checker.getTypeAtLocation(argument)

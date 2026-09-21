@@ -360,8 +360,7 @@ export const reactiveDependenciesOfBodies = (
   reactive: ReactiveCellPlan
 ): ReactiveDependencyCensus => {
   const empty = new Map<FunctionId | RegionId, readonly ReactiveDependency[]>()
-  if (reactive.cell === null || (reactive.celled.size === 0 && reactive.revisions.size === 0))
-    return { all: empty, node: empty }
+  if (reactive.cell === null || (reactive.celled.size === 0 && reactive.revisions.size === 0)) return { all: empty, node: empty }
 
   const direct = new Map<FunctionId | RegionId, readonly ReactiveDependency[]>()
   const directStructural = new Map<FunctionId | RegionId, readonly ReactiveDependency[]>()
@@ -371,8 +370,14 @@ export const reactiveDependenciesOfBodies = (
   for (const body of bodies) {
     const owner = body.sourceOwner
     const found = dependenciesOfBody(body, classes, reactive)
-    direct.set(owner, found.map((entry) => entry.dependency))
-    directStructural.set(owner, found.filter((entry) => entry.structural).map((entry) => entry.dependency))
+    direct.set(
+      owner,
+      found.map((entry) => entry.dependency)
+    )
+    directStructural.set(
+      owner,
+      found.filter((entry) => entry.structural).map((entry) => entry.dependency)
+    )
     results.set(owner, operationsByResult(body))
     const bodyCalls = receiverEdgesOf(body, classes)
     calls.set(owner, bodyCalls)

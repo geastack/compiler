@@ -605,7 +605,8 @@ const emitLazyArrowFieldCall = (ctx: EmitContext, lines: string[], operation: Ca
   // and declines the fusion.
   const storedField = ctx.classes.get(site.owner)?.fields.find((field) => field.key === fieldName)?.representation ?? null
   const storedAbi =
-    storedField !== null && (storedField.kind === 'function' || storedField.kind === 'function-family' || storedField.kind === 'function-value-dispatch')
+    storedField !== null &&
+    (storedField.kind === 'function' || storedField.kind === 'function-family' || storedField.kind === 'function-value-dispatch')
       ? storedField.abi
       : callee.abi
   const bodyAbi = ctx.abiOfCallable(plan.body)

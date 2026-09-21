@@ -31,8 +31,7 @@ class Ctx<E, P extends string = string, I extends object = object> {
   }
 }
 
-const settled = async (produced: Rsp | Promise<Rsp>): Promise<string> =>
-  (produced instanceof Rsp ? produced : await produced).body
+const settled = async (produced: Rsp | Promise<Rsp>): Promise<string> => (produced instanceof Rsp ? produced : await produced).body
 
 const main = async (): Promise<void> => {
   const bare = new Ctx<string, '/here', { seen: number }>()

@@ -38,17 +38,16 @@ import ts from 'typescript'
  * - A **function declaration**. Its evaluation is `InstantiateFunctionObject`:
  *   a closure is created and bound. Nothing observable happens, and the body
  *   does not run.
- * - A **class declaration** with no decorators, no `extends` clause, no static
+ * - A **class declaration** with no decorators, no static
  *   block, no static field initializer and no computed member name.
  *   `ClassDefinitionEvaluation` for such a class evaluates nothing at all, and
  *   this compiler lowers class evaluation to *no runtime step at all*
  *   (`ir/lower.ts`, `case 'class-lifecycle'`): the struct and the construct
  *   function it emits already are the layout the definition events record. A
  *   static block or a static initializer is the opposite -- each is a real
- *   region with a body -- so a class carrying one is kept; so is a class with
- *   a heritage clause, whose one definition-time step (the heritage read) is
- *   the event the projection takes the struct's base from (see
- *   `classDefinitionIsInert`).
+ *   region with a body -- so a class carrying one is kept. An `extends`
+ *   clause is tolerated only in the two spellings `heritageIsInert` proves
+ *   evaluate nothing; any other base keeps the class.
  * - A **variable statement** whose every declarator binds a plain name and has
  *   either no initializer or an initializer drawn from `initializerIsInert`'s
  *   whitelist: literals, function/arrow/class expressions, and object/array
@@ -248,20 +247,61 @@ const computedKeyIsInert = (checker: ts.TypeChecker, name: ts.ComputedPropertyNa
   return declarations.length > 0 && declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile)
 }
 
+/**
+ * Whether evaluating a class's `extends` clause is provably not an action.
+ *
+ * `ClassDefinitionEvaluation` (15.7.14) evaluates the heritage expression and
+ * requires a constructor. Two spellings cannot do anything else. A bare
+ * identifier naming a class DECLARED EARLIER at the top level of the same file
+ * is a read of an initialized binding -- past its temporal dead zone, never a
+ * getter, always a constructor. And a bare identifier whose every declaration
+ * is ambient names the language's own intrinsic (`Error`), for the reason
+ * `computedKeyIsInert` gives. Everything else is kept: a call (`mixin(Base)`),
+ * a property read (`ns.Base`, which can be a getter), a base declared later
+ * (a TDZ throw), and an imported base, whose module a cycle may not have
+ * evaluated yet.
+ *
+ * This used to answer `false` for every `extends`, for a reason that was never
+ * about evaluation: `projection/classes.ts` takes a struct's base from the
+ * heritage event a LIVE class publishes, so pruning a subclass some type still
+ * named left `struct One final {}` with no base under an upcast. That is a
+ * question about who names the class, and `markTypeNamedClasses` now answers
+ * it where it belongs -- a class any live annotation, alias or interface names
+ * is opened for its layout and publishes that event. What is pruned here is a
+ * subclass NOTHING names, whose struct nothing emits.
+ *
+ * The blanket rule's cost was every unused hierarchy in a rooted script:
+ * node-compat's `whatwg-streams.ts` and `abort-events.ts` are roots of every
+ * program, so every program carried `ReadableByteStreamController`,
+ * `TextEncoderStream`, `DOMException` and, through them, the whole stream
+ * implementation -- ~2.4k emitted lines in a program that prints one number.
+ */
+const heritageIsInert = (checker: ts.TypeChecker, node: ts.ClassLikeDeclaration): boolean => {
+  for (const clause of node.heritageClauses ?? []) {
+    if (clause.token !== ts.SyntaxKind.ExtendsKeyword) continue
+    for (const type of clause.types) {
+      if (!ts.isIdentifier(type.expression)) return false
+      const declarations = checker.getSymbolAtLocation(type.expression)?.declarations ?? []
+      if (declarations.length === 0) return false
+      if (declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile)) continue
+      const file = node.getSourceFile()
+      const settled = declarations.every(
+        (declaration) =>
+          ts.isClassDeclaration(declaration) &&
+          declaration.getSourceFile() === file &&
+          declaration.parent === file &&
+          declaration.end <= node.pos
+      )
+      if (!settled) return false
+    }
+  }
+  return true
+}
+
 /** Whether a class's *definition* evaluates anything beyond binding its own name. */
 const classDefinitionIsInert = (checker: ts.TypeChecker, node: ts.ClassLikeDeclaration): boolean => {
   if (ts.canHaveDecorators(node) && (ts.getDecorators(node)?.length ?? 0) > 0) return false
-  // The one step `ClassDefinitionEvaluation` performs for a decorator-free
-  // class is its heritage read, and that step is not inert in THIS compiler
-  // even though it calls nothing: `projection/classes.ts` reads a class's
-  // `base` link off the class-lifecycle heritage event the census publishes
-  // for the definition, and `records.ts` spells `struct D : B` from that
-  // link alone -- while the struct itself is emitted whenever the class's
-  // shape is reachable, which a type position keeps it. Pruning an
-  // un-instantiated `class One extends Base` whose type still names a union
-  // arm emitted `struct One final {}` with no base, and the upcast
-  // `Ref<Base>(Ref<One>)` the union's recast renders stopped compiling.
-  if (node.heritageClauses?.some((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)) return false
+  if (!heritageIsInert(checker, node)) return false
   return node.members.every((member) => {
     if (ts.canHaveDecorators(member) && (ts.getDecorators(member)?.length ?? 0) > 0) return false
     // A static block is a body that runs at definition time, and a computed key
@@ -388,6 +428,30 @@ const objectMemberIsInert = (checker: ts.TypeChecker, member: ts.ObjectLiteralEl
  * module (TS2448, which this compiler refuses the program for), it does not
  * across an import cycle.
  */
+/**
+ * `Symbol()` / `Symbol('description')` on the language's own `Symbol`.
+ *
+ * ECMA-262 20.4.1.1 does one thing a program could observe: `ToString` of the
+ * description, and `ToString` of a string literal (or of nothing) runs no
+ * code. What is left is minting a symbol, and a symbol bound to a name nothing
+ * reads is not observable -- which is the only case this is ever asked about,
+ * because a binding something names is opened regardless. The callee must be
+ * the ambient intrinsic for the reason `computedKeyIsInert` gives: a user
+ * `Symbol` is an ordinary call.
+ *
+ * A module-private brand token is what reaches it: node-compat's
+ * `abort-events.ts` is a root of every program and declares
+ * `const abortSignalConstructionToken = Symbol('AbortSignal construction')`,
+ * so every program kept a module body whose whole content was that call.
+ */
+const intrinsicSymbolCallIsInert = (checker: ts.TypeChecker, node: ts.CallExpression): boolean => {
+  if (!ts.isIdentifier(node.expression) || node.expression.text !== 'Symbol' || node.arguments.length > 1) return false
+  const description = node.arguments[0]
+  if (description !== undefined && !ts.isStringLiteral(description) && !ts.isNoSubstitutionTemplateLiteral(description)) return false
+  const declarations = checker.getSymbolAtLocation(node.expression)?.declarations ?? []
+  return declarations.length > 0 && declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile)
+}
+
 const initializerIsInert = (checker: ts.TypeChecker, node: ts.Expression): boolean => {
   if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node))
     return initializerIsInert(checker, node.expression)
@@ -432,7 +496,7 @@ const initializerIsInert = (checker: ts.TypeChecker, node: ts.Expression): boole
       declarations.every((declaration) => ts.isClassDeclaration(declaration) && declaration.getSourceFile() === node.getSourceFile())
     )
   }
-  if (ts.isCallExpression(node)) return closureFactoryCallIsInert(checker, node)
+  if (ts.isCallExpression(node)) return intrinsicSymbolCallIsInert(checker, node) || closureFactoryCallIsInert(checker, node)
   // `-1` and `+1` are how a negative numeric constant is spelled; nothing else
   // unary is admitted, because every other operand form can reach user code.
   if (ts.isPrefixUnaryExpression(node)) {
@@ -673,9 +737,39 @@ const evaluatesNothing = (file: ts.SourceFile): boolean =>
     if (ts.isExportDeclaration(statement)) {
       if (statement.isTypeOnly) return true
       if (statement.moduleSpecifier !== undefined) return false
-      return statement.exportClause !== undefined && ts.isNamedExports(statement.exportClause) && statement.exportClause.elements.length === 0
+      return (
+        statement.exportClause !== undefined && ts.isNamedExports(statement.exportClause) && statement.exportClause.elements.length === 0
+      )
     }
-    return ts.canHaveModifiers(statement) && (ts.getModifiers(statement) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword)
+    return (
+      ts.canHaveModifiers(statement) &&
+      (ts.getModifiers(statement) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword)
+    )
+  })
+
+/**
+ * Whether the statements this program REACHES in `file` evaluate anything.
+ *
+ * `evaluatesNothing` above is the syntactic answer for a whole file;
+ * this is the same question after pruning, and it is the one the entry needs:
+ * a module body is called because something in it runs. A class retained for
+ * its LAYOUT alone is the case that separates them. It is a live statement --
+ * it publishes a class-lifecycle operation, so the census gives its file a
+ * module-body region -- and by `layoutClasses`' own definition it runs no
+ * constructor, no initializer and no module effect, so lowering gives that
+ * region no body. A rooted script whose every class is pruned except one some
+ * annotation names (node-compat's `whatwg-streams.ts`, in a program that
+ * touches no stream) was scheduled on the strength of the region and refused
+ * by the printer for want of the body.
+ */
+export const fileEvaluates = (reachable: ProgramReachability, file: ts.SourceFile): boolean =>
+  reachable.statementsOf(file).some((statement) => {
+    if (ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)) return false
+    if (ts.isClassDeclaration(statement) && reachable.classIsLayoutOnly(statement)) return false
+    return !(
+      ts.canHaveModifiers(statement) &&
+      (ts.getModifiers(statement) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword)
+    )
   })
 
 export const moduleEvaluationOrder = (input: ReachabilityInput): readonly ts.SourceFile[] => {
@@ -891,11 +985,24 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
    * header already gives, and layout-only is the smallest promotion there is:
    * no module evaluation, no constructor, no member body.
    */
+  // A type alias or interface is a NAME for the types inside it, so a class it
+  // names is named by whatever names the alias: `type Arm = One | Two` then
+  // `let v: Arm` types a live cell as `One`. The walk never enters a type
+  // declaration on its own (`markReferences` returns on both), so it is entered
+  // here, once, from the reference that makes it matter. This is what lets
+  // `heritageIsInert` prune an unnamed subclass without losing a named one.
+  const followedTypeDeclarations = new Set<ts.Node>()
   const markTypeNamedClasses = (node: ts.Node): void => {
     const named = ts.isTypeReferenceNode(node) ? node.typeName : ts.isExpressionWithTypeArguments(node) ? node.expression : null
     if (named !== null) {
       const symbol = input.checker.getSymbolAtLocation(named)
       for (const declaration of symbol ? declarationsOf(input.checker, symbol) : []) {
+        if (ts.isTypeAliasDeclaration(declaration) || ts.isInterfaceDeclaration(declaration)) {
+          if (followedTypeDeclarations.has(declaration)) continue
+          followedTypeDeclarations.add(declaration)
+          ts.forEachChild(declaration, markTypeNamedClasses)
+          continue
+        }
         if (!ts.isClassDeclaration(declaration)) continue
         const file = declaration.getSourceFile()
         if (!compiled.has(file) || !topLevelOf(file).has(declaration) || liveStatements.has(declaration)) continue

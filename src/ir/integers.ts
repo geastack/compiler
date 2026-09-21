@@ -359,7 +359,28 @@ export const narrowableIntegersOf = (body: IrBody, storage: IntegerStorageFacts 
     // result is an integer no matter what reached it.
     if (bitwiseOperators.has(compute.operator) && (compute.form === 'binary' || compute.form === 'unary')) return true
     if (compute.form === 'update') return integral.has(left.value)
-    if (compute.form === 'unary') return (compute.operator === '-' || compute.operator === '+') && integral.has(left.value)
+    if (compute.form === 'unary') {
+      if (compute.operator !== '-' && compute.operator !== '+') return false
+      // Negating a zero this census can SEE is the one negation whose result a
+      // 64-bit integer cannot carry. `-0` is an integer by every arithmetic
+      // test -- `Number.isSafeInteger(-0)` is true and `-0 === 0` -- so nothing
+      // else here strikes it; but two's complement has a single zero, and the
+      // sign is gone at the store. ECMA-262 can read that sign back
+      // (`Object.is(x, -0)` is true where `Object.is(x, 0)` is false, and
+      // `1 / -0` is `-Infinity`), so a slot narrowed on the strength of a `-0`
+      // answers both the other way with no diagnostic. `emit.ts` already
+      // spells this operand `-0.0` for exactly that reason; the value it
+      // carefully produces is then rounded away by the storage this census
+      // hands out.
+      //
+      // Only the statically visible one is refused. A `-0` that arises at
+      // runtime -- `x * -1`, `-1 % 1`, `x - x` never, but `x * y` with either
+      // zero -- is the same class of hazard as an overflowing sum, which this
+      // design already tolerates: refusing every product and remainder that
+      // COULD be a negative zero would narrow nothing at all.
+      if (compute.operator === '-' && constants.get(left.value) === 0) return false
+      return integral.has(left.value)
+    }
     if (compute.form !== 'binary' || !right) return false
     if (compute.operator === '%') {
       const divisor = constants.get(right.value)

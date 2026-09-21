@@ -67,7 +67,13 @@ import type { CellFactsPublication } from './normalize/cells/index.js'
 import type { StructuralDisagreement, StructuralFormViolation } from './normalize/structural-rules.js'
 import { settleBindingCensus, type RoundCensus } from './normalize/binding-fixpoint.js'
 import { withJsDocTypeNames } from './normalize/jsdoc-type-names.js'
-import { censusReachability, moduleEvaluationOrder, nodeIsReachable, type ProgramReachability } from './normalize/reachability.js'
+import {
+  censusReachability,
+  fileEvaluates,
+  moduleEvaluationOrder,
+  nodeIsReachable,
+  type ProgramReachability
+} from './normalize/reachability.js'
 import { createProgram, defaultCompilerOptions } from './program.js'
 import { createFrontendTiming } from './frontend-timing.js'
 import type { DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
@@ -1811,7 +1817,10 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // reachability walk pruned whole, or one whose top level censused nothing,
     // has no region -- and a name in this list that no region answers would be
     // a call to a function nothing defines.
+    // `fileEvaluates` is the reached-statement half of that: a file kept only
+    // for a layout-only class has a region and, by design, no body.
     moduleOrder: moduleEvaluationOrder({ checker: compiled.checker, files: compiled.sourceFiles, entries: compiled.entryFiles })
+      .filter((file) => fileEvaluates(reachable, file))
       .map((file) => regionId(identities.nodeIdOf(file), 'module-body'))
       .filter((region) => normalized.graph.regions.has(region)),
     sourceFileNames: identities.sourceFileNames,

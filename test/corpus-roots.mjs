@@ -22,5 +22,4 @@ const rootFrom = (variable, marker) => {
 export const appsRoot = () => rootFrom('GEA_APPS_ROOT', 'apps')
 export const nodeCompatRoot = () => rootFrom('GEA_NODE_COMPAT_ROOT', 'apps')
 
-export const skipWithout = (root, variable) =>
-  root ? false : `set ${variable} to a checkout that holds the corpus for this test`
+export const skipWithout = (root, variable) => (root ? false : `set ${variable} to a checkout that holds the corpus for this test`)

@@ -258,9 +258,7 @@ test('every way an origin can gain an unenumerated key refuses', () => {
 // gea CLI sets), never guessed; the probes skip without it.
 const appsRoot = process.env.GEA_APPS_ROOT ?? ''
 const threeSource = appsRoot ? resolve(appsRoot, 'node_modules/three/src') : ''
-const skipWithoutThree = existsSync(threeSource)
-  ? false
-  : 'set GEA_APPS_ROOT to an app project root with three installed'
+const skipWithoutThree = existsSync(threeSource) ? false : 'set GEA_APPS_ROOT to an app project root with three installed'
 const probeThree = (entrySource: string) => {
   const { checker, flow, program } = programOf(resolve('test/fixtures/computed-key-set-three.js'), entrySource, true)
   const setValuesKey = (relative: string): ts.Expression => {

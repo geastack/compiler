@@ -247,7 +247,8 @@ export const structuralRecordViewPlan = (
     // when exactly one home takes the record without widening a field into
     // `dynamic`, that home is the answer, and the ambiguity guard below is
     // reserved for arms that genuinely tie.
-    const exact = homes.length > 1 ? homes.filter((candidate) => !widensFieldIntoDynamic(layouts, source, target.arms[candidate.index]!.value)) : homes
+    const exact =
+      homes.length > 1 ? homes.filter((candidate) => !widensFieldIntoDynamic(layouts, source, target.arms[candidate.index]!.value)) : homes
     const home = exact.length === 1 ? exact[0] : undefined
     return home === undefined ? null : { kind: 'arm', source, target, index: home.index, payload: home.payload }
   }

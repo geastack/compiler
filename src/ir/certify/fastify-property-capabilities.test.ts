@@ -7,9 +7,7 @@ import { compile } from '../../compiler.js'
 // location is supplied rather than guessed and the tests skip without it.
 const nodeCompatRoot = process.env.GEA_NODE_COMPAT_ROOT ?? ''
 const fastifyPackage = nodeCompatRoot ? resolve(nodeCompatRoot, 'apps/fastify-hello/node_modules') : ''
-const skipWithoutCorpus = fastifyPackage
-  ? false
-  : 'set GEA_NODE_COMPAT_ROOT to a checkout of geastack/node-compat'
+const skipWithoutCorpus = fastifyPackage ? false : 'set GEA_NODE_COMPAT_ROOT to a checkout of geastack/node-compat'
 
 const propertyRootsOf = (source: string): readonly string[] => {
   const result = compile({ rootFileNames: [source], projectFileName: null, javaScriptSources: true, dynamicFallback: true })

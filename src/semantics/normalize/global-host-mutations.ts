@@ -4299,7 +4299,7 @@ export const censusGlobalHostMutations = (
     // value.
     if ((ts.isImportSpecifier(parent) || ts.isExportSpecifier(parent)) && parent.propertyName === node) return true
     return (
-      ((ts.isVariableDeclaration(parent) ||
+      (ts.isVariableDeclaration(parent) ||
         ts.isImportSpecifier(parent) ||
         ts.isExportSpecifier(parent) ||
         ts.isImportClause(parent) ||
@@ -4324,7 +4324,7 @@ export const censusGlobalHostMutations = (
         ts.isPropertyAssignment(parent) ||
         ts.isShorthandPropertyAssignment(parent) ||
         ts.isTypeParameterDeclaration(parent)) &&
-        parent.name === node)
+      parent.name === node
     )
   }
   let globalEscapeAnswer: boolean | null = null

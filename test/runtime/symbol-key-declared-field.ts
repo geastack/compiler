@@ -29,7 +29,7 @@ const keyA = Symbol('keyA')
 const keyB = Symbol('keyB')
 
 class Pair {
-  [keyA]: number | undefined
+  [keyA]: number | undefined;
   [keyB]: string | undefined
 }
 

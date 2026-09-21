@@ -6,7 +6,10 @@ class Incoming {
   constructor(readonly url: string) {}
 }
 class IncomingTwo extends Incoming {
-  constructor(url: string, readonly stream: number) {
+  constructor(
+    url: string,
+    readonly stream: number
+  ) {
     super(url)
   }
 }

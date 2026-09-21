@@ -89,8 +89,46 @@ inline Value ordinaryToPrimitive(const Value& value, ToPrimitiveHint hint) {
   host::throwRuntimeError("TypeError", "Cannot convert object to primitive value");
 }
 
+/**
+ * ToPrimitive of a boxed typed array, which is always its ToString.
+ *
+ * A typed array is a native carrier with no dynamic property surface: it has no
+ * `@@toPrimitive`, its `valueOf` is Object's and returns the object, and
+ * nothing a program can do installs either on it. So 7.1.1 lands on
+ * `%TypedArray%.prototype.toString` for every hint, and that is knowable from
+ * the payload type alone -- without it the generic path below asks the box for
+ * `@@toPrimitive` and the box, having no field table, refuses by name. A view
+ * whose host brand states its own ToString (Node's Buffer) answers with that.
+ */
+template <typename Element>
+inline bool boxedTypedArrayToStringAs(const Value& value, std::string& out) {
+  using Handle = gea::Ref<TypedArray<Element>>;
+  if (value.payloadType() != detail::payloadTypeTagFor<Handle>()) return false;
+  const Handle& view = value.as<Handle>();
+  if constexpr (std::is_same_v<Element, std::uint8_t>) {
+    if (view) {
+      if (const detail::HostViewToString render = detail::hostViewToStringFor(view->hostBrand())) {
+        out = render(*view);
+        return true;
+      }
+    }
+  }
+  out = runtime::array::join(view);
+  return true;
+}
+
+inline bool boxedTypedArrayToString(const Value& value, std::string& out) {
+  if (value.tag() != Value::Tag::Object || value.isProxy()) return false;
+  return boxedTypedArrayToStringAs<std::uint8_t>(value, out) || boxedTypedArrayToStringAs<std::int8_t>(value, out) ||
+         boxedTypedArrayToStringAs<ClampedUint8>(value, out) || boxedTypedArrayToStringAs<std::int16_t>(value, out) ||
+         boxedTypedArrayToStringAs<std::uint16_t>(value, out) || boxedTypedArrayToStringAs<std::int32_t>(value, out) ||
+         boxedTypedArrayToStringAs<std::uint32_t>(value, out) || boxedTypedArrayToStringAs<float>(value, out) ||
+         boxedTypedArrayToStringAs<double>(value, out);
+}
+
 inline Value dynamicToPrimitive(const Value& value, ToPrimitiveHint hint = ToPrimitiveHint::Default) {
   if (!isObjectValue(value)) return value;
+  if (std::string text; boxedTypedArrayToString(value, text)) return Value::box(Value::Tag::String, std::move(text));
   const Value exotic = value.getProperty(PropertyKey::symbol(wellKnownSymbol(detail::WellKnownSymbol::ToPrimitive)));
   if (exotic.tag() != Value::Tag::Undefined && exotic.tag() != Value::Tag::Null) {
     if (exotic.tag() != Value::Tag::Function) host::throwRuntimeError("TypeError", "@@toPrimitive is not callable");

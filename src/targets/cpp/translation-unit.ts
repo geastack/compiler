@@ -56,11 +56,13 @@ import {
 } from './emit-context.js'
 import {
   censusClassStaticFieldStorage,
+  censusConstantFieldInitializers,
   censusLazyArrowFields,
   classBoxable,
   cppFieldInitializerStatements,
   publishBoxableClasses,
   publishClassStaticFieldStorage,
+  publishConstantFieldInitializers,
   publishLazyArrowFieldPlans
 } from './class-layout.js'
 import {
@@ -1980,6 +1982,13 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
   // actual reader in this same function -- `cppRecordDeclarations` itself --
   // so it cannot be published after, the way that one is.
   publishLazyArrowFieldPlans(input.classes, censusLazyArrowFields(input.bodies, input.classes, captures))
+  // Published alongside it, and read by the same constructor emission: which
+  // field initializers are a single constant, so a store that writes what
+  // value-initialization already wrote can be dropped. Passed the plugin's own
+  // `reactive.fields` rather than the settled `celledFields`, which
+  // `cppRecordDeclarations` has not produced yet -- see the census's own
+  // comment for why that is the right superset to refuse.
+  publishConstantFieldInitializers(input.classes, censusConstantFieldInitializers(input.bodies, input.classes, input.hosts.reactive.fields))
   const structs = cppRecordDeclarations(
     input.plan,
     deriver,

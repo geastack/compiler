@@ -147,9 +147,7 @@ const storageMembersOf = (declaration: ts.ClassLikeDeclaration | ts.InterfaceDec
 
 /** Class state, not instance state -- a static holds no value shaped by an instantiation's arguments. */
 const isStaticMember = (member: StorageMember): boolean =>
-  (ts.canHaveModifiers(member) ? ts.getModifiers(member) : undefined)?.some(
-    (one) => one.kind === ts.SyntaxKind.StaticKeyword
-  ) === true
+  (ts.canHaveModifiers(member) ? ts.getModifiers(member) : undefined)?.some((one) => one.kind === ts.SyntaxKind.StaticKeyword) === true
 
 /**
  * Whether `type` structurally contains `parameter` in a position that would

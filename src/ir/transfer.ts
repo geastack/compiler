@@ -131,23 +131,33 @@ export const ownedDyingValuesOf = (body: IrBody): ReadonlySet<IrValueId> => {
     }
   }
   const graph = controlFlowGraphOf(body)
-  const cyclic = cyclicBlocksOf(body)
   const dying = new Set<IrValueId>()
   for (const [value, definition] of definitions) {
     const readers = uses.get(value)
     if (readers?.length !== 1) continue
     const use = readers[0]
     if (use === undefined) continue
-    // A value defined outside a loop can still have its sole SSA use inside
-    // the loop. Moving at that use empties the storage on the first iteration
-    // and every later iteration observes a null Ref. The CFG re-entry check
-    // below only handles distinct definition/use blocks, so exclude cyclic
-    // uses before the same-block fast path as well.
-    if (cyclic.has(use)) continue
+    // Defined and consumed in ONE block: the definition dominates the use, so
+    // every execution of the block writes the storage before the use reads it.
+    // A loop re-entering the block re-runs the definition first, so the move
+    // can never be observed by a later iteration -- the same argument
+    // `buildDyingArgumentIndex` makes for a value a block defines and passes.
+    // This is what a `for`/`for-in` body is made of: `b = read(k)` inside a
+    // loop copied a whole string or union per iteration because its block was
+    // cyclic, although nothing could ever read the temporary again.
     if (use === definition) {
       dying.add(value)
       continue
     }
+    // A value defined outside a loop can still have its sole SSA use inside
+    // the loop. Moving at that use empties the storage on the first iteration
+    // and every later iteration observes a null Ref. That is exactly what the
+    // re-entry search below decides: it walks forward from the use with the
+    // DEFINITION block removed from the graph, so it finds the use again only
+    // when some path re-enters it without redefining the value first. A use in
+    // a loop whose every trip runs the definition (`k = cursor.next()` in one
+    // block, `key = k` in the next) is not re-entered by that measure, and a
+    // use in a loop the definition sits outside of is.
     // Exceptional region edges are not represented by this CFG.
     if (body.tryRegions.length > 0 || (body.iteratorCloseRegions?.length ?? 0) > 0) continue
     const pending = [...(graph.successors.get(use) ?? [])]
