@@ -80,7 +80,7 @@ jobs:
       - name: Build the compiler (npm install until its lockfile is synced with the local-path dependencies)
         run: compiler/scripts/ci/shared/npm-build.sh compiler
 
-      - name: Install the unmodified hono package from npm
+      - name: Install node-compat's dependencies and the unmodified hono package; link the compiler under test
         run: compiler/scripts/ci/node-compat/hono-hello/install.sh
 
       - name: Transpile hono-hello to C++ and link it with clang++
