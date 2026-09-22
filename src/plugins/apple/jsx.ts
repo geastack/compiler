@@ -95,6 +95,25 @@ const claimedElement = (node: ts.Node, carriers: ReadonlyMap<string, string>): C
 const childAdderOf = (carrier: string, members: ReadonlyMap<string, unknown>): string =>
   members.has(`${carrier}.addArrangedSubview`) ? 'addArrangedSubview' : 'addSubview'
 
+/**
+ * The view a parent's children are added TO, which is not always the parent.
+ *
+ * A `UIVisualEffectView` (and a table or collection cell) owns a `contentView`
+ * and takes every subview through it; adding one to the effect view itself is
+ * a UIKit assertion, so the app aborts at launch inside `_addSubview:`. The
+ * member table again decides: a view that has both a `contentView` and its
+ * own `addSubview` is one whose content view is where children belong. A
+ * window has a `contentView` but no `addSubview`, so it is left as it is.
+ *
+ * The receiver is asserted non-null. `NSBox` declares its content view
+ * nullable (it can be unset), and the checker would otherwise refuse
+ * `box.contentView.addSubview(...)` for a box that has just been constructed
+ * and cannot be without one; on `UIVisualEffectView`, whose content view is
+ * not nullable, the assertion is a no-op the checker accepts.
+ */
+const childReceiverOf = (view: string, carrier: string, members: ReadonlyMap<string, unknown>): string =>
+  members.has(`${carrier}.contentView`) && members.has(`${carrier}.addSubview`) ? `${view}.contentView!` : view
+
 /** The source text of a node, exactly as the author wrote it. */
 const sourceTextOf = (node: ts.Node, file: ts.SourceFile): string => node.getText(file)
 
@@ -269,14 +288,15 @@ const elementExpressionText = (
   }
 
   const adder = childAdderOf(carrier, members)
+  const receiver = childReceiverOf(view, carrier, members)
   for (const child of claimed.children) {
     const nested = claimedElement(child, carriers)
     if (nested) {
-      statements.push(`${view}.${adder}(${elementExpressionText(nested, file, carriers, members, nextName)});`)
+      statements.push(`${receiver}.${adder}(${elementExpressionText(nested, file, carriers, members, nextName)});`)
       continue
     }
     if (ts.isJsxExpression(child)) {
-      if (child.expression) statements.push(`${view}.${adder}(${sourceTextOf(child.expression, file)});`)
+      if (child.expression) statements.push(`${receiver}.${adder}(${sourceTextOf(child.expression, file)});`)
       continue
     }
     if (ts.isJsxText(child)) {
