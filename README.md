@@ -1,36 +1,68 @@
 # geatsc
 
-The geastack TypeScript-to-C++ compiler.
+geatsc compiles TypeScript ahead of time to C++. The output contains no
+JavaScript engine or interpreter. A C++ toolchain builds it into a native
+binary for the target: ESP32 or RP2350 firmware, a macOS, iOS, Linux or Windows
+app, an Xbox game, or a server executable.
 
-It is a clean-room rewrite. The design goal is the second constraint below: a
-statically typed value that reaches a dynamic carrier is a defect. The earlier
-implementation could not be driven to zero of them, because boxing was
-load-bearing in its emitter and removing it anywhere broke it somewhere else.
-Starting from a tree where the carrier algebra is closed and fail-closed from
-the first commit is what makes "no boxing" a property rather than an aspiration.
+The input is an ordinary TypeScript program, type-checked by the TypeScript
+compiler. geatsc uses those types to pick native C++ representations: classes
+become structs, numbers become native numeric types, and typed arrays, maps and
+records become typed containers. This is what lets the same TypeScript run on a
+microcontroller, and lets a compiled server use a fraction of the memory the
+same code needs under Node.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the pipeline, the layering
-and the constraints, and `CLAUDE.md` for the code conventions.
+## Where it fits in GeaStack
+
+geatsc is the compiler for [GeaStack](https://github.com/geastack), a framework
+for writing apps in TypeScript and JSX and running them natively on embedded
+boards, desktop, mobile and consoles. The other repositories plug into it:
+
+- [`core`](https://github.com/geastack/core) — the Gea framework (app API,
+  reactivity, rendering engine, host services) and `geatsc-plugin-gea`, the
+  plugin that teaches geatsc about Gea components and JSX.
+- [`cli`](https://github.com/geastack/cli) — the `gea` command. `gea build`
+  runs vite, and core's `build-gea-vite-geatsc.mjs` hands the module graph to
+  `geatsc compile-module-graph`. The target's toolchain then builds the
+  generated C++.
+- [`targets`](https://github.com/geastack/targets),
+  [`apple`](https://github.com/geastack/apple),
+  [`linux`](https://github.com/geastack/linux),
+  [`windows`](https://github.com/geastack/windows) — the platform projects that
+  compile and link the generated C++. `apple` also ships a geatsc plugin for the
+  Apple SDK bindings.
+- Xbox — the Xbox target is not open source; it is available commercially.
+  Contact [contact@geastack.com](mailto:contact@geastack.com).
+- [`node-compat`](https://github.com/geastack/node-compat) — the Node.js
+  runtime and geatsc plugin for compiling Node servers (`node:http`, Hono) to
+  native executables. It is a dependency of this package: running `geatsc`
+  with no input file inside a Node project builds each of the project's entry
+  points through node-compat into `dist/`.
+
+The Gea and Apple plugins are peer dependencies. Other plugins are loaded with
+`--plugin`; see [docs/CLI-PLUGINS.md](docs/CLI-PLUGINS.md).
+
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) describes the pipeline, the
+layering and the constraints. `CLAUDE.md` has the code conventions.
 
 ## Layering
 
 ```
 identity/        canonical IDs
-semantics/       the target-neutral frontend: regions, structural types,
-                 operations, edges, coverage. The frontend/backend boundary.
-representation/  physical carriers, the sealed plan, and fail-closed guards
+semantics/       target-neutral frontend: regions, structural types,
+                 operations, edges, coverage
+representation/  physical carriers, the sealed plan, fail-closed guards
 conversion/      the closed dynamic-conversion capability algebra
 preflight/       whole-pipeline capability census and certificate
 ir/              typed IR: verified operations and SSA values
-targets/cpp/     emission; consumes typed IR only
+targets/cpp/     C++ emission; consumes typed IR only
 diagnostics/     authority-component sweep, deterministic ordering
 ```
 
-Nothing after `semantics/` may import `typescript` or touch a TypeScript AST.
-That boundary is what stops two layers from answering the same question
-differently.
+`semantics/` is the frontend/backend boundary. Nothing after it may import
+`typescript` or touch a TypeScript AST.
 
-## Absolute constraints
+## Constraints
 
 1. **No source-shaped authority.** No decision may depend on a file name,
    path, source offset, `.pos`/`.end`/`getStart()` compared to a literal,
@@ -38,68 +70,74 @@ differently.
    C++ text. Identity is a checker symbol/declaration, a sealed semantic ID,
    or a versioned protocol identity.
 2. **No boxing.** A value with a static type never gets the dynamic carrier.
-   `Representation.dynamic` is admissible only for the four declared
-   `DynamicReason` values in `src/representation/model.ts`.
-3. **Fail closed.** A guard firing is always correct; the defect is upstream.
-   Never relax a guard, never downgrade an `unresolved`, never default when a
-   fact is missing. `unresolved` is lattice bottom, not an answer.
+   `Representation.dynamic` is allowed only for the four `DynamicReason`
+   values declared in `src/representation/model.ts`.
+3. **Fail closed.** When a guard fires, the defect is upstream. Do not relax a
+   guard, downgrade an `unresolved`, or substitute a default for a missing
+   fact. `unresolved` is lattice bottom, not an answer.
 
 ## Architecture gate
 
-`scripts/architecture.mjs` enforces the layering over `src/**/*.ts`: file and
-directory size maximums, and zero-tolerance checks for RegExp literals under
-`src/targets/cpp/`, source-position literal comparisons, `typescript` imports
-outside `src/semantics/`, source-shaped discriminants, unclassified
-`Authority`/`Admission`/`Proof` contracts, class declarations under
-`src/targets/`, and `any`. It collects every violation before failing, so one
-run reports everything wrong rather than one thing at a time.
+`scripts/architecture.mjs` checks `src/**/*.ts` for:
 
-## Looking at what it does
+- file and directory size limits
+- RegExp literals under `src/targets/cpp/`
+- source-position literal comparisons
+- `typescript` imports outside `src/semantics/`
+- source-shaped discriminants
+- unclassified `Authority`/`Admission`/`Proof` contracts
+- class declarations under `src/targets/`
+- `any`
+
+It reports every violation in one run.
+
+## Diagnostics
 
 ```bash
 node dist/cli.js test/fixtures/spread.ts
 ```
 
-runs the whole pipeline and prints the complete diagnostic set — never a top-N —
-exiting non-zero when no capability certificate was minted. Add `--preflight` for
-the full obligation census as canonical NDJSON.
+Runs the full pipeline and prints every diagnostic. Exits non-zero when no
+capability certificate was minted. `--preflight` prints the obligation census
+as canonical NDJSON.
+
+### Coverage
 
 ```bash
 node dist/cli.js coverage app/index.ts --plugin ../node-compat/plugin/v2.mjs
 ```
 
-answers the porting question the diagnostics do not: **which lines of my file
-are the problem, and what kind of problem is each?** It joins every layer's
-outcome by source position and prints one row per statement with a stable
-code, a status and a one-line reason, then a summary and a by-code count. A
-carrier that BOXED is a row too -- the program compiles and runs slower than it
-says, and no other view places that on a line. Exit 0 iff a certificate was
-minted and nothing refused at lowering or emission.
+Prints one row per statement with a code, a status and a one-line reason,
+followed by a summary and a count per code. Boxed carriers are reported as
+rows too. Exits 0 only if a certificate was minted and nothing was refused
+during lowering or emission.
 
 | Code    | Layer                                                          |
 | ------- | -------------------------------------------------------------- |
-| `G1xxx` | the TypeScript checker's own errors                            |
+| `G1xxx` | TypeScript checker errors                                      |
 | `G2xxx` | census blocker: a language primitive family the compiler lacks |
 | `G3xxx` | representation guard violation                                 |
 | `G4xxx` | preflight obligation missing/unsupported, by obligation kind   |
 | `G5xxx` | IR lowering blocker                                            |
-| `G6xxx` | emission refusal, by the emitter's category                    |
+| `G6xxx` | emission refusal, by emitter category                          |
 | `G7xxx` | calling-convention (ABI) projection blocker                    |
 | `G8xxx` | boxed carrier (`gea::Value`), by reason                        |
 
-The trailing digits index fixed tables in `src/cli-coverage.ts`, never a hash
-of a message, so rewording a diagnostic keeps its code; `x999` means the table
-lacks a row. Options: `--project`/`--no-project`, `--plugin`, `--plugin-option`,
-`--json` (rows + summary as one object), `--no-derived` (roots only),
-`--no-boxed` (refusals only).
+The trailing digits index fixed tables in `src/cli-coverage.ts`, so rewording a
+message does not change its code. `x999` means the table has no row for it.
+
+Options: `--project`/`--no-project`, `--plugin`, `--plugin-option`, `--json`
+(rows and summary as one object), `--no-derived` (roots only), `--no-boxed`
+(refusals only).
+
+### Carriers
 
 ```bash
 node scripts/probe-carriers.mjs test/fixtures/language.ts
 ```
 
-prints the carrier and C++ spelling selected for every declaration, and counts
-unresolved and boxed carriers. It is the view of the structural mapper and
-carrier selection, which nothing else exercises directly.
+Prints the carrier and C++ spelling chosen for every declaration, and counts
+unresolved and boxed carriers.
 
 ## Emitting C++
 
@@ -107,43 +145,46 @@ carrier selection, which nothing else exercises directly.
 node dist/cli.js compile app/index.ts --out-dir build/generated
 ```
 
-is the command the gea build pipeline drives (`build-gea-vite-geatsc.mjs`
-passes it through `--geatsc-bin`). It writes the C++ into `--out-dir` together
-with `gea_runtime.h`, `generated_support.hpp`, whatever the installed hosts
-require beside the unit, `geatsc-sources.txt` -- the list of `.cpp` files the
-build compiles -- and, for the per-file layout, `geatsc-header.txt` naming the
-shared header the build should precompile. Options:
+The gea build pipeline runs this command (`build-gea-vite-geatsc.mjs` passes it
+through `--geatsc-bin`). It writes to `--out-dir`:
 
-| Option                                               | Meaning                                                                                                                                                                                                                                                                                                 |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--project <tsconfig.json>`                          | The project the input compiles under. Default: the nearest one; a `.js` bundle has none.                                                                                                                                                                                                                |
-| `--entry-symbol <name>`                              | The C++ function the target starts the program at. Default `__gea_top_level`, which `core/gea_app_entry.cpp` calls.                                                                                                                                                                                     |
-| `--dynamic-fallback`                                 | Opt in to boxed C++ runtime dispatch for supported dynamic features. No JavaScript engine. See [coverage and limits](docs/DYNAMIC-FALLBACK.md).                                                                                                                                                         |
-| `--isolate-symbols`                                  | This program is one of several a resident build links: everything it defines is private to it, and a program that cannot be isolated is refused.                                                                                                                                                        |
-| `--translation-units single \| per-file \| balanced` | How many C++ files the program becomes. `single` (default) is one unit. `per-file` is one unit per source file plus a shared `<stem>.hpp` and a program unit, for parallel and incremental C++ builds. `balanced` groups the small units. See [`docs/TRANSLATION-UNITS.md`](docs/TRANSLATION-UNITS.md). |
-| `--plugin <module>`                                  | Load an external compiler plugin; repeat for multiple plugins. See [CLI plugins](docs/CLI-PLUGINS.md) for exports, compatibility and precedence.                                                                                                                                                        |
-| `--plugin-option <lib.key>=<value>`                  | Delivered verbatim to the library whose prefix names it (`gea.cpp-prelude=...`).                                                                                                                                                                                                                        |
+- the generated C++
+- `gea_runtime.h` and `generated_support.hpp`
+- any files the installed hosts need beside the unit
+- `geatsc-sources.txt`, the list of `.cpp` files to compile
+- `geatsc-header.txt` (per-file layout only), the shared header to precompile
 
-`compile-module-graph <gea-module-graph.json> --entry <file>` is the same
-command over vite's module graph instead of files on disk, and is the path every
-real application build takes; it accepts the same options.
+| Option                                               | Meaning                                                                                                                                                                                                                           |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--project <tsconfig.json>`                          | Project to compile the input under. Default: the nearest one. A `.js` bundle has none.                                                                                                                                            |
+| `--entry-symbol <name>`                              | C++ function the program starts at. Default `__gea_top_level`, called by `core/gea_app_entry.cpp`.                                                                                                                                |
+| `--dynamic-fallback`                                 | Allow boxed C++ runtime dispatch for supported dynamic features. No JavaScript engine is involved. See [docs/DYNAMIC-FALLBACK.md](docs/DYNAMIC-FALLBACK.md).                                                                      |
+| `--isolate-symbols`                                  | Make every definition private to this program, for builds that link several programs into one binary. Programs that cannot be isolated are refused.                                                                               |
+| `--translation-units single \| per-file \| balanced` | `single` (default): one C++ file. `per-file`: one file per source file, plus a shared `<stem>.hpp` and a program unit. `balanced`: per-file with small units grouped. See [docs/TRANSLATION-UNITS.md](docs/TRANSLATION-UNITS.md). |
+| `--plugin <module>`                                  | Load a compiler plugin. Repeatable. See [docs/CLI-PLUGINS.md](docs/CLI-PLUGINS.md).                                                                                                                                               |
+| `--plugin-option <lib.key>=<value>`                  | Passed unchanged to the library named by the prefix, e.g. `gea.cpp-prelude=...`.                                                                                                                                                  |
+
+`compile-module-graph <gea-module-graph.json> --entry <file>` does the same
+from vite's module graph instead of files on disk. Application builds use this
+form. It takes the same options.
 
 ## npm scripts
 
-| Script         | Purpose                                                   |
-| -------------- | --------------------------------------------------------- |
-| `architecture` | Run the architecture gate.                                |
-| `typecheck`    | `tsc -p tsconfig.json --noEmit`.                          |
-| `build`        | Run the architecture gate, then compile to `dist/`.       |
-| `format`       | `prettier --write .`.                                     |
-| `format:check` | `prettier --check .`.                                     |
-| `check`        | Architecture gate, typecheck, and format check, in order. |
+| Script         | Purpose                                       |
+| -------------- | --------------------------------------------- |
+| `architecture` | Run the architecture gate                     |
+| `typecheck`    | `tsc -p tsconfig.json --noEmit`               |
+| `build`        | Architecture gate, then compile to `dist/`    |
+| `format`       | `prettier --write .`                          |
+| `format:check` | `prettier --check .`                          |
+| `check`        | Architecture gate, typecheck and format check |
 
 ## License
 
-Apache-2.0 (see `LICENSE`), the compiler and the runtime it combines into
-generated programs alike. Programs you compile with geatsc are yours; their
-license is decided only by what they link. The GeaStack framework and the
-desktop, mobile and web targets are Apache-2.0 as well; the embedded board
-support (`targets`, `@geastack/chips`) is GPL-3.0-only and needs a commercial
-license for closed-source firmware. Contact [contact@geastack.com](mailto:contact@geastack.com) for commercial terms.
+The compiler and the runtime it links into generated programs are Apache-2.0
+(see `LICENSE`). Programs you compile with geatsc are yours; their license
+depends only on what they link. The GeaStack framework and the desktop, mobile
+and web targets are also Apache-2.0. The embedded board support (`targets`,
+`@geastack/chips`) is GPL-3.0-only; closed-source firmware needs a commercial
+license. Contact [contact@geastack.com](mailto:contact@geastack.com) for
+commercial terms.
