@@ -75,7 +75,10 @@ export const webglPlugin: CompilerPlugin = {
       hostNamespaceRootTypes: new Map(),
       hostSingletons: new Set<string>(),
       hostSingletonsByDeclaration: new Map(),
-      absentGlobals: webglAbsentGlobals,
+      // Read at instantiate, never at import: the package's statement is the
+      // one `plugins/load.ts` adopted from `--plugin`, and adoption happens
+      // after this module is loaded.
+      absentGlobals: webglAbsentGlobals(),
       hostPreambles: webglHostPreambles(),
       nativeBases: new Map(),
       // Declarations arrive per spelling through `hostPreambles`, not per

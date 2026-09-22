@@ -48,7 +48,7 @@ expression-carrier-repro.ts.cpp ddb7cfd98d4a
 fn.ts.cpp 4b80e17e4b22
 for-in-narrowed-optional-field.ts.cpp eed8a1a8458c
 function-call-rewrite.ts.cpp 9ece7b7c90ef
-function-typed-value.ts.cpp 0caaa3650c11
+function-typed-value.ts.cpp 858862babba0
 function-value-dispatch-get-repro.ts.cpp 08a1424154ae
 generator-method-receiver.ts.cpp 4130d0177857
 generic-arrow-declaration.ts.cpp 62318582d5a2
@@ -118,9 +118,9 @@ optional-collection-cell.ts.cpp 3c292f7e5dd5
 optional-slot-holds-null.ts.cpp 27696ec2af29
 optional-union-to-discriminated-repro.ts.cpp 1994825df37b
 overload-implementation-signature.ts.cpp d5e10f250b7a
-owned-record-union.ts.cpp 7ea2abdd2a02
+owned-record-union.ts.cpp e788814333aa
 physical-class-ancestry-declared.ts.cpp 492b223d9a66
-printer-drift.txt 846e8df39390
+printer-drift.txt cd34f472a73d
 property-access-unresolved-repro.ts.cpp 634811649cc8
 record-into-named-layout.ts.cpp 099fdfaaae11
 record-round-trip-through-box.ts.cpp 8e77a9618a7f

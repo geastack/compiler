@@ -1,6 +1,6 @@
 {
   "name": "@geastack/compiler",
-  "version": "1.0.16",
+  "version": "1.0.17",
   "description": "The geastack TypeScript-to-C++ compiler: one semantic spine, no source-shaped authority, no boxing of statically typed values.",
   "license": "Apache-2.0",
   "repository": {

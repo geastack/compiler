@@ -1,4 +1,4 @@
-import { createRequire } from 'node:module'
+import { createHostPackageLoader } from '../host-package.js'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve as resolvePath } from 'node:path'
 
@@ -67,7 +67,7 @@ export interface AppleHostShimSlice {
   readonly embeddedHostFunctionFrameworkVariants?: Readonly<Record<string, Readonly<Record<string, string>>>>
 }
 
-const require_ = createRequire(import.meta.url)
+const packageLoader = createHostPackageLoader(import.meta.url)
 
 /**
  * `nativeTypes`, narrowed at the boundary.
@@ -178,8 +178,8 @@ const appleHostShims = (): AppleHostShimSlice | null => {
   let sdk: unknown
   let plugin: unknown
   try {
-    sdk = require_(sdkSpecifier)
-    plugin = require_(pluginSpecifier)
+    sdk = packageLoader.load(sdkSpecifier)
+    plugin = packageLoader.load(pluginSpecifier)
   } catch (error) {
     const requested = process.env.GEATSC2_APPLE_SDK !== undefined || process.env.GEATSC2_APPLE_PLUGIN !== undefined
     if (!isAbsent(error) || requested) {
@@ -232,6 +232,14 @@ interface PackageExportEntry {
 
 let loadedMarkers: ReadonlyMap<string, string> | null = null
 
+/** The package entry the CLI loaded is the one this host's tables come from -- see `plugins/host-package.ts`. */
+export const adoptApplePackage = (file: string): void => {
+  packageLoader.adopt(file)
+  loaded = undefined
+  loadedMetadata = null
+  loadedMarkers = null
+}
+
 /** The directory of the package a resolved entry point belongs to, by its own manifest. */
 const packageRootOf = (entry: string, name: string): string | null => {
   let directory = dirname(entry)
@@ -281,7 +289,7 @@ export const appleModuleMarkers = (): ReadonlyMap<string, string> => {
   }
   if (used.size === 0) return markers
   const specifier = process.env.GEATSC2_APPLE_SDK ?? '@geastack/apple'
-  const root = packageRootOf(require_.resolve(specifier), specifier)
+  const root = packageRootOf(packageLoader.resolve(specifier), specifier)
   if (root === null) return markers
   const manifest: unknown = JSON.parse(readFileSync(resolvePath(root, 'package.json'), 'utf8'))
   const exports_ = (manifest as { exports?: unknown }).exports
@@ -359,7 +367,7 @@ export const appleClassConstructorParameters = (className: string): readonly App
  */
 export const writeAppleBridgeArtifacts = (metadataPath: string, outDir: string): void => {
   const pluginSpecifier = process.env.GEATSC2_APPLE_PLUGIN ?? '@geastack/geatsc-plugin-apple-native'
-  const plugin = require_(pluginSpecifier) as {
+  const plugin = packageLoader.load(pluginSpecifier) as {
     appleNativePlugin?: (options: { readonly metadata: unknown }) => {
       createCppBackend?: (context: {
         readonly outDir: string

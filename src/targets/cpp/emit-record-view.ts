@@ -313,6 +313,34 @@ const recordViewText = (ctx: ConversionSite, plan: RecordViewPlan, text: string)
       }
       return recastedUnionFromHomes(plan.source, plan.target, text, homes)
     }
+    case 'dispatch': {
+      // The same discriminant chain `taggedUnionArmText` spells, with the last
+      // arm untested: the plan admitted every arm, so one of them is live.
+      // Each home is spelled at the whole target's type so an optional target
+      // wraps once per arm and an absent arm is its empty state.
+      const targetType = cppTypeOf(plan.target)
+      const payload = plan.target.kind === 'optional' ? plan.target.payload : plan.target
+      const homes: string[] = []
+      for (const [index, arm] of plan.arms.entries()) {
+        const from = plan.source.arms[index]
+        if (from === undefined) return null
+        const armText = `${text}.get<${index}>()`
+        const rendered =
+          arm.via === 'exact'
+            ? armText
+            : arm.via === 'absent'
+              ? null
+              : arm.via === 'convert'
+                ? convertedValueText(from.value, payload, armText)
+                : recordViewText(ctx, arm.via, armText)
+        if (arm.via !== 'absent' && rendered === null) return null
+        homes.push(rendered === null ? `${targetType}()` : `${targetType}(${rendered})`)
+      }
+      let result = homes[homes.length - 1]
+      if (result === undefined) return null
+      for (let index = homes.length - 2; index >= 0; index--) result = `${text}.is<${index}>() ? ${homes[index]} : (${result})`
+      return `(${result})`
+    }
     case 'fields':
       return recordFieldsViewText(ctx, plan, text)
   }

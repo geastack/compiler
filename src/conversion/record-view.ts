@@ -114,6 +114,18 @@ export interface RecastArmPlan {
   readonly via: 'exact' | 'convert' | RecordViewPlan
 }
 
+/** One source arm of a `dispatch` plan, in the source's own arm order. */
+export interface DispatchArmPlan {
+  readonly via: 'exact' | 'convert' | 'absent' | RecordViewPlan
+}
+
+export const isRecordViewTarget = (value: Representation): value is RecordViewTarget =>
+  value.kind === 'record' || (value.kind === 'native-record-ref' && value.native === null)
+
+/** Whether this view dispatches on a sum's live arm somewhere along its spine (`dispatch`, possibly under an optional or an assert). */
+export const recordViewDispatchesArms = (plan: RecordViewPlan): boolean =>
+  plan.kind === 'dispatch' || ((plan.kind === 'optional' || plan.kind === 'assert') && recordViewDispatchesArms(plan.payload))
+
 export type RecordViewPlan =
   | { readonly kind: 'owned'; readonly plan: OwnedRecordPlan }
   /** The one arm of a sum the source can become; `payload` null when the registry converts the pair without a view. */
@@ -143,6 +155,21 @@ export type RecordViewPlan =
       readonly payload: RecordViewPlan
     }
   | { readonly kind: 'recast-union'; readonly source: TaggedUnion; readonly target: TaggedUnion; readonly arms: readonly RecastArmPlan[] }
+  /**
+   * A sum every arm of which reaches ONE record-shaped target: dispatched on
+   * the live arm, never selected. `const ctx: AudioContextLike | null = Ctor ?
+   * new Ctor() : createNativeAudioContext()` stores a `record | class` into
+   * the interface's slot; the class arm is a structural view of the record
+   * and the record arm is itself. Selecting the exact arm (`get<k>()`) read
+   * the class instance's bytes as the record whenever the native host was the
+   * live one. An `absent` arm is the target optional's own absence.
+   */
+  | {
+      readonly kind: 'dispatch'
+      readonly source: TaggedUnion
+      readonly target: RecordViewTarget | Extract<Representation, { kind: 'optional' }>
+      readonly arms: readonly DispatchArmPlan[]
+    }
   | {
       readonly kind: 'fields'
       readonly source: RecordViewSource
@@ -177,6 +204,10 @@ export const recordViewUsesOnlyDirectFields = (plan: RecordViewPlan): boolean =>
     }
     case 'recast-union':
       return plan.arms.every((arm) => arm.via === 'exact' || (arm.via !== 'convert' && recordViewUsesOnlyDirectFields(arm.via)))
+    case 'dispatch':
+      return plan.arms.every(
+        (arm) => arm.via === 'exact' || arm.via === 'absent' || (arm.via !== 'convert' && recordViewUsesOnlyDirectFields(arm.via))
+      )
     case 'fields':
       return (
         !plan.expando &&
@@ -252,6 +283,13 @@ export const structuralRecordViewPlan = (
     const home = exact.length === 1 ? exact[0] : undefined
     return home === undefined ? null : { kind: 'arm', source, target, index: home.index, payload: home.payload }
   }
+  // A bare sum carrying the target optional's absence as an ARM: the absent
+  // arm is the optional's empty state and every other arm dispatches into
+  // the payload, so the optional cannot be peeled first here.
+  if (target.kind === 'optional' && source.kind === 'tagged-union' && isRecordViewTarget(target.payload)) {
+    const dispatched = dispatchUnionPlan(layouts, source, target, convertible)
+    if (dispatched !== null) return dispatched
+  }
   // The optional wrapper is peeled on both sides first: the question is about
   // the two RECORD carriers, and an absence is answered by the optional's own
   // presence flag either way.
@@ -274,6 +312,7 @@ export const structuralRecordViewPlan = (
     return payload === null ? null : { kind: 'assert', target, payload }
   }
   if (source.kind === 'tagged-union' && target.kind === 'tagged-union') return recastUnionPlan(layouts, source, target, convertible)
+  if (source.kind === 'tagged-union' && isRecordViewTarget(target)) return dispatchUnionPlan(layouts, source, target, convertible)
   const sourceIsRecord = source.kind === 'record' || source.kind === 'record-with-index' || source.kind === 'native-record-ref'
   if (!sourceIsRecord && (source.kind !== 'class-ref' || source.ownership !== 'shared-refcount')) return null
   if (source.kind === 'native-record-ref' && source.native !== null) return null
@@ -362,6 +401,49 @@ export const structuralRecordViewPlan = (
     source.indexes[0]?.key === 'string' &&
     source.indexes[0]?.value.kind === 'dynamic'
   return { kind: 'fields', source, target, fields, indexes, expando }
+}
+
+/**
+ * Every arm of `source` reaching the one record-shaped `target` (or the
+ * payload of an optional one), in the source's own arm order.
+ *
+ * Answered only when some arm reaches the target through a VIEW: a sum whose
+ * arms are all exact or chain-convertible is the printer chain's own dispatch
+ * (`emit-narrowing.ts`'s `taggedUnionArmText`), and repeating that answer
+ * here would move every such program for nothing. An arm with no way to the
+ * target refuses the whole plan: a dispatch that skipped an arm would be the
+ * unchecked selection this plan exists to replace.
+ */
+const dispatchUnionPlan = (
+  layouts: RecordLayoutPolicy,
+  source: TaggedUnion,
+  target: RecordViewTarget | Extract<Representation, { kind: 'optional' }>,
+  convertible: PairConvertible
+): RecordViewPlan | null => {
+  const payload = target.kind === 'optional' ? target.payload : target
+  if (!isRecordViewTarget(payload)) return null
+  const key = representationKey(payload)
+  const arms: DispatchArmPlan[] = []
+  let viewed = false
+  for (const arm of source.arms) {
+    if (representationKey(arm.value) === key) {
+      arms.push({ via: 'exact' })
+      continue
+    }
+    if (target.kind === 'optional' && arm.value.kind === target.absence) {
+      arms.push({ via: 'absent' })
+      continue
+    }
+    if (convertible(arm.value, payload)) {
+      arms.push({ via: 'convert' })
+      continue
+    }
+    const view = structuralRecordViewPlan(layouts, arm.value, payload, convertible)
+    if (view === null) return null
+    viewed = true
+    arms.push({ via: view })
+  }
+  return viewed ? { kind: 'dispatch', source, target, arms } : null
 }
 
 const recastUnionPlan = (

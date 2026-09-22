@@ -29,6 +29,7 @@ import {
   cppConstructThunkName,
   cppEnvironmentStructName,
   cppReceiverName,
+  cppThunkEntryText,
   cppThunkName,
   createCppEmitBlockedError,
   declareCell,
@@ -1688,8 +1689,8 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
   // pre-`class` constructor function in three.js's renderer unclaimed.
   const pointers =
     payloadCarrier.kind === 'function-and-constructor'
-      ? `&${cppThunkName(operation.functionId)}, &${cppConstructedThunkName(operation.functionId)}`
-      : `&${cppThunkName(operation.functionId)}`
+      ? `${cppThunkEntryText(ctx, operation.functionId)}, &${cppConstructedThunkName(operation.functionId)}`
+      : cppThunkEntryText(ctx, operation.functionId)
   // Tagged by the SOURCE DECLARATION, not by this copy's thunk. Two
   // instantiations of one generic function are two thunks and one JavaScript
   // function object; the runtime's own `CallableDeclarationTag` comment says
@@ -1741,13 +1742,13 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
     }
     if (admission.kind === 'none') {
       lines.push(
-        `${name} = gea::host::installOrdinaryConstructorPrototype(${boxText(`${callableType}{&${cppThunkName(operation.functionId)}, nullptr}`)});`
+        `${name} = gea::host::installOrdinaryConstructorPrototype(${boxText(`${callableType}{${cppThunkEntryText(ctx, operation.functionId)}, nullptr}`)});`
       )
       return
     }
     const dynamicEnvironment = packedEnvironmentText(ctx, lines, operation.functionId, admission)
     lines.push(
-      `${name} = gea::host::installOrdinaryConstructorPrototype(${boxText(`${callableType}{&${cppThunkName(operation.functionId)}, ${dynamicEnvironment}}`)});`
+      `${name} = gea::host::installOrdinaryConstructorPrototype(${boxText(`${callableType}{${cppThunkEntryText(ctx, operation.functionId)}, ${dynamicEnvironment}}`)});`
     )
     return
   }

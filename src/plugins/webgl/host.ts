@@ -1,8 +1,8 @@
-import { createRequire } from 'node:module'
 import type { AmbientTypeRealization } from '../../semantics/ambient-type-realization-transform.js'
+import { createHostPackageLoader } from '../host-package.js'
 import type { PluginSourceFile } from '../model.js'
 
-const require_ = createRequire(import.meta.url)
+const packageLoader = createHostPackageLoader(import.meta.url)
 
 /**
  * What the `@geastack/native-webgl-angle` package says about its own host.
@@ -50,7 +50,7 @@ const shims = (): WebGLHostShims | null => {
   const specifier = requested ?? '@geastack/native-webgl-angle/geatsc-plugin'
   let module_: unknown
   try {
-    module_ = require_(specifier)
+    module_ = packageLoader.load(specifier)
   } catch (error) {
     const absent = (error as { code?: string }).code === 'MODULE_NOT_FOUND'
     if (!absent || requested !== undefined) {
@@ -69,6 +69,12 @@ const shims = (): WebGLHostShims | null => {
   }
   loaded = configured
   return configured
+}
+
+/** The package entry the CLI loaded is the one this host's tables come from -- see `plugins/host-package.ts`. */
+export const adoptWebglPackage = (file: string): void => {
+  packageLoader.adopt(file)
+  loaded = undefined
 }
 
 /**
@@ -141,33 +147,38 @@ export const webglSourceTransform = (input: PluginSourceFile): string | null => 
  *   for programs that use it to detect WebGL 2. The WebGL 1 constructor is
  *   absent: this host only creates NativeWebGL2RenderingContext. In three's
  *   WebGL 1 rejection guard, absence correctly skips the rejected path.
- * - `self`, `postMessage`, `importScripts`: worker globals, and whether this
- *   target has workers is not a fact about its GL context.
+ * - `postMessage`, `importScripts`: worker globals, and whether this target
+ *   has workers is not a fact about its GL context. `self` IS stated -- by the
+ *   package, in its own `absentGlobals` -- because the package ships the
+ *   `self`-less animation driver three's renderer is aliased to
+ *   (`nativeWebGLAnimation.ts`): the one fact the package does know about
+ *   `self` is that three's only use of it has already been answered natively.
  */
-export const webglAbsentGlobals: ReadonlySet<string> = new Set<string>([
-  ...(shims()?.absentGlobals ?? []),
-  'WebGLRenderingContext',
-  'ImageData',
-  'ImageBitmap',
-  'VideoFrame',
-  'OffscreenCanvas',
-  'HTMLCanvasElement',
-  'HTMLImageElement',
-  'HTMLVideoElement',
-  'createImageBitmap',
-  // WebXR. A native ANGLE context can no more start an XR session than it can
-  // decode an `ImageBitmap`, and three says so in its own source the same way:
-  // `const supportsGlBinding = typeof XRWebGLBinding !== 'undefined'`
-  // (`renderers/webxr/WebXRManager.js`, `renderers/common/XRManager.js`).
-  //
-  // These arrive from `@types/webxr` rather than `lib.dom.d.ts`, which is why
-  // `absent-globals.ts` asks whether a declaration is the PLATFORM's rather
-  // than whether TypeScript ships it -- see `platformDeclarationTest`. Both are
-  // `declare class`, the form that made a `declare var`-only value test unable
-  // to deny a single WebXR name.
-  'XRWebGLBinding',
-  'XRWebGLLayer'
-])
+export const webglAbsentGlobals = (): ReadonlySet<string> =>
+  new Set<string>([
+    ...(shims()?.absentGlobals ?? []),
+    'WebGLRenderingContext',
+    'ImageData',
+    'ImageBitmap',
+    'VideoFrame',
+    'OffscreenCanvas',
+    'HTMLCanvasElement',
+    'HTMLImageElement',
+    'HTMLVideoElement',
+    'createImageBitmap',
+    // WebXR. A native ANGLE context can no more start an XR session than it can
+    // decode an `ImageBitmap`, and three says so in its own source the same way:
+    // `const supportsGlBinding = typeof XRWebGLBinding !== 'undefined'`
+    // (`renderers/webxr/WebXRManager.js`, `renderers/common/XRManager.js`).
+    //
+    // These arrive from `@types/webxr` rather than `lib.dom.d.ts`, which is why
+    // `absent-globals.ts` asks whether a declaration is the PLATFORM's rather
+    // than whether TypeScript ships it -- see `platformDeclarationTest`. Both are
+    // `declare class`, the form that made a `declare var`-only value test unable
+    // to deny a single WebXR name.
+    'XRWebGLBinding',
+    'XRWebGLLayer'
+  ])
 
 /**
  * The ambient WebGL context names three's own source (and `@types/three`'s

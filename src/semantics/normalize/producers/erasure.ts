@@ -37,6 +37,24 @@ export const unwrapErased = (node: ts.Node): ts.Node => {
 export const unwrapErasedExpression = (expression: ts.Expression): ts.Expression => unwrapErased(expression) as ts.Expression
 
 /**
+ * Whether one of the erased wrappers around `expression` is a type assertion
+ * that names a type -- `SemanticOperand.asserted`. `as any`/`as unknown`
+ * assert nothing about which arm a value holds, so they do not count; `!` and
+ * `satisfies` are not assertions of a type at all.
+ */
+export const assertsType = (expression: ts.Expression, checker: ts.TypeChecker): boolean => {
+  let current: ts.Node = expression
+  for (;;) {
+    if (ts.isAsExpression(current) || ts.isTypeAssertionExpression(current)) {
+      if ((checker.getTypeFromTypeNode(current.type).flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) return true
+    } else if (!ts.isParenthesizedExpression(current) && !ts.isNonNullExpression(current) && !ts.isSatisfiesExpression(current)) {
+      return false
+    }
+    current = current.expression
+  }
+}
+
+/**
  * The node whose PARENT decides this expression's syntactic position.
  *
  * `unwrapErased` answers "which expression really produces this value"; this

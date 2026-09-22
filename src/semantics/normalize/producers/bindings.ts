@@ -26,6 +26,7 @@ import type { IdentityTable } from '../identities.js'
 import type { StructuralTypeTable } from '../../model/structural-type-table.js'
 import { bindingKindOf, bindingKindOfElement } from './binding-kind.js'
 import { boundElementType, citeBoundElementValue } from './destructuring.js'
+import { assertsType } from './erasure.js'
 import { citeExpressionResult } from './references.js'
 import { resultEdge } from './shared.js'
 
@@ -706,7 +707,10 @@ const contributeVariableDeclaration = (
   if (initializer) {
     const cited = citeExpressionResult(initializer, context)
     if (cited.kind === 'unmodelled') return { kind: 'blocked', blocker: blocked(candidate.id, 'binding', cited.reason, null) }
-    operands.push(operand('initializer', 0, cited.source, context.types.typeAt(initializer)))
+    operands.push({
+      ...operand('initializer', 0, cited.source, context.types.typeAt(initializer)),
+      ...(assertsType(initializer, context.checker) ? { asserted: true as const } : {})
+    })
   } else if (loopValueResult) {
     operands.push(operand('initializer', 0, { kind: 'result', result: loopValueResult }, context.types.typeAt(node)))
   }

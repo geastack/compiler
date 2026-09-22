@@ -46,6 +46,7 @@ const emptyConversions = (nodes = new Map<string, ConversionNode>()): Conversion
   coercionFor: () => {
     throw new Error('coercionFor is not used by emission reachability')
   },
+  exactArmFor: () => null,
   nodeById: (id) => nodes.get(id) ?? null,
   minted: nodes
 })

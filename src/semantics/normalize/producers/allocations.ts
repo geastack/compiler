@@ -4,6 +4,7 @@ import type { CensusCandidate } from '../census.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'
 import { bindingKindOf } from './binding-kind.js'
+import { declaresExactArms } from './exact-arms.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import { citeExpressionResult } from './references.js'
 import {
@@ -904,6 +905,7 @@ export const createAllocationProducer = (context: ProducerContext): FamilyProduc
             functionName: staticFunctionNameOf(node),
             functionLength: expectedParameterCountOf(node),
             generatorFunction: 'asteriskToken' in node && node.asteriskToken !== undefined,
+            ...(declaresExactArms(node) ? { exactArms: true } : {}),
             ...(ownPrototypePropertyOf(node) === null ? {} : { ownPrototypeProperty: ownPrototypePropertyOf(node) === true })
           }
         : {}),

@@ -16,11 +16,12 @@ import { transferOf } from '../../ir/transfer.js'
 import type { DeclarationId, FunctionId } from '../../identity/ids.js'
 import type { ConversionNode } from '../../conversion/algebra.js'
 import { coercionText } from './emit-coercion.js'
-import type { ConversionCensus } from '../../conversion/nodes.js'
+import { EXACT_ARM_MATERIALIZER, exactArmIndexOf, type ConversionCensus } from '../../conversion/nodes.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
 import type { ClassLayout } from '../../projection/classes.js'
 import type { CaptureIndex } from './emit-context.js'
-import { structuralRecordViewText } from './emit-record-view.js'
+import { structuralRecordViewText, viewPlanFor } from './emit-record-view.js'
+import { recordViewDispatchesArms } from '../../conversion/record-view.js'
 import {
   createCppEmitBlockedError,
   cppConstructThunkName,
@@ -517,6 +518,16 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
     return widenedStoreText(read, inner, unwrapped)
   }
   if (inner.kind !== 'tagged-union') return null
+  // Every arm search below SELECTS: it loads the arm the read names and
+  // trusts the narrowing that licensed the load to have killed the rest. A
+  // store into a declared slot has no such licence -- `const ctx:
+  // AudioContextLike | null = Ctor ? new Ctor() : createNativeAudioContext()`
+  // converts a `record | class` into the interface's record, and the class
+  // arm is as live as the record's. This chain cannot tell the two apart (a
+  // class viewed as a record needs the program's layouts), so the census
+  // decides it: a pair some arm reaches only through the structural view is
+  // `conversion/record-view.ts`'s `dispatch` plan, installed and rendered
+  // ahead of this chain (`conversions.ts`'s `staticRecipe`, `recipeText`).
   // A join may preserve another join (or an optional) as one physical arm.
   // Search that nested carrier before trying to compare the outer arm list
   // with the read's list. Otherwise a read of the preserved inner union is
@@ -1937,6 +1948,14 @@ export const dictionaryCastableToDictionary = (
     if (isCppEmitBlockedError(error)) return false
     throw error
   }
+}
+
+const dictionaryToRecordText = (source: Representation, target: Representation, text: string): string | null => {
+  if (source.kind !== 'dictionary' || source.key !== 'string' || source.value.kind !== 'dynamic' || source.ownership !== 'shared-refcount')
+    return null
+  if (target.kind !== 'record' || target.accessors.length !== 0 || target.ownership === 'borrowed') return null
+  const boxed = dynamicCarrierBoxText(source, text)
+  return boxed === null ? null : unboxedLoadText(target, boxed)
 }
 
 const recastedDictionaryText = (
@@ -3527,6 +3546,18 @@ export const conversionChain: readonly ConversionStep[] = [
     apply: (source, target, text) =>
       source.kind === 'dictionary' && target.kind === 'dictionary' ? claimed(recastedDictionaryText(source, target, text)) : undefined
   },
+  // The mirror of `record-to-dictionary` for the one dictionary whose values
+  // are boxed: `globalThis as unknown as { AudioContext?: Ctor }` reads named
+  // fields out of the open string-keyed surface `references.ts` gives
+  // `globalThis`. The closed field list comes from the TARGET, so this is not
+  // the reconstruction `conversion/derive.ts` refuses (recovering a field list
+  // from an open dictionary); it is the dynamic-object product read
+  // (`unboxedLoadText`'s record branch) over that dictionary boxed, which
+  // `gea::detail::dynamicRecordHasField` already reads as a document.
+  {
+    id: 'dictionary-to-record',
+    apply: (source, target, text) => claimed(dictionaryToRecordText(source, target, text))
+  },
   // An Array of one element carrier copied into an Array of another, each
   // element through its own conversion. A copy, so only for an array that is
   // not written through both names afterwards: a matcher table built once
@@ -3857,6 +3888,11 @@ export const recipeText = (ctx: ConversionSite, node: ConversionNode, text: stri
   // `conversions.ts`'s read of a structural value as a class nothing instantiates.
   if (node.capability.kind === 'atom' && node.capability.materializer.id === 'gea::host::unreachableValue')
     return `((void)(${text}), gea::host::unreachableValue<${cppTypeOf(node.target)}>())`
+  // The census's exact-arm projection (`nodes.ts`'s `exactArmFor`): the arm
+  // index is a function of the pair, so it is re-derived here rather than
+  // carried on the node.
+  if (node.capability.kind === 'static' && node.capability.materializer.id === EXACT_ARM_MATERIALIZER)
+    return `gea::host::exactArm<${exactArmIndexOf(node.source, node.target)}>(${text})`
   // `conversions.ts`'s read of a class instance's structural view as the class: the boxed origin, narrowed.
   if (node.capability.kind === 'atom' && node.capability.materializer.id === 'gea::record::viewOrigin')
     return narrowedLoadText(
@@ -3871,6 +3907,14 @@ export const recipeText = (ctx: ConversionSite, node: ConversionNode, text: stri
     return helper
       ? `${helper.name}(${text})`
       : nativeSelectionText(node.capability.materializer.nativeSelection, node.source, node.target, text)
+  }
+  // A view that DISPATCHES on a sum's live arm is rendered ahead of the
+  // chain: the chain would select the exact arm and trust a narrowing that,
+  // at a store, never happened (`narrowedLoadText`'s arm search says why).
+  // `conversions.ts`'s `staticRecipe` installs the node in the same order.
+  if (node.capability.kind === 'static' && node.capability.materializer.id === 'view:structural-record') {
+    const view = viewPlanFor(ctx.layouts, node.source, node.target)
+    if (view !== null && recordViewDispatchesArms(view)) return structuralRecordViewText(ctx, node.source, node.target, text)
   }
   return convertedValueText(node.source, node.target, text) ?? structuralRecordViewText(ctx, node.source, node.target, text)
 }

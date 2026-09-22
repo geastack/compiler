@@ -1,4 +1,4 @@
-import { createRequire } from 'node:module'
+import { createHostPackageLoader } from '../host-package.js'
 import type {
   HostCallSpelling,
   HostConstructor,
@@ -152,7 +152,7 @@ export interface GeaHostClass {
   readonly factory?: string
 }
 
-const require_ = createRequire(import.meta.url)
+const packageLoader = createHostPackageLoader(import.meta.url)
 
 /**
  * `nativeTypes`, narrowed at the boundary.
@@ -174,6 +174,14 @@ const nativeTypesOf = (value: unknown): ReadonlyMap<string, string> | null => {
 let loaded: ReadonlyMap<string, string> | null | undefined
 let loadedSlice: GeaHostShimSlice | null = null
 let loadedInterop: readonly string[] | null = null
+
+/** The package entry the CLI loaded is the one this host's tables come from -- see `plugins/host-package.ts`. */
+export const adoptGeaPackage = (file: string): void => {
+  packageLoader.adopt(file)
+  loaded = undefined
+  loadedSlice = null
+  loadedInterop = null
+}
 
 /**
  * The host type table, from the package that owns it.
@@ -214,7 +222,7 @@ export const geaNativeTypes = (): ReadonlyMap<string, string> => {
   const specifier = requested ?? '@geastack/geatsc-plugin-gea/host-shims'
   let shims: unknown
   try {
-    shims = require_(specifier)
+    shims = packageLoader.load(specifier)
   } catch (error) {
     // Not installed is a configuration; anything else is a defect. The
     // override is held to the stricter rule on purpose: naming a plugin
@@ -531,7 +539,7 @@ export const geaCanvasInterop = (): readonly string[] => {
       : requested.endsWith(shimSuffix)
         ? `${requested.slice(0, requested.length - shimSuffix.length)}cpp-ir`
         : requested
-  const loaded: unknown = require_(specifier)
+  const loaded: unknown = packageLoader.load(specifier)
   const generate = (loaded as { directCanvasInteropSource?: (uses: boolean, options: { boxedValueModel: boolean }) => readonly string[] })
     .directCanvasInteropSource
   if (typeof generate !== 'function') {

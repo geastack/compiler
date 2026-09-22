@@ -84,6 +84,23 @@ export interface SemanticOperand {
    * (`spread-arguments.ts`). Absent means 0, the whole source.
    */
   readonly from?: number
+  /**
+   * The program's own type assertion (`x as T`, `<T>x`) wraps the expression
+   * this operand cites. The assertion is erased -- it evaluates nothing and
+   * changes no value, which is why the operand cites the wrapped expression's
+   * result and carries its type -- but it is also the author STATING which
+   * arm of a union the value holds here, the same promise `@gea-exact-arms`
+   * makes for a whole body (`ConversionRoleTarget.owner`'s `exact-arm`). A
+   * lowering that must put the value into a slot that is exactly one arm of
+   * its union, and that the census has no sound per-arm answer for, may take
+   * the stated arm -- checked at runtime, a `TypeError` when the assertion
+   * was false. hono's `Context.executionCtx` returns `this.#executionCtx as
+   * ExecutionContext` off a `FetchEventLike | ExecutionContext` field: the
+   * class arm has no view as the interface, so without the assertion the
+   * store is refused, and with it the store is the projection the author
+   * wrote. An assertion to `any`/`unknown` states no arm and is not marked.
+   */
+  readonly asserted?: true
 }
 
 /** One result an operation publishes, keyed by the role it fills. */

@@ -11,6 +11,7 @@ import type { CensusCandidate } from '../census.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'
 import { bindingKindOf } from './binding-kind.js'
+import { declaresExactArms } from './exact-arms.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import {
   calleeAwareTypeAt,
@@ -205,6 +206,37 @@ const argumentConversionRolesOf = (
     // operation must not claim one it does not own.
     if (!parameter || parameter.rest) continue
     roles.push({ role: 'argument', ordinal: argument.ordinal, owner: 'parameter-slot', type: parameter.slot })
+  }
+  return roles
+}
+
+/**
+ * The `exact-arm` roles of a call into an `@gea-exact-arms` implementation
+ * (`ConversionRoleTarget.owner`): each argument's type under the overload the
+ * checker resolved. Published beside the implementation's own
+ * `parameter-slot` roles rather than instead of them, because the slot is
+ * still the implementation's union -- this only says which arm of it the
+ * argument enters. Nothing for a call that resolved straight to the body
+ * (no overload was chosen, so there is no arm to name) or to a generic
+ * overload (the instantiated parameter types are not public, exactly as
+ * `argumentConversionRolesOf` refuses them).
+ */
+const exactArmArgumentRolesOf = (
+  context: ProducerContext,
+  node: ts.CallExpression | ts.NewExpression,
+  resolved: ts.Signature | undefined,
+  implementation: ts.Signature | null,
+  operands: readonly SemanticOperand[]
+): readonly ConversionRoleTarget[] => {
+  if (!resolved || !implementation?.declaration || !declaresExactArms(implementation.declaration)) return []
+  const selected = buildSelectedSignature(context, node, resolved)
+  if (!selected || selected.typeArguments.kind !== 'none') return []
+  const roles: ConversionRoleTarget[] = []
+  for (const argument of operands) {
+    if (argument.role !== 'argument') continue
+    const parameter = selected.parameters[argument.ordinal]
+    if (!parameter || parameter.rest) continue
+    roles.push({ role: 'argument', ordinal: argument.ordinal, owner: 'exact-arm', type: parameter.slot })
   }
   return roles
 }
@@ -1890,7 +1922,10 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
         ? { intrinsicReflection: intrinsicPropertyCall }
         : {}),
       operands,
-      conversionRoles: argumentConversionRolesOf(selectedSignature, operands),
+      conversionRoles: [
+        ...argumentConversionRolesOf(selectedSignature, operands),
+        ...exactArmArgumentRolesOf(context, node, resolvedSignature, implementationSignature, operands)
+      ],
       // Two results, and they are different values. `value` is what the call
       // returned, which exists only on the branch where the guard was present;
       // `short-circuit` is what the *expression* evaluates to, which is that

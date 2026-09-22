@@ -50,6 +50,7 @@ import {
   effectiveAbiOf,
   symbolKeyDefinitions,
   templateObjectDefinitions,
+  type CallableFactsSpelling,
   type TemplateObjectDefinition,
   type CaptureAdmission,
   type CaptureIndex
@@ -90,7 +91,6 @@ import {
   cppAbiParameterType,
   cppAbiType,
   cppStringLiteral,
-  cppStringViewLiteral,
   cppBodyName,
   cppCallableDeclarationTagName,
   cppCommonJsModuleName,
@@ -983,8 +983,7 @@ const thunkOf = (
   captures: CaptureIndex,
   narrowed: ReadonlySet<number>,
   narrowedResult: boolean,
-  linkage: CppLinkage,
-  preserveFunctionFacts: boolean
+  linkage: CppLinkage
 ): RenderedThunk | null => {
   if (!body.abi) return null
   const abi = body.abi
@@ -1026,17 +1025,11 @@ const thunkOf = (
   const construct = constructThunkOf(body, abi, hasEnvironment, linkage)
   return {
     prototype: [`${signature};`, ...(construct === null ? [] : [construct.prototype])].join('\n'),
-    definition: [
-      `${signature} { ${statement} }`,
-      ...(!preserveFunctionFacts || body.functionSource === undefined
-        ? []
-        : [
-            `[[maybe_unused]] static const bool ${cppThunkName(body.sourceOwner)}_source = ` +
-              `gea::CallableObject<${cppAbiType(abi)}>::registerSource<&${cppThunkName(body.sourceOwner)}>(` +
-              `${cppStringViewLiteral(body.functionName ?? '')}, ${body.functionLength ?? 0}, ${cppStringViewLiteral(body.functionSource)});`
-          ]),
-      ...(construct === null ? [] : [construct.definition])
-    ].join('\n')
+    // No `registerSource` beside the thunk any more: the function's
+    // `name`/`length`/source text register at the sites that mint a function
+    // object from it (`emit-context.ts`'s `cppThunkEntryText`), so a function
+    // nothing reaches is not pinned into the binary by its own registration.
+    definition: [`${signature} { ${statement} }`, ...(construct === null ? [] : [construct.definition])].join('\n')
   }
 }
 
@@ -2254,16 +2247,23 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
       }
     return false
   })
+  // The facts every mint site of a function registers (`cppThunkEntryText`),
+  // spelled once per body here rather than looked up through the thunk. Empty
+  // when the census above found no reader, so `&thunk` alone is stored.
+  const functionFacts = new Map<FunctionId, CallableFactsSpelling>()
+  if (preserveFunctionFacts)
+    for (const body of input.bodies) {
+      if (isRegionId(body.sourceOwner) || body.abi === null || body.functionSource === undefined) continue
+      functionFacts.set(body.sourceOwner, {
+        abiType: cppAbiType(body.abi),
+        name: body.functionName ?? '',
+        length: body.functionLength ?? 0,
+        source: body.functionSource
+      })
+    }
   const thunks = new Map<IrBody, RenderedThunk>()
   for (const body of input.bodies) {
-    const thunk = thunkOf(
-      body,
-      captures,
-      formalsNarrowedIn(body.sourceOwner),
-      resultNarrowedIn(body.sourceOwner),
-      linkage,
-      preserveFunctionFacts
-    )
+    const thunk = thunkOf(body, captures, formalsNarrowedIn(body.sourceOwner), resultNarrowedIn(body.sourceOwner), linkage)
     if (thunk) thunks.set(body, thunk)
   }
 
@@ -2360,6 +2360,7 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
         dyingArguments,
         instantiation,
         (callable) => abiByBody.get(String(callable)) ?? null,
+        functionFacts,
         hostMethodAliases,
         callableMemberCandidates,
         borrowableMemberBodies,

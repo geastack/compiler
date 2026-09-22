@@ -4,6 +4,12 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { installedPlugins } from './installed.js'
 import { noPluginCapabilities, type CompilerPlugin, type PluginInstance } from './model.js'
+import { adoptApplePackage } from './apple/host.js'
+import { applePlugin } from './apple/plugin.js'
+import { adoptGeaPackage } from './gea/host.js'
+import { geaPlugin } from './gea/plugin.js'
+import { adoptWebglPackage } from './webgl/host.js'
+import { webglPlugin } from './webgl/plugin.js'
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error))
@@ -161,6 +167,12 @@ export const loadCliPlugins = async (specifiers: readonly string[]): Promise<rea
       if (typeof plugin['instantiate'] !== 'function') {
         const adapter = typeof plugin['configure'] === 'function' ? await legacyAdapter(file, name, exported) : undefined
         if (!adapter) throw new Error(`plugin "${name}" is incompatible: expected instantiate(options); legacy hooks are not supported`)
+        // The adapter's tables come from the package's own statement, and the
+        // statement must be the package this path names -- not the copy the
+        // compiler's own `node_modules` happens to hold (`host-package.ts`).
+        if (adapter === webglPlugin) adoptWebglPackage(file)
+        else if (adapter === geaPlugin) adoptGeaPackage(file)
+        else if (adapter === applePlugin) adoptApplePackage(file)
         process.stderr.write(`compile: --plugin ${specifier}: using built-in "${adapter.name}" adapter for the legacy package\n`)
         loadedPaths.add(file)
         continue

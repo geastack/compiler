@@ -506,7 +506,7 @@ const contributeReturn = (context: ProducerContext, candidate: CensusCandidate, 
   if (node.expression) {
     const resolved = resolveExpressionOperand(context, node.expression)
     if (!resolved) return blockedContribution(candidate, 'no normalized operation identifies the returned value')
-    valueOperand = operand('value', 0, resolved.source, resolved.type)
+    valueOperand = { ...operand('value', 0, resolved.source, resolved.type), ...(resolved.asserted ? { asserted: true as const } : {}) }
   } else {
     const undefinedType = context.table.intern({ kind: 'primitive', primitive: 'undefined' })
     valueOperand = operand('value', 0, { kind: 'absent' }, undefinedType)
@@ -556,7 +556,7 @@ const contributeImplicitReturn = (context: ProducerContext, candidate: CensusCan
     id,
     form: 'return',
     caller: candidate.caller,
-    operands: [operand('value', 0, resolved.source, resolved.type)],
+    operands: [{ ...operand('value', 0, resolved.source, resolved.type), ...(resolved.asserted ? { asserted: true as const } : {}) }],
     results: [mintResult(id, 'completion', resolved.type)],
     completion: { canThrow: false, canReturn: true, canBreak: false, canContinue: false, canSuspend: false },
     effects: pureEffects,

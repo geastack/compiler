@@ -137,7 +137,9 @@ let mutableEmitContextFieldCount = 0
  * site was migrated and this table went stale).
  */
 const recipeTextExternalCallAllowance = {
-  convertedValueText: { 'targets/cpp/emit-record-view.ts': 3 },
+  // The fourth is the `dispatch` plan's chain-converted arm, the same call the
+  // `recast-union` plan's `convert` arm already makes one case up.
+  convertedValueText: { 'targets/cpp/emit-record-view.ts': 4 },
   narrowedLoadText: { 'targets/cpp/emit-properties.ts': 1, 'targets/cpp/emit-arrays.ts': 2 },
   widenedStoreText: {
     'targets/cpp/emit-equality.ts': 1,

@@ -3170,6 +3170,25 @@ struct CallableObject<Result(Arguments...)> {
     return true;
   }
 
+  // The same registration, performed where a function OBJECT is minted from
+  // the thunk rather than by a namespace-scope initializer beside the thunk.
+  // A namespace-scope registration is a static initializer that takes the
+  // thunk's address, and a static initializer with a side effect is a GC
+  // root: neither `--gc-sections` nor LTO may drop it, so it kept every
+  // emitted function -- and its source text -- in the binary whether or not
+  // anything reached it. One `EventEmitter` boxing a listener turned the
+  // registry on for a whole program, and that pinned all 384 functions of a
+  // raw HTTP server. Here the registration is reachable only from a site
+  // that creates the function object, which is the only site that can later
+  // observe its `name`/`length`/source. The function-local static is one
+  // per `Entry`, so several minting sites of one declaration share a single
+  // registration, and a site costs one guard-variable load per mint.
+  template <Invoke Entry>
+  static Invoke entryWithFacts(std::string_view name, std::size_t length, std::string_view text) {
+    static const SourceRegistration registration{Entry, name, length, text, nullptr};
+    return Entry;
+  }
+
   // An adapter (`dropArguments` and its siblings below) shares ONE thunk
   // pointer across every closure it wraps, so the facts it reports cannot
   // live in this registration -- they belong to whichever `Source` closure
@@ -18330,6 +18349,31 @@ template <typename T>
   throw gea::Value::box(gea::Value::Tag::String, std::string("InternalError: entered a branch the compiler proved unreachable"));
 }
 
+/**
+ * The exact-arm projection of a tagged union (`conversion/nodes.ts`'s
+ * `exactArmFor`): the payload of arm `Index`, or a `TypeError` when the value
+ * holds another arm.
+ *
+ * Emitted inside a body whose declaration states `@gea-exact-arms`, and at a
+ * value the program's own `as T` states the arm of where the census has no
+ * sound per-arm answer (`lower-operands.ts`'s `assertedArmEntry`). The
+ * alternative the compiler would otherwise render is a per-arm dispatch that
+ * CONVERTS every arm into the target -- for a callable target, an adapter that
+ * boxes the typed arm's parameters to feed a generic listener -- and the tag
+ * is the author stating that the guard around the cast already excluded those
+ * arms. A `TypeError` rather than an abort because a wrong arm here is the
+ * program's contract violated (`server.on('request', genericHandler)`), not
+ * the compiler's, and the program may want to catch it.
+ */
+template <std::size_t Index, typename... Arms>
+typename gea::TaggedUnion<Arms...>::template ArmType<Index> exactArm(const gea::TaggedUnion<Arms...>& value) {
+  if (!value.template is<Index>()) {
+    throwRuntimeError("TypeError", "Value is not the union arm this operation requires (arm " + std::to_string(Index) +
+                                       " expected, arm " + std::to_string(value.index()) + " held)");
+  }
+  return value.template get<Index>();
+}
+
 }  // namespace gea::host
 
 namespace gea::runtime::string {
@@ -25051,6 +25095,77 @@ template <typename Node>
 gea::Ref<bool> nodeLiveToken(const Node& node);
 
 /**
+ * Whether the engine dispatches `name` off-tree. `rotary` (the encoder dial)
+ * always: it has no element target, the runtime hands each detent to the one
+ * document-level listener chain (`dispatchDocumentRotary`), and
+ * `Tree::setEventListener` drops "rotary" as a type it never walks the tree
+ * for -- so an `onRotary` delegated to the body was registered nowhere and the
+ * dial did nothing, silently. `keydown` is off-tree on anything but an
+ * `<input>`: the runtime hands a key to the focused input's own listener (which
+ * bubbles to the body) and then to the document-level chain. The same rule the
+ * gea plugin's `cpp-mounted-lowering.ts` applies to its direct-root listeners.
+ */
+template <typename Node>
+bool isDocumentLevelEvent(const Node& node, const std::string& name) {
+  if (name == "rotary") return true;
+  if (name != "keydown") return false;
+  const char* tag = node.tagName();
+  if (!tag) return true;
+  std::string lowered(tag);
+  for (char& character : lowered) character = static_cast<char>(std::tolower(static_cast<unsigned char>(character)));
+  return lowered != "input";
+}
+
+/**
+ * Register `invoke` for `name` on behalf of `node`: the one place both engine
+ * `addNodeListener` overloads bind through.
+ *
+ * A document-level event goes straight to `Document::addEventListener`, which
+ * chains it onto the off-tree singleton: no `containsNode` gate, since there is
+ * no target to contain. The chain has no per-listener removal, so the handler
+ * is gated on the node's live token instead -- a rebuilt subtree leaves an
+ * inert closure behind rather than a second generation of the handler.
+ *
+ * Everything else is delegated to the BODY and gated by `containsNode`; see
+ * the no-argument `addNodeListener` for why, and `recordNodeSubscription` for
+ * how it is released with the node.
+ */
+template <typename Node, typename Invoke>
+void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
+  const auto target = node;
+  auto run = [target, invoke](gea::framework::events::PointerEvent& event) mutable {
+    const auto previousTarget = event.currentTarget;
+    const auto previousTargetId = event.currentTargetId;
+    const auto previousPhase = event.eventPhase;
+    event.currentTarget = gea::framework::events::EventTarget(target.id());
+    event.currentTargetId = target.id();
+    event.eventPhase = event.targetId == target.id() ? gea::framework::events::EventPhase::AtTarget
+                                                     : gea::framework::events::EventPhase::Bubbling;
+    invoke(event);
+    event.currentTarget = previousTarget;
+    event.currentTargetId = previousTargetId;
+    event.eventPhase = previousPhase;
+  };
+  if (isDocumentLevelEvent(node, name)) {
+    auto alive = nodeLiveToken(node);
+    gea::embedded::ui::Document::instance().addEventListener(
+      name.c_str(), [alive, run](gea::framework::events::PointerEvent& event) mutable {
+        if (!*alive) return;
+        run(event);
+      });
+    return;
+  }
+  const auto listenerId = gea::embedded::ui::Document::instance().body().addEventListener(
+    name.c_str(), [target, run](gea::framework::events::PointerEvent& event) mutable {
+      if (!gea::embedded::ui::Tree::instance().containsNode(target.id(), event.targetId)) return;
+      run(event);
+    });
+  recordNodeSubscription(target.id(), [name, listenerId]() {
+    gea::embedded::ui::Document::instance().body().removeEventListener(name.c_str(), listenerId);
+  });
+}
+
+/**
  * `onClick={() => ...}` on the real engine: the handler is copied into the
  * listener the engine holds, and the event it hands back is dropped -- a
  * no-argument handler declared none.
@@ -25092,26 +25207,7 @@ void addNodeListener(Node& node, const std::string& type, const gea::CallableObj
   // flipped the unit twice and the whole UI stayed in Celsius, with nothing
   // logged and every node still rendering correctly.
   const gea::CallableObject<Result()> held = handler;
-  const auto target = node;
-  const std::string name = eventTypeOf(type);
-  const auto listenerId = gea::embedded::ui::Document::instance().body().addEventListener(
-    name.c_str(), [held, target](gea::framework::events::PointerEvent& event) mutable {
-      if (!gea::embedded::ui::Tree::instance().containsNode(target.id(), event.targetId)) return;
-      const auto previousTarget = event.currentTarget;
-      const auto previousTargetId = event.currentTargetId;
-      const auto previousPhase = event.eventPhase;
-      event.currentTarget = gea::framework::events::EventTarget(target.id());
-      event.currentTargetId = target.id();
-      event.eventPhase = event.targetId == target.id() ? gea::framework::events::EventPhase::AtTarget
-                                                       : gea::framework::events::EventPhase::Bubbling;
-      held.call();
-      event.currentTarget = previousTarget;
-      event.currentTargetId = previousTargetId;
-      event.eventPhase = previousPhase;
-    });
-  recordNodeSubscription(target.id(), [name, listenerId]() {
-    gea::embedded::ui::Document::instance().body().removeEventListener(name.c_str(), listenerId);
-  });
+  bindNodeListener(node, eventTypeOf(type), [held](gea::framework::events::PointerEvent&) mutable { held.call(); });
 }
 
 /**
@@ -25141,31 +25237,14 @@ void addNodeListener(Node& node, const std::string& type, const gea::CallableObj
 template <typename Node, typename Result, typename Argument>
 void addNodeListener(Node& node, const std::string& type, const gea::CallableObject<Result(Argument)>& handler) {
   const gea::CallableObject<Result(Argument)> held = handler;
-  const auto target = node;
   const std::string name = eventTypeOf(type);
-  const auto listenerId = gea::embedded::ui::Document::instance().body().addEventListener(
-    name.c_str(), [held, target, name](gea::framework::events::PointerEvent& event) mutable {
-      if (!gea::embedded::ui::Tree::instance().containsNode(target.id(), event.targetId)) return;
-      const auto previousTarget = event.currentTarget;
-      const auto previousTargetId = event.currentTargetId;
-      const auto previousPhase = event.eventPhase;
-      event.currentTarget = gea::framework::events::EventTarget(target.id());
-      event.currentTargetId = target.id();
-      event.eventPhase = event.targetId == target.id() ? gea::framework::events::EventPhase::AtTarget
-                                                       : gea::framework::events::EventPhase::Bubbling;
-      if constexpr (std::is_constructible_v<std::decay_t<Argument>, const gea::framework::events::PointerEvent&>) {
-        held.call(static_cast<std::decay_t<Argument>>(event));
-      } else {
-        std::fprintf(stderr, "gea: the handler for \"%s\" declares an event parameter, which no host table states a carrier for\n", name.c_str());
-        gea::detail::abortAfterFlush();
-      }
-      event.currentTarget = previousTarget;
-      event.currentTargetId = previousTargetId;
-      event.eventPhase = previousPhase;
-    });
-  // Owned by `node`, for the reason the no-argument overload above states.
-  recordNodeSubscription(target.id(), [name, listenerId]() {
-    gea::embedded::ui::Document::instance().body().removeEventListener(name.c_str(), listenerId);
+  bindNodeListener(node, name, [held, name](gea::framework::events::PointerEvent& event) mutable {
+    if constexpr (std::is_constructible_v<std::decay_t<Argument>, const gea::framework::events::PointerEvent&>) {
+      held.call(static_cast<std::decay_t<Argument>>(event));
+    } else {
+      std::fprintf(stderr, "gea: the handler for \"%s\" declares an event parameter, which no host table states a carrier for\n", name.c_str());
+      gea::detail::abortAfterFlush();
+    }
   });
 }
 

@@ -1322,6 +1322,13 @@ export const reflectionExposureOf = (
       // publish those inputs to a dynamic source listener. That publication
       // happens inside generated adapter code, not in a separate IR call.
       const targetAbi = unwrappedCallableAbi(operation.result.representation)
+      // Under `GEA_REFLECTION_DEBUG`, the site too: a row's reasons say WHAT
+      // was promoted, and an adapter's cost is only removable at the
+      // conversion that installs it.
+      if (reflectionWatch !== undefined && targetAbi !== null)
+        console.error(
+          `[REFLECTION-ADAPTER] lineage=${String(operation.lineage)} node=${operation.conversionUse} capability=${node?.capability.kind ?? 'none'}`
+        )
       if (targetAbi !== null) {
         if (targetAbi.receiver !== null) promoteFull(targetAbi.receiver, 'callable-adapter-input')
         for (const parameter of targetAbi.parameters) promoteFull(parameter.value, 'callable-adapter-input')

@@ -20,6 +20,7 @@ import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { IdentityTable } from '../identities.js'
 import type { ProducerContext } from '../producer-context.js'
 import { parameterSlotTypeOf } from '../parameter-slot.js'
+import { declaresExactArms } from './exact-arms.js'
 import { mintOperationId, mintResult, operand } from './mint.js'
 import { resultOf } from '../../model/operands.js'
 import {
@@ -263,6 +264,7 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
         ? {
             functionSource: callable.getText(),
             generatorFunction: 'asteriskToken' in callable && callable.asteriskToken !== undefined,
+            ...(declaresExactArms(callable) ? { exactArms: true } : {}),
             ...(ownPrototypePropertyOf(callable) === null ? {} : { ownPrototypeProperty: ownPrototypePropertyOf(callable) === true }),
             ...(isNamedCallableMember(callable)
               ? { functionName: staticFunctionNameOf(callable), functionLength: expectedParameterCountOf(callable) }
@@ -362,6 +364,7 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
         classConstructorBodyOf: context.identities.declarationIdOf(node),
         functionSource: written.getText(),
         generatorFunction: 'asteriskToken' in written && written.asteriskToken !== undefined,
+        ...(declaresExactArms(written) ? { exactArms: true } : {}),
         ...(ownPrototypePropertyOf(written) === null ? {} : { ownPrototypeProperty: ownPrototypePropertyOf(written) === true }),
         caller: candidate.caller,
         operands: [],

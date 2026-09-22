@@ -6,7 +6,7 @@ import type { BindingOperation, BoundaryOperation } from '../../model/operations
 import type { CensusCandidate } from '../census.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'
-import { unwrapErased } from './erasure.js'
+import { assertsType, unwrapErased } from './erasure.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import { citeExpressionResult } from './references.js'
 import { valueEdgesInto } from './shared.js'
@@ -29,11 +29,15 @@ import { valueEdgesInto } from './shared.js'
 export const resolveExpressionOperand = (
   context: ProducerContext,
   node: ts.Node
-): { readonly source: OperandSource; readonly type: StructuralTypeId } | null => {
+): { readonly source: OperandSource; readonly type: StructuralTypeId; readonly asserted?: true } | null => {
   if (!ts.isExpression(node)) return null
   const cited = citeExpressionResult(node, context)
   if (cited.kind === 'unmodelled') return null
-  return { source: cited.source, type: context.types.typeAt(unwrapErased(node)) }
+  return {
+    source: cited.source,
+    type: context.types.typeAt(unwrapErased(node)),
+    ...(assertsType(node, context.checker) ? { asserted: true as const } : {})
+  }
 }
 
 /**

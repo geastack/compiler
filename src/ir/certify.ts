@@ -4,6 +4,7 @@ import { operationOfResult } from '../identity/ids.js'
 import type { TargetRuntimeManifest } from '../preflight/obligations.js'
 import type { ClassLayout } from '../projection/classes.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
+import { forEachEmbeddedRepresentation } from '../representation/embedded-carriers.js'
 import { captureCapabilityOf, representationKey, type CallableAbi, type Representation } from '../representation/model.js'
 import type { BindingPlacement } from '../projection/bindings.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
@@ -169,13 +170,32 @@ const nativeBoundaryDemand = (representation: Representation): CapabilityDemand 
     ? { key: `native-boundary:${representation.native ?? representation.protocol}@${representation.version}` }
     : null
 
+/**
+ * The native-boundary demands of every carrier a representation EMBEDS. The
+ * root's own demand is `nativeBoundaryDemand`; this is the rest of the tree
+ * -- the fields of a record, the arms of a union, a callable's signature --
+ * because the emitted C++ spells all of it, and a `native-handle` a struct
+ * field names must be as authenticated as one an SSA value holds. Asked of
+ * the root alone, lib.dom's `Window` certified with `Navigator`/`History`
+ * fields whose tag types no host declared, and clang was the first to say so.
+ */
+const embeddedNativeBoundaryDemands = (representation: Representation): CapabilityDemand[] => {
+  const demands: CapabilityDemand[] = []
+  forEachEmbeddedRepresentation(representation, (carrier) => {
+    const boundary = nativeBoundaryDemand(carrier)
+    if (boundary) demands.push(boundary)
+  })
+  return demands
+}
+
 const abiDemands = (manifest: TargetRuntimeManifest, abi: CallableAbi | null): CapabilityDemand[] => {
   if (abi === null) return []
   const carriers: Representation[] = [...abi.parameters.map((parameter) => parameter.value), abi.result]
   if (abi.receiver !== null) carriers.push(abi.receiver)
   return carriers.flatMap((carrier) => {
     const boundary = nativeBoundaryDemand(carrier)
-    return boundary ? [physicalTypeDemand(manifest, carrier), boundary] : [physicalTypeDemand(manifest, carrier)]
+    const embedded = embeddedNativeBoundaryDemands(carrier)
+    return boundary ? [physicalTypeDemand(manifest, carrier), boundary, ...embedded] : [physicalTypeDemand(manifest, carrier), ...embedded]
   })
 }
 
@@ -590,6 +610,7 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
       decide(owner, physicalTypeDemand(input.manifest, representation), ctx)
       const boundary = nativeBoundaryDemand(representation)
       if (boundary) decide(owner, boundary, ctx)
+      for (const demand of embeddedNativeBoundaryDemands(representation)) decide(owner, demand, ctx)
     }
     for (const blockId of body.blockOrder) {
       const block = body.blocks.get(blockId)

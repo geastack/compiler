@@ -29,7 +29,15 @@ import { hostCallName, hostMemberOf, statedHostIntrinsicLength } from './host/ho
 import type { CallableAbi, RecordField, Representation } from '../../representation/model.js'
 import { representationKey } from '../../representation/model.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
-import { cppBodyName, cppConstructName, cppNarrowedIntegerType, cppStringLiteral, cppTypeOf, cppUndefinedIn } from './types.js'
+import {
+  cppBodyName,
+  cppConstructName,
+  cppNarrowedIntegerType,
+  cppStringLiteral,
+  cppStringViewLiteral,
+  cppTypeOf,
+  cppUndefinedIn
+} from './types.js'
 import {
   hostBuiltinFunctionIdentityText,
   hostClassValueText,
@@ -722,6 +730,13 @@ export interface EmitContext {
   readonly generatorBody: boolean
   /** The conventions of emitted bodies, shared with their signature renderer. */
   readonly abiOfCallable: (callable: FunctionId) => CallableAbi | null
+  /**
+   * The `name`/`length`/source text each function object must be able to
+   * answer, keyed by the body -- empty when the program never reads any of
+   * them (`translation-unit.ts`'s `preserveFunctionFacts` census). Read by
+   * `cppThunkEntryText`, at the sites that mint a function object.
+   */
+  readonly functionFacts: ReadonlyMap<FunctionId, CallableFactsSpelling>
   /** The execution context whose frame this body is, so a cell owned elsewhere is recognisable as one. */
   readonly owner: FunctionId | RegionId
   /** See `emit-narrowing.ts`'s `PrinterDrift`; one program-wide list, shared by every body's context. */
@@ -1694,6 +1709,7 @@ export const createEmitContext = (
   dyingArguments: ReadonlySet<IrValueId> = new Set(),
   instantiation: InstantiationFacts = noInstantiationFacts,
   abiOfCallable: (callable: FunctionId) => CallableAbi | null = () => null,
+  functionFacts: ReadonlyMap<FunctionId, CallableFactsSpelling> = new Map(),
   hostMethodAliases: ReadonlyMap<DeclarationId, HostMethodAlias> = new Map(),
   callableMemberCandidates: ReadonlyMap<string, FunctionId> = new Map(),
   borrowableMemberBodies: ReadonlySet<FunctionId> = new Set(),
@@ -1754,6 +1770,7 @@ export const createEmitContext = (
   const ctx: EmitContext = {
     abi: effectiveAbiOf(abi, admission),
     abiOfCallable,
+    functionFacts,
     owner,
     placements,
     classes,
@@ -2202,6 +2219,46 @@ export const cppReceiverName = 'gea_this'
 
 /** The thunk that adapts one function body to the environment-passing invoke pointer a callable carrier holds. */
 export const cppThunkName = (functionId: string): string => `${cppBodyName(functionId)}_thunk`
+
+/**
+ * What one function object answers for `name`, `length` and
+ * `Function.prototype.toString`, already spelled for the registration call:
+ * `abiType` is `cppAbiType` of the thunk's own convention, which the
+ * registry's `Invoke` template parameter must match exactly.
+ */
+export interface CallableFactsSpelling {
+  readonly abiType: string
+  readonly name: string
+  readonly length: number
+  readonly source: string
+}
+
+/**
+ * The invoke pointer a minting site stores in a callable carrier: `&thunk`,
+ * or -- when the program reads function facts -- `&thunk` handed back by
+ * `gea::CallableObject<Abi>::entryWithFacts<&thunk>(name, length, text)`,
+ * which registers the facts the first time any site mints this function.
+ *
+ * Registration lives HERE, at the mint, and not beside the thunk, because a
+ * namespace-scope `static const bool ... = registerSource<&thunk>(...)` is a
+ * static initializer that takes the thunk's address, and a static initializer
+ * with a side effect is a root the linker may not drop. Every emitted
+ * function, and its source text, then survived `--gc-sections` and LTO
+ * whether or not anything reached it: a raw HTTP server whose `EventEmitter`
+ * boxed one listener kept all 384 of its functions. A mint site is reachable
+ * exactly when a function object can exist, and only an existing function
+ * object can be asked for its facts, so registering there preserves every
+ * observable answer and pins nothing else.
+ */
+export const cppThunkEntryText = (ctx: EmitContext, functionId: FunctionId): string => {
+  const thunk = `&${cppThunkName(functionId)}`
+  const facts = ctx.functionFacts.get(functionId)
+  if (facts === undefined) return thunk
+  return (
+    `gea::CallableObject<${facts.abiType}>::entryWithFacts<${thunk}>(` +
+    `${cppStringViewLiteral(facts.name)}, ${facts.length}, ${cppStringViewLiteral(facts.source)})`
+  )
+}
 
 /** The thunk that adapts one class's construct function to the environment-passing construct pointer a constructor carrier holds. */
 export const cppConstructThunkName = (declaration: DeclarationId): string => `${cppConstructName(declaration)}_thunk`

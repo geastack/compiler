@@ -1270,7 +1270,9 @@ const lowerOwner = (
   regionParts: RegionPartMembers,
   deferredIteratorCloses: ReadonlySet<OperationId>,
   /** Whether this owner is a `function*` -- see `generatorPrologueBoundary` below. */
-  isGenerator: boolean
+  isGenerator: boolean,
+  /** Whether this owner's declaration states `@gea-exact-arms` -- see `LoweringContext.exactArmNarrowing`. */
+  exactArmNarrowing: boolean
 ): IrBody => {
   // Membership first: the execution order below keeps each branch's operations
   // contiguous, which it can only do once every operation's scope chain is
@@ -1288,7 +1290,8 @@ const lowerOwner = (
     abiRefusal,
     builder,
     values: new Map(),
-    shortCircuits: new Map()
+    shortCircuits: new Map(),
+    exactArmNarrowing
   }
   const blockStarts = new Map<OperationId, IrBlockId>()
   const finiteCloseStarts = new Map<OperationId, OperationId>()
@@ -1500,6 +1503,10 @@ export const lowerToIr = (input: IrLoweringInput): IrLoweringResult => {
   const bodies = new Map<PhysicalBodyId, IrBody>()
   const blocked: IrLoweringBlocker[] = []
   const functionFacts = new Map<FunctionId, { functionSource: string; functionName: string; functionLength: number; generator: boolean }>()
+  // Owners whose declaration states `@gea-exact-arms`. Kept apart from
+  // `functionFacts`, which is spread onto the emitted body: the tag changes
+  // how the body LOWERS and is nothing the body needs to carry afterwards.
+  const exactArmOwners = new Set<FunctionId>()
   // The graph is sealed: its loop-owned closes are identical for every body.
   // Collect once instead of scanning the entire program for each function.
   const deferredIteratorCloses = new Set<OperationId>()
@@ -1513,6 +1520,7 @@ export const lowerToIr = (input: IrLoweringInput): IrLoweringResult => {
         functionLength: operation.functionLength ?? 0,
         generator: operation.generatorFunction === true
       })
+      if (operation.exactArms === true) exactArmOwners.add(operation.callable)
     }
   }
 
@@ -1578,7 +1586,8 @@ export const lowerToIr = (input: IrLoweringInput): IrLoweringResult => {
         edgesByOwner.get(owner) ?? noEdges,
         regionParts,
         deferredIteratorCloses,
-        facts?.generator === true
+        facts?.generator === true,
+        exactArmOwners.has(owner as FunctionId)
       )
       bodies.set(body.owner, facts === undefined ? body : { ...body, ...facts })
     } catch (error) {

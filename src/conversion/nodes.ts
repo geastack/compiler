@@ -45,6 +45,28 @@ export interface ConversionCensus {
    * node's id carries the operation's name and lives in its own table.
    */
   readonly coercionFor: (source: Representation, operation: CoercionOperation) => ConversionNode
+  /**
+   * The exact-arm projection of a tagged union into the one arm whose carrier
+   * IS the target: `get<k>()` guarded by `is<k>()`, a `TypeError` otherwise.
+   * `null` where the source is not a tagged union or the target is not
+   * exactly one of its arms -- the pair then belongs to `nodeFor`.
+   *
+   * Its own table for the same reason coercions have one: the pair
+   * `tagged-union(...) -> arm` already names `nodeFor`'s dispatch node, which
+   * converts EVERY arm into the target (a callable arm through an adapter, a
+   * class arm through an upcast), and only the instruction's own node id says
+   * which of the two runs. Minted only for an owner whose declaration states
+   * `@gea-exact-arms` (`LoweringContext.exactArmNarrowing`): the projection
+   * trades a conversion the checker proved total for a runtime check the
+   * author vouched for, so nothing mints it on its own initiative.
+   *
+   * A `static` capability with `nativeFieldProtocol: 'unused'` and every
+   * transport preserved: the value handed on is the arm's own payload,
+   * untouched, so no field protocol, adapter or fresh alias is involved --
+   * which is exactly the proof the reflection census needs to leave the
+   * arm's parameters un-promoted.
+   */
+  readonly exactArmFor: (source: Representation, target: Representation) => ConversionNode | null
   /** The node a `convert` instruction names, from whichever table minted it; `null` for an id no census minted. */
   readonly nodeById: (id: ConversionNodeId) => ConversionNode | null
   /** Every node minted through `nodeFor` that the eager graph did not already hold. */
@@ -141,7 +163,52 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     return node
   }
 
-  const nodeById = (id: ConversionNodeId): ConversionNode | null => input.nodes.get(id) ?? minted.get(id) ?? coercions.get(id) ?? null
+  const exactArms = new Map<ConversionNodeId, ConversionNode>()
+  const exactArmFor = (source: Representation, target: Representation): ConversionNode | null => {
+    const index = exactArmIndexOf(source, target)
+    if (index === null) return null
+    const id = `${representationKey(source)}->${representationKey(target)}#exact-arm`
+    const remembered = exactArms.get(id)
+    if (remembered !== undefined) return remembered
+    const node: ConversionNode = {
+      id,
+      source,
+      target,
+      capability: {
+        kind: 'static',
+        materializer: {
+          id: EXACT_ARM_MATERIALIZER,
+          domain: `static:exact-arm:${index}`,
+          allocates: false,
+          nativeFieldProtocol: 'unused',
+          nativePayloadTransport: 'preserved',
+          nativeClassReferenceIdentity: 'preserved',
+          callableIdentityTransport: 'preserved'
+        }
+      }
+    }
+    exactArms.set(id, node)
+    return node
+  }
 
-  return { nodeFor, coercionFor, nodeById, minted }
+  const nodeById = (id: ConversionNodeId): ConversionNode | null =>
+    input.nodes.get(id) ?? minted.get(id) ?? coercions.get(id) ?? exactArms.get(id) ?? null
+
+  return { nodeFor, coercionFor, exactArmFor, nodeById, minted }
+}
+
+/** The materializer id every exact-arm node carries; the printer dispatches its recipe on it. */
+export const EXACT_ARM_MATERIALIZER = 'gea::host::exactArm'
+
+/**
+ * Which arm of `source` the target IS, by carrier key, or `null` when the
+ * source is not a tagged union or no single arm matches. A union's arms are
+ * pairwise disjoint at runtime, so two arms never share a key; the
+ * exactly-one test still guards the answer rather than trusting that.
+ */
+export const exactArmIndexOf = (source: Representation, target: Representation): number | null => {
+  if (source.kind !== 'tagged-union') return null
+  const targetKey = representationKey(target)
+  const matches = source.arms.flatMap((arm, index) => (representationKey(arm.value) === targetKey ? [index] : []))
+  return matches.length === 1 ? (matches[0] ?? null) : null
 }

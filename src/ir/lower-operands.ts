@@ -6,11 +6,11 @@ import type { ClassLayout } from '../projection/classes.js'
 import { classMemberOf } from '../projection/fields.js'
 import type { SlotCensus } from '../projection/slots.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
-import { representationKey, type CallableAbi, type RecordField, type Representation } from '../representation/model.js'
+import { representationKey, type CallableAbi, type RecordField, type Representation, type TaggedUnionArm } from '../representation/model.js'
 import type { SealedRepresentationPlan } from '../representation/plan.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import { operandOf, resultOf, type SemanticOperand } from '../semantics/model/operands.js'
-import type { SemanticOperation } from '../semantics/model/operations.js'
+import { conversionRoleTargetOf, type SemanticOperation } from '../semantics/model/operations.js'
 import type { IrBodyBuilder } from './build.js'
 import { anchorResultOf, IrLoweringBlockedError, requireRepresentation } from './lower-graph.js'
 import type { PendingShortCircuit } from './lower-short-circuit.js'
@@ -153,6 +153,15 @@ export interface LoweringContext {
   readonly values: Map<SemanticResultId, IrValueId>
   /** Optional-chain expressions whose merge is recorded but not yet closed (`lower-short-circuit.ts`). */
   readonly shortCircuits: Map<SemanticResultId, PendingShortCircuit>
+  /**
+   * Whether this owner's declaration states `@gea-exact-arms`
+   * (`AllocationOperation.exactArms`): a tagged-union operand entering a slot
+   * that is exactly one of its arms takes the census's exact-arm projection
+   * instead of `nodeFor`'s per-arm dispatch. Per owner rather than per site
+   * because the tag is a statement about the body's own guards, which the
+   * lowering has no way to evaluate site by site.
+   */
+  readonly exactArmNarrowing: boolean
 }
 
 export const describeOperand = (operand: SemanticOperand): string => `operand "${operand.role}"#${operand.ordinal}`
@@ -356,7 +365,10 @@ export const convertTo = (
   via = 'slot'
 ): IrOperand | null => {
   if (representationKey(operand.representation) === representationKey(slot)) return operand
-  const node = ctx.program.conversions.nodeFor(operand.representation, slot)
+  // The owner's own declaration asked for the projection; where the slot is
+  // not exactly one arm the census answers `null` and the ordinary pair runs.
+  const exact = ctx.exactArmNarrowing ? ctx.program.conversions.exactArmFor(operand.representation, slot) : null
+  const node = exact ?? ctx.program.conversions.nodeFor(operand.representation, slot)
   if (node.capability.kind === 'never') return null
   const value = ctx.builder.convert(block, lineage, node.id, operand, slot)
   traceSpeculativeLoad(lineage, via, node, value)
@@ -416,10 +428,76 @@ export const enter = (
   // converted on the way in; converting here would hand the view builder a
   // value it then re-viewed.
   if (answer.source === 'alias') return resolved
-  const entered = convertTo(ctx, block, lineage, resolved, answer.representation)
+  const entered =
+    exactArmEntry(ctx, block, lineage, operation, operand, resolved, answer.representation) ??
+    convertTo(ctx, block, lineage, resolved, answer.representation) ??
+    assertedArmEntry(ctx, block, lineage, operand, resolved, answer.representation)
   if (entered !== null) return entered
   recordDrift(ctx, block, operation.id, operand.role, operand.ordinal, resolved.representation, answer.representation)
   return resolved
+}
+
+/**
+ * An argument entering an `@gea-exact-arms` callee's union slot through the
+ * arm the resolved overload named (`ConversionRoleTarget.owner`'s
+ * `exact-arm`): the value converted into THAT arm's carrier, then wrapped --
+ * an exact wrap, since the arm's own key is one of the union's. `null` where
+ * the call published no such role, the slot is not a union, or the named
+ * type is not an arm of it, and the ordinary slot conversion runs instead.
+ *
+ * Two `convert`s rather than one so each names a census node the certificate
+ * already knows how to read: source-into-arm is the same pair a direct call
+ * of the overload would mint, and arm-into-union is the identity wrap.
+ */
+const exactArmEntry = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operation: SemanticOperation,
+  operand: SemanticOperand,
+  resolved: IrOperand,
+  slot: Representation
+): IrOperand | null => {
+  if (slot.kind !== 'tagged-union' || operand.role !== 'argument') return null
+  const target = conversionRoleTargetOf(operation, 'argument', operand.ordinal, 'exact-arm')
+  if (target === undefined) return null
+  const arm =
+    slot.arms.find((candidate) => candidate.semanticType === target.type) ??
+    ((): TaggedUnionArm | undefined => {
+      const key = representationKey(ctx.constantDeriver.layoutOf(target.type))
+      return slot.arms.find((candidate) => representationKey(candidate.value) === key)
+    })()
+  if (arm === undefined) return null
+  const held = convertTo(ctx, block, lineage, resolved, arm.value, 'exact-arm')
+  return held === null ? null : convertTo(ctx, block, lineage, held, slot, 'exact-arm')
+}
+
+/**
+ * A value the program's own type assertion states the arm of
+ * (`SemanticOperand.asserted`), entering a slot that is exactly one arm of
+ * its union, where the ordinary pair has no recipe: the census's exact-arm
+ * projection, checked at runtime. Asked only AFTER `convertTo` declined, so
+ * a pair the census answers soundly for every arm keeps that answer and the
+ * assertion changes nothing -- exactly as it changes nothing in JavaScript.
+ * The pair the census declines is the one where an arm has no home in the
+ * slot at all (`conversions.ts`'s `classArmWithoutHome`): there the only
+ * alternatives are refusing the program or reading the wrong arm's bytes,
+ * and the author has written which arm it is.
+ */
+const assertedArmEntry = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operand: SemanticOperand,
+  resolved: IrOperand,
+  slot: Representation
+): IrOperand | null => {
+  if (operand.asserted !== true) return null
+  const node = ctx.program.conversions.exactArmFor(resolved.representation, slot)
+  if (node === null) return null
+  const value = ctx.builder.convert(block, lineage, node.id, resolved, slot)
+  traceSpeculativeLoad(lineage, 'asserted-arm', node, value)
+  return { value, representation: slot }
 }
 
 /** The row `LoweringProgram.drift` keeps for a pair the census has no recipe for. */

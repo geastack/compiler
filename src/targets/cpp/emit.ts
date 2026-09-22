@@ -48,10 +48,11 @@ import {
   operandText,
   storageTypeOf,
   type CaptureIndex,
+  type CallableFactsSpelling,
   type EmitBodyFacts,
   type EmitContext,
   type TemplateObjectDefinition,
-  cppThunkName,
+  cppThunkEntryText,
   sealFactFieldsForRender
 } from './emit-context.js'
 import { hostMemberReadsOf } from './host/emit-host-properties.js'
@@ -72,7 +73,7 @@ import {
   emitBindingRead,
   emitBindingWrite
 } from './emit-bindings.js'
-import type { ConversionCensus } from '../../conversion/nodes.js'
+import { EXACT_ARM_MATERIALIZER, type ConversionCensus } from '../../conversion/nodes.js'
 import { type PrinterDrift, alignedValueText, emitMergeLiveArmRebuild, namedConversionText, widenedStoreText } from './emit-narrowing.js'
 import { admitDenseWindows, collectCapacityHints, emitAllocateArrayObject, emitDenseSetup, emitFillLoop } from './emit-arrays.js'
 import type { IntegerStorageFacts } from '../../ir/integers.js'
@@ -1051,8 +1052,14 @@ const emitConvert = (ctx: EmitContext, lines: string[], operation: ConvertOperat
   // (`alignedValueText` asks the census for the same pair and renders the
   // same node; a pair the census refused is its drift row, and the chain's).
   const named = ctx.conversions.nodeById(operation.conversionUse)
+  // A coercion and an exact-arm projection each share their (source, target)
+  // pair with the store node `alignedValueText` would look up, so for those
+  // the instruction's own node is the only thing that says which one runs.
+  const namedOverPair =
+    named?.capability.kind === 'coercion' ||
+    (named?.capability.kind === 'static' && named.capability.materializer.id === EXACT_ARM_MATERIALIZER)
   const text =
-    (named?.capability.kind === 'coercion'
+    (namedOverPair
       ? namedConversionText(ctx, 'emit.ts:1026', named, sourceText)
       : alignedValueText(ctx, 'emit.ts:1026', operation.source.representation, operation.result.representation, sourceText)) ??
     // A method value escaping into a receiver-less slot: the receiver is
@@ -1668,7 +1675,7 @@ const settleDeadCalleeSideEffects = (ctx: EmitContext, operation: IrNonTerminato
       // updating.
       const carrier = operation.result.representation
       if (carrier.kind === 'function-value-dispatch' && carrier.abi.parameters.length === 0 && carrier.abi.receiver === null) {
-        ctx.deferredTexts.set(operation.result.id, `${cppTypeOf(carrier)}{&${cppThunkName(operation.functionId)}, nullptr}`)
+        ctx.deferredTexts.set(operation.result.id, `${cppTypeOf(carrier)}{${cppThunkEntryText(ctx, operation.functionId)}, nullptr}`)
       }
     }
     return
@@ -1887,6 +1894,7 @@ export const emitBody = (
   dyingArguments: ReadonlySet<IrValueId> = new Set(),
   instantiation: InstantiationFacts = noInstantiationFacts,
   abiOfCallable: (callable: FunctionId) => IrBody['abi'] = () => null,
+  functionFacts: ReadonlyMap<FunctionId, CallableFactsSpelling> = new Map(),
   hostMethodAliases: ReadonlyMap<DeclarationId, HostMethodAlias> = new Map(),
   callableMemberCandidates: ReadonlyMap<string, FunctionId> = new Map(),
   borrowableMemberBodies: ReadonlySet<FunctionId> = new Set(),
@@ -2002,6 +2010,7 @@ export const emitBody = (
     dyingArguments,
     instantiation,
     abiOfCallable,
+    functionFacts,
     hostMethodAliases,
     callableMemberCandidates,
     borrowableMemberBodies,

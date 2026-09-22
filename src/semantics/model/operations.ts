@@ -18,7 +18,17 @@ import type { HostMethodBinding } from '../host-methods.js'
 export interface ConversionRoleTarget {
   readonly role: string
   readonly ordinal: number
-  readonly owner: 'parameter-slot' | 'array-element' | 'declared-field'
+  /**
+   * `exact-arm` is the caller's half of `AllocationOperation.exactArms`: for
+   * an argument into an `@gea-exact-arms` implementation, `type` is the
+   * parameter type of the overload the checker RESOLVED, not the
+   * implementation's union slot the `parameter-slot` role names. The lowering
+   * enters that arm of the union and no other, so the arm the body projects
+   * is the arm the checker chose -- without it a `() => 2` under `Typed |
+   * Generic` widens into whichever arm can adapt it first, and the body's
+   * projection then throws on a call the checker accepted.
+   */
+  readonly owner: 'parameter-slot' | 'array-element' | 'declared-field' | 'exact-arm'
   readonly type: StructuralTypeId
 }
 
@@ -312,6 +322,23 @@ export interface AllocationOperation extends SemanticOperationBase {
    * the same condition as `functionSource`.
    */
   readonly generatorFunction?: boolean
+  /**
+   * Whether the declaration carries `@gea-exact-arms`: inside this body, a
+   * tagged-union value entering a slot that is EXACTLY one of its arms
+   * projects that arm and throws a `TypeError` on any other, instead of the
+   * per-arm dispatch that converts every arm into the target.
+   *
+   * A fact of the declaration because the checker cannot state it. TS
+   * function assignability makes any two callable arms convertible in at
+   * least one direction, so `fn as RequestListener` over `EventHandler |
+   * RequestListener` always installs an adapter for the catch-all arm -- and
+   * that adapter publishes the typed arm's parameters to a dynamic listener,
+   * which is precisely what an overload implementation keeping typed and
+   * generic listeners in separate storage never does. Only the author knows
+   * the branch guarding the cast makes the other arms unreachable, so the
+   * author states it, per body, and pays with a runtime check.
+   */
+  readonly exactArms?: boolean
   /**
    * Whether the declaration performs ECMA-262 10.2.5 `MakeConstructor` and so
    * owns a `prototype` object -- true for an ordinary `function` declaration

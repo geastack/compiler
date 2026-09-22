@@ -10,7 +10,7 @@ import {
   bindingReference,
   captureFieldText,
   cppEnvironmentStructName,
-  cppThunkName,
+  cppThunkEntryText,
   createCppEmitBlockedError,
   operandText,
   type EmitContext,
@@ -251,7 +251,7 @@ export const classMethodValueText = (
     layout.methods.some((entry) => entry.callable === method.callable && entry.key === key)
   )
   if (owner === undefined) throw createCppEmitBlockedError('call-abi:class-method-owner', `method "${key}" has no declaring prototype`)
-  const payload = `${cppTypeOf(bodyRepresentation)}{&${cppThunkName(method.callable)}, ${environment}}`
+  const payload = `${cppTypeOf(bodyRepresentation)}{${cppThunkEntryText(ctx, method.callable)}, ${environment}}`
   const override =
     receiverRepresentation.kind === 'class-ref' && !dispatchesStatically(ctx, operation.receiver)
       ? classMethodOverrideOf(ctx.classes, receiverRepresentation.declaration, key)
@@ -1032,7 +1032,7 @@ export const classConstructorStaticMemberTextFor = (
         throw createCppEmitBlockedError('property-access:class-prototype:method-abi', 'prototype method has no native convention')
       const representation: Representation = { kind: 'function-value-dispatch', abi }
       const environment = methodEnvironmentText(ctx, method.callable, `prototype method ${method.key}`)
-      const payload = `${cppTypeOf(representation)}{&${cppThunkName(method.callable)}, ${environment}}`
+      const payload = `${cppTypeOf(representation)}{${cppThunkEntryText(ctx, method.callable)}, ${environment}}`
       return {
         representation,
         text: `gea::nativeClassMethodValue<${cppClassName(owner.declaration)}, &${cppCallableDeclarationTagName(method.callable)}>(${state}, ${payload})`
@@ -1104,7 +1104,7 @@ export const classConstructorStaticMemberTextFor = (
     // `gea::Value{&thunk, env}` for a computed read, which is not a boxed
     // callable at all.
     const methodAbi = ctx.abiOfCallable(site.method.callable)
-    const object = `{&${cppThunkName(site.method.callable)}, ${methodEnvironmentText(ctx, site.method.callable, `a "get" of static "${key}"`)}}`
+    const object = `{${cppThunkEntryText(ctx, site.method.callable)}, ${methodEnvironmentText(ctx, site.method.callable, `a "get" of static "${key}"`)}}`
     if (methodAbi === null) return `${cppTypeOf(result)}${object}`
     const methodRepresentation: Representation = { kind: 'function-value-dispatch', abi: methodAbi }
     const converted = alignedValueText(

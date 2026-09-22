@@ -35,7 +35,12 @@ import { cppTypeOf } from './types.js'
 import { nativeSumWidenable } from '../../conversion/native-sum.js'
 import { nativeSelectionRecipeOf, nativeTotalSelectionRecipeOf, type NativeSelectionRecipe } from '../../conversion/native-selection.js'
 import { nativeClassReferenceIdentityOf } from '../../conversion/native-class-reference.js'
-import { ownedRecordMaterializationPlan, recordViewUsesOnlyDirectFields } from '../../conversion/record-view.js'
+import {
+  isRecordViewTarget,
+  ownedRecordMaterializationPlan,
+  recordViewDispatchesArms,
+  recordViewUsesOnlyDirectFields
+} from '../../conversion/record-view.js'
 import { cppStringObjectNativeType } from './regexp-types.js'
 import { viewPlanFor } from './emit-record-view.js'
 
@@ -475,6 +480,40 @@ const dynamicCallablePair = (target: Extract<Representation, { kind: 'function-v
 
 type NativeNarrowingContract = Pick<MaterializerContract, 'nativeFieldProtocol' | 'nativePayloadTransport'>
 
+/**
+ * A shared class handle among a sum's arms, at a record-shaped target it
+ * reaches by neither the chain nor the structural view.
+ *
+ * Nothing in the program proves that arm dead: an interface-typed slot holds
+ * whatever object the program put there (`semantics/interface-implementors.ts`),
+ * and a class this cannot view as the record is still a value the slot can be
+ * handed -- skytail's `const ctx: AudioContextLike | null = Ctor ? new Ctor()
+ * : createNativeAudioContext()`, whose `NativeAudioContext` carries class-typed
+ * fields and a promise the view cannot rebuild. Selecting the record arm
+ * there read the class instance's bytes as the record and crashed at launch,
+ * certified. A record arm beside the exact one is the opposite case: a record
+ * the view cannot rebuild as the target is not assignable to it either, so the
+ * checker's own narrowing is what put the pair here, and the selection stands.
+ *
+ * Asked by every table that could answer the pair -- `narrowing` and
+ * `staticRecipe` -- so the census refuses it outright rather than one table
+ * declining and the next selecting.
+ */
+const classArmWithoutHome = (layouts: RecordLayoutPolicy, source: Representation, target: Representation): boolean => {
+  const union = source.kind === 'optional' ? source.payload : source
+  const selected = target.kind === 'optional' ? target.payload : target
+  if (union.kind !== 'tagged-union' || !isRecordViewTarget(selected)) return false
+  const key = representationKey(selected)
+  return union.arms.some(
+    ({ value }) =>
+      value.kind === 'class-ref' &&
+      value.ownership === 'shared-refcount' &&
+      representationKey(value) !== key &&
+      conversionRecipeOf(value, selected)?.renders !== true &&
+      viewPlanFor(layouts, value, selected) === null
+  )
+}
+
 export const createCppConversionRegistry = (layouts: RecordLayoutPolicy = defaultRecordLayoutPolicy): ConversionRuntimeRegistry => {
   // A sum narrowing's contract is composed from the contracts this same
   // registry states for its leaf pairs (`native-narrowing-transport.ts`), so
@@ -822,6 +861,7 @@ const cppConversionTables = (
     // would hand back points into the cell -- which outlives nothing the caller
     // can see, and whose lifetime the program never stated.
     if ('ownership' in target && target.ownership === 'borrowed') return null
+    if (classArmWithoutHome(layouts, source, target)) return null
     const setPair = genericFunctionSetPair(source, target)
     if (setPair) return setPair
     // The payload read as the array-extending interface it also is
@@ -987,6 +1027,17 @@ const cppConversionTables = (
     const union = source.kind === 'optional' ? source.payload : source
     const selected = source.kind === 'optional' && target.kind === 'optional' ? target.payload : target
     if (union.kind !== 'tagged-union') return null
+    // A record-shaped target some OTHER arm reaches only through the
+    // structural view is not a selection: that arm is live at a store, and a
+    // selection would read it as the exact arm. The view's `dispatch` plan
+    // (`conversion/record-view.ts`) is the conversion, installed by
+    // `staticRecipe` below once this table declines -- the same plan
+    // `emit-narrowing.ts`'s `narrowedLoadText` defers to, asked here so the
+    // admission and the render agree.
+    if (isRecordViewTarget(selected)) {
+      const view = viewPlanFor(layouts, source, target)
+      if (view !== null && recordViewDispatchesArms(view)) return null
+    }
     const targetKey = representationKey(selected)
     // A SUB-union target: `selected` is still a tagged union, just missing one
     // or more of `union`'s arms -- `h instanceof Headers`'s `else` branch
@@ -2006,6 +2057,21 @@ const cppConversionTables = (
       : { id: `coercion:${operation}`, domain: `coercion:${operation}:${representationKey(source)}`, allocates: operation === 'ToString' },
   staticRecipe: (source: Representation, target: Representation) => {
     if (!isSpellable(source) || !isSpellable(target)) return null
+    if (classArmWithoutHome(layouts, source, target)) return null
+    // A sum some arm of which reaches the record-shaped target only through
+    // the structural view is that view's `dispatch` plan, asked BEFORE the
+    // chain: the chain answers the pair too, by selecting the exact arm, and
+    // that selection is the narrowing this table's `narrowing` entry has
+    // already declined for the pair (`recordViewDispatchesArms`). The
+    // printer renders in the same order (`emit-narrowing.ts`'s `recipeText`).
+    const dispatching = viewPlanFor(layouts, source, target)
+    if (dispatching !== null && recordViewDispatchesArms(dispatching))
+      return {
+        id: 'view:structural-record',
+        domain: 'static:structural-record-view',
+        allocates: true,
+        ...(recordViewUsesOnlyDirectFields(dispatching) ? { nativeFieldProtocol: 'unused' as const } : {})
+      }
     const recipe = conversionRecipeOf(source, target)
     if (recipe !== null && recipe.renders) {
       // `unreachable-value` spells either `unreachableValue<T>()` (a throw that
@@ -2058,6 +2124,7 @@ const allocatingRecipes: ReadonlySet<string> = new Set([
   'record-recast',
   'optional-record-recast',
   'record-to-dictionary',
+  'dictionary-to-record',
   'record-to-array',
   'promise-payload'
 ])
