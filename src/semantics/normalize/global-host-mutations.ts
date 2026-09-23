@@ -5492,6 +5492,34 @@ export const censusGlobalHostMutations = (
       !receiverTypeIsAssertionSeeded(callee.expression)
     )
   }
+  /**
+   * `globalThis.hasOwnProperty('key')` on a receiver the alias graph traced to
+   * the global object itself. Unlike `calleeHasNoKeySetEffect`, the receiver's
+   * identity is proven, so which body runs is decided by the key
+   * `hasOwnProperty` on the global object and on Object.prototype -- and that
+   * is this census's own per-key answer: `intrinsicSymbolIsOverwritten` records
+   * the name as trusted, and a run whose own writes reach it is repeated with
+   * it distrusted. The intrinsic then reads one own slot; a literal key's
+   * ToPropertyKey runs no code. `window.toString()` stays wildcarded: the
+   * intrinsic `toString` performs a Get on its receiver, which may run a getter.
+   */
+  const ownKeyTestMemberNames = new Set(['hasOwnProperty'])
+  const isIntrinsicOwnKeyTestOnGlobal = (
+    call: ts.CallExpression,
+    callee: ts.PropertyAccessExpression | ts.ElementAccessExpression
+  ): boolean => {
+    const key = staticKeyOf(callee)
+    if (key === null || !ownKeyTestMemberNames.has(key) || call.arguments.length !== 1) return false
+    if (!ts.isStringLiteralLike(unwrapErasedExpression(call.arguments[0]!))) return false
+    const symbol = memberSymbolOf(callee)
+    return (
+      !!symbol &&
+      (symbol.declarations ?? []).length > 0 &&
+      (symbol.declarations ?? []).every((declaration) => declaration.getSourceFile().hasNoDefaultLib) &&
+      intrinsicReflectionIsIntact() &&
+      !intrinsicSymbolIsOverwritten(symbol)
+    )
+  }
 
   const visit = (node: ts.Node): void => {
     if (reachable.memberIsPruned(node)) return
@@ -5671,7 +5699,8 @@ export const censusGlobalHostMutations = (
         (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) &&
         mayAliasGlobal(callee.expression) &&
         // A receiver the alias graph traced to the global object itself is
-        // fail-closed UNCONDITIONALLY: a local cast from `globalThis` denotes
+        // fail-closed for every callee but an intrinsic own-key test
+        // (`isIntrinsicOwnKeyTestOnGlobal`): a local cast from `globalThis` denotes
         // the real global, whose members are host code, and no amount of
         // "every candidate body is compiled here" clears that -- the receiver
         // is what may be attacked, not just the callee. This used to be ANDed
@@ -5683,7 +5712,7 @@ export const censusGlobalHostMutations = (
         // untainted (`global-this-host-bindings.test.ts`: "an equivalent
         // authenticated global remains fail-closed as a method receiver" and
         // its neighbors).
-        (aliasFacts(callee.expression).global ||
+        ((aliasFacts(callee.expression).global && !isIntrinsicOwnKeyTestOnGlobal(node, callee)) ||
           // An UNPLACEABLE (opaque, non-global) receiver is not by itself a
           // reason to distrust the CALLEE. Where every candidate body for
           // this key is compiled here, the call runs program text whichever
@@ -5702,10 +5731,10 @@ export const censusGlobalHostMutations = (
           // call can run is that fully specified, non-reflective operation --
           // the checker had to type the receiver concretely to select it, so
           // an opaque, unplaceable identity is exactly what the method's own
-          // spec makes irrelevant. `facts.global` above still wildcards this
-          // call unconditionally when the receiver IS provably the global
-          // object, so this never reopens `window.toString()`.
-          (!callRunsOnlyProgramBodies(node) && !calleeHasNoKeySetEffect(callee)))
+          // spec makes irrelevant. A receiver that IS provably the global
+          // object never reaches this arm, so this never reopens
+          // `window.toString()`.
+          (!aliasFacts(callee.expression).global && !callRunsOnlyProgramBodies(node) && !calleeHasNoKeySetEffect(callee)))
       ) {
         if (process.env['GEA_DEBUG_GLOBAL_MUTATION']) {
           const facts = aliasFacts(callee.expression)
