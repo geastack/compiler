@@ -291,10 +291,11 @@ const emitObjectPropEntries = (
     // ahead of the apply, which the capture list then names. Scoped by the
     // node's own variable, which is unique within the body, so two elements'
     // tables cannot collide.
+    const initializers: string[] = []
     let thunk = computed.thunk
     if (!isPlainName(thunk)) {
       thunk = `gea_class_thunk_${node}_${named++}`
-      blocks.push(`const auto ${thunk} = ${computed.thunk};`)
+      initializers.push(`const auto ${thunk} = ${computed.thunk};`)
     }
     // Numeric dictionaries retain canonical PropertyKey text as their safe
     // physical key, so NaN and infinities never enter an ordered double map.
@@ -302,7 +303,9 @@ const emitObjectPropEntries = (
     const call = `${thunk}.call()`
     const written = alignedValueText(ctx, 'emit-jsx.ts:276', computed.origin.representation, value.value, call) ?? call
     const write = `[${table}, ${thunk}]() { ${subscript}[${entryKey}] = ${written}; }`
-    blocks.push(...reactiveApplyBlock(`gea::jsx::reactiveObjectPropApply(${node}, ${key}, ${table}, ${write})`, computed.subscriptions))
+    blocks.push(
+      ...reactiveApplyBlock(`gea::jsx::reactiveObjectPropApply(${node}, ${key}, ${table}, ${write})`, computed.subscriptions, initializers)
+    )
   }
   // No reactive entry means nothing here has anything to say about this prop,
   // and it takes the path it always took.
@@ -488,8 +491,11 @@ const subscriptionOwnerText = (ctx: EmitContext, dependency: ReactiveDependency)
   return reference.boxed ? null : reference.name
 }
 
-const reactiveApplyBlock = (open: string, subscriptions: readonly string[]): readonly string[] => [
+// Every initialized local belongs inside the block: control-flow labels outside
+// it must remain reachable without jumping over a C++ variable initialization.
+const reactiveApplyBlock = (open: string, subscriptions: readonly string[], initializers: readonly string[] = []): readonly string[] => [
   '{',
+  ...initializers.map((line) => `  ${line}`),
   `  const auto gea_apply = ${open};`,
   ...subscriptions.map((line) => `  ${line}`),
   '}'

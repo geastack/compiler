@@ -16,6 +16,7 @@
 // imports it.
 declare global {
   type JsxProps = {
+    class?: string | { [token: string]: string | number | boolean | null | undefined }
     id?: string
     width?: number
     style?: { left?: number; top?: number; width?: number }
