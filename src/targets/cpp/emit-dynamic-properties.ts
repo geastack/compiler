@@ -14,15 +14,7 @@ import { createCppEmitBlockedError, defineValue, operandText, type EmitContext, 
 import { cppAbiParameterType, cppRecordFieldName, cppResultTypeOf, cppStringLiteral, cppTypeOf } from './types.js'
 import { intrinsicMemberValueOf } from './host/emit-host-object.js'
 import { toStringText } from './emit-tostring.js'
-import {
-  alignedValueText,
-  convertedValueText,
-  dynamicCarrierBoxText,
-  dynamicTagFor,
-  recipeText,
-  unboxedLoadText,
-  widenedStoreText
-} from './emit-narrowing.js'
+import { alignedValueText, dynamicCarrierBoxText, dynamicTagFor, recipeText, unboxedLoadText, widenedStoreText } from './emit-narrowing.js'
 import { dictionaryTableOf } from './emit-properties.js'
 import { keyedTableKeyText, memberAccessOperator, recordIndexSidecarTableOf, recordIndexAttributeKeyText } from './emit-carrier-members.js'
 import { declaredRecordFieldOf, recordFieldsOfShape, recordIndexesOfShape } from './records.js'
@@ -265,7 +257,13 @@ export const emitDynamicSet = (ctx: EmitContext, lines: string[], operation: Set
     // The receiver is boxed while the result is typed from the receiver's
     // static type (`module.exports`, typed as the function it was assigned),
     // so threading it onward is a conversion like any other, never a copy.
-    const threaded = convertedValueText(operation.receiver.representation, operation.result.representation, receiver)
+    const threaded = alignedValueText(
+      ctx,
+      'emit-dynamic-properties.ts:268',
+      operation.receiver.representation,
+      operation.result.representation,
+      receiver
+    )
     if (threaded === null)
       throw createCppEmitBlockedError(
         `conversion:${representationKey(operation.receiver.representation)}->${representationKey(operation.result.representation)}`,
