@@ -6,6 +6,7 @@ import { createPropertyKeyDomains } from '../property-key-domain.js'
 import { isClassSpelledSourceClass, type SourceClass, type ValueFlowIndex, type ValueWrite } from './model.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from '../deferred-intrinsic-protocols.js'
 import { invocationValueUsesOf } from './invocation-facts.js'
+import { nodePathToken } from './node-path-token.js'
 import { collectionStoredValuesOf, collectionValueContinuationsOf } from './collection-value-continuation.js'
 import { arrayIterationKeys, computedKeySetOf, type ComputedKeySetAuthority } from './computed-key-set.js'
 import { classConstructorKeepsInstanceOf } from './member-call-forwarding.js'
@@ -1385,10 +1386,15 @@ const computeInventory = (
   return { values: [...values], plans, keys, keyRequirements, requirements: [...requirements] }
 }
 
-/** An origin key spelled for a cross-proof cache: its file and position. */
+/**
+ * An origin key spelled for a cross-proof cache, through `nodePathToken` like
+ * every other `sharedAnswerOf` identity: a file name and a source offset are
+ * source-shaped authority a key may not be built from, and `getSourceFile()`
+ * walks parent pointers on every ask.
+ */
 const keyNameOf = (key: OriginKey): string => {
   const node = isFieldCell(key) ? key.declaration : key
-  return `${isFieldCell(key) ? `${key.key}@` : ''}${node.getSourceFile().fileName}#${node.pos}`
+  return `${isFieldCell(key) ? `${key.key}@` : ''}${nodePathToken(node)}`
 }
 
 const inventoryOf = (
