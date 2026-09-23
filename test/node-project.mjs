@@ -370,6 +370,7 @@ test('source preparation requests the installed version, validates the checkout 
   const checkout = (identity, destination) => {
     assert.equal(identity.commit, 'a'.repeat(40))
     data.set(`${destination}/packages/sample/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' }))
+    data.set(`${destination}/packages/sample/index.js`, 'module.exports = 1\n')
   }
   const options = { files, metadata, checkout, log: () => {} }
   const first = await preparePackageSources('/app', options)
@@ -453,6 +454,43 @@ test('the dependency walk stops at the compiler: nothing reachable only through 
   assert.deepEqual(result, [])
   assert.deepEqual(asked, [])
 })
+test('a checkout whose entry points into an unbuilt dist is not substituted for the installed package', async () => {
+  const { preparePackageSources } = await import('../dist/project-preparation.js')
+  const prepare = async (layout) => {
+    const { data, files } = preparationFixture()
+    const logged = []
+    const sources = await preparePackageSources('/app', {
+      files,
+      metadata: async (name, version) => ({
+        name,
+        version,
+        gitHead: 'a'.repeat(40),
+        repository: { url: 'https://github.com/example/sample.git', directory: 'packages/sample' }
+      }),
+      checkout: (_identity, destination) => {
+        const root = `${destination}/packages/sample`
+        data.set(`${root}/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0', main: 'dist/index.js' }))
+        for (const [file, text] of Object.entries(layout)) data.set(`${root}/${file}`, text)
+      },
+      log: (message) => logged.push(message)
+    })
+    return { sources, logged }
+  }
+  // Built by a bundler from JavaScript: nothing maps `dist/index.js` back to a source.
+  const javascript = await prepare({ 'index.js': 'module.exports = 1\n' })
+  assert.deepEqual(javascript.sources, [])
+  assert.ok(
+    javascript.logged.some((message) => message.includes('checkout does not resolve the package entry')),
+    javascript.logged.join('\n')
+  )
+  // Control: the same entry emitted from TypeScript maps through the tsconfig.
+  const typed = await prepare({
+    'tsconfig.json': JSON.stringify({ compilerOptions: { rootDir: 'src', outDir: 'dist' } }),
+    'src/index.ts': 'export const one = 1\n'
+  })
+  assert.equal(typed.sources.length, 1)
+})
+
 test('every installed copy of one published version shares one checkout', async () => {
   const { preparePackageSources } = await import('../dist/project-preparation.js')
   const { data, files } = preparationFixture()
@@ -478,6 +516,7 @@ test('every installed copy of one published version shares one checkout', async 
     checkout: (_identity, destination) => {
       checkouts += 1
       data.set(`${destination}/packages/sample/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' }))
+      data.set(`${destination}/packages/sample/index.js`, 'module.exports = 1\n')
     },
     log: () => {}
   })

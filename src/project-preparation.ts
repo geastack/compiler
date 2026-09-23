@@ -3,7 +3,7 @@ import { dirname, resolve, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
-import type { PackageSource } from './semantics/package-sources.js'
+import { createPackageSourceHost, type PackageSource } from './semantics/package-sources.js'
 
 export type Manifest = Record<string, unknown>
 const object = (value: unknown): Manifest =>
@@ -209,6 +209,39 @@ export const provenanceSourceIdentity = (metadata: Manifest, response: Manifest)
   return undefined
 }
 
+/** Every runtime target a manifest's root entry names: `exports["."]` without `types`, else `main`. */
+const rootEntryTargets = (manifest: Manifest): readonly string[] => {
+  const targets = (value: unknown): string[] => {
+    if (typeof value === 'string') return [value]
+    if (Array.isArray(value)) return value.flatMap(targets)
+    return Object.entries(object(value)).flatMap(([condition, entry]) => (condition === 'types' ? [] : targets(entry)))
+  }
+  const exports = manifest.exports
+  if (exports !== undefined) {
+    const subpaths = Object.keys(object(exports)).some((key) => key.startsWith('.'))
+    return targets(subpaths ? object(exports)['.'] : exports)
+  }
+  return [typeof manifest.main === 'string' ? manifest.main : 'index.js']
+}
+
+/**
+ * Whether a checkout can stand in for the installed package: every runtime
+ * target of its root entry resolves in the checkout, directly or through a
+ * build input the source host maps. A package built from JavaScript keeps
+ * pointing into a `dist/` the checkout never built, and replacing the
+ * installed package with it leaves every importer resolving nothing.
+ */
+const checkoutServesRootEntry = (packageRoot: string, files: SourceFileSystem): boolean => {
+  const sources = createPackageSourceHost(
+    { fileExists: files.exists, readFile: (file) => (files.exists(file) ? files.read(file) : undefined) },
+    [{ root: packageRoot }]
+  )
+  const targets = rootEntryTargets(manifestAt(packageRoot, files))
+  return (
+    targets.length > 0 && targets.every((target) => !target.includes('*') && files.exists(sources.sourceOf(resolve(packageRoot, target))))
+  )
+}
+
 export interface PreparationOptions {
   readonly files?: SourceFileSystem
   readonly log?: (message: string) => void
@@ -288,7 +321,8 @@ export const preparePackageSources = async (root: string, options: PreparationOp
           typeof saved.root === 'string' &&
           files.exists(join(saved.root, 'package.json'))
         ) {
-          sources.push({ root: saved.root, origin: directory })
+          if (checkoutServesRootEntry(saved.root, files)) sources.push({ root: saved.root, origin: directory })
+          else log(`[geatsc] ${manifest.name}@${manifest.version}: checkout does not resolve the package entry; using installed JavaScript`)
           continue
         }
       }
@@ -314,7 +348,8 @@ export const preparePackageSources = async (root: string, options: PreparationOp
         record,
         `${JSON.stringify({ name: manifest.name, version: manifest.version, ...identity, root: packageRoot }, null, 2)}\n`
       )
-      sources.push({ root: packageRoot, origin: directory })
+      if (checkoutServesRootEntry(packageRoot, files)) sources.push({ root: packageRoot, origin: directory })
+      else log(`[geatsc] ${manifest.name}@${manifest.version}: checkout does not resolve the package entry; using installed JavaScript`)
     } catch (error) {
       log(
         `[geatsc] ${manifest.name}@${manifest.version}: source unavailable (${error instanceof Error ? error.message : String(error)}); using installed JavaScript`
