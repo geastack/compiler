@@ -149,6 +149,24 @@ export const recordAccessorsOf = (
  * declaration already answers, and it would drift the first time the host grew
  * a method.
  */
+/**
+ * Whether an object shape is a pure data dictionary: no named members, and
+ * index signatures whose values are data rather than something callable.
+ *
+ * The companion to `isDataOnlyObjectShape` for the one question it
+ * deliberately answers no to. A host carrier is spelled by field name, so an
+ * index signature has nowhere to go there; but a type no host names a carrier
+ * for is a structure this compiler lays out itself, and a dictionary is one.
+ */
+export const isDataOnlyDictionaryShape = (
+  shape: StructuralShape | null,
+  shapeOf: (id: StructuralTypeId) => StructuralShape | null
+): boolean => {
+  if (shape?.kind !== 'object' || shape.membersDropped) return false
+  if (shape.members.length !== 0 || shape.index.length === 0) return false
+  return shape.index.every((index) => shapeOf(index.value)?.kind !== 'signature')
+}
+
 export const isDataOnlyObjectShape = (
   shape: StructuralShape | null,
   shapeOf: (id: StructuralTypeId) => StructuralShape | null
