@@ -35,6 +35,13 @@ const implementation = (files, specifier = 'sample', packages = [], from = 'app/
     new Set(),
     packages.map((entry) => ({ root: resolve(root, entry.root), ...(entry.origin ? { origin: resolve(root, entry.origin) } : {}) }))
   ).resolve(specifier, resolve(root, from), mode).implementation?.resolvedFileName
+const declaration = (files, specifier, packages = [], from = 'app/main.ts', mode = ts.ModuleKind.ESNext) =>
+  createModuleResolver(
+    virtual(files),
+    options,
+    new Set(),
+    packages.map((entry) => ({ root: resolve(root, entry.root), ...(entry.origin ? { origin: resolve(root, entry.origin) } : {}) }))
+  ).resolve(specifier, resolve(root, from), mode).declaration?.resolvedFileName
 
 test('launch discovery handles literal Node commands and script references without running shell code', () => {
   assert.equal(startEntry('NODE_ENV=production node --import tsx "src/server main.ts"', {}), 'src/server main.ts')
@@ -169,7 +176,13 @@ test('source checkouts retain nested installed dependency versions', () => {
     'app/node_modules/parent/node_modules/dep/package.json': { main: 'index.js' },
     'app/node_modules/parent/node_modules/dep/index.js': 'export const value = 2',
     'app/node_modules/dep/package.json': { main: 'index.js' },
-    'app/node_modules/dep/index.js': 'export const value = 1'
+    'app/node_modules/dep/index.js': 'export const value = 1',
+    'app/node_modules/sample/node_modules/own/package.json': { main: 'index.js', types: 'index.d.ts' },
+    'app/node_modules/sample/node_modules/own/index.d.ts': 'export declare const value: 3',
+    'app/node_modules/sample/node_modules/own/index.js': 'export const value = 3',
+    'app/node_modules/own/package.json': { main: 'index.js', types: 'index.d.ts' },
+    'app/node_modules/own/index.d.ts': 'export declare const value: 4',
+    'app/node_modules/own/index.js': 'export const value = 4'
   }
   const packages = [
     { root: 'checkout-one', origin: 'app/node_modules/sample' },
@@ -180,6 +193,16 @@ test('source checkouts retain nested installed dependency versions', () => {
   assert.equal(
     implementation(files, 'dep', packages, 'checkout-two/src/index.ts'),
     resolve(root, 'app/node_modules/parent/node_modules/dep/index.js')
+  )
+  // A dependency nested inside the origin itself, not beside it.
+  assert.equal(
+    implementation(files, 'own', packages, 'checkout-one/src/index.ts'),
+    resolve(root, 'app/node_modules/sample/node_modules/own/index.js')
+  )
+  // Its types are asked from the same place, so they describe that same copy.
+  assert.equal(
+    declaration(files, 'own', packages, 'checkout-one/src/index.ts'),
+    resolve(root, 'app/node_modules/sample/node_modules/own/index.d.ts')
   )
 })
 test('source metadata requires a pinned commit and a contained repository directory', () => {

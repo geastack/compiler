@@ -116,7 +116,19 @@ export const createModuleResolver = (
     [...declarationModules].some((pattern) => pattern.endsWith('/*') && specifier.startsWith(pattern.slice(0, -1)))
   return {
     resolve: (specifier, containingFile, mode, statedTarget) => {
-      const typed = ts.resolveModuleName(specifier, containingFile, options, host, typesCache, undefined, mode).resolvedModule
+      // Asked from where the runtime half below asks: a bare specifier in a
+      // source checkout resolves through the installed location it stands in
+      // for, and a declaration found from the checkout's own directory names
+      // whatever version is hoisted above the cache instead.
+      const typed = ts.resolveModuleName(
+        specifier,
+        sources.containingFile(specifier, containingFile),
+        options,
+        host,
+        typesCache,
+        undefined,
+        mode
+      ).resolvedModule
       const native = nativeModule(specifier)
       let declaration = typed && isDeclarationPath(typed.resolvedFileName) ? typed : undefined
       // A plugin that declares a module native owns its declarations, and the

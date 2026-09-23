@@ -275,8 +275,13 @@ export const createPackageSourceHost = (host: ts.ModuleResolutionHost, packages:
     const absolute = resolve(file)
     const alias = aliases.find((entry) => inside(absolute, entry.prefix))
     if (alias) return resolve(alias.root, relative(alias.prefix, absolute))
+    // A dependency installed INSIDE the origin (`<origin>/node_modules/x`) is the
+    // install's, not the checkout's: the checkout never holds it, and re-rooting
+    // it there makes resolution walk past it to whatever version is hoisted.
     const origin = entries
-      .filter((entry) => entry.origin && inside(absolute, resolve(entry.origin)))
+      .filter(
+        (entry) => entry.origin && inside(absolute, resolve(entry.origin)) && !inside(absolute, resolve(entry.origin, 'node_modules'))
+      )
       .sort((left, right) => right.origin!.length - left.origin!.length)[0]
     return origin?.origin ? resolve(origin.root, relative(resolve(origin.origin), absolute)) : absolute
   }
