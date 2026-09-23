@@ -102,9 +102,21 @@ const allExits = (flow: Completion): DefinitionState => join(flow.normal, flow.r
 const resolvedSymbol = (checker: ts.TypeChecker, symbol: ts.Symbol): ts.Symbol =>
   (symbol.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(symbol) : symbol
 
+// `getSymbolAtLocation` on a property name re-checks the receiver expression,
+// which inside a large generated function is a full control-flow narrowing
+// walk. The symbol a node resolves to is a property of the program, not of the
+// facts this pass accumulates while it walks, so it is asked once per node.
+const resolvedSymbolsByChecker = new WeakMap<ts.TypeChecker, WeakMap<ts.Node, ts.Symbol | null>>()
+
 const resolvedSymbolAt = (checker: ts.TypeChecker, node: ts.Node): ts.Symbol | null => {
+  let known = resolvedSymbolsByChecker.get(checker)
+  if (!known) resolvedSymbolsByChecker.set(checker, (known = new WeakMap()))
+  const remembered = known.get(node)
+  if (remembered !== undefined) return remembered
   const local = checker.getSymbolAtLocation(node)
-  return local ? resolvedSymbol(checker, local) : null
+  const resolved = local ? resolvedSymbol(checker, local) : null
+  known.set(node, resolved)
+  return resolved
 }
 
 const unwrapExpression = (expression: ts.Expression): ts.Expression => {
