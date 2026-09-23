@@ -373,6 +373,16 @@ test('authenticated callable and constructor exports emit matching native record
   compileAndRun(result, 'commonjs-native-module-record')
 })
 
+test('the exports of a named export is the wrapper binding, not the value it exports', () => {
+  // Checked JavaScript declares `exports.isEqual = isEqual` as an alias of
+  // `isEqual` and answers that alias for the `exports` receiver; read as
+  // the value it names, the store wrote the module's exports with a function.
+  const result = compilePhysicalFixture('record-named-exports.js')
+  const reads = [...result.graph.operations.values()].filter((operation) => operation.family === 'binding' && operation.action === 'read')
+  assert.equal(reads.filter((operation) => operation.commonJs?.global === 'exports').length, 1)
+  assert.ok(result.source, JSON.stringify(result.diagnostics.diagnostics))
+})
+
 test('multiple CommonJS exports writers retain the dynamic record boundary', () => {
   const result = compilePhysicalFixture('record-ambiguous-require.js')
   const operation = staticRequiresOf(result)[0]

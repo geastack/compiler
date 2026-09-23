@@ -69,6 +69,28 @@ export const valueSymbolAt = (checker: ts.TypeChecker, node: ts.Node): ts.Symbol
 }
 
 /**
+ * Whether a symbol is the checker's module-shape bookkeeping rather than a
+ * lexical binding: the `Assignment`/`ModuleExports` synthesis, an `Alias` that
+ * `exports.x = f` declares by its own target expression, or the file's module
+ * symbol. A lexical binding is declared by a declaration node; these are
+ * declared by expressions or by the source file itself.
+ */
+const isExportSynthesis = (symbol: ts.Symbol): boolean => {
+  if ((symbol.flags & (ts.SymbolFlags.Assignment | ts.SymbolFlags.ModuleExports)) !== 0) return true
+  const declarations = symbol.declarations ?? []
+  return (
+    declarations.length > 0 &&
+    declarations.every(
+      (declaration) =>
+        ts.isSourceFile(declaration) ||
+        ts.isPropertyAccessExpression(declaration) ||
+        ts.isElementAccessExpression(declaration) ||
+        ts.isBinaryExpression(declaration)
+    )
+  )
+}
+
+/**
  * Checked JavaScript: the checker binds the `module` of `module.exports = f`
  * (and the `exports` of `exports.x = ...`) to the FILE's own synthetic
  * `export=` symbol -- an `Assignment` symbol whose declarations are the
@@ -82,13 +104,11 @@ export const valueSymbolAt = (checker: ts.TypeChecker, node: ts.Node): ts.Symbol
  * answer was not that synthesis, or nothing lexical declares the name.
  */
 const lexicalSymbolBehindExportSynthesis = (checker: ts.TypeChecker, node: ts.Identifier, symbol: ts.Symbol): ts.Symbol | null => {
-  if ((symbol.flags & (ts.SymbolFlags.Assignment | ts.SymbolFlags.ModuleExports)) === 0) return null
+  if (!isExportSynthesis(symbol)) return null
   if ((symbol.declarations ?? []).some((declaration) => ts.isVariableDeclaration(declaration) || ts.isParameter(declaration))) return null
   const scoped = checker.resolveName(node.text, node, ts.SymbolFlags.Value, false)
   const lexical =
-    scoped !== undefined && (scoped.flags & (ts.SymbolFlags.ModuleExports | ts.SymbolFlags.Assignment)) === 0
-      ? scoped
-      : checker.resolveName(node.text, undefined, ts.SymbolFlags.Value, false)
+    scoped !== undefined && !isExportSynthesis(scoped) ? scoped : checker.resolveName(node.text, undefined, ts.SymbolFlags.Value, false)
   return lexical ?? null
 }
 
