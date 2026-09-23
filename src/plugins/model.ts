@@ -196,6 +196,13 @@ export interface PluginCapabilities {
   /** Packages/modules this host implements instead of compiling their JavaScript; package/* includes subpaths. */
   readonly declarationModules?: ReadonlySet<string>
   /**
+   * `/// <reference types="…" />` names this host answers with one of its own
+   * files. A library's directive for a surface the target implements resolves
+   * to the target's declarations, never to an installed `@types` package whose
+   * wider host surface would merge into the identities this host claims.
+   */
+  readonly typeDirectives?: ReadonlyMap<string, string>
+  /**
    * An ambient declared type this plugin's own package REPLACES with a
    * concrete type it ships as ordinary source, keyed by the ambient name.
    *

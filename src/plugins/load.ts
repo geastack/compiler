@@ -121,14 +121,14 @@ const validateInstance = (value: unknown): PluginInstance => {
     if (capabilities[key] === undefined && optionalCapabilities.has(key)) continue
     checkShape(capabilities[key], example, `capabilities.${key}`)
   }
-  for (const key of ['hostMethodBindings']) {
+  for (const key of ['hostMethodBindings', 'typeDirectives']) {
     if (capabilities[key] !== undefined) checkShape(capabilities[key], new Map(), `capabilities.${key}`)
   }
   for (const key of ['declarationModules', 'hostArraySnapshotFunctions', 'hostNativeArrayFunctions']) {
     if (capabilities[key] !== undefined) checkShape(capabilities[key], new Set(), `capabilities.${key}`)
   }
-  for (const key of ['hostFunctions', 'nativeTypes', 'nativeConstants', 'hostNamespaceRootTypes']) {
-    for (const [name, spelling] of capabilities[key] as Map<unknown, unknown>) {
+  for (const key of ['hostFunctions', 'nativeTypes', 'nativeConstants', 'hostNamespaceRootTypes', 'typeDirectives']) {
+    for (const [name, spelling] of (capabilities[key] ?? new Map()) as Map<unknown, unknown>) {
       if (typeof name !== 'string' || typeof spelling !== 'string')
         throw new Error(`invalid PluginInstance: capabilities.${key} must map strings to strings`)
     }

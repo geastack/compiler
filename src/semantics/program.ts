@@ -24,6 +24,8 @@ export interface ProgramInput {
   readonly dynamicFallback?: boolean
   /** Module specifiers implemented by an installed native host, including explicit package/* claims. */
   readonly declarationModules?: ReadonlySet<string>
+  /** Type reference directive names a host answers with its own file; see `PluginCapabilities.typeDirectives`. */
+  readonly typeDirectives?: ReadonlyMap<string, string>
   readonly rootFileNames: readonly string[]
   readonly options: ts.CompilerOptions
   /**
@@ -575,6 +577,17 @@ const transformingHost = (
       }
       return { resolvedModule: implementation ?? result.declaration }
     })
+  }
+  const answeredTypeDirectives = input.typeDirectives
+  if (answeredTypeDirectives && answeredTypeDirectives.size > 0) {
+    host.resolveTypeReferenceDirectiveReferences = (references, containingFile, redirected, compilerOptions, containingSource) =>
+      references.map((reference) => {
+        const name = (typeof reference === 'string' ? reference : reference.fileName).toLowerCase()
+        const answer = answeredTypeDirectives.get(name)
+        if (answer !== undefined) return { resolvedTypeReferenceDirective: { primary: true, resolvedFileName: resolve(answer) } }
+        const mode = typeof reference === 'string' ? undefined : ts.getModeForFileReference(reference, containingSource?.impliedNodeFormat)
+        return ts.resolveTypeReferenceDirective(name, containingFile, compilerOptions, host, redirected, undefined, mode)
+      })
   }
   host.getSourceFile = (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {
     const prepared = preparedSourceText.get(resolve(fileName))

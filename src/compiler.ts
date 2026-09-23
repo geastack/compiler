@@ -434,6 +434,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   const frontend = runFrontend({
     ...(request.packageSources ? { packageSources: request.packageSources } : {}),
     declarationModules: new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.declarationModules ?? [])])),
+    typeDirectives: new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.typeDirectives ?? [])])),
     rootFileNames: request.rootFileNames,
     projectFileName: request.projectFileName ?? null,
     javaScriptSources: request.javaScriptSources ?? false,
