@@ -965,11 +965,11 @@ export const createRepresentationDeriver = (
     return result
   }
 
+  const accessorIndexRecordRefusal = 'no native record carrier preserves both index storage and accessor descriptors'
   const recordIndexesOf = (shape: Extract<StructuralShape, { kind: 'object' }>): readonly RecordIndexSidecar[] | string => {
     const structural = carriableIndexesOf(shape)
     if (typeof structural === 'string') return structural
-    if (structural.length > 0 && shape.members.some((member) => member.accessor !== null))
-      return 'no native record carrier preserves both index storage and accessor descriptors'
+    if (structural.length > 0 && shape.members.some((member) => member.accessor !== null)) return accessorIndexRecordRefusal
     return canonicalRecordIndexes(structural.map((index) => ({ key: index.key, value: deriveStored(index.value) })))
   }
 
@@ -1007,6 +1007,11 @@ export const createRepresentationDeriver = (
     }
     const fields = recordFieldsOf(shape)
     const indexes = recordIndexesOf(shape)
+    // Index storage beside accessor descriptors has no native storage contract,
+    // the same way incompatible overloads have no calling convention: it is the
+    // storage static specialization cannot select, which the opt-in boxes.
+    if (typeof indexes === 'string' && dynamicFallback && indexes === accessorIndexRecordRefusal)
+      return { kind: 'dynamic', reason: 'opt-in-fallback' }
     if (typeof indexes === 'string') return unresolved(indexes)
     if (shape.members.length === 0 && indexes.length === 1) {
       const [index] = indexes
