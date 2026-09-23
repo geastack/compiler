@@ -83,8 +83,17 @@ const settledAsTruth = new WeakSet<object>()
 
 export const hypothesisSettledAsTruth = (key: object): boolean => settledAsTruth.has(key)
 
+/**
+ * Keys a nested guard closed unsettled while another guard on the same key was
+ * still open. Two questions can share a key object (an invocation fact and a
+ * record method call both guard the call node), and the count cannot tell them
+ * apart, so the inner question's verdict is carried to the final close.
+ */
+const unsettledWhileOpen = new WeakSet<object>()
+
 export const enterHypothesisGuard = (key: object): void => {
   settledAsTruth.delete(key)
+  if (!openGuards.has(key)) unsettledWhileOpen.delete(key)
   openGuards.set(key, (openGuards.get(key) ?? 0) + 1)
 }
 
@@ -99,6 +108,12 @@ export const enterHypothesisGuard = (key: object): void => {
  */
 export interface GuardedAnswer {
   readonly assumed: Set<object>
+  /**
+   * A refusal outlives a guard only when the guard settled: `confirmed` keeps
+   * a conservative answer sound, but a refusal replayed after the question
+   * got a knowable answer refuses where a fresh walk would succeed.
+   */
+  readonly refusal?: boolean
 }
 
 /**
@@ -162,14 +177,22 @@ export const exitHypothesisGuard = (key: object, confirmed?: boolean, settled?: 
   const remaining = (openGuards.get(key) ?? 0) - 1
   if (remaining > 0) {
     openGuards.set(key, remaining)
+    if (settled !== true) unsettledWhileOpen.add(key)
     return
   }
   openGuards.delete(key)
+  if (unsettledWhileOpen.has(key)) {
+    unsettledWhileOpen.delete(key)
+    settled = false
+  }
   if (settled === true) settledAsTruth.add(key)
   const dependents = guardDependents.get(key)
   if (dependents === undefined) return
   guardDependents.delete(key)
   for (const { answer, discard } of dependents) {
+    // An unsettled refusal keeps this key: it replays wherever the guard is
+    // open again, which is all it was ever true for.
+    if (confirmed === true && answer.refusal === true && settled !== true) continue
     answer.assumed.delete(key)
     if (confirmed === true) {
       hypothesisStats.confirmed++

@@ -933,7 +933,8 @@ const fieldStats = { asks: 0, hits: 0, stores: 0 }
  * and valid wherever the parks it leaned on are in force.
  */
 interface SharedAnswer {
-  readonly assumed: ReadonlySet<object>
+  readonly assumed: Set<object>
+  readonly refusal: boolean
   /** See `ProofAnswer.escaped`: replayed on a hit, never part of applicability. */
   readonly escaped: ReadonlySet<object>
   readonly value: unknown
@@ -1805,7 +1806,23 @@ const closedMemberCallableUses = (
       for (const [reference, kinds] of opens) for (const kind of kinds) recorded.push([reference, kind])
       sharedStats.stores++
       if (computed.value === null) sharedStats.refusals++
-      answers.push({ assumed, escaped, value: computed.value, requirements: computed.requirements, opens: recorded })
+      const stored: SharedAnswer = {
+        assumed,
+        escaped,
+        value: computed.value,
+        refusal: computed.value === null,
+        requirements: computed.requirements,
+        opens: recorded
+      }
+      const bucket = answers
+      bucket.push(stored)
+      // A re-entry guard still open here closes later with the question's real
+      // answer; without registration the key stays in `assumed` after that and
+      // the answer never applies again.
+      registerGuardedAnswer(stored, () => {
+        const at = bucket.indexOf(stored)
+        if (at !== -1) bucket.splice(at, 1)
+      })
     }
     return computed
   }
@@ -5767,6 +5784,7 @@ const closedMemberCallableUses = (
     }
     activeInvocationFacts.add(call)
     enterHypothesisGuard(call)
+    let settled = false
     try {
       // Only the REFUSAL is shared across proofs. A successful fact stays in
       // this proof's own `invocationFacts` (`shareable` declines to publish
@@ -5774,7 +5792,10 @@ const closedMemberCallableUses = (
       // view; the refusal carries none, and `targets:origin-slot-open` alone
       // was re-derived 41,190 times for one site in the three.js app.
       const answer = sharedAnswerOf(`invocation-targets:${nodePathToken(call)}`, compute, (value) => value === null)
-      if (answer.value === null) return null
+      if (answer.value === null) {
+        settled = true
+        return null
+      }
       const fact = sourceInvocationFact(call, operands, answer.value, answer.requirements)
       if (fact.requirements.length > 0 && ledger?.include(fact.requirements) !== true)
         return invocationRefusal(call, 'uncapturable-intrinsic-requirements')
@@ -5786,7 +5807,7 @@ const closedMemberCallableUses = (
       // The re-entry above hands out one thing, a refusal. A refusal here is
       // therefore the same answer, so the hypothesis it issued has become a
       // fact and every answer that leaned on it is freed of it.
-      exitHypothesisGuard(call, true)
+      exitHypothesisGuard(call, true, settled)
       activeInvocationFacts.delete(call)
     }
   }

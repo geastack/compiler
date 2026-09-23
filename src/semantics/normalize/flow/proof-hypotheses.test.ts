@@ -7,7 +7,8 @@ import {
   hypothesisSettledAsTruth,
   noteHypothesis,
   popHypothesisTrail,
-  pushHypothesisTrail
+  pushHypothesisTrail,
+  registerGuardedAnswer
 } from './proof-hypotheses.js'
 
 test('a guard stays open until the outermost re-entry leaves it', () => {
@@ -85,4 +86,52 @@ test('reopening a guard clears what it settled last time', () => {
   assert.equal(hypothesisSettledAsTruth(question), false)
   exitHypothesisGuard(question, true, false)
   assert.equal(hypothesisSettledAsTruth(question), false)
+})
+
+test('a refusal leaning on a guard is discharged when the guard settles', () => {
+  const guard = {}
+  enterHypothesisGuard(guard)
+  const answer = { assumed: new Set<object>([guard]), refusal: true }
+  registerGuardedAnswer(answer)
+  exitHypothesisGuard(guard, true, true)
+  assert.equal(answer.assumed.has(guard), false)
+})
+
+test('a refusal leaning on a guard that closes unsettled keeps the guard and stays in its bucket', () => {
+  const guard = {}
+  enterHypothesisGuard(guard)
+  const answer = { assumed: new Set<object>([guard]), refusal: true }
+  let discarded = false
+  registerGuardedAnswer(answer, () => {
+    discarded = true
+  })
+  // The question got an answer the re-entries were not handed: the refusal is
+  // still true wherever the same guard is open again, and nowhere else.
+  exitHypothesisGuard(guard, true, false)
+  assert.equal(answer.assumed.has(guard), true)
+  assert.equal(discarded, false)
+})
+
+test('a positive answer leaning on a pessimistic guard is discharged when the guard is confirmed', () => {
+  const guard = {}
+  enterHypothesisGuard(guard)
+  const answer = { assumed: new Set<object>([guard]) }
+  registerGuardedAnswer(answer)
+  exitHypothesisGuard(guard, true)
+  assert.equal(answer.assumed.has(guard), false)
+})
+
+test('a nested guard on the same key that closes unsettled vetoes the outer settlement', () => {
+  // An invocation fact and a record method call both guard the call node; the
+  // inner question answering something knowable must survive the outer one
+  // settling, or a refusal that leaned on the inner one is promoted.
+  const call = {}
+  enterHypothesisGuard(call)
+  enterHypothesisGuard(call)
+  const answer = { assumed: new Set<object>([call]), refusal: true }
+  registerGuardedAnswer(answer)
+  exitHypothesisGuard(call, true, false)
+  exitHypothesisGuard(call, true, true)
+  assert.equal(hypothesisSettledAsTruth(call), false)
+  assert.equal(answer.assumed.has(call), true)
 })
