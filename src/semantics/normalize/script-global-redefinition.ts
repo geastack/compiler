@@ -11,10 +11,16 @@ import { unwrapErasedExpression } from './producers/erasure.js'
  * top-level declarations are the module's own; an ambient declaration
  * (`declare var`, in a `.d.ts` or not) creates no binding at all -- it is a
  * host's claim, which `hostGlobalMemberDeclarationOf` judges by its own rule.
+ *
+ * A CommonJS module is a module here too: the binder that set
+ * `commonJsModuleIndicator` bound its top-level declarations as file locals,
+ * so the checker never resolves `globalThis.X` to them and no write through
+ * the global object can reach their cells.
  */
 export const isScriptGlobalObjectPropertyDeclaration = (declaration: ts.Declaration): boolean => {
   const file = declaration.getSourceFile()
   if (file.isDeclarationFile || ts.isExternalModule(file)) return false
+  if ((file as { commonJsModuleIndicator?: ts.Node }).commonJsModuleIndicator) return false
   if ((ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Ambient) !== 0) return false
   if (ts.isFunctionDeclaration(declaration)) return declaration.parent === file
   if (!ts.isVariableDeclaration(declaration)) return false
