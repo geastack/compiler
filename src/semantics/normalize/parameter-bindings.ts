@@ -2069,7 +2069,7 @@ export const censusParameterBindings = (
         // already-derived record for the same call -- two authorities on one
         // invocation, which `model/selected-signature.ts` catches fail-closed
         // and pays for by withholding the call AND every binding it feeds.
-        if (!isAnyType(returned)) return returned
+        if (!isAnyType(returned) && !annotationStatesNothing(checker, node, returned)) return returned
         // The return type was not written down either. A function's `return`
         // expressions are the same kind of evidence a call's arguments are,
         // and asking them is the same question one frame down: `getContext`
