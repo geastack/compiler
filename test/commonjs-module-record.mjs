@@ -383,6 +383,14 @@ test('the exports of a named export is the wrapper binding, not the value it exp
   assert.ok(result.source, JSON.stringify(result.diagnostics.diagnostics))
 })
 
+test('a callable export that also carries its own properties compiles, links and runs', () => {
+  // fastify's own shape: `module.exports = fastify` then `.fastify`/`.default`
+  // on it. Each store threads the boxed receiver onward as its result, typed
+  // from `module.exports`'s static type -- the function.
+  const result = compilePhysicalFixture('record-callable-properties-require.js')
+  compileAndRun(result, 'commonjs-callable-properties-export')
+})
+
 test('multiple CommonJS exports writers retain the dynamic record boundary', () => {
   const result = compilePhysicalFixture('record-ambiguous-require.js')
   const operation = staticRequiresOf(result)[0]
