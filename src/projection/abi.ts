@@ -422,7 +422,15 @@ export const projectAbis = (input: AbiProjectionInput): AbiProjection => {
         continue
       }
     }
-    if (carriers.size !== abi.parameters.length) {
+    // A body binding a LEADING PREFIX of the declared frame does not disagree
+    // with it: `/** @type {SchemeFn} */ function parse (component)` is called
+    // with two arguments and reads one, and the language itself pushes the
+    // surplus and never binds it. A body that reads `arguments` publishes a
+    // phantom parameter for every position (`references.ts`), so it never
+    // takes this path. The unsafe direction -- a body binding a position the
+    // caller does not push -- still blocks.
+    const leadingPrefix = carriers.size < abi.parameters.length && [...carriers.keys()].every((ordinal) => ordinal < carriers.size)
+    if (carriers.size !== abi.parameters.length && !leadingPrefix) {
       blocked.push({
         functionId,
         reason: `the body binds ${carriers.size} physical parameter(s) but the ABI declares ${abi.parameters.length}`,
@@ -430,7 +438,9 @@ export const projectAbis = (input: AbiProjectionInput): AbiProjection => {
       })
       continue
     }
-    const mismatch = abi.parameters.findIndex((parameter, ordinal) => carriers.get(ordinal) !== representationKey(parameter.value))
+    const mismatch = abi.parameters.findIndex(
+      (parameter, ordinal) => ordinal < carriers.size && carriers.get(ordinal) !== representationKey(parameter.value)
+    )
     const declared = abi.parameters[mismatch]
     if (mismatch >= 0 && declared) {
       blocked.push({
