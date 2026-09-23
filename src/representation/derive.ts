@@ -2,7 +2,14 @@ import type { DeclarationId, FunctionId, StructuralTypeId } from '../identity/id
 import { instantiatedParameterTypes, type SelectedSignature } from '../semantics/model/selected-signature.js'
 import type { SignatureShape, StructuralMember, StructuralShape, StructuralType } from '../semantics/model/structural-types.js'
 import { genericFunctionSetMembersOf, runtimeSymbolMemberIndexOf } from '../semantics/model/structural-types.js'
-import { carriableIndexesOf, dictionaryIndexOf, isDataOnlyObjectShape, recordAccessorsOf, recordFieldKeyOf } from './object-shape.js'
+import {
+  carriableIndexesOf,
+  dictionaryIndexOf,
+  isDataOnlyDictionaryShape,
+  isDataOnlyObjectShape,
+  recordAccessorsOf,
+  recordFieldKeyOf
+} from './object-shape.js'
 import type { AbiParameter, CallableAbi, RecordField, RecordIndexSidecar, Representation } from './model.js'
 import { abiKey, passingOf, representationKey } from './model.js'
 import {
@@ -2526,7 +2533,11 @@ export const createRepresentationDeriver = (
         // operations belong to the host whether or not this compiler was told
         // the type's spelling, and inventing a layout for it would be the
         // guess this rule exists to prevent.
-        const boundWithoutCarrier = bound !== null && !bound.native && shape.body !== null && isDataOnlyBody(shape.body)
+        const boundWithoutCarrier =
+          bound !== null &&
+          !bound.native &&
+          shape.body !== null &&
+          (isDataOnlyBody(shape.body) || isDataOnlyDictionaryShape(shapeOf(shape.body), shapeOf))
         if (bound && !boundWithoutCarrier) {
           const invocable = shape.body ? shapeOf(shape.body) : null
           const call = invocable?.kind === 'signature' ? hostInvocationAbiOf(invocable.call, 'overload') : null
