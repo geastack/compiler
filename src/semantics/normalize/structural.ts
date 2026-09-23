@@ -1350,6 +1350,32 @@ const buildMapper = (
     )
   }
 
+  /**
+   * The shape of a self-referential object LITERAL, built under the anchor the
+   * retry has already reserved.
+   *
+   * `selfReferentialShapeOf` models every kind that can close a cycle without a
+   * declared name -- union, intersection, tuple, array, callable, bare index --
+   * and stops at an object carrying named members, because that shape needs
+   * `objectShapeOf`'s location-aware member walk and that module cannot reach
+   * it. This frame can: the anchor is reserved and `inProgress` already names
+   * it, so a member whose type mentions `type` resolves to the anchor instead
+   * of recursing, exactly as `buildDeclaredShape`'s members do.
+   *
+   * A literal closes a cycle through DATA as readily as through a `this`-reading
+   * method, and only the method case is anchored eagerly below. `const item = {
+   * prev: last }; last = item` is every linked-list node written in plain
+   * JavaScript -- toad-cache's cache entry, reached from five of fastify's own
+   * modules -- so a data cycle only ever surfaces here. Declaring the identical
+   * shape (`interface Item { prev: Item | null }`) already resolves, so keeping
+   * the refusal refused a modelled type for being spelled anonymously.
+   */
+  const selfReferentialLiteralShapeOf = (type: ts.Type): StructuralShape | null => {
+    const symbol = type.getSymbol()
+    const location = symbol ? identities.declarationOfSymbol(symbol) : null
+    return location && ts.isObjectLiteralExpression(location) ? objectShapeOf(type, location) : null
+  }
+
   function typeOfWalk(type: ts.Type): StructuralTypeId {
     const done = completed.get(type)
     if (done) return done
@@ -1403,9 +1429,9 @@ const buildMapper = (
           indexedShapeOf(type) ??
           (declared
             ? buildDeclaredShape(type, declared, typeArgumentsOf(type).map(typeOf))
-            : selfReferentialShapeOf(checker, type, typeOf, tupleElementsOf, indexesOf, (one) =>
+            : (selfReferentialShapeOf(checker, type, typeOf, tupleElementsOf, indexesOf, (one) =>
                 selfReferentialCallableShapeOf(one, signatureOf)
-              ))
+              ) ?? selfReferentialLiteralShapeOf(type)))
         completedShape = shape ?? completedShape
         table.complete(anchor, completedShape)
         settled = true
