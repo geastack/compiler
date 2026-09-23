@@ -1224,6 +1224,39 @@ test('an equivalent authenticated global remains fail-closed as a method receive
   assert.ok(audit.taint.has('*'), [...audit.taint].join(','))
 })
 
+// pino's `lib/transport.js`: `globalThis.hasOwnProperty('__bundlerPathsOverrides')`.
+// The receiver IS the global object, so which body runs is decided by the key
+// `hasOwnProperty` on it and on Object.prototype -- the census's own per-key
+// answer -- and the intrinsic reads one own slot without running any code.
+test('an own-key test on the proven global object with a literal key does not wildcard the census', () => {
+  const audit = globalHostMutationAuditOf(`
+    interface Process {}
+    declare var hostProcess: Process
+    globalThis.hasOwnProperty('zz')
+  `)
+  assert.equal(audit.taint.has('*'), false, [...audit.taint].join(','))
+  assert.equal(audit.taint.has(audit.bindings.get('hostProcess')!), false)
+})
+
+test('an own-key test on the global object stays fail-closed once its key may not reach the intrinsic', () => {
+  for (const spelling of [
+    ';(globalThis as any).hasOwnProperty = () => true',
+    "Object.defineProperty(globalThis, 'hasOwnProperty', { value: () => true })",
+    'Object.prototype.hasOwnProperty = function () { return true }',
+    ';(Object.getPrototypeOf(globalThis) as any).hasOwnProperty = () => true',
+    'var hasOwnProperty = () => true',
+    'declare const key: any; globalThis.hasOwnProperty(key)'
+  ]) {
+    const audit = globalHostMutationAuditOf(`
+      interface Process {}
+      declare var hostProcess: Process
+      ${spelling}
+      globalThis.hasOwnProperty('zz')
+    `)
+    assert.ok(audit.taint.has('*'), spelling)
+  }
+})
+
 test('a local receiver cast from the global object does not acquire object provenance', () => {
   assertWildcardHostTaint(`
     class LocalValue { text(): string { return 'local' } }
