@@ -4,6 +4,7 @@ import test from 'node:test'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 test('a dictionary lookup carried through a local preserves missing-key absence for a truthiness guard', () => {
   const root = resolve(import.meta.dirname, '..')
@@ -17,7 +18,7 @@ test('a dictionary lookup carried through a local preserves missing-key absence 
 
   const binary = resolve(root, `measurements/dictionary-index-truthiness${executableSuffix}`)
   execFileSync(
-    'clang++',
+    cxx,
     ['-std=c++20', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
     { input: `${result.source}\nint main() { __gea_top_level(); }\n` }
   )

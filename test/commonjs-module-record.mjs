@@ -8,6 +8,7 @@ import ts from 'typescript'
 import { compile } from '../dist/compiler.js'
 import { noPluginCapabilities } from '../dist/plugins/model.js'
 import { createCommonJsWrapperIdentity } from '../dist/semantics/commonjs-wrapper.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const fixture = (name) => resolve(root, 'test/fixtures/commonjs-module-record', name)
@@ -219,7 +220,7 @@ const compileAndRun = (result, binaryName) => {
   assert.ok(result.source, JSON.stringify(result.diagnostics.diagnostics))
   const binary = resolve(root, 'measurements', binaryName)
   execFileSync(
-    'clang++',
+    cxx,
     ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
     {
       input: `${result.source}\nint main() { try { __gea_top_level(); } catch (...) { return 1; } }\n`,
@@ -455,7 +456,7 @@ test('exact host declarations lower CommonJS wrappers to compiler-owned module r
 
   const binary = resolve(root, `measurements/commonjs-module-record${executableSuffix}`)
   execFileSync(
-    'clang++',
+    cxx,
     ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
     {
       input: `${result.source}\nint main() { try { __gea_top_level(); } catch (...) { return 1; } }\n`,
@@ -526,7 +527,7 @@ test('static CommonJS require resolves package exports under the require conditi
 test('the native module record retries failed initialization and preserves aliases and cycle state', () => {
   const binary = resolve(root, `measurements/commonjs-module-record-runtime${executableSuffix}`)
   execFileSync(
-    'clang++',
+    cxx,
     ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
     {
       input: `

@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { readFileSync, writeFileSync, existsSync, accessSync, constants } from 'node:fs'
 import { join, delimiter } from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { cxx as resolvedCxx } from './cxx.mjs'
 
 const digest = (value) => createHash('sha256').update(value).digest('hex')
 const executableOnPath = (name) => {
@@ -41,7 +42,7 @@ export function buildNative({
   compileOnly = false,
   cache = true,
   pch = true,
-  cxx = process.env.CXX ?? 'clang++',
+  cxx = resolvedCxx,
   runtimeHeader = join(out, 'gea_runtime.h'),
   flags = ['-std=c++20', '-g', '-O0'],
   pchExcludedUnits = []

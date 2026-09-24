@@ -8,6 +8,7 @@ import ts from 'typescript'
 import { wholeProgram } from '../dist/semantics/normalize/reachability.js'
 import { indexValueFlow } from '../dist/semantics/normalize/flow/value-flow.js'
 import { censusObjectBagBindings } from '../dist/semantics/normalize/object-bag-bindings.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 test('bag returns do not erase absence, promises, or generators', () => {
   const path = resolve(import.meta.dirname, 'runtime/bag-return-paths.ts')
@@ -78,7 +79,7 @@ test('returned inferred bags retain their native storage through cached factorie
   assert.doesNotMatch(result.source, /gea_cpp_value|gea::Value (?:gea_|v\d|b\d)/)
   const binary = resolve(root, `measurements/returned-object-bag${executableSuffix}`)
   execFileSync(
-    'clang++',
+    cxx,
     ['-std=c++20', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
     {
       input: `${result.source}\nint main() { __gea_top_level(); }\n`

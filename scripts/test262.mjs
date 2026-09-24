@@ -65,6 +65,7 @@ import { join, resolve, relative, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { cpus } from 'node:os'
 import { createRequire } from 'node:module'
+import { cxx } from './cxx.mjs'
 
 const here = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const require = createRequire(import.meta.url)
@@ -718,7 +719,7 @@ const runWorker = async () => {
     const shim = join(caseDir, 'main_shim.cpp')
     writeFileSync(shim, 'extern void __gea_top_level();\nint main() { __gea_top_level(); return 0; }\n')
     const binary = join(caseDir, 'program')
-    const built = spawnSync('clang++', ['-std=c++20', '-O0', ...pchArguments, `-I${caseDir}`, ...includes, '-o', binary, ...units, shim], {
+    const built = spawnSync(cxx, ['-std=c++20', '-O0', ...pchArguments, `-I${caseDir}`, ...includes, '-o', binary, ...units, shim], {
       encoding: 'utf8',
       timeout: buildTimeoutMs
     })
@@ -785,7 +786,7 @@ const prepareIncludeDir = () => {
   // C++ and every emitted unit re-parses it. The unit's own
   // `#include "gea_runtime.h"` is then a no-op behind the header guard.
   const pch = join(includeDir, 'gea_runtime.h.pch')
-  const built = spawnSync('clang++', ['-std=c++20', '-O0', '-x', 'c++-header', join(includeDir, 'gea_runtime.h'), '-o', pch], {
+  const built = spawnSync(cxx, ['-std=c++20', '-O0', '-x', 'c++-header', join(includeDir, 'gea_runtime.h'), '-o', pch], {
     encoding: 'utf8'
   })
   if (built.status !== 0) {

@@ -6,6 +6,7 @@ import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import test from 'node:test'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const fixture = resolve(root, 'test/fixtures/cli-plugins')
@@ -62,11 +63,10 @@ const linkAndRun = (expected) => {
   assert.doesNotMatch(text, /\bpb(?:Get|Set)\.call\(/)
   const binary = resolve(output, `cli-plugin-native${executableSuffix}`)
   succeed(
-    spawnSync(
-      'clang++',
-      ['-std=c++20', '-O0', `-I${output}`, `-I${fixture}`, ...sources, resolve(fixture, 'panel_bridge.cpp'), '-o', binary],
-      { encoding: 'utf8', timeout: 120000 }
-    )
+    spawnSync(cxx, ['-std=c++20', '-O0', `-I${output}`, `-I${fixture}`, ...sources, resolve(fixture, 'panel_bridge.cpp'), '-o', binary], {
+      encoding: 'utf8',
+      timeout: 120000
+    })
   )
   const result = spawnSync(binary, [], { encoding: 'utf8', timeout: 10000 })
   succeed(result)

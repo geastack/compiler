@@ -2,12 +2,13 @@ import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const binary = resolve(root, `measurements/property-key-number${executableSuffix}`)
 
 execFileSync(
-  'clang++',
+  cxx,
   ['-std=c++20', '-O2', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
   {
     input: `#include "gea_runtime.h"

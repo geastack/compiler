@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
+import { cxx } from './cxx.mjs'
 
 // TypeScript and IR contracts cannot detect a broken C++ declaration order.
 // Check the one shared header before calling a compiler build green; stdin
@@ -14,7 +15,7 @@ for (const [label, flags] of [
   ['16-bit wchar_t', ['-fshort-wchar']]
 ]) {
   const result = spawnSync(
-    process.env.CXX ?? 'clang++',
+    cxx,
     ['-std=c++20', '-fsyntax-only', ...flags, `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-'],
     { input: '#include "gea_runtime.h"\n', encoding: 'utf8' }
   )

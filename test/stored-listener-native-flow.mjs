@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
 import { walkRepresentation } from '../dist/representation/model.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const fixture = resolve(root, 'test/runtime/stored-listener-native-flow.js')
@@ -59,7 +60,7 @@ for (const [name, input] of [
     const executable = result.source.replace(/\/\/[^\n]*|\/\*[\s\S]*?\*\//g, ' ')
     assert.doesNotMatch(executable, /\bgea::Value\b|\bgea_cpp_value\b|\bValue::box\w*\s*[<(]|\bunbox\w*\s*[<(]/)
     execFileSync(
-      'clang++',
+      cxx,
       [
         '-std=c++20',
         '-O1',

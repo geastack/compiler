@@ -5,6 +5,7 @@ import path from 'node:path'
 import { execFileSync } from 'node:child_process'
 import ts from 'typescript'
 import { compile } from '../dist/compiler.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = path.resolve(import.meta.dirname, '..')
 const output = path.join(root, 'measurements/cxx')
@@ -71,11 +72,10 @@ for (const name of [
       const destination = path.join(output, name)
       if (!fs.existsSync(destination) || !fs.readFileSync(destination).equals(bytes)) fs.writeFileSync(destination, bytes)
     }
-    execFileSync(
-      process.env.CXX ?? 'clang++',
-      ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${runtime}`, `${binary}.cpp`, '-o', binary],
-      { stdio: 'inherit', env: { ...process.env, TMPDIR: output } }
-    )
+    execFileSync(cxx, ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${runtime}`, `${binary}.cpp`, '-o', binary], {
+      stdio: 'inherit',
+      env: { ...process.env, TMPDIR: output }
+    })
     const actual = execFileSync(binary, { encoding: 'utf8', env: { ...process.env, UBSAN_OPTIONS: 'halt_on_error=1' } })
     assert.equal(actual, expected, 'Native output must match Node exactly')
     console.log(`${name}: matches Node under ASan/UBSan and satisfies emitted-code assertions`)

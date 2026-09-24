@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const run = (command, args) => {
@@ -39,7 +40,7 @@ for (const name of [
   'native-record-enumeration-runtime'
 ]) {
   const binary = resolve(root, 'measurements/cxx', name)
-  run(process.env.CXX ?? 'clang++', [
+  run(cxx, [
     '-std=c++20',
     '-O3',
     '-fstrict-aliasing',

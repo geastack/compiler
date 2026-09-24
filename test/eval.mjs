@@ -4,11 +4,12 @@ import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import test from 'node:test'
 import { compile } from '../dist/compiler.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const binary = resolve(root, `measurements/eval-runtime${executableSuffix}`)
 execFileSync(
-  'clang++',
+  cxx,
   [
     '-std=c++20',
     '-O0',
@@ -167,7 +168,7 @@ for (const form of ['new Function', 'Function'])
     assert.match(result.source, /Eval::functionArgument\(/)
     assert.doesNotMatch(result.source, /Eval::constructFunction\(\{gea::Value::box/)
     const executable = resolve(root, `measurements/eval-source${executableSuffix}`)
-    execFileSync('clang++', ['-std=c++20', '-O0', '-I', resolve(root, 'src/targets/cpp/runtime'), '-x', 'c++', '-', '-o', executable], {
+    execFileSync(cxx, ['-std=c++20', '-O0', '-I', resolve(root, 'src/targets/cpp/runtime'), '-x', 'c++', '-', '-o', executable], {
       input: result.source + '\nint main(){__gea_top_level();}\n',
       stdio: ['pipe', 'pipe', 'inherit']
     })
@@ -177,7 +178,7 @@ for (const form of ['new Function', 'Function'])
 test('Eval runtime boundaries, early errors, coercion hints, and closure lifetime', () => {
   const executable = resolve(root, `measurements/eval-boundaries${executableSuffix}`)
   execFileSync(
-    'clang++',
+    cxx,
     [
       '-std=c++20',
       '-O0',
@@ -200,7 +201,7 @@ test('opt-in variadic tuple carrier preserves indexed values and array length', 
   const result = compile({ rootFileNames: [file], sourceOverlay: new Map([[file, source]]), dynamicFallback: true })
   assert.ok(result.source, JSON.stringify(result.diagnostics))
   const executable = resolve(root, `measurements/eval-variadic${executableSuffix}`)
-  execFileSync('clang++', ['-std=c++20', '-O0', '-I', resolve(root, 'src/targets/cpp/runtime'), '-x', 'c++', '-', '-o', executable], {
+  execFileSync(cxx, ['-std=c++20', '-O0', '-I', resolve(root, 'src/targets/cpp/runtime'), '-x', 'c++', '-', '-o', executable], {
     input: result.source + '\nint main(){__gea_top_level();}\n',
     stdio: ['pipe', 'pipe', 'inherit']
   })

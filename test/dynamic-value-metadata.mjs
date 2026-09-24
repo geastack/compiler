@@ -3,12 +3,13 @@ import { sanitizerArguments, sanitizerEnvironment } from './sanitizer.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const source = resolve(root, 'test/runtime/dynamic-value-metadata-runtime.cpp')
 const binary = resolve(root, `measurements/dynamic-value-metadata-runtime${executableSuffix}`)
 
-execFileSync('clang++', [
+execFileSync(cxx, [
   '-std=c++20',
   '-O0',
   '-fsanitize=address,undefined',

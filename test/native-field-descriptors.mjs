@@ -4,12 +4,13 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import ts from 'typescript'
 import { compile } from '../dist/compiler.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const output = resolve(root, 'measurements')
 const include = `-I${resolve(root, 'src/targets/cpp/runtime')}`
 const runtimeBinary = resolve(output, 'native-field-descriptor-runtime')
-execFileSync('clang++', [
+execFileSync(cxx, [
   '-std=c++20',
   '-O0',
   '-fsanitize=address,undefined',
@@ -39,7 +40,7 @@ assert.equal(
   'A fixed-field descriptor update must not box its current native value'
 )
 const executable = resolve(output, 'native-field-descriptor')
-execFileSync('clang++', ['-std=c++20', '-O1', include, '-x', 'c++', '-', '-o', executable], {
+execFileSync(cxx, ['-std=c++20', '-O1', include, '-x', 'c++', '-', '-o', executable], {
   input: `${result.source}\nint main() { __gea_top_level(); }\n`,
   env: { ...process.env, TMPDIR: output }
 })
