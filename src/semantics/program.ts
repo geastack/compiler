@@ -6,6 +6,7 @@ import { createModuleResolver, isDeclarationPath, mappedTypeScriptSource, module
 import type { CommonJsWrapperDeclaration } from '../plugins/model.js'
 import { createCommonJsRequireCensus } from './normalize/commonjs-require.js'
 import { withoutBareWrapperRedeclarations } from './commonjs-wrapper.js'
+import { scriptScopeCollisionsOf } from './script-scope-collisions.js'
 import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
 import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
@@ -840,9 +841,14 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
   const program = configured.program
   const checker = withStableTypeQueries(program.getTypeChecker())
   const sourceFiles = program.getSourceFiles().filter((file) => !file.isDeclarationFile)
+  const semanticDiagnostics = timing.measure('semantic-diagnostics', () => program.getSemanticDiagnostics())
+  const reported = new Set(semanticDiagnostics.map((diagnostic) => `${diagnostic.file?.fileName}:${diagnostic.start}:${diagnostic.code}`))
   const diagnostics = [
     ...timing.measure('syntactic-diagnostics', () => program.getSyntacticDiagnostics()),
-    ...timing.measure('semantic-diagnostics', () => program.getSemanticDiagnostics()),
+    ...semanticDiagnostics,
+    ...scriptScopeCollisionsOf(checker, sourceFiles).filter(
+      (diagnostic) => !reported.has(`${diagnostic.file?.fileName}:${diagnostic.start}:${diagnostic.code}`)
+    ),
     ...resolutionDiagnostics
       .filter(({ literal }) => !typeOnlyModuleUse(literal, checker, program.getCompilerOptions().verbatimModuleSyntax))
       .map(({ diagnostic }) => diagnostic)

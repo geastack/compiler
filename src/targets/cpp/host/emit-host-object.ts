@@ -36,7 +36,12 @@ import {
   cppTypeOf,
   cppUndefinedValue
 } from '../types.js'
-import { isNativeCallableCarrier, propertyKeyText as propertyKeyOperandText, stringKeyPreludeText } from '../emit-dynamic-properties.js'
+import {
+  isNativeCallableCarrier,
+  ownershipOfGeneratedCarrier,
+  propertyKeyText as propertyKeyOperandText,
+  stringKeyPreludeText
+} from '../emit-dynamic-properties.js'
 import { regexpRoleOf } from '../prototype/emit-prototype-regexp.js'
 
 /**
@@ -80,6 +85,35 @@ import { regexpRoleOf } from '../prototype/emit-prototype-regexp.js'
 
 /** A `dynamic` carrier, built where a member has to state the box it widens a known field into. */
 const dynamicCarrier: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+
+/**
+ * A known view's `Object.values`/`Object.entries` once a key no declared
+ * field names may exist.
+ *
+ * The braced vector over the declared fields is exact for an object whose own
+ * keys are those fields, and that is every object until an index-signature
+ * entry or a computed write (`o[key] = v`) gives it one more. `Object.keys`
+ * already asks the runtime for every own key (`ownEnumerableKeysText`), so
+ * `Object.keys(o)` said `alpha,gamma` while `Object.values(o)` said `1`. A
+ * generated shared object therefore takes the braced vector only while
+ * `gea::nativeHasUndeclaredOwnKeys` says it has no such key, and otherwise
+ * walks the same key list `Object.keys` does: declared fields keep their
+ * native reads, and every other value arrives boxed from the dynamic protocol
+ * and is entered into the result's element carrier.
+ *
+ * A carrier with no conversion from a box cannot hold such a value; that
+ * program has no sound answer to give, and says so at the key that needs one.
+ */
+const withUndeclaredKeys = (view: Extract<ObjectView, { kind: 'known' }>, fixed: string, keyed: (receiver: string) => string): string =>
+  ownershipOfGeneratedCarrier(view.representation) === 'shared-refcount'
+    ? `(gea::nativeHasUndeclaredOwnKeys(${view.receiver}) ? ${keyed(view.receiver)} : ${fixed})`
+    : fixed
+
+/** The body of the `undeclared` callback where a box has no conversion into the slot. */
+const unconvertibleUndeclaredText = (member: string, slot: Representation): string =>
+  `gea::host::throwRuntimeError("TypeError", ${cppStringLiteral(
+    `Object.${member}: an own property no declared field names holds a dynamic value, and "${representationKey(slot)}" has no conversion from one`
+  )});`
 
 const objectValueConversionText = (
   ctx: EmitContext,
@@ -297,7 +331,20 @@ const valuesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectVi
     }
   }
   const reads = ordered.map((field) => getOwnValue(ctx, view, field).text)
-  return `gea::detail::hostArrayResult(std::vector<${cppTypeOf(result.element)}>{${reads.join(', ')}})`
+  const type = cppTypeOf(result.element)
+  const fixed = `gea::detail::hostArrayResult(std::vector<${type}>{${reads.join(', ')}})`
+  return withUndeclaredKeys(view, fixed, (receiver) => {
+    const declared = ordered.map(
+      (field, index) => `if (__gea_key == ${cppStringLiteral(field.key)}) { __gea_out.push_back(${reads[index]}); return true; }`
+    )
+    const unboxed = alignedValueText(ctx, 'host/emit-host-object.ts:values-undeclared', dynamicCarrier, result.element, '__gea_value')
+    const undeclared = unboxed === null ? unconvertibleUndeclaredText('values', result.element) : `return ${unboxed};`
+    return (
+      `gea::nativeOwnEnumerableValues<${type}>(${receiver}, ` +
+      `[&](const std::string& __gea_key, std::vector<${type}>& __gea_out) -> bool { ${declared.join(' ')} return false; }, ` +
+      `[&](gea::Value __gea_value) -> ${type} { ${undeclared} })`
+    )
+  })
 }
 
 type EntryCarrier =
@@ -467,7 +514,20 @@ const entriesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectV
     const value = intoSlot(read.representation, read.text, `the field "${field.key}"`)
     return `[&]() { ${entryText(entry, cppStringLiteral(field.key), value)} }()`
   })
-  return `gea::detail::hostArrayResult(std::vector<${cppTypeOf(entry.element)}>{${built.join(', ')}})`
+  const type = cppTypeOf(entry.element)
+  const fixed = `gea::detail::hostArrayResult(std::vector<${type}>{${built.join(', ')}})`
+  return withUndeclaredKeys(view, fixed, (receiver) => {
+    const declared = ownKeyFields(view).map(
+      (field, index) => `if (__gea_key == ${cppStringLiteral(field.key)}) { __gea_out.push_back(${built[index]}); return true; }`
+    )
+    const unboxed = alignedValueText(ctx, 'host/emit-host-object.ts:entries-undeclared', dynamicCarrier, entry.value, '__gea_value')
+    const undeclared = unboxed === null ? unconvertibleUndeclaredText('entries', entry.value) : entryText(entry, '__gea_key', unboxed)
+    return (
+      `gea::nativeOwnEnumerableEntries<${type}>(${receiver}, ` +
+      `[&](const std::string& __gea_key, std::vector<${type}>& __gea_out) -> bool { ${declared.join(' ')} return false; }, ` +
+      `[&](const std::string& __gea_key, gea::Value __gea_value) -> ${type} { ${undeclared} })`
+    )
+  })
 }
 
 /**

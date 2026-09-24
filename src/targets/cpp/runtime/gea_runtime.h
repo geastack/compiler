@@ -14655,6 +14655,50 @@ std::vector<std::string> nativeDynamicKeys(const gea::Ref<T>& object) {
   return keys;
 }
 
+/**
+ * Whether a generated struct can hold an own key none of its declared fields
+ * names: an entry of its index-signature sidecar, or an expando a computed
+ * write (`o[k] = v`) created in the identity-keyed table.
+ *
+ * `Object.keys` already walks all three stores (`nativeDynamicKeys`), and a
+ * member that walks the declared fields alone -- `Object.values`,
+ * `Object.entries`, `JSON.stringify` -- must agree with it the moment such a
+ * key exists. The expando half is the object's own `expandoTagged` bit, so
+ * the ordinary object pays one load to keep its compile-time field list.
+ */
+template <typename T>
+bool nativeHasUndeclaredOwnKeys(const gea::Ref<T>& object) {
+  if (!object) return false;
+  if ((detail::refCountsOf(object.get())->weak & detail::expandoTagged) != 0) return true;
+  if constexpr (requires { T::gea_has_index_sidecar; }) return true;
+  return false;
+}
+
+/**
+ * `Object.values` over every own enumerable string key, in `nativeDynamicKeys`
+ * order. `declared` pushes a declared field's value natively and answers
+ * whether the key was one; every other key is read through the dynamic
+ * protocol and entered into the element carrier by `undeclared`.
+ */
+template <typename E, typename T, typename Declared, typename Undeclared>
+gea::Ref<ArrayObject<E>> nativeOwnEnumerableValues(const gea::Ref<T>& object, const Declared& declared, const Undeclared& undeclared) {
+  std::vector<E> values;
+  for (const std::string& key : nativeDynamicKeys(object)) {
+    if (!declared(key, values)) values.push_back(undeclared(nativeDynamicGet(object, PropertyKey::string(key))));
+  }
+  return detail::hostArrayResult(values);
+}
+
+/** `Object.entries` over the same walk as `nativeOwnEnumerableValues`; `undeclared` builds the entry from the key and its boxed value. */
+template <typename Entry, typename T, typename Declared, typename Undeclared>
+gea::Ref<ArrayObject<Entry>> nativeOwnEnumerableEntries(const gea::Ref<T>& object, const Declared& declared, const Undeclared& undeclared) {
+  std::vector<Entry> entries;
+  for (const std::string& key : nativeDynamicKeys(object)) {
+    if (!declared(key, entries)) entries.push_back(undeclared(key, nativeDynamicGet(object, PropertyKey::string(key))));
+  }
+  return detail::hostArrayResult(entries);
+}
+
 /** Array exotic own enumerable string keys, followed by enumerable expandos. */
 template <typename Element>
 std::vector<std::string> arrayOwnEnumerableKeys(const gea::Ref<ArrayObject<Element>>& array) {
@@ -28369,6 +28413,33 @@ inline void gea_json_write(std::string& out, const gea::Ref<gea::ArrayObject<Ele
  */
 template <typename Pointee>
 inline void gea_json_write(std::string& out, const gea::Ref<Pointee>& pointee) {
+  // An object holding a key no declared field names -- an index-signature
+  // entry, or an expando a computed write created -- serializes in its full
+  // own-key order (`gea::nativeDynamicKeys`, the list `Object.keys` answers
+  // with): declared fields through the struct's own native writer, every other
+  // key from its boxed value. Without this, `o[k] = v; JSON.stringify(o)` left
+  // `k` out while `Object.keys(o)` listed it.
+  if constexpr (requires(std::string& text, const Pointee& value, const std::string& key, bool& first) {
+                  gea_json_write_field(text, value, key, first);
+                }) {
+    if (gea::nativeHasUndeclaredOwnKeys(pointee)) {
+      out += '{';
+      bool first = true;
+      for (const std::string& key : gea::nativeDynamicKeys(pointee)) {
+        if (gea_json_write_field(out, *pointee, key, first)) continue;
+        const gea::Value member = gea::nativeDynamicGet(pointee, gea::PropertyKey::string(key));
+        if (member.tag() == gea::Value::Tag::Undefined || member.tag() == gea::Value::Tag::Function ||
+            member.tag() == gea::Value::Tag::Symbol) continue;
+        if (!first) out += ',';
+        gea_json_write(out, key);
+        out += ':';
+        gea_json_write(out, member);
+        first = false;
+      }
+      out += '}';
+      return;
+    }
+  }
   gea_json_write(out, *pointee);
 }
 

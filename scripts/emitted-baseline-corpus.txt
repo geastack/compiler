@@ -42,7 +42,7 @@ dynamic-instanceof-constructor-family.ts.cpp c44c4596c56d
 dynamic-json.ts.cpp b124cc52de24
 dynamic-optional-absence.ts.cpp f06ec632c13e
 dynamic-to-discriminated-repro.ts.cpp 1994825df37b
-embedded-null-string.ts.cpp fc151f32a69a
+embedded-null-string.ts.cpp f7159564744f
 explicit-void-this.ts.cpp 9b077c7c6722
 expression-carrier-repro.ts.cpp ddb7cfd98d4a
 fn.ts.cpp 4b80e17e4b22
@@ -58,7 +58,7 @@ generic-overload-implementation.ts.cpp 06c2deb81dce
 generic-two-instantiations.ts.cpp 9a9f03ed990d
 host-binding.ts.cpp f1d1448a9a9d
 host-document.ts.cpp 064d61095b13
-host-generic-return.ts.cpp a5df120f7fd0
+host-generic-return.ts.cpp 1a9db99215d8
 host-throw.ts.cpp 4b05b7ae756d
 host-tonumber.ts.cpp b893e32d6f6e
 host-tostring.ts.cpp 4f2781c444d8
@@ -69,7 +69,7 @@ initializer-write-attribution-repro.js.cpp ba89bd4284f9
 instanceof-constructor-family-repro.ts.cpp fcaf395d3eac
 intersection-conditional-member.ts.cpp e866e8990fb5
 iterable-return-carrier.ts.cpp a5aa54b0ef47
-json-stringify-fill-aliasing.ts.cpp fd2b11c6c058
+json-stringify-fill-aliasing.ts.cpp e3f559aff126
 jsx-class-component.tsx.cpp dbac6059bd15
 jsx-class-map.tsx.cpp dbeb82271f8c
 jsx-component.tsx.cpp e61967cdff39
@@ -98,8 +98,8 @@ native-optional-field-read-closed.ts.cpp e101936dfd65
 nullable-union-guard.ts.cpp 54f8197f49d7
 nullish-coalescing.ts.cpp ed1e1ce7c8fd
 number-format-methods.ts.cpp d38b5cc58bff
-number-index.ts.cpp 90477ce9ac2b
-object-assign-dictionary.ts.cpp 11bff8992e2f
+number-index.ts.cpp 2f4ec2399760
+object-assign-dictionary.ts.cpp c444798a2fd8
 object-literal-accessors.ts.cpp 38a831a64b07
 object-members.ts.cpp e521489da2df
 object-spread-class-source.ts.cpp 63b6b0724b04

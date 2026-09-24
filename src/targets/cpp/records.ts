@@ -2271,6 +2271,9 @@ const renderStructDefinition = (
       lines.push(`  gea::PackedEnvironment ${cppRecordAccessorEnvironmentName(accessor.key, half)};`)
     }
   }
+  // `gea::nativeHasUndeclaredOwnKeys` reads it: a sidecar's entries are own
+  // keys no declared field names, which a declared-field walk would miss.
+  if (layout.indexes.length > 0) lines.push('  static constexpr bool gea_has_index_sidecar = true;')
   for (const index of layout.indexes) {
     // One dictionary member carries every dynamic-keyed property the named
     // fields above do not, embedded by value so it shares the struct's own

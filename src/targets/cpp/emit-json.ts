@@ -538,7 +538,31 @@ const renderJsonRecordOverloads = (entry: JsonStructEntry): string => {
   readLines.push(`}`)
   writeLines.push(`  out += '}';`)
   writeLines.push(`}`)
-  return `${writeLines.join('\n')}\n\n${readLines.join('\n')}`
+  // One declared field by key, for the runtime's walk over an object that also
+  // holds keys no declared field names (`gea_json_write`'s `gea::Ref`
+  // overload): the walk takes the key ORDER from `gea::nativeDynamicKeys`,
+  // which only lists present keys, and each declared value keeps its native
+  // write. Omission follows the same 25.5.2.2 rules as the writer above.
+  const fieldLines = [
+    `inline bool gea_json_write_field(std::string& out, const ${entry.structName}& value, const std::string& key, bool& first) {`
+  ]
+  for (const field of entry.fields) {
+    const member = `value.${cppRecordFieldName(field.key)}`
+    const unionArms = nullableUnionArmsOf(field.value)
+    const undefinedArmIndex = unionArms !== null && unionArms.undefinedIndex !== -1 ? unionArms.undefinedIndex : null
+    const separator = `if (!first) out += ','; out += ${jsonKeyLiteral(field.key)}; first = false;`
+    let body: string
+    if (undefinedArmIndex !== null)
+      body = `if (${member}.is<${undefinedArmIndex}>()) return true; ${separator} gea_json_write(out, ${member});`
+    else if (field.value.kind === 'optional' && field.value.absence === 'undefined')
+      body = `if (!${member}.has_value()) return true; ${separator} gea_json_write(out, *${member});`
+    else if (field.value.kind === 'optional' && field.value.absence === 'null')
+      body = `${separator} if (${member}.has_value()) gea_json_write(out, *${member}); else out += "null";`
+    else body = `${separator} gea_json_write(out, ${member});`
+    fieldLines.push(`  if (key == ${cppStringLiteral(field.key)}) { ${body} return true; }`)
+  }
+  fieldLines.push(`  (void)out; (void)value; (void)key; (void)first;`, `  return false;`, `}`)
+  return `${writeLines.join('\n')}\n\n${fieldLines.join('\n')}\n\n${readLines.join('\n')}`
 }
 
 /** One `JSON.stringify`/`JSON.parse` call this program's IR reaches, and the representation that names what it stringifies (the argument) or decodes into (the asserted result). */
@@ -654,8 +678,12 @@ export const renderJsonStructDeclarations = (
     `inline void gea_json_write(std::string& out, const ${name}& value);`,
     `inline void gea_json_read(gea::json::Reader& reader, ${name}& out);`
   ])
+  const fieldForwards = names.map(
+    (name) => `inline bool gea_json_write_field(std::string& out, const ${name}& value, const std::string& key, bool& first);`
+  )
   const declarations = [
     ...forwards,
+    ...fieldForwards,
     ...names.map((name) => renderJsonRecordOverloads(collected.structs.get(name) as JsonStructEntry)),
     ...unionNames.map((name) => renderJsonNullableUnionOverloads(collected.nullableUnions.get(name) as JsonNullableUnionEntry))
   ]
