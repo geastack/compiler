@@ -1,7 +1,7 @@
 import type { PackageSource } from './package-sources.js'
 import ts from 'typescript'
 import { withStableTypeQueries } from './stable-checker.js'
-import { dirname, resolve } from 'node:path'
+import { dirname, resolve, sep } from 'node:path'
 import { createModuleResolver, isDeclarationPath, mappedTypeScriptSource, moduleExtension, typeOnlyModuleUse } from './module-resolution.js'
 import type { CommonJsWrapperDeclaration } from '../plugins/model.js'
 import { createCommonJsRequireCensus } from './normalize/commonjs-require.js'
@@ -515,6 +515,21 @@ const withoutShadowedAmbientModules = (
   return ts.createSourceFile(file.fileName, text, version, true, scriptKindOf(file.fileName))
 }
 
+/**
+ * A resolved module as TypeScript itself would name it: with `/`.
+ *
+ * TypeScript keeps whatever file name a custom resolver answers, and this
+ * resolver builds some answers with `path.resolve` -- which on Windows spells
+ * them with `\`. A file first reached through one of those imports then had a
+ * name no other platform gives it, and file identities are numbered in name
+ * order, so on Windows alone every declaration identity after it shifted
+ * (the `paths`-mapped `@geastack/core` of the JSX fixtures moved f166 to f167).
+ */
+const typeScriptSpelling = (module: ts.ResolvedModuleFull | undefined): ts.ResolvedModuleFull | undefined =>
+  module && sep !== '/' && module.resolvedFileName.includes(sep)
+    ? { ...module, resolvedFileName: module.resolvedFileName.split(sep).join('/') }
+    : module
+
 const transformingHost = (
   input: ProgramInput,
   options: ts.CompilerOptions,
@@ -554,7 +569,8 @@ const transformingHost = (
     return literals.map((literal) => {
       const mode = ts.getModeForUsageLocation(containingSource, literal, compilerOptions)
       const result = resolver.resolve(literal.text, containingFile, mode, answers?.get(literal.text))
-      if (typeOnlyModuleUse(literal) && result.declaration && !answers?.has(literal.text)) return { resolvedModule: result.declaration }
+      if (typeOnlyModuleUse(literal) && result.declaration && !answers?.has(literal.text))
+        return { resolvedModule: typeScriptSpelling(result.declaration) }
       let implementation = result.implementation
       if (implementation && !answers?.has(literal.text)) {
         const source = mappedTypeScriptSource(implementation.resolvedFileName, host)
@@ -576,7 +592,7 @@ const transformingHost = (
           }
         })
       }
-      return { resolvedModule: implementation ?? result.declaration }
+      return { resolvedModule: typeScriptSpelling(implementation ?? result.declaration) }
     })
   }
   const unchecked = createUncheckedJavaScriptPolicy(input.uncheckedJavaScript ?? new Set(), host)
