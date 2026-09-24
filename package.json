@@ -46,6 +46,7 @@
   "scripts": {
     "test:cli-plugins": "node --test test/cli-plugins.mjs",
     "test:webgl-plugin-off": "node --test test/webgl-plugin-off.mjs",
+    "test:unchecked-javascript": "node --test test/unchecked-javascript.mjs",
     "test:allocation-runtime": "node test/allocation-runtime.mjs",
     "test:stored-listener-native-flow": "node test/stored-listener-native-flow.mjs",
     "test:native-typed-field-read": "node test/native-typed-field-read.mjs",

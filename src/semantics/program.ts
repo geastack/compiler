@@ -9,6 +9,7 @@ import { withoutBareWrapperRedeclarations } from './commonjs-wrapper.js'
 import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
 import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
+import { createUncheckedJavaScriptPolicy, markUnchecked } from './unchecked-javascript.js'
 
 /**
  * The TypeScript program host.
@@ -24,6 +25,8 @@ export interface ProgramInput {
   readonly dynamicFallback?: boolean
   /** Module specifiers implemented by an installed native host, including explicit package/* claims. */
   readonly declarationModules?: ReadonlySet<string>
+  /** Package file globs whose JavaScript reports no checker diagnostics -- see `unchecked-javascript.ts`. */
+  readonly uncheckedJavaScript?: ReadonlySet<string>
   readonly rootFileNames: readonly string[]
   readonly options: ts.CompilerOptions
   /**
@@ -576,7 +579,8 @@ const transformingHost = (
       return { resolvedModule: implementation ?? result.declaration }
     })
   }
-  host.getSourceFile = (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {
+  const unchecked = createUncheckedJavaScriptPolicy(input.uncheckedJavaScript ?? new Set(), host)
+  const parse: ts.CompilerHost['getSourceFile'] = (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {
     const prepared = preparedSourceText.get(resolve(fileName))
     if (prepared !== undefined) return ts.createSourceFile(fileName, prepared, languageVersionOrOptions, true, scriptKindOf(fileName))
     const overlaid = overlay?.get(resolve(fileName))
@@ -604,6 +608,12 @@ const transformingHost = (
     const marked = moduleMarkerForTopLevelAwait(transformed)
     if (marked === null) return transformed
     return ts.createSourceFile(fileName, marked, languageVersionOrOptions, true, scriptKindOf(fileName))
+  }
+  // After every rewrite, on whichever parse the program keeps: the mark lives
+  // on the parsed file, so a file parsed again from rewritten text would drop it.
+  host.getSourceFile = (fileName, ...rest) => {
+    const file = parse(fileName, ...rest)
+    return file && !file.isDeclarationFile && unchecked(fileName) ? markUnchecked(file) : file
   }
   return host
 }

@@ -124,8 +124,11 @@ const validateInstance = (value: unknown): PluginInstance => {
   for (const key of ['hostMethodBindings']) {
     if (capabilities[key] !== undefined) checkShape(capabilities[key], new Map(), `capabilities.${key}`)
   }
-  for (const key of ['declarationModules', 'hostArraySnapshotFunctions', 'hostNativeArrayFunctions']) {
+  for (const key of ['declarationModules', 'hostArraySnapshotFunctions', 'hostNativeArrayFunctions', 'uncheckedJavaScript']) {
     if (capabilities[key] !== undefined) checkShape(capabilities[key], new Set(), `capabilities.${key}`)
+  }
+  for (const pattern of (capabilities['uncheckedJavaScript'] as Set<unknown> | undefined) ?? []) {
+    if (typeof pattern !== 'string') throw new Error('invalid PluginInstance: capabilities.uncheckedJavaScript must hold strings')
   }
   for (const key of ['hostFunctions', 'nativeTypes', 'nativeConstants', 'hostNamespaceRootTypes']) {
     for (const [name, spelling] of capabilities[key] as Map<unknown, unknown>) {

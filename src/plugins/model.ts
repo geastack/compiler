@@ -196,6 +196,22 @@ export interface PluginCapabilities {
   /** Packages/modules this host implements instead of compiling their JavaScript; package/* includes subpaths. */
   readonly declarationModules?: ReadonlySet<string>
   /**
+   * Package JavaScript this host's programs compile unchecked: the checker
+   * reports no diagnostics for it, exactly as `// @ts-nocheck` would, and the
+   * source is left as written.
+   *
+   * Each entry is a package name and a glob inside it -- `three/src/**`,
+   * `@scope/name/lib/*.js`, or a bare name for the whole package. Types and
+   * JSDoc in those files are still read and still drive inference; only the
+   * report is withheld. A library whose JSDoc is sound enough to compile from
+   * and too loose to typecheck is the case: three.js raises thousands of
+   * checker errors none of which is a defect in the program, and prefixing
+   * the directive to each file moved every offset in it and put a text
+   * rewrite between the compiler and the library. See
+   * `semantics/unchecked-javascript.ts`.
+   */
+  readonly uncheckedJavaScript?: ReadonlySet<string>
+  /**
    * An ambient declared type this plugin's own package REPLACES with a
    * concrete type it ships as ordinary source, keyed by the ambient name.
    *
