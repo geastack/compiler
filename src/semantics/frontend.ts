@@ -2,6 +2,7 @@ import type { PackageSource } from './package-sources.js'
 import type { CommonJsWrapperDeclaration, HostNativeTypeDeclaration, HostOwnedDeclaration } from '../plugins/model.js'
 import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, proxyFallbackTypes } from './dynamic-fallback.js'
 import ts from 'typescript'
+import { isScriptGlobalObjectPropertyDeclaration } from './normalize/script-global-redefinition.js'
 import { structuralShapeKey } from './model/structural-types.js'
 import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
 import type { DeclarationId, FunctionId, NodeId, OperationFamily, RegionId, StructuralTypeId } from '../identity/ids.js'
@@ -119,6 +120,30 @@ import {
  * and so a family with no producer is reported by the census instead of quietly
  * contributing nothing.
  */
+
+
+const scriptGlobalPropertiesOf = (
+  checker: ts.TypeChecker,
+  identities: IdentityTable,
+  files: readonly ts.SourceFile[]
+): ReadonlyMap<DeclarationId, string> => {
+  const properties = new Map<DeclarationId, string>()
+  for (const file of files)
+    for (const statement of file.statements) {
+      const declarations = ts.isVariableStatement(statement)
+        ? statement.declarationList.declarations
+        : ts.isFunctionDeclaration(statement)
+          ? [statement]
+          : []
+      for (const declaration of declarations) {
+        if (!declaration.name || !ts.isIdentifier(declaration.name) || !isScriptGlobalObjectPropertyDeclaration(declaration)) continue
+        const symbol = checker.getSymbolAtLocation(declaration.name)
+        const id = symbol ? identities.symbolValueDeclarationId(symbol, declaration.name) : null
+        if (id !== null) properties.set(id, declaration.name.text)
+      }
+    }
+  return properties
+}
 
 export interface FrontendInput {
   /** Package checkouts prepared by the project loader; the compiler discovers their implementation entries. */
@@ -385,6 +410,14 @@ export interface FrontendResult {
    * bodies nothing calls.
    */
   readonly moduleOrder: readonly RegionId[]
+  /**
+   * The program's script-level `var`/function declarations that are own
+   * properties of the global object (`isScriptGlobalObjectPropertyDeclaration`),
+   * by the name the global object holds each under. A target that lets
+   * constructed code write the global object needs these beside the host
+   * bindings: both are cells the program reads without going through it.
+   */
+  readonly scriptGlobalProperties?: ReadonlyMap<DeclarationId, string>
   /**
    * The file each identity segment names, for every compiled (non-declaration)
    * source file: `f12` -> its `fileName`.
@@ -1827,6 +1860,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       .filter((file) => fileEvaluates(reachable, file))
       .map((file) => regionId(identities.nodeIdOf(file), 'module-body'))
       .filter((region) => normalized.graph.regions.has(region)),
+    scriptGlobalProperties: scriptGlobalPropertiesOf(compiled.checker, identities, compiled.sourceFiles),
     sourceFileNames: identities.sourceFileNames,
     typedArrayElements,
     promiseDeclaration,

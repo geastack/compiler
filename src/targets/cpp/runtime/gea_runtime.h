@@ -10172,6 +10172,21 @@ inline gea::Ref<gea::Dictionary<gea::Value>> globalThis() {
   static auto value = gea::makeRef<gea::Dictionary<gea::Value>>();
   return value;
 }
+/**
+ * Global names this program reads through a native binding rather than
+ * through `globalThis()`. A write, definition or delete of one through the
+ * global object would leave that binding stale -- the compiler proved no
+ * program text does it, but a constructed `Function` body is text it never
+ * saw -- so the global object refuses it by name. The entry states them once,
+ * before any module body runs.
+ */
+inline std::unordered_set<std::string>& nativelyBoundGlobalNames() {
+  static std::unordered_set<std::string> names;
+  return names;
+}
+inline void bindGlobalNamesNatively(std::initializer_list<const char*> names) {
+  for (const char* name : names) nativelyBoundGlobalNames().insert(name);
+}
 struct Error;
 }
 namespace host {
@@ -14938,6 +14953,13 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
   return Value();
 }
 
+namespace runtime {
+inline void refuseNativelyBoundGlobal(const gea::Dictionary<gea::Value>* dictionary, const std::string& name) {
+  if (dictionary != globalThis().get() || nativelyBoundGlobalNames().count(name) == 0) return;
+  gea::host::throwRuntimeError("TypeError", "'" + name + "' is bound natively by this compiled program and cannot be changed through the global object");
+}
+}  // namespace runtime
+
 inline void Value::setProperty(const PropertyKey& key, const Value& value) {
   if (proxy_) {
     if (!dynamicProxySet(*this, key, value, *this)) gea::host::throwRuntimeError("TypeError", "Proxy set trap rejected the assignment");
@@ -14958,6 +14980,7 @@ inline void Value::setProperty(const PropertyKey& key, const Value& value) {
       // 10.1.9, which refuses a non-writable property. `Value::setProperty`
       // reports nothing, so the refusal is the discard sloppy code gets --
       // the same thing this arm did for every OTHER failure it could meet.
+      if (dictionary) runtime::refuseNativelyBoundGlobal(dictionary.get(), key.text());
       if (dictionary) dictionary->setProperty(key.text(), value);
     }
     return;
@@ -15024,6 +15047,7 @@ inline bool Value::deleteProperty(const PropertyKey& key) {
     // 10.1.10's own answer. `true` unconditionally was right only while every
     // entry was configurable; `delete` on a non-configurable property is
     // false, which is what strict code turns into a TypeError.
+    if (dictionary) runtime::refuseNativelyBoundGlobal(dictionary.get(), key.text());
     return !dictionary || dictionary->deleteProperty(key.text());
   }
   if (tag_ == Tag::String) {

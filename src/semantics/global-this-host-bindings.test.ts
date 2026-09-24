@@ -1466,6 +1466,24 @@ test("a package's typings describe program code, not a host native, outside glob
   assert.notDeepEqual([...audit('hostLog', true)], [])
 })
 
+// A constructed `Function` runs in `gea::Eval`, which refuses to change a name
+// the program binds natively and reaches no intrinsic object; `eval` stays open.
+test('a constructed Function neither lets the global object escape nor widens argument stamps; eval still does', () => {
+  const escape = (code: string) =>
+    globalHostMutationAuditOf(`
+      interface Process {}
+      declare var hostProcess: Process
+      declare const opaqueValue: any
+      ${code}
+      ;(opaqueValue as any).hostProcess = undefined
+    `)
+  assert.deepEqual([...escape("new Function('return 1')").taint], [])
+  const escaped = escape("eval('1')")
+  assert.ok(escaped.taint.has('*') || escaped.taint.has(escaped.bindings.get('hostProcess')!))
+  assert.deepEqual([...hostCallableUse("new Function('return 1')").taint], [])
+  assert.notDeepEqual([...hostCallableUse("eval('1')").taint], [])
+})
+
 test('own-key reflection dependencies revoke source slot closure after method replacement', () => {
   for (const replaced of [false, true]) {
     const audit = globalHostMutationAuditOf(`

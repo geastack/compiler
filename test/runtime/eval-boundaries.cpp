@@ -38,6 +38,20 @@ int main() {
   const auto comparesActiveGlobal = gea::Eval::constructFunction(
       {gea::Eval::functionArgument(std::string("return this === globalThis;"))});
   assert(truth(comparesActiveGlobal.callAsFunction({})));
+  // A name the program binds natively cannot be changed through the global
+  // object: a constructed body's sloppy write, a compiled dynamic write, a
+  // definition and a delete are refused alike. Every other name stays an
+  // ordinary global property.
+  gea::runtime::bindGlobalNamesNatively({"nativelyBound"});
+  throws("TypeError", [] {
+    gea::Eval::constructFunction({gea::Eval::functionArgument(std::string("nativelyBound = 1;"))}).callAsFunction({});
+  });
+  Value activeGlobalValue = Value::box(Value::Tag::Object, activeGlobal);
+  throws("TypeError", [&] { activeGlobalValue.setProperty(PropertyKey::string("nativelyBound"), number(1)); });
+  throws("TypeError", [&] { activeGlobalValue.deleteProperty(PropertyKey::string("nativelyBound")); });
+  throws("TypeError", [&] { activeGlobalValue.defineProperty(PropertyKey::string("nativelyBound"), gea::PropertyDescriptor::assignment(number(1))); });
+  gea::Eval::constructFunction({gea::Eval::functionArgument(std::string("freeName = 2;"))}).callAsFunction({});
+  assert(numeric(activeGlobal->read("freeName")) == 2);
   Value escapedActiveRealm;
   {
     const auto activeFactory = gea::Eval::constructFunction(
