@@ -174,6 +174,29 @@ for (const form of ['new Function', 'Function'])
     assert.equal(execFileSync(executable, { encoding: 'utf8' }), '5 9 2 anonymous\n')
   })
 
+test('a constructed Function cannot change a global the compiled program binds natively', () => {
+  const file = resolve(root, 'test/runtime/eval-natively-bound.js')
+  const source =
+    "let refused = false; try { new Function('parseInt = null')() } catch { refused = true } console.log(refused, parseInt('7') + 1)"
+  const result = compile({
+    rootFileNames: [file],
+    sourceOverlay: new Map([[file, source]]),
+    javaScriptSources: true,
+    dynamicFallback: true
+  })
+  assert.ok(
+    result.source,
+    JSON.stringify({ diagnostics: result.diagnostics, lowering: result.loweringBlockers, emission: result.emissionRefusals })
+  )
+  assert.match(result.source, /bindGlobalNamesNatively\(\{[^}]*"parseInt"/)
+  const executable = resolve(root, `measurements/eval-natively-bound${executableSuffix}`)
+  execFileSync('clang++', ['-std=c++20', '-O0', '-I', resolve(root, 'src/targets/cpp/runtime'), '-x', 'c++', '-', '-o', executable], {
+    input: result.source + '\nint main(){__gea_top_level();}\n',
+    stdio: ['pipe', 'pipe', 'inherit']
+  })
+  assert.equal(execFileSync(executable, { encoding: 'utf8' }), 'true 8\n')
+})
+
 test('Eval runtime boundaries, early errors, coercion hints, and closure lifetime', () => {
   const executable = resolve(root, `measurements/eval-boundaries${executableSuffix}`)
   execFileSync(

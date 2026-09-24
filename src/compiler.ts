@@ -1278,6 +1278,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
           hosts,
           runtimeDefinitions: plugins.flatMap((plugin) => [...plugin.capabilities.runtimeDefinitions]),
           moduleOrder: frontend.moduleOrder,
+          ...(frontend.scriptGlobalProperties ? { scriptGlobalProperties: frontend.scriptGlobalProperties } : {}),
           entrySymbol: request.entrySymbol === undefined ? defaultEntrySymbol : request.entrySymbol,
           // `'preferred'` rather than `false`: a unit that is the whole program
           // has nothing to collide with, but internal linkage is still what

@@ -4385,6 +4385,15 @@ export const censusGlobalHostMutations = (
         // expression anywhere for the walk below to find. The bare NAME is not
         // that -- `x instanceof Function` and every `Function`-typed
         // annotation mention it without ever running one.
+        //
+        // A constructed `Function` is not that either, on this backend: its
+        // body runs in `gea::Eval`, and every global name the program reads
+        // without going through the global object -- host bindings and script
+        // cells -- is one the global object refuses to change
+        // (`gea::runtime::bindGlobalNamesNatively`). Whatever the body does
+        // with the global object, it cannot move a binding this census lets
+        // bind natively, which is the only question this answer feeds.
+        if (node.text === 'Function') continue
         const invoked = (ts.isCallExpression(node.parent) || ts.isNewExpression(node.parent)) && node.parent.expression === node
         if (invoked) {
           if (process.env['GEA_GLOBAL_ESCAPE_DEBUG']) console.log(`[ESCAPE] ${node.text} called at ${node.getSourceFile().fileName}`)
@@ -4875,9 +4884,10 @@ export const censusGlobalHostMutations = (
    *   `getOwnPropertyNames` is all-or-nothing whole-program -- which intrinsic
    *   was replaced does not bound which slot the replacement reaches -- so no
    *   key set this visit read is a bound on anything.
-   * - `eval` or `Function` in callee position. Both mint code out of a string,
-   *   and that code is in no source file, so `visitWrittenKeys` is not a
-   *   superset of what runs.
+   * - `eval` in callee position. It mints code out of a string, and that
+   *   code is in no source file, so `visitWrittenKeys` is not a superset of
+   *   what runs. A constructed `Function` does too, but cannot write an
+   *   intrinsic object on this backend; see `dynamicCodeCalleeExists`.
    * - a reflection mutator (`Object.defineProperty`/`defineProperties`/
    *   `assign`/`setPrototypeOf`, `Reflect.set`/`defineProperty`/
    *   `setPrototypeOf`) whose TARGET this census cannot place. Its keys are
@@ -4890,7 +4900,12 @@ export const censusGlobalHostMutations = (
     if (dynamicCodeCalleeAnswer !== null) return dynamicCodeCalleeAnswer
     dynamicCodeCalleeAnswer = false
     for (const node of nodes) {
-      if (!ts.isIdentifier(node) || (node.text !== 'eval' && node.text !== 'Function')) continue
+      // A constructed `Function` reaches no intrinsic object this program
+      // trusts: `gea::Eval` runs it in its own realm with its own intrinsics,
+      // and a compiled object's ordinary prototype is a fixed member set
+      // (`ordinaryObjectPrototypeHas`), not a table code can write. What it
+      // can write is what it is handed, which the stamp already covers.
+      if (!ts.isIdentifier(node) || node.text !== 'eval') continue
       const invoked = (ts.isCallExpression(node.parent) || ts.isNewExpression(node.parent)) && node.parent.expression === node
       if (invoked) {
         dynamicCodeCalleeAnswer = true

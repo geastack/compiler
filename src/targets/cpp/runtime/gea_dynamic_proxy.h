@@ -496,6 +496,7 @@ inline bool Value::defineProperty(const PropertyKey& key, const PropertyDescript
     if (key.isSymbol() || descriptor.isAccessor()) return false;
     const gea::Ref<gea::Dictionary<gea::Value>>& dictionary = as<gea::Ref<gea::Dictionary<gea::Value>>>();
     if (!dictionary) return false;
+    runtime::refuseNativelyBoundGlobal(dictionary.get(), key.text());
     if (!descriptor.hasValue) return dictionary->has(key.text());
     (*dictionary)[key.text()] = descriptor.value;
     return true;

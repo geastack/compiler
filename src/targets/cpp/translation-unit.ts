@@ -325,6 +325,12 @@ export interface CppTranslationUnitInput {
   readonly runtimeDefinitions: readonly RuntimeDefinition[]
   readonly moduleOrder: readonly RegionId[]
   /**
+   * The program's script-level declarations that are own properties of the
+   * global object (`FrontendResult.scriptGlobalProperties`), by the name the
+   * global object holds them under.
+   */
+  readonly scriptGlobalProperties?: ReadonlyMap<DeclarationId, string>
+  /**
    * The C++ name the target starts this program at, or `null` to emit none.
    *
    * A name rather than a fixed symbol because it is the TARGET's convention,
@@ -1207,15 +1213,59 @@ export interface CppTranslationUnitResult {
  * which is a program whose module state is half-built and whose failure lands
  * at runtime with nothing pointing back here.
  */
+/**
+ * Whether a body constructs a `Function`: the one code this program runs that
+ * no compiler pass read, and so the one that could write a global name the
+ * program binds natively (`gea::runtime::bindGlobalNamesNatively`).
+ */
+const constructsFunction = (bodies: readonly IrBody[]): boolean =>
+  bodies.some((body) =>
+    [...body.blocks.values()].some((block) =>
+      allOperationsOf(block).some(
+        (operation) =>
+          (operation.kind === 'call' || operation.kind === 'construct') &&
+          operation.callee.representation.kind === 'native-handle' &&
+          operation.callee.representation.protocol === 'FunctionConstructor'
+      )
+    )
+  )
+
+/** The global names this unit reads through a host binding or as a script-level cell instead of through `globalThis()`. */
+const nativelyBoundGlobalNamesOf = (
+  placements: ReadonlyMap<DeclarationId, BindingPlacement>,
+  scriptGlobalProperties: ReadonlyMap<DeclarationId, string>
+): readonly string[] => {
+  const names = new Set<string>()
+  for (const [declaration, placement] of placements) {
+    const storage = placement.storage
+    if (
+      storage.kind === 'host-function' ||
+      storage.kind === 'host-class' ||
+      storage.kind === 'host-namespace' ||
+      storage.kind === 'host-singleton' ||
+      storage.kind === 'host-constant'
+    )
+      names.add(storage.linkageName)
+    else if (storage.kind === 'local' || storage.kind === 'region') {
+      const name = scriptGlobalProperties.get(declaration)
+      if (name !== undefined) names.add(name)
+    }
+  }
+  return [...names].sort()
+}
+
 const entryDefinitionOf = (
   entrySymbol: string,
   moduleOrder: readonly RegionId[],
   bodies: readonly IrBody[],
   commonJsModules: ReadonlySet<RegionId>,
-  hasBuiltinModuleRegistry: boolean
+  hasBuiltinModuleRegistry: boolean,
+  nativelyBoundGlobals: readonly string[]
 ): { readonly text: string } | { readonly refusal: CppEmissionRefusal } => {
   const byOwner = new Map(bodies.map((body) => [body.sourceOwner, body]))
   const calls: string[] = hasBuiltinModuleRegistry ? ['gea_register_commonjs_builtin_modules();'] : []
+  if (nativelyBoundGlobals.length > 0)
+    calls.unshift(`gea::runtime::bindGlobalNamesNatively({${nativelyBoundGlobals.map(cppStringLiteral).join(', ')}});`)
   for (const region of moduleOrder) {
     const body = byOwner.get(region)
     if (!body) {
@@ -2439,7 +2489,8 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
       input.moduleOrder,
       input.bodies,
       commonJs.modules,
-      commonJs.hasBuiltinModuleRegistry
+      commonJs.hasBuiltinModuleRegistry,
+      constructsFunction(input.bodies) ? nativelyBoundGlobalNamesOf(input.placements, input.scriptGlobalProperties ?? new Map()) : []
     )
     if ('refusal' in rendered) refused.push(rendered.refusal)
     else entry = rendered.text
