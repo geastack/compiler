@@ -180,6 +180,13 @@ export interface BindingPlacementInput {
    */
   readonly coreGlobalClasses?: ReadonlySet<string>
   /**
+   * The standard intrinsics the backend implements as builtin function
+   * objects, to the C++ expression that is each one's single function object
+   * (`coreDynamicIntrinsics`, targets/cpp/host/core-globals.ts). On the same
+   * standard-library gate as the two tables above.
+   */
+  readonly coreDynamicIntrinsics?: ReadonlyMap<string, string>
+  /**
    * The declarations the standard library declares
    * (`FrontendResult.standardLibraryBindings`).
    *
@@ -290,6 +297,13 @@ const hostStorageOf = (
   if (input.standardLibraryExternals?.has(declaration) && input.coreGlobalClasses?.has(linkageName)) {
     return { kind: 'host-class', linkageName }
   }
+  // A dynamic intrinsic is a value like any other function object, so its read
+  // is the one object the runtime holds for it -- but only where the carrier
+  // agrees. Without `--dynamic-fallback` its type stays a host handle nothing
+  // registers, and claiming the name here would hide that refusal behind a
+  // `gea::Value` no cell of that carrier can hold.
+  const intrinsic = input.standardLibraryExternals?.has(declaration) ? input.coreDynamicIntrinsics?.get(linkageName) : undefined
+  if (intrinsic !== undefined && representation?.kind === 'dynamic') return { kind: 'host-constant', linkageName, emit: intrinsic }
   if (input.hostNamespaceBindings?.has(declaration)) return { kind: 'host-namespace', linkageName }
   if (input.exactHostNamespaceNames?.has(linkageName)) return null
   if (file !== undefined && input.hostNamespaceRootsByDeclaration?.get(file)?.has(linkageName)) {

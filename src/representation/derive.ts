@@ -34,7 +34,7 @@ import type {
   StandardBufferPolicy,
   StringObjectDeclarationPolicy,
   ErrorDeclarationPolicy,
-  FunctionDeclarationPolicy,
+  BoxedDeclarationPolicy,
   ClassHeritagePolicy,
   ClassCopyPolicy,
   InterfaceImplementorPolicy,
@@ -54,7 +54,7 @@ import {
   defaultStandardBufferPolicy,
   defaultStringObjectDeclarationPolicy,
   defaultErrorDeclarationPolicy,
-  defaultFunctionDeclarationPolicy,
+  defaultBoxedDeclarationPolicy,
   defaultClassHeritagePolicy,
   defaultInterfaceImplementorPolicy,
   defaultTypedArrayElementPolicy,
@@ -77,7 +77,7 @@ export type {
   StandardBufferPolicy,
   StringObjectDeclarationPolicy,
   ErrorDeclarationPolicy,
-  FunctionDeclarationPolicy,
+  BoxedDeclarationPolicy,
   ClassHeritagePolicy,
   ClassCopyPolicy,
   InterfaceImplementorPolicy,
@@ -97,7 +97,7 @@ export {
   defaultStandardBufferPolicy,
   defaultStringObjectDeclarationPolicy,
   defaultErrorDeclarationPolicy,
-  defaultFunctionDeclarationPolicy,
+  defaultBoxedDeclarationPolicy,
   defaultClassHeritagePolicy,
   defaultInterfaceImplementorPolicy,
   defaultTypedArrayElementPolicy,
@@ -295,7 +295,7 @@ export const createRepresentationDeriver = (
   generator: GeneratorDeclarationPolicy = defaultGeneratorDeclarationPolicy,
   regexp: RegExpDeclarationPolicy = defaultRegExpDeclarationPolicy,
   stringObject: StringObjectDeclarationPolicy = defaultStringObjectDeclarationPolicy,
-  functionType: FunctionDeclarationPolicy = defaultFunctionDeclarationPolicy,
+  boxed: BoxedDeclarationPolicy = defaultBoxedDeclarationPolicy,
   heritage: ClassHeritagePolicy = defaultClassHeritagePolicy,
   valueRecords: ValueRecordPolicy = defaultValueRecordPolicy,
   implementors: InterfaceImplementorPolicy = defaultInterfaceImplementorPolicy,
@@ -2461,9 +2461,12 @@ export const createRepresentationDeriver = (
         // nothing else, so there is no frame to choose, and the honest carrier
         // is the box. See `'untyped-callable'` (model.ts) for why that is a
         // genuine dynamic boundary rather than a lowering not yet written, and
-        // `FunctionDeclarationPolicy` (policies.ts) for why the body is not
+        // `BoxedDeclarationPolicy` (policies.ts) for why the body is not
         // sealed into a `name`/`length`/`prototype` struct instead.
-        if (functionType.forDeclaration(shape.declaration)) return { kind: 'dynamic', reason: 'untyped-callable' }
+        // `WeakRef`/`FinalizationRegistry` under `--dynamic-fallback` take the
+        // same place for the same first reason; see `BoxedDeclarationPolicy`.
+        const boxedReason = boxed.forDeclaration(shape.declaration)
+        if (boxedReason !== null) return { kind: 'dynamic', reason: boxedReason }
         // An interface the classes of this program declare themselves the
         // implementations of. Nothing constructs an interface, so a slot typed
         // by one holds one of those classes and nothing else -- see

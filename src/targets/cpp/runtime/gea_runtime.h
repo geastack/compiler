@@ -10504,12 +10504,29 @@ class DynamicObject {
       detail::traceRefs(property.descriptor.get, visitor);
       detail::traceRefs(property.descriptor.set, visitor);
     }
+    detail::traceRefs(value.internalSlots_, visitor);
   }
 
   struct Property {
     PropertyKey key;
     PropertyDescriptor descriptor;
   };
+
+  /**
+   * Which intrinsic constructor gave this object internal slots beyond
+   * `[[Prototype]]` and `[[Extensible]]` (ECMA-262 6.1.7.2). A method that
+   * requires a slot checks this brand, never the prototype chain, because a
+   * program can give any object `WeakRef.prototype` without it becoming one.
+   */
+  enum class InternalBrand : std::uint8_t { None, WeakRef, FinalizationRegistry };
+
+  InternalBrand internalBrand() const { return internalBrand_; }
+  const gea::Ref<void>& internalSlots() const { return internalSlots_; }
+  /** Installed once, by the intrinsic whose `[[Construct]]` allocated this object. */
+  void installInternalSlots(InternalBrand brand, gea::Ref<void> slots) {
+    internalBrand_ = brand;
+    internalSlots_ = std::move(slots);
+  }
 
   /** 10.1.2 -- the `[[Prototype]]` slot. Null for `Object.create(null)` and for the root of every chain this runtime builds. */
   const gea::Ref<DynamicObject>& prototype() const { return prototype_; }
@@ -10864,6 +10881,8 @@ class DynamicObject {
   bool extensible_ = true;
   bool nativeFieldsFrozen_ = false;
   bool nativeExpando_ = false;
+  InternalBrand internalBrand_ = InternalBrand::None;
+  gea::Ref<void> internalSlots_{};
 };
 
 /**
@@ -11849,6 +11868,173 @@ inline Value installOrdinaryConstructorPrototype(Value ctor) {
 }
 
 }  // namespace host
+
+/**
+ * The ECMAScript intrinsics a program reaches only as dynamic objects:
+ * `WeakRef` (ECMA-262 26.1) and `FinalizationRegistry` (26.2).
+ *
+ * Each constructor is an ordinary builtin function object with a real
+ * `prototype` holding its methods, so `ref.fn = fn`, `instanceof WeakRef` and
+ * `global.WeakRef || Fallback` behave as they do in any engine. An instance
+ * is the ordinary object `Value::construct` allocates, given its internal
+ * slots by the constructor body (`DynamicObject::installInternalSlots`).
+ *
+ * The target is held strongly and cleanup never runs. Both are the liveness
+ * answer 9.10.3 permits -- an implementation MAY treat a set of non-live
+ * objects as collectable and is never required to -- and they are consistent
+ * with each other: a target no WeakRef ever empties is a target no registry
+ * ever cleans up. What a program observes is exactly what it would observe
+ * under an engine that never collected; what differs is memory only.
+ */
+namespace intrinsics {
+namespace detail {
+
+struct FinalizationRegistryCells {
+  Value cleanup;
+  // Only a cell registered WITH a token is kept: its holdings are observable
+  // solely through cleanup, which never runs, while `unregister(token)`
+  // must still find it.
+  std::vector<Value> tokens;
+  friend void geaTraceRefs(const FinalizationRegistryCells& value, gea::detail::RefVisitor& visitor) {
+    gea::detail::traceRefs(value.cleanup, visitor);
+    for (const Value& token : value.tokens) gea::detail::traceRefs(token, visitor);
+  }
+};
+
+/** ECMA-262 9.13 CanBeHeldWeakly: an object, or a symbol `Symbol.for` did not register. */
+inline bool canBeHeldWeakly(const Value& value) {
+  if (value.tag() == Value::Tag::Object || value.tag() == Value::Tag::Function) return true;
+  return value.tag() == Value::Tag::Symbol && !symbolKeyFor(value.as<Symbol>()).has_value();
+}
+
+/** The spelling V8 gives an operand in these intrinsics' TypeErrors: a symbol by its description, any other primitive by ToString. */
+inline std::string operandText(const Value& value) {
+  if (value.tag() == Value::Tag::Symbol) return symbolToString(value.as<Symbol>());
+  if (value.tag() != Value::Tag::Object && value.tag() != Value::Tag::Function) return dynamicToString(value);
+  const Value constructor = value.getProperty(PropertyKey::string("constructor"));
+  const Value name = constructor.tag() == Value::Tag::Function ? constructor.getProperty(PropertyKey::string("name")) : Value();
+  return "#<" + (name.tag() == Value::Tag::String && !name.as<std::string>().empty() ? name.as<std::string>() : std::string("Object")) + ">";
+}
+
+/** The slots `brand` gave `receiver`, or the TypeError a method on the wrong receiver throws. */
+inline const gea::Ref<void>& slotsOf(const Value& receiver, DynamicObject::InternalBrand brand, std::string_view method) {
+  const gea::Ref<DynamicObject> object = receiver.asDynamicObject();
+  if (!object || object->internalBrand() != brand)
+    host::throwRuntimeError("TypeError", "Method " + std::string(method) + " called on incompatible receiver " + operandText(receiver));
+  return object->internalSlots();
+}
+
+inline void requireConstruction(const Value& receiver, std::string_view name) {
+  if (runtime::captureNewTarget(receiver).tag() == Value::Tag::Undefined)
+    host::throwRuntimeError("TypeError", "Constructor " + std::string(name) + " requires 'new'");
+}
+
+inline PropertyDescriptor dataDescriptor(Value value, bool writable, bool configurable) {
+  PropertyDescriptor descriptor;
+  descriptor.hasValue = descriptor.hasWritable = descriptor.hasEnumerable = descriptor.hasConfigurable = true;
+  descriptor.value = std::move(value);
+  descriptor.writable = writable;
+  descriptor.enumerable = false;
+  descriptor.configurable = configurable;
+  return descriptor;
+}
+
+/**
+ * ECMA-262 18 (the builtin property defaults) applied to one constructor:
+ * `prototype` is non-writable and non-configurable, the prototype's
+ * `constructor` and methods are writable and configurable, and
+ * `@@toStringTag` is configurable only. Every one is non-enumerable.
+ */
+inline Value builtinConstructor(Value constructor, std::string_view tag, std::initializer_list<std::pair<std::string_view, Value>> methods) {
+  Value prototype = Value::object();
+  const gea::Ref<DynamicObject> table = prototype.asDynamicObject();
+  table->defineOwnProperty(PropertyKey::string("constructor"), dataDescriptor(constructor, true, true));
+  for (const auto& [name, method] : methods) table->defineOwnProperty(PropertyKey::string(std::string(name)), dataDescriptor(method, true, true));
+  table->defineOwnProperty(
+      PropertyKey::symbol(wellKnownSymbol(gea::detail::WellKnownSymbol::ToStringTag)),
+      dataDescriptor(Value::box(Value::Tag::String, std::string(tag)), false, true));
+  constructor.functionProperties()->defineOwnProperty(PropertyKey::string("prototype"), dataDescriptor(prototype, false, false));
+  return runtime::markReadsNewTarget(constructor);
+}
+
+inline Value weakRefConstruct(void*, Value receiver, Value target) {
+  requireConstruction(receiver, "WeakRef");
+  if (!canBeHeldWeakly(target)) host::throwRuntimeError("TypeError", "WeakRef: invalid target");
+  receiver.asDynamicObject()->installInternalSlots(DynamicObject::InternalBrand::WeakRef, refCastToVoid(makeRef<Value>(std::move(target))));
+  return Value();
+}
+
+inline Value weakRefDeref(void*, Value receiver) {
+  return *refStaticCast<Value>(slotsOf(receiver, DynamicObject::InternalBrand::WeakRef, "WeakRef.prototype.deref"));
+}
+
+inline Value finalizationRegistryConstruct(void*, Value receiver, Value cleanup) {
+  requireConstruction(receiver, "FinalizationRegistry");
+  if (cleanup.tag() != Value::Tag::Function) host::throwRuntimeError("TypeError", "FinalizationRegistry: cleanup must be callable");
+  receiver.asDynamicObject()->installInternalSlots(
+      DynamicObject::InternalBrand::FinalizationRegistry,
+      refCastToVoid(makeRef<FinalizationRegistryCells>(FinalizationRegistryCells{std::move(cleanup), {}})));
+  return Value();
+}
+
+inline FinalizationRegistryCells& registryCellsOf(const Value& receiver, std::string_view method) {
+  return *refStaticCast<FinalizationRegistryCells>(slotsOf(receiver, DynamicObject::InternalBrand::FinalizationRegistry, method));
+}
+
+[[noreturn]] inline void refuseUnregisterToken(const Value& token) {
+  host::throwRuntimeError("TypeError", "Invalid unregisterToken ('" + operandText(token) + "')");
+}
+
+inline Value finalizationRegistryRegister(void*, Value receiver, Value target, Value heldValue, Value unregisterToken) {
+  FinalizationRegistryCells& cells = registryCellsOf(receiver, "FinalizationRegistry.prototype.register");
+  if (!canBeHeldWeakly(target)) host::throwRuntimeError("TypeError", "FinalizationRegistry.prototype.register: invalid target");
+  if (Value::sameValue(target, heldValue))
+    host::throwRuntimeError("TypeError", "FinalizationRegistry.prototype.register: target and holdings must not be same");
+  if (canBeHeldWeakly(unregisterToken)) cells.tokens.push_back(std::move(unregisterToken));
+  else if (unregisterToken.tag() != Value::Tag::Undefined) refuseUnregisterToken(unregisterToken);
+  return Value();
+}
+
+inline Value finalizationRegistryUnregister(void*, Value receiver, Value unregisterToken) {
+  FinalizationRegistryCells& cells = registryCellsOf(receiver, "FinalizationRegistry.prototype.unregister");
+  if (!canBeHeldWeakly(unregisterToken)) refuseUnregisterToken(unregisterToken);
+  const auto removed = std::remove_if(
+      cells.tokens.begin(), cells.tokens.end(), [&](const Value& token) { return Value::sameValue(token, unregisterToken); });
+  const bool any = removed != cells.tokens.end();
+  cells.tokens.erase(removed, cells.tokens.end());
+  return Value::box(Value::Tag::Boolean, any);
+}
+
+template <typename Signature, typename CallableObject<Signature>::Invoke Entry>
+inline Value builtinFunction(std::string_view name, std::size_t length, std::string_view text) {
+  return Value::boxMethod<-1>(CallableObject<Signature>{CallableObject<Signature>::template entryWithFacts<Entry>(name, length, text), nullptr});
+}
+
+}  // namespace detail
+
+inline const Value& weakRefConstructor() {
+  static const Value constructor = detail::builtinConstructor(
+      detail::builtinFunction<Value(Value, Value), &detail::weakRefConstruct>("WeakRef", 1, "function WeakRef() { [native code] }"),
+      "WeakRef",
+      {{"deref", detail::builtinFunction<Value(Value), &detail::weakRefDeref>("deref", 0, "function deref() { [native code] }")}});
+  return constructor;
+}
+
+inline const Value& finalizationRegistryConstructor() {
+  static const Value constructor = detail::builtinConstructor(
+      detail::builtinFunction<Value(Value, Value), &detail::finalizationRegistryConstruct>(
+          "FinalizationRegistry", 1, "function FinalizationRegistry() { [native code] }"),
+      "FinalizationRegistry",
+      {{"register",
+        detail::builtinFunction<Value(Value, Value, Value, Value), &detail::finalizationRegistryRegister>(
+            "register", 2, "function register() { [native code] }")},
+       {"unregister",
+        detail::builtinFunction<Value(Value, Value), &detail::finalizationRegistryUnregister>(
+            "unregister", 1, "function unregister() { [native code] }")}});
+  return constructor;
+}
+
+}  // namespace intrinsics
 
 namespace detail {
 

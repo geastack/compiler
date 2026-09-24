@@ -107,6 +107,27 @@ export const coreNativeTypes: ReadonlyMap<string, string> = new Map<string, stri
 ])
 
 /**
+ * The standard intrinsics this backend implements as BUILTIN FUNCTION OBJECTS
+ * over dynamic objects, to the C++ expression that is each one's single
+ * function object.
+ *
+ * `WeakRef` (ECMA-262 26.1) and `FinalizationRegistry` (26.2) have no fields
+ * and no layout -- an instance is an ordinary object with internal slots -- and
+ * the programs that use them treat the constructor as a value
+ * (`global.WeakRef || FakeWeakRef`) and the instance as an object
+ * (`ref.fn = fn`). The runtime's `gea::intrinsics` implements exactly that, so
+ * these are admitted only under `--dynamic-fallback`, where the box is a
+ * carrier the program opted into. The frontend resolves each name to its
+ * standard declarations (`dynamicIntrinsicDeclarationsOf`), the deriver carries
+ * them boxed (`BoxedDeclarationPolicy`), and `projection/bindings.ts` places
+ * the global read as the expression below.
+ */
+export const coreDynamicIntrinsics: ReadonlyMap<string, string> = new Map<string, string>([
+  ['WeakRef', 'gea::intrinsics::weakRefConstructor()'],
+  ['FinalizationRegistry', 'gea::intrinsics::finalizationRegistryConstructor()']
+])
+
+/**
  * The same names again, as the CLASS OBJECTS a program reaches by name.
  *
  * `new TextEncoder()` names two different things: the instance type, bound
