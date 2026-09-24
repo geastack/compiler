@@ -410,6 +410,7 @@ numeric-parameter-self-update.runtime.js.cpp dc24846abf14
 numeric-record-reads.js.cpp 3a1a43509eba
 object-create-contextual.ts.cpp a1ea4ea40b7f
 object-destructuring-assignment.ts.cpp c0f9e4a7ab05
+object-entries-subclass-through-helper.ts.cpp 326fa9e13f0e
 object-literal-es5-method-receiver.runtime.js.cpp 35067ec88af1
 object-literal-getter-capture.ts.cpp 962dd1d3202c
 object-pattern-numeric-key-over-array.ts.cpp 828ec7992347

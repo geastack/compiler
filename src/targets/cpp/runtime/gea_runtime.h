@@ -14786,6 +14786,11 @@ bool nativeHasUndeclaredOwnKeys(const gea::Ref<T>& object) {
   if constexpr (requires { T::gea_tracks_own_key_order; }) return true;
   if ((detail::refCountsOf(object.get())->weak & detail::expandoTagged) != 0) return true;
   if constexpr (requires { T::gea_has_index_sidecar; }) return true;
+  // A struct something derives from may be a subclass instance behind a
+  // base-class handle, whose own fields the base's declared list does not
+  // name. The struct's virtual dispatcher lists them; `final` says nothing
+  // can be.
+  if constexpr (std::is_class_v<T> && std::is_polymorphic_v<T> && !std::is_final_v<T>) return true;
   return false;
 }
 

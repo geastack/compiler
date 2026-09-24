@@ -77,3 +77,30 @@ test('flattening retains no-evidence vetoes and subtype overlap refusals', () =>
     }
   )
 })
+
+test('a subclass instance beside its base class is carried by the base arm', () => {
+  const classes = 'class A { a = 1 } class B extends A { b = 2 } class C extends B { c = 3 } '
+  withTypes(`${classes}const a = new A(); const b = new B(); const c = new C(); const z = { z: 9 };`, (checker, types) => {
+    assert.deepEqual(
+      disjointArmsOf(checker, types)?.map((type) => checker.typeToString(type)),
+      ['A', '{ z: number; }']
+    )
+  })
+  withTypes(`${classes}const b = new B(); const c = new C(); const z = { z: 9 };`, (checker, types) => {
+    assert.deepEqual(
+      disjointArmsOf(checker, types)?.map((type) => checker.typeToString(type)),
+      ['B', '{ z: number; }']
+    )
+  })
+  // Structural, not nominal: a class with its base's shape is not carried by it.
+  withTypes(
+    'class A { a = 1 } class Lookalike { a = 1; b = 2 } const a = new A(); const l = new Lookalike(); const z = { z: 9 };',
+    (checker, types) => {
+      assert.equal(disjointArmsOf(checker, types), null)
+    }
+  )
+  // The subclass must still be disjoint from every other arm.
+  withTypes(`${classes}const a = new A(); const b = new B(); const z = { b: 9 };`, (checker, types) => {
+    assert.equal(disjointArmsOf(checker, types), null)
+  })
+})
