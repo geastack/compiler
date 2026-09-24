@@ -223,6 +223,7 @@ guarded-property-class-union.ts.cpp 65553d3e4fa7
 harness-is-writable-shape.runtime.js.cpp 72e0aa13cf5c
 hoisted-function-declaration-dependencies.ts.cpp c825ef865026
 hoisted-function-declaration.ts.cpp 27eb208fa439
+hoisted-value-not-moved-in-loop.ts.cpp 2476672d5091
 host-method-alias.runtime.js.cpp 050cfab07ca3
 host-method-read-as-value.ts.cpp 1eb870019631
 hot-path-borrowed-tree.ts.cpp ce11f4ca7e3f

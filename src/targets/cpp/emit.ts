@@ -81,7 +81,7 @@ import type { IntegerStorageFacts } from '../../ir/integers.js'
 import { noInstantiationFacts, type InstantiationFacts } from '../../ir/instantiation.js'
 import { observesEveryCallableIdentity, type CallableIdentityDemand } from '../../ir/callable-identity-demand.js'
 import { stringConstantsOf } from '../../ir/dead-values.js'
-import type { HoistPlan } from '../../ir/hoist.js'
+import { loopInvariantHoistsOf, type HoistPlan } from '../../ir/hoist.js'
 import { bodyValueOriginsOf, irBodyCensusOf } from '../../ir/facts.js'
 import { emitGetIterator, emitIteratorClose, emitIteratorDone, emitIteratorNext, renderIteratorCloseRegion } from './emit-iterator.js'
 import { absenceComparisonText, booleanTestText, definedTestText, presenceTestText } from './emit-presence.js'
@@ -1953,7 +1953,9 @@ export const emitBody = (
     ? { layout: owningClass, derived: constructedBaseOf(owningClass) !== null || owningClass.nativeBase !== null, callsSuper }
     : null
   const formalInputs = ownedFormalInputsOf(body)
-  const ownedDyingValues = new Set<IrValueId>([...ownedDyingValuesOf(body), ...formalInputs.arguments])
+  // The same plan `irBodyCensusOf` settles below: a value it relocates above a
+  // loop is defined there, not beside its use, and cannot die at that use.
+  const ownedDyingValues = new Set<IrValueId>([...ownedDyingValuesOf(body, loopInvariantHoistsOf(body)), ...formalInputs.arguments])
   const origins = bodyValueOriginsOf(body)
   const hostClassReads = hostClassReadsOf(body, placements)
   const classObjectReads = classObjectReadsOf(body, placements)
