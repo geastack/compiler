@@ -685,6 +685,8 @@ export interface RecordLayoutPolicy {
   readonly classAccessorFor?: (declaration: DeclarationId, key: string) => Representation | null
   /** Whether no evaluation can instantiate this class (`semantics/uninstantiable-classes.ts`). */
   readonly classUninstantiable?: (declaration: DeclarationId) => boolean
+  /** Whether a record shape is a tuple type, which is an Array to the language and a positional record here. */
+  readonly tupleShape?: (shapeId: string) => boolean
 }
 
 export const defaultRecordLayoutPolicy: RecordLayoutPolicy = { forShape: () => null }

@@ -92,6 +92,7 @@ dynamic-union-ambiguous.ts	ok
 dynamic-union-nominal.ts	ok
 dynamic-union-optional.ts	ok
 empty-pattern-coercible-and-nullish-typeerror.runtime.js	ok
+entry-join-and-inspect.ts	ok
 every-path-returns.ts	ok
 evolving-array-member-arguments.runtime.js	ok
 evolving-array-push-union.runtime.js	ok

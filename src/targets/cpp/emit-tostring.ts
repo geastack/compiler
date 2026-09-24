@@ -3,11 +3,11 @@ import { isNativeError } from './error-types.js'
 import { operandText, type EmitContext } from './emit-context.js'
 import type { ComputeOperation, IrOperand } from '../../ir/model.js'
 import type { DeclarationId } from '../../identity/ids.js'
-import type { ClassLayout } from '../../projection/classes.js'
+import { constructedBaseOf, type ClassLayout } from '../../projection/classes.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
-import { recordLayoutPolicyOf } from '../../projection/fields.js'
+import { recordFieldsOfShape, recordLayoutPolicyOf } from '../../projection/fields.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
-import { cppBodyName, cppConstantLiteral, cppRecordFieldName } from './types.js'
+import { cppBodyName, cppConstantLiteral, cppRecordFieldKeyIsSymbol, cppRecordFieldName, cppStringLiteral, cppTypeOf } from './types.js'
 import { memberAccessOperator } from './emit-carrier-members.js'
 import { cppDateType, isDateCarrier } from './prototype/emit-prototype-date.js'
 
@@ -304,6 +304,7 @@ export const toStringTextOver = (
   //
   // hono reaches this constantly: `${c.req.raw}` and `console.error(err)` over
   // an interface-typed value are both a ToString of a record.
+  if (carrier.kind === 'record' && (layouts.tupleShape?.(carrier.shapeId) ?? false)) return tupleToStringText(text, carrier, layouts)
   if (carrier.kind === 'record' || carrier.kind === 'record-with-index') {
     return carrier.fields.some((field) => field.key === 'toString')
       ? ownToStringCallText(text, carrier.fields, carrier.ownership, layouts, explicit)
@@ -343,6 +344,40 @@ export const toStringTextOver = (
 }
 
 /**
+ * A tuple is an Array, carried as a positional record (there is no tuple
+ * carrier), and ECMA-262 23.1.3.36 gives an Array the ToString of
+ * `join(",")`: each position through 23.1.3.18's ToString, a nullish one as
+ * the empty string. Answering the ordinary object's "[object Object]" tag
+ * made `Object.entries(o).join(';')` print that tag for every entry.
+ *
+ * An optional position refuses: whether it is present decides the tuple's
+ * length, and with it whether a trailing separator is written.
+ */
+const tupleToStringText = (
+  text: string,
+  carrier: Extract<Representation, { kind: 'record' }>,
+  layouts: RecordLayoutPolicy
+): string | null => {
+  if (carrier.fields.some((field, position) => field.key !== String(position) || !field.required)) return null
+  if (carrier.fields.length === 0) return cppConstantLiteral('', 'string', { kind: 'string' })
+  const tuple = '__gea_tuple'
+  const pieces: string[] = []
+  for (const field of carrier.fields) {
+    const piece = toStringTextOver(
+      `${tuple}${memberAccessOperator(carrier.ownership)}${cppRecordFieldName(field.key)}`,
+      field.value,
+      layouts,
+      false,
+      true
+    )
+    if (piece === null) return null
+    if (pieces.length > 0) pieces.push(cppConstantLiteral(',', 'string', { kind: 'string' }))
+    pieces.push(piece)
+  }
+  return `([&](const ${cppTypeOf(carrier)}& ${tuple}) -> std::string { return gea::concatStrings({${pieces.join(', ')}}); }(${text}))`
+}
+
+/**
  * ToString over a list of operands, folded with `separator` inserted between
  * every pair -- the one machine behind two different joins: a template
  * literal's own adjacency (`separator: null`, `templateText` below) and
@@ -367,11 +402,12 @@ export const toStringTextOver = (
 const joinedToStringText = (
   ctx: EmitContext,
   operands: readonly IrOperand[],
-  separator: string | null
+  separator: string | null,
+  rendered: (operand: IrOperand) => string | null = () => null
 ): { text: string } | { refused: Representation } => {
   const pieces: string[] = []
   for (const operand of operands) {
-    const converted = toStringText(operandText(ctx, operand), operand.representation, ctx.classes, ctx.deriver)
+    const converted = rendered(operand) ?? toStringText(operandText(ctx, operand), operand.representation, ctx.classes, ctx.deriver)
     if (converted === null) return { refused: operand.representation }
     pieces.push(converted)
   }
@@ -490,7 +526,66 @@ export const consoleArgumentsText = (ctx: EmitContext, operands: readonly IrOper
   for (const operand of operands) {
     if (carrierWithADate(operand.representation) !== null) return { refused: operand.representation }
   }
-  return joinedToStringText(ctx, operands, 'std::string(" ")')
+  return joinedToStringText(ctx, operands, 'std::string(" ")', (operand) => inspectedClassInstanceText(ctx, operand))
+}
+
+/**
+ * `util.inspect` of a class instance, the way node's `console.log` prints
+ * one: `Logged { logged: 12 }` where ToString answers "[object Object]".
+ *
+ * Only where the answer is certain. The class must be one nothing derives
+ * from, since the name printed is the instance's own constructor's and a
+ * base-class handle may hold a subclass; its name must not be shadowed by a
+ * static member; and every field must be a primitive, whose inspection needs
+ * no depth, cycle or nesting rule. Every other operand keeps its ToString.
+ *
+ * The keys are the runtime's own-enumerable list (`gea::nativeDynamicKeys`,
+ * which `Object.keys` answers from), so a deleted or absent field is left out
+ * and an expando is printed; a declared field is inspected from its native
+ * carrier, anything else from its box.
+ */
+const inspectedClassInstanceText = (ctx: EmitContext, operand: IrOperand): string | null => {
+  const carrier = operand.representation
+  if (carrier.kind !== 'class-ref') return null
+  const layout = ctx.classes.get(carrier.declaration)
+  if (layout === undefined || layout.name === null || layout.nativeBase !== null) return null
+  const statics = [...layout.staticFields, ...layout.staticMethods, ...layout.staticAccessors]
+  if (statics.some((member) => member.key === 'name')) return null
+  for (const other of ctx.classes.values()) {
+    if (other.base === carrier.declaration || constructedBaseOf(other) === carrier.declaration) return null
+  }
+  const fields = recordFieldsOfShape(ctx.deriver, carrier.shapeId)
+  if (fields === null) return null
+  const object = '__gea_object'
+  const declared: string[] = []
+  for (const field of fields) {
+    if (cppRecordFieldKeyIsSymbol(field.key)) return null
+    const value = inspectedPrimitiveText(`${object}${memberAccessOperator(carrier.ownership)}${cppRecordFieldName(field.key)}`, field.value)
+    if (value === null) return null
+    declared.push(`if (__gea_key == ${cppStringLiteral(field.key)}) { __gea_out = ${value}; return true; }`)
+  }
+  return (
+    `gea::inspect::object(${operandText(ctx, operand)}, ${cppStringLiteral(layout.name)}, ` +
+    `[&](const auto& ${object}, const std::string& __gea_key, std::string& __gea_out) -> bool { ${declared.join(' ')} return false; })`
+  )
+}
+
+/** `util.inspect` of a primitive carrier, or `null` for any other. */
+const inspectedPrimitiveText = (text: string, carrier: Representation): string | null => {
+  if (carrier.kind === 'string') return `gea::inspect::string(${text})`
+  if (carrier.kind === 'null') return 'std::string("null")'
+  if (carrier.kind === 'undefined') return 'std::string("undefined")'
+  if (carrier.kind === 'scalar') {
+    if (carrier.domain === 'boolean') return `std::string((${text}) ? "true" : "false")`
+    if (carrier.domain === 'bigint') return null
+    return `gea::inspect::number(static_cast<double>(${text}))`
+  }
+  if (carrier.kind === 'optional') {
+    const present = inspectedPrimitiveText(`(*${text})`, carrier.payload)
+    if (present === null) return null
+    return `(${text}.has_value() ? ${present} : std::string("${carrier.absence}"))`
+  }
+  return null
 }
 
 /** The Date inside a carrier -- itself, an optional's payload, or a union arm -- or `null`. */

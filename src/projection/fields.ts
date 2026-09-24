@@ -62,6 +62,7 @@ export const recordLayoutPolicyOf = (
         ? fieldsOf(shapeId)
         : null,
     classUninstantiable: (declaration) => classes.get(declaration)?.uninstantiable === true,
+    tupleShape: (shapeId) => deriver.isTupleShape(shapeId as StructuralTypeId),
     classMethodFor: (declaration, key) => {
       const member = classMemberOf(classes, declaration, key)
       return member?.kind === 'method' && member.method.callable !== null

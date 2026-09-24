@@ -29681,6 +29681,175 @@ inline std::string runtimeErrorString(const gea::Value& value) {
 }
 }
 
+/**
+ * node's `util.inspect`, for the values `console.log` prints by inspecting
+ * rather than by ToString (`emit-tostring.ts`'s `inspectedClassInstanceText`).
+ *
+ * Only the default options, at the top level, over an object whose own values
+ * are primitives: node's `lib/internal/util/inspect.js` with `depth` 2,
+ * `compact` 3, `breakLength` 80 and no colors. The emitter admits nothing
+ * that needs its nesting, cycle or grouping rules.
+ */
+namespace gea::inspect {
+
+/** A JavaScript string's `length`, which node measures lines in, from its UTF-8 bytes. */
+inline std::size_t utf16Length(std::string_view text) {
+  std::size_t length = 0;
+  for (const unsigned char byte : text) {
+    if ((byte & 0xC0) != 0x80) ++length;
+    if ((byte & 0xF8) == 0xF0) ++length;
+  }
+  return length;
+}
+
+/** `strEscape`: the quote no character of the string needs escaped, and the `meta` escapes. */
+inline std::string quoted(std::string_view text) {
+  char quote = '\'';
+  if (text.find('\'') != std::string_view::npos) {
+    if (text.find('"') == std::string_view::npos) quote = '"';
+    else if (text.find('`') == std::string_view::npos && text.find("${") == std::string_view::npos) quote = '`';
+  }
+  static constexpr char hex[] = "0123456789ABCDEF";
+  std::string out;
+  out.reserve(text.size() + 2);
+  out += quote;
+  for (std::size_t index = 0; index < text.size(); ++index) {
+    const unsigned char byte = static_cast<unsigned char>(text[index]);
+    // U+0080..U+009F, two UTF-8 bytes, escape as \x80..\x9F like the C0 controls.
+    const bool c1 = byte == 0xC2 && index + 1 < text.size() && static_cast<unsigned char>(text[index + 1]) <= 0x9F &&
+        static_cast<unsigned char>(text[index + 1]) >= 0x80;
+    const unsigned code = c1 ? static_cast<unsigned char>(text[index + 1]) : byte;
+    if (c1) ++index;
+    if (quote == '\'' && code == '\'') out += "\\'";
+    else if (code == '\\') out += "\\\\";
+    else if (code == '\b') out += "\\b";
+    else if (code == '\t') out += "\\t";
+    else if (code == '\n') out += "\\n";
+    else if (code == '\f') out += "\\f";
+    else if (code == '\r') out += "\\r";
+    else if (code < 0x20 || code == 0x7F || c1) {
+      out += "\\x";
+      out += hex[code >> 4];
+      out += hex[code & 0xF];
+    } else out += static_cast<char>(byte);
+  }
+  out += quote;
+  return out;
+}
+
+/** `formatPrimitive` of a string that is an object's property value (indentation 2). */
+inline std::string string(std::string_view text) {
+  static constexpr std::size_t maxLength = 10000;
+  std::string_view shown = text;
+  std::string trailer;
+  const std::size_t length = utf16Length(text);
+  if (length > maxLength) {
+    std::size_t units = 0;
+    std::size_t cut = 0;
+    while (cut < text.size() && units < maxLength) {
+      const unsigned char byte = static_cast<unsigned char>(text[cut]);
+      units += (byte & 0xF8) == 0xF0 ? 2 : 1;
+      ++cut;
+      while (cut < text.size() && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) ++cut;
+    }
+    shown = text.substr(0, cut);
+    const std::size_t remaining = length - units;
+    trailer = "... " + std::to_string(remaining) + " more character" + (remaining > 1 ? "s" : "");
+  }
+  const std::size_t shownLength = utf16Length(shown);
+  // A long string is split after each line break, one quoted piece per line.
+  if (shownLength > 16 && shownLength > 80 - 2 - 4 && shown.find('\n') != std::string_view::npos) {
+    std::string out;
+    std::size_t begin = 0;
+    while (begin < shown.size()) {
+      const std::size_t newline = shown.find('\n', begin);
+      const std::size_t end = newline == std::string_view::npos ? shown.size() : newline + 1;
+      if (!out.empty()) out += " +\n    ";
+      out += gea::inspect::quoted(shown.substr(begin, end - begin));
+      begin = end;
+    }
+    return out + trailer;
+  }
+  return gea::inspect::quoted(shown) + trailer;
+}
+
+/** `formatNumber`: the Number's ToString, except that -0 keeps its sign. */
+inline std::string number(double value) {
+  if (value == 0 && std::signbit(value)) return "-0";
+  return gea::host::detail::toString(value);
+}
+
+/** A property key: bare where it is an identifier node would not quote, otherwise quoted. */
+inline std::string key(const std::string& text) {
+  bool bare = !text.empty() && !(text[0] >= '0' && text[0] <= '9');
+  for (const char character : text) {
+    const bool word = (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+        (character >= '0' && character <= '9') || character == '_';
+    if (!word) bare = false;
+  }
+  return bare ? text : gea::inspect::quoted(text);
+}
+
+/** A boxed own value no declared field names: a primitive by its tag, anything else by the ToString it had before. */
+inline std::string value(const gea::Value& boxed) {
+  switch (boxed.tag()) {
+    case gea::Value::Tag::Undefined:
+      return "undefined";
+    case gea::Value::Tag::Null:
+      return "null";
+    case gea::Value::Tag::Boolean:
+      return boxed.as<bool>() ? "true" : "false";
+    case gea::Value::Tag::Number:
+      return gea::inspect::number(boxed.as<double>());
+    case gea::Value::Tag::String:
+      return gea::inspect::string(boxed.as<std::string>());
+    case gea::Value::Tag::BigInt:
+      return boxed.as<gea::BigInt>().toString() + "n";
+    default:
+      return gea::host::detail::toString(boxed);
+  }
+}
+
+/** `reduceToSingleString` at the top level: one line when it fits in 80 columns, else one entry per line. */
+inline std::string braces(const std::string& prefix, const std::vector<std::string>& output) {
+  const std::string open = prefix.empty() ? std::string("{") : prefix + " {";
+  if (output.empty()) return open + "}";
+  const std::size_t start = output.size() + utf16Length(open) + 10;
+  std::size_t total = output.size() + start;
+  bool fits = total + output.size() <= 80;
+  for (const std::string& entry : output) {
+    if (!fits) break;
+    total += utf16Length(entry);
+    if (total > 80 || entry.find('\n') != std::string::npos) fits = false;
+  }
+  std::string out = open;
+  for (std::size_t index = 0; index < output.size(); ++index) {
+    out += fits ? (index == 0 ? " " : ", ") : (index == 0 ? "\n  " : ",\n  ");
+    out += output[index];
+  }
+  out += fits ? " }" : "\n}";
+  return out;
+}
+
+/**
+ * A generated object's own enumerable string keys, in the order `Object.keys`
+ * lists them, each as `key: value`. `declared` inspects a declared field from
+ * its native carrier and answers whether the key was one.
+ */
+template <typename T, typename Declared>
+std::string object(const gea::Ref<T>& target, const std::string& prefix, const Declared& declared) {
+  if (!target) return "null";
+  std::vector<std::string> output;
+  for (const std::string& name : gea::nativeDynamicKeys(target)) {
+    std::string shown;
+    if (!declared(target, name, shown)) shown = gea::inspect::value(gea::nativeDynamicGet(target, gea::PropertyKey::string(name)));
+    output.push_back(gea::inspect::key(name) + ": " + shown);
+  }
+  return gea::inspect::braces(prefix, output);
+}
+
+}  // namespace gea::inspect
+
 #include "gea_dynamic_proxy.h"
 
 #endif  // GEA_RUNTIME_H
