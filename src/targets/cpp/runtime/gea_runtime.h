@@ -21234,6 +21234,50 @@ E reduceRight(const gea::Ref<ArrayObject<E>>& array, const Callable& fn) {
 }
 
 /**
+ * `reduce(callbackfn)` whose accumulator is not the element's carrier -- an
+ * unannotated `(a, b) => a + b` over a `number[]` accumulates a `gea::Value`.
+ * Step 6's seed is the first present element, entered into the accumulator
+ * through `seed`, the conversion the emitter renders; every rule of the
+ * element-typed overload above holds unchanged.
+ */
+template <typename E, typename Callable, typename Seed>
+auto reduceSeeded(const gea::Ref<ArrayObject<E>>& array, const Callable& fn, const Seed& seed) {
+  using A = std::decay_t<decltype(seed(std::declval<const E&>()))>;
+  std::size_t index = 0;
+  const std::size_t size = array ? array->size() : 0;
+  while (index < size && !array->present(index)) ++index;
+  if (index >= size) {
+    std::fprintf(stderr, "gea: Array.prototype.reduce of an empty array with no initial value is a TypeError (ECMA-262 23.1.3.24 step 6.c)\n");
+    gea::detail::abortAfterFlush();
+  }
+  A accumulator = seed(array->at(index));
+  for (++index; index < size; ++index) {
+    if (!array->present(index)) continue;
+    accumulator = reduceCall(fn, accumulator, array->at(index), static_cast<double>(index), array);
+  }
+  return accumulator;
+}
+
+/** `reduceRight(callbackfn)` over a seed conversion -- `reduceSeeded` walked from the end. */
+template <typename E, typename Callable, typename Seed>
+auto reduceRightSeeded(const gea::Ref<ArrayObject<E>>& array, const Callable& fn, const Seed& seed) {
+  using A = std::decay_t<decltype(seed(std::declval<const E&>()))>;
+  std::size_t step = array ? array->size() : 0;
+  while (step > 0 && !array->present(step - 1)) --step;
+  if (step == 0) {
+    std::fprintf(stderr, "gea: Array.prototype.reduceRight of an empty array with no initial value is a TypeError (ECMA-262 23.1.3.25 step 6.c)\n");
+    gea::detail::abortAfterFlush();
+  }
+  A accumulator = seed(array->at(step - 1));
+  for (--step; step > 0; --step) {
+    const std::size_t index = step - 1;
+    if (!array->present(index)) continue;
+    accumulator = reduceCall(fn, accumulator, array->at(index), static_cast<double>(index), array);
+  }
+  return accumulator;
+}
+
+/**
  * IsStrictlyEqual (ECMA-262 7.2.15) and SameValueZero (7.2.11) over one
  * element carrier -- the two comparisons `indexOf` and `includes` respectively
  * use, and the whole of what separates them: NaN is not strictly equal to

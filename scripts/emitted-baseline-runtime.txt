@@ -13,6 +13,7 @@ array-pattern-defaults-keep-positions.ts.cpp 9b003f6f7de9
 array-pattern-elision-over-generator.ts.cpp fb66b4eed4c6
 array-pattern-over-generator.ts.cpp 3d9b68a0208e
 array-pattern-over-regexp-exec.ts.cpp 6f6b129a1e6c
+array-reduce-accumulator-carrier.ts.cpp 1b6929059b9b
 array-rest-target-reassigned-dynamic.runtime.js.cpp b8383e82ff79
 asserted-arm-into-interface-slot.ts.cpp ab0d11a21074
 assign-for-in-generic.ts.cpp 00fa51c20b53
@@ -470,7 +471,7 @@ recursive-alias-through-generic-copy.ts.cpp d873c5b1caee
 recursive-callable-alias.ts.cpp b4790f8e56d1
 recursive-derived-parameter-access.runtime.js.cpp 70a7a4f027fe
 recursive-jsdoc-typedef.runtime.js.cpp 10afd030a337
-recursive-union-alias.ts.cpp 43d3e2295c99
+recursive-union-alias.ts.cpp f4753b1869f6
 ref-virtual-base-address.ts.cpp ab724d570479
 reflect-native-boundary.ts.cpp 22950f295e6b
 reflect-native-operations.ts.cpp c6d6efe0dee1

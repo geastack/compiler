@@ -32,6 +32,7 @@ import { nativeClassConstructionOf } from './native-class-construction.js'
 import { nativeHostConstructionOf } from './native-host-construction.js'
 import { closePhysicalClassReflection } from './physical-class-reflection.js'
 import { absentClassArmRead } from './absent-class-arm.js'
+import { arrayCallbackBoxedInputs, arrayCallbackCalleesOf } from './array-callback-inputs.js'
 import { nativeAbsentPropertyReadOf } from './native-absent-property.js'
 
 /** Complete retention choices for a generated native object's protocol. */
@@ -1152,6 +1153,7 @@ export const reflectionExposureOf = (
     }
   }
   const constants = constantsOf(operations)
+  const arrayCallbackCallees = arrayCallbackCalleesOf(operations, constants)
   const typedReturnValues = new Set<string>()
   for (const body of bodies) {
     // The body publishes its exact native ABI result. How callers expose it
@@ -1380,6 +1382,7 @@ export const reflectionExposureOf = (
           continue
         }
       }
+      for (const boxed of arrayCallbackBoxedInputs(operation, arrayCallbackCallees)) promoteFull(boxed, 'array-callback-boxed-input')
       if (operation.fixedDataDefinition !== undefined) {
         if (operation.fixedDataDefinition.nativeFieldProtocol === 'unused') continue
         // The recipe explicitly records missing authentication or a conversion
