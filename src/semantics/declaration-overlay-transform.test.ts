@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { resolve } from 'node:path'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import ts from 'typescript'
 import { compile } from '../compiler.js'
@@ -682,4 +684,34 @@ console.log( Pipeline( 4 ).channels.color.setClear( 1, 2, 3, 0.5, true ) );
   })
   assert.ok(result.certificate && result.source, JSON.stringify(result.diagnostics.diagnostics))
   assert.doesNotMatch(result.source, /gea_body_[^(\n]*\([^\n)]*gea::Value/)
+})
+
+// With no declaration file named, the overlay finds the package's `@types`
+// mirror from the source's own path -- three's sources are found this way. On
+// Windows that path is spelled with backslashes, and a lookup that only knew
+// `/node_modules/` found nothing there, so no overlay applied at all.
+test('the @types mirror of a package source is found from either path spelling', () => {
+  const root = mkdtempSync(join(tmpdir(), 'geatsc-declaration-path-'))
+  try {
+    const text = 'export function area(width, height) { return width * height; }\n'
+    const declaration = 'export declare function area(width: number, height: number): number;\n'
+    const place = (path: string, contents: string): void => {
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, contents)
+    }
+    for (const [source, types] of [
+      ['shapes/src/area.js', '@types/shapes/src/area.d.ts'],
+      ['@figures/shapes/src/area.js', '@types/figures__shapes/src/area.d.ts']
+    ] as const) {
+      const js = join(root, 'node_modules', source)
+      place(js, text)
+      place(join(root, 'node_modules', types), declaration)
+      const forward = js.replaceAll('\\', '/')
+      const overlaid = declarationOverlayTransform({ fileName: forward, text })
+      assert.ok(overlaid?.includes('@param {number} width'), `${source}: the mirror's parameter types apply`)
+      assert.equal(declarationOverlayTransform({ fileName: forward.replaceAll('/', '\\'), text }), overlaid, source)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })

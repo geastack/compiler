@@ -352,7 +352,11 @@ const modulesReachableFrom = (start: string): ReadonlySet<string> => {
 }
 
 /** The declaration file mirroring this source file, or `null`. */
-const declarationPathFor = (fileName: string): string | null => {
+const declarationPathFor = (givenFileName: string): string | null => {
+  // Read with forward slashes, as TypeScript reads every path: a Windows
+  // spelling of the same file otherwise has no `/node_modules/` in it, and
+  // three's sources silently lost every `@types/three` overlay there.
+  const fileName = givenFileName.replaceAll('\\', '/')
   const marker = '/node_modules/'
   const at = fileName.lastIndexOf(marker)
   if (at < 0) return null
