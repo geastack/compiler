@@ -39,6 +39,7 @@ import { prototypeInstallSourceTransform } from './semantics/prototype-install-s
 import { prototypeObjectClassSourceTransform } from './semantics/prototype-object-class-source-transform.js'
 import { jsdocNamepathTransform } from './semantics/jsdoc-namepath-transform.js'
 import { thisConstructorSourceTransform } from './semantics/this-constructor-source-transform.js'
+import { undefinedDefaultParameterTransform } from './semantics/undefined-default-parameter-transform.js'
 import { symbolKeyedExpandoSourceTransform } from './semantics/symbol-keyed-expando-source-transform.js'
 import { newCalleeClassTagSourceTransform } from './semantics/new-callee-class-tag-source-transform.js'
 import { borrowedBuiltinCallBindSourceTransform } from './semantics/borrowed-builtin-call-bind-source-transform.js'
@@ -378,6 +379,10 @@ export const sourceTransformsFor = (
   // says -- a parameter already annotated, or already carrying a `@param`, is
   // left exactly as written -- so it speaks only where the program was silent.
   declarationOverlayTransform,
+  // After the overlay, so a type a package's own declarations state for a
+  // parameter wins: this only restates an `= undefined` default as the
+  // untyped parameter it is where nothing else spoke. See the transform.
+  undefinedDefaultParameterTransform,
   // The subclass overlay runs on the overlay's output and before the ambient
   // realization, so a member it declares is respelled too.
   createSubclassMemberOverlayTransform(declarerReaderFor(plugins)),
