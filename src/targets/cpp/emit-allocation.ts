@@ -1,3 +1,5 @@
+import { tracksOwnKeyOrder } from '../../ir/own-key-order.js'
+import { recordFieldsOfShape } from '../../projection/fields.js'
 import { boxedValueText } from './emit-dynamic-properties.js'
 import type {
   AllocateRecordOperation,
@@ -82,7 +84,7 @@ const emitFieldInits = (
     // `cppRecordFieldName`, so the initializer has to reach it the same way.
     lines.push(`${receiverName}${accessor}${cppRecordFieldName(field.key)} = ${valueText};`)
     const declared = declaredRecordFieldOf(ctx.deriver, representation, field.key, ctx.classes)
-    if (declared && !declared.required) {
+    if (declared && (!declared.required || tracksOwnKeyOrder(ctx.ownKeyOrder, representation))) {
       lines.push(`${receiverName}${accessor}${cppRecordFieldPresenceName(field.key)} = true;`)
     }
   }
@@ -243,6 +245,10 @@ export const emitAllocateRecord = (ctx: EmitContext, lines: string[], operation:
           'frame owns; there is nothing for an allocation to borrow from'
       )
   }
+  // A tracked literal starts holding none of its keys; the initializers and
+  // the definitions after this allocation create them in written order.
+  if (tracksOwnKeyOrder(ctx.ownKeyOrder, representation) && (recordFieldsOfShape(ctx.deriver, representation.shapeId) ?? []).length > 0)
+    lines.push(`${name}${memberAccessOperator(representation.ownership)}gea_beginOwnKeys();`)
   emitFieldInits(ctx, lines, name, representation, representation.ownership, operation.fields)
   emitAccessorEnvironments(ctx, lines, name, representation, representation.ownership)
 }

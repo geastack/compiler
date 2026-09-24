@@ -1,3 +1,4 @@
+import { tracksOwnKeyOrder } from '../../ir/own-key-order.js'
 import type { Ownership, RecordAccessor, Representation } from '../../representation/model.js'
 import { dictionaryKeyDomainOf, ownershipOf, representationKey } from '../../representation/model.js'
 import { carrierDifference, shortCarrierText } from '../../representation/difference.js'
@@ -1770,8 +1771,13 @@ const emitFieldStoreLines = (
     }
     // A required field the program can never delete is present for the
     // object's whole life (`ctx.fixedFieldStateConstant`), so there is no bit
-    // to re-set -- `records.ts` declared it `static` on the same fact.
-    if (field && !(field.required && ctx.fixedFieldStateConstant))
+    // to re-set -- `records.ts` declared it `static` on the same fact. A
+    // struct that tracks its key order holds a key only once a store creates
+    // it, and setting the bit is what stamps that creation.
+    if (
+      field &&
+      (tracksOwnKeyOrder(ctx.ownKeyOrder, operation.receiver.representation) || !(field.required && ctx.fixedFieldStateConstant))
+    )
       stores.push(`${receiverText}${accessor}${cppRecordFieldPresenceName(fieldName)} = true;`)
     const fieldWritable = `${receiverText}${accessor}${cppRecordFieldAttributesName(fieldName)}.writable`
     const present = field === undefined ? 'true' : `${receiverText}${accessor}${cppRecordFieldPresenceName(fieldName)}`

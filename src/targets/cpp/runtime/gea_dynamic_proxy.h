@@ -428,6 +428,11 @@ inline std::vector<PropertyKey> Value::ownPropertyKeys() const {
     keys.push_back(PropertyKey::string("length"));
     return keys;
   }
+  if (metadata_->fields && metadata_->fields->ownKeyOrders != nullptr) {
+    std::vector<std::pair<std::uint64_t, PropertyKey>> ordered;
+    metadata_->fields->ownKeyOrders(held_.get(), ordered);
+    return detail::orderedOwnPropertyKeys(std::move(ordered), detail::expandoFor(expandoAnchor(), false).get());
+  }
   if (metadata_->fields) metadata_->fields->ownKeys(held_.get(), keys);
   if (metadata_->elements) {
     for (std::size_t i = 0; i < metadata_->elements->length(held_.get()); ++i) {

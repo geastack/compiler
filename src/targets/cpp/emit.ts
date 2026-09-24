@@ -1,3 +1,4 @@
+import { noOwnKeyOrderTracking, type OwnKeyOrderTracking } from '../../ir/own-key-order.js'
 import { objectTagExpression, objectTagCapability } from './emit-object-tag.js'
 import type { NativeSelectionHelper } from './native-selection-helpers.js'
 import { stableBorrowActualsOf } from '../../ir/borrowed-call-arguments.js'
@@ -1914,7 +1915,8 @@ export const emitBody = (
   nativeSelections: ReadonlyMap<string, NativeSelectionHelper> | undefined = undefined,
   callableIdentityDemand: CallableIdentityDemand = observesEveryCallableIdentity,
   nativeIntegrityRestricted = true,
-  fixedFieldStateConstant = false
+  fixedFieldStateConstant = false,
+  ownKeyOrder: OwnKeyOrderTracking = noOwnKeyOrderTracking
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -2032,7 +2034,8 @@ export const emitBody = (
     nativeSelections,
     callableIdentityDemand,
     nativeIntegrityRestricted,
-    fixedFieldStateConstant
+    fixedFieldStateConstant,
+    ownKeyOrder
   )
   // `ownedValues` stays a genuine render-time OUTPUT buffer (`EmitContext`'s
   // own doc: `defineValue` grows it as each operation's result is named) --

@@ -1,3 +1,4 @@
+import { tracksOwnKeyOrder } from '../../../ir/own-key-order.js'
 import type { CallableAbi, Ownership, RecordField, Representation } from '../../../representation/model.js'
 import { passingOf, representationKey } from '../../../representation/model.js'
 import { hostMemberTemplateOf } from '../../../representation/host-templates.js'
@@ -2490,16 +2491,20 @@ const fixedFieldDefinePropertyText = (
   // Same class of defect this whole refactor is about: a second authority
   // answering a question one already owned.
   const presenceText = `${target}${view.accessor}${cppRecordFieldPresenceName(field.key)}`
-  const existing = !field.required
-    ? presenceText
-    : (() => {
-        if (ctx.recordFieldSources.get(targetOperand.value)?.has(field.key) === true) return 'true'
-        if (view.representation.kind !== 'class-ref') return 'true'
-        const site = classMemberOf(ctx.classes, view.representation.declaration, field.key)
-        if (site?.kind !== 'field') return 'true'
-        const projected = ctx.classes.get(site.owner)?.fields.find((candidate) => candidate.key === field.key)
-        return projected === undefined || projected.initializer !== null ? 'true' : 'false'
-      })()
+  // A struct that tracks its key order holds a field only once something
+  // creates it, so its bit answers existence for a required field too.
+  const tracked = tracksOwnKeyOrder(ctx.ownKeyOrder, view.representation)
+  const existing =
+    !field.required || tracked
+      ? presenceText
+      : (() => {
+          if (ctx.recordFieldSources.get(targetOperand.value)?.has(field.key) === true) return 'true'
+          if (view.representation.kind !== 'class-ref') return 'true'
+          const site = classMemberOf(ctx.classes, view.representation.declaration, field.key)
+          if (site?.kind !== 'field') return 'true'
+          const projected = ctx.classes.get(site.owner)?.fields.find((candidate) => candidate.key === field.key)
+          return projected === undefined || projected.initializer !== null ? 'true' : 'false'
+        })()
   // `convertedValueText` is allowed to spell an authorized implicit widening
   // as the source text (bare T -> Optional<T>). Materialize the selected field
   // carrier before template deduction: the runtime helper deliberately takes
@@ -2509,7 +2514,7 @@ const fixedFieldDefinePropertyText = (
   // A define that CREATES an optional field has to publish the property, or
   // the value lands in the payload while every other reader -- `in`, `delete`,
   // `Object.keys`, the descriptor read -- still sees an absent property.
-  const publish = field.required ? '' : ` ${presenceText} = true;`
+  const publish = field.required && !tracked ? '' : ` ${presenceText} = true;`
   // `applyNativeFixedDataDescriptor` reads the CURRENT value through
   // `fieldText` when the field is present, non-configurable and
   // non-writable (a SameValue check against the incoming value) -- an

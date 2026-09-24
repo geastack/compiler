@@ -434,6 +434,12 @@ export interface ClassLifecycleOperation extends SemanticOperationBase {
   /** True only for a field synthesized onto an ancestor by the subclass-member overlay. */
   readonly syntheticSubclassMemberOverlay?: boolean
   /**
+   * True for a JavaScript class member TypeScript infers from a `this.x =`
+   * store: no field definition creates it at construction, so an instance
+   * holds it only once that store runs.
+   */
+  readonly assignedMember?: true
+  /**
    * The `static-block` region a `run-static-block` event runs -- the one
    * `census.ts` put the block's own statements in. Set on that event only.
    */

@@ -5,6 +5,7 @@ import { classFieldStorageOwnerOf, classMemberOf, classMethodOverrideOf } from '
 import { balanceCppUnits } from './balanced-units.js'
 import { stableBorrowEntryOf, type StableBorrowEntry } from './borrowed-call-entry.js'
 import { programFactsOf } from '../../ir/program-facts.js'
+import { ownKeyOrderTrackingOf } from '../../ir/own-key-order.js'
 import { nativeOrdinaryConstructInstanceMatches } from '../../ir/construct-entry.js'
 import type { CapabilityCertificate } from '../../ir/certificate.js'
 import type { CapabilityKey } from '../../ir/certify.js'
@@ -1715,6 +1716,7 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
   // `typed-array(float32)` as `native-record-ref` and `native-handle(
   // ArrayBuffer@1)` as `native-record-ref`. One plan, one deriver.
   const deriver = input.deriver
+  const ownKeyOrder = ownKeyOrderTrackingOf(input.bodies, input.classes, deriver)
 
   // The prelude and the struct declarations carry no single semantic result:
   // a struct is required by every carrier that names it, not authored by one
@@ -1997,7 +1999,8 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
     input.physicalClasses ?? input.classes,
     (body) => captures.of(body).kind === 'ok',
     fixedFieldStateConstant,
-    singleEvaluationClasses
+    singleEvaluationClasses,
+    ownKeyOrder
   )
   const recursiveContainers = cppRecursiveContainerDeclarations(input.plan, emissionRepresentations)
 
@@ -2370,7 +2373,8 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
         selectionHelpers,
         callableIdentityDemand,
         nativeIntegrityRestricted,
-        fixedFieldStateConstant
+        fixedFieldStateConstant,
+        ownKeyOrder
       )
       const stableEntry = stableBorrowEntries.get(cppBodyName(body.sourceOwner))
       const commonJsScope =

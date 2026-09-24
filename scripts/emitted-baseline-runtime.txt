@@ -50,7 +50,7 @@ callback-call-with-this-arg.ts.cpp 8760329cda2f
 captured-cell-branch-assignment.ts.cpp 2d307e995d74
 class-accessors-viewed-as-record.ts.cpp f390fdd89ddd
 class-arm-into-declared-interface-slot.ts.cpp 1cf8ed753b5b
-class-arrow-field-lazy.ts.cpp 26716977c13d
+class-arrow-field-lazy.ts.cpp 1faacfab4068
 class-cast-through-unknown-is-identity.ts.cpp 2b6430638e1e
 class-defaulted-census-slot.runtime.js.cpp d6231db471a1
 class-dynamic-json-reflection.ts.cpp 1ab6016eb6c8
@@ -105,7 +105,7 @@ delete-symbol-expando-on-class-through-interface.ts.cpp 4d04cd30773e
 derived-class-extends-instantiated-generic-base.ts.cpp d7a3a67ce230
 derived-class-reads-base-private-method-in-closure.ts.cpp a8fe7d67798f
 derived-constructor-completion.runtime.js.cpp 031f79a18812
-descriptor-array-splice.js.cpp 6e9f3fb16872
+descriptor-array-splice.js.cpp 96429601e125
 descriptor-function-this-is-the-lookup-receiver.ts.cpp 7ed558c58fe2
 destructured-default-host-options.ts.cpp c11cc6124034
 destructuring-defaults.ts.cpp 5b9603fe4315
@@ -157,7 +157,7 @@ filter-under-a-type-guard-narrows-its-element.ts.cpp 0cdd79245c69
 fixed-data-definition.js.cpp 0f5f99ceadbf
 fixed-field-assignment-widening.runtime.js.cpp e65d803536e4
 fixed-field-define-property-widening.runtime.js.cpp f8e1377f59b3
-fixed-field-define-property.runtime.js.cpp b6e65af6127c
+fixed-field-define-property.runtime.js.cpp 98e324996107
 fn-classref.ts.cpp 927dda4e017c
 fn-scalar.ts.cpp 21e6234db785
 for-in-generic-key.ts.cpp a76e38dc426c
@@ -234,7 +234,7 @@ hot-path-closure-identity.ts.cpp 05b1a334b21d
 hot-path-closure-table.ts.cpp 50d3b20c5fa0
 hot-path-integer-ring.ts.cpp 2908c51674fc
 hot-path-integrity-fast-path.ts.cpp c11af41f0e95
-hot-path-layout-guards.ts.cpp c2004286a04d
+hot-path-layout-guards.ts.cpp 428b454ea6d3
 hot-path-static-layout.ts.cpp dece133bb037
 hot-path-string-append.ts.cpp ebc31f846d6d
 implicit-arguments-number.js.cpp 5a65e7d5b878
@@ -243,7 +243,7 @@ in-boxed-key-over-string-dictionary.ts.cpp 5bced2f5fe7f
 in-boxed-key.ts.cpp 6dc5a87af0a9
 in-unique-symbol-key-sidecar.ts.cpp ef0b91f83f40
 indexed-absence-forwarded-cache.runtime.js.cpp 259e8c71adf4
-indexed-record-define-property.ts.cpp 760a93a0b9fa
+indexed-record-define-property.ts.cpp eeaa04777ef7
 indexed-record-descriptor-typed.ts.cpp ad259ad60603
 inferred-array-index-absence.ts.cpp 4f3be740bef8
 inferred-callable-union.ts.cpp 7177452b9a96
@@ -337,7 +337,7 @@ native-error-base-implicit-constructor.ts.cpp 55452c0adac1
 native-error-descriptor-inheritance.ts.cpp 822133489b1b
 native-error-expando-truthiness.ts.cpp a07b76cb546b
 native-field-descriptor.ts.cpp 76231ff0cbe7
-native-field-operation-demand.ts.cpp 24f3a5bfe3ca
+native-field-operation-demand.ts.cpp b932d870dd5e
 native-field-owner.runtime.js.cpp 9def534f6e27
 native-function-source.js.cpp dd5545a5449c
 native-handle-computed-access.runtime.js.cpp e4016c5abb8f
@@ -351,10 +351,10 @@ native-method-prototype-write.runtime.ts.cpp 9df720b6b5bd
 native-method-public-frame.runtime.ts.cpp 64100491c108
 native-nullish-enumeration.runtime.js.cpp fd2453035960
 native-nullish-operations.ts.cpp 00d10d2b41dd
-native-object-freeze.ts.cpp 8d325b730e52
+native-object-freeze.ts.cpp e0d711da4888
 native-optional-call-frame.ts.cpp df33b4e46e0c
 native-optional-record-dynamic-hook.ts.cpp 0c3b4c2d6786
-native-optional-record-presence.ts.cpp 3f0925b8b3a4
+native-optional-record-presence.ts.cpp c42df7a8353e
 native-parameter-dynamic-forward.runtime.js.cpp d7a29f4fbf78
 native-parameter-union-forward.runtime.js.cpp 3fa6cc12c2d7
 native-presence-query.ts.cpp 7d63605f1889
@@ -364,7 +364,7 @@ native-prototype-presence.ts.cpp 38a0ef3ef2b1
 native-record-copy.ts.cpp 6e6507ee86f1
 native-record-expando-recast.ts.cpp ba5a70c3d31c
 native-record-parameter.ts.cpp 210414da2c2e
-native-reflect-class-operations.runtime.ts.cpp be5d09ea1b91
+native-reflect-class-operations.runtime.ts.cpp e56d0322046d
 native-reflection-callable-adapter.ts.cpp 79bda0c1aef2
 native-reflection-callable-record.ts.cpp 229e4d5c1550
 native-reflection-container-fields.ts.cpp 271e017865c8
@@ -375,8 +375,8 @@ native-sequence-field-flow.ts.cpp fc191267c3da
 native-static-method-frame.ts.cpp a782268c5e2d
 native-stored-event-callback.runtime.ts.cpp 87ea53b91377
 native-super-field-flow.ts.cpp ebca11b263fe
-native-symbol-index.ts.cpp 0d60ee1dd28a
-native-symbol-property-identity.runtime.ts.cpp 449e504d9c5d
+native-symbol-index.ts.cpp 3b194e20c627
+native-symbol-property-identity.runtime.ts.cpp a4194ff171f9
 native-tagged-field-read.ts.cpp 6265b3b86bfd
 native-type-only-reflection-family.ts.cpp a3c21c0c79d7
 native-typed-array-element-width.ts.cpp 61238ae3e9e2
@@ -433,6 +433,8 @@ overloaded-generic-callback-parameter.ts.cpp 6932c80d4ef4
 overloaded-generic-field-generic-arrow-call.ts.cpp 9f55ea59f7d1
 overloaded-source-function-value.ts.cpp 0f98cf29840a
 overloaded-source-return-narrowing.ts.cpp 064bf9a2e5d9
+own-key-creation-order.runtime.js.cpp 249c37f93ea2
+own-key-creation-order.ts.cpp 33c84020dcae
 own-keys-declared-order.runtime.js.cpp 41d37df5ba12
 owned-formal.ts.cpp 108ef61fdbb8
 owned-string-dynamic-transfer.ts.cpp 420210f5f43f
@@ -444,7 +446,7 @@ physical-class-ancestry-declared.ts.cpp e1d3e127c931
 physical-class-ancestry-live.ts.cpp 728e6f672df0
 physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
-populated-record-late-fields.js.cpp 50f20517ba63
+populated-record-late-fields.js.cpp 1d2c5e207449
 printer-drift.txt 7f6242725b17
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
@@ -508,7 +510,7 @@ stable-string-read.ts.cpp 712320438b5d
 stated-open-union-preserves-closed-arms.ts.cpp 878f72cd6f91
 static-intrinsic-reflection.runtime.js.cpp 9a7c2a8500d2
 static-method-as-callback-value.ts.cpp 8ec7c5dfe2ea
-static-property-descriptors.runtime.js.cpp b9ec00f6580d
+static-property-descriptors.runtime.js.cpp d6c981deef9d
 stored-listener-native-flow.js.cpp ad6f1cabef1e
 strict-delete-module-exports.ts.cpp 155a2051d279
 strict-delete.ts.cpp 85fdced0a04d

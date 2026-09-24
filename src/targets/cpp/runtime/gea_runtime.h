@@ -10403,6 +10403,55 @@ struct PropertyDescriptor {
   }
 };
 
+namespace detail {
+
+/**
+ * One program-wide creation clock for own properties.
+ *
+ * A native object keeps its keys in up to three stores -- its declared
+ * fields, its index-signature sidecar and its expando table -- and ECMA-262
+ * 10.1.11.1 orders string keys by when each was CREATED, across all three.
+ * A per-object counter would need every store to reach the object that owns
+ * it; a global one only needs each store to stamp its own entries, and the
+ * stamps of any two keys then compare. 0 means absent and 1 means present
+ * from allocation (ordered by declaration), so the clock starts past both.
+ */
+inline std::uint64_t& ownKeyClock() {
+  static std::uint64_t clock = 1;
+  return clock;
+}
+inline std::uint64_t nextOwnKeyStamp() { return ++ownKeyClock(); }
+
+}  // namespace detail
+
+/**
+ * The presence bit of a declared field whose own-key order the program can
+ * observe (`records.ts`, for a struct `ir/own-key-order.ts` tracks).
+ *
+ * It is the `bool` every generated reader and writer already spells -- it
+ * converts to one and is assigned from one -- plus the moment the field was
+ * created: becoming present stamps it, and a delete clears it, so a delete
+ * and re-add moves the key to the end exactly as OrdinaryDelete followed by
+ * CreateDataProperty does. A field present from allocation carries 1, which
+ * sorts before every created key in declaration order.
+ */
+class OwnKeyPresence {
+ public:
+  constexpr OwnKeyPresence() : order_(0) {}
+  // Explicit, so a conditional mixing a bit with a `bool` has one conversion to pick.
+  constexpr explicit OwnKeyPresence(bool present) : order_(present ? 1 : 0) {}
+  OwnKeyPresence& operator=(bool present) {
+    if (!present) order_ = 0;
+    else if (order_ == 0) order_ = detail::nextOwnKeyStamp();
+    return *this;
+  }
+  operator bool() const { return order_ != 0; }
+  std::uint64_t order() const { return order_; }
+
+ private:
+  std::uint64_t order_;
+};
+
 /**
  * An ordinary object: an ORDERED own-property table, a prototype slot, and an
  * extensible flag. ECMA-262 10.1, over the one carrier a value the program
@@ -10455,6 +10504,8 @@ class DynamicObject {
   struct Property {
     PropertyKey key;
     PropertyDescriptor descriptor;
+    /** When this key was created (`detail::ownKeyClock`), so a native object's expando keys interleave with its tracked fields. */
+    std::uint64_t order = detail::nextOwnKeyStamp();
   };
 
   /** 10.1.2 -- the `[[Prototype]]` slot. Null for `Object.create(null)` and for the root of every chain this runtime builds. */
@@ -10904,9 +10955,9 @@ bool sameNativeFieldValue(const T& left, const T& right) {
  * nor rewrite the value. Validate everything before mutating either storage or
  * attributes so a rejected definition leaves the object unchanged.
  */
-template <typename T>
+template <typename T, typename Presence>
 bool applyNativeFieldDescriptor(
-    T& value, NativeIndexAttributes& attributes, bool& present,
+    T& value, NativeIndexAttributes& attributes, Presence& present,
     const PropertyDescriptor& incoming, bool extensible, Value::Tag expected) {
   if (incoming.isAccessor() || (!present && !extensible)) return false;
   if (incoming.hasValue) {
@@ -10993,6 +11044,26 @@ class NativeIndexAttributeTable {
 
  private:
   std::map<Key, NativeIndexAttributes> entries_;
+};
+
+/**
+ * When each entry of a tracked struct's index sidecar was created, beside the
+ * sidecar the way its attribute table is. The generated write hooks note a key
+ * they add and the delete hook forgets it; an entry nothing noted (a path
+ * that writes the dictionary directly) answers 1, the allocation order.
+ */
+template <typename Key>
+class NativeIndexOrderTable {
+ public:
+  void note(const Key& key) { entries_[key] = detail::nextOwnKeyStamp(); }
+  void erase(const Key& key) { entries_.erase(key); }
+  std::uint64_t order(const Key& key) const {
+    const auto found = entries_.find(key);
+    return found == entries_.end() ? 1 : found->second;
+  }
+
+ private:
+  std::map<Key, std::uint64_t> entries_;
 };
 
 /**
@@ -11877,6 +11948,10 @@ struct NativeFieldOps {
   // would each get their own expando, which is the aliasing JavaScript does
   // not have.
   gea::Ref<void> (*owner)(const void* payload);
+  // Each fixed and index key with its creation stamp, for a struct that tracks
+  // its own-key order (`gea_ownKeyOrders`); null for every other payload,
+  // whose keys keep declaration order ahead of its expando keys.
+  void (*ownKeyOrders)(const void* payload, std::vector<std::pair<std::uint64_t, PropertyKey>>& out) = nullptr;
 };
 
 /**
@@ -12124,6 +12199,19 @@ concept TypedStringDictionaryTable = !std::is_void_v<typename StringDictionaryEn
                                      !std::is_same_v<typename StringDictionaryEntry<T>::type, Value> &&
                                      DynamicCarrier<typename StringDictionaryEntry<T>::type>::supported;
 
+/** `NativeFieldOps::ownKeyOrders` for a payload whose struct tracks its own-key order, and null for any other. */
+template <typename T, typename Target>
+constexpr auto nativeOwnKeyOrdersOp() -> void (*)(const void*, std::vector<std::pair<std::uint64_t, PropertyKey>>&) {
+  if constexpr (requires(const Target& target, std::vector<std::pair<std::uint64_t, PropertyKey>>& out) { target.gea_ownKeyOrders(out); }) {
+    return [](const void* payload, std::vector<std::pair<std::uint64_t, PropertyKey>>& out) {
+      const Target* target = NativeFieldPayload<T>::reader(payload);
+      if (target != nullptr) target->gea_ownKeyOrders(out);
+    };
+  } else {
+    return nullptr;
+  }
+}
+
 template <typename T>
 const NativeFieldOps* nativeFieldOpsFor() {
   using Target = typename NativeFieldPayload<T>::Target;
@@ -12276,7 +12364,8 @@ const NativeFieldOps* nativeFieldOpsFor() {
         if constexpr (requires { target->extensible(); }) return target->extensible();
         return true;
       },
-      [](const void* payload) { return NativeFieldPayload<T>::owner(payload); }};
+      [](const void* payload) { return NativeFieldPayload<T>::owner(payload); },
+      nativeOwnKeyOrdersOp<T, Target>()};
     return &ops;
   } else {
     return nullptr;
@@ -13149,9 +13238,9 @@ bool dynamicFieldAccepts(const Value& value) {
  * does not allocate a boxed copy of a native value merely to run the
  * descriptor algorithm.
  */
-template <typename T>
+template <typename T, typename Presence>
 bool applyNativeDynamicFieldDescriptor(
-    T& value, NativeIndexAttributes& attributes, bool& present,
+    T& value, NativeIndexAttributes& attributes, Presence& present,
     const PropertyDescriptor& incoming, bool extensible, bool allowsUndefined, bool allowsNull,
     const char* owner, const char* key) {
   if constexpr (!DynamicCarrier<T>::supported) {
@@ -13420,6 +13509,24 @@ inline std::vector<PropertyKey> ordinaryOwnPropertyKeyOrder(std::vector<Property
   for (const PropertyKey& key : strings) ordered.push_back(key);
   for (const PropertyKey& key : symbols) ordered.push_back(key);
   return ordered;
+}
+
+/**
+ * A tracked native object's own keys (`gea_ownKeyOrders`) merged with its
+ * expando keys by creation stamp, then put in 10.1.11.1 order. Keys present
+ * from allocation carry 1 and keep declaration order ahead of every key the
+ * program created later; the stable sort keeps each store's own order for
+ * equal stamps.
+ */
+inline std::vector<PropertyKey> orderedOwnPropertyKeys(std::vector<std::pair<std::uint64_t, PropertyKey>> ordered, const DynamicObject* expando) {
+  if (expando != nullptr)
+    for (const DynamicObject::Property& property : expando->properties()) ordered.emplace_back(property.order, property.key);
+  std::stable_sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) { return left.first < right.first; });
+  std::vector<PropertyKey> keys;
+  keys.reserve(ordered.size());
+  for (const auto& entry : ordered)
+    if (std::find(keys.begin(), keys.end(), entry.second) == keys.end()) keys.push_back(entry.second);
+  return ordinaryOwnPropertyKeyOrder(std::move(keys));
 }
 
 /** String exotic own-index lookup in UTF-16 code units, not UTF-8 bytes. */
@@ -14425,6 +14532,11 @@ template <typename T>
 std::vector<PropertyKey> nativeOwnPropertyKeys(const gea::Ref<T>& object) {
   std::vector<PropertyKey> keys;
   if (!object) return keys;
+  if constexpr (requires(const T& reader, std::vector<std::pair<std::uint64_t, PropertyKey>>& out) { reader.gea_ownKeyOrders(out); }) {
+    std::vector<std::pair<std::uint64_t, PropertyKey>> ordered;
+    object->gea_ownKeyOrders(ordered);
+    return detail::orderedOwnPropertyKeys(std::move(ordered), detail::expandoFor(gea::refCastToVoid(object), false).get());
+  }
   if constexpr (detail::NativeOwnKeysTable<T>) object->gea_ownFieldKeys(keys);
   const gea::Ref<DynamicObject> expando = detail::expandoFor(gea::refCastToVoid(object), false);
   if (expando) {
@@ -14669,6 +14781,9 @@ std::vector<std::string> nativeDynamicKeys(const gea::Ref<T>& object) {
 template <typename T>
 bool nativeHasUndeclaredOwnKeys(const gea::Ref<T>& object) {
   if (!object) return false;
+  // A tracked struct's declared fields need not be in declaration order, so
+  // every walk over it takes the ordered key list.
+  if constexpr (requires { T::gea_tracks_own_key_order; }) return true;
   if ((detail::refCountsOf(object.get())->weak & detail::expandoTagged) != 0) return true;
   if constexpr (requires { T::gea_has_index_sidecar; }) return true;
   return false;

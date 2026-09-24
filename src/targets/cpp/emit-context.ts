@@ -1,3 +1,4 @@
+import { noOwnKeyOrderTracking, type OwnKeyOrderTracking } from '../../ir/own-key-order.js'
 import type { NativeSelectionHelper } from './native-selection-helpers.js'
 import type { StableBorrowEntry } from './borrowed-call-entry.js'
 import type { SharedStringLayout } from '../../ir/string-layout-reuse.js'
@@ -1355,6 +1356,8 @@ export interface EmitContext {
    * made a `static` member; `false` keeps the store.
    */
   readonly fixedFieldStateConstant: boolean
+  /** `ir/own-key-order.ts`'s census: a store into a tracked struct always sets its presence bit, which stamps a created key. */
+  readonly ownKeyOrder: OwnKeyOrderTracking
   /** Settled from `EmitBodyFacts.classTableRoots` -- see that type's own doc. */
   readonly classTableRoots: ReadonlyMap<IrValueId, IrValueId>
   /** One candidate table's withheld lines, keyed by the table's own value. See `classTableRoots`. */
@@ -1722,7 +1725,8 @@ export const createEmitContext = (
   nativeSelections: ReadonlyMap<string, NativeSelectionHelper> | undefined = undefined,
   callableIdentityDemand: CallableIdentityDemand = observesEveryCallableIdentity,
   nativeIntegrityRestricted = true,
-  fixedFieldStateConstant = false
+  fixedFieldStateConstant = false,
+  ownKeyOrder: OwnKeyOrderTracking = noOwnKeyOrderTracking
 ): { readonly ctx: EmitContext; readonly prepass: EmitBodyPrepassFacts } => {
   const admission = captures.of(owner)
   const layouts = recordLayoutPolicyOf(deriver, classes)
@@ -1819,6 +1823,7 @@ export const createEmitContext = (
     callableIdentityDemand,
     nativeIntegrityRestricted,
     fixedFieldStateConstant,
+    ownKeyOrder,
     functionSourceReads: bodyFacts.functionSourceReads,
     functionSourceSnapshotNames: bodyFacts.functionSourceSnapshotNames,
     callCallees: bodyFacts.callCallees,

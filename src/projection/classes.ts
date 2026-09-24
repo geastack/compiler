@@ -33,6 +33,8 @@ export interface ClassField {
   readonly representation: Representation | null
   /** The field exists only to type a base-typed duck-property read; it was not declared by the program's class. */
   readonly syntheticSubclassMemberOverlay: boolean
+  /** A JavaScript member inferred from a `this.x =` store: created by that store, not at construction. */
+  readonly assignedMember?: true
 }
 
 /**
@@ -886,7 +888,8 @@ export const projectClasses = (input: ClassProjectionInput): ReadonlyMap<Declara
         const storage = operandOf(operation, 'field-storage')
         return storage ? input.deriver.derive(storage.type) : null
       })(),
-      syntheticSubclassMemberOverlay: operation.syntheticSubclassMemberOverlay === true
+      syntheticSubclassMemberOverlay: operation.syntheticSubclassMemberOverlay === true,
+      ...(operation.assignedMember === true ? { assignedMember: true as const } : {})
     })
     target.set(operation.classDeclaration, bucket)
   }
