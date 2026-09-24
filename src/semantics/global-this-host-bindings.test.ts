@@ -1238,6 +1238,38 @@ test('an own-key test on the proven global object with a literal key does not wi
   assert.equal(audit.taint.has(audit.bindings.get('hostProcess')!), false)
 })
 
+// fast-querystring, pino's levels and find-my-way write unknown keys into
+// objects typed `{}`. Such a write withdraws whole-program intrinsic trust, but
+// the own-key test on the global object rests only on the Object.prototype
+// slot it reads, the same per-key obligation every intrinsic `hasOwnProperty`
+// lowering carries.
+const unknownKeyWriteThrough = (receiver: string): GlobalHostMutationAudit =>
+  globalHostMutationAuditOf(
+    `
+      interface Process {}
+      declare var hostProcess: Process
+      interface HostResponse { text(): string }
+      declare const key: string
+      ${receiver}
+      ;(target as any)[key] = 1
+      globalThis.hasOwnProperty('zz')
+    `,
+    ['hostProcess'],
+    ['HostResponse']
+  )
+
+test("an unknown-key write through a fresh object leaves the global object's own-key test trusted", () => {
+  const audit = unknownKeyWriteThrough('let target = {}')
+  assert.equal(audit.taint.has('*'), false, [...audit.taint].join(','))
+  assert.equal(audit.taint.has(audit.bindings.get('hostProcess')!), false)
+})
+
+test('an unknown-key write through a receiver that may be an intrinsic object keeps the own-key test fail-closed', () => {
+  for (const receiver of ['const target = Object.prototype', 'const holder = { proto: Object.prototype }; const target = holder.proto']) {
+    assert.ok(unknownKeyWriteThrough(receiver).taint.has('*'), receiver)
+  }
+})
+
 test('an own-key test on the global object stays fail-closed once its key may not reach the intrinsic', () => {
   for (const spelling of [
     ';(globalThis as any).hasOwnProperty = () => true',
@@ -1245,6 +1277,8 @@ test('an own-key test on the global object stays fail-closed once its key may no
     'Object.prototype.hasOwnProperty = function () { return true }',
     ';(Object.getPrototypeOf(globalThis) as any).hasOwnProperty = () => true',
     'var hasOwnProperty = () => true',
+    ';(globalThis as any).__proto__ = { hasOwnProperty: () => true }',
+    'Object.setPrototypeOf(globalThis, { hasOwnProperty: () => true })',
     'declare const key: any; globalThis.hasOwnProperty(key)'
   ]) {
     const audit = globalHostMutationAuditOf(`
