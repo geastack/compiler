@@ -1,4 +1,5 @@
 import type { PackageSource } from './package-sources.js'
+import type { ScopedTypeRealization } from './scoped-type-realizations.js'
 import type { CommonJsWrapperDeclaration, HostNativeTypeDeclaration, HostOwnedDeclaration } from '../plugins/model.js'
 import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, proxyFallbackTypes } from './dynamic-fallback.js'
 import ts from 'typescript'
@@ -126,6 +127,8 @@ export interface FrontendInput {
   readonly declarationModules?: ReadonlySet<string>
   /** Package file globs whose JavaScript reports no checker diagnostics -- see `unchecked-javascript.ts`. */
   readonly uncheckedJavaScript?: ReadonlySet<string>
+  /** Package-scoped JSDoc type names, bound by the checker -- see `scoped-type-realizations.ts`. */
+  readonly scopedTypeRealizations?: readonly ScopedTypeRealization[]
   readonly dynamicFallback?: boolean
   readonly hostMethodBindings?: HostMethodBindingTable
   /** Exact host declarations eligible for checker-derived TypedArray inheritance. */
@@ -722,6 +725,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     ...(input.packageSources ? { packageSources: input.packageSources } : {}),
     ...(input.declarationModules ? { declarationModules: input.declarationModules } : {}),
     ...(input.uncheckedJavaScript ? { uncheckedJavaScript: input.uncheckedJavaScript } : {}),
+    ...(input.scopedTypeRealizations ? { scopedTypeRealizations: input.scopedTypeRealizations } : {}),
     rootFileNames: input.rootFileNames,
     options: input.javaScriptSources
       ? // `maxNodeModuleJsDepth` alongside `allowJs` for the reason `program.ts`'s

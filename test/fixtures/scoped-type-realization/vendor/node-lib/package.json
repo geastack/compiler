@@ -1,0 +1,8 @@
+{
+  "name": "node-lib",
+  "type": "module",
+  "exports": {
+    "./src/*": "./src/*",
+    "./extra/*": "./extra/*"
+  }
+}

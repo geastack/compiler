@@ -52,26 +52,33 @@ const globPattern = (glob: string): RegExp => {
   return new RegExp(`^${pattern}$`)
 }
 
-const parsePattern = (pattern: string): PackagePattern => {
+const parsePattern = (pattern: string, stating: string): PackagePattern => {
   const segments = pattern.split('/')
   const nameSegments = segments.slice(0, pattern.startsWith('@') ? 2 : 1)
   if (
     nameSegments.length < (pattern.startsWith('@') ? 2 : 1) ||
     nameSegments.some((segment) => segment.length === 0 || /[*?]/.test(segment))
   ) {
-    throw new Error(`unchecked JavaScript pattern '${pattern}' does not start with a package name`)
+    throw new Error(`${stating} pattern '${pattern}' does not start with a package name`)
   }
   return { packageName: nameSegments.join('/'), path: globPattern(segments.slice(nameSegments.length).join('/')) }
 }
 
 const isJavaScriptPath = (fileName: string): boolean => /\.(?:[cm]?js|jsx)$/i.test(fileName)
 
-export const createUncheckedJavaScriptPolicy = (
+/**
+ * Whether a JavaScript file is inside one of `patterns`, in the package-glob
+ * grammar above. `stating` names the capability in the error for a pattern
+ * with no package name. A scoped `ambientTypeRealizations` row takes its scope
+ * in the same grammar (`scoped-type-realizations.ts`).
+ */
+export const createPackageJavaScriptPolicy = (
   patterns: ReadonlySet<string>,
-  host: Pick<ts.ModuleResolutionHost, 'fileExists' | 'readFile'>
+  host: Pick<ts.ModuleResolutionHost, 'fileExists' | 'readFile'>,
+  stating: string
 ): UncheckedJavaScriptPolicy => {
   if (patterns.size === 0) return () => false
-  const parsed = [...patterns].map(parsePattern)
+  const parsed = [...patterns].map((pattern) => parsePattern(pattern, stating))
   const packageAt = new Map<string, { readonly root: string; readonly name: string } | null>()
   const packageOf = (directory: string): { readonly root: string; readonly name: string } | null => {
     const cached = packageAt.get(directory)
@@ -102,6 +109,11 @@ export const createUncheckedJavaScriptPolicy = (
     return parsed.some((pattern) => pattern.packageName === owner.name && pattern.path.test(inside))
   }
 }
+
+export const createUncheckedJavaScriptPolicy = (
+  patterns: ReadonlySet<string>,
+  host: Pick<ts.ModuleResolutionHost, 'fileExists' | 'readFile'>
+): UncheckedJavaScriptPolicy => createPackageJavaScriptPolicy(patterns, host, 'unchecked JavaScript')
 
 /** What `// @ts-nocheck` leaves on a parsed file -- see this module's comment. */
 export const markUnchecked = (file: ts.SourceFile): ts.SourceFile => {

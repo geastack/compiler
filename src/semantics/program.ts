@@ -11,6 +11,7 @@ import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.j
 import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
 import { createUncheckedJavaScriptPolicy, markUnchecked } from './unchecked-javascript.js'
+import { createScopedTypeRealizer, type ScopedTypeRealization } from './scoped-type-realizations.js'
 
 /**
  * The TypeScript program host.
@@ -28,6 +29,8 @@ export interface ProgramInput {
   readonly declarationModules?: ReadonlySet<string>
   /** Package file globs whose JavaScript reports no checker diagnostics -- see `unchecked-javascript.ts`. */
   readonly uncheckedJavaScript?: ReadonlySet<string>
+  /** Package-scoped JSDoc type names, bound by the checker -- see `scoped-type-realizations.ts`. */
+  readonly scopedTypeRealizations?: readonly ScopedTypeRealization[]
   readonly rootFileNames: readonly string[]
   readonly options: ts.CompilerOptions
   /**
@@ -727,6 +730,9 @@ const configuredProgram = (
   const projectFileName = input.projectFileName
   const buildProgram = (rootNames: readonly string[], options: ts.CompilerOptions, host: ts.CompilerHost): ConfiguredProgram => {
     const targetOf = runtimeModuleTargetOf(host, options)
+    const realizer = createScopedTypeRealizer(input.scopedTypeRealizations ?? [], host, (specifier, containingFile) =>
+      targetOf(specifier, containingFile, 'import')
+    )
     const roots = new Set(rootNames)
     const commonJsTargetPaths = new Set<string>()
     let program = timing.measure('create-program', () => ts.createProgram({ rootNames: [...roots], options, host }))
@@ -741,13 +747,17 @@ const configuredProgram = (
         )
       ]
       for (const target of targets) commonJsTargetPaths.add(target)
-      const added = targets.filter((target) => !roots.has(target) && program.getSourceFile(target) === undefined)
+      const added = [...targets, ...realizer.missingTargets(program)].filter(
+        (target) => !roots.has(target) && program.getSourceFile(target) === undefined
+      )
       if (added.length === 0) break
       for (const target of added) {
         roots.add(target)
       }
       program = timing.measure('rebuild-program', () => ts.createProgram({ rootNames: [...roots], options, host }))
     }
+    // On the program this build keeps, before anything asks it a type question.
+    timing.measure('scoped-type-realizations', () => realizer.install(program))
     return { program, runtimeModuleTargetOf: targetOf, commonJsTargetPaths: [...commonJsTargetPaths] }
   }
   if (!projectFileName) {
