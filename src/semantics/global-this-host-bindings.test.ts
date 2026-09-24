@@ -1415,6 +1415,21 @@ test('a host callable bound or held as a value escapes', () => {
   }
 })
 
+// node-compat's CommonJS `require` is a host binding spelled as a variable of
+// function type; it states its contract the way a `declare function` does.
+test('a host variable of function type can state that it writes no property', () => {
+  const stamped = (tag: string) =>
+    globalHostMutationAuditOf(`
+      interface Process {}
+      declare var hostProcess: Process
+      ${tag}
+      declare var loadModule: (specifier: string) => any
+      loadModule('x')
+    `).taint
+  assert.deepEqual([...stamped('/** @gea-host-no-property-writes */')], [])
+  assert.notDeepEqual([...stamped('')], [])
+})
+
 test('own-key reflection dependencies revoke source slot closure after method replacement', () => {
   for (const replaced of [false, true]) {
     const audit = globalHostMutationAuditOf(`
