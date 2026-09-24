@@ -42013,6 +42013,17 @@ gea::Value parseWithReviver(const std::string& text, const Reviver& reviver) {
 
 }  // namespace gea::json
 
+/**
+ * An `optional` outside a record field -- an array element, or an arm of a
+ * written union (`emit-json.ts`'s `JsonWriteReach`): absent writes `null`,
+ * ECMA-262 25.5.2.4's answer for an array element and the value of a `null`.
+ */
+template <typename T>
+inline void gea_json_write(std::string& out, const gea::Optional<T>& value) {
+  if (value.has_value()) gea_json_write(out, *value);
+  else out += "null";
+}
+
 /** An Array position: a hole and a stored `undefined` both serialize as `null` -- ECMA-262's own rule for an array, and the one JSON position `undefined` has any spelling at all (an *object property* holding `undefined` is omitted instead -- `emit-json.ts`'s generated struct writer does that, not this template, because only it knows which member is which). */
 template <typename Element>
 inline void gea_json_write(std::string& out, const gea::Ref<gea::ArrayObject<Element>>& array) {
