@@ -9,7 +9,7 @@ import {
   type PhysicalClassLayoutPublication
 } from './projection/classes.js'
 import type { ConversionNode } from './conversion/algebra.js'
-import { buildConversionGraph } from './conversion/build.js'
+import { buildConversionGraph, withNarrowingMemo } from './conversion/build.js'
 import { createConversionNodes, type ConversionCensus } from './conversion/nodes.js'
 import type { ConversionRuntimeRegistry } from './conversion/registry.js'
 import type { DiagnosticLocation, DiagnosticReport } from './diagnostics/model.js'
@@ -415,7 +415,15 @@ export const sourceTransformsFor = (
   ...plugins.flatMap((plugin) => (plugin.transformSource ? [plugin.transformSource] : []))
 ]
 
-export const compile = (request: CompilationRequest): CompilationResult => {
+/**
+ * A compilation's output is a function of its request alone, never of what the
+ * process compiled before: the harnesses compile hundreds of programs in one
+ * process, and a memo that outlived one compilation made a program emit
+ * different C++ there than on its own (`withNarrowingMemo`).
+ */
+export const compile = (request: CompilationRequest): CompilationResult => withNarrowingMemo(() => compileProgram(request))
+
+const compileProgram = (request: CompilationRequest): CompilationResult => {
   // One instance per compilation. A plugin that learns something from a program
   // and acts on it later has to remember it in between, and a registry of
   // long-lived instances would let a fact derived from one program be read back

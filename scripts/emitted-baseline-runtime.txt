@@ -370,7 +370,7 @@ native-reflection-callable-record.ts.cpp 229e4d5c1550
 native-reflection-container-fields.ts.cpp 271e017865c8
 native-reflection-demand.ts.cpp 8c71e0258df1
 native-reflection-optional-control-flow.ts.cpp ebb7534603b3
-native-reflection-virtual-class.ts.cpp e06e53ed8478
+native-reflection-virtual-class.ts.cpp 022b3d7dd4d4
 native-sequence-field-flow.ts.cpp fc191267c3da
 native-static-method-frame.ts.cpp a782268c5e2d
 native-stored-event-callback.runtime.ts.cpp 87ea53b91377
