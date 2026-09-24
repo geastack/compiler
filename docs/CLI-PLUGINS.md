@@ -85,5 +85,8 @@ After `npm run build`, run `npm run test:cli-plugins`. The tests invoke the buil
 CLI for both commands, link its emitted C++ against the external fixture's
 native `pbGet` and `pbSet`, and execute the binary. They cover legacy package
 adapters, multiple plugins, options, duplicate paths, mapping precedence and
-loading failures. Native testing requires `clang++` with C++20 support and uses
-the existing ignored `measurements/` output directory.
+loading failures. Native testing requires a clang with C++20 support, chosen by
+`scripts/cxx.mjs` (see the README for Windows), and uses the existing ignored
+`measurements/` output directory. The test also needs
+`@geastack/geatsc-plugin-gea` and `@geastack/geatsc-plugin-apple-native`
+installed beside the compiler.

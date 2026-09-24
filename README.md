@@ -179,6 +179,33 @@ form. It takes the same options.
 | `format:check` | `prettier --check .`                          |
 | `check`        | Architecture gate, typecheck and format check |
 
+### On Windows
+
+`npm run build` and `npm run gate` run on Windows 11 with the Visual Studio 2026
+Build Tools and their "C++ Clang tools for Windows" component
+(`Microsoft.VisualStudio.Component.VC.Llvm.Clang`). No developer prompt is
+needed: every test and script takes its compiler from `scripts/cxx.mjs`, which
+uses `CXX` if set, then `clang++` on `PATH`, then the clang inside the newest
+Visual Studio that `vswhere` reports. Visual Studio 2022's clang 19 does not
+work: it picks up the newest MSVC STL, which refuses any clang older than 20.
+
+- Sanitized tests that go through `test/sanitizer.mjs` (the ones `build`
+  runs) find the ASan runtime DLL from clang's own resource directory. Without
+  the "C++ AddressSanitizer" component
+  (`Microsoft.VisualStudio.Component.VC.ASAN`) they build with the
+  `std::string`/`std::vector` container annotations off and print a note;
+  heap, stack and UB checks are unaffected. The other sanitized tests do not
+  use it yet and fail to link without that component.
+- `.gitattributes` checks text out as LF, since a program that reads its own
+  source (`Function.prototype.toString`) embeds it in the emitted C++. A tree
+  checked out before it keeps its CRLF files until they are checked out again;
+  on a tree with no uncommitted work, `git checkout-index --force --all`.
+- The gate's gea, Apple and WebGL programs and `test:cli-plugins` need
+  `@geastack/geatsc-plugin-gea`, `@geastack/geatsc-plugin-apple-native`,
+  `@geastack/apple` and `@geastack/native-webgl-angle` in this package's
+  `node_modules`. They are optional peer dependencies, which `npm install`
+  does not add; without them the gate reports those programs lost.
+
 ## License
 
 The compiler and the runtime it links into generated programs are Apache-2.0
