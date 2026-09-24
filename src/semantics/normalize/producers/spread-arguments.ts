@@ -170,6 +170,27 @@ const admitsMaxArityTupleSpread = (
 }
 
 /**
+ * A plain array spread as the call's LAST argument into a callee with NO rest
+ * formal -- pino's `normalize(instance, caller(), ...args)`. The ground is
+ * `admitsMaxArityTupleSpread`'s: a callee with no rest formal (and so no
+ * `arguments` read, which would have given it a phantom one) cannot tell an
+ * omitted argument from an explicit `undefined`, so reading element `i` for
+ * each formal the spread reaches -- `undefined` past the array's end, surplus
+ * elements bound to nothing -- is what the language binds.
+ */
+const admitsFinalArraySpread = (
+  context: ProducerContext,
+  args: readonly ts.Expression[],
+  index: number,
+  restFrom: number | null,
+  selected: SelectedSignature | null
+): boolean => {
+  const argument = args[index]
+  if (!argument || !ts.isSpreadElement(argument) || selected === null || restFrom !== null || index !== args.length - 1) return false
+  return context.table.get(context.types.typeAt(argument.expression)).shape.kind === 'array'
+}
+
+/**
  * How many argument-list positions one written argument occupies.
  *
  * A closed tuple occupies its own arity; everything else occupies one. Needed
@@ -215,6 +236,21 @@ const admitsFixedArgumentsSpread = (
   restFrom: number | null,
   selected: SelectedSignature | null
 ): boolean => isFixedArgumentsSpreadAt(context.checker, args, index, selected === null ? null : { restFrom })
+
+/** One read per formal the final array spread reaches, each typed with the `undefined` a read past the end yields. */
+const finalArraySpreadReads = (
+  context: ProducerContext,
+  candidate: CensusCandidate,
+  source: ts.Expression,
+  reached: number
+): ReturnType<typeof mintPositionalSpreadReads> | null => {
+  const receiver = spreadReceiverOf(context, source)
+  const shape = context.table.get(receiver?.type ?? context.types.typeAt(source)).shape
+  if (!receiver || shape.kind !== 'array') return null
+  const undefinedType = context.table.intern({ kind: 'primitive', primitive: 'undefined' })
+  const position = context.table.intern({ kind: 'union', members: [shape.element, undefinedType] })
+  return mintPositionalSpreadReads(context, candidate, receiver, Array<StructuralTypeId>(reached).fill(position))
+}
 
 export const buildArgumentOperands = (
   context: ProducerContext,
@@ -264,7 +300,8 @@ export const buildArgumentOperands = (
       declaredTupleRestArityOf(context, argument.expression) === null &&
       !admitsOpenTupleSpread(context, argument, scan, restFrom, selected) &&
       !admitsMaxArityTupleSpread(context, args, scanIndex, restFrom, selected) &&
-      !admitsFixedArgumentsSpread(context, args, scanIndex, restFrom, selected)
+      !admitsFixedArgumentsSpread(context, args, scanIndex, restFrom, selected) &&
+      !admitsFinalArraySpread(context, args, scanIndex, restFrom, selected)
     ) {
       // The magic `arguments` object -- `IArguments` has no native iteration
       // cursor of its own (it is not a `Set`/`Map`/`Array`/`string`/
@@ -383,6 +420,9 @@ export const buildArgumentOperands = (
         declaredTupleRestSpreadReads(context, candidate, argument.expression) ??
         (admitsMaxArityTupleSpread(context, args, buildIndex, restFrom, selected)
           ? maxArityTupleSpreadReads(context, candidate, argument.expression)
+          : null) ??
+        (admitsFinalArraySpread(context, args, buildIndex, restFrom, selected) && selected
+          ? finalArraySpreadReads(context, candidate, argument.expression, Math.max(0, selected.parameters.length - position))
           : null)
       if (expanded) {
         operations.push(...expanded.operations)

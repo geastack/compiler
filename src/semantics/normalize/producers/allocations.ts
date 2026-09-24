@@ -277,7 +277,7 @@ const spreadCopyOf = (
   // fields, rather than emitting a store into a member that does not exist.
   // A target whose shape is not statically known has no field set to scope to,
   // and refuses by name here rather than installing a guess.
-  const target = staticSpreadMembersOf(context, receiverType)
+  const target = staticSpreadMembersOf(context, receiverType, 'target')
   if ('blocked' in target) {
     return { blocked: `an object spread into a target with no statically known field set cannot place its copies (${target.blocked})` }
   }
