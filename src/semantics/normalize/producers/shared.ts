@@ -830,7 +830,14 @@ export const isPlainArrayType = (context: ProducerContext, type: StructuralTypeI
  */
 export const staticSpreadMembersOf = (
   context: ProducerContext,
-  type: StructuralTypeId
+  type: StructuralTypeId,
+  /**
+   * `source`: the members a spread COPIES. `target`: the fields the literal
+   * receiving it DECLARES -- every one an own data property the literal
+   * installs, a function-valued one included, since a literal being allocated
+   * has no prototype method of its own; its symbol keys are placed elsewhere.
+   */
+  role: 'source' | 'target' = 'source'
 ): { readonly members: readonly StructuralMember[] } | { readonly blocked: string } => {
   const outer = context.table.get(type).shape
   const shape = outer.kind === 'declared' && outer.body !== null ? context.table.get(outer.body).shape : outer
@@ -851,7 +858,7 @@ export const staticSpreadMembersOf = (
     >()
     const arms: (readonly StructuralMember[])[] = []
     for (const arm of shape.members) {
-      const admitted = staticSpreadMembersOf(context, arm)
+      const admitted = staticSpreadMembersOf(context, arm, role)
       if ('blocked' in admitted) return admitted
       arms.push(admitted.members)
     }
@@ -894,6 +901,7 @@ export const staticSpreadMembersOf = (
     if (member.accessor !== null) {
       return { blocked: `an object spread of a source with the accessor "${key}" must call it, which is not modelled` }
     }
+    if (role === 'target') continue
     if (context.table.get(member.type).shape.kind === 'signature') {
       return {
         blocked:
