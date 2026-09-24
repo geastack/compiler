@@ -942,6 +942,21 @@ export const censusGlobalHostMutations = (
     const symbol = actualSymbol(checker.getSymbolAtLocation(current))
     return !!symbol && hasStandardLibraryDeclaration(symbol)
   }
+  /**
+   * Whether the member a write replaces is one a call could resolve to: an
+   * unknown key, or a member the standard library declares callable. The
+   * checker selects only declared members, so assigning an undeclared one
+   * (`Error.stackTraceLimit = 0`, `Error.prepareStackTrace = f` -- V8 hooks
+   * the library does not declare) or a data member (`Math.PI`) redirects no
+   * call the census trusts as an intrinsic.
+   */
+  const replacedMemberMayBeCalled = (target: ts.PropertyAccessExpression | ts.ElementAccessExpression): boolean => {
+    if (staticKeyOf(target) === null) return true
+    const symbol = memberSymbolOf(target)
+    if (!symbol || !hasStandardLibraryDeclaration(symbol)) return false
+    const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0]
+    return !declaration || checker.getSignaturesOfType(checker.getTypeOfSymbolAtLocation(symbol, declaration), ts.SignatureKind.Call).length > 0
+  }
   const invalidateAllIntrinsicTrust = (node: ts.Node): void => {
     if (process.env['GEA_DEBUG_GLOBAL_MUTATION'] && !allIntrinsicTrustInvalidated) {
       const file = node.getSourceFile()
@@ -1092,7 +1107,8 @@ export const censusGlobalHostMutations = (
       // .toString.call(x)` and it fell to a dynamic property read on a boxed
       // native handle with no field dispatcher: a certified program that
       // aborts at run time (`static-intrinsic-reflection.runtime.js`).
-      if (!ts.isDeleteExpression(node.parent) && replacesStandardGlobalMember(node.expression)) intrinsicSurfaceMemberReplaced = true
+      if (!ts.isDeleteExpression(node.parent) && replacesStandardGlobalMember(node.expression) && replacedMemberMayBeCalled(node))
+        intrinsicSurfaceMemberReplaced = true
       const symbol = memberSymbolOf(node)
       if (symbol) overwrittenIntrinsicSymbols.add(symbol)
       else if (
