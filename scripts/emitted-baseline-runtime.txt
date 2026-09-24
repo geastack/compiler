@@ -480,6 +480,7 @@ hand-written-async-generator-object-literal.runtime.ts.cpp 558226c559e2
 harness-is-writable-shape.runtime.js.cpp fed310ce8c79
 hoisted-function-declaration-dependencies.ts.cpp 0b3c26e8f8be
 hoisted-function-declaration.ts.cpp 9e49c197a221
+hoisted-value-not-moved-in-loop.ts.cpp 2476672d5091
 host-accessor-call-through-module-helper.runtime.ts.cpp f77f026ad3d3
 host-function-call-through-captured-binding.runtime.ts.cpp 48c614a521b1
 host-method-alias.runtime.js.cpp cbd713f6a911

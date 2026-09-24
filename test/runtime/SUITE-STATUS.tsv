@@ -149,6 +149,7 @@ guarded-property-class-union.ts	ok
 harness-is-writable-shape.runtime.js	ok
 hoisted-function-declaration-dependencies.ts	ok
 hoisted-function-declaration.ts	ok
+hoisted-value-not-moved-in-loop.ts	ok
 host-method-alias.runtime.js	ok
 in-boxed-key.ts	ok
 indexed-record-define-property.ts	ok

@@ -2,6 +2,7 @@ import type { DeclarationId, IrValueId } from '../identity/ids.js'
 import { cppTypeOf } from '../targets/cpp/types.js'
 import { controlFlowGraphOf, cyclicBlocksOf } from './dominance.js'
 import { implicitSuccessorsOf } from './exception-edges.js'
+import { loopInvariantHoistsOf, type HoistPlan } from './hoist.js'
 import type { IrBlockId, IrBody, IrOperand, IrOperation, ValueTransfer } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 
@@ -36,6 +37,29 @@ export interface SunkStore {
 export class DyingArgumentSet extends Set<IrValueId> {
   /** Keyed by the stored value's read id. */
   readonly sunkStores = new Map<IrValueId, SunkStore>()
+}
+
+/**
+ * Where each value is actually defined once `hoist.ts` has run: its own block,
+ * or the preheader a loop-invariant operation is relocated into.
+ *
+ * Every rule below reasons about the definition's block, and the IR still
+ * places a relocated operation in the loop body beside its use. Read there, a
+ * hoisted `a + '!'` or cell read passed to a call looks defined and consumed in
+ * one block -- the shape that can never be re-entered without being redefined
+ * -- while the printer defines it once above the loop and moves it on the first
+ * iteration, leaving every later iteration an empty string or a null `Ref`
+ * (skytail a2bab0f's mip-upload loop).
+ */
+const landingsOf = (hoists: HoistPlan): ReadonlyMap<IrValueId, IrBlockId> => {
+  const landings = new Map<IrValueId, IrBlockId>()
+  for (const [block, operations] of hoists.into) {
+    for (const operation of operations) {
+      const result = resultOfIrOperation(operation)
+      if (result !== null && hoists.relocated.has(result.id)) landings.set(result.id, block)
+    }
+  }
+  return landings
 }
 
 /**
@@ -97,16 +121,17 @@ export const buildDyingArgumentIndex = (
     }
   }
   for (const body of bodies) {
+    const landings = landingsOf(loopInvariantHoistsOf(body))
     for (const [blockId, block] of body.blocks) {
       for (const operation of [...block.operations, block.terminator]) {
         const produced = resultOfIrOperation(operation)
-        if (produced !== null) definedIn.set(produced.id, blockId)
+        if (produced !== null) definedIn.set(produced.id, landings.get(produced.id) ?? blockId)
         for (const operand of operandsOfIrOperation(operation)) {
           uses.set(operand.value, (uses.get(operand.value) ?? 0) + 1)
           usedIn.set(operand.value, blockId)
         }
         if (operation.kind === 'binding-read') {
-          reads.set(operation.result.id, { declaration: operation.declaration, body, block: blockId })
+          reads.set(operation.result.id, { declaration: operation.declaration, body, block: landings.get(operation.result.id) ?? blockId })
           readCounts.set(operation.declaration, (readCounts.get(operation.declaration) ?? 0) + 1)
         }
         if (operation.kind === 'binding-write') {
@@ -406,13 +431,14 @@ const constructorFormalLastReadsOf = (
  * aliases and borrowed formals are excluded later by the emitter's actual
  * storage ownership, rather than inferred from a read's source type.
  */
-export const ownedDyingValuesOf = (body: IrBody): ReadonlySet<IrValueId> => {
+export const ownedDyingValuesOf = (body: IrBody, hoists: HoistPlan): ReadonlySet<IrValueId> => {
+  const landings = landingsOf(hoists)
   const definitions = new Map<IrValueId, IrBlockId>()
   const uses = new Map<IrValueId, IrBlockId[]>()
   for (const [blockId, block] of body.blocks) {
     for (const operation of [...block.operations, block.terminator]) {
       const result = resultOfIrOperation(operation)
-      if (result) definitions.set(result.id, blockId)
+      if (result) definitions.set(result.id, landings.get(result.id) ?? blockId)
       for (const operand of operandsOfIrOperation(operation)) {
         const readers = uses.get(operand.value) ?? []
         readers.push(blockId)
