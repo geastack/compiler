@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const outDir = resolve(root, 'measurements/cxx')
@@ -27,7 +28,7 @@ const run = (name, { source: checkSource, epilogue = '' }) => {
   checkSource(result.source)
   const binary = resolve(outDir, `${name}-test${executableSuffix}`)
   execFileSync(
-    process.env.CXX || 'clang++',
+    cxx,
     [
       '-std=c++20',
       '-O1',

@@ -4,6 +4,7 @@ import test from 'node:test'
 import { createRequire } from 'node:module'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 // fastify is a devDependency here, not a sibling checkout: this test needs a
@@ -34,7 +35,7 @@ try {
 const bodies = [...new Map(generated.map((args) => [args.at(-1), args])).values()]
 const binary = resolve(root, `measurements/eval-runtime${executableSuffix}`)
 execFileSync(
-  'clang++',
+  cxx,
   [
     '-std=c++20',
     '-O0',

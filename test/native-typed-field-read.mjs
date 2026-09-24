@@ -3,11 +3,12 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const protocolBinary = resolve(root, 'dist/native-typed-field-protocol')
 execFileSync(
-  'clang++',
+  cxx,
   [
     '-std=c++20',
     '-O1',
@@ -29,7 +30,7 @@ assert.deepEqual(result.emissionRefusals, [])
 assert.match(result.source, /gea::nativeFieldGet</)
 const binary = resolve(root, `dist/native-typed-field-read${executableSuffix}`)
 execFileSync(
-  'clang++',
+  cxx,
   [
     '-std=c++20',
     '-O1',

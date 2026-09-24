@@ -4,6 +4,7 @@ import test from 'node:test'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 test('private native cursors preserve key deletion, snapshots, live array growth, holes, and generator state', () => {
   const root = resolve(import.meta.dirname, '..')
@@ -17,7 +18,7 @@ test('private native cursors preserve key deletion, snapshots, live array growth
   assert.match(result.source, /gea::LocalArrayCursor<std::string>/)
   const binary = resolve(root, `measurements/local-iteration${executableSuffix}`)
   execFileSync(
-    'clang++',
+    cxx,
     ['-std=c++20', '-O2', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
     { input: `${result.source}\nint main() { __gea_top_level(); }\n` }
   )

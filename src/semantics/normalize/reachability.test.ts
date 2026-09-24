@@ -7,6 +7,7 @@ import { createProgram, defaultCompilerOptions } from '../program.js'
 import { censusReachability, moduleEvaluationOrder } from './reachability.js'
 import { compile } from '../../compiler.js'
 import { runtimeClassLayoutsOf } from '../../projection/classes.js'
+import { cxx } from '../../../scripts/cxx.mjs'
 
 const entry = resolve('test/fixtures/erased-derived-entry.ts')
 const base = resolve('test/fixtures/erased-derived-base.ts')
@@ -83,11 +84,10 @@ test('a type-only derived receiver retains a valid native inherited field layout
     assert.equal(layout.construct, null, 'a shape-only class must not claim a construction recipe')
     assert.equal(layout.constructor, null, 'no empty constructor stub may be published')
   }
-  const native = spawnSync(
-    process.env['CXX'] ?? 'clang++',
-    ['-std=c++20', '-fsyntax-only', '-I', resolve('src/targets/cpp/runtime'), '-x', 'c++', '-'],
-    { input: result.source, encoding: 'utf8' }
-  )
+  const native = spawnSync(cxx, ['-std=c++20', '-fsyntax-only', '-I', resolve('src/targets/cpp/runtime'), '-x', 'c++', '-'], {
+    input: result.source,
+    encoding: 'utf8'
+  })
   assert.equal(native.status, 0, native.stderr)
 })
 
@@ -100,11 +100,10 @@ test('dynamic constructor reads consider runtime classes while keeping unused su
   assert.ok(result.certificate && result.source, JSON.stringify(result.refusals.filter((item) => item.stage !== 'census')))
   assert.equal(runtimeClassLayoutsOf(result.projection.classes).length, 1)
   assert.ok([...result.projection.classes.values()].some((layout) => layout.layoutOnly))
-  const native = spawnSync(
-    process.env['CXX'] ?? 'clang++',
-    ['-std=c++20', '-fsyntax-only', '-I', resolve('src/targets/cpp/runtime'), '-x', 'c++', '-'],
-    { input: result.source, encoding: 'utf8' }
-  )
+  const native = spawnSync(cxx, ['-std=c++20', '-fsyntax-only', '-I', resolve('src/targets/cpp/runtime'), '-x', 'c++', '-'], {
+    input: result.source,
+    encoding: 'utf8'
+  })
   assert.equal(native.status, 0, native.stderr)
 })
 
@@ -157,11 +156,10 @@ test('a copy override reached only through new this.constructor().copy(this) is 
     ![...result.projection.classes.values()].some((layout) => layout.layoutOnly),
     'Dead is dispatched through .copy(this) and must not stay a shape-only layout'
   )
-  const native = spawnSync(
-    process.env['CXX'] ?? 'clang++',
-    ['-std=c++20', '-fsyntax-only', '-I', resolve('src/targets/cpp/runtime'), '-x', 'c++', '-'],
-    { input: result.source, encoding: 'utf8' }
-  )
+  const native = spawnSync(cxx, ['-std=c++20', '-fsyntax-only', '-I', resolve('src/targets/cpp/runtime'), '-x', 'c++', '-'], {
+    input: result.source,
+    encoding: 'utf8'
+  })
   assert.equal(native.status, 0, native.stderr)
 })
 

@@ -4,6 +4,7 @@ import test from 'node:test'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const compileFixture = (name) => compile({ rootFileNames: [resolve(root, `test/fixtures/${name}.ts`)], projectFileName: null })
@@ -43,7 +44,7 @@ for (const [name, expected] of [
     assert.ok(result.source)
     assertNativeOperations(result.source)
     const binary = resolve(root, 'measurements', name)
-    execFileSync('clang++', ['-std=c++20', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary], {
+    execFileSync(cxx, ['-std=c++20', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary], {
       input: `${result.source}\nint main() { __gea_top_level(); }\n`,
       encoding: 'utf8'
     })
@@ -62,7 +63,7 @@ test('a block that can complete normally falls through into the next clause', ()
   assert.deepEqual(result.emissionRefusals, [])
   assert.ok(result.source)
   const binary = resolve(root, 'measurements', 'switch-normal-completion')
-  execFileSync('clang++', ['-std=c++20', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary], {
+  execFileSync(cxx, ['-std=c++20', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary], {
     input: `${result.source}\nint main() { __gea_top_level(); }\n`,
     encoding: 'utf8'
   })
@@ -97,7 +98,7 @@ test('optional chains preserve nullish checks and parenthesized boundaries', () 
   assert.ok(result.source)
   assertNativeOperations(result.source)
   const binary = resolve(root, `measurements/optional-chain-boundaries${executableSuffix}`)
-  execFileSync('clang++', ['-std=c++20', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary], {
+  execFileSync(cxx, ['-std=c++20', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary], {
     input: `${result.source}\nint main() { __gea_top_level(); }\n`,
     encoding: 'utf8'
   })
@@ -113,7 +114,7 @@ test('dynamic JSON parses and stringifies through its declared carrier', () => {
   assert.ok(result.source)
   const binary = resolve(root, `measurements/dynamic-json${executableSuffix}`)
   execFileSync(
-    'clang++',
+    cxx,
     ['-std=c++20', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
     { input: `${result.source}\nint main() { __gea_top_level(); }\n` }
   )

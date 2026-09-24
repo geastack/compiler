@@ -9,6 +9,7 @@ import { existsSync } from 'node:fs'
 import { createModuleResolver, mappedTypeScriptSource } from '../dist/semantics/module-resolution.js'
 import { createProgram, defaultCompilerOptions } from '../dist/semantics/program.js'
 import { compile } from '../dist/compiler.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 const compiler = resolve(import.meta.dirname, '..')
 const home = resolve(compiler, 'test/fixtures/module-resolution')
@@ -420,7 +421,7 @@ test('an automatically loaded package compiles, links, and executes native C++',
   assert.ok(result.certificate)
   assert.deepEqual(result.emissionRefusals, [])
   const binary = resolve(compiler, `measurements/module-resolution${executableSuffix}`)
-  execFileSync('clang++', ['-std=c++20', `-I${resolve(compiler, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary], {
+  execFileSync(cxx, ['-std=c++20', `-I${resolve(compiler, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary], {
     input: `${result.source}\nint main() { __gea_top_level(); }\n`
   })
   assert.equal(execFileSync(binary, { encoding: 'utf8' }).trim(), '43')

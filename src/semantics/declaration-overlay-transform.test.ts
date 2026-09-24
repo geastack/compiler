@@ -6,6 +6,7 @@ import ts from 'typescript'
 import { compile } from '../compiler.js'
 import { representationKey } from '../representation/model.js'
 import { declarationOverlayTransform, statesNothingWithin } from './declaration-overlay-transform.js'
+import { cxx } from '../../scripts/cxx.mjs'
 
 // Windows' CreateProcess appends `.exe` to a name that has none, so a binary
 // linked without an extension cannot be spawned at all.
@@ -154,7 +155,7 @@ const compileAndRun = (source: string, extraSources: ReadonlyMap<string, string>
   assert.ok(result.source)
   assert.deepEqual(result.representations.violations, [])
   const binary = resolve(`measurements/declaration-accessors${executableSuffix}`)
-  const built = spawnSync('clang++', ['-std=c++20', '-x', 'c++', '-', '-I', resolve('src/targets/cpp/runtime'), '-o', binary], {
+  const built = spawnSync(cxx, ['-std=c++20', '-x', 'c++', '-', '-I', resolve('src/targets/cpp/runtime'), '-o', binary], {
     input: `${result.source}\nint main() { __gea_top_level(); return 0; }\n`,
     encoding: 'utf8'
   })

@@ -4,6 +4,7 @@ import { join, resolve, relative, basename, dirname } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
+import { cxx } from './cxx.mjs'
 // THE compiler. There is one, it is `dist/`, and every agent's changes rebuild
 // it -- see `CLAUDE.md`'s "One compiler".
 //
@@ -576,13 +577,9 @@ for (const row of rows) {
     // check, both declare the same UIKit, and the simulator sysroot is the one
     // present on a machine with Xcode and no device provisioning.
     const sdk = row.platform === 'ios' ? iosSdkArguments() : []
-    execFileSync(
-      'clang++',
-      ['-std=c++20', '-fsyntax-only', ...language, ...sdk, `-I${cxxDir}`, ...nativeInclude, ...engineIncludes, path],
-      {
-        stdio: ['ignore', 'pipe', 'pipe']
-      }
-    )
+    execFileSync(cxx, ['-std=c++20', '-fsyntax-only', ...language, ...sdk, `-I${cxxDir}`, ...nativeInclude, ...engineIncludes, path], {
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
     row.compiles = 'yes'
   } catch (error) {
     row.compiles = 'NO'

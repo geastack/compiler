@@ -2,6 +2,7 @@ import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 for (const name of [
@@ -37,7 +38,7 @@ for (const name of [
 ]) {
   const binary = resolve(root, 'measurements/cxx', `${name}-test${executableSuffix}`)
   execFileSync(
-    process.env.CXX || 'clang++',
+    cxx,
     [
       '-std=c++20',
       '-O1',

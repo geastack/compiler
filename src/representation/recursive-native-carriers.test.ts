@@ -10,6 +10,7 @@ import { createRepresentationDeriver } from './derive.js'
 import type { SealedRepresentationPlan } from './plan.js'
 import { representationKey, walkRepresentation, type Representation } from './model.js'
 import { verifyRepresentationPlan } from './verify.js'
+import { cxx } from '../../scripts/cxx.mjs'
 
 const type = (name: string): StructuralTypeId => name as StructuralTypeId
 const declaration = (name: string): DeclarationId => name as DeclarationId
@@ -40,9 +41,8 @@ const emittedFor = (plan: SealedRepresentationPlan): string => {
 }
 
 const syntaxCheckRecursiveContainers = (declarations: string, completenessChecks: string): void => {
-  const compiler = process.env.CXX ?? 'clang++'
   const checked = spawnSync(
-    compiler,
+    cxx,
     ['-std=c++20', '-fsyntax-only', `-I${resolve(import.meta.dirname, '../../src/targets/cpp/runtime')}`, '-x', 'c++', '-'],
     {
       input: `#include "gea_runtime.h"\n${declarations}\n${completenessChecks}\n`,
@@ -50,7 +50,7 @@ const syntaxCheckRecursiveContainers = (declarations: string, completenessChecks
     }
   )
   const diagnostics = [checked.stdout, checked.stderr, checked.error?.message].filter(Boolean).join('\n')
-  assert.equal(checked.status, 0, `${compiler} rejected generated recursive-container declarations:\n${diagnostics}`)
+  assert.equal(checked.status, 0, `${cxx} rejected generated recursive-container declarations:\n${diagnostics}`)
 }
 
 test('derivation closes a recursive alias and its collection body at one wrapper identity', () => {

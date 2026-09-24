@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
 import { walkRepresentation } from '../dist/representation/model.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 
@@ -32,7 +33,7 @@ test('optional record fields distinguish absence from present undefined and dele
   assert.doesNotMatch(operations, /gea_cpp_value|Value::box\(gea::Value::Tag::Object|\.callAsFunction/)
   const binary = resolve(root, `measurements/native-optional-record-presence${executableSuffix}`)
   execFileSync(
-    'clang++',
+    cxx,
     ['-std=c++20', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
     { input: `${result.source}\nint main() { __gea_top_level(); }\n` }
   )

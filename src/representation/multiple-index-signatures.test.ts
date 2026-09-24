@@ -13,6 +13,7 @@ import { createRepresentationDeriver } from './derive.js'
 import type { Representation } from './model.js'
 import type { SealedRepresentationPlan } from './plan.js'
 import { verifyRepresentationPlan } from './verify.js'
+import { cxx } from '../../scripts/cxx.mjs'
 
 // Windows' CreateProcess appends `.exe` to a name that has none, so a binary
 // linked without an extension cannot be spawned at all.
@@ -126,7 +127,6 @@ test('compatible string+number indexes canonicalize while symbols retain identit
   )
   assert.match(declarations, /gea_value\.assign\(fixed\)/)
 
-  const compiler = process.env.CXX ?? 'clang++'
   const executable = resolve(import.meta.dirname, `../../node_modules/.bin/gea-multiple-index-signatures-test${executableSuffix}`)
   const struct = cppRecordStructName(shape)
   const source = `
@@ -250,12 +250,12 @@ int main() {
 `
   try {
     const compiled = spawnSync(
-      compiler,
+      cxx,
       ['-std=c++20', `-I${resolve(import.meta.dirname, '../../src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', executable],
       { input: source, encoding: 'utf8' }
     )
     const diagnostics = [compiled.stdout, compiled.stderr, compiled.error?.message].filter(Boolean).join('\n')
-    assert.equal(compiled.status, 0, `${compiler} rejected the generated multi-sidecar record:\n${diagnostics}`)
+    assert.equal(compiled.status, 0, `${cxx} rejected the generated multi-sidecar record:\n${diagnostics}`)
     const executed = spawnSync(executable, [], { encoding: 'utf8' })
     const runtimeDiagnostics = [executed.stdout, executed.stderr, executed.error?.message].filter(Boolean).join('\n')
     assert.equal(executed.status, 0, `generated multi-sidecar record failed at runtime:\n${runtimeDiagnostics}`)
@@ -299,7 +299,6 @@ test('number indexes use canonical PropertyKey text without NaN ordering', () =>
   assert.match(declarations, /NativeIndexAttributeTable<std::string>/)
   assert.doesNotMatch(declarations, /NativeIndexAttributeTable<double>/)
 
-  const compiler = process.env.CXX ?? 'clang++'
   const executable = resolve(import.meta.dirname, `../../node_modules/.bin/gea-number-property-key-test${executableSuffix}`)
   const struct = cppRecordStructName(recordShape)
   const source = `
@@ -342,12 +341,12 @@ int main() {
 `
   try {
     const compiled = spawnSync(
-      compiler,
+      cxx,
       ['-std=c++20', `-I${resolve(import.meta.dirname, '../../src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', executable],
       { input: source, encoding: 'utf8' }
     )
     const diagnostics = [compiled.stdout, compiled.stderr, compiled.error?.message].filter(Boolean).join('\n')
-    assert.equal(compiled.status, 0, `${compiler} rejected canonical number-key storage:\n${diagnostics}`)
+    assert.equal(compiled.status, 0, `${cxx} rejected canonical number-key storage:\n${diagnostics}`)
     const executed = spawnSync(executable, [], { encoding: 'utf8' })
     const runtimeDiagnostics = [executed.stdout, executed.stderr, executed.error?.message].filter(Boolean).join('\n')
     assert.equal(executed.status, 0, `canonical number-key runtime regression failed:\n${runtimeDiagnostics}`)
@@ -377,7 +376,7 @@ test('symbol storage may use a different native value carrier from the text doma
   const rendered = cppRecordDeclarations(planOf(carrier), deriver, new Map(), emptyReactivePlan, new Map())
   assert.deepEqual(rendered.refused, [])
   const checked = spawnSync(
-    process.env.CXX ?? 'clang++',
+    cxx,
     ['-std=c++20', '-fsyntax-only', `-I${resolve(import.meta.dirname, '../../src/targets/cpp/runtime')}`, '-x', 'c++', '-'],
     { input: `#include "gea_runtime.h"\n${rendered.declarations.join('\n')}\n`, encoding: 'utf8' }
   )
@@ -583,7 +582,7 @@ int main() {
 `
   try {
     const compiled = spawnSync(
-      process.env.CXX ?? 'clang++',
+      cxx,
       [
         '-std=c++20',
         '-fsanitize=address,undefined',

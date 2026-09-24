@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
+import { cxx } from '../scripts/cxx.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const fixture = resolve(root, 'test/runtime/dynamic-fallback.js')
@@ -23,7 +24,7 @@ test('negative-array source retains Proxy behavior and target identity in the C+
   assert.ok(result.source)
   const binary = resolve(root, `measurements/dynamic-fallback${executableSuffix}`)
   execFileSync(
-    'clang++',
+    cxx,
     ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
     {
       input: `${result.source}\nint main() { try { __gea_top_level(); } catch (const gea::Value& error) { std::fprintf(stderr, "%s", gea::host::runtimeErrorString(error).c_str()); return 1; } }\n`,
@@ -43,7 +44,7 @@ test('prototype reassignment and prototype-method definition on a plain JS const
   assert.ok(result.source)
   const binary = resolve(root, `measurements/dynamic-fallback-prototype${executableSuffix}`)
   execFileSync(
-    'clang++',
+    cxx,
     ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
     {
       input: `${result.source}\nint main() { try { __gea_top_level(); } catch (const gea::Value& error) { std::fprintf(stderr, "%s", gea::host::runtimeErrorString(error).c_str()); return 1; } }\n`,
@@ -110,7 +111,7 @@ for (const [name, source] of cases) {
     assert.deepEqual(result.emissionRefusals, [])
     const binary = resolve(root, `measurements/dynamic-fallback${executableSuffix}`)
     execFileSync(
-      'clang++',
+      cxx,
       [
         '-std=c++20',
         '-O0',
@@ -148,7 +149,7 @@ test('the flag leaves a statically compilable program native', () => {
 test('C++ proxy runtime preserves invariants, live handlers, receivers and revocation', () => {
   const binary = resolve(root, `measurements/dynamic-proxy-runtime${executableSuffix}`)
   execFileSync(
-    'clang++',
+    cxx,
     [
       '-std=c++20',
       '-O0',
@@ -183,7 +184,7 @@ test('CLI ships the fallback runtime and links both C++ layouts', () => {
     const files = readFileSync(resolve(root, 'measurements/geatsc-sources.txt'), 'utf8').trim().split('\n')
     const binary = resolve(root, `measurements/dynamic-fallback-cli${executableSuffix}`)
     execFileSync(
-      'clang++',
+      cxx,
       ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'measurements')}`, ...files, '-x', 'c++', '-', '-o', binary],
       {
         input: 'extern void __gea_top_level(); int main() { __gea_top_level(); }\n',
