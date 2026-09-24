@@ -4,12 +4,13 @@ import type { SemanticEdge } from '../../model/edges.js'
 import type { OperandEvaluation, SemanticOperand } from '../../model/operands.js'
 import type { SemanticOperation } from '../../model/operations.js'
 import type { SelectedSignature } from '../../model/selected-signature.js'
+import { implicitArgumentsSlotOf } from '../implicit-arguments.js'
 import { isFixedArgumentsSpreadAt } from '../implicit-arguments-tuple.js'
 import type { CensusCandidate } from '../census.js'
 import type { ProducerContext } from '../producer-context.js'
 import { argumentsObjectValueAt, isArgumentsObjectIdentifier } from './bindings.js'
 import { operand } from './mint.js'
-import { hasNativeIterationCursor, sourceForValue } from './shared.js'
+import { hasNativeIterationCursor, isPlainArrayType, sourceForValue } from './shared.js'
 import { isDynamicIterationSource } from './protocol.js'
 import {
   isClosedTupleSpread,
@@ -20,7 +21,8 @@ import {
   spreadReceiverOf,
   tupleSpreadReads,
   declaredTupleRestArityOf,
-  declaredTupleRestSpreadReads
+  declaredTupleRestSpreadReads,
+  widenedWithUndefined
 } from './tuple-spread.js'
 
 /**
@@ -68,10 +70,17 @@ import {
  * indistinguishable to the callee, which is exactly what licenses reading the
  * declared arity unconditionally instead of the tuple's true runtime length.
  *
+ * A fourth shape fills NAMED formals from a runtime-length Array spread as
+ * the call's LAST argument: an Array's iteration is its index reads in order,
+ * so each formal from the landing position on reads its own index, and a
+ * rest formal after them takes a range copy of the remainder
+ * (`admitsFixedFormalArraySpread`).
+ *
  * Everything else -- a user-defined iterable, a hand-written
  * `[Symbol.iterator]()`, an optional-tailed tuple anywhere but a call's last
- * argument or into a rest formal, a natively iterable source in a NAMED
- * formal's position -- is refused by name. None of those has a compile-time
+ * argument or into a rest formal, a runtime-length Array followed by more
+ * arguments, a Set, Map, string or generator in a NAMED formal's position --
+ * is refused by name. None of those has a compile-time
  * arity, and inventing one is the failure mode this refusal exists to
  * prevent.
  */
@@ -207,6 +216,107 @@ const admitsOpenTupleSpread = (
   return selected === null || (restFrom !== null && scan + open.fixed.length >= restFrom)
 }
 
+/**
+ * Whether the spread at `index` is a runtime-length Array filling the callee's
+ * NAMED formals positionally: `new Color( ...params )` against `constructor(
+ * r, g, b )`, `super.build( builder, ...params )` against `build( builder,
+ * output = null )`.
+ *
+ * ArgumentListEvaluation iterates the Array and the formals bind what came
+ * out left to right. An Array's own iteration is its index reads in order,
+ * with nothing user-written in between, so the formal at offset `k` from the
+ * spread's landing position binds exactly `xs[k]`: `undefined` past the end
+ * (an omitted argument, which runs a default), and every value past the last
+ * named formal either dropped or, when the callee has a rest formal, range
+ * copied into it from offset `k`. The length is a runtime fact, but no
+ * formal's binding depends on it -- which is the whole of what a named formal
+ * needs.
+ *
+ * It must be the LAST argument: a written argument after it lands at a
+ * position only the Array's runtime length knows. The magic `arguments` object
+ * has its own positional expansion (`admitsFixedArgumentsSpread`), and a Set,
+ * a Map, a string or a generator has no index reads that equal its iteration
+ * (a string iterates code points, a generator runs user code per step), so
+ * each keeps its refusal.
+ */
+const admitsFixedFormalArraySpread = (
+  context: ProducerContext,
+  args: readonly ts.Expression[],
+  index: number,
+  selected: SelectedSignature | null
+): boolean => {
+  const argument = args[index]
+  return (
+    !!argument &&
+    ts.isSpreadElement(argument) &&
+    selected !== null &&
+    index === args.length - 1 &&
+    !isArgumentsObjectIdentifier(argument.expression, context.checker) &&
+    arrayElementTypeOf(context, context.types.typeAt(argument.expression)) !== null
+  )
+}
+
+/** The element of a plain or named Array (`isPlainArrayType`), or `null` for anything else. */
+const arrayElementTypeOf = (context: ProducerContext, type: StructuralTypeId): StructuralTypeId | null => {
+  if (!isPlainArrayType(context, type)) return null
+  const shape = context.table.get(type).shape
+  const array = shape.kind === 'declared' && shape.body !== null ? context.table.get(shape.body).shape : shape
+  return array.kind === 'array' ? array.element : null
+}
+
+/**
+ * Where a fixed-formal spread's values stop filling formals and start filling
+ * a packed tail: the written rest formal, or else the phantom rest slot of a
+ * callee that reads its own `arguments` (`implicitArgumentsSlotOf`).
+ *
+ * The phantom has no declaration, so `SelectedSignature` does not mark it
+ * `rest` -- yet the callable ABI packs it as one (`structural-parts.ts`), and
+ * the body's `arguments` is the declared formals followed by it
+ * (`argumentsObjectValueAt`). Filling it as a named formal would hand the
+ * frame one element read where the language hands it every value past the
+ * declared formals; range-copying the remainder into it is what keeps
+ * `remove( ...this.children )` seeing every child through `arguments`.
+ */
+const fixedFillTailOf = (context: ProducerContext, candidate: CensusCandidate, restFrom: number | null): number | null => {
+  if (restFrom !== null) return restFrom
+  const node = candidate.node
+  if (!ts.isCallExpression(node) && !ts.isNewExpression(node)) return null
+  const signature = context.checker.getResolvedSignature(node)
+  return signature ? (implicitArgumentsSlotOf(signature)?.ordinal ?? null) : null
+}
+
+/**
+ * Whether a formal's slot can hold the `undefined` an out-of-range read hands
+ * it. An optional or defaulted formal's slot is widened with `undefined`
+ * (`SignatureParameter.slot`), and a dynamic one holds anything.
+ */
+const slotAdmitsUndefined = (context: ProducerContext, slot: StructuralTypeId): boolean => {
+  const shape = context.table.get(slot).shape
+  if (shape.kind === 'primitive') return shape.primitive === 'undefined' || shape.primitive === 'any' || shape.primitive === 'unknown'
+  if (shape.kind !== 'union') return false
+  return shape.members.some((member) => {
+    const arm = context.table.get(member).shape
+    return arm.kind === 'primitive' && arm.primitive === 'undefined'
+  })
+}
+
+/**
+ * The type the read at one formal carries. A slot that holds `undefined`
+ * reads `element | undefined`, exactly what an out-of-range `[[Get]]` yields
+ * (the same widening `maxArityTupleElementTypesOf` gives an optional tuple
+ * position). A slot that cannot is a REQUIRED formal whose declared type
+ * excludes `undefined` -- the checker refuses that spread in a checked file,
+ * so this is unchecked JavaScript stating a contract -- and it reads the bare
+ * element, which is an ordinary unchecked index read: present, or an abort,
+ * never a value the slot cannot hold.
+ */
+const fixedFormalReadType = (context: ProducerContext, element: StructuralTypeId, slot: StructuralTypeId): StructuralTypeId => {
+  if (!slotAdmitsUndefined(context, slot)) return element
+  const shape = context.table.get(element).shape
+  if (shape.kind === 'primitive' && (shape.primitive === 'any' || shape.primitive === 'unknown')) return element
+  return widenedWithUndefined(context, element)
+}
+
 /** A final magic `arguments` spread can fill a fixed signature positionally. */
 const admitsFixedArgumentsSpread = (
   context: ProducerContext,
@@ -298,7 +408,19 @@ export const buildArgumentOperands = (
       // against, the same shape `invocationArgumentTarget`
       // (`preflight/invocation-arguments.ts`) already treats as satisfied
       // outright for a dynamic callee's ordinary arguments.
-      if (selected !== null && (restFrom === null || (scan < restFrom && !restAbsorbsLeadingFormals(context, selected, scan, restFrom)))) {
+      if (
+        selected !== null &&
+        (restFrom === null || (scan < restFrom && !restAbsorbsLeadingFormals(context, selected, scan, restFrom))) &&
+        !admitsFixedFormalArraySpread(context, args, scanIndex, selected)
+      ) {
+        if (arrayElementTypeOf(context, context.types.typeAt(argument.expression)) !== null) {
+          return {
+            kind: 'refused',
+            reason:
+              'a spread of a runtime-length array that fills named formals must be the last argument; ' +
+              'a written argument after it lands at a position only the array length knows'
+          }
+        }
         // How many values a native range copy produces is a runtime fact.
         // Matching it against named formals would need the arity the iteration
         // produces, which is exactly what this compiler does not have -- so the
@@ -389,6 +511,36 @@ export const buildArgumentOperands = (
         edges.push(...expanded.edges)
         for (const slot of expanded.positions) {
           operands.push(operand('argument', position, slot.source, slot.type, evaluation))
+          position += 1
+        }
+        continue
+      }
+      if (
+        selected !== null &&
+        (restFrom === null || (position < restFrom && !restAbsorbsLeadingFormals(context, selected, position, restFrom))) &&
+        admitsFixedFormalArraySpread(context, args, buildIndex, selected)
+      ) {
+        const receiver = spreadReceiverOf(context, argument.expression)
+        const element = receiver ? arrayElementTypeOf(context, receiver.type) : null
+        if (!receiver || element === null) {
+          return { kind: 'refused', reason: 'no normalized operation identifies the array a fixed-formal spread reads' }
+        }
+        const tailFrom = fixedFillTailOf(context, candidate, restFrom)
+        const formals = selected.parameters.slice(position, Math.max(position, tailFrom ?? selected.parameters.length))
+        const head = mintPositionalSpreadReads(
+          context,
+          candidate,
+          receiver,
+          formals.map((formal) => fixedFormalReadType(context, element, formal.slot))
+        )
+        operations.push(...head.operations)
+        edges.push(...head.edges)
+        for (const slot of head.positions) {
+          operands.push(operand('argument', position, slot.source, slot.type, evaluation))
+          position += 1
+        }
+        if (tailFrom !== null) {
+          operands.push({ ...operand(spreadArgumentRole, position, receiver.source, receiver.type, evaluation), from: formals.length })
           position += 1
         }
         continue

@@ -304,7 +304,7 @@ export const maxArityTupleElementTypesOf = (context: ProducerContext, type: Stru
   return shape.elements.map((element) => (element.optional ? widenedWithUndefined(context, element.type) : element.type))
 }
 
-const widenedWithUndefined = (context: ProducerContext, type: StructuralTypeId): StructuralTypeId => {
+export const widenedWithUndefined = (context: ProducerContext, type: StructuralTypeId): StructuralTypeId => {
   const undefinedType = context.table.intern({ kind: 'primitive', primitive: 'undefined' })
   if (type === undefinedType) return type
   const shape = context.table.get(type).shape
