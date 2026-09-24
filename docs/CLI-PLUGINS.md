@@ -44,6 +44,12 @@ option pairs are errors.
 
 - Gea, Apple native and native WebGL remain installed, in their existing order.
   Explicit custom plugins are appended in command-line order.
+- `--no-webgl-plugin` (or `GEA_WEBGL_PLUGIN=0` in the environment, for builds
+  that reach the compiler through a script) leaves the native WebGL built-in
+  out: the `@geastack/native-webgl-angle` package is not loaded, so none of
+  its source rewrites, `absentGlobals` or host functions reach the program. A
+  `--plugin` naming that package's legacy entry is dropped with it. The API
+  spelling is `compile({ webglPlugin: false })`.
 - Repeating the same resolved module loads and instantiates it once. Relative
   paths, absolute paths, package aliases, file URLs and symlinks resolving to
   the same real file count as the same module.

@@ -1,0 +1,10 @@
+{
+  "modules": [
+    {
+      "file": "entry.ts",
+      "isEntry": true,
+      "imports": [{ "specifier": "./vendor/fake-three/src/renderer.js", "resolvedId": "vendor/fake-three/src/renderer.js" }]
+    },
+    { "file": "vendor/fake-three/src/renderer.js", "imports": [] }
+  ]
+}
