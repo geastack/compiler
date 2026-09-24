@@ -10,8 +10,8 @@ import type { ExplicitThisCallFrame, ReceiverReference, ValueFlowIndex, ValueWri
 import { sourceClassDataMemberPlanOf } from './flow/source-class-data.js'
 import { sourceRecordSlotValuesOf } from './flow/source-record-data.js'
 import { isRealCallableDeclaration, runtimeParametersOf } from './flow/targets.js'
-import { seededOriginSolver } from './flow/seeded-origins.js'
-import { closedCallableAuthorityOf } from './flow/callable-reach.js'
+import { isVacuousOrigin, seededOriginSolver } from './flow/seeded-origins.js'
+import { closedCallableAuthorityOf, closedValueOriginAuthorityOf } from './flow/callable-reach.js'
 import type { SourceInvocationFact, SourceInvocationFrame } from './flow/invocation-facts.js'
 import { sourceConstructorSelectionsOf, sourceConstructorReturnValuesOf } from './flow/member-call-forwarding.js'
 import { wholeProgram, type ProgramReachability } from './reachability.js'
@@ -116,6 +116,8 @@ const isDirectAssignmentTarget = (node: ts.Node): boolean => {
  *   holds all of them.
  * - `noComputedKeys`: a key set's intrinsic assumption failed against the
  *   census's own result; every computed key is unknown.
+ * - `rejectedFieldProofs`: field reads whose closed value set rested on an
+ *   intrinsic assumption that failed; their values are unknown again.
  */
 type CensusSeed = {
   readonly names: ReadonlySet<string>
@@ -123,13 +125,15 @@ type CensusSeed = {
   readonly objectPrototypeKeys: MutationKeySet
   readonly noComputedKeys: boolean
   readonly rejectedCallableProofs: ReadonlySet<ts.Node>
+  readonly rejectedFieldProofs: ReadonlySet<ts.Node>
 }
 const initialCensusSeed: CensusSeed = {
   names: new Set(),
   all: false,
   objectPrototypeKeys: { names: new Set(), numeric: false, every: false },
   noComputedKeys: false,
-  rejectedCallableProofs: new Set()
+  rejectedCallableProofs: new Set(),
+  rejectedFieldProofs: new Set()
 }
 
 /**
@@ -952,13 +956,38 @@ export const censusGlobalHostMutations = (
     }
     allIntrinsicTrustInvalidated = true
   }
+  // A field's value set comes from the shared closed source-slot proof, which
+  // accounts for every write to the slot and every escape of its holders. Its
+  // intrinsic assumptions are checked against this run's own result at the end.
+  const fieldProofRequirements = new Map<ts.Node, readonly IntrinsicProtocolRequirement[]>()
+  const closedFieldValuesOf = (access: ts.PropertyAccessExpression | ts.ElementAccessExpression): readonly ts.Expression[] | null => {
+    if (trustSeed.rejectedFieldProofs.has(access)) return null
+    const read = (): readonly ts.Expression[] | null => closedValueOriginAuthorityOf(checker, flow, access).fieldValuesOf(access)
+    const ledger = deferredIntrinsicProtocolLedgerOf(flow)
+    if (!ledger) return read()
+    const proof = ledger.capture(read)
+    if (proof.value !== null && proof.requirements.length > 0) fieldProofRequirements.set(access, proof.requirements)
+    return proof.value
+  }
   // Structural compatibility cannot turn a fresh allocation into an existing
   // host object: {} is assignable to almost every native interface. Follow
   // every reachable whole-cell write before using that conservative type test.
+  //
+  // A field is followed through its closed value set. three's BufferGeometry
+  // types `morphAttributes` as JSDoc `{Object}`, the global `Object` interface
+  // under `strict`, so the type test reads it as possibly any native object;
+  // but its only stores are two `{}` literals. Taking the type test there made
+  // `this.morphAttributes[ name ] = array` revoke all intrinsic trust, and with
+  // it every host global binding in the program.
   const freshLiteralOrigin = seededOriginSolver<ts.Expression>((expression) => {
     const current = unwrapErasedExpression(expression)
     if (ts.isObjectLiteralExpression(current)) return { seed: true, admitted: true, dependencies: [] }
+    if (isVacuousOrigin(flow, current)) return { seed: false, admitted: true, dependencies: [] }
     if (ts.isConditionalExpression(current)) return { seed: false, admitted: true, dependencies: [current.whenTrue, current.whenFalse] }
+    if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+      const stored = closedFieldValuesOf(current)
+      return { seed: false, admitted: stored !== null && stored.length > 0, dependencies: stored ?? [] }
+    }
     const declaration = ts.isIdentifier(current) ? bindingOf(current) : null
     if (
       !declaration ||
@@ -5790,7 +5819,24 @@ export const censusGlobalHostMutations = (
       )
         rejectedCallableProofs.add(call)
     const invocationFailed = rejectedCallableProofs.size > trustSeed.rejectedCallableProofs.size
-    if (distrusted.length > 0 || (written.every && !trustSeed.all) || inheritedGrew || assumptionFailed || invocationFailed) {
+    const rejectedFieldProofs = new Set(trustSeed.rejectedFieldProofs)
+    for (const [access, requirements] of fieldProofRequirements)
+      if (
+        failedIntrinsicProtocolRequirements(
+          { checker, identities, globalHostMutationTaint: tainted, isStandardLibraryDeclaration },
+          requirements
+        ).length > 0
+      )
+        rejectedFieldProofs.add(access)
+    const fieldProofFailed = rejectedFieldProofs.size > trustSeed.rejectedFieldProofs.size
+    if (
+      distrusted.length > 0 ||
+      (written.every && !trustSeed.all) ||
+      inheritedGrew ||
+      assumptionFailed ||
+      invocationFailed ||
+      fieldProofFailed
+    ) {
       if (process.env['GEA_DEBUG_GLOBAL_MUTATION'])
         process.stderr.write(
           `global host census re-run: distrusting ${written.every ? '<all>' : distrusted.join(', ') || '-'}` +
@@ -5819,7 +5865,8 @@ export const censusGlobalHostMutations = (
             every: trustSeed.objectPrototypeKeys.every || objectPrototypeKeys.every
           },
           noComputedKeys: trustSeed.noComputedKeys || assumptionFailed,
-          rejectedCallableProofs
+          rejectedCallableProofs,
+          rejectedFieldProofs
         }
       )
     }
