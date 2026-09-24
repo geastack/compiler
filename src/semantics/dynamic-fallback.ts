@@ -174,6 +174,39 @@ export const anyKeyedWriteTypes = (
   return selected
 }
 
+/**
+ * An object literal defining a key whose type states no key domain -- `{
+ * [context.label]: id }` over an `any` label, fastify's child-logger bindings
+ * and find-my-way's constraint notes. The checker still invents a layout for
+ * it (a numeric index signature, for an `any` key), and a string or symbol
+ * key stored under that layout would be stored under the wrong kind of key.
+ * The literal is the dynamic object the program builds: a real property table
+ * that takes the key through ToPropertyKey at run time.
+ */
+export const anyKeyedLiteralTypes = (
+  files: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+  types: StructuralMapper
+): ReadonlySet<StructuralTypeId> => {
+  const selected = new Set<StructuralTypeId>()
+  const statesNoKeyDomain = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isObjectLiteralExpression(node) &&
+      node.properties.some(
+        (property) =>
+          property.name &&
+          ts.isComputedPropertyName(property.name) &&
+          statesNoKeyDomain(checker.getTypeAtLocation(property.name.expression))
+      )
+    )
+      selected.add(types.typeAt(node))
+    ts.forEachChild(node, visit)
+  }
+  for (const file of files) if (!file.isDeclarationFile) visit(file)
+  return selected
+}
+
 export const proxyFallbackTypes = (
   files: readonly ts.SourceFile[],
   checker: ts.TypeChecker,

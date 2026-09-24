@@ -20,7 +20,14 @@ import {
 } from '../../representation/template-object.js'
 import { fieldPresenceOf, staticOwnFieldsOf } from '../../representation/record-fields.js'
 import { regexpFlagSupportKeyOf, spreadSourceCarrierKeyOf } from '../../ir/certify/carrier-keys.js'
-import { createCppEmitBlockedError, defineValue, internTemplateObject, operandText, type EmitContext } from './emit-context.js'
+import {
+  createCppEmitBlockedError,
+  defineValue,
+  internTemplateObject,
+  operandText,
+  staticPropertyKeyText,
+  type EmitContext
+} from './emit-context.js'
 import { memberAccessOperator } from './emit-carrier-members.js'
 import {
   cppArrayExtensionStructName,
@@ -170,7 +177,7 @@ export const emitAllocateRecord = (ctx: EmitContext, lines: string[], operation:
     lines.push(`${name} = gea::Value::object();`)
     for (const field of operation.fields) {
       lines.push(
-        `${name}.setProperty(gea::PropertyKey::string(${cppStringLiteral(field.key)}), ${boxedValueText(ctx, field.value, 'dynamic object field')});`
+        `${name}.setProperty(${staticPropertyKeyText(ctx.wellKnownSymbols, field.key)}, ${boxedValueText(ctx, field.value, 'dynamic object field')});`
       )
     }
     return

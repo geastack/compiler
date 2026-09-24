@@ -4,7 +4,13 @@ import { objectShapePrototypeMethods } from '../../../projection/callee.js'
 import type { RecordField, Representation } from '../../../representation/model.js'
 import { representationKey } from '../../../representation/model.js'
 import type { GetOperation, IrOperand } from '../../../ir/model.js'
-import { createCppEmitBlockedError, operandText, type EmitContext, type PrototypeMethodRead } from '../emit-context.js'
+import {
+  createCppEmitBlockedError,
+  operandText,
+  staticPropertyKeyText,
+  type EmitContext,
+  type PrototypeMethodRead
+} from '../emit-context.js'
 import type { IrValueId } from '../../../identity/ids.js'
 import { classMemberOf, lazyArrowFieldPlanOf, lazyMaterializedFieldText } from '../class-layout.js'
 import { alignedValueText, widenedStoreText } from '../emit-narrowing.js'
@@ -222,8 +228,8 @@ export const refuseObjectReceiver = (member: string, representation: Representat
 }
 
 /** The caller supplies the value produced by its certified conversion. */
-export const setOwnCallableText = (receiver: string, key: string, value: string): string =>
-  `gea::callableDynamicSet(${receiver}, gea::PropertyKey::string(${cppStringLiteral(key)}), ${value});`
+export const setOwnCallableText = (ctx: EmitContext, receiver: string, key: string, value: string): string =>
+  `gea::callableDynamicSet(${receiver}, ${staticPropertyKeyText(ctx.wellKnownSymbols, key)}, ${value});`
 
 /**
  * The receiver question, answered once.
@@ -495,7 +501,7 @@ export const setOwnText = (
     if (ownership === 'shared-refcount') {
       const boxed = widenedStoreText({ kind: 'dynamic', reason: 'declared-any-never-narrowed' }, value.representation, value.text)
       if (boxed !== null) {
-        return `gea::nativeDynamicSet(${view.receiver}, gea::PropertyKey::string(${cppStringLiteral(key)}), ${boxed});`
+        return `gea::nativeDynamicSet(${view.receiver}, ${staticPropertyKeyText(ctx.wellKnownSymbols, key)}, ${boxed});`
       }
     }
     throw createCppEmitBlockedError(

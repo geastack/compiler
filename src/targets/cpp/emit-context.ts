@@ -33,6 +33,7 @@ import {
   cppBodyName,
   cppConstructName,
   cppNarrowedIntegerType,
+  cppRecordFieldKeyIsSymbol,
   cppStringLiteral,
   cppStringViewLiteral,
   cppTypeOf,
@@ -112,6 +113,20 @@ export const wellKnownSymbolMemberOfKey = (wellKnownSymbols: ReadonlyMap<Declara
     if (key === `sym(${declaration})`) return member
   }
   return null
+}
+
+/**
+ * The runtime property key a static key's TEXT denotes. A `sym(declaration)`
+ * key is the symbol that declaration names -- a standard `Symbol.<name>`, or
+ * the program's own symbol its declaring cell registered -- never the marker
+ * spelled as a string, which is a different property altogether.
+ */
+export const staticPropertyKeyText = (wellKnownSymbols: ReadonlyMap<DeclarationId, string>, key: string): string => {
+  if (!cppRecordFieldKeyIsSymbol(key)) return `gea::PropertyKey::string(${cppStringLiteral(key)})`
+  const wellKnown = wellKnownSymbolMemberOfKey(wellKnownSymbols, key)
+  if (wellKnown !== null)
+    return `gea::PropertyKey::symbol(gea::wellKnownSymbol(gea::detail::WellKnownSymbol::${wellKnown.charAt(0).toUpperCase()}${wellKnown.slice(1)}))`
+  return `gea::detail::declaredSymbolKey(${cppStringLiteral(key)})`
 }
 
 /** The standard `Symbol.<name>` identity encoded by a static `sym(declaration)` property key. */

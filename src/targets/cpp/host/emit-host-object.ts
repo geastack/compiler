@@ -2065,7 +2065,7 @@ const assignIntoCallableText = (ctx: EmitContext, operation: CallOperation, targ
           value.representation,
           value.text
         )
-        const store = setOwnCallableText(targetText, field.key, converted)
+        const store = setOwnCallableText(ctx, targetText, field.key, converted)
         const presence = ownKeyPresenceText('assign', sourceView, field)
         return presence === null ? store : `if (${presence}) ${store}`
       })

@@ -9,6 +9,7 @@ import {
   createCppEmitBlockedError,
   defineValueAlias,
   operandText,
+  staticPropertyKeyText,
   wellKnownSymbolMemberOf,
   type EmitContext,
   type PrototypeMethodRead,
@@ -227,7 +228,7 @@ const armRuntimeFieldText = (
     if (tag !== null) return alignedValueText(ctx, 'emit-union-properties.ts:116', { kind: 'string' }, published, tag)
   }
   const boxed: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
-  const propertyKey = `gea::PropertyKey::string(${cppStringLiteral(key)})`
+  const propertyKey = staticPropertyKeyText(ctx.wellKnownSymbols, key)
   if (arm.kind === 'dynamic')
     return alignedValueText(ctx, 'emit-union-properties.ts:120', arm, published, `${armExprText}.getProperty(${propertyKey})`)
   const index = canonicalIndexLiteral(key)
@@ -1144,7 +1145,7 @@ const unionLeafSetText = (
       return `${cppBodyName(member.accessor.setter)}(${leaf.text}, ${converted});`
     }
   }
-  const propertyKey = `gea::PropertyKey::string(${cppStringLiteral(key)})`
+  const propertyKey = staticPropertyKeyText(ctx.wellKnownSymbols, key)
   const boxedValue = sidecarStoredValueText(operation, rawValueText)
   if (leaf.representation.kind === 'dynamic' && boxedValue !== null) {
     return `${leaf.text}.setProperty(${propertyKey}, ${boxedValue});`

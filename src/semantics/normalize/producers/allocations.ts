@@ -114,9 +114,11 @@ const keyTextOf = (name: ts.PropertyName | undefined): string | null => {
  * numeric key needs no separate coercion here because the receiver a numeric
  * index signature derives is itself numerically keyed, so both sides of the
  * store already agree. Every other carrier (`any`/`unknown` above all, which
- * the checker admits where it admits nothing else) has no key conversion at
- * all, and is refused by name rather than spelled into a table whose key type
- * it does not have.
+ * the checker admits where it admits nothing else) has no key conversion into
+ * a typed table, and is refused by name rather than spelled into one whose key
+ * type it does not have -- unless the literal itself is a real property table
+ * (`anyKeyedLiteralTypes`, dynamic-fallback.ts), which converts the key at run
+ * time.
  */
 const objectLiteralKeyOperand = (
   context: ProducerContext,
@@ -140,7 +142,9 @@ const objectLiteralKeyOperand = (
   const shape = context.table.get(keyType).shape
   const domain = sharedPrimitiveDomainOf((id) => context.table.get(id).shape, shape)
   const convertible = domain === 'string' || domain === 'number' || domain === 'symbol'
-  if (!convertible) {
+  // A receiver the fallback census made a real property table
+  // (`anyKeyedLiteralTypes`) takes any key through ToPropertyKey at run time.
+  if (!convertible && !context.dynamicFallbackTypes.has(receiverType)) {
     const described = shape.kind === 'primitive' ? shape.primitive : shape.kind
     return {
       blocked: `a computed property key of type "${described}" has no ToPropertyKey conversion; only string, number and symbol keys convert`
