@@ -1359,6 +1359,30 @@ test('opaque wrapper exposure revokes deferred source invocation closure', () =>
   }
 })
 
+// pino's caller.js and secure-json-parse set V8's stack-trace hooks on `Error`.
+// No call resolves to a member the library does not declare callable, so
+// neither can stand in for reflection.
+test('replacing a member no call resolves to keeps own-key reflection trusted', () => {
+  for (const replacement of [
+    ';(Error as any).stackTraceLimit = 0',
+    ";(Error as any).prepareStackTrace = () => ''",
+    ';(Math as any).PI = 3'
+  ]) {
+    const audit = globalHostMutationAuditOf(`
+      export {}
+      declare var hostProcess: object
+      class Owner { run = (value: unknown) => {} }
+      const owners = [new Owner()]
+      const owner = [...owners][0]!
+      ${replacement}
+      Object.keys(owner)
+      'run' in owner
+      owner.run(globalThis)
+    `)
+    assert.equal(audit.taint.has('*'), false, replacement)
+  }
+})
+
 test('own-key reflection dependencies revoke source slot closure after method replacement', () => {
   for (const replaced of [false, true]) {
     const audit = globalHostMutationAuditOf(`
