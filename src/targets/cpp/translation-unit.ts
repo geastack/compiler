@@ -1717,6 +1717,13 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
   // set has to come from the carriers rather than from the operations -- see
   // `recordAccessorBodiesOf`.
   const captures = buildCaptureIndex(input.bodies, input.placements, recordAccessorBodiesOf(emissionRepresentations, input.deriver))
+  const newTargetReaders = new Set(
+    input.bodies.flatMap((body) =>
+      [...body.blocks.values()].some((block) => block.operations.some((operation) => operation.kind === 'new-target'))
+        ? [body.sourceOwner as FunctionId]
+        : []
+    )
+  )
   const directCallables = buildDirectCallableIndex(input.bodies, captures, input.placements)
   const {
     callableMemberCandidates,
@@ -2420,7 +2427,8 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
         selectionHelpers,
         callableIdentityDemand,
         nativeIntegrityRestricted,
-        fixedFieldStateConstant
+        fixedFieldStateConstant,
+        newTargetReaders
       )
       const stableEntry = stableBorrowEntries.get(cppBodyName(body.sourceOwner))
       const commonJsScope =

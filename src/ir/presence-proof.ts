@@ -77,6 +77,7 @@ const inertKinds = new Set<IrOperation['kind']>([
   'parameter',
   'receiver',
   'global-this',
+  'new-target',
   'phi',
   'test',
   'catch-binding',

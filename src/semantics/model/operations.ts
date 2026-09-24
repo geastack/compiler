@@ -65,7 +65,7 @@ export interface ReferenceOperation extends SemanticOperationBase {
    * so the raw argument can be a guard's own citable result, the same way an
    * `if` condition or a `??` left side already is.
    */
-  readonly form: 'identifier' | 'property' | 'super-property' | 'private-name' | 'this' | 'parameter-value' | 'global-this'
+  readonly form: 'identifier' | 'property' | 'super-property' | 'private-name' | 'this' | 'parameter-value' | 'global-this' | 'new-target'
   /** A `parameter-value` read of a rest slot: the fresh Array the call's argument packing built. */
   readonly restPacked?: boolean
   readonly strict: boolean

@@ -848,6 +848,13 @@ const lowerOneOperation = (
       // from a fact this layer cannot supply, instead of a value it invented.
       return
     case 'reference': {
+      // Captured once at the body's entry (`captureNewTarget` in `lowerOwner`),
+      // so every read in the body answers the same activation's value.
+      if (operation.form === 'new-target') {
+        if (!ctx.values.has(requireLineage(operation)))
+          throw new IrLoweringBlockedError(`new.target ${operation.id} was not captured at its body's entry`)
+        return
+      }
       if (operation.form === 'global-this') {
         const lineage = requireLineage(operation)
         const representation = requireResultRepresentation(ctx, operation, 'value', `a globalThis reference (${operation.id})`)
@@ -1255,6 +1262,26 @@ const iteratorCloseRegionsOf = (
   return regions
 }
 
+/**
+ * `new.target` is the activation's, not the read's: the runtime publishes it
+ * only until the body it constructs captures it, so the body captures it once,
+ * in its entry block before any statement (a parameter initializer included)
+ * can run, and every read cites that one value.
+ */
+const captureNewTarget = (ctx: LoweringContext, entry: IrBlockId, operationIds: readonly OperationId[]): void => {
+  const reads = operationIds
+    .map((id) => ctx.graph.operations.get(id))
+    .filter((operation): operation is SemanticOperation => operation?.family === 'reference' && operation.form === 'new-target')
+  const [first] = reads
+  if (!first) return
+  const lineage = requireLineage(first)
+  const receiver = operandOf(first, 'receiver', 0)
+  if (!receiver) throw new IrLoweringBlockedError(`new.target ${first.id} names no receiver to capture against`)
+  const representation = requireResultRepresentation(ctx, first, 'value', `new.target (${first.id})`)
+  const value = ctx.builder.newTarget(entry, lineage, resolveRequiredOperand(ctx, entry, lineage, receiver), representation)
+  for (const read of reads) registerResult(ctx, read, value)
+}
+
 const lowerOwner = (
   graph: SemanticGraph,
   plan: SealedRepresentationPlan,
@@ -1316,6 +1343,7 @@ const lowerOwner = (
     membership,
     resolveGuardOperand: (guard) => resolveResultValue(ctx, guard, `conditional guard ${guard}`)
   })
+  captureNewTarget(ctx, flow.currentBlock(), operationIds)
 
   for (const operationId of order) {
     const operation = graph.operations.get(operationId)

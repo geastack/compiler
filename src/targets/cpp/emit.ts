@@ -24,6 +24,7 @@ import type {
   ParameterOperation,
   ReceiverOperation,
   GlobalThisOperation,
+  NewTargetOperation,
   UnresolvableReferenceOperation,
   YieldOperation
 } from '../../ir/model.js'
@@ -1226,6 +1227,22 @@ const emitGlobalThis = (ctx: EmitContext, lines: string[], operation: GlobalThis
 }
 
 /**
+ * The runtime publishes a new target only to a body its `Value::construct`
+ * runs, keyed on the boxed receiver that construction allocated -- so both the
+ * receiver and the captured value are boxes here, and anything else refuses.
+ */
+const emitNewTarget = (ctx: EmitContext, lines: string[], operation: NewTargetOperation): void => {
+  if (operation.receiver.representation.kind !== 'dynamic' || operation.result.representation.kind !== 'dynamic') {
+    throw createCppEmitBlockedError(
+      'runtime-helper:new-target-native-construction',
+      `new.target is transported only to a body its boxed [[Construct]] runs; this receiver is "${representationKey(operation.receiver.representation)}"`
+    )
+  }
+  const name = defineValue(ctx, operation.result)
+  lines.push(`${name} = gea::runtime::captureNewTarget(${operandText(ctx, operation.receiver)});`)
+}
+
+/**
  * A name with no declaration anywhere -- reading it is a ReferenceError, not
  * a value this backend approximates or boxes (`ir/lower.ts`'s
  * `unresolvableThrows`). `throwReferenceError<T>()` is `[[noreturn]]`,
@@ -1258,6 +1275,9 @@ const emitOperationStatements = (ctx: EmitContext, lines: string[], operation: I
       return
     case 'global-this':
       emitGlobalThis(ctx, lines, operation)
+      return
+    case 'new-target':
+      emitNewTarget(ctx, lines, operation)
       return
     case 'unresolvable-reference':
       emitUnresolvableReference(ctx, lines, operation)
@@ -1904,7 +1924,8 @@ export const emitBody = (
   nativeSelections: ReadonlyMap<string, NativeSelectionHelper> | undefined = undefined,
   callableIdentityDemand: CallableIdentityDemand = observesEveryCallableIdentity,
   nativeIntegrityRestricted = true,
-  fixedFieldStateConstant = false
+  fixedFieldStateConstant = false,
+  newTargetReaders: ReadonlySet<FunctionId> = new Set()
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -2020,7 +2041,8 @@ export const emitBody = (
     nativeSelections,
     callableIdentityDemand,
     nativeIntegrityRestricted,
-    fixedFieldStateConstant
+    fixedFieldStateConstant,
+    newTargetReaders
   )
   // `ownedValues` stays a genuine render-time OUTPUT buffer (`EmitContext`'s
   // own doc: `defineValue` grows it as each operation's result is named) --

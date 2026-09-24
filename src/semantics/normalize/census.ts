@@ -32,6 +32,10 @@ import type { ProgramReachability } from './reachability.js'
  * proof, and proof comes later.
  */
 
+/** `new.target`, the one meta-property that reads a value. */
+export const isNewTarget = (node: ts.Node): node is ts.MetaProperty =>
+  ts.isMetaProperty(node) && node.keywordToken === ts.SyntaxKind.NewKeyword && node.name.text === 'target'
+
 export interface CensusCandidate {
   readonly node: ts.Node
   readonly id: NodeId
@@ -310,6 +314,9 @@ export const familyOf = (node: ts.Node, paths: NamespacePathCensus): OperationFa
   // a reference site, and censusing it as one is what gives the receiver a
   // published result instead of a placeholder every consumer has to invent.
   if (node.kind === ts.SyntaxKind.ThisKeyword) return 'reference'
+  // `new.target` reads the running function's [[NewTarget]], a value the
+  // frame supplies exactly as it supplies the receiver.
+  if (isNewTarget(node)) return 'reference'
   // `super` in `super.x`/`super.x(...)` resolves against the environment
   // chain the identical way `this` does: `GetSuperBase` reads the active
   // function's `[[HomeObject]]`, and a class method's home object is a fully

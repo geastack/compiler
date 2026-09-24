@@ -135,6 +135,8 @@ export const operandsOfIrOperation = (operation: IrOperation): readonly IrOperan
       return []
     case 'binding-read':
       return []
+    case 'new-target':
+      return [operation.receiver]
     case 'parameter':
     case 'receiver':
     case 'global-this':
