@@ -1355,6 +1355,8 @@ export interface EmitContext {
    * made a `static` member; `false` keeps the store.
    */
   readonly fixedFieldStateConstant: boolean
+  /** Functions whose body reads `new.target`: their allocation marks the function object so `[[Construct]]` publishes it. */
+  readonly newTargetReaders: ReadonlySet<FunctionId>
   /** Settled from `EmitBodyFacts.classTableRoots` -- see that type's own doc. */
   readonly classTableRoots: ReadonlyMap<IrValueId, IrValueId>
   /** One candidate table's withheld lines, keyed by the table's own value. See `classTableRoots`. */
@@ -1722,7 +1724,8 @@ export const createEmitContext = (
   nativeSelections: ReadonlyMap<string, NativeSelectionHelper> | undefined = undefined,
   callableIdentityDemand: CallableIdentityDemand = observesEveryCallableIdentity,
   nativeIntegrityRestricted = true,
-  fixedFieldStateConstant = false
+  fixedFieldStateConstant = false,
+  newTargetReaders: ReadonlySet<FunctionId> = new Set()
 ): { readonly ctx: EmitContext; readonly prepass: EmitBodyPrepassFacts } => {
   const admission = captures.of(owner)
   const layouts = recordLayoutPolicyOf(deriver, classes)
@@ -1819,6 +1822,7 @@ export const createEmitContext = (
     callableIdentityDemand,
     nativeIntegrityRestricted,
     fixedFieldStateConstant,
+    newTargetReaders,
     functionSourceReads: bodyFacts.functionSourceReads,
     functionSourceSnapshotNames: bodyFacts.functionSourceSnapshotNames,
     callCallees: bodyFacts.callCallees,

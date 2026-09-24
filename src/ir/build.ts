@@ -198,6 +198,7 @@ export interface IrBodyBuilder {
   readonly parameter: (block: IrBlockId, lineage: SemanticResultId, ordinal: number, representation: Representation) => IrValueId
   readonly receiver: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
   readonly globalThis: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
+  readonly newTarget: (block: IrBlockId, lineage: SemanticResultId, receiver: IrOperand, representation: Representation) => IrValueId
   readonly unresolvableReference: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
   /**
    * `await`. `representation` is the awaited *result's* carrier (the payload
@@ -693,6 +694,12 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
+  const newTarget: IrBodyBuilder['newTarget'] = (block, lineage, receiver, representation) => {
+    const result = mintResult(representation)
+    append(block, { kind: 'new-target', lineage, receiver, result })
+    return result.id
+  }
+
   const unresolvableReference: IrBodyBuilder['unresolvableReference'] = (block, lineage, representation) => {
     const result = mintResult(representation)
     append(block, { kind: 'unresolvable-reference', lineage, result })
@@ -962,6 +969,7 @@ export const createIrBodyBuilder = (
     parameter,
     receiver,
     globalThis,
+    newTarget,
     unresolvableReference,
     await: awaitValue,
     yield: yieldValue,

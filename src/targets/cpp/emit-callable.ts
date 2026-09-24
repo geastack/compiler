@@ -1740,17 +1740,29 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
       if (abi.restFrom === null) return `gea::Value::box(gea::Value::Tag::Function, ${callable})`
       return `gea::Value::boxCallable<${abi.restFrom}>(${callable})`
     }
+    // A body that reads `new.target` is told so on its function object, which
+    // is what makes `Value::construct` publish the new target to it.
+    const constructor = (boxed: string): string =>
+      ctx.newTargetReaders.has(operation.functionId)
+        ? `gea::runtime::markReadsNewTarget(gea::host::installOrdinaryConstructorPrototype(${boxed}))`
+        : `gea::host::installOrdinaryConstructorPrototype(${boxed})`
     if (admission.kind === 'none') {
-      lines.push(
-        `${name} = gea::host::installOrdinaryConstructorPrototype(${boxText(`${callableType}{${cppThunkEntryText(ctx, operation.functionId)}, nullptr}`)});`
-      )
+      lines.push(`${name} = ${constructor(boxText(`${callableType}{${cppThunkEntryText(ctx, operation.functionId)}, nullptr}`))};`)
       return
     }
     const dynamicEnvironment = packedEnvironmentText(ctx, lines, operation.functionId, admission)
     lines.push(
-      `${name} = gea::host::installOrdinaryConstructorPrototype(${boxText(`${callableType}{${cppThunkEntryText(ctx, operation.functionId)}, ${dynamicEnvironment}}`)});`
+      `${name} = ${constructor(boxText(`${callableType}{${cppThunkEntryText(ctx, operation.functionId)}, ${dynamicEnvironment}}`))};`
     )
     return
+  }
+  // Only the boxed `[[Construct]]` publishes a new target; a native
+  // construction entry has nothing to hand the body.
+  if (ctx.newTargetReaders.has(operation.functionId)) {
+    throw createCppEmitBlockedError(
+      'runtime-helper:new-target-native-construction',
+      `a function whose body reads new.target is carried as "${representationKey(payloadCarrier)}", whose construction does not transport it`
+    )
   }
   if (admission.kind === 'none') {
     // Same reasoning as a module-level function cell: a callable with no

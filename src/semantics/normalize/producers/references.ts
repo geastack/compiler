@@ -17,7 +17,7 @@ import type { SemanticEdge } from '../../model/edges.js'
 import { normalCompletion, pureEffects, throwingCompletion, type ConstantLiteral, type OperandSource } from '../../model/operands.js'
 import type { BindingOperation, ReferenceOperation } from '../../model/operations.js'
 import type { CensusCandidate } from '../census.js'
-import { familyOf } from '../census.js'
+import { familyOf, isNewTarget } from '../census.js'
 import type { NamespacePathCensus } from '../namespace-paths.js'
 import type { ArgumentsObjectCensus } from '../arguments-objects.js'
 import type { IdentityTable } from '../identities.js'
@@ -228,6 +228,11 @@ export const citeExpressionResult = (
   // object's static type, so a member reached off it resolves starting one
   // prototype above `this`'s own class instead of at it.
   if (real.kind === ts.SyntaxKind.SuperKeyword) {
+    const id = operationId(identities.nodeIdOf(real), 'reference', 0)
+    return { kind: 'source', source: { kind: 'result', result: semanticResultId(id, 'value') } }
+  }
+  // `new.target` publishes its value the same direct way (`buildNewTargetReference`).
+  if (isNewTarget(real)) {
     const id = operationId(identities.nodeIdOf(real), 'reference', 0)
     return { kind: 'source', source: { kind: 'result', result: semanticResultId(id, 'value') } }
   }
@@ -1097,11 +1102,55 @@ const buildSuperReference = (candidate: CensusCandidate, node: ts.Node, context:
   return { kind: 'operations', operations: [operation], edges: [] }
 }
 
+/**
+ * `new.target` in an ordinary function's own body: the frame's [[NewTarget]],
+ * which the runtime publishes to the body it constructs and the body captures
+ * against its own receiver (`ir/lower.ts`, `runtime::captureNewTarget`). An
+ * arrow's `new.target` is its enclosing function's, carried across a function
+ * boundary this does not capture, and a class constructor's is the class a
+ * derived construction started from; both refuse by name.
+ */
+const buildNewTargetReference = (candidate: CensusCandidate, node: ts.MetaProperty, context: ProducerContext): CandidateContribution => {
+  let owner: ts.Node | undefined = node.parent
+  while (owner && !ts.isFunctionLike(owner) && !ts.isClassStaticBlockDeclaration(owner)) owner = owner.parent
+  if (!owner || !(ts.isFunctionDeclaration(owner) || ts.isFunctionExpression(owner))) {
+    return {
+      kind: 'blocked',
+      blocker: blocked(
+        candidate.id,
+        'reference',
+        "new.target outside an ordinary function body (an arrow reads its enclosing function's, a class constructor its derived construction's) is not transported",
+        null
+      )
+    }
+  }
+  const id = mintOperationId(context.ordinals, candidate.id, 'reference')
+  const unknown = context.table.intern({ kind: 'primitive', primitive: 'unknown' })
+  const operation: ReferenceOperation = {
+    id,
+    family: 'reference',
+    form: 'new-target',
+    strict: ts.isExternalModule(node.getSourceFile()),
+    unresolvableThrows: false,
+    hasNoCell: false,
+    caller: candidate.caller,
+    // The capture is keyed on the receiver the construction allocated; it is
+    // provenance, never evaluated here.
+    operands: [operand('receiver', 0, { kind: 'receiver' }, unknown, { kind: 'provenance' })],
+    results: [mintResult(id, 'value', unknown)],
+    completion: normalCompletion,
+    effects: { ...pureEffects, readsMutableState: true },
+    evaluationOrdinal: candidate.evaluationOrdinal
+  }
+  return { kind: 'operations', operations: [operation], edges: [] }
+}
+
 export const createReferenceProducer = (context: ProducerContext): FamilyProducer => ({
   family: 'reference',
   contribute: (candidate) => {
     const node = candidate.node
     if (node.kind === ts.SyntaxKind.ThisKeyword) return buildThisReference(candidate, node, context)
+    if (isNewTarget(node)) return buildNewTargetReference(candidate, node, context)
     if (node.kind === ts.SyntaxKind.SuperKeyword) return buildSuperReference(candidate, node, context)
     if (ts.isIdentifier(node)) {
       // Ahead of `classifyIdentifier`, which reads only syntax and would call

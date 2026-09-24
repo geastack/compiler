@@ -591,6 +591,17 @@ export interface GlobalThisOperation extends IrOperationBase {
 }
 
 /**
+ * The frame's [[NewTarget]] (ECMA-262 13.3.12.1), captured once at the body's
+ * entry against the receiver a construction allocated: the constructor when
+ * this activation is a `[[Construct]]` of the body, `undefined` otherwise.
+ */
+export interface NewTargetOperation extends IrOperationBase {
+  readonly kind: 'new-target'
+  readonly receiver: IrOperand
+  readonly result: IrResult
+}
+
+/**
  * A binding that resolves to no declaration anywhere in the program --
  * `ResolveBinding` (ECMA-262 6.2.5.6) finds no environment record naming it,
  * so `GetValue` throws a ReferenceError before any value is produced.
@@ -1279,6 +1290,7 @@ export interface TestOperation extends IrOperationBase {
 export type IrTerminatorOperation = BranchOperation | JumpOperation | ReturnOperation | ThrowOperation | SwitchOperation
 
 export type IrOperation =
+  | NewTargetOperation
   | GetOperation
   | SetOperation
   | DeleteOperation

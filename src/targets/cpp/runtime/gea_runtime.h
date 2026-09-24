@@ -11138,6 +11138,8 @@ class FunctionObjectIdentity {
   bool ownFactsInstalled = false;
   /** Null for runtime-created/builtin functions; otherwise the emitter's exact source FunctionId token. */
   const void* declarationIdentity = nullptr;
+  /** The body reads `new.target`, so `[[Construct]]` publishes it (`Value::construct`, `runtime::captureNewTarget`). */
+  bool readsNewTarget = false;
 };
 
 inline Ref<FunctionObjectIdentity> makeFunctionObjectIdentity() { return makeRef<FunctionObjectIdentity>(); }
@@ -11709,12 +11711,55 @@ inline void setBinding(std::string_view global, const Value& value) {
  * dynamic object's root, so a reassigned non-object prototype changes
  * nothing this runtime could otherwise answer.
  */
+namespace runtime {
+/**
+ * The new target a `[[Construct]]` hands the body it runs, for the one body
+ * that reads it (`DynamicObject::readsNewTarget`). Published only for such a
+ * body, and only for the instance it was allocated for, so no other body can
+ * observe it: the body captures it before running anything, and the
+ * construction restores the channel when it returns, so a construction nested
+ * in a parameter initializer leaves the outer one intact.
+ */
+struct NewTargetChannel {
+  const void* instance = nullptr;
+  Value target{};
+};
+inline NewTargetChannel& newTargetChannel() {
+  static NewTargetChannel channel;
+  return channel;
+}
+/** Set at the allocation of a function object whose body reads `new.target`. */
+inline Value markReadsNewTarget(Value function) {
+  if (const Ref<FunctionObjectIdentity>& identity = function.functionObjectIdentity()) identity->readsNewTarget = true;
+  return function;
+}
+/** ECMA-262 13.3.12.1 `new.target`: the constructor when this activation is a `[[Construct]]` of it, `undefined` otherwise. */
+inline Value captureNewTarget(const Value& receiver) {
+  NewTargetChannel& channel = newTargetChannel();
+  if (channel.instance == nullptr || channel.instance != receiver.identity()) return Value();
+  Value target = std::move(channel.target);
+  channel = NewTargetChannel{};
+  return target;
+}
+}  // namespace runtime
+
 inline Value Value::construct(const std::vector<Value>& arguments) const {
   if (tag_ != Tag::Function) gea::host::throwRuntimeError("TypeError", "Value is not a constructor");
   Value instance = Value::object();
   const Ref<DynamicObject>& properties = functionProperties();
   const Value prototypeProperty = properties ? properties->get(PropertyKey::string("prototype"), *this) : Value();
   gea::refStaticCast<DynamicObject>(instance.held_)->setPrototype(prototypeProperty.asDynamicObject());
+  if (!functionObject_ || !functionObject_->readsNewTarget) {
+    const Value result = callWithReceiver(instance, arguments);
+    return result.tag() == Tag::Object ? result : instance;
+  }
+  runtime::NewTargetChannel& channel = runtime::newTargetChannel();
+  struct Restore {
+    runtime::NewTargetChannel& channel;
+    runtime::NewTargetChannel saved;
+    ~Restore() { channel = std::move(saved); }
+  } restore{channel, channel};
+  channel = runtime::NewTargetChannel{instance.identity(), *this};
   const Value result = callWithReceiver(instance, arguments);
   return result.tag() == Tag::Object ? result : instance;
 }
