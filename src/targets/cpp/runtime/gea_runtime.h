@@ -11871,6 +11871,12 @@ inline std::uint32_t declaredSymbolId(std::string_view marker) {
   const auto found = declaredSymbolIds().find(marker);
   return found == declaredSymbolIds().end() ? 0 : found->second;
 }
+/** The property key a program symbol's `sym(...)` marker denotes -- the symbol its declaring cell registered. */
+inline PropertyKey declaredSymbolKey(std::string_view marker) {
+  const std::uint32_t id = declaredSymbolId(marker);
+  if (id == 0) refusePayloadMismatch("a program symbol key read before its declaring cell registered it");
+  return PropertyKey::symbol(Symbol(id));
+}
 
 [[noreturn]] inline void refuseUnaddressableField(const char* structName, std::string_view field) {
   std::fprintf(stderr, "gea: dynamic access to %s::", structName);

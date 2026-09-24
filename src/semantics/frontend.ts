@@ -1,6 +1,6 @@
 import type { PackageSource } from './package-sources.js'
 import type { CommonJsWrapperDeclaration, HostNativeTypeDeclaration, HostOwnedDeclaration } from '../plugins/model.js'
-import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, proxyFallbackTypes } from './dynamic-fallback.js'
+import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, anyKeyedLiteralTypes, proxyFallbackTypes } from './dynamic-fallback.js'
 import ts from 'typescript'
 import { isScriptGlobalObjectPropertyDeclaration } from './normalize/script-global-redefinition.js'
 import { structuralShapeKey } from './model/structural-types.js'
@@ -120,7 +120,6 @@ import {
  * and so a family with no producer is reported by the census instead of quietly
  * contributing nothing.
  */
-
 
 const scriptGlobalPropertiesOf = (
   checker: ts.TypeChecker,
@@ -1317,7 +1316,11 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     ? prototypeMutatedConstructorTypes(compiled.sourceFiles, compiled.checker, types, identities)
     : { types: new Set<StructuralTypeId>(), callables: new Set<FunctionId>() }
   const dynamicFallbackTypes = input.dynamicFallback
-    ? new Set<StructuralTypeId>([...proxyFallbackTypes(compiled.sourceFiles, compiled.checker, types), ...prototypeFallback.types])
+    ? new Set<StructuralTypeId>([
+        ...proxyFallbackTypes(compiled.sourceFiles, compiled.checker, types),
+        ...anyKeyedLiteralTypes(compiled.sourceFiles, compiled.checker, types),
+        ...prototypeFallback.types
+      ])
     : new Set<StructuralTypeId>()
   const dynamicWrittenTypes = anyKeyedWriteTypes(compiled.sourceFiles, compiled.checker, types)
   const census = censusProgram(compiled.sourceFiles, identities, reachable, specializations, namespacePaths)
@@ -1680,7 +1683,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       // both readers.
       computedKeysOf,
       undefined,
-      new Set(compiled.program.getSourceFiles().filter((file) => file.isDeclarationFile && compiled.program.isSourceFileFromExternalLibrary(file)))
+      new Set(
+        compiled.program.getSourceFiles().filter((file) => file.isDeclarationFile && compiled.program.isSourceFileFromExternalLibrary(file))
+      )
     )
   )
   hostMutationFactsSealed = true
