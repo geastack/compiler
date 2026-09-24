@@ -279,6 +279,7 @@ jsdoc-defaulted-class-constructor.runtime.js.cpp ca5226775273
 jsdoc-optional-parameter.runtime.js.cpp 2cfb2703873b
 json-parse-as-a-value.ts.cpp 0ea01b076f42
 json-reader-dispatch.ts.cpp f43e28fc48ee
+json-stringify-nested-literal.ts.cpp 742dc85e30d9
 json-stringify-replacer.ts.cpp 027f3871f9d3
 jsx-class-map.tsx.cpp 933edb2655e6
 jsx-reactive-list-row-style.tsx.cpp 77d9cb5ad889

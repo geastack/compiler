@@ -1,6 +1,7 @@
 import type { IrBody, IrOperand, CallOperation } from '../../ir/model.js'
 import { allOperationsOf } from '../../ir/model.js'
-import type { IrValueId } from '../../identity/ids.js'
+import type { DeclarationId, IrValueId } from '../../identity/ids.js'
+import type { ClassLayout } from '../../projection/classes.js'
 import { representationKey, type Representation } from '../../representation/model.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import {
@@ -65,6 +66,8 @@ import { armAt, armIs } from './emit-union-properties.js'
 interface JsonStructEntry {
   readonly structName: string
   readonly fields: ReadonlyArray<{ readonly key: string; readonly value: Representation; readonly required: boolean }>
+  /** Whether a document can decode into it. False only for a struct a write-only shape reached (`JsonWriteReach`), which renders no reader. */
+  readonly readable: boolean
 }
 
 /**
@@ -89,7 +92,40 @@ interface JsonNullableUnionEntry {
   readonly nullIndex: number
   readonly presentIndex: number
   readonly payload: Representation
+  /** See `JsonStructEntry.readable`. */
+  readonly readable: boolean
 }
+
+/**
+ * A union with more than one JSON-carrying arm, which only a WRITE can
+ * serve: the live arm names what to write, while a document names no arm to
+ * decode back into. Its overload is write-only; see `JsonWriteReach`.
+ */
+interface JsonWideUnionEntry {
+  readonly typeName: string
+  /** Per arm, in arm order: `null` for an absence arm, written as `null`. */
+  readonly arms: readonly (Representation | null)[]
+}
+
+/**
+ * How far a WRITE may reach past what a read can decode.
+ *
+ * `wide` is set only for an argument the boxed route cannot take -- a box of
+ * a by-value record has no field table to walk -- so every argument either
+ * route already served keeps the overloads it had. It admits the two shapes
+ * only a write can spell: a union of several JSON types (the live arm is
+ * written) and an absent `optional` outside a record field (written `null`).
+ * `inArray` is ECMA-262 25.5.2.4's rule that an `undefined` array element
+ * serializes as `null`; anywhere else `undefined` is omitted, which only a
+ * record field has a spelling for.
+ */
+interface JsonWriteReach {
+  readonly wide: boolean
+  readonly inArray: boolean
+}
+
+const strictWrite: JsonWriteReach = { wide: false, inArray: false }
+const wideWriteReach: JsonWriteReach = { wide: true, inArray: false }
 
 /** The arm layout above, read off a `tagged-union` -- or `null` when it is a real sum this file has no JSON discriminator for. */
 interface NullableUnionArms {
@@ -124,10 +160,11 @@ const nullableUnionArmsOf = (representation: Representation): NullableUnionArms 
 interface JsonCollected {
   readonly structs: Map<string, JsonStructEntry>
   readonly nullableUnions: Map<string, JsonNullableUnionEntry>
+  readonly wideUnions: Map<string, JsonWideUnionEntry>
 }
 
 /** A fresh, empty collector for one walk. */
-const emptyJsonCollected = (): JsonCollected => ({ structs: new Map(), nullableUnions: new Map() })
+const emptyJsonCollected = (): JsonCollected => ({ structs: new Map(), nullableUnions: new Map(), wideUnions: new Map() })
 
 /**
  * Whether `representation` has a native `gea_json_write`/`gea_json_read`
@@ -150,11 +187,19 @@ const jsonUnsupportedReason = (
   representation: Representation,
   collected: JsonCollected,
   visiting: ReadonlySet<string>,
-  direction: 'write' | 'read'
+  direction: 'write' | 'read',
+  reach: JsonWriteReach = strictWrite
 ): string | null => {
+  const wideWrite = direction === 'write' && reach.wide
   switch (representation.kind) {
     case 'dynamic':
       return null
+    case 'optional':
+      // An absent value outside a record field writes `null`: always for a
+      // `T | null`, and for `T | undefined` only as an array element.
+      if (wideWrite && (representation.absence === 'null' || reach.inArray))
+        return jsonUnsupportedReason(deriver, representation.payload, collected, visiting, direction, reach)
+      return `representation "${representationKey(representation)}" has no native JSON.stringify/parse mapping`
     case 'dictionary':
       return direction === 'write' && representation.key === 'string' && representation.value.kind === 'dynamic'
         ? null
@@ -172,7 +217,7 @@ const jsonUnsupportedReason = (
         ? null
         : `a "${representation.domain}" scalar has no JSON.stringify/parse mapping`
     case 'array-object':
-      return jsonUnsupportedReason(deriver, representation.element, collected, visiting, direction)
+      return jsonUnsupportedReason(deriver, representation.element, collected, visiting, direction, { ...reach, inArray: true })
     case 'record':
     case 'native-record-ref': {
       // A carrier whose struct the HOST declares has no compiler-emitted
@@ -245,7 +290,9 @@ const jsonUnsupportedReason = (
       // discloses for every other self-referential value, and what node
       // answers instead is a `TypeError` this backend does not raise.
       if (visiting.has(structName)) return null
-      if (collected.structs.has(structName)) return null
+      const known = collected.structs.get(structName)
+      if (known !== undefined)
+        return direction === 'read' && !known.readable ? `record "${structName}" holds a value only a write can spell` : null
       const fields = recordFieldsOfShape(deriver, representation.shapeId)
       if (fields === null) return `no record layout could be derived for shape ${representation.shapeId}`
       const stillVisiting = new Set(visiting)
@@ -260,24 +307,50 @@ const jsonUnsupportedReason = (
         // else falls through to the `default:` refusal below.
         const fieldRepresentation =
           field.value.kind === 'optional' && field.value.absence === 'undefined' ? field.value.payload : field.value
-        const reason = jsonUnsupportedReason(deriver, fieldRepresentation, collected, stillVisiting, direction)
+        const reason = jsonUnsupportedReason(deriver, fieldRepresentation, collected, stillVisiting, direction, {
+          ...reach,
+          inArray: false
+        })
         if (reason) return `field "${field.key}" of record "${structName}": ${reason}`
       }
+      // Asked of a scratch collector: the question is only whether every
+      // field decodes, and a write must not collect a reader's overloads.
+      const readable =
+        !wideWrite ||
+        fields.every((field) => {
+          const fieldRepresentation =
+            field.value.kind === 'optional' && field.value.absence === 'undefined' ? field.value.payload : field.value
+          return jsonUnsupportedReason(deriver, fieldRepresentation, emptyJsonCollected(), stillVisiting, 'read') === null
+        })
       // Recorded only after every field resolved: a record that turns out to
       // be unsupported must not leave a partial entry another call site's
       // `collected.structs.has(structName)` short-circuit could mistake for done.
-      collected.structs.set(structName, { structName, fields })
+      collected.structs.set(structName, { structName, fields, readable })
       return null
     }
     case 'tagged-union': {
       const arms = nullableUnionArmsOf(representation)
+      if (arms === null && wideWrite) {
+        for (const arm of representation.arms) {
+          if (arm.value.kind === 'null' || (arm.value.kind === 'undefined' && reach.inArray)) continue
+          const reason = jsonUnsupportedReason(deriver, arm.value, collected, visiting, direction, reach)
+          if (reason !== null) return reason
+        }
+        const typeName = cppTypeOf(representation)
+        if (!collected.wideUnions.has(typeName))
+          collected.wideUnions.set(typeName, {
+            typeName,
+            arms: representation.arms.map((arm) => (arm.value.kind === 'null' || arm.value.kind === 'undefined' ? null : arm.value))
+          })
+        return null
+      }
       if (arms === null) {
         return (
           'representation kind "tagged-union" has no native JSON.stringify/parse mapping unless its arms are one JSON-carrying type ' +
           'plus `null` (optionally with `undefined` too); a wider sum has no discriminator in the document to decode back with'
         )
       }
-      const reason = jsonUnsupportedReason(deriver, arms.payload, collected, visiting, direction)
+      const reason = jsonUnsupportedReason(deriver, arms.payload, collected, visiting, direction, reach)
       if (reason !== null) return reason
       const typeName = cppTypeOf(representation)
       // Keyed by the C++ type, so two shapes that lower to the same union
@@ -287,7 +360,8 @@ const jsonUnsupportedReason = (
           typeName,
           nullIndex: arms.nullIndex,
           presentIndex: arms.presentIndex,
-          payload: arms.payload
+          payload: arms.payload,
+          readable: !wideWrite || jsonUnsupportedReason(deriver, arms.payload, emptyJsonCollected(), visiting, 'read') === null
         })
       }
       return null
@@ -327,6 +401,7 @@ const renderJsonNullableUnionOverloads = (entry: JsonNullableUnionEntry): string
     `  out += "null";`,
     `}`
   ]
+  if (!entry.readable) return write.join('\n')
   const read = [
     `inline void gea_json_read(gea::json::Reader& reader, ${entry.typeName}& out) {`,
     `  if (reader.consumeNull()) {`,
@@ -340,6 +415,19 @@ const renderJsonNullableUnionOverloads = (entry: JsonNullableUnionEntry): string
   ]
   return `${write.join('\n')}\n\n${read.join('\n')}`
 }
+
+/** The write-only overload for a union of several JSON types: the live arm writes itself, and an absence arm writes `null`. */
+const renderJsonWideUnionOverload = (entry: JsonWideUnionEntry): string =>
+  [
+    `inline void gea_json_write(std::string& out, const ${entry.typeName}& value) {`,
+    ...entry.arms.map((arm, index) =>
+      arm === null
+        ? `  if (value.is<${index}>()) { out += "null"; return; }`
+        : `  if (value.is<${index}>()) { gea_json_write(out, value.get<${index}>()); return; }`
+    ),
+    `  out += "null";`,
+    `}`
+  ].join('\n')
 
 /**
  * A record field's JS property name, JSON-escaped and wrapped as a C++ string
@@ -562,6 +650,7 @@ const renderJsonRecordOverloads = (entry: JsonStructEntry): string => {
     fieldLines.push(`  if (key == ${cppStringLiteral(field.key)}) { ${body} return true; }`)
   }
   fieldLines.push(`  (void)out; (void)value; (void)key; (void)first;`, `  return false;`, `}`)
+  if (!entry.readable) return `${writeLines.join('\n')}\n\n${fieldLines.join('\n')}`
   return `${writeLines.join('\n')}\n\n${fieldLines.join('\n')}\n\n${readLines.join('\n')}`
 }
 
@@ -647,7 +736,8 @@ const jsonRootsOf = (bodies: readonly IrBody[]): readonly JsonCallSite[] => {
  */
 export const renderJsonStructDeclarations = (
   bodies: readonly IrBody[],
-  deriver: RepresentationDeriver
+  deriver: RepresentationDeriver,
+  classes: ReadonlyMap<DeclarationId, ClassLayout>
 ): {
   readonly declarations: readonly string[]
   /**
@@ -662,10 +752,16 @@ export const renderJsonStructDeclarations = (
 } => {
   const collected = emptyJsonCollected()
   for (const site of jsonRootsOf(bodies)) {
-    jsonUnsupportedReason(deriver, site.representation, collected, new Set(), site.member === 'stringify' ? 'write' : 'read')
+    const direction = site.member === 'stringify' ? 'write' : 'read'
+    const reason = jsonUnsupportedReason(deriver, site.representation, collected, new Set(), direction)
+    // The same order `jsonCallText` decides in: the boxed route first, and
+    // the write-only reach only for an argument that route cannot take.
+    if (reason !== null && direction === 'write' && !jsonBoxRouteTakes(deriver, classes, site.representation))
+      jsonUnsupportedReason(deriver, site.representation, collected, new Set(), direction, wideWriteReach)
   }
   const names = [...collected.structs.keys()].sort()
   const unionNames = [...collected.nullableUnions.keys()].sort()
+  const wideUnionNames = [...collected.wideUnions.keys()].sort()
   // Every pair is declared before any pair is defined. Required as soon as a
   // record's field reaches the record itself: the write body calls
   // `gea_json_write` on its own struct -- through `std::vector`'s template for
@@ -674,9 +770,10 @@ export const renderJsonStructDeclarations = (
   // refusal. Unconditional rather than only-when-recursive because the cost is
   // two lines per struct and the alternative is a second rule deciding when
   // they are needed.
-  const forwards = [...names, ...unionNames].flatMap((name) => [
+  const readableOf = (name: string): boolean => (collected.structs.get(name) ?? collected.nullableUnions.get(name))?.readable !== false
+  const forwards = [...names, ...unionNames, ...wideUnionNames].flatMap((name) => [
     `inline void gea_json_write(std::string& out, const ${name}& value);`,
-    `inline void gea_json_read(gea::json::Reader& reader, ${name}& out);`
+    ...(!collected.wideUnions.has(name) && readableOf(name) ? [`inline void gea_json_read(gea::json::Reader& reader, ${name}& out);`] : [])
   ])
   const fieldForwards = names.map(
     (name) => `inline bool gea_json_write_field(std::string& out, const ${name}& value, const std::string& key, bool& first);`
@@ -685,7 +782,8 @@ export const renderJsonStructDeclarations = (
     ...forwards,
     ...fieldForwards,
     ...names.map((name) => renderJsonRecordOverloads(collected.structs.get(name) as JsonStructEntry)),
-    ...unionNames.map((name) => renderJsonNullableUnionOverloads(collected.nullableUnions.get(name) as JsonNullableUnionEntry))
+    ...unionNames.map((name) => renderJsonNullableUnionOverloads(collected.nullableUnions.get(name) as JsonNullableUnionEntry)),
+    ...wideUnionNames.map((name) => renderJsonWideUnionOverload(collected.wideUnions.get(name) as JsonWideUnionEntry))
   ]
   return { declarations, structNames: new Set(names) }
 }
@@ -719,27 +817,54 @@ export const renderJsonStructDeclarations = (
  * emitted it printed `{"first":0,"second":""}` for `first = 1; second =
  * 'two'`, which is why the union case above is the whole of what this admits.
  */
-const boxHoldsOnlyBoxable = (ctx: EmitContext, representation: Representation, seen: Set<string>, whole: boolean): boolean => {
+const boxHoldsOnlyBoxable = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  representation: Representation,
+  seen: Set<string>,
+  whole: boolean
+): boolean => {
   const key = representationKey(representation)
   if (seen.has(key)) return true
   seen.add(key)
   switch (representation.kind) {
     case 'class-ref':
-      return !whole && classBoxable(ctx.classes, representation.declaration)
+      return !whole && classBoxable(classes, representation.declaration)
     case 'optional':
-      return boxHoldsOnlyBoxable(ctx, representation.payload, seen, whole)
+      return boxHoldsOnlyBoxable(classes, representation.payload, seen, whole)
     case 'tagged-union':
-      return representation.arms.every((arm) => boxHoldsOnlyBoxable(ctx, arm.value, seen, false))
+      return representation.arms.every((arm) => boxHoldsOnlyBoxable(classes, arm.value, seen, false))
     case 'array-object':
-      return boxHoldsOnlyBoxable(ctx, representation.element, seen, false)
+      return boxHoldsOnlyBoxable(classes, representation.element, seen, false)
     case 'dictionary':
     case 'promise':
-      return boxHoldsOnlyBoxable(ctx, representation.value, seen, false)
+      return boxHoldsOnlyBoxable(classes, representation.value, seen, false)
+    // A record held BY VALUE inside what the box holds has no `DynamicCarrier`
+    // rule: an array, union or field holding one boxes with no table to read
+    // it through, and the walk aborts on its first read (`{ k: [1, { z: true }] }`).
+    // The argument itself is `dynamicCarrierBoxText`'s to judge.
     case 'record':
-      return representation.fields.every((field) => boxHoldsOnlyBoxable(ctx, field.value, seen, false))
+      return (
+        (whole || representation.ownership === 'shared-refcount') &&
+        representation.fields.every((field) => boxHoldsOnlyBoxable(classes, field.value, seen, false))
+      )
+    case 'record-with-index':
+    case 'native-record-ref':
+      return whole || representation.ownership === 'shared-refcount'
     default:
       return true
   }
+}
+
+/** Whether `JSON.stringify` of this carrier takes the boxed route -- see `boxHoldsOnlyBoxable`. */
+const jsonBoxRouteTakes = (
+  deriver: RepresentationDeriver,
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  representation: Representation
+): boolean => {
+  if (!boxHoldsOnlyBoxable(classes, representation, new Set(), true)) return false
+  if (dynamicCarrierBoxText(representation, 'gea_json_value') === null) return false
+  const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+  return jsonUnsupportedReason(deriver, dynamic, emptyJsonCollected(), new Set(), 'write') === null
 }
 
 /**
@@ -747,13 +872,20 @@ const boxHoldsOnlyBoxable = (ctx: EmitContext, representation: Representation, s
  * as `BodyInit` -- serialized from its box, which the dynamic writer walks as
  * JSON.stringify walks any object.
  */
-const boxedJsonArgumentText = (ctx: EmitContext, argument: IrOperand): string | null => {
-  if (!boxHoldsOnlyBoxable(ctx, argument.representation, new Set(), true)) return null
-  const boxed = dynamicCarrierBoxText(argument.representation, operandText(ctx, argument))
-  if (boxed === null) return null
-  const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
-  return jsonUnsupportedReason(ctx.deriver, dynamic, emptyJsonCollected(), new Set(), 'write') === null ? boxed : null
-}
+const boxedJsonArgumentText = (ctx: EmitContext, argument: IrOperand): string | null =>
+  jsonBoxRouteTakes(ctx.deriver, ctx.classes, argument.representation)
+    ? dynamicCarrierBoxText(argument.representation, operandText(ctx, argument))
+    : null
+
+/**
+ * Why `JSON.stringify` cannot write this argument at all: `null` when a
+ * native writer serves it, strictly or -- for an argument the boxed route
+ * cannot take -- with the write-only reach (`JsonWriteReach`).
+ */
+const nativeStringifyReason = (ctx: EmitContext, argument: IrOperand, strictReason: string): string | null =>
+  jsonUnsupportedReason(ctx.deriver, argument.representation, emptyJsonCollected(), new Set(), 'write', wideWriteReach) === null
+    ? null
+    : strictReason
 
 export const jsonCallText = (ctx: EmitContext, member: 'stringify' | 'parse', operation: CallOperation): string => {
   if (member === 'stringify') {
@@ -764,14 +896,16 @@ export const jsonCallText = (ctx: EmitContext, member: 'stringify' | 'parse', op
       )
     }
     const argument = operation.arguments[0] as IrOperand
-    const reason = jsonUnsupportedReason(ctx.deriver, argument.representation, emptyJsonCollected(), new Set(), 'write')
-    if (reason !== null) {
+    const strictReason = jsonUnsupportedReason(ctx.deriver, argument.representation, emptyJsonCollected(), new Set(), 'write')
+    if (strictReason !== null) {
       const boxed = operation.arguments.length === 1 ? boxedJsonArgumentText(ctx, argument) : null
       if (boxed !== null) return `[&]() { std::string gea_json_out; gea_json_write(gea_json_out, ${boxed}); return gea_json_out; }()`
-      throw createCppEmitBlockedError(
-        'host-member-call:JSON.stringify',
-        `JSON.stringify cannot serialize this argument natively: ${reason}`
-      )
+      const reason = operation.arguments.length === 1 ? nativeStringifyReason(ctx, argument, strictReason) : strictReason
+      if (reason !== null)
+        throw createCppEmitBlockedError(
+          'host-member-call:JSON.stringify',
+          `JSON.stringify cannot serialize this argument natively: ${reason}`
+        )
     }
     const valueText = operandText(ctx, argument)
     if (operation.arguments.length > 1) {
@@ -938,11 +1072,16 @@ export const jsonStringifyFillLines = (ctx: EmitContext, operation: CallOperatio
   if (placement.storage.kind === 'local' && placement.storage.owner !== ctx.owner) return null
   if (placement.storage.kind !== 'local' && placement.storage.kind !== 'region') return null
   const argument = operation.arguments[0] as IrOperand
-  const reason = jsonUnsupportedReason(ctx.deriver, argument.representation, emptyJsonCollected(), new Set(), 'write')
-  if (reason !== null) {
+  const strictReason = jsonUnsupportedReason(ctx.deriver, argument.representation, emptyJsonCollected(), new Set(), 'write')
+  if (strictReason !== null) {
     // The expression form serializes the boxed value instead (`jsonCallText`).
     if (boxedJsonArgumentText(ctx, argument) !== null) return null
-    throw createCppEmitBlockedError('host-member-call:JSON.stringify', `JSON.stringify cannot serialize this argument natively: ${reason}`)
+    const reason = nativeStringifyReason(ctx, argument, strictReason)
+    if (reason !== null)
+      throw createCppEmitBlockedError(
+        'host-member-call:JSON.stringify',
+        `JSON.stringify cannot serialize this argument natively: ${reason}`
+      )
   }
   const cell = bindingReference(ctx, declaration, 'a JSON.stringify written in place')
   if (cell.boxed) return null

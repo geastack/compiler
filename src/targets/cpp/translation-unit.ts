@@ -1814,7 +1814,7 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
   // of the type the element declares. Each of those decides the member's type
   // for itself, and a census that narrowed one anyway would produce two
   // spellings of one storage.
-  const jsonStructs = renderJsonStructDeclarations(input.bodies, deriver)
+  const jsonStructs = renderJsonStructDeclarations(input.bodies, deriver, input.classes)
   // A reactive class is NOT among them. `records.ts`'s `fieldStorageType`
   // spells a celled member from this same answer -- `Signal<long long>` where
   // the slot narrowed, `Signal<double>` where it did not -- so the cell and the
