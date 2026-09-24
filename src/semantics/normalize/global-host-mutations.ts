@@ -5043,6 +5043,10 @@ export const censusGlobalHostMutations = (
     const ambient = declarations.filter((declaration) => isAmbientDeclaration(declaration) || declaration.getSourceFile().isDeclarationFile)
     if (ambient.length === 0 || ambient.length !== declarations.length) return null
     const callable = ambient.some((declaration) => {
+      // `ts.isFunctionLike` holds for an index signature too; what it hands
+      // back is its value type, callable or not.
+      if (ts.isIndexSignatureDeclaration(declaration))
+        return checker.getSignaturesOfType(checker.getTypeFromTypeNode(declaration.type), ts.SignatureKind.Call).length > 0
       if (ts.isFunctionLike(declaration)) return (declaration as ts.FunctionLikeDeclarationBase).body === undefined
       if (!ts.isVariableDeclaration(declaration) && !ts.isPropertyDeclaration(declaration) && !ts.isPropertySignature(declaration))
         return false
@@ -5129,9 +5133,15 @@ export const censusGlobalHostMutations = (
   // the function it returns has its receiver's body, not one the library
   // minted, and the receiver is counted here instead.
   const FORWARDING_MEMBERS: ReadonlySet<string> = new Set(['bind', 'call', 'apply'])
-  const isNonValuePosition = (node: ts.Identifier): boolean => {
+  const isNonValuePosition = (node: ts.Expression): boolean => {
     const parent = node.parent
-    if (ts.isPropertyAccessExpression(parent) && parent.expression === node && FORWARDING_MEMBERS.has(parent.name.text)) return false
+    // A member's NAME goes wherever the access goes: `process.hrtime.bigint()`
+    // reads a member off `hrtime` and hands the function nowhere.
+    if (ts.isPropertyAccessExpression(parent) && parent.name === node) return isNonValuePosition(parent)
+    // `f.call( ... )` / `f.apply( ... )` invoke `f` where they stand; only
+    // `bind` hands a function carrying `f`'s body back as a value.
+    if (ts.isPropertyAccessExpression(parent) && parent.expression === node && FORWARDING_MEMBERS.has(parent.name.text))
+      return parent.name.text !== 'bind' && ts.isCallExpression(parent.parent) && parent.parent.expression === parent
     if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === node) return true
     if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && parent.right === node) return true
     if (ts.isExpressionWithTypeArguments(parent) && ts.isHeritageClause(parent.parent)) return true
