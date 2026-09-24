@@ -438,7 +438,7 @@ physical-class-ancestry-live.ts.cpp 728e6f672df0
 physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 50f20517ba63
-printer-drift.txt a60237e4b8b8
+printer-drift.txt 86a42e44e6b2
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
 promise-method-read-as-value.ts.cpp d92abcc1e89f
@@ -496,6 +496,7 @@ scalar-roundtrip.ts.cpp c1558853e8f5
 set-constructed-from-a-string.ts.cpp ae1377b3d02f
 slot-write-closure.runtime.ts.cpp 9b9ef35c8b5f
 spread-call-immediately-invoked.runtime.js.cpp c5ae95452df2
+spread-into-index-signature-target.ts.cpp 31c1943d2092
 spread-into-target-with-callable-field.ts.cpp 6e32828cb1eb
 stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d
@@ -560,7 +561,7 @@ typeof-runtime-string.ts.cpp 5b4c672dec2a
 typeof-then-discriminates-a-union.ts.cpp 16fe804a602d
 unbox-nullable-union.ts.cpp b8a67b94f69c
 uncallable-member-slot-call.runtime.js.cpp f925ad615e3e
-uncertified.txt e531acd3c304
+uncertified.txt 38cc5e758b69
 union-member-absent-on-promise-arm.ts.cpp fb968705a335
 union-method-absent-on-one-arm-discarded.ts.cpp d2bf86271461
 union-of-tuples-array-pattern.ts.cpp aa8e76675555
