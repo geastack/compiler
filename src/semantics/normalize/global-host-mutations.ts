@@ -4797,7 +4797,8 @@ export const censusGlobalHostMutations = (
       directMutator(node.expression) === null &&
       (isUntrustedMutator(node.expression) || !callHasAuthenticatedExternalEffect(node)) &&
       callableFrames.callThroughUncallable?.(node) !== true &&
-      !callRunsOnlyProgramBodies(node)
+      !callRunsOnlyProgramBodies(node) &&
+      !ownKeyTestOnSpelledGlobal(node)
     // TEMPORARY INSTRUMENT -- not for landing. `GEA_DEBUG_GLOBAL_MUTATION=asks`
     // names WHICH of the four disjuncts made a call ask, per call site. The
     // three refusal channels this question has are logged separately and none
@@ -5498,9 +5499,14 @@ export const censusGlobalHostMutations = (
    * identity is proven, so which body runs is decided by the key
    * `hasOwnProperty` on the global object and on Object.prototype -- and that
    * is this census's own per-key answer: `intrinsicSymbolIsOverwritten` records
-   * the name as trusted, and a run whose own writes reach it is repeated with
-   * it distrusted. The intrinsic then reads one own slot; a literal key's
-   * ToPropertyKey runs no code. `window.toString()` stays wildcarded: the
+   * the name as trusted on the global object, and the Object.prototype slot is
+   * the same per-key obligation every other intrinsic `hasOwnProperty` lowering
+   * rests on, checked against this census's result; a run whose own writes
+   * reach either is repeated with the call rejected. It is deliberately not
+   * `intrinsicReflectionIsIntact()`: that whole-program flag also answers
+   * whether any object's prototype may have been replaced, which cannot change
+   * what the global object's own-key test resolves to. The intrinsic then
+   * reads one own slot; a literal key's ToPropertyKey runs no code. `window.toString()` stays wildcarded: the
    * intrinsic `toString` performs a Get on its receiver, which may run a getter.
    */
   const ownKeyTestMemberNames = new Set(['hasOwnProperty'])
@@ -5512,12 +5518,27 @@ export const censusGlobalHostMutations = (
     if (key === null || !ownKeyTestMemberNames.has(key) || call.arguments.length !== 1) return false
     if (!ts.isStringLiteralLike(unwrapErasedExpression(call.arguments[0]!))) return false
     const symbol = memberSymbolOf(callee)
+    if (
+      !symbol ||
+      (symbol.declarations ?? []).length === 0 ||
+      !(symbol.declarations ?? []).every((declaration) => declaration.getSourceFile().hasNoDefaultLib) ||
+      trustSeed.rejectedCallableProofs.has(call) ||
+      intrinsicSymbolIsOverwritten(symbol)
+    )
+      return false
+    invocationRequirements.set(call, [{ intrinsic: 'Object', prototypeKeys: { names: [key] }, location: call }])
+    return true
+  }
+
+  // The same decision for the arguments: an own-key test the receiver leg
+  // accepts runs no code, so its literal key is handed to nothing. Asked of
+  // the spelled global because this question is settled before the alias graph.
+  const ownKeyTestOnSpelledGlobal = (call: ts.CallExpression): boolean => {
+    const callee = unwrapErasedExpression(call.expression)
     return (
-      !!symbol &&
-      (symbol.declarations ?? []).length > 0 &&
-      (symbol.declarations ?? []).every((declaration) => declaration.getSourceFile().hasNoDefaultLib) &&
-      intrinsicReflectionIsIntact() &&
-      !intrinsicSymbolIsOverwritten(symbol)
+      (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) &&
+      isProvenGlobalObject(unwrapErasedExpression(callee.expression)) &&
+      isIntrinsicOwnKeyTestOnGlobal(call, callee)
     )
   }
 
