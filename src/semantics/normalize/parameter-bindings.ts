@@ -1603,8 +1603,14 @@ export const censusParameterBindings = (
       return type
     }
 
+    // An import binding is the exporting module's cell, not one of its own:
+    // three's `WebGPUBackend.js` builds `{ [ Compatibility.TEXTURE_COMPARE ]:
+    // ... }` through one, and stopping at the `ImportSpecifier` left that key
+    // with the checker's `any` (the const is JSDoc `{Object}`) where
+    // `constants.js` itself reads the initializer's `string`.
     const declarationOf = (node: ts.Identifier): ts.Declaration | null => {
-      const symbol = checker.getSymbolAtLocation(node)
+      const named = checker.getSymbolAtLocation(node)
+      const symbol = named && (named.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(named) : named
       const declarations = symbol?.declarations
       return declarations && declarations.length === 1 ? (declarations[0] ?? null) : null
     }
