@@ -1484,6 +1484,41 @@ test('a constructed Function neither lets the global object escape nor widens ar
   assert.notDeepEqual([...hostCallableUse("eval('1')").taint], [])
 })
 
+// Reflection is replaced only by a callable stored where `Object.keys` or
+// `Reflect.ownKeys` live. fastify's unknown-key writes store strings, numbers
+// and fresh objects, or store callables into objects that cannot be `Object`.
+const reflectionAfter = (write: string): boolean =>
+  globalHostMutationAuditOf(
+    `
+      export {}
+      declare var hostProcess: object
+      interface HostResponse { text(): string }
+      declare const key: string
+      declare function opaque(): {}
+      class Owner { run = (value: unknown) => {} }
+      const owners = [new Owner()]
+      const owner = [...owners][0]!
+      ${write}
+      Object.keys(owner)
+      'run' in owner
+      owner.run(globalThis)
+    `,
+    ['hostProcess'],
+    ['HostResponse']
+  ).taint.has('*')
+
+test('an unknown-key write that stores nothing callable where reflection lives keeps reflection trusted', () => {
+  for (const write of ['let bag: {} = {}; (bag as any)[key] = () => 1', 'let bag: {} = {}; delete (bag as any)[key]']) {
+    assert.equal(reflectionAfter(write), false, write)
+  }
+})
+
+test('a callable stored with an unknown key where reflection may live still revokes reflection', () => {
+  for (const write of [';(Object as any)[key] = () => 1', 'const target = opaque(); (target as any)[key] = () => 1']) {
+    assert.equal(reflectionAfter(write), true, write)
+  }
+})
+
 test('own-key reflection dependencies revoke source slot closure after method replacement', () => {
   for (const replaced of [false, true]) {
     const audit = globalHostMutationAuditOf(`
@@ -3088,4 +3123,82 @@ test('a receiver merged with a proven global path still surface-taints without a
     w.k = 1
   `)
   assert.ok(audit.taint.surfaceKeys.every || audit.taint.surfaceKeys.names.has('k'), [...audit.taint.surfaceKeys.names].join(','))
+})
+
+test('an intrinsic constructor held as data and written through with an unknown key revokes reflection', () => {
+  const writes = [
+    'class C { c: any = null; constructor() { this.c = Object } }; const x = new C(); x.c[key] = () => 1',
+    'const holder: any = {}; holder.c = Object; holder.c[key] = () => 1',
+    'const bag: any = {}; bag.c = Reflect; const r = bag.c; r[key] = () => 1',
+    'const holder: { c?: {} } = {}; holder.c = Object; (holder.c as any)[key] = () => 1',
+    'let slot: {} = {}; slot = Object; (slot as any)[key] = () => 1',
+    'const slots: {}[] = [Reflect]; (slots[0] as any)[key] = () => 1',
+    'declare function hostTake(f: (this: any) => void): void; hostTake(function (this: any) { this.c = Object; this.c[key] = () => 1 })',
+    'declare function hostTake(f: (this: any) => void): void; hostTake(function (this: any) { this.constructor[key] = () => 1 })',
+    'const h: any = {}; Object.assign(h, { c: Object }); h.c[key] = () => 1',
+    'const h: any = {}; const src = { c: Reflect }; Object.assign(h, src); h.c[key] = () => 1',
+    'const p: Record<string, unknown> = { c: Object }; (p.c as any)[key] = () => 1',
+    'const m = new Map<string, unknown>([["c", Object]]); (m.get("c") as any)[key] = () => 1'
+  ]
+  assert.deepEqual(
+    writes.filter((write) => !reflectionAfter(write)),
+    []
+  )
+})
+
+// light-my-request's `_CustomLMRRequest`: an instance's `constructor` is its
+// allocator, read through the allocator's own prototype -- not `Object`, which
+// the untyped receiver's checker type would suggest -- so an unknown-key write
+// through `this.constructor.prototype` reaches no intrinsic prototype.
+const allocatorPrototypeWrite = (program: string): boolean =>
+  globalHostMutationAuditOf(`'use strict'
+    interface Process {}
+    declare var hostProcess: Process
+    declare const key: string
+    declare const text: string
+    ${program}
+    globalThis.hasOwnProperty('zz')
+  `).taint.has('*')
+
+test("an unknown-key write through an instance's constructor prototype stays on the allocator's prototype", () => {
+  for (const program of [
+    `function F(this: any) { this.constructor.prototype[key] = () => 1 }
+     new F()`,
+    `function Base(this: any) {}
+     Base.prototype.m = function () {}
+     function Inner(this: any, source: any) {
+       Object.assign(this, source)
+       for (const fn of Object.keys(Base.prototype)) this.constructor.prototype[fn] = Base.prototype[fn]
+     }
+     function Outer(this: any) { return new Inner(this) }
+     new Outer()`,
+    `function F(this: any, source: any) { Object.assign(this, source); this.constructor.prototype[key] = () => 1 }
+     const methods: any = { make(this: any) { new F(this) } }
+     methods[key]()`
+  ]) {
+    assert.equal(allocatorPrototypeWrite(program), false, program)
+  }
+})
+
+test("an instance's constructor stays fail-closed when a store may change it", () => {
+  const write = 'this.constructor.prototype[key] = () => 1'
+  for (const program of [
+    `function F(this: any) { ${write} }; F.prototype = {}; new F()`,
+    `function F(this: any) { Object.setPrototypeOf(this, Object.prototype); ${write} }; new F()`,
+    `function F(this: any) { this.__proto__ = {}; ${write} }; new F()`,
+    `function F(this: any) { delete F.prototype.constructor; ${write} }; new F()`,
+    `function F(this: any) { this.constructor = Object; ${write} }; new F()`,
+    `function F(this: any, source: any) { Object.assign(this, source); ${write} }; new F({ constructor: Object })`,
+    `function F(this: any) { ${write} }; F.prototype.constructor = Object; new F()`,
+    `function F(this: any) { ${write} }; Object.defineProperty(F.prototype, 'constructor', { value: Object }); new F()`,
+    `function F(this: any) { ${write} }; (F.prototype as any)[key] = Object; new F()`,
+    `function F(this: any) { Object.getPrototypeOf(this).constructor = Object; ${write} }; new F()`,
+    `function F(this: any, source: any) { Object.assign(this, source); ${write} }
+     const source: any = {}
+     Object.defineProperty(source, '__proto__', { value: Object.prototype, enumerable: true })
+     new F(source)`,
+    `function F(this: any) { Reflect.set(this, '__proto__', Object.prototype); ${write} }; new F()`
+  ]) {
+    assert.equal(allocatorPrototypeWrite(program), true, program)
+  }
 })
