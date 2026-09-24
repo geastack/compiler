@@ -739,9 +739,11 @@ export const publishRepresentations = (
     builder.publish({
       result: resultId,
       representation:
-        operation?.family === 'binding' || operation?.family === 'property'
-          ? deriver.deriveStored(result.type)
-          : deriver.derive(result.type),
+        (operation?.family === 'binding' || operation?.family === 'reference') && operation.restPacked === true
+          ? deriver.deriveRestPacked(result.type)
+          : operation?.family === 'binding' || operation?.family === 'property'
+            ? deriver.deriveStored(result.type)
+            : deriver.derive(result.type),
       strength: override ? 'conservative' : 'exact',
       producer: 'structural-derivation',
       // Structural derivation answers from one shape, so it never produces the

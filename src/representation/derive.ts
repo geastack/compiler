@@ -146,6 +146,13 @@ export interface RepresentationDeriver {
    */
   readonly deriveStored: (type: StructuralTypeId) => Representation
   /**
+   * The carrier a rest parameter holds, in its call frame and in its binding
+   * alike: rest packing creates a fresh ordinary Array, which cannot be a
+   * proxy, so the frame stays concrete even when observable arrays of this
+   * type use fallback dispatch.
+   */
+  readonly deriveRestPacked: (type: StructuralTypeId) => Representation
+  /**
    * Whether a structural type's own shape is the primitive `never` --
    * distinct from asking whether its *carrier* is `{kind:'void'}`, which
    * `never` and a genuine completed-void evaluation share on purpose
@@ -397,6 +404,13 @@ export const createRepresentationDeriver = (
 
   /** The carrier a *stored* position holds -- see `storedCarrier`. */
   const deriveStored = (id: StructuralTypeId): Representation => storedCarrier(derive(id))
+  const deriveRestPacked = (id: StructuralTypeId): Representation => {
+    const value = deriveStored(id)
+    const slot = shapeOf(id)
+    return value.kind === 'dynamic' && value.reason === 'opt-in-fallback' && slot?.kind === 'array'
+      ? { kind: 'array-object', element: deriveStored(slot.element), ownership: 'shared-refcount', extension: null }
+      : value
+  }
   const isDataOnlyBody = (id: StructuralTypeId): boolean => isDataOnlyObjectShape(shapeOf(id), shapeOf)
 
   type RecursiveContainerSource =
@@ -782,13 +796,7 @@ export const createRepresentationDeriver = (
       // was refused outright. `SignatureParameter.slot` is that union, interned
       // by the normalizer where types are still being made, and it derives to
       // the three-armed tagged union the union deriver has always built.
-      let value = deriveStored(parameter.slot)
-      const slot = shapeOf(parameter.slot)
-      // Rest packing creates a fresh ordinary Array; it cannot produce a proxy.
-      // Keep the call frame concrete even when observable arrays of this type use fallback dispatch.
-      if (parameter.rest && value.kind === 'dynamic' && value.reason === 'opt-in-fallback' && slot?.kind === 'array') {
-        value = { kind: 'array-object', element: deriveStored(slot.element), ownership: 'shared-refcount', extension: null }
-      }
+      const value = parameter.rest ? deriveRestPacked(parameter.slot) : deriveStored(parameter.slot)
       const parameterOwnership = ownership.forParameter(value)
       parameters.push({ value, ownership: parameterOwnership, passing: passingOf(value, parameterOwnership) })
     }
@@ -2760,5 +2768,16 @@ export const createRepresentationDeriver = (
   const isDateCarrier = (representation: Representation): boolean =>
     representation.kind === 'native-record-ref' && representation.native !== null && dateNatives.has(representation.native)
 
-  return { derive, layoutOf, abiOf, deriveStored, isNeverType, isTupleShape, nativeCallableConventions, isDateCarrier, dynamicFallback }
+  return {
+    derive,
+    layoutOf,
+    abiOf,
+    deriveStored,
+    deriveRestPacked,
+    isNeverType,
+    isTupleShape,
+    nativeCallableConventions,
+    isDateCarrier,
+    dynamicFallback
+  }
 }
