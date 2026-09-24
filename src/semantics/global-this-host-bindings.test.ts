@@ -1383,6 +1383,38 @@ test('replacing a member no call resolves to keeps own-key reflection trusted', 
   }
 })
 
+// An unknown program callee narrows its argument stamp only while no host
+// callable escapes as a value; what escapes is decided by where the read goes.
+const hostCallableUse = (use: string): GlobalHostMutationAudit =>
+  globalHostMutationAuditOf(`
+    export {}
+    interface Process {}
+    declare var hostProcess: Process
+    declare function hostThing(value?: unknown): number
+    declare const hostEnv: { [key: string]: string | undefined }
+    declare const hostClock: { hrtime: { (): number; bigint(): bigint } }
+    ${use}
+    export const apply = (run: (value: object) => void) => run({ held: 1 })
+  `)
+
+test('reading a member off a host callable, or invoking it through call/apply, does not let it escape', () => {
+  for (const use of [
+    'hostClock.hrtime.bigint()',
+    'hostThing.call(null)',
+    'hostThing.apply(null, [1])',
+    "hostEnv['PATH']",
+    'hostEnv.PATH'
+  ]) {
+    assert.deepEqual([...hostCallableUse(use).taint], [], use)
+  }
+})
+
+test('a host callable bound or held as a value escapes', () => {
+  for (const use of ['const bound = hostThing.bind(null)', 'const held = hostThing', 'const clock = hostClock.hrtime']) {
+    assert.notDeepEqual([...hostCallableUse(use).taint], [], use)
+  }
+})
+
 test('own-key reflection dependencies revoke source slot closure after method replacement', () => {
   for (const replaced of [false, true]) {
     const audit = globalHostMutationAuditOf(`
