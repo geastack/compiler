@@ -36,6 +36,8 @@ captured-cell-branch-assignment.ts	ok
 class-defaulted-census-slot.runtime.js	ok
 class-expression-written-constructor.runtime.js	ok
 class-name-length-and-absent-default.runtime.js	ok
+class-static-block-prototype-flag.ts	ok
+class-static-blocks.ts	ok
 class-static-computed-key.runtime.js	ok
 classref-control.ts	ok
 classref-mismatch.ts	ok

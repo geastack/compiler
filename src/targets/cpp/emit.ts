@@ -1667,6 +1667,11 @@ const emitOperationStatements = (
     case 'super-initialize':
       emitSuperInitialize(ctx, lines, operation)
       return
+    // A region body is `void name()` (`signatureOf`), and every region stays
+    // reachable (`shake.ts`), so the body this names is always in the unit.
+    case 'run-region':
+      lines.push(`${cppBodyName(operation.region)}();`)
+      return
     case 'reparent-constructor':
       lines.push(
         `gea::reparentNativeClass<${cppClassName(operation.derived)}, ${cppClassName(operation.base)}>(` +

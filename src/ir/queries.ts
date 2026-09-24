@@ -102,6 +102,7 @@ export const resultOfIrOperation = (operation: IrOperation): IrResult | null => 
   switch (operation.kind) {
     case 'binding-write':
     case 'binding-renew':
+    case 'run-region':
     case 'commonjs-binding-set':
     case 'super-initialize':
     case 'reparent-constructor':
@@ -162,6 +163,7 @@ export const operandsOfIrOperation = (operation: IrOperation): readonly IrOperan
       return []
     case 'binding-read':
     case 'binding-renew':
+    case 'run-region':
       return []
     case 'parameter':
     case 'receiver':

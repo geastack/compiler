@@ -818,6 +818,17 @@ export interface BindingRenewOperation extends IrOperationBase {
   readonly declaration: DeclarationId
 }
 
+/**
+ * Runs a run-once region's body where its evaluation belongs: a class static
+ * block, at its place among the class's static elements (ECMA-262 15.7.14
+ * ClassDefinitionEvaluation). The block binds `this` to the class, which its
+ * own body reads as the class's constructor value, so the call passes nothing.
+ */
+export interface RunRegionOperation extends IrOperationBase {
+  readonly kind: 'run-region'
+  readonly region: RegionId
+}
+
 /** One incoming edge of a phi: the predecessor it is reached from, and the value visible at that predecessor's exit. */
 export interface IrPhiIncoming {
   readonly block: IrBlockId
@@ -1445,6 +1456,7 @@ export type IrOperation =
   | BindingReadOperation
   | BindingWriteOperation
   | BindingRenewOperation
+  | RunRegionOperation
   | ParameterOperation
   | ReceiverOperation
   | GlobalThisOperation

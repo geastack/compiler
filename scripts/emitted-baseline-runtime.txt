@@ -165,6 +165,7 @@ class-prototype-members-installed-from-key-list.ts.cpp 0e2481f7cb90
 class-prototype-reparented-onto-another-class.ts.cpp 32e8837b54a7
 class-reflection-sibling-isolation.ts.cpp 5f815e266e20
 class-static-assignment-slot.runtime.js.cpp d1d9260701cd
+class-static-blocks.ts.cpp a9d11fbf4296
 class-static-computed-key.runtime.js.cpp 00d46dce80c9
 class-symbol-cache-typed-store-through-interface-view.ts.cpp d9820b137c26
 class-symbol-iterator-generator-overload.ts.cpp ecb2b2dc379a

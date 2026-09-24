@@ -792,6 +792,11 @@ const lowerClassLifecycle = (ctx: LoweringContext, block: IrBlockId, operation: 
     lowerPrototypeReparenting(ctx, block, operation)
     return
   }
+  if (operation.event === 'run-static-block') {
+    if (!operation.staticBlock) throw new IrLoweringBlockedError(`static block ${operation.declaration} names no region to run`)
+    ctx.builder.runRegion(block, requireLineage(operation), operation.staticBlock)
+    return
+  }
   if (operation.event !== 'define-field' || operation.placement !== 'static') return
   const initializerOperand = operandOf(operation, 'initializer')
   if (!initializerOperand || initializerOperand.source.kind !== 'result') return

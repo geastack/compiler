@@ -208,6 +208,8 @@ export interface IrBodyBuilder {
   ) => IrValueId
   readonly bindingWrite: (block: IrBlockId, lineage: SemanticResultId, declaration: DeclarationId, value: IrOperand) => void
   readonly bindingRenew: (block: IrBlockId, lineage: SemanticResultId, declaration: DeclarationId) => void
+  /** See `RunRegionOperation`. */
+  readonly runRegion: (block: IrBlockId, lineage: SemanticResultId, region: RegionId) => void
   readonly parameter: (block: IrBlockId, lineage: SemanticResultId, ordinal: number, representation: Representation) => IrValueId
   readonly receiver: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
   readonly globalThis: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
@@ -741,6 +743,10 @@ export const createIrBodyBuilder = (
     append(block, { kind: 'binding-renew', lineage, declaration })
   }
 
+  const runRegion: IrBodyBuilder['runRegion'] = (block, lineage, region) => {
+    append(block, { kind: 'run-region', lineage, region })
+  }
+
   const parameter: IrBodyBuilder['parameter'] = (block, lineage, ordinal, representation) => {
     const result = mintResult(representation)
     append(block, { kind: 'parameter', lineage, ordinal, result })
@@ -1057,6 +1063,7 @@ export const createIrBodyBuilder = (
     bindingRead,
     bindingWrite,
     bindingRenew,
+    runRegion,
     parameter,
     receiver,
     globalThis,
