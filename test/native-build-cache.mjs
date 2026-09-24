@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, writeFileSync, statSync, utimesSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { buildNative } from '../scripts/native-build-cache.mjs'
+import { buildNative, nativeProgram } from '../scripts/native-build-cache.mjs'
 import { lockNativeOutput } from '../scripts/native-output-lock.mjs'
 
 const index = process.argv.indexOf('--out-dir')
@@ -36,7 +36,7 @@ writeFileSync(header, '#pragma once\n#include "native cache test dependency.h"\n
 writeFileSync(dependency, '#define CACHE_TEST_VALUE 17\n')
 writeFileSync(source, '#include "native-cache-test-runtime.h"\nint main() { std::printf("%d\\n", CACHE_TEST_VALUE); }\n')
 const options = { out, units: [source], includes: [`-I${out}`], runtimeHeader: header }
-const printed = () => execFileSync(join(out, 'program'), { encoding: 'utf8' }).trim()
+const printed = () => execFileSync(nativeProgram(out), { encoding: 'utf8' }).trim()
 const cold = buildNative(options)
 assert.equal(printed(), '17')
 const warm = buildNative(options)

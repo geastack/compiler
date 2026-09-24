@@ -38,7 +38,7 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { buildNative } from './native-build-cache.mjs'
+import { buildNative, nativeProgram } from './native-build-cache.mjs'
 import { lockNativeOutput } from './native-output-lock.mjs'
 
 const argv = process.argv.slice(2)
@@ -177,7 +177,7 @@ if (compileOnly) {
   console.error('COMPILED OK')
   process.exit(0)
 }
-const binary = join(out, 'program')
+const binary = nativeProgram(out)
 
 const ran = spawnSync(binary, { encoding: 'utf8' })
 process.stdout.write(ran.stdout ?? '')

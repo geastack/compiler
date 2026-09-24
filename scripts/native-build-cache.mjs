@@ -26,10 +26,15 @@ const run = (command, args, env = process.env) => {
 
 // Decode Make dependency output, including spaces escaped by Clang. Include
 // system headers: changing an SDK must invalidate a PCH as well as our header.
+// Clang escapes only a space and `#`; any other backslash is literal, and on
+// Windows it is the path separator, which a general `\.` escape would eat.
 const dependencies = (text) => {
   const body = text.replace(/\\\r?\n/g, '').replace(/^[^:]*:\s*/, '')
-  return [...new Set((body.match(/(?:\\.|[^\s])+/g) ?? []).map((word) => word.replace(/\\(.)/g, '$1').replace(/\$\$/g, '$')))]
+  return [...new Set((body.match(/(?:\\[ #]|[^\s])+/g) ?? []).map((word) => word.replace(/\\([ #])/g, '$1').replace(/\$\$/g, '$')))]
 }
+// CreateProcess appends `.exe` to a name that has none, so an unsuffixed
+// binary links on Windows and then cannot be spawned.
+export const nativeProgram = (out) => join(out, process.platform === 'win32' ? 'program.exe' : 'program')
 
 /** Build objects separately so ccache can cache them; linking is never cached.
  * Artifacts live in the caller's existing output directory. Callers must keep
@@ -113,7 +118,7 @@ export function buildNative({
     })
     const compileMs = performance.now() - compileStarted
     const linkStarted = performance.now()
-    run(cxx, ['-g', '-O0', ...objects, '-o', join(out, 'program')])
+    run(cxx, ['-g', '-O0', ...objects, '-o', nativeProgram(out)])
     return {
       pch: pchState,
       launcher: launcher ?? 'none',
