@@ -165,7 +165,15 @@ export const censusGlobalHostMutations = (
    * key unknown.
    */
   computedKeysOf: CensusComputedKeysOf = () => null,
-  trustSeed: CensusSeed = initialCensusSeed
+  trustSeed: CensusSeed = initialCensusSeed,
+  /**
+   * Declaration files TypeScript loaded from installed packages
+   * (`Program.isSourceFileFromExternalLibrary`). A package is compiled from
+   * its own source here, so what its typings declare -- outside any global or
+   * ambient-module declaration -- is JavaScript this program supplies, not a
+   * host native.
+   */
+  packageDeclarationFiles: ReadonlySet<ts.SourceFile> = new Set()
 ): HostMutationTaint => {
   const tainted = new HostMutationTaint()
   // Every intrinsic member name this run trusted, and every key its visit
@@ -5161,9 +5169,17 @@ export const censusGlobalHostMutations = (
    * `toString`/`subarray`, whose implementation is the native carrier -- is
    * not, and keeps needing a stated contract.
    */
+  const declaresGlobalSurface = (declaration: ts.Declaration): boolean =>
+    !ts.isExternalModule(declaration.getSourceFile()) ||
+    !!ts.findAncestor(
+      declaration,
+      (node) => ts.isModuleDeclaration(node) && ((node.flags & ts.NodeFlags.GlobalAugmentation) !== 0 || ts.isStringLiteral(node.name))
+    )
   const ambientCallableIsProgramSupplied = (symbol: ts.Symbol): boolean => {
     const declaration = symbol.declarations?.[0]
     if (!declaration) return false
+    const declarations = symbol.declarations ?? []
+    if (declarations.every((each) => packageDeclarationFiles.has(each.getSourceFile()) && !declaresGlobalSurface(each))) return true
     const signatures = checker.getSignaturesOfType(checker.getTypeOfSymbolAtLocation(symbol, declaration), ts.SignatureKind.Call)
     return (
       signatures.length > 0 &&
@@ -5896,7 +5912,8 @@ export const censusGlobalHostMutations = (
           },
           noComputedKeys: trustSeed.noComputedKeys || assumptionFailed,
           rejectedCallableProofs
-        }
+        },
+        packageDeclarationFiles
       )
     }
   }
