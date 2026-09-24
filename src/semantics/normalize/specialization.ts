@@ -198,6 +198,16 @@ export const emptySpecializationCensus: SpecializationCensus = {
 }
 
 const typeParametersOf = (declaration: ts.Declaration): readonly ts.TypeParameterDeclaration[] => {
+  // A JavaScript declaration writes its type parameters as JSDoc `@template`,
+  // and the checker gives its signature those parameters exactly as it does a
+  // TypeScript one's; `getEffectiveTypeParameterDeclarations` reads both.
+  if (
+    ts.isFunctionLike(declaration) ||
+    ts.isClassLike(declaration) ||
+    ts.isInterfaceDeclaration(declaration) ||
+    ts.isTypeAliasDeclaration(declaration)
+  )
+    return ts.getEffectiveTypeParameterDeclarations(declaration)
   const withParameters = declaration as ts.Declaration & { readonly typeParameters?: ts.NodeArray<ts.TypeParameterDeclaration> }
   return withParameters.typeParameters ?? []
 }
