@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import { valueSymbolAt } from './unresolvable-names.js'
 
 /** The checker-synthesized trailing slot, keyed by its owning signature. */
 export interface ImplicitArgumentsSlot {
@@ -16,7 +17,9 @@ export const implicitArgumentsSlotOf = (signature: ts.Signature): ImplicitArgume
 
 export const isArgumentsObjectIdentifier = (node: ts.Node, checker: ts.TypeChecker): node is ts.Identifier => {
   if (!ts.isIdentifier(node) || node.text !== 'arguments') return false
-  const symbol = checker.getSymbolAtLocation(node)
+  // `{ arguments }` reads the arguments object through its shorthand name, where
+  // the checker's symbol AT the node is the literal's property, not the value.
+  const symbol = valueSymbolAt(checker, node)
   return !!symbol && symbol.valueDeclaration === undefined && (symbol.declarations?.length ?? 0) === 0
 }
 
