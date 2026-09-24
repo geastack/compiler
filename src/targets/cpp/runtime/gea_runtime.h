@@ -16810,6 +16810,8 @@ class DynamicObject {
   struct Property {
     PropertyKey key;
     PropertyDescriptor descriptor;
+    /** When this key was created (`detail::ownKeyClock`), so a native object's expando keys interleave with its tracked fields. */
+    std::uint64_t order = detail::nextOwnKeyStamp();
   };
 
   /** 10.1.2 -- the `[[Prototype]]` slot. Null for `Object.create(null)` and for the root of every chain this runtime builds. */
@@ -17359,9 +17361,9 @@ bool sameNativeFieldValue(const T& left, const T& right) {
  * nor rewrite the value. Validate everything before mutating either storage or
  * attributes so a rejected definition leaves the object unchanged.
  */
-template <typename T>
+template <typename T, typename Presence>
 bool applyNativeFieldDescriptor(
-    T& value, NativeIndexAttributes& attributes, bool& present,
+    T& value, NativeIndexAttributes& attributes, Presence& present,
     const PropertyDescriptor& incoming, bool extensible, Value::Tag expected) {
   if (incoming.isAccessor() || (!present && !extensible)) return false;
   // An empty `Ref` IS `null` (`Value::box` boxes it as `Tag::Null`), so a Ref
@@ -17487,6 +17489,26 @@ class NativeIndexAttributeTable {
 
  private:
   std::map<Key, NativeIndexAttributes> entries_;
+};
+
+/**
+ * When each entry of a tracked struct's index sidecar was created, beside the
+ * sidecar the way its attribute table is. The generated write hooks note a key
+ * they add and the delete hook forgets it; an entry nothing noted (a path
+ * that writes the dictionary directly) answers 1, the allocation order.
+ */
+template <typename Key>
+class NativeIndexOrderTable {
+ public:
+  void note(const Key& key) { entries_[key] = detail::nextOwnKeyStamp(); }
+  void erase(const Key& key) { entries_.erase(key); }
+  std::uint64_t order(const Key& key) const {
+    const auto found = entries_.find(key);
+    return found == entries_.end() ? 1 : found->second;
+  }
+
+ private:
+  std::map<Key, std::uint64_t> entries_;
 };
 
 /**
@@ -25542,6 +25564,9 @@ bool assignOwnPropertiesUnorderedWith(const gea::Ref<T>& source, const gea::Ref<
 template <typename T>
 bool nativeHasUndeclaredOwnKeys(const gea::Ref<T>& object) {
   if (!object) return false;
+  // A tracked struct's declared fields need not be in declaration order, so
+  // every walk over it takes the ordered key list.
+  if constexpr (requires { T::gea_tracks_own_key_order; }) return true;
   if ((detail::refCountsOf(object.get())->weak & detail::expandoTagged) != 0) return true;
   if constexpr (requires { T::gea_has_index_sidecar; }) return true;
   return false;

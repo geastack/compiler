@@ -2035,6 +2035,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // `typed-array(float32)` as `native-record-ref` and `native-handle(
   // ArrayBuffer@1)` as `native-record-ref`. One plan, one deriver.
   const deriver = input.deriver
+  const ownKeyOrder = ownKeyOrderTrackingOf(input.bodies, input.classes, deriver)
 
   // The prelude and the struct declarations carry no single semantic result:
   // a struct is required by every carrier that names it, not authored by one

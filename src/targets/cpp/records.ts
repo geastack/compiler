@@ -28,6 +28,7 @@ import type { SealedRepresentationPlan } from '../../representation/plan.js'
 import { integerStorageSlot } from '../../ir/integer-storage.js'
 import { recordIndexDomainContainsKey } from '../../ir/native-record-index.js'
 import type { ReflectionExposure, ReflectionFieldOperations } from '../../ir/reflection-demand.js'
+import { noOwnKeyOrderTracking, type OwnKeyOrderTracking } from '../../ir/own-key-order.js'
 import {
   cppBodyName,
   cppClassName,
@@ -952,6 +953,22 @@ export const cppRecordIndexAttributesName = 'gea_dynamic_attributes'
 export const cppRecordIndexAttributesNameFor = (index: RecordIndexSidecar, indexes: readonly RecordIndexSidecar[]): string =>
   indexes.length > 1 && index.key === 'symbol' ? 'gea_symbol_dynamic_attributes' : cppRecordIndexAttributesName
 
+/** The creation stamps of one sidecar's entries, beside it in a struct that tracks its own-key order. */
+const cppRecordIndexOrderName = (sidecar: string): string => `${sidecar}_order`
+
+/**
+ * A struct whose own-key order or presence the program can observe, and
+ * whose instances can come to hold their keys in an order other than the
+ * layout's (`ir/own-key-order.ts`). Every presence bit is then per instance
+ * and stamped when it becomes present, so enumeration answers creation order.
+ */
+export interface StructOwnKeyOrder {
+  /** Declared keys an instance does not hold until a store creates one: a JavaScript class's `this.key =` members. */
+  readonly lateKeys: ReadonlySet<string>
+  /** Whether the struct is allocated as an object literal, whose own stores then create its keys in written order. */
+  readonly literal: boolean
+}
+
 /**
  * The C++ type each `gea::Value::Tag` pins down exactly.
  *
@@ -1740,6 +1757,7 @@ const renderFieldDispatcher = (
   for (const index of layout.indexes) {
     const member = cppRecordIndexSidecarNameFor(index, layout.indexes)
     const attributes = cppRecordIndexAttributesNameFor(index, layout.indexes)
+    const order = cppRecordIndexOrderName(member)
     const sidecarTag = dynamicTagFor(index.value)
     const sidecarValueType = cppTypeOf(index.value)
     const sidecarCanonical = sidecarTag === null ? undefined : canonicalDynamicPayloads.get(sidecarTag)
@@ -1786,6 +1804,9 @@ const renderFieldDispatcher = (
           : 'gea_key.text()'
     const sidecarGuard =
       index.key === 'symbol' ? 'gea_key.isSymbol()' : index.key === 'number' ? 'gea_key.isCanonicalNumberKey()' : '!gea_key.isSymbol()'
+    // A tracked sidecar stamps the entries a write creates; every write hook
+    // below has `gea_exists` in scope for exactly that test.
+    const noteCreated = trackOwnKeyOrder ? `if (!gea_exists) ${order}.note(${sidecarKey}); ` : ''
     sidecarPresent.push(`    if (${sidecarGuard}) { gea_out = ${member}.has(${sidecarKey}); return true; }`)
     sidecarEnumerable.push(
       `    if (${sidecarGuard}) { gea_out = ${member}.has(${sidecarKey}) && ${attributes}.attributes(${sidecarKey}).enumerable; return true; }`
@@ -1835,7 +1856,7 @@ const renderFieldDispatcher = (
     sidecarMatches.push(`    if (${sidecarGuard}) return true;`)
     sidecarDelete.push(
       `    if (${sidecarGuard}) { if (${member}.has(${sidecarKey}) && !${attributes}.deleteAllowed(${sidecarKey})) return false; ` +
-        `${member}.erase(${sidecarKey}); ${attributes}.erase(${sidecarKey}); return true; }`
+        `${member}.erase(${sidecarKey}); ${attributes}.erase(${sidecarKey}); ${trackOwnKeyOrder ? `${order}.erase(${sidecarKey}); ` : ''}return true; }`
     )
     sidecarFreeze.push(`    for (const auto& gea_entry : ${member}) ${attributes}.freeze(gea_entry.first);`)
     sidecarSeal.push(
@@ -2298,6 +2319,32 @@ const renderFieldDispatcher = (
       `    if (${cppRecordFieldPresenceName(key)}) gea_declared.push_back(gea::PropertyKey::symbol(gea::wellKnownSymbol(gea::detail::WellKnownSymbol::${wellKnown})));`
     ]
   })
+  // The same walk, each present key paired with its creation stamp. An
+  // accessor has a plain presence bit and no stamp: it is created with the
+  // object, so it sorts with the keys present from allocation.
+  const accessorKeys = new Set(accessors.map((accessor) => accessor.key))
+  const orderedKeys = ownKeys.flatMap((key) => {
+    const presence = cppRecordFieldPresenceName(key)
+    const order = accessorKeys.has(key) ? '1' : `${presence}.order()`
+    if (!cppRecordFieldKeyIsSymbol(key))
+      return [`    if (${presence}) gea_out.emplace_back(${order}, gea::PropertyKey::string(${cppStringLiteral(key)}));`]
+    const wellKnown = wellKnownSymbolEnumNameOf(wellKnownSymbols, key)
+    if (wellKnown === null) return []
+    return [
+      `    if (${presence}) gea_out.emplace_back(${order}, gea::PropertyKey::symbol(gea::wellKnownSymbol(gea::detail::WellKnownSymbol::${wellKnown})));`
+    ]
+  })
+  const baseOrders = !base
+    ? []
+    : base.native
+      ? [
+          '    {',
+          '      std::vector<gea::PropertyKey> gea_inherited;',
+          `      this->${base.structName}::gea_ownFieldKeys(gea_inherited);`,
+          '      for (const auto& gea_key : gea_inherited) gea_out.emplace_back(1, gea_key);',
+          '    }'
+        ]
+      : [`    this->${base.structName}::gea_ownKeyOrders(gea_out);`]
   const matches = ownKeys.map((key) => `    if (gea_name == ${cppStringLiteral(key)}) return true;`)
   const matchesByKey = new Map(layout.fields.map((field) => [field.key, matches[ownKeys.indexOf(field.key)] as string]))
   const presentFields = ownKeys.map(
@@ -3453,6 +3500,7 @@ const renderStructDefinition = (
   // `gea::nativeHasUndeclaredOwnKeys` reads it: a sidecar's entries are own
   // keys no declared field names, which a declared-field walk would miss.
   if (layout.indexes.length > 0) lines.push('  static constexpr bool gea_has_index_sidecar = true;')
+  if (ownKeyOrder !== null) lines.push('  static constexpr bool gea_tracks_own_key_order = true;')
   for (const index of layout.indexes) {
     // One dictionary member carries every dynamic-keyed property the named
     // fields above do not, embedded by value so it shares the struct's own
@@ -3466,6 +3514,10 @@ const renderStructDefinition = (
     lines.push(`  ${cppTypeOf(sidecar)} ${cppRecordIndexSidecarNameFor(index, layout.indexes)};`)
     const attributeKey = index.key === 'symbol' ? 'gea::Symbol' : 'std::string'
     lines.push(`  gea::NativeIndexAttributeTable<${attributeKey}> ${cppRecordIndexAttributesNameFor(index, layout.indexes)};`)
+    if (ownKeyOrder !== null)
+      lines.push(
+        `  gea::NativeIndexOrderTable<${attributeKey}> ${cppRecordIndexOrderName(cppRecordIndexSidecarNameFor(index, layout.indexes))};`
+      )
   }
   // Presence is separate from the value carrier for EVERY fixed field.
   // `value === undefined` is present, and a required TypeScript member starts

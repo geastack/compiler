@@ -548,8 +548,8 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
     // one runtime initialization, so this event contributes storage only.
     for (const field of inferredJavaScriptFieldsOf(context.checker, node)) {
       const fieldId = mintOperationId(context.ordinals, source, 'class-lifecycle')
-      operations.push(
-        buildOperation(
+      operations.push({
+        ...buildOperation(
           fieldId,
           candidate.caller,
           context.evaluationOrdinals.next(candidate.caller),
@@ -564,8 +564,9 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
           ],
           normalCompletion,
           { readsMutableState: false, writesMutableState: true, allocates: false, callsUserCode: false }
-        )
-      )
+        ),
+        assignedMember: true
+      })
       edges.push({ kind: 'evaluation', from: bindOperation.id, to: fieldId })
     }
 

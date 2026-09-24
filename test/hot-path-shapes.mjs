@@ -210,7 +210,9 @@ run('hot-path-layout-guards', {
       /^  gea::Ref<gea::NativeClassMethodState> gea_method_state;$/m,
       'a class evaluated per call keeps its state per instance'
     )
-    assert.match(source, /^  bool gea_present_x = true;$/m, 'a program that deletes a field keeps presence per instance')
+    // Its `Object.keys` after a `delete` also makes the record track key
+    // order (`ir/own-key-order.ts`), whose presence bit carries a stamp.
+    assert.match(source, /^  gea::OwnKeyPresence gea_present_x\{true\};$/m, 'a program that deletes a field keeps presence per instance')
     assert.doesNotMatch(source, /static inline bool gea_present_/, 'no struct claims a constant presence bit while `delete` exists')
   }
 })
