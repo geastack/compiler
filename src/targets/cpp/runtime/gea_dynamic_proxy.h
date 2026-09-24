@@ -298,20 +298,12 @@ inline PropertyDescriptor proxyDescriptorFrom(const Value& value) {
   result.configurable = host::detail::toBoolean(read("configurable", result.hasConfigurable));
   result.value = read("value", result.hasValue);
   result.writable = host::detail::toBoolean(read("writable", result.hasWritable));
-  Value getter = read("get", result.hasGet);
-  Value setter = read("set", result.hasSet);
-  if (getter.tag() != Value::Tag::Undefined) {
-    if (getter.tag() != Value::Tag::Function) host::throwRuntimeError("TypeError", "Descriptor getter must be callable");
-    result.getIdentity = getter.identity();
-    result.getterValue = getter;
-    result.get = [getter](const Value& receiver) { return getter.callWithReceiver(receiver, {}); };
-  }
-  if (setter.tag() != Value::Tag::Undefined) {
-    if (setter.tag() != Value::Tag::Function) host::throwRuntimeError("TypeError", "Descriptor setter must be callable");
-    result.setIdentity = setter.identity();
-    result.setterValue = setter;
-    result.set = [setter](const Value& receiver, const Value& value) { setter.callWithReceiver(receiver, {value}); };
-  }
+  bool hasGetter = false;
+  bool hasSetter = false;
+  const Value getter = read("get", hasGetter);
+  const Value setter = read("set", hasSetter);
+  if (hasGetter) detail::setDescriptorGetter(result, getter);
+  if (hasSetter) detail::setDescriptorSetter(result, setter);
   if (result.isAccessor() && result.isData()) host::throwRuntimeError("TypeError", "Descriptor mixes accessors and a data value");
   return result;
 }

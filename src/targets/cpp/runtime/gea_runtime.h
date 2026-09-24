@@ -10400,6 +10400,18 @@ struct PropertyDescriptor {
   }
 };
 
+namespace detail {
+/**
+ * ECMA-262 6.2.6.5 ToPropertyDescriptor steps 11-14 for one accessor field: a
+ * present `get`/`set` is `undefined` or callable, and a callable one runs with
+ * the receiver the lookup started from (10.1.8.1 OrdinaryGet step 7,
+ * 10.1.9.2 OrdinarySetWithOwnDescriptor step 5). The function object itself is
+ * kept so reading the descriptor back yields the same identity.
+ */
+inline void setDescriptorGetter(PropertyDescriptor& descriptor, const Value& getter);
+inline void setDescriptorSetter(PropertyDescriptor& descriptor, const Value& setter);
+}  // namespace detail
+
 /**
  * An ordinary object: an ORDERED own-property table, a prototype slot, and an
  * extensible flag. ECMA-262 10.1, over the one carrier a value the program
@@ -14736,6 +14748,25 @@ inline Value Value::callWithReceiver(const Value& receiver, const std::vector<Va
   frame.insert(frame.end(), arguments.begin(), arguments.end());
   return metadata_->calls->call(held_.get(), frame.data(), frame.size());
 }
+
+namespace detail {
+inline void setDescriptorGetter(PropertyDescriptor& descriptor, const Value& getter) {
+  descriptor.hasGet = true;
+  if (getter.tag() == Value::Tag::Undefined) return;
+  if (getter.tag() != Value::Tag::Function) host::throwRuntimeError("TypeError", "Getter must be a function");
+  descriptor.getIdentity = getter.identity();
+  descriptor.getterValue = getter;
+  descriptor.get = [getter](const Value& receiver) { return getter.callWithReceiver(receiver, {}); };
+}
+inline void setDescriptorSetter(PropertyDescriptor& descriptor, const Value& setter) {
+  descriptor.hasSet = true;
+  if (setter.tag() == Value::Tag::Undefined) return;
+  if (setter.tag() != Value::Tag::Function) host::throwRuntimeError("TypeError", "Setter must be a function");
+  descriptor.setIdentity = setter.identity();
+  descriptor.setterValue = setter;
+  descriptor.set = [setter](const Value& receiver, const Value& value) { setter.callWithReceiver(receiver, {value}); };
+}
+}  // namespace detail
 
 inline std::string Value::functionSourceText() const {
   if (tag_ != Tag::Function) detail::refusePayloadMismatch("Function.prototype.toString");

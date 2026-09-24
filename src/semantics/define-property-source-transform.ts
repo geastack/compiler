@@ -32,9 +32,11 @@ import ts from 'typescript'
  * A closed data-descriptor map whose attributes are not assignment-equivalent
  * is lowered to one `Object.defineProperty` per own key. Every descriptor is
  * evaluated into its own binding, in source property-evaluation order, before
- * any property is installed, just as `Object.defineProperties` requires.
- * Accessors, computed keys, spreads and open maps are left untouched and fail
- * closed at the ordinary host/representation boundary.
+ * any property is installed, just as `Object.defineProperties` requires. A map
+ * of pure descriptors (accessors included) is lowered with each descriptor
+ * left in place instead (`isPureDescriptor`). Computed keys, spreads, open
+ * maps and impure accessor maps are left untouched and fail closed at the
+ * ordinary host/representation boundary.
  *
  * ## Why text, and why splicing
  *
@@ -141,6 +143,39 @@ const isClosedDataDescriptor = (descriptor: ts.ObjectLiteralExpression): boolean
     seen.add(entry.key)
   }
   return seen.has('value')
+}
+
+/**
+ * A descriptor whose every member evaluates without observable effect: a
+ * function, arrow or method (creating a closure runs nothing) and a literal.
+ * Accessors are admitted here, and only here, because such a map can be
+ * installed one key at a time with each descriptor left where it was written:
+ * `Object.defineProperties` evaluates every descriptor before installing any,
+ * and with nothing observable to evaluate that order cannot be told apart.
+ * Leaving the functions in place matters: the checker types their `this` from
+ * the definition they are an argument of (`ThisType<any>`, or in JavaScript
+ * the prototype the call defines on), and a hoisted binding loses that.
+ */
+const isPureDescriptor = (descriptor: ts.ObjectLiteralExpression): boolean => {
+  const allowed = new Set(['value', 'get', 'set', 'writable', 'enumerable', 'configurable'])
+  const seen = new Set<string>()
+  const isPureValue = (expression: ts.Expression): boolean =>
+    ts.isFunctionExpression(expression) ||
+    ts.isArrowFunction(expression) ||
+    ts.isStringLiteralLike(expression) ||
+    ts.isNumericLiteral(expression) ||
+    expression.kind === ts.SyntaxKind.TrueKeyword ||
+    expression.kind === ts.SyntaxKind.FalseKeyword ||
+    expression.kind === ts.SyntaxKind.NullKeyword ||
+    (ts.isIdentifier(expression) && expression.text === 'undefined')
+  for (const property of descriptor.properties) {
+    const name = property.name ? literalPropertyNameOf(property.name) : null
+    if (name === null || !allowed.has(name) || seen.has(name)) return false
+    seen.add(name)
+    if (ts.isMethodDeclaration(property) && !property.asteriskToken && !property.modifiers?.length) continue
+    if (!ts.isPropertyAssignment(property) || !isPureValue(property.initializer)) return false
+  }
+  return !((seen.has('get') || seen.has('set')) && (seen.has('value') || seen.has('writable')))
 }
 
 /** A generated binding absent from the whole input, so it cannot shadow an initializer's free name. */
@@ -359,6 +394,8 @@ const pluralReplacement = (call: ts.CallExpression, file: ts.SourceFile): string
   if (receiver === undefined || mapArgument === undefined) return null
   if (!ts.isObjectLiteralExpression(mapArgument)) return null
   const receiverText = receiver.getText(file)
+  const pure = pureMapReplacement(call, receiver, mapArgument, file)
+  if (pure !== null) return pure
   const assignments: string[] = []
   const entries: {
     readonly key: string
@@ -429,6 +466,58 @@ const pluralReplacement = (call: ts.CallExpression, file: ts.SourceFile): string
     ...evaluatedEntries.map(({ entry, binding }) => `const ${binding} = ${entry.descriptorText};`),
     ...definitions,
     ...thisFieldDeclarations(call, receiver, evaluatedEntries),
+    '}'
+  ].join('\n')
+}
+
+/** OrdinaryOwnPropertyKeys: array-index strings numerically, before other strings in their source order. */
+const ownKeyOrder = <T extends { readonly key: string; readonly ordinal: number }>(entries: readonly T[]): readonly T[] => {
+  const arrayIndex = (key: string): number | null => {
+    const numeric = Number(key)
+    return Number.isInteger(numeric) && numeric >= 0 && numeric < 4_294_967_295 && String(numeric) === key ? numeric : null
+  }
+  return [...entries].sort((left, right) => {
+    const a = arrayIndex(left.key)
+    const b = arrayIndex(right.key)
+    if (a !== null && b !== null) return a - b
+    if (a !== null) return -1
+    if (b !== null) return 1
+    return left.ordinal - right.ordinal
+  })
+}
+
+/**
+ * A closed map of pure descriptors (`isPureDescriptor`) as one singular
+ * definition per key, each descriptor written where it was. The receiver is
+ * read once into its own binding, as `Object.defineProperties` reads it once;
+ * that also keeps TypeScript's JavaScript support from reading the result as
+ * a declaration of the prototype's member (it types a `value: function` as
+ * `{}`), so each function's `this` is the descriptor's own `ThisType<any>`.
+ * A `this` receiver stays on the general path, which also declares the
+ * fields the definition installs.
+ */
+const pureMapReplacement = (
+  call: ts.CallExpression,
+  receiver: ts.Expression,
+  map: ts.ObjectLiteralExpression,
+  file: ts.SourceFile
+): string | null => {
+  if (receiver.kind === ts.SyntaxKind.ThisKeyword || map.properties.length === 0) return null
+  const entries: { readonly key: string; readonly ordinal: number; readonly text: string }[] = []
+  const seen = new Set<string>()
+  for (const [ordinal, property] of map.properties.entries()) {
+    if (!ts.isPropertyAssignment(property)) return null
+    const key = literalPropertyNameOf(property.name)
+    if (key === null || seen.has(key) || !ts.isObjectLiteralExpression(property.initializer) || !isPureDescriptor(property.initializer))
+      return null
+    seen.add(key)
+    entries.push({ key, ordinal, text: property.initializer.getText(file) })
+  }
+  const receiverName = freshIdentifier(`__gea_define_properties_receiver_${call.getStart(file)}`, file)
+  return [
+    '{',
+    `const ${receiverName} = ${receiver.getText(file)};`,
+    ...ownKeyOrder(entries).map((entry) => `Object.defineProperty(${receiverName}, ${JSON.stringify(entry.key)}, ${entry.text});`),
     '}'
   ].join('\n')
 }

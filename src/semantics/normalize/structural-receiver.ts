@@ -301,7 +301,16 @@ export const createReceiverResolver = (
       ts.isFunctionExpression(declaration) && ts.isPropertyAssignment(declaration.parent) && declaration.parent.initializer === declaration
         ? declaration.parent.parent
         : null
-    if (owner && ts.isObjectLiteralExpression(owner)) return overriddenLiteralReceiverOf(declaration, owner) ?? layoutTypeAt(owner)
+    // Unless the checker types that `this` as something other than the
+    // literal: a property descriptor's `get`/`set`/`value` functions run with
+    // the object they are installed on, which TypeScript states as
+    // `ThisType<any>` on `Object.defineProperty`/`defineProperties`/`create`
+    // and, in JavaScript, as the instance type of the prototype they define.
+    if (owner && ts.isObjectLiteralExpression(owner)) {
+      const installed = installedReceiverOf(declaration, owner)
+      if (installed !== null) return installed
+      return overriddenLiteralReceiverOf(declaration, owner) ?? layoutTypeAt(owner)
+    }
     const prototypeConstructor = prototypeMethodConstructorOf(declaration)
     if (prototypeConstructor !== null) {
       const construct = prototypeConstructor.getConstructSignatures()
@@ -335,6 +344,22 @@ export const createReceiverResolver = (
    * which lowering refuses by name; so this can only turn a refused program
    * into an emitted one.
    */
+  const installedReceiverOf = (
+    declaration: ts.FunctionDeclaration | ts.FunctionExpression,
+    owner: ts.ObjectLiteralExpression
+  ): ts.Type | null => {
+    if (!declaration.body) return null
+    const keyword = firstOwnThisKeyword(declaration.body)
+    if (keyword === null) return null
+    const written = checker.getTypeAtLocation(keyword)
+    const receiver =
+      written.isTypeParameter() && (written as ts.TypeParameter & { isThisType?: boolean }).isThisType
+        ? (checker.getBaseConstraintOfType(written) ?? written)
+        : written
+    if ((receiver.flags & ts.TypeFlags.Any) !== 0) return receiver
+    const declarations = receiver.getSymbol()?.declarations ?? []
+    return declarations.length === 0 || declarations.includes(owner) ? null : receiver
+  }
   const implicitAnyReceiverOf = (declaration: ts.FunctionDeclaration | ts.FunctionExpression): ts.Type | null => {
     if (!declaration.body) return null
     const keyword = firstOwnThisKeyword(declaration.body)
