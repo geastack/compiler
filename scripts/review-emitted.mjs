@@ -10,7 +10,7 @@ export const reviewEmitted = ({ set, directory, measurements, rows, report, rese
   const baseline = new Map(
     readFileSync(set.baseline, 'utf8')
       .trim()
-      .split('\n')
+      .split(/\r?\n/)
       .map((row) => {
         const split = row.lastIndexOf(' ')
         return [row.slice(0, split), row.slice(split + 1)]
