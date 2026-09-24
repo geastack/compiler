@@ -996,6 +996,16 @@ export const calleeAwareTypeAt = (context: ProducerContext, node: ts.Expression)
 }
 
 /**
+ * Whether a structural type is one of the nine standard typed arrays, by the
+ * same declaration identities `representation/derive.ts` carries as
+ * `gea::TypedArray<T>` (`ProducerContext.typedArrayDeclarations`).
+ */
+export const isTypedArrayType = (context: ProducerContext, type: StructuralTypeId): boolean => {
+  const shape = context.table.get(type).shape
+  return shape.kind === 'declared' && context.typedArrayDeclarations.has(shape.declaration)
+}
+
+/**
  * Whether a structural type is a plain `T[]`/`Array<T>` -- never a tuple,
  * never a union, never an interned `unresolved`.
  *

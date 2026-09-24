@@ -374,6 +374,14 @@ export interface ProducerContext {
   /** The standard `ArrayIterator<T>` declaration returned by `Array.prototype.entries()`/`keys()`/`values()`. */
   readonly arrayIteratorDeclaration: DeclarationId | null
   /**
+   * The nine standard TypedArray instance declarations, the same identities
+   * `representation/derive.ts` carries as `gea::TypedArray<T>`
+   * (`FrontendResult.typedArrayElements`). Read by the spread producer, whose
+   * positional reads off a typed array are sound for the same reason they are
+   * off an Array: its iteration is its index reads in order.
+   */
+  readonly typedArrayDeclarations: ReadonlySet<DeclarationId>
+  /**
    * What every unannotated JS function actually returns (`return-bindings.ts`),
    * for a producer that wants it directly rather than through
    * `context.types.typeAt` -- see the "not yet the load-bearing seam" note

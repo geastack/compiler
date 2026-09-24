@@ -1801,6 +1801,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   )) {
     typedArrayElements.set(declaration, domain)
   }
+  for (const declaration of typedArrayElements.keys()) typedArrayDeclarationSet.add(declaration)
   // After the ambient census, deliberately: a standard-library class the
   // census already bound weakly (as a structural body, or as a protocol with
   // no carrier) must end up on the backend's own carrier, not beside it. See
