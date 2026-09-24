@@ -108,7 +108,8 @@ node dist/cli.js coverage app/index.ts --plugin ../node-compat/plugin/v2.mjs
 ```
 
 Prints one row per statement with a code, a status and a one-line reason,
-followed by a summary and a count per code. Boxed carriers are reported as
+followed by a summary, the last stage that ran (`plan`, `lowering`,
+`certification` or `emission`) and a count per code. Boxed carriers are reported as
 rows too. Exits 0 only if a certificate was minted and nothing was refused
 during lowering or emission.
 

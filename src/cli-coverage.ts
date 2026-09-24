@@ -91,6 +91,12 @@ interface CoverageSummary {
   readonly certifyRefusals: number
   readonly certified: boolean
   readonly emittedLines: number
+  /**
+   * The last stage that ran. Zero lowering blockers or certification refusals
+   * reads the same whether that stage passed or never ran: lowering waits for a
+   * plan with no refusals, and certification walks only what lowering built.
+   */
+  readonly reached: 'plan' | 'lowering' | 'certification' | 'emission'
 }
 
 const parseArguments = (argv: readonly string[]): CoverageArguments => {
@@ -322,7 +328,15 @@ const summarize = (result: CompilationResult): CoverageSummary => {
     abiBlockers: result.abiBlockers.length,
     certifyRefusals: result.refusals.filter((refusal) => refusal.stage === 'certify').length,
     certified: result.certificate !== null,
-    emittedLines: result.source === null ? 0 : result.source.split('\n').length
+    emittedLines: result.source === null ? 0 : result.source.split('\n').length,
+    reached:
+      result.source !== null
+        ? 'emission'
+        : result.certification !== null
+          ? 'certification'
+          : result.diagnostics.planClean
+            ? 'lowering'
+            : 'plan'
   }
 }
 
@@ -362,6 +376,7 @@ const renderText = (entry: string, project: string | null, rows: readonly Covera
       ? `certificate: minted; emitted ${summary.emittedLines} line(s) of C++`
       : 'certificate: not minted; nothing is emitted'
   )
+  lines.push(`reached: ${summary.reached}`)
   const byCode = new Map<string, { layer: string; count: number }>()
   for (const row of rows) {
     const bucket = byCode.get(row.code) ?? { layer: row.layer, count: 0 }
