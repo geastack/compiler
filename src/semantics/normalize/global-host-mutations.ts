@@ -4573,6 +4573,26 @@ export const censusGlobalHostMutations = (
     return globalObjectEscapesIntoData() && globalObjectMayInhabit(expression)
   }
   /**
+   * Whether this receiver may be the global object, an intrinsic prototype, a
+   * standard constructor, or a host object -- anything but a value this
+   * program allocated or a primitive. Only a published representation proves
+   * the negative: the per-expression proof `taintReceiverKeys` asks before it
+   * trusts a component's terms. A receiver the graph merely has no term for
+   * (a global member the declarations do not name) stays a possible surface.
+   */
+  const receiverMayBeIntrinsicSurface = (receiver: ts.Expression): boolean => {
+    const facts = aliasFacts(receiver)
+    const published = publishedRepresentationOf(receiver)
+    if (process.env['GEA_DEBUG_GLOBAL_MUTATION'])
+      debugSite(
+        receiver,
+        `structural surface write: global=${facts.global} prototypes=${facts.prototypes.size} ` +
+          `constructors=${constructorFactsOf(receiver).size} opaque=${facts.opaque} published=${published}`
+      )
+    if (facts.global || facts.prototypes.size > 0 || constructorFactsOf(receiver).size > 0) return true
+    return published !== 'object' && published !== 'primitive'
+  }
+  /**
    * Whether the global object can be REACHED from a value of this type --
    * `globalObjectMayInhabit`'s question asked transitively, because
    * `containsGlobal` below is about retaining the global in a field, not only

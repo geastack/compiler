@@ -2943,6 +2943,9 @@ const jsdocObjectGeometry = (store: string): string => `
       }
       return this
     }
+    clone() {
+      return new this.constructor().copy(this)
+    }
   }
 `
 
@@ -2951,22 +2954,26 @@ test('a keyed write through a JSDoc {Object} field that only ever holds fresh li
   assert.equal(audit.taint.has('*'), false, [...audit.taint].join(','))
 })
 
+// three's own `clone` is `new this.constructor().copy( this )`: an allocation
+// no class names, so the field's closed value set cannot enumerate its holders
+// and the write is left to the solved alias graph, which places the field's
+// contents all the same.
+test('a keyed write through a JSDoc {Object} field keeps intrinsic trust when its holders are not enumerable', () => {
+  const audit = jsdocObjectFieldAuditOf(jsdocObjectGeometry('{}'), 'new Geometry().clone()')
+  assert.equal(audit.taint.has('*'), false, [...audit.taint].join(','))
+})
+
 test('a keyed write through a JSDoc {Object} field still revokes intrinsic trust when the field may hold another value', () => {
   for (const [store, use] of [
-    // The field is filled from outside the program.
-    ['external()', 'new Geometry().copy(new Geometry())'],
+    // The field is filled with a value from outside the program.
+    ['globalThis.hostValue', 'new Geometry().copy(new Geometry())'],
     // The field is filled with the global object itself.
     ['globalThis', 'new Geometry().copy(new Geometry())'],
-    // The fields are all literals, but an instance leaves the program, so
-    // nothing proves what unseen code stores in its slot.
-    ['{}', 'const geometry = new Geometry(); release(geometry); geometry.copy(new Geometry())']
+    // The same two stores with holders no class names.
+    ['globalThis.hostValue', 'new Geometry().clone()'],
+    ['globalThis', 'new Geometry().clone()']
   ]) {
-    const audit = jsdocObjectFieldAuditOf(
-      `/** @returns {Object} */ function external() { return globalThis }
-${jsdocObjectGeometry(store!)}`,
-      `declare function release(value: unknown): void
-${use}`
-    )
+    const audit = jsdocObjectFieldAuditOf(jsdocObjectGeometry(store!), use!)
     assert.equal(audit.taint.has('*'), true, `${store} / ${use}`)
   }
 })
