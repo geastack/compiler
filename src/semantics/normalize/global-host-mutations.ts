@@ -1004,13 +1004,19 @@ export const censusGlobalHostMutations = (
     }
   })
   const hasFreshLiteralIdentity = (expression: ts.Expression): boolean => freshLiteralOrigin(expression) === 'allocated'
-  const isIntrinsicSurface = (expression: ts.Expression, seen: ReadonlySet<ts.Node> = new Set()): boolean => {
+  /**
+   * `structural` admits the conservative type test: a type some native
+   * receiver is assignable to, or assignable to one. Without it the answer is
+   * only what identity says -- the global object, a native result, a standard
+   * library binding, or storage one of those was written into.
+   */
+  const isIntrinsicSurface = (expression: ts.Expression, seen: ReadonlySet<ts.Node> = new Set(), structural = true): boolean => {
     const current = unwrapErasedExpression(expression)
     if (hasFreshLiteralIdentity(current)) return false
     if (
       isProvenGlobalObject(current) ||
       nativeResult(checker.getTypeAtLocation(current), current) ||
-      mayBeAuthenticatedNativeSurface(checker.getTypeAtLocation(current))
+      (structural && mayBeAuthenticatedNativeSurface(checker.getTypeAtLocation(current)))
     ) {
       return true
     }
@@ -1024,10 +1030,10 @@ export const censusGlobalHostMutations = (
       return flow
         .writesToDeclaration(declaration)
         .filter((write) => flowSiteIsReachable(write.site) && write.slot === 'whole' && write.value !== null)
-        .some((write) => isIntrinsicSurface(write.value!, next))
+        .some((write) => isIntrinsicSurface(write.value!, next, structural))
     }
     if (!ts.isPropertyAccessExpression(current) && !ts.isElementAccessExpression(current)) return false
-    if (staticKeyOf(current) === 'prototype') return isIntrinsicSurface(current.expression, seen)
+    if (staticKeyOf(current) === 'prototype') return isIntrinsicSurface(current.expression, seen, structural)
     const symbol = memberSymbolOf(current)
     return isProvenGlobalObject(current.expression) && !!symbol && hasStandardLibraryDeclaration(symbol)
   }
@@ -1083,6 +1089,18 @@ export const censusGlobalHostMutations = (
   const markIntrinsicPrototypeKeys = (target: ts.Expression, keys: readonly MutationKey[]): void => {
     for (const id of intrinsicPrototypesOf(target)) for (const key of keys) tainted.taintObject(id, key)
   }
+  // A computed write that may replace a prototype, through a receiver that is
+  // an intrinsic surface only by the conservative type test. What such a
+  // receiver holds is the solved alias graph's question, which is not built
+  // yet: the write is asked there at the end of this run, and one that may
+  // reach an intrinsic re-runs the census with all intrinsic trust revoked.
+  //
+  // three's `BufferGeometry.copy` writes `this.morphAttributes[ name ] = array`
+  // through a JSDoc `{Object}` field (the global `Object` interface, which
+  // every native receiver is assignable to) that only ever holds `{}`. Taking
+  // the type test as the answer there revoked all intrinsic trust, and every
+  // host global binding of three's WebGPU renderer refused with it.
+  const structuralSurfaceWrites: ts.Expression[] = []
   const markOverwrittenMember = (target: ts.Expression, key: string | null): void => {
     markIntrinsicPrototypeKeys(target, key === null ? [everyKey] : [key === '__proto__' ? everyKey : namedKey(key)])
     if (key === null) {
@@ -1133,9 +1151,10 @@ export const censusGlobalHostMutations = (
         const domain = ts.isElementAccessExpression(node) ? propertyKeyDomains.of(node.argumentExpression) : null
         // A prototype replacement can affect every method, regardless of its
         // name. Other computed writes invalidate only the names they can reach.
-        if (domain === null || propertyKeyDomains.mayName(domain, '__proto__') || propertyKeyDomains.mayName(domain, 'prototype'))
-          invalidateAllIntrinsicTrust(node)
-        else computedIntrinsicKeys.add(domain)
+        if (domain === null || propertyKeyDomains.mayName(domain, '__proto__') || propertyKeyDomains.mayName(domain, 'prototype')) {
+          if (isIntrinsicSurface(node.expression, new Set(), false)) invalidateAllIntrinsicTrust(node)
+          else structuralSurfaceWrites.push(node.expression)
+        } else computedIntrinsicKeys.add(domain)
       }
       continue
     }
@@ -4426,6 +4445,26 @@ export const censusGlobalHostMutations = (
     return globalObjectEscapesIntoData() && globalObjectMayInhabit(expression)
   }
   /**
+   * Whether this receiver may be the global object, an intrinsic prototype, a
+   * standard constructor, or a host object -- anything but a value this
+   * program allocated or a primitive. Only a published representation proves
+   * the negative: the per-expression proof `taintReceiverKeys` asks before it
+   * trusts a component's terms. A receiver the graph merely has no term for
+   * (a global member the declarations do not name) stays a possible surface.
+   */
+  const receiverMayBeIntrinsicSurface = (receiver: ts.Expression): boolean => {
+    const facts = aliasFacts(receiver)
+    const published = publishedRepresentationOf(receiver)
+    if (process.env['GEA_DEBUG_GLOBAL_MUTATION'])
+      debugSite(
+        receiver,
+        `structural surface write: global=${facts.global} prototypes=${facts.prototypes.size} ` +
+          `constructors=${constructorFactsOf(receiver).size} opaque=${facts.opaque} published=${published}`
+      )
+    if (facts.global || facts.prototypes.size > 0 || constructorFactsOf(receiver).size > 0) return true
+    return published !== 'object' && published !== 'primitive'
+  }
+  /**
    * Whether the global object can be REACHED from a value of this type --
    * `globalObjectMayInhabit`'s question asked transitively, because
    * `containsGlobal` below is about retaining the global in a field, not only
@@ -5829,13 +5868,15 @@ export const censusGlobalHostMutations = (
       )
         rejectedFieldProofs.add(access)
     const fieldProofFailed = rejectedFieldProofs.size > trustSeed.rejectedFieldProofs.size
+    const structuralSurfaceWritten = !trustSeed.all && structuralSurfaceWrites.filter(receiverMayBeIntrinsicSurface).length > 0
     if (
       distrusted.length > 0 ||
       (written.every && !trustSeed.all) ||
       inheritedGrew ||
       assumptionFailed ||
       invocationFailed ||
-      fieldProofFailed
+      fieldProofFailed ||
+      structuralSurfaceWritten
     ) {
       if (process.env['GEA_DEBUG_GLOBAL_MUTATION'])
         process.stderr.write(
@@ -5858,7 +5899,7 @@ export const censusGlobalHostMutations = (
         computedKeysOf,
         {
           names: new Set([...trustSeed.names, ...distrusted]),
-          all: trustSeed.all || written.every,
+          all: trustSeed.all || written.every || structuralSurfaceWritten,
           objectPrototypeKeys: {
             names: new Set([...trustSeed.objectPrototypeKeys.names, ...objectPrototypeKeys.names]),
             numeric: trustSeed.objectPrototypeKeys.numeric || objectPrototypeKeys.numeric,
