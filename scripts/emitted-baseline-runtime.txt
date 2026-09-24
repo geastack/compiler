@@ -868,6 +868,7 @@ partial-record-merge-and-intersection-spread.runtime.ts.cpp 74454f8722a3
 pass-through-host-call-unboxes-a-dynamic-argument.runtime.ts.cpp 0fb2d8689a01
 pattern-native-property-routing.ts.cpp 57d5dbab54db
 pending-promise-payload-narrowed-at-call.ts.cpp bc6c28e122e6
+per-iteration-let-bindings.ts.cpp 1618f9a92d68
 physical-class-ancestry-declared.ts.cpp 66cb73d87d9a
 physical-class-ancestry-live.ts.cpp ee6944277aed
 physical-class-ancestry-optional.ts.cpp d6ebb83f6f1c
