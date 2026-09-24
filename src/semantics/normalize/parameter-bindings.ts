@@ -452,6 +452,24 @@ const isUnannotated = (checker: ts.TypeChecker, parameter: ts.ParameterDeclarati
 }
 
 /**
+ * A parameter the program typed only by its default value, or a read of one:
+ * `isUnannotated`'s "a default value is not a type", asked by the layout
+ * resolver so the binding and every read of the cell take the census's answer
+ * exactly where the signature's slot does (`structural-parts.ts`'s
+ * `parameterOf`, which asks the census first unconditionally).
+ */
+export const typedOnlyByDefault = (checker: ts.TypeChecker, node: ts.Node): boolean => {
+  const declaration = ts.isParameter(node) ? node : ts.isIdentifier(node) ? checker.getSymbolAtLocation(node)?.valueDeclaration : undefined
+  return (
+    declaration !== undefined &&
+    ts.isParameter(declaration) &&
+    declaration.initializer !== undefined &&
+    ts.isIdentifier(declaration.name) &&
+    isUnannotated(checker, declaration)
+  )
+}
+
+/**
  * Whether a type still carries a piece of an UNSUBSTITUTED generic -- a bare
  * type parameter, an indexed access whose object type is one (`E['Bindings']`),
  * a conditional or a substitution.

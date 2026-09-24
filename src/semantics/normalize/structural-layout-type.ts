@@ -13,7 +13,7 @@ import {
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import ts from 'typescript'
 import { emptyAbsentGlobalCensus, type AbsentGlobalCensus } from './absent-globals.js'
-import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
+import { emptyParameterBindingCensus, typedOnlyByDefault, type ParameterBindingCensus } from './parameter-bindings.js'
 
 /**
  * Which type an object or array literal is laid out as.
@@ -905,7 +905,11 @@ export const createLayoutTypeResolver = (
       (own.flags & ts.TypeFlags.Any) !== 0 ||
       annotationStatesNothing(checker, node, own) ||
       impliedPatternParameterOf(checker, node) !== null ||
-      impliedPatternElementRootOf(checker, node) !== null
+      impliedPatternElementRootOf(checker, node) !== null ||
+      // The fourth: a parameter typed only by its default value, whose
+      // checker type is the default's (`false`, `null`), not the domain its
+      // callers write -- see `typedOnlyByDefault`.
+      typedOnlyByDefault(checker, node)
     ) {
       // Asked before the parameter census: a literal token is not a value the
       // program left open for its callers to write down. See above.
