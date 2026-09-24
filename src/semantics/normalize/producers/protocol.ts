@@ -16,6 +16,7 @@ import {
   isGeneratorType,
   isNativeIterableSetType,
   isNativeIterableStringType,
+  isTypedArrayType,
   staticSpreadMembersOf,
   valueEdgesInto
 } from './shared.js'
@@ -739,6 +740,14 @@ const contributeIterationSpread = (context: ProducerContext, candidate: CensusCa
     consumedWithoutIterator &&
     (hasNativeIterationCursor(context, source.type) || closedTupleElementTypesOf(context, source.type) !== null)
   ) {
+    return { kind: 'operations', operations: [], edges: [] }
+  }
+  // A typed array spread into a call's NAMED formals is read by index
+  // (`spread-arguments.ts`'s `admitsFixedFormalArraySpread`); every other
+  // typed-array call spread is refused there by name, so no call cites steps
+  // minted for one.
+  const consumedByCall = ts.isCallExpression(node.parent) || ts.isNewExpression(node.parent)
+  if (consumedByCall && isTypedArrayType(context, source.type)) {
     return { kind: 'operations', operations: [], edges: [] }
   }
   // Everything else keeps its steps. When the source is a provably plain

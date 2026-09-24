@@ -509,6 +509,7 @@ set-constructed-from-a-string.ts.cpp ae1377b3d02f
 slot-write-closure.runtime.ts.cpp 9b9ef35c8b5f
 spread-call-immediately-invoked.runtime.js.cpp c5ae95452df2
 spread-fixed-arity-three.runtime.js.cpp 978c1dcd93de
+spread-fixed-arity-typed-array.ts.cpp b8a4802269a5
 spread-fixed-arity.ts.cpp 355a4e5a2a88
 stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d

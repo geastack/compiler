@@ -10,7 +10,7 @@ import type { CensusCandidate } from '../census.js'
 import type { ProducerContext } from '../producer-context.js'
 import { argumentsObjectValueAt, isArgumentsObjectIdentifier } from './bindings.js'
 import { operand } from './mint.js'
-import { hasNativeIterationCursor, isPlainArrayType, sourceForValue } from './shared.js'
+import { hasNativeIterationCursor, isPlainArrayType, isTypedArrayType, sourceForValue } from './shared.js'
 import { isDynamicIterationSource } from './protocol.js'
 import {
   isClosedTupleSpread,
@@ -70,10 +70,10 @@ import {
  * indistinguishable to the callee, which is exactly what licenses reading the
  * declared arity unconditionally instead of the tuple's true runtime length.
  *
- * A fourth shape fills NAMED formals from a runtime-length Array spread as
- * the call's LAST argument: an Array's iteration is its index reads in order,
- * so each formal from the landing position on reads its own index, and a
- * rest formal after them takes a range copy of the remainder
+ * A fourth shape fills NAMED formals from a runtime-length Array or typed
+ * array spread as the call's LAST argument: its iteration is its index reads
+ * in order, so each formal from the landing position on reads its own index,
+ * and a rest formal after them takes a range copy of an Array's remainder
  * (`admitsFixedFormalArraySpread`).
  *
  * Everything else -- a user-defined iterable, a hand-written
@@ -232,8 +232,9 @@ const admitsOpenTupleSpread = (
  * formal's binding depends on it -- which is the whole of what a named formal
  * needs.
  *
- * It must be the LAST argument: a written argument after it lands at a
- * position only the Array's runtime length knows. The magic `arguments` object
+ * A typed array fills formals the same way (`arrayElementTypeOf`). It must be
+ * the LAST argument: a written argument after it lands at a position only the
+ * Array's runtime length knows. The magic `arguments` object
  * has its own positional expansion (`admitsFixedArgumentsSpread`), and a Set,
  * a Map, a string or a generator has no index reads that equal its iteration
  * (a string iterates code points, a generator runs user code per step), so
@@ -256,8 +257,14 @@ const admitsFixedFormalArraySpread = (
   )
 }
 
-/** The element of a plain or named Array (`isPlainArrayType`), or `null` for anything else. */
+/**
+ * The element of a plain or named Array (`isPlainArrayType`) or of one of the
+ * nine standard typed arrays, or `null` for anything else. A typed array's
+ * `%TypedArray%.prototype[@@iterator]` is its index reads in order exactly as
+ * an Array's is, and every one of the nine reads a `number`.
+ */
 const arrayElementTypeOf = (context: ProducerContext, type: StructuralTypeId): StructuralTypeId | null => {
+  if (isTypedArrayType(context, type)) return context.table.intern({ kind: 'primitive', primitive: 'number' })
   if (!isPlainArrayType(context, type)) return null
   const shape = context.table.get(type).shape
   const array = shape.kind === 'declared' && shape.body !== null ? context.table.get(shape.body).shape : shape
@@ -284,6 +291,19 @@ const fixedFillTailOf = (context: ProducerContext, candidate: CensusCandidate, r
   const signature = context.checker.getResolvedSignature(node)
   return signature ? (implicitArgumentsSlotOf(signature)?.ordinal ?? null) : null
 }
+
+/**
+ * Whether a spread landing at `position` fills NAMED formals: the callee has a
+ * static convention, and either no rest formal or one past `position` that
+ * the leading formals do not simply extend (`restAbsorbsLeadingFormals`).
+ */
+const fillsNamedFormals = (
+  context: ProducerContext,
+  selected: SelectedSignature | null,
+  position: number,
+  restFrom: number | null
+): selected is SelectedSignature =>
+  selected !== null && (restFrom === null || (position < restFrom && !restAbsorbsLeadingFormals(context, selected, position, restFrom)))
 
 /**
  * Whether a formal's slot can hold the `undefined` an out-of-range read hands
@@ -374,7 +394,8 @@ export const buildArgumentOperands = (
       declaredTupleRestArityOf(context, argument.expression) === null &&
       !admitsOpenTupleSpread(context, argument, scan, restFrom, selected) &&
       !admitsMaxArityTupleSpread(context, args, scanIndex, restFrom, selected) &&
-      !admitsFixedArgumentsSpread(context, args, scanIndex, restFrom, selected)
+      !admitsFixedArgumentsSpread(context, args, scanIndex, restFrom, selected) &&
+      !(fillsNamedFormals(context, selected, scan, restFrom) && admitsFixedFormalArraySpread(context, args, scanIndex, selected))
     ) {
       // The magic `arguments` object -- `IArguments` has no native iteration
       // cursor of its own (it is not a `Set`/`Map`/`Array`/`string`/
@@ -408,11 +429,7 @@ export const buildArgumentOperands = (
       // against, the same shape `invocationArgumentTarget`
       // (`preflight/invocation-arguments.ts`) already treats as satisfied
       // outright for a dynamic callee's ordinary arguments.
-      if (
-        selected !== null &&
-        (restFrom === null || (scan < restFrom && !restAbsorbsLeadingFormals(context, selected, scan, restFrom))) &&
-        !admitsFixedFormalArraySpread(context, args, scanIndex, selected)
-      ) {
+      if (fillsNamedFormals(context, selected, scan, restFrom)) {
         if (arrayElementTypeOf(context, context.types.typeAt(argument.expression)) !== null) {
           return {
             kind: 'refused',
@@ -517,7 +534,7 @@ export const buildArgumentOperands = (
       }
       if (
         selected !== null &&
-        (restFrom === null || (position < restFrom && !restAbsorbsLeadingFormals(context, selected, position, restFrom))) &&
+        fillsNamedFormals(context, selected, position, restFrom) &&
         admitsFixedFormalArraySpread(context, args, buildIndex, selected)
       ) {
         const receiver = spreadReceiverOf(context, argument.expression)
@@ -526,6 +543,16 @@ export const buildArgumentOperands = (
           return { kind: 'refused', reason: 'no normalized operation identifies the array a fixed-formal spread reads' }
         }
         const tailFrom = fixedFillTailOf(context, candidate, restFrom)
+        if (tailFrom !== null && isTypedArrayType(context, receiver.type)) {
+          // The packed tail is an Array the callee binds; filling it from a
+          // typed array is a per-element copy out of `gea::TypedArray<T>`,
+          // which the rest pack (`packRestArguments`) has no range source for.
+          return {
+            kind: 'refused',
+            reason:
+              'a typed-array spread whose values reach a rest parameter needs a range copy out of a typed array, which is not installed'
+          }
+        }
         const formals = selected.parameters.slice(position, Math.max(position, tailFrom ?? selected.parameters.length))
         const head = mintPositionalSpreadReads(
           context,

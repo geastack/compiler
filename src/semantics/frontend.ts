@@ -1427,6 +1427,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     provenKeyTextsCache.set(key, result)
     return result
   }
+  const typedArrayDeclarationSet = new Set<DeclarationId>()
   const context: ProducerContext = {
     isStandardLibraryDeclaration: (declaration) => compiled.program.isSourceFileDefaultLibrary(declaration.getSourceFile()),
     hostMethodOf: (node) => resolveHostMethod(compiled.checker, hostMethodBindings, node),
@@ -1502,6 +1503,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     generatorDeclaration: generatorDeclarationEarly,
     asyncGeneratorDeclaration: asyncGeneratorDeclarationEarly,
     mapIteratorDeclaration: mapIteratorDeclarationEarly,
+    // Filled below, before normalization reads it, the same way `hosts` is.
+    typedArrayDeclarations: typedArrayDeclarationSet,
     ...(returns ? { returns } : {})
   }
   const hostInput: HostProtocolInput = {
@@ -1547,6 +1550,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   )) {
     typedArrayElements.set(declaration, domain)
   }
+  for (const declaration of typedArrayElements.keys()) typedArrayDeclarationSet.add(declaration)
   // After the ambient census, deliberately: a standard-library class the
   // census already bound weakly (as a structural body, or as a protocol with
   // no carrier) must end up on the backend's own carrier, not beside it. See
