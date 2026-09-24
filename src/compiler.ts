@@ -75,7 +75,7 @@ import {
   type HostMemberTable,
   type HostSpellings
 } from './targets/cpp/host/host-members.js'
-import { coreGlobalClasses, coreGlobalFunctions, coreNativeTypes } from './targets/cpp/host/core-globals.js'
+import { coreDynamicIntrinsics, coreGlobalClasses, coreGlobalFunctions, coreNativeTypes } from './targets/cpp/host/core-globals.js'
 import { createCppConversionRegistry } from './targets/cpp/conversions.js'
 import type { PrinterDrift } from './targets/cpp/emit-narrowing.js'
 import { recordLayoutPolicyOf } from './projection/fields.js'
@@ -449,6 +449,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     nativeTypesByDeclaration,
     hostSingletonDeclarations: new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.hostSingletonDeclarations ?? new Map())])),
     standardClasses: new Set(coreNativeTypes.keys()),
+    dynamicIntrinsics: new Set(coreDynamicIntrinsics.keys()),
     // What the installed hosts state they do NOT provide, unioned the same way
     // their positive claims are. A name is absent only because a host said so:
     // with no plugin stating one this set is empty and every ambient
@@ -649,9 +650,15 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     // program reaches the type constantly (`typeof x === 'function'`,
     // `x.constructor`) with no textual reference the ambient-value seed walk
     // could pick up. Forwarded rather than composed -- unlike `Date`/`String`,
-    // the carrier names no C++ type for this target to spell.
+    // the carrier names no C++ type for this target to spell. The dynamic
+    // intrinsics join it only under the opt-in their runtime objects need.
     {
-      forDeclaration: (declaration: DeclarationId) => declaration === frontend.functionDeclaration
+      forDeclaration: (declaration: DeclarationId) =>
+        declaration === frontend.functionDeclaration
+          ? 'untyped-callable'
+          : request.dynamicFallback && frontend.dynamicIntrinsicDeclarations.has(declaration)
+            ? 'opt-in-fallback'
+            : null
     },
     // Class heritage, forwarded from the frontend's own checker-answered walk
     // (`classHeritageOf`, semantics/class-heritage.ts). Forwarded rather than
@@ -892,6 +899,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     // see `BindingPlacementInput.coreGlobalFunctions`.
     coreGlobalFunctions,
     coreGlobalClasses,
+    coreDynamicIntrinsics,
     standardLibraryExternals: frontend.standardLibraryBindings,
     hostNamespaces: hosts.namespaces,
     hostNamespaceRootsByDeclaration: new Map(plugins.flatMap((plugin) => [...plugin.capabilities.hostNamespaceRootsByDeclaration])),

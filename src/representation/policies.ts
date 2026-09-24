@@ -1,5 +1,5 @@
 import type { DeclarationId, FunctionId, StructuralTypeId } from '../identity/ids.js'
-import type { Ownership, RecordField, Representation, TypedArrayElementDomain, RecordAccessor } from './model.js'
+import type { DynamicReason, Ownership, RecordField, Representation, TypedArrayElementDomain, RecordAccessor } from './model.js'
 import type { StructuralShape } from '../semantics/model/structural-types.js'
 
 /**
@@ -485,15 +485,24 @@ export const defaultErrorDeclarationPolicy: ErrorDeclarationPolicy = { forDeclar
  * callee side. Deriving the interface's BODY instead would seal a struct of
  * `name`/`length`/`arguments`/`caller`/`prototype` -- a plausible-looking
  * layout that is not a function.
+ *
+ * The same policy answers the standard intrinsics whose instances are ordinary
+ * objects with internal slots and no fields at all -- `WeakRef` and
+ * `FinalizationRegistry` and their constructor interfaces -- when the program
+ * was compiled with `--dynamic-fallback`: the runtime implements them as
+ * builtin function objects over dynamic objects, so the box is the carrier
+ * their values really have, and the reason is the opt-in. Without the opt-in
+ * the policy answers nothing for them and they keep failing closed as the
+ * unregistered host boundary they are.
  */
-export interface FunctionDeclarationPolicy {
-  /** True when this declaration is the standard bare `Function` interface. */
-  readonly forDeclaration: (declaration: DeclarationId) => boolean
+export interface BoxedDeclarationPolicy {
+  /** Why a value of this standard declaration is carried in the box, or `null` when it is not. */
+  readonly forDeclaration: (declaration: DeclarationId) => DynamicReason | null
 }
 
-/** No `Function` declaration installed: every declared type falls through to its ordinary answer, unchanged. */
-export const defaultFunctionDeclarationPolicy: FunctionDeclarationPolicy = {
-  forDeclaration: () => false
+/** No boxed declaration installed: every declared type falls through to its ordinary answer, unchanged. */
+export const defaultBoxedDeclarationPolicy: BoxedDeclarationPolicy = {
+  forDeclaration: () => null
 }
 
 /**

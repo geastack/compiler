@@ -19,7 +19,7 @@ import type {
   StandardBufferPolicy,
   StringObjectDeclarationPolicy,
   ErrorDeclarationPolicy,
-  FunctionDeclarationPolicy,
+  BoxedDeclarationPolicy,
   ClassHeritagePolicy,
   ClassCopyPolicy,
   TypedArrayElementPolicy,
@@ -39,7 +39,7 @@ import {
   defaultStandardBufferPolicy,
   defaultStringObjectDeclarationPolicy,
   defaultErrorDeclarationPolicy,
-  defaultFunctionDeclarationPolicy,
+  defaultBoxedDeclarationPolicy,
   defaultClassHeritagePolicy,
   defaultTypedArrayElementPolicy,
   defaultValueRecordPolicy
@@ -604,10 +604,10 @@ export const publishRepresentations = (
   // interface -- one declaration, its own parameter for the same reason
   // `date` is one. See `StringObjectDeclarationPolicy` (policies.ts).
   stringObject: StringObjectDeclarationPolicy = defaultStringObjectDeclarationPolicy,
-  // Which declared type is the bare `Function` interface -- one declaration,
-  // its own parameter for the same reason `generator` is one. See
-  // `FunctionDeclarationPolicy` (policies.ts).
-  functionType: FunctionDeclarationPolicy = defaultFunctionDeclarationPolicy,
+  // Which standard declarations are carried in the box, and why: the bare
+  // `Function` interface always, the dynamic intrinsics under the opt-in. See
+  // `BoxedDeclarationPolicy` (policies.ts).
+  boxed: BoxedDeclarationPolicy = defaultBoxedDeclarationPolicy,
   // Which classes each class inherits from, transitively -- read by the
   // deriver's intersection reduction. See `ClassHeritagePolicy` (policies.ts).
   heritage: ClassHeritagePolicy = defaultClassHeritagePolicy,
@@ -667,7 +667,7 @@ export const publishRepresentations = (
     generator,
     regexp,
     stringObject,
-    functionType,
+    boxed,
     heritage,
     valueRecords,
     implementors,

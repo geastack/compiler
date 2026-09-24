@@ -974,7 +974,7 @@ export const errorDeclarationsOf = (
  * `ts.SymbolFlags.Interface`, because that is what declares it; the value
  * `Function` resolves to `FunctionConstructor`, which is a different symbol
  * and deliberately untouched -- an ambient constructor object really is a host
- * boundary. See `FunctionDeclarationPolicy` (representation/policies.ts).
+ * boundary. See `BoxedDeclarationPolicy` (representation/policies.ts).
  */
 export const functionDeclarationOf = (
   checker: ts.TypeChecker,
@@ -986,6 +986,61 @@ export const functionDeclarationOf = (
   const symbol = checker.resolveName('Function', anchor, ts.SymbolFlags.Interface, false)
   if (!symbol) return null
   return identities.symbolDeclarationId(symbol, anchor)
+}
+
+/**
+ * The declaration identities of the standard intrinsics the backend
+ * implements as builtin function objects over dynamic objects (`names`,
+ * supplied by the backend -- see `coreDynamicIntrinsics`,
+ * targets/cpp/host/core-globals.ts): for each, the instance INTERFACE and the
+ * interface its global VALUE is declared as.
+ *
+ * Both halves come from the one name. `lib.es2021.weakref.d.ts` declares
+ * `interface WeakRef<T>` and `declare var WeakRef: WeakRefConstructor`, and a
+ * program reaches the constructor interface through `global.WeakRef` and the
+ * instance interface through what `new` returns; asking the checker for the
+ * value's declared type is what finds `WeakRefConstructor` without this file
+ * spelling it. A declaration outside the default library is never returned:
+ * a program's own `class WeakRef` is its own class.
+ *
+ * The global value itself is returned apart, as a host SINGLETON: the backend
+ * defines exactly one such function object, so a read of `global.WeakRef` is
+ * that binding exactly as a read of a host's own singleton is, and a program
+ * that writes the global through the global object taints it the same way.
+ */
+export const dynamicIntrinsicDeclarationsOf = (
+  checker: ts.TypeChecker,
+  identities: IdentityTable,
+  files: readonly ts.SourceFile[],
+  names: ReadonlySet<string>
+): { readonly carried: ReadonlySet<DeclarationId>; readonly singletons: ReadonlySet<DeclarationId> } => {
+  const carried = new Set<DeclarationId>()
+  const singletons = new Set<DeclarationId>()
+  const anchor = files[0]
+  if (!anchor) return { carried, singletons }
+  const standard = (symbol: ts.Symbol | undefined): symbol is ts.Symbol =>
+    symbol?.declarations?.some((declaration) => declaration.getSourceFile().hasNoDefaultLib) === true
+  for (const name of names) {
+    const instance = checker.resolveName(name, anchor, ts.SymbolFlags.Interface, false)
+    const value = checker.resolveName(name, anchor, ts.SymbolFlags.Value, false)
+    const constructorType = standard(value) ? checker.getTypeOfSymbol(value) : undefined
+    for (const symbol of [instance, constructorType?.getSymbol()]) {
+      if (!standard(symbol)) continue
+      const declaration = identities.symbolDeclarationId(symbol, anchor)
+      if (declaration) carried.add(declaration)
+    }
+    // `WeakRef.prototype` is typed by the constructor's `prototype` slot, whose
+    // declaration anchors a shape of its own (`prototypeObjectTypeAt`,
+    // normalize/structural.ts). Here that object is the runtime's real
+    // prototype, holding the methods, so it is carried the same way.
+    const prototypeSlot = constructorType?.getProperty('prototype')
+    const slotDeclaration = prototypeSlot?.valueDeclaration ?? prototypeSlot?.declarations?.[0]
+    if (slotDeclaration?.getSourceFile().hasNoDefaultLib) carried.add(identities.declarationIdOf(slotDeclaration))
+    if (!standard(value)) continue
+    const singleton = identities.symbolValueDeclarationId(value, anchor)
+    if (singleton) singletons.add(singleton)
+  }
+  return { carried, singletons }
 }
 
 /** Standard `SymbolConstructor` unique-symbol declarations, keyed by declaration identity. */

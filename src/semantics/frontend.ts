@@ -95,6 +95,7 @@ import {
   stringObjectDeclarationOf,
   errorDeclarationsOf,
   functionDeclarationOf,
+  dynamicIntrinsicDeclarationsOf,
   generatorDeclarationOf,
   asyncGeneratorDeclarationOf,
   mapIteratorDeclarationOf,
@@ -195,6 +196,12 @@ export interface FrontendInput {
    * here is derived from a name this file knows.
    */
   readonly standardClasses?: ReadonlySet<string>
+  /**
+   * The standard intrinsic names the backend implements as builtin function
+   * objects over dynamic objects, admitted only under `dynamicFallback` --
+   * see `coreDynamicIntrinsics` (targets/cpp/host/core-globals.ts).
+   */
+  readonly dynamicIntrinsics?: ReadonlySet<string>
   /**
    * Class member names an installed host reaches without the program spelling
    * them -- see `PluginCapabilities.reachedMemberKeys`, and
@@ -461,11 +468,18 @@ export interface FrontendResult {
    * The declaration identity of the bare `Function` interface -- what
    * `typeof x === 'function'` narrows to and what `Object.prototype.constructor`
    * is declared as -- or `null` if this compilation's `lib` does not install
-   * one. See `functionDeclarationOf`, and `FunctionDeclarationPolicy`
+   * one. See `functionDeclarationOf`, and `BoxedDeclarationPolicy`
    * (representation/policies.ts) for why it is carried dynamically rather than
    * as a host handle.
    */
   readonly functionDeclaration: DeclarationId | null
+  /**
+   * Under `--dynamic-fallback`, the standard declarations of the intrinsics
+   * the backend implements as dynamic objects (`input.dynamicIntrinsics`);
+   * empty otherwise. See `dynamicIntrinsicDeclarationsOf`, and
+   * `BoxedDeclarationPolicy` (representation/policies.ts) for the carrier.
+   */
+  readonly dynamicIntrinsicDeclarations: ReadonlySet<DeclarationId>
   /**
    * Which classes each class inherits from, transitively. See
    * `classHeritageOf` (class-heritage.ts) and `ClassHeritagePolicy`
@@ -1583,6 +1597,13 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // no carrier) must end up on the backend's own carrier, not beside it. See
   // `bindStandardClasses`.
   bindStandardClasses(hostInput, hosts, input.standardClasses ?? new Set())
+  // Before the global-binding set is taken, so the mutation census guards the
+  // intrinsics' singletons exactly as it guards a host's. See
+  // `dynamicIntrinsicDeclarationsOf`.
+  const dynamicIntrinsics = input.dynamicFallback
+    ? dynamicIntrinsicDeclarationsOf(compiled.checker, identities, compiled.sourceFiles, input.dynamicIntrinsics ?? new Set())
+    : { carried: new Set<DeclarationId>(), singletons: new Set<DeclarationId>() }
+  for (const singleton of dynamicIntrinsics.singletons) hosts.hostSingletonBindings.add(singleton)
   const hostGlobalBindings = new Set<DeclarationId>([...hosts.hostSingletonBindings, ...hosts.hostNamespaceBindings])
   // The mutation census must see the exact identities whose representation
   // policy carries them outside `globalThis`: typed-array instances and native
@@ -1873,6 +1894,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     stringObjectDeclaration,
     errorDeclarations,
     functionDeclaration,
+    dynamicIntrinsicDeclarations: dynamicIntrinsics.carried,
     classHeritage,
     constructorSlotSubclasses,
     uninstantiableClasses,
