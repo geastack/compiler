@@ -97,6 +97,35 @@ import { ownPropertySymbolsText } from './emit-host-reflect.js'
 /** A `dynamic` carrier, built where a member has to state the box it widens a known field into. */
 const dynamicCarrier: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
 
+/**
+ * A known view's `Object.values`/`Object.entries` once a key no declared
+ * field names may exist.
+ *
+ * The braced vector over the declared fields is exact for an object whose own
+ * keys are those fields, and that is every object until an index-signature
+ * entry or a computed write (`o[key] = v`) gives it one more. `Object.keys`
+ * already asks the runtime for every own key (`ownEnumerableKeysText`), so
+ * `Object.keys(o)` said `alpha,gamma` while `Object.values(o)` said `1`. A
+ * generated shared object therefore takes the braced vector only while
+ * `gea::nativeHasUndeclaredOwnKeys` says it has no such key, and otherwise
+ * walks the same key list `Object.keys` does: declared fields keep their
+ * native reads, and every other value arrives boxed from the dynamic protocol
+ * and is entered into the result's element carrier.
+ *
+ * A carrier with no conversion from a box cannot hold such a value; that
+ * program has no sound answer to give, and says so at the key that needs one.
+ */
+const withUndeclaredKeys = (view: Extract<ObjectView, { kind: 'known' }>, fixed: string, keyed: (receiver: string) => string): string =>
+  ownershipOfGeneratedCarrier(view.representation) === 'shared-refcount'
+    ? `(gea::nativeHasUndeclaredOwnKeys(${view.receiver}) ? ${keyed(view.receiver)} : ${fixed})`
+    : fixed
+
+/** The body of the `undeclared` callback where a box has no conversion into the slot. */
+const unconvertibleUndeclaredText = (member: string, slot: Representation): string =>
+  `gea::host::throwRuntimeError("TypeError", ${cppStringLiteral(
+    `Object.${member}: an own property no declared field names holds a dynamic value, and "${representationKey(slot)}" has no conversion from one`
+  )});`
+
 const objectValueConversionText = (
   ctx: EmitContext,
   operation: CallOperation,

@@ -9,6 +9,7 @@ import type { CommonJsWrapperDeclaration } from '../plugins/model.js'
 import { createCommonJsRequireCensus, createCommonJsRequireTargetCensus, type CommonJsRequireCensus } from './normalize/commonjs-require.js'
 import { withoutBareWrapperRedeclarations } from './commonjs-wrapper.js'
 import { withoutModuleAmbientGlobalRedeclarations } from './ambient.js'
+import { scriptScopeCollisionsOf } from './script-scope-collisions.js'
 import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
 import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
@@ -1019,11 +1020,14 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
   const program = configured.program
   const checker = withStableTypeQueries(program.getTypeChecker(), program)
   const sourceFiles = program.getSourceFiles().filter((file) => !file.isDeclarationFile)
+  const semanticDiagnostics = timing.measure('semantic-diagnostics', () => program.getSemanticDiagnostics())
+  const reported = new Set(semanticDiagnostics.map((diagnostic) => `${diagnostic.file?.fileName}:${diagnostic.start}:${diagnostic.code}`))
   const diagnostics = [
     ...timing.measure('syntactic-diagnostics', () => program.getSyntacticDiagnostics()),
-    ...timing
-      .measure('semantic-diagnostics', () => program.getSemanticDiagnostics())
-      .filter((diagnostic) => !isUncheckedGuardCopyArtifact(diagnostic, guardCopies.originalNames)),
+    ...semanticDiagnostics.filter((diagnostic) => !isUncheckedGuardCopyArtifact(diagnostic, guardCopies.originalNames)),
+    ...scriptScopeCollisionsOf(checker, sourceFiles).filter(
+      (diagnostic) => !reported.has(`${diagnostic.file?.fileName}:${diagnostic.start}:${diagnostic.code}`)
+    ),
     ...resolutionDiagnostics
       .filter(({ literal }) => !typeOnlyModuleUse(literal, checker, program.getCompilerOptions().verbatimModuleSyntax))
       .map(({ diagnostic }) => diagnostic)

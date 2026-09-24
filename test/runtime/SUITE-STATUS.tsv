@@ -45,6 +45,9 @@ classref-mismatch.ts	ok
 classref-roundtrip.ts	ok
 closure-cycle-lifetime.ts	ok
 computed-class-prototype-method.ts	ok
+computed-key-enumeration-dynamic.runtime.js	ok
+computed-key-enumeration.runtime.js	ok
+computed-key-enumeration.ts	ok
 computed-record-union.ts	ok
 conditional-any-arm-returned-as-optional.ts	ok
 constant-table.ts	ok
@@ -287,6 +290,8 @@ return-type-mints-no-copy.ts	ok
 return-void-call-into-union.ts	ok
 returned-generic-spelling.ts	ok
 scalar-roundtrip.ts	ok
+script-global-name-collision-dynamic.runtime.js	ok
+script-global-name-collision.runtime.js	ok
 spread-call-immediately-invoked.runtime.js	ok
 stable-binding-identity.ts	ok
 stable-string-read.ts	ok

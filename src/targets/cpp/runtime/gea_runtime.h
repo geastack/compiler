@@ -25528,6 +25528,50 @@ bool assignOwnPropertiesUnorderedWith(const gea::Ref<T>& source, const gea::Ref<
   return assignOwnPropertiesInCreationOrderWith(source, target, std::forward<Each>(each), std::forward<StaticCopy>(staticCopy));
 }
 
+/**
+ * Whether a generated struct can hold an own key none of its declared fields
+ * names: an entry of its index-signature sidecar, or an expando a computed
+ * write (`o[k] = v`) created in the identity-keyed table.
+ *
+ * `Object.keys` already walks all three stores (`nativeDynamicKeys`), and a
+ * member that walks the declared fields alone -- `Object.values`,
+ * `Object.entries`, `JSON.stringify` -- must agree with it the moment such a
+ * key exists. The expando half is the object's own `expandoTagged` bit, so
+ * the ordinary object pays one load to keep its compile-time field list.
+ */
+template <typename T>
+bool nativeHasUndeclaredOwnKeys(const gea::Ref<T>& object) {
+  if (!object) return false;
+  if ((detail::refCountsOf(object.get())->weak & detail::expandoTagged) != 0) return true;
+  if constexpr (requires { T::gea_has_index_sidecar; }) return true;
+  return false;
+}
+
+/**
+ * `Object.values` over every own enumerable string key, in `nativeDynamicKeys`
+ * order. `declared` pushes a declared field's value natively and answers
+ * whether the key was one; every other key is read through the dynamic
+ * protocol and entered into the element carrier by `undeclared`.
+ */
+template <typename E, typename T, typename Declared, typename Undeclared>
+gea::Ref<ArrayObject<E>> nativeOwnEnumerableValues(const gea::Ref<T>& object, const Declared& declared, const Undeclared& undeclared) {
+  std::vector<E> values;
+  for (const std::string& key : nativeDynamicKeys(object)) {
+    if (!declared(key, values)) values.push_back(undeclared(nativeDynamicGet(object, PropertyKey::string(key))));
+  }
+  return detail::hostArrayResult(values);
+}
+
+/** `Object.entries` over the same walk as `nativeOwnEnumerableValues`; `undeclared` builds the entry from the key and its boxed value. */
+template <typename Entry, typename T, typename Declared, typename Undeclared>
+gea::Ref<ArrayObject<Entry>> nativeOwnEnumerableEntries(const gea::Ref<T>& object, const Declared& declared, const Undeclared& undeclared) {
+  std::vector<Entry> entries;
+  for (const std::string& key : nativeDynamicKeys(object)) {
+    if (!declared(key, entries)) entries.push_back(undeclared(key, nativeDynamicGet(object, PropertyKey::string(key))));
+  }
+  return detail::hostArrayResult(entries);
+}
+
 /** Array exotic own enumerable string keys, followed by enumerable expandos. */
 template <typename Element>
 std::vector<std::string> arrayOwnEnumerableKeys(const gea::Ref<ArrayObject<Element>>& array) {
