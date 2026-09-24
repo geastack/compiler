@@ -66,6 +66,8 @@ export interface ReferenceOperation extends SemanticOperationBase {
    * `if` condition or a `??` left side already is.
    */
   readonly form: 'identifier' | 'property' | 'super-property' | 'private-name' | 'this' | 'parameter-value' | 'global-this'
+  /** A `parameter-value` read of a rest slot: the fresh Array the call's argument packing built. */
+  readonly restPacked?: boolean
   readonly strict: boolean
   /** Reference resolution can throw before any value is produced. */
   readonly unresolvableThrows: boolean
@@ -169,6 +171,8 @@ export interface BindingOperation extends SemanticOperationBase {
   readonly temporalDeadZone: boolean
   /** This initializes a formal parameter before the enclosing body's declarations and statements. */
   readonly parameterInitialization?: boolean
+  /** This initializes a rest parameter: its value is the fresh Array the call's argument packing built. */
+  readonly restPacked?: boolean
   /** This initializes a direct body-level function declaration during FunctionDeclarationInstantiation. */
   readonly hoistedFunctionInitialization?: boolean
   /**
