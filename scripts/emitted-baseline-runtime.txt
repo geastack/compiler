@@ -45,6 +45,7 @@ array-pattern-elision-over-generator.ts.cpp 7a23cbce00e8
 array-pattern-over-generator.ts.cpp c2cb92041ade
 array-pattern-over-regexp-exec.ts.cpp 04e5fb3ea606
 array-read-keyed-by-a-dynamic-index.ts.cpp cfe86a1aab02
+array-reduce-accumulator-carrier.ts.cpp 1b6929059b9b
 array-rest-target-reassigned-dynamic.runtime.js.cpp 44b8f69c9e73
 array-spread-into-fixed-formals.runtime.ts.cpp 2d79f7506e95
 arrow-contextual-this.runtime.ts.cpp 4da8c5dc28a7
@@ -949,7 +950,7 @@ recursive-derived-parameter-access.runtime.js.cpp 30b6b7e5730c
 recursive-function-declarations-share-one-environment.runtime.ts.cpp 22611ffefa99
 recursive-jsdoc-typedef.runtime.js.cpp 346c5aa64ecc
 recursive-map-alias-nested-three-levels.runtime.ts.cpp b87d3bc3d7a5
-recursive-union-alias.ts.cpp 56831b3ac290
+recursive-union-alias.ts.cpp f4753b1869f6
 ref-virtual-base-address.ts.cpp 376edec0544a
 reflect-native-boundary.ts.cpp 4cc14a2c5e16
 reflect-native-operations.ts.cpp 36be69d77625

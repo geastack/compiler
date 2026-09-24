@@ -827,12 +827,91 @@ const includesText: ArrayCallRenderer = (ctx, receiverText, element, args, resul
   return rangedMethodText('includes', '23.1.3.16', [1, 2], 0)(ctx, receiverText, element, args, result)
 }
 
-/** The reducers: `reduce(cb)` and `reduce(cb, initialValue)` are two physical arities and two runtime overloads; the no-initial form's empty-array TypeError lives in the runtime. */
+/**
+ * The reducers: `reduce(cb)` and `reduce(cb, initialValue)` are two physical
+ * arities and two runtime overloads; the no-initial form's empty-array
+ * TypeError lives in the runtime.
+ *
+ * The runtime template takes its accumulator type from the initial value's C++
+ * expression, and a literal's expression is not its carrier: `(0)` is an
+ * `int` and `("")` a `const char[1]`, so `xs.reduce((a, b) => a + b, 0)`
+ * truncated every partial sum to an integer, and the string seed did not
+ * compile. The accumulator is the callback's first parameter (ECMA-262 step
+ * 8.b.iii passes it straight back in), so it is stated here: the seed is
+ * converted into that carrier and spelled as its C++ type, the element into
+ * the second parameter's carrier, and the callback's result back into the
+ * accumulator's, each through the one conversion authority.
+ */
 const reduceText =
   (member: 'reduce' | 'reduceRight', clause: string): ArrayCallRenderer =>
-  (ctx, receiverText, _element, args): string => {
+  (ctx, receiverText, element, args, result): string => {
     requireArity(member, clause, [1, 2], args)
-    return call(ctx, member, receiverText, args)
+    const [callback, initial] = args
+    const carrier = callback?.representation
+    if (!callback || carrier?.kind !== 'function-value-dispatch' || carrier.abi.receiver !== null) {
+      return call(ctx, member, receiverText, args)
+    }
+    const [accumulatorParameter, elementParameter, index, array, ...beyond] = carrier.abi.parameters
+    const accumulator = accumulatorParameter?.value ?? result?.representation
+    if (!accumulator) return call(ctx, member, receiverText, args)
+    const refuse = (detail: string): never => {
+      throw createCppEmitBlockedError(
+        `runtime-helper:callback:${member}:${elementKey(element)}`,
+        `"Array.prototype.${member}" (ECMA-262 ${clause}) reduces a receiver of element "${elementKey(element)}" into the callback's ` +
+          `accumulator "${representationKey(accumulator)}"; ${detail}`
+      )
+    }
+    const convert = (from: Representation, to: Representation, text: string, what: string): string =>
+      alignedValueText(ctx, `prototype/emit-prototype-array.ts:reduceText`, from, to, text) ??
+      refuse(`${what} carries "${representationKey(from)}", and no installed conversion reaches "${representationKey(to)}"`)
+    if (carrier.abi.restFrom !== null || beyond.length > 0)
+      refuse('a callback with more parameters than accumulator, element, index and array has no runtime call shape')
+    if (index && representationKey(index.value) !== 'scalar(number)')
+      refuse(`its index parameter carries "${representationKey(index.value)}", and the runtime passes a number`)
+    if (array && (array.value.kind !== 'array-object' || representationKey(array.value.element) !== representationKey(element)))
+      refuse(`its array parameter carries "${representationKey(array.value)}", and the runtime passes the receiver itself`)
+    const accumulatorType = cppTypeOf(accumulator)
+    const adapts =
+      (elementParameter !== undefined && representationKey(elementParameter.value) !== representationKey(element)) ||
+      representationKey(carrier.abi.result) !== representationKey(accumulator)
+    let reducer = operandText(ctx, callback)
+    if (adapts) {
+      const formals = [`const ${accumulatorType}& __gea_accumulator`]
+      const actuals = ['__gea_accumulator']
+      if (elementParameter) {
+        formals.push(`const ${cppTypeOf(element)}& __gea_element`)
+        actuals.push(convert(element, elementParameter.value, '__gea_element', "the callback's element parameter"))
+      }
+      if (index) {
+        formals.push('double __gea_index')
+        actuals.push('__gea_index')
+      }
+      if (array) {
+        formals.push(`const ${cppTypeOf(array.value)}& __gea_array`)
+        actuals.push('__gea_array')
+      }
+      const produced = convert(carrier.abi.result, accumulator, `__gea_fn(${actuals.join(', ')})`, "the callback's result")
+      reducer = `[__gea_fn = ${reducer}](${formals.join(', ')}) -> ${accumulatorType} { return ${produced}; }`
+    }
+    let reduced: string
+    if (initial) {
+      // A constant's C++ literal is the one seed whose expression type is not
+      // its carrier's; every other operand already arrives spelled as it.
+      const converted = convert(initial.representation, accumulator, operandText(ctx, initial), 'the initial value')
+      const seed = ctx.constantTexts.has(initial.value) ? `static_cast<${accumulatorType}>(${converted})` : converted
+      reduced = `gea::runtime::array::${member}(${receiverText}, ${reducer}, ${seed})`
+    } else if (representationKey(element) === representationKey(accumulator)) {
+      reduced = `gea::runtime::array::${member}(${receiverText}, ${reducer})`
+    } else {
+      // Step 6's seed is the first present element itself, so it enters the
+      // accumulator's carrier exactly as every later element enters the callback.
+      const seed = convert(element, accumulator, '__gea_seed', 'the first element, which seeds the accumulator,')
+      reduced =
+        `gea::runtime::array::${member}Seeded(${receiverText}, ${reducer}, ` +
+        `[](const ${cppTypeOf(element)}& __gea_seed) -> ${accumulatorType} { return ${seed}; })`
+    }
+    if (result === null) return reduced
+    return convert(accumulator, result.representation, reduced, 'the reduced accumulator')
   }
 
 /** `pop`/`shift`: no arguments at all, and an optional element for a result -- the receiver is the whole call. */

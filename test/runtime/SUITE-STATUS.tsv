@@ -8,6 +8,7 @@ array-pattern-defaults-keep-positions.ts	ok
 array-pattern-elision-over-generator.ts	ok
 array-pattern-over-generator.ts	ok
 array-pattern-over-regexp-exec.ts	ok
+array-reduce-accumulator-carrier.ts	ok
 array-rest-target-reassigned-dynamic.runtime.js	ok
 assign-for-in-generic.ts	ok
 async-integer-result.ts	ok
@@ -279,6 +280,7 @@ regexp-utf16-coordinate.ts	ok
 repeated-construction.ts	ok
 rest-forwarding-spread-argument.ts	ok
 rest-parameter-rebase.ts	ok
+rest-reduce-dynamic.runtime.js	ok
 rest-tuple-spread.ts	ok
 return-type-mints-no-copy.ts	ok
 return-void-call-into-union.ts	ok
