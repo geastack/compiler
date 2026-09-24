@@ -1,0 +1,7 @@
+# Every tracked text file is LF in the repository, and prettier requires LF.
+# Check it out as LF on every platform too: a CRLF checkout (Git for
+# Windows' core.autocrlf=true default) reaches the emitted C++ wherever a
+# program observes its own source text -- Function.prototype.toString copies
+# it verbatim, as node does -- so the same commit emitted different C++ on
+# Windows, and prettier --check failed on every file there.
+* text=auto eol=lf
