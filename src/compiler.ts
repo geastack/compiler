@@ -429,7 +429,15 @@ export const sourceTransformsFor = (
   // types that transform just injected, not only the program's own source. A
   // package states, as data, that an ambient name a library documents is
   // realised by a concrete class the package ships; nothing here names one.
-  createAmbientTypeRealizationTransform(new Map(plugins.flatMap((plugin) => [...plugin.capabilities.ambientTypeRealizations]))),
+  // A scoped row is the checker's (`scoped-type-realizations.ts`), so one does
+  // not displace another plugin's unscoped row of the same name here.
+  createAmbientTypeRealizationTransform(
+    new Map(
+      plugins.flatMap((plugin) =>
+        [...plugin.capabilities.ambientTypeRealizations].filter(([, realization]) => realization.within === undefined)
+      )
+    )
+  ),
   ...plugins.flatMap((plugin) => (plugin.transformSource ? [plugin.transformSource] : []))
 ]
 
@@ -484,6 +492,13 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     ...(request.packageSources ? { packageSources: request.packageSources } : {}),
     declarationModules: new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.declarationModules ?? [])])),
     uncheckedJavaScript: new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.uncheckedJavaScript ?? [])])),
+    // Every plugin's scoped rows are kept, not merged by name: two packages may
+    // each state what one ambient name means in their own files.
+    scopedTypeRealizations: plugins.flatMap((plugin) =>
+      [...plugin.capabilities.ambientTypeRealizations].flatMap(([name, { type, importedFrom, within }]) =>
+        within === undefined ? [] : [{ name, type, importedFrom, within }]
+      )
+    ),
     rootFileNames: request.rootFileNames,
     projectFileName: request.projectFileName ?? null,
     javaScriptSources: request.javaScriptSources ?? false,

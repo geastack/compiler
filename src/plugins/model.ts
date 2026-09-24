@@ -236,6 +236,15 @@ export interface PluginCapabilities {
    * applied) carry, and imports the realization from `importedFrom`. Nothing
    * about the transform names a library; the map is the whole of what a
    * plugin states.
+   *
+   * A row with `within` is SCOPED and takes neither path: only JavaScript
+   * modules inside those package globs see the name as the realization, only
+   * in type positions, and the checker binds it in each file's own scope with
+   * the text left as written (`semantics/scoped-type-realizations.ts`). That is
+   * three's node system writing `@param {Node} node` in files that never import
+   * `Node`, which lib.dom would otherwise answer:
+   * `['Node', { type: 'default', importedFrom: 'three/src/nodes/core/Node.js', within: new Set(['three/src/**']) }]`.
+   * Scoped rows are kept from every plugin rather than merged by name.
    */
   readonly ambientTypeRealizations: ReadonlyMap<string, AmbientTypeRealization>
   /**

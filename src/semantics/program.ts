@@ -17,6 +17,7 @@ import { isUncheckedGuardCopyArtifact, uncheckedGuardArgumentCopies } from './un
 import { knownCallerPredicateParameters } from './known-caller-predicate-parameters.js'
 import { uncheckedWriteMemberDeclarations } from './unchecked-write-member-declarations.js'
 import { createUncheckedJavaScriptPolicy, markUnchecked } from './unchecked-javascript.js'
+import { createScopedTypeRealizer, type ScopedTypeRealization } from './scoped-type-realizations.js'
 
 /**
  * The TypeScript program host.
@@ -34,6 +35,8 @@ export interface ProgramInput {
   readonly declarationModules?: ReadonlySet<string>
   /** Package file globs whose JavaScript reports no checker diagnostics -- see `unchecked-javascript.ts`. */
   readonly uncheckedJavaScript?: ReadonlySet<string>
+  /** Package-scoped JSDoc type names, bound by the checker -- see `scoped-type-realizations.ts`. */
+  readonly scopedTypeRealizations?: readonly ScopedTypeRealization[]
   readonly rootFileNames: readonly string[]
   readonly options: ts.CompilerOptions
   /**
@@ -844,6 +847,9 @@ const configuredProgram = (
   const requiredJsonFiles = new Set<string>()
   const buildProgram = (rootNames: readonly string[], options: ts.CompilerOptions, host: ts.CompilerHost): ConfiguredProgram => {
     const targetOf = runtimeModuleTargetOf(host, options)
+    const realizer = createScopedTypeRealizer(input.scopedTypeRealizations ?? [], host, (specifier, containingFile) =>
+      targetOf(specifier, containingFile, 'import')
+    )
     const roots = new Set(rootNames)
     const commonJsTargetPaths = new Set<string>()
     let program = timing.measure('create-program', () => ts.createProgram({ rootNames: [...roots], options, host }))

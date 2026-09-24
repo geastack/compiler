@@ -130,6 +130,21 @@ const validateInstance = (value: unknown): PluginInstance => {
   for (const pattern of (capabilities['uncheckedJavaScript'] as Set<unknown> | undefined) ?? []) {
     if (typeof pattern !== 'string') throw new Error('invalid PluginInstance: capabilities.uncheckedJavaScript must hold strings')
   }
+  for (const [name, realization] of capabilities['ambientTypeRealizations'] as Map<unknown, unknown>) {
+    if (
+      typeof name !== 'string' ||
+      !isRecord(realization) ||
+      typeof realization['type'] !== 'string' ||
+      typeof realization['importedFrom'] !== 'string'
+    )
+      throw new Error('invalid PluginInstance: capabilities.ambientTypeRealizations must map names to { type, importedFrom }')
+    const within = realization['within']
+    if (
+      within !== undefined &&
+      (!(within instanceof Set) || within.size === 0 || ![...within].every((pattern) => typeof pattern === 'string'))
+    )
+      throw new Error('invalid PluginInstance: capabilities.ambientTypeRealizations within must be a nonempty Set of strings')
+  }
   for (const key of ['hostFunctions', 'nativeTypes', 'nativeConstants', 'hostNamespaceRootTypes']) {
     for (const [name, spelling] of capabilities[key] as Map<unknown, unknown>) {
       if (typeof name !== 'string' || typeof spelling !== 'string')

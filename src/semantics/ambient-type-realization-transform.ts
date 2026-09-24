@@ -30,10 +30,19 @@ import { documentationRangesIn } from './documentation-ranges.js'
  * says.
  */
 export interface AmbientTypeRealization {
-  /** The concrete type's own name, as its package exports it. */
+  /** The concrete type's own name, as its package exports it; `default` names a scoped row's default export. */
   readonly type: string
   /** The module specifier a consumer imports `type` from, UNQUOTED. */
   readonly importedFrom: string
+  /**
+   * Package JavaScript globs, in `uncheckedJavaScript`'s grammar
+   * (`three/src/**`), that make the row SCOPED: only JavaScript modules inside
+   * them see the ambient name as `type`, and only as a type. Nothing is
+   * respelled and nothing is imported; the checker binds the name in each such
+   * file's own scope (`scoped-type-realizations.ts`). A row without `within`
+   * applies to every file, by the source transform below.
+   */
+  readonly within?: ReadonlySet<string>
 }
 
 const scriptKindOf = (fileName: string): ts.ScriptKind =>
@@ -108,8 +117,10 @@ const boundNamesIn = (file: ts.SourceFile): ReadonlySet<string> => {
 export const createAmbientTypeRealizationTransform = (
   realizations: ReadonlyMap<string, AmbientTypeRealization>
 ): ((input: { readonly fileName: string; readonly text: string }) => string | null) => {
-  if (realizations.size === 0) return () => null
-  const patterns = [...realizations].map(([name, realization]) => ({
+  // A scoped row is bound by the checker instead (`scoped-type-realizations.ts`).
+  const unscoped = [...realizations].filter(([, realization]) => realization.within === undefined)
+  if (unscoped.length === 0) return () => null
+  const patterns = unscoped.map(([name, realization]) => ({
     name,
     realization,
     pattern: new RegExp(`\\b${name}\\b`, 'g')
