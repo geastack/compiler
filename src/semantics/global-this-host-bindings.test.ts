@@ -31,13 +31,15 @@ const globalHostMutationAuditOf = (
   nativeReceiverNames: readonly string[] = [],
   publishedTypeProvider?: (checker: ts.TypeChecker, file: ts.SourceFile) => (expression: ts.Expression) => ts.Type,
   useSettledCalls = false,
-  modules: ReadonlyMap<string, string> = new Map()
+  modules: ReadonlyMap<string, string> = new Map(),
+  extraOptions: ts.CompilerOptions = {}
 ): GlobalHostMutationAudit => {
   const options: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES2022,
     module: ts.ModuleKind.NodeNext,
     moduleResolution: ts.ModuleResolutionKind.NodeNext,
-    moduleDetection: ts.ModuleDetectionKind.Legacy
+    moduleDetection: ts.ModuleDetectionKind.Legacy,
+    ...extraOptions
   }
   const host = ts.createCompilerHost(options, true)
   const originalSourceFile = host.getSourceFile.bind(host)
@@ -2896,4 +2898,75 @@ test('a receiver merged with a proven global path still surface-taints without a
     w.k = 1
   `)
   assert.ok(audit.taint.surfaceKeys.every || audit.taint.surfaceKeys.names.has('k'), [...audit.taint.surfaceKeys.names].join(','))
+})
+
+// three's `BufferGeometry` declares `morphAttributes` as JSDoc `@type {Object}`,
+// which under `strict` is the global `Object` interface: every native receiver
+// is assignable to it, so a keyed write through the field looked like a write
+// that could land on an intrinsic surface, and `this.morphAttributes[ name ] =
+// array` in `copy` revoked every intrinsic's trust for the whole program. What
+// the field holds is answered by its closed write inventory instead: two `{}`
+// literals, neither of which is the global object or any intrinsic. The
+// program-body call `inspect(globalThis)` is what observes the difference: it
+// is proven only while intrinsic reflection is intact.
+const geometryModule = resolve('test/fixtures/global-host-mutation-geometry.js')
+const jsdocObjectFieldAuditOf = (geometry: string, use: string): GlobalHostMutationAudit =>
+  globalHostMutationAuditOf(
+    `
+    import { Geometry } from './global-host-mutation-geometry.js'
+    declare var hostProcess: object
+    ${globalReachesDataQuietly}
+    function inspect(value: unknown): void { void value }
+    inspect(globalThis)
+    ${use}
+  `,
+    ['hostProcess'],
+    ['Uint8Array'],
+    undefined,
+    false,
+    new Map([[geometryModule, geometry]]),
+    { allowJs: true, strict: true }
+  )
+const jsdocObjectGeometry = (store: string): string => `
+  export class Geometry {
+    constructor() {
+      /** @type {Object} */
+      this.morphAttributes = {}
+    }
+    /** @param {Geometry} source */
+    copy(source) {
+      this.morphAttributes = ${store}
+      const morphAttributes = source.morphAttributes
+      for (const name in morphAttributes) {
+        const array = []
+        this.morphAttributes[name] = array
+      }
+      return this
+    }
+  }
+`
+
+test('a keyed write through a JSDoc {Object} field that only ever holds fresh literals keeps intrinsic trust', () => {
+  const audit = jsdocObjectFieldAuditOf(jsdocObjectGeometry('{}'), 'new Geometry().copy(new Geometry())')
+  assert.equal(audit.taint.has('*'), false, [...audit.taint].join(','))
+})
+
+test('a keyed write through a JSDoc {Object} field still revokes intrinsic trust when the field may hold another value', () => {
+  for (const [store, use] of [
+    // The field is filled from outside the program.
+    ['external()', 'new Geometry().copy(new Geometry())'],
+    // The field is filled with the global object itself.
+    ['globalThis', 'new Geometry().copy(new Geometry())'],
+    // The fields are all literals, but an instance leaves the program, so
+    // nothing proves what unseen code stores in its slot.
+    ['{}', 'const geometry = new Geometry(); release(geometry); geometry.copy(new Geometry())']
+  ]) {
+    const audit = jsdocObjectFieldAuditOf(
+      `/** @returns {Object} */ function external() { return globalThis }
+${jsdocObjectGeometry(store!)}`,
+      `declare function release(value: unknown): void
+${use}`
+    )
+    assert.equal(audit.taint.has('*'), true, `${store} / ${use}`)
+  }
 })
