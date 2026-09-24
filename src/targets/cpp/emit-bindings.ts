@@ -1,4 +1,4 @@
-import type { BindingReadOperation, BindingWriteOperation, IrBody, IrOperand } from '../../ir/model.js'
+import type { BindingReadOperation, BindingRenewOperation, BindingWriteOperation, IrBody, IrOperand } from '../../ir/model.js'
 import { allOperationsOf } from '../../ir/model.js'
 import { operandsOfIrOperation } from '../../ir/queries.js'
 import type { DeclarationId, IrValueId } from '../../identity/ids.js'
@@ -529,6 +529,29 @@ export const emitBindingWrite = (ctx: EmitContext, lines: string[], operation: B
     lines.push(`${cell.name} = ${valueText};`)
   }
   ctx.declaredBindings.add(operation.declaration)
+}
+
+/**
+ * `CreatePerIterationEnvironment` for one cell. Only a boxed cell has anything
+ * to renew: a closure that captured it holds the handle, so the binding moves
+ * to a fresh box holding the same value and the closure keeps the old one. A
+ * cell copied into environments by value is already one copy per closure, and
+ * renders nothing -- which is what keeps a loop whose `let` no closure shares
+ * byte-identical.
+ */
+export const emitBindingRenew = (ctx: EmitContext, lines: string[], operation: BindingRenewOperation): void => {
+  const placement = ctx.placements.get(operation.declaration)
+  if (placement?.storage.kind !== 'local' || placement.storage.owner !== ctx.owner || !ctx.captures.isBoxed(operation.declaration)) return
+  const held = placement.representation
+  if (!held || held.kind === 'unresolved' || held.kind === 'void' || !ctx.declaredBindings.has(operation.declaration)) {
+    throw createCppEmitBlockedError(
+      'capture:per-iteration-renew',
+      `a loop renews ${operation.declaration} for its next iteration before any write declared the shared cell`
+    )
+  }
+  const cell = bindingReference(ctx, operation.declaration, 'a per-iteration renewal')
+  const heldType = ctx.typeQueryBindings.has(operation.declaration) ? 'gea::Value::Tag' : cppTypeOf(held)
+  lines.push(`${cell.name} = gea::makeRef<${heldType}>(${cellValueText(cell)});`)
 }
 
 /**

@@ -6,6 +6,7 @@ import type { CandidateContribution } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'
 import { resolveExpressionOperand } from './boundary.js'
 import { blocked, mintOperationId, operand } from './mint.js'
+import { iterationBindingsOf } from '../iteration-bindings.js'
 
 /**
  * The two loops driven by a boolean test -- `while`/counted `for`, and
@@ -108,4 +109,31 @@ export const contributeTailTestedLoop = (
     evaluationOrdinal: candidate.evaluationOrdinal
   }
   return { kind: 'operations', operations: [operation], edges: [] }
+}
+
+/**
+ * Attaches a loop's per-iteration cells (`iteration-bindings.ts`) to the loop
+ * operation it contributed. Both lists are omitted when empty, so a loop no
+ * closure reaches into publishes exactly the operation it always did.
+ */
+export const withIterationBindings = (
+  context: ProducerContext,
+  node: ts.IterationStatement,
+  contribution: CandidateContribution
+): CandidateContribution => {
+  if (contribution.kind !== 'operations') return contribution
+  const { copied, copiedAtEntry, captured } = iterationBindingsOf(context.checker, node)
+  if (captured.length === 0) return contribution
+  const declarationsOf = (nodes: readonly ts.NamedDeclaration[]) =>
+    nodes.map((declaration) => context.identities.declarationIdOf(declaration))
+  const operations = contribution.operations.map((operation) =>
+    operation.family === 'control' && (operation.form === 'loop' || operation.form === 'loop-tail')
+      ? {
+          ...operation,
+          ...(copied.length > 0 ? { perIterationBindings: { declarations: declarationsOf(copied), atEntry: copiedAtEntry } } : {}),
+          iterationCaptures: declarationsOf(captured)
+        }
+      : operation
+  )
+  return { ...contribution, operations }
 }

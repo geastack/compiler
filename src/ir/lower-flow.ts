@@ -231,12 +231,20 @@ export interface FlowControllerDeps {
   readonly membership: ConditionalMembership
   /** Resolves a guard's own published result to the operand its branch tests. Throws to block when the guard cannot supply one. */
   readonly resolveGuardOperand: (guard: SemanticResultId) => IrOperand
+  /**
+   * Places the loop's `CreatePerIterationEnvironment` in `block`: called once
+   * where control first enters the loop, and again at the start of every later
+   * iteration -- the latch, before the incrementor, or the header when there is
+   * no latch to run it in.
+   */
+  readonly renewIterationBindings?: (loop: OperationId, block: IrBlockId, entry: boolean) => void
 }
 
 export const createFlowController = (deps: FlowControllerDeps): FlowController => {
-  const { builder, membership, resolveGuardOperand } = deps
+  const { builder, membership, resolveGuardOperand, renewIterationBindings } = deps
   const guardCache = new Map<SemanticResultId, GuardBlocks>()
   const loopCache = new Map<OperationId, LoopBlocks>()
+  const renewedLatches = new Set<IrBlockId>()
   const regionCache = new Map<OperationId, RegionBlocks>()
   /** A switch statement's own exit block, reserved by the first `break` that names the switch -- see `switchExitOf`. */
   const switchCache = new Map<OperationId, IrBlockId>()
@@ -378,8 +386,13 @@ export const createFlowController = (deps: FlowControllerDeps): FlowController =
         exit: null
       }
       if (!cached) loopCache.set(ref.loop, info)
+      // With a latch, the header is re-entered only after the latch's own
+      // renewal, so the first iteration's copy belongs before the header. With
+      // none, every entry to the header starts an iteration.
+      if (!cached && info.latch !== null && !isTerminated()) renewIterationBindings?.(ref.loop, currentBlock, true)
       if (!isTerminated()) builder.jump(currentBlock, null, info.header)
       currentBlock = info.header
+      if (!cached && info.latch === null) renewIterationBindings?.(ref.loop, currentBlock, false)
       // The cached record itself, not a copy: `exit` is filled in later, by
       // whichever `break` asks for it first, and a copy would not see it.
       stack.push({ kind: 'loop', loop: ref.loop, info })
@@ -393,6 +406,8 @@ export const createFlowController = (deps: FlowControllerDeps): FlowController =
       if (!latch) throw new IrLoweringBlockedError('a loop-latch scope opened for a loop whose header never reserved one')
       if (!isTerminated()) builder.jump(currentBlock, null, latch)
       currentBlock = latch
+      if (!renewedLatches.has(latch)) renewIterationBindings?.(ref.loop, currentBlock, false)
+      renewedLatches.add(latch)
       stack.push({ kind: 'loop-latch', loop: ref.loop, info: { latch } })
       return
     }

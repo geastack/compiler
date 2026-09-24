@@ -71,6 +71,7 @@ import {
   collectFormalCells,
   earlyCapturedCellPrologue,
   emitBindingRead,
+  emitBindingRenew,
   emitBindingWrite
 } from './emit-bindings.js'
 import { EXACT_ARM_MATERIALIZER, type ConversionCensus } from '../../conversion/nodes.js'
@@ -1249,6 +1250,9 @@ const emitOperationStatements = (ctx: EmitContext, lines: string[], operation: I
       return
     case 'binding-write':
       emitBindingWrite(ctx, lines, operation)
+      return
+    case 'binding-renew':
+      emitBindingRenew(ctx, lines, operation)
       return
     case 'parameter':
       emitParameter(ctx, lines, operation)

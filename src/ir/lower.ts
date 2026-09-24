@@ -1314,7 +1314,24 @@ const lowerOwner = (
   const flow = createFlowController({
     builder,
     membership,
-    resolveGuardOperand: (guard) => resolveResultValue(ctx, guard, `conditional guard ${guard}`)
+    resolveGuardOperand: (guard) => resolveResultValue(ctx, guard, `conditional guard ${guard}`),
+    renewIterationBindings: (loop, block, entry) => {
+      const operation = graph.operations.get(loop)
+      if (operation?.family !== 'control' || !operation.perIterationBindings) return
+      if (entry && !operation.perIterationBindings.atEntry) return
+      for (const declaration of operation.perIterationBindings.declarations) {
+        const introduction = operationIds
+          .map((id) => graph.operations.get(id))
+          .find(
+            (candidate) => candidate?.family === 'binding' && candidate.action === 'initialize' && candidate.declaration === declaration
+          )
+        const lineage = introduction ? resultOf(introduction, 'value')?.id : undefined
+        if (lineage === undefined) {
+          throw new IrLoweringBlockedError(`loop ${loop} renews ${declaration} each iteration, and this owner never introduces that cell`)
+        }
+        builder.bindingRenew(block, lineage, declaration)
+      }
+    }
   })
 
   for (const operationId of order) {

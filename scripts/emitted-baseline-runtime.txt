@@ -433,6 +433,7 @@ owned-string-dynamic-transfer.ts.cpp 420210f5f43f
 parameter-properties.ts.cpp fd6b80041f4e
 pattern-native-property-routing.ts.cpp 8a279c88b5b9
 pending-promise-payload-narrowed-at-call.ts.cpp cd9445c5b066
+per-iteration-let-bindings.ts.cpp 1618f9a92d68
 physical-class-ancestry-declared.ts.cpp e1d3e127c931
 physical-class-ancestry-live.ts.cpp 728e6f672df0
 physical-class-ancestry-optional.ts.cpp 1f126ab304d0

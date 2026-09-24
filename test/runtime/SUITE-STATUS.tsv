@@ -241,6 +241,7 @@ owned-formal.ts	ok
 owned-string-dynamic-transfer.ts	ok
 parameter-properties.ts	ok
 pattern-native-property-routing.ts	ok
+per-iteration-let-bindings.ts	ok
 plain-function-returns-generator.runtime.js	ok
 promise-pending.ts	ok
 promise-rejection.ts	ok

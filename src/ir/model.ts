@@ -757,6 +757,19 @@ export interface BindingWriteOperation extends IrOperationBase {
   readonly value: IrOperand
 }
 
+/**
+ * `CreatePerIterationEnvironment` (ECMA-262 14.7.4.4) for one cell: from here
+ * on the binding names a fresh cell holding the value the old one held, and a
+ * closure that captured the old cell keeps it. The value does not change, so
+ * this is not a write -- a cell copied into a closure's environment by value is
+ * already its own per-iteration cell, and renewing it does nothing. Its lineage
+ * is the result of the declaration that introduced the cell.
+ */
+export interface BindingRenewOperation extends IrOperationBase {
+  readonly kind: 'binding-renew'
+  readonly declaration: DeclarationId
+}
+
 /** One incoming edge of a phi: the predecessor it is reached from, and the value visible at that predecessor's exit. */
 export interface IrPhiIncoming {
   readonly block: IrBlockId
@@ -1296,6 +1309,7 @@ export type IrOperation =
   | ConstantOperation
   | BindingReadOperation
   | BindingWriteOperation
+  | BindingRenewOperation
   | ParameterOperation
   | ReceiverOperation
   | GlobalThisOperation

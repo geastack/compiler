@@ -8,7 +8,7 @@ import type { CensusCandidate } from '../census.js'
 import { familyOf, isFieldInitializerBody } from '../census.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
-import { contributePlainLoop, contributeTailTestedLoop } from './control-loops.js'
+import { contributePlainLoop, contributeTailTestedLoop, withIterationBindings } from './control-loops.js'
 import { resolveExpressionOperand } from './boundary.js'
 import type { IdentityTable } from '../identities.js'
 import type { ProducerContext } from '../producer-context.js'
@@ -975,10 +975,11 @@ export const createControlProducer = (context: ProducerContext): FamilyProducer 
     }
     if (isFieldInitializerBody(node)) return contributeImplicitReturn(context, candidate, node as ts.Expression)
     if (ts.isIfStatement(node)) return contributeBranch(context, candidate, node)
-    if (ts.isForOfStatement(node) || ts.isForInStatement(node)) return contributeForOfIn(context, candidate, node)
-    if (ts.isForStatement(node)) return contributePlainLoop(context, candidate, node.condition)
-    if (ts.isWhileStatement(node)) return contributePlainLoop(context, candidate, node.expression)
-    if (ts.isDoStatement(node)) return contributeTailTestedLoop(context, candidate, node.expression)
+    if (ts.isForOfStatement(node) || ts.isForInStatement(node))
+      return withIterationBindings(context, node, contributeForOfIn(context, candidate, node))
+    if (ts.isForStatement(node)) return withIterationBindings(context, node, contributePlainLoop(context, candidate, node.condition))
+    if (ts.isWhileStatement(node)) return withIterationBindings(context, node, contributePlainLoop(context, candidate, node.expression))
+    if (ts.isDoStatement(node)) return withIterationBindings(context, node, contributeTailTestedLoop(context, candidate, node.expression))
     if (ts.isSwitchStatement(node)) return contributeSwitch(context, candidate, node)
     if (ts.isReturnStatement(node)) return contributeReturn(context, candidate, node)
     if (ts.isThrowStatement(node)) return contributeThrow(context, candidate, node)

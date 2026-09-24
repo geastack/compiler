@@ -496,6 +496,23 @@ export interface ControlOperation extends SemanticOperationBase {
     | 'debugger'
   /** The cleanup protocol operation owned by a synchronous dynamic `for`-`of` loop. */
   readonly iteratorClose?: OperationId | null
+  /**
+   * `CreatePerIterationEnvironment` (ECMA-262 14.7.4.4): the `for` head's
+   * `let` cells a nested function captures. Each gets a fresh cell holding its
+   * current value before the incrementor runs, so a closure keeps the
+   * iteration it was created in. `atEntry` adds the copy the language also
+   * makes before the first test, which only a closure in the head's own
+   * initializer can observe. Absent when no closure captures a head `let`,
+   * which is when the copy is unobservable.
+   */
+  readonly perIterationBindings?: { readonly declarations: readonly DeclarationId[]; readonly atEntry: boolean }
+  /**
+   * Every block-scoped cell one iteration of this loop creates afresh that a
+   * nested function captures, head and body alike. A run-once region cannot
+   * hold such a cell in its file-scope storage, because there is one of those
+   * and there must be one cell per iteration (`projection/bindings.ts`).
+   */
+  readonly iterationCaptures?: readonly DeclarationId[]
 }
 
 /**

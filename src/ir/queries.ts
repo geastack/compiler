@@ -76,6 +76,7 @@ export const successorsOfTerminator = (terminator: IrTerminatorOperation): reado
 export const resultOfIrOperation = (operation: IrOperation): IrResult | null => {
   switch (operation.kind) {
     case 'binding-write':
+    case 'binding-renew':
     case 'commonjs-binding-set':
     case 'super-initialize':
     case 'reparent-constructor':
@@ -153,6 +154,8 @@ export const operandsOfIrOperation = (operation: IrOperation): readonly IrOperan
       return operation.operand ? [operation.operand] : []
     case 'binding-write':
       return [operation.value]
+    case 'binding-renew':
+      return []
     case 'phi':
       return operation.incoming.map((edge) => edge.value)
     case 'branch':

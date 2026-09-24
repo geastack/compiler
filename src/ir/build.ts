@@ -195,6 +195,8 @@ export interface IrBodyBuilder {
     reactive?: boolean
   ) => IrValueId
   readonly bindingWrite: (block: IrBlockId, lineage: SemanticResultId, declaration: DeclarationId, value: IrOperand) => void
+  /** See `BindingRenewOperation`. */
+  readonly bindingRenew: (block: IrBlockId, lineage: SemanticResultId, declaration: DeclarationId) => void
   readonly parameter: (block: IrBlockId, lineage: SemanticResultId, ordinal: number, representation: Representation) => IrValueId
   readonly receiver: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
   readonly globalThis: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
@@ -675,6 +677,10 @@ export const createIrBodyBuilder = (
     append(block, { kind: 'binding-write', lineage, declaration, value })
   }
 
+  const bindingRenew: IrBodyBuilder['bindingRenew'] = (block, lineage, declaration) => {
+    append(block, { kind: 'binding-renew', lineage, declaration })
+  }
+
   const parameter: IrBodyBuilder['parameter'] = (block, lineage, ordinal, representation) => {
     const result = mintResult(representation)
     append(block, { kind: 'parameter', lineage, ordinal, result })
@@ -959,6 +965,7 @@ export const createIrBodyBuilder = (
     constant,
     bindingRead,
     bindingWrite,
+    bindingRenew,
     parameter,
     receiver,
     globalThis,

@@ -32,8 +32,13 @@ import { resultOf } from '../semantics/model/operands.js'
  */
 
 export type BindingStorage =
-  /** A cell owned by one callable frame. */
-  | { readonly kind: 'local'; readonly owner: FunctionId }
+  /**
+   * A cell owned by one callable frame -- or by a run-once region's own frame,
+   * for a cell one loop iteration creates afresh and a closure captures
+   * (`ControlOperation.iterationCaptures`): file-scope storage is one cell,
+   * and each iteration needs its own.
+   */
+  | { readonly kind: 'local'; readonly owner: FunctionId | RegionId }
   /** A cell owned by a region that runs once: a module body, an initializer, a static block. */
   | { readonly kind: 'region'; readonly owner: RegionId }
   /**
@@ -431,6 +436,11 @@ export const projectBindingPlacements = (input: BindingPlacementInput): Readonly
     placements.set(declaration, { storage, representation })
   }
 
+  const iterationCaptures = new Set<DeclarationId>()
+  for (const operation of input.graph.operations.values()) {
+    if (operation.family === 'control') for (const declaration of operation.iterationCaptures ?? []) iterationCaptures.add(declaration)
+  }
+
   for (const operation of input.graph.operations.values()) {
     const introduces =
       (operation.family === 'binding' && (operation.action === 'initialize' || operation.action === 'declare')) ||
@@ -450,7 +460,9 @@ export const projectBindingPlacements = (input: BindingPlacementInput): Readonly
           })
         : operation.caller.kind === 'function'
           ? { kind: 'local', owner: operation.caller.functionId }
-          : { kind: 'region', owner: operation.caller.regionId }
+          : iterationCaptures.has(operation.declaration)
+            ? { kind: 'local', owner: operation.caller.regionId }
+            : { kind: 'region', owner: operation.caller.regionId }
     record(operation.declaration, storage, representation)
   }
 
