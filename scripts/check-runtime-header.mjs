@@ -10,9 +10,14 @@ const root = resolve(import.meta.dirname, '..')
 // (xtensa-esp32s3-elf-g++ reports `__SIZEOF_WCHAR_T__ 2`); a host clang has
 // 32. A `static_assert` on the width once refused every embedded program from
 // a header this check had passed, so both widths are checked here.
+//
+// The allocation profile is a third header: its instrumentation, and the
+// platform backtrace it includes, exist only under GEA_PROFILE_ALLOCATIONS,
+// so a portability break there was first seen by test:hot-path-shapes.
 for (const [label, flags] of [
   ['native', []],
-  ['16-bit wchar_t', ['-fshort-wchar']]
+  ['16-bit wchar_t', ['-fshort-wchar']],
+  ['allocation profile', ['-DGEA_PROFILE_ALLOCATIONS=1']]
 ]) {
   const result = spawnSync(
     cxx,

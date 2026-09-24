@@ -42,7 +42,17 @@
 #include <unordered_map>
 #include <unordered_set>
 #if defined(GEA_PROFILE_ALLOCATIONS)
+#if defined(_WIN32)
+// The leak probe's backtrace. `<execinfo.h>` is glibc's and Apple's; Windows'
+// equivalent is this kernel32 export, declared exactly as `winnt.h` declares
+// it so a unit that also includes `<windows.h>` sees one function, without
+// this header dragging `<windows.h>` and its `min`/`max` macros into every
+// profiled program.
+extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(
+    unsigned long framesToSkip, unsigned long framesToCapture, void** backTrace, unsigned long* backTraceHash);
+#else
 #include <execinfo.h>
+#endif
 #endif
 #include <string>
 #include <string_view>
@@ -1127,8 +1137,16 @@ inline const void*& leakProbeTarget() {
 inline void leakProbeEvent(const char* what, const void* object, std::uint32_t strong) {
   std::fprintf(stderr, "PROBE %s %p strong=%u\n", what, object, strong);
   void* frames[16];
+#if defined(_WIN32)
+  // Raw return addresses: Windows has no `backtrace_symbols_fd`, and linking
+  // DbgHelp into every profiled program to name them is not worth it when a
+  // debugger attached to the running probe names them.
+  const unsigned short count = ::RtlCaptureStackBackTrace(0, 16, frames, nullptr);
+  for (unsigned short index = 0; index < count; ++index) std::fprintf(stderr, "  %p\n", frames[index]);
+#else
   const int count = ::backtrace(frames, 16);
   ::backtrace_symbols_fd(frames, count, 2);
+#endif
   std::fprintf(stderr, "PROBE end\n");
 }
 // Leak probe: every live element buffer (`PooledAllocator<T>::allocate`), by address.
