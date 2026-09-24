@@ -227,6 +227,7 @@ null-default-nested-reference-union.ts	ok
 nullish-union.ts	ok
 object-create-contextual.ts	ok
 object-destructuring-assignment.ts	ok
+object-entries-subclass-through-helper.ts	ok
 object-literal-es5-method-receiver.runtime.js	ok
 object-literal-getter-capture.ts	ok
 object-pattern-numeric-key-over-array.ts	ok

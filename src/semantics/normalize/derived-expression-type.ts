@@ -3212,9 +3212,18 @@ export const carriesNoEvidence = (type: ts.Type): boolean =>
  * made downstream forwarding indistinguishable from an unknown caller.
  */
 export const disjointArmsOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): readonly ts.Type[] | null => {
+  if (types.some(carriesNoEvidence)) return null
+  // A subclass instance written beside its base class's is carried by the
+  // base's arm, the same reduction `widestOf` makes when those two are the
+  // whole set: the base's struct holds the subclass's through its derived
+  // C++ type, so no value can be mis-selected into an arm it is not. Refusing
+  // instead left `f(new Base())`, `f(new Sub())`, `f({ b: 2 })` with the
+  // declared type, and an `object` parameter then read every own key through
+  // an empty record. The subclass must still be disjoint from every other arm.
+  const absorbed = types.filter((type) => types.some((other) => other !== type && inheritsClassInstance(checker, type, other)))
   const arms: ts.Type[] = []
   for (const type of types) {
-    if (carriesNoEvidence(type)) return null
+    if (absorbed.includes(type)) continue
     let duplicate = false
     for (const existing of arms) {
       // Two different classes' constructor objects are disjoint by identity,
@@ -3230,7 +3239,38 @@ export const disjointArmsOf = (checker: ts.TypeChecker, types: readonly ts.Type[
     }
     if (!duplicate) arms.push(type)
   }
+  for (const type of absorbed) {
+    for (const arm of arms) {
+      if (inheritsClassInstance(checker, type, arm)) continue
+      if (checker.isTypeAssignableTo(type, arm) || checker.isTypeAssignableTo(arm, type)) return null
+    }
+  }
   return arms.length >= 2 ? arms : null
+}
+
+/**
+ * Whether `derived` is an instance of a source class whose `extends` chain
+ * names exactly `base`, a source class instance type. Nominal, never
+ * structural: a class that merely has its base's shape is not carried by it.
+ */
+const inheritsClassInstance = (checker: ts.TypeChecker, derived: ts.Type, base: ts.Type): boolean => {
+  if (sourceClassOfInstance(derived) === null || sourceClassOfInstance(base) === null) return false
+  const seen = new Set<ts.Type>()
+  const visit = (type: ts.Type): boolean => {
+    const target = ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0 ? (type as ts.TypeReference).target : type
+    if (!target.isClassOrInterface() || seen.has(target)) return false
+    seen.add(target)
+    // A generic base is compared as the instantiation the chain states;
+    // walking past it would compare its type parameters, not its arguments.
+    return checker.getBaseTypes(target).some((next) => next === base || (!isGenericClassInstance(next) && visit(next)))
+  }
+  return visit(derived)
+}
+
+/** A class instance type is a reference even without type parameters (its `this` type); only declared ones make it generic. */
+const isGenericClassInstance = (type: ts.Type): boolean => {
+  const target = ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0 ? (type as ts.TypeReference).target : type
+  return target.isClassOrInterface() && (target.typeParameters?.length ?? 0) > 0
 }
 
 /**
