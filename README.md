@@ -126,9 +126,10 @@ during lowering or emission.
 The trailing digits index fixed tables in `src/cli-coverage.ts`, so rewording a
 message does not change its code. `x999` means the table has no row for it.
 
-Options: `--project`/`--no-project`, `--plugin`, `--plugin-option`, `--json`
-(rows and summary as one object), `--no-derived` (roots only), `--no-boxed`
-(refusals only).
+Options: `--project`/`--no-project`, `--plugin` (repeatable; loaded as
+`compile` loads them, after the built-ins), `--plugin-option`,
+`--no-webgl-plugin`, `--json` (rows and summary as one object), `--no-derived`
+(roots only), `--no-boxed` (refusals only).
 
 ### Carriers
 
