@@ -51,6 +51,7 @@ import type { SemanticGraph } from './semantics/model/graph.js'
 import { installedProducers } from './semantics/normalize/producers/installed.js'
 import type { CompilerPlugin, PluginInstance, PluginOptions } from './plugins/model.js'
 import { installedPlugins } from './plugins/installed.js'
+import { webglPlugin } from './plugins/webgl/plugin.js'
 import type { IrLoweringBlocker } from './ir/lower.js'
 import type { SlotDrift } from './ir/lower-operands.js'
 import { createSlotCensus } from './projection/slots.js'
@@ -135,6 +136,25 @@ export interface CompilationRequest {
   readonly plugins?: readonly CompilerPlugin[]
   /** What the build told those libraries -- see `PluginOptions`. Empty when the caller passed none. */
   readonly pluginOptions?: PluginOptions
+  /**
+   * Whether the built-in native-webgl-angle host takes part in this build.
+   *
+   * On by default, which is the behavior every existing build has. `false`
+   * drops it from `plugins` before anything is instantiated, so the ANGLE
+   * package is never loaded and none of its statement -- its rewrites of
+   * three.js source, its `absentGlobals`, its host functions -- reaches the
+   * program. A build of three's own WebGPURenderer needs exactly that: the
+   * package rewrites three for a WebGL context it provides, and its `self`
+   * absence leaves the WebGPU renderer's animation loop with no context.
+   * Uninstalling the package was the only way to say so.
+   *
+   * Removed by identity, not by name, so a legacy `--plugin` entry that the
+   * loader answered with this same built-in adapter goes with it. Unset, the
+   * environment decides, and `GEA_WEBGL_PLUGIN=0` turns it off: the platform
+   * build scripts reach this compiler through `build-gea-vite-geatsc.mjs`,
+   * which forwards no compiler flag of its own for this.
+   */
+  readonly webglPlugin?: boolean
   /**
    * The C++ name the target starts this program at, or `null` to emit no entry.
    *
@@ -443,7 +463,10 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     }
     if (stopAfterStage === name) process.exit(0)
   }
-  const plugins = (request.plugins ?? installedPlugins).map((plugin) => plugin.instantiate(request.pluginOptions ?? new Map()))
+  const webglInstalled = request.webglPlugin ?? process.env['GEA_WEBGL_PLUGIN'] !== '0'
+  const plugins = (request.plugins ?? installedPlugins)
+    .filter((plugin) => webglInstalled || plugin !== webglPlugin)
+    .map((plugin) => plugin.instantiate(request.pluginOptions ?? new Map()))
   // Which declared type names the installed hosts own, unioned once. It reaches
   // the frontend because only the frontend can turn a name into a declaration
   // identity, and it reaches the manifest below because only the manifest can

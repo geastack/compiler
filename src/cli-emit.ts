@@ -38,6 +38,8 @@ interface EmitRequest {
   readonly dynamicFallback: boolean
   /** Caller asserts this compilation is the complete classic-script realm. */
   readonly closedScriptScope: boolean
+  /** `--no-webgl-plugin`: leave the built-in native-webgl-angle host out -- see `CompilationRequest.webglPlugin`. */
+  readonly noWebglPlugin: boolean
   readonly input: string
   readonly outDir: string
   readonly entrySymbol: string | null
@@ -90,6 +92,7 @@ const parseEmitArguments = (argv: readonly string[]): EmitRequest | string => {
   let projectFileName: string | null = null
   let dynamicFallback = false
   let closedScriptScope = false
+  let noWebglPlugin = false
   let isolateSymbols = false
   let realmStorage = false
   let translationUnits: CppTranslationUnitLayout = 'single'
@@ -124,6 +127,8 @@ const parseEmitArguments = (argv: readonly string[]): EmitRequest | string => {
       closedScriptScope = true
     } else if (argument === '--realm-storage') {
       realmStorage = true
+    } else if (argument === '--no-webgl-plugin') {
+      noWebglPlugin = true
     } else if (argument === '--isolate-symbols') {
       isolateSymbols = true
     } else if (argument === '--translation-units') {
@@ -163,6 +168,7 @@ const parseEmitArguments = (argv: readonly string[]): EmitRequest | string => {
   return {
     dynamicFallback,
     closedScriptScope,
+    noWebglPlugin,
     input,
     outDir,
     entrySymbol,
@@ -241,6 +247,7 @@ export const runEmit = async (argv: readonly string[], moduleGraph = false): Pro
     javaScriptSources: bundled,
     dynamicFallback: parsed.dynamicFallback,
     ...(parsed.closedScriptScope ? { closedScriptScope: true } : {}),
+    ...(parsed.noWebglPlugin ? { webglPlugin: false } : {}),
     plugins,
     pluginOptions: parsed.pluginOptions,
     isolateSymbols: parsed.isolateSymbols,
@@ -271,6 +278,7 @@ const runModuleGraph = (parsed: EmitRequest, plugins: readonly CompilerPlugin[])
     projectFileName: parsed.projectFileName ?? findProjectFile(dirname(graph.entry)),
     javaScriptSources: true,
     dynamicFallback: parsed.dynamicFallback,
+    ...(parsed.noWebglPlugin ? { webglPlugin: false } : {}),
     plugins,
     pluginOptions: parsed.pluginOptions,
     sourceOverlay: graph.overlay,

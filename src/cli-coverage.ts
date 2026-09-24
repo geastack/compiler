@@ -60,6 +60,7 @@ interface CoverageArguments {
   readonly json: boolean
   readonly derived: boolean
   readonly boxed: boolean
+  readonly webglPlugin: boolean
 }
 
 type RowStatus = 'refused' | 'unsupported' | 'derived' | 'boxed' | 'typecheck'
@@ -103,6 +104,7 @@ const parseArguments = (argv: readonly string[]): CoverageArguments => {
   let json = false
   let derived = true
   let boxed = true
+  let webglPlugin = true
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index] ?? ''
     if (argument === '--project') {
@@ -124,11 +126,13 @@ const parseArguments = (argv: readonly string[]): CoverageArguments => {
       derived = false
     } else if (argument === '--no-boxed') {
       boxed = false
+    } else if (argument === '--no-webgl-plugin') {
+      webglPlugin = false
     } else if (!argument.startsWith('--') && entry === null) {
       entry = argument
     }
   }
-  return { entry, projectFileName, plugin, pluginOptions, json, derived, boxed }
+  return { entry, projectFileName, plugin, pluginOptions, json, derived, boxed, webglPlugin }
 }
 
 /**
@@ -412,6 +416,7 @@ export const runCoverage = async (argv: readonly string[]): Promise<number> => {
     rootFileNames: [entry],
     projectFileName,
     ...(plugin ? { plugins: [plugin] } : {}),
+    ...(parsed.webglPlugin ? {} : { webglPlugin: false }),
     pluginOptions: new Map(parsed.pluginOptions)
   })
   const rows = [...collectRows(result, parsed)].sort(compareRows)
