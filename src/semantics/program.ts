@@ -3,6 +3,7 @@ import ts from 'typescript'
 import { withStableTypeQueries } from './stable-checker.js'
 import { dirname, resolve } from 'node:path'
 import { createModuleResolver, isDeclarationPath, mappedTypeScriptSource, moduleExtension, typeOnlyModuleUse } from './module-resolution.js'
+import { elidedTypeImportSpecifiers } from './elided-type-imports.js'
 import type { CommonJsWrapperDeclaration } from '../plugins/model.js'
 import { createCommonJsRequireCensus } from './normalize/commonjs-require.js'
 import { withoutBareWrapperRedeclarations } from './commonjs-wrapper.js'
@@ -519,7 +520,8 @@ const transformingHost = (
   options: ts.CompilerOptions,
   resolutionDiagnostics: { readonly literal: ts.StringLiteralLike; readonly diagnostic: ts.Diagnostic }[],
   preparedSourceText: ReadonlyMap<string, string>,
-  timing: FrontendTiming
+  timing: FrontendTiming,
+  routes: TypeViewRoutes
 ): ts.CompilerHost => {
   const transforms = input.sourceTransforms ?? []
   const overlay = input.sourceOverlay
@@ -553,7 +555,9 @@ const transformingHost = (
     return literals.map((literal) => {
       const mode = ts.getModeForUsageLocation(containingSource, literal, compilerOptions)
       const result = resolver.resolve(literal.text, containingFile, mode, answers?.get(literal.text))
-      if (typeOnlyModuleUse(literal) && result.declaration && !answers?.has(literal.text)) return { resolvedModule: result.declaration }
+      const elided = routes.elided.get(resolve(containingFile))?.has(literal.text) === true
+      if ((typeOnlyModuleUse(literal) || elided) && result.declaration && !answers?.has(literal.text))
+        return { resolvedModule: result.declaration }
       let implementation = result.implementation
       if (implementation && !answers?.has(literal.text)) {
         const source = mappedTypeScriptSource(implementation.resolvedFileName, host)
@@ -561,6 +565,10 @@ const transformingHost = (
       }
       if (implementation && result.declaration && !isDeclarationPath(implementation.resolvedFileName)) {
         declarations.set(resolve(implementation.resolvedFileName), result.declaration.resolvedFileName)
+        const file = resolve(containingFile)
+        const declared = routes.declaredImplementations.get(file)
+        if (declared) declared.add(literal.text)
+        else routes.declaredImplementations.set(file, new Set([literal.text]))
       }
       if (!implementation && result.declaration && !result.native && !isDeclarationPath(containingFile) && !typeOnlyModuleUse(literal)) {
         resolutionDiagnostics.push({
@@ -625,6 +633,19 @@ interface ConfiguredProgram {
   readonly program: ts.Program
   readonly runtimeModuleTargetOf: CompiledProgram['runtimeModuleTargetOf']
   readonly commonJsTargetPaths: readonly string[]
+  /** Per containing file, the specifiers this program resolved to an implementation that has a declaration beside it. */
+  readonly declaredImplementations: ReadonlyMap<string, ReadonlySet<string>>
+}
+
+/**
+ * Which specifiers resolve to their TYPE view (`elided`, per containing file:
+ * see `elidedTypeImportSpecifiers`), and -- written by the host as it resolves
+ * -- which ones went to an implementation that has a declaration beside it,
+ * the only ones an elided route can change.
+ */
+interface TypeViewRoutes {
+  readonly elided: ReadonlyMap<string, ReadonlySet<string>>
+  readonly declaredImplementations: Map<string, Set<string>>
 }
 
 /**
@@ -695,8 +716,10 @@ const configuredProgram = (
   input: ProgramInput,
   resolutionDiagnostics: { readonly literal: ts.StringLiteralLike; readonly diagnostic: ts.Diagnostic }[],
   preparedSourceText: ReadonlyMap<string, string>,
-  timing: FrontendTiming
+  timing: FrontendTiming,
+  elided: ReadonlyMap<string, ReadonlySet<string>> = new Map()
 ): ConfiguredProgram => {
+  const routes: TypeViewRoutes = { elided, declaredImplementations: new Map() }
   const runtimeModuleTargetOf = (host: ts.CompilerHost, options: ts.CompilerOptions): CompiledProgram['runtimeModuleTargetOf'] => {
     const resolver = createModuleResolver(host, options, input.declarationModules, input.packageSources)
     return (specifier, containingFile, mode) => {
@@ -734,11 +757,16 @@ const configuredProgram = (
       }
       program = timing.measure('rebuild-program', () => ts.createProgram({ rootNames: [...roots], options, host }))
     }
-    return { program, runtimeModuleTargetOf: targetOf, commonJsTargetPaths: [...commonJsTargetPaths] }
+    return {
+      program,
+      runtimeModuleTargetOf: targetOf,
+      commonJsTargetPaths: [...commonJsTargetPaths],
+      declaredImplementations: routes.declaredImplementations
+    }
   }
   if (!projectFileName) {
     const options = { ...input.options, ...(input.dynamicFallback ? { noImplicitAny: false, checkJs: false } : {}) }
-    const host = transformingHost(input, options, resolutionDiagnostics, preparedSourceText, timing)
+    const host = transformingHost(input, options, resolutionDiagnostics, preparedSourceText, timing, routes)
     const rootNames = [
       ...new Set([
         ...input.rootFileNames,
@@ -782,7 +810,7 @@ const configuredProgram = (
     ...fixedOptions,
     ...(input.dynamicFallback ? { noImplicitAny: false, checkJs: false } : {})
   }
-  const host = transformingHost(input, options, resolutionDiagnostics, preparedSourceText, timing)
+  const host = transformingHost(input, options, resolutionDiagnostics, preparedSourceText, timing, routes)
   return buildProgram(rootNames, options, host ?? ts.createCompilerHost(options, true))
 }
 
@@ -820,9 +848,17 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
     new Set(input.commonJsGlobals?.keys() ?? []),
     preparation.sourceText
   )
-  if (preparation.audit.length > 0 || redeclarations.size > 0) {
+  // Only the elided imports whose specifier went to an implementation with a
+  // declaration beside it: every other one already resolves the one way it can.
+  const elided = new Map(
+    [...elidedTypeImportSpecifiers(configured.program)].flatMap(([file, specifiers]) => {
+      const routed = [...specifiers].filter((specifier) => configured.declaredImplementations.get(file)?.has(specifier) === true)
+      return routed.length > 0 ? [[file, new Set(routed)] as const] : []
+    })
+  )
+  if (preparation.audit.length > 0 || redeclarations.size > 0 || elided.size > 0) {
     resolutionDiagnostics.length = 0
-    configured = configuredProgram(input, resolutionDiagnostics, new Map([...preparation.sourceText, ...redeclarations]), timing)
+    configured = configuredProgram(input, resolutionDiagnostics, new Map([...preparation.sourceText, ...redeclarations]), timing, elided)
   }
   const program = configured.program
   const checker = withStableTypeQueries(program.getTypeChecker())
