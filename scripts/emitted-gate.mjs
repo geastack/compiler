@@ -146,9 +146,12 @@ for (const set of sets) {
     continue
   }
   if (!existsSync(set.baseline)) throw new Error(`${set.name}: no baseline at ${set.baseline} -- take one with --write and TRACK it`)
+  // `\r?\n`: git checks this tracked file out with CRLF where core.autocrlf is
+  // on (the Windows default), and a row split on `\n` alone keeps the `\r` in
+  // its hash -- so every program read as moved on a byte-identical emission.
   const before = new Map(
     readFileSync(set.baseline, 'utf8')
-      .split('\n')
+      .split(/\r?\n/)
       .filter((line) => line.trim() !== '')
       .map((line) => [line.slice(0, line.lastIndexOf(' ')), line.slice(line.lastIndexOf(' ') + 1)])
   )
