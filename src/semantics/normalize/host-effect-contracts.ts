@@ -28,10 +28,13 @@ import { isAmbientDeclaration } from '../ambient.js'
  */
 export const hostInertTagName = 'gea-host-inert'
 
+// A host binding spelled `declare var require: (specifier: string) => any`
+// states a callable with no body just as a `declare function` does.
 const isBodilessCallableDeclaration = (declaration: ts.Declaration): boolean =>
   ((ts.isFunctionDeclaration(declaration) || ts.isMethodDeclaration(declaration)) && declaration.body === undefined) ||
   ts.isMethodSignature(declaration) ||
-  (ts.isSetAccessorDeclaration(declaration) && declaration.body === undefined)
+  (ts.isSetAccessorDeclaration(declaration) && declaration.body === undefined) ||
+  (ts.isVariableDeclaration(declaration) && declaration.initializer === undefined && declaration.type !== undefined && ts.isFunctionTypeNode(declaration.type))
 
 /** This one declaration states the inert host contract. */
 export const declarationStatesHostInert = (declaration: ts.Declaration): boolean =>
