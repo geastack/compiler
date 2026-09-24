@@ -106,6 +106,10 @@ const isDirectAssignmentTarget = (node: ts.Node): boolean => {
  * What one census run learned that an earlier decision in the same run had
  * to assume, carried into a re-run. Every field only grows, so it ends.
  *
+ * - `reflection`: reflection itself may have been replaced -- a callable
+ *   stored through a receiver that can be `Object` or `Reflect`. Decided from
+ *   the solved alias graph, which the run that decides it already trusted
+ *   reflection to build; see `reflectionSuspects`.
  * - `names`/`all`: intrinsic members the census must not trust. A key
  *   written through a receiver that may be ANY intrinsic is known only after
  *   the alias graph -- which already trusted intrinsic callees by name -- is
@@ -116,20 +120,28 @@ const isDirectAssignmentTarget = (node: ts.Node): boolean => {
  *   holds all of them.
  * - `noComputedKeys`: a key set's intrinsic assumption failed against the
  *   census's own result; every computed key is unknown.
+ * - `unshadowedConstructors`: constructor functions whose instances' `.constructor`
+ *   may not be the function itself -- its prototype was replaced, its
+ *   prototype's `constructor` deleted or defined, or an instance re-parented
+ *   (`shadowingAllocatorOf`). Their instances answer as an unknown object would.
  */
 type CensusSeed = {
   readonly names: ReadonlySet<string>
   readonly all: boolean
+  readonly reflection: boolean
   readonly objectPrototypeKeys: MutationKeySet
   readonly noComputedKeys: boolean
   readonly rejectedCallableProofs: ReadonlySet<ts.Node>
+  readonly unshadowedConstructors: ReadonlySet<ts.Node>
 }
 const initialCensusSeed: CensusSeed = {
   names: new Set(),
   all: false,
+  reflection: false,
   objectPrototypeKeys: { names: new Set(), numeric: false, every: false },
   noComputedKeys: false,
-  rejectedCallableProofs: new Set()
+  rejectedCallableProofs: new Set(),
+  unshadowedConstructors: new Set()
 }
 
 /**
@@ -213,7 +225,7 @@ export const censusGlobalHostMutations = (
    * all-or-nothing: which intrinsic was replaced does not bound which slot
    * the replacement can reach.
    */
-  const intrinsicReflectionIsIntact = (): boolean => !allIntrinsicTrustInvalidated && !intrinsicSurfaceMemberReplaced
+  const intrinsicReflectionIsIntact = (): boolean => !trustSeed.reflection && !intrinsicSurfaceMemberReplaced
 
   /** `GEA_PROGRAM_BODY_CALLS=0` files the wildcard for every unnamed callee again, so one build can be measured with and without the rule. */
   const programBodyCallsEnabled = process.env['GEA_PROGRAM_BODY_CALLS'] !== '0'
@@ -963,7 +975,9 @@ export const censusGlobalHostMutations = (
     const symbol = memberSymbolOf(target)
     if (!symbol || !hasStandardLibraryDeclaration(symbol)) return false
     const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0]
-    return !declaration || checker.getSignaturesOfType(checker.getTypeOfSymbolAtLocation(symbol, declaration), ts.SignatureKind.Call).length > 0
+    return (
+      !declaration || checker.getSignaturesOfType(checker.getTypeOfSymbolAtLocation(symbol, declaration), ts.SignatureKind.Call).length > 0
+    )
   }
   const invalidateAllIntrinsicTrust = (node: ts.Node): void => {
     if (process.env['GEA_DEBUG_GLOBAL_MUTATION'] && !allIntrinsicTrustInvalidated) {
@@ -974,6 +988,46 @@ export const censusGlobalHostMutations = (
       )
     }
     allIntrinsicTrustInvalidated = true
+  }
+  /**
+   * The writes that withdrew all intrinsic trust, kept for the narrower
+   * question reflection asks. `allIntrinsicTrustInvalidated` must assume any
+   * intrinsic member was replaced; reflection is replaced only by a CALLABLE
+   * stored where `Object.keys` or `Reflect.ownKeys` live -- a non-callable
+   * replacement makes the call throw, and a receiver that cannot be `Object`
+   * or `Reflect` holds no reflection. Both halves are answered once the alias
+   * graph is solved (`reflectionMayBeReplaced`). `value` is `null` for a write
+   * that stores nothing callable (`delete`, `++`, a `for-in` key) and
+   * `undefined` where the stored value is not an expression here.
+   *
+   * A write suspected only because the graph reached an intrinsic identity
+   * through its receiver (`byIdentity`) is judged on those identities. Whether
+   * an opaque receiver may be `Object` is the question every unsuspected
+   * unknown-key write already leaves to the surface census; reaching some
+   * other intrinsic object does not make this write the one to answer it.
+   */
+  type ReflectionSuspect = {
+    readonly receiver: ts.Expression
+    readonly value: ts.Expression | null | undefined
+    readonly byIdentity: boolean
+  }
+  const reflectionSuspects: ReflectionSuspect[] = []
+  const withdrawIntrinsicTrust = (site: ts.Node, receiver: ts.Expression, value: ts.Expression | null | undefined): void => {
+    invalidateAllIntrinsicTrust(site)
+    reflectionSuspects.push({ receiver: unwrapErasedExpression(receiver), value, byIdentity: false })
+  }
+  const storedValueOf = (target: ts.Expression): ts.Expression | null | undefined => {
+    const parent = target.parent
+    if (ts.isDeleteExpression(parent) || ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) return null
+    if (ts.isForInStatement(parent)) return null
+    if (!ts.isBinaryExpression(parent) || parent.left !== target) return undefined
+    const operator = parent.operatorToken.kind
+    return operator === ts.SyntaxKind.EqualsToken ||
+      operator === ts.SyntaxKind.QuestionQuestionEqualsToken ||
+      operator === ts.SyntaxKind.BarBarEqualsToken ||
+      operator === ts.SyntaxKind.AmpersandAmpersandEqualsToken
+      ? parent.right
+      : null
   }
   // Structural compatibility cannot turn a fresh allocation into an existing
   // host object: {} is assignable to almost every native interface. Follow
@@ -1080,7 +1134,7 @@ export const censusGlobalHostMutations = (
   const markOverwrittenMember = (target: ts.Expression, key: string | null): void => {
     markIntrinsicPrototypeKeys(target, key === null ? [everyKey] : [key === '__proto__' ? everyKey : namedKey(key)])
     if (key === null) {
-      if (isIntrinsicSurface(target)) invalidateAllIntrinsicTrust(target)
+      if (isIntrinsicSurface(target)) withdrawIntrinsicTrust(target, target, undefined)
       return
     }
     const symbol = actualSymbol(checker.getPropertyOfType(checker.getTypeAtLocation(target), key))
@@ -1129,7 +1183,7 @@ export const censusGlobalHostMutations = (
         // A prototype replacement can affect every method, regardless of its
         // name. Other computed writes invalidate only the names they can reach.
         if (domain === null || propertyKeyDomains.mayName(domain, '__proto__') || propertyKeyDomains.mayName(domain, 'prototype'))
-          invalidateAllIntrinsicTrust(node)
+          withdrawIntrinsicTrust(node, node.expression, storedValueOf(node))
         else computedIntrinsicKeys.add(domain)
       }
       continue
@@ -2033,7 +2087,7 @@ export const censusGlobalHostMutations = (
   const invalidateIntrinsicMember = (target: ts.Expression, key: string | null): void => {
     if (!isIntrinsicSurface(target) && !standardGlobalValue(target)) return
     if (key === null) {
-      invalidateAllIntrinsicTrust(target)
+      withdrawIntrinsicTrust(target, target, undefined)
       return
     }
     markOverwrittenMember(target, key)
@@ -2071,9 +2125,8 @@ export const censusGlobalHostMutations = (
       continue
     }
     if (!isUntrustedMutator(node.expression) && !mutatorSpellingOf(node.expression)) continue
-    if (node.arguments.some((argument) => isIntrinsicSurface(argument) || standardGlobalValue(argument))) {
-      invalidateAllIntrinsicTrust(node)
-    }
+    for (const argument of node.arguments)
+      if (isIntrinsicSurface(argument) || standardGlobalValue(argument)) withdrawIntrinsicTrust(node, argument, undefined)
   }
 
   type RestRead = { readonly kind: 'object'; readonly excluded: ReadonlySet<string> } | { readonly kind: 'array'; readonly offset: number }
@@ -2659,6 +2712,10 @@ export const censusGlobalHostMutations = (
       return null
     }
   }
+  const enumeratedWritelessParameterValuesOf = (declaration: ts.Node): readonly ts.Expression[] | null =>
+    ts.isParameter(declaration) && ts.isIdentifier(declaration.name) && process.env['GEA_NO_ENUMERATED_PARAMETER_VALUES'] !== '1'
+      ? enumeratedParameterValuesOf(declaration)
+      : null
 
   const writesByDeclaration = new Map<ts.Node, readonly ValueWrite[]>()
   const writesOf = (declaration: ts.Node): readonly ValueWrite[] => {
@@ -2920,9 +2977,21 @@ export const censusGlobalHostMutations = (
   type AliasTerm =
     | { readonly kind: 'GLOBAL_TRUE' }
     | { readonly kind: 'INTRINSIC_OBJECT'; readonly declaration: DeclarationId }
-    | { readonly kind: 'INHERITED_INTRINSIC_PROTOTYPE'; readonly declaration: DeclarationId }
+    // `constructorShadowed`: a nearer prototype (a source constructor's own
+    // `prototype`, see `SOURCE_INSTANCE`) answers `constructor` first.
+    | { readonly kind: 'INHERITED_INTRINSIC_PROTOTYPE'; readonly declaration: DeclarationId; readonly constructorShadowed: boolean }
     | { readonly kind: 'OPAQUE_UNKNOWN' }
     | { readonly kind: 'REPRESENTED_NON_GLOBAL' }
+    // Not the global object either, but an object nothing here placed: a host
+    // call's `object` result, a refused call's, an untraced strict `this`.
+    // For the global question it is `REPRESENTED_NON_GLOBAL`; reflection asks
+    // whether it can be `Object` or `Reflect`, which a program carrier cannot.
+    | { readonly kind: 'UNPLACED_OBJECT' }
+    // An ordinary object `new allocator(...)` allocated, and `allocator.prototype`.
+    // Each answers `constructor` with the allocator itself plus every value a
+    // placed store may have put under that key (`fireStoreWatch`).
+    | { readonly kind: 'SOURCE_INSTANCE'; readonly allocator: ts.FunctionDeclaration }
+    | { readonly kind: 'SOURCE_PROTOTYPE'; readonly allocator: ts.FunctionDeclaration }
     | {
         readonly kind: 'source-containment'
         readonly values: readonly ValueNode[]
@@ -2956,6 +3025,7 @@ export const censusGlobalHostMutations = (
   type Selector = { readonly source: Component; readonly key: string | null; readonly target: Component; readonly mode: SelectorMode }
 
   const inheritedPrototypeTerms = new Map<DeclarationId, AliasTerm>()
+  const shadowedInheritedPrototypeTerms = new Map<DeclarationId, AliasTerm>()
   const constructorsByPrototype = new Map<DeclarationId, DeclarationId>()
   const prototypesByConstructor = new Map<DeclarationId, DeclarationId>()
   const inheritedPrototypeNames = new WeakMap<ts.Type, ReadonlySet<string>>()
@@ -3013,16 +3083,28 @@ export const censusGlobalHostMutations = (
     inheritedPrototypeNames.set(type, names)
     return names
   }
-  const inheritedPrototypesOf = (expression: ts.Expression): readonly AliasTerm[] => {
+  const inheritedPrototypesOf = (expression: ts.Expression, constructorShadowed = false): readonly AliasTerm[] => {
     const terms: AliasTerm[] = []
     const type = checker.getTypeAtLocation(expression)
     // A widened local cell still has complete concrete inbound value edges.
     // Keep unknown seeds at their origins rather than overwriting that flow
     // with every possible intrinsic merely because the checker says `any`.
+    // So do a parameter whose every argument is enumerated and a receiver whose
+    // every invocation is: each of those values carries its own origin's.
     if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 && ts.isIdentifier(expression)) {
       const declaration = bindingOf(expression)
       if (declaration && writesOf(declaration).some((write) => write.slot === 'whole' && write.value !== null)) return terms
+      if (declaration && writesOf(declaration).length === 0 && (enumeratedWritelessParameterValuesOf(declaration)?.length ?? 0) > 0)
+        return terms
     }
+    if (
+      (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 &&
+      (expression.kind === ts.SyntaxKind.ThisKeyword || expression.kind === ts.SyntaxKind.SuperKeyword) &&
+      !sourceClassThisIsRepresented(expression) &&
+      !globalObjectReceivers.has(expression as ReceiverReference) &&
+      enumeratedThisReceiversOf(expression) !== null
+    )
+      return terms
     for (const name of prototypeNamesOf(type)) {
       const constructor = checker.resolveName(name, undefined, ts.SymbolFlags.Value, false)
       if (!constructor || !hasStandardLibraryDeclaration(constructor)) continue
@@ -3034,10 +3116,11 @@ export const censusGlobalHostMutations = (
         constructorsByPrototype.set(declaration, constructorId)
         prototypesByConstructor.set(constructorId, declaration)
       }
-      let term = inheritedPrototypeTerms.get(declaration)
+      const cache = constructorShadowed ? shadowedInheritedPrototypeTerms : inheritedPrototypeTerms
+      let term = cache.get(declaration)
       if (!term) {
-        term = { kind: 'INHERITED_INTRINSIC_PROTOTYPE', declaration }
-        inheritedPrototypeTerms.set(declaration, term)
+        term = { kind: 'INHERITED_INTRINSIC_PROTOTYPE', declaration, constructorShadowed }
+        cache.set(declaration, term)
       }
       terms.push(term)
     }
@@ -3047,6 +3130,7 @@ export const censusGlobalHostMutations = (
   const globalTerm: AliasTerm = { kind: 'GLOBAL_TRUE' }
   const opaqueTerm: AliasTerm = { kind: 'OPAQUE_UNKNOWN' }
   const representedNonGlobalTerm: AliasTerm = { kind: 'REPRESENTED_NON_GLOBAL' }
+  const unplacedObjectTerm: AliasTerm = { kind: 'UNPLACED_OBJECT' }
   const storageTerms = new Map<ts.Node, AliasTerm>()
   const literalTerms = new Map<ts.ObjectLiteralExpression | ts.ArrayLiteralExpression, AliasTerm>()
   // A storage term names a cell a value passed through, so a later `x.k`
@@ -3356,6 +3440,68 @@ export const censusGlobalHostMutations = (
     return declarations.length > 0 && declarations.every(walk)
   }
 
+  /**
+   * A constructor function whose instances answer `.constructor` with the
+   * function itself. `new F()` allocates an ordinary object whose prototype is
+   * `F.prototype`, whose own `constructor` is `F`; a type-derived guess that
+   * the instance's `constructor` is `Object` answers from the wrong end of the
+   * chain. Every placed store that can change the answer is watched
+   * (`fireStoreWatch`), and one that makes it unknowable -- replacing
+   * `F.prototype`, deleting or defining its `constructor`, re-parenting an
+   * instance -- withdraws `F` for a re-run (`CensusSeed.unshadowedConstructors`).
+   * A declaration only: a function expression's value is its binding's, and a
+   * generator or async function cannot be constructed.
+   */
+  const shadowingAllocatorOf = (declaration: ts.Node | undefined): declaration is ts.FunctionDeclaration =>
+    !!declaration &&
+    ts.isFunctionDeclaration(declaration) &&
+    declaration.body !== undefined &&
+    declaration.asteriskToken === undefined &&
+    (ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Async) === 0 &&
+    !declaration.getSourceFile().isDeclarationFile &&
+    !trustSeed.unshadowedConstructors.has(declaration) &&
+    !writesOf(declaration).some((write) => write.slot === 'whole' && write.edge !== 'return' && write.edge !== 'yield')
+  const constructionAllocatorsOf = (construction: ts.NewExpression): readonly ts.FunctionDeclaration[] | null => {
+    const targets = (reachableTargetsOfNode.get(construction) ?? []).map((target) => executableDeclarationOf(target.declaration))
+    if (targets.length === 0 || !constructedChainIsSourceOwned(construction)) return null
+    const allocators = new Set<ts.FunctionDeclaration>()
+    for (const target of targets) {
+      if (!shadowingAllocatorOf(target)) return null
+      allocators.add(target)
+    }
+    return [...allocators]
+  }
+  // Watching stores costs a node per watched receiver and value; a program
+  // that allocates through no constructor function pays nothing.
+  const allocatorsSeeded = nodes.some((node) => ts.isNewExpression(node) && constructionAllocatorsOf(node) !== null)
+  const reflectionHolders = new Set(
+    ['Object', 'Reflect'].flatMap((name) => {
+      const anchor = files[0]
+      const symbol = anchor ? checker.resolveName(name, anchor, ts.SymbolFlags.Value, false) : undefined
+      const id = symbol && anchor && hasStandardLibraryDeclaration(symbol) ? identities.symbolValueDeclarationId(symbol, anchor) : null
+      return id === null ? [] : [id]
+    })
+  )
+  const prototypeReaderOf = (expression: ts.Expression): boolean => {
+    const callee = unwrapErasedExpression(expression)
+    if ((!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) || staticKeyOf(callee) !== 'getPrototypeOf')
+      return false
+    const symbol = memberSymbolOf(callee)
+    return !!symbol && hasStandardLibraryDeclaration(symbol)
+  }
+  const sourceInstanceTerms = new Map<ts.FunctionDeclaration, AliasTerm>()
+  const sourcePrototypeTerms = new Map<ts.FunctionDeclaration, AliasTerm>()
+  const sourceInstanceTermOf = (allocator: ts.FunctionDeclaration): AliasTerm => {
+    let term = sourceInstanceTerms.get(allocator)
+    if (!term) sourceInstanceTerms.set(allocator, (term = { kind: 'SOURCE_INSTANCE', allocator }))
+    return term
+  }
+  const sourcePrototypeTermOf = (allocator: ts.FunctionDeclaration): AliasTerm => {
+    let term = sourcePrototypeTerms.get(allocator)
+    if (!term) sourcePrototypeTerms.set(allocator, (term = { kind: 'SOURCE_PROTOTYPE', allocator }))
+    return term
+  }
+
   const expandValueNode = (node: ValueNode): void => {
     if (node.expanded || node.expression === null) return
     node.expanded = true
@@ -3372,7 +3518,8 @@ export const censusGlobalHostMutations = (
         // is a source class or registered native receiver seeds what it
         // proved instead of the unconditional unknown a frame-proof gap does
         // not, by itself, establish.
-        node.seeds.add(publishedRepresentationOf(current) !== null ? representedNonGlobalTerm : opaqueTerm)
+        const refusedResult = publishedRepresentationOf(current)
+        node.seeds.add(refusedResult === null ? opaqueTerm : refusedResult === 'object' ? unplacedObjectTerm : representedNonGlobalTerm)
         return
       }
       const sourceFact = ts.isCallExpression(current) && sourceFrameOwnedCalls.has(current) ? sourceInvocationFacts.get(current) : undefined
@@ -3399,8 +3546,24 @@ export const censusGlobalHostMutations = (
     if (storage !== null) link(storageValueNodeOf(storage), node)
     const sourceContents = sourceContainmentOf(current)
     if (sourceContents) node.seeds.add(sourceContents)
-    for (const term of inheritedPrototypesOf(current)) node.seeds.add(term)
-    for (const declaration of intrinsicPrototypesOf(current)) {
+    const allocators = allocatorsSeeded && ts.isNewExpression(current) ? constructionAllocatorsOf(current) : null
+    for (const term of inheritedPrototypesOf(current, allocators !== null)) node.seeds.add(term)
+    for (const allocator of allocators ?? []) {
+      node.seeds.add(sourceInstanceTermOf(allocator))
+      storageValueNodeOf(allocator)
+    }
+    // A reflection holder named as a value is that object: `holder.c = Object`
+    // hands `Object` to whatever later writes through `holder.c`, and
+    // `x.constructor` already selects the same identity. Other intrinsic
+    // constructors still enter only through `x.constructor`: the graph answers
+    // an unknown-key read with everything its receiver transitively contains,
+    // so seeding every one made fastify's options and schemas (which reach
+    // `@fastify/error`'s `Base = Error`) write targets for `Error`.
+    const namedConstructor = intrinsicConstructorSeedOf(current)
+    const namedDeclaration = namedConstructor ? identities.symbolValueDeclarationId(namedConstructor, current) : null
+    const constructorDeclarations = namedDeclaration !== null && reflectionHolders.has(namedDeclaration) ? [namedDeclaration] : []
+    for (const declaration of [...intrinsicPrototypesOf(current), ...constructorDeclarations]) {
+      if (declaration === null) continue
       let term = prototypeTerms.get(declaration)
       if (!term) {
         term = { kind: 'INTRINSIC_OBJECT', declaration }
@@ -3433,6 +3596,10 @@ export const censusGlobalHostMutations = (
       return
     }
     if (ts.isCallExpression(current)) {
+      // What the prototype read hands back is the `__proto__` a value answers:
+      // an instance's is its allocator's prototype.
+      if (allocatorsSeeded && current.arguments[0] && prototypeReaderOf(current.expression))
+        select(valueNodeOf(current.arguments[0]), '__proto__', node)
       const mutator = directMutator(current.expression)
       if (
         (mutator === 'Object.assign' ||
@@ -3457,10 +3624,9 @@ export const censusGlobalHostMutations = (
         // carrier. The result is not an identity copy of the property lookup:
         // receiver-sensitive calls were refused before this point unless the
         // receiver itself had non-global provenance.
-        node.seeds.add(representedNonGlobalTerm)
-        if (representation === 'object' && declaration && !declaration.getSourceFile().isDeclarationFile && body) {
-          for (const returned of observableCompletionValuesOf(declaration)) link(valueNodeOf(returned), node)
-        }
+        const returnsLinked = representation === 'object' && !!declaration && !declaration.getSourceFile().isDeclarationFile && !!body
+        node.seeds.add(representation === 'object' && !returnsLinked ? unplacedObjectTerm : representedNonGlobalTerm)
+        if (returnsLinked) for (const returned of observableCompletionValuesOf(declaration!)) link(valueNodeOf(returned), node)
       } else if (!declaration || declaration.getSourceFile().isDeclarationFile || !body || !flow.callableBodyIsIndexed(declaration)) {
         if (process.env['GEA_DEBUG_GLOBAL_MUTATION']) {
           const file = current.getSourceFile()
@@ -3485,7 +3651,15 @@ export const censusGlobalHostMutations = (
       for (const value of constructionReturns ?? []) link(valueNodeOf(value), node)
       const declaration = executableDeclarationOf(callDeclarationAt(current))
       const body = declaration && ts.isFunctionLike(declaration) ? (declaration as ts.FunctionLikeDeclarationBase).body : undefined
-      if (publishedRepresentationOf(current) !== null) node.seeds.add(representedNonGlobalTerm)
+      const constructedCallee = unwrapErasedExpression(current.expression)
+      const constructedSymbol = ts.isIdentifier(constructedCallee) ? actualSymbol(checker.getSymbolAtLocation(constructedCallee)) : null
+      // `new Object( value )` returns `value` itself when it is an object.
+      const forwardsArgument =
+        (current.arguments?.length ?? 0) > 0 &&
+        !!constructedSymbol &&
+        hasStandardLibraryDeclaration(constructedSymbol) &&
+        constructedSymbol.getName() === 'Object'
+      if (publishedRepresentationOf(current) !== null) node.seeds.add(forwardsArgument ? unplacedObjectTerm : representedNonGlobalTerm)
       else if (constructionReturns !== null && constructionReturns.length > 0) {
         // All inherited completion origins were linked above.
       } else if (!declaration || declaration.getSourceFile().isDeclarationFile || !body || !constructedChainIsSourceOwned(current))
@@ -3566,7 +3740,7 @@ export const censusGlobalHostMutations = (
           !anyCallSiteMayBindThisToGlobal &&
           sourceFileIsProvablyStrict(current.getSourceFile())
         ) {
-          node.seeds.add(representedNonGlobalTerm)
+          node.seeds.add(unplacedObjectTerm)
         } else {
           node.seeds.add(opaqueTerm)
         }
@@ -3585,12 +3759,7 @@ export const censusGlobalHostMutations = (
       // binding-element name resolves to a `BindingElement`, never a
       // `ParameterDeclaration`, so `ts.isParameter` already keeps this to
       // the identifier-parameter case the census can actually enumerate.
-      const isIdentifierParameter = ts.isParameter(declaration) && ts.isIdentifier(declaration.name)
-      // TEMPORARY bisect switch, remove before landing.
-      const parameterValues =
-        isIdentifierParameter && process.env['GEA_NO_ENUMERATED_PARAMETER_VALUES'] !== '1'
-          ? enumeratedParameterValuesOf(declaration as ts.ParameterDeclaration)
-          : null
+      const parameterValues = enumeratedWritelessParameterValuesOf(declaration)
       // An EMPTY closed set is not a proof of safety, it is the absence of
       // any runtime data point: a function with zero enumerated callers
       // (dead code, or a call graph this proof cannot yet see) never
@@ -3638,6 +3807,94 @@ export const censusGlobalHostMutations = (
   for (const writes of stagedBulk.values()) for (const write of writes) valueNodeOf(write.source)
   for (const node of nodes) {
     if (ts.isObjectLiteralExpression(node) || ts.isArrayLiteralExpression(node)) addLiteralChildren(node)
+  }
+  for (const suspect of reflectionSuspects) valueNodeOf(suspect.receiver)
+  // Every placed store that can change what an allocator's instances answer
+  // for `constructor` (see `shadowingAllocatorOf`): a value stored under that
+  // key, an `Object.assign` that may copy it, a definition or delete of it, a
+  // re-parenting (with the new prototype, when it is an expression here), a
+  // definition of an own `__proto__` a later copy would re-parent through, and
+  // a replacement of a function's `prototype`.
+  type StoreKind =
+    'constructor-value' | 'constructor-copy' | 'constructor-define' | 'constructor-delete' | 'reparent' | 'proto-define' | 'prototype'
+  const storeSpecs: { readonly receiver: ValueNode; readonly kind: StoreKind; readonly value: ValueNode | null; readonly site: ts.Node }[] =
+    []
+  const watchStore = (receiver: ts.Expression, kind: StoreKind, value: ts.Expression | null = null): void => {
+    storeSpecs.push({ receiver: valueNodeOf(receiver), kind, value: value ? valueNodeOf(value) : null, site: receiver })
+  }
+  const keyMayName = (key: ts.Expression | undefined, name: string): boolean => {
+    if (!key) return true
+    const literal = staticKeyExpression(key)
+    if (literal !== null) return literal === name
+    // A symbol is its own property key; it never names a string one.
+    const keyType = publishedTypeAt(unwrapErasedExpression(key))
+    if ((keyType.flags & ts.TypeFlags.ESSymbolLike) !== 0 && (keyType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) return false
+    const domain = propertyKeyDomains.of(key)
+    return domain === null || propertyKeyDomains.mayName(domain, name)
+  }
+  const accessMayName = (access: ts.PropertyAccessExpression | ts.ElementAccessExpression, name: string): boolean => {
+    if (ts.isPropertyAccessExpression(access)) return access.name.text === name
+    if (isDefinitelyNumericElementKey(access) || isDefinitelyProgramSymbolElementKey(access)) return false
+    return keyMayName(access.argumentExpression, name)
+  }
+  if (allocatorsSeeded) {
+    for (const node of nodes) {
+      if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && isDirectAssignmentTarget(node)) {
+        const stored = storedValueOf(node)
+        const deleted = ts.isDeleteExpression(node.parent)
+        if (accessMayName(node, 'constructor')) {
+          if (deleted) watchStore(node.expression, 'constructor-delete')
+          else if (stored) watchStore(node.expression, 'constructor-value', stored)
+          else if (stored === undefined) watchStore(node.expression, 'constructor-define')
+        }
+        if ((deleted || stored !== null) && accessMayName(node, 'prototype')) watchStore(node.expression, 'prototype')
+        if (!deleted && stored !== null && accessMayName(node, '__proto__')) watchStore(node.expression, 'reparent', stored ?? null)
+        continue
+      }
+      if (!ts.isCallExpression(node)) continue
+      const [target, key, value, receiver] = node.arguments
+      if (!target || ts.isSpreadElement(target)) continue
+      if (isUntrustedMutator(node.expression)) {
+        for (const kind of ['constructor-define', 'prototype', 'reparent'] as const) watchStore(target, kind)
+        continue
+      }
+      const mutator = directMutator(node.expression)
+      if (mutator === 'Object.assign') {
+        for (const source of node.arguments.slice(1))
+          watchStore(target, 'constructor-copy', ts.isSpreadElement(source) ? source.expression : source)
+        watchStore(target, 'prototype')
+      } else if (mutator === 'Object.defineProperty' || mutator === 'Reflect.defineProperty' || mutator === 'Object.defineProperties') {
+        const properties = mutator === 'Object.defineProperties' && key ? unwrapErasedExpression(key) : null
+        const names =
+          properties &&
+          ts.isObjectLiteralExpression(properties) &&
+          properties.properties.every((property) => !ts.isSpreadAssignment(property))
+            ? properties.properties.map((property) => property.name)
+            : null
+        const nameMayBe = (candidate: ts.PropertyName | undefined, name: string): boolean => {
+          if (!candidate) return true
+          const spelled = staticPropertyName(candidate)
+          if (spelled !== null) return spelled === name
+          return !ts.isComputedPropertyName(candidate) || keyMayName(candidate.expression, name)
+        }
+        const mayName = (name: string): boolean =>
+          mutator === 'Object.defineProperties'
+            ? names === null || names.some((candidate) => nameMayBe(candidate, name))
+            : keyMayName(key, name)
+        if (mayName('constructor')) watchStore(target, 'constructor-define')
+        if (mayName('prototype')) watchStore(target, 'prototype')
+        if (mayName('__proto__')) watchStore(target, 'proto-define')
+      } else if (mutator === 'Reflect.set') {
+        for (const object of receiver ? [target, receiver] : [target]) {
+          if (keyMayName(key, 'constructor')) watchStore(object, value ? 'constructor-value' : 'constructor-define', value ?? null)
+          if (keyMayName(key, 'prototype')) watchStore(object, 'prototype')
+          if (keyMayName(key, '__proto__')) watchStore(object, 'reparent', value ?? null)
+        }
+      } else if (mutator === 'Reflect.deleteProperty') {
+        if (keyMayName(key, 'constructor')) watchStore(target, 'constructor-delete')
+        if (keyMayName(key, 'prototype')) watchStore(target, 'prototype')
+      } else if (mutator === 'Object.setPrototypeOf' || mutator === 'Reflect.setPrototypeOf') watchStore(target, 'reparent', key ?? null)
+    }
   }
   let expansionIndex = 0
   while (expansionIndex < pendingExpansion.length) expandValueNode(pendingExpansion[expansionIndex++]!)
@@ -3834,14 +4091,69 @@ export const censusGlobalHostMutations = (
   // One synthetic component per source holds the answer -- it carries the
   // source's only null selector, and every other null-key selection on that
   // source, an asker's or a containing value's, is a flow out of it.
+  const syntheticComponent = (): Component => {
+    const component: Component = { id: components.length, nodes: [], out: new Set<Component>() }
+    components.push(component)
+    return component
+  }
+  const allocatorComponentOf = (allocator: ts.FunctionDeclaration): Component => {
+    const node = storageValueNodes.get(allocator)
+    const component = node ? componentOf.get(node) : undefined
+    if (!component) throw new Error('global-host mutation allocator has no value node')
+    return component
+  }
+  // What stores put under `constructor` on instances (`own`) and on the
+  // prototype, the prototypes an instance may be re-parented to, and an own
+  // `__proto__` a copy of an instance would re-parent its target through.
+  type ConstructorStore = 'own' | 'prototype' | 'reparent' | 'own-proto'
+  const constructorStores = new Map<ts.FunctionDeclaration, { [where in ConstructorStore]?: Component }>()
+  const constructorStoreOf = (allocator: ts.FunctionDeclaration, where: ConstructorStore): Component => {
+    let stores = constructorStores.get(allocator)
+    if (!stores) constructorStores.set(allocator, (stores = {}))
+    return (stores[where] ??= syntheticComponent())
+  }
+  type StoreWatch = { readonly kind: StoreKind; readonly value: Component | null; readonly site: ts.Node }
+  const storeWatchers = new Map<Component, StoreWatch[]>()
+  for (const spec of storeSpecs) {
+    const receiver = componentOf.get(spec.receiver)!
+    const watches = storeWatchers.get(receiver) ?? []
+    storeWatchers.set(receiver, watches)
+    watches.push({ kind: spec.kind, value: spec.value ? componentOf.get(spec.value)! : null, site: spec.site })
+  }
+  const withdrawnAllocators = new Set<ts.FunctionDeclaration>()
+  const withdrawAllocator = (allocator: ts.FunctionDeclaration, site: ts.Node, why: string): void => {
+    if (!withdrawnAllocators.has(allocator) && process.env['GEA_DEBUG_GLOBAL_MUTATION'])
+      debugSite(site, `withdraws constructor ${allocator.name?.text ?? '<anonymous>'}: ${why}`)
+    withdrawnAllocators.add(allocator)
+  }
+  // `Object.assign` copies own enumerable keys with [[Set]]: the source's own
+  // `constructor` becomes the target's, and an own `__proto__` re-parents it.
+  const fireStoreWatch = (watch: StoreWatch, term: AliasTerm): void => {
+    if (term.kind === 'SOURCE_INSTANCE' || term.kind === 'SOURCE_PROTOTYPE') {
+      const where = term.kind === 'SOURCE_INSTANCE' ? 'own' : 'prototype'
+      if (watch.kind === 'constructor-value') addFlow(watch.value!, constructorStoreOf(term.allocator, where))
+      else if (watch.kind === 'constructor-copy') {
+        addSelector(watch.value!, 'constructor', constructorStoreOf(term.allocator, where), 'copied-reachable')
+        if (where === 'own') addSelector(watch.value!, '__proto__', constructorStoreOf(term.allocator, 'reparent'), 'copied-reachable')
+      } else if (watch.kind === 'constructor-define') withdrawAllocator(term.allocator, watch.site, `constructor defined on ${where}`)
+      // A deleted own `constructor` falls back to the prototype's; a
+      // re-parented prototype keeps its own.
+      else if (watch.kind === 'constructor-delete' && where === 'prototype')
+        withdrawAllocator(term.allocator, watch.site, 'prototype constructor deleted')
+      else if (watch.kind === 'reparent' && where === 'own') {
+        if (watch.value) addFlow(watch.value, constructorStoreOf(term.allocator, 'reparent'))
+        else withdrawAllocator(term.allocator, watch.site, 'instance re-parented to an unknown prototype')
+      } else if (watch.kind === 'proto-define' && where === 'own') addTerm(constructorStoreOf(term.allocator, 'own-proto'), opaqueTerm)
+    } else if (term.kind === 'storage' && watch.kind === 'prototype' && shadowingAllocatorOf(term.declaration))
+      withdrawAllocator(term.declaration, watch.site, 'prototype replaced')
+  }
   const deepComponents = new Map<Component, Map<SelectorMode, Component>>()
   const deepOf = (source: Component, mode: SelectorMode): Component => {
     let modes = deepComponents.get(source)
     if (!modes) deepComponents.set(source, (modes = new Map()))
     const existing = modes.get(mode)
     if (existing) return existing
-    const deep: Component = { id: components.length, nodes: [], out: new Set<Component>() }
-    components.push(deep)
+    const deep = syntheticComponent()
     modes.set(mode, deep)
     addSelector(source, null, deep, mode)
     return deep
@@ -3902,6 +4214,7 @@ export const censusGlobalHostMutations = (
     if (indexed.spreads.length > 0) addTerm(target, opaqueTerm)
   }
   const addStorageSelection = (declaration: ts.Node, key: string | null, target: Component, mode: SelectorMode = 'own'): void => {
+    if (key === 'prototype' && allocatorsSeeded && shadowingAllocatorOf(declaration)) addTerm(target, sourcePrototypeTermOf(declaration))
     const indexed = indexedWritesOf(declaration)
     for (const value of key === null ? indexed.everyMember : (indexed.members.get(key) ?? [])) {
       if (key === null) addSelector(componentOfExpression(value), null, target, childModeOf(mode))
@@ -3993,7 +4306,10 @@ export const censusGlobalHostMutations = (
           addTerm(target, value)
         }
       }
-      const declaration = selector.key === 'constructor' ? constructorsByPrototype.get(term.declaration) : undefined
+      const declaration =
+        selector.key === 'constructor' && !term.constructorShadowed && selector.mode !== 'copied-reachable'
+          ? constructorsByPrototype.get(term.declaration)
+          : undefined
       if (declaration !== undefined) {
         let prototype = prototypeTerms.get(declaration)
         if (!prototype) {
@@ -4038,7 +4354,36 @@ export const censusGlobalHostMutations = (
       addTerm(target, opaqueTerm)
       return
     }
+    if (term.kind === 'SOURCE_INSTANCE' || term.kind === 'SOURCE_PROTOTYPE') {
+      // A copy takes own keys only: the instance's own `constructor` stores and
+      // own `__proto__`, never what its prototype answers.
+      const copied = selector.mode === 'copied-reachable'
+      if (selector.key === 'constructor') {
+        if (term.kind === 'SOURCE_INSTANCE') addFlow(constructorStoreOf(term.allocator, 'own'), target)
+        if (copied) {
+          if (term.kind === 'SOURCE_PROTOTYPE') addFlow(constructorStoreOf(term.allocator, 'prototype'), target)
+          return
+        }
+        addFlow(allocatorComponentOf(term.allocator), target)
+        addFlow(constructorStoreOf(term.allocator, 'prototype'), target)
+        if (term.kind === 'SOURCE_INSTANCE') addSelector(constructorStoreOf(term.allocator, 'reparent'), 'constructor', target)
+      } else if (selector.key === '__proto__' && term.kind === 'SOURCE_INSTANCE') {
+        if (copied) addFlow(constructorStoreOf(term.allocator, 'own-proto'), target)
+        else {
+          addTerm(target, sourcePrototypeTermOf(term.allocator))
+          addFlow(constructorStoreOf(term.allocator, 'reparent'), target)
+        }
+      }
+      return
+    }
     if (term.kind === 'REPRESENTED_NON_GLOBAL' || term.kind === 'storage-unwritten' || term.kind === 'storage-reassigned') return
+    if (term.kind === 'UNPLACED_OBJECT') {
+      // What an unplaced object can hand back that is `Object` or `Reflect`:
+      // its `constructor`, whatever an unknown key names, or an own `__proto__`
+      // a copy of it re-parents through.
+      if (selector.key === null || selector.key === 'constructor' || selector.key === '__proto__') addTerm(target, unplacedObjectTerm)
+      return
+    }
     if (term.kind === 'literal') addLiteralSelection(term.literal, selector.key, target, selector.mode)
     else if (term.kind === 'storage') addStorageSelection(term.declaration, selector.key, target, selector.mode)
     else {
@@ -4083,6 +4428,7 @@ export const censusGlobalHostMutations = (
         for (const target of component.out) addTerm(target, term)
         for (const target of dynamicOut.get(component) ?? []) addTerm(target, term)
         for (const selector of selectorTargets.get(component) ?? []) scheduleSelection(selector, term)
+        for (const watch of storeWatchers.get(component) ?? []) fireStoreWatch(watch, term)
         continue
       }
       const { selector, term } = pendingSelections[pendingSelectionIndex++]!
@@ -4101,6 +4447,7 @@ export const censusGlobalHostMutations = (
     readonly global: boolean
     readonly opaque: boolean
     readonly represented: boolean
+    readonly unplaced: boolean
     readonly prototypes: ReadonlySet<DeclarationId>
   }
   const factsByComponent = new Map<Component, AliasFacts>()
@@ -4132,14 +4479,16 @@ export const censusGlobalHostMutations = (
       let global = false
       let opaque = false
       let represented = false
+      let unplaced = false
       const prototypes = new Set<DeclarationId>()
       for (const term of termsByComponent.get(component) ?? []) {
         opaque ||= term.kind === 'OPAQUE_UNKNOWN'
         global ||= term.kind === 'GLOBAL_TRUE'
-        represented ||= term.kind === 'REPRESENTED_NON_GLOBAL'
+        represented ||= term.kind === 'REPRESENTED_NON_GLOBAL' || term.kind === 'UNPLACED_OBJECT'
+        unplaced ||= term.kind === 'UNPLACED_OBJECT'
         if (term.kind === 'INTRINSIC_OBJECT') prototypes.add(term.declaration)
       }
-      factsByComponent.set(component, { global, opaque, represented, prototypes })
+      factsByComponent.set(component, { global, opaque, represented, unplaced, prototypes })
     }
   }
   // `finishCensus` (below) sets `factsByComponent` for every member of
@@ -4609,7 +4958,14 @@ export const censusGlobalHostMutations = (
         unknown = true
         continue
       }
-      if (term.kind === 'REPRESENTED_NON_GLOBAL' || term.kind === 'INHERITED_INTRINSIC_PROTOTYPE' || term.kind === 'storage-reassigned')
+      if (
+        term.kind === 'REPRESENTED_NON_GLOBAL' ||
+        term.kind === 'UNPLACED_OBJECT' ||
+        term.kind === 'INHERITED_INTRINSIC_PROTOTYPE' ||
+        term.kind === 'SOURCE_INSTANCE' ||
+        term.kind === 'SOURCE_PROTOTYPE' ||
+        term.kind === 'storage-reassigned'
+      )
         continue
       if (term.kind === 'source-containment') {
         for (const key of term.ownKeys) keys.add(key)
@@ -5603,7 +5959,10 @@ export const censusGlobalHostMutations = (
     if (reachable.memberIsPruned(node)) return
     if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && isDirectAssignmentTarget(node)) {
       const keys = keyReader.keysOfAccess(node)
-      for (const declaration of aliasFacts(node.expression).prototypes)
+      const intrinsics = aliasFacts(node.expression).prototypes
+      if (intrinsics.size > 0 && keys.some((key) => key.kind === 'every'))
+        reflectionSuspects.push({ receiver: unwrapErasedExpression(node.expression), value: storedValueOf(node), byIdentity: true })
+      for (const declaration of intrinsics)
         for (const key of keys) {
           noteWritten(key)
           tainted.taintObject(declaration, key)
@@ -5864,6 +6223,59 @@ export const censusGlobalHostMutations = (
     for (const statement of reachableStatementsOf(file)) visit(statement)
   }
   flushNarrowedArgumentStamps()
+  const valueMayBeCallable = (value: ts.Expression, depth = 0): boolean => {
+    const current = unwrapErasedExpression(value)
+    if (receiverTypeIsAssertionSeeded(current)) return true
+    if (ts.isObjectLiteralExpression(current) || ts.isArrayLiteralExpression(current) || ts.isLiteralExpression(current)) return false
+    if (ts.isTemplateExpression(current) || current.kind === ts.SyntaxKind.TrueKeyword || current.kind === ts.SyntaxKind.FalseKeyword)
+      return false
+    if (ts.isConditionalExpression(current))
+      return valueMayBeCallable(current.whenTrue, depth) || valueMayBeCallable(current.whenFalse, depth)
+    // A construction yields a fresh object, callable only through the three
+    // constructors that can hand back a function: `Function` builds one,
+    // `Proxy` wraps its target, and `Object( value )` returns `value` itself.
+    if (ts.isNewExpression(current)) {
+      const callee = unwrapErasedExpression(current.expression)
+      const symbol = ts.isIdentifier(callee) ? actualSymbol(checker.getSymbolAtLocation(callee)) : null
+      const forwarding = !!symbol && hasStandardLibraryDeclaration(symbol) && ['Function', 'Proxy', 'Object'].includes(symbol.getName())
+      if (!forwarding && checker.getSignaturesOfType(checker.getTypeAtLocation(current), ts.SignatureKind.Call).length === 0) return false
+    }
+    const type = checker.getTypeAtLocation(current)
+    const primitive = (candidate: ts.Type): boolean =>
+      (candidate.flags &
+        (ts.TypeFlags.StringLike |
+          ts.TypeFlags.NumberLike |
+          ts.TypeFlags.BooleanLike |
+          ts.TypeFlags.BigIntLike |
+          ts.TypeFlags.ESSymbolLike |
+          ts.TypeFlags.Null |
+          ts.TypeFlags.Undefined |
+          ts.TypeFlags.Void)) !==
+      0
+    if (type.isUnion() ? type.types.every(primitive) : primitive(type)) return false
+    if (checker.isArrayType(type) || checker.isTupleType(type)) return false
+    // A body compiled here that only ever completes with a fresh literal or a
+    // primitive -- ajv's `schemaOrData` -- hands back nothing callable.
+    if (ts.isCallExpression(current) && depth < 3) {
+      const declaration = executableDeclarationOf(callDeclarationAt(current))
+      const body = declaration && ts.isFunctionLike(declaration) ? (declaration as ts.FunctionLikeDeclarationBase).body : undefined
+      if (declaration && body && !declaration.getSourceFile().isDeclarationFile) {
+        const completions = observableCompletionValuesOf(declaration)
+        if (completions.length > 0 && completions.every((completion) => !valueMayBeCallable(completion, depth + 1))) return false
+      }
+    }
+    return true
+  }
+  const reflectionMayBeReplaced =
+    !trustSeed.reflection &&
+    reflectionSuspects.some(({ receiver, value, byIdentity }) => {
+      if (value === null || (value !== undefined && !valueMayBeCallable(value))) return false
+      const facts = aliasFacts(receiver)
+      const reached = [...facts.prototypes].some((id) => reflectionHolders.has(id))
+      const holder = byIdentity ? reached : facts.global || facts.opaque || facts.unplaced || reached
+      if (holder && process.env['GEA_DEBUG_GLOBAL_MUTATION']) debugSite(receiver, 'may replace reflection')
+      return holder
+    })
   // With '*' every consumer refuses already. Otherwise: no name this run
   // trusted may have been written by its own visit; a `for-in` key set holds
   // every key Object.prototype may carry; and a key set's intrinsic
@@ -5897,11 +6309,22 @@ export const censusGlobalHostMutations = (
       )
         rejectedCallableProofs.add(call)
     const invocationFailed = rejectedCallableProofs.size > trustSeed.rejectedCallableProofs.size
-    if (distrusted.length > 0 || (written.every && !trustSeed.all) || inheritedGrew || assumptionFailed || invocationFailed) {
+    const unshadowedConstructors = new Set<ts.Node>([...trustSeed.unshadowedConstructors, ...withdrawnAllocators])
+    const shadowWithdrawn = unshadowedConstructors.size > trustSeed.unshadowedConstructors.size
+    if (
+      distrusted.length > 0 ||
+      (written.every && !trustSeed.all) ||
+      reflectionMayBeReplaced ||
+      inheritedGrew ||
+      assumptionFailed ||
+      invocationFailed ||
+      shadowWithdrawn
+    ) {
       if (process.env['GEA_DEBUG_GLOBAL_MUTATION'])
         process.stderr.write(
-          `global host census re-run: distrusting ${written.every ? '<all>' : distrusted.join(', ') || '-'}` +
-            `${inheritedGrew ? '; Object.prototype keys grew' : ''}${assumptionFailed ? '; computed-key assumption failed' : ''}\n`
+          `global host census re-run: distrusting ${written.every ? '<all>' : distrusted.join(', ') || '-'}${reflectionMayBeReplaced ? '; reflection' : ''}` +
+            `${inheritedGrew ? '; Object.prototype keys grew' : ''}${assumptionFailed ? '; computed-key assumption failed' : ''}` +
+            `${shadowWithdrawn ? `; constructors ${[...withdrawnAllocators].map((allocator) => allocator.name?.text ?? '<anonymous>').join(', ')}` : ''}\n`
         )
       return censusGlobalHostMutations(
         checker,
@@ -5920,13 +6343,15 @@ export const censusGlobalHostMutations = (
         {
           names: new Set([...trustSeed.names, ...distrusted]),
           all: trustSeed.all || written.every,
+          reflection: trustSeed.reflection || reflectionMayBeReplaced,
           objectPrototypeKeys: {
             names: new Set([...trustSeed.objectPrototypeKeys.names, ...objectPrototypeKeys.names]),
             numeric: trustSeed.objectPrototypeKeys.numeric || objectPrototypeKeys.numeric,
             every: trustSeed.objectPrototypeKeys.every || objectPrototypeKeys.every
           },
           noComputedKeys: trustSeed.noComputedKeys || assumptionFailed,
-          rejectedCallableProofs
+          rejectedCallableProofs,
+          unshadowedConstructors
         },
         packageDeclarationFiles
       )
