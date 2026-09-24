@@ -230,7 +230,7 @@ const callableChildrenOf = (abi: {
  * a native frame does not publish that frame's fields back to dynamic code.
  * Keep the full type inventory in directChildrenOf for candidate discovery.
  */
-const publishedChildrenOf = (
+export const publishedChildrenOf = (
   representation: Representation,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   deriver: RepresentationDeriver | null

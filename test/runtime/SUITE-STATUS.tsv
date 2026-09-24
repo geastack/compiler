@@ -154,6 +154,7 @@ hoisted-function-declaration-dependencies.ts	ok
 hoisted-function-declaration.ts	ok
 hoisted-value-not-moved-in-loop.ts	ok
 host-method-alias.runtime.js	ok
+host-read-class-field-initializer.ts	ok
 in-boxed-key.ts	ok
 indexed-record-define-property.ts	ok
 indexed-record-descriptor-typed.ts	ok

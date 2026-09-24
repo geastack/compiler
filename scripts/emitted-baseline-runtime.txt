@@ -157,7 +157,7 @@ filter-under-a-type-guard-narrows-its-element.ts.cpp 0cdd79245c69
 fixed-data-definition.js.cpp 0f5f99ceadbf
 fixed-field-assignment-widening.runtime.js.cpp e65d803536e4
 fixed-field-define-property-widening.runtime.js.cpp f8e1377f59b3
-fixed-field-define-property.runtime.js.cpp b66b0f8b09d0
+fixed-field-define-property.runtime.js.cpp b6e65af6127c
 fn-classref.ts.cpp 927dda4e017c
 fn-scalar.ts.cpp 21e6234db785
 for-in-generic-key.ts.cpp a76e38dc426c
@@ -228,6 +228,7 @@ hoisted-function-declaration.ts.cpp 27eb208fa439
 hoisted-value-not-moved-in-loop.ts.cpp 2476672d5091
 host-method-alias.runtime.js.cpp 050cfab07ca3
 host-method-read-as-value.ts.cpp 1eb870019631
+host-read-class-field-initializer.ts.cpp 3c87b38b7e81
 hot-path-borrowed-tree.ts.cpp ce11f4ca7e3f
 hot-path-closure-identity.ts.cpp 05b1a334b21d
 hot-path-closure-table.ts.cpp 50d3b20c5fa0
@@ -327,7 +328,7 @@ native-class-identity-upcast.ts.cpp baa813ef302f
 native-class-union-widen-field-flow.ts.cpp 892ba9d63873
 native-constructor-choice-field-flow.ts.cpp 032ad81a27c9
 native-default-merge-field-flow.ts.cpp 689e8a2be639
-native-defined-callable-field.ts.cpp 4175c39717d2
+native-defined-callable-field.ts.cpp c574ae62139a
 native-derived-prototype-read.runtime.js.cpp 8d7b9b81b22b
 native-dictionary-field-flow.ts.cpp 0b930eee68e9
 native-dynamic-equality.ts.cpp 0641fba0da76
