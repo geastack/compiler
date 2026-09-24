@@ -500,6 +500,12 @@ export interface ControlOperation extends SemanticOperationBase {
     | 'debugger'
   /** The cleanup protocol operation owned by a synchronous dynamic `for`-`of` loop. */
   readonly iteratorClose?: OperationId | null
+  /**
+   * A `yield*`: the generator kind whose GetIterator the delegation runs
+   * (ECMA-262 15.5.5), `'async'` inside an `async function*`. Absent on a
+   * plain `yield`.
+   */
+  readonly delegate?: 'sync' | 'async'
 }
 
 /**

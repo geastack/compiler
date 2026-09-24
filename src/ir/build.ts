@@ -222,7 +222,8 @@ export interface IrBodyBuilder {
     block: IrBlockId,
     lineage: SemanticResultId,
     operand: IrOperand | null,
-    representation: Representation | null
+    representation: Representation | null,
+    delegate: 'sync' | 'async' | null
   ) => IrValueId | null
   /** The value a native `catch` clause binds. See `CatchBindingOperation`. */
   readonly catchBinding: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
@@ -712,9 +713,9 @@ export const createIrBodyBuilder = (
     return result?.id ?? null
   }
 
-  const yieldValue: IrBodyBuilder['yield'] = (block, lineage, operand, representation) => {
+  const yieldValue: IrBodyBuilder['yield'] = (block, lineage, operand, representation, delegate) => {
     const result = mintOptionalResult(representation)
-    append(block, { kind: 'yield', lineage, operand, result })
+    append(block, { kind: 'yield', lineage, operand, result, delegate })
     return result?.id ?? null
   }
 
