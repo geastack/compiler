@@ -2120,12 +2120,13 @@ const assignText = (ctx: EmitContext, operation: CallOperation): string => {
  *   struct copy that set every field would rewrite attributes the program
  *   never mentioned.
  *
- * The ACCESSOR form (`get`/`set` in the literal) is refused by name. The
- * object model stores accessors as native `std::function`s and invokes them
- * (`gea::runtime::object::get`), so the model is not the gap -- what is
- * missing is the conversion from the program's own callable carrier into that
- * signature, and inventing one that dropped the receiver would make
- * `get: () => this.x` read the wrong object.
+ * The ACCESSOR form (`get`/`set`) installs the function object through
+ * `gea::detail::setDescriptorGetter`/`setDescriptorSetter`, which call it with
+ * the lookup's receiver. That is only right because the function's own
+ * receiver convention is the installed-on object (`installedReceiverOf`,
+ * structural-receiver.ts) or none at all (an arrow's lexical `this`); a
+ * convention that named the descriptor literal would read the wrong object,
+ * and its conversion into the boxed callable has no rendering.
  */
 const defineDescriptorLines = (ctx: EmitContext, operation: CallOperation, descriptor: IrOperand, slot: string): string =>
   descriptorSlotLines(ctx, operation, descriptor.representation, operandText(ctx, descriptor), slot)
@@ -2192,33 +2193,32 @@ const descriptorSlotLines = (
     const held = field.value.kind === 'optional' ? `(*${read})` : read
     const stated = (assignment: string): string =>
       field.value.kind === 'optional' ? `if ((${read}).has_value()) { ${assignment} }` : assignment
-    if ((field.key === 'get' || field.key === 'set') && (!field.required || field.value.kind === 'optional')) {
-      // The record `Object.getOwnPropertyDescriptor` publishes declares
-      // `get?`/`set?` beside the data fields, and for every data property --
-      // which is what test262's `verifyProperty` restores -- both are absent.
-      // A PRESENT accessor is the case the compile-time refusal below states,
-      // reached here at runtime rather than at compile time because the same
-      // record carries both kinds; it refuses by name where the language would
-      // have installed the accessor, never installs a data property in its
-      // place. The guards `push`/`stated` wrap this in are exactly the
-      // presence tests, so the throw is dead code for a data descriptor.
+    // An accessor is the function object itself, boxed through the certified
+    // conversion like `value`, and installed so every lookup calls it with the
+    // receiver it started from. Its receiver convention is the object it is
+    // installed on (`structural-receiver.ts`'s `installedReceiverOf`), so the
+    // compiled body reads the right object.
+    // Where no conversion was planned -- a definition the census proved
+    // installs data, whose descriptor type merely declares the accessors -- a
+    // present accessor still refuses by name where it would be installed.
+    if (field.key === 'get' || field.key === 'set') {
+      const cited = operation.objectValueConversions?.some(
+        (value) => value.role === 'descriptor-value' && value.argument === 2 && value.field === field.key
+      )
+      const boxed =
+        carried.kind === 'dynamic'
+          ? held
+          : cited
+            ? objectValueConversionText(ctx, operation, 'descriptor-value', 2, field.key, carried, held)
+            : null
+      const install = field.key === 'get' ? 'setDescriptorGetter' : 'setDescriptorSetter'
       push(
         field,
         stated(
-          `gea::host::throwRuntimeError("TypeError", "Object.defineProperty with an accessor descriptor (${field.key}) is not rendered by this backend");`
+          boxed === null
+            ? `gea::host::throwRuntimeError("TypeError", "Object.defineProperty with an accessor descriptor (${field.key}) is not rendered by this backend");`
+            : `gea::detail::${install}(${slot}, ${boxed});`
         )
-      )
-      continue
-    }
-    // A literal accessor descriptor refuses the same way, at the call rather
-    // than the compile: installing it would have to decide how the receiver
-    // reaches the compiled getter, and a wrong answer reads the wrong object.
-    // `@hono/node-server` installs one only on its TRACE path, so the program
-    // runs and that path throws by name.
-    if (field.key === 'get' || field.key === 'set') {
-      push(
-        field,
-        `gea::host::throwRuntimeError("TypeError", "Object.defineProperty with an accessor descriptor (${field.key}) is not rendered by this backend");`
       )
       continue
     }

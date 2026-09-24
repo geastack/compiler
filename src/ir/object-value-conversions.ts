@@ -34,11 +34,14 @@ export const objectValueConversionInputsOf = (
     return []
   }
   if (intrinsic === 'object-define-property') {
+    // `value`, and the `get`/`set` accessors: each is handed over as the
+    // `any` the descriptor declares, a function object for the accessors.
     const descriptor = args[2]?.representation
-    const value = descriptor && fieldsOf(descriptor).find((field) => field.key === 'value')
-    if (!value) return []
-    const source = value.value.kind === 'optional' && value.value.absence === 'undefined' ? value.value.payload : value.value
-    return source.kind === 'dynamic' ? [] : [{ role: 'descriptor-value', argument: 2, field: 'value', source, target: dynamic }]
+    return (descriptor ? fieldsOf(descriptor) : []).flatMap((field): ObjectValueConversionInput[] => {
+      if (field.key !== 'value' && field.key !== 'get' && field.key !== 'set') return []
+      const source = field.value.kind === 'optional' && field.value.absence === 'undefined' ? field.value.payload : field.value
+      return source.kind === 'dynamic' ? [] : [{ role: 'descriptor-value', argument: 2, field: field.key, source, target: dynamic }]
+    })
   }
   const target = args[0]?.representation
   if (intrinsic !== 'object-assign' || !target || !isNativeCallableCarrier(target.kind)) return []

@@ -17,7 +17,7 @@ import { createStructuralCallResultResolver, createStructuralConstructResultReso
 import type { DeclarationId, StructuralTypeId } from '../../identity/ids.js'
 import { genericFunctionChoiceMembersOf, genericSourceFunctionDeclarationOf } from './generic-function-choice.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'
-import type { StructuralMember, StructuralShape } from '../model/structural-types.js'
+import type { SignatureShape, StructuralMember, StructuralShape } from '../model/structural-types.js'
 import {
   accessorSignatureOf,
   constructorImplementationSignatureOf,
@@ -2187,12 +2187,25 @@ const buildMapper = (
       // `valueTypeAt` gives the DECLARATION the same answer.
       const implementation = sourceOverloadImplementationOf(callSignatures, constructSignatures)
       const generic = genericSourceFunctionOf(type, callSignatures, constructSignatures, implementation)
+      // TypeScript's JavaScript inference gives a function that writes to
+      // `this` a construct signature of its own making: no declaration and no
+      // parameters. The function object has one body and one formal list, so
+      // `new` binds the same parameters `[[Call]]` does.
+      const [soleCall] = callSignatures
+      const soleCallBody = callSignatures.length === 1 ? soleCall?.getDeclaration() : undefined
+      const constructFrameOf = (construct: ts.Signature): SignatureShape =>
+        construct.getDeclaration() === undefined &&
+        soleCall &&
+        soleCallBody &&
+        (ts.isFunctionExpression(soleCallBody) || ts.isFunctionDeclaration(soleCallBody))
+          ? signatureOf(soleCall, construct.getReturnType())
+          : signatureOf(construct)
       return remember(
         type,
         table.intern({
           kind: 'signature',
           call: implementation ? [signatureOf(implementation)] : callSignatures.map((one) => signatureOf(one)),
-          construct: constructSignatures.map((one) => signatureOf(one)),
+          construct: constructSignatures.map(constructFrameOf),
           ...(generic ? { generic } : {})
         })
       )
