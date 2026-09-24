@@ -31,7 +31,8 @@ const globalHostMutationAuditOf = (
   nativeReceiverNames: readonly string[] = [],
   publishedTypeProvider?: (checker: ts.TypeChecker, file: ts.SourceFile) => (expression: ts.Expression) => ts.Type,
   useSettledCalls = false,
-  modules: ReadonlyMap<string, string> = new Map()
+  modules: ReadonlyMap<string, string> = new Map(),
+  packageFiles: readonly string[] = []
 ): GlobalHostMutationAudit => {
   const options: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES2022,
@@ -112,7 +113,11 @@ const globalHostMutationAuditOf = (
     nativeReceiverSymbols,
     nativeConstructorSymbols,
     publishedTypeProvider?.(checker, file) ??
-      (parameters ? (expression) => parameters.typeAt(expression) ?? checker.getTypeAtLocation(expression) : undefined)
+      (parameters ? (expression) => parameters.typeAt(expression) ?? checker.getTypeAtLocation(expression) : undefined),
+    [],
+    undefined,
+    undefined,
+    new Set(packageFiles.map((name) => program.getSourceFile(name)!))
   )
   return { taint, bindings }
 }
@@ -1428,6 +1433,37 @@ test('a host variable of function type can state that it writes no property', ()
     `).taint
   assert.deepEqual([...stamped('/** @gea-host-no-property-writes */')], [])
   assert.notDeepEqual([...stamped('')], [])
+})
+
+// fastify's `logger.info(...)` resolves to pino's typings; the implementation is
+// pino's JavaScript, compiled here like any other body.
+test("a package's typings describe program code, not a host native, outside global declarations", () => {
+  const library = resolve('test/fixtures/global-host-package-typings.d.ts')
+  const audit = (member: string, packaged: boolean) =>
+    globalHostMutationAuditOf(
+      `
+        import type { Logger } from './global-host-package-typings.js'
+        interface Process {}
+        declare var hostProcess: Process
+        declare const logger: Logger
+        ${member}({ held: 1 })
+      `,
+      ['hostProcess'],
+      [],
+      undefined,
+      false,
+      new Map([
+        [
+          library,
+          `export interface Logger { info(value: object): void }
+           declare global { function hostLog(value: object): void }`
+        ]
+      ]),
+      packaged ? [library] : []
+    ).taint
+  assert.deepEqual([...audit('logger.info', true)], [])
+  assert.notDeepEqual([...audit('logger.info', false)], [])
+  assert.notDeepEqual([...audit('hostLog', true)], [])
 })
 
 test('own-key reflection dependencies revoke source slot closure after method replacement', () => {

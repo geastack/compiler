@@ -1645,7 +1645,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       // The one shared instance built above, alongside `computedKeyTextsOf` --
       // `GEA_HOST_CENSUS_KEY_SETS_OFF` keeps every computed key unknown for
       // both readers.
-      computedKeysOf
+      computedKeysOf,
+      undefined,
+      new Set(compiled.program.getSourceFiles().filter((file) => file.isDeclarationFile && compiled.program.isSourceFileFromExternalLibrary(file)))
     )
   )
   hostMutationFactsSealed = true
