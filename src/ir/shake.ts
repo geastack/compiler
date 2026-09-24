@@ -7,6 +7,7 @@ import { isOpenDocument, representationKey, walkRepresentation, type CallableAbi
 import { restForwards } from '../conversion/record-view.js'
 import { allOperationsOf, type IrBlock, type IrBlockId, type IrBody, type IrNonTerminatorOperation, type IrOperation } from './model.js'
 import { arrayAllocationDrainsDynamicIterator, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
+import { publishedChildrenOf } from './reflection-demand.js'
 import { verifyIrBody, type IrViolation } from './verify.js'
 
 /**
@@ -250,6 +251,37 @@ const storeReceiverOf = (operation: IrNonTerminatorOperation): IrValueId | null 
   }
 }
 
+/**
+ * Whether a call runs host code rather than a body this pass reads.
+ *
+ * A host function is handed its arguments whole and reads them however it
+ * likes: `JSON.stringify` and `Object.assign` walk every own key through the
+ * struct's runtime field dispatcher, so a field nothing in the program spells
+ * is still read. A program body's reads are its own operations, which its own
+ * slice files, so only the host side needs to be stated here.
+ *
+ * The callee is host code when it is a native handle itself, a member read
+ * off one (`JSON.stringify`, `console.log`), or dynamic, which can hold
+ * either. Left out are the calls whose reads `sliceBody` already files
+ * exactly: Reflect's authenticated operations (by key), the own-key and
+ * carrier intrinsics (which read no value), and `String`/`Number`/`Boolean`
+ * (whose ToPrimitive reaches `toString`/`valueOf`, rooted by name there).
+ */
+const isHostCall = (operation: Extract<IrOperation, { kind: 'call' }>, definitions: ReadonlyMap<IrValueId, IrOperation>): boolean => {
+  if (operation.intrinsicReflection || operation.intrinsicOwnKeys || operation.intrinsicCarrierPredicate) return false
+  const callee = operation.callee.representation
+  if (callee.kind === 'native-handle') {
+    const protocol = callee.protocol
+    return protocol !== 'StringConstructor' && protocol !== 'NumberConstructor' && protocol !== 'BooleanConstructor'
+  }
+  if (callee.kind === 'dynamic') return true
+  const definition = definitions.get(operation.callee.value)
+  if (definition?.kind !== 'get') return false
+  const receiver = definition.receiver.representation
+  const holder = receiver.kind === 'optional' ? receiver.payload : receiver
+  return holder.kind === 'native-handle' || holder.kind === 'dynamic'
+}
+
 /** What one body's backward slice concluded. */
 interface BodySlice {
   /** Every operation kept, by identity. */
@@ -422,6 +454,7 @@ const sliceBody = (
   const spelledKeys = new Set<string>()
   const fieldHazardScopes = new Set<string>()
   const computedMemberHazards: ComputedMemberHazard[] = []
+  const hostBoundaries: Representation[] = []
   const constructors = new Set<FunctionId>()
   const constructedClasses = new Set<DeclarationId>()
   const evaluatedClasses = new Set<DeclarationId>()
@@ -539,6 +572,9 @@ const sliceBody = (
             for (const scope of scopes) computedMemberHazards.push({ scope, target: operation.result.representation })
         }
       }
+    }
+    if (operation.kind === 'call' && isHostCall(operation, definitions)) {
+      for (const operand of [operation.receiver, ...operation.arguments]) if (operand) hostBoundaries.push(operand.representation)
     }
     // OrdinaryToPrimitive invokes `toString`/`valueOf` without an explicit
     // property operation. Root those protocol members on the carrier being
@@ -1012,7 +1048,9 @@ const inheritanceScopesOf = (classes: ReadonlyMap<DeclarationId, ClassLayout>): 
  * `for`-`in`, so a computed access or an enumeration reaches a field nothing
  * ever spelled. Those are the two hazards, and they are recorded per receiver
  * scope by `sliceBody` -- so an enumeration of one class does not pin the
- * fields of an unrelated one.
+ * fields of an unrelated one. A value handed to a host function is the same
+ * hazard from outside the program: `hostReadableScopes` files every class the
+ * host can reach through it.
  *
  * The other half is EFFECTS. Eliding a method body elides a call nothing
  * makes; eliding a field initializer elides work a construction performs
@@ -1027,8 +1065,8 @@ const inheritanceScopesOf = (classes: ReadonlyMap<DeclarationId, ClassLayout>): 
  * because the struct member itself is rendered from the class's SHAPE and not
  * from this layout (`records.ts`'s `recordLayoutOfShape`). That is the same
  * state a field declared with no initializer at all is already in today, which
- * is why it is acceptable here: nothing spells the key, and the two hazards
- * that could reach it without spelling it are what this predicate rules out.
+ * is why it is acceptable here: nothing spells the key, and the hazards that
+ * could reach it without spelling it are what this predicate rules out.
  */
 const fieldInitializerRuns = (
   field: ClassField,
@@ -1041,6 +1079,53 @@ const fieldInitializerRuns = (
   if (memberIsReachable(reach, scopes, field.key)) return true
   if (hazards.has(anyClassScope) || scopes.some((scope) => hazards.has(scope))) return true
   return !effectFree.has(field.initializer)
+}
+
+/**
+ * The class scopes a host function can read fields of, given one carrier it
+ * was handed.
+ *
+ * `class Box { w = 1 }` passed as `object` to `JSON.stringify` printed
+ * `{"w":0}`: nothing spelled `w`, so the initializer was dropped, and the
+ * serializer read the member C++ had zeroed. A host reads the whole object
+ * graph it was given, so the walk is the one reflection demand uses for an
+ * unknown call boundary (`publishedChildrenOf`): through containers, unions
+ * and every class's declared fields, and into a callable only as far as the
+ * values it returns. A class reached through a base-typed carrier may be any
+ * subclass at runtime, so their fields are walked too; the scopes themselves
+ * already cover the hierarchy (`inheritanceScopesOf`).
+ *
+ * A dynamic carrier can hold any object, which is the scope a computed read
+ * of one already files.
+ *
+ * `visited` is shared across the whole shake: the scopes a carrier yields
+ * never change, and a fixpoint only ever adds to the hazard set.
+ */
+const hostReadableScopes = (
+  carrier: Representation,
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  deriver: RepresentationDeriver,
+  scopesOfClass: ReadonlyMap<DeclarationId, readonly string[]>,
+  structuralViewScopes: ReadonlyMap<string, readonly string[]>,
+  visited: Set<string>
+): readonly string[] => {
+  const scopes: string[] = []
+  const pending = [carrier]
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    const key = representationKey(next)
+    if (visited.has(key)) continue
+    visited.add(key)
+    if (next.kind === 'dynamic') scopes.push(anyClassScope)
+    if (next.kind === 'class-ref' || next.kind === 'record' || next.kind === 'record-with-index' || next.kind === 'native-record-ref')
+      scopes.push(...receiverClassScopes(next, structuralViewScopes))
+    if (next.kind === 'class-ref')
+      for (const related of scopesOfClass.get(next.declaration) ?? []) {
+        const instance = classes.get(related as DeclarationId)?.instance
+        if (instance) pending.push(instance)
+      }
+    pending.push(...publishedChildrenOf(next, classes, deriver))
+  }
+  return scopes
 }
 
 /**
@@ -1282,6 +1367,7 @@ export const shakeProgram = (input: IrShakeInput): IrShakeResult => {
   // a fact about the program that runs.
   const fieldHazards = new Set<string>()
   const computedMemberHazards = new Map<string, Representation[]>()
+  const hostWalked = new Set<string>()
   // Which bodies do nothing but produce a value. Computed once over every body
   // rather than per lookup: it is a property of the body alone, not of what is
   // live, so it cannot change as the fixpoint widens.
@@ -1383,6 +1469,13 @@ export const shakeProgram = (input: IrShakeInput): IrShakeResult => {
         if (fieldHazards.has(scope)) continue
         fieldHazards.add(scope)
         freshKeys = true
+      }
+      for (const carrier of slice.hostBoundaries) {
+        for (const scope of hostReadableScopes(carrier, input.classes, input.deriver, scopesOfClass, structuralViewScopes, hostWalked)) {
+          if (fieldHazards.has(scope)) continue
+          fieldHazards.add(scope)
+          freshKeys = true
+        }
       }
       for (const hazard of slice.computedMemberHazards) {
         const targets = computedMemberHazards.get(hazard.scope) ?? []
