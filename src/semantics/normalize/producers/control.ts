@@ -761,6 +761,16 @@ const contributeAwait = (context: ProducerContext, candidate: CensusCandidate, n
   }
 }
 
+/** Whether the function a `yield` belongs to is an `async function*`. */
+const enclosingGeneratorIsAsync = (node: ts.Node): boolean => {
+  for (let current = node.parent; current !== undefined; current = current.parent) {
+    if (isFunctionBoundary(current)) {
+      return isFunctionLike(current) && (ts.getCombinedModifierFlags(current) & ts.ModifierFlags.Async) !== 0
+    }
+  }
+  return false
+}
+
 const contributeYield = (context: ProducerContext, candidate: CensusCandidate, node: ts.YieldExpression): CandidateContribution => {
   // `context.types.typeAt(node)` is the checker's type of the YIELD
   // EXPRESSION ITSELF -- ECMA-262 makes that the RESUME channel (what a
@@ -779,21 +789,19 @@ const contributeYield = (context: ProducerContext, candidate: CensusCandidate, n
   const auxiliaryOperations: SemanticOperation[] = []
   const auxiliaryEdges: SemanticEdge[] = []
 
+  let delegate: 'sync' | 'async' | null = null
   if (node.asteriskToken) {
     if (!node.expression) return blockedContribution(candidate, 'yield* with no delegated expression is not valid syntax to model')
     const source = resolveExpressionOperand(context, node.expression)
     if (!source) return blockedContribution(candidate, 'no normalized operation identifies the yield* delegated expression value')
-    // `yield*` is refused here rather than modelled and refused later. ECMA-262
-    // 27.5.3.7 makes delegation a LOOP -- pull a step from the inner iterator,
-    // yield it, repeat, forwarding `return`/`throw` -- and this expression
-    // position cannot hold a loop, for the same reason a spread's own drain
-    // cannot be built in one (`producers/protocol.ts`'s bypass comment). The
-    // steps below were being minted and then never lowered, so the program
-    // certified against `protocol:iterator:*` keys nothing consumed.
-    return blockedContribution(
-      candidate,
-      'yield* delegates to another iterator, which is a loop over its steps; this expression position has no loop to build one in'
-    )
+    // ECMA-262 15.5.5 makes delegation a loop -- step the inner iterator,
+    // yield what it yields, forward what the outer caller resumes with,
+    // `throw` and `return` included -- whose only suspension is its own
+    // yield. So it is one operation carrying the iterable, and the loop is
+    // that operation's rendering (`emitYield`), never a CFG loop around an
+    // expression position. The generator kind decides GetIterator's kind.
+    operands.push(operand('value', 0, source.source, source.type))
+    delegate = enclosingGeneratorIsAsync(node) ? 'async' : 'sync'
   } else if (node.expression) {
     const resolved = resolveExpressionOperand(context, node.expression)
     if (!resolved) return blockedContribution(candidate, 'no normalized operation identifies the yielded value')
@@ -864,6 +872,7 @@ const contributeYield = (context: ProducerContext, candidate: CensusCandidate, n
     caller: candidate.caller,
     operands,
     results,
+    ...(delegate !== null ? { delegate } : {}),
     // `yield` can itself throw the value a `generator.throw()` injects, unlike
     // `await`, which only ever resumes with a resolved value or a rejection
     // surfacing at the same site -- this is a real capability, not symmetry

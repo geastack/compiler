@@ -24189,6 +24189,92 @@ inline Step stepClosing(const gea::Value& iterator) {
   }
 }
 
+/** How a suspended generator was resumed: `next(v)`, `throw(e)` or `return(v)` (ECMA-262 27.5.3.2 step 6). */
+enum class Resumption { Next, Throw, Return };
+
+/**
+ * One `yield*` delegation's iterator record (ECMA-262 15.5.5).
+ *
+ * `async` is the generator kind. For an async generator whose iterable has no
+ * `@@asyncIterator`, `fromSync` records CreateAsyncFromSyncIterator's wrapper
+ * (27.1.6): the sync iterator is stepped, and every value it produces is
+ * awaited before the delegation sees it.
+ */
+struct Delegation {
+  gea::Value iterator;
+  gea::Value next;
+  bool async = false;
+  bool fromSync = false;
+};
+
+/** Await, over a boxed value: a promise this runtime holds is waited on; any other value is its own resolution. */
+inline gea::Value awaitBoxed(const gea::Value& value) {
+  gea::Promise<gea::Value> adopted;
+  if (!gea::detail::adoptBoxedPromise(adopted, value)) return value;
+  return adopted.awaited();
+}
+
+/** GetIterator(source, sync|async) and the record's `next`, as 15.5.5 steps 3-4 read them. */
+inline Delegation delegate(const gea::Value& source, bool async) {
+  if (async) {
+    const gea::PropertyKey key = gea::PropertyKey::symbol(gea::wellKnownSymbol(gea::detail::WellKnownSymbol::AsyncIterator));
+    const gea::Value method = source.getProperty(key);
+    if (method.tag() != gea::Value::Tag::Undefined && method.tag() != gea::Value::Tag::Null) {
+      const gea::Value iterator = method.callWithReceiver(source, {});
+      if (!isObject(iterator)) throwNotIterable("async iterator method returned a non-object value");
+      return Delegation{iterator, iterator.getProperty(gea::PropertyKey::string("next")), true, false};
+    }
+  }
+  const gea::Value iterator = getIterator(source);
+  return Delegation{iterator, iterator.getProperty(gea::PropertyKey::string("next")), async, async};
+}
+
+/**
+ * One inner step of 15.5.5 step 7, for how the outer generator resumed.
+ *
+ * True: the delegation goes on and `out` is the value to yield. False: it is
+ * over and `out` is its value -- the value of the `yield*` expression after a
+ * `next` or a `throw` the inner iterator absorbed, or the value the generator
+ * must now return after a `return`. An inner iterator with no `throw` method
+ * is closed and a TypeError thrown (7.b.iii); one with no `return` method
+ * lets the return complete with the received value (7.c.iii).
+ */
+inline bool delegateStep(Delegation& delegation, Resumption resumption, const gea::Value& received, gea::Value& out) {
+  const auto settle = [&](const gea::Value& resultValue) -> bool {
+    const gea::Value innerResult = delegation.async && !delegation.fromSync ? awaitBoxed(resultValue) : resultValue;
+    if (!isObject(innerResult)) throwNotIterable("iterator result is not an object");
+    const bool done = gea::host::detail::toBoolean(innerResult.getProperty(gea::PropertyKey::string("done")));
+    const gea::Value value = innerResult.getProperty(gea::PropertyKey::string("value"));
+    out = delegation.fromSync ? awaitBoxed(value) : value;
+    return !done;
+  };
+  switch (resumption) {
+    case Resumption::Next:
+      return settle(delegation.next.callWithReceiver(delegation.iterator, {received}));
+    case Resumption::Throw: {
+      const gea::Value method = delegation.iterator.getProperty(gea::PropertyKey::string("throw"));
+      if (method.tag() != gea::Value::Tag::Undefined && method.tag() != gea::Value::Tag::Null)
+        return settle(method.callWithReceiver(delegation.iterator, {received}));
+      const gea::Value closer = delegation.iterator.getProperty(gea::PropertyKey::string("return"));
+      if (closer.tag() != gea::Value::Tag::Undefined && closer.tag() != gea::Value::Tag::Null) {
+        const gea::Value closed = closer.callWithReceiver(delegation.iterator, {});
+        if (!isObject(delegation.async && !delegation.fromSync ? awaitBoxed(closed) : closed))
+          throwNotIterable("iterator return method returned a non-object value");
+      }
+      throwNotIterable("The iterator does not provide a 'throw' method.");
+    }
+    case Resumption::Return: {
+      const gea::Value method = delegation.iterator.getProperty(gea::PropertyKey::string("return"));
+      if (method.tag() == gea::Value::Tag::Undefined || method.tag() == gea::Value::Tag::Null) {
+        out = delegation.async ? awaitBoxed(received) : received;
+        return false;
+      }
+      return settle(method.callWithReceiver(delegation.iterator, {received}));
+    }
+  }
+  return false;
+}
+
 /**
  * Drain a dynamic iterator into an already-fresh `ArrayObject<Value>`.
  *

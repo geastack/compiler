@@ -71,6 +71,12 @@ const tryEntryFirstOperationsOf = (body: IrBody): ReadonlySet<IrOperation> => {
  */
 const ownKindDemandsOf = (operation: IrOperation, ctx: CertifyContext): readonly CapabilityDemand[] => {
   switch (operation.kind) {
+    case 'yield':
+      // A `yield*` runs ECMA-262 15.5.5's delegation loop over its iterable,
+      // keyed by the iterable's carrier the way a `get-iterator` step is.
+      return operation.delegate !== null && operation.operand !== null
+        ? [helper(`yield-delegate:${operation.delegate}:${operation.operand.representation.kind}`)]
+        : []
     case 'get': {
       const semantic = ctx.semanticOperationOf(operation.lineage)
       if (semantic?.family === 'protocol') {

@@ -675,6 +675,8 @@ export interface YieldOperation extends IrOperationBase {
   readonly kind: 'yield'
   readonly operand: IrOperand | null
   readonly result: IrResult | null
+  /** `yield*`: the delegation loop over `operand`'s iterator, run for this generator kind; `null` for a plain `yield`. */
+  readonly delegate: 'sync' | 'async' | null
 }
 
 /**

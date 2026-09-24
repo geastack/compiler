@@ -3,6 +3,7 @@ import { cppNativeProtocolsOf } from '../host/native-protocols.js'
 import { coreHostMembers } from '../host/host-members.js'
 import { hasPropertyHelperClaims } from '../emit-in.js'
 import { dynamicIteratorHelperClaims, enumerateHelperClaims, staticTupleIteratorHelperClaims } from '../emit-iterator.js'
+import { yieldDelegateHelperClaims } from '../emit-yield-delegate.js'
 import { cppInstanceofHelperKeys } from '../emit-instanceof.js'
 import { completeTemplateObjectCapabilityKey } from '../../../representation/template-object.js'
 
@@ -1324,6 +1325,9 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // `Array.prototype`'s own -- off this claim, on the deliberately
     // unclaimed `record(no-iterator-method)` sibling instead.
     ...dynamicIteratorHelperClaims,
+    // `yield*` over a boxed iterable, in either kind of generator -- claimed by
+    // the file that renders the delegation loop, same as the lists around it.
+    ...yieldDelegateHelperClaims,
     // `for (const name of ['a', 'b'] as const)` -- a fixed-arity tuple, which
     // has no method to fetch at all and unrolls to a positional read; stated
     // by the file that renders it, same as the two lists around it.

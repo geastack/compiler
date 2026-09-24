@@ -638,13 +638,13 @@ const lowerControl = (
       return
     case 'yield': {
       // A real suspension: the enclosing body is emitted as a C++20 coroutine
-      // and this becomes `co_yield`. `yield*` never reaches here --
-      // `producers/control.ts` refuses it by name, because delegation is a loop
-      // and this position is the middle of an expression.
+      // and this becomes `co_yield`. A `yield*` is one operation too: its
+      // delegation loop suspends only inside itself, so the loop is the
+      // operation's own rendering and nothing around it needs a block.
       const lineage = requireLineage(operation)
       const value = resolveOptionalOperand(ctx, block, lineage, operandOf(operation, 'value', 0))
       const representation = optionalResultRepresentation(ctx, operation, 'value')
-      registerResult(ctx, operation, ctx.builder.yield(block, lineage, value, representation))
+      registerResult(ctx, operation, ctx.builder.yield(block, lineage, value, representation, operation.delegate ?? null))
       return
     }
     case 'switch':

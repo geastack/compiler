@@ -4,6 +4,7 @@ import { stableBorrowActualsOf } from '../../ir/borrowed-call-arguments.js'
 import { owningConversionInputText } from './owning-conversion-input.js'
 import type { StableBorrowEntry } from './borrowed-call-entry.js'
 import { boxedValueText } from './emit-dynamic-properties.js'
+import { emitYieldDelegate } from './emit-yield-delegate.js'
 import { ownedDyingValuesOf, ownedFormalInputsOf, transfersFormalConversion } from '../../ir/transfer.js'
 import type { FunctionId, DeclarationId, IrValueId } from '../../identity/ids.js'
 import type { BindingPlacement } from '../../projection/bindings.js'
@@ -1146,6 +1147,10 @@ const emitAwait = (ctx: EmitContext, lines: string[], operation: AwaitOperation)
  * yielding a default-constructed element the program never wrote.
  */
 const emitYield = (ctx: EmitContext, lines: string[], operation: YieldOperation): void => {
+  if (operation.delegate !== null) {
+    emitYieldDelegate(ctx, lines, operation)
+    return
+  }
   const cursor = ctx.abi?.result
   if (cursor?.kind !== 'iterator') {
     throw createCppEmitBlockedError(
