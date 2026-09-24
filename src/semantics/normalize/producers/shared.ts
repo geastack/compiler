@@ -6,7 +6,12 @@ import type { OperationId, StructuralTypeId } from '../../../identity/ids.js'
 import type { SemanticEdge, ValueEdge } from '../../model/edges.js'
 import type { OperandSource, SemanticOperand } from '../../model/operands.js'
 import type { CandidateContribution } from '../contribution.js'
-import { symbolPropertyKeyText, type StructuralMember, type StructuralShape } from '../../model/structural-types.js'
+import {
+  symbolPropertyKeyText,
+  type StructuralIndexShape,
+  type StructuralMember,
+  type StructuralShape
+} from '../../model/structural-types.js'
 import { symbolKeyDeclarationOf } from '../structural-leaves.js'
 import { blocked } from './mint.js'
 import type { ProducerContext } from '../producer-context.js'
@@ -816,8 +821,10 @@ export const isPlainArrayType = (context: ProducerContext, type: StructuralTypeI
  * members, so one level is unwrapped. Every other shape -- and every member
  * this cannot copy correctly -- answers with a reason instead:
  *
- *  - an INDEX SIGNATURE: the own-property set is not known until runtime, and
- *    copying only the declared members would silently drop the rest;
+ *  - an INDEX SIGNATURE on a source: the own-property set is not known until
+ *    runtime, and copying only the declared members would silently drop the
+ *    rest (on a target it is returned instead: it is where an undeclared key
+ *    is placed);
  *  - an ACCESSOR: `{ ...o }` copies a getter's RETURNED value, so it must be
  *    called, which is user code this layer does not invoke;
  *  - a `signature`-shaped member: a method on a class instance lives on the
@@ -838,7 +845,7 @@ export const staticSpreadMembersOf = (
    * has no prototype method of its own; its symbol keys are placed elsewhere.
    */
   role: 'source' | 'target' = 'source'
-): { readonly members: readonly StructuralMember[] } | { readonly blocked: string } => {
+): { readonly members: readonly StructuralMember[]; readonly index?: readonly StructuralIndexShape[] } | { readonly blocked: string } => {
   const outer = context.table.get(type).shape
   const shape = outer.kind === 'declared' && outer.body !== null ? context.table.get(outer.body).shape : outer
   // `...(parsed ? { resolutionMode: parsed } : {})` (tsc's parser.ts, and an
@@ -860,6 +867,8 @@ export const staticSpreadMembersOf = (
     for (const arm of shape.members) {
       const admitted = staticSpreadMembersOf(context, arm, role)
       if ('blocked' in admitted) return admitted
+      if (admitted.index !== undefined && admitted.index.length > 0)
+        return { blocked: 'an object spread into a union target whose arm has an index signature has no one place for an undeclared key' }
       arms.push(admitted.members)
     }
     for (const members of arms) {
@@ -893,7 +902,9 @@ export const staticSpreadMembersOf = (
   if (shape.membersDropped) {
     return { blocked: "an object spread of a projected (data-only) body cannot state the source's own-property set" }
   }
-  if (shape.index.length > 0) {
+  // A TARGET's index signature is where the keys it does not declare go, so it
+  // is returned rather than refused; only a SOURCE's hides keys from the copy.
+  if (shape.index.length > 0 && role === 'source') {
     return { blocked: 'an object spread of a source with an index signature needs the runtime own-property enumeration' }
   }
   for (const member of shape.members) {
@@ -913,7 +924,7 @@ export const staticSpreadMembersOf = (
       return { blocked: `an object spread of a source with the symbol-keyed member "${key}" needs its enumerability` }
     }
   }
-  return { members: shape.members }
+  return role === 'target' ? { members: shape.members, index: shape.index } : { members: shape.members }
 }
 
 /**

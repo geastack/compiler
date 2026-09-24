@@ -284,6 +284,14 @@ const spreadCopyOf = (
   const installable = new Map(
     target.members.flatMap((member) => (member.key.kind === 'symbol' ? [] : [[String(member.key.value), member.type] as const]))
   )
+  // A key the target does not declare is an own property of the literal all
+  // the same, and an index signature whose key domain admits it is where the
+  // literal keeps it: ajv's `{ ...$dataRefSchema }` into a `SchemaObject`.
+  const openIndex = (target.index ?? []).filter((index) => index.finite !== true)
+  const stringIndex = openIndex.find((index) => index.key === 'string')
+  const numberIndex = openIndex.find((index) => index.key === 'number')
+  const indexValueOf = (key: string): StructuralTypeId | undefined =>
+    stringIndex?.value ?? (numberIndex !== undefined && String(Number(key)) === key ? numberIndex.value : undefined)
   const stringType = context.table.intern({ kind: 'primitive', primitive: 'string' })
   const sourceValue = sourceForValue(context, property.expression)
   const operations: PropertyOperation[] = []
@@ -295,7 +303,8 @@ const spreadCopyOf = (
     // is readable without a second check that could disagree with it.
     if (member.key.kind === 'symbol') continue
     const key = String(member.key.value)
-    const destinationType = installable.get(key)
+    const declaredType = installable.get(key)
+    const destinationType = declaredType ?? indexValueOf(key)
     if (destinationType === undefined) continue
     const read = mintOperationId(context.ordinals, spreadNode, 'property')
     const readOperands: SemanticOperand[] = [
@@ -337,7 +346,9 @@ const spreadCopyOf = (
       // contextual literal type (`{ p: any }` spread into `{ p: void }`), so
       // the conversion role must name the latter or preflight audits the
       // source against itself and silently skips the real store conversion.
-      conversionRoles: [{ role: 'value', ordinal: 0, owner: 'declared-field', type: destinationType }],
+      ...(declaredType !== undefined
+        ? { conversionRoles: [{ role: 'value', ordinal: 0, owner: 'declared-field', type: declaredType }] }
+        : {}),
       results: [mintResult(install, 'value', receiverType)],
       completion: normalCompletion,
       effects: { readsMutableState: false, writesMutableState: true, allocates: false, callsUserCode: false },
