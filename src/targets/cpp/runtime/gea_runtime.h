@@ -25126,9 +25126,10 @@ bool isDocumentLevelEvent(const Node& node, const std::string& name) {
  * is gated on the node's live token instead -- a rebuilt subtree leaves an
  * inert closure behind rather than a second generation of the handler.
  *
- * Everything else is delegated to the BODY and gated by `containsNode`; see
+ * Bubbling events are delegated to the BODY and gated by `containsNode`; see
  * the no-argument `addNodeListener` for why, and `recordNodeSubscription` for
- * how it is released with the node.
+ * how it is released with the node. Scroll stays on its target because it does
+ * not bubble.
  */
 template <typename Node, typename Invoke>
 void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
@@ -25153,6 +25154,10 @@ void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
         if (!*alive) return;
         run(event);
       });
+    return;
+  }
+  if (name == "scroll") {
+    target.addEventListener(name.c_str(), std::move(run));
     return;
   }
   const auto listenerId = gea::embedded::ui::Document::instance().body().addEventListener(
