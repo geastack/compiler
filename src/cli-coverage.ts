@@ -1,10 +1,9 @@
 import { relative, resolve } from 'node:path'
-import { pathToFileURL } from 'node:url'
 import { compile } from './compiler.js'
 import type { CompilationResult } from './compiler.js'
 import type { Diagnostic, DiagnosticLocation } from './diagnostics/model.js'
 import { nodeOfOperation, operationOfResult } from './identity/ids.js'
-import type { CompilerPlugin } from './plugins/model.js'
+import { loadCliPlugins } from './plugins/load.js'
 import { capabilityFamilies, familyOf, isCapabilityKey } from './ir/certify.js'
 import { obligationKinds } from './preflight/obligations.js'
 import type { EvaluatedObligation } from './preflight/run.js'
@@ -55,7 +54,7 @@ import { findProjectFile } from './semantics/program.js'
 interface CoverageArguments {
   readonly entry: string | null
   readonly projectFileName: string | null | 'discover'
-  readonly plugin: string | null
+  readonly plugins: readonly string[]
   readonly pluginOptions: ReadonlyMap<string, string>
   readonly json: boolean
   readonly derived: boolean
@@ -94,12 +93,10 @@ interface CoverageSummary {
   readonly emittedLines: number
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
-
 const parseArguments = (argv: readonly string[]): CoverageArguments => {
   let entry: string | null = null
   let projectFileName: string | null | 'discover' = 'discover'
-  let plugin: string | null = null
+  const plugins: string[] = []
   const pluginOptions = new Map<string, string>()
   let json = false
   let derived = true
@@ -113,7 +110,8 @@ const parseArguments = (argv: readonly string[]): CoverageArguments => {
     } else if (argument === '--no-project') {
       projectFileName = null
     } else if (argument === '--plugin') {
-      plugin = argv[index + 1] ?? null
+      const specifier = argv[index + 1]
+      if (specifier !== undefined) plugins.push(specifier)
       index += 1
     } else if (argument === '--plugin-option') {
       const pair = argv[index + 1] ?? ''
@@ -132,22 +130,7 @@ const parseArguments = (argv: readonly string[]): CoverageArguments => {
       entry = argument
     }
   }
-  return { entry, projectFileName, plugin, pluginOptions, json, derived, boxed, webglPlugin }
-}
-
-/**
- * The plugin module's factory, the same contract `analyze` reads: the default
- * export, or the one exported function, called with no arguments. A host such
- * as node-compat (`plugin/v2.mjs`) exports `geatscNodePluginV2` this way.
- */
-const loadPlugin = async (modulePath: string): Promise<CompilerPlugin | null> => {
-  const loaded: unknown = await import(pathToFileURL(resolve(modulePath)).href)
-  if (!isRecord(loaded)) return null
-  const exported = loaded['default'] ?? Object.values(loaded).find((value) => typeof value === 'function')
-  if (typeof exported !== 'function') return null
-  const plugin: unknown = (exported as () => unknown)()
-  if (!isRecord(plugin) || typeof plugin['instantiate'] !== 'function' || typeof plugin['name'] !== 'string') return null
-  return plugin as unknown as CompilerPlugin
+  return { entry, projectFileName, plugins, pluginOptions, json, derived, boxed, webglPlugin }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,14 +381,21 @@ export const runCoverage = async (argv: readonly string[]): Promise<number> => {
   const parsed = parseArguments(argv)
   if (parsed.entry === null) {
     process.stderr.write(
-      'usage: geatsc coverage <entry> [--project <tsconfig.json>] [--no-project] [--plugin <module>] [--plugin-option k=v]... [--json] [--no-derived] [--no-boxed]\n'
+      'usage: geatsc coverage <entry> [--project <tsconfig.json>] [--no-project] [--plugin <module>]... [--plugin-option k=v]... [--json] [--no-derived] [--no-boxed] [--no-webgl-plugin]\n'
     )
     return 1
   }
   const entry = resolve(parsed.entry)
-  const plugin = parsed.plugin === null ? null : await loadPlugin(parsed.plugin)
-  if (parsed.plugin !== null && plugin === null) {
-    process.stderr.write(`coverage: ${parsed.plugin} does not export a compiler plugin factory\n`)
+  // The loader `compile` uses, so coverage reports a program with the plugin
+  // list its build has: the built-ins, then each `--plugin` in order. With one
+  // plugin of its own that replaced the built-ins, a program that builds with
+  // two -- a facade package, and a policy for the library that drives it --
+  // could not be measured as it builds.
+  let plugins: Awaited<ReturnType<typeof loadCliPlugins>>
+  try {
+    plugins = await loadCliPlugins(parsed.plugins)
+  } catch (error: unknown) {
+    process.stderr.write(`coverage: ${error instanceof Error ? error.message : String(error)}\n`)
     return 1
   }
   const projectFileName =
@@ -415,7 +405,7 @@ export const runCoverage = async (argv: readonly string[]): Promise<number> => {
   const result = compile({
     rootFileNames: [entry],
     projectFileName,
-    ...(plugin ? { plugins: [plugin] } : {}),
+    plugins,
     ...(parsed.webglPlugin ? {} : { webglPlugin: false }),
     pluginOptions: new Map(parsed.pluginOptions)
   })
