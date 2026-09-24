@@ -142,6 +142,8 @@ export interface FrontendInput {
   /** Package checkouts prepared by the project loader; the compiler discovers their implementation entries. */
   readonly packageSources?: readonly PackageSource[]
   readonly declarationModules?: ReadonlySet<string>
+  /** Package file globs whose JavaScript reports no checker diagnostics -- see `unchecked-javascript.ts`. */
+  readonly uncheckedJavaScript?: ReadonlySet<string>
   readonly dynamicFallback?: boolean
   readonly hostMethodBindings?: HostMethodBindingTable
   /** Exact host declarations eligible for checker-derived TypedArray inheritance. */
@@ -875,6 +877,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   const compiled = createProgram({
     ...(input.packageSources ? { packageSources: input.packageSources } : {}),
     ...(input.declarationModules ? { declarationModules: input.declarationModules } : {}),
+    ...(input.uncheckedJavaScript ? { uncheckedJavaScript: input.uncheckedJavaScript } : {}),
     rootFileNames: input.rootFileNames,
     options: input.javaScriptSources
       ? // `maxNodeModuleJsDepth` alongside `allowJs` for the reason `program.ts`'s
