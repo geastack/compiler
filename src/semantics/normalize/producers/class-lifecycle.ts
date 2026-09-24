@@ -1,6 +1,6 @@
 import ts from 'typescript'
 import type { DeclarationId, OperationId } from '../../../identity/ids.js'
-import { operationId, operationOfResult } from '../../../identity/ids.js'
+import { operationId, operationOfResult, regionId } from '../../../identity/ids.js'
 import type { PrimitiveFamily } from '../../model/coverage.js'
 import type { SemanticEdge } from '../../model/edges.js'
 import type {
@@ -1055,7 +1055,10 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
     )
     const edges: SemanticEdge[] = []
     edges.push({ kind: 'evaluation', from: ready, to: operation.id })
-    return { kind: 'operations', operations: [operation], edges }
+    // The same identity `census.ts` minted for the block's region, so the
+    // event names the body its statements were lowered into.
+    const staticBlock = regionId(context.identities.declarationIdOf(node, candidate.specialization), 'static-block')
+    return { kind: 'operations', operations: [{ ...operation, staticBlock }], edges }
   }
 
   /**

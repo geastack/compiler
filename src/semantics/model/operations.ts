@@ -433,6 +433,11 @@ export interface ClassLifecycleOperation extends SemanticOperationBase {
   readonly placement: 'own' | 'prototype' | 'static' | null
   /** True only for a field synthesized onto an ancestor by the subclass-member overlay. */
   readonly syntheticSubclassMemberOverlay?: boolean
+  /**
+   * The `static-block` region a `run-static-block` event runs -- the one
+   * `census.ts` put the block's own statements in. Set on that event only.
+   */
+  readonly staticBlock?: RegionId
   /** A layout demand, not evaluation or allocation of this class's constructor. */
   readonly classLayoutOnly?: boolean
 }
