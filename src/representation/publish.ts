@@ -76,6 +76,8 @@ import { verifyRepresentationPlan } from './verify.js'
 
 export interface RepresentationPublication {
   readonly plan: SealedRepresentationPlan
+  /** Which values may hold a proxy (`semantics/proxy-origins.ts`); empty for a program with no `new Proxy` site. */
+  readonly proxyOrigins: ProxyOrigins
   /** Components that committed, in deterministic order. */
   readonly committed: readonly ComponentId[]
   /** Components that selected nothing because their carriers disagreed. */
@@ -533,7 +535,10 @@ const proxyOriginOf = (
   callableOrigins: ReadonlyMap<SemanticResultId, FunctionId>,
   derived: () => Representation
 ): Representation | null => {
-  if (origins.results.has(result.id)) return proxyOriginCarrier
+  // A value already carried as `dynamic` keeps the reason it has: the box
+  // holds a proxy as well as anything else, and a second reason for the same
+  // slot would only make its views disagree with the convention that binds it.
+  if (origins.results.has(result.id)) return derived().kind === 'dynamic' ? null : proxyOriginCarrier
   const origin = callableOrigins.get(result.id)
   if (origin === undefined) return null
   const callable = withoutFunctionSpecialization(origin)
@@ -748,17 +753,23 @@ export const publishRepresentations = (
   const resultTypes = new Map<SemanticResultId, StructuralTypeId>()
   if (proxySites.size > 0)
     for (const operation of graph.operations.values()) for (const result of operation.results) resultTypes.set(result.id, result.type)
-  const proxyOrigins = proxyOriginsOf(graph, proxySites, (result) => {
+  const carrierKindOf = (result: SemanticResultId): Representation['kind'] | null => {
     const type = resultTypes.get(result)
-    if (type === undefined) return false
-    const carrier = deriver.deriveStored(type)
-    return (
-      carrier.kind === 'function' ||
-      carrier.kind === 'function-family' ||
-      carrier.kind === 'function-value-family' ||
-      carrier.kind === 'function-value-dispatch' ||
-      carrier.kind === 'function-and-constructor'
-    )
+    return type === undefined ? null : deriver.deriveStored(type).kind
+  }
+  const proxyOrigins = proxyOriginsOf(graph, proxySites, {
+    callable: (result) => {
+      const kind = carrierKindOf(result)
+      return (
+        kind === 'function' ||
+        kind === 'function-family' ||
+        kind === 'function-value-family' ||
+        kind === 'function-value-dispatch' ||
+        kind === 'function-and-constructor'
+      )
+    },
+    dynamic: (result) => carrierKindOf(result) === 'dynamic',
+    functionOf: (result) => callableOrigins.get(result)
   })
 
   // Evidence for every published result, including the ones that derive to
@@ -872,5 +883,5 @@ export const publishRepresentations = (
   }
 
   const plan = builder.seal()
-  return { plan, committed, blocked, conflicts, violations: verifyRepresentationPlan(plan), deriver }
+  return { plan, committed, blocked, conflicts, violations: verifyRepresentationPlan(plan), deriver, proxyOrigins }
 }

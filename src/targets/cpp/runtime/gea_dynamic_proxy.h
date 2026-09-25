@@ -915,4 +915,84 @@ inline std::string objectTag(const FunctionValue& value, const char* builtinTag 
   return objectTag(static_cast<const Value&>(value), builtinTag, defaultTag);
 }
 
+/**
+ * A native iterator cursor -- a `function*`'s own generator above all --
+ * crossing into a dynamic value: an ordinary iterator object over the SAME
+ * cursor, with `next`, `return` and an `@@iterator` that answers itself
+ * (ECMA-262 27.5.1, %GeneratorPrototype%). This is what a generator function
+ * boxed as a `gea::Value` returns when the runtime calls it, and TSL's proxies
+ * need exactly that: their `get` trap answers `@@iterator` with a
+ * `function*`, and `gea::runtime::iterator::getIterator` calls it.
+ *
+ * Only the out direction exists. A dynamic iterator object entering a native
+ * cursor would have to become a coroutine it is not, so that refuses by name.
+ */
+namespace detail {
+
+template <typename Cursor>
+struct IteratorObjectState {
+  gea::Ref<Cursor> cursor;
+  friend void geaTraceRefs(const IteratorObjectState& value, RefVisitor& visitor) { traceRefs(value.cursor, visitor); }
+};
+
+template <typename E, typename TReturn, typename TNext>
+Value iteratorObjectOver(Iterator<E, TReturn, TNext> source) {
+  using Cursor = Iterator<E, TReturn, TNext>;
+  using State = IteratorObjectState<Cursor>;
+  State state{gea::makeRef<Cursor>(std::move(source))};
+  CallableObject<Value()> next(
+      +[](void* environment) -> Value {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        Cursor& cursor = *unpackEnvironment<State>(environment, slot)->cursor;
+        if (cursor.done()) return runtime::iterator::result(Value(), true);
+        E value = cursor.arrayNext();
+        if (cursor.done()) {
+          // The completion a finished generator states; `undefined` for a
+          // cursor that has none (every other source, and `TReturn = void`).
+          if constexpr (!std::is_void_v<TReturn>) {
+            if (cursor.isGeneratorFrame()) return runtime::iterator::result(DynamicCarrier<TReturn>::out(cursor.takeCompletionValue()), true);
+          }
+          return runtime::iterator::result(Value(), true);
+        }
+        return runtime::iterator::result(DynamicCarrier<E>::out(value), false);
+      },
+      packEnvironment(state));
+  CallableObject<Value(Value)> close(
+      +[](void* environment, Value completion) -> Value {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        Cursor& cursor = *unpackEnvironment<State>(environment, slot)->cursor;
+        if (cursor.done() || !cursor.isGeneratorFrame()) {
+          cursor.setDone(true);
+          return runtime::iterator::result(completion, true);
+        }
+        typename Cursor::ReturnStorage value{};
+        if constexpr (!std::is_void_v<TReturn>) value = DynamicCarrier<TReturn>::in(completion, 0);
+        E yielded = cursor.resumeReturn(std::move(value));
+        // A `finally` in the frame may yield again; the generator is then
+        // suspended there, not finished.
+        if (!cursor.done()) return runtime::iterator::result(DynamicCarrier<E>::out(yielded), false);
+        if constexpr (!std::is_void_v<TReturn>) return runtime::iterator::result(DynamicCarrier<TReturn>::out(cursor.takeCompletionValue()), true);
+        return runtime::iterator::result(completion, true);
+      },
+      packEnvironment(state));
+  CallableObject<Value(Value)> self(+[](void*, Value receiver) -> Value { return receiver; }, nullptr);
+  Value object = Value::object();
+  object.setProperty(PropertyKey::string("next"), Value::box(Value::Tag::Function, next));
+  object.setProperty(PropertyKey::string("return"), Value::box(Value::Tag::Function, close));
+  object.setProperty(PropertyKey::symbol(wellKnownSymbol(WellKnownSymbol::Iterator)), Value::boxMethod(self));
+  return object;
+}
+
+template <typename E, typename TReturn, typename TNext>
+struct DynamicCarrier<Iterator<E, TReturn, TNext>> {
+  static constexpr bool supported = DynamicCarrier<E>::supported && (std::is_void_v<TReturn> || DynamicCarrier<TReturn>::supported);
+  static Value out(const Iterator<E, TReturn, TNext>& cursor) { return iteratorObjectOver(cursor); }
+  static bool accepts(const Value&) { return false; }
+  static Iterator<E, TReturn, TNext> in(const Value&, std::size_t) {
+    refusePayloadMismatch("a dynamic iterator object entering a native iterator cursor");
+  }
+};
+
+}  // namespace detail
+
 }  // namespace gea

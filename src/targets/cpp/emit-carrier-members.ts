@@ -48,6 +48,7 @@ import {
   cppUndefinedValue
 } from './types.js'
 import { toStringText } from './emit-tostring.js'
+import { propertyKeyText } from './emit-dynamic-properties.js'
 import {
   typedArrayBufferMemberText,
   typedArrayBufferMembers,
@@ -341,6 +342,17 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
       absentCapableElementText(ctx, receiverText, 'elementAt', indexText, receiver.representation.element, result) ??
       reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->elementAt(${indexText})`)
     )
+  }
+  // A key that may be a Symbol -- a proxy trap's `property`, `string | symbol`
+  // -- is a full [[Get]] on the Array object: an index, `length`, an own
+  // property, or what Array.prototype answers. The boxed Array is that object
+  // (`Value::box` shares the allocation), so its own `getProperty` is the
+  // authority, and a read whose result is `dynamic` takes its answer as is.
+  if (
+    (key.representation.kind === 'tagged-union' || key.representation.kind === 'symbol' || key.representation.kind === 'dynamic') &&
+    result?.representation.kind === 'dynamic'
+  ) {
+    return `gea::Value::box(gea::Value::Tag::Object, ${receiverText}).getProperty(${propertyKeyText(ctx, key, 'an Array element access')})`
   }
   if (key.representation.kind !== 'scalar') {
     throw createCppEmitBlockedError(

@@ -492,7 +492,8 @@ prototype-method-value-call.runtime.js.cpp 355c69c2d49e
 prototype-object-class-typed-instance.ts.cpp 69503f24b43e
 prototype-reflection-descriptors.runtime.js.cpp 0a9c19974c02
 prototype-reflection-getter-copy-refused.runtime.js.cpp 7e3ce9c00cde
-proxy-callable-origin.runtime.js.cpp 5691da3c1958
+proxy-callable-origin.runtime.js.cpp e6a4643b8322
+proxy-iterator-traps.runtime.js.cpp 2af3034aecc7
 reactive-inherited-cell-no-list-tick.ts.cpp 7699cb1bf2f5
 receiver-ignored-construct.ts.cpp a68d985fdfa2
 record-index-sidecar.ts.cpp e29ea6fdfee3

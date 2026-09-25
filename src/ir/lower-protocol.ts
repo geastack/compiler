@@ -38,6 +38,18 @@ const steppedByPattern = (ctx: LoweringContext, operation: ProtocolOperation): b
   return false
 }
 
+/** Whether this step's source and its own result are both `dynamic`: the runtime then performs GetMethod and Call itself. */
+const dynamicallyIterated = (ctx: LoweringContext, operation: ProtocolOperation, role: 'value' | 'iterator-record'): boolean => {
+  const target = operandOf(operation, 'target')?.source
+  const result = resultOf(operation, role)
+  return (
+    target?.kind === 'result' &&
+    result !== undefined &&
+    ctx.plan.selected.get(target.result)?.kind === 'dynamic' &&
+    ctx.plan.selected.get(result.id)?.kind === 'dynamic'
+  )
+}
+
 export const lowerProtocol = (ctx: LoweringContext, block: IrBlockId, operation: ProtocolOperation): void => {
   // `CopyDataProperties` (object spread of a source with no statically known
   // own-property set, `producers/protocol.ts`'s `contributeObjectSpread`) is
@@ -81,6 +93,13 @@ export const lowerProtocol = (ctx: LoweringContext, block: IrBlockId, operation:
       // a fully dynamic method lookup off a receiver with no such statically
       // named member stays unbuilt, exactly as it did before this case
       // existed.
+      // A step the plan carries entirely as `dynamic` is the runtime's own
+      // GetIterator, exactly as for a source declared `any` (whose producer
+      // mints no get-method at all): see the get-iterator step below. A
+      // proxy is the case (`semantics/proxy-origins.ts`) -- typed as its
+      // target, it answers `@@iterator` through its `get` trap, whatever the
+      // target declares.
+      if (dynamicallyIterated(ctx, operation, 'value')) return
       const key = operandOf(operation, 'key')
       if (!key) {
         throw new IrLoweringBlockedError(
@@ -104,8 +123,10 @@ export const lowerProtocol = (ctx: LoweringContext, block: IrBlockId, operation:
       // published only for the generic dynamic-protocol path and is absent
       // here. `getIterator` itself already treats a null method as "no
       // dynamic call needed" (see build.ts).
-      const method = resolveOptionalOperand(ctx, block, lineage, operandOf(operation, 'method'))
       const representation = requireResultRepresentation(ctx, operation, 'iterator-record', 'a get-iterator step')
+      const method = dynamicallyIterated(ctx, operation, 'iterator-record')
+        ? null
+        : resolveOptionalOperand(ctx, block, lineage, operandOf(operation, 'method'))
       registerResult(
         ctx,
         operation,
