@@ -530,6 +530,8 @@ export interface ConstructOperation extends IrOperationBase {
    * emission reads the same operands and result carrier it was derived from.
    */
   readonly hostFrame?: CallableAbi
+  /** As on `CallOperation`: the one operand is the whole argument list a spread packed for a `dynamic` callee. */
+  readonly argumentsAreSpread?: boolean
   readonly arguments: readonly IrOperand[]
   readonly result: IrResult
 }

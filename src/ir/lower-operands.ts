@@ -723,7 +723,9 @@ export const packRestArguments = (
   lineage: SemanticResultId,
   operation: OperationId,
   abi: CallableAbi | null,
-  passed: readonly ArgumentSlot[]
+  passed: readonly ArgumentSlot[],
+  /** The callee's carrier, named in a refusal only. */
+  callee?: Representation
 ): readonly IrOperand[] => {
   let args: readonly ArgumentSlot[] = passed
   const firstSpread = args.findIndex((slot) => slot.kind === 'spread')
@@ -732,7 +734,7 @@ export const packRestArguments = (
       throw new IrLoweringBlockedError(
         'a call range-copies a spread argument into a convention that declares no rest slot; a spread contributes a runtime number of ' +
           `values and there is no fixed formal for them to land in (spread at ${firstSpread} of ${args.length}, convention ` +
-          `${abi ? abiKey(abi) : 'none'})`
+          `${abi ? abiKey(abi) : 'none'}${callee ? `, callee carried as ${callee.kind}` : ''})`
       )
     }
     return args.map((slot) => slot.value)

@@ -519,6 +519,7 @@ export const ambientHostBindings = (
     if (ts.isIdentifier(node)) {
       const value = isValueReference(node, input.namespacePaths) ? bindAmbientValue(input, census, node, seedPaths, commonJsIdentity) : null
       if (value) seeds.push(value)
+      if (isValueReference(node, input.namespacePaths)) bindHeldConstructorPrototype(input, census, node)
       // Deliberately NOT an `else`. `isValueReference` is true for plenty of
       // identifiers whose `bindAmbientValue` then answers `null`, so an `else`
       // here never ran at all -- measured: with it, not one of the thirty-nine
@@ -1333,6 +1334,61 @@ export const regexpDeclarationsOf = (
   return found
 }
 
+/**
+ * A host constructor object's `prototype` slot, registered as its own
+ * protocol (`Date.prototype@1`): read as a value it is a namespace-shaped
+ * intrinsic whose own members are the instance methods, never an instance.
+ * Keyed by the slot's declaration, which only an `X.prototype` read is ever
+ * typed by (`structural.ts`'s `prototypeObjectTypeAt`), so constructed
+ * instances stay what the construct signature says they are.
+ */
+const registerPrototypeSlot = (input: HostProtocolInput, census: HostCensus, member: ts.Symbol): void => {
+  const slot = member.valueDeclaration ?? member.declarations?.[0]
+  if (!slot) return
+  const instanceType = input.checker.getTypeOfSymbolAtLocation(member, slot)
+  const instanceName = instanceType.getSymbol()?.name
+  if (instanceName === undefined) return
+  // `X.prototype.constructor` is the one own member the instance
+  // interface does not spell (10.2.4 / every builtin prototype's own
+  // `constructor` data property, writable and configurable); the
+  // backend names its value from the protocol.
+  const constructorMember: HostIntrinsicMember = { name: 'constructor', kind: 'method', arity: null }
+  // Opaque: the host builds a prototype object, never the program, so a body
+  // with no methods (`Error`'s instance interface declares none) is still not
+  // a layout -- read as one, `Error.prototype` and `TypeError.prototype`
+  // derived to one struct.
+  census.protocols.set(input.identities.declarationIdOf(slot), {
+    protocol: `${instanceName}.prototype`,
+    version: 1,
+    native: null,
+    opaque: true,
+    members: [...hostIntrinsicMembersOf(input.checker, instanceType), constructorMember]
+  })
+}
+
+/**
+ * The prototype slot of a host constructor object the program holds as a
+ * VALUE -- `Error` defaulting a parameter, `TypeError` passed as an argument.
+ * Such a value can reach any `.prototype` read (`Object.create(Base.prototype,
+ * ...)`), and a slot left unregistered derived as a record: `Error.prototype`
+ * and `TypeError.prototype` then shared one struct, and which object a read
+ * produced was lost. Only the slot is registered, never the constructor's
+ * other members: what a program constructs through it is the program's
+ * (`bindHostObjectClosure`'s own rule).
+ */
+const bindHeldConstructorPrototype = (input: HostProtocolInput, census: HostCensus, node: ts.Identifier): void => {
+  const type = input.checker.getTypeAtLocation(node)
+  if (type.getConstructSignatures().length === 0) return
+  const symbol = type.getSymbol()
+  if (!symbol || (symbol.flags & ts.SymbolFlags.Interface) === 0) return
+  if (!(symbol.declarations ?? []).every((declaration) => declaration.getSourceFile().isDeclarationFile)) return
+  const slot = input.checker.getPropertyOfType(type, 'prototype')
+  const declaration = slot?.valueDeclaration ?? slot?.declarations?.[0]
+  if (!slot || !declaration?.getSourceFile().isDeclarationFile) return
+  if (census.protocols.has(input.identities.declarationIdOf(declaration))) return
+  registerPrototypeSlot(input, census, slot)
+}
+
 const bindHostObjectClosure = (
   input: HostProtocolInput,
   census: HostCensus,
@@ -1396,23 +1452,7 @@ const bindHostObjectClosure = (
       // (`prototypeObjectTypeAt`) -- so constructed instances stay what the
       // construct signature says they are.
       if (member.getName() === 'prototype') {
-        const slot = member.valueDeclaration ?? member.declarations?.[0]
-        if (!slot) continue
-        const instanceType = input.checker.getTypeOfSymbolAtLocation(member, slot)
-        const instanceName = instanceType.getSymbol()?.name
-        if (instanceName === undefined) continue
-        // `X.prototype.constructor` is the one own member the instance
-        // interface does not spell (10.2.4 / every builtin prototype's own
-        // `constructor` data property, writable and configurable); the
-        // backend names its value from the protocol.
-        const constructorMember: HostIntrinsicMember = { name: 'constructor', kind: 'method', arity: null }
-        census.protocols.set(input.identities.declarationIdOf(slot), {
-          protocol: `${instanceName}.prototype`,
-          version: 1,
-          native: null,
-          opaque: false,
-          members: [...hostIntrinsicMembersOf(input.checker, instanceType), constructorMember]
-        })
+        registerPrototypeSlot(input, census, member)
         continue
       }
       const declaration = member.valueDeclaration ?? member.declarations?.[0]

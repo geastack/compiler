@@ -3202,6 +3202,22 @@ const buildMapper = (
   const prototypeObjectTypeAt = (node: ts.Node): StructuralTypeId | null => {
     if (!ts.isPropertyAccessExpression(node) || node.name.text !== 'prototype') return null
     const receiverType = checker.getTypeAtLocation(node.expression)
+    // A union of host constructors (`Base` holding `Error` or `TypeError`, the
+    // union the parameter census built from `createError`'s callers) reads
+    // each member's own prototype object, so the read is the union of those
+    // objects, each anchored exactly as a lone `X.prototype` read is. One
+    // member that is not such a constructor leaves the read to the checker.
+    const members = parameters.unionArmsAt(node.expression) ?? (receiverType.isUnion() ? receiverType.types : null)
+    if (members !== null) {
+      const anchors = members.map((member) => prototypeAnchorOf(node, member))
+      if (anchors.some((anchor) => anchor === null)) return null
+      const distinct = [...new Set(anchors as StructuralTypeId[])]
+      return distinct.length === 1 ? (distinct[0] ?? null) : table.intern({ kind: 'union', members: distinct })
+    }
+    return prototypeAnchorOf(node, receiverType)
+  }
+
+  const prototypeAnchorOf = (node: ts.PropertyAccessExpression, receiverType: ts.Type): StructuralTypeId | null => {
     if (receiverType.getConstructSignatures().length === 0) return null
     const slot = checker.getPropertyOfType(receiverType, 'prototype')
     const declaration = slot?.valueDeclaration ?? slot?.declarations?.[0]

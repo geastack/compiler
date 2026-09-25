@@ -2235,15 +2235,29 @@ export const withoutUndefinedMember = (checker: ts.TypeChecker, type: ts.Type): 
 }
 
 /** The class a constructor-object type (`typeof C`) belongs to, or `null` for any other type. */
-const classOfConstructorType = (type: ts.Type): ts.Symbol | null =>
-  type.symbol !== undefined && (type.symbol.flags & ts.SymbolFlags.Class) !== 0 && type.getConstructSignatures().length > 0
-    ? type.symbol
+/**
+ * The declaration a constructor object's carrier is nominal in: a class, or a
+ * host constructor -- an interface with a construct signature declared only in
+ * declaration files (lib's `ErrorConstructor`, `TypeErrorConstructor`), which a
+ * host binds as one protocol per interface. Two such types name two different
+ * runtime objects whatever the checker says of their shapes.
+ */
+const nominalConstructorOf = (type: ts.Type): ts.Symbol | null => {
+  const symbol = type.symbol
+  if (symbol === undefined || type.getConstructSignatures().length === 0) return null
+  if ((symbol.flags & ts.SymbolFlags.Class) !== 0) return symbol
+  const declarations = symbol.declarations ?? []
+  return (symbol.flags & ts.SymbolFlags.Interface) !== 0 &&
+    declarations.length > 0 &&
+    declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile)
+    ? symbol
     : null
+}
 
-/** Whether `a` and `b` are the constructor objects of two different classes -- nominally distinct, whatever their shapes. */
+/** Whether `a` and `b` are the constructor objects of two different classes or host constructors -- nominally distinct, whatever their shapes. */
 export const isDistinctClassConstructorPair = (a: ts.Type, b: ts.Type): boolean => {
-  const first = classOfConstructorType(a)
-  const second = classOfConstructorType(b)
+  const first = nominalConstructorOf(a)
+  const second = nominalConstructorOf(b)
   return first !== null && second !== null && first !== second
 }
 
@@ -2256,7 +2270,7 @@ export const nominalConstructorChoiceTypeAt = (
   if (ts.isParenthesizedExpression(node)) return nominalConstructorChoiceTypeAt(checker, node.expression, read)
   if (!ts.isConditionalExpression(node)) return null
   const arms = [read(node.whenTrue), read(node.whenFalse)].flatMap((type) => (type.isUnion() ? type.types : [type]))
-  if (arms.some((arm) => classOfConstructorType(arm) === null)) return null
+  if (arms.some((arm) => nominalConstructorOf(arm) === null)) return null
   return disjointUnionTypeOf(checker, arms)
 }
 

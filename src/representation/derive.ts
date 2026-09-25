@@ -2547,6 +2547,7 @@ export const createRepresentationDeriver = (
         const boundWithoutCarrier =
           bound !== null &&
           !bound.native &&
+          !bound.opaque &&
           shape.body !== null &&
           (isDataOnlyBody(shape.body) || isDataOnlyDictionaryShape(shapeOf(shape.body), shapeOf))
         if (bound && !boundWithoutCarrier) {
