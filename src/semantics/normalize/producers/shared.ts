@@ -1080,8 +1080,30 @@ export const presentIterationArm = (context: ProducerContext, type: StructuralTy
   return only !== undefined && present.length < shape.members.length ? only : null
 }
 
+/**
+ * A source typed `never`: no value can reach the iteration, so the loop, the
+ * spread or the pattern over it never runs. `typeof x !== 'string' &&
+ * !Array.isArray(x)` over `string | T[]` leaves one, and so does three's
+ * `if ( colors && ... ) push( ...colors.updateRanges )` over a `colors` the
+ * checker types `null`: `colors &&` narrows it to `never`, and the member read
+ * off it is `never` too (`structural.ts`'s `absentSubstitutedTypeAt`).
+ *
+ * It takes the native cursor path because that path has something to say for
+ * it: the cursor is never constructed (`emit-iterator.ts` spells its
+ * `get-iterator` as `unreachableValue`, the same stand-in a storage-free value
+ * gets in a slot declaring a real carrier), and it yields the storage-free
+ * `undefined` every `never` value is carried as (`representation/primitives.ts`).
+ * Asking the checker for its `@@iterator` chain instead answers nothing and
+ * refuses a statement that cannot execute.
+ */
+export const isNeverIterationSource = (context: ProducerContext, type: StructuralTypeId): boolean => {
+  const shape = context.table.get(type).shape
+  return shape.kind === 'primitive' && shape.primitive === 'never'
+}
+
 export const hasNativeIterationCursor = (context: ProducerContext, type: StructuralTypeId): boolean => {
   if (
+    isNeverIterationSource(context, type) ||
     isPlainArrayType(context, type) ||
     isNativeIterableSetType(context, type) ||
     isNativeIterableMapType(context, type) ||

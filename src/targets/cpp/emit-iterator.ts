@@ -436,6 +436,15 @@ export const emitGetIterator = (ctx: EmitContext, lines: string[], operation: Ge
     )
   }
   const carried = operation.receiver.representation
+  // A `never` source: the statement cannot execute, so the cursor is the
+  // stand-in for a value that cannot exist (`producers/shared.ts`'s
+  // `isNeverIterationSource`). It arrives storage-free, and only a `never`
+  // source takes the cursor path with that carrier.
+  if (operation.protocol === 'iterator' && (carried.kind === 'undefined' || carried.kind === 'void')) {
+    const name = defineValue(ctx, operation.result)
+    lines.push(`${name} = gea::host::unreachableValue<${cppTypeOf(representation)}>();`)
+    return
+  }
   if (operation.protocol === 'enumerate' && (carried.kind === 'optional' || carried.kind === 'tagged-union')) {
     const plan = nativeEnumerationPlanOf(carried)
     if (plan) {

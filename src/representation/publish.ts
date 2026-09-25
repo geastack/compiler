@@ -256,6 +256,9 @@ const nativeCursorIteratorOf = (
   // COLLAPSES it for the three carriers that hold their own absence, so a
   // `class-ref`, a `native-handle` and the box never arrive wrapped).
   const source = derived.kind === 'optional' ? derived.payload : derived
+  // A `never` source (`producers/shared.ts`'s `isNeverIterationSource`): its
+  // cursor is never built, and what it would yield is the storage-free value.
+  if (source.kind === 'void' && source.bottom === true) return sequenceIterator({ kind: 'undefined' })
   if (source.kind === 'array-object') return sequenceIterator(source.element)
   // A `string`'s own iteration (ECMA-262 22.1.3.36) is the third fixed walk
   // with no `@@iterator` lookup behind it, and the one whose snapshot is

@@ -1308,6 +1308,12 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     'protocol:iterator:get-iterator:optional(keyed-collection)',
     'protocol:iterator:get-iterator:optional(string)',
     'protocol:iterator:get-iterator:optional(iterator)',
+    // A `never` source, carried storage-free (`producers/shared.ts`'s
+    // `isNeverIterationSource`): the loop cannot run, so the cursor is
+    // `unreachableValue` rather than a constructed walk (`emit-iterator.ts`).
+    // Only a `never` source reaches a cursor step with this carrier; an
+    // `undefined`-typed one has no native cursor and mints a `get-method`.
+    'protocol:iterator:get-iterator:undefined',
     'protocol:iterator:next:iterator',
     // The GENERAL protocol: a class instance or a plain object whose
     // `[Symbol.iterator]()` is a real, program-written method (`Headers`'s
