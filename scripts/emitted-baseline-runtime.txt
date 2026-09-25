@@ -56,6 +56,7 @@ class-arrow-field-lazy.ts.cpp 1faacfab4068
 class-cast-through-unknown-is-identity.ts.cpp 2b6430638e1e
 class-defaulted-census-slot.runtime.js.cpp d6231db471a1
 class-dynamic-json-reflection.ts.cpp 1ab6016eb6c8
+class-expando-array-method-name.runtime.js.cpp e26fa4d413ad
 class-expression-written-constructor.runtime.js.cpp 645ec9806bef
 class-extends-const-alias-upcast-in-merge.ts.cpp b6c2eb81f0cc
 class-family-union-from-dynamic.ts.cpp bd2aa64e2543
