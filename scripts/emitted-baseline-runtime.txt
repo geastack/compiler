@@ -240,6 +240,7 @@ implicit-arguments-returned-member.js.cpp 0e657a482a81
 in-boxed-key-over-string-dictionary.ts.cpp 5bced2f5fe7f
 in-boxed-key.ts.cpp 6dc5a87af0a9
 in-unique-symbol-key-sidecar.ts.cpp ef0b91f83f40
+index-of-over-union-elements.runtime.ts.cpp dcd945a69ec6
 indexed-absence-forwarded-cache.runtime.js.cpp 039419251b07
 indexed-record-define-property.ts.cpp d1578cdc4f04
 indexed-record-descriptor-typed.ts.cpp c618c16381ee
@@ -444,7 +445,7 @@ physical-class-ancestry-live.ts.cpp 3191b418595a
 physical-class-ancestry-optional.ts.cpp 1c3a76306a64
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 50f20517ba63
-printer-drift.txt 792935e513be
+printer-drift.txt a3092649b61c
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp d85168f70bf0
 promise-method-read-as-value.ts.cpp d92abcc1e89f
