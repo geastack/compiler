@@ -441,6 +441,10 @@ const buildMapper = (
    * containing `unresolved(...)`. `null` when nothing is in flight.
    */
   let journal: ts.Type[] | null = null
+  // The anchors completed inside the same attempt that no checker type
+  // remembers -- an interface family's shared layout (`familyBodyOf`) is keyed
+  // by the family, not by a type -- so the unwind below can release them too.
+  let anchorJournal: StructuralTypeId[] | null = null
   const selfReferentialKeys = new Map<ts.Type, string>()
 
   const unresolved = (reason: string, fallback?: 'erased-type-expression'): StructuralTypeId =>
@@ -1095,6 +1099,7 @@ const buildMapper = (
     try {
       table.complete(id, familyLayoutOf(family))
       settled = true
+      anchorJournal?.push(id)
     } finally {
       if (!settled) table.abandon(id)
     }
@@ -1458,6 +1463,9 @@ const buildMapper = (
     const attempt: ts.Type[] = journal ?? []
     journal = attempt
     const mark = attempt.length
+    const attemptAnchors: StructuralTypeId[] = anchorJournal ?? []
+    anchorJournal = attemptAnchors
+    const anchorMark = attemptAnchors.length
     try {
       return translate(type)
     } catch (error) {
@@ -1485,10 +1493,20 @@ const buildMapper = (
         if (rememberedId && table.citesAbandoned(rememberedId)) table.releaseKey(rememberedId)
       }
       attempt.length = mark
+      // The same rule for an anchor no type remembers. ajv's `SchemaCxt` family
+      // layout completed inside an attempt, citing an `Options` built on a
+      // since-abandoned sibling, and -- keyed by the family, so never withdrawn
+      // -- was handed back to every later member as a union arm that cites an
+      // abandoned stub.
+      for (const anchor of attemptAnchors.slice(anchorMark)) if (table.citesAbandoned(anchor)) table.releaseKey(anchor)
+      attemptAnchors.length = anchorMark
       selfReferential.add(type)
     } finally {
       walking.delete(type)
-      if (outermost) journal = null
+      if (outermost) {
+        journal = null
+        anchorJournal = null
+      }
     }
     // Retry inside the alias-recurrence frame that owns this walk. Calling
     // `typeOf` here would enter `aliasRecurrence.within` again before the
