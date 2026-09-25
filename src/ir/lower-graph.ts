@@ -19,6 +19,12 @@ import type { SemanticOperation } from '../semantics/model/operations.js'
 
 /** Thrown to abort lowering of exactly one owner. The message states the missing capability, never a source site. */
 export class IrLoweringBlockedError extends Error {
+  /**
+   * The operation whose lowering refused, stamped once by the per-operation
+   * walk in `lower.ts`: the owner alone names a whole body, and one body in
+   * three.js holds dozens of calls, any one of which may be the refusal.
+   */
+  operation: OperationId | null = null
   constructor(reason: string) {
     super(reason)
     this.name = 'IrLoweringBlockedError'

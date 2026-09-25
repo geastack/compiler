@@ -382,8 +382,15 @@ const placedRefusals = (result: CompileResult) => {
     const location = placeOf(result, owner)
     return { stage, owner, key, reason, file: location?.file ?? null, line: location?.line ?? 0, column: location?.column ?? 0 }
   }
+  // A lowering blocker also names the operation that refused; its own place is
+  // the call or read to look at, where the owner's place is the whole body.
+  const lowering = (blocker: CompileResult['loweringBlockers'][number]) => {
+    const row = placed('lowering', blocker.owner, blocker.reason, null)
+    const site = blocker.operation === undefined ? null : placeOf(result, blocker.operation)
+    return site === null ? row : { ...row, operation: blocker.operation, siteLine: site.line, siteColumn: site.column }
+  }
   return [
-    ...result.loweringBlockers.map((blocker) => placed('lowering', blocker.owner, blocker.reason, null)),
+    ...result.loweringBlockers.map(lowering),
     ...result.refusals
       .filter((refusal) => refusal.stage === 'certify')
       .map((refusal) => placed('certify', refusal.owner, refusal.reason, refusal.key)),

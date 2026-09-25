@@ -137,6 +137,8 @@ export interface IrLoweringInput {
 export interface IrLoweringBlocker {
   readonly owner: OwnerId
   readonly reason: string
+  /** The operation whose lowering refused, when the refusal came from one. */
+  readonly operation?: OperationId
 }
 
 export interface IrLoweringResult {
@@ -1397,89 +1399,96 @@ const lowerOwner = (
     }
   })
 
-  for (const operationId of order) {
-    const operation = graph.operations.get(operationId)
-    if (!operation) continue
-    // IteratorClose is owned by its `for`-`of` completion region. Positioning
-    // it in ordinary flow would invoke `.return()` before the loop body.
-    if (operation.family === 'protocol' && operation.step === 'close' && deferredIteratorCloses.has(operation.id)) continue
-    // A resume boundary that publishes nothing places nothing: `await` and
-    // `yield` both fall straight through here (`lowerBoundary`), so resolving a
-    // scope for one only risks `enterScope`'s "still terminated" fallback
-    // manufacturing a stray block, read downstream as a body that falls off its
-    // end -- a bogus `return`.
-    //
-    // An `exception-region` is the opposite and is excluded by name: it does
-    // not sit inside the handler, it OPENS it. It is the only operation a
-    // `catch {}` with an empty body owns, so skipping its scope resolution left
-    // the catch part never entered, `IrTryRegion.catchEntry` null, and the whole
-    // try statement refused at emission -- "no catch clause and no finally
-    // primitive to explain the gap", a message describing an internal
-    // inconsistency for what is an ordinary ES2019 program (`maps`'s network
-    // handler, and `test/fixtures/try-catch-empty.ts`). The ordering hazard that
-    // motivated skipping it is gone: `orderOwnerOperations` now schedules a
-    // catch part's own opener before every non-prologue member of that part
-    // (`lower-graph.ts`), so the scope is entered before anything in the
-    // handler can terminate the block.
-    if (operation.family === 'boundary' && operation.results.length === 0 && operation.boundary !== 'exception-region') {
-      lowerOneOperation(ctx, flow, blockStarts, flow.currentBlock(), operation, plugins)
-      continue
+  let lowering: OperationId | null = null
+  try {
+    for (const operationId of order) {
+      lowering = operationId
+      const operation = graph.operations.get(operationId)
+      if (!operation) continue
+      // IteratorClose is owned by its `for`-`of` completion region. Positioning
+      // it in ordinary flow would invoke `.return()` before the loop body.
+      if (operation.family === 'protocol' && operation.step === 'close' && deferredIteratorCloses.has(operation.id)) continue
+      // A resume boundary that publishes nothing places nothing: `await` and
+      // `yield` both fall straight through here (`lowerBoundary`), so resolving a
+      // scope for one only risks `enterScope`'s "still terminated" fallback
+      // manufacturing a stray block, read downstream as a body that falls off its
+      // end -- a bogus `return`.
+      //
+      // An `exception-region` is the opposite and is excluded by name: it does
+      // not sit inside the handler, it OPENS it. It is the only operation a
+      // `catch {}` with an empty body owns, so skipping its scope resolution left
+      // the catch part never entered, `IrTryRegion.catchEntry` null, and the whole
+      // try statement refused at emission -- "no catch clause and no finally
+      // primitive to explain the gap", a message describing an internal
+      // inconsistency for what is an ordinary ES2019 program (`maps`'s network
+      // handler, and `test/fixtures/try-catch-empty.ts`). The ordering hazard that
+      // motivated skipping it is gone: `orderOwnerOperations` now schedules a
+      // catch part's own opener before every non-prologue member of that part
+      // (`lower-graph.ts`), so the scope is entered before anything in the
+      // handler can terminate the block.
+      if (operation.family === 'boundary' && operation.results.length === 0 && operation.boundary !== 'exception-region') {
+        lowerOneOperation(ctx, flow, blockStarts, flow.currentBlock(), operation, plugins)
+        continue
+      }
+      const scope = membership.requiredScopeOf(operationId)
+      // `branch`, `switch`, `debugger` and the two LOOP markers compute nothing
+      // and place nothing: the transfers they stand for are built by the flow
+      // controller out of scope membership, so `lowerControl` returns on sight.
+      // They still have to be POSITIONED -- unwinding the frames their scope
+      // leaves is what closes the arms of the very construct they mark -- but
+      // they must not be given a block of their own once every path has already
+      // ended, because that block is an orphan `lower.ts` then terminates with a
+      // valueless `return`. See `enterScope`.
+      //
+      // The loop markers belong here for a reason a head-tested loop never
+      // shows: a statement's marker is ordered after everything inside it, so a
+      // loop whose body cannot fall out of the bottom reaches its own marker
+      // with every path already terminated. `while (true)` inside a `try`, with
+      // the only ways out a `return` and a `yield`, is exactly that shape --
+      // mongodb's `AbstractCursor[Symbol.asyncIterator]` and
+      // `test/fixtures/loop-iteration-helper-repro.ts`. The block opened for the
+      // marker there held zero operations and was reached from nothing, and
+      // `builder.seal` rejected the whole body: certified clean, 0 lines of C++.
+      const placesNothing =
+        operation.family === 'control' &&
+        (operation.form === 'branch' ||
+          operation.form === 'switch' ||
+          operation.form === 'debugger' ||
+          operation.form === 'loop' ||
+          operation.form === 'loop-tail')
+      // An optional chain's own value is a merge, and a merge needs both arms
+      // closed. That is true exactly once this operation's own guards have
+      // unwound, because unwinding is what closes them -- asking any earlier finds
+      // the guard still open and blocks. It must also run *before* any guard this
+      // operation's own scope newly opens, because a guard whose boolean test is
+      // itself a short-circuit result -- `options?.mirror ? a() : b()`, whose
+      // ternary guard is the property access's own `short-circuit` result --
+      // resolves that test while `enterScope` is still running, not after it
+      // returns. Passing the settle step in as a callback `enterScope` runs at
+      // exactly that point keeps `lower-flow.ts` ignorant of what a short circuit
+      // is, while still settling at the one moment that is safe.
+      let block = flow.enterScope(scope, () => settleShortCircuits(ctx, flow, ctx.shortCircuits, scope), placesNothing)
+      const finiteCloseAtStart = finiteCloseByStart.get(operationId)
+      if (finiteCloseAtStart) {
+        const close = graph.operations.get(finiteCloseAtStart)
+        const lineage = close ? (resultOf(close, 'completion')?.id ?? null) : null
+        block = flow.splitCurrentBlock(lineage)
+        finiteEntries.set(finiteCloseAtStart, { start: operationId, entry: block })
+      }
+      blockStarts.set(operationId, block)
+      const finiteStart = finiteCloseStarts.get(operationId)
+      if (operation.family === 'destructuring' && operation.form === 'array-pattern-close' && finiteStart) {
+        const entry = finiteEntries.get(operation.id)
+        if (!entry) throw new IrLoweringBlockedError(`finite iterator close ${operation.id} has no opened cleanup entry`)
+        finiteBoundaries.push({ close: operation.id, start: entry.start, entry: entry.entry, exit: block })
+        flow.splitCurrentBlock(resultOf(operation, 'completion')?.id ?? null)
+        continue
+      }
+      lowerOneOperation(ctx, flow, blockStarts, block, operation, plugins)
     }
-    const scope = membership.requiredScopeOf(operationId)
-    // `branch`, `switch`, `debugger` and the two LOOP markers compute nothing
-    // and place nothing: the transfers they stand for are built by the flow
-    // controller out of scope membership, so `lowerControl` returns on sight.
-    // They still have to be POSITIONED -- unwinding the frames their scope
-    // leaves is what closes the arms of the very construct they mark -- but
-    // they must not be given a block of their own once every path has already
-    // ended, because that block is an orphan `lower.ts` then terminates with a
-    // valueless `return`. See `enterScope`.
-    //
-    // The loop markers belong here for a reason a head-tested loop never
-    // shows: a statement's marker is ordered after everything inside it, so a
-    // loop whose body cannot fall out of the bottom reaches its own marker
-    // with every path already terminated. `while (true)` inside a `try`, with
-    // the only ways out a `return` and a `yield`, is exactly that shape --
-    // mongodb's `AbstractCursor[Symbol.asyncIterator]` and
-    // `test/fixtures/loop-iteration-helper-repro.ts`. The block opened for the
-    // marker there held zero operations and was reached from nothing, and
-    // `builder.seal` rejected the whole body: certified clean, 0 lines of C++.
-    const placesNothing =
-      operation.family === 'control' &&
-      (operation.form === 'branch' ||
-        operation.form === 'switch' ||
-        operation.form === 'debugger' ||
-        operation.form === 'loop' ||
-        operation.form === 'loop-tail')
-    // An optional chain's own value is a merge, and a merge needs both arms
-    // closed. That is true exactly once this operation's own guards have
-    // unwound, because unwinding is what closes them -- asking any earlier finds
-    // the guard still open and blocks. It must also run *before* any guard this
-    // operation's own scope newly opens, because a guard whose boolean test is
-    // itself a short-circuit result -- `options?.mirror ? a() : b()`, whose
-    // ternary guard is the property access's own `short-circuit` result --
-    // resolves that test while `enterScope` is still running, not after it
-    // returns. Passing the settle step in as a callback `enterScope` runs at
-    // exactly that point keeps `lower-flow.ts` ignorant of what a short circuit
-    // is, while still settling at the one moment that is safe.
-    let block = flow.enterScope(scope, () => settleShortCircuits(ctx, flow, ctx.shortCircuits, scope), placesNothing)
-    const finiteCloseAtStart = finiteCloseByStart.get(operationId)
-    if (finiteCloseAtStart) {
-      const close = graph.operations.get(finiteCloseAtStart)
-      const lineage = close ? (resultOf(close, 'completion')?.id ?? null) : null
-      block = flow.splitCurrentBlock(lineage)
-      finiteEntries.set(finiteCloseAtStart, { start: operationId, entry: block })
-    }
-    blockStarts.set(operationId, block)
-    const finiteStart = finiteCloseStarts.get(operationId)
-    if (operation.family === 'destructuring' && operation.form === 'array-pattern-close' && finiteStart) {
-      const entry = finiteEntries.get(operation.id)
-      if (!entry) throw new IrLoweringBlockedError(`finite iterator close ${operation.id} has no opened cleanup entry`)
-      finiteBoundaries.push({ close: operation.id, start: entry.start, entry: entry.entry, exit: block })
-      flow.splitCurrentBlock(resultOf(operation, 'completion')?.id ?? null)
-      continue
-    }
-    lowerOneOperation(ctx, flow, blockStarts, block, operation, plugins)
+  } catch (error) {
+    if (error instanceof IrLoweringBlockedError && error.operation === null) error.operation = lowering
+    throw error
   }
 
   // Anything still pending is a chain whose value no operation outside its
@@ -1714,7 +1723,9 @@ export const lowerToIr = (input: IrLoweringInput): IrLoweringResult => {
       bodies.set(body.owner, facts === undefined ? body : { ...body, ...facts })
     } catch (error) {
       if (!(error instanceof IrLoweringBlockedError)) throw error
-      blocked.push({ owner, reason: error.message })
+      blocked.push(
+        error.operation === null ? { owner, reason: error.message } : { owner, reason: error.message, operation: error.operation }
+      )
     }
   }
 
