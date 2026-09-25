@@ -397,6 +397,16 @@ const emitDynamicGetIterator = (ctx: EmitContext, lines: string[], operation: Ge
   // ordinary overridden method call does (`emit-callable.ts`): the value
   // `classMemberText` built names the base's body, and only the object's own
   // virtual member selects the override.
+  // A record an array binding pattern steps keeps its exhaustion state from
+  // here on, in the same per-iterator table a dynamic record uses: the
+  // pattern's positions read it (`emitRecordPatternNext`) and its close tests
+  // it (`iteratorCloseWhileOpenStatements`).
+  if (operation.tracksExhaustion === true && representation.kind !== 'iterator') {
+    const doneState = `v${ctx.nextValueOrdinal++}`
+    ctx.declarations.push({ name: doneState, type: 'bool' })
+    ctx.dynamicIteratorDoneStates.set(operation.result.id, doneState)
+    lines.push(`${doneState} = false;`)
+  }
   const dispatched = ctx.virtualCallees.get(method.value)
   if (dispatched !== undefined) {
     ctx.virtualCalleesUsed.add(method.value)
@@ -1036,6 +1046,11 @@ const emitDynamicIteratorNext = (
       'carries a "value" argument; the general iterator protocol\'s next() call never consumes one (only a generator\'s .next(v) does, which is never carried as a "record")'
     )
   }
+  const doneState = ctx.dynamicIteratorDoneStates.get(operation.iterator.value)
+  if (doneState !== undefined) {
+    emitRecordPatternNext(ctx, lines, operation, iteratorRecord, doneState)
+    return
+  }
   const planned = recordIteratorStepOf(ctx, operation.iterator, iteratorRecord)
   if (planned.kind === 'union') {
     emitUnionResultIteratorNext(
@@ -1419,7 +1434,10 @@ const iteratorCloseWhileOpenStatements = (
         })()
       : representation.kind === 'iterator'
         ? `!${operandText(ctx, iterator)}.done()`
-        : null
+        : (representation.kind === 'record' || representation.kind === 'native-record-ref') &&
+            ctx.dynamicIteratorDoneStates.has(iterator.value)
+          ? `!${ctx.dynamicIteratorDoneStates.get(iterator.value)}`
+          : null
   if (condition === null) {
     throw createCppEmitBlockedError(
       `runtime-helper:protocol:iterator:close:${representation.kind}`,

@@ -208,6 +208,20 @@ const isSnapshotSource = (kind: string): boolean => kind === 'string' || kind ==
  * widened guard and `lowerArrayPatternIteratorRead`/`lowerArrayPatternIteratorElision`
  * below for the per-position reads this one cursor answers.
  */
+/**
+ * Whether a pattern's iterator is an iterator OBJECT the program wrote -- a
+ * record the protocol's own get-iterator step produced by calling the source's
+ * `[Symbol.iterator]()` -- rather than a closed tuple, which is a record too
+ * but is read by position and has no `next()`. Told apart by the operation
+ * that produced the value, never by its layout.
+ */
+const isRecordIterator = (ctx: LoweringContext, operand: SemanticOperand, representation: Representation): boolean => {
+  if (representation.kind !== 'record' && representation.kind !== 'native-record-ref') return false
+  if (operand.source.kind !== 'result') return false
+  const producer = ctx.graph.operations.get(operationOfResult(operand.source.result))
+  return producer?.family === 'protocol' && producer.step === 'get-iterator'
+}
+
 const isCursorCarrier = (kind: string): boolean => kind === 'iterator'
 
 /**
@@ -513,6 +527,12 @@ const lowerArrayPatternRest = (ctx: LoweringContext, block: IrBlockId, operation
     registerResult(ctx, operation, ctx.builder.allocateArrayObject(block, lineage, [{ kind: 'gather', iterator: source }], representation))
     return
   }
+  // An iterator object the program wrote: its rest gathers what the bound
+  // positions left through the same `next()` (`recordIteratorGatherLines`).
+  if (isRecordIterator(ctx, iteratorOperand, source.representation) && representation.kind === 'array-object') {
+    registerResult(ctx, operation, ctx.builder.allocateArrayObject(block, lineage, [{ kind: 'gather', iterator: source }], representation))
+    return
+  }
   // A generator cursor -- a `Generator<T>` source, or a class whose
   // `[Symbol.iterator]()` is a generator method -- is the pattern's one shared
   // iterator: the bound positions before the rest already advanced it, so the
@@ -699,6 +719,8 @@ const lowerArrayPatternStep = (ctx: LoweringContext, block: IrBlockId, operation
     // it would make `[ , value ] = dynamic` read the first item for `value`.
     if (cursor.representation.kind === 'dynamic')
       ctx.builder.iteratorNext(block, lineage, cursor, null, { kind: 'dynamic', reason: 'declared-any-never-narrowed' })
+    // An iterator object the program wrote steps the same way, binding nothing.
+    if (isRecordIterator(ctx, elided, cursor.representation)) ctx.builder.iteratorNext(block, lineage, cursor, null, { kind: 'undefined' })
     return
   }
   const iteratorOperand = operandOf(operation, 'iterator')
@@ -711,6 +733,14 @@ const lowerArrayPatternStep = (ctx: LoweringContext, block: IrBlockId, operation
     }
     if (iterator.representation.kind === 'dynamic') {
       lowerArrayPatternRead(ctx, block, operation)
+      return
+    }
+    // An iterator object the program wrote (`[Symbol.iterator]()` returning a
+    // record with its own `next()`): one `next()` per position, `undefined`
+    // past the end (`emit-iterator.ts`'s `emitRecordPatternNext`).
+    if (isRecordIterator(ctx, iteratorOperand, iterator.representation)) {
+      const representation = requireResultRepresentation(ctx, operation, 'value', 'an array-pattern element')
+      registerResult(ctx, operation, ctx.builder.iteratorNext(block, lineage, iterator, null, representation))
       return
     }
   }
@@ -857,9 +887,13 @@ export const lowerDestructuring = (
   if (operation.form === 'array-pattern-close') {
     const lineage = requireLineage(operation)
     const iterator = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'iterator'))
-    if (iterator.representation.kind !== 'dynamic' && iterator.representation.kind !== 'iterator') {
+    if (
+      iterator.representation.kind !== 'dynamic' &&
+      iterator.representation.kind !== 'iterator' &&
+      !isRecordIterator(ctx, namedOperand(operation, 'iterator'), iterator.representation)
+    ) {
       throw new IrLoweringBlockedError(
-        `a finite array-pattern close expected a dynamic or generator iterator, but resolved a "${iterator.representation.kind}" carrier`
+        `a finite array-pattern close expected a dynamic, generator or iterator-object iterator, but resolved a "${iterator.representation.kind}" carrier`
       )
     }
     const completion = operation.results.find((result) => result.role === 'completion')

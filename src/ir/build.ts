@@ -407,7 +407,8 @@ export interface IrBodyBuilder {
     protocol: GetIteratorOperation['protocol'],
     receiver: IrOperand,
     method: IrOperand | null,
-    representation: Representation
+    representation: Representation,
+    tracksExhaustion?: boolean
   ) => IrValueId
   readonly iteratorNext: (
     block: IrBlockId,
@@ -967,9 +968,25 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
-  const getIterator: IrBodyBuilder['getIterator'] = (block, lineage, protocol, receiver, method, representation) => {
+  const getIterator: IrBodyBuilder['getIterator'] = (
+    block,
+    lineage,
+    protocol,
+    receiver,
+    method,
+    representation,
+    tracksExhaustion = false
+  ) => {
     const result = mintResult(representation)
-    append(block, { kind: 'get-iterator', lineage, protocol, receiver, method, result })
+    append(block, {
+      kind: 'get-iterator',
+      lineage,
+      protocol,
+      receiver,
+      method,
+      result,
+      ...(tracksExhaustion ? { tracksExhaustion: true as const } : {})
+    })
     return result.id
   }
 

@@ -1204,6 +1204,12 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // needed (`lower-destructuring.ts`'s `lowerArrayPatternRest`).
     'destructuring:array-pattern:iterator',
     'destructuring:rest-element:iterator',
+    // The same rest over an iterator OBJECT the program wrote: gathered through
+    // its own `next()` from where the bound positions left it
+    // (`emit-iterator.ts`'s `recordIteratorGatherLines`), keyed apart from a
+    // tuple's positional record, which has no `next()` and stays unclaimed.
+    'destructuring:rest-element:record(gather)',
+    'destructuring:rest-element:native-record-ref(gather)',
     'destructuring:rest-element:array-object',
     // `const { strict, ...rest } = options` over a `record`/`native-record-ref`
     // source: the "object-pattern" segment in the obligation key
