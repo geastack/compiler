@@ -413,6 +413,10 @@ const fieldDeletionKeysOf = (bodies: readonly IrBody[]): ReadonlySet<string> | n
  * receiver is anything but a dictionary (the one carrier with no fixed
  * fields) counts, so does `Reflect.deleteProperty`, and a receiver the
  * program only knows dynamically counts because it could be any struct.
+ *
+ * So does a read of `C.prototype` as a native object: that object has C's
+ * layout with every field absent (`nativeClassPrototype`), and a presence bit
+ * shared by every instance would make each instance's fields absent too.
  */
 export const fixedFieldDeletionsOf = (bodies: readonly IrBody[]): boolean => {
   for (const body of bodies) {
