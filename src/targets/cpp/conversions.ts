@@ -23,6 +23,7 @@ import {
   dynamicTagFor,
   promisePayloadConvertible,
   rebasesRestOverLeadingParameters,
+  gathersLeadingIntoRest,
   dictionaryCastableToDictionary,
   recordCastableToDictionary,
   recordRecastCrossesDynamic,
@@ -1249,6 +1250,20 @@ const cppConversionTables = (
         materializer: {
           id: 'gea::CallableObject::rest-rebase-ctor',
           domain: `callable-rest-rebase:${sourceKey}->${targetKey}`,
+          allocates: true
+        }
+      }
+    }
+    // Its mirror, `gea_runtime.h`'s gathering constructor under the same
+    // `LeadingGatherAdmits` trait.
+    if (gathersLeadingIntoRest(source, target)) {
+      const sourceKey = representationKey(source)
+      const targetKey = representationKey(target)
+      return {
+        classifier: { id: 'gea::CallableObject::leading-gather-ctor', domain: `callable-leading-gather:${sourceKey}->${targetKey}` },
+        materializer: {
+          id: 'gea::CallableObject::leading-gather-ctor',
+          domain: `callable-leading-gather:${sourceKey}->${targetKey}`,
           allocates: true
         }
       }

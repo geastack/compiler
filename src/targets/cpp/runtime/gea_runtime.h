@@ -3123,6 +3123,19 @@ template <typename Element, typename... SourceArguments>
 struct RestRebasable : std::false_type {};
 
 /**
+ * Whether a carrier holds `undefined` itself, so a position the call never
+ * reached can be spelled in it without an `Optional` around it: the box.
+ * Specialized for `Value` once it is declared.
+ */
+template <typename T>
+struct HoldsItsOwnAbsence : std::false_type {};
+
+namespace detail {
+template <typename T>
+struct DynamicCallableCarrier;
+}
+
+/**
  * The rest slot itself, and the end of the walk. More specialized than the
  * recursive case below for the same argument list, so a source whose LAST
  * parameter is the array terminates here rather than demanding an
@@ -3133,7 +3146,44 @@ struct RestRebasable<Element, Ref<ArrayObject<Element>>> : std::true_type {};
 
 template <typename Element, typename First, typename... Rest>
 struct RestRebasable<Element, First, Rest...>
-    : std::bool_constant<std::is_same_v<First, Optional<Element>> && RestRebasable<Element, Rest...>::value> {};
+    : std::bool_constant<(std::is_same_v<First, Optional<Element>> || (std::is_same_v<First, Element> && HoldsItsOwnAbsence<Element>::value)) &&
+                         RestRebasable<Element, Rest...>::value> {};
+
+/**
+ * The opposite rebase: a source taking ONE rest array stored where the slot
+ * names leading parameters before its own rest (`(...args) => void` held as
+ * `(msg: string, ...rest) => void`). Every leading slot parameter must enter
+ * the source's element: the element itself, an `Optional` of it (absent ends
+ * the run, as a call that stopped short does), or anything a box can hold
+ * when the element IS the box.
+ */
+template <typename Element, typename Leading>
+struct GatherableLeading
+    : std::bool_constant<std::is_same_v<Leading, Element> || std::is_same_v<Leading, Optional<Element>> || HoldsItsOwnAbsence<Element>::value> {};
+
+template <typename SlotList, typename SourceList>
+struct LeadingGatherAdmits : std::false_type {};
+
+template <typename... SlotArguments, typename Element>
+struct LeadingGatherAdmits<std::tuple<SlotArguments...>, std::tuple<Ref<ArrayObject<Element>>>> {
+ private:
+  static constexpr std::size_t count = sizeof...(SlotArguments);
+  template <std::size_t... Indices>
+  static constexpr bool leadingAll(std::index_sequence<Indices...>) {
+    return (GatherableLeading<Element, std::tuple_element_t<Indices, std::tuple<SlotArguments...>>>::value && ...);
+  }
+
+ public:
+  static constexpr bool value = [] {
+    if constexpr (count < 2) {
+      return false;
+    } else {
+      return std::is_same_v<std::tuple_element_t<count - 1, std::tuple<SlotArguments...>>, Ref<ArrayObject<Element>>> &&
+             leadingAll(std::make_index_sequence<count - 1>{});
+    }
+  }();
+  using element = Element;
+};
 
 /**
  * The whole admissibility question, asked of two parameter lists at once.
@@ -3598,7 +3648,18 @@ struct CallableObject<Result(Arguments...)> {
     const std::size_t length = all.get() == nullptr ? 0 : all->size();
     auto tail = makeRef<ArrayObject<Element>>();
     for (std::size_t index = leading; index < length; index++) tail->push(all->at(index));
-    return callWithSpreadRest<Source, Element>(static_cast<Source*>(environment_), std::make_index_sequence<leading>{}, all, length, tail);
+    return callWithSpreadRest<Source, Element, std::tuple<SourceArguments...>>(
+        static_cast<Source*>(environment_), std::make_index_sequence<leading>{}, all, length, tail);
+  }
+
+  /** One leading position read out of the array: absent past its end, in the leading parameter's own carrier. */
+  template <typename Leading, typename Element, typename Array>
+  static Leading leadingAt(const Array& all, std::size_t index, std::size_t length) {
+    if constexpr (std::is_same_v<Leading, Optional<Element>>) {
+      return index < length ? Optional<Element>(all->at(index)) : Optional<Element>();
+    } else {
+      return index < length ? Leading(all->at(index)) : Leading();
+    }
   }
 
   /**
@@ -3607,10 +3668,48 @@ struct CallableObject<Result(Arguments...)> {
    * pack is what turns "the first `leading` positions" into an argument list
    * at all.
    */
-  template <typename Source, typename Element, std::size_t... Indices, typename Array>
+  template <typename Source, typename Element, typename SourceList, std::size_t... Indices, typename Array>
   static Result callWithSpreadRest(Source* source, std::index_sequence<Indices...>, const Array& all, std::size_t length,
                                    Ref<ArrayObject<Element>> tail) {
-    return source->call((Indices < length ? Optional<Element>(all->at(Indices)) : Optional<Element>())..., tail);
+    return source->call(leadingAt<std::tuple_element_t<Indices, SourceList>, Element>(all, Indices, length)..., tail);
+  }
+
+  /**
+   * The gathering constructor (`LeadingGatherAdmits`): the thunk takes the
+   * slot's leading parameters and its rest array, and calls the source with
+   * ONE array holding the leading values, in order, followed by the rest.
+   */
+  template <
+      typename SourceResult, typename Element,
+      typename = std::enable_if_t<std::is_same_v<SourceResult, Result> &&
+                                  LeadingGatherAdmits<std::tuple<Arguments...>, std::tuple<Ref<ArrayObject<Element>>>>::value>,
+      typename = void, typename = void>
+  CallableObject(const CallableObject<SourceResult(Ref<ArrayObject<Element>>)>& source)
+      : CallableObject(&gatherLeadingIntoRest<SourceResult, Element>, packEnvironment(source)) {
+    shareFunctionObject(source);
+    registerSourceAdapter<&gatherLeadingIntoRest<SourceResult, Element>, CallableObject<SourceResult(Ref<ArrayObject<Element>>)>>();
+  }
+
+  template <typename SourceResult, typename Element>
+  static Result gatherLeadingIntoRest(void* environment_, Arguments... arguments) {
+    using Source = CallableObject<SourceResult(Ref<ArrayObject<Element>>)>;
+    auto gathered = makeRef<ArrayObject<Element>>();
+    bool open = true;
+    const auto take = [&](auto&& argument) {
+      using Argument = std::decay_t<decltype(argument)>;
+      if constexpr (std::is_same_v<Argument, Ref<ArrayObject<Element>>>) {
+        if (argument.get() != nullptr) for (std::size_t index = 0; index < argument->size(); index++) gathered->push(argument->at(index));
+      } else if constexpr (std::is_same_v<Argument, Optional<Element>>) {
+        if (!argument.has_value()) open = false;
+        else if (open) gathered->push(*argument);
+      } else if constexpr (std::is_same_v<Argument, Element>) {
+        if (open) gathered->push(argument);
+      } else {
+        if (open) gathered->push(detail::DynamicCallableCarrier<Argument>::out(argument));
+      }
+    };
+    (take(arguments), ...);
+    return static_cast<Source*>(environment_)->call(gathered);
   }
 
   template <typename Source, std::size_t... Indices, typename... All>
@@ -4954,6 +5053,8 @@ inline const gea::Ref<ArrayObject<Element>>& emptyArraySentinel() {
 }
 
 class Value;
+template <>
+struct HoldsItsOwnAbsence<Value> : std::true_type {};
 
 template <typename Element, typename Source>
 inline gea::Ref<ArrayObject<Element>> emptyArraySentinel(const gea::Ref<ArrayObject<Source>>& source) {

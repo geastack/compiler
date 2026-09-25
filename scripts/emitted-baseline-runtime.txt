@@ -45,6 +45,7 @@ callable-intersection.ts.cpp cc66a28ab4f9
 callable-literal-union-slot-result.ts.cpp abb8a8868c52
 callable-omitted-trailing-optional-parameter.ts.cpp 44bff1970b40
 callable-own-mutation-guards.runtime.js.cpp 11e6c00455f4
+callable-rest-rebases-both-ways.runtime.js.cpp 14f7d669a38e
 callable-result-conversion.ts.cpp 94868e63593b
 callback-call-with-this-arg.ts.cpp 8760329cda2f
 captured-cell-branch-assignment.ts.cpp 2d307e995d74
@@ -440,7 +441,7 @@ physical-class-ancestry-live.ts.cpp 728e6f672df0
 physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 50f20517ba63
-printer-drift.txt 370cbbe20c3b
+printer-drift.txt b47bbdb9d464
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
 promise-method-read-as-value.ts.cpp d92abcc1e89f
