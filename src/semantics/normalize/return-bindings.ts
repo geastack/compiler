@@ -26,7 +26,8 @@ import {
   objectAssignedValueTypeOf,
   returnsOnlyAssignedObjects,
   unwrapExplicitThisCall,
-  widestOf
+  widestOf,
+  constructedClassChoiceCheckerTypeAt
 } from './derived-expression-type.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'

@@ -20,7 +20,8 @@ import {
   synthesizedUnionArmsAt,
   unwrapExplicitThisCall,
   withoutUndefinedMember,
-  widestOf
+  widestOf,
+  constructedClassChoiceCheckerTypeAt
 } from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
@@ -677,7 +678,9 @@ export const censusLocalBindings = (
    */
   const known = (node: ts.Node): ts.Type | null => {
     const exported = moduleRecords.exportExpressionAt(node) ?? moduleRecords.requiredExportExpressionAt(node)
-    const type = exported ? checker.getTypeAtLocation(exported) : (objectAssignTargetType(checker, node) ?? checker.getTypeAtLocation(node))
+    const type = exported
+      ? checker.getTypeAtLocation(exported)
+      : (objectAssignTargetType(checker, node) ?? constructedClassChoiceCheckerTypeAt(checker, node) ?? checker.getTypeAtLocation(node))
     return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) ? null : type
   }
 

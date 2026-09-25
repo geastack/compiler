@@ -1521,6 +1521,10 @@ export const overloadInvariantReturnTypeAt = (
     callee = read(expression)
   }
   if (!callee) return null
+  if (ts.isNewExpression(call)) {
+    const chosen = constructedClassChoiceOf(checker, callee)
+    if (chosen) return chosen
+  }
   const signatures = ts.isNewExpression(call) ? callee.getConstructSignatures() : callee.getCallSignatures()
   if (signatures.length < 2 || signatures.some((signature) => signature.typeParameters?.length)) return null
   const returned = signatures[0]?.getReturnType()
@@ -2627,6 +2631,13 @@ export const widestOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts
     // as "the" type made the other's default convert into it --
     // `[cls = class {}, xCls = class X {}]` read `xCls.name` as `"cls"`.
     if (isDistinctClassConstructorPair(other, candidate)) return false
+    // The same holds for their INSTANCES: a class-instance carrier names one
+    // class, so a candidate that names classes carries only those classes and
+    // their subclasses. three's `new ( wide ? Uint32BufferAttribute :
+    // Uint16BufferAttribute )( indices, 1 )` builds one of two sibling classes
+    // with one layout, and a join that answered `Uint32BufferAttribute` for
+    // it gave a `Uint16BufferAttribute` the other class's identity.
+    if (!nominallyCarries(checker, other, candidate)) return false
     if (!checker.isTypeAssignableTo(other, candidate)) return false
     // Assignability is not carriage, the same reason the nominal veto above
     // exists. A union with a VACUOUS member alongside real ones -- hono's
@@ -3269,6 +3280,9 @@ export const disjointArmsOf = (checker: ts.TypeChecker, types: readonly ts.Type[
       // Two different classes' constructor objects are disjoint by identity,
       // whatever the checker says of their shapes -- `widestOf`'s rule.
       if (isDistinctClassConstructorPair(type, existing)) continue
+      // ...and so are instances of two source classes neither of which
+      // extends the other, however alike their layouts.
+      if (isDistinctSourceClassInstancePair(checker, type, existing)) continue
       const forward = checker.isTypeAssignableTo(type, existing)
       const backward = checker.isTypeAssignableTo(existing, type)
       if (forward && backward) {
@@ -3281,7 +3295,7 @@ export const disjointArmsOf = (checker: ts.TypeChecker, types: readonly ts.Type[
   }
   for (const type of absorbed) {
     for (const arm of arms) {
-      if (inheritsClassInstance(checker, type, arm)) continue
+      if (inheritsClassInstance(checker, type, arm) || isDistinctSourceClassInstancePair(checker, type, arm)) continue
       if (checker.isTypeAssignableTo(type, arm) || checker.isTypeAssignableTo(arm, type)) return null
     }
   }
@@ -3305,6 +3319,41 @@ const inheritsClassInstance = (checker: ts.TypeChecker, derived: ts.Type, base: 
     return checker.getBaseTypes(target).some((next) => next === base || (!isGenericClassInstance(next) && visit(next)))
   }
   return visit(derived)
+}
+
+/** The class declaration a source class instance type is an instance of, generic or not. */
+const classTargetOf = (type: ts.Type): ts.Type =>
+  ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) !== 0 ? (type as ts.TypeReference).target : type
+
+/**
+ * Whether `a` and `b` are instances of two different source classes, neither
+ * of which extends the other: nominally disjoint, whatever their shapes.
+ */
+const isDistinctSourceClassInstancePair = (checker: ts.TypeChecker, a: ts.Type, b: ts.Type): boolean =>
+  sourceClassOfInstance(a) !== null &&
+  sourceClassOfInstance(b) !== null &&
+  classTargetOf(a) !== classTargetOf(b) &&
+  !inheritsClassInstance(checker, a, b) &&
+  !inheritsClassInstance(checker, b, a)
+
+/**
+ * Whether every source-class instance `held` may be is one `carrier` names,
+ * or a subclass of one. A carrier that names no source class leaves the
+ * question to assignability, as does a `held` that is no class instance.
+ */
+const nominallyCarries = (checker: ts.TypeChecker, held: ts.Type, carrier: ts.Type): boolean => {
+  const classesOf = (type: ts.Type): readonly ts.Type[] =>
+    (type.isUnion() ? type.types : [type]).filter((member) => sourceClassOfInstance(member) !== null)
+  const carried = classesOf(carrier)
+  if (carried.length === 0) return true
+  return classesOf(held).every((instance) =>
+    carried.some(
+      (named) =>
+        instance === named ||
+        (classTargetOf(instance) === classTargetOf(named) && !isGenericClassInstance(instance)) ||
+        inheritsClassInstance(checker, instance, named)
+    )
+  )
 }
 
 /** A class instance type is a reference even without type parameters (its `this` type); only declared ones make it generic. */
