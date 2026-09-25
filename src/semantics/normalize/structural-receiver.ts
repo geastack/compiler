@@ -247,6 +247,27 @@ export const createReceiverResolver = (
   }
 
   /**
+   * The object a function expression is installed on as a property --
+   * `ipaddr.IPv4.isIPv4 = function (string) { return this.parser(string) }` --
+   * which is the `this` a call through that property binds (`ipaddr.IPv4.isIPv4(s)`),
+   * and which the checker states as the host's type at the keyword. `null`
+   * for any other shape: an assignment through `this` or onto a `.prototype`
+   * has its own rule above, and a function reading no `this` needs no frame.
+   */
+  const propertyHostReceiverOf = (declaration: ts.FunctionExpression | ts.FunctionDeclaration): ts.Type | null => {
+    const assignment = declaration.parent
+    if (!ts.isBinaryExpression(assignment) || assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return null
+    if (assignment.right !== declaration || !declaration.body) return null
+    const target = assignment.left
+    if (!ts.isPropertyAccessExpression(target) && !ts.isElementAccessExpression(target)) return null
+    if (target.expression.kind === ts.SyntaxKind.ThisKeyword) return null
+    const keyword = firstOwnThisKeyword(declaration.body)
+    if (keyword === null) return null
+    const receiver = checker.getTypeAtLocation(keyword)
+    return (receiver.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 ? null : receiver
+  }
+
+  /**
    * The receiver an ordinary JavaScript function is entered with, for the one
    * shape where the language supplies one the type system never spells: the
    * pre-`class` constructor function three.js's renderer is built out of.
@@ -318,11 +339,22 @@ export const createReceiverResolver = (
       const constructed = construct[0]
       return constructed ? constructed.getReturnType() : null
     }
+    // The checker gives a JavaScript function a construct signature for any
+    // `this.x =` in its body -- a heuristic about the spelling -- and it keeps
+    // that signature even where the program states the receiver with
+    // `@this`. A stated receiver is the call convention's receiver: the
+    // program wrote it, and `program.ts`'s unconstructed-`this` preparation
+    // writes `@this {any}` on exactly the functions the program never
+    // constructs, whose `this` is whatever their callers pass.
+    if (ts.getJSDocThisTag(declaration) !== undefined) {
+      const keyword = firstOwnThisKeyword(declaration.body)
+      return keyword === null ? null : checker.getTypeAtLocation(keyword)
+    }
     const type = checker.getTypeAtLocation(declaration)
     const construct = type.getConstructSignatures()
     const constructed = type.getCallSignatures().length === 0 || construct.length !== 1 ? undefined : construct[0]
     if (constructed) return constructed.getReturnType()
-    return implicitAnyReceiverOf(declaration)
+    return propertyHostReceiverOf(declaration) ?? implicitAnyReceiverOf(declaration)
   }
 
   /**

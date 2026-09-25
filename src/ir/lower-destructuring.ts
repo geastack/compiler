@@ -537,8 +537,14 @@ const lowerObjectPatternRest = (ctx: LoweringContext, block: IrBlockId, operatio
   // keys from the new table. Dictionary entries are data properties, so this
   // produces the same key order and values as skipping those keys during the
   // copy, while keeping the source untouched.
-  if (source.representation.kind === 'dictionary' && representation.kind === 'dictionary') {
-    const value = ctx.builder.allocateRecord(block, lineage, [], representation)
+  // A dynamic source whose rest binding is itself dynamic is the same walk
+  // over the dynamic object substrate: a fresh ordinary object, the one
+  // `CopyDataProperties` object spread performs, then the excluded keys.
+  const dynamicRest = source.representation.kind === 'dynamic' && representation.kind === 'dynamic'
+  if ((source.representation.kind === 'dictionary' && representation.kind === 'dictionary') || dynamicRest) {
+    const value = dynamicRest
+      ? ctx.builder.allocateOrdinaryObject(block, lineage, representation)
+      : ctx.builder.allocateRecord(block, lineage, [], representation)
     const target: IrOperand = { value, representation }
     ctx.builder.spreadCopy(block, lineage, target, source)
     const excluded = operation.operands

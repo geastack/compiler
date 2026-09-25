@@ -53,7 +53,10 @@ declare global {
 const positiveRequireFixtures = [
   'require-alias-stable.ts',
   'require-bind-safe-callbacks-remain-static.ts',
-  'require-safe-callbacks-remain-static.ts'
+  'require-safe-callbacks-remain-static.ts',
+  // A call the census cannot resolve reaches no `require` write when the file
+  // has none to reach (fastify's lazy `require('light-my-request')`).
+  'require-unresolved-call-without-write-route-remains-static.ts'
 ]
 
 const negativeRequireFixtures = [
@@ -267,6 +270,9 @@ test('cyclic Function.prototype receiver resolution terminates and fails closed'
     request({
       'host-wrapper.d.ts': hostWrapper,
       'entry.ts': `
+function poison() {
+  require = (_specifier: string) => ({ poisoned: 'cyclic-receiver' })
+}
 let recursive = () => undefined
 recursive = recursive.call(null)
 recursive.call(null)
@@ -389,6 +395,40 @@ test('a callable export that also carries its own properties compiles, links and
   // from `module.exports`'s static type -- the function.
   const result = compilePhysicalFixture('record-callable-properties-require.js')
   compileAndRun(result, 'commonjs-callable-properties-export')
+})
+
+test("a module's own this is the wrapper's this-value, the initial exports object", () => {
+  // TypeScript's emitted helpers read it: `(this && this.__assign) || ...`.
+  // Node calls the wrapper with `module.exports` as this, fixed for the
+  // evaluation, so replacing `module.exports` does not move it, and a
+  // module-level arrow closes over the same object.
+  const result = compilePhysicalFixture('record-module-this-require.js')
+  assert.deepEqual(result.loweringBlockers, [])
+  const reads = [...result.graph.operations.values()].filter(
+    (operation) => operation.family === 'reference' && operation.commonJsModuleThis !== undefined
+  )
+  assert.equal(reads.length, 6)
+  // A module that reads its own this has a route to the initial exports
+  // object, so even a single callable writer does not prove a native record.
+  const exporter = [...result.graph.operations.values()].filter(
+    (operation) => operation.family === 'binding' && operation.commonJs?.nativeRecord === true
+  )
+  assert.deepEqual(exporter, [])
+  compileAndRun(result, 'commonjs-module-this')
+})
+
+test("a file writing through its own module name leaves every other file's wrapper authenticated", () => {
+  // abstract-logging's whole body is `Object.defineProperty(module, 'exports',
+  // { get() {...} })`. Checked JavaScript records that as a declaration of the
+  // global `module`; read as a competing declaration, it failed every module
+  // in the program, and no constructor export anywhere proved a native record.
+  // (The checker also reports the script-shaped file as "not a module", which
+  // Node never says of a CommonJS file; the proof is what this asserts.)
+  const result = compilePhysicalFixture('record-global-augmentation-require.js')
+  const [logger, constructor] = staticRequiresOf(result)
+  assert.ok(logger && constructor)
+  assert.equal(logger.commonJsRequire.nativeRecord, undefined)
+  assert.equal(constructor.commonJsRequire.nativeRecord, true)
 })
 
 test('multiple CommonJS exports writers retain the dynamic record boundary', () => {

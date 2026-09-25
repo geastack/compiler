@@ -209,6 +209,8 @@ export interface ProducerContext {
   readonly commonJsRequire: CommonJsRequireCensus
   /** Source-local proof for the one CommonJS record shape eligible for native lowering. */
   readonly commonJsModuleRecords: CommonJsModuleRecordCensus
+  /** The files this program runs inside the CommonJS module wrapper -- those reached through authenticated `require` edges. */
+  readonly commonJsModules: ReadonlySet<ts.SourceFile>
   /** A host build's exact loader-spelling to canonical builtin-registry mapping. */
   readonly builtinModuleNameOf: (specifier: string) => string | null
   /** The host-stated implementation source for one canonical builtin registry name. */

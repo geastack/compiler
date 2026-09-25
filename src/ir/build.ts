@@ -148,7 +148,7 @@ export interface IrBodyBuilder {
   readonly commonJsBinding: (
     block: IrBlockId,
     lineage: SemanticResultId,
-    global: 'require' | 'exports' | 'module',
+    global: 'require' | 'exports' | 'module' | 'this',
     owner: RegionId,
     representation: Representation
   ) => IrValueId

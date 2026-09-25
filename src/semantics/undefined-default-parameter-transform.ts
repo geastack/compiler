@@ -115,11 +115,20 @@ const editsIn = (file: ts.SourceFile, text: string): readonly Edit[] => {
       )
       const host = names.length > 0 ? tagHostOf(node) : null
       if (host !== null && ts.getJSDocTypeTag(node) === undefined && ts.getJSDocTypeTag(host) === undefined) {
-        const start = host.getStart(file)
-        const lineStart = file.getLineStarts()[file.getLineAndCharacterOfPosition(start).line] ?? start
-        const indent = text.slice(lineStart, start).replace(/[^\t ]/g, '')
-        const lines = names.map((name) => `${indent} * @param {any} [${name}]`)
-        edits.push({ at: start, text: `/**\n${lines.join('\n')}\n${indent} */\n${indent}` })
+        // Into the function's last JSDoc block when it has one: a second block
+        // between a `@param` block and its function detaches the first one's
+        // parameter types (`newCalleeClassTagSourceTransform` states the same).
+        const docs = ts.getJSDocCommentsAndTags(node).filter(ts.isJSDoc)
+        const last = docs[docs.length - 1]
+        if (last) {
+          edits.push({ at: last.end - 2, text: names.map((name) => ` @param {any} [${name}] `).join('') })
+        } else {
+          const start = host.getStart(file)
+          const lineStart = file.getLineStarts()[file.getLineAndCharacterOfPosition(start).line] ?? start
+          const indent = text.slice(lineStart, start).replace(/[^\t ]/g, '')
+          const lines = names.map((name) => `${indent} * @param {any} [${name}]`)
+          edits.push({ at: start, text: `/**\n${lines.join('\n')}\n${indent} */\n${indent}` })
+        }
       }
     }
     ts.forEachChild(node, visit)

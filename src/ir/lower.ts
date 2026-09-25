@@ -865,6 +865,12 @@ const lowerOneOperation = (
       // `this` is one reference form that publishes a value, so it is one
       // that lowers: the frame's receiver becomes an SSA value every
       // consumer of `this` then cites like any other result.
+      if (operation.form === 'this' && operation.commonJsModuleThis !== undefined) {
+        const lineage = requireLineage(operation)
+        const representation = requireResultRepresentation(ctx, operation, 'value', `a CommonJS module's this (${operation.id})`)
+        registerResult(ctx, operation, ctx.builder.commonJsBinding(block, lineage, 'this', operation.commonJsModuleThis, representation))
+        return
+      }
       if (operation.form === 'this') {
         const lineage = requireLineage(operation)
         // Ordinarily `receiver`; `captured-receiver` for the one case

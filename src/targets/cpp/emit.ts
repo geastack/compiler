@@ -1315,7 +1315,9 @@ const emitOperationStatements = (ctx: EmitContext, lines: string[], operation: I
         }
         lines.push(`${defineValue(ctx, operation.result)} = ${cppCommonJsRecordName(operation.owner)}();`)
       } else {
-        lines.push(`${defineValue(ctx, operation.result)} = gea::commonjs::${operation.global}();`)
+        lines.push(
+          `${defineValue(ctx, operation.result)} = gea::commonjs::${operation.global === 'this' ? 'moduleThis' : operation.global}();`
+        )
       }
       return
     case 'commonjs-binding-set':

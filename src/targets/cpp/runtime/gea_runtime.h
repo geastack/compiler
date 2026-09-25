@@ -11679,6 +11679,8 @@ struct ModuleRecord {
   Value requireAlias;
   Value exportsAlias;
   Value moduleAlias;
+  /** The wrapper's this-value: the initial exports object, fixed for the evaluation. */
+  Value thisValue;
 
   ModuleRecord() { resetBindings(); }
 
@@ -11687,6 +11689,7 @@ struct ModuleRecord {
     exportsAlias = Value::object();
     moduleObject.setProperty(PropertyKey::string("exports"), exportsAlias);
     moduleAlias = moduleObject;
+    thisValue = exportsAlias;
     requireAlias = requireBinding();
   }
 };
@@ -11734,6 +11737,7 @@ inline Value exports() { return active().exportsAlias; }
 
 inline Value module() { return active().moduleAlias; }
 inline Value require() { return active().requireAlias; }
+inline Value moduleThis() { return active().thisValue; }
 
 inline void setBinding(std::string_view global, const Value& value) {
   ModuleRecord& record = active();

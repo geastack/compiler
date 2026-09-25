@@ -1,5 +1,9 @@
 export {}
 
+function poison() {
+  require = (_specifier: string) => ({ poisoned: 'destructured-bind-global-taint' })
+}
+
 function safe() {}
 
 const { bind: invoke } = safe

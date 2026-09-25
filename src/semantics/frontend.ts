@@ -1531,6 +1531,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     commonJsProvenanceFailures: hosts.commonJsProvenanceFailures,
     commonJsRequire: createCommonJsRequireCensus(compiled.checker, compiled.program.getSourceFiles(), input.commonJsGlobals ?? new Map()),
     commonJsModuleRecords,
+    commonJsModules: new Set(compiled.commonJsSourceFiles),
     builtinModuleNameOf: (specifier) => input.commonJsBuiltinModules?.get(specifier) ?? null,
     builtinModuleSourceOf: (name) => input.commonJsBuiltinModuleSources?.get(name) ?? null,
     runtimeModuleTargetOf: compiled.runtimeModuleTargetOf,

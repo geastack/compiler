@@ -63,6 +63,13 @@ test('the tag goes where the checker reads it for a function expression', () => 
   )
 })
 
+test('an existing JSDoc block takes the tag, so its own parameter types stay attached', () => {
+  assert.equal(
+    transform({ fileName: 'a.js', text: '/** @param {string} a */\nfunction f (a, b = undefined) {}' }),
+    '/** @param {string} a  @param {any} [b] */\nfunction f (a, b = undefined) {}'
+  )
+})
+
 test('what the source already states, and anything but the global undefined, is left as written', () => {
   for (const text of [
     '/** @param {Function} [cb] */ function f (cb = undefined) {}',

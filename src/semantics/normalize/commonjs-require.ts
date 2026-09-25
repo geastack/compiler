@@ -1423,6 +1423,80 @@ const collectFunctions = (files: readonly ts.SourceFile[]): readonly FunctionNod
 }
 
 /**
+ * Whether anything in this file can write its wrapper `require`.
+ *
+ * The wrapper's `require` is a parameter of the one function Node compiles the
+ * file into, so the only code that can assign it is code in this file: an
+ * assignment, update, or `for`-`in`/`of` target naming it, a `var require = x`
+ * or `function require` at wrapper scope, a direct `eval`, or a wrapper-level
+ * `arguments` (a sloppy wrapper's mapped arguments object aliases the
+ * parameter). A file with none of these keeps the loader's `require` on every
+ * path, whatever an unresolved call does: no function anywhere else can name
+ * the binding. The flow analysis below answers the files that do have a route.
+ */
+const hasRequireWriteRoute = (file: ts.SourceFile, identity: ReturnType<typeof createCommonJsWrapperIdentity>): boolean => {
+  const isRequire = (node: ts.Node): boolean =>
+    ts.isIdentifier(node) &&
+    node.text === 'require' &&
+    ((): boolean => {
+      const classified = identity.classify(node)
+      return classified.kind !== 'wrapper' || classified.global === 'require'
+    })()
+  const isWriteTarget = (node: ts.Node): boolean => {
+    let current = node
+    for (;;) {
+      const parent = current.parent
+      if (
+        ts.isParenthesizedExpression(parent) ||
+        ts.isArrayLiteralExpression(parent) ||
+        ts.isSpreadElement(parent) ||
+        ts.isObjectLiteralExpression(parent) ||
+        ts.isSpreadAssignment(parent) ||
+        (ts.isShorthandPropertyAssignment(parent) && parent.name === current) ||
+        (ts.isPropertyAssignment(parent) && parent.initializer === current)
+      ) {
+        current = parent
+        continue
+      }
+      if (ts.isBinaryExpression(parent)) return parent.left === current && isAssignmentOperatorKind(parent.operatorToken.kind)
+      if (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent))
+        return parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken
+      if (ts.isForInStatement(parent) || ts.isForOfStatement(parent)) return parent.initializer === current
+      return false
+    }
+  }
+  // A declaration writes when anything initializes it: its own initializer,
+  // the pattern it destructures out of, or the `for`-`in`/`of` it heads. A bare
+  // `var require` is the one form that leaves the parameter as it was.
+  const bindsByWriting = (declaration: ts.VariableDeclaration | ts.BindingElement): boolean => {
+    let current: ts.Node = declaration
+    while (ts.isBindingElement(current) || ts.isObjectBindingPattern(current) || ts.isArrayBindingPattern(current)) current = current.parent
+    if (!ts.isVariableDeclaration(current)) return true
+    const list = current.parent
+    return (
+      current !== declaration || current.initializer !== undefined || ts.isForInStatement(list.parent) || ts.isForOfStatement(list.parent)
+    )
+  }
+  const withinOwnArguments = (node: ts.Node): boolean => {
+    for (let current = node.parent; current; current = current.parent)
+      if (isFunctionNode(current) && !ts.isArrowFunction(current)) return true
+    return false
+  }
+  let found = false
+  const visit = (node: ts.Node): void => {
+    if (found) return
+    if (isRequire(node) && isWriteTarget(node)) found = true
+    else if (ts.isFunctionDeclaration(node) && node.name && isRequire(node.name)) found = true
+    else if ((ts.isVariableDeclaration(node) || ts.isBindingElement(node)) && isRequire(node.name)) found = bindsByWriting(node)
+    else if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'eval') found = true
+    else if (ts.isIdentifier(node) && node.text === 'arguments' && !withinOwnArguments(node)) found = true
+    if (!found) ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return found
+}
+
+/**
  * CommonJS static dispatch is a reaching-definition proof over one wrapper
  * cell per source module. The cell starts at Node's original loader and every
  * possible write replaces that proof with unknown. Const aliases snapshot the
@@ -1575,6 +1649,7 @@ export const createCommonJsRequireCensus = (
     }
   }
 
+  const writeRoutes = new Set(implementationFiles.filter((file) => hasRequireWriteRoute(file, identity)))
   const statusOf = (expression: ts.Expression, seen: Set<ts.Symbol> = new Set()): CommonJsRequireStatus => {
     const node = unwrapExpression(expression)
     if (!ts.isIdentifier(node)) return 'ordinary'
@@ -1582,6 +1657,7 @@ export const createCommonJsRequireCensus = (
     if (identityAtNode.kind === 'provenance-failure') return 'provenance-failure'
     if (identityAtNode.kind === 'wrapper') {
       if (identityAtNode.global !== 'require') return 'ordinary'
+      if (!writeRoutes.has(node.getSourceFile())) return 'static'
       const definitions = reads.get(node) ?? unreachable
       if (definitions === originalDefinition) return 'static'
       return definitions === unreachable ? 'ordinary' : 'possibly-reassigned'

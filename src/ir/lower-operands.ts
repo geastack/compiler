@@ -1,6 +1,6 @@
 import type { DeclarationId, FunctionId, IrValueId, OperationId, ResultRole, SemanticResultId, StructuralTypeId } from '../identity/ids.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
-import type { ConversionNode } from '../conversion/algebra.js'
+import type { ConversionCapability, ConversionNode } from '../conversion/algebra.js'
 import { detachedMethodAbiOf, isClosedContiguousTupleRecord } from '../projection/callee.js'
 import type { ClassLayout } from '../projection/classes.js'
 import { classMemberOf } from '../projection/fields.js'
@@ -391,6 +391,15 @@ const traceSpeculativeLoad = (lineage: SemanticResultId, via: string, node: Conv
   if (tracingSpeculativeLoads && node.capability.kind === 'atom') speculativeLoads.push({ lineage, via, node, value })
 }
 
+/** Whether a conversion materializes a new object from the source's fields rather than carrying the same one. */
+const rebuildsObject = (capability: ConversionCapability): boolean => {
+  if (capability.kind === 'optional') return rebuildsObject(capability.payload)
+  return (
+    (capability.kind === 'static' || capability.kind === 'atom' || capability.kind === 'product') &&
+    capability.materializer.id.startsWith('gea::record::recast')
+  )
+}
+
 /**
  * An operand as its consumer's slot wants it: resolved, then converted into
  * the slot's carrier when the census names one. A raw operand -- a key, a
@@ -428,6 +437,19 @@ export const enter = (
   // converted on the way in; converting here would hand the view builder a
   // value it then re-viewed.
   if (answer.source === 'alias') return resolved
+  // A receiver is the object the callee runs on (ECMA-262 OrdinaryCallBindThis
+  // binds the this-argument unchanged), so a conversion that REBUILDS the
+  // object member by member hands the callee a twin: every write through
+  // `this` lands on the copy and every field the target layout omits is gone.
+  if (
+    operand.role === 'receiver' &&
+    rebuildsObject(ctx.program.conversions.nodeFor(resolved.representation, answer.representation).capability)
+  ) {
+    throw new IrLoweringBlockedError(
+      `the call's receiver is carried as "${representationKey(resolved.representation)}" and the callee's frame expects ` +
+        `"${representationKey(answer.representation)}"; the only conversion between them rebuilds the object, and a receiver keeps its identity`
+    )
+  }
   const entered =
     exactArmEntry(ctx, block, lineage, operation, operand, resolved, answer.representation) ??
     convertTo(ctx, block, lineage, resolved, answer.representation) ??

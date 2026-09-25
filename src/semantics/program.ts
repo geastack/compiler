@@ -4,6 +4,7 @@ import { withStableTypeQueries } from './stable-checker.js'
 import { dirname, resolve } from 'node:path'
 import { createModuleResolver, isDeclarationPath, mappedTypeScriptSource, moduleExtension, typeOnlyModuleUse } from './module-resolution.js'
 import { elidedTypeImportSpecifiers } from './elided-type-imports.js'
+import { unconstructedThisInsertions, withInsertions } from './unconstructed-this.js'
 import type { CommonJsWrapperDeclaration } from '../plugins/model.js'
 import { createCommonJsRequireCensus } from './normalize/commonjs-require.js'
 import { withoutBareWrapperRedeclarations } from './commonjs-wrapper.js'
@@ -856,9 +857,18 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
       return routed.length > 0 ? [[file, new Set(routed)] as const] : []
     })
   )
-  if (preparation.audit.length > 0 || redeclarations.size > 0 || elided.size > 0) {
+  // A `this.x =` function the program never constructs keeps its callers'
+  // `this` rather than the checker's imagined instance; which functions the
+  // program constructs is read from this first program. See `unconstructed-this.ts`.
+  const unconstructed = unconstructedThisInsertions(configured.program)
+  if (preparation.audit.length > 0 || redeclarations.size > 0 || elided.size > 0 || unconstructed.size > 0) {
     resolutionDiagnostics.length = 0
-    configured = configuredProgram(input, resolutionDiagnostics, new Map([...preparation.sourceText, ...redeclarations]), timing, elided)
+    const prepared = new Map([...preparation.sourceText, ...redeclarations])
+    for (const [file, insertions] of unconstructed) {
+      const base = prepared.get(file) ?? configured.program.getSourceFile(file)?.text
+      if (base !== undefined) prepared.set(file, withInsertions(base, insertions))
+    }
+    configured = configuredProgram(input, resolutionDiagnostics, prepared, timing, elided)
   }
   const program = configured.program
   const checker = withStableTypeQueries(program.getTypeChecker())
