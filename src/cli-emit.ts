@@ -7,6 +7,9 @@ import type { CompilerPlugin } from './plugins/model.js'
 import { readModuleGraph } from './cli-module-graph.js'
 import { findProjectFile } from './semantics/program.js'
 import type { CppTranslationUnitLayout } from './targets/cpp/translation-unit.js'
+import type { DiagnosticLocation } from './diagnostics/model.js'
+import { declarationOfFunction, nodeOfOperation } from './identity/ids.js'
+import type { DeclarationId, FunctionId, NodeId, OperationId } from './identity/ids.js'
 
 /**
  * The `compile <input> --out-dir <dir>` command the gea build pipeline drives.
@@ -349,6 +352,37 @@ const writeGeneratedSupport = (outDir: string, hostHeaders: readonly string[]): 
   writeIfChanged(join(outDir, 'generated_support.hpp'), `${lines.join('\n')}\n`)
 }
 
+/** Where an owner id is: a function's declaration, an operation's node, or a region's owner. */
+const placeOf = (result: CompileResult, owner: string): DiagnosticLocation | null => {
+  try {
+    if (owner.startsWith('fn|')) return result.locationOfDeclaration(declarationOfFunction(owner as FunctionId))
+    if (owner.startsWith('op|')) return result.locationOfNode(nodeOfOperation(owner as OperationId))
+    if (owner.startsWith('region|')) {
+      const inner = owner.slice('region|'.length, owner.lastIndexOf('|'))
+      if (inner.startsWith('decl|')) return result.locationOfDeclaration(inner as DeclarationId)
+      if (inner.startsWith('node|')) return result.locationOfNode(inner as NodeId)
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
+/** Every lowering blocker, certification refusal and emission refusal, each at its owner's place. */
+const placedRefusals = (result: CompileResult) => {
+  const placed = (stage: string, owner: string, reason: string, key: string | null) => {
+    const location = placeOf(result, owner)
+    return { stage, owner, key, reason, file: location?.file ?? null, line: location?.line ?? 0, column: location?.column ?? 0 }
+  }
+  return [
+    ...result.loweringBlockers.map((blocker) => placed('lowering', blocker.owner, blocker.reason, null)),
+    ...result.refusals
+      .filter((refusal) => refusal.stage === 'certify')
+      .map((refusal) => placed('certify', refusal.owner, refusal.reason, refusal.key)),
+    ...result.emissionRefusals.map((refusal) => placed('emission', refusal.owner, refusal.reason, null))
+  ]
+}
+
 const report = (result: CompileResult, outDirName: string): number => {
   // Which file each `fN` identity segment names. A refusal cites raw ids
   // (`decl|f9|179`), and on the module-graph path -- the one every real
@@ -359,6 +393,12 @@ const report = (result: CompileResult, outDirName: string): number => {
   if (process.env['GEA_DUMP_FILE_IDS']) {
     for (const [identity, fileName] of result.sourceFileNames) process.stderr.write(`[FILE] ${identity}\t${fileName}\n`)
   }
+  // Every refusal, where the report below prints the first 40 certification
+  // refusals by owner id alone: the lowering and certification half of what
+  // `coverage --json` gives the plan, for the module-graph build that has no
+  // coverage command of its own. The same kind of instrument as the dump above.
+  const refusalsPath = process.env['GEA_REFUSALS_JSON']
+  if (refusalsPath) writeFileSync(refusalsPath, `${JSON.stringify(placedRefusals(result), null, 1)}\n`)
   if (result.units.length === 0) {
     const certifyRefusals = result.refusals.filter((refusal) => refusal.stage === 'certify')
     process.stderr.write(
