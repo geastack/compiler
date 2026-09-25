@@ -566,7 +566,7 @@ try-region-placement.ts.cpp 67f714215dfd
 tuple-rest-abi.ts.cpp 12e4104fea85
 tuple-typed-rest-spread.runtime.js.cpp e268df529266
 type-guard-intersection-of-family-member.ts.cpp 21d75f47558e
-type-only-class-reflection.runtime.js.cpp fba00d1a0248
+type-only-class-reflection.runtime.js.cpp 9852cdc4712d
 type-query-escapes.ts.cpp 6e9842035b57
 type-query-snapshots.ts.cpp cc537a79b16d
 typed-array-buffer-into-array-buffer-like.ts.cpp cccfdfb3fdfb
