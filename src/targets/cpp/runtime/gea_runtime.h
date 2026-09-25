@@ -14675,6 +14675,12 @@ bool nativeDynamicRead(const gea::Ref<T>& object, const PropertyKey& key, Value&
   const auto receiver = [&] { return Value::box(Value::Tag::Object, object); };
   const gea::Ref<DynamicObject> expando = detail::expandoFor(gea::refCastToVoid(object), false);
   if (expando && expando->readWithReceiver(key, receiver, answer)) return true;
+  // The declared members before the run-time installs, in the order the boxed
+  // read (`Value::getProperty`) takes them: a key read off a native instance
+  // (a proxy `get` trap's `t[k]`) names a method as often as a field.
+  if constexpr (detail::NativePrototypeTable<T>) {
+    if (object->gea_readPrototypeProperty(key, answer)) return true;
+  }
   if constexpr (requires { object->gea_method_state.get(); }) {
     const auto* start = detail::nativePrototypeChainStart(object->gea_method_state.get(), static_cast<const void*>(object.get()));
     return detail::nativePrototypeChainRead(start, key, receiver, answer);
