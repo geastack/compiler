@@ -33,3 +33,26 @@ export const classPrototypeReadOf = (
   }
   return layout
 }
+
+/**
+ * Whether an object carried as `declaration` may inherit from a prototype the
+ * program extends at run time (`ClassLayout.prototypeExtensions`): the class
+ * itself or an ancestor is extended, or a descendant is, since the carrier
+ * may hold a descendant's instance. Only then can a read that misses every
+ * declared method find something in a prototype table.
+ */
+export const classPrototypeExtendedOf = (classes: ReadonlyMap<DeclarationId, ClassLayout>, declaration: DeclarationId): boolean => {
+  const chainOf = (start: DeclarationId): DeclarationId[] => {
+    const chain: DeclarationId[] = []
+    for (let current: DeclarationId | null = start; current !== null && !chain.includes(current);) {
+      chain.push(current)
+      current = classes.get(current)?.base ?? null
+    }
+    return chain
+  }
+  for (const layout of classes.values()) {
+    if (!layout.prototypeExtensions?.length) continue
+    if (chainOf(declaration).includes(layout.declaration) || chainOf(layout.declaration).includes(declaration)) return true
+  }
+  return false
+}
