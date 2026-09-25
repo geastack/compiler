@@ -12,7 +12,7 @@ import type { NodeId, OperationFamily } from '../../identity/ids.js'
 import { regionId } from '../../identity/ids.js'
 import type { SemanticCaller } from '../model/operands.js'
 import type { SemanticRegion } from '../model/graph.js'
-import { forEachEvaluationChild } from './evaluation-order.js'
+import { evaluatedStatementsOf, forEachEvaluationChild } from './evaluation-order.js'
 import { enclosingCallIfCallee } from './producers/erasure.js'
 import { rootSpecialization, type IdentityTable, type SpecializationPath } from './identities.js'
 import type { SpecializationCensus } from './specialization.js'
@@ -743,7 +743,7 @@ export const censusProgram = (
         for (const clause of node.caseBlock.clauses) {
           if (ts.isCaseClause(clause)) visit(clause.expression, path)
           clauseOrdinals.set(clause, nextOrdinal(caller))
-          for (const statement of clause.statements) visit(statement, path)
+          for (const statement of evaluatedStatementsOf(clause.statements)) visit(statement, path)
         }
         record(node, path, path)
         return
@@ -755,7 +755,7 @@ export const censusProgram = (
     // reaches has no meaning to census, exactly as an uninstantiated generic
     // above has none. `reachability.ts` is the one authority on which those
     // are, and every other whole-program walk asks the same one.
-    for (const node of reachable.statementsOf(file)) visit(node, rootSpecialization)
+    for (const node of evaluatedStatementsOf(reachable.statementsOf(file))) visit(node, rootSpecialization)
   }
 
   const byFamily = new Map<OperationFamily, CensusCandidate[]>()

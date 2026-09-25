@@ -662,13 +662,36 @@ const contributeForOfLoopHeadWrite = (candidate: CensusCandidate, node: ts.Ident
   return { kind: 'operations', operations: [operation], edges: [{ kind: 'value', result: value, to: id, role: 'value', ordinal: 0 }] }
 }
 
+/**
+ * The declaration a `var` binding's cell is keyed by. Every declaration of one
+ * `var` name in a function names ONE binding (ECMA-262 VarDeclaredNames /
+ * FunctionDeclarationInstantiation), and every read resolves to it through the
+ * symbol's value declaration (`references.ts`), so a repeated `var v` in
+ * another arm writes that same cell rather than one of its own. `let`, `const`
+ * and a destructured name keep their own declaration.
+ */
+const varBindingDeclarationOf = (node: ts.VariableDeclaration, context: ProducerContext): ts.VariableDeclaration => {
+  const list = node.parent
+  if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.BlockScoped) !== 0 || !ts.isIdentifier(node.name)) return node
+  const symbol = context.checker.getSymbolAtLocation(node.name)
+  const canonical = symbol ? context.identities.valueDeclarationOfSymbol(symbol) : null
+  return canonical && ts.isVariableDeclaration(canonical) ? canonical : node
+}
+
 const contributeVariableDeclaration = (
   candidate: CensusCandidate,
   node: ts.VariableDeclaration,
   context: ProducerContext
 ): CandidateContribution => {
   const ambient = isAmbient(node)
-  const declaration = context.identities.declarationIdOf(node)
+  const binding = varBindingDeclarationOf(node, context)
+  const declaration = context.identities.declarationIdOf(binding)
+  // A repeated `var v` with nothing to store declares nothing new: the one
+  // binding already exists, and re-declaring it must not reset what an earlier
+  // write left there.
+  if (binding !== node && !node.initializer && !forOfLoopVariableNextResult(node, context)) {
+    return { kind: 'operations', operations: [], edges: [] }
+  }
 
   // The linkage name is read here and nowhere else in the compiler: an ambient
   // declaration's spelling is the ABI contract with the host that defines it,

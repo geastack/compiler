@@ -522,7 +522,12 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
   // than one physical argument, one of them a runtime-counted range -- with
   // no single array to pass whole, and stays refused below: only the pure
   // spread was ever measured.
-  const wholeSpreadArgument =
+  //
+  // A mixed call (`console.error('SEMVER', ...args)`) packs every argument,
+  // leading values boxed and the spread drained, into the one boxed list the
+  // same joined runtime overload takes: the language passes the host one
+  // argument list, and the host joins whatever it holds.
+  const pureSpread =
     textJoined &&
     evaluated.length === 1 &&
     evaluated[0]?.kind === 'spread' &&
@@ -530,6 +535,11 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
     evaluated[0].value.representation.element.kind === 'dynamic'
       ? evaluated[0].value
       : null
+  const wholeSpreadArgument =
+    pureSpread ??
+    (textJoined && calleeReceiverIsNativeHandle(ctx, operation) && evaluated.some((slot) => slot.kind === 'spread')
+      ? packedArgumentList(ctx, block, lineage, { kind: 'dynamic', reason: 'opt-in-fallback' }, evaluated)
+      : null)
   const argumentList =
     callee.representation.kind === 'dynamic' && evaluated.some((slot) => slot.kind === 'spread')
       ? packedArgumentList(ctx, block, lineage, callee.representation, evaluated)

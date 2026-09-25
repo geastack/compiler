@@ -14,6 +14,7 @@ import type { IdentityTable } from '../identities.js'
 import type { ProducerContext } from '../producer-context.js'
 import { isDynamicIterationSource, mintIteratorSteps } from './protocol.js'
 import { hasNativeEnumerationCursor, hasNativeIterationCursor, isGeneratorType, valueEdgesInto } from './shared.js'
+import { alwaysAbrupt } from '../evaluation-order.js'
 
 /**
  * `if`/`for`/`for`-`of`/`for`-`in`/`while`/`do`/`switch`/`return`/`throw`/
@@ -374,31 +375,11 @@ export const citeSwitchGroupTest = (clause: ts.CaseClause, identities: IdentityT
   semanticResultId(operationId(identities.nodeIdOf(clause), 'computation', 1), 'value')
 
 /**
- * A sufficient proof that evaluation cannot produce a normal completion.
- * ECMA-262 (2025), StatementList and IfStatement evaluation: a block passes
- * through its final completion, and an if can complete normally if either arm
- * can. Unknown forms stay unproven; in particular a nested loop can consume a
- * break, and a finally can override a pending return.
- *
- * Switch guard chains need this completion fact, not the spelling of the final
- * statement. A block wrapping a return and an if whose arms both return cannot
- * fall through any more than a bare return can.
- */
-const alwaysAbrupt = (statement: ts.Statement | undefined): boolean => {
-  if (!statement) return false
-  if (ts.isBlock(statement)) return alwaysAbrupt(statement.statements[statement.statements.length - 1])
-  if (ts.isIfStatement(statement)) return alwaysAbrupt(statement.thenStatement) && alwaysAbrupt(statement.elseStatement)
-  return (
-    ts.isBreakStatement(statement) || ts.isReturnStatement(statement) || ts.isThrowStatement(statement) || ts.isContinueStatement(statement)
-  )
-}
-
-/**
  * Whether a clause cannot complete normally -- so control never falls out of
  * its bottom into the next clause. Asked here to mint the guards and in
  * `gating.ts` to place the bodies, ONE answer for both.
  */
-export const clauseTerminates = (clause: ts.CaseOrDefaultClause): boolean => alwaysAbrupt(clause.statements[clause.statements.length - 1])
+export const clauseTerminates = (clause: ts.CaseOrDefaultClause): boolean => clause.statements.some(alwaysAbrupt)
 
 const contributeSwitch = (context: ProducerContext, candidate: CensusCandidate, node: ts.SwitchStatement): CandidateContribution => {
   const discriminant = resolveExpressionOperand(context, node.expression)
