@@ -440,7 +440,7 @@ physical-class-ancestry-live.ts.cpp 728e6f672df0
 physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 50f20517ba63
-printer-drift.txt 941efa15186a
+printer-drift.txt 370cbbe20c3b
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
 promise-method-read-as-value.ts.cpp d92abcc1e89f
@@ -523,6 +523,7 @@ subclass-overlay-presence-storage.js.cpp 93e6f3d3b217
 subclass-overlay-receiver-storage.js.cpp 4a488d2e5797
 subclass-overlay-unused-storage.js.cpp a0248250f884
 super-constructor-opaque-argument.runtime.js.cpp aa4c5ba64c4f
+switch-case-falls-into-default.runtime.js.cpp a07465024fd7
 switch-clause-groups.ts.cpp 882804cf2d4f
 switch-dispatch.ts.cpp cb43d35840c3
 switch-fallthrough.ts.cpp 215b19f50b89

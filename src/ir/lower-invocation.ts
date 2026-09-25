@@ -1,6 +1,6 @@
 import { operandOf, type SemanticOperand } from '../semantics/model/operands.js'
 import type { InvocationOperation } from '../semantics/model/operations.js'
-import type { CallableAbi } from '../representation/model.js'
+import type { CallableAbi, Representation } from '../representation/model.js'
 import { representationKey } from '../representation/model.js'
 import { selectedHostConstructFrameOf } from '../representation/derive.js'
 import { fixedDataDefinitionRecipeOf } from './fixed-data-definition.js'
@@ -28,7 +28,7 @@ import {
   convertTo,
   convertOrDrift
 } from './lower-operands.js'
-import type { CallOperation, IrBlockId, IrOperand } from './model.js'
+import type { CallOperation, IrArrayElement, IrBlockId, IrOperand } from './model.js'
 import type { DeclarationId, FunctionId, SemanticResultId } from '../identity/ids.js'
 import { calleeRenderingOf, deferredCalleeOf, numericRestHostCallOf } from '../projection/callee.js'
 import { fixedApplyArgumentFieldsOf } from '../projection/apply-arguments.js'
@@ -329,6 +329,44 @@ const calleeReceiverIsIteratorCarrier = (ctx: LoweringContext, operation: Invoca
  * split of an array literal, for the same reason: neither role has to know
  * the other exists.
  */
+/**
+ * The whole argument list of a call through a callee with no convention -- a
+ * `dynamic` value -- as one fresh array of boxes, in written order, when a
+ * spread makes the count a runtime fact.
+ *
+ * Such a callee is invoked with ECMA-262's flat argument list
+ * (`Value::callWithReceiver`, which takes it as a runtime sequence), so a
+ * spread is simply more of that list: an Array source contributes its elements
+ * as a range copy converted per element into the callee's own box, and every
+ * other argument enters as one box. `null` for a spread over anything but an
+ * Array, whose iteration is not a range copy.
+ */
+const packedArgumentList = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  box: Representation,
+  evaluated: readonly ArgumentSlot[]
+): IrOperand | null => {
+  const elements: IrArrayElement[] = []
+  for (const slot of evaluated) {
+    if (slot.kind === 'spread') {
+      if (slot.value.representation.kind !== 'array-object') return null
+      elements.push(
+        representationKey(slot.value.representation.element) === representationKey(box)
+          ? { kind: 'spread', value: slot.value, from: slot.from ?? 0 }
+          : { kind: 'spread', value: slot.value, from: slot.from ?? 0, element: box }
+      )
+      continue
+    }
+    const value = convertTo(ctx, block, lineage, slot.value, box)
+    if (value === null) return null
+    elements.push({ kind: 'element', value })
+  }
+  const representation: Representation = { kind: 'array-object', element: box, ownership: 'shared-refcount', extension: null }
+  return { value: ctx.builder.allocateArrayObject(block, lineage, elements, representation), representation }
+}
+
 const argumentSlotsOf = (
   ctx: LoweringContext,
   block: IrBlockId,
@@ -484,35 +522,41 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
     evaluated[0].value.representation.element.kind === 'dynamic'
       ? evaluated[0].value
       : null
+  const argumentList =
+    operation.internalMethod === 'call' && callee.representation.kind === 'dynamic' && evaluated.some((slot) => slot.kind === 'spread')
+      ? packedArgumentList(ctx, block, lineage, callee.representation, evaluated)
+      : null
   const args =
-    numericRestHostCall !== null
-      ? evaluated.map((slot) => slot.value)
-      : calleeReceiverIsNativeHandle(ctx, operation) && textJoined
-        ? wholeSpreadArgument !== null
-          ? [wholeSpreadArgument]
-          : evaluated.map((slot) => {
-              if (slot.kind === 'spread') {
-                // The text-joined native-handle path renders its call from the
-                // operands themselves, one rendered text per operand, so there is
-                // nothing for a range copy to expand INTO -- `console.log(...args)`
-                // would print the array where the language prints its elements.
-                throw new IrLoweringBlockedError(
-                  'a spread argument reaches a host member whose call is rendered from its operands as text; a range copy has no expansion there'
-                )
-              }
-              return slot.value
-            })
-        : calleeReceiverIsIteratorCarrier(ctx, operation)
-          ? evaluated.map((slot) => {
-              if (slot.kind === 'spread') {
-                throw new IrLoweringBlockedError(
-                  "a spread argument reaches a generator cursor's next()/return()/throw(), which reads its own resume/abrupt operand " +
-                    'directly and has no rest frame for a range copy to expand into'
-                )
-              }
-              return slot.value
-            })
-          : packRestArguments(ctx, block, lineage, operation.id, calleeAbi, evaluated)
+    argumentList !== null
+      ? [argumentList]
+      : numericRestHostCall !== null
+        ? evaluated.map((slot) => slot.value)
+        : calleeReceiverIsNativeHandle(ctx, operation) && textJoined
+          ? wholeSpreadArgument !== null
+            ? [wholeSpreadArgument]
+            : evaluated.map((slot) => {
+                if (slot.kind === 'spread') {
+                  // The text-joined native-handle path renders its call from the
+                  // operands themselves, one rendered text per operand, so there is
+                  // nothing for a range copy to expand INTO -- `console.log(...args)`
+                  // would print the array where the language prints its elements.
+                  throw new IrLoweringBlockedError(
+                    'a spread argument reaches a host member whose call is rendered from its operands as text; a range copy has no expansion there'
+                  )
+                }
+                return slot.value
+              })
+          : calleeReceiverIsIteratorCarrier(ctx, operation)
+            ? evaluated.map((slot) => {
+                if (slot.kind === 'spread') {
+                  throw new IrLoweringBlockedError(
+                    "a spread argument reaches a generator cursor's next()/return()/throw(), which reads its own resume/abrupt operand " +
+                      'directly and has no rest frame for a range copy to expand into'
+                  )
+                }
+                return slot.value
+              })
+            : packRestArguments(ctx, block, lineage, operation.id, calleeAbi, evaluated)
   // `operation.target` (the `SemanticTargetProof`) is never read here: `open`
   // is a complete answer that selects this same generic path, and a narrower
   // proof does not license skipping straight to a direct call this IR has no
@@ -587,7 +631,7 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
       produced,
       undefined,
       operation.builtinModuleLookup,
-      wholeSpreadArgument !== null,
+      wholeSpreadArgument !== null || argumentList !== null,
       operation.intrinsicOwnKeys && calleeRenderingOf(ctx.program.slots.input, operation) === 'template' ? true : undefined,
       fixedDataDefinition ?? undefined,
       numericRestHostCall ?? undefined,

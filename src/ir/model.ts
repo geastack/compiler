@@ -306,8 +306,12 @@ export interface CallOperation extends IrOperationBase {
    * ordinary single array-typed argument (`console.log(values)`) by
    * `arguments` alone, which is why this exists: only `emit-host-invoke.ts`'s
    * `variadic` arity reads it, to render a runtime join over the array's
-   * elements instead of ToString-ing the array itself as one value. Absent
-   * everywhere else, so no other consumer of `arguments` is affected.
+   * elements instead of ToString-ing the array itself as one value. A call
+   * through a `dynamic` callee sets it too, for the array of boxes a spread
+   * made the whole argument list (`lower-invocation.ts`'s
+   * `packedArgumentList`), which the dynamic call hands over as its runtime
+   * argument list. Absent everywhere else, so no other consumer of
+   * `arguments` is affected.
    */
   readonly argumentsAreSpread?: boolean
   /** Authenticated host property with a borrowed numeric rest sequence, instead of an escaping rest array. */

@@ -1591,6 +1591,12 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
       signature !== undefined &&
       isFabricatedSignatureShape(context.checker, signature) &&
       structuralCallSignatures(context.table, calleeType) !== null
+    // The fabricated signature names no frame, but this compiler's own view
+    // of the callee does: that one call signature is what the callee's
+    // carrier, and so this call's ABI, is derived from, and it is the frame
+    // the argument list binds against (`spread-arguments.ts`'s `ArgumentFrame`).
+    const structuralFrames = fabricatedNativeCall ? structuralCallSignatures(context.table, calleeType) : null
+    const structuralFrame = structuralFrames?.length === 1 ? (structuralFrames[0] ?? null) : null
     if (calleeIsDynamic || fabricatedNativeCall) {
       signature = undefined
       selectedSignature = null
@@ -1678,7 +1684,14 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // copy) resolved into operands. `spread-arguments.ts` owns the whole
     // decision, including the refusals, so the admission rule lives in one
     // place instead of being split between a gate here and a loop below.
-    const argumentList = buildArgumentOperands(context, candidate, args, argumentEvaluation, selectedSignature, shortCircuit !== null)
+    const argumentList = buildArgumentOperands(
+      context,
+      candidate,
+      args,
+      argumentEvaluation,
+      selectedSignature ?? structuralFrame,
+      shortCircuit !== null
+    )
     if (argumentList.kind === 'refused') {
       return { kind: 'blocked', blocker: blocked(candidate.id, 'invocation', argumentList.reason, 'P4') }
     }

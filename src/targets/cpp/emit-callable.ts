@@ -1077,9 +1077,15 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   if (callee.kind === 'dynamic') {
     // The dynamic call adapter transports this separately from positional
     // arguments; the actual callable decides whether its ABI consumes it.
-    const boxed = operation.arguments.map((argument) => alignedText(ctx, callee, argument, 'boxed-callee'))
     const receiver = operation.receiver ? boxedValueText(ctx, operation.receiver, 'dynamic call receiver') : 'gea::Value()'
-    const text = `${operandText(ctx, calleeOperand)}.callWithReceiver(${receiver}, {${boxed.join(', ')}})`
+    // A spread made the argument list a runtime sequence: the lowering packed
+    // all of it, in order, into the one array of boxes this call hands over.
+    const packed = operation.argumentsAreSpread === true ? operation.arguments[0] : undefined
+    const list =
+      packed !== undefined && operation.arguments.length === 1
+        ? `gea::argumentListOf(${operandText(ctx, packed)})`
+        : `{${operation.arguments.map((argument) => alignedText(ctx, callee, argument, 'boxed-callee')).join(', ')}}`
+    const text = `${operandText(ctx, calleeOperand)}.callWithReceiver(${receiver}, ${list})`
     if (!operation.result) {
       lines.push(`${text};`)
       return

@@ -227,6 +227,17 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
                 '"array-object", a "Set", a "Map", a "string" and a cursor'
             )
           }
+          // A dynamic literal is an Array of boxes (`emit-arrays.ts` builds
+          // `ArrayObject<gea::Value>` and boxes it): an Array source boxes each
+          // copied element, and a cursor already yielding boxes copies as is.
+          if (tuple.kind === 'dynamic' && source.representation.kind === 'array-object') {
+            return spreadElement.kind === 'dynamic'
+              ? { kind: 'spread', value: source, from: 0 }
+              : { kind: 'spread', value: source, from: 0, element: tuple }
+          }
+          if (tuple.kind === 'dynamic' && source.representation.kind === 'iterator' && spreadElement.kind === 'dynamic') {
+            return { kind: 'spread', value: source, from: 0 }
+          }
           // An Array source whose elements are carried differently converts
           // per element on the way in, exactly as a call's rest pack does
           // (`lower-operands.ts`): the emitter installs the conversion from
@@ -240,9 +251,16 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
           ) {
             return { kind: 'spread', value: source, from: 0, element: tuple.element }
           }
-          if (tuple.kind !== 'array-object' || representationKey(spreadElement) !== representationKey(tuple.element)) {
+          // Any other range copy converts nothing, so it admits the same
+          // carrier and the pairs the conversion algebra answers with the
+          // identity.
+          if (
+            tuple.kind !== 'array-object' ||
+            (representationKey(spreadElement) !== representationKey(tuple.element) &&
+              ctx.program.conversions.nodeFor(spreadElement, tuple.element).capability.kind !== 'identity')
+          ) {
             throw new IrLoweringBlockedError(
-              `an array literal spreads a source whose element carrier ("${representationKey(spreadElement)}") does not match ` +
+              `an array literal spreads a "${source.representation.kind}" source whose element carrier ("${representationKey(spreadElement)}") does not match ` +
                 `this literal's own element carrier ("${tuple.kind === 'array-object' ? representationKey(tuple.element) : tuple.kind}"); a mismatch would need a ` +
                 'per-element conversion into the destination carrier, which this range copy does not perform'
             )

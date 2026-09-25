@@ -487,6 +487,7 @@ struct gea_native_protocol_Number_prototype_v1 {};
 struct gea_native_protocol_RegExp_prototype_v1 {};
 struct gea_native_protocol_Boolean_prototype_v1 {};
 struct gea_native_protocol_Object_prototype_v1 {};
+struct gea_native_protocol_Promise_prototype_v1 {};
 struct gea_native_protocol_StringConstructor_v1 {};
 struct gea_native_protocol_ErrorConstructor_v1 {};
 struct gea_native_protocol_NumberConstructor_v1 {};
@@ -14972,6 +14973,18 @@ std::vector<std::string> arrayOwnPropertyNames(const gea::Ref<ArrayObject<Elemen
 
 inline Value Value::callAsFunction(const std::vector<Value>& arguments) const {
   return callWithReceiver(Value(), arguments);
+}
+
+/** ECMA-262 ArgumentListEvaluation's result for one packed array: each element in order, a hole as `undefined`. */
+template <typename Packed>
+inline std::vector<Value> argumentListOf(const Packed& packed) {
+  std::vector<Value> list;
+  list.reserve(packed->size());
+  for (std::size_t index = 0; index < packed->size(); ++index) {
+    const long long at = static_cast<long long>(index);
+    list.push_back(packed->hasElementValueAtIndex(at) ? packed->elementAtIndex(at) : Value());
+  }
+  return list;
 }
 
 inline Value Value::callWithReceiver(const Value& receiver, const std::vector<Value>& arguments) const {
