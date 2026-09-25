@@ -132,6 +132,23 @@ export interface ClassLayout {
    * runtime one that turns out to name one aborts when the install runs.
    */
   readonly prototypeExtensions?: readonly (string | null)[]
+  /**
+   * The program reflects over class prototypes as objects --
+   * `Object.getPrototypeOf(instance)` of a class instance, or
+   * `Object.getOwnPropertyDescriptors(...)` (three's `RenderObject` material
+   * keys and `NodeMaterial`'s descriptor loops). The walk may reach any class
+   * dynamically, so it is one program-wide fact, stated on every class: each
+   * evaluation can then materialize its prototype object on demand and list
+   * its declared members as descriptors. The member list is the class
+   * body's own (`declaredPrototypeMembers`), not the reachable members the
+   * layout keeps: a reflected member is observable whether or not anything
+   * calls it.
+   */
+  readonly prototypeReflected?: readonly {
+    readonly key: string
+    /** `null` for a method; which halves an accessor declares otherwise. */
+    readonly accessor: { readonly getter: boolean; readonly setter: boolean } | null
+  }[]
   readonly declaration: DeclarationId
   /**
    * The class this one extends, or `null` for a base class.
@@ -1262,6 +1279,8 @@ export const publishClassMethodOverrides = (
           }
           unsupported(declaration, `prototype ${operation.internalMethod} of ${name ?? 'a runtime key'} has no typed method protocol`)
         }
+      } else if (operand.role === 'argument' && operand.ordinal === 0 && reflectionCallOf(operation) !== null) {
+        continue
       } else if (
         operation.family === 'invocation' &&
         operand.role === 'argument' &&
@@ -1383,6 +1402,23 @@ export const publishClassMethodOverrides = (
       }
     } else mark(selected ?? input.deriver.derive(receiver.type), key, null, symbolKeys)
   }
+  const holdsClass = (carrier: Representation | undefined): boolean =>
+    carrier !== undefined &&
+    (carrier.kind === 'class-ref' ||
+      (carrier.kind === 'optional' && holdsClass(carrier.payload)) ||
+      (carrier.kind === 'tagged-union' && carrier.arms.some((arm) => holdsClass(arm.value))))
+  const declaredMembers = new Map<DeclarationId, NonNullable<ClassLayout['prototypeReflected']>>()
+  for (const operation of input.graph.operations.values()) {
+    if (operation.family === 'class-lifecycle' && operation.event === 'bind-class-value' && operation.declaredPrototypeMembers)
+      declaredMembers.set(operation.classDeclaration, operation.declaredPrototypeMembers)
+  }
+  let prototypeReflected = false
+  for (const operation of input.graph.operations.values()) {
+    const member: string | null = prototypeReflected ? null : reflectionCallOf(operation)
+    if (member === null || member === 'getOwnPropertyDescriptor') continue
+    const target = operation.operands.find((operand) => operand.role === 'argument' && operand.ordinal === 0)
+    prototypeReflected = member === 'getOwnPropertyDescriptors' || holdsClass(target === undefined ? undefined : carrierOf(target))
+  }
   return new Map(
     [...layouts].map(([declaration, layout]) => {
       const fields = overrides.get(declaration)
@@ -1396,7 +1432,10 @@ export const publishClassMethodOverrides = (
           ...(fields ? { methodOverrides: [...fields.values()] } : {}),
           ...(prototypeKeys ? { prototypeMethodMutations: [...prototypeKeys] } : {}),
           ...(unsupportedUses ? { prototypeUnsupportedUses: [...unsupportedUses] } : {}),
-          ...(extended ? { prototypeExtensions: [...extended] } : {})
+          ...(extended ? { prototypeExtensions: [...extended] } : {}),
+          ...(prototypeReflected
+            ? { prototypeReflected: declaredMembers.get(declaration) ?? declaredMembers.get(genericRootOf(declaration)) ?? [] }
+            : {})
         }
       ]
     })

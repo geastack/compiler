@@ -15,16 +15,18 @@ import {
   cppTypeOf
 } from '../types.js'
 
+type OriginalMethod = (
+  owner: ClassLayout,
+  method: ClassLayout['methods'][number],
+  state: string
+) => { text: string; representation: Representation }
+
 export const nativePrototypeObjectText = (
   ctx: EmitContext,
   receiver: Extract<Representation, { kind: 'constructor-family' }>,
   result: Representation,
   receiverText: string,
-  originalMethod: (
-    owner: ClassLayout,
-    method: ClassLayout['methods'][number],
-    state: string
-  ) => { text: string; representation: Representation }
+  originalMethod: OriginalMethod
 ): string => {
   if (receiver.members.length > 1) return familyPrototypeObjectText(ctx, receiver, result, receiverText, originalMethod)
   const layout = classPrototypeReadOf(ctx.classes, receiver, 'prototype', result)
@@ -36,6 +38,38 @@ export const nativePrototypeObjectText = (
       'prototype read has no admitted native method-only class layout'
     )
   }
+  const prototype = `gea::nativeClassPrototype<${cppClassName(layout.declaration)}>(gea::nativeClassMethodStateFromEnvironment(${receiverText}.environment), ${nativePrototypeInitializerText(ctx, layout, originalMethod)})`
+  const converted = alignedValueText(ctx, 'native-prototype:result', layout.instance, result, prototype)
+  if (converted === null)
+    throw createCppEmitBlockedError(
+      'property-access:class-prototype:result',
+      'prototype native layout cannot fill the published class carrier'
+    )
+  return converted
+}
+
+/**
+ * The class evaluation's hook for `Object.getPrototypeOf` in a program that
+ * reflects over prototypes (`ClassLayout.prototypeReflected`): the same
+ * materialization a `C.prototype` read performs, boxed. `null` for a class
+ * whose prototype has no native method-only layout (its instances then
+ * cannot hand a prototype out, and the runtime says so by name).
+ */
+export const nativePrototypeValueHookText = (
+  ctx: EmitContext,
+  declaration: DeclarationId,
+  originalMethod: OriginalMethod
+): string | null => {
+  const layout = ctx.classes.get(declaration)
+  if (!layout?.prototypeReflected || layout.instance?.kind !== 'class-ref' || layout.prototypeUnsupportedUses?.length) return null
+  const initializer = nativePrototypeInitializerText(ctx, layout, originalMethod)
+  return (
+    `+[](const gea::Ref<gea::NativeClassMethodState>& gea_state) -> gea::Value { return gea::Value::box(gea::Value::Tag::Object, ` +
+    `gea::nativeClassPrototype<${cppClassName(declaration)}>(gea_state, ${initializer})); }`
+  )
+}
+
+const nativePrototypeInitializerText = (ctx: EmitContext, layout: ClassLayout, originalMethod: OriginalMethod): string => {
   const declaration = layout.declaration
   const chain: ClassLayout[] = []
   for (let current: DeclarationId | null = declaration; current !== null;) {
@@ -51,7 +85,10 @@ export const nativePrototypeObjectText = (
       : []
   for (const entry of chain) {
     if (entry.instance?.kind === 'class-ref') {
-      for (const field of ctx.layouts.forShape(entry.instance.shapeId) ?? []) clear.add(field.key)
+      // A descendant field the subclass-member overlay put on this shape and
+      // the class's native storage then left out has no slot to clear.
+      const omitted = new Set(entry.nativeStorage?.omittedOverlays ?? [])
+      for (const field of ctx.layouts.forShape(entry.instance.shapeId) ?? []) if (!omitted.has(field.key)) clear.add(field.key)
     }
     // Semantic class accessors dispatch through bodies and need not allocate
     // record-property slots. Only the shared physical layout owns these bits.
@@ -74,14 +111,22 @@ export const nativePrototypeObjectText = (
     initialize.push(`gea_prototype->${cppRecordFieldAttributesName(method.key)}.enumerable = false;`)
   }
   if (layout.prototypeExtensions?.includes(null)) initialize.push(declaredMemberOwnerText(chain))
-  const prototype = `gea::nativeClassPrototype<${cppClassName(declaration)}>(gea::nativeClassMethodStateFromEnvironment(${receiverText}.environment), [&](const auto& gea_prototype) { ${initialize.join(' ')} })`
-  const converted = alignedValueText(ctx, 'native-prototype:result', layout.instance, result, prototype)
-  if (converted === null)
-    throw createCppEmitBlockedError(
-      'property-access:class-prototype:result',
-      'prototype native layout cannot fill the published class carrier'
+  if (layout.prototypeReflected) initialize.push(declaredDescriptorsText(layout.prototypeReflected))
+  return `[&](const auto& gea_prototype) { ${initialize.join(' ')} }`
+}
+
+/** The class's own declared methods and accessors, for `Object.getOwnPropertyDescriptors(C.prototype)`. */
+const declaredDescriptorsText = (members: NonNullable<ClassLayout['prototypeReflected']>): string => {
+  const entries: string[] = []
+  for (const { key, accessor } of members) {
+    if (cppRecordFieldKeyIsSymbol(key)) continue
+    entries.push(
+      accessor === null
+        ? `gea::detail::declaredMethodDescriptor(gea_out, ${cppStringLiteral(key)});`
+        : `gea::detail::declaredAccessorDescriptor(gea_out, ${cppStringLiteral(key)}, ${accessor.getter}, ${accessor.setter});`
     )
-  return converted
+  }
+  return `gea_prototype->gea_method_state->declaredDescriptors = +[](std::vector<std::pair<gea::PropertyKey, gea::PropertyDescriptor>>& gea_out) { ${entries.join(' ')} };`
 }
 
 /**

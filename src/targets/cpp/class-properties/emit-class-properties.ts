@@ -1181,6 +1181,28 @@ export const classConstructorStaticFieldName = (ctx: EmitContext, receiver: Repr
  * name: the census skips those, so no storage was emitted for one, and
  * reading it would be a lookup path answering before its storage exists.
  */
+/** A prototype object's own slot for a declared method, filled with the method's original function object. */
+const prototypeOriginalMethodText =
+  (ctx: EmitContext) =>
+  (owner: ClassLayout, method: ClassLayout['methods'][number], state: string): { text: string; representation: Representation } => {
+    if (method.callable === null)
+      throw createCppEmitBlockedError('property-access:class-prototype:abstract-method', 'abstract method has no function object')
+    const abi = ctx.abiOfCallable(method.callable)
+    if (abi === null)
+      throw createCppEmitBlockedError('property-access:class-prototype:method-abi', 'prototype method has no native convention')
+    const representation: Representation = { kind: 'function-value-dispatch', abi }
+    const environment = methodEnvironmentText(ctx, method.callable, `prototype method ${method.key}`)
+    const payload = `${cppTypeOf(representation)}{${cppThunkEntryText(ctx, method.callable)}, ${environment}}`
+    return {
+      representation,
+      text: `gea::nativeClassMethodValue<${cppClassName(owner.declaration)}, &${cppCallableDeclarationTagName(method.callable)}>(${state}, ${payload})`
+    }
+  }
+
+/** `gea::reflectNativeClassPrototype`'s hook for one class evaluation, or `null` when the program does not reflect over prototypes. */
+export const classPrototypeValueHookText = (ctx: EmitContext, declaration: DeclarationId): string | null =>
+  nativePrototypeValueHookText(ctx, declaration, prototypeOriginalMethodText(ctx))
+
 export const classConstructorStaticMemberTextFor = (
   ctx: EmitContext,
   receiver: Representation,

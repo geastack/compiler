@@ -1010,6 +1010,10 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
     'ObjectConstructor.getOwnPropertyDescriptor',
     { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }
   ],
+  [
+    'ObjectConstructor.getOwnPropertyDescriptors',
+    { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }
+  ],
   ['ObjectConstructor.freeze', { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }],
   ['ObjectConstructor.isFrozen', { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }],
   ['ObjectConstructor.seal', { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }],

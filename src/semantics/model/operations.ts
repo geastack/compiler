@@ -528,6 +528,17 @@ export interface ClassLifecycleOperation extends SemanticOperationBase {
   readonly staticBlock?: RegionId
   /** A layout demand, not evaluation or allocation of this class's constructor. */
   readonly classLayoutOnly?: boolean
+  /**
+   * On `bind-class-value`: the instance methods and accessors the class body
+   * declares with a plain name, whether or not anything reaches them. The
+   * members reachability keeps are the `define-*` events; this is what
+   * `Object.getOwnPropertyDescriptors(C.prototype)` observes.
+   */
+  readonly declaredPrototypeMembers?: readonly {
+    readonly key: string
+    /** `null` for a method; which halves an accessor declares otherwise. */
+    readonly accessor: { readonly getter: boolean; readonly setter: boolean } | null
+  }[]
 }
 
 /** A property descriptor as the language defines it. */

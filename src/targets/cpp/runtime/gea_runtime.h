@@ -19430,6 +19430,12 @@ T unboxValue(const Value& value, Value::Tag expected, const char* site) {
   else return T(unboxAs<T>(value, expected, site));
 }
 
+/** Class evaluation for a program that reflects over prototypes: the evaluation can hand out its prototype object. */
+inline PackedEnvironment reflectNativeClassPrototype(PackedEnvironment environment, Value (*prototypeValue)(const Ref<NativeClassMethodState>&)) {
+  static_cast<NativeClassMethodState*>(environment.pointer)->prototypeValue = prototypeValue;
+  return environment;
+}
+
 /**
  * Projects an authenticated boxed program-class allocation to a stated class.
  *
@@ -40624,6 +40630,33 @@ inline gea::Optional<Descriptor> getOwnPropertyDescriptor(const gea::Value& targ
   return gea::Optional<Descriptor>(Descriptor(found));
 }
 
+/**
+ * ECMA-262 20.1.2.9 `Object.getOwnPropertyDescriptors`: each own key's
+ * descriptor, in own-key order. A class's prototype object also holds the
+ * class's declared methods and accessors, which live in generated code rather
+ * than in a table; the class states them (`declaredDescriptors`, installed
+ * when the prototype object is materialized) and they follow its table keys.
+ */
+inline std::vector<std::pair<gea::PropertyKey, gea::PropertyDescriptor>> getOwnPropertyDescriptorList(const gea::Value& target) {
+  std::vector<std::pair<gea::PropertyKey, gea::PropertyDescriptor>> out;
+  if (target.tag() != gea::Value::Tag::Object && target.tag() != gea::Value::Tag::Function) gea::host::throwRuntimeError("TypeError", "Cannot convert undefined or null to object");
+  for (const gea::PropertyKey& key : target.ownPropertyKeys()) {
+    gea::PropertyDescriptor found;
+    if (target.ownDescriptor(key, found)) out.emplace_back(key, found);
+  }
+  const gea::NativeClassMethodState* state = target.classPrototypeState();
+  if (state != nullptr && state->declaredDescriptors != nullptr) {
+    std::vector<std::pair<gea::PropertyKey, gea::PropertyDescriptor>> declared;
+    state->declaredDescriptors(declared);
+    for (auto& entry : declared) {
+      bool shadowed = false;
+      for (const auto& present : out) shadowed = shadowed || present.first == entry.first;
+      if (!shadowed) out.push_back(std::move(entry));
+    }
+  }
+  return out;
+}
+
 /** ECMA-262 20.1.2.6 `Object.freeze` -- SetIntegrityLevel(frozen): every own property becomes non-configurable, every data property non-writable, and the object non-extensible. */
 inline gea::Value freeze(const gea::Value& target) {
   target.freezeIntegrity();
@@ -40651,6 +40684,9 @@ inline bool hasOwn(const gea::Value& target, const gea::PropertyKey& key) { retu
  * instance's chain points at.
  */
 inline gea::Value getPrototypeOf(const gea::Value& target) {
+  if (const gea::NativeClassMethodState* start = nullptr; target.nativeClassChainStart(start)) {
+    return gea::detail::nativeClassPrototypeValue(start);
+  }
   gea::DynamicObject& table = gea::runtime::object::require(target, "Object.getPrototypeOf");
   const gea::Ref<gea::DynamicObject> proto = table.prototype();
   if (!proto) return gea::Value::box(gea::Value::Tag::Null, nullptr);

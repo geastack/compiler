@@ -48,6 +48,7 @@ import {
   unitFunctionName
 } from '../types.js'
 import {
+  boxedValueText,
   isNativeCallableCarrier,
   ownershipOfGeneratedCarrier,
   propertyKeyText as propertyKeyOperandText,
@@ -939,6 +940,14 @@ const getPrototypeOfText = (ctx: EmitContext, operation: CallOperation): string 
   if (view.kind === 'dictionary') {
     return refuseDictionaryArm(member, view, 'a native Dictionary carries no [[Prototype]] slot this backend models')
   }
+  // A class instance's [[Prototype]] is its class evaluation's prototype
+  // object, handed out by the evaluation (`prototypeReflected`).
+  if (
+    view.representation.kind === 'class-ref' &&
+    view.accessor === '->' &&
+    ctx.classes.get(view.representation.declaration)?.prototypeReflected
+  )
+    return `gea::nativeGetPrototypeOf(${view.receiver})`
   return refuseObjectCarrier(
     member,
     view.representation,
@@ -3394,6 +3403,87 @@ const definePropertiesText = (ctx: EmitContext, operation: CallOperation): strin
 }
 
 /**
+ * `Object.getOwnPropertyDescriptors(target)` -- three reads it over class
+ * prototypes (`RenderObject`'s material cache keys, `NodeMaterial`'s
+ * `setDefaultValues`/`copy`). The runtime lists every own descriptor, a class
+ * prototype's declared methods and accessors included
+ * (`gea::host::ObjectConstructor::getOwnPropertyDescriptorList`), and each is
+ * built into the call's own `PropertyDescriptor` record with the presence
+ * bits its `has*` flags state.
+ *
+ * A descriptor's `get`/`set` becomes a callable that stops the program by
+ * name if it is called: the accessor's function takes a receiver the
+ * record's `get(): any` does not pass, and three only tests for it
+ * (`typeof descriptor.get === 'function'`, `.get !== undefined`). Handing the
+ * record to `Object.defineProperty` -- `setDefaultValues` copying another
+ * class's getters, decision 5 -- is refused by name there when it runs.
+ */
+const getOwnPropertyDescriptorsText = (ctx: EmitContext, operation: CallOperation): string => {
+  const member = 'getOwnPropertyDescriptors'
+  const target = operation.arguments[0]
+  const refuse = (reason: string): never => {
+    throw createCppEmitBlockedError('host-member-call:ObjectConstructor.getOwnPropertyDescriptors', reason)
+  }
+  if (target === undefined || operation.arguments.length !== 1 || operation.argumentsAreSpread) return refuse('the call takes one target')
+  const result = operation.result?.representation
+  if (result === undefined)
+    return `(void)gea::host::ObjectConstructor::getOwnPropertyDescriptorList(${boxedValueText(ctx, target, member)})`
+  if (result.kind !== 'dictionary' || result.key !== 'string')
+    return refuse(`the result is carried as "${representationKey(result)}" rather than a string-keyed table of descriptors`)
+  const { aggregateOf, attributeText, convertValueField } = descriptorAggregateBuilder(ctx, result.value, `"Object.${member}"`)
+  const recordFields =
+    result.value.kind === 'record' || result.value.kind === 'record-with-index'
+      ? result.value.fields
+      : result.value.kind === 'native-record-ref'
+        ? (recordFieldsOfShape(ctx.deriver, result.value.shapeId) ?? [])
+        : []
+  const accessorStub = (key: 'get' | 'set'): string | null => {
+    const field = recordFields.find((candidate) => candidate.key === key)
+    if (!field) return null
+    const carrier = field.value.kind === 'optional' ? field.value.payload : field.value
+    if (carrier.kind !== 'function-value-dispatch' || carrier.abi.receiver !== null) return null
+    const parameters = carrier.abi.parameters.map((parameter) => cppTypeOf(parameter.value)).join(', ')
+    const stub =
+      `${cppTypeOf(carrier)}{+[](void*${parameters ? `, ${parameters}` : ''}) -> ${carrier.abi.result.kind === 'void' ? 'void' : cppTypeOf(carrier.abi.result)} { ` +
+      `std::fputs("gea: an accessor's ${key} read out of Object.getOwnPropertyDescriptors was called; it takes the object the property is ` +
+      `read on, which this descriptor does not pass\\n", stderr); gea::detail::abortAfterFlush(); }, nullptr}`
+    return field.value.kind === 'optional' ? `${cppTypeOf(field.value)}(${stub})` : stub
+  }
+  const overrides: Record<string, string> = {
+    value: convertValueField({ kind: 'dynamic', reason: 'declared-any-never-narrowed' }, '__gea_native.value'),
+    writable: attributeText('writable', '__gea_native.hasWritable', '__gea_native.writable'),
+    enumerable: attributeText('enumerable', '__gea_native.hasEnumerable', '__gea_native.enumerable'),
+    configurable: attributeText('configurable', '__gea_native.hasConfigurable', '__gea_native.configurable')
+  }
+  const present: Record<string, string> = {
+    value: '__gea_native.hasValue',
+    writable: '__gea_native.hasWritable',
+    enumerable: '__gea_native.hasEnumerable',
+    configurable: '__gea_native.hasConfigurable'
+  }
+  for (const key of ['get', 'set'] as const) {
+    const stub = accessorStub(key)
+    if (stub === null) {
+      if (recordFields.some((field) => field.key === key))
+        refuse(`the descriptor record's "${key}" field has no receiver-free callable carrier`)
+      continue
+    }
+    overrides[key] = stub
+    present[key] =
+      `(__gea_native.has${key === 'get' ? 'Get' : 'Set'} && (__gea_native.${key}${key === 'get' ? 'terValue' : 'terValue'}.tag() != gea::Value::Tag::Undefined || static_cast<bool>(__gea_native.${key})))`
+  }
+  const record = aggregateOf(overrides, present)
+  const tableType = cppTypeOf(result)
+  const accessor = memberAccessOperator(result.ownership)
+  const fresh = result.ownership === 'shared-refcount' ? `gea::makeRef<gea::Dictionary<${cppTypeOf(result.value)}>>()` : `${tableType}{}`
+  return (
+    `([&]() -> ${tableType} { auto __gea_table = ${fresh}; ` +
+    `for (const auto& [__gea_key, __gea_native] : gea::host::ObjectConstructor::getOwnPropertyDescriptorList(${boxedValueText(ctx, target, member)})) { ` +
+    `if (__gea_key.isSymbol()) continue; __gea_table${accessor}setProperty(__gea_key.text(), ${record}); } return __gea_table; })()`
+  )
+}
+
+/**
  * `Object`'s statics, dispatched by member.
  *
  * Every member `host-members.ts` claims has an arm here, and every member it
@@ -3669,6 +3759,7 @@ export const objectMemberText = (ctx: EmitContext, member: string, operation: Ca
   if (member === 'create') return createText(operation)
   if (member === 'defineProperty') return definePropertyText(ctx, operation)
   if (member === 'defineProperties') return definePropertiesText(ctx, operation)
+  if (member === 'getOwnPropertyDescriptors') return getOwnPropertyDescriptorsText(ctx, operation)
   throw createCppEmitBlockedError(
     `host-member-call:Object.${member}`,
     `"ObjectConstructor.${member}" is claimed with a call-site spelling in host-members.ts, but this file states no arm ` +
