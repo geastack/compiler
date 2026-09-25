@@ -1,3 +1,4 @@
+import { hostMemberOf } from './host/host-members.js'
 import type { Representation } from '../../representation/model.js'
 import { dictionaryKeyDomainOf, representationKey } from '../../representation/model.js'
 import { typedArrayUnionOnly } from '../../representation/host-templates.js'
@@ -226,6 +227,15 @@ const armRuntimeFieldText = (
   if (wellKnownSymbolMemberOf(ctx, operation.key) === 'toStringTag') {
     const tag = binaryToStringTagText(arm)
     if (tag !== null) return alignedValueText(ctx, 'emit-union-properties.ts:116', { kind: 'string' }, published, tag)
+  }
+  // A host object's own data member, read off the arm that holds it: the
+  // host row states the member's emitted text and carrier (`TypeErrorConstructor
+  // .prototype` is its prototype's handle), exactly as the same read off a lone
+  // handle renders.
+  if (arm.kind === 'native-handle' && arm.native === null) {
+    const row = hostMemberOf(ctx.hosts.members, arm.protocol, key)
+    if (row?.kind === 'property' && row.resultRepresentation !== undefined && row.emit !== null)
+      return alignedValueText(ctx, 'emit-union-properties.ts:host-arm', row.resultRepresentation, published, row.emit)
   }
   const boxed: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
   const propertyKey = staticPropertyKeyText(ctx.wellKnownSymbols, key)

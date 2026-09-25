@@ -177,7 +177,8 @@ export interface IrBodyBuilder {
     args: readonly IrOperand[],
     representation: Representation,
     /** `ConstructOperation.hostFrame`: the site's selected host-constructor frame, where one was derived. */
-    hostFrame?: CallableAbi
+    hostFrame?: CallableAbi,
+    argumentsAreSpread?: boolean
   ) => IrValueId
 
   readonly constant: (
@@ -674,9 +675,29 @@ export const createIrBodyBuilder = (
     append(block, { kind: 'reparent-constructor', lineage, derived, base, classValue, heritage })
   }
 
-  const construct: IrBodyBuilder['construct'] = (block, lineage, callee, newTarget, target, args, representation, hostFrame) => {
+  const construct: IrBodyBuilder['construct'] = (
+    block,
+    lineage,
+    callee,
+    newTarget,
+    target,
+    args,
+    representation,
+    hostFrame,
+    argumentsAreSpread
+  ) => {
     const result = mintResult(representation)
-    append(block, { kind: 'construct', lineage, callee, newTarget, target, ...(hostFrame ? { hostFrame } : {}), arguments: args, result })
+    append(block, {
+      kind: 'construct',
+      lineage,
+      callee,
+      newTarget,
+      target,
+      ...(hostFrame ? { hostFrame } : {}),
+      ...(argumentsAreSpread ? { argumentsAreSpread } : {}),
+      arguments: args,
+      result
+    })
     return result.id
   }
 

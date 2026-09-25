@@ -259,7 +259,17 @@ export const hostBuiltinFunctionIdentityText = (protocol: string, member: string
  */
 const hostClassCallPaths: ReadonlyMap<string, string> = new Map([['String', 'gea::host::detail::toString']])
 
-export const hostClassValueText = (representation: Representation, className: string): string | null => {
+export const hostClassValueText = (representation: Representation, className: string): string | null =>
+  hostClassCallableValueText(representation, className) ??
+  // A host class held in its own handle carrier, where no call-half thunk
+  // stands for it: the constructor object is a stateless singleton, so its
+  // protocol's tag IS the whole value -- the same spelling the `X.prototype`
+  // handles already have (host-members.ts). A union of host constructors
+  // (`createError(..., Base = Error)` called with `TypeError`) holds each arm
+  // this way.
+  (representation.kind === 'native-handle' && representation.native === null ? `${cppTypeOf(representation)}{}` : null)
+
+const hostClassCallableValueText = (representation: Representation, className: string): string | null => {
   // A host class READ carries its own `native-handle`, whose `call` half is
   // the convention the class object is callable under -- the same shape
   // `function-value-dispatch` states for a function, one field deeper.

@@ -490,6 +490,19 @@ struct gea_native_protocol_Object_prototype_v1 {};
 struct gea_native_protocol_Promise_prototype_v1 {};
 struct gea_native_protocol_StringConstructor_v1 {};
 struct gea_native_protocol_ErrorConstructor_v1 {};
+struct gea_native_protocol_EvalErrorConstructor_v1 {};
+struct gea_native_protocol_RangeErrorConstructor_v1 {};
+struct gea_native_protocol_ReferenceErrorConstructor_v1 {};
+struct gea_native_protocol_SyntaxErrorConstructor_v1 {};
+struct gea_native_protocol_TypeErrorConstructor_v1 {};
+struct gea_native_protocol_URIErrorConstructor_v1 {};
+struct gea_native_protocol_Error_prototype_v1 {};
+struct gea_native_protocol_EvalError_prototype_v1 {};
+struct gea_native_protocol_RangeError_prototype_v1 {};
+struct gea_native_protocol_ReferenceError_prototype_v1 {};
+struct gea_native_protocol_SyntaxError_prototype_v1 {};
+struct gea_native_protocol_TypeError_prototype_v1 {};
+struct gea_native_protocol_URIError_prototype_v1 {};
 struct gea_native_protocol_NumberConstructor_v1 {};
 struct gea_native_protocol_BigIntConstructor_v1 {};
 // `JSON`, `lib.es5.d.ts`'s own ambient global -- ECMAScript, not a host's
@@ -9684,6 +9697,54 @@ const ValueMetadata* valueMetadataFor() {
   }();
   return &metadata;
 }
+/**
+ * A host intrinsic object this runtime models on the dynamic substrate, named
+ * by its protocol's handle tag: the seven error prototypes
+ * (%Error.prototype% and each %NativeError.prototype%). Boxing such a handle
+ * yields that one object (`Value::box`), so `Object.create(TypeError.
+ * prototype, ...)` links to it and a later `instanceof` walk meets it.
+ */
+template <typename Protocol>
+struct IntrinsicErrorPrototype {
+  static constexpr const char* name = nullptr;
+};
+template <>
+struct IntrinsicErrorPrototype<gea_native_protocol_Error_prototype_v1> {
+  static constexpr const char* name = "Error";
+};
+template <>
+struct IntrinsicErrorPrototype<gea_native_protocol_EvalError_prototype_v1> {
+  static constexpr const char* name = "EvalError";
+};
+template <>
+struct IntrinsicErrorPrototype<gea_native_protocol_RangeError_prototype_v1> {
+  static constexpr const char* name = "RangeError";
+};
+template <>
+struct IntrinsicErrorPrototype<gea_native_protocol_ReferenceError_prototype_v1> {
+  static constexpr const char* name = "ReferenceError";
+};
+template <>
+struct IntrinsicErrorPrototype<gea_native_protocol_SyntaxError_prototype_v1> {
+  static constexpr const char* name = "SyntaxError";
+};
+template <>
+struct IntrinsicErrorPrototype<gea_native_protocol_TypeError_prototype_v1> {
+  static constexpr const char* name = "TypeError";
+};
+template <>
+struct IntrinsicErrorPrototype<gea_native_protocol_URIError_prototype_v1> {
+  static constexpr const char* name = "URIError";
+};
+template <typename T>
+struct IntrinsicObjectHandle {
+  static constexpr const char* name = nullptr;
+};
+template <typename Protocol>
+struct IntrinsicObjectHandle<gea::NativeHandle<Protocol>> {
+  static constexpr const char* name = IntrinsicErrorPrototype<Protocol>::name;
+};
+inline Value intrinsicErrorPrototypeValue(const char* name);
 }  // namespace detail
 
 class Value {
@@ -9702,6 +9763,9 @@ class Value {
   /** Boxes a value of any shape. The tag is stated by the caller because C++ type identity is not JavaScript type identity -- a `std::string` is a JS string, but a `gea::Optional<double>` is a JS number or `undefined` depending on the presence flag, and only the emitter knows which. */
   template <typename T>
   static Value box(Tag tag, T&& value) {
+    if constexpr (detail::IntrinsicObjectHandle<std::decay_t<T>>::name != nullptr) {
+      return detail::intrinsicErrorPrototypeValue(detail::IntrinsicObjectHandle<std::decay_t<T>>::name);
+    }
     Value result;
     result.tag_ = tag;
     if (tag == Tag::Function) {
@@ -23125,6 +23189,16 @@ inline void registerErrorRecordType(const char* name) {
 inline bool instanceOfError(const gea::Value& value, const char* name) {
   if (value.tag() != gea::Value::Tag::Object) return false;
   if (gea::host::isRuntimeError(value)) return gea::host::instanceOfRuntimeError(value, name);
+  // An ordinary object reaches the constructor through its prototype chain
+  // (10.2.3 OrdinaryHasInstance): `new FastifyError()` whose prototype was
+  // `Object.create(TypeError.prototype, ...)` meets the intrinsic
+  // %TypeError.prototype%, and through it %Error.prototype%.
+  if (const gea::Ref<gea::DynamicObject> object = value.asDynamicObject()) {
+    const gea::Ref<gea::DynamicObject> sought = gea::detail::intrinsicErrorPrototypeValue(name).asDynamicObject();
+    for (gea::Ref<gea::DynamicObject> link = object->prototype(); link; link = link->prototype())
+      if (link.get() == sought.get()) return true;
+    return false;
+  }
   const auto found = detail::errorPayloadTypes().find(name);
   if (found == detail::errorPayloadTypes().end()) return false;
   const void* payload = value.payloadType();
@@ -27064,7 +27138,100 @@ inline bool defineOwnProperty(const Value& receiver, const PropertyKey& key, con
 /** 10.1.11.1 OrdinaryOwnPropertyKeys -- every own key, enumerable or not, in specification order. */
 inline std::vector<PropertyKey> ownKeys(const Value& receiver) { return receiver.ownPropertyKeys(); }
 
+/**
+ * ECMA-262 6.2.6.5 ToPropertyDescriptor over a descriptor OBJECT the program
+ * built dynamically: each field is stated only when the object has it (own or
+ * inherited, `HasProperty`), and a present `get`/`set` installs the function
+ * object itself.
+ */
+inline PropertyDescriptor toPropertyDescriptor(const Value& object) {
+  if (object.tag() != Value::Tag::Object && object.tag() != Value::Tag::Function) {
+    gea::host::throwRuntimeError("TypeError", "Property description must be an object");
+  }
+  PropertyDescriptor out;
+  const auto field = [&](const char* name, auto&& apply) {
+    const PropertyKey key = PropertyKey::string(name);
+    if (object.hasProperty(key)) apply(object.getProperty(key));
+  };
+  field("enumerable", [&](const Value& v) { out.hasEnumerable = true; out.enumerable = gea::host::detail::toBoolean(v); });
+  field("configurable", [&](const Value& v) { out.hasConfigurable = true; out.configurable = gea::host::detail::toBoolean(v); });
+  field("value", [&](const Value& v) { out.hasValue = true; out.value = v; });
+  field("writable", [&](const Value& v) { out.hasWritable = true; out.writable = gea::host::detail::toBoolean(v); });
+  field("get", [&](const Value& v) { gea::detail::setDescriptorGetter(out, v); });
+  field("set", [&](const Value& v) { gea::detail::setDescriptorSetter(out, v); });
+  if ((out.hasGet || out.hasSet) && (out.hasValue || out.hasWritable)) {
+    gea::host::throwRuntimeError("TypeError", "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute");
+  }
+  return out;
+}
+
+/**
+ * ECMA-262 20.1.2.3.1 ObjectDefineProperties: every own ENUMERABLE key of
+ * `properties`, strings then symbols in its own key order, read into a
+ * descriptor first and only then defined, so a throwing descriptor defines
+ * nothing.
+ */
+inline void defineProperties(const Value& target, const Value& properties) {
+  std::vector<std::pair<PropertyKey, PropertyDescriptor>> descriptors;
+  for (const PropertyKey& key : properties.ownPropertyKeys()) {
+    PropertyDescriptor own;
+    if (!properties.ownDescriptor(key, own) || !own.enumerable) continue;
+    descriptors.emplace_back(key, toPropertyDescriptor(properties.getProperty(key)));
+  }
+  for (const auto& [key, descriptor] : descriptors) {
+    if (!defineOwnProperty(target, key, descriptor)) gea::host::throwRuntimeError("TypeError", "Cannot redefine property");
+  }
+}
+
+/**
+ * ECMA-262 20.1.2.2 `Object.create(O, Properties)`: an ordinary object whose
+ * `[[Prototype]]` is `O` (an object or `null`), then ObjectDefineProperties
+ * when `Properties` is not `undefined`.
+ */
+inline Value create(const Value& prototype, const Value& properties) {
+  Value object = Value::object();
+  if (prototype.tag() == Value::Tag::Object || prototype.tag() == Value::Tag::Function) {
+    const gea::Ref<DynamicObject> link = prototype.asDynamicObject();
+    if (!link) gea::host::throwRuntimeError("TypeError", "Object prototype may only be an Object or null: a native object has no prototype this runtime can link to");
+    object.asDynamicObject()->setPrototype(link);
+  } else if (prototype.tag() != Value::Tag::Null) {
+    gea::host::throwRuntimeError("TypeError", "Object prototype may only be an Object or null");
+  }
+  if (properties.tag() != Value::Tag::Undefined) defineProperties(object, properties);
+  return object;
+}
+
 }  // namespace gea::runtime::object
+
+namespace gea::detail {
+/**
+ * %Error.prototype% (ECMA-262 20.5.3) and the six %NativeError.prototype%s
+ * (20.5.6.3), one object each for the program's lifetime. Each NativeError
+ * prototype's `[[Prototype]]` is %Error.prototype%; every one carries its own
+ * `name` and an empty `message`, writable, non-enumerable and configurable as
+ * the specification's data properties are.
+ */
+inline Value intrinsicErrorPrototypeValue(const char* name) {
+  static std::vector<std::pair<std::string, Value>> made;
+  for (const auto& [known, object] : made)
+    if (known == name) return object;
+  Value object = Value::object();
+  if (std::string_view(name) != "Error") object.asDynamicObject()->setPrototype(intrinsicErrorPrototypeValue("Error").asDynamicObject());
+  const auto data = [&](const char* key, Value value) {
+    PropertyDescriptor descriptor;
+    descriptor.hasValue = descriptor.hasWritable = descriptor.hasEnumerable = descriptor.hasConfigurable = true;
+    descriptor.value = std::move(value);
+    descriptor.writable = true;
+    descriptor.enumerable = false;
+    descriptor.configurable = true;
+    gea::runtime::object::defineOwnProperty(object, PropertyKey::string(key), descriptor);
+  };
+  data("name", Value::box(Value::Tag::String, std::string(name)));
+  data("message", Value::box(Value::Tag::String, std::string()));
+  made.emplace_back(name, object);
+  return object;
+}
+}  // namespace gea::detail
 
 /**
  * `Object`'s own statics -- the `ObjectConstructor@1` boundary's runtime half.

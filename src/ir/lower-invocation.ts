@@ -523,7 +523,7 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
       ? evaluated[0].value
       : null
   const argumentList =
-    operation.internalMethod === 'call' && callee.representation.kind === 'dynamic' && evaluated.some((slot) => slot.kind === 'spread')
+    callee.representation.kind === 'dynamic' && evaluated.some((slot) => slot.kind === 'spread')
       ? packedArgumentList(ctx, block, lineage, callee.representation, evaluated)
       : null
   const args =
@@ -556,7 +556,7 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
                 }
                 return slot.value
               })
-            : packRestArguments(ctx, block, lineage, operation.id, calleeAbi, evaluated)
+            : packRestArguments(ctx, block, lineage, operation.id, calleeAbi, evaluated, callee.representation)
   // `operation.target` (the `SemanticTargetProof`) is never read here: `open`
   // is a complete answer that selects this same generic path, and a narrower
   // proof does not license skipping straight to a direct call this IR has no
@@ -678,6 +678,16 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
   registerResult(
     ctx,
     operation,
-    ctx.builder.construct(block, lineage, callee, newTarget, operation.target, args, representation, hostFrame ?? undefined)
+    ctx.builder.construct(
+      block,
+      lineage,
+      callee,
+      newTarget,
+      operation.target,
+      args,
+      representation,
+      hostFrame ?? undefined,
+      argumentList !== null
+    )
   )
 }

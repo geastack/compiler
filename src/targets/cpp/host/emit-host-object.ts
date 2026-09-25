@@ -1,3 +1,4 @@
+import { errorPrototypeProtocols } from '../error-types.js'
 import type { CallableAbi, Ownership, RecordField, Representation } from '../../../representation/model.js'
 import { passingOf, representationKey } from '../../../representation/model.js'
 import { hostMemberTemplateOf } from '../../../representation/host-templates.js'
@@ -1754,7 +1755,7 @@ export const getOwnPropertyDescriptorText = (ctx: EmitContext, operation: CallOp
  * `Object.defineProperty`-per-key loop `definePropertyText` already writes --
  * both real features, neither one this row.
  */
-const createText = (operation: CallOperation): string => {
+const createText = (ctx: EmitContext, operation: CallOperation): string => {
   const proto = operation.arguments[0]
   if (proto === undefined) {
     throw createCppEmitBlockedError(
@@ -1762,21 +1763,7 @@ const createText = (operation: CallOperation): string => {
       '"Object.create" takes a prototype argument, and this call passes none'
     )
   }
-  if (operation.arguments.length > 1) {
-    throw createCppEmitBlockedError(
-      'host-member-call:Object.create',
-      '"Object.create" with a second (properties object) argument is not rendered: it is the same per-key ' +
-        '`Object.defineProperty` loop this file writes for that call, not yet installed for this one'
-    )
-  }
-  if (proto.representation.kind !== 'null') {
-    throw createCppEmitBlockedError(
-      'host-member-call:Object.create',
-      `"Object.create" was passed a prototype carried as "${representationKey(proto.representation)}"; only the null-` +
-        'prototype form renders, since every dynamic object this runtime builds starts with a null `[[Prototype]]` and ' +
-        'nothing here installs any other one yet'
-    )
-  }
+  if (operation.arguments.length > 1 || proto.representation.kind !== 'null') return linkedCreateText(ctx, operation, proto)
   const result = operation.result?.representation ?? null
   // The result's own carrier, whenever the program stated one. 20.1.2.2 makes
   // this call an OrdinaryObjectCreate with a null prototype and no own
@@ -1793,6 +1780,60 @@ const createText = (operation: CallOperation): string => {
     return result.ownership === 'shared-refcount' ? `gea::makeRef<${storage}>()` : `${storage}{}`
   }
   return 'gea::Value::object()'
+}
+
+/**
+ * `Object.create(O, Properties)` over the dynamic substrate
+ * (`gea::runtime::object::create`): the prototype and the descriptor map cross
+ * as boxes, and boxing a host prototype handle yields the runtime's intrinsic
+ * object for it (`gea::detail::IntrinsicObjectHandle`), so the new object links
+ * to the one %TypeError.prototype% every later lookup meets. The result is that
+ * ordinary object, which only a `dynamic` carrier can hold.
+ */
+const linkedCreateText = (ctx: EmitContext, operation: CallOperation, proto: IrOperand): string => {
+  const result = operation.result?.representation ?? null
+  if (result !== null && result.kind !== 'dynamic') {
+    throw createCppEmitBlockedError(
+      'host-member-call:Object.create',
+      `"Object.create" with a prototype or a properties argument builds an ordinary object with a [[Prototype]] link, and this ` +
+        `call's result is carried as "${representationKey(result)}", which holds no such link`
+    )
+  }
+  // A prototype is linkable only as an object this runtime can link to: a
+  // box, `null`, or a host intrinsic prototype handle, which boxes to the
+  // intrinsic object itself. A native struct has no [[Prototype]] slot to
+  // hand over, and boxing one would only defer the refusal to run time.
+  const linkable = (carrier: Representation): boolean =>
+    carrier.kind === 'dynamic' ||
+    carrier.kind === 'null' ||
+    (carrier.kind === 'native-handle' && carrier.native === null && errorPrototypeProtocols.has(carrier.protocol)) ||
+    (carrier.kind === 'tagged-union' && carrier.arms.every((arm) => linkable(arm.value)))
+  if (!linkable(proto.representation)) {
+    throw createCppEmitBlockedError(
+      'host-member-call:Object.create',
+      `"Object.create" was passed a prototype carried as "${representationKey(proto.representation)}"; only a null, boxed or ` +
+        'host intrinsic prototype renders, since a native struct has no [[Prototype]] slot this runtime can link a new object to'
+    )
+  }
+  const boxed = (operand: IrOperand, role: string): string => {
+    if (operand.representation.kind === 'dynamic') return operandText(ctx, operand)
+    const text = alignedValueText(
+      ctx,
+      'emit-host-object.ts:create',
+      operand.representation,
+      { kind: 'dynamic', reason: 'opt-in-fallback' },
+      operandText(ctx, operand)
+    )
+    if (text === null) {
+      throw createCppEmitBlockedError(
+        'host-member-call:Object.create',
+        `"Object.create"'s ${role} is carried as "${representationKey(operand.representation)}", which has no box to cross into the ordinary object`
+      )
+    }
+    return text
+  }
+  const properties = operation.arguments[1]
+  return `gea::runtime::object::create(${boxed(proto, 'prototype')}, ${properties === undefined ? 'gea::Value()' : boxed(properties, 'properties object')})`
 }
 
 /**
@@ -2756,7 +2797,7 @@ export const objectMemberText = (ctx: EmitContext, member: string, operation: Ca
   if (member === 'getOwnPropertyDescriptor') return getOwnPropertyDescriptorText(ctx, operation)
   if (hostMemberTemplateOf('ObjectConstructor', member) === 'object-assign') return assignText(ctx, operation)
   if (member === 'fromEntries') return fromEntriesText(ctx, operation)
-  if (member === 'create') return createText(operation)
+  if (member === 'create') return createText(ctx, operation)
   if (member === 'defineProperty') return definePropertyText(ctx, operation)
   throw createCppEmitBlockedError(
     `host-member-call:Object.${member}`,

@@ -101,6 +101,16 @@ export const prototypeMutatedConstructorTypes = (
     // results proven to originate from this exact FunctionId.
     const declaration = callableDeclarationOf(expression)
     if (declaration) callables.add(identities.functionIdOf(declaration))
+    // The type the program observes the constructor AT is marked too. A slot
+    // typed by it -- a return (`createError` handing back `FastifyError`), a
+    // record field, a parameter -- can hold this Function object, and the
+    // boxed object has no conversion back to a native callable carrier
+    // ("constructor identity is nominal"), so such a slot must be the box
+    // itself. Value-level provenance above cannot reach those slots: they are
+    // typed, not traced. A same-signature sibling sharing the id is boxed with
+    // it, which costs dispatch, never correctness -- a slot of that type
+    // cannot tell the two functions apart either.
+    if (declaration) selected.add(types.typeAt(expression))
     for (const signature of constructSignatures) {
       selected.add(types.typeOf(checker.getReturnTypeOfSignature(signature)))
     }

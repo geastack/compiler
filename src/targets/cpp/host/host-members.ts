@@ -687,6 +687,35 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
     nativeHandleProperty('Boolean.prototype', 'gea::NativeHandle<gea_native_protocol_Boolean_prototype_v1>{}')
   ],
   ['ObjectConstructor.prototype', nativeHandleProperty('Object.prototype', 'gea::NativeHandle<gea_native_protocol_Object_prototype_v1>{}')],
+  // The seven error constructors' prototype slots, for the same reflection and
+  // for `Object.create(Base.prototype, ...)` (@fastify/error's
+  // `createError`): each is its own protocol's handle, whose boxed value is
+  // the runtime's intrinsic prototype object (`gea::host::intrinsicPrototype`).
+  ['ErrorConstructor.prototype', nativeHandleProperty('Error.prototype', 'gea::NativeHandle<gea_native_protocol_Error_prototype_v1>{}')],
+  [
+    'EvalErrorConstructor.prototype',
+    nativeHandleProperty('EvalError.prototype', 'gea::NativeHandle<gea_native_protocol_EvalError_prototype_v1>{}')
+  ],
+  [
+    'RangeErrorConstructor.prototype',
+    nativeHandleProperty('RangeError.prototype', 'gea::NativeHandle<gea_native_protocol_RangeError_prototype_v1>{}')
+  ],
+  [
+    'ReferenceErrorConstructor.prototype',
+    nativeHandleProperty('ReferenceError.prototype', 'gea::NativeHandle<gea_native_protocol_ReferenceError_prototype_v1>{}')
+  ],
+  [
+    'SyntaxErrorConstructor.prototype',
+    nativeHandleProperty('SyntaxError.prototype', 'gea::NativeHandle<gea_native_protocol_SyntaxError_prototype_v1>{}')
+  ],
+  [
+    'TypeErrorConstructor.prototype',
+    nativeHandleProperty('TypeError.prototype', 'gea::NativeHandle<gea_native_protocol_TypeError_prototype_v1>{}')
+  ],
+  [
+    'URIErrorConstructor.prototype',
+    nativeHandleProperty('URIError.prototype', 'gea::NativeHandle<gea_native_protocol_URIError_prototype_v1>{}')
+  ],
   // light-my-request builds its chainable request by walking
   // `Object.getOwnPropertyNames(Promise.prototype)`; the names come from the
   // protocol's own members, as for the six above.

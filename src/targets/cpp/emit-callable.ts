@@ -2370,9 +2370,13 @@ export const emitConstruct = (ctx: EmitContext, lines: string[], operation: Cons
   // `[[Call]]` thunk with that object as `this`, and returns the object
   // unless the body itself returned one.
   if (callee.kind === 'dynamic') {
-    const args = operation.arguments.map((argument) => boxedValueText(ctx, argument, 'dynamic construction argument'))
     const name = defineValue(ctx, operation.result)
-    lines.push(`${name} = ${operandText(ctx, operation.callee)}.construct({${args.join(', ')}});`)
+    const packed = operation.argumentsAreSpread === true && operation.arguments.length === 1 ? operation.arguments[0] : undefined
+    const list =
+      packed !== undefined
+        ? `gea::argumentListOf(${operandText(ctx, packed)})`
+        : `{${operation.arguments.map((argument) => boxedValueText(ctx, argument, 'dynamic construction argument')).join(', ')}}`
+    lines.push(`${name} = ${operandText(ctx, operation.callee)}.construct(${list});`)
     return
   }
   if (callee.kind !== 'constructor-family' && callee.kind !== 'constructor-value-dispatch' && callee.kind !== 'function-and-constructor') {

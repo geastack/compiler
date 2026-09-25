@@ -1,5 +1,5 @@
 //! expect-refusal: "Object.create" was passed a prototype carried as
-//! expect-refusal: only the null-prototype form renders
+//! expect-refusal: only a null, boxed or host intrinsic prototype renders
 // `@hono/node-server`'s `requestPrototype`: an object literal annotated
 // `Record<string | symbol, any>` whose accessor and symbol-keyed method read
 // `this[methodKey]`, used as the PROTOTYPE of `Object.create` objects that
