@@ -24497,6 +24497,21 @@ inline void appendGather(gea::ArrayObject<gea::Value>& out, const gea::Value& it
 }
 
 /**
+ * `appendGather` into an array whose elements are not boxes: each yielded value
+ * is converted by `convert`, the element conversion the emitter renders, before
+ * it is pushed. A conversion that throws propagates with the iterator left as
+ * `step` left it, exactly as a throwing `next()` does above.
+ */
+template <typename T, typename Convert>
+inline void appendGatherConverted(gea::ArrayObject<T>& out, const gea::Value& iterator, Convert&& convert) {
+  for (;;) {
+    Step next = step(iterator);
+    if (next.done) return;
+    out.push(convert(next.value));
+  }
+}
+
+/**
  * One protected for-of body iteration.  Normal continuation dismisses it;
  * return/break destroy it and therefore run IteratorClose. A throw is caught
  * by the emitter's surrounding catch first, where close failures are ignored

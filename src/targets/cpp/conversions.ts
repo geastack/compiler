@@ -180,8 +180,22 @@ const boxable = (representation: Representation): boolean => {
   if (representation.kind === 'dynamic') return true
   if (representation.kind === 'optional') return boxable(representation.payload)
   if (representation.kind === 'tagged-union') return representation.arms.every((arm) => boxable(arm.value))
-  return dynamicTagFor(representation) !== null
+  return dynamicTagFor(representation) !== null && callableFrameRecoverable(representation)
 }
+
+/**
+ * A boxed callable is called through the box's dynamic entry, which recovers
+ * each argument from a box by the callable's own frame. A frame it cannot
+ * recover (`dynamicCallableAbiSupported`, which refuses a `null`-absent
+ * optional parameter among others) is not boxable: boxing it would abort at the
+ * first dynamic call instead of refusing here.
+ */
+const callableFrameRecoverable = (representation: Representation): boolean =>
+  (representation.kind !== 'function' &&
+    representation.kind !== 'function-family' &&
+    representation.kind !== 'function-value-family' &&
+    representation.kind !== 'function-value-dispatch') ||
+  dynamicCallableAbiSupported(representation.abi)
 
 const exactTagRead = (tag: string): ClassifierMaterializerPair => ({
   classifier: { id: 'gea::Value::tag', domain: `tag:${tag}` },
@@ -572,6 +586,7 @@ const boxingWideningPair = (source: Representation): ClassifierMaterializerPair 
       materializer: { id: 'gea::Value::box', domain: `box:sum:${representationKey(source)}`, allocates: true }
     }
   }
+  if (!callableFrameRecoverable(source)) return null
   const tag = dynamicTagFor(source)
   if (tag === null) return null
   // Absence constructs only the dynamic tag; there is no native payload

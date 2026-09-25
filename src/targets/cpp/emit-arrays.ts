@@ -415,6 +415,22 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
       continue
     }
     if (slot.kind === 'gather') {
+      if (slot.iterator.representation.kind === 'dynamic' && slot.element !== undefined) {
+        const converted =
+          representationKey(slot.element) === representationKey(representation.element)
+            ? alignedValueText(ctx, 'emit-arrays.ts:gather', slot.iterator.representation, representation.element, 'gea_element')
+            : null
+        if (converted === null) {
+          throw createCppEmitBlockedError(
+            `conversion:${representationKey(slot.iterator.representation)}->${representationKey(representation.element)}`,
+            `a gathered box has no conversion into this array's "${representationKey(representation.element)}" element carrier`
+          )
+        }
+        lines.push(
+          `gea::runtime::iterator::appendGatherConverted(*${name}, ${operandText(ctx, slot.iterator)}, [&](const gea::Value& gea_element) { return ${converted}; });`
+        )
+        continue
+      }
       if (representation.element.kind !== 'dynamic' || slot.iterator.representation.kind !== 'dynamic') {
         throw createCppEmitBlockedError(
           `runtime-helper:allocation:array-literal:${representation.element.kind}(dynamic-gather)`,

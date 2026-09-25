@@ -2,7 +2,7 @@ import type { IrOperand, IrResult } from '../../../ir/model.js'
 import type { Representation } from '../../../representation/model.js'
 import { representationKey } from '../../../representation/model.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from '../emit-context.js'
-import { alignedValueText, type ConversionSite } from '../emit-narrowing.js'
+import { alignedValueText, convertedEvaluationText, type ConversionSite } from '../emit-narrowing.js'
 import { toStringRefusal, toStringText } from '../emit-tostring.js'
 import { cppConstantLiteral, cppTypeOf } from '../types.js'
 
@@ -326,7 +326,7 @@ const optionalElementResultText = (
   if (result === null) return text
   const carrier = result.representation
   const produced: Representation = { kind: 'optional', payload: element, absence: 'undefined' }
-  const converted = alignedValueText(ctx, 'prototype/emit-prototype-array.ts:242', produced, carrier, text)
+  const converted = convertedEvaluationText(ctx, 'prototype/emit-prototype-array.ts:242', produced, carrier, text)
   if (converted !== null) return converted
   throw createCppEmitBlockedError(
     `conversion:${representationKey(produced)}->${representationKey(carrier)}`,
