@@ -132,6 +132,12 @@ export interface StructuralPartsInput {
    * without the bag census is a second authority over the same storage.
    */
   readonly bags?: ObjectBagCensus
+  /**
+   * Whether an array literal is the unstated empty `[]` that `structural.ts`'s
+   * `unstated-never-array` rule lays out as an array of boxes. A member holding
+   * one is stored the same way, not as the checker's `never[]`.
+   */
+  readonly unstatedNeverArrayAt?: (node: ts.Node) => boolean
 }
 
 export interface StructuralParts {
@@ -809,12 +815,17 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // union -- which is every optional member without
     // `exactOptionalPropertyTypes`, and every one whose payload cannot
     // absorb an absence -- so this adds a state only where one was missing.
+    const unstatedEmptyArray =
+      censusNode && ts.isArrayLiteralExpression(censusNode) && input.unstatedNeverArrayAt?.(censusNode)
+        ? internArray(typeOf(checker.getAnyType()))
+        : null
     const stated = physical ?? declared
     return {
       key,
       type:
         inferredBag ??
         arraySlot ??
+        unstatedEmptyArray ??
         inferredCollection ??
         typeOf(optional ? checker.getNullableType(stated, ts.TypeFlags.Undefined) : stated),
       optional,

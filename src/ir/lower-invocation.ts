@@ -350,6 +350,14 @@ const packedArgumentList = (
 ): IrOperand | null => {
   const elements: IrArrayElement[] = []
   for (const slot of evaluated) {
+    // A dynamic spread source is the GetIterator record the producer acquired
+    // for it (`producers/spread-arguments.ts`), drained by the same gather an
+    // array literal's dynamic spread uses; the list's elements are boxes.
+    if (slot.kind === 'spread' && slot.value.representation.kind === 'dynamic' && box.kind === 'dynamic') {
+      if ((slot.from ?? 0) !== 0) return null
+      elements.push({ kind: 'gather', iterator: slot.value })
+      continue
+    }
     if (slot.kind === 'spread') {
       if (slot.value.representation.kind !== 'array-object') return null
       elements.push(

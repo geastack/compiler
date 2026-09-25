@@ -734,7 +734,8 @@ export const packRestArguments = (
       throw new IrLoweringBlockedError(
         'a call range-copies a spread argument into a convention that declares no rest slot; a spread contributes a runtime number of ' +
           `values and there is no fixed formal for them to land in (spread at ${firstSpread} of ${args.length}, convention ` +
-          `${abi ? abiKey(abi) : 'none'}${callee ? `, callee carried as ${callee.kind}` : ''})`
+          `${abi ? abiKey(abi) : 'none'}${callee ? `, callee carried as ${callee.kind}` : ''}, ` +
+          `spread source carried as ${representationKey(args[firstSpread]!.value.representation)})`
       )
     }
     return args.map((slot) => slot.value)

@@ -1163,6 +1163,16 @@ export const createLayoutTypeResolver = (
     if (statesNoStorageBeyondTheLiteral(node, candidate, own)) return own
     if (discardsLiteralAccessor(node, candidate, own)) return own
     if (ts.isArrayLiteralExpression(node) && !checker.isArrayType(candidate) && !checker.isTupleType(candidate)) return own
+    // A literal with elements cannot be laid out as an array that holds none.
+    // The checker keeps a TypeScript source from writing one; an unchecked
+    // JavaScript source can write `['a', 'b']` where the context is the
+    // `never[]` read back from an empty literal, and adopting it would store
+    // the elements into an element carrier with no values at all. A looser
+    // context (a JSDoc `Array<Object>`) still boxes what it is handed.
+    if (ts.isArrayLiteralExpression(node) && node.elements.length > 0 && checker.isArrayType(candidate)) {
+      const [element] = checker.getTypeArguments(candidate as ts.TypeReference)
+      if (element !== undefined && (element.flags & ts.TypeFlags.Never) !== 0) return own
+    }
     // Context can state the tuple shape without stating the callable stored
     // inside it: [Function][] must not erase a literal's concrete signature.
     // The same upper-bound test the parameter census uses proves that only
