@@ -98,7 +98,7 @@ import {
   unionMemberTypeofTagText,
   unionMemberTypeofText
 } from './emit-typeof.js'
-import { emitHasProperty } from './emit-in.js'
+import { emitHasProperty, ownedFieldPresenceText } from './emit-in.js'
 import { mergeWritesOf } from './emit-namespaces.js'
 import { templateText, toStringRefusal } from './emit-tostring.js'
 import { mixedDynamicPlusText } from './emit-mixed-binary.js'
@@ -1354,9 +1354,28 @@ const emitOperationStatements = (ctx: EmitContext, lines: string[], operation: I
     case 'set':
       emitFieldStore(ctx, classTableLines(ctx, lines, operation.receiver.value), operation, 'set')
       return
-    case 'define-own-property':
-      emitFieldStore(ctx, classTableLines(ctx, lines, operation.receiver.value), operation, 'define-own-property')
+    case 'define-own-property': {
+      const owner = operation.onlyIfOwnedBy
+      if (owner === undefined) {
+        emitFieldStore(ctx, classTableLines(ctx, lines, operation.receiver.value), operation, 'define-own-property')
+        return
+      }
+      const key = ctx.staticKeyTexts.get(operation.key.value)
+      const owned =
+        key === undefined || ctx.classTableRoots.has(operation.receiver.value)
+          ? null
+          : ownedFieldPresenceText(ctx, owner.representation, operandText(ctx, owner), key)
+      if (owned === null) {
+        throw createCppEmitBlockedError(
+          `runtime-helper:protocol:spread:owned-member:${owner.representation.kind}`,
+          `an object spread copies a member its "${representationKey(owner.representation)}" source may not own, and this carrier has no presence to test`
+        )
+      }
+      const guarded: string[] = []
+      emitFieldStore(ctx, guarded, operation, 'define-own-property')
+      lines.push(`if (${owned}) {`, ...guarded, '}')
       return
+    }
     case 'spread-copy':
       emitSpreadCopy(ctx, lines, operation)
       return

@@ -2,7 +2,7 @@ import type { IrBlockId } from './model.js'
 import { narrowedOperandView } from '../conversion/operand-view.js'
 import { callableOwnPrototypeAt } from '../semantics/callable-origins.js'
 import type { PropertyOperation } from '../semantics/model/operations.js'
-import { resultOf } from '../semantics/model/operands.js'
+import { operandOf, resultOf } from '../semantics/model/operands.js'
 import { IrLoweringBlockedError } from './lower-graph.js'
 import { pendingShortCircuitOf } from './lower-short-circuit.js'
 import { methodValueOriginOf } from '../projection/callee.js'
@@ -185,6 +185,7 @@ export const lowerProperty = (ctx: LoweringContext, block: IrBlockId, operation:
       if (!descriptor) {
         throw new IrLoweringBlockedError('a define-own-property operation states no descriptor for the IR to install')
       }
+      const owner = operandOf(operation, 'owner', 0)
       registerResult(
         ctx,
         operation,
@@ -195,7 +196,8 @@ export const lowerProperty = (ctx: LoweringContext, block: IrBlockId, operation:
           key,
           value,
           { writable: descriptor.writable, enumerable: descriptor.enumerable, configurable: descriptor.configurable },
-          optionalResultRepresentation(ctx, operation, 'value')
+          optionalResultRepresentation(ctx, operation, 'value'),
+          owner ? resolveRequiredOperand(ctx, block, lineage, owner) : undefined
         )
       )
       return
