@@ -1,7 +1,7 @@
 import type { PackageSource } from './package-sources.js'
 import type { ScopedTypeRealization } from './scoped-type-realizations.js'
 import type { CommonJsWrapperDeclaration, HostNativeTypeDeclaration, HostOwnedDeclaration } from '../plugins/model.js'
-import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, proxyFallbackTypes } from './dynamic-fallback.js'
+import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, proxyConstructionSites, proxyFallbackTypes } from './dynamic-fallback.js'
 import ts from 'typescript'
 import { structuralShapeKey } from './model/structural-types.js'
 import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
@@ -283,6 +283,12 @@ export interface FrontendResult {
   readonly dynamicWrittenTypes: ReadonlySet<StructuralTypeId>
   /** Exact source functions whose own mutable Function-object table requires fallback storage. */
   readonly dynamicFallbackCallables: ReadonlySet<FunctionId>
+  /**
+   * The `new Proxy` sites whose values `representation/publish.ts` follows
+   * (`semantics/proxy-origins.ts`). Empty under `--dynamic-fallback`, whose
+   * structural census (`proxyFallbackTypes`) answers the same question by type.
+   */
+  readonly proxySites: ReadonlySet<NodeId>
   readonly graph: SemanticGraph
   readonly sourcePreparations: readonly DiagnosticSourcePreparationAudit[]
   /**
@@ -1292,6 +1298,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     ? new Set<StructuralTypeId>([...proxyFallbackTypes(compiled.sourceFiles, compiled.checker, types), ...prototypeFallback.types])
     : new Set<StructuralTypeId>()
   const dynamicWrittenTypes = anyKeyedWriteTypes(compiled.sourceFiles, compiled.checker, types)
+  const proxySites = input.dynamicFallback ? new Set<NodeId>() : proxyConstructionSites(compiled.sourceFiles, compiled.checker, identities)
   const census = censusProgram(compiled.sourceFiles, identities, reachable, specializations, namespacePaths)
   // Before normalization, not after: the table seals when the graph does, and a
   // census that interns a type it is the first to ask about would be asking a
@@ -1809,6 +1816,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     dynamicFallbackTypes,
     dynamicWrittenTypes,
     dynamicFallbackCallables: prototypeFallback.callables,
+    proxySites,
     graph: normalized.graph,
     sourcePreparations: compiled.sourcePreparations,
     hostProtocols: hosts.protocols,

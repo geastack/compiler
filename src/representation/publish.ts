@@ -1,10 +1,11 @@
-import type { ComponentId, FunctionId, OperationId, SemanticResultId, StructuralTypeId } from '../identity/ids.js'
+import type { ComponentId, FunctionId, NodeId, OperationId, SemanticResultId, StructuralTypeId } from '../identity/ids.js'
 import { componentId, withoutFunctionSpecialization } from '../identity/ids.js'
 import { callableOriginsOf, callableOwnPropertyWritesOf, unknownCallableOwnProperty } from '../semantics/callable-origins.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import { partitionAuthorityComponents } from '../semantics/model/graph.js'
 import { operandOf, type SemanticResult } from '../semantics/model/operands.js'
 import type { SemanticOperation } from '../semantics/model/operations.js'
+import { proxyOriginsOf, type ProxyOrigins } from '../semantics/proxy-origins.js'
 import type {
   DateDeclarationPolicy,
   HostBindingPolicy,
@@ -44,7 +45,14 @@ import {
   defaultTypedArrayElementPolicy,
   defaultValueRecordPolicy
 } from './derive.js'
-import { isArrayPatternCapable, representationKey, soleArrayPatternCapableArm, type Representation } from './model.js'
+import {
+  isArrayPatternCapable,
+  passingOf,
+  representationKey,
+  soleArrayPatternCapableArm,
+  type CallableAbi,
+  type Representation
+} from './model.js'
 import { literalDestinationsOf } from './literal-destination.js'
 import type { RepresentationConflict, SealedRepresentationPlan } from './plan.js'
 import { createRepresentationPlanBuilder } from './plan.js'
@@ -500,6 +508,54 @@ const dynamicCallableValueOf = (
     : null
 }
 
+const proxyOriginCarrier: Representation = { kind: 'dynamic', reason: 'proxy-origin' }
+
+/** A convention whose result, or whose parameters at `positions`, may be a proxy: those slots take `dynamic`. */
+const proxyReachedAbi = (abi: CallableAbi, returns: boolean, positions: ReadonlySet<number> | undefined): CallableAbi => ({
+  ...abi,
+  result: returns ? proxyOriginCarrier : abi.result,
+  parameters: abi.parameters.map((parameter, ordinal) =>
+    positions?.has(ordinal) && parameter.value.kind !== 'dynamic'
+      ? { value: proxyOriginCarrier, ownership: parameter.ownership, passing: passingOf(proxyOriginCarrier, parameter.ownership) }
+      : parameter
+  )
+})
+
+/**
+ * The carrier of a value that may hold a proxy (`semantics/proxy-origins.ts`),
+ * or of a source function whose convention a proxy reaches -- every view of
+ * that exact Function object states the same convention, so the body, its
+ * callers and its own value agree.
+ */
+const proxyOriginOf = (
+  result: SemanticResult,
+  origins: ProxyOrigins,
+  callableOrigins: ReadonlyMap<SemanticResultId, FunctionId>,
+  derived: () => Representation
+): Representation | null => {
+  if (origins.results.has(result.id)) return proxyOriginCarrier
+  const origin = callableOrigins.get(result.id)
+  if (origin === undefined) return null
+  const callable = withoutFunctionSpecialization(origin)
+  const returns = origins.returning.has(callable)
+  const positions = origins.parameters.get(callable)
+  if (!returns && positions === undefined) return null
+  const carrier = derived()
+  switch (carrier.kind) {
+    case 'function':
+    case 'function-value-dispatch':
+      return { ...carrier, abi: proxyReachedAbi(carrier.abi, returns, positions) }
+    case 'function-and-constructor':
+      return {
+        ...carrier,
+        call: proxyReachedAbi(carrier.call, returns, positions),
+        construct: proxyReachedAbi(carrier.construct, false, positions)
+      }
+    default:
+      return null
+  }
+}
+
 /**
  * CommonJS module records are the one explicitly dynamic host boundary here.
  * The checker authenticated the wrapper declaration and normalization carried
@@ -629,7 +685,11 @@ export const publishRepresentations = (
   dynamicWrittenTypes: ReadonlySet<StructuralTypeId> = new Set(),
   // The copies of every generic class whose copies can differ in layout; see
   // `ClassCopyPolicy` (policies.ts) and the deriver's `physicalClassDeclarationOf`.
-  classCopies?: ClassCopyPolicy
+  classCopies?: ClassCopyPolicy,
+  // The `new Proxy` sites the frontend authenticated, outside
+  // `--dynamic-fallback` (which boxes by structural type instead). Empty for a
+  // program that constructs no proxy, and then nothing here changes.
+  proxySites: ReadonlySet<NodeId> = new Set()
 ): RepresentationPublication => {
   const callableOrigins = callableOriginsOf(graph)
   // The deriver may recover a boxed callable's declaration-owned frame only
@@ -685,6 +745,21 @@ export const publishRepresentations = (
   // A fresh object literal whose one consumer is a declared cell is minted as
   // that cell's record (`literal-destination.ts`).
   const literalDestinations = literalDestinationsOf(graph, deriver)
+  const resultTypes = new Map<SemanticResultId, StructuralTypeId>()
+  if (proxySites.size > 0)
+    for (const operation of graph.operations.values()) for (const result of operation.results) resultTypes.set(result.id, result.type)
+  const proxyOrigins = proxyOriginsOf(graph, proxySites, (result) => {
+    const type = resultTypes.get(result)
+    if (type === undefined) return false
+    const carrier = deriver.deriveStored(type)
+    return (
+      carrier.kind === 'function' ||
+      carrier.kind === 'function-family' ||
+      carrier.kind === 'function-value-family' ||
+      carrier.kind === 'function-value-dispatch' ||
+      carrier.kind === 'function-and-constructor'
+    )
+  })
 
   // Evidence for every published result, including the ones that derive to
   // `unresolved`. Withholding those would leave the guards with nothing to fire
@@ -702,7 +777,11 @@ export const publishRepresentations = (
     // Every other result is completely unaffected -- `override` is `null` for
     // all of them, and this degrades to exactly the unconditional `exact`
     // publish this loop always did.
+    const structural = (): Representation =>
+      operation?.family === 'binding' || operation?.family === 'property' ? deriver.deriveStored(result.type) : deriver.derive(result.type)
+    const proxyOrigin = proxySites.size > 0 ? proxyOriginOf(result, proxyOrigins, callableOrigins, structural) : null
     const override =
+      proxyOrigin ??
       commonJsBoundaryOf(graph, operation) ??
       shadowedCallableBuiltinReadOf(graph, operation, callableOrigins) ??
       dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables) ??
@@ -757,17 +836,19 @@ export const publishRepresentations = (
         representation: override,
         strength: 'exact',
         producer:
-          override === literalDestinations.get(resultId)
-            ? 'literal-destination'
-            : commonJsBoundaryOf(graph, operation)
-              ? 'commonjs-module-boundary'
-              : shadowedCallableBuiltinReadOf(graph, operation, callableOrigins)
-                ? 'shadowed-callable-builtin'
-                : dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables)
-                  ? 'dynamic-callable-identity'
-                  : dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables)
-                    ? 'dynamic-call-frame'
-                    : 'protocol-array-fast-path',
+          override === proxyOrigin
+            ? 'proxy-origin'
+            : override === literalDestinations.get(resultId)
+              ? 'literal-destination'
+              : commonJsBoundaryOf(graph, operation)
+                ? 'commonjs-module-boundary'
+                : shadowedCallableBuiltinReadOf(graph, operation, callableOrigins)
+                  ? 'shadowed-callable-builtin'
+                  : dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables)
+                    ? 'dynamic-callable-identity'
+                    : dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables)
+                      ? 'dynamic-call-frame'
+                      : 'protocol-array-fast-path',
         joinsClosedFamily: false
       })
     }

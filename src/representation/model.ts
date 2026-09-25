@@ -59,7 +59,11 @@ export const dynamicReasons = [
   // read the `(prototype-dynamic)` recipe, which emits `callableDynamicGet`
   // and yields a `gea::Value` -- so before this reason existed the carrier and
   // the code emitted for it disagreed about the same read.
-  'shadowed-callable-builtin'
+  'shadowed-callable-builtin',
+  // A value that may hold a Proxy, followed from the `new Proxy` site that
+  // made it (`semantics/proxy-origins.ts`). Every property read, call and
+  // `typeof` on one runs a handler trap, so no native layout can stand for it.
+  'proxy-origin'
 ] as const
 
 export type DynamicReason = (typeof dynamicReasons)[number]
