@@ -989,6 +989,10 @@ export const censusLocalBindings = (
         const priorArms = parameters.unionArmsAt(declaration) ?? prior.unionArmsAt(declaration)
         const types: ts.Type[] = priorArms ? priorArms.flatMap((type) => (type.isUnion() ? type.types : [type])) : []
         let silent = 0
+        // A silent write that READS a member (`let split = cache[key]`) is a
+        // lookup that may find nothing, whatever the writes that do speak
+        // store there later: its `undefined` is a value the cell holds.
+        let silentMayBeAbsent = false
         let refused: string | null = null
         for (const write of writes) {
           // A loop-head pattern write already carries its own resolved type
@@ -1019,7 +1023,11 @@ export const censusLocalBindings = (
           else if (statesNoStorage(write.node)) {
             refused = 'write-states-no-storage'
             break
-          } else silent += 1
+          } else {
+            silent += 1
+            const read = ts.isExpression(write.node) ? unwrapParens(write.node) : write.node
+            if (ts.isPropertyAccessExpression(read) || ts.isElementAccessExpression(read)) silentMayBeAbsent = true
+          }
         }
         // EVIDENCE EXHAUSTED -- the same rule, the same order, as
         // `parameter-bindings.ts`'s `skipSilentSites` phase and
@@ -1032,7 +1040,16 @@ export const censusLocalBindings = (
         // then refuses, exactly as before. Speakers that state only
         // `null`/`undefined` exhaust nothing, though (`speaksOnlyNullish`).
         if (refused) attribute(declaration, refused)
-        else if (silent > 0 && (!lenientPhase || types.length === 0 || speaksOnlyNullish(types))) {
+        else if (silent > 0 && silentMayBeAbsent) {
+          // The writes that speak say what the cell holds once filled, never
+          // that the lookup found something: joining only them types the
+          // cache idiom (`let split = cache[key]; if (split === undefined)
+          // { split = new SplitNode(...); cache[key] = split }`, three's TSL
+          // swizzle getter) as the filled value, so the missed lookup unboxed
+          // `undefined` into it and aborted, and the `=== undefined` guard
+          // folded to false. The cell stays as dynamic as its lookup.
+          attribute(declaration, 'write-unresolved')
+        } else if (silent > 0 && (!lenientPhase || types.length === 0 || speaksOnlyNullish(types))) {
           // Some write failed the ordinary route -- try the one remaining
           // authority before giving up: the enclosing function's own STATED
           // return type, when this cell is what its `return` is built from

@@ -301,6 +301,7 @@ jump-threading.ts.cpp 35065f7450fa
 key-order-cases.ts.cpp 36f9f7e763c5
 lazy-map-in-logical-or-assignment.ts.cpp 1173673c5bbd
 lazy-subclass-accessor-override.ts.cpp f3d043d1536d
+let-cache-lookup-miss.runtime.js.cpp a8b2966ce67f
 local-iteration.ts.cpp 9f4a7461cb94
 logical-and-object-left-falsy-arm.ts.cpp 24e43ef8d14b
 logical-native-merge.ts.cpp eea411f205b3
