@@ -290,6 +290,7 @@ iterator-object-destructuring.ts.cpp 5595f0dc7234
 js-constructor-with-statics.js.cpp a70df1026a91
 jsdoc-asserted-class-method.runtime.js.cpp 274ea169260d
 jsdoc-defaulted-class-constructor.runtime.js.cpp ca5226775273
+jsdoc-field-type-contradicted-by-writes.runtime.js.cpp f9608f5b2fc1
 jsdoc-optional-parameter.runtime.js.cpp 2cfb2703873b
 json-parse-as-a-value.ts.cpp 0ea01b076f42
 json-reader-dispatch.ts.cpp f43e28fc48ee

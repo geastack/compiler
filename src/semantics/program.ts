@@ -9,6 +9,7 @@ import { withoutBareWrapperRedeclarations } from './commonjs-wrapper.js'
 import { scriptScopeCollisionsOf } from './script-scope-collisions.js'
 import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
 import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
+import { contradictedJsDocTypeBlanks } from './contradicted-jsdoc-types.js'
 import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
 import { createUncheckedJavaScriptPolicy, markUnchecked } from './unchecked-javascript.js'
 import { createScopedTypeRealizer, type ScopedTypeRealization } from './scoped-type-realizations.js'
@@ -885,9 +886,14 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
     new Set(input.commonJsGlobals?.keys() ?? []),
     preparation.sourceText
   )
-  if (preparation.audit.length > 0 || redeclarations.size > 0) {
+  const prepared = new Map([...preparation.sourceText, ...redeclarations])
+  // On the same first program, and composed onto what the two passes above
+  // prepared: each of the three blanks bytes in place, so none moves another's
+  // offsets (`contradicted-jsdoc-types.ts`).
+  const contradictions = timing.measure('contradicted-jsdoc-types', () => contradictedJsDocTypeBlanks(configured.program, prepared))
+  if (preparation.audit.length > 0 || redeclarations.size > 0 || contradictions.size > 0) {
     resolutionDiagnostics.length = 0
-    configured = configuredProgram(input, resolutionDiagnostics, new Map([...preparation.sourceText, ...redeclarations]), timing)
+    configured = configuredProgram(input, resolutionDiagnostics, new Map([...prepared, ...contradictions]), timing)
   }
   const program = configured.program
   const checker = withStableTypeQueries(program.getTypeChecker())
