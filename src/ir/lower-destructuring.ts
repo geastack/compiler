@@ -490,6 +490,27 @@ const lowerArrayPatternRest = (ctx: LoweringContext, block: IrBlockId, operation
     registerResult(ctx, operation, ctx.builder.allocateArrayObject(block, lineage, [{ kind: 'gather', iterator: source }], representation))
     return
   }
+  // A generator cursor -- a `Generator<T>` source, or a class whose
+  // `[Symbol.iterator]()` is a generator method -- is the pattern's one shared
+  // iterator: the bound positions before the rest already advanced it, so the
+  // rest drains what remains, from the cursor's current step.
+  if (source.representation.kind === 'iterator') {
+    if (
+      representation.kind !== 'array-object' ||
+      representationKey(representation.element) !== representationKey(source.representation.element)
+    ) {
+      throw new IrLoweringBlockedError(
+        "an array-pattern rest element's own carrier does not match its cursor source's element carrier; a mismatch would need a " +
+          'per-element conversion the cursor range copy does not perform'
+      )
+    }
+    registerResult(
+      ctx,
+      operation,
+      ctx.builder.allocateArrayObject(block, lineage, [{ kind: 'spread', value: source, from: 0 }], representation)
+    )
+    return
+  }
   if (source.representation.kind !== 'array-object') {
     throw new IrLoweringBlockedError(
       `an array-pattern rest element reads a "${source.representation.kind}" source; the array/string fast path only range-copies an "array-object" source`

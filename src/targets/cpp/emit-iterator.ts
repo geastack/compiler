@@ -789,18 +789,43 @@ const emitUnionResultIteratorNext = (
   })
 }
 
-const emitDynamicIteratorNext = (
+/**
+ * One `next()` call on a "record"-carried iterator whose result is a plain
+ * `{ value, done }` record, as the texts its callers need: the call assigned
+ * to a fresh hoisted local, and the two member reads off that local.
+ *
+ * `emitDynamicIteratorNext` is one caller (a `for`-`of` step, whose `done`
+ * half `emitIteratorDone` reads back later); `recordIteratorGatherLines` is
+ * the other (a spread that drains the iterator in one loop). One helper, so
+ * the loop and the step can never call `next` differently. A result that is
+ * `IteratorResult<T>`'s tagged union comes back as `union`: its reads dispatch
+ * over the arms, and only the step path (`emitUnionResultIteratorNext`) builds
+ * that dispatch.
+ */
+interface RecordIteratorStep {
+  readonly tempName: string
+  readonly callText: string
+  readonly resultAccessor: string
+  readonly memberText: (key: 'value' | 'done') => string
+  /** The carrier the result's own `value` member holds, or `null` when no member states one. */
+  readonly valueRepresentation: Representation | null
+}
+
+type RecordIteratorPlan =
+  | { readonly kind: 'step'; readonly step: RecordIteratorStep }
+  | {
+      readonly kind: 'union'
+      readonly nextAbi: CallableAbi
+      readonly nextField: RecordField | undefined
+      readonly nextAccessor: { readonly key: string; readonly getter: FunctionId | null } | undefined
+      readonly result: Extract<Representation, { kind: 'tagged-union' }>
+    }
+
+const recordIteratorStepOf = (
   ctx: EmitContext,
-  lines: string[],
-  operation: IteratorNextOperation,
+  iterator: IteratorNextOperation['iterator'],
   iteratorRecord: Extract<Representation, { kind: 'record' | 'native-record-ref' }>
-): void => {
-  if (operation.value) {
-    throw createCppEmitBlockedError(
-      `runtime-helper:protocol:iterator:next:${iteratorRecord.kind}`,
-      'carries a "value" argument; the general iterator protocol\'s next() call never consumes one (only a generator\'s .next(v) does, which is never carried as a "record")'
-    )
-  }
+): RecordIteratorPlan => {
   const iteratorFields = iteratorRecordFieldsOf(ctx, iteratorRecord)
   const nextField = iteratorFields?.find((field) => field.key === 'next')
   const nextAccessor = iteratorRecordAccessorsOf(ctx, iteratorRecord)?.find((accessor) => accessor.key === 'next')
@@ -821,8 +846,7 @@ const emitDynamicIteratorNext = (
   // arm is live is the tag, and the read dispatches on it exactly as any
   // other union member read does.
   if (resultRepresentation.kind === 'tagged-union') {
-    emitUnionResultIteratorNext(ctx, lines, operation, iteratorRecord, nextCallable.abi, nextField, nextAccessor, resultRepresentation)
-    return
+    return { kind: 'union', nextAbi: nextCallable.abi, nextField, nextAccessor, result: resultRepresentation }
   }
   if (
     (resultFields === null && resultAccessors === null) ||
@@ -842,19 +866,19 @@ const emitDynamicIteratorNext = (
       'calls a "next()" whose result record has no "value"/"done" field pair to read the iteration result out of'
     )
   }
-  const receiverText = operandText(ctx, operation.iterator)
+  const receiverText = operandText(ctx, iterator)
   const receiverAccessor = memberAccessOperator(iteratorRecord.ownership)
   const nextText = nextField
     ? `${receiverText}${receiverAccessor}${cppRecordFieldName('next')}`
     : nextAccessor?.getter
-      ? iteratorGetterText(ctx, nextAccessor.key, nextAccessor.getter, operation.iterator, 'iterator-next')
+      ? iteratorGetterText(ctx, nextAccessor.key, nextAccessor.getter, iterator, 'iterator-next')
       : null
   if (nextText === null)
     throw createCppEmitBlockedError(
       `runtime-helper:protocol:iterator:next:${iteratorRecord.kind}`,
       'cannot resolve the iterator next method'
     )
-  const callText = iteratorMethodCallText(ctx, nextText, nextCallable.abi, operation.iterator, 'iterator next()')
+  const callText = iteratorMethodCallText(ctx, nextText, nextCallable.abi, iterator, 'iterator next()')
   // A fresh local, hoisted exactly as `defineValue` hoists every other IR
   // result -- this one just names no semantic result of its own, because
   // `IteratorResult` as a whole is never published as one value (`next`'s own
@@ -863,9 +887,7 @@ const emitDynamicIteratorNext = (
   const tempName = `v${ctx.nextValueOrdinal}`
   ctx.nextValueOrdinal += 1
   ctx.declarations.push({ name: tempName, type: cppTypeOf(resultRepresentation) })
-  lines.push(`${tempName} = ${callText};`)
   const resultAccessor = memberAccessOperator(resultRepresentation.ownership)
-  const name = defineValue(ctx, operation.result)
   const memberText = (key: 'value' | 'done'): string => {
     if (resultFields?.some((field) => field.key === key)) return `${tempName}${resultAccessor}${cppRecordFieldName(key)}`
     const accessor = resultAccessors?.find((candidate) => candidate.key === key)
@@ -878,6 +900,42 @@ const emitDynamicIteratorNext = (
     const environment = accessorEnvironmentArguments(ctx, resultRepresentation, key, accessor.getter, 'getter', tempName)
     return `${cppBodyName(accessor.getter)}(${[...environment, tempName].join(', ')})`
   }
+  const valueField = resultFields?.find((field) => field.key === 'value')
+  const valueAccessor = resultAccessors?.find((candidate) => candidate.key === 'value')
+  const valueRepresentation =
+    valueField?.value ?? (valueAccessor?.getter ? (ctx.abiOfCallable(valueAccessor.getter)?.result ?? null) : null)
+  return { kind: 'step', step: { tempName, callText, resultAccessor, memberText, valueRepresentation } }
+}
+
+const emitDynamicIteratorNext = (
+  ctx: EmitContext,
+  lines: string[],
+  operation: IteratorNextOperation,
+  iteratorRecord: Extract<Representation, { kind: 'record' | 'native-record-ref' }>
+): void => {
+  if (operation.value) {
+    throw createCppEmitBlockedError(
+      `runtime-helper:protocol:iterator:next:${iteratorRecord.kind}`,
+      'carries a "value" argument; the general iterator protocol\'s next() call never consumes one (only a generator\'s .next(v) does, which is never carried as a "record")'
+    )
+  }
+  const planned = recordIteratorStepOf(ctx, operation.iterator, iteratorRecord)
+  if (planned.kind === 'union') {
+    emitUnionResultIteratorNext(
+      ctx,
+      lines,
+      operation,
+      iteratorRecord,
+      planned.nextAbi,
+      planned.nextField,
+      planned.nextAccessor,
+      planned.result
+    )
+    return
+  }
+  const { tempName, callText, resultAccessor, memberText } = planned.step
+  lines.push(`${tempName} = ${callText};`)
+  const name = defineValue(ctx, operation.result)
   ctx.protocolNextResults.set(operation.iterator.value, {
     tempName,
     accessor: resultAccessor,
@@ -885,6 +943,47 @@ const emitDynamicIteratorNext = (
     valueText: memberText('value'),
     doneText: memberText('done')
   })
+}
+
+/**
+ * A spread that drains a "record"-carried iterator into an array: ECMA-262
+ * 13.2.4.2 ArrayAccumulation, and its argument-list twin 13.3.8.1, call
+ * `IteratorStep` until `done` and append each value, and never close the
+ * iterator -- a spread has no early exit. One `next()` per step, through
+ * `recordIteratorStepOf`, the same call a `for`-`of` step makes.
+ */
+export const recordIteratorGatherLines = (
+  ctx: EmitContext,
+  iterator: IteratorNextOperation['iterator'],
+  array: string,
+  element: Representation
+): readonly string[] => {
+  const iteratorRecord = iterator.representation
+  if (iteratorRecord.kind !== 'record' && iteratorRecord.kind !== 'native-record-ref') {
+    throw createCppEmitBlockedError(
+      `runtime-helper:allocation:array-literal:${element.kind}(record-gather)`,
+      `gathers a "${iteratorRecord.kind}" iterator as a record iterator`
+    )
+  }
+  const planned = recordIteratorStepOf(ctx, iterator, iteratorRecord)
+  if (planned.kind === 'union') {
+    throw createCppEmitBlockedError(
+      `runtime-helper:allocation:array-literal:${element.kind}(record-gather)`,
+      "gathers an iterator whose next() returns IteratorResult's tagged union; only the for-of step dispatches over its arms"
+    )
+  }
+  const { tempName, callText, memberText, valueRepresentation } = planned.step
+  const value =
+    valueRepresentation === null
+      ? null
+      : alignedValueText(ctx, 'emit-iterator.ts:record-gather', valueRepresentation, element, memberText('value'))
+  if (value === null) {
+    throw createCppEmitBlockedError(
+      `conversion:${valueRepresentation === null ? 'absent' : representationKey(valueRepresentation)}->${representationKey(element)}`,
+      `gathers iterator values into an array of "${representationKey(element)}" with no installed conversion`
+    )
+  }
+  return [`for (;;) { ${tempName} = ${callText}; if (${memberText('done')}) break; ${array}->push(${value}); }`]
 }
 
 export const emitIteratorNext = (ctx: EmitContext, lines: string[], operation: IteratorNextOperation): void => {

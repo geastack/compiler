@@ -205,6 +205,17 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
             }
             return { kind: 'gather', iterator: source }
           }
+          // A declared iterable whose `[Symbol.iterator]()` returns an object
+          // (`producers/protocol.ts`'s `gathersDeclaredIterator`): the record
+          // is drained through its own `next()` (`emit-iterator.ts`'s
+          // `recordIteratorGatherLines`), which converts each value into this
+          // literal's element carrier.
+          if (
+            (source.representation.kind === 'record' || source.representation.kind === 'native-record-ref') &&
+            tuple.kind === 'array-object'
+          ) {
+            return { kind: 'gather', iterator: source }
+          }
           // The element carrier the source's own range copy will produce, or
           // `null` when this source has no native range copy at all. The four
           // sources here are exactly the four `producers/shared.ts`'s

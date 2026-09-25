@@ -21,8 +21,7 @@ import {
   ownPrototypePropertyOf
 } from './shared.js'
 import { isClosedTupleSpread, tupleSpreadReads } from './tuple-spread.js'
-import { isDynamicIterationSource } from './protocol.js'
-import { iteratorMethodSymbolOf } from './iteration-yield.js'
+import { gathersDeclaredIterator, isDynamicIterationSource } from './protocol.js'
 import type { SemanticEdge } from '../../model/edges.js'
 import { sharedPrimitiveDomainOf } from '../../model/primitive-domain.js'
 import { symbolPropertyKeyText, type StructuralMember, type StructuralShape } from '../../model/structural-types.js'
@@ -606,30 +605,6 @@ const nameBindingOf = (
       evaluationOrdinal: candidate.evaluationOrdinal
     }
   ]
-}
-
-/**
- * A spread source that is neither a native cursor nor dynamic, but declares
- * its own `[Symbol.iterator]` -- a class with a `*[Symbol.iterator]()`, the
- * shape every hand-written iterable has.
- *
- * `protocol.ts` already mints the whole GetIterator record for it; only this
- * producer refused to consume one, so `[...new Range(1, 4)]` was blocked for
- * a protocol that was installed. The operand cites that record exactly as a
- * dynamic spread's does, and `ir/lower-allocation.ts` gathers the cursor it
- * carries.
- */
-const gathersDeclaredIterator = (context: ProducerContext, expression: ts.Expression): boolean => {
-  // A plain array, a Set, a string, a tuple -- everything with a native range
-  // copy -- declares `[Symbol.iterator]` too, and `protocol.ts` mints NO
-  // record for those (its `consumedWithoutIterator` bypass returns first). So
-  // they are excluded here rather than asked: citing a record nobody publishes
-  // is a withheld certificate, which is what `[...state.items, action.item]`
-  // became when this predicate answered on the symbol alone.
-  const type = context.types.typeAt(expression)
-  if (hasNativeIterationCursor(context, type) || isDynamicIterationSource(context, type) || isClosedTupleSpread(context, expression))
-    return false
-  return iteratorMethodSymbolOf(context.types.rawTypeAt(expression)) !== null
 }
 
 const allocatedKindOf = (node: AllocationNode): AllocationOperation['allocated'] | null => {

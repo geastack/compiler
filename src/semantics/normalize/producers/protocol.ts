@@ -23,7 +23,7 @@ import {
 } from './shared.js'
 import { iteratorMethodSymbolOf, iteratorRecordTypesOf, iteratorYieldStructuralType } from './iteration-yield.js'
 import type { IterationProtocol } from './iteration-yield.js'
-import { closedTupleElementTypesOf } from './tuple-spread.js'
+import { closedTupleElementTypesOf, isClosedTupleSpread } from './tuple-spread.js'
 import { symbolPropertyKeyText } from '../../model/structural-types.js'
 import { symbolKeyDeclarationOf } from '../structural-leaves.js'
 
@@ -688,6 +688,32 @@ const contributeObjectSpread = (context: ProducerContext, candidate: CensusCandi
   return { kind: 'operations', operations: [operation], edges: valueEdgesInto(id, operands) }
 }
 
+/**
+ * A spread source that is neither a native cursor nor dynamic, but declares
+ * its own `[Symbol.iterator]` -- a class with a `*[Symbol.iterator]()`, the
+ * shape every hand-written iterable has.
+ *
+ * `contributeIterationSpread` below mints the whole GetIterator record for
+ * it, and both consumers of a spread drain that record rather than the source:
+ * an array literal (`producers/allocations.ts`) and an argument list
+ * (`spread-arguments.ts`). Each operand cites the record exactly as a dynamic
+ * spread's does; `ir/lower-allocation.ts` and `ir/lower-operands.ts`'s
+ * `packRestArguments` range-copy a generator cursor and gather a record
+ * iterator through its own `next()`.
+ */
+export const gathersDeclaredIterator = (context: ProducerContext, expression: ts.Expression): boolean => {
+  // A plain array, a Set, a string, a tuple -- everything with a native range
+  // copy -- declares `[Symbol.iterator]` too, and `protocol.ts` mints NO
+  // record for those (its `consumedWithoutIterator` bypass returns first). So
+  // they are excluded here rather than asked: citing a record nobody publishes
+  // is a withheld certificate, which is what `[...state.items, action.item]`
+  // became when this predicate answered on the symbol alone.
+  const type = context.types.typeAt(expression)
+  if (hasNativeIterationCursor(context, type) || isDynamicIterationSource(context, type) || isClosedTupleSpread(context, expression))
+    return false
+  return iteratorMethodSymbolOf(context.types.rawTypeAt(expression)) !== null
+}
+
 const contributeIterationSpread = (context: ProducerContext, candidate: CensusCandidate, node: ts.SpreadElement): CandidateContribution => {
   // `...arguments` in an invocation is sourced by the CONSUMER, not here.
   // `resolveExpressionOperand` resolves an identifier's value through its
@@ -783,7 +809,12 @@ const contributeIterationSpread = (context: ProducerContext, candidate: CensusCa
       // gather step -- for a typed custom iterable (`[...new Range(1, 4)]`)
       // exactly as for a dynamic one. A speculative `next()` here would eat
       // the first value before the gather ever ran.
-      includeNext: !(consumedWithoutIterator && (dynamicSource || ts.isArrayLiteralExpression(node.parent)))
+      // An argument list gathers a declared iterator's record the same way
+      // (`spread-arguments.ts`), so it takes no pre-step either.
+      includeNext: !(
+        consumedWithoutIterator &&
+        (dynamicSource || ts.isArrayLiteralExpression(node.parent) || gathersDeclaredIterator(context, node.expression))
+      )
     }
   )
   return { kind: 'operations', operations: steps.operations, edges: steps.edges }

@@ -584,6 +584,7 @@ union-of-tuples-nested-array-pattern.ts.cpp a33a8e162a03
 union-void-arm-is-the-undefined-carrier.ts.cpp 230baa95b904
 unknown-callee-argument-key-narrowing.ts.cpp f037154b942f
 unused-subclass-is-pruned.ts.cpp 904fa5b0cd56
+user-iterable-protocol.ts.cpp 3eea6235cd08
 value-record-literal-union.ts.cpp ad9d4204d83c
 virtual-call-through-a-base-whose-override-narrows-unknown.ts.cpp 62f0efa5a9a4
 virtual-parameter-widening.ts.cpp 87284ed30699

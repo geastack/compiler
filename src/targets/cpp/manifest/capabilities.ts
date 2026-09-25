@@ -1014,6 +1014,10 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     'allocation:array-literal:dynamic(dynamic-gather)',
     'allocation:array-literal:array-object',
     'allocation:array-literal:array-object(dynamic-gather)',
+    // A declared iterable's own iterator object drained into a native array:
+    // `emit-iterator.ts`'s `recordIteratorGatherLines` calls its `next()` until
+    // `done`, converting each value into the element carrier.
+    'allocation:array-literal:array-object(record-gather)',
     // A tuple literal (`[a, b]` typed `[number, string]`, `readonly [x, y]`,
     // or any other array literal whose own type derives to `record` --
     // `representation/derive.ts`'s `deriveTuple` states there is deliberately
@@ -1152,15 +1156,13 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // array-pattern form until this producer also mints the get-method/
     // get-iterator call the loop's own `mintIteratorSteps` already does.
     //
-    // A REST element over the same cursor source (`[...xs] = g()`) is
-    // deliberately NOT claimed alongside it: draining an unbounded cursor into
-    // a fresh array needs an actual gathering LOOP, and every loop this IR
-    // builds today lowers a real source-level `for`/`while`/`for`-`of`
-    // construct through `control.ts`'s own census/gating wiring -- there is no
-    // synthetic-loop desugaring an array-pattern's rest element could reach
-    // for instead, so it stays refused at preflight rather than certifying a
-    // shape nothing can lower.
+    // A REST element over the same cursor source (`[head, ...tail] = g()`)
+    // drains what the bound positions left in the one shared cursor into a
+    // fresh array: the loop is the runtime's own `gea::appendIteratorRange`,
+    // the same one `[...g]` range-copies with, so no synthetic IR loop is
+    // needed (`lower-destructuring.ts`'s `lowerArrayPatternRest`).
     'destructuring:array-pattern:iterator',
+    'destructuring:rest-element:iterator',
     'destructuring:rest-element:array-object',
     // `const { strict, ...rest } = options` over a `record`/`native-record-ref`
     // source: the "object-pattern" segment in the obligation key
