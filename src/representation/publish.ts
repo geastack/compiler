@@ -80,6 +80,8 @@ import { verifyRepresentationPlan } from './verify.js'
 
 export interface RepresentationPublication {
   readonly plan: SealedRepresentationPlan
+  /** Which values may hold a proxy (`semantics/proxy-origins.ts`); empty for a program with no `new Proxy` site. */
+  readonly proxyOrigins: ProxyOrigins
   /** Components that committed, in deterministic order. */
   readonly committed: readonly ComponentId[]
   /** Components that selected nothing because their carriers disagreed. */
@@ -662,7 +664,10 @@ const proxyOriginOf = (
   callableOrigins: ReadonlyMap<SemanticResultId, FunctionId>,
   derived: () => Representation
 ): Representation | null => {
-  if (origins.results.has(result.id)) return proxyOriginCarrier
+  // A value already carried as `dynamic` keeps the reason it has: the box
+  // holds a proxy as well as anything else, and a second reason for the same
+  // slot would only make its views disagree with the convention that binds it.
+  if (origins.results.has(result.id)) return derived().kind === 'dynamic' ? null : proxyOriginCarrier
   const origin = callableOrigins.get(result.id)
   if (origin === undefined) return null
   const callable = withoutFunctionSpecialization(origin)
