@@ -19,7 +19,7 @@ import {
   restParameterUnionOfTuplesElementTypeOf,
   impliedPatternArrayElementAt
 } from './parameter-slot.js'
-import { isUnusableEvidence, memberCensusNodeOf } from './derived-expression-type.js'
+import { constructedClassChoiceMemberTypeOf, isUnusableEvidence, memberCensusNodeOf } from './derived-expression-type.js'
 import { inferredArrayElementAt, inferredCollectionTypeArgumentsAt } from './structural-array-element.js'
 import type { IdentityTable } from './identities.js'
 
@@ -686,7 +686,10 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
       }
     }
     const declaration = identities.declarationOfSymbol(symbol)
-    const checkerAnswer = typeOfSymbolAt(symbol, declaration ?? location ?? undefined)
+    // A member some write fills with a `new` through a constructor choice is
+    // one of the chosen classes, which the checker reduces to one of them.
+    const checkerAnswer =
+      constructedClassChoiceMemberTypeOf(checker, symbol) ?? typeOfSymbolAt(symbol, declaration ?? location ?? undefined)
     // The checker answers an object-literal PROPERTY's or a class FIELD's own
     // type by asking the checker DIRECTLY at the member's declaration -- a
     // question the checker itself can only answer from what IT can see, which

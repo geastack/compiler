@@ -2281,34 +2281,90 @@ export const constructedClassChoiceOf = (checker: ts.TypeChecker, callee: ts.Typ
 }
 
 /**
- * `constructedClassChoiceOf` at a position: the `new` itself, and a `const`
- * it initializes along with every read of that `const`. The checker types all
- * three with its reduced instance, and a cell holding a `Uint16BufferAttribute`
- * laid out as a `Uint32BufferAttribute` has no value to select at run time.
- * A `const` holds exactly its initializer's value, so its reads need no write
- * set; a `let` is the write-set censuses' question, not this one.
+ * `constructedClassChoiceOf` at a position: the `new` itself, a `const` it
+ * initializes along with every read of that `const`, and a JavaScript member
+ * declared by assignment that any of its writes fills that way (three's
+ * `Geometries.getIndex`: `this.index = new ( wide ? Uint32Attribute :
+ * Uint16Attribute )( ... )`) along with every read of it. The checker types
+ * all of them with its reduced instance, since it joins a member's writes by
+ * subtype as it does the `new`, and a cell holding a `Uint16Attribute` laid
+ * out as a `Uint32Attribute` has no value to select at run time. A `const`
+ * holds exactly its initializer's value, and a member declared only by
+ * assignments holds one of them, so neither needs a write-set census; a `let`
+ * is the write-set censuses' question, not this one.
  */
 export const constructedClassChoiceTypeAt = (
   checker: ts.TypeChecker,
   node: ts.Node,
   read: (operand: ts.Expression) => ts.Type
+): ts.Type | null => constructedChoiceAt(checker, node, read, new Set())
+
+const constructedChoiceAt = (
+  checker: ts.TypeChecker,
+  node: ts.Node,
+  read: (operand: ts.Expression) => ts.Type,
+  visiting: Set<ts.Symbol>
 ): ts.Type | null => {
-  if (ts.isParenthesizedExpression(node)) return constructedClassChoiceTypeAt(checker, node.expression, read)
-  if (!ts.isNewExpression(node) && !ts.isIdentifier(node) && !ts.isVariableDeclaration(node)) return null
-  // Only a position the checker types as ONE source class instance can be a
-  // reduced choice (a choice between two layouts stays a union for it too),
-  // and asking that first keeps the symbol lookup below off every other
-  // identifier the layout resolver is asked about.
-  if (sourceClassOfInstance(checker.getTypeAtLocation(node)) === null) return null
+  if (ts.isParenthesizedExpression(node)) return constructedChoiceAt(checker, node.expression, read, visiting)
+  if (!ts.isNewExpression(node) && !ts.isIdentifier(node) && !ts.isVariableDeclaration(node) && !ts.isPropertyAccessExpression(node))
+    return null
+  // Only a position the checker types as ONE source class instance (or that
+  // instance or an absence) can be a reduced choice (a choice between two
+  // layouts stays a union for it too), and asking that first keeps the
+  // symbol lookup below off every other node the layout resolver is asked about.
+  const own = checker.getTypeAtLocation(node)
+  const present = checker.getNonNullableType(own)
+  if (sourceClassOfInstance(present) === null) return null
   if (ts.isNewExpression(node)) return constructedClassChoiceOf(checker, read(node.expression))
+  const chosen = ts.isPropertyAccessExpression(node)
+    ? memberChoiceOf(checker, checker.getSymbolAtLocation(node), read, visiting)
+    : constChoiceOf(checker, node, read, visiting)
+  // A read keeps the checker's narrowing of absence alone: past `index ===
+  // null` it holds one of the classes, never nothing.
+  return chosen && present === own ? checker.getNonNullableType(chosen) : chosen
+}
+
+const constChoiceOf = (
+  checker: ts.TypeChecker,
+  node: ts.Identifier | ts.VariableDeclaration,
+  read: (operand: ts.Expression) => ts.Type,
+  visiting: Set<ts.Symbol>
+): ts.Type | null => {
   const declarations = ts.isIdentifier(node) ? checker.getSymbolAtLocation(node)?.declarations : undefined
   const declaration = ts.isVariableDeclaration(node) ? node : declarations?.length === 1 ? declarations[0] : undefined
   if (!declaration || !ts.isVariableDeclaration(declaration) || declaration.type || !declaration.initializer) return null
   if ((ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) === 0) return null
   const initializer = unwrapErasedExpression(declaration.initializer)
-  return ts.isNewExpression(initializer) || ts.isParenthesizedExpression(initializer)
-    ? constructedClassChoiceTypeAt(checker, initializer, read)
+  return ts.isNewExpression(initializer) || ts.isParenthesizedExpression(initializer) || ts.isPropertyAccessExpression(initializer)
+    ? constructedChoiceAt(checker, initializer, read, visiting)
     : null
+}
+
+const memberChoiceOf = (
+  checker: ts.TypeChecker,
+  symbol: ts.Symbol | undefined,
+  read: (operand: ts.Expression) => ts.Type,
+  visiting: Set<ts.Symbol>
+): ts.Type | null => {
+  const declarations = symbol?.declarations
+  if (!symbol || !declarations?.length || visiting.has(symbol)) return null
+  const writes: ts.Expression[] = []
+  for (const declaration of declarations) {
+    if (!ts.isBinaryExpression(declaration) || declaration.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return null
+    writes.push(unwrapErasedExpression(declaration.right))
+  }
+  visiting.add(symbol)
+  try {
+    let chose = false
+    const types = writes.map((write) => {
+      const choice = constructedChoiceAt(checker, write, read, visiting)
+      if (choice) chose = true
+      return choice ?? checker.getTypeAtLocation(write)
+    })
+    return chose ? disjointUnionTypeOf(checker, types) : null
+  } finally {
+    visiting.delete(symbol)
+  }
 }
 
 /**
@@ -2320,6 +2376,17 @@ export const constructedClassChoiceCheckerTypeAt = (checker: ts.TypeChecker, nod
   const read = (operand: ts.Expression): ts.Type =>
     nominalConstructorChoiceTypeAt(checker, operand, read) ?? checker.getTypeAtLocation(operand)
   return constructedClassChoiceTypeAt(checker, node, read)
+}
+
+/**
+ * The same answer for a member's own storage, asked by the class layout
+ * (`structural-parts.ts`'s `memberOf`) where it holds the symbol rather than
+ * a read.
+ */
+export const constructedClassChoiceMemberTypeOf = (checker: ts.TypeChecker, symbol: ts.Symbol): ts.Type | null => {
+  const read = (operand: ts.Expression): ts.Type =>
+    nominalConstructorChoiceTypeAt(checker, operand, read) ?? checker.getTypeAtLocation(operand)
+  return memberChoiceOf(checker, symbol, read, new Set())
 }
 
 /** Shape subtyping cannot discard the identity of a class constructor selected at runtime. */
