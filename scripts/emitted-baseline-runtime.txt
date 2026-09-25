@@ -85,6 +85,7 @@ clone-idiom-family-dispatch.runtime.js.cpp ffafe4778937
 closed-literal-absent-key-push.runtime.js.cpp 3c1046c8e89c
 closure-cycle-lifetime.ts.cpp 86aea6acdbda
 closure-factory-export-never-read.ts.cpp 35b275d3d6f5
+closure-written-null-cell-read.runtime.js.cpp 20118f22c8cc
 collection-get-native-union.ts.cpp ea90283c893f
 composed-field-descriptor.runtime.js.cpp a11d2a79f4b4
 computed-class-prototype-method.ts.cpp f1375430414d

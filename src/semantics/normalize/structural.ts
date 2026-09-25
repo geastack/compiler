@@ -38,6 +38,7 @@ import {
   isGlobalObjectInterface,
   isStandardInterfaceType,
   isUnusableEvidence,
+  memberCensusNodeOf,
   widestOf
 } from './derived-expression-type.js'
 import { createLeafKeying, literalFor, primitiveFor, symbolKeyDeclarationOf } from './structural-leaves.js'
@@ -2533,19 +2534,67 @@ const buildMapper = (
    * answer. A read the checker places from a write in the reader's OWN scope,
    * and a cell every write of which sits beside its reads, keep the checker's
    * view: there the `undefined` is the program's, not the analysis's.
+   *
+   * A cell INITIALIZED to its absence is the same shape one assignment later:
+   * `let output = null; node.traverse( n => { output = n } ); if ( output ===
+   * null )` (three's `RangeNode.getConstNode`) reads `null` from the checker,
+   * which saw the initializer and not the callback, and after the test it
+   * reads `never`. Taking either at face value is not a narrowing of the cell:
+   * a `null` carrier holds no instance, so the test would be spelled as the
+   * constant it is not, and the `never` read would be an unreachable return
+   * the program does reach. Only a bare absence (or `never`) answer is
+   * replaced -- a narrowing to a type that still carries a value keeps the
+   * checker's view, whose conversion is checked -- and only for a cell some
+   * other function writes. The cell is the census's answer, or, where the
+   * program stated one, its declared type.
    */
   const unplacedHoistedReadAt = (node: ts.Node): ts.Type | null => {
     if (!flow || !ts.isIdentifier(node)) return null
     const own = absentSubstitutedTypeAt(node)
-    if ((own.flags & ts.TypeFlags.Undefined) === 0 || own.isUnion()) return null
+    const absenceOnly = ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.Never
+    if ((own.flags & absenceOnly) === 0 || own.isUnion()) return null
     const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration
-    if (!declaration || !ts.isVariableDeclaration(declaration) || declaration.type || declaration.initializer) return null
+    if (!declaration || !ts.isVariableDeclaration(declaration)) return null
     if (node === declaration.name || !ts.isIdentifier(declaration.name)) return null
+    if ((ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Constant) !== 0) return null
+    const initializer = declaration.initializer
+    const initializedAbsent =
+      initializer === undefined ||
+      initializer.kind === ts.SyntaxKind.NullKeyword ||
+      (ts.isIdentifier(initializer) && initializer.text === 'undefined') ||
+      ts.isVoidExpression(initializer)
+    if (!initializedAbsent) return null
     const reader = ts.findAncestor(node, ts.isFunctionLike) ?? null
     const writes = flow.writesToDeclaration(declaration).filter((write) => write.slot === 'whole')
     if (!writes.length || !writes.some((write) => (ts.findAncestor(write.site, ts.isFunctionLike) ?? null) !== reader)) return null
-    const cell = parameters.typeAt(declaration)
-    return cell && (cell.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Undefined)) === 0 ? cell : null
+    const unusable = ts.TypeFlags.Any | ts.TypeFlags.Unknown | absenceOnly
+    const stated = parameters.typeAt(declaration) ?? checker.getTypeAtLocation(declaration.name)
+    if (!stated || (stated.flags & unusable) !== 0) return null
+    const cell = absent.substituteAbsentType(stated)
+    return (cell.flags & unusable) === 0 ? cell : null
+  }
+
+  /**
+   * A member read off such a read. The checker collapsed the receiver to
+   * `never` after its test, so it answers the member `never` too -- and a
+   * `never` member read spells the language's `undefined`, which is what
+   * `if ( late !== null ) late.value` printed for a cell a callback had
+   * filled. The member is read off the cell's type instead, through the field
+   * census where the class declares it without a type.
+   */
+  const unplacedHoistedMemberReadAt = (node: ts.Node): ts.Type | null => {
+    if (!ts.isPropertyAccessExpression(node)) return null
+    if ((absentSubstitutedTypeAt(node).flags & ts.TypeFlags.Never) === 0) return null
+    let receiver: ts.Expression = node.expression
+    while (ts.isParenthesizedExpression(receiver)) receiver = receiver.expression
+    const cell = unplacedHoistedReadAt(receiver)
+    if (!cell) return null
+    const member = checker.getPropertyOfType(checker.getNonNullableType(cell), node.name.text)
+    if (!member) return null
+    const read = checker.getTypeOfSymbolAtLocation(member, node)
+    if (!isUnusableEvidence(read)) return read
+    const declaration = member.valueDeclaration ?? member.declarations?.[0]
+    return (declaration && parameters.typeAt(memberCensusNodeOf(declaration))) ?? read
   }
 
   /**
@@ -4375,6 +4424,14 @@ const buildMapper = (
         const unplacedHoistedRead = unplacedHoistedReadAt(node)
         if (unplacedHoistedRead) return typeOf(unplacedHoistedRead)
         return null
+      }
+    },
+    {
+      name: 'unplaced-hoisted-member-read',
+      forms: [ts.SyntaxKind.PropertyAccessExpression],
+      resolve: (node) => {
+        const member = unplacedHoistedMemberReadAt(node)
+        return member ? typeOf(member) : null
       }
     }
   ]
