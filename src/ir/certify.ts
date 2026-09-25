@@ -200,6 +200,23 @@ const abiDemands = (manifest: TargetRuntimeManifest, abi: CallableAbi | null): C
 }
 
 /**
+ * `C.prototype` read as a native object of a class whose prototype the
+ * program also uses in a way the native prototype protocol has no answer
+ * for (`ClassLayout.prototypeUnsupportedUses`: a declared field written on
+ * it, the object handed to a call, ...). Refused here, by the projection's
+ * own reasons, rather than when the printer reaches the read.
+ */
+const classPrototypeUseRefusalOf = (operation: Extract<IrOperation, { kind: 'get' }>, ctx: CertifyContext): CapabilityDemand | null => {
+  const receiver = operation.receiver.representation
+  if (receiver.kind !== 'constructor-family' || receiver.members.length !== 1) return null
+  const key = ctx.definitionOf(operation.key.value)
+  if (key?.kind !== 'constant' || key.literal !== 'string' || key.text !== 'prototype') return null
+  const reasons = ctx.classes.get(receiver.members[0]!)?.prototypeUnsupportedUses
+  if (!reasons?.length) return null
+  return { key: 'property-access:class-prototype:method-only', verdict: 'unsupported', detail: reasons.join('; ') }
+}
+
+/**
  * The demands this module derives itself: the ones whose fact is a single
  * field of the operation. The property families and the runtime-helper
  * families each live in their own module because their key spellings are
@@ -312,6 +329,8 @@ const ownDemandsOf = (operation: IrOperation, ctx: CertifyContext): CapabilityDe
     case 'binding-read':
       return ctx.externalBindings.has(operation.declaration) ? [{ key: 'native-boundary:external-binding' }] : []
     case 'get': {
+      const prototypeRefusal = classPrototypeUseRefusalOf(operation, ctx)
+      if (prototypeRefusal !== null) return [prototypeRefusal]
       if (operation.absentClassArms !== undefined) {
         const key = ctx.definitionOf(operation.key.value)
         if (
