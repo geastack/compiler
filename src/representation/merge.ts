@@ -23,6 +23,62 @@ export const mergeFalsyAbsence = (source: Representation, target: Representation
   contributesOnlyAbsence(source) ? mergeTaggedAbsence(source, target) : null
 
 /**
+ * The one absence a value of this type can hold while falsy, or `null` when a
+ * falsy value could be something else, or either absence.
+ *
+ * `dataType && post` over `dataType?: JSONType`, a union of non-empty string
+ * literals: the carrier is `optional(string)`, whose `""` is falsy, but the
+ * type admits no `""`. The `&&` therefore keeps its left operand only when it
+ * is `undefined`, which the merge spells in its own carrier. Every member must
+ * have no falsy value (a non-empty string literal, a non-zero number or bigint
+ * literal, a symbol, or an object shape) or be the absence.
+ */
+export const falsyOnlyAbsenceOf = (
+  types: ReadonlyMap<StructuralTypeId, StructuralType>,
+  id: StructuralTypeId
+): 'null' | 'undefined' | null => {
+  const absences = new Set<'null' | 'undefined'>()
+  const visit = (member: StructuralTypeId, depth: number): boolean => {
+    const shape = types.get(member)?.shape
+    if (!shape || depth > 16) return false
+    switch (shape.kind) {
+      case 'primitive':
+        if (shape.primitive === 'undefined' || shape.primitive === 'void') absences.add('undefined')
+        else if (shape.primitive === 'null') absences.add('null')
+        else return shape.primitive === 'symbol'
+        return true
+      case 'literal':
+        if (shape.primitive === 'string') return shape.text !== ''
+        return shape.primitive !== 'boolean' && !['0', '-0', 'NaN'].includes(shape.text)
+      case 'union':
+        return shape.members.every((part) => visit(part, depth + 1))
+      case 'declared':
+        return shape.body !== null && visit(shape.body, depth + 1)
+      case 'unique-symbol':
+      case 'class-instance':
+      case 'class-constructor':
+      case 'object':
+      case 'object-anchor':
+      case 'array':
+      case 'tuple':
+      case 'signature':
+        return true
+      default:
+        return false
+    }
+  }
+  if (!visit(id, 0) || absences.size !== 1) return null
+  const [absence] = absences
+  return absence ?? null
+}
+
+/** Whether a merge carrier has a state for exactly this absence. */
+export const carriesAbsence = (target: Representation, absence: 'null' | 'undefined'): boolean =>
+  target.kind === 'optional'
+    ? target.absence === absence
+    : target.kind === 'tagged-union' && target.arms.some((arm) => arm.value.kind === absence)
+
+/**
  * A merge can construct these values in its own carrier without converting an
  * incoming carrier. Preflight and lowering must ask the same question: a
  * `never[]` arm contains no elements, whereas `void[]` and `undefined[]` may

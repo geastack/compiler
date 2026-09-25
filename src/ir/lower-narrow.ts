@@ -12,7 +12,7 @@ import {
   representationKey,
   type Representation
 } from '../representation/model.js'
-import { mergeFalsyAbsence, mergeMaterialization, mergeTaggedAbsence } from '../representation/merge.js'
+import { carriesAbsence, falsyOnlyAbsenceOf, mergeFalsyAbsence, mergeMaterialization, mergeTaggedAbsence } from '../representation/merge.js'
 import { operandOf, type SemanticOperand } from '../semantics/model/operands.js'
 import type { SemanticOperation } from '../semantics/model/operations.js'
 import { IrLoweringBlockedError } from './lower-graph.js'
@@ -28,11 +28,12 @@ import type { IrBlockId, IrOperand } from './model.js'
  * "no node" is a refusal here rather than a drift row the printer's own
  * chain would answer, because nothing downstream is entitled to decide it.
  */
-const blockedMergeArm = (operation: SemanticOperation, role: string, from: Representation, to: Representation): IrLoweringBlockedError =>
-  new IrLoweringBlockedError(
+const blockedMergeArm = (operation: SemanticOperation, role: string, from: Representation, to: Representation): IrLoweringBlockedError => {
+  return new IrLoweringBlockedError(
     `merge arm "${role}" of ${operation.family === 'computation' ? `${operation.form} ${'operator' in operation ? operation.operator : ''}`.trim() : operation.family}: ` +
       `no conversion is installed from ${representationKey(from)} into ${representationKey(to)}`
   )
+}
 
 /**
  * Every live arm of a rebuilt union must have somewhere to go: the merge's
@@ -179,6 +180,13 @@ export const mergeIncoming = (
     falsyAbsence
   ) {
     return { value: ctx.builder.constant(block, lineage, falsyAbsence, falsyAbsence, representation), representation }
+  }
+  const typedFalsyAbsence =
+    role === 'kept' && operation.family === 'computation' && operation.form === 'logical' && operation.operator === '&&'
+      ? falsyOnlyAbsenceOf(ctx.graph.structuralTypes, operand.type)
+      : null
+  if (typedFalsyAbsence && carriesAbsence(representation, typedFalsyAbsence)) {
+    return { value: ctx.builder.constant(block, lineage, typedFalsyAbsence, typedFalsyAbsence, representation), representation }
   }
   if (
     role === 'kept' &&
