@@ -105,7 +105,8 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
   }
   if (tagsOf.size === 0) return blanked
 
-  const contradicted = new Set<ts.Symbol>()
+  /** Each contradicted field, with the store that proves it -- for the debug line below. */
+  const contradicted = new Map<ts.Symbol, ts.Node>()
   const assignmentsOf = new Map<ts.VariableDeclaration, readonly ts.Expression[]>()
   const localAssignments = (declaration: ts.VariableDeclaration & { readonly name: ts.Identifier }): readonly ts.Expression[] => {
     const known = assignmentsOf.get(declaration)
@@ -156,12 +157,12 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
         const target = withoutParentheses(node.left)
         const whole = fieldAt(target)
-        if (whole && !contradicted.has(whole) && contradicts(node.right, checker.getTypeOfSymbol(whole))) contradicted.add(whole)
+        if (whole && !contradicted.has(whole) && contradicts(node.right, checker.getTypeOfSymbol(whole))) contradicted.set(whole, node)
         if (ts.isElementAccessExpression(target) && !isLiteralKey(target.argumentExpression)) {
           const owner = fieldAt(withoutParentheses(target.expression))
           if (owner && !contradicted.has(owner)) {
             const element = indexTypeAt(checker, checker.getTypeOfSymbol(owner), target.argumentExpression)
-            if (element && contradicts(node.right, element)) contradicted.add(owner)
+            if (element && contradicts(node.right, element)) contradicted.set(owner, node)
           }
         }
       }
@@ -171,7 +172,7 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
   }
 
   const spans = new Map<ts.SourceFile, { readonly at: number; readonly end: number }[]>()
-  for (const symbol of contradicted) {
+  for (const [symbol, store] of contradicted) {
     for (const tag of tagsOf.get(symbol) ?? []) {
       const file = tag.getSourceFile()
       const fileSpans = spans.get(file) ?? []
@@ -179,7 +180,11 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
       spans.set(file, fileSpans)
       if (process.env['GEA_JSDOC_CONTRADICTION_DEBUG']) {
         const line = file.getLineAndCharacterOfPosition(tag.pos).line + 1
-        process.stderr.write(`[JSDOC-CONTRADICTED] ${file.fileName}:${line} ${symbol.name}: ${tag.typeExpression.getText(file)}\n`)
+        const storeFile = store.getSourceFile()
+        const storeLine = storeFile.getLineAndCharacterOfPosition(store.getStart(storeFile)).line + 1
+        process.stderr.write(
+          `[JSDOC-CONTRADICTED] ${file.fileName}:${line} ${symbol.name}: ${tag.typeExpression.getText(file)} by ${storeFile.fileName}:${storeLine}\n`
+        )
       }
     }
   }
