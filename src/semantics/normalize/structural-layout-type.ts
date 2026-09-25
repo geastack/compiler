@@ -223,6 +223,12 @@ export const createLayoutTypeResolver = (
     if (!isEvolvingArrayType(own)) return own
     const symbol = boundSymbolOf(node)
     if (!symbol) return own
+    // `Array.isArray(value)` narrows a union or an unannotated parameter to
+    // the same `any[]` spelling. Only a binding DECLARED as that array is
+    // evolving; any other binding's `any[]` is a control-flow narrowing of
+    // what it holds, and settling it would hand the read the whole binding.
+    const declaration = symbol.valueDeclaration
+    if (declaration && !isEvolvingArrayType(checker.getTypeOfSymbolAtLocation(symbol, declaration))) return own
     let settled = settledEvolvingType.get(symbol)
     if (settled === undefined) {
       const last = lastReferenceTo(symbol, node.getSourceFile())
@@ -652,6 +658,29 @@ export const createLayoutTypeResolver = (
   }
 
   /**
+   * What a parameter or variable binding holds, as this resolver lays it out
+   * at its declaration. In unchecked JavaScript the checker declares an
+   * unannotated binding `any` (or a union built from `any[]` spreads) while
+   * the censuses have bound the domain its writers actually give it; the
+   * declaration's layout is the carrier every read of that binding narrows
+   * from, so it is the only honest source of arms. A declaration whose layout
+   * is still being answered (a self-referential initializer) falls back to the
+   * checker's declared type.
+   */
+  const bindingsInFlight = new Set<ts.Node>()
+  const bindingCarrierOf = (symbol: ts.Symbol, declaration: ts.Declaration): ts.Type => {
+    const declared = checker.getTypeOfSymbolAtLocation(symbol, declaration)
+    if (!ts.isParameter(declaration) && !ts.isVariableDeclaration(declaration)) return declared
+    if (bindingsInFlight.has(declaration)) return declared
+    bindingsInFlight.add(declaration)
+    try {
+      return layoutTypeAt(declaration)
+    } finally {
+      bindingsInFlight.delete(declaration)
+    }
+  }
+
+  /**
    * The declared carrier behind TypeScript's `Array.isArray` narrowing.
    *
    * The standard predicate deliberately narrows every array-shaped value to
@@ -681,7 +710,7 @@ export const createLayoutTypeResolver = (
     const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0]
     if (!symbol || !declaration) return null
 
-    const declared = checker.getTypeOfSymbolAtLocation(symbol, declaration)
+    const declared = bindingCarrierOf(symbol, declaration)
     // `Array.isArray(value)` narrows a value declared `any`/`unknown` to
     // `any[]`.  That is a control-flow fact about the ONE dynamic value, not
     // an allocation or an element-wise conversion.  Returning the declared

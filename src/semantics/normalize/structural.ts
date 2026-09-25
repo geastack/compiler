@@ -3659,6 +3659,25 @@ const buildMapper = (
     return written
   }
 
+  /**
+   * A census union read at `node`. A read inside a guard (`Array.isArray(x) ?
+   * [...x] : ...`) carries the arms the guard admits: the checker's own type
+   * there, narrowed by a runtime test, keeps exactly the arms assignable to it.
+   * An unguarded read keeps them all, spelled as before.
+   */
+  const unionOfGuardedArms = (
+    node: ts.Node,
+    arms: readonly ts.Type[],
+    translate: (type: ts.Type) => StructuralTypeId
+  ): StructuralTypeId => {
+    const guarded = ts.isIdentifier(node) ? checker.getTypeAtLocation(node) : null
+    const admitted = guarded ? arms.filter((arm) => checker.isTypeAssignableTo(arm, guarded)) : arms
+    const [only] = admitted
+    if (admitted.length === 1 && only && admitted.length < arms.length) return translate(only)
+    const kept = admitted.length > 0 ? admitted : arms
+    return table.intern({ kind: 'union', members: kept.map((arm) => translate(arm)) })
+  }
+
   const structuralRules: readonly StructuralRule[] = [
     {
       // A reference to the host constructor global itself -- `Error`, not a
@@ -4267,7 +4286,7 @@ const buildMapper = (
           const copy = mapperFor(copyPathOf(site))
           // The synthesized-union check of the non-specialized path below.
           const specializedUnionArms = parameters.unionArmsAt(node)
-          if (specializedUnionArms) return table.intern({ kind: 'union', members: specializedUnionArms.map((arm) => copy.typeOf(arm)) })
+          if (specializedUnionArms) return unionOfGuardedArms(node, specializedUnionArms, copy.typeOf)
           return copy.typeOf(absentSubstitutedTypeAt(node))
         }
         return null
@@ -4547,8 +4566,7 @@ const buildMapper = (
       ],
       resolve: (node) => {
         const unionArms = parameters.unionArmsAt(node)
-        if (unionArms) return table.intern({ kind: 'union', members: unionArms.map((arm) => typeOf(arm)) })
-        return null
+        return unionArms ? unionOfGuardedArms(node, unionArms, typeOf) : null
       }
     },
     {
