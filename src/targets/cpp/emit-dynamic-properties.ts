@@ -1258,7 +1258,16 @@ export const nativeSidecarGetText = (ctx: EmitContext, operation: GetOperation):
     // `arrayMemberRefusals` refuses a member the array carrier itself cannot
     // render: a program that reaches here is not turned into a silent
     // TypeError or a SIGABRT, it is told at compile time which method and why.
-    if (arrayPrototypeMethods.has(staticKey)) {
+    //
+    // A class instance's prototype chain is its classes' and never
+    // `Array.prototype`, so an undeclared `map` READ off one is an ordinary
+    // own property the program gave it (three's
+    // `NodeMaterial.setDefaultValues` copying `MeshBasicMaterial.map`), which
+    // the sidecar answers like any other name. Only a read that is called --
+    // the shape a borrowed `Array.prototype.map.call(instance, f)` was
+    // rewritten to -- still refuses here.
+    const classRead = representation.kind === 'class-ref' && ![...ctx.callCallees.values()].some((callee) => callee === operation.result.id)
+    if (arrayPrototypeMethods.has(staticKey) && !classRead) {
       throw createCppEmitBlockedError(
         `property-access:${representation.kind}:get:false`,
         `"Array.prototype.${staticKey}" has no rendering off a "${representationKey(representation)}" receiver -- only a genuine array carrier ` +
