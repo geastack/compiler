@@ -641,15 +641,35 @@ const dynamicCallableValueOf = (
 
 const proxyOriginCarrier: Representation = { kind: 'dynamic', reason: 'proxy-origin' }
 
-/** A convention whose result, or whose parameters at `positions`, may be a proxy: those slots take `dynamic`. */
-const proxyReachedAbi = (abi: CallableAbi, returns: boolean, positions: ReadonlySet<number> | undefined): CallableAbi => ({
+/**
+ * An array whose elements may hold a proxy: the array keeps its own native
+ * carrier and its elements take `dynamic`. `null` for a carrier that is not
+ * such an array, or whose elements already are.
+ */
+const proxyElementArrayOf = (carrier: Representation): Representation | null =>
+  carrier.kind === 'array-object' && carrier.element.kind !== 'dynamic' ? { ...carrier, element: proxyOriginCarrier } : null
+
+/**
+ * A convention whose result, or whose parameters at `positions`, may be a
+ * proxy: those slots take `dynamic`. A rest slot whose gathered arguments may
+ * be one (`restElements`) keeps its array and takes `dynamic` elements.
+ */
+const proxyReachedAbi = (
+  abi: CallableAbi,
+  returns: boolean,
+  positions: ReadonlySet<number> | undefined,
+  restElements: boolean
+): CallableAbi => ({
   ...abi,
   result: returns ? proxyOriginCarrier : abi.result,
-  parameters: abi.parameters.map((parameter, ordinal) =>
-    positions?.has(ordinal) && parameter.value.kind !== 'dynamic'
-      ? { value: proxyOriginCarrier, ownership: parameter.ownership, passing: passingOf(proxyOriginCarrier, parameter.ownership) }
-      : parameter
-  )
+  parameters: abi.parameters.map((parameter, ordinal) => {
+    if (positions?.has(ordinal) && parameter.value.kind !== 'dynamic')
+      return { value: proxyOriginCarrier, ownership: parameter.ownership, passing: passingOf(proxyOriginCarrier, parameter.ownership) }
+    const elements = restElements && ordinal === abi.restFrom ? proxyElementArrayOf(parameter.value) : null
+    return elements === null
+      ? parameter
+      : { value: elements, ownership: parameter.ownership, passing: passingOf(elements, parameter.ownership) }
+  })
 })
 
 /**
@@ -668,22 +688,24 @@ const proxyOriginOf = (
   // holds a proxy as well as anything else, and a second reason for the same
   // slot would only make its views disagree with the convention that binds it.
   if (origins.results.has(result.id)) return derived().kind === 'dynamic' ? null : proxyOriginCarrier
+  if (origins.elementResults.has(result.id)) return proxyElementArrayOf(derived())
   const origin = callableOrigins.get(result.id)
   if (origin === undefined) return null
   const callable = withoutFunctionSpecialization(origin)
   const returns = origins.returning.has(callable)
   const positions = origins.parameters.get(callable)
-  if (!returns && positions === undefined) return null
+  const restElements = origins.restElements.has(callable)
+  if (!returns && positions === undefined && !restElements) return null
   const carrier = derived()
   switch (carrier.kind) {
     case 'function':
     case 'function-value-dispatch':
-      return { ...carrier, abi: proxyReachedAbi(carrier.abi, returns, positions) }
+      return { ...carrier, abi: proxyReachedAbi(carrier.abi, returns, positions, restElements) }
     case 'function-and-constructor':
       return {
         ...carrier,
-        call: proxyReachedAbi(carrier.call, returns, positions),
-        construct: proxyReachedAbi(carrier.construct, false, positions)
+        call: proxyReachedAbi(carrier.call, returns, positions, restElements),
+        construct: proxyReachedAbi(carrier.construct, false, positions, restElements)
       }
     default:
       return null
