@@ -610,6 +610,20 @@ const programSourceClosure = (
   return seen
 }
 
+/**
+ * What the source transforms made of each file's text, kept across every
+ * program one `createProgram` builds. A transform is a function of the file's
+ * name, its text and its declaration file, so a file read again with the same
+ * three gets the same answer -- and the rebuilds (a program re-created to add
+ * a CommonJS target, or from prepared text) would otherwise run the whole
+ * chain over every file again, which on three's source is most of a
+ * program's cost.
+ */
+type TransformedText = Map<
+  string,
+  { readonly input: string; readonly declarationFileName: string | undefined; readonly roots: string; readonly output: string }
+>
+
 const transformingHost = (
   input: ProgramInput,
   roots: readonly string[],
@@ -693,6 +707,12 @@ const transformingHost = (
   const unchecked = createUncheckedJavaScriptPolicy(input.uncheckedJavaScript ?? new Set(), host)
   let programFiles: ReadonlySet<string> | undefined
   const programFilesOf = (): ReadonlySet<string> => (programFiles ??= programSourceClosure(roots, host, resolver, stated))
+  // A cached transform result is valid only for the roots it was made with:
+  // `programFiles` is derived from them, and a rebuild may add roots.
+  const rootsKey = roots
+    .map((root) => resolve(root))
+    .sort()
+    .join('\n')
   const parse: ts.CompilerHost['getSourceFile'] = (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {
     const prepared = preparedSourceText.get(resolve(fileName))
     if (prepared !== undefined) return ts.createSourceFile(fileName, prepared, languageVersionOrOptions, true, scriptKindOf(fileName))
@@ -947,7 +967,7 @@ const configuredProgram = (
         ...(input.commonJsGlobals ? [...input.commonJsGlobals.values()].map((entry) => entry.declarationFileName) : [])
       ])
     ]
-    const host = transformingHost(input, rootNames, options, resolutionDiagnostics, preparedSourceText, timing)
+    const host = transformingHost(input, rootNames, options, resolutionDiagnostics, preparedSourceText, timing, transformed)
     // `host` is omitted rather than passed as `undefined`: under
     // `exactOptionalPropertyTypes` the two are different, and the option is
     // "the caller supplies a host" -- not "the caller supplies no host".
