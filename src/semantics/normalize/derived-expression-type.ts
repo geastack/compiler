@@ -2547,6 +2547,33 @@ export const isLibArrayBufferViewType = (type: ts.Type): boolean =>
 export const statesAnArrayBufferView = (declared: ts.Type): boolean =>
   (declared.isUnion() ? declared.types : [declared]).some(isLibArrayBufferViewType)
 
+const memberChoiceOf = (
+  checker: ts.TypeChecker,
+  symbol: ts.Symbol | undefined,
+  read: (operand: ts.Expression) => ts.Type,
+  visiting: Set<ts.Symbol>
+): ts.Type | null => {
+  const declarations = symbol?.declarations
+  if (!symbol || !declarations?.length || visiting.has(symbol)) return null
+  const writes: ts.Expression[] = []
+  for (const declaration of declarations) {
+    if (!ts.isBinaryExpression(declaration) || declaration.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return null
+    writes.push(unwrapErasedExpression(declaration.right))
+  }
+  visiting.add(symbol)
+  try {
+    let chose = false
+    const types = writes.map((write) => {
+      const choice = constructedChoiceAt(checker, write, read, visiting)
+      if (choice) chose = true
+      return choice ?? checker.getTypeAtLocation(write)
+    })
+    return chose ? disjointUnionTypeOf(checker, types) : null
+  } finally {
+    visiting.delete(symbol)
+  }
+}
+
 /**
  * Whether `actual` refines a statement naming `ArrayBufferView` only at the
  * view identity it leaves open: every present member is a lib-declared buffer
@@ -2574,6 +2601,17 @@ export const narrowsArrayBufferViewToViews = (checker: ts.TypeChecker, declared:
     sawView = true
   }
   return sawView
+}
+
+/**
+ * The same answer for a member's own storage, asked by the class layout
+ * (`structural-parts.ts`'s `memberOf`) where it holds the symbol rather than
+ * a read.
+ */
+export const constructedClassChoiceMemberTypeOf = (checker: ts.TypeChecker, symbol: ts.Symbol): ts.Type | null => {
+  const read = (operand: ts.Expression): ts.Type =>
+    nominalConstructorChoiceTypeAt(checker, operand, read) ?? checker.getTypeAtLocation(operand)
+  return memberChoiceOf(checker, symbol, read, new Set())
 }
 
 /** Shape subtyping cannot discard the identity of a class constructor selected at runtime. */
