@@ -1253,7 +1253,8 @@ export const packRestArguments = (
     if (firstSpread >= 0) {
       throw new IrLoweringBlockedError(
         'a call range-copies a spread argument into a convention that declares no rest slot; a spread contributes a runtime number of ' +
-          'values and there is no fixed formal for them to land in'
+          'values and there is no fixed formal for them to land in' +
+          (abi ? ` (the convention is ${abiKey(abi)})` : ' (the callee states no convention)')
       )
     }
     return args.map((slot) => slot.value)
@@ -1328,18 +1329,33 @@ export const packRestArguments = (
     return [...args.slice(0, abi.restFrom).map((entry) => entry.value), { value: packed, representation: slot.value }]
   }
   if (slot.value.kind !== 'array-object') {
-    throw new IrLoweringBlockedError('a variadic convention declares a rest slot that is not an array-object and cannot be packed')
+    throw new IrLoweringBlockedError(
+      `a variadic convention declares a rest slot that is not an array-object and cannot be packed (the slot is "${representationKey(slot.value)}")`
+    )
   }
-  // `slot` is captured by the element callback below; keep the narrowing in a
-  // stable local rather than asking TypeScript to retain it through closure
-  // control flow.  This is the same ABI-proved rest carrier, not a cast.
-  const restArray = slot.value
+  const packed = packArgumentArray(ctx, block, lineage, args.slice(abi.restFrom), slot.value)
+  return [...args.slice(0, abi.restFrom).map((entry) => entry.value), { value: packed, representation: slot.value }]
+}
+
+/**
+ * A run of arguments packed into one fresh array, positional values and range
+ * copies in written order: a rest parameter's array, or the whole argument
+ * list of a call through a callee that states no frame (`packRestArguments`'s
+ * caller hands a `dynamic` callee that list to spread at run time).
+ */
+export const packArgumentArray = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  entries: readonly ArgumentSlot[],
+  restArray: Extract<Representation, { kind: 'array-object' }>
+): IrValueId => {
   // The rest array is FRESH per call -- the language binds `...rest` to a new
   // Array, never to the caller's -- so a spread contributes a range copy into
   // it rather than aliasing it. That is also why a mixed `f(a, ...xs, b)`
   // needs no special case: the copy and the push are both just elements of the
   // array being built, in written order.
-  const elements = args.slice(abi.restFrom).map((entry) => {
+  const elements = entries.map((entry) => {
     // A positional element enters the pack's element slot the way a literal's
     // element enters an array literal's: converted here, so the printer's
     // folded push (`emit-arrays.ts`) and the packed array agree on the carrier.
@@ -1382,6 +1398,5 @@ export const packRestArguments = (
       ? { kind: 'spread' as const, value: entry.value, from: entry.from ?? 0, element: restArray.element }
       : { kind: 'spread' as const, value: entry.value, from: entry.from ?? 0 }
   })
-  const packed = ctx.builder.allocateArrayObject(block, lineage, elements, restArray)
-  return [...args.slice(0, abi.restFrom).map((entry) => entry.value), { value: packed, representation: restArray }]
+  return ctx.builder.allocateArrayObject(block, lineage, elements, restArray)
 }

@@ -25787,6 +25787,21 @@ inline void installDescriptorSetter(PropertyDescriptor& descriptor, const Value&
   descriptor.set = [setter](const Value& receiver, const Value& written) { setter.callWithReceiver(receiver, {written}); };
 }
 
+/**
+ * The flat argument list of a call through a boxed callable whose arguments
+ * include a spread: the compiler builds the whole list as one fresh array
+ * (`f(a, ...xs)` is `Reflect.apply(f, this, [a, ...xs])`), and its elements,
+ * in order, are the list `callWithReceiver` takes. A hole reads `undefined`,
+ * as CreateListFromArrayLike's Get does.
+ */
+inline std::vector<Value> dynamicArgumentList(const Ref<ArrayObject<Value>>& list) {
+  std::vector<Value> arguments;
+  if (!list) return arguments;
+  arguments.reserve(list->size());
+  for (std::size_t index = 0; index < list->size(); ++index) arguments.push_back(list->present(index) ? list->at(index) : Value());
+  return arguments;
+}
+
 inline std::string Value::functionSourceText() const {
   if (tag_ != Tag::Function) detail::refusePayloadMismatch("Function.prototype.toString");
   // Same reasoning as `callWithReceiver`: preserve today's refusal exactly,

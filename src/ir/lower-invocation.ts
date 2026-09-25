@@ -17,6 +17,7 @@ import { hostTemplateOfRead } from '../representation/host-templates.js'
 import {
   abiOfCallee,
   constructAbiOfCallee,
+  packArgumentArray,
   packRestArguments,
   namedOperand,
   type ArgumentSlot,
@@ -689,17 +690,44 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
   // own elements at runtime (`gea_runtime.h`'s
   // `console::joined(const Ref<ArrayObject<Value>>&)`) instead of the
   // compile-time per-operand join every other text-joined call takes. A
-  // mixed call (`console.log("x", ...rest)`) is a different shape -- more
-  // than one physical argument, one of them a runtime-counted range -- with
-  // no single array to pass whole, and stays refused below: only the pure
-  // spread was ever measured.
-  const wholeSpreadArgument =
+  // mixed call (`console.log("x", ...rest)`, three's `utils.js` `log`) has
+  // no single array to pass whole, so it builds one: the member's own rest
+  // array, every argument in written order with the spread range-copied in,
+  // is exactly the sequence the language hands `console.log`.
+  // The rest element is `dynamic` (`textJoined`), and a leading formal such
+  // a member declares (`log(message?: any, ...optionalParams: any[])`) is
+  // joined exactly like the tail, so the one array holds every argument.
+  const textRest = restElement
+  const wholeSpreadArgument: IrOperand | null =
     textJoined &&
     evaluated.length === 1 &&
     evaluated[0]?.kind === 'spread' &&
     evaluated[0].value.representation.kind === 'array-object' &&
     evaluated[0].value.representation.element.kind === 'dynamic'
       ? evaluated[0].value
+      : textJoined &&
+          textRest !== null &&
+          textRest.kind === 'array-object' &&
+          calleeReceiverIsNativeHandle(ctx, operation) &&
+          evaluated.some((slot) => slot.kind === 'spread')
+        ? { value: packArgumentArray(ctx, block, lineage, evaluated, textRest), representation: textRest }
+        : null
+  // A callee the program never gave a frame (`Function`, `any`) is called
+  // with the flat ECMA-262 argument list, boxed, and the callable it holds
+  // binds its own formals from it (`Value::callWithReceiver`). A spread there
+  // contributes a runtime number of entries to that list, so the whole list
+  // is built as one fresh array -- positional values and range copies in
+  // written order, exactly as a rest array is -- and handed over as the
+  // argument list itself: `f(a, ...xs)` is `Reflect.apply(f, this, [a, ...xs])`.
+  const spreadListCarrier: Extract<Representation, { kind: 'array-object' }> = {
+    kind: 'array-object',
+    element: callee.representation,
+    ownership: 'shared-refcount',
+    extension: null
+  }
+  const dynamicSpreadList: IrOperand | null =
+    callee.representation.kind === 'dynamic' && evaluated.some((slot) => slot.kind === 'spread')
+      ? { value: packArgumentArray(ctx, block, lineage, evaluated, spreadListCarrier), representation: spreadListCarrier }
       : null
   const args =
     numericRestHostCall !== null
@@ -826,7 +854,7 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
       produced,
       undefined,
       operation.builtinModuleLookup,
-      wholeSpreadArgument !== null,
+      wholeSpreadArgument !== null || dynamicSpreadList !== null,
       operation.intrinsicOwnKeys && calleeRenderingOf(ctx.program.slots.input, operation) === 'template' ? true : undefined,
       fixedDataDefinition ?? undefined,
       numericRestHostCall ?? undefined,

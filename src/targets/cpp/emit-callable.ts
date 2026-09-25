@@ -1359,9 +1359,22 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   if (callee.kind === 'dynamic') {
     // The dynamic call adapter transports this separately from positional
     // arguments; the actual callable decides whether its ABI consumes it.
-    const boxed = operation.arguments.map((argument) => alignedText(ctx, callee, argument, 'boxed-callee'))
     const receiver = operation.receiver ? boxedValueText(ctx, operation.receiver, 'dynamic call receiver') : 'gea::Value()'
-    const text = `${operandText(ctx, calleeOperand)}.callWithReceiver(${receiver}, {${boxed.join(', ')}})`
+    // A call with a spread argument arrives as ONE operand: the whole argument
+    // list, already built as an array of boxes (`ir/lower-invocation.ts`), so
+    // its elements are the list rather than one argument each.
+    const spreadList = operation.argumentsAreSpread ? operation.arguments[0] : undefined
+    if (operation.argumentsAreSpread && (operation.arguments.length !== 1 || spreadList?.representation.kind !== 'array-object')) {
+      throw createCppEmitBlockedError(
+        `call-abi:dynamic-spread-list`,
+        'a dynamic call recorded as a spread call does not carry exactly one array argument list'
+      )
+    }
+    const argumentList =
+      spreadList !== undefined
+        ? `gea::dynamicArgumentList(${operandText(ctx, spreadList)})`
+        : `{${operation.arguments.map((argument) => alignedText(ctx, callee, argument, 'boxed-callee')).join(', ')}}`
+    const text = `${operandText(ctx, calleeOperand)}.callWithReceiver(${receiver}, ${argumentList})`
     if (!operation.result) {
       lines.push(`${text};`)
       return
