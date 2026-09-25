@@ -413,6 +413,17 @@ inline std::vector<PropertyKey> Value::ownPropertyKeys() const {
   if (dynamic_) return asDynamicObject()->ownKeys();
   if (tag_ == Tag::Function) return functionProperties()->ownKeys();
   std::vector<PropertyKey> keys;
+  // The same arm `ownDescriptor`, `getProperty` and `ownEnumerableStringKeys`
+  // have: a `Dictionary<Value>` (what `JSON.parse` builds) answers for its own
+  // keys, every one an enumerable data property, and has no field table or
+  // expando for the arms below to find them in -- `Object.keys` of a parsed
+  // object was empty.
+  if (metadata_->payloadType == detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<gea::Value>>>()) {
+    const gea::Ref<gea::Dictionary<gea::Value>>& dictionary = as<gea::Ref<gea::Dictionary<gea::Value>>>();
+    if (dictionary)
+      for (const std::string& key : dictionary->enumerableKeys()) keys.push_back(PropertyKey::string(key));
+    return detail::ordinaryOwnPropertyKeyOrder(std::move(keys));
+  }
   if (tag_ == Tag::String) {
     const std::size_t length = runtime::string::utf16Length(as<std::string>());
     keys.reserve(length + 1);
