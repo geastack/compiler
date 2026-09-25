@@ -14983,6 +14983,12 @@ inline bool ordinaryObjectPrototypeHas(const PropertyKey& key) {
 template <typename T>
 bool nativeDynamicHasProperty(const gea::Ref<T>& object, const PropertyKey& key) {
   if (nativeDynamicHas(object, key)) return true;
+  // The declared members before the run-time installs, the order
+  // `nativeDynamicRead` and the boxed HasProperty take them in: `'m' in t` on
+  // a native instance names a method as often as a field.
+  if constexpr (detail::NativePrototypeTable<T>) {
+    if (object && object->gea_hasPrototypeProperty(key)) return true;
+  }
   if constexpr (requires { object->gea_method_state.get(); }) {
     if (object) {
       const auto* start = detail::nativePrototypeChainStart(object->gea_method_state.get(), static_cast<const void*>(object.get()));

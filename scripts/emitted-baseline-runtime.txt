@@ -497,6 +497,7 @@ prototype-reflection-getter-copy-refused.runtime.js.cpp 7e3ce9c00cde
 proxy-callable-origin.runtime.js.cpp e6a4643b8322
 proxy-constructor-traps.runtime.js.cpp e38d659a7f08
 proxy-get-trap-prototype-method.runtime.js.cpp 885ed317fba7
+proxy-has-trap-prototype-method.runtime.js.cpp f3611b448e13
 proxy-iterator-traps.runtime.js.cpp cf94d54819b3
 proxy-native-slot-refusal.runtime.js.cpp 38c6ceb3e2d4
 proxy-receiver-generic-copies.runtime.js.cpp e7ecc2a81e2b
