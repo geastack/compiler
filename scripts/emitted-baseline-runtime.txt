@@ -166,6 +166,7 @@ fn-classref.ts.cpp 927dda4e017c
 fn-scalar.ts.cpp 21e6234db785
 for-in-generic-key.ts.cpp a76e38dc426c
 for-in-over-sparse-array.ts.cpp 7acc76c5f087
+for-in-this-copy-narrowed-member.runtime.js.cpp d38591a42681
 for-of-array-heritage-interface.ts.cpp d300eed8af4f
 for-of-array-object.ts.cpp 0b0710a08b19
 for-of-in-bare-identifier-head.ts.cpp d70a5ed6b7b3
