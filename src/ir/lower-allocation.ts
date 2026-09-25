@@ -227,6 +227,19 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
                 '"array-object", a "Set", a "Map", a "string" and a cursor'
             )
           }
+          // An Array source whose elements are carried differently converts
+          // per element on the way in, exactly as a call's rest pack does
+          // (`lower-operands.ts`): the emitter installs the conversion from
+          // the ordinary recipes and refuses by name where none exists. Two
+          // `dynamic` carriers whose reasons differ are one such pair -- the
+          // reason says why a value is boxed, not how.
+          if (
+            tuple.kind === 'array-object' &&
+            source.representation.kind === 'array-object' &&
+            representationKey(spreadElement) !== representationKey(tuple.element)
+          ) {
+            return { kind: 'spread', value: source, from: 0, element: tuple.element }
+          }
           if (tuple.kind !== 'array-object' || representationKey(spreadElement) !== representationKey(tuple.element)) {
             throw new IrLoweringBlockedError(
               `an array literal spreads a source whose element carrier ("${representationKey(spreadElement)}") does not match ` +

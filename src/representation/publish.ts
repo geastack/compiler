@@ -511,6 +511,11 @@ const commonJsBoundaryOf = (graph: SemanticGraph, operation: SemanticOperation |
     (operation.commonJs.global !== 'module' || operation.commonJs.nativeRecord !== true)
   )
     return { kind: 'dynamic', reason: 'commonjs-module-boundary' }
+  // The wrapper's this-value is the initial exports object, the same host
+  // object the `exports` binding starts as; a module that reads it has no
+  // native record (`commonjs-module-record.ts`).
+  if (operation?.family === 'reference' && operation.commonJsModuleThis !== undefined)
+    return { kind: 'dynamic', reason: 'commonjs-module-boundary' }
   // `module.exports` is a wrapper-cell read, not an ordinary read from the
   // declared shape of `module`.  Follow its normalized receiver edge instead
   // of asking the checker again: the only admitted route is the authenticated
@@ -521,18 +526,17 @@ const commonJsBoundaryOf = (graph: SemanticGraph, operation: SemanticOperation |
   // wrote into (`lower-property.ts`'s `set`, rendered as the cell after
   // `reflectSet`), so the result crosses the same boundary the receiver did.
   // Derived structurally it was `module`'s declared `{ exports }` record, and
-  // `module.exports = { ... }` emitted `gea::Ref<record> = gea::Value`.
+  // `module.exports = { ... }` emitted `gea::Ref<record> = gea::Value`. The
+  // receiver is any value this boundary publishes -- a wrapper binding, the
+  // `module.exports` cell read, the wrapper's this-value: derived from the
+  // module's FINAL declared shape, `module.exports.a = 1` asserted the
+  // exports object held `b` before the next statement wrote it.
   if (operation?.family === 'property' && operation.internalMethod === 'set') {
     const receiver = operandOf(operation, 'receiver')
     if (receiver?.source.kind === 'result') {
       const producerId = graph.results.get(receiver.source.result)
       const producer = producerId === undefined ? undefined : graph.operations.get(producerId)
-      if (
-        producer?.family === 'binding' &&
-        producer.commonJs !== undefined &&
-        (producer.commonJs.global !== 'module' || producer.commonJs.nativeRecord !== true)
-      )
-        return { kind: 'dynamic', reason: 'commonjs-module-boundary' }
+      if (commonJsBoundaryOf(graph, producer) !== null) return { kind: 'dynamic', reason: 'commonjs-module-boundary' }
     }
   }
   if (operation?.family === 'property' && operation.internalMethod === 'get') {

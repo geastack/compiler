@@ -28,6 +28,7 @@ import { valueSymbolAt } from '../unresolvable-names.js'
 import type { UnresolvableNameCensus } from '../unresolvable-names.js'
 import { argumentsObjectValueAt } from './bindings.js'
 import { calleeAwareTypeAt, isAssignmentOperatorKind } from './shared.js'
+import { isModuleWrapperThis } from '../commonjs-module-record.js'
 
 const literalConstantOf = (expression: ts.Expression): { text: string; literal: ConstantLiteral } | null => {
   if (ts.isStringLiteralLike(expression)) return { text: expression.text, literal: 'string' }
@@ -875,6 +876,32 @@ const staticThisOwner = (node: ts.Node): { readonly classNode: ts.ClassLikeDecla
 }
 
 /**
+ * Whether the function an arrow's `this` resolves to binds one: ECMA-262
+ * 9.4.3 GetThisEnvironment walks outward past every arrow to the nearest
+ * function environment with a `this` binding, so an arrow inside a plain
+ * function or method reads THAT function's receiver -- avvio's
+ * `this._readyQ.drain = () => { this.emit('start') }` inside `function Boot`.
+ * Module-level code binds none this layer models, and keeps the refusal; a
+ * class field or static block is `isClassBoundThis`'s and `staticThisOwner`'s.
+ */
+/** Whether a class body (a field initializer or static block) encloses this node, whose `this` the class binds. */
+const enclosingFunctionBindsThis = (node: ts.Node): boolean => {
+  for (let current: ts.Node | undefined = node.parent; current; current = current.parent) {
+    if (
+      ts.isFunctionDeclaration(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isMethodDeclaration(current) ||
+      ts.isConstructorDeclaration(current) ||
+      ts.isGetAccessorDeclaration(current) ||
+      ts.isSetAccessorDeclaration(current)
+    )
+      return true
+    if (ts.isPropertyDeclaration(current) || ts.isClassStaticBlockDeclaration(current)) return false
+  }
+  return false
+}
+
+/**
  * Whether this `this` is genuinely bound to an enclosing class, as opposed to
  * the global object, `undefined`, or some other binding this layer does not
  * model.
@@ -908,20 +935,45 @@ const buildThisReference = (candidate: CensusCandidate, node: ts.Node, context: 
   // lowers the read), gated on this operand's own *role* rather than on a new
   // `OperandSource` variant -- `role` is an ordinary string
   // (`semantics/model/operands.ts`), and `captured-receiver` is this
-  // producer's own proof, computed once, right here, that `isClassBoundThis`
-  // already confirmed the read resolves to an enclosing class's own instance
-  // -- not to `undefined`, the global object, or some other binding this
-  // layer does not model. Every other `this` -- inside a method or
-  // constructor's own body, or inside a plain function with no lexically
-  // enclosing class receiver at all -- keeps the ordinary `receiver` role, so
+  // producer's own proof, computed once, right here, that the read resolves
+  // to a receiver an enclosing frame binds -- a class's own instance
+  // (`isClassBoundThis`), or the receiver of the plain function or method the
+  // arrow sits in (`enclosingFunctionBindsThis`), whatever its caller passed
+  // -- and not to a module's `this`, which this layer does not model. Every
+  // other `this` -- inside a method or constructor's own body, or in an arrow
+  // at module level -- keeps the ordinary `receiver` role, so
   // a genuinely undeclared read still refuses exactly as it always has
   // (`ir/lower-operands.ts`'s `resolveRequiredOperand`, unchanged for that
   // role). Nothing downstream can mistake one for the other: the role a
   // *plain* function's dynamic `this` might coincidentally share a carrier
   // with is never `captured-receiver`, because only this one condition ever
   // mints that role.
-  const captured = nearestOwningScopeIsArrow(node) && isClassBoundThis(node, context)
+  const captured = nearestOwningScopeIsArrow(node) && (isClassBoundThis(node, context) || enclosingFunctionBindsThis(node))
   const staticOwner = staticThisOwner(node)
+  // A CommonJS module's wrapper this-value -- TypeScript's helpers read it as
+  // `(this && this.__createBinding) || ...` -- is a wrapper binding, not a
+  // frame's receiver.
+  const file = node.getSourceFile()
+  if (!staticOwner && isModuleWrapperThis(node) && context.commonJsModules.has(file)) {
+    const moduleThisId = mintOperationId(context.ordinals, candidate.id, 'reference')
+    const moduleThisType = context.types.typeAt(node)
+    const moduleThis: ReferenceOperation = {
+      id: moduleThisId,
+      family: 'reference',
+      form: 'this',
+      strict: ts.isExternalModule(file),
+      unresolvableThrows: false,
+      hasNoCell: false,
+      commonJsModuleThis: regionId(context.identities.nodeIdOf(file), 'module-body'),
+      caller: candidate.caller,
+      operands: [],
+      results: [mintResult(moduleThisId, 'value', moduleThisType)],
+      completion: normalCompletion,
+      effects: { ...pureEffects, readsMutableState: true },
+      evaluationOrdinal: candidate.evaluationOrdinal
+    }
+    return { kind: 'operations', operations: [moduleThis], edges: [] }
+  }
   const id = mintOperationId(context.ordinals, candidate.id, 'reference')
   const type = staticOwner ? context.types.valueTypeAt(staticOwner.classNode) : context.types.typeAt(node)
   const canThrow = thisCanThrow(node)

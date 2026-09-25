@@ -75,6 +75,28 @@ const containingTopLevelStatement = (node: ts.Node): ts.Statement | null => {
   return ts.isStatement(current) ? current : null
 }
 
+/**
+ * Whether a `this` keyword is the module wrapper's own this-value: no
+ * function, method, accessor, constructor or class between it and the file
+ * binds one (an arrow binds none). Node calls a CommonJS wrapper with
+ * `module.exports` as that value, so it is the initial exports object.
+ */
+export const isModuleWrapperThis = (node: ts.Node): boolean => {
+  for (let current: ts.Node | undefined = node.parent; current; current = current.parent) {
+    if (
+      ts.isFunctionDeclaration(current) ||
+      ts.isFunctionExpression(current) ||
+      ts.isMethodDeclaration(current) ||
+      ts.isConstructorDeclaration(current) ||
+      ts.isGetAccessorDeclaration(current) ||
+      ts.isSetAccessorDeclaration(current) ||
+      ts.isClassLike(current)
+    )
+      return false
+  }
+  return true
+}
+
 const executesInNestedBody = (node: ts.Node): boolean => {
   let current: ts.Node = node
   while (!ts.isSourceFile(current.parent)) {
@@ -208,6 +230,11 @@ export const censusCommonJsModuleRecords = (
             return
           }
         }
+      }
+      // The wrapper's this-value is the initial exports object: one more route to it.
+      if (node.kind === ts.SyntaxKind.ThisKeyword && isModuleWrapperThis(node)) {
+        unsafe.add(file)
+        return
       }
       if (ts.isIdentifier(node)) {
         const global = wrapperGlobalOf(node)

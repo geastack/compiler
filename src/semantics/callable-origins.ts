@@ -74,6 +74,20 @@ export const callableOriginsOf = (graph: SemanticGraph): ReadonlyMap<SemanticRes
           changed = true
         }
       }
+      // A plain `=` evaluates to the value it assigned (ECMA-262 13.15.2), so
+      // `module.exports = F` is F itself. Left unstamped, the expression was
+      // the one view of a boxed constructor that kept its native carrier, and
+      // the value merged into it had no conversion back.
+      if (operation.family === 'computation' && operation.form === 'assignment') {
+        const assigned = operandOf(operation, 'value')
+        const origin = assigned?.source.kind === 'result' ? origins.get(assigned.source.result) : undefined
+        const value = resultOf(operation, 'value')
+        if (origin !== undefined && value && !origins.has(value.id)) {
+          origins.set(value.id, origin)
+          changed = true
+        }
+        continue
+      }
       if (operation.family !== 'binding') continue
       const origin = cells.get(operation.declaration)
       if (origin === undefined) continue

@@ -68,6 +68,12 @@ export interface ReferenceOperation extends SemanticOperationBase {
   readonly form: 'identifier' | 'property' | 'super-property' | 'private-name' | 'this' | 'parameter-value' | 'global-this' | 'new-target'
   /** A `parameter-value` read of a rest slot: the fresh Array the call's argument packing built. */
   readonly restPacked?: boolean
+  /**
+   * A `this` at the top level of a CommonJS module: the module wrapper is
+   * called with `module.exports` as its this-value, so this is the same object
+   * the wrapper's `exports` parameter names, for the module body in this region.
+   */
+  readonly commonJsModuleThis?: RegionId
   readonly strict: boolean
   /** Reference resolution can throw before any value is produced. */
   readonly unresolvableThrows: boolean

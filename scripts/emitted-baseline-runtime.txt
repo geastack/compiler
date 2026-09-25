@@ -7,6 +7,7 @@ array-concat-array-argument.ts.cpp 86c31adb9c34
 array-element-string-key.ts.cpp 82836dce1c7b
 array-index-absence.ts.cpp b9f1195e8e0b
 array-isarray-identity-conditional.ts.cpp 33c73a99fa8f
+array-literal-spread-converts-elements.runtime.js.cpp 34e7b008842d
 array-multiple-windows.ts.cpp ee13367467b2
 array-mutator-frozen-integrity.ts.cpp f122fdb38185
 array-pattern-defaults-keep-positions.ts.cpp 9b003f6f7de9
@@ -116,7 +117,7 @@ drift.txt bec8498d5c98
 dynamic-array-absent-element.ts.cpp 6838ef917ebe
 dynamic-array-literal-gather.runtime.js.cpp 4c1e3d9c21cf
 dynamic-array-projection.ts.cpp 25d0cdd3b0d1
-dynamic-callable-boxed-call-frame.runtime.js.cpp c15648a680d6
+dynamic-callable-boxed-call-frame.runtime.js.cpp 1588daa30176
 dynamic-callable-rest-adapter.runtime.js.cpp 698f3d19b6f0
 dynamic-callable-union-identity.runtime.ts.cpp 48c0af8339b2
 dynamic-class-family-roundtrip.ts.cpp 93fefa26ad00
@@ -439,7 +440,7 @@ physical-class-ancestry-live.ts.cpp 728e6f672df0
 physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 50f20517ba63
-printer-drift.txt d070272a5a19
+printer-drift.txt 941efa15186a
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
 promise-method-read-as-value.ts.cpp d92abcc1e89f
@@ -563,7 +564,7 @@ typeof-runtime-string.ts.cpp 5b4c672dec2a
 typeof-then-discriminates-a-union.ts.cpp 16fe804a602d
 unbox-nullable-union.ts.cpp b8a67b94f69c
 uncallable-member-slot-call.runtime.js.cpp f925ad615e3e
-uncertified.txt 316ae9ea793a
+uncertified.txt 8643c5c8819f
 union-member-absent-on-promise-arm.ts.cpp fb968705a335
 union-method-absent-on-one-arm-discarded.ts.cpp d2bf86271461
 union-of-tuples-array-pattern.ts.cpp aa8e76675555

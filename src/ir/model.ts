@@ -440,10 +440,14 @@ export interface CommonJsRequireOperation extends IrOperationBase {
   readonly result: IrResult
 }
 
-/** A lexical CommonJS wrapper parameter read. */
+/**
+ * A lexical CommonJS wrapper parameter read, or (`this`) the wrapper's
+ * this-value: the initial exports object, which reassigning `exports` or
+ * `module.exports` does not change.
+ */
 export interface CommonJsBindingOperation extends IrOperationBase {
   readonly kind: 'commonjs-binding'
-  readonly global: 'require' | 'exports' | 'module'
+  readonly global: 'require' | 'exports' | 'module' | 'this'
   readonly owner: RegionId
   readonly result: IrResult
 }

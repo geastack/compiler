@@ -157,6 +157,46 @@ const wrapperRedeclarationFor = (
 }
 
 /**
+ * A write THROUGH the wrapper name that TypeScript records as a declaration of
+ * the global it resolved the name to.
+ *
+ * Checked JavaScript binds a top-level `Object.defineProperty(module,
+ * 'exports', {...})` or `module.x = ...` whose root it cannot find in the file
+ * as an expando on a global -- `jsGlobalAugmentations`, merged into the global
+ * symbol with the root identifier as a declaration. abstract-logging does
+ * exactly that, and every `module` in the program then failed authentication:
+ * no module anywhere proved a native record. In a CommonJS file Node's wrapper
+ * introduced that name, so the statement writes a property of the file's own
+ * wrapper cell and declares nothing; what the write does to that file's record
+ * is the record census's question, not this one.
+ */
+const wrapperExpandoWriteFor = (
+  declaration: ts.Declaration,
+  configured: CommonJsWrapperDeclaration,
+  formats: Map<ts.SourceFile, ts.ResolutionMode>
+): boolean => {
+  if (!ts.isIdentifier(declaration) || declaration.text !== configured.declarationName) return false
+  if (declaration.getSourceFile().isDeclarationFile || !isCommonJsSourceFile(declaration.getSourceFile(), formats)) return false
+  const parent = declaration.parent
+  const definedOn =
+    ts.isCallExpression(parent) &&
+    parent.arguments[0] === declaration &&
+    ts.isPropertyAccessExpression(parent.expression) &&
+    ts.isIdentifier(parent.expression.expression) &&
+    parent.expression.expression.text === 'Object' &&
+    parent.expression.name.text === 'defineProperty'
+  if (definedOn) return true
+  let root: ts.Node = declaration
+  while (ts.isPropertyAccessExpression(root.parent) && root.parent.expression === root) root = root.parent
+  return (
+    root !== declaration &&
+    ts.isBinaryExpression(root.parent) &&
+    root.parent.left === root &&
+    root.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+  )
+}
+
+/**
  * One authentication result shared by host binding and static-require analysis.
  * The configured path and declaration spelling establish the host identity;
  * module-scope `var` declarations may join it only because Node's wrapper has
@@ -193,7 +233,8 @@ export const createCommonJsWrapperIdentity = (
                 (declaration) =>
                   exactConfiguredDeclaration(declaration, configured) ||
                   exactCompatibleDeclaration(declaration, configured) ||
-                  wrapperRedeclarationFor(declaration, configured, formats)
+                  wrapperRedeclarationFor(declaration, configured, formats) ||
+                  wrapperExpandoWriteFor(declaration, configured, formats)
               )
             if (complete) authenticatedSymbols.set(symbol, configured.global)
             else failedSymbols.add(symbol)
