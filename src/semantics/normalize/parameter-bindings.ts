@@ -12,6 +12,7 @@ import { censusArgumentsObjects, type ArgumentsObjectCensus } from './arguments-
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import type { ExplicitThisCallFrame, FlowInvocationOperands, ValueFlowIndex } from './flow/model.js'
 import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
+import { foreignClassDefaultTypeOf } from './foreign-class-default.js'
 import { omissionStatedTypeOf, statedParameterWithOmission } from './omitted-stated-parameter.js'
 import { indexValueFlow } from './flow/value-flow.js'
 import { closedArrayCalleeAuthorityOf, hasClosedMemberCallableUses } from './flow/callable-reach.js'
@@ -658,6 +659,8 @@ export interface ParameterBindingProgramIndex {
     readonly index: number
     readonly stated: ts.Type
   }[]
+  /** Stated parameters whose default is an instance of a class the statement does not name -- see `foreign-class-default.ts`. */
+  readonly foreignDefaultSites: readonly { readonly parameter: ts.ParameterDeclaration; readonly type: ts.Type }[]
   readonly assigned: ReadonlySet<ts.Symbol>
   /**
    * What each in-body assignment writes into a reassigned parameter's own
@@ -697,6 +700,7 @@ export const indexParameterBindingProgram = (
   const candidates: ParameterCandidate[] = []
   const restParameterCandidates: RestParameterCandidate[] = []
   const omissionSites: { declaration: ts.SignatureDeclaration; parameter: ts.ParameterDeclaration; index: number; stated: ts.Type }[] = []
+  const foreignDefaultSites: { parameter: ts.ParameterDeclaration; type: ts.Type }[] = []
   const assigned = new Set<ts.Symbol>()
   // An update, logical assignment, destructuring assignment, or loop binding
   // also replaces a parameter. Sharing the write inventory prevents the
@@ -781,6 +785,8 @@ export const indexParameterBindingProgram = (
               // Not inferred -- but a caller may still leave it out.
               const omissionStated = omissionStatedTypeOf(checker, parameter)
               if (omissionStated) omissionSites.push({ declaration: node, parameter, index, stated: omissionStated })
+              const foreignDefault = foreignClassDefaultTypeOf(checker, parameter)
+              if (foreignDefault) foreignDefaultSites.push({ parameter, type: foreignDefault })
             }
           }
         })
@@ -963,6 +969,7 @@ export const indexParameterBindingProgram = (
     notReassigned,
     reassigned,
     omissionSites,
+    foreignDefaultSites,
     assigned,
     assignedEvidence,
     allCalls,
@@ -3206,6 +3213,13 @@ export const censusParameterBindings = (
     protocolRequirements.set(site.parameter, captured.requirements)
     if (process.env['GEA_BINDING_DEBUG'])
       console.error(`[STATED-OMISSION] ${describeParameter(site.parameter)} :: ${checker.typeToString(answer.type)}`)
+  }
+  // Every caller is held to the statement, which the widened type contains,
+  // so no caller set -- closed or open -- can disagree with it.
+  for (const site of index.foreignDefaultSites) {
+    if (bindings.has(site.parameter) || unionArms.has(site.parameter)) continue
+    bindings.set(site.parameter, site.type)
+    statedBindings.set(site.parameter, site.type)
   }
   for (const [parameter, reason] of lastRefusal) refuse(reason, describeParameter(parameter))
   /**
