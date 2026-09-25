@@ -21,6 +21,23 @@ import {
  * family does not also carry one family's whole implementation.
  */
 
+/**
+ * Whether an array binding pattern steps this get-iterator's record: the
+ * destructuring producer (`producers/destructuring.ts`) mints the protocol's
+ * get-method/get-iterator pair for a source whose `@@iterator` the program
+ * wrote, and then cites the record from its own element, rest and close
+ * operations. Asked of the operations that cite the record, never of syntax.
+ */
+const steppedByPattern = (ctx: LoweringContext, operation: ProtocolOperation): boolean => {
+  const record = resultOf(operation, 'iterator-record')
+  if (!record) return false
+  for (const candidate of ctx.graph.operations.values()) {
+    if (candidate.family !== 'destructuring') continue
+    if (candidate.operands.some((operand) => operand.source.kind === 'result' && operand.source.result === record.id)) return true
+  }
+  return false
+}
+
 export const lowerProtocol = (ctx: LoweringContext, block: IrBlockId, operation: ProtocolOperation): void => {
   // `CopyDataProperties` (object spread of a source with no statically known
   // own-property set, `producers/protocol.ts`'s `contributeObjectSpread`) is
@@ -89,7 +106,19 @@ export const lowerProtocol = (ctx: LoweringContext, block: IrBlockId, operation:
       // dynamic call needed" (see build.ts).
       const method = resolveOptionalOperand(ctx, block, lineage, operandOf(operation, 'method'))
       const representation = requireResultRepresentation(ctx, operation, 'iterator-record', 'a get-iterator step')
-      registerResult(ctx, operation, ctx.builder.getIterator(block, lineage, operation.protocol, target, method, representation))
+      registerResult(
+        ctx,
+        operation,
+        ctx.builder.getIterator(
+          block,
+          lineage,
+          operation.protocol,
+          target,
+          method,
+          representation,
+          (representation.kind === 'record' || representation.kind === 'native-record-ref') && steppedByPattern(ctx, operation)
+        )
+      )
       return
     }
     case 'next': {

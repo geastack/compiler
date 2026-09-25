@@ -228,9 +228,15 @@ const ownKindDemandsOf = (operation: IrOperation, ctx: CertifyContext): readonly
       // doc on why the two forms must not share a key.
       if (semantic?.family === 'destructuring' && semantic.form === 'rest-element') {
         const element = operation.elements[0]
+        // An iterator OBJECT's rest gathers through its `next()`, which a
+        // tuple's positional record never has: its own `(gather)` key, so the
+        // unclaimed tuple rest keeps refusing by name.
+        const gathered = element?.kind === 'gather' ? element.iterator.representation.kind : null
         const carrier =
-          element?.kind === 'gather'
-            ? element.iterator.representation.kind
+          gathered !== null
+            ? gathered === 'record' || gathered === 'native-record-ref'
+              ? `${gathered}(gather)`
+              : gathered
             : element?.kind === 'spread'
               ? element.value.representation.kind
               : 'absent'

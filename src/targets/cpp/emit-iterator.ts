@@ -380,6 +380,16 @@ const emitDynamicGetIterator = (ctx: EmitContext, lines: string[], operation: Ge
   // ordinary overridden method call does (`emit-callable.ts`): the value
   // `classMemberText` built names the base's body, and only the object's own
   // virtual member selects the override.
+  // A record an array binding pattern steps keeps its exhaustion state from
+  // here on, in the same per-iterator table a dynamic record uses: the
+  // pattern's positions read it (`emitRecordPatternNext`) and its close tests
+  // it (`iteratorCloseWhileOpenStatements`).
+  if (operation.tracksExhaustion === true && representation.kind !== 'iterator') {
+    const doneState = `v${ctx.nextValueOrdinal++}`
+    ctx.declarations.push({ name: doneState, type: 'bool' })
+    ctx.dynamicIteratorDoneStates.set(operation.result.id, doneState)
+    lines.push(`${doneState} = false;`)
+  }
   const dispatched = ctx.virtualCallees.get(method.value)
   if (dispatched !== undefined) {
     ctx.virtualCalleesUsed.add(method.value)
@@ -919,6 +929,11 @@ const emitDynamicIteratorNext = (
       'carries a "value" argument; the general iterator protocol\'s next() call never consumes one (only a generator\'s .next(v) does, which is never carried as a "record")'
     )
   }
+  const doneState = ctx.dynamicIteratorDoneStates.get(operation.iterator.value)
+  if (doneState !== undefined) {
+    emitRecordPatternNext(ctx, lines, operation, iteratorRecord, doneState)
+    return
+  }
   const planned = recordIteratorStepOf(ctx, operation.iterator, iteratorRecord)
   if (planned.kind === 'union') {
     emitUnionResultIteratorNext(
@@ -943,6 +958,48 @@ const emitDynamicIteratorNext = (
     valueText: memberText('value'),
     doneText: memberText('done')
   })
+}
+
+/**
+ * One position of an array binding pattern over a "record"-carried iterator
+ * (ECMA-262 8.6.3 IteratorBindingInitialization): `next()` is called only
+ * while the iterator is not yet done, `done` is remembered, and a position
+ * past the end reads `undefined`. The exhaustion state is the one
+ * `emitDynamicGetIterator` declared for a pattern-stepped record, and the
+ * pattern's close tests the same state.
+ */
+const emitRecordPatternNext = (
+  ctx: EmitContext,
+  lines: string[],
+  operation: IteratorNextOperation,
+  iteratorRecord: Extract<Representation, { kind: 'record' | 'native-record-ref' }>,
+  doneState: string
+): void => {
+  const planned = recordIteratorStepOf(ctx, operation.iterator, iteratorRecord)
+  if (planned.kind === 'union') {
+    throw createCppEmitBlockedError(
+      `runtime-helper:protocol:iterator:next:${iteratorRecord.kind}`,
+      "destructures an iterator whose next() returns IteratorResult's tagged union; only the for-of step dispatches over its arms"
+    )
+  }
+  const { tempName, callText, memberText, valueRepresentation } = planned.step
+  lines.push(`if (!${doneState}) { ${tempName} = ${callText}; ${doneState} = ${memberText('done')}; }`)
+  const name = defineValue(ctx, operation.result)
+  const result = operation.result.representation
+  // An elision steps and binds nothing.
+  if (result.kind === 'undefined' || result.kind === 'void') return
+  const absent = alignedValueText(ctx, 'emit-iterator.ts:record-pattern-absent', { kind: 'undefined' }, result, cppUndefinedValue)
+  const present =
+    valueRepresentation === null
+      ? null
+      : alignedValueText(ctx, 'emit-iterator.ts:record-pattern-value', valueRepresentation, result, memberText('value'))
+  if (absent === null || present === null) {
+    throw createCppEmitBlockedError(
+      `conversion:${valueRepresentation === null ? 'absent' : representationKey(valueRepresentation)}->${representationKey(result)}`,
+      `reads an iterator value into a "${representationKey(result)}" pattern position, and no conversion handles both the value and exhaustion`
+    )
+  }
+  lines.push(`${name} = ${doneState} ? (${absent}) : (${present});`)
 }
 
 /**
@@ -983,7 +1040,11 @@ export const recordIteratorGatherLines = (
       `gathers iterator values into an array of "${representationKey(element)}" with no installed conversion`
     )
   }
-  return [`for (;;) { ${tempName} = ${callText}; if (${memberText('done')}) break; ${array}->push(${value}); }`]
+  const loop = `for (;;) { ${tempName} = ${callText}; if (${memberText('done')}) break; ${array}->push(${value}); }`
+  // A pattern's rest drains what its positions left, and only if they did not
+  // already exhaust the iterator; afterwards it is exhausted.
+  const doneState = ctx.dynamicIteratorDoneStates.get(iterator.value)
+  return doneState === undefined ? [loop] : [`if (!${doneState}) { ${loop} ${doneState} = true; }`]
 }
 
 export const emitIteratorNext = (ctx: EmitContext, lines: string[], operation: IteratorNextOperation): void => {
@@ -1223,7 +1284,10 @@ const iteratorCloseWhileOpenStatements = (
         })()
       : representation.kind === 'iterator'
         ? `!${operandText(ctx, iterator)}.done()`
-        : null
+        : (representation.kind === 'record' || representation.kind === 'native-record-ref') &&
+            ctx.dynamicIteratorDoneStates.has(iterator.value)
+          ? `!${ctx.dynamicIteratorDoneStates.get(iterator.value)}`
+          : null
   if (condition === null) {
     throw createCppEmitBlockedError(
       `runtime-helper:protocol:iterator:close:${representation.kind}`,

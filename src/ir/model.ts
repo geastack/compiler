@@ -1121,6 +1121,18 @@ export interface MergeLiveArmRebuildOperation extends IrOperationBase {
 export interface GetIteratorOperation extends IrOperationBase {
   readonly kind: 'get-iterator'
   /**
+   * The record is stepped one POSITION at a time by an array binding pattern
+   * rather than by a loop: `const [a, b] = new Countdown(3)` over an iterator
+   * object the program wrote. A loop asks `done` once per step through its
+   * own `iterator-done` operation; a pattern reads `undefined` for every
+   * position past the end without calling `next()` again (ECMA-262 8.6.3
+   * IteratorBindingInitialization) and closes the iterator only if it is still
+   * open when the pattern ends, so the record needs an exhaustion state that
+   * outlives each step. Set by `ir/lower-protocol.ts` when a destructuring
+   * step consumes this record; `emit-iterator.ts` declares the state here.
+   */
+  readonly tracksExhaustion?: true
+  /**
    * Which walk this is. Two protocols reach this one operation over the same
    * receiver carrier and mean opposite things: `for`-`in` over a struct yields
    * its KEYS, `for`-`of` over a fixed-arity tuple -- also carried as a
