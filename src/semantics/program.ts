@@ -573,13 +573,28 @@ const programSourceClosure = (
   return seen
 }
 
+/**
+ * What the source transforms made of each file's text, kept across every
+ * program one `createProgram` builds. A transform is a function of the file's
+ * name, its text and its declaration file, so a file read again with the same
+ * three gets the same answer -- and the rebuilds (a program re-created to add
+ * a CommonJS target, or from prepared text) would otherwise run the whole
+ * chain over every file again, which on three's source is most of a
+ * program's cost.
+ */
+type TransformedText = Map<
+  string,
+  { readonly input: string; readonly declarationFileName: string | undefined; readonly roots: string; readonly output: string }
+>
+
 const transformingHost = (
   input: ProgramInput,
   roots: readonly string[],
   options: ts.CompilerOptions,
   resolutionDiagnostics: { readonly literal: ts.StringLiteralLike; readonly diagnostic: ts.Diagnostic }[],
   preparedSourceText: ReadonlyMap<string, string>,
-  timing: FrontendTiming
+  timing: FrontendTiming,
+  transformed: TransformedText
 ): ts.CompilerHost => {
   const transforms = input.sourceTransforms ?? []
   const overlay = input.sourceOverlay
@@ -642,6 +657,12 @@ const transformingHost = (
   const unchecked = createUncheckedJavaScriptPolicy(input.uncheckedJavaScript ?? new Set(), host)
   let programFiles: ReadonlySet<string> | undefined
   const programFilesOf = (): ReadonlySet<string> => (programFiles ??= programSourceClosure(roots, host, resolver, stated))
+  // A cached transform result is valid only for the roots it was made with:
+  // `programFiles` is derived from them, and a rebuild may add roots.
+  const rootsKey = roots
+    .map((root) => resolve(root))
+    .sort()
+    .join('\n')
   const parse: ts.CompilerHost['getSourceFile'] = (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {
     const prepared = preparedSourceText.get(resolve(fileName))
     if (prepared !== undefined) return ts.createSourceFile(fileName, prepared, languageVersionOrOptions, true, scriptKindOf(fileName))
@@ -652,23 +673,31 @@ const transformingHost = (
         : ts.createSourceFile(fileName, overlaid, languageVersionOrOptions, true, scriptKindOf(fileName))
     if (!file) return file
     if (file.isDeclarationFile) return withoutShadowedAmbientModules(file, shadowedSpecifiers, languageVersionOrOptions)
-    let text = jsonModuleAsTypeScript(fileName, file.text) ?? file.text
+    const untransformed = jsonModuleAsTypeScript(fileName, file.text) ?? file.text
     const declarationFileName = declarations.get(resolve(fileName))
-    for (const [index, transform] of transforms.entries()) {
-      text = timing.measure(
-        `transform:${index}:${transform.name}`,
-        () => transform({ fileName, text, programFiles: programFilesOf(), ...(declarationFileName ? { declarationFileName } : {}) }) ?? text
-      )
+    const known = transformed.get(resolve(fileName))
+    let text = untransformed
+    if (known && known.input === untransformed && known.declarationFileName === declarationFileName && known.roots === rootsKey)
+      text = known.output
+    else {
+      for (const [index, transform] of transforms.entries()) {
+        text = timing.measure(
+          `transform:${index}:${transform.name}`,
+          () =>
+            transform({ fileName, text, programFiles: programFilesOf(), ...(declarationFileName ? { declarationFileName } : {}) }) ?? text
+        )
+      }
+      transformed.set(resolve(fileName), { input: untransformed, declarationFileName, roots: rootsKey, output: text })
     }
-    const transformed =
+    const rewritten =
       text === file.text ? file : ts.createSourceFile(fileName, text, languageVersionOrOptions, true, scriptKindOf(fileName))
     // Asked of the TRANSFORMED file, not the one on disk: a plugin (or the
     // `.json` rewrite above) can add the import or export that already makes
     // the file a module, and can equally introduce the top-level `await` that
     // asks for one. Either way the question is about the text this program
     // actually compiles.
-    const marked = moduleMarkerForTopLevelAwait(transformed)
-    if (marked === null) return transformed
+    const marked = moduleMarkerForTopLevelAwait(rewritten)
+    if (marked === null) return rewritten
     return ts.createSourceFile(fileName, marked, languageVersionOrOptions, true, scriptKindOf(fileName))
   }
   // After every rewrite, on whichever parse the program keeps: the mark lives
@@ -754,7 +783,8 @@ const configuredProgram = (
   input: ProgramInput,
   resolutionDiagnostics: { readonly literal: ts.StringLiteralLike; readonly diagnostic: ts.Diagnostic }[],
   preparedSourceText: ReadonlyMap<string, string>,
-  timing: FrontendTiming
+  timing: FrontendTiming,
+  transformed: TransformedText
 ): ConfiguredProgram => {
   const runtimeModuleTargetOf = (host: ts.CompilerHost, options: ts.CompilerOptions): CompiledProgram['runtimeModuleTargetOf'] => {
     const resolver = createModuleResolver(host, options, input.declarationModules, input.packageSources)
@@ -810,7 +840,7 @@ const configuredProgram = (
         ...(input.commonJsGlobals ? [...input.commonJsGlobals.values()].map((entry) => entry.declarationFileName) : [])
       ])
     ]
-    const host = transformingHost(input, rootNames, options, resolutionDiagnostics, preparedSourceText, timing)
+    const host = transformingHost(input, rootNames, options, resolutionDiagnostics, preparedSourceText, timing, transformed)
     // `host` is omitted rather than passed as `undefined`: under
     // `exactOptionalPropertyTypes` the two are different, and the option is
     // "the caller supplies a host" -- not "the caller supplies no host".
@@ -848,7 +878,7 @@ const configuredProgram = (
     ...fixedOptions,
     ...(input.dynamicFallback ? { noImplicitAny: false, checkJs: false } : {})
   }
-  const host = transformingHost(input, rootNames, options, resolutionDiagnostics, preparedSourceText, timing)
+  const host = transformingHost(input, rootNames, options, resolutionDiagnostics, preparedSourceText, timing, transformed)
   return buildProgram(rootNames, options, host ?? ts.createCompilerHost(options, true))
 }
 
@@ -874,7 +904,8 @@ const entryFilesOf = (program: ts.Program, rootFileNames: readonly string[]): re
 export const createProgram = (input: ProgramInput): CompiledProgram => {
   const timing = createFrontendTiming('program')
   const resolutionDiagnostics: { readonly literal: ts.StringLiteralLike; readonly diagnostic: ts.Diagnostic }[] = []
-  let configured = configuredProgram(input, resolutionDiagnostics, new Map(), timing)
+  const transformed: TransformedText = new Map()
+  let configured = configuredProgram(input, resolutionDiagnostics, new Map(), timing, transformed)
   const preparation = timing.measure('diagnostic-source-preparation', () =>
     diagnosticSourcePreparation(ts, configured.program, input.packageSources ?? [])
   )
@@ -893,7 +924,7 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
   const contradictions = timing.measure('contradicted-jsdoc-types', () => contradictedJsDocTypeBlanks(configured.program, prepared))
   if (preparation.audit.length > 0 || redeclarations.size > 0 || contradictions.size > 0) {
     resolutionDiagnostics.length = 0
-    configured = configuredProgram(input, resolutionDiagnostics, new Map([...prepared, ...contradictions]), timing)
+    configured = configuredProgram(input, resolutionDiagnostics, new Map([...prepared, ...contradictions]), timing, transformed)
   }
   const program = configured.program
   const checker = withStableTypeQueries(program.getTypeChecker())
