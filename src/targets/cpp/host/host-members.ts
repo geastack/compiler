@@ -801,6 +801,26 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
     'Float64ArrayConstructor.from',
     { kind: 'method', emit: '/* unused: see typedArrayFromText, emit-host-invoke.ts */', arity: 'call-site' }
   ],
+  // `BYTES_PER_ELEMENT` on each typed-array constructor (23.2.6.1) is the
+  // Element Size of the type's row in ECMA-262 Table 71: a non-writable
+  // constant, the same number an instance's own `BYTES_PER_ELEMENT` reads
+  // (`emit-buffers.ts`). three's `Buffer` reads it off `Float32Array` itself.
+  ...(
+    [
+      ['Int8Array', 1],
+      ['Uint8Array', 1],
+      ['Uint8ClampedArray', 1],
+      ['Int16Array', 2],
+      ['Uint16Array', 2],
+      ['Int32Array', 4],
+      ['Uint32Array', 4],
+      ['Float32Array', 4],
+      ['Float64Array', 8]
+    ] as const
+  ).map(
+    ([name, size]) =>
+      [`${name}Constructor.BYTES_PER_ELEMENT`, { kind: 'property', store: null, emit: `static_cast<double>(${size})` }] as const
+  ),
   ['StringConstructor.fromCharCode', { kind: 'property', store: null, emit: 'gea::host::StringConstructor::fromCharCode' }],
   // `Promise.resolve` -- ECMA-262 27.2.4.7. `PromiseConstructor@1` is claimed
   // in `manifest.ts`'s own `nativeProtocols` beside `Math`/`Date`/`String`
