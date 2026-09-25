@@ -5,7 +5,8 @@
 //   THREE_DIR=<three package> NATIVE_WEBGPU_DIR=<@geastack/native-webgpu checkout> \
 //   GEA_CORE_DIR=<an installed @geastack/core> \
 //     node scripts/three-webgpu-coverage.mjs [--three <dir>] [--native-webgpu <dir>]
-//     [--gea-core <dir>] [--out <dir>] [--memory-limit-gb <n>] [--summarize <coverage.json>]
+//     [--gea-core <dir>] [--gea-plugin <host-shims>] [--out <dir>] [--memory-limit-gb <n>]
+//     [--summarize <coverage.json>]
 //
 // The program is `test/fixtures/three-webgpu/entry.ts`: a scene, a camera, a
 // box with a node material, and `renderer.render(scene, camera)`. No real app
@@ -22,7 +23,6 @@
 //     --out-dir <out>/generated --geatsc-bin dist/cli.js --no-apple-native
 //     --gea-embedded-compat --compile-module-graph
 //     --extra-geatsc-plugin <native-webgpu>/geatsc-plugin.mjs
-//     --extra-geatsc-plugin test/fixtures/three-webgpu/unchecked-three.mjs
 //   with GEA_WEBGL_PLUGIN=0.
 //
 // `--gea-embedded-compat` is the build's own switch for the Vite config that
@@ -31,10 +31,16 @@
 // `--no-apple-native` is what the Windows target passes. `GEA_WEBGL_PLUGIN=0`
 // keeps native-webgl-angle's three.js text patches, its `@ts-nocheck` prefixes
 // and its absent `self` out; the build hands geatsc no `--no-webgl-plugin`, and
-// geatsc reads the variable from the environment it inherits. The two plugins
-// are the facade's (`navigator.gpu`, the `GPU*` flag namespaces, `self`) and
-// the fixture's (three's `src/**` unchecked, and its JSDoc `Node` and
-// `AudioListener` realized as three's classes).
+// geatsc reads the variable from the environment it inherits. The extra plugin
+// is the facade's: `navigator.gpu`, the `GPU*` flag namespaces, `self`, three's
+// `src/**` unchecked, and its JSDoc `Node` and `AudioListener` realized as
+// three's classes. It carries the three settings itself, so a second plugin
+// stating them would realize `Node` twice over one file, which is an error.
+//
+// `--gea-plugin` (or `GEATSC2_GEA_PLUGIN`) names the gea host-shims module to
+// load instead of the installed `@geastack/geatsc-plugin-gea/host-shims`, as a
+// path without its `.js`, so a core branch's own build is measured. Both
+// compiles inherit it; unset, the compiler loads the installed one.
 //
 // `compile-module-graph` reports only its root diagnostics, as text, on
 // stderr, and `geatsc coverage` has no module-graph input. So the codes,
@@ -95,6 +101,17 @@ const packageAt = (label, directory, expectedName, requiredFile) => {
   if (name !== expectedName) fail(`${label}=${dir} is package '${name}', not '${expectedName}'`)
   if (!existsSync(join(dir, requiredFile))) fail(`${label}=${dir} has no ${requiredFile}`)
   return { dir, version }
+}
+
+// The compiler loads the override with `require`, which adds the `.js`; a path
+// that names no module is refused here rather than as a load error mid-build.
+const geaPluginOverride = () => {
+  const requested = option('--gea-plugin') ?? process.env.GEATSC2_GEA_PLUGIN
+  if (!requested) return null
+  const path = resolve(requested)
+  if (path.endsWith('.js')) fail(`--gea-plugin ${path}: name the module without its .js, as GEATSC2_GEA_PLUGIN takes it`)
+  if (!existsSync(`${path}.js`)) fail(`--gea-plugin ${path}: there is no ${path}.js`)
+  return path
 }
 
 const outDir = resolve(option('--out') ?? join(root, 'measurements/three-webgpu'))
@@ -383,6 +400,8 @@ const compileOnce = async () => {
   if (!existsSync(cli)) fail('dist/cli.js is missing; run `npm run build` first')
   const limitBytes = Number(option('--memory-limit-gb') ?? 11) * 1024 ** 3
   const packageDirs = { three: three.dir, 'native-webgpu': webgpu.dir }
+  const geaPlugin = geaPluginOverride()
+  const pluginEnv = geaPlugin === null ? {} : { GEATSC2_GEA_PLUGIN: geaPlugin }
 
   mkdirSync(outDir, { recursive: true })
   const appDir = join(outDir, 'app')
@@ -404,9 +423,7 @@ const compileOnce = async () => {
     '--gea-embedded-compat',
     '--compile-module-graph',
     '--extra-geatsc-plugin',
-    join(webgpu.dir, 'geatsc-plugin.mjs'),
-    '--extra-geatsc-plugin',
-    join(fixture, 'unchecked-three.mjs')
+    join(webgpu.dir, 'geatsc-plugin.mjs')
   ]
   say(`running gea's build on ${appDir}`)
   const pipelineLog = join(outDir, 'pipeline.log')
@@ -414,7 +431,7 @@ const compileOnce = async () => {
     label: 'pipeline',
     command: process.execPath,
     args: pipelineArgs,
-    env: { ...process.env, NODE_OPTIONS: nodeOptions, GEA_STAGE_TIMING: '1', GEA_WEBGL_PLUGIN: '0' },
+    env: { ...process.env, ...pluginEnv, NODE_OPTIONS: nodeOptions, GEA_STAGE_TIMING: '1', GEA_WEBGL_PLUGIN: '0' },
     stdoutFile: pipelineLog,
     stderrFile: pipelineLog,
     limitBytes,
@@ -454,7 +471,7 @@ const compileOnce = async () => {
     label: 'coverage',
     command: process.execPath,
     args,
-    env: { ...process.env, GEA_STAGE_TIMING: '1', GEA_WEBGL_PLUGIN: '0' },
+    env: { ...process.env, ...pluginEnv, GEA_STAGE_TIMING: '1', GEA_WEBGL_PLUGIN: '0' },
     stdoutFile: join(outDir, 'coverage.json'),
     stderrFile: join(outDir, 'stderr.log'),
     limitBytes
@@ -468,6 +485,7 @@ const compileOnce = async () => {
     three: `${three.version} (${three.dir})`,
     nativeWebgpu: `${webgpu.version} (${webgpu.dir})`,
     geaCore: `${core.version} (${core.dir})`,
+    geaPlugin: geaPlugin ?? 'installed @geastack/geatsc-plugin-gea/host-shims',
     packageDirs,
     pipeline: {
       args: pipelineArgs,
