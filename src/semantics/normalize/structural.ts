@@ -3635,6 +3635,30 @@ const buildMapper = (
     (node) => mapper.typeAt(node),
     (node) => mapper.rawTypeAt(node)
   )
+  /**
+   * Whether a local variable is written from inside a function other than the
+   * one that declares it -- `list.forEach((x) => { found = x })`.
+   *
+   * The checker's flow narrowing from an assignment holds only while nothing
+   * else can write the cell, and it does not see a write made inside a
+   * closure: after `let found = null` and that `forEach`, it still answers
+   * `null` at `found`, and `never` past `found !== null`. Such a cell's reads
+   * carry the cell's own type, every write joined, instead.
+   */
+  const closureWrittenCells = new Map<ts.Symbol, boolean>()
+  const isClosureWrittenCell = (symbol: ts.Symbol): boolean => {
+    const known = closureWrittenCells.get(symbol)
+    if (known !== undefined) return known
+    const declaration = symbol.valueDeclaration
+    let written = false
+    if (flow && declaration && ts.isVariableDeclaration(declaration) && (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) === 0) {
+      const home = ts.findAncestor(declaration.parent, ts.isFunctionLike) ?? null
+      written = flow.writesToSymbol(symbol).some((write) => (ts.findAncestor(write.site, ts.isFunctionLike) ?? null) !== home)
+    }
+    closureWrittenCells.set(symbol, written)
+    return written
+  }
+
   const structuralRules: readonly StructuralRule[] = [
     {
       // A reference to the host constructor global itself -- `Error`, not a
@@ -3645,6 +3669,49 @@ const buildMapper = (
       name: 'exact-host-constructor-global',
       forms: [ts.SyntaxKind.Identifier],
       resolve: (node) => (ts.isIdentifier(node) ? hostConstructorGlobalOf(checker.getSymbolAtLocation(node)?.valueDeclaration) : null)
+    },
+    {
+      // See `isClosureWrittenCell`: a read of a cell some other function writes
+      // takes the cell's own type, never an assignment's narrowing.
+      name: 'closure-written-cell-read',
+      forms: [ts.SyntaxKind.Identifier],
+      resolve: (node) => {
+        if (!ts.isIdentifier(node)) return null
+        const parent = node.parent
+        if (ts.isBinaryExpression(parent) && parent.left === node && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) return null
+        if (ts.isVariableDeclaration(parent) && parent.name === node) return null
+        const symbol = checker.getSymbolAtLocation(node)
+        if (!symbol || !isClosureWrittenCell(symbol)) return null
+        const declaration = symbol.valueDeclaration
+        return declaration && ts.isVariableDeclaration(declaration) ? typeAt(declaration) : null
+      }
+    },
+    {
+      // A merge whose arm reads such a cell (`setMin && setMin > 0`) is typed
+      // by the checker from that arm's narrowing too, so it takes the union of
+      // its arms' own types instead: the value is one of them.
+      name: 'closure-written-cell-merge',
+      forms: [ts.SyntaxKind.BinaryExpression, ts.SyntaxKind.ConditionalExpression],
+      resolve: (node) => {
+        const arms = ts.isConditionalExpression(node)
+          ? [node.whenTrue, node.whenFalse]
+          : ts.isBinaryExpression(node) &&
+              (node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+                node.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+                node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
+            ? [node.left, node.right]
+            : null
+        if (!arms) return null
+        const readsClosureCell = arms.some((arm) => {
+          let bare: ts.Expression = arm
+          while (ts.isParenthesizedExpression(bare)) bare = bare.expression
+          const symbol = ts.isIdentifier(bare) ? checker.getSymbolAtLocation(bare) : undefined
+          return symbol !== undefined && isClosureWrittenCell(symbol)
+        })
+        if (!readsClosureCell) return null
+        const members = [...new Set(arms.map((arm) => typeAt(arm)))]
+        return members.length === 1 ? (members[0] ?? null) : table.intern({ kind: 'union', members })
+      }
     },
     {
       name: 'mutable-method-storage',
