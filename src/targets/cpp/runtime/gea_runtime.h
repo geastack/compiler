@@ -21760,6 +21760,28 @@ bool sameValueZero(const E& left, const E& right) {
 }
 
 /**
+ * The same two comparisons over a tagged union element (`(string | symbol)[]`
+ * in `indexOf`): its arms are pairwise disjoint carriers, so values in two
+ * different arms are never equal, and two values in one arm compare by that
+ * arm's own rule.
+ */
+template <typename... Arms>
+bool strictlyEqual(const TaggedUnion<Arms...>& left, const TaggedUnion<Arms...>& right) {
+  if (left.index() != right.index()) return false;
+  return [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
+    return ((left.template is<Indices>() && ::gea::runtime::array::strictlyEqual(left.template get<Indices>(), right.template get<Indices>())) || ...);
+  }(std::index_sequence_for<Arms...>{});
+}
+
+template <typename... Arms>
+bool sameValueZero(const TaggedUnion<Arms...>& left, const TaggedUnion<Arms...>& right) {
+  if (left.index() != right.index()) return false;
+  return [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
+    return ((left.template is<Indices>() && ::gea::runtime::array::sameValueZero(left.template get<Indices>(), right.template get<Indices>())) || ...);
+  }(std::index_sequence_for<Arms...>{});
+}
+
+/**
  * ECMA-262 23.1.3.17 `indexOf(searchElement, fromIndex)`.
  *
  * `-1` on miss. A hole is SKIPPED (step 9.b's `HasProperty` test), never
