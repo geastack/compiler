@@ -8,7 +8,8 @@ import {
   impliedPatternParameterOf,
   impliedPatternTargetOf,
   objectAssignFreshTargetType,
-  nominalConstructorChoiceTypeAt
+  nominalConstructorChoiceTypeAt,
+  memberCensusNodeOf
 } from './derived-expression-type.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import ts from 'typescript'
@@ -414,11 +415,7 @@ export const createLayoutTypeResolver = (
     // its INITIALIZER/shorthand name, exactly as `structural-parts.ts`'s
     // `censusValueNodeOf` reads it -- a class field's is published against
     // the declaration (one of its own writes) directly.
-    const censusNode = ts.isPropertyAssignment(declaration)
-      ? declaration.initializer
-      : ts.isShorthandPropertyAssignment(declaration)
-        ? declaration.name
-        : declaration
+    const censusNode = memberCensusNodeOf(declaration)
     const fromCensus = parameters.typeAt(censusNode)
     if (fromCensus && !isUnreducedTypeForm(fromCensus) && (fromCensus.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0)
       return fromCensus

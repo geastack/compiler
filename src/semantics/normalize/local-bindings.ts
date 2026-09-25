@@ -14,6 +14,7 @@ import {
   normalizedArrayConditionalType,
   objectAssignTargetType,
   isEmptyObjectType,
+  speaksOnlyNullish,
   synthesizedUnionArmsAt,
   unwrapExplicitThisCall,
   withoutUndefinedMember,
@@ -1024,9 +1025,10 @@ export const censusLocalBindings = (
         // strict pass could not bind, joins the writes that DO speak.
         // `writes-disagree` still fires over what remains, and a cell whose
         // every write is silent still asks `declaredReturnEvidenceFor` and
-        // then refuses, exactly as before.
+        // then refuses, exactly as before. Speakers that state only
+        // `null`/`undefined` exhaust nothing, though (`speaksOnlyNullish`).
         if (refused) attribute(declaration, refused)
-        else if (silent > 0 && (!lenientPhase || types.length === 0)) {
+        else if (silent > 0 && (!lenientPhase || types.length === 0 || speaksOnlyNullish(types))) {
           // Some write failed the ordinary route -- try the one remaining
           // authority before giving up: the enclosing function's own STATED
           // return type, when this cell is what its `return` is built from
