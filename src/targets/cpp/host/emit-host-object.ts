@@ -1815,25 +1815,59 @@ const linkedCreateText = (ctx: EmitContext, operation: CallOperation, proto: IrO
         'host intrinsic prototype renders, since a native struct has no [[Prototype]] slot this runtime can link a new object to'
     )
   }
-  const boxed = (operand: IrOperand, role: string): string => {
-    if (operand.representation.kind === 'dynamic') return operandText(ctx, operand)
-    const text = alignedValueText(
-      ctx,
-      'emit-host-object.ts:create',
-      operand.representation,
-      { kind: 'dynamic', reason: 'opt-in-fallback' },
-      operandText(ctx, operand)
-    )
-    if (text === null) {
-      throw createCppEmitBlockedError(
-        'host-member-call:Object.create',
-        `"Object.create"'s ${role} is carried as "${representationKey(operand.representation)}", which has no box to cross into the ordinary object`
-      )
-    }
-    return text
-  }
   const properties = operation.arguments[1]
-  return `gea::runtime::object::create(${boxed(proto, 'prototype')}, ${properties === undefined ? 'gea::Value()' : boxed(properties, 'properties object')})`
+  const prototypeText = boxedObjectArgumentText(ctx, 'create', proto, 'prototype')
+  return `gea::runtime::object::create(${prototypeText}, ${properties === undefined ? 'gea::Value()' : boxedObjectArgumentText(ctx, 'create', properties, 'properties object')})`
+}
+
+/** An `Object.<member>` argument crossing into the dynamic substrate as a box. */
+const boxedObjectArgumentText = (ctx: EmitContext, member: string, operand: IrOperand, role: string): string => {
+  if (operand.representation.kind === 'dynamic') return operandText(ctx, operand)
+  const text = alignedValueText(
+    ctx,
+    `emit-host-object.ts:${member}`,
+    operand.representation,
+    { kind: 'dynamic', reason: 'opt-in-fallback' },
+    operandText(ctx, operand)
+  )
+  if (text === null) {
+    throw createCppEmitBlockedError(
+      `host-member-call:Object.${member}`,
+      `"Object.${member}"'s ${role} is carried as "${representationKey(operand.representation)}", which has no box to cross into the ordinary object`
+    )
+  }
+  return text
+}
+
+/**
+ * `Object.defineProperties(O, Properties)` -- ObjectDefineProperties
+ * (20.1.2.3.1), the operation `Object.create`'s second argument performs, over
+ * the same substrate (`gea::runtime::object::defineProperties`): the map
+ * crosses as a box and each descriptor is read by ToPropertyDescriptor
+ * (6.2.6.5), which asks the object which fields it has. The target is
+ * modified in place and handed back, so it has to be a box already: boxing a
+ * native struct would define the properties on a copy nothing else holds.
+ */
+const definePropertiesText = (ctx: EmitContext, operation: CallOperation): string => {
+  const [target, properties] = operation.arguments
+  if (target === undefined || properties === undefined) {
+    throw createCppEmitBlockedError(
+      'host-member-call:Object.defineProperties',
+      '"Object.defineProperties" takes a target and a properties object, and this call passes fewer'
+    )
+  }
+  const result = operation.result?.representation ?? null
+  if (target.representation.kind !== 'dynamic' || (result !== null && result.kind !== 'dynamic')) {
+    throw createCppEmitBlockedError(
+      'host-member-call:Object.defineProperties',
+      `"Object.defineProperties" defines properties on its target in place, and this target is carried as ` +
+        `"${representationKey(target.representation)}"${result === null ? '' : ` with the result as "${representationKey(result)}"`}; only a boxed ` +
+        'target, handed back boxed, holds the properties the call defines'
+    )
+  }
+  const targetText = operandText(ctx, target)
+  const map = boxedObjectArgumentText(ctx, 'defineProperties', properties, 'properties object')
+  return `(gea::runtime::object::defineProperties(${targetText}, ${map}), ${targetText})`
 }
 
 /**
@@ -2799,6 +2833,7 @@ export const objectMemberText = (ctx: EmitContext, member: string, operation: Ca
   if (member === 'fromEntries') return fromEntriesText(ctx, operation)
   if (member === 'create') return createText(ctx, operation)
   if (member === 'defineProperty') return definePropertyText(ctx, operation)
+  if (member === 'defineProperties') return definePropertiesText(ctx, operation)
   throw createCppEmitBlockedError(
     `host-member-call:Object.${member}`,
     `"ObjectConstructor.${member}" is claimed with a call-site spelling in host-members.ts, but this file states no arm ` +

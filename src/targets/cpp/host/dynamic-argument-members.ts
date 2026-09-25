@@ -35,9 +35,11 @@
  * `Object.defineProperty:argument:2` is deliberately absent. The emitter
  * materializes descriptors only from an exact descriptor carrier; a dynamic
  * box does not state which descriptor fields and attributes are present.
- * `Object.defineProperties` is absent wholesale: its source transform accepts
- * only a closed descriptor-map literal and lowers it to singular operations,
- * while an open/dynamic map must remain fail-closed.
+ * `Object.defineProperties` needs no row: its closed descriptor-map literal is
+ * lowered to singular operations by a source transform, and any other map
+ * crosses whole as a box into ObjectDefineProperties
+ * (`emit-host-object.ts`'s `definePropertiesText`), which reads each
+ * descriptor's fields off the object itself.
  */
 export const cppDynamicArgumentHostParameters: ReadonlySet<string> = new Set<string>([
   'gea::ReflectNamespace.get:argument:0',

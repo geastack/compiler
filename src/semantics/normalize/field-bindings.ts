@@ -904,7 +904,16 @@ export const censusFieldBindings = (
     // (`this.x = e[ 12 ]`, `e` unannotated) silent -- 759 reads boxed by a
     // veto that read no fact.
     else if (silent > 0 && (!lenientPhase || types.length === 0)) attribute(symbol, 'write-unresolved')
-    else {
+    // AN ABSENCE IS NOT EVIDENCE -- `local-bindings.ts`'s rule for a cell, for
+    // the same reason: the relaxed phase joins the writes that speak, and when
+    // every one of them is `null`/`undefined` beside a silent one, `null`
+    // states what the field holds before anything else is stored, never what
+    // it holds. toad-cache's `this.first = null` beside `this.first = item`,
+    // whose node reads `this.first` back, bound the field to bare `null` and
+    // left every store of a node without a conversion.
+    else if (silent > 0 && types.every((type) => (type.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0)) {
+      attribute(symbol, 'writes-state-only-absence')
+    } else {
       const joined = joinOfWrites(checker, types)
       if (joined) result = joined
       else {

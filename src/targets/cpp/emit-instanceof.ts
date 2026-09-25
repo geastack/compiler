@@ -12,6 +12,7 @@ import { createCppEmitBlockedError, operandText, type EmitContext } from './emit
 import { cppClassName, cppScalarType } from './types.js'
 import { cppErrorNativeType, errorConstructorNames, isNativeError } from './error-types.js'
 import { cppRegExpNativeTypes } from './regexp-types.js'
+import { hostConstructorUnionArms } from '../../ir/certify/instanceof-key.js'
 
 /**
  * `v instanceof C` -- ECMA-262 13.10.2, for the one right-hand side this
@@ -504,6 +505,15 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
   if (recipe?.test.kind === 'throws-non-object') return classInstanceTestText(recipe.test, operandText(ctx, left))
   if (constructor.kind === 'undefined') {
     return `(gea::host::throwInstanceofNonObject("undefined"), false)`
+  }
+  const constructorArms = hostConstructorUnionArms(constructor)
+  if (constructorArms) {
+    const rightText = operandText(ctx, right)
+    const lastIndex = constructorArms.length - 1
+    return constructorArms.reduceRight<string>((otherwise, representation, index) => {
+      const armTest = instanceofText(ctx, left, { ...right, representation }, recipe)
+      return index === lastIndex ? `(${armTest})` : `(${rightText}.is<${index}>() ? (${armTest}) : ${otherwise})`
+    }, '')
   }
   // A `constructor-family` right-hand side names a PROGRAM class rather than
   // a host protocol, and unlike the general prototype-walk case just above,

@@ -32,7 +32,7 @@ import {
   recordAnswerFor,
   resolvedLayoutOf
 } from './has-property-key.js'
-import { definitelyPrimitive, mapTestable } from './instanceof-key.js'
+import { definitelyPrimitive, hostConstructorUnionArms, mapTestable } from './instanceof-key.js'
 import { atomicsCallSupport } from '../../targets/cpp/host/atomics.js'
 import { regexpRoleOf } from '../../targets/cpp/prototype/emit-prototype-regexp.js'
 import { nativeRecordIndexHasPropertyOf } from '../native-record-index-transport.js'
@@ -578,6 +578,16 @@ const instanceofRuntimeHelperKey = (operands: readonly IrOperand[], ctx: Certify
   return `computation:instanceof:${instanceofSideKey(ctx, 'left', left, right)}:${instanceofSideKey(ctx, 'right', right, undefined)}`
 }
 
+const instanceofDemandsOf = (operands: readonly IrOperand[], ctx: CertifyContext): readonly CapabilityDemand[] => {
+  const [left, right] = operands
+  const arms = right ? hostConstructorUnionArms(right.representation) : null
+  const keys =
+    right && left && arms
+      ? arms.map((representation) => instanceofRuntimeHelperKey([left, { ...right, representation }], ctx))
+      : [instanceofRuntimeHelperKey(operands, ctx)]
+  return [...new Set(keys)].map((key) => ({ key: `runtime-helper:${key}` }))
+}
+
 // ---------------------------------------------------------------------------
 // Atomics -- `preflight/invocation-arguments.ts`'s `buildAtomicsInvocationObligation`.
 // `host-member-call` states its own verdict (`ir/certify.ts`'s own doc: an
@@ -645,8 +655,30 @@ const atomicsDemandOf = (operation: CallOperation, ctx: CertifyContext): readonl
  * listed, its descriptor deliberately is not -- `host/dynamic-argument-
  * members.ts` states why per row), so a waived position is never refused.
  */
+/**
+ * `Object.defineProperties` defines on its target in place and hands the same
+ * object back (`emit-host-object.ts`'s `definePropertiesText`), so the target
+ * has to be a box already and a consumed result one too: boxing a native
+ * struct would define the properties on a copy nothing else holds.
+ */
+const definePropertiesTargetDemandOf = (operation: CallOperation): readonly CapabilityDemand[] => {
+  const target = operation.arguments[0]
+  const result = operation.result?.representation ?? null
+  if (target?.representation.kind === 'dynamic' && (result === null || result.kind === 'dynamic')) return []
+  return [
+    {
+      key: 'host-member-call:ObjectConstructor.defineProperties',
+      verdict: 'unsupported',
+      detail:
+        `"ObjectConstructor.defineProperties" defines on a target carried as "${target ? representationKey(target.representation) : 'absent'}"` +
+        `${result === null ? '' : ` with its result as "${representationKey(result)}"`}; only a boxed target, handed back boxed, holds what it defines`
+    } satisfies CapabilityDemand
+  ]
+}
+
 const hostArgumentDemandOf = (operation: CallOperation, ctx: CertifyContext): readonly CapabilityDemand[] => {
   const member = hostMemberOfCall(ctx, operation)
+  if (member === 'ObjectConstructor.defineProperties') return definePropertiesTargetDemandOf(operation)
   if (member !== 'ObjectConstructor.defineProperty') return []
   const waivers = ctx.manifest.dynamicArgumentHostParameters
   return operation.arguments.flatMap((argument, ordinal) => {
@@ -678,7 +710,7 @@ export const propertyAccessKeysOf = (operation: IrOperation, ctx: CertifyContext
     case 'has-property':
       return [{ key: `runtime-helper:${hasPropertyRuntimeHelperKey(operation, ctx)}` }]
     case 'compute':
-      return operation.form === 'instanceof' ? [{ key: `runtime-helper:${instanceofRuntimeHelperKey(operation.operands, ctx)}` }] : []
+      return operation.form === 'instanceof' ? instanceofDemandsOf(operation.operands, ctx) : []
     case 'call':
       return [...atomicsDemandOf(operation, ctx), ...hostArgumentDemandOf(operation, ctx)]
     default:

@@ -48,7 +48,7 @@ test('a dynamic Object.defineProperty key keeps its exact host waiver', () => {
   assert.match(result.source ?? '', /gea::host::toPropertyKey\(gea_arg_1\)/)
 })
 
-test('Object.defineProperties has no dynamic descriptor-map waiver', () => {
+test('Object.defineProperties defines only on a boxed target', () => {
   assert.equal(
     [...cppDynamicArgumentHostParameters].some((key) => key.startsWith('ObjectConstructor.defineProperties:')),
     false
@@ -62,11 +62,11 @@ test('Object.defineProperties has no dynamic descriptor-map waiver', () => {
 
   assert.equal(result.certificate, null)
   assert.deepEqual(result.emissionRefusals, [])
-  // No host member table claims `defineProperties` (its closed-literal form is
-  // lowered away by a source transform), so the member read itself is the
-  // capability the manifest lacks.
+  // The map crosses whole as a box, but the target is defined on in place, so
+  // a native struct target is refused at certification by name -- never left
+  // for the printer to discover on a certified program.
   assert.ok(
-    result.refusals.some((row) => row.stage === 'certify' && row.key === 'host-invocation:ObjectConstructor.defineProperties'),
+    result.refusals.some((row) => row.stage === 'certify' && row.key === 'host-member-call:ObjectConstructor.defineProperties'),
     JSON.stringify(result.refusals)
   )
 })

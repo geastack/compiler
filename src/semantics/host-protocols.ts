@@ -1408,6 +1408,10 @@ const bindHostObjectClosure = (
     if (!type || visited.has(type)) continue
     visited.add(type)
     const path = pathOf.get(type) ?? null
+    // A value typed by a host constructor family's base can be any member,
+    // and a member is carried by its own handle, so each is handed back.
+    for (const member of input.types.hostConstructorFamilyOf(type) ?? [])
+      admitHandedType(input, census, pending, member, null, null, pathOf)
     // A host value that is itself CALLABLE hands back what it returns, and an
     // ambient free FUNCTION is exactly that and nothing else. It has no
     // receiver, so it is nobody's member and the walk below never reaches it --
@@ -1542,7 +1546,7 @@ const admitHandedType = (
   const object = hostObjectTypeOf(input, candidate)
   const symbol = object?.getSymbol()
   if (!object || !symbol || !isAmbientSymbol(symbol)) return
-  const shape = input.table.get(input.types.typeOf(object))?.shape
+  const shape = input.table.get(input.types.exactHostConstructorOf(object) ?? input.types.typeOf(object))?.shape
   // The same three shapes `bindAmbientValue` admits, and for the reason
   // it states there: a host declared with `interface` + `declare var` hands back
   // a `declared` shape, and one declared with `declare class` hands back
@@ -1758,7 +1762,7 @@ const bindAmbientValue = (
     const rootType = input.hostNamespaceRootTypes.get(symbol.name)
     if (rootType !== undefined) census.namespaceRoots.set(typeId, rootType)
   }
-  const shape = input.table.get(typeId)?.shape
+  const shape = input.table.get(input.types.exactHostConstructorOf(type) ?? typeId)?.shape
   // An ambient `declare class`'s value reference (`UIColor` read, not
   // constructed) resolves to the class's own constructor type, whose shape
   // is `class-constructor` -- and a value typed by that class (a parameter,
