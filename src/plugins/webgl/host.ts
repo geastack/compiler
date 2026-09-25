@@ -164,6 +164,9 @@ export const webglAbsentGlobals = (): ReadonlySet<string> =>
     'OffscreenCanvas',
     'HTMLCanvasElement',
     'HTMLImageElement',
+    // lib.dom's other constructor of that element, `new Image(w, h)`. three's
+    // JSDoc types its image slots by it (`@param {Image} image`).
+    'Image',
     'HTMLVideoElement',
     'createImageBitmap',
     // WebXR. A native ANGLE context can no more start an XR session than it can

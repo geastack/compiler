@@ -432,6 +432,37 @@ const traceSpeculativeLoad = (lineage: SemanticResultId, via: string, node: Conv
 }
 
 /**
+ * Whether storing a value of `source` into `slot` would throw the value away:
+ * the slot, or the element or payload of it the value lands in, is the empty
+ * carrier `undefined` while the value is one that cannot be `undefined`.
+ *
+ * A slot is that only when its type is uninhabited -- `never`, which a type the
+ * host states absent becomes (`absent-globals.ts`: `Array<Image>` on a build
+ * with no `Image`). No value of a checked program reaches one; three's
+ * unchecked JSDoc lets `CubeRenderTarget` hand `{ width, height, depth }`
+ * records to its `Array<Image>` slot, and the printer's conversion into
+ * `undefined` is a discard (`emit-narrowing.ts`'s `unreachable-value`, there
+ * for a branch flow analysis proved dead). Entering a slot is not such a
+ * branch, so this refuses rather than dropping six records and handing on an
+ * empty array. A dynamic source is not asked: its unbox checks the tag.
+ */
+const dropsValue = (source: Representation, slot: Representation): boolean => {
+  if (source.kind === 'dynamic') return false
+  if (slot.kind === 'undefined') {
+    return !(
+      source.kind === 'undefined' ||
+      source.kind === 'void' ||
+      source.kind === 'null' ||
+      source.kind === 'optional' ||
+      source.kind === 'tagged-union'
+    )
+  }
+  if (slot.kind === 'optional') return dropsValue(source.kind === 'optional' ? source.payload : source, slot.payload)
+  if (slot.kind === 'array-object' && source.kind === 'array-object') return dropsValue(source.element, slot.element)
+  return false
+}
+
+/**
  * An operand as its consumer's slot wants it: resolved, then converted into
  * the slot's carrier when the census names one. A raw operand -- a key, a
  * callee, a condition, an argument to a host member the printer spells from
