@@ -31,6 +31,7 @@ borrow-helper-chain.ts.cpp bb76b67a3451
 borrow-helper-reentry.ts.cpp 613e5978a89e
 borrowed-builtin-call-bind.runtime.js.cpp a77f6865272c
 borrowed-formals.ts.cpp 9aa056d93959
+boxed-function-wrapped-with-nullable-parameter.runtime.ts.cpp d2214881985f
 boxed-payload-scope.ts.cpp 36aa3bc2df5f
 boxed-record-refcount.ts.cpp bf8f0867e314
 boxed-typed-array-to-primitive.ts.cpp 3d75a95030ab
@@ -445,7 +446,7 @@ physical-class-ancestry-live.ts.cpp 3191b418595a
 physical-class-ancestry-optional.ts.cpp 1c3a76306a64
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 50f20517ba63
-printer-drift.txt a3092649b61c
+printer-drift.txt 0467af87a61e
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp d85168f70bf0
 promise-method-read-as-value.ts.cpp d92abcc1e89f
