@@ -143,6 +143,27 @@ export interface IrLoweringResult {
  * `typeof`/`instanceof`/`in` interrogate the object substrate. Each of those is
  * its own missing primitive, named as such rather than folded into this one.
  */
+/**
+ * Every result the graph reads: cited by an operand, carried on a value edge,
+ * or tested by a conditional edge. Built once per graph.
+ */
+const readResultsByGraph = new WeakMap<SemanticGraph, ReadonlySet<SemanticResultId>>()
+const resultIsRead = (graph: SemanticGraph, operation: ComputationOperation): boolean => {
+  let read = readResultsByGraph.get(graph)
+  if (!read) {
+    const cited = new Set<SemanticResultId>()
+    for (const candidate of graph.operations.values())
+      for (const operand of candidate.operands) if (operand.source.kind === 'result') cited.add(operand.source.result)
+    for (const edge of graph.edges) {
+      if (edge.kind === 'value') cited.add(edge.result)
+      else if (edge.kind === 'conditional') cited.add(edge.guard)
+    }
+    readResultsByGraph.set(graph, cited)
+    read = cited
+  }
+  return operation.results.some((result) => read.has(result.id))
+}
+
 const lowerComputation = (ctx: LoweringContext, flow: FlowController, block: IrBlockId, operation: ComputationOperation): void => {
   // An assignment expression's own value is the value it assigned, and a comma
   // expression's is its last operand's. Neither computes anything: the write
@@ -277,8 +298,10 @@ const lowerComputation = (ctx: LoweringContext, flow: FlowController, block: IrB
     const evaluated = operation.operator === '&&' ? sources.truthy : sources.falsy
     const representation = requireResultRepresentation(ctx, operation, 'value', 'a logical computation')
     // Same as the conditional below: a merge whose carrier is `void` has no
-    // value to merge.
-    if (representation.kind === 'void') return
+    // value to merge. Neither has one whose value nothing reads (`!added &&
+    // (added = true) || (json += ',')` as a statement): its arms run for their
+    // effects, and no arm's value has to reach a carrier.
+    if (representation.kind === 'void' || !resultIsRead(ctx.graph, operation)) return
     const incoming = [
       { block: shortCircuit, value: mergeIncoming(ctx, shortCircuit, lineage, operation, 'kept', left, representation) },
       {
