@@ -53,6 +53,29 @@ const isStaticMember = (node: ts.ClassElement): boolean =>
  * This is `context.ordinals`' per-(node,family) mint count, unrelated to the
  * `evaluationOrdinal` data field, which comes from `context.evaluationOrdinals`.
  */
+/** `ClassLifecycleOperation.declaredPrototypeMembers`: the body's plainly named instance methods and accessors. */
+const declaredPrototypeMembersOf = (
+  classNode: ts.ClassLikeDeclaration
+): NonNullable<ClassLifecycleOperation['declaredPrototypeMembers']> => {
+  // Source order, one entry per key: a getter and a setter of one key are one
+  // property, defined where the first of them stands.
+  const members = new Map<string, { key: string; accessor: { getter: boolean; setter: boolean } | null }>()
+  for (const member of classNode.members) {
+    if (isStaticMember(member) || !member.name) continue
+    const key =
+      ts.isIdentifier(member.name) || ts.isStringLiteral(member.name) || ts.isNumericLiteral(member.name) ? member.name.text : null
+    if (key === null) continue
+    if (ts.isMethodDeclaration(member)) {
+      members.set(key, { key, accessor: null })
+    } else if (ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)) {
+      const prior = members.get(key)?.accessor ?? { getter: false, setter: false }
+      const accessor = ts.isGetAccessorDeclaration(member) ? { ...prior, getter: true } : { ...prior, setter: true }
+      members.set(key, { key, accessor })
+    }
+  }
+  return [...members.values()]
+}
+
 const hasExtendsClause = (classNode: ts.ClassLikeDeclaration): boolean =>
   (classNode.heritageClauses ?? []).some((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)
 
@@ -444,7 +467,8 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
               callsUserCode: false
             }
       ),
-      ...(candidate.classLayoutOnly ? { classLayoutOnly: true } : {})
+      ...(candidate.classLayoutOnly ? { classLayoutOnly: true } : {}),
+      declaredPrototypeMembers: declaredPrototypeMembersOf(node)
     }
     operations.push(bindOperation)
     if (heritageOperation) edges.push({ kind: 'evaluation', from: heritageOperation.id, to: bindOperation.id })

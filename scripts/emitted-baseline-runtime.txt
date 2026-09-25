@@ -490,6 +490,8 @@ prototype-install-shadow-abort.runtime.js.cpp 5eec0e0a4849
 prototype-method-own-length.runtime.js.cpp 271ede6b5b47
 prototype-method-value-call.runtime.js.cpp 355c69c2d49e
 prototype-object-class-typed-instance.ts.cpp 69503f24b43e
+prototype-reflection-descriptors.runtime.js.cpp 0a9c19974c02
+prototype-reflection-getter-copy-refused.runtime.js.cpp 7e3ce9c00cde
 reactive-inherited-cell-no-list-tick.ts.cpp 7699cb1bf2f5
 receiver-ignored-construct.ts.cpp a68d985fdfa2
 record-index-sidecar.ts.cpp e29ea6fdfee3

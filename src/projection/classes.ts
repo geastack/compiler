@@ -3,6 +3,7 @@ import { representationKey, walkRepresentation, type CallableAbi, type RecordFie
 import type { SealedRepresentationPlan } from '../representation/plan.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
+import type { SemanticOperation } from '../semantics/model/operations.js'
 import { symbolPropertyKeyDeclarationOf, type StructuralType } from '../semantics/model/structural-types.js'
 import type { NativeClassStorage } from './class-storage.js'
 import { operandOf, resultOf, type SemanticOperand } from '../semantics/model/operands.js'
@@ -116,6 +117,23 @@ export interface ClassLayout {
    * runtime one that turns out to name one aborts when the install runs.
    */
   readonly prototypeExtensions?: readonly (string | null)[]
+  /**
+   * The program reflects over class prototypes as objects --
+   * `Object.getPrototypeOf(instance)` of a class instance, or
+   * `Object.getOwnPropertyDescriptors(...)` (three's `RenderObject` material
+   * keys and `NodeMaterial`'s descriptor loops). The walk may reach any class
+   * dynamically, so it is one program-wide fact, stated on every class: each
+   * evaluation can then materialize its prototype object on demand and list
+   * its declared members as descriptors. The member list is the class
+   * body's own (`declaredPrototypeMembers`), not the reachable members the
+   * layout keeps: a reflected member is observable whether or not anything
+   * calls it.
+   */
+  readonly prototypeReflected?: readonly {
+    readonly key: string
+    /** `null` for a method; which halves an accessor declares otherwise. */
+    readonly accessor: { readonly getter: boolean; readonly setter: boolean } | null
+  }[]
   readonly declaration: DeclarationId
   /**
    * The class this one extends, or `null` for a base class.
@@ -1013,6 +1031,26 @@ export const publishClassMethodOverrides = (
       }
     }
   }
+  // `Object.getPrototypeOf`/`getOwnPropertyDescriptors`/`getOwnPropertyDescriptor`
+  // reads, by the result the call's callee cites. Handing `C.prototype` to one
+  // of them only reads it.
+  const reflectionMembers = new Set(['getPrototypeOf', 'getOwnPropertyDescriptors', 'getOwnPropertyDescriptor'])
+  const reflectionReads = new Map<SemanticResultId, string>()
+  for (const operation of input.graph.operations.values()) {
+    if (operation.family !== 'property' || operation.internalMethod !== 'get') continue
+    const key = operandOf(operation, 'key')
+    const receiver = operandOf(operation, 'receiver')
+    const carrier = receiver?.source.kind === 'result' ? input.plan.selected.get(receiver.source.result) : undefined
+    const result = resultOf(operation, 'value')
+    if (!result || key?.source.kind !== 'constant' || carrier?.kind !== 'native-handle' || carrier.protocol !== 'ObjectConstructor')
+      continue
+    if (reflectionMembers.has(key.source.text)) reflectionReads.set(result.id, key.source.text)
+  }
+  const reflectionCallOf = (operation: SemanticOperation): string | null => {
+    if (operation.family !== 'invocation') return null
+    const callee = operation.operands.find((operand) => operand.role === 'callee')
+    return callee?.source.kind === 'result' ? (reflectionReads.get(callee.source.result) ?? null) : null
+  }
   const unsupportedPrototypes = new Map<DeclarationId, Set<string>>()
   const unsupported = (declaration: DeclarationId, reason: string): void => {
     const reasons = unsupportedPrototypes.get(declaration) ?? new Set<string>()
@@ -1090,6 +1128,8 @@ export const publishClassMethodOverrides = (
           }
           unsupported(declaration, `prototype ${operation.internalMethod} of ${name ?? 'a runtime key'} has no typed method protocol`)
         }
+      } else if (operand.role === 'argument' && operand.ordinal === 0 && reflectionCallOf(operation) !== null) {
+        continue
       } else if (
         operation.family === 'invocation' &&
         operand.role === 'argument' &&
@@ -1211,6 +1251,23 @@ export const publishClassMethodOverrides = (
       }
     } else mark(selected ?? input.deriver.derive(receiver.type), key, null, symbolKeys)
   }
+  const holdsClass = (carrier: Representation | undefined): boolean =>
+    carrier !== undefined &&
+    (carrier.kind === 'class-ref' ||
+      (carrier.kind === 'optional' && holdsClass(carrier.payload)) ||
+      (carrier.kind === 'tagged-union' && carrier.arms.some((arm) => holdsClass(arm.value))))
+  const declaredMembers = new Map<DeclarationId, NonNullable<ClassLayout['prototypeReflected']>>()
+  for (const operation of input.graph.operations.values()) {
+    if (operation.family === 'class-lifecycle' && operation.event === 'bind-class-value' && operation.declaredPrototypeMembers)
+      declaredMembers.set(operation.classDeclaration, operation.declaredPrototypeMembers)
+  }
+  let prototypeReflected = false
+  for (const operation of input.graph.operations.values()) {
+    const member: string | null = prototypeReflected ? null : reflectionCallOf(operation)
+    if (member === null || member === 'getOwnPropertyDescriptor') continue
+    const target = operation.operands.find((operand) => operand.role === 'argument' && operand.ordinal === 0)
+    prototypeReflected = member === 'getOwnPropertyDescriptors' || holdsClass(target === undefined ? undefined : carrierOf(target))
+  }
   return new Map(
     [...layouts].map(([declaration, layout]) => {
       const fields = overrides.get(declaration)
@@ -1224,7 +1281,10 @@ export const publishClassMethodOverrides = (
           ...(fields ? { methodOverrides: [...fields.values()] } : {}),
           ...(prototypeKeys ? { prototypeMethodMutations: [...prototypeKeys] } : {}),
           ...(unsupportedUses ? { prototypeUnsupportedUses: [...unsupportedUses] } : {}),
-          ...(extended ? { prototypeExtensions: [...extended] } : {})
+          ...(extended ? { prototypeExtensions: [...extended] } : {}),
+          ...(prototypeReflected
+            ? { prototypeReflected: declaredMembers.get(declaration) ?? declaredMembers.get(genericRootOf(declaration)) ?? [] }
+            : {})
         }
       ]
     })

@@ -1,3 +1,4 @@
+import { classPrototypeValueHookText } from './class-properties/emit-class-properties.js'
 import { receivableArguments } from '../../ir/call-entry.js'
 import { stableBorrowEntryAccepts } from './borrowed-call-entry.js'
 import { callableMemberSlot } from '../../ir/callable-member-candidates.js'
@@ -2434,6 +2435,8 @@ export const emitAllocateConstructor = (ctx: EmitContext, lines: string[], opera
       : exactBase !== null
         ? `gea::exactNativeClassHeritage<${cppClassName(exactBase)}>(${operandText(ctx, heritageOperand)}.environment)`
         : `gea::nativeClassMethodStateFromEnvironment(${operandText(ctx, heritageOperand)}.environment)`
-  const environment = `gea::allocateNativeClassMethodEnvironment<${cppClassName(operation.declaration)}>(${parent})`
+  const allocated = `gea::allocateNativeClassMethodEnvironment<${cppClassName(operation.declaration)}>(${parent})`
+  const prototypeHook = classPrototypeValueHookText(ctx, operation.declaration)
+  const environment = prototypeHook === null ? allocated : `gea::reflectNativeClassPrototype(${allocated}, ${prototypeHook})`
   lines.push(`${name} = ${cppTypeOf(operation.result.representation)}{&${cppConstructThunkName(operation.declaration)}, ${environment}};`)
 }

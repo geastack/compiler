@@ -9425,6 +9425,9 @@ const NativePrototypeOps* nativePrototypeOpsFor();
 using NativeMethodStateRead = const NativeClassMethodState* (*)(const void* payload);
 template <typename T>
 NativeMethodStateRead nativeMethodStateOpsFor();
+/** The class evaluation whose prototype object a boxed payload is, or null (`Value::classPrototypeState`). */
+template <typename T>
+NativeMethodStateRead nativePrototypeStateOpsFor();
 
 /**
  * The `[[Call]]` of a boxed callable, installed the same way and for the same
@@ -9693,8 +9696,9 @@ struct ValueMetadata {
   bool array;
   bool map;
   NativeMethodStateRead methodState;
+  NativeMethodStateRead prototypeState;
 };
-inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false, nullptr};
+inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false, nullptr, nullptr};
 
 template <typename T, int RestFrom = -1>
 const ValueMetadata* valueMetadataFor() {
@@ -9704,7 +9708,7 @@ const ValueMetadata* valueMetadataFor() {
     else calls = nativeRestCallOpsFor<T, static_cast<std::size_t>(RestFrom)>();
     return ValueMetadata{nativeFieldOpsFor<T>(), nativePrototypeOpsFor<T>(), calls, nativeArrayOpsFor<T>(),
                          payloadTypeTagFor<T>(), RestFrom, IsArrayPayload<T>::value, IsMapPayload<T>::value,
-                         nativeMethodStateOpsFor<T>()};
+                         nativeMethodStateOpsFor<T>(), nativePrototypeStateOpsFor<T>()};
   }();
   return &metadata;
 }
@@ -9886,6 +9890,10 @@ class Value {
   Value getProperty(const PropertyKey& key, const Value& receiver) const;
   bool reflectSet(const PropertyKey& key, const Value& value, const Value& receiver);
   bool ownDescriptor(const PropertyKey& key, PropertyDescriptor& out) const;
+  /** The class evaluation whose prototype object this box holds, or null for every other value. */
+  const NativeClassMethodState* classPrototypeState() const;
+  /** Whether this box holds a native class instance or prototype object; `start` is where its prototype walk begins. */
+  bool nativeClassChainStart(const NativeClassMethodState*& start) const;
   std::vector<PropertyKey> ownPropertyKeys() const;
   bool defineProperty(const PropertyKey& key, const PropertyDescriptor& descriptor) const;
   /** SetIntegrityLevel/IsFrozen over the exact native payload plus its identity sidecar. */
@@ -11282,6 +11290,14 @@ struct NativeClassMethodState {
   // the class that declares `key` as a method or accessor (this class or an
   // ancestor), or null. Set when the prototype object is materialized.
   const char* (*declaredMemberOwner)(const PropertyKey& key) = nullptr;
+  // The class's own declared methods and accessors as descriptors, for
+  // `Object.getOwnPropertyDescriptors(C.prototype)`; null until the
+  // prototype object is materialized.
+  void (*declaredDescriptors)(std::vector<std::pair<PropertyKey, PropertyDescriptor>>& out) = nullptr;
+  // Materializes this evaluation's prototype object and boxes it, for
+  // `Object.getPrototypeOf` over an instance; installed at class evaluation
+  // when the program reflects over prototypes (`reflectNativeClassPrototype`).
+  Value (*prototypeValue)(const Ref<NativeClassMethodState>& state) = nullptr;
   std::vector<std::pair<const void*, Ref<FunctionObjectIdentity>>> methods;
   std::vector<AdaptedMethod> adaptedMethods;
 
@@ -11310,6 +11326,12 @@ PackedEnvironment allocateNativeClassMethodEnvironment(Ref<NativeClassMethodStat
   state->declaration = &nativeClassMethodDeclaration<NativeClass>;
   state->parent = std::move(parent);
   return nativeClassMethodEnvironment(std::move(state));
+}
+
+/** Class evaluation for a program that reflects over prototypes: the evaluation can hand out its prototype object. */
+inline PackedEnvironment reflectNativeClassPrototype(PackedEnvironment environment, Value (*prototypeValue)(const Ref<NativeClassMethodState>&)) {
+  static_cast<NativeClassMethodState*>(environment.pointer)->prototypeValue = prototypeValue;
+  return environment;
 }
 
 /**
@@ -12209,6 +12231,21 @@ NativeMethodStateRead nativeMethodStateOpsFor() {
       // layout; its [[Prototype]] is the parent evaluation's prototype.
       if (state != nullptr && state->prototypeObject.get() == static_cast<const void*>(target)) return state->parent.get();
       return state;
+    };
+  } else {
+    return nullptr;
+  }
+}
+
+template <typename T>
+NativeMethodStateRead nativePrototypeStateOpsFor() {
+  using Target = typename NativeFieldPayload<T>::Target;
+  if constexpr (!std::is_void_v<Target> && requires(const Target& target) { target.gea_method_state.get(); }) {
+    return [](const void* payload) -> const NativeClassMethodState* {
+      const Target* target = NativeFieldPayload<T>::reader(payload);
+      if (target == nullptr) return nullptr;
+      const NativeClassMethodState* state = target->gea_method_state.get();
+      return state != nullptr && state->prototypeObject.get() == static_cast<const void*>(target) ? state : nullptr;
     };
   } else {
     return nullptr;
@@ -14176,7 +14213,61 @@ NativePrototypeOps::SetResult nativePrototypeChainSet(const NativeClassMethodSta
   return found->writable ? NativePrototypeOps::SetResult::Absent : NativePrototypeOps::SetResult::Rejected;
 }
 
+/** `Object.getPrototypeOf` for an object whose walk starts at `start`: that evaluation's prototype object, or null past the root class (this runtime models no `Object.prototype` object; an ordinary `{}` answers null too). */
+inline Value nativeClassPrototypeValue(const NativeClassMethodState* start) {
+  if (start == nullptr) return Value::box(Value::Tag::Null, nullptr);
+  if (start->prototypeValue == nullptr) {
+    std::fputs("gea: Object.getPrototypeOf reached a class evaluation that cannot hand out its prototype object\n", stderr);
+    gea::detail::abortAfterFlush();
+  }
+  return start->prototypeValue(Ref<NativeClassMethodState>::adopt(const_cast<NativeClassMethodState*>(start), true));
+}
+
+/**
+ * A declared method or accessor, as `Object.getOwnPropertyDescriptors(C.prototype)`
+ * lists it. The attributes are a class member's (non-enumerable,
+ * configurable, a method writable); the function is a stand-in that stops
+ * the program if it is called, since the member's body takes a receiver the
+ * descriptor does not carry. three only tests these for presence.
+ */
+[[noreturn]] inline Value declaredMemberFunctionCalled() {
+  std::fputs("gea: a declared class member's function read out of Object.getOwnPropertyDescriptors was called; this backend lists it but does not hand it out\n", stderr);
+  gea::detail::abortAfterFlush();
+}
+inline Value declaredMemberFunctionStandIn() {
+  return Value::box(Value::Tag::Function, CallableObject<Value()>{+[](void*) -> Value { declaredMemberFunctionCalled(); }, nullptr});
+}
+inline void declaredMethodDescriptor(std::vector<std::pair<PropertyKey, PropertyDescriptor>>& out, const char* key) {
+  PropertyDescriptor descriptor;
+  descriptor.hasValue = descriptor.hasWritable = descriptor.hasEnumerable = descriptor.hasConfigurable = true;
+  descriptor.value = declaredMemberFunctionStandIn();
+  descriptor.writable = descriptor.configurable = true;
+  out.emplace_back(PropertyKey::string(key), std::move(descriptor));
+}
+inline void declaredAccessorDescriptor(std::vector<std::pair<PropertyKey, PropertyDescriptor>>& out, const char* key, bool getter, bool setter) {
+  PropertyDescriptor descriptor;
+  descriptor.hasGet = descriptor.hasSet = descriptor.hasEnumerable = descriptor.hasConfigurable = true;
+  descriptor.configurable = true;
+  if (getter) {
+    descriptor.getterValue = declaredMemberFunctionStandIn();
+    descriptor.get = [](const Value&) -> Value { declaredMemberFunctionCalled(); };
+  }
+  if (setter) {
+    descriptor.setterValue = declaredMemberFunctionStandIn();
+    descriptor.set = [](const Value&, const Value&) { declaredMemberFunctionCalled(); };
+  }
+  out.emplace_back(PropertyKey::string(key), std::move(descriptor));
+}
+
 }  // namespace detail
+
+/** `Object.getPrototypeOf(instance)` for a native class instance (or a class's prototype object, whose [[Prototype]] is the parent's). */
+template <typename T>
+Value nativeGetPrototypeOf(const gea::Ref<T>& object) {
+  if (!object) gea::host::throwRuntimeError("TypeError", "Cannot convert undefined or null to object");
+  return detail::nativeClassPrototypeValue(
+      detail::nativePrototypeChainStart(object->gea_method_state.get(), static_cast<const void*>(object.get())));
+}
 
 inline std::size_t Value::dynamicArrayLength(const char* site) const {
   if (tag_ != Tag::Object || !metadata_->array || metadata_->elements == nullptr) {
@@ -27369,6 +27460,33 @@ inline gea::Optional<Descriptor> getOwnPropertyDescriptor(const gea::Value& targ
   return gea::Optional<Descriptor>(Descriptor(found));
 }
 
+/**
+ * ECMA-262 20.1.2.9 `Object.getOwnPropertyDescriptors`: each own key's
+ * descriptor, in own-key order. A class's prototype object also holds the
+ * class's declared methods and accessors, which live in generated code rather
+ * than in a table; the class states them (`declaredDescriptors`, installed
+ * when the prototype object is materialized) and they follow its table keys.
+ */
+inline std::vector<std::pair<gea::PropertyKey, gea::PropertyDescriptor>> getOwnPropertyDescriptorList(const gea::Value& target) {
+  std::vector<std::pair<gea::PropertyKey, gea::PropertyDescriptor>> out;
+  if (target.tag() != gea::Value::Tag::Object && target.tag() != gea::Value::Tag::Function) gea::host::throwRuntimeError("TypeError", "Cannot convert undefined or null to object");
+  for (const gea::PropertyKey& key : target.ownPropertyKeys()) {
+    gea::PropertyDescriptor found;
+    if (target.ownDescriptor(key, found)) out.emplace_back(key, found);
+  }
+  const gea::NativeClassMethodState* state = target.classPrototypeState();
+  if (state != nullptr && state->declaredDescriptors != nullptr) {
+    std::vector<std::pair<gea::PropertyKey, gea::PropertyDescriptor>> declared;
+    state->declaredDescriptors(declared);
+    for (auto& entry : declared) {
+      bool shadowed = false;
+      for (const auto& present : out) shadowed = shadowed || present.first == entry.first;
+      if (!shadowed) out.push_back(std::move(entry));
+    }
+  }
+  return out;
+}
+
 /** ECMA-262 20.1.2.6 `Object.freeze` -- SetIntegrityLevel(frozen): every own property becomes non-configurable, every data property non-writable, and the object non-extensible. */
 inline gea::Value freeze(const gea::Value& target) {
   target.freezeIntegrity();
@@ -27396,6 +27514,9 @@ inline bool hasOwn(const gea::Value& target, const gea::PropertyKey& key) { retu
  * instance's chain points at.
  */
 inline gea::Value getPrototypeOf(const gea::Value& target) {
+  if (const gea::NativeClassMethodState* start = nullptr; target.nativeClassChainStart(start)) {
+    return gea::detail::nativeClassPrototypeValue(start);
+  }
   gea::DynamicObject& table = gea::runtime::object::require(target, "Object.getPrototypeOf");
   const gea::Ref<gea::DynamicObject> proto = table.prototype();
   if (!proto) return gea::Value::box(gea::Value::Tag::Null, nullptr);

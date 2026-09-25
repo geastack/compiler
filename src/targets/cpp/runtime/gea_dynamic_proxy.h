@@ -540,6 +540,17 @@ inline bool Value::defineProperty(const PropertyKey& key, const PropertyDescript
   return detail::expandoFor(expandoAnchor(), true)->defineOwnProperty(key, descriptor);
 }
 
+inline const NativeClassMethodState* Value::classPrototypeState() const {
+  if (proxy_ || dynamic_ || metadata_ == nullptr || metadata_->prototypeState == nullptr || !held_) return nullptr;
+  return metadata_->prototypeState(held_.get());
+}
+
+inline bool Value::nativeClassChainStart(const NativeClassMethodState*& start) const {
+  if (proxy_ || dynamic_ || metadata_ == nullptr || metadata_->methodState == nullptr || !held_) return false;
+  start = metadata_->methodState(held_.get());
+  return true;
+}
+
 inline bool Value::ownDescriptor(const PropertyKey& key, PropertyDescriptor& out) const {
   if (proxy_) return dynamicProxyDescriptor(*this, key, out);
   if (tag_ == Tag::Function) {
