@@ -6,7 +6,14 @@ import type { ClassLayout } from '../projection/classes.js'
 import { classMemberOf } from '../projection/fields.js'
 import type { SlotCensus } from '../projection/slots.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
-import { representationKey, type CallableAbi, type RecordField, type Representation, type TaggedUnionArm } from '../representation/model.js'
+import {
+  abiKey,
+  representationKey,
+  type CallableAbi,
+  type RecordField,
+  type Representation,
+  type TaggedUnionArm
+} from '../representation/model.js'
 import type { SealedRepresentationPlan } from '../representation/plan.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import { operandOf, resultOf, type SemanticOperand } from '../semantics/model/operands.js'
@@ -199,10 +206,14 @@ export const resolveRequiredOperand = (
   // genuinely take nothing (`return f()` in a `void` function, an expression
   // statement) asks `namesVoidResult` itself before resolving. A `never`-typed
   // result shares the void carrier and is the opposite fact -- the point past
-  // `return Debug.fail(...)` is unreachable, not undefined -- so it keeps
-  // refusing here; its consumers (`emit-return.ts`) render the point as
-  // `gea::host::unreachableValue<T>()` from the absence of a value.
-  if (source.kind === 'result' && namesVoidResult(ctx, operand) && !ctx.constantDeriver.isNeverType(operand.type)) {
+  // `return Debug.fail(...)` is unreachable, not undefined. Its reader gets the
+  // same stand-in an uninhabited merge arm gets (`lower-narrow.ts`'s
+  // `mergeIncoming`, materialization `unreachable`): `undefined`, whose load
+  // into a carrier that cannot hold it renders as the trap
+  // `gea::host::unreachableValue<T>()`. `const s = a ? fail() : fail()`
+  // (fastify's two unimplemented `http2` servers) otherwise refused the code
+  // after it, which never runs.
+  if (source.kind === 'result' && namesVoidResult(ctx, operand)) {
     const absent: Representation = { kind: 'undefined' }
     return { value: ctx.builder.constant(block, lineage, 'undefined', 'undefined', absent), representation: absent }
   }
@@ -720,7 +731,8 @@ export const packRestArguments = (
     if (firstSpread >= 0) {
       throw new IrLoweringBlockedError(
         'a call range-copies a spread argument into a convention that declares no rest slot; a spread contributes a runtime number of ' +
-          'values and there is no fixed formal for them to land in'
+          `values and there is no fixed formal for them to land in (spread at ${firstSpread} of ${args.length}, convention ` +
+          `${abi ? abiKey(abi) : 'none'})`
       )
     }
     return args.map((slot) => slot.value)

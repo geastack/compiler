@@ -687,6 +687,13 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
     nativeHandleProperty('Boolean.prototype', 'gea::NativeHandle<gea_native_protocol_Boolean_prototype_v1>{}')
   ],
   ['ObjectConstructor.prototype', nativeHandleProperty('Object.prototype', 'gea::NativeHandle<gea_native_protocol_Object_prototype_v1>{}')],
+  // light-my-request builds its chainable request by walking
+  // `Object.getOwnPropertyNames(Promise.prototype)`; the names come from the
+  // protocol's own members, as for the six above.
+  [
+    'PromiseConstructor.prototype',
+    nativeHandleProperty('Promise.prototype', 'gea::NativeHandle<gea_native_protocol_Promise_prototype_v1>{}')
+  ],
   // `Date.parse` / `Date.UTC` -- ECMA-262 21.4.3.2 / 21.4.3.4.
   //
   // `call-site`, not a fixed-arity template, because `Date.UTC` takes one to

@@ -4,6 +4,16 @@ import type { SemanticEdge } from '../../model/edges.js'
 import type { OperandEvaluation, SemanticOperand } from '../../model/operands.js'
 import type { SemanticOperation } from '../../model/operations.js'
 import type { SelectedSignature } from '../../model/selected-signature.js'
+
+/**
+ * The formals an argument list binds against: the checker's selected
+ * signature, or, for a call the checker typed through a fabricated `any`
+ * signature while this compiler's own view of the callee states one call
+ * signature (`invocations.ts`'s `fabricatedNativeCall`), that signature --
+ * the frame the callee's carrier, and so the call's ABI, is derived from.
+ * `null` only for a callee that is genuinely dynamic.
+ */
+export type ArgumentFrame = Pick<SelectedSignature, 'parameters'>
 import { isFixedArgumentsSpreadAt } from '../implicit-arguments-tuple.js'
 import type { CensusCandidate } from '../census.js'
 import type { ProducerContext } from '../producer-context.js'
@@ -98,7 +108,7 @@ export type ArgumentListBuild =
  * `representation/derive.ts` builds `CallableAbi.restFrom` from the same
  * declared rest parameter `SelectedSignature.parameters[i].rest` records.
  */
-const restFormalIndexOf = (selected: SelectedSignature | null): number | null => {
+const restFormalIndexOf = (selected: ArgumentFrame | null): number | null => {
   if (!selected) return null
   const index = selected.parameters.findIndex((parameter) => parameter.rest)
   return index >= 0 ? index : null
@@ -132,7 +142,7 @@ const restFormalIndexOf = (selected: SelectedSignature | null): number | null =>
  * (`[...[]]` yields none), so the arity question is real again even when the
  * types match.
  */
-const restAbsorbsLeadingFormals = (context: ProducerContext, selected: SelectedSignature, from: number, restFrom: number): boolean => {
+const restAbsorbsLeadingFormals = (context: ProducerContext, selected: ArgumentFrame, from: number, restFrom: number): boolean => {
   const rest = selected.parameters[restFrom]
   if (rest === undefined) return false
   const restShape = context.table.get(rest.type).shape
@@ -162,7 +172,7 @@ const admitsMaxArityTupleSpread = (
   args: readonly ts.Expression[],
   index: number,
   restFrom: number | null,
-  selected: SelectedSignature | null
+  selected: ArgumentFrame | null
 ): boolean => {
   const argument = args[index]
   if (!argument || !ts.isSpreadElement(argument) || selected === null || restFrom !== null || index !== args.length - 1) return false
@@ -183,7 +193,7 @@ const admitsFinalArraySpread = (
   args: readonly ts.Expression[],
   index: number,
   restFrom: number | null,
-  selected: SelectedSignature | null
+  selected: ArgumentFrame | null
 ): boolean => {
   const argument = args[index]
   if (!argument || !ts.isSpreadElement(argument) || selected === null || restFrom !== null || index !== args.length - 1) return false
@@ -220,7 +230,7 @@ const admitsOpenTupleSpread = (
   argument: ts.Expression,
   scan: number,
   restFrom: number | null,
-  selected: SelectedSignature | null
+  selected: ArgumentFrame | null
 ): boolean => {
   if (!ts.isSpreadElement(argument)) return false
   const open = openTupleSpreadShapeOf(context, context.types.typeAt(argument.expression))
@@ -234,7 +244,7 @@ const admitsFixedArgumentsSpread = (
   args: readonly ts.Expression[],
   index: number,
   restFrom: number | null,
-  selected: SelectedSignature | null
+  selected: ArgumentFrame | null
 ): boolean => isFixedArgumentsSpreadAt(context.checker, args, index, selected === null ? null : { restFrom })
 
 /** One read per formal the final array spread reaches, each typed with the `undefined` a read past the end yields. */
@@ -257,7 +267,7 @@ export const buildArgumentOperands = (
   candidate: CensusCandidate,
   args: readonly ts.Expression[],
   evaluation: OperandEvaluation,
-  selected: SelectedSignature | null,
+  selected: ArgumentFrame | null,
   shortCircuits: boolean
 ): ArgumentListBuild => {
   const spreads = args.filter(ts.isSpreadElement)

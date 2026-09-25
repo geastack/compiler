@@ -458,7 +458,7 @@ const contributeSwitch = (context: ProducerContext, candidate: CensusCandidate, 
       results: [mintResult(testId, 'value', booleanType)],
       completion: normalCompletion,
       effects: pureEffects,
-      evaluationOrdinal: candidate.evaluationOrdinal
+      evaluationOrdinal: context.clauseOrdinals.get(clause) ?? candidate.evaluationOrdinal
     })
     edges.push(...valueEdgesInto(testId, operands))
     let guard = semanticResultId(testId, 'value')
@@ -482,7 +482,7 @@ const contributeSwitch = (context: ProducerContext, candidate: CensusCandidate, 
         results: [mintResult(foldId, 'value', booleanType)],
         completion: normalCompletion,
         effects: pureEffects,
-        evaluationOrdinal: candidate.evaluationOrdinal
+        evaluationOrdinal: context.clauseOrdinals.get(clause) ?? candidate.evaluationOrdinal
       })
       edges.push(...valueEdgesInto(foldId, foldOperands))
       guard = semanticResultId(foldId, 'value')

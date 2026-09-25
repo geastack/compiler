@@ -211,6 +211,8 @@ export interface ProducerContext {
   readonly commonJsModuleRecords: CommonJsModuleRecordCensus
   /** The files this program runs inside the CommonJS module wrapper -- those reached through authenticated `require` edges. */
   readonly commonJsModules: ReadonlySet<ts.SourceFile>
+  /** The census's per-clause evaluation ordinal (`ProgramCensus.clauseOrdinals`). */
+  readonly clauseOrdinals: ReadonlyMap<ts.CaseOrDefaultClause, number>
   /** A host build's exact loader-spelling to canonical builtin-registry mapping. */
   readonly builtinModuleNameOf: (specifier: string) => string | null
   /** The host-stated implementation source for one canonical builtin registry name. */

@@ -186,6 +186,34 @@ const packElementText = (ctx: EmitContext, element: Representation, elementType:
   return `static_cast<${elementType}>(${text})`
 }
 
+/**
+ * One spread into a dynamic literal's `ArrayObject<gea::Value>`: a range copy
+ * of an Array source, each element boxed on the way in unless it already is a
+ * box, or a cursor that already yields boxes. Anything else needs the general
+ * iterator protocol, which the lowering routes as a `gather` instead.
+ */
+const dynamicLiteralSpreadText = (
+  ctx: EmitContext,
+  array: string,
+  box: Representation,
+  slot: Extract<AllocateArrayObjectOperation['elements'][number], { kind: 'spread' }>
+): string => {
+  const spread = slot.value.representation
+  if (spread.kind === 'array-object' && spread.element.kind === 'dynamic')
+    return `${array}->appendRange(*${operandText(ctx, slot.value)}, ${slot.from});`
+  if (spread.kind === 'array-object') {
+    const converted = alignedValueText(ctx, 'emit-arrays.ts:dynamic-literal-spread', spread.element, box, 'gea_element')
+    if (converted !== null)
+      return `${array}->appendRangeConverted(*${operandText(ctx, slot.value)}, ${slot.from}, [&](const ${cppTypeOf(spread.element)}& gea_element) { return ${converted}; });`
+  }
+  if (spread.kind === 'iterator' && spread.element.kind === 'dynamic' && slot.from === 0)
+    return `gea::appendIteratorRange(*${array}, ${operandText(ctx, slot.value)});`
+  throw createCppEmitBlockedError(
+    `runtime-helper:allocation:array-literal:dynamic(spread:${spread.kind})`,
+    `a spread of a "${representationKey(spread)}" source into a dynamic array literal has no range copy that boxes its elements`
+  )
+}
+
 export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], operation: AllocateArrayObjectOperation): void => {
   const representation = operation.result.representation
   // `reason` records only WHY the destination cell is `dynamic` (an opt-in
@@ -204,11 +232,7 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
       if (slot.kind === 'element') lines.push(`${array}->push(${boxedValueText(ctx, slot.value, 'a fallback array element')});`)
       else if (slot.kind === 'hole') lines.push(`${array}->pushHole();`)
       else if (slot.kind === 'gather') lines.push(`gea::runtime::iterator::appendGather(*${array}, ${operandText(ctx, slot.iterator)});`)
-      else
-        throw createCppEmitBlockedError(
-          'runtime-helper:allocation:array-literal:dynamic(spread)',
-          'fallback array spread needs dynamic iteration'
-        )
+      else lines.push(dynamicLiteralSpreadText(ctx, array, representation, slot))
     }
     lines.push(`return gea::Value::box(gea::Value::Tag::Object, ${array}); }();`)
     return
@@ -285,7 +309,7 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
       // element's "everything past position N" shape, and `lower-allocation.ts`
       // never mints a non-zero `from` for the other two.
       if (spread.kind === 'keyed-collection' && spread.family === 'set') {
-        if (representationKey(spread.key) !== representationKey(representation.element) || slot.from !== 0) {
+        if (cppTypeOf(spread.key) !== cppTypeOf(representation.element) || slot.from !== 0) {
           throw createCppEmitBlockedError(
             `conversion:${representationKey(spread.key)}->${representationKey(representation.element)}`,
             `a Set spread element's own key carrier does not match this array's "${representationKey(representation.element)}" element carrier`
@@ -353,7 +377,7 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
       // inside a spread, so a generator that never completes never returns
       // here, the same way it never returns in node.
       if (spread.kind === 'iterator') {
-        if (representationKey(spread.element) !== representationKey(representation.element) || slot.from !== 0) {
+        if (cppTypeOf(spread.element) !== cppTypeOf(representation.element) || slot.from !== 0) {
           throw createCppEmitBlockedError(
             `conversion:${representationKey(spread.element)}->${representationKey(representation.element)}`,
             `a cursor spread element yields "${representationKey(spread.element)}", which this array's "${representationKey(representation.element)}" element carrier cannot hold`

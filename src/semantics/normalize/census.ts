@@ -76,6 +76,8 @@ export interface ProgramCensus {
   readonly candidates: readonly CensusCandidate[]
   readonly regions: ReadonlyMap<string, SemanticRegion>
   readonly byFamily: ReadonlyMap<OperationFamily, readonly CensusCandidate[]>
+  /** Where each switch clause begins in its caller's evaluation order, for the operations its switch mints there. */
+  readonly clauseOrdinals: ReadonlyMap<ts.CaseOrDefaultClause, number>
 }
 
 /**
@@ -595,6 +597,7 @@ export const censusProgram = (
   const candidates: CensusCandidate[] = []
   const regions = new Map<string, SemanticRegion>()
   const ordinals = new Map<string, number>()
+  const clauseOrdinals = new Map<ts.CaseOrDefaultClause, number>()
   const nextOrdinal = (caller: SemanticCaller): number => {
     const key = callerKey(caller)
     const ordinal = ordinals.get(key) ?? 0
@@ -725,6 +728,26 @@ export const censusProgram = (
         forEachEvaluationChild(node, (child) => visit(child, path))
         return
       }
+      // A switch's clause tests (`producers/control.ts`) are evaluated where
+      // each clause begins: after that clause's label, before its statements
+      // (ECMA-262 14.12.4 CaseBlockEvaluation) -- so each clause takes an
+      // ordinal of its own at exactly that point. The switch's own post-order
+      // ordinal sorted every test after the whole case block, and a `default`
+      // body no earlier test gates was scheduled ahead of them, leaving every
+      // case body behind it dead; one ordinal for all of them before the block
+      // would instead put a fall-through clause's `A || B` fold ahead of the
+      // body that falls into it.
+      if (ts.isSwitchStatement(node)) {
+        visit(node.expression, path)
+        const caller = callerOf(node, identities, regions, path)
+        for (const clause of node.caseBlock.clauses) {
+          if (ts.isCaseClause(clause)) visit(clause.expression, path)
+          clauseOrdinals.set(clause, nextOrdinal(caller))
+          for (const statement of clause.statements) visit(statement, path)
+        }
+        record(node, path, path)
+        return
+      }
       forEachEvaluationChild(node, (child) => visit(child, path))
       record(node, path, path)
     }
@@ -742,5 +765,5 @@ export const censusProgram = (
     byFamily.set(candidate.family, bucket)
   }
 
-  return { candidates, regions, byFamily }
+  return { candidates, regions, byFamily, clauseOrdinals }
 }
