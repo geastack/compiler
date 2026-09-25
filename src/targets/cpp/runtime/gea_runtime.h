@@ -12585,6 +12585,13 @@ template <typename Target>
 gea::Ref<Target> unboxClassRef(const Value& value, const char* site) {
   const auto* target = &RefOperationsFor<Target>::table;
   if (value.tag() != Value::Tag::Object || !value.classObject() || !classIdentityExtends(value.classIdentity(), target)) {
+    // A proxy is carried as `dynamic` exactly where the compiler followed it
+    // (`semantics/proxy-origins.ts`), and a method runs with one as `this`
+    // only through its receiver-generic copy: anywhere else is this refusal.
+    if (value.isProxy()) {
+      std::fprintf(stderr, "gea: %s is a Proxy where a native class instance is required (a slot or a method `this` the proxy was not followed to)\n", site);
+      gea::detail::abortAfterFlush();
+    }
     refusePayloadMismatch(site);
   }
   return value.classObject().template staticCast<Target>();

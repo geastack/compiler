@@ -758,16 +758,6 @@ export const publishRepresentations = (
     return type === undefined ? null : deriver.deriveStored(type).kind
   }
   const proxyOrigins = proxyOriginsOf(graph, proxySites, {
-    callable: (result) => {
-      const kind = carrierKindOf(result)
-      return (
-        kind === 'function' ||
-        kind === 'function-family' ||
-        kind === 'function-value-family' ||
-        kind === 'function-value-dispatch' ||
-        kind === 'function-and-constructor'
-      )
-    },
     dynamic: (result) => carrierKindOf(result) === 'dynamic',
     functionOf: (result) => callableOrigins.get(result)
   })

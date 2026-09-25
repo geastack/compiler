@@ -55,6 +55,7 @@ import type { SlotDrift } from './ir/lower-operands.js'
 import { createSlotCensus } from './projection/slots.js'
 import { hostMethodAliasDeclarations } from './projection/callee.js'
 import { lowerToIr } from './ir/lower.js'
+import { receiverGenericCopiesOf, receiverGenericCopyOf, relocateReceiverGenericCopies } from './ir/receiver-generic-copies.js'
 import { certifyIr, type IrCertification } from './ir/certify.js'
 import { publishCaptureFacts } from './ir/captures.js'
 import { recordAccessorBodiesOf } from './projection/fields.js'
@@ -999,6 +1000,15 @@ const compileProgram = (request: CompilationRequest): CompilationResult => {
     })()
   )
   const conversionCensus = createConversionNodes({ registry: conversionRegistry, nodes: conversions.nodes })
+  // The class methods a proxy may run with itself as `this` get a second body
+  // with a `dynamic` receiver (`ir/receiver-generic-copies.ts`); none for a
+  // program that constructs no proxy.
+  const receiverGenericCopies = receiverGenericCopiesOf({
+    graph: frontend.graph,
+    classes,
+    abis: abis.abis,
+    origins: representations.proxyOrigins
+  })
   // Lowering runs on the plan's verdict alone. An uncertified program lowers
   // too, so its refusals are rows beside preflight's rather than a stage that
   // never ran; only emission waits for the certificate (see the header).
@@ -1016,7 +1026,8 @@ const compileProgram = (request: CompilationRequest): CompilationResult => {
         classes,
         slots: slotsForClasses(classes),
         conversions: conversionCensus,
-        plugins
+        plugins,
+        receiverGenericCopies
       })
     : null
 
@@ -1034,9 +1045,10 @@ const compileProgram = (request: CompilationRequest): CompilationResult => {
   // consumers of the body list, so the shaker and the emitter agree on which
   // bodies -- and which placements, since a bridged cell mints its own -- the
   // program actually has.
-  const split = complete && lowered ? splitGeneratorBodies(lowered.bodies, placements) : null
-  const splitBodies = split?.bodies ?? lowered?.bodies ?? new Map()
-  const splitPlacements = split?.placements ?? placements
+  const relocated = lowered ? relocateReceiverGenericCopies(lowered.bodies, placements, receiverGenericCopies) : null
+  const split = complete && relocated ? splitGeneratorBodies(relocated.bodies, relocated.placements) : null
+  const splitBodies = split?.bodies ?? relocated?.bodies ?? new Map()
+  const splitPlacements = split?.placements ?? relocated?.placements ?? placements
   const pruned = complete
     ? pruneProvenBranches(splitBodies, frontend.graph, lowered?.slotDrift ?? [])
     : { bodies: splitBodies, slotDrift: lowered?.slotDrift ?? [] }
@@ -1056,6 +1068,7 @@ const compileProgram = (request: CompilationRequest): CompilationResult => {
           placements: splitPlacements,
           classes,
           deriver: representations.deriver,
+          companions: new Map([...receiverGenericCopies.keys()].map((callable) => [callable, receiverGenericCopyOf(callable)])),
           // A computed class read keeps only methods the C++ callable
           // conversion authority can actually publish at that read's ABI.
           // Passing the question in keeps the generic IR shaker free of C++
