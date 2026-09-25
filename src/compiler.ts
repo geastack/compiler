@@ -905,6 +905,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         ['Reflect.set', { kind: 'path', text: 'gea::reflectSet', arguments: 'dynamic' }],
         ['Reflect.has', { kind: 'path', text: 'gea::reflectHas', arguments: 'dynamic' }],
         ['Reflect.deleteProperty', { kind: 'path', text: 'gea::reflectDelete', arguments: 'dynamic' }],
+        ['Reflect.apply', { kind: 'path', text: 'gea::reflectApply', arguments: 'dynamic', result: 'dynamic' }],
         ['Reflect.getOwnPropertyDescriptor', { kind: 'path', text: 'gea::reflectOwnDescriptor', arguments: 'dynamic', result: 'dynamic' }],
         // The key-array carrier belongs to this call's native recipe; there
         // is no single runtime function ABI to materialize for this template.

@@ -118,7 +118,8 @@ export const nativeReflectCallText = (ctx: EmitContext, operation: CallOperation
   }
   const representation = target.representation
   const expected = method === 'set' ? 3 : 2
-  if (operation.arguments.length !== expected) return refuse('explicit receivers or omitted arguments have no native recipe')
+  const explicitReceiver = (method === 'get' || method === 'set') && operation.arguments.length === expected + 1
+  if (operation.arguments.length !== expected && !explicitReceiver) return refuse('omitted arguments have no native recipe')
   const key = operation.arguments[1]
   if (!key) return refuse('the property key is missing')
   const receiver = operandText(ctx, target)
@@ -181,6 +182,20 @@ export const nativeReflectCallText = (ctx: EmitContext, operation: CallOperation
     (representation.kind === 'native-record-ref' && representation.native === null)
   if (!generated || representation.ownership !== 'shared-refcount') return refuse('the target has no generated shared record layout')
   const property = propertyKeyText(ctx, key, site)
+  if (explicitReceiver) {
+    // `Reflect.get(T, k, R)` / `Reflect.set(T, k, v, R)`: OrdinaryGet and
+    // OrdinarySet with a receiver other than the target (three's TSL proxy
+    // traps). A shared native object boxes as a view of the SAME object, so
+    // the runtime's receiver-aware lookup runs over the target's own storage,
+    // declared members and prototype tables with no copy; a by-value record
+    // was refused above, since boxing it would copy.
+    const explicit = boxedValueText(ctx, operation.arguments[expected]!, site)
+    if (method === 'get') {
+      const read = `gea::reflectGetNative(${receiver}, ${property}, ${explicit})`
+      return operation.result ? unboxedReadText(operation.result.representation, read, site) : `(void)${read}`
+    }
+    return `gea::reflectSetNative(${receiver}, ${property}, ${boxedValueText(ctx, operation.arguments[2]!, site)}, ${explicit})`
+  }
   const staticKey = ctx.staticKeyTexts.get(key.value)
   const field = staticKey === undefined ? null : declaredRecordFieldOf(ctx.deriver, representation, staticKey, ctx.classes)
   const transport = nativeReflectFieldTransportOf(operation, field)

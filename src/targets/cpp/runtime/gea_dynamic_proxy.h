@@ -787,6 +787,10 @@ inline bool Value::reflectSet(const PropertyKey& key, const Value& value, const 
       return result == detail::NativePrototypeOps::SetResult::Accepted;
     }
   }
+  if (!exists && metadata_->methodState != nullptr) {
+    const auto result = detail::nativePrototypeChainSet(metadata_->methodState(held_.get()), key, value, [&]() -> const Value& { return receiver; });
+    if (result != detail::NativePrototypeOps::SetResult::Absent) return result == detail::NativePrototypeOps::SetResult::Accepted;
+  }
   if (exists) {
     if (descriptor.isAccessor()) {
       if (!descriptor.set) return false;
@@ -826,6 +830,42 @@ inline bool reflectSet(const T& target, const K& key, const V& value, const R& r
 }
 template <typename T, typename K, typename V>
 inline bool reflectSet(const T& target, const K& key, const V& value) { return reflectSet(target, key, value, target); }
+
+/**
+ * `Reflect.get(T, k, R)` over a native object (three's TSL proxy traps).
+ * The box is a view of the same object, so this is OrdinaryGet over its own
+ * storage, declared members and prototype tables, with an inherited
+ * accessor entered with `R`.
+ */
+template <typename T>
+inline Value reflectGetNative(const gea::Ref<T>& target, const PropertyKey& key, const Value& receiver) {
+  if (!target) host::throwRuntimeError("TypeError", "Reflect.get target must be an object");
+  return Value::box(Value::Tag::Object, target).getProperty(key, receiver);
+}
+
+/** `Reflect.set(T, k, v, R)` over a native object: OrdinarySet, creating or updating the key on `R` for a data property. */
+template <typename T>
+inline bool reflectSetNative(const gea::Ref<T>& target, const PropertyKey& key, const Value& value, const Value& receiver) {
+  if (!target) host::throwRuntimeError("TypeError", "Reflect.set target must be an object");
+  Value object = Value::box(Value::Tag::Object, target);
+  return object.reflectSet(key, value, receiver);
+}
+
+/**
+ * `Reflect.apply(F, thisArgument, argumentsList)`: 28.1.1 -- CreateListFromArrayLike
+ * over the list, then [[Call]] with `thisArgument` as the receiver.
+ */
+template <typename F, typename T, typename A>
+inline Value reflectApply(const F& target, const T& thisArgument, const A& argumentsList) {
+  const Value function = reflectBox(target);
+  if (function.tag() != Value::Tag::Function) host::throwRuntimeError("TypeError", "Reflect.apply target must be a function");
+  const Value list = reflectBox(argumentsList);
+  if (!isObjectValue(list)) host::throwRuntimeError("TypeError", "CreateListFromArrayLike called on non-object");
+  const double length = dynamicToNumber(list.getProperty(PropertyKey::string("length")));
+  std::vector<Value> arguments;
+  for (double index = 0; index < length; ++index) arguments.push_back(list.getProperty(PropertyKey::number(index)));
+  return function.callWithReceiver(reflectBox(thisArgument), arguments);
+}
 
 template <typename T, typename K>
 inline bool reflectHas(const T& target, const K& key) {
