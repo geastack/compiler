@@ -9398,6 +9398,7 @@ class ProxyObject {
 // can break it.
 class PropertyKey;
 class DynamicObject;
+struct NativeClassMethodState;
 
 namespace host::detail {
 inline std::string toString(double value);
@@ -9420,6 +9421,10 @@ const NativeFieldOps* nativeFieldOpsFor();
 struct NativePrototypeOps;
 template <typename T>
 const NativePrototypeOps* nativePrototypeOpsFor();
+/** Where a boxed class instance's prototype-table walk starts (`nativePrototypeChainStart`); null for every other payload. */
+using NativeMethodStateRead = const NativeClassMethodState* (*)(const void* payload);
+template <typename T>
+NativeMethodStateRead nativeMethodStateOpsFor();
 
 /**
  * The `[[Call]]` of a boxed callable, installed the same way and for the same
@@ -9687,8 +9692,9 @@ struct ValueMetadata {
   int restFrom;
   bool array;
   bool map;
+  NativeMethodStateRead methodState;
 };
-inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false};
+inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false, nullptr};
 
 template <typename T, int RestFrom = -1>
 const ValueMetadata* valueMetadataFor() {
@@ -9697,7 +9703,8 @@ const ValueMetadata* valueMetadataFor() {
     if constexpr (RestFrom < 0) calls = nativeCallOpsFor<T>();
     else calls = nativeRestCallOpsFor<T, static_cast<std::size_t>(RestFrom)>();
     return ValueMetadata{nativeFieldOpsFor<T>(), nativePrototypeOpsFor<T>(), calls, nativeArrayOpsFor<T>(),
-                         payloadTypeTagFor<T>(), RestFrom, IsArrayPayload<T>::value, IsMapPayload<T>::value};
+                         payloadTypeTagFor<T>(), RestFrom, IsArrayPayload<T>::value, IsMapPayload<T>::value,
+                         nativeMethodStateOpsFor<T>()};
   }();
   return &metadata;
 }
@@ -10480,7 +10487,11 @@ class OwnKeyPresence {
  * `<unordered_map>`, the counter is what the vector's own position already is,
  * and a delete-then-re-add appends -- which is the specification's rule, not a
  * side effect of the container. Lookup is a linear scan, which is the right
- * shape for the property counts an ordinary object actually carries.
+ * shape for the property counts an ordinary object actually carries. A table
+ * that grows past `kIndexThreshold` entries -- a class prototype three.js
+ * installs ~3,400 methods and accessors on -- also keeps a hash index from key
+ * to position, built on first lookup and dropped by a delete (which shifts
+ * positions). The vector stays the one authority on creation order.
  *
  * ## Identity
  *
@@ -10490,6 +10501,27 @@ class OwnKeyPresence {
  */
 class DynamicObject {
  public:
+  DynamicObject() = default;
+  // The index is a cache of positions in `properties_`; a copy rebuilds its own.
+  DynamicObject(const DynamicObject& other)
+      : properties_(other.properties_),
+        prototype_(other.prototype_),
+        extensible_(other.extensible_),
+        nativeFieldsFrozen_(other.nativeFieldsFrozen_),
+        nativeExpando_(other.nativeExpando_) {}
+  DynamicObject& operator=(const DynamicObject& other) {
+    if (this == &other) return *this;
+    properties_ = other.properties_;
+    prototype_ = other.prototype_;
+    extensible_ = other.extensible_;
+    nativeFieldsFrozen_ = other.nativeFieldsFrozen_;
+    nativeExpando_ = other.nativeExpando_;
+    index_.reset();
+    return *this;
+  }
+  DynamicObject(DynamicObject&&) = default;
+  DynamicObject& operator=(DynamicObject&&) = default;
+
   friend void geaTraceRefs(const DynamicObject& value, detail::RefVisitor& visitor) {
     detail::traceRefs(value.prototype_, visitor);
     for (const auto& property : value.properties_) {
@@ -10560,10 +10592,8 @@ class DynamicObject {
 
   /** 10.1.5.1 OrdinaryGetOwnProperty -- the stored descriptor, or `nullptr` when the key names no OWN property. */
   const PropertyDescriptor* ownProperty(const PropertyKey& key) const {
-    for (const Property& property : properties_) {
-      if (property.key == key) return &property.descriptor;
-    }
-    return nullptr;
+    const std::size_t at = positionOf(key);
+    return at == kAbsent ? nullptr : &properties_[at].descriptor;
   }
 
   /** Copy-out form of OrdinaryGetOwnProperty for sidecars that expose a descriptor protocol. */
@@ -10582,13 +10612,8 @@ class DynamicObject {
    * but an ordinary assignment to a non-writable property is) or a TypeError.
    */
   bool defineOwnProperty(const PropertyKey& key, const PropertyDescriptor& incoming) {
-    Property* existing = nullptr;
-    for (Property& property : properties_) {
-      if (property.key == key) {
-        existing = &property;
-        break;
-      }
-    }
+    const std::size_t at = positionOf(key);
+    Property* existing = at == kAbsent ? nullptr : &properties_[at];
     if (existing == nullptr) {
       // Step 2: a new property needs an extensible object.
       if (!extensible_) return false;
@@ -10611,7 +10636,7 @@ class DynamicObject {
       stored.hasEnumerable = stored.hasConfigurable = true;
       stored.enumerable = incoming.hasEnumerable && incoming.enumerable;
       stored.configurable = incoming.hasConfigurable && incoming.configurable;
-      properties_.push_back(Property{key, std::move(stored)});
+      append(Property{key, std::move(stored)});
       return true;
     }
     PropertyDescriptor& current = existing->descriptor;
@@ -10752,14 +10777,9 @@ class DynamicObject {
   template <typename Receiver>
   bool setWithReceiver(const PropertyKey& key, const Value& written, Receiver&& receiver) {
     for (DynamicObject* cursor = this; cursor != nullptr; cursor = cursor->prototype_.get()) {
-      PropertyDescriptor* found = nullptr;
-      for (Property& property : cursor->properties_) {
-        if (property.key == key) {
-          found = &property.descriptor;
-          break;
-        }
-      }
-      if (found == nullptr) continue;
+      const std::size_t at = cursor->positionOf(key);
+      if (at == kAbsent) continue;
+      PropertyDescriptor* found = &cursor->properties_[at].descriptor;
       if (found->isAccessor()) {
         if (!found->hasSet || !found->set) return false;
         found->set(receiver(), written);
@@ -10784,18 +10804,18 @@ class DynamicObject {
     created.enumerable = true;
     created.hasConfigurable = true;
     created.configurable = true;
-    properties_.push_back(Property{key, created});
+    append(Property{key, created});
     return true;
   }
 
   /** 10.1.10.1 OrdinaryDelete. False means the property is non-configurable and survives, which is the answer `delete` itself reports. */
   bool deleteOwnProperty(const PropertyKey& key) {
-    for (std::size_t index = 0; index < properties_.size(); ++index) {
-      if (properties_[index].key != key) continue;
-      if (!properties_[index].descriptor.configurable) return false;
-      properties_.erase(properties_.begin() + static_cast<std::ptrdiff_t>(index));
-      return true;
-    }
+    const std::size_t index = positionOf(key);
+    if (index == kAbsent) return true;
+    if (!properties_[index].descriptor.configurable) return false;
+    properties_.erase(properties_.begin() + static_cast<std::ptrdiff_t>(index));
+    // Every later position moved down by one; the next lookup rebuilds.
+    index_.reset();
     return true;
   }
 
@@ -10856,11 +10876,49 @@ class DynamicObject {
   }
 
  private:
+  static constexpr std::size_t kAbsent = std::numeric_limits<std::size_t>::max();
+  // Below this a linear scan is as fast as a hash and costs no allocation.
+  static constexpr std::size_t kIndexThreshold = 16;
+
+  struct Index {
+    std::unordered_map<std::string, std::size_t> strings;
+    std::unordered_map<std::size_t, std::size_t> symbols;
+    void add(const PropertyKey& key, std::size_t at) {
+      if (key.isSymbol()) symbols.emplace(key.symbolId(), at);
+      else strings.emplace(key.text(), at);
+    }
+  };
+
+  std::size_t positionOf(const PropertyKey& key) const {
+    if (properties_.size() < kIndexThreshold) {
+      for (std::size_t at = 0; at < properties_.size(); ++at) {
+        if (properties_[at].key == key) return at;
+      }
+      return kAbsent;
+    }
+    if (!index_) {
+      index_ = std::make_unique<Index>();
+      for (std::size_t at = 0; at < properties_.size(); ++at) index_->add(properties_[at].key, at);
+    }
+    if (key.isSymbol()) {
+      const auto found = index_->symbols.find(key.symbolId());
+      return found == index_->symbols.end() ? kAbsent : found->second;
+    }
+    const auto found = index_->strings.find(key.text());
+    return found == index_->strings.end() ? kAbsent : found->second;
+  }
+
+  void append(Property property) {
+    if (index_) index_->add(property.key, properties_.size());
+    properties_.push_back(std::move(property));
+  }
+
   std::vector<Property> properties_{};
   gea::Ref<DynamicObject> prototype_{};
   bool extensible_ = true;
   bool nativeFieldsFrozen_ = false;
   bool nativeExpando_ = false;
+  mutable std::unique_ptr<Index> index_{};
 };
 
 /**
@@ -11215,6 +11273,11 @@ struct NativeClassMethodState {
   const void* declaration = nullptr;
   Ref<NativeClassMethodState> parent;
   Ref<void> prototypeObject;
+  // The property table on `prototypeObject` (its expando), once one exists:
+  // what a program added to this class's prototype at run time. Cached for
+  // the instance-read walk (`detail::nativePrototypeChainRead`); the table
+  // lives exactly as long as `prototypeObject`, which this state holds.
+  mutable DynamicObject* prototypeTable = nullptr;
   std::vector<std::pair<const void*, Ref<FunctionObjectIdentity>>> methods;
   std::vector<AdaptedMethod> adaptedMethods;
 
@@ -12129,6 +12192,24 @@ struct NativeFieldPayload<gea::Ref<U>> {
     return gea::refCastToVoid(*static_cast<const gea::Ref<U>*>(payload));
   }
 };
+
+template <typename T>
+NativeMethodStateRead nativeMethodStateOpsFor() {
+  using Target = typename NativeFieldPayload<T>::Target;
+  if constexpr (!std::is_void_v<Target> && requires(const Target& target) { target.gea_method_state.get(); }) {
+    return [](const void* payload) -> const NativeClassMethodState* {
+      const Target* target = NativeFieldPayload<T>::reader(payload);
+      if (target == nullptr) return nullptr;
+      const NativeClassMethodState* state = target->gea_method_state.get();
+      // A class's prototype object is a native object of the class's own
+      // layout; its [[Prototype]] is the parent evaluation's prototype.
+      if (state != nullptr && state->prototypeObject.get() == static_cast<const void*>(target)) return state->parent.get();
+      return state;
+    };
+  } else {
+    return nullptr;
+  }
+}
 
 template <typename T>
 const NativePrototypeOps* nativePrototypeOpsFor() {
@@ -14012,6 +14093,70 @@ inline void dropNativeExpando(const void* object, RefCounts* counts) {
   --counts->weak;
 }
 
+/**
+ * The run-time half of a class's prototype chain: the tables a program added
+ * to each class evaluation's native prototype object (`C.prototype.k = v`,
+ * `Object.defineProperties(C.prototype, ...)`), most-derived first.
+ *
+ * Declared methods are not here: the emitter answers them before it asks
+ * this, by the object's run-time class. That order is the language's only
+ * because an install never shadows a member declared on its class or an
+ * ancestor -- such an install aborts by name when it runs
+ * (`nativePrototypeInstallShadows`) -- so "every declared method, then every
+ * table" and "per level, declared then table" give one answer.
+ */
+inline DynamicObject* nativePrototypeTableOf(const NativeClassMethodState& state) {
+  if (state.prototypeTable != nullptr) return state.prototypeTable;
+  if (!state.prototypeObject) return nullptr;
+  // The expando bit is set exactly when a table exists for the address.
+  if ((refCountsOf(state.prototypeObject.get())->weak & expandoTagged) == 0) return nullptr;
+  state.prototypeTable = const_cast<DynamicObject*>(findNativeExpando(state.prototypeObject.get()));
+  return state.prototypeTable;
+}
+
+/** Where `object`'s walk starts: its own class evaluation, or the parent's when `object` is that evaluation's prototype object. */
+inline const NativeClassMethodState* nativePrototypeChainStart(const NativeClassMethodState* state, const void* object) {
+  if (state != nullptr && state->prototypeObject.get() == object) return state->parent.get();
+  return state;
+}
+
+/** The first table in the chain that holds `key` as an own property, or null. */
+inline const PropertyDescriptor* nativePrototypeChainFind(const NativeClassMethodState* start, const PropertyKey& key) {
+  for (const NativeClassMethodState* level = start; level != nullptr; level = level->parent.get()) {
+    const DynamicObject* table = nativePrototypeTableOf(*level);
+    if (table == nullptr) continue;
+    if (const PropertyDescriptor* found = table->ownProperty(key)) return found;
+  }
+  return nullptr;
+}
+
+/** OrdinaryGet's inherited step over those tables; an accessor runs with the original receiver. */
+template <typename Receiver>
+bool nativePrototypeChainRead(const NativeClassMethodState* start, const PropertyKey& key, Receiver&& receiver, Value& answer) {
+  const PropertyDescriptor* found = nativePrototypeChainFind(start, key);
+  if (found == nullptr) return false;
+  answer = !found->isAccessor() ? found->value : found->hasGet && found->get ? found->get(receiver()) : Value();
+  return true;
+}
+
+/**
+ * OrdinarySet's inherited step (10.1.9.2 step 1) over those tables, for a key
+ * the receiver does not hold itself. `Absent` sends the write on to create an
+ * own property; an inherited setter runs with the receiver; an inherited
+ * non-writable data property or a setter-less accessor rejects the write.
+ */
+template <typename Receiver>
+NativePrototypeOps::SetResult nativePrototypeChainSet(const NativeClassMethodState* start, const PropertyKey& key, const Value& value, Receiver&& receiver) {
+  const PropertyDescriptor* found = nativePrototypeChainFind(start, key);
+  if (found == nullptr) return NativePrototypeOps::SetResult::Absent;
+  if (found->isAccessor()) {
+    if (!found->hasSet || !found->set) return NativePrototypeOps::SetResult::Rejected;
+    found->set(receiver(), value);
+    return NativePrototypeOps::SetResult::Accepted;
+  }
+  return found->writable ? NativePrototypeOps::SetResult::Absent : NativePrototypeOps::SetResult::Rejected;
+}
+
 }  // namespace detail
 
 inline std::size_t Value::dynamicArrayLength(const char* site) const {
@@ -14410,8 +14555,14 @@ bool nativeDynamicRead(const gea::Ref<T>& object, const PropertyKey& key, Value&
     if (object->gea_readOwnIndex(key, answer)) return true;
     if (object->gea_matchesOwnIndex(key)) return false;
   }
+  const auto receiver = [&] { return Value::box(Value::Tag::Object, object); };
   const gea::Ref<DynamicObject> expando = detail::expandoFor(gea::refCastToVoid(object), false);
-  return expando && expando->readWithReceiver(key, [&] { return Value::box(Value::Tag::Object, object); }, answer);
+  if (expando && expando->readWithReceiver(key, receiver, answer)) return true;
+  if constexpr (requires { object->gea_method_state.get(); }) {
+    const auto* start = detail::nativePrototypeChainStart(object->gea_method_state.get(), static_cast<const void*>(object.get()));
+    return detail::nativePrototypeChainRead(start, key, receiver, answer);
+  }
+  return false;
 }
 
 // A certified missing property still evaluates its receiver/key and throws on
@@ -14455,6 +14606,11 @@ bool nativeDynamicSet(const gea::Ref<T>& object, const PropertyKey& key, const V
     if (result != detail::NativePrototypeOps::SetResult::Absent) {
       return result == detail::NativePrototypeOps::SetResult::Accepted;
     }
+  }
+  if constexpr (requires { object->gea_method_state.get(); }) {
+    const auto* start = detail::nativePrototypeChainStart(object->gea_method_state.get(), static_cast<const void*>(object.get()));
+    const auto result = detail::nativePrototypeChainSet(start, key, value, receiver);
+    if (result != detail::NativePrototypeOps::SetResult::Absent) return result == detail::NativePrototypeOps::SetResult::Accepted;
   }
   if (!nativeIsExtensible(object)) return false;
   return detail::expandoFor(gea::refCastToVoid(object), true)->setWithReceiver(key, value, receiver);
@@ -14697,7 +14853,14 @@ inline bool ordinaryObjectPrototypeHas(const PropertyKey& key) {
 
 template <typename T>
 bool nativeDynamicHasProperty(const gea::Ref<T>& object, const PropertyKey& key) {
-  return nativeDynamicHas(object, key) || ordinaryObjectPrototypeHas(key);
+  if (nativeDynamicHas(object, key)) return true;
+  if constexpr (requires { object->gea_method_state.get(); }) {
+    if (object) {
+      const auto* start = detail::nativePrototypeChainStart(object->gea_method_state.get(), static_cast<const void*>(object.get()));
+      if (detail::nativePrototypeChainFind(start, key) != nullptr) return true;
+    }
+  }
+  return ordinaryObjectPrototypeHas(key);
 }
 
 template <typename T>
@@ -15035,6 +15198,9 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
     const gea::Ref<DynamicObject> expando = detail::expandoFor(expandoAnchor(), false);
     if (expando && expando->hasProperty(key)) return expando->get(key, receiver);
     if (metadata_->prototype != nullptr && metadata_->prototype->read(held_.get(), key, answer)) return answer;
+    if (metadata_->methodState != nullptr &&
+        detail::nativePrototypeChainRead(metadata_->methodState(held_.get()), key, [&]() -> const Value& { return receiver; }, answer))
+      return answer;
     return Value();
   }
   if (metadata_->elements != nullptr) {
@@ -15117,6 +15283,10 @@ inline void Value::setProperty(const PropertyKey& key, const Value& value) {
     }
     if (metadata_->prototype != nullptr) {
       const auto result = metadata_->prototype->set(const_cast<void*>(held_.get()), key, value, *this);
+      if (result != detail::NativePrototypeOps::SetResult::Absent) return;
+    }
+    if (metadata_->methodState != nullptr) {
+      const auto result = detail::nativePrototypeChainSet(metadata_->methodState(held_.get()), key, value, [&]() -> const Value& { return *this; });
       if (result != detail::NativePrototypeOps::SetResult::Absent) return;
     }
     if (!isExtensible()) return;
@@ -15213,7 +15383,8 @@ inline bool Value::hasProperty(const PropertyKey& key) const {
     if (metadata_->fields->matchesIndex(held_.get(), key)) return false;
     const gea::Ref<DynamicObject> expando = detail::expandoFor(expandoAnchor(), false);
     if (expando && expando->hasProperty(key)) return true;
-    return metadata_->prototype != nullptr && metadata_->prototype->has(held_.get(), key);
+    if (metadata_->prototype != nullptr && metadata_->prototype->has(held_.get(), key)) return true;
+    return metadata_->methodState != nullptr && detail::nativePrototypeChainFind(metadata_->methodState(held_.get()), key) != nullptr;
   }
   if (metadata_->elements != nullptr) {
     if (!key.isSymbol() && key.text() == "length") return true;
