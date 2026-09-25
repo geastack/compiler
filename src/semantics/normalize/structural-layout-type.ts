@@ -9,7 +9,8 @@ import {
   impliedPatternTargetOf,
   objectAssignFreshTargetType,
   nominalConstructorChoiceTypeAt,
-  memberCensusNodeOf
+  memberCensusNodeOf,
+  constructedClassChoiceTypeAt
 } from './derived-expression-type.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import ts from 'typescript'
@@ -810,6 +811,8 @@ export const createLayoutTypeResolver = (
     if (absentType) return absentType
     const constructorChoice = nominalConstructorChoiceTypeAt(checker, node, layoutTypeAt)
     if (constructorChoice) return constructorChoice
+    const constructedChoice = constructedClassChoiceTypeAt(checker, node, layoutTypeAt)
+    if (constructedChoice) return constructedChoice
     // A narrowly scoped construction proof can outrank a checker answer that
     // is usable but wider than every value the initializer can produce. The
     // local-binding census currently publishes only the authenticated

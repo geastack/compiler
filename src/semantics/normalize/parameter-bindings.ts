@@ -60,7 +60,8 @@ import {
   synthesizedUnionArmsAt,
   widestOf,
   impliedPatternElementRootOf,
-  impliedPatternParameterOf
+  impliedPatternParameterOf,
+  constructedClassChoiceCheckerTypeAt
 } from './derived-expression-type.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
@@ -1570,6 +1571,7 @@ export const censusParameterBindings = (
       const type =
         (node.kind === ts.SyntaxKind.ThisKeyword ? concreteThisTypeOf(node) : null) ??
         objectAssignTargetType(checker, node) ??
+        constructedClassChoiceCheckerTypeAt(checker, node) ??
         checker.getTypeAtLocation(node)
       // `annotationStatesNothing` beside `isUnusableEvidence`, both halves of
       // the one shared rule: a vacuous type (`Object`, `{}`, bare `object`)

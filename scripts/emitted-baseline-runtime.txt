@@ -512,6 +512,7 @@ return-void-call-into-union.ts.cpp 47aada9e27cb
 returned-generic-spelling.ts.cpp 0be54b91c124
 scalar-roundtrip.ts.cpp c1558853e8f5
 set-constructed-from-a-string.ts.cpp ae1377b3d02f
+sibling-class-return-join.runtime.js.cpp 0b997f0cacbf
 slot-write-closure.runtime.ts.cpp 9b9ef35c8b5f
 spread-call-immediately-invoked.runtime.js.cpp c5ae95452df2
 spread-fixed-arity-three.runtime.js.cpp 978c1dcd93de

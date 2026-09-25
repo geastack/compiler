@@ -16,7 +16,8 @@ import {
   memberTypeOf,
   objectAssignTargetType,
   speaksOnlyNullish,
-  unwrapExplicitThisCall
+  unwrapExplicitThisCall,
+  constructedClassChoiceCheckerTypeAt
 } from './derived-expression-type.js'
 import { carriesUnsubstitutedGeneric, emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
@@ -613,7 +614,8 @@ export const censusFieldBindings = (
    * was drift, now closed.
    */
   const known = (node: ts.Node): ts.Type | null => {
-    const type = objectAssignTargetType(checker, node) ?? checker.getTypeAtLocation(node)
+    const type =
+      objectAssignTargetType(checker, node) ?? constructedClassChoiceCheckerTypeAt(checker, node) ?? checker.getTypeAtLocation(node)
     return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) || isVacuousArrayType(checker, type) ? null : type
   }
 
