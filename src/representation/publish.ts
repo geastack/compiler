@@ -5,6 +5,7 @@ import type { SemanticGraph } from '../semantics/model/graph.js'
 import { partitionAuthorityComponents } from '../semantics/model/graph.js'
 import { operandOf, type SemanticResult } from '../semantics/model/operands.js'
 import type { SemanticOperation } from '../semantics/model/operations.js'
+import { proxyOriginsOf, type ProxyOrigins } from '../semantics/proxy-origins.js'
 import type {
   DateDeclarationPolicy,
   HostBindingPolicy,
@@ -44,7 +45,14 @@ import {
   defaultTypedArrayElementPolicy,
   defaultValueRecordPolicy
 } from './derive.js'
-import { isArrayPatternCapable, representationKey, soleArrayPatternCapableArm, type Representation } from './model.js'
+import {
+  isArrayPatternCapable,
+  passingOf,
+  representationKey,
+  soleArrayPatternCapableArm,
+  type CallableAbi,
+  type Representation
+} from './model.js'
 import { literalDestinationsOf } from './literal-destination.js'
 import { proxyCarriersOf } from './proxy-carriers.js'
 import { staticFieldAbsenceOf, staticMembersOf, withStaticFieldAbsence } from './static-field-cells.js'
@@ -629,6 +637,54 @@ const dynamicCallableValueOf = (
     : null
 }
 
+const proxyOriginCarrier: Representation = { kind: 'dynamic', reason: 'proxy-origin' }
+
+/** A convention whose result, or whose parameters at `positions`, may be a proxy: those slots take `dynamic`. */
+const proxyReachedAbi = (abi: CallableAbi, returns: boolean, positions: ReadonlySet<number> | undefined): CallableAbi => ({
+  ...abi,
+  result: returns ? proxyOriginCarrier : abi.result,
+  parameters: abi.parameters.map((parameter, ordinal) =>
+    positions?.has(ordinal) && parameter.value.kind !== 'dynamic'
+      ? { value: proxyOriginCarrier, ownership: parameter.ownership, passing: passingOf(proxyOriginCarrier, parameter.ownership) }
+      : parameter
+  )
+})
+
+/**
+ * The carrier of a value that may hold a proxy (`semantics/proxy-origins.ts`),
+ * or of a source function whose convention a proxy reaches -- every view of
+ * that exact Function object states the same convention, so the body, its
+ * callers and its own value agree.
+ */
+const proxyOriginOf = (
+  result: SemanticResult,
+  origins: ProxyOrigins,
+  callableOrigins: ReadonlyMap<SemanticResultId, FunctionId>,
+  derived: () => Representation
+): Representation | null => {
+  if (origins.results.has(result.id)) return proxyOriginCarrier
+  const origin = callableOrigins.get(result.id)
+  if (origin === undefined) return null
+  const callable = withoutFunctionSpecialization(origin)
+  const returns = origins.returning.has(callable)
+  const positions = origins.parameters.get(callable)
+  if (!returns && positions === undefined) return null
+  const carrier = derived()
+  switch (carrier.kind) {
+    case 'function':
+    case 'function-value-dispatch':
+      return { ...carrier, abi: proxyReachedAbi(carrier.abi, returns, positions) }
+    case 'function-and-constructor':
+      return {
+        ...carrier,
+        call: proxyReachedAbi(carrier.call, returns, positions),
+        construct: proxyReachedAbi(carrier.construct, false, positions)
+      }
+    default:
+      return null
+  }
+}
+
 /**
  * CommonJS module records are the one explicitly dynamic host boundary here.
  * The checker authenticated the wrapper declaration and normalization carried
@@ -762,7 +818,11 @@ export const publishRepresentations = (
   dynamicWrittenTypes: ReadonlySet<StructuralTypeId> = new Set(),
   // The copies of every generic class whose copies can differ in layout; see
   // `ClassCopyPolicy` (policies.ts) and the deriver's `physicalClassDeclarationOf`.
-  classCopies?: ClassCopyPolicy
+  classCopies?: ClassCopyPolicy,
+  // The `new Proxy` sites the frontend authenticated, outside
+  // `--dynamic-fallback` (which boxes by structural type instead). Empty for a
+  // program that constructs no proxy, and then nothing here changes.
+  proxySites: ReadonlySet<NodeId> = new Set()
 ): RepresentationPublication => {
   const callableOrigins = callableOriginsOf(graph)
   // The deriver may recover a boxed callable's declaration-owned frame only

@@ -2983,8 +2983,7 @@ export const emitConstruct = (ctx: EmitContext, lines: string[], operation: Cons
       return
     }
     if (callee.protocol === 'ProxyConstructor') {
-      if (!ctx.deriver.dynamicFallback || result.kind !== 'dynamic')
-        throw createCppEmitBlockedError('call-abi:proxy-construct', 'Proxy requires --dynamic-fallback and a dynamic result carrier')
+      if (result.kind !== 'dynamic') throw createCppEmitBlockedError('call-abi:proxy-construct', 'Proxy requires a dynamic result carrier')
       if (operation.arguments.length !== 2) throw createCppEmitBlockedError('call-abi:proxy-construct', 'Proxy requires target and handler')
       const args = operation.arguments.map((argument) => boxedValueText(ctx, argument, 'Proxy construction'))
       lines.push(`${defineValue(ctx, operation.result)} = gea::Value::proxy(${args.join(', ')});`)

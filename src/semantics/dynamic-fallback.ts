@@ -1,5 +1,5 @@
 import ts from 'typescript'
-import type { FunctionId, StructuralTypeId } from '../identity/ids.js'
+import type { FunctionId, NodeId, StructuralTypeId } from '../identity/ids.js'
 import type { IdentityTable } from './normalize/identities.js'
 import type { StructuralMapper } from './normalize/structural.js'
 
@@ -174,6 +174,35 @@ export const anyKeyedWriteTypes = (
   return selected
 }
 
+/** `new Proxy(...)` whose constructor the checker resolves to the standard library's own `ProxyConstructor`. */
+const isStandardProxyConstruction = (node: ts.Node, checker: ts.TypeChecker): node is ts.NewExpression => {
+  if (!ts.isNewExpression(node)) return false
+  const constructor = checker.getTypeAtLocation(node.expression).getSymbol()
+  return (
+    constructor?.name === 'ProxyConstructor' &&
+    constructor.declarations?.some((declaration) => declaration.getSourceFile().hasNoDefaultLib) === true
+  )
+}
+
+/**
+ * Every `new Proxy(...)` site, for the provenance fact that decides which
+ * values may hold a proxy without `--dynamic-fallback`
+ * (`semantics/proxy-origins.ts`). The flag keeps `proxyFallbackTypes` instead.
+ */
+export const proxyConstructionSites = (
+  files: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+  identities: IdentityTable
+): ReadonlySet<NodeId> => {
+  const sites = new Set<NodeId>()
+  const visit = (node: ts.Node): void => {
+    if (isStandardProxyConstruction(node, checker)) sites.add(identities.nodeIdOf(node, []))
+    ts.forEachChild(node, visit)
+  }
+  for (const file of files) if (!file.isDeclarationFile) visit(file)
+  return sites
+}
+
 export const proxyFallbackTypes = (
   files: readonly ts.SourceFile[],
   checker: ts.TypeChecker,
@@ -182,11 +211,7 @@ export const proxyFallbackTypes = (
   const selected = new Set<StructuralTypeId>()
   const visit = (node: ts.Node): void => {
     if (ts.isNewExpression(node)) {
-      const constructor = checker.getTypeAtLocation(node.expression).getSymbol()
-      if (
-        constructor?.name === 'ProxyConstructor' &&
-        constructor.declarations?.some((declaration) => declaration.getSourceFile().hasNoDefaultLib)
-      ) {
+      if (isStandardProxyConstruction(node, checker)) {
         selected.add(types.typeAt(node))
         // A trap's source signature need not match ProxyHandler<T>'s declared
         // ArrayLike/receiver frame. Preserve the actual callable in a property

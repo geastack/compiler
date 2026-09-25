@@ -2,7 +2,7 @@ import type { PackageSource } from './package-sources.js'
 import { withSharedArrayStorage } from './normalize/shared-array-storage.js'
 import { deadEventCallsOf } from './normalize/dead-event-emissions.js'
 import type { CommonJsWrapperDeclaration, HostNativeTypeDeclaration, HostOwnedDeclaration } from '../plugins/model.js'
-import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, proxyFallbackTypes } from './dynamic-fallback.js'
+import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, proxyConstructionSites, proxyFallbackTypes } from './dynamic-fallback.js'
 import ts from 'typescript'
 import { structuralShapeKey } from './model/structural-types.js'
 import { createPackageDeclarationNames, resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
@@ -310,6 +310,12 @@ export interface FrontendResult {
   readonly dynamicWrittenTypes: ReadonlySet<StructuralTypeId>
   /** Exact source functions whose own mutable Function-object table requires fallback storage. */
   readonly dynamicFallbackCallables: ReadonlySet<FunctionId>
+  /**
+   * The `new Proxy` sites whose values `representation/publish.ts` follows
+   * (`semantics/proxy-origins.ts`). Empty under `--dynamic-fallback`, whose
+   * structural census (`proxyFallbackTypes`) answers the same question by type.
+   */
+  readonly proxySites: ReadonlySet<NodeId>
   readonly graph: SemanticGraph
   readonly sourcePreparations: readonly DiagnosticSourcePreparationAudit[]
   /**
@@ -2067,6 +2073,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     dynamicFallbackTypes,
     dynamicWrittenTypes,
     dynamicFallbackCallables: prototypeFallback.callables,
+    proxySites,
     graph: normalized.graph,
     sourcePreparations: compiled.sourcePreparations,
     hostProtocols: hosts.protocols,

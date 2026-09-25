@@ -774,7 +774,8 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     // The copies of every generic class whose copies can differ in layout,
     // forwarded from the frontend's typing for the deriver to group into
     // physical classes (`physicalClassDeclarationOf`).
-    { copiesOf: (declaration: DeclarationId) => frontend.classCopies.get(declaration) ?? [] }
+    { copiesOf: (declaration: DeclarationId) => frontend.classCopies.get(declaration) ?? [] },
+    frontend.proxySites
   )
   // The backend's own registry is the default, not `empty`: a compilation that
   // asked for no registry is asking this compiler to use the target it has, and

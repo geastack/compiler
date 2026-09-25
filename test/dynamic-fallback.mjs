@@ -11,6 +11,10 @@ const root = resolve(import.meta.dirname, '..')
 const fixture = resolve(root, 'test/runtime/dynamic-fallback.js')
 
 test('negative-array source retains Proxy behavior and target identity in the C++ fallback', () => {
+  // Without the flag the checker's implicit-any errors still refuse this
+  // source (the flag turns `noImplicitAny` off). The Proxy itself no longer
+  // does: the values that may hold one are dynamic by provenance
+  // (`semantics/proxy-origins.ts`), so the protocol is admitted.
   const strict = compile({ rootFileNames: [fixture], javaScriptSources: true })
   // `ProxyConstructor` is claimed natively now (a handler literal's traps are
   // known statically), so the strict refusal is the source's own untyped
