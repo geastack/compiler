@@ -11278,6 +11278,10 @@ struct NativeClassMethodState {
   // the instance-read walk (`detail::nativePrototypeChainRead`); the table
   // lives exactly as long as `prototypeObject`, which this state holds.
   mutable DynamicObject* prototypeTable = nullptr;
+  // For a class whose prototype takes run-time-keyed installs: the name of
+  // the class that declares `key` as a method or accessor (this class or an
+  // ancestor), or null. Set when the prototype object is materialized.
+  const char* (*declaredMemberOwner)(const PropertyKey& key) = nullptr;
   std::vector<std::pair<const void*, Ref<FunctionObjectIdentity>>> methods;
   std::vector<AdaptedMethod> adaptedMethods;
 
@@ -14114,6 +14118,21 @@ inline DynamicObject* nativePrototypeTableOf(const NativeClassMethodState& state
   return state.prototypeTable;
 }
 
+/**
+ * A run-time install on a class's prototype object whose key names a method
+ * or accessor the class or an ancestor declares. Declared members answer
+ * before the prototype tables (`nativePrototypeChainFind`), so the install
+ * would be silently ignored; it stops the program instead, when it runs.
+ */
+inline void refusePrototypeInstallShadow(const NativeClassMethodState* state, const void* object, const PropertyKey& key) {
+  if (state == nullptr || state->declaredMemberOwner == nullptr || state->prototypeObject.get() != object) return;
+  const char* owner = state->declaredMemberOwner(key);
+  if (owner == nullptr) return;
+  std::fprintf(stderr, "gea: a run-time install on a class prototype shadows the member '%s' that %s declares\n",
+               key.isSymbol() ? "<symbol>" : key.text().c_str(), owner);
+  gea::detail::abortAfterFlush();
+}
+
 /** Where `object`'s walk starts: its own class evaluation, or the parent's when `object` is that evaluation's prototype object. */
 inline const NativeClassMethodState* nativePrototypeChainStart(const NativeClassMethodState* state, const void* object) {
   if (state != nullptr && state->prototypeObject.get() == object) return state->parent.get();
@@ -14598,6 +14617,9 @@ bool nativeDynamicSet(const gea::Ref<T>& object, const PropertyKey& key, const V
       if (object->gea_matchesOwnIndex(key)) return object->gea_writeOwnIndex(key, value, nativeIsExtensible(object));
     }
   }
+  if constexpr (requires { object->gea_method_state.get(); }) {
+    detail::refusePrototypeInstallShadow(object->gea_method_state.get(), static_cast<const void*>(object.get()), key);
+  }
   const gea::Ref<DynamicObject> existing = detail::expandoFor(gea::refCastToVoid(object), false);
   const auto receiver = [&] { return Value::box(Value::Tag::Object, object); };
   if (existing && existing->ownProperty(key) != nullptr) return existing->setWithReceiver(key, value, receiver);
@@ -14639,6 +14661,9 @@ bool nativeDynamicDefineProperty(const gea::Ref<T>& object, const PropertyKey& k
     if constexpr (detail::NativeIndexFieldTable<T>) {
       if (object->gea_matchesOwnIndex(key)) return object->gea_defineOwnIndex(key, descriptor, nativeIsExtensible(object));
     }
+  }
+  if constexpr (requires { object->gea_method_state.get(); }) {
+    detail::refusePrototypeInstallShadow(object->gea_method_state.get(), static_cast<const void*>(object.get()), key);
   }
   const gea::Ref<DynamicObject> existing = detail::expandoFor(gea::refCastToVoid(object), false);
   if (existing && existing->ownProperty(key) != nullptr) return existing->defineOwnProperty(key, descriptor);

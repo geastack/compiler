@@ -11,6 +11,7 @@ import {
   cppRecordFieldKeyIsSymbol,
   cppRecordFieldName,
   cppRecordFieldPresenceName,
+  cppStringLiteral,
   cppTypeOf
 } from '../types.js'
 
@@ -72,6 +73,7 @@ export const nativePrototypeObjectText = (
     initialize.push(`gea_prototype->${cppRecordFieldPresenceName(method.key)} = true;`)
     initialize.push(`gea_prototype->${cppRecordFieldAttributesName(method.key)}.enumerable = false;`)
   }
+  if (layout.prototypeExtensions?.includes(null)) initialize.push(declaredMemberOwnerText(chain))
   const prototype = `gea::nativeClassPrototype<${cppClassName(declaration)}>(gea::nativeClassMethodStateFromEnvironment(${receiverText}.environment), [&](const auto& gea_prototype) { ${initialize.join(' ')} })`
   const converted = alignedValueText(ctx, 'native-prototype:result', layout.instance, result, prototype)
   if (converted === null)
@@ -80,6 +82,27 @@ export const nativePrototypeObjectText = (
       'prototype native layout cannot fill the published class carrier'
     )
   return converted
+}
+
+/**
+ * The run-time guard for installs through a runtime key
+ * (`gea::detail::refusePrototypeInstallShadow`): which class of the chain
+ * declares a key as a method or accessor. Most-derived first, as the lookup
+ * the install would lose to.
+ */
+const declaredMemberOwnerText = (chain: readonly ClassLayout[]): string => {
+  const owners = new Map<string, string>()
+  for (const entry of chain) {
+    for (const member of [...entry.methods, ...entry.accessors]) {
+      if (cppRecordFieldKeyIsSymbol(member.key) || owners.has(member.key)) continue
+      owners.set(member.key, entry.name ?? 'an anonymous class')
+    }
+  }
+  const tests = [...owners].map(([key, owner]) => `if (gea_name == ${cppStringLiteral(key)}) return ${cppStringLiteral(owner)};`)
+  return (
+    `gea_prototype->gea_method_state->declaredMemberOwner = +[](const gea::PropertyKey& gea_key) -> const char* { ` +
+    `if (gea_key.isSymbol()) return nullptr; const std::string& gea_name = gea_key.text(); ${tests.join(' ')} return nullptr; };`
+  )
 }
 
 /**

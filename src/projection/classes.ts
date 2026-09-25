@@ -106,6 +106,16 @@ export interface ClassLayout {
   readonly prototypeMethodMutations?: readonly string[]
   /** Uses outside the currently supported typed method-only prototype protocol. */
   readonly prototypeUnsupportedUses?: readonly string[]
+  /**
+   * Keys the program adds to this class's own prototype object at run time
+   * (`C.prototype.k = v`, `C.prototype[k] = v`), `null` for a runtime key.
+   * They live in the prototype object's property table, which an instance read
+   * that misses every declared member walks (`gea::nativeDynamicGet`). No key
+   * here names a member the class or an ancestor declares: a constant one is
+   * a declared-method write (`prototypeMethodMutations`) or unsupported, and a
+   * runtime one that turns out to name one aborts when the install runs.
+   */
+  readonly prototypeExtensions?: readonly (string | null)[]
   readonly declaration: DeclarationId
   /**
    * The class this one extends, or `null` for a base class.
@@ -1009,6 +1019,29 @@ export const publishClassMethodOverrides = (
     reasons.add(reason)
     unsupportedPrototypes.set(declaration, reasons)
   }
+  const extensions = new Map<DeclarationId, Set<string | null>>()
+  const extend = (declaration: DeclarationId, key: string | null): void => {
+    const keys = extensions.get(declaration) ?? new Set<string | null>()
+    keys.add(key)
+    extensions.set(declaration, keys)
+  }
+  const prototypeMemberIsDeclared = (declaration: DeclarationId, key: string): boolean => {
+    const seen = new Set<DeclarationId>()
+    for (let current: DeclarationId | null = declaration; current !== null && !seen.has(current);) {
+      seen.add(current)
+      const layout = layouts.get(current)
+      // An unknown ancestor may declare anything, so it is not an extension.
+      if (!layout) return true
+      if (
+        layout.fields.some((field) => field.key === key) ||
+        layout.accessors.some((accessor) => accessor.key === key) ||
+        layout.methods.some((method) => method.key === key)
+      )
+        return true
+      current = layout.base
+    }
+    return false
+  }
   const prototypeMemberIsMethod = (declaration: DeclarationId, key: string): boolean => {
     const seen = new Set<DeclarationId>()
     for (let current: DeclarationId | null = declaration; current !== null && !seen.has(current);) {
@@ -1046,6 +1079,15 @@ export const publishClassMethodOverrides = (
             prototypeMemberIsMethod(declaration, name)
           )
             continue
+          // A key no class in the chain declares lives in the prototype
+          // object's own property table, beside every declared member.
+          if (
+            (operation.internalMethod === 'get' || operation.internalMethod === 'set') &&
+            (name === null || !prototypeMemberIsDeclared(declaration, name))
+          ) {
+            if (operation.internalMethod === 'set') extend(declaration, name)
+            continue
+          }
           unsupported(declaration, `prototype ${operation.internalMethod} of ${name ?? 'a runtime key'} has no typed method protocol`)
         }
       } else {
@@ -1144,6 +1186,9 @@ export const publishClassMethodOverrides = (
     const prototypeOrigins = receiver.source.kind === 'result' ? prototypes.get(receiver.source.result) : undefined
     if (prototypeOrigins?.size) {
       for (const declaration of prototypeOrigins) {
+        // A runtime-key install is a table entry, never an override slot on
+        // every declared method: a key that names one aborts when it runs.
+        if (runtimeKey !== undefined && extensions.get(declaration)?.has(null)) continue
         const instance = layouts.get(declaration)?.instance
         if (instance) mark(instance, key, declaration, symbolKeys)
       }
@@ -1154,13 +1199,15 @@ export const publishClassMethodOverrides = (
       const fields = overrides.get(declaration)
       const prototypeKeys = prototypeMutations.get(declaration)
       const unsupportedUses = unsupportedPrototypes.get(declaration)
+      const extended = extensions.get(declaration)
       return [
         declaration,
         {
           ...layout,
           ...(fields ? { methodOverrides: [...fields.values()] } : {}),
           ...(prototypeKeys ? { prototypeMethodMutations: [...prototypeKeys] } : {}),
-          ...(unsupportedUses ? { prototypeUnsupportedUses: [...unsupportedUses] } : {})
+          ...(unsupportedUses ? { prototypeUnsupportedUses: [...unsupportedUses] } : {}),
+          ...(extended ? { prototypeExtensions: [...extended] } : {})
         }
       ]
     })

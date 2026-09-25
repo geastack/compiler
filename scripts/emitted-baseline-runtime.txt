@@ -69,6 +69,8 @@ class-prototype-read-keeps-instance-fields.ts.cpp 031d8164be6d
 class-prototype-reparented-onto-another-class.ts.cpp a57c1a586c1d
 class-reflection-sibling-isolation.ts.cpp d2b89912bd4c
 class-static-assignment-slot.runtime.js.cpp 81e438a49b32
+class-static-block-prototype-flag.runtime.js.cpp 06a3df753132
+class-static-block-prototype-flag.ts.cpp 5416597e45f5
 class-static-blocks.ts.cpp a9d11fbf4296
 class-static-computed-key.runtime.js.cpp 4f5fc601e4f8
 class-symbol-cache-typed-store-through-interface-view.ts.cpp 0db4ecd5646f
@@ -478,6 +480,9 @@ property-helper-math-abs.runtime.js.cpp eb96eb2bbdfa
 property-helper-math-sqrt2.runtime.js.cpp e2fa88a92b80
 property-rejection-boundaries.ts.cpp e395e548c519
 prototype-constructor-and-number-reflection.runtime.js.cpp 662862e5fafa
+prototype-install-many.runtime.js.cpp 88575449862c
+prototype-install-runtime-key.runtime.js.cpp 221eadff8d19
+prototype-install-shadow-abort.runtime.js.cpp 5eec0e0a4849
 prototype-method-own-length.runtime.js.cpp 271ede6b5b47
 prototype-method-value-call.runtime.js.cpp 355c69c2d49e
 prototype-object-class-typed-instance.ts.cpp 69503f24b43e

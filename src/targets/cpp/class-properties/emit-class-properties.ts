@@ -42,6 +42,7 @@ import {
 import { alignedValueText, receiverBoundFieldText } from '../emit-narrowing.js'
 import { computedOverriddenMethodValueText } from './computed-method-value.js'
 import { nativePrototypeMethodFallbackText } from './native-prototype.js'
+import { classPrototypeExtendedOf } from '../../../projection/class-prototype.js'
 import { classMethodValueArmsOf, classPrototypeMethodKeysOf, classPrototypeMethodValueArmsOf } from '../../../projection/dispatch.js'
 
 /**
@@ -845,6 +846,12 @@ export const computedClassPrototypeMethodText = (ctx: EmitContext, operation: Ge
     const keys = staticKey === undefined ? classPrototypeMethodKeysOf(ctx.classes, receiver.declaration) : [staticKey]
     const type = cppTypeOf(result)
     const object = operandText(ctx, operation.receiver)
+    // A key no declared method of the allocated class answers continues to
+    // the prototype tables the program added (`gea::nativeDynamicGet`'s walk
+    // past the object's own properties, which the caller already found empty).
+    const missText = classPrototypeExtendedOf(ctx.classes, receiver.declaration)
+      ? `gea::nativeDynamicGet(${object}, gea::PropertyKey::string(${staticKey === undefined ? 'gea_method_key' : cppStringLiteral(staticKey)}))`
+      : 'gea::Value()'
     const branches: string[] = []
     for (const key of keys) {
       const arms = classPrototypeMethodValueArmsOf(ctx.classes, receiver.declaration, key)
@@ -853,15 +860,15 @@ export const computedClassPrototypeMethodText = (ctx: EmitContext, operation: Ge
       // allocations. Preserve undefined for the others and choose the method
       // at READ time, before a later call supplies a possibly new receiver.
       const selections = arms.map(({ allocation, method }) => {
-        const value = method === null ? 'gea::Value()' : classMethodValueText(ctx, operation, key, method, result).text
+        const value = method === null ? missText : classMethodValueText(ctx, operation, key, method, result).text
         return `if (gea::host::hasNativeClassLayoutRef<${cppClassName(allocation)}>(${object})) return ${value};`
       })
-      const selection = `${selections.join(' ')} return gea::Value();`
+      const selection = `${selections.join(' ')} return ${missText};`
       branches.push(staticKey === undefined ? `if (gea_method_key == ${cppStringLiteral(key)}) { ${selection} }` : selection)
     }
     if (branches.length === 0) return null
     const keyBinding = staticKey === undefined ? `const std::string& gea_method_key = ${operandText(ctx, operation.key)}; ` : ''
-    return { text: `([&]() -> ${type} { ${keyBinding}${branches.join(' ')} return gea::Value(); })()`, spelling: type, carrier: result }
+    return { text: `([&]() -> ${type} { ${keyBinding}${branches.join(' ')} return ${missText}; })()`, spelling: type, carrier: result }
   }
   if (staticKey !== undefined) return null
   if (result.kind !== 'function-value-dispatch') return null
