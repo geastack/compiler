@@ -1225,6 +1225,15 @@ export const widenedStoreText = (held: Representation, written: Representation, 
           : null
     if (recast !== null) return `${cppTypeOf(held)}::ofArm<${armIndex}>(${recast})`
   }
+  // A union that keeps a `dynamic` arm holds anything that boxes: the value
+  // no static arm above could take is stored there boxed (`conversions.ts`'s
+  // widening states the same pair). A sum is left to the recast.
+  if (written.kind !== 'tagged-union') {
+    const dynamicIndex = held.arms.findIndex((arm) => arm.value.kind === 'dynamic')
+    const dynamicArm = held.arms[dynamicIndex]
+    const boxed = dynamicArm ? widenedStoreText(dynamicArm.value, written, text) : null
+    if (boxed !== null) return `${cppTypeOf(held)}::ofArm<${dynamicIndex}>(${boxed})`
+  }
   return null
 }
 

@@ -687,7 +687,8 @@ const buildMapper = (
     table,
     // The bag census the collection value slot needs -- see
     // `StructuralPartsInput.bags`.
-    bags
+    bags,
+    unstatedNeverArrayAt: (node) => unstatedNeverArray(checker, collections, layoutTypeAt, node)
   })
 
   const { keeperFor } = createMemberRules(identities)
@@ -2963,8 +2964,16 @@ const buildMapper = (
    */
   const evolvingArrayMemberTypeAt = (node: ts.Node): StructuralTypeId | null => {
     if (!ts.isPropertyAccessExpression(node)) return null
-    const element = inferredArrayElementAt(checker, collections, layoutTypeAt, node.expression)
-    if (!element || (element.flags & (ts.TypeFlags.Any | ts.TypeFlags.Never)) !== 0) return null
+    const inferred = inferredArrayElementAt(checker, collections, layoutTypeAt, node.expression)
+    // A receiver the `unstated-never-array` rule laid out as an array of boxes
+    // reads its members over that same element, not over the checker's `never`.
+    const element =
+      inferred && (inferred.flags & (ts.TypeFlags.Any | ts.TypeFlags.Never)) === 0
+        ? inferred
+        : unstatedNeverArray(checker, collections, layoutTypeAt, node.expression)
+          ? checker.getAnyType()
+          : null
+    if (!element) return null
     // The checker's own member type, interned directly: asking `typeAt` of
     // this same node would re-enter here.
     const declared = typeOf(checker.getTypeAtLocation(node))
@@ -4231,6 +4240,7 @@ const buildMapper = (
         ts.SyntaxKind.PropertyDeclaration,
         ts.SyntaxKind.Identifier,
         ts.SyntaxKind.PropertyAccessExpression,
+        ts.SyntaxKind.ElementAccessExpression,
         // A parameter is here for ONE case: it is an alias of an array whose
         // component the collection census refused, so it must carry the same
         // boxed element the caller's cell does. See `unstatedNeverArray`.

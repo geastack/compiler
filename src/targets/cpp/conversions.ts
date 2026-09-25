@@ -528,6 +528,67 @@ export const createCppConversionRegistry = (layouts: RecordLayoutPolicy = defaul
   return registry
 }
 
+/**
+ * Boxing into `dynamic`: the one widening direction whose *target* carries no
+ * structural information about which sources are valid at all (a tagged
+ * union's arms are a fixed list; `gea::Value` accepts anything
+ * `dynamicTagFor` recognizes). `emit-narrowing.ts`'s `widenedStoreText`
+ * already renders exactly this store; asking the identical function here is
+ * what lets the conversion graph -- built structurally from `target`'s own
+ * shape everywhere else -- offer this one capability too, rather than leaving
+ * every merge whose carrier is `dynamic` refused for a conversion emission can
+ * already perform.
+ */
+const boxingWideningPair = (source: Representation): ClassifierMaterializerPair | null => {
+  // An optional value has no single tag of its own -- see this
+  // function's sibling render, `emit-narrowing.ts`'s `widenedStoreText`,
+  // whose `held.kind === 'dynamic'` branch already renders exactly this
+  // recursively: absence boxes to `Null`/`Undefined`, presence boxes
+  // whatever the payload itself boxes as (which may in turn be a tagged
+  // union, the case just below). This installs the capability that
+  // render already implements; without it, every optional value merging
+  // or returning into a declared-`any`/`unknown` carrier refused for a
+  // conversion `emitConvert` could already perform.
+  if (source.kind === 'optional') {
+    const payload = source.payload
+    if (!boxable(payload)) return null
+    return {
+      classifier: { id: 'gea::Value::box', domain: `box:optional:${representationKey(payload)}` },
+      materializer: { id: 'gea::Value::box', domain: `box:optional:${representationKey(payload)}`, allocates: true }
+    }
+  }
+  // A tagged union is the other sum carrier, and it boxes on exactly the
+  // condition the optional case above already states for its payload:
+  // every arm boxes. `dynamicTagFor` cannot answer for the union itself --
+  // a sum has no single tag, which is the whole point of it -- but each
+  // arm has one, and `widenedStoreText` already renders the per-arm store
+  // recursively. Without this the identical value refused one level out
+  // from where it was admitted: `optional(tagged-union(A|B))` boxed and a
+  // bare `tagged-union(A|B)` did not.
+  if (source.kind === 'tagged-union') {
+    if (!boxable(source)) return null
+    return {
+      classifier: { id: 'gea::Value::box', domain: `box:sum:${representationKey(source)}` },
+      materializer: { id: 'gea::Value::box', domain: `box:sum:${representationKey(source)}`, allocates: true }
+    }
+  }
+  const tag = dynamicTagFor(source)
+  if (tag === null) return null
+  // Absence constructs only the dynamic tag; there is no native payload
+  // to allocate, inspect or publish. In particular, an omitted any formal
+  // must not turn an otherwise known constructor into an external entry.
+  const absent = source.kind === 'undefined' || source.kind === 'null'
+  return {
+    classifier: { id: 'gea::Value::box', domain: `box:${tag}` },
+    materializer: {
+      id: 'gea::Value::box',
+      domain: `box:${tag}`,
+      allocates: !absent,
+      ...(absent ? { nativeFieldProtocol: 'unused' as const } : {})
+    }
+  }
+}
+
 const cppConversionTables = (
   layouts: RecordLayoutPolicy,
   nativeNarrowing: (source: Representation, target: Representation) => NativeNarrowingContract,
@@ -1298,64 +1359,7 @@ const cppConversionTables = (
         }
       }
     }
-    // Boxing into `dynamic`: the one widening direction whose *target*
-    // carries no structural information about which sources are valid at
-    // all (a tagged union's arms are a fixed list; `gea::Value` accepts
-    // anything `dynamicTagFor` recognizes). `emit-narrowing.ts`'s
-    // `widenedStoreText` already renders exactly this store; asking the
-    // identical function here is what lets the conversion graph -- built
-    // structurally from `target`'s own shape everywhere else -- offer this
-    // one capability too, rather than leaving every merge whose carrier is
-    // `dynamic` refused for a conversion emission can already perform.
-    if (target.kind === 'dynamic') {
-      // An optional value has no single tag of its own -- see this
-      // function's sibling render, `emit-narrowing.ts`'s `widenedStoreText`,
-      // whose `held.kind === 'dynamic'` branch already renders exactly this
-      // recursively: absence boxes to `Null`/`Undefined`, presence boxes
-      // whatever the payload itself boxes as (which may in turn be a tagged
-      // union, the case just below). This installs the capability that
-      // render already implements; without it, every optional value merging
-      // or returning into a declared-`any`/`unknown` carrier refused for a
-      // conversion `emitConvert` could already perform.
-      if (source.kind === 'optional') {
-        const payload = source.payload
-        if (!boxable(payload)) return null
-        return {
-          classifier: { id: 'gea::Value::box', domain: `box:optional:${representationKey(payload)}` },
-          materializer: { id: 'gea::Value::box', domain: `box:optional:${representationKey(payload)}`, allocates: true }
-        }
-      }
-      // A tagged union is the other sum carrier, and it boxes on exactly the
-      // condition the optional case above already states for its payload:
-      // every arm boxes. `dynamicTagFor` cannot answer for the union itself --
-      // a sum has no single tag, which is the whole point of it -- but each
-      // arm has one, and `widenedStoreText` already renders the per-arm store
-      // recursively. Without this the identical value refused one level out
-      // from where it was admitted: `optional(tagged-union(A|B))` boxed and a
-      // bare `tagged-union(A|B)` did not.
-      if (source.kind === 'tagged-union') {
-        if (!boxable(source)) return null
-        return {
-          classifier: { id: 'gea::Value::box', domain: `box:sum:${representationKey(source)}` },
-          materializer: { id: 'gea::Value::box', domain: `box:sum:${representationKey(source)}`, allocates: true }
-        }
-      }
-      const tag = dynamicTagFor(source)
-      if (tag === null) return null
-      // Absence constructs only the dynamic tag; there is no native payload
-      // to allocate, inspect or publish. In particular, an omitted any formal
-      // must not turn an otherwise known constructor into an external entry.
-      const absent = source.kind === 'undefined' || source.kind === 'null'
-      return {
-        classifier: { id: 'gea::Value::box', domain: `box:${tag}` },
-        materializer: {
-          id: 'gea::Value::box',
-          domain: `box:${tag}`,
-          allocates: !absent,
-          ...(absent ? { nativeFieldProtocol: 'unused' as const } : {})
-        }
-      }
-    }
+    if (target.kind === 'dynamic') return boxingWideningPair(source)
     // The bare absence marker -- `null`/`undefined` as its OWN static type,
     // not a literal appearing where a wider carrier is held -- widening into
     // an optional whose absence tag it matches: no payload conversion at
@@ -1488,6 +1492,36 @@ const cppConversionTables = (
         }
       }
     }
+    // The same authorities for a callable reaching one ARM of a tagged union:
+    // `widenedStoreText`'s arm loop renders each into `ofArm<i>(...)`, and a
+    // union with absence arms (`onfulfilled?: F | null | undefined`) is the
+    // optional's twin. A rest rebase is left out because that loop renders
+    // none.
+    if (target.kind === 'tagged-union') {
+      for (const arm of target.arms) {
+        const payload = arm.value
+        const nativeConstructor =
+          dropsUnboundParameters(source, payload) ||
+          dropsAllParametersIntoResultArm(source, payload) ||
+          widensResultIntoArm(source, payload)
+        const adapter = nativeConstructor ? null : resultAdapterTransportOf(source, payload)
+        if (!nativeConstructor && adapter === null) continue
+        const domain = `arm-callable:${sourceKey}->${representationKey(payload)}`
+        const native = nativeConstructor
+          ? nativeCallableTransport(source, payload)
+          : adapter?.nativeConventions
+            ? {
+                nativeFieldProtocol: 'unused' as const,
+                callableAdapter: adapter.nativeConventions,
+                callableIdentityTransport: 'preserved' as const
+              }
+            : {}
+        return {
+          classifier: { id: 'gea::TaggedUnion::ofArm', domain },
+          materializer: { id: 'gea::TaggedUnion::ofArm', domain, allocates: true, ...native }
+        }
+      }
+    }
     if ((target.kind === 'optional' || target.kind === 'tagged-union') && hasSingleClassUpcastHome(source, target)) {
       const domain = `class-upcast-arm:${sourceKey}->${representationKey(target)}`
       return {
@@ -1513,6 +1547,18 @@ const cppConversionTables = (
           nativeFieldProtocol: 'unused',
           ...nativeClassReferenceIdentityOf(source, target)
         }
+      }
+    }
+    // A union that keeps a `dynamic` arm holds anything that boxes, so a value
+    // with no home among the static arms is stored in that arm boxed -- the
+    // store `widenedStoreText` renders last. A sum source is left to the
+    // recast, which keeps each of its arms where one has a home.
+    const boxed =
+      source.kind !== 'tagged-union' && union.arms.some((arm) => arm.value.kind === 'dynamic') ? boxingWideningPair(source) : null
+    if (boxed) {
+      return {
+        classifier: { id: 'gea::TaggedUnion::ofArm', domain: `dynamic-arm:${boxed.classifier.domain}` },
+        materializer: { ...boxed.materializer, id: 'gea::TaggedUnion::ofArm', domain: `dynamic-arm:${boxed.materializer.domain}` }
       }
     }
     return null

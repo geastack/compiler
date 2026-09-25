@@ -178,7 +178,7 @@ export const unstatedNeverArray = (
       collections.arrayRefusalForOwner(node) !== null &&
       checker.isArrayType(layoutTypeAt(node))
     )
-  if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)) {
+  if (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
     if (statesItsOwnType(checker, node)) return false
     // A REFUSED component reads back boxed even where the checker's own
     // flow-sensitive answer at this reference looks concrete. The census
@@ -215,7 +215,10 @@ export const unstatedNeverArray = (
  * `targets/cpp/conversions.ts`'s question (the one empty array of the target
  * element, by identity); this only keeps the read honest about its source.
  */
-const statesItsOwnType = (checker: ts.TypeChecker, node: ts.Identifier | ts.PropertyAccessExpression): boolean => {
+const statesItsOwnType = (
+  checker: ts.TypeChecker,
+  node: ts.Identifier | ts.PropertyAccessExpression | ts.ElementAccessExpression
+): boolean => {
   const symbol = checker.getSymbolAtLocation(ts.isPropertyAccessExpression(node) ? node.name : node)
   const target = symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(symbol) : symbol
   return (target?.declarations ?? []).some(
