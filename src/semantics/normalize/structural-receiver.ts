@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import { isGlobalObjectConstructor } from './derived-expression-type.js'
 
 // Whether a function-like body reads `this` anywhere in its OWN scope -- an
 // arrow function is walked through (lexical `this`, so an arrow nested
@@ -69,9 +70,62 @@ export const contextTypedLiteralThisOf = (
   keyword: ts.Node
 ): ts.Type | null => {
   const contextual = checker.getContextualType(literal)
-  if (!contextual || (contextual.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return null
+  const contextTyped = contextual !== undefined && (contextual.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0
+  if (!contextTyped && !isDescriptorTableEntry(checker, literal)) return null
   const receiver = checker.getTypeAtLocation(keyword)
   return (receiver.flags & ts.TypeFlags.Any) === 0 ? null : receiver
+}
+
+/**
+ * Whether a literal is stored as an entry of a table the program hands to
+ * `Object.defineProperties` -- three's TSL builds `proto[k] = { get() {...},
+ * set(v) {...} }` in a loop and then calls `Object.defineProperties(
+ * Node.prototype, proto)`. The literal is then a property descriptor exactly
+ * as a `defineProperty` argument is, and its `get`/`set` run with whatever
+ * object a later lookup resolved on, never with the literal; but nothing
+ * types it as one, so the context check above cannot see it.
+ *
+ * The literal must be the value of an assignment (through a chain
+ * `a[k] = b[j] = { ... }`) into a property of a binding that some
+ * `Object.defineProperties(target, binding)` call in that binding's own file
+ * passes as its descriptor map. Both are checker symbols; the file scan is
+ * once per file.
+ */
+const descriptorTablesByFile = new WeakMap<ts.SourceFile, ReadonlySet<ts.Symbol>>()
+
+const descriptorTablesOf = (checker: ts.TypeChecker, file: ts.SourceFile): ReadonlySet<ts.Symbol> => {
+  const known = descriptorTablesByFile.get(file)
+  if (known) return known
+  const tables = new Set<ts.Symbol>()
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'defineProperties') {
+      const owner = node.expression.expression
+      const map = node.arguments[1]
+      if (map && ts.isIdentifier(map) && isGlobalObjectConstructor(checker, owner, checker.getTypeAtLocation(owner))) {
+        const symbol = checker.getSymbolAtLocation(map)
+        if (symbol) tables.add(symbol)
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  descriptorTablesByFile.set(file, tables)
+  return tables
+}
+
+const isDescriptorTableEntry = (checker: ts.TypeChecker, literal: ts.ObjectLiteralExpression): boolean => {
+  for (let value: ts.Node = literal; ;) {
+    const assignment = value.parent
+    if (!ts.isBinaryExpression(assignment) || assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken || assignment.right !== value)
+      return false
+    const target = assignment.left
+    if ((ts.isElementAccessExpression(target) || ts.isPropertyAccessExpression(target)) && ts.isIdentifier(target.expression)) {
+      const table = checker.getSymbolAtLocation(target.expression)
+      const declaration = table?.valueDeclaration
+      if (table && declaration && descriptorTablesOf(checker, declaration.getSourceFile()).has(table)) return true
+    }
+    value = assignment
+  }
 }
 
 export const bodyReadsThis = (node: ts.Node, includeSuper = false): boolean => {

@@ -481,6 +481,8 @@ property-helper-math-abs.runtime.js.cpp eb96eb2bbdfa
 property-helper-math-sqrt2.runtime.js.cpp e2fa88a92b80
 property-rejection-boundaries.ts.cpp e395e548c519
 prototype-constructor-and-number-reflection.runtime.js.cpp 662862e5fafa
+prototype-define-properties-table.runtime.js.cpp feafeceab587
+prototype-define-property-accessor.runtime.js.cpp c4b1da10e192
 prototype-install-many.runtime.js.cpp 88575449862c
 prototype-install-runtime-key.runtime.js.cpp 221eadff8d19
 prototype-install-shadow-abort.runtime.js.cpp 5eec0e0a4849
