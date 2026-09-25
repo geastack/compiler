@@ -232,6 +232,29 @@ const methodValueOf = (
  * ordinals are consecutive within `(node, 'property')` exactly as
  * `operationsOfNode` (normalize/gating.ts) requires.
  */
+/**
+ * The keys a later member of the same literal writes unconditionally, by the
+ * key each installs: `{ ...opts, strict: x }` defines `strict` after the spread
+ * copied it, so the copy is dead and its value never observable.
+ *
+ * Only a member whose key is statically known counts -- a later spread writes
+ * only the keys its source happens to own, and a computed key names a key the
+ * program chooses at run time -- and the key is the property key the member
+ * installs, the same domain `CopyDataProperties` copies over.
+ */
+const keysWrittenAfter = (property: ts.SpreadAssignment): ReadonlySet<string> => {
+  const literal = property.parent
+  const keys = new Set<string>()
+  for (const later of literal.properties.slice(literal.properties.indexOf(property) + 1)) {
+    if (ts.isSpreadAssignment(later) || later.name === undefined) continue
+    const name = ts.isComputedPropertyName(later.name) ? later.name.expression : later.name
+    if (ts.isIdentifier(name) || ts.isPrivateIdentifier(name)) keys.add(name.text)
+    else if (ts.isStringLiteralLike(name)) keys.add(name.text)
+    else if (ts.isNumericLiteral(name)) keys.add(String(Number(name.text)))
+  }
+  return keys
+}
+
 const spreadCopyOf = (
   property: ts.SpreadAssignment,
   receiver: SemanticResultId,
@@ -297,12 +320,17 @@ const spreadCopyOf = (
   const operations: PropertyOperation[] = []
   const edges: SemanticEdge[] = []
   const spreadNode = context.identities.nodeIdOf(property)
+  const overwritten = keysWrittenAfter(property)
   for (const member of admitted.members) {
     // Every member reaching here was admitted by `staticSpreadMembersOf`
     // above -- data-only, non-accessor, string- or number-keyed -- so the key
     // is readable without a second check that could disagree with it.
     if (member.key.kind === 'symbol') continue
     const key = String(member.key.value)
+    // A later member of this literal redefines the key, so copying it would
+    // install a value nothing can observe -- and, for a member the source only
+    // may own, would demand its presence where the language copies nothing.
+    if (overwritten.has(key)) continue
     const declaredType = installable.get(key)
     const destinationType = declaredType ?? indexValueOf(key)
     if (destinationType === undefined) continue
@@ -330,7 +358,12 @@ const spreadCopyOf = (
     const installOperands: SemanticOperand[] = [
       operand('receiver', 0, { kind: 'result', result: receiver }, receiverType, { kind: 'provenance' }),
       operand('key', 0, { kind: 'constant', text: key, literal: 'string' }, stringType),
-      operand('value', 0, { kind: 'result', result: semanticResultId(read, 'value') }, member.type)
+      operand('value', 0, { kind: 'result', result: semanticResultId(read, 'value') }, member.type),
+      // `CopyDataProperties` copies the source's OWN keys, and a member its type
+      // states as optional may simply not be there: the definition runs only
+      // when the source owns the key, so an absent member stays absent in the
+      // literal rather than arriving as a present `undefined`.
+      ...(member.optional ? [operand('owner', 0, sourceValue, sourceType, { kind: 'provenance' })] : [])
     ]
     operations.push({
       id: install,

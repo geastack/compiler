@@ -246,6 +246,8 @@ export interface DefineOwnPropertyOperation extends IrOperationBase {
   readonly value: IrOperand
   readonly attributes: IrPropertyAttributes
   readonly result: IrResult | null
+  /** An object spread's copy of a member its source may not own: the definition runs only when this source owns the key. */
+  readonly onlyIfOwnedBy?: IrOperand
 }
 
 /**

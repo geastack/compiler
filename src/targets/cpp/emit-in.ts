@@ -65,6 +65,42 @@ const fieldsOf = (ctx: EmitContext, receiver: Representation): readonly RecordFi
   return ctx.layouts.forShape(receiver.shapeId)
 }
 
+/**
+ * Whether a statically laid-out source owns `key` -- the question an object
+ * spread's `CopyDataProperties` asks of every member its source may lack, and
+ * answered by the same physical presence bits `in` reads: per arm of a tagged
+ * union, through an optional's payload (an absent source owns nothing), and
+ * `false` for a layout with no such field. `null` for a carrier with no static
+ * layout to read, which the caller refuses by name.
+ */
+export const ownedFieldPresenceText = (ctx: EmitContext, carrier: Representation, receiverText: string, key: string): string | null => {
+  if (carrier.kind === 'optional') {
+    const inner = ownedFieldPresenceText(ctx, carrier.payload, `(*${receiverText})`, key)
+    return inner === null ? null : `(${receiverText}.has_value() && ${inner})`
+  }
+  if (carrier.kind === 'tagged-union') {
+    const arms = carrier.arms.map((arm, index) => {
+      const fields = fieldsOf(ctx, arm.value)
+      if (fields === null) return arm.value.kind === 'undefined' || arm.value.kind === 'null' ? 'false' : null
+      const field = fields.find((candidate) => candidate.key === key)
+      return field === undefined
+        ? 'false'
+        : `${armAt(receiverText, index)}${memberAccessOperator(ownershipOf(arm.value))}${cppRecordFieldPresenceName(field.key)}`
+    })
+    if (arms.some((text) => text === null)) return null
+    return arms.reduceRight<string>(
+      (rest, text, index) => (rest === '' ? text! : `(${armIs(receiverText, index)} ? ${text} : ${rest})`),
+      ''
+    )
+  }
+  const fields = fieldsOf(ctx, carrier)
+  if (fields === null) return null
+  const field = fields.find((candidate) => candidate.key === key)
+  return field === undefined
+    ? 'false'
+    : `${receiverText}${memberAccessOperator(ownershipOf(carrier))}${cppRecordFieldPresenceName(field.key)}`
+}
+
 /** Whether this is an ordinary object whose layout the compiler emits and whose identity can own an expando sidecar. */
 const generatedSharedObjectCarrier = (carrier: Representation): boolean => {
   if (carrier.kind === 'record' || carrier.kind === 'record-with-index' || carrier.kind === 'class-ref') {

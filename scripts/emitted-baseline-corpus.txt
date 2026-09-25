@@ -101,7 +101,7 @@ object-literal-accessors.ts.cpp db9c4670be07
 object-members.ts.cpp 63fa60d87c83
 object-spread-class-source.ts.cpp 8306a96f4fc0
 object-spread-dynamic-source.ts.cpp 9f90926930a5
-object-spread-key-order.ts.cpp fc4a97472d68
+object-spread-key-order.ts.cpp 3a5f535293db
 object-union-literal-layout.ts.cpp f490652a750e
 object.ts.cpp 291ece4b4bab
 optional-call-sequence.ts.cpp 62eb554f3f94

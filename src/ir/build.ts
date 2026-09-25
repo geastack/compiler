@@ -109,7 +109,8 @@ export interface IrBodyBuilder {
     key: IrOperand,
     value: IrOperand,
     attributes: IrPropertyAttributes,
-    representation: Representation | null
+    representation: Representation | null,
+    onlyIfOwnedBy?: IrOperand
   ) => IrValueId | null
   /**
    * Object spread's `CopyDataProperties` for a source with no statically
@@ -583,9 +584,27 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
-  const defineOwnProperty: IrBodyBuilder['defineOwnProperty'] = (block, lineage, receiver, key, value, attributes, representation) => {
+  const defineOwnProperty: IrBodyBuilder['defineOwnProperty'] = (
+    block,
+    lineage,
+    receiver,
+    key,
+    value,
+    attributes,
+    representation,
+    onlyIfOwnedBy
+  ) => {
     const result = mintOptionalResult(representation)
-    append(block, { kind: 'define-own-property', lineage, receiver, key, value, attributes, result })
+    append(block, {
+      kind: 'define-own-property',
+      lineage,
+      receiver,
+      key,
+      value,
+      attributes,
+      result,
+      ...(onlyIfOwnedBy ? { onlyIfOwnedBy } : {})
+    })
     return result?.id ?? null
   }
 

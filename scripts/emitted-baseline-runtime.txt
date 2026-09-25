@@ -496,8 +496,9 @@ scalar-roundtrip.ts.cpp c1558853e8f5
 set-constructed-from-a-string.ts.cpp ae1377b3d02f
 slot-write-closure.runtime.ts.cpp 9b9ef35c8b5f
 spread-call-immediately-invoked.runtime.js.cpp c5ae95452df2
+spread-copies-only-owned-members.ts.cpp a451a3d1e2e4
 spread-into-index-signature-target.ts.cpp 31c1943d2092
-spread-into-target-with-callable-field.ts.cpp 6e32828cb1eb
+spread-into-target-with-callable-field.ts.cpp 1f30355ad1e6
 stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d
 stated-open-union-preserves-closed-arms.ts.cpp 878f72cd6f91
