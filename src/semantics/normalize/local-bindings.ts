@@ -723,6 +723,16 @@ export const censusLocalBindings = (
    * excluded: its value
    * is the right operand or the LEFT's falsy state, which is a narrowing of
    * the left rather than the left itself.
+   *
+   * A branch that reads the cell being written stores what the cell already
+   * holds, which the other writes state: `min = min || new Vector4()` (three's
+   * `RangeNode.js`, over a module `let min = null`) writes either `min` or a
+   * `Vector4`. That read resolves to nothing while the cell is itself being
+   * resolved, and its checker `any` made the dynamic-operand rule below
+   * contribute the whole expression's `any` -- which the join then took as
+   * agreeing with the initializer's `null`, and a cell every later write fills
+   * with an instance was laid out as bare `null`. It is left out of the arms
+   * instead; a write whose every branch reads the cell adds nothing.
    */
   const branchArmsOf = (node: ts.Node): readonly ts.Type[] | null => {
     // `&&`'s right operand IS a write, though: when it is a genuinely dynamic
@@ -742,7 +752,12 @@ export const censusLocalBindings = (
           (node.operatorToken.kind === ts.SyntaxKind.BarBarToken || node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
         ? ([node.left, node.right] as const)
         : null
-    if (!branches) return null
+    if (!written) return null
+    const branches = written.filter((branch) => {
+      const read = unwrapParens(branch)
+      return !(ts.isIdentifier(read) && checker.getSymbolAtLocation(read) === cell)
+    })
+    if (branches.length === 0) return null
     // A DYNAMIC operand is evidence too, and the evidence is that the cell is
     // dynamic: `value || "u"` where `value` is bound `any` by its call sites
     // stores the box, and dropping that arm placed the cell from the other
@@ -1063,7 +1078,7 @@ export const censusLocalBindings = (
           // narrower caller/write samples, just as upstream typeAt does.
           const sourceArms = declared ? null : unionArmsForResolution(write.node)
           const type = declared ?? (sourceArms ? null : resolveExpr(write.node))
-          const arms = sourceArms ?? (type ? null : branchArmsOf(write.node))
+          const arms = sourceArms ?? (type ? null : branchArmsOf(write.node, symbol))
           // A checker union and a census arm list describe the same possible
           // writes. Join their constituents uniformly from the first round;
           // flattening only carried arms can alternate the publication between
