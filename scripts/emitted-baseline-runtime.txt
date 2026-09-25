@@ -108,6 +108,7 @@ derived-constructor-completion.runtime.js.cpp 031f79a18812
 descriptor-array-splice.js.cpp 96429601e125
 descriptor-function-this-is-the-lookup-receiver.ts.cpp 7ed558c58fe2
 destructured-default-host-options.ts.cpp c11cc6124034
+destructured-key-of-filled-empty-literal.runtime.js.cpp 88004e30660b
 destructuring-defaults.ts.cpp 5b9603fe4315
 dictionary-define-property-nondefault.ts.cpp ee362b11ee3c
 dictionary-define-property.ts.cpp 294cfc8a7aca

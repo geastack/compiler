@@ -54,6 +54,7 @@ import {
   narrowsOnlyUnstatedPositions,
   withoutUndefinedMember,
   memberTypeOf,
+  closedLiteralMemberAbsent,
   objectAssignTargetType,
   nameOfCallable,
   synthesizedUnionArmsAt,
@@ -1856,6 +1857,9 @@ export const censusParameterBindings = (
         checker.getIndexTypeOfType(nonNull, ts.IndexKind.Number)
       )
         return null
+      // Closed for the whole program, not only at the literal: a write through
+      // an alias can add exactly this key -- see `local-bindings.ts`'s twin.
+      if (!closedLiteralMemberAbsent(checker, valueFlow, nonNull, key, element)) return null
       const read = checker.getUndefinedType()
       patternReadTypes.set(element, read)
       if (!element.initializer) return read

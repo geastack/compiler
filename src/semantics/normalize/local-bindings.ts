@@ -15,6 +15,7 @@ import {
   objectAssignTargetType,
   isEmptyObjectType,
   speaksOnlyNullish,
+  closedLiteralMemberAbsent,
   synthesizedUnionArmsAt,
   unwrapExplicitThisCall,
   withoutUndefinedMember,
@@ -1488,6 +1489,15 @@ export const censusLocalBindings = (
         // `undefined` (`const { fn = function () {} } = {}` binds the default);
         // the parameter census's `absentKeyPatternReadOf` is the same rule and
         // states why an index signature or a union keeps the member read.
+        //
+        // Closed means closed for the whole program, not just at the literal:
+        // a named read commits to one key, and a write through an alias can add
+        // exactly that key (`closedLiteralMemberAbsent`, the same proof a
+        // member read off a closed literal passes). three's
+        // `getDataFromNode` returns the `{}` its callers fill --
+        // `nodeData.flowCodes || ( nodeData.flowCodes = [] )` -- and
+        // `const { flowCodes } = this.getDataFromNode( node )` read the empty
+        // literal's missing `flowCodes` as `undefined`, then iterated it.
         const absentRead =
           keyText !== null &&
           arrayIndexRead === null &&
@@ -1495,7 +1505,8 @@ export const censusLocalBindings = (
           (nonNull.flags & ts.TypeFlags.Object) !== 0 &&
           !checker.getPropertyOfType(nonNull, keyText) &&
           !indexed &&
-          !checker.getIndexTypeOfType(nonNull, ts.IndexKind.String)
+          !checker.getIndexTypeOfType(nonNull, ts.IndexKind.String) &&
+          closedLiteralMemberAbsent(checker, flow, nonNull, keyText, element)
             ? checker.getUndefinedType()
             : null
         ownType = arrayIndexRead ?? absentRead ?? (keyText !== null ? propertyTypeOf(sourceType, keyText, element) : null)

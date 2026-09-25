@@ -1099,7 +1099,13 @@ const literalMayHoldType = (checker: ts.TypeChecker, candidate: ts.Type, record:
  * literal has neither; there is still every other way a program can hand a
  * plain object a new key.
  */
-const closedLiteralMemberAbsent = (checker: ts.TypeChecker, flow: ValueFlowIndex, record: ts.Type, name: string, at: ts.Node): boolean => {
+export const closedLiteralMemberAbsent = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  record: ts.Type,
+  name: string,
+  at: ts.Node
+): boolean => {
   const refuse = (reason: string, site?: ts.Node): false => {
     if (closedLiteralAbsenceDebug !== undefined) {
       const file = site?.getSourceFile()
