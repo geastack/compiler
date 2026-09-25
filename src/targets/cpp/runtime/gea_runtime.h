@@ -14956,6 +14956,38 @@ std::vector<std::string> nativeDynamicKeys(const gea::Ref<T>& object) {
 }
 
 /**
+ * `for`-`in`'s key list for a class instance whose prototype the program
+ * extends: the own enumerable keys, then each prototype table's enumerable
+ * string keys, most-derived first, each key at its first appearance only
+ * (14.7.5.9: a non-enumerable key still shadows an enumerable one further up).
+ */
+template <typename T>
+std::vector<std::string> nativeForInKeys(const gea::Ref<T>& object) {
+  std::vector<std::string> keys = nativeDynamicKeys(object);
+  if constexpr (requires { object->gea_method_state.get(); }) {
+    if (!object) return keys;
+    std::vector<std::string> seen;
+    for (const PropertyKey& key : nativeOwnPropertyKeys(object)) {
+      if (!key.isSymbol()) seen.push_back(key.text());
+    }
+    const auto* start = detail::nativePrototypeChainStart(object->gea_method_state.get(), static_cast<const void*>(object.get()));
+    for (const NativeClassMethodState* level = start; level != nullptr; level = level->parent.get()) {
+      const DynamicObject* table = detail::nativePrototypeTableOf(*level);
+      if (table == nullptr) continue;
+      for (const PropertyKey& key : table->ownKeys()) {
+        if (key.isSymbol()) continue;
+        const std::string text = key.text();
+        if (std::find(seen.begin(), seen.end(), text) != seen.end()) continue;
+        seen.push_back(text);
+        const PropertyDescriptor* descriptor = table->ownProperty(key);
+        if (descriptor != nullptr && descriptor->enumerable) keys.push_back(text);
+      }
+    }
+  }
+  return keys;
+}
+
+/**
  * Whether a generated struct can hold an own key none of its declared fields
  * names: an entry of its index-signature sidecar, or an expando a computed
  * write (`o[k] = v`) created in the identity-keyed table.

@@ -483,6 +483,7 @@ property-rejection-boundaries.ts.cpp e395e548c519
 prototype-constructor-and-number-reflection.runtime.js.cpp 662862e5fafa
 prototype-define-properties-table.runtime.js.cpp feafeceab587
 prototype-define-property-accessor.runtime.js.cpp c4b1da10e192
+prototype-install-enumeration.runtime.js.cpp 6ec4db5d6312
 prototype-install-many.runtime.js.cpp 88575449862c
 prototype-install-runtime-key.runtime.js.cpp 221eadff8d19
 prototype-install-shadow-abort.runtime.js.cpp 5eec0e0a4849
@@ -501,7 +502,7 @@ recursive-union-alias.ts.cpp f4753b1869f6
 ref-virtual-base-address.ts.cpp ab724d570479
 reflect-native-boundary.ts.cpp 22950f295e6b
 reflect-native-operations.ts.cpp 95b27190af99
-reflect-receiver-native-target.runtime.js.cpp 9f674086200a
+reflect-receiver-native-target.runtime.js.cpp 15ba43988234
 regexp-boolean-object-prototype-reflection.runtime.js.cpp 9254238f31d5
 regexp-clone-unsupported-flags.ts.cpp 338f1e437d93
 regexp-exec-result-length.ts.cpp 1383aa7a8c38

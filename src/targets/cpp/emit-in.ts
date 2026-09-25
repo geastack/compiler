@@ -18,6 +18,7 @@ import { classPrototypeMemberIsPresent, symbolKeyedMemberIsDeclared } from '../.
 import { binaryToStringTagText } from './emit-buffers.js'
 import { regexpRoleOf } from './prototype/emit-prototype-regexp.js'
 import { nativeRecordIndexHasPropertyOf } from '../../ir/native-record-index-transport.js'
+import { classPrototypeExtendedOf } from '../../projection/class-prototype.js'
 
 /** A shape-named or inline record carrier's ownership, which decides whether its fields are reached through `.` or `->`. */
 const ownershipOf = (carrier: Representation): Ownership =>
@@ -230,7 +231,13 @@ const layoutAnswerFor = (ctx: EmitContext, carrier: Representation, receiverText
   if (staticKey !== null && generatedSharedObjectCarrier(carrier)) {
     const receiver = receiverText()
     const keyText = propertyKeyText(ctx, key, 'an "in" test on a native receiver')
-    return `((void)(${operandText(ctx, key)}), ${receiver} ? gea::nativeDynamicHas(${receiver}, ${keyText}) : (gea::host::throwInPropertyNonObject(), false))`
+    // HasProperty, not HasOwnProperty, once the class's prototype chain holds
+    // run-time installs: `'isVector3' in v`.
+    const has =
+      carrier.kind === 'class-ref' && classPrototypeExtendedOf(ctx.classes, carrier.declaration)
+        ? 'nativeDynamicHasProperty'
+        : 'nativeDynamicHas'
+    return `((void)(${operandText(ctx, key)}), ${receiver} ? gea::${has}(${receiver}, ${keyText}) : (gea::host::throwInPropertyNonObject(), false))`
   }
   // A symbol key read out of a binding rather than spelled as a name -- see
   // `symbolKeyedMemberIsDeclared`, which states why this receiver's own

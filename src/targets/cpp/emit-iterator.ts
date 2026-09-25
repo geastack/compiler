@@ -28,6 +28,7 @@ import { dispatchedLeafExpression, unionPropertyLeaves } from './emit-union-prop
 import { recordAccessorsOfShape, recordFieldsOfShape } from './records.js'
 import { renderTryRegion, type RegionRendering } from './emit-exceptions.js'
 import { accessorEnvironmentArguments } from './emit-properties.js'
+import { classPrototypeExtendedOf } from '../../projection/class-prototype.js'
 
 /**
  * What `renderIteratorCloseRegion` needs from `emit.ts`, beyond ordinary
@@ -138,6 +139,16 @@ const emitStaticEnumerateIterator = (
   }
   const receiver = operandText(ctx, operation.receiver)
   const name = defineValue(ctx, operation.result)
+  // An instance of a class whose prototype the program extends also visits
+  // the enumerable keys installed there, after its own.
+  if (target.kind === 'class-ref' && classPrototypeExtendedOf(ctx.classes, target.declaration)) {
+    lines.push(
+      `${name} = gea::Iterator<std::string>(gea::nativeForInKeys(${receiver}), ` +
+        `std::function<bool(const std::string&)>([gea_receiver = ${receiver}](const std::string& gea_key) { ` +
+        'return gea::nativeDynamicHasProperty(gea_receiver, gea::PropertyKey::string(gea_key)); }));'
+    )
+    return true
+  }
   lines.push(
     `${name} = gea::Iterator<std::string>(gea::nativeDynamicKeys(${receiver}), ` +
       `std::function<bool(const std::string&)>([gea_receiver = ${receiver}](const std::string& gea_key) { ` +
