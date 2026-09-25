@@ -23,6 +23,7 @@ await-over-an-optional-thenable.ts.cpp fdab8693a27f
 base-typed-derived-dynamic-dictionary.ts.cpp 74bbd1b9fa0d
 base-typed-derived-dynamic-fields.ts.cpp 3291e2cf977d
 bind-method-value-to-receiver.ts.cpp d1df1b6343b5
+bind-polymorphic-this-callback.runtime.js.cpp 96ecc563dabe
 boolean-host-class-read-as-value.ts.cpp e67eba589351
 borrow-effectful-private-actual.ts.cpp 428e04d68442
 borrow-getter-reentry.ts.cpp 491bbaef90f3
