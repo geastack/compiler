@@ -304,6 +304,9 @@ inline void flushAllOutput() {
  */
 inline std::terminate_handler previousTerminateHandler = nullptr;
 
+/** Defined at the end of this header, once a thrown value can be spelled. */
+inline void reportUncaughtException() noexcept;
+
 inline void flushThenTerminate() {
   flushAllOutput();
   if (previousTerminateHandler != nullptr) previousTerminateHandler();
@@ -43775,6 +43778,40 @@ std::string object(const gea::Ref<T>& target, const std::string& prefix, const D
 }
 
 }  // namespace gea::inspect
+
+namespace gea::detail {
+/**
+ * What an uncaught throw says before the process dies, as Node prints it.
+ *
+ * A runtime refusal is a thrown `TypeError` like any other, and without this
+ * one that nobody caught ended the program with an abort code and nothing on
+ * the screen to say which refusal it was. Printed after `stdout` is flushed,
+ * so it lands after what the program printed; spelling the value runs
+ * `ToString` (an error) or `util.inspect` (any other object), whose own throw
+ * is swallowed here rather than recursing into terminate.
+ */
+inline void reportUncaughtException() noexcept {
+  const std::exception_ptr pending = std::current_exception();
+  if (!pending) return;
+  std::fflush(stdout);
+  try {
+    std::rethrow_exception(pending);
+  } catch (const gea::Value& value) {
+    std::string text;
+    try {
+      const bool object = value.tag() == gea::Value::Tag::Object || value.tag() == gea::Value::Tag::Function;
+      text = object && !gea::host::isRuntimeError(value) ? gea::inspect::value(value) : gea::host::detail::toString(value);
+    } catch (...) {
+      text = "(a thrown value this runtime cannot print)";
+    }
+    std::fprintf(stderr, "Uncaught %s\n", text.c_str());
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "Uncaught C++ exception: %s\n", error.what());
+  } catch (...) {
+    std::fprintf(stderr, "Uncaught exception\n");
+  }
+}
+}  // namespace gea::detail
 
 #include "gea_dynamic_proxy.h"
 
