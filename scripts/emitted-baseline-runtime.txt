@@ -77,7 +77,7 @@ classref-mismatch.ts.cpp e1f6ccf62e55
 classref-roundtrip.ts.cpp 4c858fed3521
 clone-idiom-family-dispatch.runtime.js.cpp 27d792ad85a1
 closed-literal-absent-key-push.runtime.js.cpp 3c1046c8e89c
-closure-cycle-lifetime.ts.cpp 399157e1c4c4
+closure-cycle-lifetime.ts.cpp ef066a319b73
 closure-factory-export-never-read.ts.cpp 35b275d3d6f5
 collection-get-native-union.ts.cpp bf735b8cd94a
 composed-field-descriptor.runtime.js.cpp a11d2a79f4b4
@@ -127,7 +127,7 @@ dynamic-class-family-wrong.ts.cpp 1c1d997e7a4d
 dynamic-expando-read-into-an-optional-union.ts.cpp 50e2e29bbdc9
 dynamic-fallback-call-bind.js.cpp e354fb71dea9
 dynamic-finite-destructuring-close.ts.cpp a3d4cc28c1db
-dynamic-for-of-iterator-close.ts.cpp 91912cb66fbd
+dynamic-for-of-iterator-close.ts.cpp 880775b0beda
 dynamic-iterator-gather.ts.cpp ccdb8a9f5be5
 dynamic-iterator-header-close.ts.cpp 747fd9e0e506
 dynamic-optional-absence-mismatch.ts.cpp 7df14bcbd5c2
@@ -285,7 +285,7 @@ jsx-reactive-style-slot.tsx.cpp 58a929ed432b
 jsx-stateless-component.tsx.cpp bf0fdf5dde35
 jump-threading.ts.cpp 35065f7450fa
 key-order-cases.ts.cpp 36f9f7e763c5
-lazy-map-in-logical-or-assignment.ts.cpp 1173673c5bbd
+lazy-map-in-logical-or-assignment.ts.cpp 59a3db4e460c
 lazy-subclass-accessor-override.ts.cpp f3d043d1536d
 local-iteration.ts.cpp 8233f4009842
 logical-and-object-left-falsy-arm.ts.cpp 24e43ef8d14b
@@ -444,7 +444,7 @@ physical-class-ancestry-live.ts.cpp 3191b418595a
 physical-class-ancestry-optional.ts.cpp 1c3a76306a64
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 50f20517ba63
-printer-drift.txt 16c431d84f55
+printer-drift.txt 792935e513be
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp d85168f70bf0
 promise-method-read-as-value.ts.cpp d92abcc1e89f
@@ -535,8 +535,8 @@ symbol-description.runtime.js.cpp 6eb1a4ca2572
 symbol-key-declared-field.ts.cpp 96012e0a99c5
 symbol-keyed-class-field-declarations.ts.cpp 3db41fd4fd08
 symbol-keyed-method-deletes-symbol-expando.ts.cpp 7684e183ecc6
-template-strings-array-identity.ts.cpp 7ca0cde119e7
-template-strings-array-structural.ts.cpp 3ec9a0f77005
+template-strings-array-identity.ts.cpp df5d8ebcda37
+template-strings-array-structural.ts.cpp 87dd98401e3b
 template-strings-readonly-array.ts.cpp a3aa686bb2ad
 then-callback-returns-value-or-promise-union.ts.cpp c86d58270dc6
 then-handler-value-into-a-void-result.ts.cpp 8fb52f13f20c
@@ -563,13 +563,13 @@ typed-array-multiple-windows.ts.cpp 766249933e5b
 typed-array-narrowing-over-class.ts.cpp 069c3279b884
 typed-computed-record-read-global.ts.cpp 197ade80cc2d
 typed-computed-record-read.ts.cpp db9ced2d6827
-typed-custom-iterator-close.ts.cpp 13c6d0c64a48
+typed-custom-iterator-close.ts.cpp 230e283ad850
 typed-custom-iterator-receiver.runtime.ts.cpp 3492a6678388
 typeof-runtime-string.ts.cpp 5b4c672dec2a
 typeof-then-discriminates-a-union.ts.cpp 16fe804a602d
 unbox-nullable-union.ts.cpp b8a67b94f69c
 uncallable-member-slot-call.runtime.js.cpp ea683f3f15a6
-uncertified.txt 616ad1c9c2e3
+uncertified.txt 2b86d7a4c28f
 union-member-absent-on-promise-arm.ts.cpp fb968705a335
 union-method-absent-on-one-arm-discarded.ts.cpp d2bf86271461
 union-of-tuples-array-pattern.ts.cpp aa8e76675555
