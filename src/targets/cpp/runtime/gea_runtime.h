@@ -26202,6 +26202,10 @@ inline void Value::setProperty(const PropertyKey& key, const Value& value) {
       const auto result = metadata_->prototype->set(payload(), key, value, *this);
       if (result != detail::NativePrototypeOps::SetResult::Absent) return;
     }
+    if (metadata_->methodState != nullptr) {
+      const auto result = detail::nativePrototypeChainSet(metadata_->methodState(held_.get()), key, value, [&]() -> const Value& { return *this; });
+      if (result != detail::NativePrototypeOps::SetResult::Absent) return;
+    }
     if (!isExtensible()) return;
     const gea::Ref<void> anchor = expandoAnchor();
     if (!detail::expandoFor(anchor, true)->set(key, value, *this)) return;
