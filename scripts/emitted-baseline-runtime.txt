@@ -493,7 +493,9 @@ prototype-object-class-typed-instance.ts.cpp 69503f24b43e
 prototype-reflection-descriptors.runtime.js.cpp 0a9c19974c02
 prototype-reflection-getter-copy-refused.runtime.js.cpp 7e3ce9c00cde
 proxy-callable-origin.runtime.js.cpp e6a4643b8322
+proxy-constructor-traps.runtime.js.cpp e38d659a7f08
 proxy-iterator-traps.runtime.js.cpp 7320f7dd665a
+proxy-native-slot-refusal.runtime.js.cpp 38c6ceb3e2d4
 proxy-receiver-generic-copies.runtime.js.cpp 976926647e3d
 reactive-inherited-cell-no-list-tick.ts.cpp 7699cb1bf2f5
 receiver-ignored-construct.ts.cpp a68d985fdfa2
