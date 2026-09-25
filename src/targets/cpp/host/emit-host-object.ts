@@ -2722,6 +2722,27 @@ const assignText = (ctx: EmitContext, operation: CallOperation): string => {
  * signature, and inventing one that dropped the receiver would make
  * `get: () => this.x` read the wrong object.
  */
+const accessorDescriptorFieldText = (field: RecordField, read: string, slot: string): string | null => {
+  if (field.key !== 'get' && field.key !== 'set') return null
+  if (field.value.kind !== 'function-value-dispatch') return null
+  const abi = field.value.abi
+  if (abi.receiver !== null && abi.receiver.kind !== 'dynamic') return null
+  const boxed =
+    abi.receiver === null
+      ? abi.restFrom === null
+        ? `gea::Value::box(gea::Value::Tag::Function, ${read})`
+        : `gea::Value::boxCallable<${abi.restFrom}>(${read})`
+      : `gea::Value::boxMethod<${abi.restFrom === null ? -1 : abi.restFrom + 1}>(${read})`
+  const held = `__gea_${field.key}ter`
+  return field.key === 'get'
+    ? `{ const gea::Value ${held} = ${boxed}; ${slot}.hasGet = true; ${slot}.getterValue = ${held}; ` +
+        `${slot}.getIdentity = ${held}.functionObjectIdentity().get(); ` +
+        `${slot}.get = [${held}](const gea::Value& gea_receiver) -> gea::Value { return ${held}.callWithReceiver(gea_receiver, {}); }; }`
+    : `{ const gea::Value ${held} = ${boxed}; ${slot}.hasSet = true; ${slot}.setterValue = ${held}; ` +
+        `${slot}.setIdentity = ${held}.functionObjectIdentity().get(); ` +
+        `${slot}.set = [${held}](const gea::Value& gea_receiver, const gea::Value& gea_written) { ${held}.callWithReceiver(gea_receiver, {gea_written}); }; }`
+}
+
 const defineDescriptorLines = (ctx: EmitContext, operation: CallOperation, descriptor: IrOperand, slot: string): string =>
   descriptorSlotLines(ctx, operation, descriptor.representation, operandText(ctx, descriptor), slot)
 
@@ -2752,6 +2773,16 @@ const descriptorSlotLines = (
       `if (!(${text}).has_value()) gea::host::throwRuntimeError("TypeError", "Property description must be an object: ${representation.absence}"); ` +
       descriptorSlotLines(ctx, operation, representation.payload, `(*${text})`, slot)
     )
+  }
+  // A table of descriptor literals of different shapes (`{ get, set }` beside
+  // `{ get }`, three's swizzle and index accessors) holds one of each arm; the
+  // arm present is read as that literal.
+  if (representation.kind === 'tagged-union') {
+    const arms = representation.arms.map(
+      (arm, index) =>
+        `if ((${text}).is<${index}>()) { ${descriptorSlotLines(ctx, operation, arm.value, `(${text}).get<${index}>()`, `${slot}_arm`)} ${slot} = ${slot}_arm; }`
+    )
+    return `gea::PropertyDescriptor ${slot}; ${arms.map((arm, index) => (index === 0 ? arm : ` else { ${arm}`)).join('')}${' }'.repeat(arms.length - 1)}`
   }
   const fields =
     representation.kind === 'record'
@@ -3322,6 +3353,47 @@ const definePropertyText = (ctx: EmitContext, operation: CallOperation): string 
 }
 
 /**
+ * `Object.defineProperties(target, map)` onto a native object -- three's
+ * `Object.defineProperties(Node.prototype, proto)` over the swizzle
+ * accessor table TSL builds. ECMA-262 20.1.2.3.1 ObjectDefineProperties:
+ * every own enumerable key of the map, in order, is read and converted with
+ * ToPropertyDescriptor (`descriptorSlotLines`, the reader `defineProperty`
+ * uses) before any is defined, then each is defined on the target's own
+ * property table.
+ */
+const definePropertiesText = (ctx: EmitContext, operation: CallOperation): string => {
+  const site = '"Object.defineProperties"'
+  const target = targetOf(ctx, 'defineProperties', operation)
+  const map = operation.arguments[1]
+  if (map === undefined || operation.arguments.length !== 2)
+    throw createCppEmitBlockedError('host-member-call:ObjectConstructor.defineProperties', `${site} takes a target and a descriptor map`)
+  const view = objectViewOf(ctx, 'defineProperties', target, 'target')
+  if (view.kind !== 'known' || view.accessor !== '->')
+    throw createCppEmitBlockedError(
+      'host-member-call:ObjectConstructor.defineProperties',
+      `${site} defines onto a native object with its own shared identity; this target carries "${representationKey(target.representation)}"`
+    )
+  const table = map.representation
+  if (table.kind !== 'dictionary' || table.key !== 'string')
+    throw createCppEmitBlockedError(
+      'host-member-call:ObjectConstructor.defineProperties',
+      `${site} reads its descriptors from a string-keyed table; this map carries "${representationKey(table)}"`
+    )
+  const slot = '__gea_descriptor'
+  const read = descriptorSlotLines(ctx, operation, table.value, '__gea_entry', slot)
+  const mapText = `(${operandText(ctx, map)})${memberAccessOperator(table.ownership)}`
+  return (
+    `([&]() { std::vector<std::pair<gea::PropertyKey, gea::PropertyDescriptor>> __gea_descriptors; ` +
+    `for (const std::string& __gea_key : ${mapText}enumerableKeys()) { const auto __gea_entry = ${mapText}read(__gea_key); ` +
+    `${read} __gea_descriptors.emplace_back(gea::PropertyKey::string(__gea_key), ${slot}); } ` +
+    `for (const auto& [__gea_key, __gea_defined] : __gea_descriptors) ` +
+    `if (!gea::nativeDynamicDefineProperty(${view.receiver}, __gea_key, __gea_defined)) ` +
+    'gea::host::throwRuntimeError("TypeError", "Cannot define native property"); ' +
+    `return ${view.receiver}; })()`
+  )
+}
+
+/**
  * `Object`'s statics, dispatched by member.
  *
  * Every member `host-members.ts` claims has an arm here, and every member it
@@ -3596,6 +3668,7 @@ export const objectMemberText = (ctx: EmitContext, member: string, operation: Ca
   if (member === 'fromEntries') return fromEntriesText(ctx, operation)
   if (member === 'create') return createText(operation)
   if (member === 'defineProperty') return definePropertyText(ctx, operation)
+  if (member === 'defineProperties') return definePropertiesText(ctx, operation)
   throw createCppEmitBlockedError(
     `host-member-call:Object.${member}`,
     `"ObjectConstructor.${member}" is claimed with a call-site spelling in host-members.ts, but this file states no arm ` +

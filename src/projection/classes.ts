@@ -1262,6 +1262,23 @@ export const publishClassMethodOverrides = (
           }
           unsupported(declaration, `prototype ${operation.internalMethod} of ${name ?? 'a runtime key'} has no typed method protocol`)
         }
+      } else if (
+        operation.family === 'invocation' &&
+        operand.role === 'argument' &&
+        operand.ordinal === 0 &&
+        (operation.intrinsicMutation === 'object-define-property' || operation.intrinsicMutation === 'object-define-properties')
+      ) {
+        // `Object.defineProperty(C.prototype, k, d)` / `defineProperties(
+        // C.prototype, table)`: the same table entries as an assignment, with
+        // the descriptor's attributes and accessors.
+        const named = operation.operands.find((candidate) => candidate.role === 'argument' && candidate.ordinal === 1)
+        const name =
+          operation.intrinsicMutation === 'object-define-property' && named?.source.kind === 'constant' ? named.source.text : null
+        for (const declaration of origins) {
+          if (name !== null && prototypeMemberIsDeclared(declaration, name))
+            unsupported(declaration, `prototype define of ${name} has no typed method protocol`)
+          else extend(declaration, name)
+        }
       } else {
         for (const declaration of origins) unsupported(declaration, `prototype escapes through ${operation.family}:${operand.role}`)
       }
@@ -1360,7 +1377,7 @@ export const publishClassMethodOverrides = (
       for (const declaration of prototypeOrigins) {
         // A runtime-key install is a table entry, never an override slot on
         // every declared method: a key that names one aborts when it runs.
-        if (runtimeKey !== undefined && extensions.get(declaration)?.has(null)) continue
+        if ((runtimeKey !== undefined || key === null) && extensions.get(declaration)?.has(null)) continue
         const instance = layouts.get(declaration)?.instance
         if (instance) mark(instance, key, declaration, symbolKeys)
       }
