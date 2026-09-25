@@ -1058,6 +1058,18 @@ export const createLayoutTypeResolver = (
     // the literal out by it made every field of the default dynamic where the
     // literal itself wrote a number. The literal's own type is the value.
     if (impliedPatternTargetOf(checker, node)) return own
+    // A literal written as a property value of another object literal fills
+    // that literal's member, so its layout is the member's type in the
+    // parent's layout. A parent that keeps its own type (an intersection
+    // context: `PropertyDescriptorMap & ThisType<any>`) types that member as
+    // the checker's own type for this literal, which is `own`; laying the
+    // literal out by its own contextual type instead (`PropertyDescriptor`)
+    // gives one value two layouts and no conversion between them.
+    const parentLiteral =
+      ts.isPropertyAssignment(node.parent) && node.parent.initializer === node && ts.isObjectLiteralExpression(node.parent.parent)
+        ? node.parent.parent
+        : null
+    if (parentLiteral && layoutTypeAt(parentLiteral) === checker.getTypeAtLocation(parentLiteral)) return own
     const contextual = narrowedSlot ?? narrowedCallSlot ?? checkerContext ?? inferredDeclarationContext
     if (!contextual || contextual.isIntersection()) return own
     let candidate = contextual.isUnion() ? soleShapedArm(contextual) : contextual

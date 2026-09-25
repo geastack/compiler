@@ -946,8 +946,7 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // a fixed `emit` string cannot say. `objectMemberText` (emit-host-invoke.ts)
   // states all of them and refuses by name for a carrier neither arm covers.
   //
-  // The claim is per MEMBER, never per protocol: `Object.create`,
-  // `Object.setPrototypeOf`, `Object.defineProperties`
+  // The claim is per MEMBER, never per protocol: `Object.setPrototypeOf`
   // and the rest have no row here, so each refuses
   // at its own access with its own name. See `manifest.ts`'s
   // `ObjectConstructor@1` entry for why each is absent. `Object.getPrototypeOf`
@@ -975,6 +974,10 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   ['ObjectConstructor.create', { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }],
   [
     'ObjectConstructor.defineProperty',
+    { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }
+  ],
+  [
+    'ObjectConstructor.defineProperties',
     { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }
   ],
   [

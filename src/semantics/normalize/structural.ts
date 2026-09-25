@@ -174,6 +174,15 @@ export interface StructuralMapper {
   /** The carrier of the value a declaration binds, which for a class is its constructor object rather than its instances. */
   readonly valueTypeAt: (node: ts.Declaration) => StructuralTypeId
   /**
+   * Every host constructor a value of `type` can be, when `type` is a host
+   * constructor interface others extend (lib's `ErrorConstructor`), or `null`.
+   * `typeOf` answers such a type with the union of the family's handles; the
+   * host census asks this to bind each member it can hold.
+   */
+  readonly hostConstructorFamilyOf: (type: ts.Type) => readonly ts.Type[] | null
+  /** The exact handle of a host constructor family base, where `typeOf` answers the family union; `null` for any other type. */
+  readonly exactHostConstructorOf: (type: ts.Type) => StructuralTypeId | null
+  /**
    * The INSTANCE side of a class node. A class declaration's node type already
    * is its instance type, but a class EXPRESSION is an expression, and the
    * checker types it as its value -- the constructor -- so `typeAt` on
@@ -936,6 +945,173 @@ const buildMapper = (
     readonly kind: 'declared' | 'class-constructor' | 'class-instance'
     readonly declaration: DeclarationId
     readonly declarationNode: ts.Node
+  }
+
+  /**
+   * The host constructors a value of `type` can be, when `type` is a host
+   * constructor interface other host constructor interfaces extend: the
+   * interface itself and every such extender, transitively (lib's six
+   * `NativeError` constructors extend `ErrorConstructor`). `null` otherwise.
+   *
+   * A host constructor object is a singleton its protocol's handle names, so a
+   * slot typed by the base interface holding `TypeError` cannot be the base's
+   * one handle: the value is one of the family, and its carrier is the union of
+   * their exact handles. The global itself (`Error`) is exactly one of them and
+   * keeps its own (`hostConstructorGlobalOf`).
+   */
+  const hostConstructorFamilies = new Map<ts.Symbol, readonly ts.Type[] | null>()
+  const ambientConstructorInterface = (symbol: ts.Symbol | undefined): boolean =>
+    symbol !== undefined &&
+    (symbol.flags & ts.SymbolFlags.Interface) !== 0 &&
+    (symbol.declarations ?? []).length > 0 &&
+    (symbol.declarations ?? []).every((declaration) => declaration.getSourceFile().isDeclarationFile) &&
+    checker.getDeclaredTypeOfSymbol(symbol).getConstructSignatures().length > 0
+  const hostConstructorFamilyOf = (type: ts.Type): readonly ts.Type[] | null => {
+    const base = type.getSymbol()
+    if (!ambientConstructorInterface(base) || !base) return null
+    if (typeArgumentsOf(type).length > 0) return null
+    const known = hostConstructorFamilies.get(base)
+    if (known !== undefined) return known
+    const anchor = base.declarations?.[0]?.getSourceFile()
+    const members: ts.Symbol[] = [base]
+    if (anchor) {
+      const interfaces = checker.getSymbolsInScope(anchor, ts.SymbolFlags.Interface).filter((symbol) => ambientConstructorInterface(symbol))
+      for (let grew = true; grew;) {
+        grew = false
+        for (const candidate of interfaces) {
+          if (members.includes(candidate)) continue
+          const extendsMember = (candidate.declarations ?? []).some(
+            (declaration) =>
+              ts.isInterfaceDeclaration(declaration) &&
+              (declaration.heritageClauses ?? []).some((clause) =>
+                clause.types.some((heritage) => {
+                  const named = checker.getSymbolAtLocation(heritage.expression)
+                  return named !== undefined && members.includes(named)
+                })
+              )
+          )
+          if (extendsMember) {
+            members.push(candidate)
+            grew = true
+          }
+        }
+      }
+    }
+    const family = members.length > 1 ? members.map((member) => checker.getDeclaredTypeOfSymbol(member)) : null
+    hostConstructorFamilies.set(base, family)
+    return family
+  }
+  /** The exact handle anchor of a family base, kept aside when `typeOf` answers the family union for the same type. */
+  const exactFamilyAnchors = new Map<ts.Symbol, StructuralTypeId>()
+  const exactHostConstructorOf = (type: ts.Type): StructuralTypeId | null => {
+    const base = type.getSymbol()
+    if (!base || hostConstructorFamilyOf(type) === null) return null
+    typeOf(type)
+    return exactFamilyAnchors.get(base) ?? null
+  }
+  /**
+   * The exact handle of a standard library global holding a family base's own
+   * constructor (`declare var Error: ErrorConstructor`): that cell holds the
+   * one object, not any member of the family. Only a default-library
+   * declaration is the host's own global; a package's `.d.ts` stating a value
+   * of the interface type states a slot like any other.
+   */
+  const hostConstructorGlobalOf = (declaration: ts.Node | undefined): StructuralTypeId | null => {
+    if (!declaration || !ts.isVariableDeclaration(declaration) || !declaration.getSourceFile().hasNoDefaultLib) return null
+    const symbol = checker.getSymbolAtLocation(declaration.name)
+    return symbol ? exactHostConstructorOf(checker.getTypeOfSymbolAtLocation(symbol, declaration)) : null
+  }
+
+  /** A declared name's anchor, reserved before its members are walked (see the body). */
+  const anchorDeclared = (type: ts.Type, declared: DeclaredAnchor): StructuralTypeId => {
+    // Anchor before walking members. Every cycle in the type graph passes
+    // through a declared name, so this is the one place that makes recursion
+    // terminate: a member that refers back resolves to an id that already
+    // exists instead of re-entering translation.
+    // The key uses the arguments' canonical structural ids, not the checker's
+    // type objects: the checker hands back a fresh object for each mention of
+    // one instantiation, so object identity would mint a new anchor per member
+    // and the member walk below would never converge.
+    //
+    // A class or interface's own type parameter that never reaches a stored
+    // field -- `layoutRelevantParameterIndices`'s own question -- is folded
+    // to one canonical placeholder instead of its real argument. Two
+    // instantiations that disagree ONLY on such a parameter (hono's
+    // `Hono<E,S,BasePath,CurrentPath>` across every distinct route
+    // registration, `S` never stored) are the SAME physical layout, and
+    // keying them apart mints one specialization per call site -- the
+    // shape of the `#addRoute` producer stack overflow this exists to cut
+    // off. `Context<E,...>`'s `env: E['Bindings']` keeps `E` unerased: an
+    // unproven position is never folded, only one the field walk actually
+    // proved irrelevant.
+    const genericOwner =
+      ts.isClassLike(declared.declarationNode) || ts.isInterfaceDeclaration(declared.declarationNode) ? declared.declarationNode : null
+    const layoutRelevant = genericOwner ? layoutRelevantParameterIndices(checker, genericOwner) : null
+    //
+    // A class's CONSTRUCTOR type (`typeof Box`) carries no type arguments,
+    // so the constructor side of a generic class was one anchor for every
+    // instantiation -- one construct signature, one instance carrier and
+    // one thunk, whichever copy completed it first, and `new Box<string>`
+    // beside `new Box<number>` converted its argument to the other copy's
+    // parameter. Inside a copy of the class, when the class's copies can
+    // differ in layout at all (`copiesMayDifferInLayout`), the copy's own
+    // fillings are the arguments the constructor object is being read AT
+    // (`this.constructor`, `new Box(...)` in a method, and every
+    // `new Box<string>(...)` site, which the census types in the copy it
+    // reaches), folded exactly as the instance side folds its written
+    // arguments; the deriver's `physicalClassDeclarationOf` then keys the
+    // two sides of one instantiation to one physical class. Outside any
+    // copy the arguments stay empty, which is the root's own constructor
+    // object.
+    const copy =
+      declared.kind === 'class-constructor' &&
+      ts.isClassLike(declared.declarationNode) &&
+      specializations.copiesMayDifferInLayout(declared.declarationNode)
+        ? foldedCopyOf(declared.declarationNode, layoutRelevant)
+        : null
+    // A class whose copies must not split has ONE struct. Keying each
+    // instantiation's anchor on its own written fillings gives that one
+    // struct several shapes, and its field carriers then come from
+    // whichever shape completed the anchor first -- for
+    // `ReadableStream<any>` beside `ReadableStream<Uint8Array>` that was
+    // the `any` one, so the struct stored `dynamic` and every read in the
+    // concrete copy refused a narrowing no target installs. The census
+    // names the most specific copy instead; keying every instantiation
+    // there gives the collapse a single honest shape, and the wider
+    // copies' reads widen out of it.
+    const canonical =
+      declared.kind === 'class-instance' && genericOwner && ts.isClassLike(genericOwner)
+        ? specializations.canonicalLayoutFillings(genericOwner)
+        : null
+    const typeArguments =
+      declared.kind === 'class-constructor'
+        ? (copy?.typeArguments ?? [])
+        : typeArgumentsOf(type).map((argument, index) => {
+            if (layoutRelevant && !layoutRelevant.has(index)) return erasedTypeArgument()
+            return typeOf(canonical?.[index] ?? argument)
+          })
+    // Reserved before the body is built, because building it walks members and
+    // a member can reach this same anchor through a second checker type
+    // object. `fresh` says which of the two this call is: the reserver
+    // completes, everyone else just reads the id back.
+    const { id: anchor, fresh } = table.anchor(`${declared.kind}:${declared.declaration}:${typeArguments.join(',')}`)
+    if (copy) recordClassCopy(declared.declaration, copy.ordinal, copy.typeArguments, anchor)
+    inProgress.set(type, anchor)
+    remember(type, anchor)
+    let settled = false
+    try {
+      if (fresh) table.complete(anchor, buildDeclaredShape(type, declared, typeArguments))
+      settled = true
+    } finally {
+      inProgress.delete(type)
+      // An unwound walk leaves nothing standing: not the memo, and -- when
+      // this walk is the one that reserved it -- not the reservation either.
+      if (!settled) {
+        completed.delete(type)
+        if (fresh) table.abandon(anchor)
+      }
+    }
+    return anchor
   }
 
   const declaredAnchorOf = (type: ts.Type): DeclaredAnchor | null => {
@@ -2095,94 +2271,13 @@ const buildMapper = (
 
     const declared = declaredAnchorOf(type)
     if (declared) {
-      // Anchor before walking members. Every cycle in the type graph passes
-      // through a declared name, so this is the one place that makes recursion
-      // terminate: a member that refers back resolves to an id that already
-      // exists instead of re-entering translation.
-      // The key uses the arguments' canonical structural ids, not the checker's
-      // type objects: the checker hands back a fresh object for each mention of
-      // one instantiation, so object identity would mint a new anchor per member
-      // and the member walk below would never converge.
-      //
-      // A class or interface's own type parameter that never reaches a stored
-      // field -- `layoutRelevantParameterIndices`'s own question -- is folded
-      // to one canonical placeholder instead of its real argument. Two
-      // instantiations that disagree ONLY on such a parameter (hono's
-      // `Hono<E,S,BasePath,CurrentPath>` across every distinct route
-      // registration, `S` never stored) are the SAME physical layout, and
-      // keying them apart mints one specialization per call site -- the
-      // shape of the `#addRoute` producer stack overflow this exists to cut
-      // off. `Context<E,...>`'s `env: E['Bindings']` keeps `E` unerased: an
-      // unproven position is never folded, only one the field walk actually
-      // proved irrelevant.
-      const genericOwner =
-        ts.isClassLike(declared.declarationNode) || ts.isInterfaceDeclaration(declared.declarationNode) ? declared.declarationNode : null
-      const layoutRelevant = genericOwner ? layoutRelevantParameterIndices(checker, genericOwner) : null
-      //
-      // A class's CONSTRUCTOR type (`typeof Box`) carries no type arguments,
-      // so the constructor side of a generic class was one anchor for every
-      // instantiation -- one construct signature, one instance carrier and
-      // one thunk, whichever copy completed it first, and `new Box<string>`
-      // beside `new Box<number>` converted its argument to the other copy's
-      // parameter. Inside a copy of the class, when the class's copies can
-      // differ in layout at all (`copiesMayDifferInLayout`), the copy's own
-      // fillings are the arguments the constructor object is being read AT
-      // (`this.constructor`, `new Box(...)` in a method, and every
-      // `new Box<string>(...)` site, which the census types in the copy it
-      // reaches), folded exactly as the instance side folds its written
-      // arguments; the deriver's `physicalClassDeclarationOf` then keys the
-      // two sides of one instantiation to one physical class. Outside any
-      // copy the arguments stay empty, which is the root's own constructor
-      // object.
-      const copy =
-        declared.kind === 'class-constructor' &&
-        ts.isClassLike(declared.declarationNode) &&
-        specializations.copiesMayDifferInLayout(declared.declarationNode)
-          ? foldedCopyOf(declared.declarationNode, layoutRelevant)
-          : null
-      // A class whose copies must not split has ONE struct. Keying each
-      // instantiation's anchor on its own written fillings gives that one
-      // struct several shapes, and its field carriers then come from
-      // whichever shape completed the anchor first -- for
-      // `ReadableStream<any>` beside `ReadableStream<Uint8Array>` that was
-      // the `any` one, so the struct stored `dynamic` and every read in the
-      // concrete copy refused a narrowing no target installs. The census
-      // names the most specific copy instead; keying every instantiation
-      // there gives the collapse a single honest shape, and the wider
-      // copies' reads widen out of it.
-      const canonical =
-        declared.kind === 'class-instance' && genericOwner && ts.isClassLike(genericOwner)
-          ? specializations.canonicalLayoutFillings(genericOwner)
-          : null
-      const typeArguments =
-        declared.kind === 'class-constructor'
-          ? (copy?.typeArguments ?? [])
-          : typeArgumentsOf(type).map((argument, index) => {
-              if (layoutRelevant && !layoutRelevant.has(index)) return erasedTypeArgument()
-              return typeOf(canonical?.[index] ?? argument)
-            })
-      // Reserved before the body is built, because building it walks members and
-      // a member can reach this same anchor through a second checker type
-      // object. `fresh` says which of the two this call is: the reserver
-      // completes, everyone else just reads the id back.
-      const { id: anchor, fresh } = table.anchor(`${declared.kind}:${declared.declaration}:${typeArguments.join(',')}`)
-      if (copy) recordClassCopy(declared.declaration, copy.ordinal, copy.typeArguments, anchor)
-      inProgress.set(type, anchor)
-      remember(type, anchor)
-      let settled = false
-      try {
-        if (fresh) table.complete(anchor, buildDeclaredShape(type, declared, typeArguments))
-        settled = true
-      } finally {
-        inProgress.delete(type)
-        // An unwound walk leaves nothing standing: not the memo, and -- when
-        // this walk is the one that reserved it -- not the reservation either.
-        if (!settled) {
-          completed.delete(type)
-          if (fresh) table.abandon(anchor)
-        }
-      }
-      return anchor
+      const family = hostConstructorFamilyOf(type)
+      if (family === null) return anchorDeclared(type, declared)
+      const exact = anchorDeclared(type, declared)
+      const base = type.getSymbol()
+      if (base) exactFamilyAnchors.set(base, exact)
+      const members = [...new Set(family.map((member) => (member.getSymbol() === base ? exact : typeOf(member))))]
+      return remember(type, members.length === 1 ? exact : table.intern({ kind: 'union', members }))
     }
 
     const callSignatures = type.getCallSignatures()
@@ -3207,14 +3302,19 @@ const buildMapper = (
     // each member's own prototype object, so the read is the union of those
     // objects, each anchored exactly as a lone `X.prototype` read is. One
     // member that is not such a constructor leaves the read to the checker.
-    const members = parameters.unionArmsAt(node.expression) ?? (receiverType.isUnion() ? receiverType.types : null)
-    if (members !== null) {
-      const anchors = members.map((member) => prototypeAnchorOf(node, member))
-      if (anchors.some((anchor) => anchor === null)) return null
-      const distinct = [...new Set(anchors as StructuralTypeId[])]
-      return distinct.length === 1 ? (distinct[0] ?? null) : table.intern({ kind: 'union', members: distinct })
-    }
-    return prototypeAnchorOf(node, receiverType)
+    //
+    // A member typed by a host constructor family's base is any of the family,
+    // as `typeOf` carries it (`hostConstructorFamilyOf`), so it reads every
+    // member's prototype -- except through the standard global itself, which
+    // is exactly its own constructor.
+    const exactGlobal =
+      ts.isIdentifier(node.expression) && hostConstructorGlobalOf(checker.getSymbolAtLocation(node.expression)?.valueDeclaration) !== null
+    const receivers = parameters.unionArmsAt(node.expression) ?? (receiverType.isUnion() ? receiverType.types : [receiverType])
+    const members = receivers.flatMap((member) => (exactGlobal ? null : hostConstructorFamilyOf(member)) ?? [member])
+    const anchors = members.map((member) => prototypeAnchorOf(node, member))
+    if (anchors.some((anchor) => anchor === null)) return null
+    const distinct = [...new Set(anchors as StructuralTypeId[])]
+    return distinct.length === 1 ? (distinct[0] ?? null) : table.intern({ kind: 'union', members: distinct })
   }
 
   const prototypeAnchorOf = (node: ts.PropertyAccessExpression, receiverType: ts.Type): StructuralTypeId | null => {
@@ -3527,6 +3627,16 @@ const buildMapper = (
     (node) => mapper.rawTypeAt(node)
   )
   const structuralRules: readonly StructuralRule[] = [
+    {
+      // A reference to the host constructor global itself -- `Error`, not a
+      // value typed `ErrorConstructor` -- is exactly that one object, so it
+      // keeps its own handle where `typeOf` answers the family union
+      // (`hostConstructorFamilyOf`): `new Error(m)` constructs through that
+      // handle, and passing `Error` where the family is expected picks its arm.
+      name: 'exact-host-constructor-global',
+      forms: [ts.SyntaxKind.Identifier],
+      resolve: (node) => (ts.isIdentifier(node) ? hostConstructorGlobalOf(checker.getSymbolAtLocation(node)?.valueDeclaration) : null)
+    },
     {
       name: 'mutable-method-storage',
       forms: [ts.SyntaxKind.PropertyAccessExpression, ts.SyntaxKind.ElementAccessExpression],
@@ -4424,7 +4534,11 @@ const buildMapper = (
       const construct = checker.getTypeAtLocation(node).getConstructSignatures()[0]
       return construct ? typeOf(construct.getReturnType()) : typeAt(node)
     },
+    hostConstructorFamilyOf,
+    exactHostConstructorOf,
     valueTypeAt: (node) => {
+      const hostGlobal = hostConstructorGlobalOf(node)
+      if (hostGlobal) return hostGlobal
       const localUnion = localUnionAt(node)
       if (localUnion) return localUnion
       const accessor = accessorSignatureOf(checker, node)

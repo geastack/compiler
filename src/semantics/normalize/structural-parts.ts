@@ -658,6 +658,12 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
   const censusValueNodeOf = (declaration: ts.Declaration): ts.Node | null => {
     if (ts.isPropertyAssignment(declaration)) return declaration.initializer
     if (ts.isShorthandPropertyAssignment(declaration)) return declaration.name
+    // A field a JavaScript class declares by assignment (`this.first = null`)
+    // is stored where the write's LEFT side names it, and that is where the
+    // field census publishes the joined type every read and write of it gets.
+    // The assignment expression itself evaluates to its right side -- one
+    // write's value, not what the field holds.
+    if (ts.isBinaryExpression(declaration) && declaration.operatorToken.kind === ts.SyntaxKind.EqualsToken) return declaration.left
     return null
   }
 
@@ -765,7 +771,7 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // (`structural-array-element.ts`) for why the checker's answer needs a
     // second opinion here at all.
     const inferredCollection =
-      table && declaration ? inferredCollectionTypeArgumentsAt(collections, table, typeOf, bags, declared, declaration) : null
+      table && censusNode ? inferredCollectionTypeArgumentsAt(collections, table, typeOf, bags, declared, censusNode) : null
     const arrayElement = censusNode
       ? inferredArrayElementAt(checker, collections, (node) => checker.getTypeAtLocation(node), censusNode)
       : null

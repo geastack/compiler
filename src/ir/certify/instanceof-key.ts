@@ -34,3 +34,17 @@ export const mapTestable = (representation: Representation): boolean => {
   if (representation.kind === 'tagged-union') return representation.arms.every((arm) => mapTestable(arm.value))
   return true
 }
+
+/**
+ * The arms of a right-hand operand that is a union of host constructor handles
+ * (a slot typed by a host constructor family's base holds whichever member was
+ * passed), or `null`. The value is exactly one arm at run time, so the test is
+ * that arm's own `[[HasInstance]]`: certification demands each arm's key as a
+ * lone right operand carrying it would, and emission dispatches on the tag.
+ */
+export const hostConstructorUnionArms = (representation: Representation): readonly Representation[] | null =>
+  representation.kind === 'tagged-union' &&
+  representation.arms.length > 0 &&
+  representation.arms.every((arm) => arm.value.kind === 'native-handle')
+    ? representation.arms.map((arm) => arm.value)
+    : null
