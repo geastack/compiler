@@ -1,6 +1,7 @@
 import { isRealCallableDeclaration, isModuleExportedDeclaration, isTypePositionReference, runtimeParametersOf } from './flow/targets.js'
 import { inProgramImportReferencesOf } from './flow/export-importers.js'
 import ts from 'typescript'
+import { methodSlotIsWritten } from './flow/method-slot-writes.js'
 import { implicitArgumentsSlotOf } from './implicit-arguments.js'
 import {
   implicitArgumentsReadTypeAt,
@@ -2396,7 +2397,7 @@ export const censusParameterBindings = (
         // returns `canvas.getContext( ... )`, and once `canvas` is known so is
         // this.
         const declared = signature.declaration
-        return declared && ts.isFunctionLike(declared) ? resolvedReturnTypeOf(declared) : null
+        return declared && ts.isFunctionLike(declared) && !methodSlotIsWritten(valueFlow, declared) ? resolvedReturnTypeOf(declared) : null
       }
       if (ts.isVariableDeclaration(node)) return writeSetTypeOf(node)
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {

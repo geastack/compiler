@@ -7,6 +7,7 @@ import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } 
 import type { ValueFlowIndex } from './flow/model.js'
 import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
 import { thisConstructorFamilyOf } from './flow/member-call-forwarding.js'
+import { methodSlotIsWritten } from './flow/method-slot-writes.js'
 import { unwrapErasedExpression } from './producers/erasure.js'
 import {
   annotationStatesNothing,
@@ -570,12 +571,13 @@ export const censusReturnBindings = (
   const assignedObjectReturns = new Set<ReturnCandidateDeclaration>()
   /** Function expressions whose return convention is the slot they are written into -- see `contextualReturnTypeOf`. */
   const contextualReturns = new Map<ReturnCandidateDeclaration, ts.Type>()
+  const slotIsWritten = (node: ReturnCandidateDeclaration): boolean => methodSlotIsWritten(flow, node)
   const visit = (node: ts.Node): void => {
     if ((ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && !hasStatedReturnType(checker, node) && node.body !== undefined) {
       const contextual = contextualReturnTypeOf(checker, node)
       if (contextual) contextualReturns.set(node, contextual)
     }
-    if (isReturnCandidateKind(node) && !hasStatedReturnType(checker, node) && node.body !== undefined) {
+    if (isReturnCandidateKind(node) && !hasStatedReturnType(checker, node) && node.body !== undefined && !slotIsWritten(node)) {
       const signature = checker.getSignatureFromDeclaration(node)
       const returned = signature ? checker.getReturnTypeOfSignature(signature) : null
       // `isAnyType` alone is a trap here, and exactly the one `parameter-
