@@ -2686,14 +2686,53 @@ export const rebasesRestOverLeadingParameters = (source: Representation, target:
   if (!slot || !tail || slot.kind !== 'array-object') return false
   if (representationKey(slot) !== representationKey(tail)) return false
   const elementKey = representationKey(slot.element)
+  // A box holds `undefined` itself, so a leading parameter carried as the
+  // element when the element IS the box needs no `Optional` around it
+  // (`HoldsItsOwnAbsence`, gea_runtime.h): pino's `function (...args)` held
+  // where `(first, ...rest)` is written.
   return from.parameters
     .slice(0, leading)
     .every(
       (parameter) =>
-        parameter.value.kind === 'optional' &&
-        parameter.value.absence === 'undefined' &&
-        representationKey(parameter.value.payload) === elementKey
+        (parameter.value.kind === 'optional' &&
+          parameter.value.absence === 'undefined' &&
+          representationKey(parameter.value.payload) === elementKey) ||
+        (slot.element.kind === 'dynamic' && representationKey(parameter.value) === elementKey)
     )
+}
+
+/**
+ * The opposite rebase: a source taking ONE rest array stored where the target
+ * names leading parameters before its own rest -- avvio's `debug`, node's
+ * `util.debuglog(...)` result `(...args) => void` declared `(msg: string,
+ * ...param) => void`. The thunk gathers the leading arguments, in order, into
+ * the array the source takes, followed by the target's own rest. Each leading
+ * parameter must enter the element: the element itself, an `Optional` of it
+ * (absent ends the run), or any carrier a box holds when the element is the
+ * box. `gea_runtime.h`'s `LeadingGatherAdmits` states the same conditions over
+ * the C++ types.
+ */
+export const gathersLeadingIntoRest = (source: Representation, target: Representation): boolean => {
+  const from = callableObjectAbi(source)
+  const to = callableObjectAbi(target)
+  if (!from || !to) return false
+  if (from.receiver !== null || to.receiver !== null) return false
+  if (representationKey(from.result) !== representationKey(to.result)) return false
+  if (from.restFrom !== 0 || from.parameters.length !== 1) return false
+  const leading = to.parameters.length - 1
+  if (leading < 1 || to.restFrom !== leading) return false
+  const tail = from.parameters[0]?.value
+  const slot = to.parameters[leading]?.value
+  if (!tail || !slot || tail.kind !== 'array-object') return false
+  if (representationKey(slot) !== representationKey(tail)) return false
+  const element = tail.element
+  const elementKey = representationKey(element)
+  return to.parameters.slice(0, leading).every((parameter) => {
+    const carrier = parameter.value
+    if (representationKey(carrier) === elementKey) return true
+    if (carrier.kind === 'optional' && carrier.absence === 'undefined' && representationKey(carrier.payload) === elementKey) return true
+    return element.kind === 'dynamic' && dynamicTagFor(carrier) !== null
+  })
 }
 
 export const discardsResultIntoVoid = (source: Representation, target: Representation): boolean => {
@@ -3389,6 +3428,7 @@ export const conversionChain: readonly ConversionStep[] = [
     apply: (source, target, text) => (discardsResultIntoVoid(source, target) ? text : undefined)
   },
   { id: 'callable-rebases-rest', apply: (source, target, text) => (rebasesRestOverLeadingParameters(source, target) ? text : undefined) },
+  { id: 'callable-gathers-leading', apply: (source, target, text) => (gathersLeadingIntoRest(source, target) ? text : undefined) },
   { id: 'result-adapted-callable', apply: (source, target, text) => claimed(resultAdaptedCallableText(source, target, text)) },
   // `gea::Optional<T>` declares a converting constructor from `T`, so a present
   // payload widens by being written where the optional is expected.
