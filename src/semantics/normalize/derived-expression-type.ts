@@ -3136,6 +3136,46 @@ const widenLiteralForm = (checker: ts.TypeChecker, type: ts.Type): ts.Type =>
  * reasoning that made `annotationStatesNothing` shared. One rule, one file,
  * asked by both.
  */
+/**
+ * Whether the writes that DO speak state only the placeholder a storage holds
+ * before its value arrives: `null` or `undefined`, and nothing else.
+ *
+ * The lenient retry of `local-bindings.ts` and `field-bindings.ts` joins the
+ * speaking writes on the ground that the silent ones state nothing that could
+ * disagree. That ground holds for `Vector3.x`'s 33 `number` writes and one
+ * silent one. It does not hold when every speaker is nullish: then the silent
+ * writes are the only ones that could say what the storage holds, and joining
+ * the placeholder alone types a slot the program fills with a real value as
+ * `null`. three's `Node._beforeNodes` is written `null` in the constructor,
+ * `[]` in `before()` (silent: its element comes from a push through the field
+ * itself) and `currentBeforeNodes` in `build()` (silent: a copy of the field),
+ * and was bound to `null` -- so `for ( const beforeNode of currentBeforeNodes )`
+ * iterated a `null` with no `@@iterator` to read. Asked by both censuses so the
+ * twin loops keep one rule.
+ */
+/**
+ * The node a MEMBER's census answer is published against: an object-literal
+ * property's initializer (or a shorthand's name), and for every other
+ * declaration the declaration itself -- except a JavaScript field declared by
+ * assignment (`this._beforeNodes = null`), which is asked at its left-hand
+ * side, the read of the field. The assignment EXPRESSION's value is its
+ * right-hand side, so asking it answered the FIRST write's type for the whole
+ * field whenever `field-bindings.ts` refused the field's join: `null`, for a
+ * field the program later fills with an array. `structural-parts.ts`'s
+ * `memberOf` (the field's layout) and `structural-layout-type.ts`'s
+ * `declaredMemberTypeOf` (a read through the census receiver) ask this one
+ * rule, so the layout and the reads agree.
+ */
+export const memberCensusNodeOf = (declaration: ts.Declaration): ts.Node => {
+  if (ts.isPropertyAssignment(declaration)) return declaration.initializer
+  if (ts.isShorthandPropertyAssignment(declaration)) return declaration.name
+  if (ts.isBinaryExpression(declaration) && declaration.operatorToken.kind === ts.SyntaxKind.EqualsToken) return declaration.left
+  return declaration
+}
+
+export const speaksOnlyNullish = (types: readonly ts.Type[]): boolean =>
+  types.length > 0 && types.every((type) => (type.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0)
+
 export const joinOfWrites = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts.Type | null => {
   const direct = widestOf(checker, types)
   if (direct) return direct

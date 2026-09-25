@@ -15,6 +15,7 @@ import {
   narrowsOnlyUnstatedPositions,
   memberTypeOf,
   objectAssignTargetType,
+  speaksOnlyNullish,
   unwrapExplicitThisCall
 } from './derived-expression-type.js'
 import { carriesUnsubstitutedGeneric, emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
@@ -963,8 +964,9 @@ export const censusFieldBindings = (
     // whose every write is silent refuses exactly as before. Measured shape:
     // `Vector3`'s `x`/`y`/`z` carry 34 writes each, 33 typed `number` and one
     // (`this.x = e[ 12 ]`, `e` unannotated) silent -- 759 reads boxed by a
-    // veto that read no fact.
-    else if (silent > 0 && (!lenientPhase || types.length === 0)) attribute(symbol, 'write-unresolved')
+    // veto that read no fact. Speakers that state only `null`/`undefined`
+    // exhaust nothing, though (`speaksOnlyNullish`).
+    else if (silent > 0 && (!lenientPhase || types.length === 0 || speaksOnlyNullish(types))) attribute(symbol, 'write-unresolved')
     else {
       const joined = joinOfWrites(checker, types)
       if (joined) result = joined

@@ -687,25 +687,6 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     }
   }
 
-  /**
-   * The expression a member's OWN declaration states its value from, when that
-   * declaration is one of the shapes `parameters` (the fully composed
-   * parameter+return+local+field census, despite the name -- see
-   * `frontend.ts`'s `compose`) already knows how to answer about: an object
-   * LITERAL property's initializer (`shaderID: shaderID` -- the identifier
-   * `shaderID` is exactly the node `local-bindings.ts` published an answer
-   * for), or a shorthand property's own name (`{ shaderID }`, which names the
-   * same outer binding). A class field's declaration is one one of its OWN
-   * writes -- `field-bindings.ts` already joins every write reaching the
-   * FIELD's symbol under one answer, so the declaration node itself, not its
-   * "value", is what should be asked; see the call site below.
-   */
-  const censusValueNodeOf = (declaration: ts.Declaration): ts.Node | null => {
-    if (ts.isPropertyAssignment(declaration)) return declaration.initializer
-    if (ts.isShorthandPropertyAssignment(declaration)) return declaration.name
-    return null
-  }
-
   /** Accessor members currently being resolved through their passthrough target; see `memberOf`. */
   const passthroughSeen = new Set<ts.Symbol>()
 

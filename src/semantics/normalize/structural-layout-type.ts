@@ -484,11 +484,7 @@ export const createLayoutTypeResolver = (
     // its INITIALIZER/shorthand name, exactly as `structural-parts.ts`'s
     // `censusValueNodeOf` reads it -- a class field's is published against
     // the declaration (one of its own writes) directly.
-    const censusNode = ts.isPropertyAssignment(declaration)
-      ? declaration.initializer
-      : ts.isShorthandPropertyAssignment(declaration)
-        ? declaration.name
-        : declaration
+    const censusNode = memberCensusNodeOf(declaration)
     const fromCensus = parameters.typeAt(censusNode)
     if (fromCensus && !isUnreducedTypeForm(fromCensus) && (fromCensus.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0)
       return fromCensus
