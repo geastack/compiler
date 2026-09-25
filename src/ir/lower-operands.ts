@@ -1364,6 +1364,11 @@ export const packRestArguments = (
       }
       return { kind: 'gather' as const, iterator: entry.value }
     }
+    // A declared iterable's own iterator object: gathered through its `next()`,
+    // each value converted into the rest element (`recordIteratorGatherLines`).
+    if (entry.value.representation.kind === 'record' || entry.value.representation.kind === 'native-record-ref') {
+      return { kind: 'gather' as const, iterator: entry.value }
+    }
     // Set/string/cursor range sources retain their existing emitter checks.
     // Only a dynamic iterator needs this dedicated materialization path.
     // A source carried wider than the rest element -- an open-ended tuple's

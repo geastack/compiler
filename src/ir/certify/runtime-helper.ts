@@ -215,8 +215,17 @@ const ownKindDemandsOf = (operation: IrOperation, ctx: CertifyContext): readonly
     case 'allocate-array-object': {
       const semantic = ctx.semanticOperationOf(operation.lineage)
       if (semantic?.family === 'allocation') {
-        const dynamicGather = operation.elements.some((element) => element.kind === 'gather')
-        return [helper(`allocation:array-literal:${operation.result.representation.kind}${dynamicGather ? '(dynamic-gather)' : ''}`)]
+        const gathers = operation.elements.flatMap((element) => (element.kind === 'gather' ? [element.iterator.representation.kind] : []))
+        const recordGather = gathers.some((kind) => kind === 'record' || kind === 'native-record-ref')
+        const dynamicGather = gathers.some((kind) => kind !== 'record' && kind !== 'native-record-ref')
+        return [
+          helper(
+            `allocation:array-literal:${operation.result.representation.kind}${dynamicGather ? '(dynamic-gather)' : recordGather ? '(record-gather)' : ''}`
+          ),
+          ...(dynamicGather && recordGather
+            ? [helper(`allocation:array-literal:${operation.result.representation.kind}(record-gather)`)]
+            : [])
+        ]
       }
       // An array-pattern rest ("[...tail]") allocates through this identical
       // primitive; its capability is the SOURCE's own carrier (what the

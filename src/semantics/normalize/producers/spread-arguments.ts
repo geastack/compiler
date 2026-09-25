@@ -462,7 +462,8 @@ export const buildArgumentOperands = (
       if (
         !isArguments &&
         !hasNativeIterationCursor(context, context.types.typeAt(argument.expression)) &&
-        !isDynamicIterationSource(context, context.types.typeAt(argument.expression))
+        !isDynamicIterationSource(context, context.types.typeAt(argument.expression)) &&
+        !gathersDeclaredIterator(context, argument.expression)
       ) {
         return {
           kind: 'refused',
@@ -683,12 +684,16 @@ export const buildArgumentOperands = (
         continue
       }
       const sourceType = context.types.typeAt(argument.expression)
-      const source = isDynamicIterationSource(context, sourceType)
-        ? {
-            kind: 'result' as const,
-            result: semanticResultId(operationId(context.identities.nodeIdOf(argument), 'protocol', 1), 'iterator-record')
-          }
-        : sourceForValue(context, argument.expression)
+      // A dynamic source and a declared iterable are both drained from the one
+      // GetIterator record the protocol candidate publishes: re-reading the
+      // source here would call @@iterator a second time.
+      const source =
+        isDynamicIterationSource(context, sourceType) || gathersDeclaredIterator(context, argument.expression)
+          ? {
+              kind: 'result' as const,
+              result: semanticResultId(operationId(context.identities.nodeIdOf(argument), 'protocol', 1), 'iterator-record')
+            }
+          : sourceForValue(context, argument.expression)
       operands.push(operand(spreadArgumentRole, position, source, sourceType, evaluation))
       position += 1
       continue

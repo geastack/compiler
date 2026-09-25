@@ -24,8 +24,7 @@ import {
   isAsyncCallableNode
 } from './shared.js'
 import { isClosedTupleSpread, tupleSpreadReads } from './tuple-spread.js'
-import { isDynamicIterationSource } from './protocol.js'
-import { iteratorMethodSymbolOf } from './iteration-yield.js'
+import { gathersDeclaredIterator, isDynamicIterationSource } from './protocol.js'
 import type { SemanticEdge } from '../../model/edges.js'
 import { sharedPrimitiveDomainOf } from '../../model/primitive-domain.js'
 import { symbolPropertyKeyText, type StructuralMember, type StructuralShape } from '../../model/structural-types.js'

@@ -43,6 +43,7 @@ import { alignedText } from './emit-callable.js'
 import { cppConstantLiteral, cppNarrowedIntegerType, cppRecordFieldName, cppTypeOf, cppScalarType } from './types.js'
 import { alignedValueText, narrowedLoadText, widenedStoreText } from './emit-narrowing.js'
 import { arrayBulkAppendMethodName } from './prototype/emit-prototype-array.js'
+import { recordIteratorGatherLines } from './emit-iterator.js'
 
 /**
  * How many constant elements make a static table the better spelling.
@@ -423,6 +424,13 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
         continue
       }
       lines.push(`${name}->appendRange(*${operandText(ctx, slot.value)}, ${slot.from});`)
+      continue
+    }
+    if (
+      slot.kind === 'gather' &&
+      (slot.iterator.representation.kind === 'record' || slot.iterator.representation.kind === 'native-record-ref')
+    ) {
+      lines.push(...recordIteratorGatherLines(ctx, slot.iterator, name, representation.element))
       continue
     }
     if (slot.kind === 'gather') {
