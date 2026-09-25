@@ -120,7 +120,7 @@ optional-union-to-discriminated-repro.ts.cpp 1994825df37b
 overload-implementation-signature.ts.cpp d5e10f250b7a
 owned-record-union.ts.cpp e788814333aa
 physical-class-ancestry-declared.ts.cpp 492b223d9a66
-printer-drift.txt cd34f472a73d
+printer-drift.txt 91f366182812
 property-access-unresolved-repro.ts.cpp 634811649cc8
 record-into-named-layout.ts.cpp 099fdfaaae11
 record-round-trip-through-box.ts.cpp 8e77a9618a7f
@@ -156,7 +156,7 @@ uncertified.txt 94ba914aee1b
 uniform-value-union.ts.cpp 2ee92a0d9d2e
 uninhabited-intersection-branch.ts.cpp 65a48829ae60
 uninstantiated-generic.ts.cpp 6b5540eea079
-union-absent-class-arm.js.cpp b4cae105b5c2
+union-absent-class-arm.js.cpp d0ca29cc246e
 union-no-discriminant.ts.cpp 7b032835dca3
 update.ts.cpp 3d975c6429db
 user-collection-method-names.ts.cpp 3b5f653006ce

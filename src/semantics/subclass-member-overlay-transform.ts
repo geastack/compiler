@@ -232,6 +232,17 @@ const AMBIENT_TOKENS: ReadonlySet<string> = new Set([
   'WeakSet'
 ])
 
+/**
+ * The program's own `.js`/`.mjs` files that belong to the package at `root`,
+ * in path order -- what the index reads when the compilation states its
+ * files. A class in a file the program does not include is not a declarer of
+ * anything in it, whatever directory it shares: the package-wide walk below
+ * let another test's `class Leaf` and a three.js copy staged under the
+ * gitignored `measurements/` change what a program emitted.
+ */
+const programSourcesUnder = (root: string, programFiles: ReadonlySet<string>): readonly string[] =>
+  [...programFiles].filter((file) => /\.m?js$/.test(file) && packageRootFor(file) === root).sort()
+
 /** The nearest ancestor directory that owns a `package.json`, or `null`. */
 const packageRootFor = (filePath: string): string | null => {
   let dir = dirname(resolve(filePath))
@@ -840,8 +851,13 @@ const classImportLine = (info: ClassInfo, hereDir: string): string => {
   return `@import { ${exported} } from '${specifier}'`
 }
 
-const buildPackageIndex = (root: string, read: DeclarerReader, neverSkip: ReadonlySet<string>): PackageIndex => {
-  const key = indexKey(root, neverSkip)
+const buildPackageIndex = (
+  root: string,
+  read: DeclarerReader,
+  neverSkip: ReadonlySet<string>,
+  programFiles: ReadonlySet<string> | undefined
+): PackageIndex => {
+  const key = programFiles === undefined ? indexKey(root, neverSkip) : root
   const cached = cachesFor(read).index.get(key)
   if (cached) return cached
 
@@ -853,7 +869,7 @@ const buildPackageIndex = (root: string, read: DeclarerReader, neverSkip: Readon
   const constantDomainsByName = new Map<string, string>()
   const duplicateConstants = new Set<string>()
 
-  for (const filePath of collectSourceFiles(root, neverSkip)) {
+  for (const filePath of programFiles === undefined ? collectSourceFiles(root, neverSkip) : programSourcesUnder(root, programFiles)) {
     let text: string
     try {
       text = read(filePath)
@@ -1213,11 +1229,11 @@ const joinedObjectRecordText = (
  */
 export const createSubclassMemberOverlayTransform =
   (read: DeclarerReader) =>
-  (input: { readonly fileName: string; readonly text: string }): string | null => {
+  (input: { readonly fileName: string; readonly text: string; readonly programFiles?: ReadonlySet<string> }): string | null => {
     if (!/\.m?js$/.test(input.fileName)) return null
     const root = packageRootFor(input.fileName)
     if (!root) return null
-    const index = buildPackageIndex(root, read, ancestryBetween(root, input.fileName))
+    const index = buildPackageIndex(root, read, ancestryBetween(root, input.fileName), input.programFiles)
 
     const here = resolve(input.fileName)
     const file = ts.createSourceFile(input.fileName, input.text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)

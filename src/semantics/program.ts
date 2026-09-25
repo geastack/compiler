@@ -115,6 +115,8 @@ export interface ProgramInput {
     readonly fileName: string
     readonly text: string
     readonly declarationFileName?: string
+    /** Every source file this program's roots reach -- see `programSourceClosure`. */
+    readonly programFiles?: ReadonlySet<string>
   }) => string | null)[]
 }
 
@@ -534,8 +536,45 @@ const typeScriptSpelling = (module: ts.ResolvedModuleFull | undefined): ts.Resol
     ? { ...module, resolvedFileName: module.resolvedFileName.split(sep).join('/') }
     : module
 
+/**
+ * Every source file the roots reach through the module specifiers they spell,
+ * resolved exactly as the program resolves them, as absolute paths.
+ *
+ * A transform that reads OTHER files to decide what one file means (the
+ * subclass member overlay) has to read the program's files and nothing else:
+ * reading every file in a package made one program's output depend on what
+ * else happened to sit in that directory -- another test's class, or a copy
+ * of three.js staged under the gitignored `measurements/`. The program itself
+ * cannot answer this yet (its files are what the transforms are producing),
+ * so it is asked of the roots' own text, which is the same graph before any
+ * rewrite.
+ */
+const programSourceClosure = (
+  roots: readonly string[],
+  host: ts.CompilerHost,
+  resolver: ReturnType<typeof createModuleResolver>,
+  stated: ProgramInput['moduleResolution']
+): ReadonlySet<string> => {
+  const seen = new Set<string>()
+  const queue = roots.map((root) => resolve(root))
+  for (let file = queue.pop(); file !== undefined; file = queue.pop()) {
+    if (seen.has(file)) continue
+    seen.add(file)
+    if (isDeclarationPath(file)) continue
+    const text = host.readFile(file)
+    if (text === undefined) continue
+    const answers = stated?.get(file)
+    for (const imported of ts.preProcessFile(text, true, true).importedFiles) {
+      const target = resolver.resolve(imported.fileName, file, undefined, answers?.get(imported.fileName)).implementation
+      if (target && !isDeclarationPath(target.resolvedFileName)) queue.push(resolve(target.resolvedFileName))
+    }
+  }
+  return seen
+}
+
 const transformingHost = (
   input: ProgramInput,
+  roots: readonly string[],
   options: ts.CompilerOptions,
   resolutionDiagnostics: { readonly literal: ts.StringLiteralLike; readonly diagnostic: ts.Diagnostic }[],
   preparedSourceText: ReadonlyMap<string, string>,
@@ -600,6 +639,8 @@ const transformingHost = (
     })
   }
   const unchecked = createUncheckedJavaScriptPolicy(input.uncheckedJavaScript ?? new Set(), host)
+  let programFiles: ReadonlySet<string> | undefined
+  const programFilesOf = (): ReadonlySet<string> => (programFiles ??= programSourceClosure(roots, host, resolver, stated))
   const parse: ts.CompilerHost['getSourceFile'] = (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {
     const prepared = preparedSourceText.get(resolve(fileName))
     if (prepared !== undefined) return ts.createSourceFile(fileName, prepared, languageVersionOrOptions, true, scriptKindOf(fileName))
@@ -615,7 +656,7 @@ const transformingHost = (
     for (const [index, transform] of transforms.entries()) {
       text = timing.measure(
         `transform:${index}:${transform.name}`,
-        () => transform({ fileName, text, ...(declarationFileName ? { declarationFileName } : {}) }) ?? text
+        () => transform({ fileName, text, programFiles: programFilesOf(), ...(declarationFileName ? { declarationFileName } : {}) }) ?? text
       )
     }
     const transformed =
@@ -762,13 +803,13 @@ const configuredProgram = (
   }
   if (!projectFileName) {
     const options = { ...input.options, ...(input.dynamicFallback ? { noImplicitAny: false, checkJs: false } : {}) }
-    const host = transformingHost(input, options, resolutionDiagnostics, preparedSourceText, timing)
     const rootNames = [
       ...new Set([
         ...input.rootFileNames,
         ...(input.commonJsGlobals ? [...input.commonJsGlobals.values()].map((entry) => entry.declarationFileName) : [])
       ])
     ]
+    const host = transformingHost(input, rootNames, options, resolutionDiagnostics, preparedSourceText, timing)
     // `host` is omitted rather than passed as `undefined`: under
     // `exactOptionalPropertyTypes` the two are different, and the option is
     // "the caller supplies a host" -- not "the caller supplies no host".
@@ -806,7 +847,7 @@ const configuredProgram = (
     ...fixedOptions,
     ...(input.dynamicFallback ? { noImplicitAny: false, checkJs: false } : {})
   }
-  const host = transformingHost(input, options, resolutionDiagnostics, preparedSourceText, timing)
+  const host = transformingHost(input, rootNames, options, resolutionDiagnostics, preparedSourceText, timing)
   return buildProgram(rootNames, options, host ?? ts.createCompilerHost(options, true))
 }
 
