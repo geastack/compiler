@@ -485,6 +485,28 @@ const dynamicCallableAbiSupported = (abi: CallableAbi, seen = new Set<Representa
   )
 }
 
+/**
+ * A boxed function wrapped as a typed callable (`list.pop() as (error?: Error |
+ * null) => void`): the adapter boxes each argument it is called with and
+ * recovers the result from the box the function returns. So a parameter only
+ * has to box, and only the result has to be recoverable -- the reverse of
+ * boxing a typed callable (`callableFrameRecoverable`), whose dynamic entry
+ * recovers each argument and boxes the result.
+ */
+const wrappedCallableAbiSupported = (abi: CallableAbi): boolean => {
+  if (abi.receiver !== null && !boxable(abi.receiver)) return false
+  if (abi.result.kind !== 'void' && !dynamicCarrierSupported(abi.result)) return false
+  if (!abi.parameters.every((parameter) => boxable(parameter.value))) return false
+  if (abi.restFrom === null) return true
+  const rest = abi.parameters[abi.restFrom]?.value
+  return (
+    abi.restFrom === abi.parameters.length - 1 &&
+    rest?.kind === 'array-object' &&
+    rest.ownership === 'shared-refcount' &&
+    boxable(rest.element)
+  )
+}
+
 const dynamicCallablePair = (target: Extract<Representation, { kind: 'function-value-dispatch' }>): ClassifierMaterializerPair => {
   const domain = `dynamic-callable:${representationKey(target)}`
   return {
@@ -660,7 +682,7 @@ const cppConversionTables = (
    */
   functionValueDispatchMaterializer: (abi) => {
     const target = { kind: 'function-value-dispatch' as const, abi }
-    return dynamicCallableAbiSupported(abi) ? dynamicCallablePair(target) : null
+    return wrappedCallableAbiSupported(abi) ? dynamicCallablePair(target) : null
   },
   functionMaterializer: (functionId, abi) => {
     if (!dynamicCallableAbiSupported(abi)) return null
