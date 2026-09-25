@@ -64,8 +64,9 @@ class-fixed-slot-reflection.ts.cpp f7e40606208a
 class-instance-viewed-as-interface-keeps-identity.ts.cpp c8600238a7b6
 class-name-length-and-absent-default.runtime.js.cpp f5b8ae02edee
 class-own-field-shadows-method-union.ts.cpp 8ac0d2c3e46f
-class-prototype-members-installed-from-key-list.ts.cpp aec58f2171f7
-class-prototype-reparented-onto-another-class.ts.cpp 5006da2f9672
+class-prototype-members-installed-from-key-list.ts.cpp 164ee443a0c6
+class-prototype-read-keeps-instance-fields.ts.cpp 031d8164be6d
+class-prototype-reparented-onto-another-class.ts.cpp a57c1a586c1d
 class-reflection-sibling-isolation.ts.cpp d2b89912bd4c
 class-static-assignment-slot.runtime.js.cpp 81e438a49b32
 class-static-blocks.ts.cpp a9d11fbf4296
@@ -356,8 +357,8 @@ native-implicit-arguments-union.runtime.js.cpp 6803e558246e
 native-indexed-union.ts.cpp 974e38deb63a
 native-inherited-number-storage.runtime.ts.cpp 08adf0400fd7
 native-method-own-override.runtime.ts.cpp 0ccbd157ccde
-native-method-prototype-read.runtime.ts.cpp fbc84b3b3d29
-native-method-prototype-write.runtime.ts.cpp 9df720b6b5bd
+native-method-prototype-read.runtime.ts.cpp aa6f1353d9f0
+native-method-prototype-write.runtime.ts.cpp 9d9e08b28298
 native-method-public-frame.runtime.ts.cpp 64100491c108
 native-nullish-enumeration.runtime.js.cpp fd2453035960
 native-nullish-operations.ts.cpp 00d10d2b41dd
