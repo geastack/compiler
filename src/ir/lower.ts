@@ -126,6 +126,12 @@ export interface IrLoweringInput {
    * it got merely incompletely.
    */
   readonly plugins: readonly PluginInstance[]
+  /**
+   * Methods lowered a second time with a `dynamic` receiver, with the copy's
+   * convention (`ir/receiver-generic-copies.ts`). Empty for a program that
+   * constructs no proxy.
+   */
+  readonly receiverGenericCopies?: ReadonlyMap<FunctionId, CallableAbi>
 }
 
 export interface IrLoweringBlocker {
@@ -1712,5 +1718,67 @@ export const lowerToIr = (input: IrLoweringInput): IrLoweringResult => {
     }
   }
 
+  // A receiver-generic copy reads the SAME operations with its receiver, and
+  // what is read or called through it, carried as `dynamic`; every other
+  // result keeps the plan's carrier. A copy that does not lower is left out
+  // rather than blocking the program: the method keeps its typed body, whose
+  // receiver unbox refuses a proxy by name if one ever reaches it.
+  for (const [callable, abi] of input.receiverGenericCopies ?? []) {
+    const operationIds = owners.get(callable)
+    if (!operationIds || functionFacts.get(callable)?.generator === true) continue
+    const operations = operationIds.flatMap((id) => input.graph.operations.get(id) ?? [])
+    const dynamic: Representation = { kind: 'dynamic', reason: 'proxy-origin' }
+    const overlay = new Map<SemanticResultId, Representation>(
+      [...receiverDependentResultsOf(operations)].map((result) => [result, dynamic])
+    )
+    const plan = overlaidPlan(input.plan, overlay)
+    // The slots this body's operands enter are the copy's: its own
+    // convention's receiver and result, and the overlaid carriers.
+    const slots = createSlotCensus({ ...input.slots.input, plan, abis: new Map(input.abis).set(callable, abi) })
+    try {
+      const body = lowerOwner(
+        input.graph,
+        plan,
+        constantDeriver,
+        { ...program, slots },
+        abi,
+        null,
+        null,
+        receiverGenericCopyOf(callable),
+        operationIds,
+        input.plugins,
+        edgesByOwner.get(callable) ?? noEdges,
+        regionParts,
+        deferredIteratorCloses,
+        false,
+        exactArmOwners.has(callable)
+      )
+      bodies.set(body.owner, body)
+    } catch (error) {
+      if (!(error instanceof IrLoweringBlockedError)) throw error
+    }
+  }
+
   return { bodies, blocked: Object.freeze(blocked), slotDrift: Object.freeze(program.drift) }
+}
+
+/** The plan with some results' carriers replaced, for one body lowered under a second convention. */
+const overlaidPlan = (plan: SealedRepresentationPlan, overlay: ReadonlyMap<SemanticResultId, Representation>): SealedRepresentationPlan => {
+  // Lookups are what lowering asks; a walk of the whole table is rare, and
+  // only it pays for a merged copy.
+  let merged: Map<SemanticResultId, Representation> | null = null
+  const whole = (): ReadonlyMap<SemanticResultId, Representation> => (merged ??= new Map([...plan.selected, ...overlay]))
+  const selected: ReadonlyMap<SemanticResultId, Representation> = {
+    get: (result) => overlay.get(result) ?? plan.selected.get(result),
+    has: (result) => overlay.has(result) || plan.selected.has(result),
+    get size() {
+      return whole().size
+    },
+    forEach: (visit) => whole().forEach((representation, result) => visit(representation, result, selected)),
+    entries: () => whole().entries(),
+    keys: () => whole().keys(),
+    values: () => whole().values(),
+    [Symbol.iterator]: () => whole()[Symbol.iterator]()
+  }
+  return { ...plan, selected }
 }

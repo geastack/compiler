@@ -1295,6 +1295,12 @@ export interface IrShakeInput {
   readonly deriver: RepresentationDeriver
   /** Whether one method body can fill the callable carrier published by a computed class read. */
   readonly computedMethodCanFill: (callable: FunctionId, target: Representation) => boolean
+  /**
+   * A second body of one owner that nothing names -- a receiver-generic copy
+   * (`ir/receiver-generic-copies.ts`), reached only through the method value
+   * a dynamic read builds -- lives exactly as long as its owner does.
+   */
+  readonly companions?: ReadonlyMap<FunctionId | RegionId, FunctionId | RegionId>
 }
 
 export interface IrShakeResult {
@@ -1345,6 +1351,8 @@ export const shakeProgram = (input: IrShakeInput): IrShakeResult => {
     if (liveOwners.has(owner)) return
     liveOwners.add(owner)
     queue.push(owner)
+    const companion = input.companions?.get(owner)
+    if (companion !== undefined) reach(companion)
   }
 
   // A region runs because something structural runs it -- the entry calls each

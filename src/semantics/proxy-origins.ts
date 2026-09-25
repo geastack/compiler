@@ -21,11 +21,11 @@ import type { InvocationOperation, SemanticOperation } from './model/operations.
  * Values a trap PRODUCES are reached too, because the handler decides them
  * and the checker read their types off the target: the result of calling a
  * proxy (its `apply` trap -- `Fn(...)` is `() => void`, so the checker types
- * its call `void`), a callable read off one (its `get` trap, then called with
- * the proxy as `this`, so the call may return the proxy again, as FnNode's
- * `setLayout` does), and what iterating or destructuring one yields. They are
- * `dynamic`, but only the first kind is a proxy, and only a proxy decides which
- * member names are read with a proxy as `this` (`proxyKeys`).
+ * its call `void`), any member read off one (its `get` trap), and what
+ * iterating or destructuring one yields. They are `dynamic` but not proxies --
+ * except the result of calling a member read off a proxy, which runs with the
+ * proxy as `this` and may return it, as FnNode's `setLayout` does. Only a proxy
+ * decides which member names are read with a proxy as `this` (`proxyKeys`).
  *
  * A proxy passed to a call whose callee is itself `dynamic` escapes this
  * walk: the callee can be any Function object the program boxed. TSL is that
@@ -67,8 +67,6 @@ export const noProxyOrigins: ProxyOrigins = {
 
 /** A carrier question the representation layer answers for the walk: this layer states flow, not carriers. */
 export interface ProxyOriginCarriers {
-  /** Whether a result's own structural carrier is a callable one. */
-  readonly callable: (result: SemanticResultId) => boolean
   /** Whether a result's own structural carrier is `dynamic`. */
   readonly dynamic: (result: SemanticResultId) => boolean
   /** The exact source function a result is proven to be (`callableOriginsOf`). */
@@ -138,10 +136,16 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
   // callee, a store into a `dynamic` cell or property. A dynamic call can
   // reach exactly these.
   const boxed = new Set<FunctionId>()
-  const noteBoxed = (operand: SemanticOperand | undefined): void => {
+  const noteBoxed = (operand: SemanticOperand | undefined, depth = 0): void => {
     if (operand?.source.kind !== 'result') return
     const callable = carriers.functionOf(operand.source.result)
-    if (callable !== undefined) boxed.add(withoutFunctionSpecialization(callable))
+    if (callable !== undefined) {
+      boxed.add(withoutFunctionSpecialization(callable))
+      return
+    }
+    // `o.f = () => {}` stores the assignment's value, which is its operand's.
+    const producer = graph.operations.get(graph.results.get(operand.source.result) ?? ('' as never))
+    if (producer && depth < 8 && passesOperandThrough(producer)) for (const inner of producer.operands) noteBoxed(inner, depth + 1)
   }
   for (const operation of graph.operations.values()) {
     if (operation.family === 'invocation') {
@@ -281,7 +285,8 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
           if (how === 0) break
           // A `[[Set]]` publishes the receiver it wrote into.
           if (operation.internalMethod === 'set') reach(value?.id, how)
-          if (operation.internalMethod === 'get' && value && carriers.callable(value.id)) reach(value.id, DYNAMIC)
+          // A read through one is whatever its `get` trap returns.
+          if (operation.internalMethod === 'get') reach(value?.id, DYNAMIC)
           break
         }
         case 'protocol':

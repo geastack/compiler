@@ -456,6 +456,34 @@ export interface PrototypeReadHooks {
  * dynamic carrier must not spell at all (`test/stored-listener-native-flow`,
  * `native-method-overrides`' `emitted-lacks: gea::Value::box`).
  */
+/**
+ * The method value a dynamic read builds for a method that has a
+ * receiver-generic copy (`ir/receiver-generic-copies.ts`): a receiver that is
+ * an instance of the method's class runs the typed body, and any other -- a
+ * proxy in front of one -- runs the copy, which reads and calls through the
+ * receiver it was given. `null` when the method has no copy.
+ */
+const receiverGenericEntryText = (callable: FunctionId, abi: CallableAbi, copy: CallableAbi | null): string | null => {
+  if (copy === null || abi.receiver === null) return null
+  const receiver = cppTypeOf(abi.receiver)
+  const formals = ['gea::Value gea_receiver', ...abi.parameters.map((p, i) => `${cppAbiParameterType(p)} ${cppFormalName(i)}`)]
+  const actuals = abi.parameters.map((_, i) => cppFormalName(i))
+  const typed = `${cppBodyName(callable)}(${[`gea::detail::DynamicCarrier<${receiver}>::in(gea_receiver, 0)`, ...actuals].join(', ')})`
+  const typedValue =
+    cppResultTypeOf(abi.result) === 'void'
+      ? `(${typed}, gea::Value())`
+      : abi.result.kind === 'dynamic'
+        ? typed
+        : dynamicCarrierBoxText(abi.result, typed)
+  if (typedValue === null) return null
+  const generic = `${cppBodyName(receiverGenericCopyOf(callable))}(${['gea_receiver', ...actuals].join(', ')})`
+  const thunk =
+    `+[](void*, ${formals.join(', ')}) -> gea::Value { ` +
+    `if (gea::detail::DynamicCarrier<${receiver}>::accepts(gea_receiver)) return ${typedValue}; return ${generic}; }`
+  const value: Representation = { kind: 'function-value-dispatch', abi: copy }
+  return dynamicCarrierBoxText(value, `${cppTypeOf(value)}{${thunk}, nullptr}`)
+}
+
 export const prototypeReadHooks = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   abiOf: (callable: FunctionId) => CallableAbi | null,
@@ -487,6 +515,8 @@ export const prototypeReadHooks = (
         ...abi.parameters.map((p, i) => `${cppAbiParameterType(p)} ${cppFormalName(i)}`)
       ]
       const actuals = ['gea_receiver', ...abi.parameters.map((_, i) => cppFormalName(i))]
+      const generic = receiverGenericEntryText(method.callable, abi, abiOf(receiverGenericCopyOf(method.callable)))
+      if (generic !== null) return [{ key: method.key, text: generic }]
       const thunk = `+[](void*, ${formals.join(', ')}) -> ${cppResultTypeOf(abi.result)} { return ${cppBodyName(method.callable)}(${actuals.join(', ')}); }`
       const identified =
         `gea::nativeClassMethodValue<${cppClassName(owner.declaration)}, &${cppCallableDeclarationTagName(callable)}>` +

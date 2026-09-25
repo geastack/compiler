@@ -57,6 +57,7 @@ import type { SlotDrift } from './ir/lower-operands.js'
 import { createSlotCensus } from './projection/slots.js'
 import { hostMethodAliasDeclarations } from './projection/callee.js'
 import { lowerToIr } from './ir/lower.js'
+import { receiverGenericCopiesOf, receiverGenericCopyOf, relocateReceiverGenericCopies } from './ir/receiver-generic-copies.js'
 import { certifyIr, type IrCertification } from './ir/certify.js'
 import { rewriteLiteralSetMembership } from './ir/literal-set-membership.js'
 import { shareReadOnlyEmptyRecords } from './ir/shared-empty-records.js'
@@ -1049,6 +1050,15 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     })()
   )
   const conversionCensus = createConversionNodes({ registry: conversionRegistry, nodes: conversions.nodes })
+  // The class methods a proxy may run with itself as `this` get a second body
+  // with a `dynamic` receiver (`ir/receiver-generic-copies.ts`); none for a
+  // program that constructs no proxy.
+  const receiverGenericCopies = receiverGenericCopiesOf({
+    graph: frontend.graph,
+    classes,
+    abis: abis.abis,
+    origins: representations.proxyOrigins
+  })
   // Lowering runs on the plan's verdict alone. An uncertified program lowers
   // too, so its refusals are rows beside preflight's rather than a stage that
   // never ran; only emission waits for the certificate (see the header).
@@ -1066,7 +1076,8 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         classes,
         slots: slotsForClasses(classes),
         conversions: conversionCensus,
-        plugins
+        plugins,
+        receiverGenericCopies
       })
     : null
 
@@ -1121,6 +1132,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
           placements: splitPlacements,
           classes,
           deriver: representations.deriver,
+          companions: new Map([...receiverGenericCopies.keys()].map((callable) => [callable, receiverGenericCopyOf(callable)])),
           // A computed class read keeps only methods the C++ callable
           // conversion authority can actually publish at that read's ABI.
           // Passing the question in keeps the generic IR shaker free of C++
