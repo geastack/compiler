@@ -4,11 +4,12 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
+import ts from 'typescript'
 import { createProgram } from '../dist/semantics/program.js'
 
 // `PluginCapabilities.uncheckedJavaScript`: package file globs whose JavaScript
 // reports no checker diagnostics, as `// @ts-nocheck` would, with the source
-// left as written. Every JS file in the fixture has one JSDoc type error;
+// left as written. Every JS file the entry imports has one JSDoc type error;
 // `loose-lib/src/**` covers two of them (one nested), and `loose-lib/extra`
 // and `strict-lib/src` stay checked.
 
@@ -90,4 +91,42 @@ test('a plugin states the policy through compile --plugin', () => {
   for (const file of uncovered) assert.ok(withPlugin(file), file)
   const withoutPlugin = reported(invoke([]))
   for (const file of [...covered, ...uncovered]) assert.ok(withoutPlugin(file), file)
+})
+
+// `contradicted-jsdoc-types.ts`: in an unchecked file, a field `@type` that a
+// value the program constructs and stores there contradicts is blanked before
+// the checker the compilation keeps reads it; every other tag stays as written.
+// `groups.js` has one of each kind; the checked copy in `strict-lib` keeps all.
+const groups = (library) => resolve(fixture, `vendor/${library}/src/groups.js`)
+const groupsProgram = () =>
+  createProgram({
+    rootFileNames: [groups('loose-lib'), groups('strict-lib')],
+    projectFileName: resolve(fixture, 'tsconfig.json'),
+    options: {},
+    uncheckedJavaScript: new Set(['loose-lib/src/**'])
+  })
+
+test('a field tag a constructed store contradicts is blanked in place, and no other tag is', () => {
+  const compiled = groupsProgram()
+  const onDisk = readFileSync(groups('loose-lib'), 'utf8')
+  const compiledText = compiled.program.getSourceFile(groups('loose-lib'))?.text ?? ''
+  assert.equal(compiledText.length, onDisk.length)
+  const contradicted = '@type {Object<string,Object<string,Group>>}'
+  const at = onDisk.indexOf(contradicted)
+  assert.equal(compiledText.slice(at, at + contradicted.length), ' '.repeat(contradicted.length))
+  assert.equal(compiledText.slice(0, at) + contradicted + compiledText.slice(at + contradicted.length), onDisk)
+  // The checker the compilation keeps no longer reads a dictionary of groups
+  // out of `byName[ name ]`.
+  const read = compiled.program.getSourceFile(groups('loose-lib'))
+  const initializer = read.statements
+    .flatMap((statement) => (ts.isClassDeclaration(statement) ? [...statement.members] : []))
+    .flatMap((member) => (ts.isMethodDeclaration(member) ? [...(member.body?.statements ?? [])] : []))
+    .find(ts.isVariableStatement).declarationList.declarations[0].initializer
+  assert.doesNotMatch(compiled.checker.typeToString(compiled.checker.getTypeAtLocation(initializer)), /\[x: string\]/)
+})
+
+test('a checked file keeps a contradicted tag, and reports it', () => {
+  const compiled = groupsProgram()
+  assert.equal(compiled.program.getSourceFile(groups('strict-lib'))?.text, readFileSync(groups('strict-lib'), 'utf8'))
+  assert.ok(errorsIn(compiled, groups('strict-lib')).length > 0)
 })
