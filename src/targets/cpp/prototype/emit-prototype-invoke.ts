@@ -3,7 +3,7 @@ import type { CallableAbi, Representation } from '../../../representation/model.
 import { dictionaryKeyDomainOf, representationKey } from '../../../representation/model.js'
 import { hasReferenceIdentity } from '../../../representation/collections.js'
 import { thrownValueCarrier } from '../../../ir/lower-exceptions.js'
-import { alignedValueText, callableObjectAbi } from '../emit-narrowing.js'
+import { alignedValueText, callableObjectAbi, convertedEvaluationText } from '../emit-narrowing.js'
 import { cppConstantLiteral, cppStringLiteral, cppTypeOf, cppUndefinedValue } from '../types.js'
 import {
   createCppEmitBlockedError,
@@ -940,7 +940,13 @@ const keyedCollectionCallText = (
     // The runtime returns Optional<V> in the collection's storage order.
     // The call site's union can have a different order or a narrowed payload.
     const source: Representation = { kind: 'optional', payload: carrier.value, absence: 'undefined' }
-    const converted = alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:collection-get', source, result.representation, invocation)
+    const converted = convertedEvaluationText(
+      ctx,
+      'prototype/emit-prototype-invoke.ts:collection-get',
+      source,
+      result.representation,
+      invocation
+    )
     if (converted === null) {
       throw createCppEmitBlockedError(
         `conversion:${representationKey(source)}->${representationKey(result.representation)}`,
@@ -1159,7 +1165,13 @@ const renderPrototypeMethodCall = (
       const invocation = typedArrayCallText(ctx, read.member, receiver, typedArrayElementSpelling(arm.value), operation.arguments)
       if (operation.result === null || operation.result.representation.kind === 'void') return invocation
       const source: Representation = read.member === 'set' ? { kind: 'undefined' } : arm.value
-      const converted = alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:682', source, operation.result.representation, invocation)
+      const converted = convertedEvaluationText(
+        ctx,
+        'prototype/emit-prototype-invoke.ts:682',
+        source,
+        operation.result.representation,
+        invocation
+      )
       if (converted === null) {
         throw createCppEmitBlockedError(
           `conversion:${representationKey(source)}->${representationKey(operation.result.representation)}`,

@@ -3910,6 +3910,32 @@ export const alignedValueText = (
 }
 
 /**
+ * `alignedValueText` over the text of an EVALUATION -- a call's own rendering
+ * (`gea::runtime::array::pop(xs)`, `map->get(k)`) rather than a name.
+ *
+ * A conversion recipe may spell its input once per branch (an optional read as
+ * a box is `x.has_value() ? box(*x) : undefined`), which is free for a name
+ * and wrong for a call: each spelling runs it again, and a `pop` removes one
+ * element per spelling. So the result is bound once and converted by name
+ * whenever the recipe would mention it more than once.
+ */
+export const convertedEvaluationText = (
+  ctx: ConversionSite,
+  site: string,
+  source: Representation,
+  target: Representation,
+  evaluation: string
+): string | null => {
+  const bound = alignedValueText(ctx, site, source, target, 'gea_evaluated')
+  if (bound === null) return null
+  const parts = bound.split('gea_evaluated')
+  // Exactly one mention runs the evaluation exactly once where the recipe put
+  // it; none would drop it, and more would repeat it.
+  if (parts.length === 2) return parts.join(evaluation)
+  return `[&]() { auto gea_evaluated = ${evaluation}; return ${bound}; }()`
+}
+
+/**
  * A census node's recipe, rendered by one of the two renderers the census
  * owns. The chain first: the registry's atoms ARE its narrowing, widening
  * and recasting steps, and its static recipes are named by the step that

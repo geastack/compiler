@@ -93,7 +93,7 @@ constructor-alias-installed-members.runtime.js.cpp 19a6cf4855e4
 contextual-handler-union-return-slot.ts.cpp 6e40af1ea7a2
 contextual-pattern-callback.ts.cpp 7664ae43caef
 control-flow-structural-view.ts.cpp 9901c479e84d
-converted-pop-result-evaluated-once.runtime.ts.cpp b6b16423d81e
+converted-pop-result-evaluated-once.runtime.ts.cpp 1c193aa49d76
 cpn-numeric-computed-keys.runtime.js.cpp d21f394f1e0c
 date-prototype-method-reflection.runtime.js.cpp 89df87bd3921
 date-setter-argument-coercion.runtime.js.cpp 2235debf782d
@@ -444,7 +444,7 @@ physical-class-ancestry-live.ts.cpp 728e6f672df0
 physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 50f20517ba63
-printer-drift.txt f7b063fb4dd3
+printer-drift.txt c63be35fb50e
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
 promise-method-read-as-value.ts.cpp d92abcc1e89f
@@ -569,7 +569,7 @@ typeof-runtime-string.ts.cpp 5b4c672dec2a
 typeof-then-discriminates-a-union.ts.cpp 16fe804a602d
 unbox-nullable-union.ts.cpp b8a67b94f69c
 uncallable-member-slot-call.runtime.js.cpp f925ad615e3e
-uncertified.txt 903feddc5cf9
+uncertified.txt 81d88eb66100
 union-member-absent-on-promise-arm.ts.cpp fb968705a335
 union-method-absent-on-one-arm-discarded.ts.cpp d2bf86271461
 union-of-tuples-array-pattern.ts.cpp aa8e76675555

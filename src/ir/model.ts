@@ -875,8 +875,13 @@ export type IrArrayElement =
        */
       readonly element?: Representation
     }
-  /** Drain one genuinely dynamic iterator record into this fresh/native array. */
-  | { readonly kind: 'gather'; readonly iterator: IrOperand }
+  /**
+   * Drain one genuinely dynamic iterator record into this fresh/native array.
+   * `element`, when present, is this array's own element carrier, and each
+   * yielded box is converted into it by the ordinary recipe for that pair
+   * (absent, the array's elements are boxes and nothing converts).
+   */
+  | { readonly kind: 'gather'; readonly iterator: IrOperand; readonly element?: Representation }
 
 export interface AllocateArrayObjectOperation extends IrOperationBase {
   readonly kind: 'allocate-array-object'

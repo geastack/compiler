@@ -827,14 +827,15 @@ export const packRestArguments = (
     // folded push (`emit-arrays.ts`) and the packed array agree on the carrier.
     if (entry.kind !== 'spread')
       return { kind: 'element' as const, value: convertTo(ctx, block, lineage, entry.value, restArray.element) ?? entry.value }
+    // A boxed spread drains through the iterator protocol, each yielded box
+    // converted into the rest's own element on the way in -- the same
+    // per-element conversion a wider Array source gets below, which the
+    // emitter installs from the ordinary recipes and refuses by name where
+    // none exists.
     if (entry.value.representation.kind === 'dynamic') {
-      if (restArray.element.kind !== 'dynamic') {
-        throw new IrLoweringBlockedError(
-          `a call gathers a dynamic iterator into a "${representationKey(restArray.element)}" rest element carrier; ` +
-            'per-element dynamic conversion is not installed'
-        )
-      }
-      return { kind: 'gather' as const, iterator: entry.value }
+      return restArray.element.kind === 'dynamic'
+        ? { kind: 'gather' as const, iterator: entry.value }
+        : { kind: 'gather' as const, iterator: entry.value, element: restArray.element }
     }
     // Set/string/cursor range sources retain their existing emitter checks.
     // Only a dynamic iterator needs this dedicated materialization path.
