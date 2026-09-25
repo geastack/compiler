@@ -1345,6 +1345,16 @@ export const packRestArguments = (
     // folded push (`emit-arrays.ts`) and the packed array agree on the carrier.
     if (entry.kind !== 'spread')
       return { kind: 'element' as const, value: convertTo(ctx, block, lineage, entry.value, restArray.element) ?? entry.value }
+    // A `never` spread source (`producers/shared.ts`'s `isNeverIterationSource`)
+    // arrives storage-free: the call cannot run, so the range copy reads the
+    // stand-in for a value that cannot exist, in the rest array's own carrier.
+    // No other spread source is storage-free: the producer admits a spread
+    // only over a native cursor, a tuple, `arguments` or a dynamic value.
+    if (entry.value.representation.kind === 'undefined' || entry.value.representation.kind === 'void') {
+      const standIn = convertTo(ctx, block, lineage, entry.value, restArray, 'never-spread-source')
+      if (standIn === null) throw new IrLoweringBlockedError('a storage-free spread source has no stand-in in the rest array carrier')
+      return { kind: 'spread' as const, value: standIn, from: 0 }
+    }
     if (entry.value.representation.kind === 'dynamic') {
       if (restArray.element.kind !== 'dynamic') {
         throw new IrLoweringBlockedError(

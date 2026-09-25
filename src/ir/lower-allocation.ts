@@ -221,6 +221,13 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
             const value = ctx.builder.compute(block, lineage, 'require-iterable-present', 'RequireIterablePresent', [source], payload)
             source = { value, representation: payload }
           }
+          // A `never` source (`producers/shared.ts`'s `isNeverIterationSource`)
+          // arrives storage-free. The spread cannot run, so the range copy
+          // reads the stand-in for a value that cannot exist, in this
+          // literal's own carrier: `unreachableValue`, never a copy.
+          if (tuple.kind === 'array-object' && isStorageFree(source.representation) && ctx.constantDeriver.isNeverType(slot.operand.type)) {
+            source = convertTo(ctx, block, lineage, source, tuple, 'never-spread-source') ?? source
+          }
           // Dynamic spread operands cite the already-acquired iterator
           // record.  A `Value` does not become an ArrayObject projection just
           // because it is being spread: only the gather primitive may drain

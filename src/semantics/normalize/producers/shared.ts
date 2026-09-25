@@ -1438,6 +1438,7 @@ export const nativeCollectionIterationViewOf = (context: ProducerContext, type: 
 
 export const hasNativeIterationCursor = (context: ProducerContext, type: StructuralTypeId): boolean => {
   if (
+    isNeverIterationSource(context, type) ||
     isPlainArrayType(context, type) ||
     isNativeIterableSetType(context, type) ||
     isNativeIterableMapType(context, type) ||

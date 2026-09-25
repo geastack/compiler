@@ -15,6 +15,7 @@ import {
   iterationPayloadArm,
   isGeneratorType,
   isNativeIterableSetType,
+  isNeverIterationSource,
   isNativeIterableStringType,
   objectSpreadCopiesAtRuntime,
   dynamicSpreadSourceTypeOf,
@@ -133,6 +134,10 @@ const iterationElementType = (
   if (shape.kind === 'array') return shape.element
   if (shape.kind === 'tuple') return context.table.intern({ kind: 'union', members: shape.elements.map((element) => element.type) })
   if (shape.kind === 'unresolved') return effectiveType
+  // See `isNeverIterationSource`: the element of an iteration that never runs
+  // is the storage-free value a `never` is carried as, so the cursor, the
+  // `next` value and the loop variable all agree on one carrier.
+  if (isNeverIterationSource(context, effectiveType)) return context.table.intern({ kind: 'primitive', primitive: 'undefined' })
   // A string yields STRINGS -- one code point per step (ECMA-262 22.1.3.36),
   // and a code point is itself a String value. Answered here rather than by
   // the checker walk below for the same reason an array's is: this layer
