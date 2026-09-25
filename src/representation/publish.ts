@@ -1,6 +1,11 @@
 import type { ComponentId, FunctionId, OperationId, SemanticResultId, StructuralTypeId } from '../identity/ids.js'
 import { componentId, withoutFunctionSpecialization } from '../identity/ids.js'
-import { callableOriginsOf, callableOwnPropertyWritesOf, unknownCallableOwnProperty } from '../semantics/callable-origins.js'
+import {
+  callableBuiltinResolution,
+  callableMutationFactsOver,
+  callableOriginsOf,
+  type CallableMutationFacts
+} from '../semantics/callable-origins.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import { partitionAuthorityComponents } from '../semantics/model/graph.js'
 import { operandOf, type SemanticResult } from '../semantics/model/operands.js'
@@ -467,9 +472,9 @@ const dynamicCallableReadOf = (
  * read the renderer would have spelled statically.
  */
 const shadowedCallableBuiltinReadOf = (
-  graph: SemanticGraph,
   operation: SemanticOperation | undefined,
-  callableOrigins: ReadonlyMap<SemanticResultId, FunctionId>
+  callableOrigins: ReadonlyMap<SemanticResultId, FunctionId>,
+  facts: () => CallableMutationFacts
 ): Representation | null => {
   if (operation?.family !== 'property' || operation.internalMethod !== 'get' || operation.keyIsComputed) return null
   const key = operandOf(operation, 'key')
@@ -479,10 +484,16 @@ const shadowedCallableBuiltinReadOf = (
   const receiver = operandOf(operation, 'receiver')
   if (receiver?.source.kind !== 'result') return null
   const origin = callableOrigins.get(receiver.source.result)
-  if (origin === undefined) return null
-  const own = callableOwnPropertyWritesOf(graph, callableOrigins).get(withoutFunctionSpecialization(origin))
-  if (!own || (!own.has(member) && !own.has(unknownCallableOwnProperty))) return null
-  return { kind: 'dynamic', reason: 'shadowed-callable-builtin' }
+  // Whenever the census cannot prove the read reaches the builtin -- a write
+  // onto this Function object, onto `Function.prototype`, or through a value
+  // whose Function object it cannot name -- the read is the ordinary lookup
+  // the renderer spells as `callableDynamicGet`, whose answer is a box. Only
+  // the first of those three used to count, so a program with one computed
+  // write onto any boxed object still typed every `f.call` as
+  // `CallableFunction.call`'s generic signature, and its receiver slot had no
+  // conversion from `f`'s own frame (fastify's `router.prepareRoute.call`).
+  const resolution = callableBuiltinResolution(facts(), origin === undefined ? null : withoutFunctionSpecialization(origin), member)
+  return resolution === 'builtin' ? null : { kind: 'dynamic', reason: 'shadowed-callable-builtin' }
 }
 
 /** A semantic value proven to be one exact Function object selected for fallback storage. */
@@ -683,6 +694,20 @@ export const publishRepresentations = (
     classCopies
   )
   const builder = createRepresentationPlanBuilder()
+  // The mutation facts over the carriers results' types derive to (with the
+  // module boundary's own override), since no plan exists yet.
+  let mutationFacts: CallableMutationFacts | null = null
+  const facts = (): CallableMutationFacts =>
+    (mutationFacts ??= callableMutationFactsOver(
+      graph,
+      (result) => {
+        const producerId = graph.results.get(result)
+        const producer = producerId === undefined ? undefined : graph.operations.get(producerId)
+        const own = producer?.results.find((candidate) => candidate.id === result)
+        return commonJsBoundaryOf(graph, producer) ?? (own ? deriver.derive(own.type) : undefined)
+      },
+      callableOrigins
+    ))
   // A fresh object literal whose one consumer is a declared cell is minted as
   // that cell's record (`literal-destination.ts`).
   const literalDestinations = literalDestinationsOf(graph, deriver)
@@ -705,7 +730,7 @@ export const publishRepresentations = (
     // publish this loop always did.
     const override =
       commonJsBoundaryOf(graph, operation) ??
-      shadowedCallableBuiltinReadOf(graph, operation, callableOrigins) ??
+      shadowedCallableBuiltinReadOf(operation, callableOrigins, facts) ??
       dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables) ??
       dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables) ??
       nativeCursorIteratorOf(graph.structuralTypes, operation, result, deriver) ??
@@ -764,7 +789,7 @@ export const publishRepresentations = (
             ? 'literal-destination'
             : commonJsBoundaryOf(graph, operation)
               ? 'commonjs-module-boundary'
-              : shadowedCallableBuiltinReadOf(graph, operation, callableOrigins)
+              : shadowedCallableBuiltinReadOf(operation, callableOrigins, facts)
                 ? 'shadowed-callable-builtin'
                 : dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables)
                   ? 'dynamic-callable-identity'

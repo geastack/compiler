@@ -406,6 +406,7 @@ numeric-parameter-self-update.runtime.js.cpp dc24846abf14
 numeric-record-reads.js.cpp 3a1a43509eba
 object-create-contextual.ts.cpp a1ea4ea40b7f
 object-destructuring-assignment.ts.cpp c0f9e4a7ab05
+object-keys-of-parsed-json.runtime.js.cpp 24af362af8ce
 object-literal-es5-method-receiver.runtime.js.cpp 35067ec88af1
 object-literal-getter-capture.ts.cpp 962dd1d3202c
 object-pattern-numeric-key-over-array.ts.cpp 828ec7992347
@@ -441,7 +442,7 @@ physical-class-ancestry-live.ts.cpp 728e6f672df0
 physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 50f20517ba63
-printer-drift.txt b47bbdb9d464
+printer-drift.txt 413c6c68dfaa
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
 promise-method-read-as-value.ts.cpp d92abcc1e89f

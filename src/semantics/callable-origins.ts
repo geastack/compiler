@@ -1,4 +1,5 @@
 import type { DeclarationId, FunctionId, SemanticResultId } from '../identity/ids.js'
+import type { Representation } from '../representation/model.js'
 import type { SealedRepresentationPlan } from '../representation/plan.js'
 import type { SemanticGraph } from './model/graph.js'
 import { operandOf, resultOf } from './model/operands.js'
@@ -322,8 +323,7 @@ export const callableOwnPropertyWritesOf = (
 
 const callableMutationFactsByPlan = new WeakMap<SealedRepresentationPlan, CallableMutationFacts>()
 
-const canCarryCallableObject = (plan: SealedRepresentationPlan, result: SemanticResultId): boolean => {
-  const representation = plan.selected.get(result)
+const canCarryCallableObject = (representation: Representation | undefined): boolean => {
   if (representation === undefined) return false
   switch (representation.kind) {
     case 'function':
@@ -355,6 +355,22 @@ export const callableMutationFactsOf = (
 ): CallableMutationFacts => {
   const known = callableMutationFactsByPlan.get(plan)
   if (known) return known
+  const facts = callableMutationFactsOver(graph, (result) => plan.selected.get(result), origins)
+  callableMutationFactsByPlan.set(plan, facts)
+  return facts
+}
+
+/**
+ * The same facts over any answer to "what carries this result" -- the sealed
+ * plan's, or, while the plan is still being published, the carrier a result's
+ * type derives to (`representation/publish.ts`, which must decide the carrier
+ * of a `call`/`apply`/`bind` read before any plan exists).
+ */
+export const callableMutationFactsOver = (
+  graph: SemanticGraph,
+  carrierOf: (result: SemanticResultId) => Representation | undefined,
+  origins: ReadonlyMap<SemanticResultId, FunctionId> = callableOriginsOf(graph)
+): CallableMutationFacts => {
   const anonymousWrites = new Set<string>()
   const prototypeWrites = new Set<string>()
   const prototypeOrigins = functionPrototypeOriginsOf(graph)
@@ -364,15 +380,13 @@ export const callableMutationFactsOf = (
       continue
     }
     if (origins.get(target.result) !== undefined) continue
-    if (canCarryCallableObject(plan, target.result)) anonymousWrites.add(target.name)
+    if (canCarryCallableObject(carrierOf(target.result))) anonymousWrites.add(target.name)
   }
-  const facts: CallableMutationFacts = {
+  return {
     ownProperties: callableOwnPropertyWritesOf(graph, origins),
     anonymousProperties: anonymousWrites,
     functionPrototypeProperties: prototypeWrites
   }
-  callableMutationFactsByPlan.set(plan, facts)
-  return facts
 }
 
 /** One shared proof used by preflight and IR lowering before skipping [[Get]]. */
