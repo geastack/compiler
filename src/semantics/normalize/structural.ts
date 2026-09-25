@@ -760,6 +760,26 @@ const buildMapper = (
     return indexedAccessMemberTypes(checker, bound, indexType)
   }
 
+  /**
+   * `T[K]` over an object type that is not open at all, deferred only because
+   * its INDEX is: `source[property]` inside `for (const property in this)`,
+   * which the checker types `NodeMaterial[Extract<keyof this, string>]`.
+   *
+   * No substitution applies (nothing in the object is a parameter) and no
+   * bound either (a concrete type is its own base constraint), so the two
+   * steps above both decline and the access was refused although its member
+   * set is the object's own. It is answered exactly as `this[property]` on
+   * the same line already is through `this`'s bound, the class: the members
+   * `indexedAccessMemberTypes` enumerates for a string key, which declines any
+   * index it cannot name. The polymorphic `this` the key ranges over is the
+   * class instance (`translate`'s `TypeParameter` branch), so its keys are the
+   * class's keys.
+   */
+  const memberTypesOfConcreteObject = (objectType: ts.Type, indexType: ts.Type): readonly ts.Type[] | null => {
+    if ((objectType.flags & ts.TypeFlags.Object) === 0) return null
+    return indexedAccessMemberTypes(checker, objectType, indexType)
+  }
+
   // `getMinArgumentCount` is checker-internal. The public answer is the count of
   // leading parameters the call site must supply: everything before the first
   // optional, defaulted, or rest parameter.
@@ -2515,7 +2535,8 @@ const buildMapper = (
         (statesOnlyAbsence ? null : substituted) ??
         memberTypesThroughBound(access.objectType, indexType) ??
         memberTypesThroughBound(objectType, indexType) ??
-        substituted
+        substituted ??
+        memberTypesOfConcreteObject(objectType, indexType)
       const only = members?.length === 1 ? members[0] : undefined
       if (only) return remember(type, typeOf(only))
       if (members) return remember(type, table.intern({ kind: 'union', members: members.map(typeOf) }))
