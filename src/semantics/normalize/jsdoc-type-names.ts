@@ -372,9 +372,15 @@ export const programTypeNames = (checker: ts.TypeChecker, files: readonly ts.Sou
       const target = (exported.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(exported) : exported
       const declared = checker.getDeclaredTypeOfSymbol(target)
       if (!declared || isUninformative(declared)) continue
-      const existing = byName.get(exported.name)
+      // A default export is referred to by its own declared name: three's
+      // `renderers/common/Pipelines.js` ends `export default Pipelines`, and
+      // `Bindings.js` documents `@type {Pipelines}` over the field it writes
+      // `this.pipelines.bindings = this` through. Keyed only `default`, no
+      // prose name could ever reach it.
+      const name = exported.name === 'default' && target.name !== 'default' ? target.name : exported.name
+      const existing = byName.get(name)
       if (existing) existing.add(target)
-      else byName.set(exported.name, new Set([target]))
+      else byName.set(name, new Set([target]))
       privateBasesOf(target, file)
     }
   }
