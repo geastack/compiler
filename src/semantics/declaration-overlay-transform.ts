@@ -931,6 +931,12 @@ const counterpartOf = (
   const parameter = jsSignature.parameters[index]
   const counterpart = declared.parameters[index]
   if (!parameter || !counterpart || !ts.isIdentifier(parameter.name) || !ts.isIdentifier(counterpart.name)) return null
+  // A rest parameter's type is the array of every argument from here on, an
+  // ordinary one's is one argument: neither describes the other. three's
+  // `FnNode.call( ...params )` met `ShaderNode.call: ( inputs: {...} )` by
+  // name, and the checker read the record as the rest ELEMENT while the
+  // parameter census read it as the whole binding.
+  if ((parameter.dotDotDotToken === undefined) !== (counterpart.dotDotDotToken === undefined)) return null
   const name = parameter.name.text
   if (counterpart.name.text === name) return counterpart
   if (jsSignature.parameters.length > declared.parameters.length) return null
