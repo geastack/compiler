@@ -60,9 +60,14 @@ import { nativeAbsentPropertyReadOf } from '../../ir/native-absent-property.js'
  *
  * A numeric key converts through the same `toStringText` every other ToString
  * in this backend goes through, because ToPropertyKey of a Number *is*
- * ToString of it. A carrier that is neither string, symbol nor number is
- * refused by name: `ToPropertyKey` on an arbitrary object runs `ToPrimitive`,
- * which can call user code, and no such dispatch is installed.
+ * ToString of it. A class instance takes the same road: ToPropertyKey is
+ * ToPrimitive with hint string and then ToString, which is exactly ToString
+ * of the object, and `toStringText` already answers that for a `class-ref`
+ * ("[object Object]" when no class up the chain declares `toString`, the
+ * method's own body when one does and nothing overrides it). three's
+ * `ShadowNode` keys a WeakMap's ordinary properties by a Camera that way.
+ * Any other object carrier is refused by name: `ToPropertyKey` on it runs
+ * `ToPrimitive`, which can call user code, and no such dispatch is installed.
  */
 const propertyKeyCarrierText = (ctx: EmitContext, carrier: Representation, text: string, contextDescription: string): string => {
   if (carrier.kind === 'null' || carrier.kind === 'undefined') {
@@ -72,6 +77,10 @@ const propertyKeyCarrierText = (ctx: EmitContext, carrier: Representation, text:
   if (carrier.kind === 'symbol') return `gea::PropertyKey::symbol(${text})`
   if (carrier.kind === 'scalar') {
     if (carrier.domain !== 'boolean' && carrier.domain !== 'bigint') return `gea::PropertyKey::number(static_cast<double>(${text}))`
+    const converted = toStringText(text, carrier, ctx.classes, ctx.deriver)
+    if (converted !== null) return `gea::PropertyKey::string(${converted})`
+  }
+  if (carrier.kind === 'class-ref') {
     const converted = toStringText(text, carrier, ctx.classes, ctx.deriver)
     if (converted !== null) return `gea::PropertyKey::string(${converted})`
   }
@@ -356,7 +365,14 @@ const nativeSidecarReceiver = (ctx: EmitContext, receiver: IrOperand, contextDes
     // writes into it: `finalizeTemplateObject` installs GetTemplateObject's
     // `raw` there. See `arrayAccessText`'s own comment for why that function
     // defers here rather than stating a table exists or does not.
-    representation.kind === 'array-object'
+    representation.kind === 'array-object' ||
+    // A Map/Set/WeakMap/WeakSet OBJECT's ordinary own properties, which are
+    // not its entries: `weakMap[ camera ] = id` is an ordinary [[Set]] of the
+    // key ToPropertyKey(camera) spells, and three's `ShadowNode` does exactly
+    // that. The same identity-keyed table holds them; the read and the write
+    // go through `keyedCollectionOrdinaryGet`/`Set`, which refuse a key the
+    // collection would inherit, since no prototype member is rendered here.
+    representation.kind === 'keyed-collection'
   if (!addressable) return null
   if (representation.ownership !== 'shared-refcount') {
     throw createCppEmitBlockedError(
@@ -1033,7 +1049,9 @@ export const nativeSidecarGetText = (ctx: EmitContext, operation: GetOperation):
   const key = propertyKeyText(ctx, operation.key, site)
   const read = isPatternSidecarReceiver(operation.receiver)
     ? `gea::runtime::regex::dynamicGet(${receiver}, ${key})`
-    : `gea::nativeDynamicGet(${receiver}, ${key})`
+    : operation.receiver.representation.kind === 'keyed-collection'
+      ? `gea::keyedCollectionOrdinaryGet(${receiver}, ${key})`
+      : `gea::nativeDynamicGet(${receiver}, ${key})`
   const prototypeMethod = computedClassPrototypeMethodText(ctx, operation)
   // ONE carrier for the whole read, and it is the prototype arm's when there
   // is a prototype arm. A `?:` has a single type, and the two arms are the two
@@ -1141,9 +1159,11 @@ export const emitNativeSidecarSet = (ctx: EmitContext, lines: string[], operatio
   const generated = generatedNativeSidecarReceiver(ctx, operation.receiver, site)
   const write = isPatternSidecarReceiver(operation.receiver)
     ? `gea::runtime::regex::dynamicSet(${receiver}, ${key}, ${value})`
-    : generated === null
-      ? `gea::nativeDynamicSet(${receiver}, ${key}, ${value})`
-      : generatedNativeWriteText(generated, key, value)
+    : operation.receiver.representation.kind === 'keyed-collection'
+      ? `gea::keyedCollectionOrdinarySet(${receiver}, ${key}, ${value})`
+      : generated === null
+        ? `gea::nativeDynamicSet(${receiver}, ${key}, ${value})`
+        : generatedNativeWriteText(generated, key, value)
   if (operation.kind === 'set' && operation.strict) {
     lines.push(`if (!${write}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read-only property");`)
   } else {

@@ -15104,6 +15104,60 @@ bool nativeDynamicHasProperty(const gea::Ref<T>& object, const PropertyKey& key)
   return ordinaryObjectPrototypeHas(key);
 }
 
+/**
+ * Whether a Map/Set/WeakMap/WeakSet object inherits `key`: a member of its
+ * family's prototype (ECMA-262 24.1.3, 24.2.4, 24.3.3, 24.4.3, with the
+ * ES2025 set algebra and `getOrInsert`) or of Object.prototype. The four
+ * families' names are pooled: this answers "refuse", never "absent", so an
+ * over-broad list costs a refusal and an incomplete one a wrong read. Every
+ * symbol key counts as inherited, since `@@iterator` and `@@toStringTag` are.
+ */
+inline bool keyedCollectionInheritedKey(const PropertyKey& key) {
+  if (key.isSymbol()) return true;
+  const std::string& name = key.text();
+  static const char* const members[] = {"get", "set", "has", "delete", "clear", "add", "forEach", "entries", "keys", "values", "size",
+      "getOrInsert", "getOrInsertComputed", "union", "intersection", "difference", "symmetricDifference", "isSubsetOf",
+      "isSupersetOf", "isDisjointFrom"};
+  for (const char* member : members) {
+    if (name == member) return true;
+  }
+  return ordinaryObjectPrototypeHas(key);
+}
+
+[[noreturn]] inline void refuseKeyedCollectionInheritedKey(const char* operation, const PropertyKey& key) {
+  const std::string named = key.isSymbol() ? std::string("a symbol key") : "\"" + key.text() + "\"";
+  std::fprintf(stderr,
+      "gea: %s of %s on a keyed collection names a member it inherits, and no prototype member is rendered through an "
+      "ordinary property access\n",
+      operation, named.c_str());
+  gea::detail::abortAfterFlush();
+}
+
+/**
+ * `[[Get]]` of a keyed collection OBJECT's ordinary property, never one of its
+ * entries. `weakMap[ camera ]` reads the key ToPropertyKey(camera) spells --
+ * "[object Object]" for a class with no `toString` -- and three's
+ * `ShadowNode` keys a WeakMap exactly that way. The own properties live in the
+ * identity-keyed table every native object's expandos do; a key the
+ * collection inherits and has not shadowed aborts by name.
+ */
+template <typename T>
+Value keyedCollectionOrdinaryGet(const gea::Ref<T>& collection, const PropertyKey& key) {
+  if (!collection) gea::host::throwRuntimeError("TypeError", "Cannot read properties of null");
+  Value answer;
+  if (nativeDynamicRead(collection, key, answer)) return answer;
+  if (keyedCollectionInheritedKey(key)) refuseKeyedCollectionInheritedKey("a read", key);
+  return answer;
+}
+
+/** `[[Set]]` of the same ordinary property; see `keyedCollectionOrdinaryGet`. */
+template <typename T>
+bool keyedCollectionOrdinarySet(const gea::Ref<T>& collection, const PropertyKey& key, const Value& value) {
+  if (!collection) gea::host::throwRuntimeError("TypeError", "Cannot set properties of null");
+  if (keyedCollectionInheritedKey(key) && !nativeDynamicHas(collection, key)) refuseKeyedCollectionInheritedKey("a write", key);
+  return nativeDynamicSet(collection, key, value);
+}
+
 template <typename T>
 bool nativeDynamicDelete(const gea::Ref<T>& object, const PropertyKey& key) {
   if (!object) return true;
