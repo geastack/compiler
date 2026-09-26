@@ -69,9 +69,14 @@ import ts from 'typescript'
  * value that is `null` or `undefined` is not evidence either: a
  * non-nullable tag written with absence is a statement about absence, which
  * the existing readers already handle. Where no constructed value contradicts
- * the tag it stands exactly as written, and a tag on a local, a parameter or
- * a return is never touched: it states one binding, which no store carries
- * anywhere else.
+ * the tag it stands exactly as written, and a tag on a local or a parameter
+ * is never touched: it states one binding, which no store carries anywhere
+ * else.
+ *
+ * A `@return` tag is the one other statement every caller reads, and the
+ * function's own `return` is its store: a returned construction, or a returned
+ * object literal constructing a member the tag types otherwise, contradicts it
+ * the same way (three's `NodeFrame._getMaps`, below).
  */
 export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: ReadonlyMap<string, string>): Map<string, string> => {
   const blanked = new Map<string, string>()
@@ -82,8 +87,12 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
 
   const tagsOf = new Map<ts.Symbol, ts.JSDocTypeTag[]>()
   const names = new Set<string>()
+  const returnTags: { readonly body: ts.Block; readonly tag: ts.JSDocReturnTag & { readonly typeExpression: ts.JSDocTypeExpression } }[] =
+    []
   for (const file of unchecked) {
     const visit = (node: ts.Node): void => {
+      const returned = taggedReturnAt(node)
+      if (returned) returnTags.push(returned)
       const field = taggedFieldAt(node)
       if (field) {
         const symbol = checker.getSymbolAtLocation(field.name)
@@ -103,7 +112,7 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
   for (const symbol of [...tagsOf.keys()]) {
     if (!(symbol.declarations ?? []).every((declaration) => isUncheckedJavaScript(declaration.getSourceFile()))) tagsOf.delete(symbol)
   }
-  if (tagsOf.size === 0) return blanked
+  if (tagsOf.size === 0 && returnTags.length === 0) return blanked
 
   /** Each contradicted field, with the store that proves it -- for the debug line below. */
   const contradicted = new Map<ts.Symbol, ts.Node>()
@@ -152,6 +161,19 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
       return !saysNothing(type) && !checker.isTypeAssignableTo(type, stated) && !derivesFromStatedClass(checker, type, stated)
     })
   }
+  const literalContradicts = (value: ts.Expression, stated: ts.Type): boolean => {
+    if (!ts.isObjectLiteralExpression(value)) return false
+    return value.properties.some((property) => {
+      if (!ts.isPropertyAssignment(property) || !(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name))) return false
+      const constructed = withoutParentheses(property.initializer)
+      if (!isConstruction(constructed)) return false
+      const member = checker.getPropertyOfType(stated, property.name.text)
+      const slot = member ? checker.getTypeOfSymbol(member) : checker.getIndexTypeOfType(stated, ts.IndexKind.String)
+      if (!slot || saysNothing(slot)) return false
+      const type = checker.getTypeAtLocation(constructed)
+      return !saysNothing(type) && !checker.isTypeAssignableTo(type, slot) && !derivesFromStatedClass(checker, type, slot)
+    })
+  }
   for (const file of files) {
     const visit = (node: ts.Node): void => {
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
@@ -171,7 +193,43 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
     visit(file)
   }
 
+  // A `@return` tag the function's own `return` contradicts: three's
+  // `NodeFrame._getMaps` states `Object<string,WeakMap<Object, number>>` and
+  // returns `{ renderId: 0, frameId: 0 }`, whose callers then store a frame
+  // number into the "WeakMap" slot and compare one against it. A returned
+  // object literal is evidence only through the members it constructs.
+  const contradictedReturns = new Map<ts.JSDocReturnTag, ts.Node>()
+  for (const { body, tag } of returnTags) {
+    const stated = checker.getNonNullableType(checker.getTypeFromTypeNode(tag.typeExpression.type))
+    if (saysNothing(stated)) continue
+    const visit = (node: ts.Node): void => {
+      if (contradictedReturns.has(tag) || ts.isFunctionLike(node) || ts.isClassLike(node)) return
+      if (ts.isReturnStatement(node) && node.expression) {
+        const store = node
+        const refuted =
+          contradicts(node.expression, stated) ||
+          valuesWritten(node.expression).some((written) => literalContradicts(withoutParentheses(written), stated))
+        if (refuted) contradictedReturns.set(tag, store)
+      }
+      ts.forEachChild(node, visit)
+    }
+    ts.forEachChild(body, visit)
+  }
+
   const spans = new Map<ts.SourceFile, { readonly at: number; readonly end: number }[]>()
+  for (const [tag, store] of contradictedReturns) {
+    const file = tag.getSourceFile()
+    const fileSpans = spans.get(file) ?? []
+    fileSpans.push({ at: tag.pos, end: tag.typeExpression?.end ?? tag.pos })
+    spans.set(file, fileSpans)
+    if (process.env['GEA_JSDOC_CONTRADICTION_DEBUG']) {
+      const line = file.getLineAndCharacterOfPosition(tag.pos).line + 1
+      const storeLine = file.getLineAndCharacterOfPosition(store.getStart(file)).line + 1
+      process.stderr.write(
+        `[JSDOC-CONTRADICTED] ${file.fileName}:${line} @return: ${tag.typeExpression?.getText(file)} by line ${storeLine}\n`
+      )
+    }
+  }
   for (const [symbol, store] of contradicted) {
     for (const tag of tagsOf.get(symbol) ?? []) {
       const file = tag.getSourceFile()
@@ -219,6 +277,20 @@ const taggedFieldAt = (node: ts.Node): { readonly name: ts.Identifier | ts.Priva
     return tag ? { name: node.left.name, tag } : null
   }
   return null
+}
+
+/** A function with a body whose return a `@return` tag states, with no annotation of its own; generators and async bodies return something else. */
+const taggedReturnAt = (
+  node: ts.Node
+): { readonly body: ts.Block; readonly tag: ts.JSDocReturnTag & { readonly typeExpression: ts.JSDocTypeExpression } } | null => {
+  if (!ts.isFunctionLike(node) || node.type) return null
+  const body = (node as { readonly body?: ts.Node }).body
+  if (!body || !ts.isBlock(body)) return null
+  if ((node as { readonly asteriskToken?: ts.Node }).asteriskToken) return null
+  if (ts.getCombinedModifierFlags(node as ts.Declaration) & ts.ModifierFlags.Async) return null
+  const tag = ts.getJSDocReturnTag(node)
+  if (!tag?.typeExpression) return null
+  return { body, tag: tag as ts.JSDocReturnTag & { readonly typeExpression: ts.JSDocTypeExpression } }
 }
 
 const isLiteralKey = (key: ts.Expression): boolean => ts.isStringLiteralLike(key) || ts.isNumericLiteral(key)
