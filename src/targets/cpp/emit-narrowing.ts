@@ -1383,6 +1383,9 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
     // a result the arm declares `any`.
     const adaptedArm = resultAdaptedCallableText(written, arm.value, text)
     if (adaptedArm !== null) return `${cppTypeOf(held)}::ofArm<${armIndex}>(${adaptedArm})`
+    if (isBroadFunctionArm(arm) && boxesIntoFunctionArm(held, written)) {
+      return `${cppTypeOf(held)}::ofArm<${armIndex}>(gea::FunctionValue(${boxedText(written, 'Function', text)}))`
+    }
     // A record recasts into a dictionary/array-object ARM the same way
     // `convertedValueText`'s own top level recasts it directly -- identity above never matches an object literal against either.
     // A dictionary reaches a WIDER dictionary arm the same way (`dictionaryCastableToDictionary`);
@@ -3687,6 +3690,46 @@ export const boxDiscriminantsOf = (carrier: Representation): BoxDiscriminant[] |
     }
   ]
 }
+
+/**
+ * The broad `Function` arm a TYPED callable boxes into.
+ *
+ * three's `overrideNode( targetNode, callback = null )` declares `callback`
+ * `{Function|Node|null}` and then writes `callback = () => node` into it: an
+ * arrow with a static ABI stored where the program itself declared the broad,
+ * untyped `Function`. That arm is a dynamic boundary the SOURCE states
+ * (`dynamic(untyped-callable)`, kept as `gea::FunctionValue` so the union
+ * retains its Function-tag discriminator), so boxing the callable there is the
+ * same `Value::box` a `Function`-typed plain cell already performs, one arm
+ * down.
+ *
+ * Only when the sum names exactly one such arm and no typed callable arm
+ * anywhere in its nesting: a typed arm is the value's exact home, reached by
+ * the non-boxing converting constructors `widenedStoreText` asks first, and
+ * boxing past it would store a different carrier than the program chose.
+ * Asked by both the conversion registry and the store render, so the two
+ * cannot disagree about which pairs box.
+ */
+export const boxesIntoFunctionArm = (held: Representation, written: Representation): boolean => {
+  if (held.kind !== 'optional' && held.kind !== 'tagged-union') return false
+  if (dynamicTagFor(written) !== 'Function') return false
+  let broad = 0
+  let typed = false
+  const visit = (carrier: Representation): void => {
+    if (carrier.kind === 'optional') return visit(carrier.payload)
+    if (carrier.kind !== 'tagged-union') return
+    for (const arm of carrier.arms) {
+      if (isBroadFunctionArm(arm)) broad++
+      else if (dynamicTagFor(arm.value) === 'Function') typed = true
+      else visit(arm.value)
+    }
+  }
+  visit(held)
+  return broad === 1 && !typed
+}
+
+const isBroadFunctionArm = (arm: TaggedUnionArm): boolean =>
+  arm.runtimeDiscriminator.kind === 'callable-tag' && arm.value.kind === 'dynamic' && arm.value.reason === 'untyped-callable'
 
 /** The representation arm's carried discriminator and the executable classifier must agree. */
 export const boxDiscriminantsOfArm = (arm: TaggedUnionArm): BoxDiscriminant[] | null => {

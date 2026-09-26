@@ -28,6 +28,7 @@ import {
   resultAdapterTransportOf,
   adaptsConstructorIntoDispatch,
   boxDiscriminantsOfArm,
+  boxesIntoFunctionArm,
   type BoxDiscriminant,
   conversionRecipeOf,
   boxedAssertionText,

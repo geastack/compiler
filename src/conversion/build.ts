@@ -895,6 +895,13 @@ const callableObjectAbiKey = (representation: Representation): string | null => 
   }
 }
 
+/** Whether a sum names a broad `Function` arm anywhere in its optional/union nesting. */
+const declaresBroadFunctionArm = (representation: Representation): boolean => {
+  if (representation.kind === 'optional') return declaresBroadFunctionArm(representation.payload)
+  if (representation.kind !== 'tagged-union') return false
+  return representation.arms.some((arm) => arm.runtimeDiscriminator.kind === 'callable-tag' || declaresBroadFunctionArm(arm.value))
+}
+
 /**
  * The `Representation`s nested one level inside another -- an ABI's
  * parameters/result/receiver, a record's fields, a container's element, and
@@ -1169,6 +1176,31 @@ export const buildConversionGraph = (
         target,
         capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
       })
+    }
+  }
+
+  // A sum that declares the broad `Function` beside other members --
+  // three's `{Function|Node|null}` callback -- admits every typed callable
+  // into that arm, and which callables the program writes there is a fact
+  // about each SOURCE: the arm states no ABI to enumerate candidates from.
+  // So every referenced callable is paired with every such sum, and the
+  // registry alone decides which pairs box.
+  const broadFunctionSums = sumCarriers.filter(([, one]) => declaresBroadFunctionArm(one))
+  if (broadFunctionSums.length > 0) {
+    const callables = keyedDistinct(referenced.values()).filter(([, one]) => callableObjectAbiKey(one) !== null)
+    for (const [targetKey, target] of broadFunctionSums) {
+      for (const [sourceKey, source] of callables) {
+        const id = `${sourceKey}->${targetKey}`
+        if (nodes.has(id)) continue
+        const installed = registry.widening(source, target)
+        if (!installed) continue
+        nodes.set(id, {
+          id,
+          source,
+          target,
+          capability: { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
+        })
+      }
     }
   }
 
