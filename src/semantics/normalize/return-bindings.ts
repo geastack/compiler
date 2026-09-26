@@ -12,6 +12,7 @@ import { unwrapErasedExpression } from './producers/erasure.js'
 import {
   annotationStatesNothing,
   containsUnstatedPosition,
+  jsDocTagOpensOnlyArrayElements,
   narrowsOnlyUnstatedPositions,
   derivedExpressionType,
   disjointUnionMembersOf,
@@ -402,18 +403,25 @@ const hasStatedReturnType = (checker: ts.TypeChecker, declaration: ReturnCandida
  * array the caller still holds, so no backend can render it. The three cells
  * have to AGREE, which means the same rule holds at each of them.
  *
- * Only a real `.type` annotation is admitted, never a JSDoc tag: the tag
- * forms this file's `hasStatedReturnType` documents degrade to `any` when
- * they name an unimportable type, and `containsUnstatedPosition` cannot tell
- * that absence from a stated `any`.
+ * A JSDoc return tag is read the same way. A tag naming a type its file
+ * cannot import degrades to `any` at that position, which
+ * `containsUnstatedPosition` cannot tell from a written `any` -- and need
+ * not: either way the tag states nothing there. three's `Node._getChildren`
+ * states `@returns {Array<Object>}` over the array of child records it
+ * builds, and read as the last word, the return boxed the element of an
+ * array the caller then iterates, a conversion no backend can render
+ * because the array is not copied.
  */
 const statedReturnBound = (checker: ts.TypeChecker, declaration: ReturnCandidateDeclaration): ts.Type | null => {
-  if (!declaration.type || declaration.body === undefined) return null
+  if (declaration.body === undefined) return null
   if (declaration.getSourceFile().isDeclarationFile) return null
-  const declared = checker.getTypeFromTypeNode(declaration.type)
-  if (annotationStatesNothing(checker, declaration.type, declared)) return null
+  const statement = declaration.type ?? ts.getJSDocReturnType(declaration)
+  if (!statement) return null
+  const declared = checker.getTypeFromTypeNode(statement)
+  if (annotationStatesNothing(checker, statement, declared)) return null
   if (isUnusableEvidence(declared)) return null
-  return containsUnstatedPosition(checker, declaration.type, declared) ? declared : null
+  if (!declaration.type && !jsDocTagOpensOnlyArrayElements(checker, statement, declared)) return null
+  return containsUnstatedPosition(checker, statement, declared) ? declared : null
 }
 
 const unwrapParens = (node: ts.Expression): ts.Expression => {
