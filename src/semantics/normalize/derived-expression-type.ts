@@ -2123,6 +2123,30 @@ export const containsUnstatedPosition = (checker: ts.TypeChecker, anchor: ts.Nod
 }
 
 /**
+ * `containsUnstatedPosition` for a JSDoc tag, admitted only where the open
+ * position is an ARRAY's element: `{Array<Object>}`, `{Array<BindGroup>}`
+ * (a name the file cannot bind).
+ *
+ * That is the one place a tag read as the last word has no way back: an
+ * Array is shared and mutable, so a caller's typed array cannot be converted
+ * into the tag's boxed element without copying it, and a copy is not the
+ * caller's array. A tag that is itself open -- `{unknown}`, `{*}`, bare
+ * `{Function}` -- is the whole-parameter question `isUnannotated`
+ * (`parameter-bindings.ts`) and `jsDocTypeIsUninformative` already answer,
+ * differently on purpose. A bare `{WeakMap}` or `{Map}` is left to the
+ * collection census, which already answers a keyed collection's K and V
+ * across its allocations and reads; narrowing it here as well made the two
+ * disagree between rounds (three's `EnvironmentNode._getPMREMNodeCache`).
+ */
+export const jsDocTagOpensOnlyArrayElements = (checker: ts.TypeChecker, anchor: ts.Node, declared: ts.Type): boolean => {
+  const absent = ts.TypeFlags.Null | ts.TypeFlags.Undefined
+  const members = (declared.isUnion() ? declared.types : [declared]).filter((member) => (member.flags & absent) === 0)
+  if (members.length === 0 || members.some((member) => positionStatesNothing(checker, anchor, member))) return false
+  const open = members.filter((member) => containsUnstatedPosition(checker, anchor, member))
+  return open.length > 0 && open.every((member) => checker.isArrayType(member))
+}
+
+/**
  * WHETHER A STATED TYPE AND THE TYPE THAT ACTUALLY FLOWS INTO IT DIFFER ONLY
  * WHERE THE STATEMENT SAID NOTHING.
  *

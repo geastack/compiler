@@ -35,6 +35,7 @@ import {
   exactEmptyObjectLiteralType,
   isNullishType,
   containsUnstatedPosition,
+  jsDocTagOpensOnlyArrayElements,
   derivedExpressionType,
   indexAliasEvidence,
   indexedTypeOf,
@@ -503,12 +504,22 @@ export const carriesUnsubstitutedGeneric = (checker: ts.TypeChecker, type: ts.Ty
 const statedUpperBound = (checker: ts.TypeChecker, parameter: ts.ParameterDeclaration): ts.Type | null => {
   if (parameter.dotDotDotToken) return null
   if (!ts.isIdentifier(parameter.name)) return null
-  if (!parameter.type) return null
-  const declared = checker.getTypeFromTypeNode(parameter.type)
+  // A JavaScript parameter states its type in a JSDoc tag, and `Array<Object>`
+  // or `Array<BindGroup>` (a name the file cannot bind) is exactly such an
+  // upper bound: it states the container and nothing about the element. Read
+  // as the last word, it boxes the parameter's element while every caller
+  // passes a typed array, and an Array is shared and mutable, so no
+  // conversion between the two exists (three's `Bindings._createBindings(
+  // bindings )`, `NodeFunction`'s `inputs`).
+  const jsDocTags = parameter.type ? [] : ts.getJSDocParameterTags(parameter)
+  const statement = parameter.type ?? ts.getJSDocType(parameter) ?? jsDocTags[0]?.typeExpression?.type
+  if (!statement) return null
+  const declared = checker.getTypeFromTypeNode(statement)
   // Already `isUnannotated`'s own business, and admitted there.
-  if (annotationStatesNothing(checker, parameter.type, declared)) return null
+  if (annotationStatesNothing(checker, statement, declared)) return null
   if (isUnusableEvidence(declared)) return null
-  if (!containsUnstatedPosition(checker, parameter.type, declared)) return null
+  if (!containsUnstatedPosition(checker, statement, declared)) return null
+  if (!parameter.type && !jsDocTagOpensOnlyArrayElements(checker, statement, declared)) return null
   // A DEFAULTED or OPTIONAL parameter's statement is `T | undefined` to its
   // callers, whatever its annotation spells: the absence is what the default
   // exists to answer. Testing the agreed argument type against the bare `T`
@@ -520,7 +531,8 @@ const statedUpperBound = (checker: ts.TypeChecker, parameter: ts.ParameterDeclar
   // already splits this answer back into the raw slot (with the absence) and
   // the body's own binding (without it), so handing it the union is what
   // makes both halves agree.
-  const absent = parameter.initializer !== undefined || parameter.questionToken !== undefined
+  const absent =
+    parameter.initializer !== undefined || parameter.questionToken !== undefined || jsDocTags.some((tag) => tag.isBracketed === true)
   return absent ? checker.getNullableType(declared, ts.TypeFlags.Undefined) : declared
 }
 
