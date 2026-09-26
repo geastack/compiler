@@ -181,9 +181,13 @@ const nativeBoundaryDemand = (representation: Representation): CapabilityDemand 
  */
 const embeddedNativeBoundaryDemands = (representation: Representation): CapabilityDemand[] => {
   const demands: CapabilityDemand[] = []
+  // Named in the refusal: the handle alone does not say which slot carried it,
+  // and an embedded one is usually a parameter of a callable nobody wrote.
+  const root = representationKey(representation)
+  const within = `embedded in ${root.length > 240 ? `${root.slice(0, 240)}...` : root}`
   forEachEmbeddedRepresentation(representation, (carrier) => {
     const boundary = nativeBoundaryDemand(carrier)
-    if (boundary) demands.push(boundary)
+    if (boundary) demands.push({ ...boundary, detail: within })
   })
   return demands
 }
