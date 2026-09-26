@@ -212,6 +212,18 @@ const deriveAt = (target: Representation, context: ConversionDerivationContext, 
       // installs no such classifier -- v1 spelled that route as
       // `gea_cpp_typed_js_map::from_dynamic_checked`, which is exactly the
       // boxed round trip this compiler declines to build.
+      //
+      // A collection whose key AND value are both dynamic needs no per-entry
+      // conversion at all, so only the brand check is left -- and that is the
+      // `dictionary` identity round trip above: the collection this program
+      // boxed comes back as itself, the same object, or the load refuses
+      // (three's `ChainMap` stores each inner `new WeakMap()` in its outer
+      // map's dynamic value slot and walks back down with
+      // `map = map.get( key )`).
+      if (target.key.kind === 'dynamic' && (target.value === null || target.value.kind === 'dynamic')) {
+        const identity = maybeAtom(context.registry.boxedIdentityMaterializer(target))
+        if (identity) return identity
+      }
       return never(
         'no checked Map/Set materializer is installed; recovering a keyed collection from a dynamic value needs a runtime ' +
           'brand check plus a per-entry checked conversion of both key and value'

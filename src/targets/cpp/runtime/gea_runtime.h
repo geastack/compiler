@@ -10054,8 +10054,20 @@ class Value {
    */
   static bool strictEquals(const Value& left, const Value& right);
 
-  /** The address of the held payload -- object identity, and nothing else. Two boxes of the same object share it; two boxes of equal primitives do not. */
-  const void* identity() const { return held_ ? held_.get() : this; }
+  /**
+   * Object identity, and nothing else: two boxes of the same object share it;
+   * two boxes of equal primitives do not.
+   *
+   * An object or function answers `expandoAnchor()`, the address `===` and
+   * SameValue compare. `held_` is the BOX's allocation: boxing a
+   * `gea::Ref<Foo>` twice holds two copies of the handle, so a weak key read
+   * off `held_` missed every lookup that boxed the same object again (three's
+   * `ChainMap` keys each level by `keys[ i ]`, a fresh box per call).
+   */
+  const void* identity() const {
+    if (tag_ == Tag::Object || tag_ == Tag::Function) return expandoAnchor().get();
+    return held_ ? held_.get() : this;
+  }
 
   /**
    * ECMA-262 7.3.14 Call, for the one payload this header can perform it on.

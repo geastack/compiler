@@ -434,6 +434,7 @@ negative-zero.ts.cpp db9cf54df813
 nested-dynamic-operand-roles.ts.cpp 15ac506240eb
 nested-typed-array-union-narrowing.ts.cpp 28167130b69a
 nested-union-arm-recast-keeps-inner-discriminant.ts.cpp 002df74b5618
+nested-weakmap-self-descent.runtime.js.cpp 1ade3c79e3d5
 never-arm-conditional-merge.ts.cpp 226e37bb927f
 never-array-sentinel.ts.cpp 699b40b17e86
 never-constructed-class-deletes-symbol-expando.ts.cpp a880fdd0d514
