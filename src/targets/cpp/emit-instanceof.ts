@@ -1,15 +1,11 @@
-import {
-  classViewCarrierKinds,
-  typedArrayConstructorDomains,
-  type ClassInstanceTest,
-  type ClassInstanceTestRecipe
-} from '../../projection/instance-test.js'
+import { classViewCarrierKinds, type ClassInstanceTest, type ClassInstanceTestRecipe } from '../../projection/instance-test.js'
 import type { DeclarationId } from '../../identity/ids.js'
 import type { IrOperand } from '../../ir/model.js'
 import type { Representation } from '../../representation/model.js'
 import { isOpenDocument, representationKey } from '../../representation/model.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from './emit-context.js'
 import { boxedValueText } from './emit-dynamic-properties.js'
+import { typedArrayConstructorDomains } from '../../representation/typed-array-constructors.js'
 import { cppClassName, cppScalarType } from './types.js'
 import { cppErrorNativeType, errorConstructorNames, isNativeError } from './error-types.js'
 import { cppRegExpNativeTypes } from './regexp-types.js'
