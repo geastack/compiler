@@ -1967,6 +1967,38 @@ export const isGlobalObjectInterface = (checker: ts.TypeChecker, anchor: ts.Node
 }
 
 /**
+ * Whether `type` is an object literal that SPREAD a global `Object` interface
+ * value: `{ ...this.context }` where three types `context` `@type {Object}`.
+ *
+ * The checker copies the interface's members (`constructor`, `toString`,
+ * `valueOf`, ...) into the literal's type, each property still declared by
+ * the library's `interface Object`. Those members are not the literal's own
+ * keys -- the spread copied whatever the value held, which `Object` states
+ * nothing about -- so the literal states nothing either, and interning it
+ * with that layout would be the same fiction `isGlobalObjectInterface`
+ * already refuses one level up. Resolved by declaration identity: a literal
+ * that declares its own `toString` names a declaration in the source.
+ */
+export const isGlobalObjectInterfaceSpread = (checker: ts.TypeChecker, anchor: ts.Node, type: ts.Type): boolean => {
+  if ((type.flags & ts.TypeFlags.Object) === 0) return false
+  // The literal's own type, or the regular (widened) anonymous type a binding
+  // initialized with it carries.
+  if (((type as ts.ObjectType).objectFlags & (ts.ObjectFlags.ObjectLiteral | ts.ObjectFlags.Anonymous)) === 0) return false
+  const objectInterface = standardInterfaceSymbol(checker, anchor, 'Object')
+  if (objectInterface === null) return false
+  return type.getProperties().some((property) => {
+    const declarations = property.declarations ?? []
+    return (
+      declarations.length > 0 &&
+      declarations.every(
+        (declaration) =>
+          ts.isInterfaceDeclaration(declaration.parent) && checker.getSymbolAtLocation(declaration.parent.name) === objectInterface
+      )
+    )
+  })
+}
+
+/**
  * Whether `type` is the standard library's `ObjectConstructor` interface --
  * the type the global `Object` VALUE has, as opposed to `isGlobalObjectInterface`'s
  * `Object` INSTANCE interface immediately above.

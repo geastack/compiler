@@ -655,14 +655,11 @@ export const emitSpreadCopy = (ctx: EmitContext, lines: string[], operation: Spr
     )
   }
   if (receiver.kind === 'dynamic') {
-    if (source.kind !== 'dynamic') {
-      throw createCppEmitBlockedError(
-        `runtime-helper:protocol:spread:next:${spreadSourceCarrierKeyOf(source.kind, source, receiver, ctx.deriver)}`,
-        `writes a dynamic object-spread receiver from a "${representationKey(source)}" source; this runtime-key walk is installed only for a dynamic source`
-      )
-    }
     const receiverText = operandText(ctx, operation.receiver)
-    const sourceText = operandText(ctx, operation.source)
+    // A typed source is boxed first and walked as the box: `CopyDataProperties`
+    // reads only the source's own keys, and the box answers them from the
+    // carrier's own field table (`boxedValueText`'s one boxing authority).
+    const sourceText = boxedValueText(ctx, operation.source, 'an object spread into a dynamic receiver')
     lines.push('{')
     lines.push(`const auto& __gea_spread_source = ${sourceText};`)
     lines.push('if (__gea_spread_source.tag() != gea::Value::Tag::Null && __gea_spread_source.tag() != gea::Value::Tag::Undefined) {')
