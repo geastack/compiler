@@ -653,6 +653,24 @@ export function trailing( count, tag ) { return count; }
   assert.equal(types.get('tag'), 'string')
 })
 
+// three's `FnNode.call( ...params )` met `ShaderNode.call( inputs )` by name:
+// the record the declaration states for ONE argument was published for the
+// array of all of them, and the census and the checker read it differently.
+test('a rest parameter and an ordinary one never take each other type', () => {
+  const source = `
+export function gathered( ...inputs ) { return inputs; }
+export function spread( values ) { return values; }
+export function listed( ...items ) { return items; }
+`
+  const text = overlayRecord('positions', source)
+  const { types } = parameterTypes('positions', text)
+  assert.doesNotMatch(text, /@param \{[^}]*\} (?:inputs|values)\b/)
+  assert.equal(types.get('inputs'), 'any[]')
+  assert.equal(types.get('values'), 'any')
+  // Rest against rest still transfers.
+  assert.equal(types.get('items'), 'string[]')
+})
+
 test('an Array tag given more type arguments than Array takes yields to the declared tuple', () => {
   const source = `
 export class Angles {
