@@ -428,7 +428,7 @@ export const censusCollectionBindings = (
     'index-assignment',
     'call-argument'
   ])
-  const aliasClosureOf = (owner: ts.Node): ReadonlySet<ts.Node> => {
+  const aliasClosureOf = (owner: ts.Node, stopAt: (node: ts.Node) => boolean = () => false): ReadonlySet<ts.Node> => {
     const seen = new Set<ts.Node>([owner])
     const queue: ts.Node[] = [owner]
     while (queue.length > 0) {
@@ -438,7 +438,7 @@ export const censusCollectionBindings = (
         const target = write.target.declaration
         if (target && !seen.has(target)) {
           seen.add(target)
-          queue.push(target)
+          if (!stopAt(target)) queue.push(target)
         }
       }
     }
@@ -903,6 +903,18 @@ export const censusCollectionBindings = (
   // Two allocations that reach the same held reference slot also share its
   // physical element ABI. Join their whole alias component, rather than
   // publishing incompatible answers according to which owner was visited last.
+  //
+  // A PARAMETER that states its type is not such a slot. Its element ABI is
+  // the statement, and every array a caller passes converts into it (an arm of
+  // three's `Float32BufferAttribute( array )`, `@param {(Array<number>|
+  // Float32Array)}`), so it does not make its callers one storage: joining
+  // through it pooled `PlaneGeometry`'s all-number `vertices` with
+  // `BufferGeometry.setFromPoints`' `point.z || 0` pushes and boxed every
+  // geometry's buffers. Its own writes stay evidence for each caller that
+  // reaches it; nothing past it is followed.
+  const statesItsType = (node: ts.Node): boolean =>
+    ts.isParameter(node) && (node.type !== undefined || ts.getJSDocType(node) !== undefined || ts.getJSDocParameterTags(node).length > 0)
+  const boundariesOf = new Map<ts.Node, Set<ts.Node>>()
   const arrayRoots = new Map<ts.Node, ts.Node>()
   const rootOf = (node: ts.Node): ts.Node => {
     const parent = arrayRoots.get(node)
@@ -912,7 +924,13 @@ export const censusCollectionBindings = (
     return root
   }
   for (const owner of arraysByOwner.keys()) {
-    for (const alias of aliasClosureOf(owner)) {
+    for (const alias of aliasClosureOf(owner, statesItsType)) {
+      if (alias !== owner && statesItsType(alias)) {
+        const boundaries = boundariesOf.get(owner) ?? new Set<ts.Node>()
+        boundaries.add(alias)
+        boundariesOf.set(owner, boundaries)
+        continue
+      }
       const ownerRoot = rootOf(owner)
       arrayRoots.set(rootOf(alias), ownerRoot)
       if (!arrayRoots.has(ownerRoot)) arrayRoots.set(ownerRoot, ownerRoot)
@@ -928,7 +946,8 @@ export const censusCollectionBindings = (
 
   for (const [owner, aliases] of arrayComponents) {
     const evidence: ts.Expression[] = []
-    for (const decl of aliases) {
+    const boundaries = new Set([...aliases].flatMap((alias) => [...(boundariesOf.get(alias) ?? [])]))
+    for (const decl of [...aliases, ...boundaries]) {
       for (const write of flow.writesToDeclaration(decl)) {
         if ((write.edge === 'array-append' || write.edge === 'array-fill') && write.value) evidence.push(write.value)
         else if (write.edge === 'index-assignment' && write.slot === 'element' && write.value) evidence.push(write.value)
