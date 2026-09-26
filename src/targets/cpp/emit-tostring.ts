@@ -353,6 +353,22 @@ export const toStringTextOver = (
   if (carrier.kind === 'array-object' && (carrier.element.kind === 'string' || carrier.element.kind === 'scalar')) {
     return `gea::runtime::array::join(${text})`
   }
+  // Any other element joins through this same table, one element at a time,
+  // with step 3.d's empty text for a `null`/`undefined` one: the loop
+  // `Array.prototype.join` already renders for such elements
+  // (`emit-prototype-array.ts`'s `joinText`). An element this table cannot
+  // convert -- a class whose own `toString` needs a call -- still refuses.
+  if (carrier.kind === 'array-object') {
+    const element = toStringTextOver('gea_join_source->at(gea_join_index)', carrier.element, layouts, explicit, true)
+    if (element === null) return null
+    return (
+      `([&]() -> std::string { const auto& gea_join_source = ${text}; std::string gea_join_result; ` +
+      'for (std::size_t gea_join_index = 0; gea_join_index < gea_join_source->size(); ++gea_join_index) { ' +
+      "if (gea_join_index != 0) gea_join_result += ','; " +
+      `if (gea_join_source->present(gea_join_index)) gea_join_result += ${element}; ` +
+      '} return gea_join_result; })()'
+    )
+  }
   // ECMA-262 23.2.3.18 gives TypedArray the same comma-joined ToString shape
   // as Array, without holes or nullish elements. Every typed-array carrier in
   // this backend stores Number elements, so the runtime overload converts each
