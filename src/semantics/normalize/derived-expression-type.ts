@@ -2763,7 +2763,71 @@ const widenLiteralForm = (checker: ts.TypeChecker, type: ts.Type): ts.Type =>
  * reasoning that made `annotationStatesNothing` shared. One rule, one file,
  * asked by both.
  */
+/**
+ * Arrays of distinct OBJECT-LITERAL records join to an array of their union.
+ *
+ * fastify's precompiled config validator starts `let vErrors = null` and
+ * assigns `[err0]`, `[err1]`, ..., where most errors are full records
+ * (`{instancePath, schemaPath, keyword, params, message}`, each with its own
+ * `params`) and some are `{}`. `widestOf` answers `{}[]`: every record is
+ * assignable to the empty one, so the vacuous element dominates and the cell
+ * stores records with no fields at all. Structural subsumption between two
+ * literal records says nothing about their layouts -- each literal is its own
+ * allocation with its own fields -- so the only element carrier that holds
+ * every write is the union of the literals' types. Restricted to literal
+ * element types, where that is exactly the case; a class family or a declared
+ * interface keeps the ordinary join.
+ */
+const objectLiteralArrayFamilyOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts.Type | null => {
+  let observed = 0
+  const elements: ts.Type[] = []
+  for (const type of types) {
+    if (isNullishType(type)) {
+      observed |= type.flags & NULLISH_FLAGS
+      continue
+    }
+    if (!checker.isArrayType(type)) return null
+    const [element] = checker.getTypeArguments(type as ts.TypeReference)
+    if (!element || !isObjectLiteralRecord(element)) return null
+    // Structurally identical literals are one layout; only a join that would
+    // drop fields is this rule's business.
+    const same = (other: ts.Type): boolean =>
+      other === element || (checker.isTypeAssignableTo(other, element) && checker.isTypeAssignableTo(element, other))
+    if (!elements.some(same)) elements.push(element)
+  }
+  if (elements.length < 2) return null
+  const constructing = checker as unknown as {
+    getUnionType?: (types: readonly ts.Type[]) => ts.Type
+    createArrayType?: (element: ts.Type) => ts.Type
+  }
+  if (typeof constructing.getUnionType !== 'function' || typeof constructing.createArrayType !== 'function') return null
+  const family = constructing.createArrayType(constructing.getUnionType(elements))
+  return observed === 0 ? family : checker.getNullableType(family, observed)
+}
+
+/**
+ * A record type an object literal allocates. In JavaScript `const err4 = {}`
+ * makes the variable an expando container, and its literal's type carries the
+ * variable's symbol rather than an object-literal one.
+ */
+const isObjectLiteralRecord = (type: ts.Type): boolean => {
+  if ((type.flags & ts.TypeFlags.Object) === 0) return false
+  if (type.getCallSignatures().length > 0 || type.getConstructSignatures().length > 0) return false
+  const symbol = type.getSymbol()
+  if (!symbol) return false
+  if ((symbol.flags & ts.SymbolFlags.ObjectLiteral) !== 0) return true
+  const declaration = symbol.valueDeclaration
+  return (
+    declaration !== undefined &&
+    ts.isVariableDeclaration(declaration) &&
+    declaration.initializer !== undefined &&
+    ts.isObjectLiteralExpression(declaration.initializer)
+  )
+}
+
 export const joinOfWrites = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts.Type | null => {
+  const family = objectLiteralArrayFamilyOf(checker, types)
+  if (family) return family
   const direct = widestOf(checker, types)
   if (direct) return direct
   let observed = 0
