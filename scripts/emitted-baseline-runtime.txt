@@ -130,7 +130,7 @@ dictionary-index-truthiness.ts.cpp 519009b6c81f
 dictionary-named-absence.ts.cpp dc9ba237a175
 direct-interface-method-receiver.ts.cpp 55d743cf5d7d
 downcast-method-read-absent-on-other-arm.ts.cpp 52495ee800d6
-drift.txt dc173b6725be
+drift.txt ed53208eb6bf
 dynamic-array-absent-element.ts.cpp 6838ef917ebe
 dynamic-array-literal-gather.runtime.js.cpp 4c1e3d9c21cf
 dynamic-array-projection.ts.cpp 25d0cdd3b0d1
@@ -303,6 +303,7 @@ jsdoc-asserted-class-method.runtime.js.cpp 274ea169260d
 jsdoc-defaulted-class-constructor.runtime.js.cpp ca5226775273
 jsdoc-field-type-contradicted-by-writes.runtime.js.cpp f9608f5b2fc1
 jsdoc-optional-parameter.runtime.js.cpp 2cfb2703873b
+jsdoc-return-tag-contradicted-by-arrow.runtime.js.cpp 77d8407f51cd
 jsdoc-tag-leaves-null-out.runtime.js.cpp 7033bcb07563
 json-parse-as-a-value.ts.cpp 0ea01b076f42
 json-reader-dispatch.ts.cpp f43e28fc48ee
