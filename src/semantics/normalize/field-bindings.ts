@@ -987,7 +987,8 @@ export const censusFieldBindings = (
       // `/** @type {Object} */ this.userData = {};` is the measured case:
       // with that write silent, every class's `userData` fell back to the
       // annotation's `any` and boxed the empty object it only ever holds.
-      const type = nullDefault ?? parameters.statedTypeAt(write) ?? exactEmptyObjectLiteralType(checker, write) ?? known(write) ?? resolveExpr(write)
+      const type =
+        nullDefault ?? parameters.statedTypeAt(write) ?? exactEmptyObjectLiteralType(checker, write) ?? known(write) ?? resolveExpr(write)
       if (type) types.push(type)
       // A write typed `void`/`never` is a real fact stating the storage holds
       // nothing a program can use -- a veto in both phases, exactly as
