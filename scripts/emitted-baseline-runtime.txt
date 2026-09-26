@@ -241,6 +241,7 @@ globalthis-as-optional-record.ts.cpp be3ce0b17f1d
 globalthis-reads-a-script-var.ts.cpp a6ef65170a56
 grouped-carrier-field-read.runtime.js.cpp 716308dd9372
 grouped-field-read.runtime.js.cpp 09e22eb4a9b9
+guard-narrows-census-union-parameter.runtime.js.cpp 34e98abe8bb2
 guarded-property-class-union.ts.cpp 65553d3e4fa7
 harness-is-writable-shape.runtime.js.cpp 72e0aa13cf5c
 hoisted-function-declaration-dependencies.ts.cpp c825ef865026
