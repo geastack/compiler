@@ -169,6 +169,43 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
     return !domains.some((domain) => checker.isTypeAssignableTo(checker.getBaseTypeOfLiteralType(passed), domain))
   }
 
+  // A member tag -- `@param {T} [parameters.name]` -- states one member of an
+  // options object, and a literal argument writes that member: three's
+  // `ReflectorNode` states `[parameters.defaultTexture]` a `TextureNode` and
+  // constructs `new ReflectorNode( { defaultTexture: _defaultRT.depthTexture
+  // } )`, a `DepthTexture` its constructor hands on as the texture it is. The
+  // parameter's own default is no statement about the member unless it
+  // writes it, so an empty `{}` default leaves the member tag to its callers.
+  const contradictMemberTags = (parameter: ts.ParameterDeclaration, argument: ts.ObjectLiteralExpression): void => {
+    if (!ts.isIdentifier(parameter.name)) return
+    const initializer = parameter.initializer
+    if (
+      initializer &&
+      !isAbsence(checker, initializer) &&
+      !(ts.isObjectLiteralExpression(initializer) && initializer.properties.length === 0)
+    )
+      return
+    const owner = parameter.name.text
+    const memberTags = new Map<string, ts.JSDocParameterTag>()
+    // The parser folds `@param {Object} parameters` and its `parameters.name`
+    // tags into one type literal on the owning tag.
+    for (const tag of ts.getJSDocParameterTags(parameter)) {
+      const literal = tag.typeExpression?.type
+      if (!literal || !ts.isJSDocTypeLiteral(literal)) continue
+      for (const member of literal.jsDocPropertyTags ?? []) {
+        if (!ts.isJSDocParameterTag(member) || !member.typeExpression || !ts.isQualifiedName(member.name)) continue
+        if (!ts.isIdentifier(member.name.left) || member.name.left.text !== owner) continue
+        memberTags.set(member.name.right.text, member)
+      }
+    }
+    if (memberTags.size === 0) return
+    for (const property of argument.properties) {
+      if (!ts.isPropertyAssignment(property) || !ts.isIdentifier(property.name)) continue
+      const tag = memberTags.get(property.name.text)
+      if (tag && !contradicted.has(tag) && contradicts(property.initializer, tag)) contradicted.add(tag)
+    }
+  }
+
   for (const file of unchecked) {
     const visit = (node: ts.Node): void => {
       if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && node.arguments && node.arguments.length > 0) {
@@ -178,6 +215,7 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
             if (ts.isSpreadElement(argument)) return
             const parameter = declaration.parameters[index]
             if (!parameter || parameter.dotDotDotToken) return
+            if (ts.isObjectLiteralExpression(argument)) contradictMemberTags(parameter, argument)
             if (parameter.initializer && !isAbsence(checker, parameter.initializer)) return
             const tag = ts.getJSDocParameterTags(parameter).find((candidate) => candidate.typeExpression !== undefined)
             if (tag && !contradicted.has(tag) && contradicts(argument, tag)) {
