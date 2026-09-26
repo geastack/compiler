@@ -285,6 +285,7 @@ instanceof-regexp-and-arraybuffer-over-union.ts.cpp 8fb7e4a5b890
 instanceof-set-and-dataview-over-union.ts.cpp 0c80b1749d0d
 instanceof-through-structural-parameter.ts.cpp 3e3ad483a51a
 instanceof-typed-array-over-class-ref.ts.cpp b244834e84f0
+instanceof-typed-union-against-undeclared-global.runtime.js.cpp 6f54190efecb
 integer-imul-loop.ts.cpp ab3c6c768415
 integer-imul.ts.cpp 15c93c1dce5d
 integer-index-cells.ts.cpp c2746519796f
