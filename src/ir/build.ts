@@ -11,6 +11,7 @@ import { successorsOfTerminator } from './queries.js'
 import type {
   CallOperation,
   ComputeOperation,
+  ConstructOperation,
   ConversionUseId,
   ElementOperation,
   GetIteratorOperation,
@@ -188,7 +189,9 @@ export interface IrBodyBuilder {
     args: readonly IrOperand[],
     representation: Representation,
     /** `ConstructOperation.hostFrame`: the site's selected host-constructor frame, where one was derived. */
-    hostFrame?: CallableAbi
+    hostFrame?: CallableAbi,
+    /** `ConstructOperation.spreadTail`. */
+    spreadTail?: ConstructOperation['spreadTail']
   ) => IrValueId
 
   readonly constant: (
@@ -718,9 +721,29 @@ export const createIrBodyBuilder = (
     append(block, { kind: 'reparent-constructor', lineage, derived, base, classValue, heritage })
   }
 
-  const construct: IrBodyBuilder['construct'] = (block, lineage, callee, newTarget, target, args, representation, hostFrame) => {
+  const construct: IrBodyBuilder['construct'] = (
+    block,
+    lineage,
+    callee,
+    newTarget,
+    target,
+    args,
+    representation,
+    hostFrame,
+    spreadTail
+  ) => {
     const result = mintResult(representation)
-    append(block, { kind: 'construct', lineage, callee, newTarget, target, ...(hostFrame ? { hostFrame } : {}), arguments: args, result })
+    append(block, {
+      kind: 'construct',
+      lineage,
+      callee,
+      newTarget,
+      target,
+      ...(hostFrame ? { hostFrame } : {}),
+      arguments: args,
+      ...(spreadTail ? { spreadTail } : {}),
+      result
+    })
     return result.id
   }
 

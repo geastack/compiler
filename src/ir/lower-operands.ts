@@ -10,7 +10,7 @@ import {
 } from '../identity/ids.js'
 import { exactArmIndexOf, type ConversionCensus } from '../conversion/nodes.js'
 import type { ConversionNode } from '../conversion/algebra.js'
-import { detachedMethodAbiOf, isClosedContiguousTupleRecord } from '../projection/callee.js'
+import { abiOfCallee, constructAbiOfCallee, detachedMethodAbiOf, isClosedContiguousTupleRecord } from '../projection/callee.js'
 import type { ClassLayout } from '../projection/classes.js'
 import { classMemberOf } from '../projection/fields.js'
 import type { SlotCensus } from '../projection/slots.js'
@@ -1270,6 +1270,168 @@ export const recordLayoutOf = (ctx: LoweringContext, props: Representation): rea
  */
 export type ArgumentSlot = { readonly kind: 'value' | 'spread'; readonly value: IrOperand; readonly from?: number }
 
+/**
+ * The frames a spread may fill positionally: the one convention a callee
+ * states, or, for a sum of callables, every arm's own. `sum` says which, since
+ * a sum's arms convert each argument themselves when the arm is selected
+ * (`emitTaggedUnionConstruct`, `emit-callable.ts`). `named` is how many
+ * formals the reads have to cover: the widest frame's, counting only the
+ * formals before a rest slot. A rest slot is admitted only in a sum's
+ * construction, whose arms take the rest of the list themselves; anywhere else
+ * a frame with one, a missing frame, or an arm that expects a receiver is
+ * `null`.
+ */
+interface SpreadFrames {
+  readonly frames: readonly CallableAbi[]
+  readonly sum: boolean
+  readonly named: number
+  readonly rest: boolean
+}
+
+const spreadFramesOf = (
+  abi: CallableAbi | null,
+  callee: Representation | null,
+  internalMethod: 'call' | 'construct'
+): SpreadFrames | null => {
+  if (abi !== null) return abi.restFrom === null ? { frames: [abi], sum: false, named: abi.parameters.length, rest: false } : null
+  if (callee?.kind !== 'tagged-union' || callee.arms.length === 0) return null
+  const frames = callee.arms.map((arm) => (internalMethod === 'construct' ? constructAbiOfCallee(arm.value) : abiOfCallee(arm.value)))
+  const admitted = (frame: CallableAbi | null): frame is CallableAbi =>
+    frame !== null &&
+    frame.receiver === null &&
+    (frame.restFrom === null || (internalMethod === 'construct' && frame.parameters[frame.restFrom]?.value.kind === 'array-object'))
+  if (!frames.every(admitted)) return null
+  return {
+    frames,
+    sum: true,
+    named: Math.max(...frames.map((frame) => frame.restFrom ?? frame.parameters.length)),
+    rest: frames.some((frame) => frame.restFrom !== null)
+  }
+}
+
+/**
+ * The carrier one fresh array holds a spread's tail in: every value and every
+ * range the tail contributes, in one element carrier. A dynamic iterable's
+ * values are dynamic. The carriers have to agree: a tail that mixes them is
+ * refused rather than widened, since widening a typed value into the dynamic
+ * carrier is boxing it.
+ */
+const spreadTailElementOf = (tail: readonly ArgumentSlot[]): Representation => {
+  const carriers = tail.map((slot) => {
+    const held = slot.value.representation
+    if (slot.kind === 'value' || held.kind === 'dynamic') return held
+    if (held.kind === 'array-object') return held.element
+    throw new IrLoweringBlockedError(
+      `a call spreads a "${representationKey(held)}" into fixed formals; only an Array or a dynamic value is read positionally here`
+    )
+  })
+  // One dynamic box holds a value whatever reason each operand was boxed for.
+  const physical = (carrier: Representation): string => (carrier.kind === 'dynamic' ? 'dynamic' : representationKey(carrier))
+  const [first] = carriers
+  if (first === undefined || carriers.some((carrier) => physical(carrier) !== physical(first))) {
+    throw new IrLoweringBlockedError(
+      `a call spreads into fixed formals from values carried as ${[...new Set(carriers.map(representationKey))].join(', ')}; ` +
+        'the positional reads need one element carrier'
+    )
+  }
+  return first
+}
+
+/** The arguments a spread fills positionally, and the list the reads came from when an arm's rest slot takes the rest of it. */
+export interface SpreadFill {
+  readonly args: readonly IrOperand[]
+  readonly tail: { readonly from: number; readonly list: IrOperand } | null
+}
+
+/**
+ * `new NodeClass( ...params )` against named formals: ArgumentListEvaluation
+ * builds the argument list and the formals bind it left to right, so the
+ * formal at position `p` from the first spread on binds the tail's element
+ * `p - spread`, or `undefined` past its end, values past the last formal are
+ * dropped, and a rest formal binds a fresh array of the rest. The tail is read
+ * where it lies when it is one whole Array (an Array's iteration is its index
+ * reads in order); anything else -- a dynamic iterable, or values written
+ * after the spread -- is built into one fresh array first, which runs the
+ * iteration exactly once.
+ *
+ * Normalize already expands this shape when the checker selected a signature
+ * (`admitsFixedFormalArraySpread`, `producers/spread-arguments.ts`). The
+ * callee here is a parameter the checker types `any`, whose frames only the
+ * plan knows: three's `ShaderNodeProxy` constructs whichever node class it
+ * was handed, each with its own arity and some with a rest formal, so the
+ * reads cover the widest run of named formals and each arm takes its own
+ * prefix of them.
+ */
+const fillFromSpread = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operation: OperationId,
+  frames: SpreadFrames,
+  args: readonly ArgumentSlot[],
+  firstSpread: number
+): SpreadFill => {
+  const prefix = args.slice(0, firstSpread).map((slot) => slot.value)
+  const tail = args.slice(firstSpread)
+  const [only] = tail
+  const wholeArray =
+    tail.length === 1 && only !== undefined && only.value.representation.kind === 'array-object' && (only.from ?? 0) === 0
+      ? only.value
+      : null
+  // Past the widest frame nothing is read, but a tail that is not all Arrays
+  // is still iterated: its values are dropped, its iteration is not.
+  const iterates = tail.some((slot) => slot.kind === 'spread' && slot.value.representation.kind !== 'array-object')
+  if (firstSpread >= frames.named && !iterates && !frames.rest) return { args: prefix, tail: null }
+  const element = wholeArray?.representation.kind === 'array-object' ? wholeArray.representation.element : spreadTailElementOf(tail)
+  const listCarrier: Extract<Representation, { kind: 'array-object' }> = {
+    kind: 'array-object',
+    element,
+    ownership: 'shared-refcount',
+    extension: null
+  }
+  const list: IrOperand = wholeArray ?? {
+    value: packArgumentArray(ctx, block, lineage, tail, listCarrier),
+    representation: listCarrier
+  }
+  const read = optionalOf(element, 'undefined')
+  if (read.kind === 'unresolved') {
+    throw new IrLoweringBlockedError(
+      `a call spreads "${representationKey(element)}" elements into fixed formals, and a read past the end has no carrier: ${read.reason}`
+    )
+  }
+  const reads: IrOperand[] = []
+  for (let position = firstSpread; position < frames.named; position += 1) {
+    const keyRepresentation: Representation = { kind: 'scalar', domain: 'number' }
+    const key: IrOperand = {
+      value: ctx.builder.constant(block, lineage, String(position - firstSpread), 'number', keyRepresentation),
+      representation: keyRepresentation
+    }
+    const value: IrOperand = { value: ctx.builder.get(block, lineage, list, key, read), representation: read }
+    const formal = frames.sum ? null : frames.frames[0]?.parameters[position]
+    reads.push(formal ? convertOrDrift(ctx, block, lineage, operation, 'spread-argument', position, value, formal.value) : value)
+  }
+  return { args: [...prefix, ...reads], tail: frames.rest ? { from: firstSpread, list } : null }
+}
+
+/**
+ * A construction through a sum of constructors whose arguments spread, filled
+ * for every arm at once (`fillFromSpread`), or `null` when the callee is not
+ * such a sum and the ordinary packing answers.
+ */
+export const spreadConstructArguments = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operation: OperationId,
+  callee: Representation,
+  passed: readonly ArgumentSlot[]
+): SpreadFill | null => {
+  const firstSpread = passed.findIndex((slot) => slot.kind === 'spread')
+  if (firstSpread < 0 || callee.kind !== 'tagged-union') return null
+  const frames = spreadFramesOf(null, callee, 'construct')
+  return frames === null ? null : fillFromSpread(ctx, block, lineage, operation, frames, passed, firstSpread)
+}
+
 export const packRestArguments = (
   ctx: LoweringContext,
   block: IrBlockId,
@@ -1277,11 +1439,15 @@ export const packRestArguments = (
   operation: OperationId,
   abi: CallableAbi | null,
   passed: readonly ArgumentSlot[],
-  callee: Representation | null = null
+  callee: Representation | null = null,
+  internalMethod: 'call' | 'construct' = 'call'
 ): readonly IrOperand[] => {
   let args: readonly ArgumentSlot[] = passed
   const firstSpread = args.findIndex((slot) => slot.kind === 'spread')
   if (!abi || abi.restFrom === null) {
+    const frames = firstSpread >= 0 ? spreadFramesOf(abi, callee, internalMethod) : null
+    // A rest arm needs the list itself, which only a construction carries.
+    if (frames !== null && !frames.rest) return fillFromSpread(ctx, block, lineage, operation, frames, args, firstSpread).args
     if (firstSpread >= 0) {
       throw new IrLoweringBlockedError(
         'a call range-copies a spread argument into a convention that declares no rest slot; a spread contributes a runtime number of ' +

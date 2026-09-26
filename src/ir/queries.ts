@@ -158,7 +158,7 @@ export const operandsOfIrOperation = (operation: IrOperation): readonly IrOperan
     case 'reparent-constructor':
       return [operation.classValue, operation.heritage]
     case 'construct':
-      return [operation.callee, operation.newTarget, ...operation.arguments]
+      return [operation.callee, operation.newTarget, ...operation.arguments, ...(operation.spreadTail ? [operation.spreadTail.list] : [])]
     case 'constant':
       return []
     case 'binding-read':
