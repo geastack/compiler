@@ -15,6 +15,7 @@ array-pattern-over-generator.ts.cpp 3d9b68a0208e
 array-pattern-over-regexp-exec.ts.cpp 6f6b129a1e6c
 array-reduce-accumulator-carrier.ts.cpp 1b6929059b9b
 array-rest-target-reassigned-dynamic.runtime.js.cpp b8383e82ff79
+array-shift-tostring-once.runtime.js.cpp 3b871dab34f1
 asserted-arm-into-interface-slot.ts.cpp ab0d11a21074
 assign-for-in-generic.ts.cpp 00fa51c20b53
 async-integer-result.ts.cpp 40d406729713
@@ -545,7 +546,7 @@ spread-call-immediately-invoked.runtime.js.cpp c5ae95452df2
 spread-fixed-arity-three.runtime.js.cpp 978c1dcd93de
 spread-fixed-arity-typed-array.ts.cpp b8a4802269a5
 spread-fixed-arity.ts.cpp 355a4e5a2a88
-spread-into-untyped-callable.runtime.js.cpp ab9c6e0031e1
+spread-into-untyped-callable.runtime.js.cpp d476762f9a54
 stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d
 stated-open-union-preserves-closed-arms.ts.cpp 878f72cd6f91
