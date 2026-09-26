@@ -178,9 +178,13 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
       return excludesEachOther(type, stated)
     })
   }
-  // Two statements that exclude each other: neither type holds the other, as a
-  // subtype or as a subclass, and neither is only a host's. One of them is
-  // false, and the store says which one the program acts on.
+  // Two statements that exclude each other: a primitive stored where the tag
+  // states only objects, and neither is only a host's. One of them is false,
+  // and the store says which one the program acts on. Two object types are
+  // not compared: a returned object literal typed by its own members is a
+  // shape the tag may well describe loosely, and blanking three's
+  // `LightingContextNode.getContext`'s `@return {{ radiance: Node<vec3>, ... }}`
+  // typed its context by a literal of itself (a self-referential record).
   const excludesEachOther = (written: ts.Type, stated: ts.Type): boolean => {
     const value = checker.getNonNullableType(written)
     if (
@@ -189,9 +193,13 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
       0
     )
       return false
-    if (namesDeclaredOnlyType(checker, value) || namesDeclaredOnlyType(checker, stated)) return false
-    if (checker.isTypeAssignableTo(value, stated) || checker.isTypeAssignableTo(stated, value)) return false
-    return !derivesFromStatedClass(checker, value, stated) && !derivesFromStatedClass(checker, stated, value)
+    const primitive = ts.TypeFlags.StringLike | ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike | ts.TypeFlags.BigIntLike
+    const valueArms = value.isUnion() ? value.types : [value]
+    if (!valueArms.every((arm) => (arm.flags & primitive) !== 0)) return false
+    const statedArms = stated.isUnion() ? stated.types : [stated]
+    if (!statedArms.every((arm) => (arm.flags & ts.TypeFlags.Object) !== 0)) return false
+    if (namesDeclaredOnlyType(checker, stated)) return false
+    return !checker.isTypeAssignableTo(value, stated)
   }
   const literalContradicts = (value: ts.Expression, stated: ts.Type): boolean => {
     if (!ts.isObjectLiteralExpression(value)) return false

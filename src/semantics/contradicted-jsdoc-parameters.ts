@@ -1,6 +1,6 @@
 import { resolve } from 'node:path'
 import ts from 'typescript'
-import { derivesFromStatedClass, isUncheckedJavaScript, namesDeclaredOnlyType } from './contradicted-jsdoc-types.js'
+import { derivesFromStatedClass, isClassInstance, isUncheckedJavaScript, namesDeclaredOnlyType } from './contradicted-jsdoc-types.js'
 
 /**
  * `@param` types that the program's own calls contradict, in unchecked
@@ -165,9 +165,3 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
 /** `null`, or a value the checker types `undefined`, written as a default. */
 const isAbsence = (checker: ts.TypeChecker, value: ts.Expression): boolean =>
   value.kind === ts.SyntaxKind.NullKeyword || (checker.getTypeAtLocation(value).flags & ts.TypeFlags.Undefined) !== 0
-
-/** An instance of a class the program declares: its type's symbol is the class. */
-const isClassInstance = (type: ts.Type): boolean => {
-  const symbol = ((type as ts.TypeReference).target ?? type).getSymbol()
-  return symbol !== undefined && (symbol.flags & ts.SymbolFlags.Class) !== 0 && (type.flags & ts.TypeFlags.Object) !== 0
-}
