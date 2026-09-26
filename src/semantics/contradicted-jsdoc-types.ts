@@ -62,12 +62,13 @@ import ts from 'typescript'
  *   is initialized or assigned with: the local carries those values into the
  *   field, and it is the local's own assignment the checker would flag.
  *
- * The values: `new C( ... )` and a primitive literal, whose types are the
- * construction itself. Any other value's type is some other statement
- * speaking -- a call's `@returns`, a parameter's `@param`, another field's
- * `@type` -- and one of those being imprecise is not evidence against this
- * one: three's `LightShadow.clone()` states it returns a `LightShadow`, and
- * its subclasses store the clone into a field they state more narrowly.
+ * The values: `new C( ... )`, a primitive literal, and a function or arrow
+ * expression, whose types are the construction itself. Any other value's type
+ * is some other statement speaking -- a call's `@returns`, a parameter's
+ * `@param`, another field's `@type` -- and one of those being imprecise is
+ * not evidence against this one: three's `LightShadow.clone()` states it
+ * returns a `LightShadow`, and its subclasses store the clone into a field
+ * they state more narrowly.
  *
  * An object literal is evidence through what it lacks: a member the tag
  * requires that the literal does not write at all. Which members a literal
@@ -86,7 +87,10 @@ import ts from 'typescript'
  * A `@return` tag is the one other statement every caller reads, and the
  * function's own `return` is its store: a returned construction, or a returned
  * object literal constructing a member the tag types otherwise, contradicts it
- * the same way (three's `NodeFrame._getMaps`, below).
+ * the same way (three's `NodeFrame._getMaps`, below). An arrow with an
+ * expression body returns that expression: three's `overloadingFn = (
+ * functionNodes ) => ( ...params ) => ...` states `@returns
+ * {FunctionOverloadingNode}` and returns an arrow, which no node is.
  */
 export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: ReadonlyMap<string, string>): Map<string, string> => {
   const blanked = new Map<string, string>()
@@ -97,8 +101,10 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
 
   const tagsOf = new Map<ts.Symbol, ts.JSDocTypeTag[]>()
   const names = new Set<string>()
-  const returnTags: { readonly body: ts.Block; readonly tag: ts.JSDocReturnTag & { readonly typeExpression: ts.JSDocTypeExpression } }[] =
-    []
+  const returnTags: {
+    readonly body: ts.Block | ts.Expression
+    readonly tag: ts.JSDocReturnTag & { readonly typeExpression: ts.JSDocTypeExpression }
+  }[] = []
   for (const file of unchecked) {
     const visit = (node: ts.Node): void => {
       const returned = taggedReturnAt(node)
@@ -231,7 +237,9 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
       }
       ts.forEachChild(node, visit)
     }
-    ts.forEachChild(body, visit)
+    if (ts.isBlock(body)) ts.forEachChild(body, visit)
+    else if (contradicts(body, stated) || valuesWritten(body).some((written) => literalContradicts(withoutParentheses(written), stated)))
+      contradictedReturns.set(tag, body)
   }
 
   const spans = new Map<ts.SourceFile, { readonly at: number; readonly end: number }[]>()
@@ -297,13 +305,20 @@ const taggedFieldAt = (node: ts.Node): { readonly name: ts.Identifier | ts.Priva
   return null
 }
 
-/** A function with a body whose return a `@return` tag states, with no annotation of its own; generators and async bodies return something else. */
+/**
+ * A function with a body whose return a `@return` tag states, with no
+ * annotation of its own; generators and async bodies return something else.
+ * An arrow's expression body is its one returned value.
+ */
 const taggedReturnAt = (
   node: ts.Node
-): { readonly body: ts.Block; readonly tag: ts.JSDocReturnTag & { readonly typeExpression: ts.JSDocTypeExpression } } | null => {
+): {
+  readonly body: ts.Block | ts.Expression
+  readonly tag: ts.JSDocReturnTag & { readonly typeExpression: ts.JSDocTypeExpression }
+} | null => {
   if (!ts.isFunctionLike(node) || node.type) return null
   const body = (node as { readonly body?: ts.Node }).body
-  if (!body || !ts.isBlock(body)) return null
+  if (!body || !(ts.isBlock(body) || (ts.isArrowFunction(node) && ts.isExpression(body)))) return null
   if ((node as { readonly asteriskToken?: ts.Node }).asteriskToken) return null
   if (ts.getCombinedModifierFlags(node as ts.Declaration) & ts.ModifierFlags.Async) return null
   const tag = ts.getJSDocReturnTag(node)
@@ -354,9 +369,9 @@ const derivesFromStatedClass = (checker: ts.TypeChecker, constructed: ts.Type, s
   return false
 }
 
-/** A value whose type is its own construction: `new C( ... )`, or a primitive literal. */
+/** A value whose type is its own construction: `new C( ... )`, a primitive literal, or a function or arrow expression. */
 const isConstruction = (value: ts.Expression): boolean => {
-  if (ts.isNewExpression(value)) return true
+  if (ts.isNewExpression(value) || ts.isArrowFunction(value) || ts.isFunctionExpression(value)) return true
   if (ts.isPrefixUnaryExpression(value) && value.operator === ts.SyntaxKind.MinusToken)
     return ts.isNumericLiteral(value.operand) || ts.isBigIntLiteral(value.operand)
   return (
