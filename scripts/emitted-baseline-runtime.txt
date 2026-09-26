@@ -177,6 +177,7 @@ exact-arm-projection-mismatch.ts.cpp 90fefbbf44f8
 exact-arm-projection.ts.cpp 6dc8eaf2989d
 explicit-never-array.ts.cpp 0ba4795e6a01
 extra-call-arguments.ts.cpp fdeaa29d7b02
+field-assigned-only-in-method-starts-undefined.runtime.js.cpp 7a82e171467b
 field-census-class-family-narrowing.runtime.js.cpp 183db30cd770
 field-constructor-choice.runtime.js.cpp 4c5adc06cba9
 field-nullish-placeholder-for-of.runtime.js.cpp 23714acc63f4
