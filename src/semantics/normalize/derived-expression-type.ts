@@ -2610,6 +2610,8 @@ export const widestOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts
     // it gave a `Uint16BufferAttribute` the other class's identity.
     if (!nominallyCarries(checker, other, candidate)) return false
     if (!checker.isTypeAssignableTo(other, candidate)) return false
+    // Assignable is not the same storage either: see `changesStorage`.
+    if (changesStorage(checker, other, candidate)) return false
     // Assignability is not carriage, the same reason the nominal veto above
     // exists. A union with a VACUOUS member alongside real ones -- hono's
     // `Env?: E['Bindings'] | {}` -- absorbs every object type there is, so a
@@ -3277,6 +3279,47 @@ const nominallyCarries = (checker: ts.TypeChecker, held: ts.Type, carrier: ts.Ty
         inheritsClassInstance(checker, instance, named)
     )
   )
+}
+
+/**
+ * Whether carrying `held` as `carrier` would put it in another storage.
+ *
+ * - `carrier` is a plain record (an object literal's type, or any other
+ *   anonymous object type) and `held` is a source-class instance or a
+ *   record of another shape. Both reach the record through a structural
+ *   view (`emit-record-view.ts`), which is a new object: writes through it
+ *   never reach the original, and `===`, a WeakMap key or a WeakSet sees a
+ *   different object (plan item 1.15: `mark( literal ); mark( new
+ *   Descriptor() )` into one untyped parameter, where `d.label += '!'`
+ *   left the instance unchanged).
+ * - `carrier` is a source-class instance and `held` a plain record. A
+ *   record is not an instance of the class, and no conversion makes it one.
+ *
+ * A view is the answer for a type the program STATES; a join this compiler
+ * infers must not choose a carrier that is not the storage of every one of
+ * its own observations.
+ */
+const changesStorage = (checker: ts.TypeChecker, held: ts.Type, carrier: ts.Type): boolean => {
+  const isPlainRecord = (type: ts.Type): boolean =>
+    (type.flags & ts.TypeFlags.Object) !== 0 &&
+    ((type as ts.ObjectType).objectFlags & (ts.ObjectFlags.Anonymous | ts.ObjectFlags.ObjectLiteral)) !== 0 &&
+    !checker.isArrayType(type) &&
+    !checker.isTupleType(type) &&
+    type.getCallSignatures().length === 0 &&
+    type.getConstructSignatures().length === 0
+  const present = (type: ts.Type): readonly ts.Type[] =>
+    (type.isUnion() ? type.types : [type]).filter((member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) === 0)
+  const carried = present(carrier)
+  const [record] = carried
+  if (carried.length !== 1 || record === undefined) return false
+  if (sourceClassOfInstance(record) !== null) return present(held).some(isPlainRecord)
+  if (!isPlainRecord(record)) return false
+  return present(held).some((member) => {
+    if (member === record) return false
+    if (sourceClassOfInstance(member) !== null) return true
+    if (!isPlainRecord(member)) return false
+    return !checker.isTypeAssignableTo(record, member)
+  })
 }
 
 /** A class instance type is a reference even without type parameters (its `this` type); only declared ones make it generic. */

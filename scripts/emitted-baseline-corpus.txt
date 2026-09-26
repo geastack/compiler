@@ -1,7 +1,7 @@
 ambient-global-guard.ts.cpp 1eeb2c0e892d
 ambient-layout-relevance.ts.cpp 3d975c6429db
 ambient-merged-global.ts.cpp 9c5ddd917e45
-any-parameter-boxing.ts.cpp 21be6aab2a43
+any-parameter-boxing.ts.cpp 6f00853c2900
 array-length-store.ts.cpp 3c9f34e74964
 array-literal-index.ts.cpp 815872a6c081
 arrow-captures-receiver.ts.cpp 34b1e6622062
@@ -79,7 +79,7 @@ jsx-factory-jsx-runtime.ts.cpp d9e738bd5c08
 jsx-framework.tsx.cpp 86ddacdf6248
 keyed-collection-member-argument.ts.cpp 5e4bf9054fc5
 language.ts.cpp c230515aeb06
-literal-receiver-properties.ts.cpp 05b05c06d947
+literal-receiver-properties.ts.cpp 96fae2f1df37
 logical-guard-optional-instance.ts.cpp 8e3e86fcda49
 logical-merge-boolean-left.ts.cpp b5b3c07c04d0
 logical-merge-nullable-reference.ts.cpp db1ba84a1b96
@@ -93,7 +93,7 @@ namespace-qualified-lib.ts.cpp 8e4ddc40a9e5
 namespace-qualified-paths.ts.cpp 0cfc76e642e9
 narrowed-read.ts.cpp 7b29d159bdb6
 narrowed-union-read.ts.cpp 8c4c45da99ef
-native-instanceof.ts.cpp 011fb7498133
+native-instanceof.ts.cpp 6d34a2eadff5
 native-optional-field-read-closed.ts.cpp e101936dfd65
 nullable-union-guard.ts.cpp 54f8197f49d7
 nullish-coalescing.ts.cpp ed1e1ce7c8fd
@@ -120,7 +120,7 @@ optional-union-to-discriminated-repro.ts.cpp 1994825df37b
 overload-implementation-signature.ts.cpp d5e10f250b7a
 owned-record-union.ts.cpp e788814333aa
 physical-class-ancestry-declared.ts.cpp 492b223d9a66
-printer-drift.txt 91f366182812
+printer-drift.txt b65efbb3a43d
 property-access-unresolved-repro.ts.cpp 634811649cc8
 record-into-named-layout.ts.cpp 099fdfaaae11
 record-round-trip-through-box.ts.cpp 8e77a9618a7f
