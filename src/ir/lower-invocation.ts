@@ -502,6 +502,8 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
   // is built as one fresh array -- positional values and range copies in
   // written order, exactly as a rest array is -- and handed over as the
   // argument list itself: `f(a, ...xs)` is `Reflect.apply(f, this, [a, ...xs])`.
+  // A `new` keeps refusing: the construct operation has no spread form, and
+  // handing it the list would construct with the array as one argument.
   const spreadListCarrier: Extract<Representation, { kind: 'array-object' }> = {
     kind: 'array-object',
     element: callee.representation,
@@ -509,7 +511,7 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
     extension: null
   }
   const dynamicSpreadList: IrOperand | null =
-    callee.representation.kind === 'dynamic' && evaluated.some((slot) => slot.kind === 'spread')
+    operation.internalMethod === 'call' && callee.representation.kind === 'dynamic' && evaluated.some((slot) => slot.kind === 'spread')
       ? { value: packArgumentArray(ctx, block, lineage, evaluated, spreadListCarrier), representation: spreadListCarrier }
       : null
   const args =
@@ -542,7 +544,7 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
                 }
                 return slot.value
               })
-            : packRestArguments(ctx, block, lineage, operation.id, calleeAbi, evaluated)
+            : packRestArguments(ctx, block, lineage, operation.id, calleeAbi, evaluated, callee.representation)
   // `operation.target` (the `SemanticTargetProof`) is never read here: `open`
   // is a complete answer that selects this same generic path, and a narrower
   // proof does not license skipping straight to a direct call this IR has no
