@@ -1207,6 +1207,83 @@ export const censusCollectionBindings = (
     arrayComponents.set(root, component)
   }
 
+  // A subclass's `this.members = members` declares no field of its own: it
+  // writes the one its base class declares, so the base's `@type` is the
+  // statement for this storage too (three's `MRTNode.setup` over
+  // `OutputStructNode`'s `@type {Array<Node>}`).
+  const inheritedFieldTypeNode = (decl: ts.BinaryExpression): ts.TypeNode | undefined => {
+    const target = decl.left
+    if (!ts.isPropertyAccessExpression(target) || target.expression.kind !== ts.SyntaxKind.ThisKeyword) return undefined
+    let container: ts.Node | undefined = decl.parent
+    while (container && (!ts.isFunctionLike(container) || ts.isArrowFunction(container))) container = container.parent
+    const owningClass = container?.parent
+    if (
+      !container ||
+      !(ts.isMethodDeclaration(container) || ts.isConstructorDeclaration(container)) ||
+      !owningClass ||
+      !ts.isClassLike(owningClass)
+    ) {
+      return undefined
+    }
+    const classSymbol = owningClass.name ? checker.getSymbolAtLocation(owningClass.name) : undefined
+    if (!classSymbol) return undefined
+    const instance = checker.getDeclaredTypeOfSymbol(classSymbol)
+    if (!instance.isClassOrInterface()) return undefined
+    for (const base of checker.getBaseTypes(instance)) {
+      const property = checker.getPropertyOfType(base, target.name.text)
+      for (const declaration of property?.declarations ?? []) {
+        const typeNode = ts.getJSDocType(declaration)
+        if (typeNode) return typeNode
+      }
+    }
+    return undefined
+  }
+  // The element a declaration in the component STATES for the array it holds
+  // -- a parameter's annotation or `@param`, a variable's annotation, or the
+  // `@type` on the statement that declares a JavaScript field -- or
+  // `undefined` when it states nothing. `null` is a statement this census
+  // cannot adopt: not one array type once null/undefined are removed, or an
+  // `any`/`unknown` element, which is a dynamic boundary by the program's
+  // own choice.
+  const statedArrayElementOf = (decl: ts.Node): ts.Type | null | undefined => {
+    const typeNode =
+      ts.isParameter(decl) || ts.isVariableDeclaration(decl) || ts.isPropertyDeclaration(decl)
+        ? (decl.type ?? ts.getJSDocType(decl))
+        : ts.isBinaryExpression(decl) && ts.isExpressionStatement(decl.parent)
+          ? (ts.getJSDocType(decl) ?? inheritedFieldTypeNode(decl))
+          : undefined
+    if (!typeNode) return undefined
+    const statedType = checker.getTypeFromTypeNode(typeNode)
+    const members = (statedType.isUnion() ? statedType.types : [statedType]).filter(
+      (member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
+    )
+    const [only] = members
+    if (members.length !== 1 || only === undefined || !checker.isArrayType(only)) return null
+    const [element] = checker.getTypeArguments(only as ts.TypeReference)
+    if (element === undefined || (element.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) !== 0) return null
+    return element
+  }
+  // The one element every stating declaration of an array component agrees
+  // on, or `null`. An empty literal whose writes leave its element open (no
+  // write at all, or a write of an untyped value) is otherwise laid out as
+  // the checker's `any[]`, and the cell it is stored in or the parameter it is
+  // passed to keeps its statement: one storage, two array carriers, and no
+  // conversion between them that keeps the array's identity (three's
+  // `hashArray( values )` under `@param {Array<number>}`, and `MRTNode`'s
+  // `members` stored into `@type {Array<Node>}`). The statement is the only
+  // fact about the element, so the storage takes it, and an untyped write
+  // converts into it at the write. A component whose statements disagree
+  // states nothing this census may pick between.
+  const statedElementOfComponent = (decls: readonly ts.Node[]): ts.Type | null => {
+    let found: ts.Type | null = null
+    for (const decl of decls) {
+      const element = statedArrayElementOf(decl)
+      if (element === undefined) continue
+      if (element === null || (found !== null && found !== element)) return null
+      found = element
+    }
+    return found
+  }
   for (const [owner, aliases] of arrayComponents) {
     const evidence: ts.Expression[] = []
     const boundaries = new Set([...aliases].flatMap((alias) => [...(boundariesOf.get(alias) ?? [])]))
@@ -1215,6 +1292,13 @@ export const censusCollectionBindings = (
         if ((write.edge === 'array-append' || write.edge === 'array-fill') && write.value) evidence.push(write.value)
         else if (write.edge === 'index-assignment' && write.slot === 'element' && write.value) evidence.push(write.value)
       }
+    }
+    const writeTypes = evidence.map(argumentType)
+    const stated =
+      writeTypes.some((type) => type === null) || evidence.length === 0 ? statedElementOfComponent([...aliases, ...boundaries]) : null
+    if (stated && writeTypes.every((type) => type === null || checker.isTypeAssignableTo(type, stated))) {
+      for (const alias of aliases) boundElement.set(alias, stated)
+      continue
     }
     if (evidence.length === 0) {
       for (const alias of aliases) ownerArrayRefusal.set(alias, 'array:no-writes')
