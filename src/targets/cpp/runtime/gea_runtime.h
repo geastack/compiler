@@ -24522,6 +24522,21 @@ inline void appendGather(gea::ArrayObject<gea::Value>& out, const gea::Value& it
 }
 
 /**
+ * `appendGather` into a typed element: each drained value goes through the
+ * element's own conversion before the push. The conversion is the compiler's
+ * checked load of a dynamic value into that carrier, not program code, so the
+ * iterator-close reasoning above is unchanged.
+ */
+template <typename E, typename Convert>
+inline void appendGatherConverted(gea::ArrayObject<E>& out, const gea::Value& iterator, Convert&& convert) {
+  for (;;) {
+    Step next = step(iterator);
+    if (next.done) return;
+    out.push(convert(next.value));
+  }
+}
+
+/**
  * One protected for-of body iteration.  Normal continuation dismisses it;
  * return/break destroy it and therefore run IteratorClose. A throw is caught
  * by the emitter's surrounding catch first, where close failures are ignored

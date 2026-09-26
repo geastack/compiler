@@ -9,6 +9,7 @@ array-dynamic-element-search.ts.cpp 80d32b7cb646
 array-element-string-key.ts.cpp 82836dce1c7b
 array-index-absence.ts.cpp b9f1195e8e0b
 array-isarray-identity-conditional.ts.cpp 33c73a99fa8f
+array-literal-gathers-dynamic-into-class.runtime.js.cpp 7294712508f2
 array-multiple-windows.ts.cpp ee13367467b2
 array-mutator-frozen-integrity.ts.cpp f122fdb38185
 array-pattern-defaults-keep-positions.ts.cpp 9b003f6f7de9

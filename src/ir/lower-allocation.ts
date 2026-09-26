@@ -197,11 +197,25 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
             // fixed by construction, so a capability the target certifies and
             // the emitter renders had no lowering to reach it either way.
             const dynamicDestination = tuple.kind === 'dynamic'
-            if (!dynamicDestination && (tuple.kind !== 'array-object' || tuple.element.kind !== 'dynamic')) {
+            if (!dynamicDestination && tuple.kind !== 'array-object') {
               throw new IrLoweringBlockedError(
-                `an array literal gathers dynamic iterator values into a "${tuple.kind === 'array-object' ? representationKey(tuple.element) : tuple.kind}" element carrier; ` +
-                  'per-element dynamic conversion is not installed'
+                `an array literal gathers dynamic iterator values into a "${tuple.kind}" carrier, which is not an array`
               )
+            }
+            // A typed element takes each drained value through the same
+            // conversion a dynamic value stored into that element takes
+            // (`emit-arrays.ts`'s `appendGatherConverted`): three's
+            // `[ ...materialLightings, ...this._lights ]` gathers a dynamic
+            // context array into an array of lights. A pair with no conversion
+            // is refused here, by name.
+            if (tuple.kind === 'array-object' && tuple.element.kind !== 'dynamic') {
+              const node = ctx.program.conversions.nodeFor(source.representation, tuple.element)
+              if (node.capability.kind === 'never') {
+                throw new IrLoweringBlockedError(
+                  `an array literal gathers dynamic iterator values into a "${representationKey(tuple.element)}" element carrier, ` +
+                    `and no conversion takes one there: ${node.capability.reason}`
+                )
+              }
             }
             return { kind: 'gather', iterator: source }
           }
