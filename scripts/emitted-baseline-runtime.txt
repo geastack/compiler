@@ -641,6 +641,8 @@ type-query-escapes.ts.cpp 6e9842035b57
 type-query-snapshots.ts.cpp cc537a79b16d
 typed-array-buffer-into-array-buffer-like.ts.cpp cccfdfb3fdfb
 typed-array-constructor-bytes-per-element.ts.cpp 1e0438fda93c
+typed-array-constructor-map-keys.runtime.js.cpp 7d7a36f6e3d2
+typed-array-constructor-retagged-construct.runtime.js.cpp aa4e828d0fc2
 typed-array-loop-alias.ts.cpp 1ec2ce6004a7
 typed-array-loop-window.ts.cpp 9c30662c0e78
 typed-array-multiple-windows.ts.cpp 766249933e5b

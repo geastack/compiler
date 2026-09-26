@@ -1,4 +1,4 @@
-import type { TypedArrayElementDomain } from './model.js'
+import type { Representation, TypedArrayElementDomain } from './model.js'
 
 /**
  * The standard TypedArray constructor interfaces, keyed by name, to the element
@@ -37,3 +37,11 @@ const identities: ReadonlyMap<string, number> = new Map(
  * named. `null` for any other protocol.
  */
 export const typedArrayConstructorIdentityOf = (protocol: string): number | null => identities.get(protocol) ?? null
+
+/**
+ * A compiler-owned handle to one of the constructors above -- the carrier whose
+ * id is that identity. A plugin-stated carrier (`native !== null`) is its own
+ * C++ type and says nothing about ids, so it is not one.
+ */
+export const isTypedArrayConstructorHandle = (representation: Representation): boolean =>
+  representation.kind === 'native-handle' && representation.native === null && identities.has(representation.protocol)

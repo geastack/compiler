@@ -1,5 +1,6 @@
 import type { CallableAbi, Representation } from '../../../representation/model.js'
 import type { RecordLayoutPolicy } from '../../../representation/policies.js'
+import { isTypedArrayConstructorHandle, typedArrayConstructorIdentityOf } from '../../../representation/typed-array-constructors.js'
 import { cppAbiParameterType, cppResultTypeOf, cppStringLiteral, cppTypeOf } from '../types.js'
 import { toStringTextOver } from '../emit-tostring.js'
 import { booleanTestText } from '../emit-presence.js'
@@ -258,6 +259,21 @@ export const hostBuiltinFunctionIdentityText = (protocol: string, member: string
  * a class read as a value is only ever the callable half.
  */
 const hostClassCallPaths: ReadonlyMap<string, string> = new Map([['String', 'gea::host::detail::toString']])
+
+/**
+ * A standard typed-array constructor read as a VALUE (`const K = Int16Array`,
+ * a Map keyed by constructors). Every one of the nine is carried as the
+ * `NativeHandle` of the type the slot states, holding the identity of the
+ * constructor the program actually named
+ * (`typedArrayConstructorIdentityOf`), so `===` and keyed-collection lookups
+ * compare the constructors themselves even where the checker reduced a list of
+ * them to one representative type. `null` for any other class.
+ */
+export const typedArrayConstructorValueText = (representation: Representation, className: string): string | null => {
+  if (!isTypedArrayConstructorHandle(representation)) return null
+  const identity = typedArrayConstructorIdentityOf(`${className}Constructor`)
+  return identity === null ? null : `${cppTypeOf(representation)}(${identity})`
+}
 
 export const hostClassValueText = (representation: Representation, className: string): string | null => {
   // A host class READ carries its own `native-handle`, whose `call` half is

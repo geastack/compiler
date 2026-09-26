@@ -3,7 +3,14 @@ import type { StructuralTypeId } from '../../../identity/ids.js'
 import { representationKey } from '../../../representation/model.js'
 import { hostMemberTemplateOf, isArrayConstantOf } from '../../../representation/host-templates.js'
 import type { CallOperation, IrOperand } from '../../../ir/model.js'
-import { createCppEmitBlockedError, internSymbolKey, operandText, paddedArguments, type EmitContext } from '../emit-context.js'
+import {
+  createCppEmitBlockedError,
+  internSymbolKey,
+  operandText,
+  paddedArguments,
+  typedArrayConstructorGuardText,
+  type EmitContext
+} from '../emit-context.js'
 import { consoleArgumentsText, toStringRefusal, toStringText } from '../emit-tostring.js'
 import { toNumberRefusal, toNumberText } from '../emit-tonumber.js'
 import { booleanTestText } from '../emit-presence.js'
@@ -1251,8 +1258,19 @@ export const nativeHandleInvocationText = (
  * member was reached and how the receiver renders, and this fills the host's
  * template with both. Returns `null` when the callee is not a deferred host
  * member, so the ordinary invoke paths run unchanged.
+ *
+ * `K.from(xs)` on a typed-array constructor is spelled from K's tag, so a
+ * receiver that is not the host class by name is checked first
+ * (`typedArrayConstructorGuardText`).
  */
 export const hostCallText = (ctx: EmitContext, operation: CallOperation): string | null => {
+  const text = unguardedHostCallText(ctx, operation)
+  const receiver = ctx.hostMemberReads.get(operation.callee.value)?.receiver ?? null
+  const guard = text === null || receiver === null ? null : typedArrayConstructorGuardText(ctx, receiver)
+  return guard === null ? text : `(${guard}, ${text})`
+}
+
+const unguardedHostCallText = (ctx: EmitContext, operation: CallOperation): string | null => {
   const numericRest = operation.numericRestHostCall
   if (numericRest !== undefined) {
     const host = hostMemberOf(ctx.hosts.members, numericRest.protocol, numericRest.member)
