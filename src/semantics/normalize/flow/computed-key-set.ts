@@ -4,7 +4,7 @@ import { outermostErasureOf, unwrapErasedExpression } from '../producers/erasure
 import { deferredIntrinsicProtocolLedgerOf } from '../deferred-intrinsic-protocols.js'
 import type { PrototypeKeyQuery } from '../host-mutation-keys.js'
 import { isVacuousOrigin } from './seeded-origins.js'
-import { sourceRecordDataWritePlanOf } from './source-record-data.js'
+import { sourceRecordDataWritePlanOf, sourceRecordSlotValuesOf } from './source-record-data.js'
 import type { OriginAuthority } from './origin-authority.js'
 import { calleeDeclarationOf, isModuleExportedDeclaration, isTypePositionReference, resolveFlowSymbolAlias } from './targets.js'
 import { sourceClassFamilyOf } from './owned-class-receivers.js'
@@ -600,6 +600,19 @@ export const computedKeySetVerdictOf = (
     if (ts.isConditionalExpression(value)) {
       keyValues(value.whenTrue)
       return keyValues(value.whenFalse)
+    }
+    if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+      // A record slot's own values -- three's `{ [ TimestampQuery.RENDER ]: null }`,
+      // where `TimestampQuery` is a constants literal nothing rewrites. The
+      // slot authority proves the holder's allocations, that the slot is a
+      // data entry, and that no store or open alias replaces it; each stored
+      // value is then a key origin of its own.
+      if (visiting.has(value)) return
+      visiting.add(value)
+      const stored = sourceRecordSlotValuesOf(flow, value, frames)
+      if (stored === null) return refuse('key-slot-refused', value)
+      for (const one of stored) keyValues(one)
+      return
     }
     if (!ts.isIdentifier(value)) return refuse('key-origin-unsupported', value)
     const declaration = flow.targetOf(value)?.declaration

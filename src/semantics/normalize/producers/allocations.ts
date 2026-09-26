@@ -148,6 +148,16 @@ const objectLiteralKeyOperand = (
       blocked: `a computed property key of type "${described}" has no ToPropertyKey conversion; only string, number and symbol keys convert`
     }
   }
+  // A key whose type is only `string` can still be ONE value: three's
+  // `{ [ TimestampQuery.RENDER ]: null }` reads a slot of a constants literal
+  // that nothing rewrites. The whole-program key-set proof names every value
+  // the key can take; exactly one is that value, and the member is the same
+  // static definition a literal-typed key gives. The read it replaces is a
+  // data slot of a proven record, so no evaluation is lost with it. Only a
+  // `string` key folds: a `number` key keeps its numeric key, which is the
+  // key every read of that member already uses.
+  const proven = context.computedKeyTextsOf?.(name.expression) ?? null
+  if (domain === 'string' && proven !== null && proven.length === 1 && proven[0] !== undefined) return constantKey(proven[0])
   const cited = citeExpressionResult(name.expression, context)
   if (cited.kind === 'unmodelled') return { blocked: cited.reason }
   return { operand: operand('key', 0, cited.source, keyType), computed: true }
