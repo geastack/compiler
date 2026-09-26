@@ -677,7 +677,14 @@ const buildMapper = (
     checker,
     identities,
     typeOf: (type) => typeOf(type),
-    parameterOverrideAt: (parameter) => refusedArrayParameterTypeAt(parameter) ?? prototypeObjectParameterTypeAt(parameter),
+    parameterOverrideAt: (parameter) => {
+      const nullDefaulted = nullDefaultedParameterReadAt(parameter)
+      return (
+        refusedArrayParameterTypeAt(parameter) ??
+        prototypeObjectParameterTypeAt(parameter) ??
+        (nullDefaulted ? typeOf(nullDefaulted) : null)
+      )
+    },
     implicitReceiverOf,
     declaredMemberSignatureOf,
     declaredMembers,
@@ -2598,6 +2605,42 @@ const buildMapper = (
   }
 
   /**
+   * A parameter defaulted to `null` whose stated type leaves `null` out:
+   * three's `getCacheKey( force = false, ignores = null )` under `@param
+   * {Set<Node>} [ignores=null]`, and `getNodeType( builder, output = null )`
+   * under `@param {string} [output=null]`. three's files are unchecked, so
+   * nothing rejects the default, and the binding really does hold `null`
+   * whenever the caller omits the argument -- the language binds the
+   * initializer's value, whatever the tag says. Typed by the tag alone, the
+   * default had no conversion into the slot, and every `ignores === null`
+   * read would have unwrapped a value the cell does not hold. The parameter,
+   * its ABI slot and each read of it carry the `null` too; a read the checker
+   * narrowed to nothing (`ignores === null` itself) is the `null` the test
+   * found.
+   */
+  const nullDefaultedParameterReadAt = (node: ts.Node): ts.Type | null => {
+    const declaration = ts.isParameter(node)
+      ? node
+      : ts.isIdentifier(node)
+        ? checker.getSymbolAtLocation(node)?.valueDeclaration
+        : undefined
+    if (!declaration || !ts.isParameter(declaration) || declaration.dotDotDotToken) return null
+    if (declaration.initializer?.kind !== ts.SyntaxKind.NullKeyword) return null
+    if (ts.isIdentifier(node) && node === declaration.name) return null
+    // The tag decides, not the read: a read the checker narrowed past a `null`
+    // test the tag DOES admit (`@param {?string} [node]`) is that narrowing.
+    const stated = absentSubstitutedTypeAt(declaration)
+    const admitsNull = (type: ts.Type): boolean =>
+      (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Null)) !== 0 ||
+      (type.isUnion() && type.types.some((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0))
+    if (admitsNull(stated)) return null
+    const own = node === declaration ? stated : absentSubstitutedTypeAt(node)
+    if (admitsNull(own)) return null
+    if ((own.flags & ts.TypeFlags.Never) !== 0) return ts.isIdentifier(node) ? checker.getNullType() : null
+    return checker.getNullableType(own, ts.TypeFlags.Null)
+  }
+
+  /**
    * Whether this node is the one its parent site NAMES, rather than merely a
    * child of it.
    *
@@ -3571,6 +3614,16 @@ const buildMapper = (
     (node) => mapper.rawTypeAt(node)
   )
   const structuralRules: readonly StructuralRule[] = [
+    {
+      // First: the tag's own answer, which every later rule starts from, is
+      // the one that leaves the default's `null` out.
+      name: 'null-defaulted-parameter',
+      forms: [ts.SyntaxKind.Parameter, ts.SyntaxKind.Identifier],
+      resolve: (node) => {
+        const widened = nullDefaultedParameterReadAt(node)
+        return widened ? typeOf(widened) : null
+      }
+    },
     {
       name: 'mutable-method-storage',
       forms: [ts.SyntaxKind.PropertyAccessExpression, ts.SyntaxKind.ElementAccessExpression],
