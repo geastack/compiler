@@ -23,6 +23,7 @@ import {
   dropsUnboundParameters,
   dynamicTagFor,
   promisePayloadConvertible,
+  promiseArmAdoptionOf,
   rebasesRestOverLeadingParameters,
   dictionaryCastableToDictionary,
   recordCastableToDictionary,
@@ -1543,6 +1544,15 @@ const cppConversionTables = (
     // and stating that twice is how the census and the printer drift apart.
     if (source.kind === 'promise' && target.kind === 'promise' && promisePayloadConvertible(source.value, target.value)) {
       const domain = `promise-state-adoption:${representationKey(source)}->${representationKey(target)}`
+      return {
+        classifier: { id: 'gea::Promise::state', domain },
+        materializer: { id: 'gea::Promise::adopt-converted', domain, allocates: true }
+      }
+    }
+    // The same adoption into a union's one promise arm -- the pair the
+    // `promise-payload-arm` chain step renders, asked through its own predicate.
+    if (promiseArmAdoptionOf(source, target) !== null) {
+      const domain = `promise-arm-adoption:${representationKey(source)}->${representationKey(target)}`
       return {
         classifier: { id: 'gea::Promise::state', domain },
         materializer: { id: 'gea::Promise::adopt-converted', domain, allocates: true }

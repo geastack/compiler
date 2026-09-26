@@ -107,7 +107,7 @@ constant-table.ts.cpp 71ba3bcbd3b5
 constructor-alias-installed-members-class.runtime.js.cpp 0bd7b7483932
 constructor-alias-installed-members.runtime.js.cpp 19a6cf4855e4
 constructor-reads-arguments.runtime.js.cpp 68f158847348
-contextual-handler-union-return-slot.ts.cpp 6e40af1ea7a2
+contextual-handler-union-return-slot.ts.cpp a7f04d951606
 contextual-pattern-callback.ts.cpp 7664ae43caef
 contradicted-return-tag-record.runtime.js.cpp d1351e69b586
 control-flow-structural-view.ts.cpp 9901c479e84d
@@ -499,6 +499,7 @@ physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 1d2c5e207449
 printer-drift.txt 7f6242725b17
+promise-any-into-union-promise-arm.runtime.js.cpp 9372b4c219cd
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
 promise-method-read-as-value.ts.cpp d92abcc1e89f
