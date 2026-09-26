@@ -78,6 +78,7 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
   if (unchecked.length === 0) return blanked
   const checker = program.getTypeChecker()
   const contradicted = new Set<ts.JSDocParameterTag>()
+  const parameterOfTag = new Map<ts.JSDocParameterTag, ts.ParameterDeclaration>()
   const saysNothing =
     ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never | ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void
 
@@ -181,6 +182,7 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
             const tag = ts.getJSDocParameterTags(parameter).find((candidate) => candidate.typeExpression !== undefined)
             if (tag && !contradicted.has(tag) && contradicts(argument, tag)) {
               contradicted.add(tag)
+              parameterOfTag.set(tag, parameter)
               if (process.env['GEA_JSDOC_CONTRADICTION_DEBUG']) {
                 const at = (where: ts.Node): string => {
                   const source = where.getSourceFile()
@@ -197,8 +199,33 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
     visit(file)
   }
 
+  // A field the function stores the parameter in, tagged with the very type
+  // the parameter's tag states, holds what the callers passed: three's
+  // `CubeCamera( near, far, renderTarget )` stores `this.renderTarget =
+  // renderTarget` under `@type {WebGLCubeRenderTarget}` and is constructed
+  // with a WebGPU `CubeRenderTarget`, which is no `WebGLCubeRenderTarget`.
+  // The contradicted arguments are the field's values too, so its tag goes
+  // with the parameter's.
+  const blankedTags: ts.JSDocTag[] = [...contradicted]
+  for (const [tag, parameter] of parameterOfTag) {
+    const owner = parameter.parent
+    const body = 'body' in owner ? owner.body : undefined
+    if (!tag.typeExpression || !body || !ts.isBlock(body) || !ts.isIdentifier(parameter.name)) continue
+    const stated = typeOfTypeNode(tag.typeExpression.type)
+    const symbol = checker.getSymbolAtLocation(parameter.name)
+    for (const statement of body.statements) {
+      if (!ts.isExpressionStatement(statement)) continue
+      const store = statement.expression
+      if (!ts.isBinaryExpression(store) || store.operatorToken.kind !== ts.SyntaxKind.EqualsToken) continue
+      if (!ts.isPropertyAccessExpression(store.left) || store.left.expression.kind !== ts.SyntaxKind.ThisKeyword) continue
+      if (!ts.isIdentifier(store.right) || checker.getSymbolAtLocation(store.right) !== symbol) continue
+      const fieldTag = ts.getJSDocTypeTag(statement)
+      if (fieldTag && typeOfTypeNode(fieldTag.typeExpression.type) === stated) blankedTags.push(fieldTag)
+    }
+  }
+
   const spans = new Map<ts.SourceFile, { readonly at: number; readonly end: number }[]>()
-  for (const tag of contradicted) {
+  for (const tag of blankedTags) {
     const file = tag.getSourceFile()
     const fileSpans = spans.get(file) ?? []
     // The tag's own text ends where the next tag or the comment's close
