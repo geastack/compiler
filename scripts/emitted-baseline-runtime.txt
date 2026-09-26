@@ -4,6 +4,7 @@ annotated-generic-function-alias.ts.cpp 85b2e03d22b0
 app-root-through-factory-and-host-callback.runtime.ts.cpp 68a9f057aff4
 array-assignment-rest-target.ts.cpp 99169090bee7
 array-concat-array-argument.ts.cpp 86c31adb9c34
+array-dynamic-element-search.ts.cpp 80d32b7cb646
 array-element-string-key.ts.cpp 82836dce1c7b
 array-index-absence.ts.cpp b9f1195e8e0b
 array-isarray-identity-conditional.ts.cpp 33c73a99fa8f

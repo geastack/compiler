@@ -21791,18 +21791,30 @@ auto reduceRightSeeded(const gea::Ref<ArrayObject<E>>& array, const Callable& fn
  * -1 and `[NaN].includes(NaN)` is true.
  *
  * `+0` and `-0` are equal under BOTH, so no signbit test appears here.
+ *
+ * A boxed element has no `==`: two `gea::Value`s compare by the language's
+ * own algorithms, which `Value` already spells (`strictEquals`, and the
+ * keyed collections' `gea::sameValueZero<Value>`).
  */
 template <typename E>
 bool strictlyEqual(const E& left, const E& right) {
-  return left == right;
+  if constexpr (std::is_same_v<E, gea::Value>) {
+    return gea::Value::strictEquals(left, right);
+  } else {
+    return left == right;
+  }
 }
 
 template <typename E>
 bool sameValueZero(const E& left, const E& right) {
-  if constexpr (std::is_floating_point_v<E>) {
-    if (std::isnan(left) && std::isnan(right)) return true;
+  if constexpr (std::is_same_v<E, gea::Value>) {
+    return gea::sameValueZero<gea::Value>(left, right);
+  } else {
+    if constexpr (std::is_floating_point_v<E>) {
+      if (std::isnan(left) && std::isnan(right)) return true;
+    }
+    return left == right;
   }
-  return left == right;
 }
 
 /**
@@ -21871,7 +21883,7 @@ bool includes(const gea::Ref<ArrayObject<E>>& array, const std::type_identity_t<
   if (!array) return false;
   const std::size_t length = array->size();
   for (std::size_t index = relativeIndex(fromIndex, length); index < length; ++index) {
-    if (sameValueZero(elementOrRefuse(array, index, "includes"), search)) return true;
+    if (gea::runtime::array::sameValueZero(elementOrRefuse(array, index, "includes"), search)) return true;
   }
   return false;
 }
