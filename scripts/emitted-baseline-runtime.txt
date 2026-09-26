@@ -286,6 +286,7 @@ invocation-dynamic-number-throws.ts.cpp 0e972c2fd810
 isolated-inheritance.ts.cpp c483c0a7f63e
 iterate-absent-source-aborts.ts.cpp 4f1f57828b54
 iterate-absent-source.ts.cpp 816e8b5dc992
+iterate-array-arm-of-number-union.ts.cpp 1e51a77a3817
 iterate-never-source.ts.cpp 77f7522aef1f
 iterator-object-destructuring.ts.cpp 5595f0dc7234
 js-constructor-with-statics.js.cpp a70df1026a91

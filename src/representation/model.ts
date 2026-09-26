@@ -1243,6 +1243,35 @@ export const carriesNoAbsence = (representation: Representation): boolean => alw
  * carrier on the store path.
  */
 /**
+ * The one arm of a sum a `for`-`of` can walk, when every other arm is a
+ * primitive with no iterator: an Array, a `string` or a `Set` beside numbers,
+ * booleans and absences. three's `NodeBuilder.vars` is `Object<string,
+ * Array<NodeVar>|number>` -- a stage's variables beside a counter -- and
+ * `getVars` walks the array. GetIterator over a number, a boolean, `null` or
+ * `undefined` finds no `@@iterator` and throws a TypeError (ECMA-262 7.4.2,
+ * 7.3.10), so this arm is the only one a walk can start from.
+ *
+ * `null` for anything else: an object arm may answer `@@iterator` itself, and
+ * two iterable arms are a real question about which walk runs. The published
+ * cursor (`publish.ts`) and the lowering that narrows the source to this arm
+ * (`ir/lower-protocol.ts`) both ask here, so they cannot disagree.
+ */
+export const soleIterableArmOf = (representation: Representation): Representation | null => {
+  if (representation.kind !== 'tagged-union') return null
+  const iterable = representation.arms.filter(
+    (arm) =>
+      arm.value.kind === 'array-object' ||
+      arm.value.kind === 'string' ||
+      (arm.value.kind === 'keyed-collection' && arm.value.family === 'set')
+  )
+  const [only] = iterable
+  if (only === undefined || iterable.length !== 1) return null
+  const primitive = (value: Representation): boolean =>
+    value.kind === 'scalar' || value.kind === 'null' || value.kind === 'undefined' || value.kind === 'void'
+  return representation.arms.every((arm) => arm === only || primitive(arm.value)) ? only.value : null
+}
+
+/**
  * Whether a carrier has an `undefined` state at all -- the question a
  * definedness test asks, asked of the carrier rather than of a value.
  *
