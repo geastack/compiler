@@ -48,10 +48,12 @@ import {
 import {
   hostBuiltinFunctionIdentityText,
   hostClassValueText,
+  typedArrayConstructorValueText,
   hostFunctionValueText,
   hostJsonMemberValueText,
   hostMemberValueText
 } from './host/emit-host-value.js'
+import { isTypedArrayConstructorHandle, typedArrayConstructorIdentityOf } from '../../representation/typed-array-constructors.js'
 import type { HostMethodAlias } from './host/host-method-aliases.js'
 import type { PrinterDrift } from './emit-narrowing.js'
 import { createConversionNodes, type ConversionCensus } from '../../conversion/nodes.js'
@@ -2500,6 +2502,8 @@ export const operandText = (ctx: EmitContext, operand: IrOperand): string => {
   }
   const hostClass = ctx.hostClassReads.get(operand.value)
   if (hostClass !== undefined) {
+    const typedArrayConstructor = typedArrayConstructorValueText(operand.representation, hostClass.linkageName)
+    if (typedArrayConstructor !== null) return typedArrayConstructor
     const called = hostClassValueText(operand.representation, hostClass.linkageName)
     if (called !== null) return called
     throw createCppEmitBlockedError(
@@ -2541,6 +2545,27 @@ export const operandText = (ctx: EmitContext, operand: IrOperand): string => {
     )
   }
   return nameOfValue(ctx, operand.value)
+}
+
+/**
+ * The check a use makes before it reads a typed-array constructor off its
+ * static tag -- `new K(n)`, `x instanceof K`, `K.BYTES_PER_ELEMENT`,
+ * `K.from(xs)` -- or `null` when there is nothing to check.
+ *
+ * `typed-array-constructor-retag` (`emit-narrowing.ts`) lets a handle tagged
+ * `Int8ArrayConstructor` hold `Int16Array`'s identity, because tsc folds a
+ * Map's keys onto one constructor interface. Those uses render the TAG's
+ * constructor, so each first asks the runtime that the id is the tag's own and
+ * aborts otherwise: a program that constructs through a retagged handle stops
+ * rather than building the wrong element type. The host class read by name
+ * (`new Int16Array(n)`) is its own tag by construction and needs no check.
+ */
+export const typedArrayConstructorGuardText = (ctx: EmitContext, operand: IrOperand): string | null => {
+  const representation = operand.representation
+  if (representation.kind !== 'native-handle' || !isTypedArrayConstructorHandle(representation)) return null
+  if (ctx.hostClassReads.has(operand.value)) return null
+  const identity = typedArrayConstructorIdentityOf(representation.protocol)
+  return identity === null ? null : `gea::detail::requireTypedArrayConstructor(${operandText(ctx, operand)}, ${identity})`
 }
 
 /**

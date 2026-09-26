@@ -1688,6 +1688,10 @@ export const nativeHandleInvocationText = (
  * member was reached and how the receiver renders, and this fills the host's
  * template with both. Returns `null` when the callee is not a deferred host
  * member, so the ordinary invoke paths run unchanged.
+ *
+ * `K.from(xs)` on a typed-array constructor is spelled from K's tag, so a
+ * receiver that is not the host class by name is checked first
+ * (`typedArrayConstructorGuardText`).
  */
 /**
  * One argument of a pass-through host member call. The row lets C++ choose
@@ -1713,6 +1717,13 @@ const passThroughArgumentText = (ctx: EmitContext, operation: CallOperation, arg
 }
 
 export const hostCallText = (ctx: EmitContext, operation: CallOperation): string | null => {
+  const text = unguardedHostCallText(ctx, operation)
+  const receiver = ctx.hostMemberReads.get(operation.callee.value)?.receiver ?? null
+  const guard = text === null || receiver === null ? null : typedArrayConstructorGuardText(ctx, receiver)
+  return guard === null ? text : `(${guard}, ${text})`
+}
+
+const unguardedHostCallText = (ctx: EmitContext, operation: CallOperation): string | null => {
   const numericRest = operation.numericRestHostCall
   if (numericRest !== undefined) {
     const host = hostMemberOf(ctx.hosts.members, numericRest.protocol, numericRest.member)

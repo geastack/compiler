@@ -49,6 +49,7 @@ import {
   isIntegerStorageValue,
   operandText,
   paddedArguments,
+  typedArrayConstructorGuardText,
   type CaptureAdmission,
   type CaptureSlot,
   type EmitContext,
@@ -2360,6 +2361,10 @@ const emitTypedArrayConstruct = (
     )
   }
   const target = typedArrayTargetSpelling(result)
+  // The element type comes from the callee's tag, so a callee that is not
+  // the host class by name must hold that tag's own constructor.
+  const guard = typedArrayConstructorGuardText(ctx, operation.callee)
+  if (guard !== null) lines.push(`${guard};`)
   // ECMA-262 23.2.5.1's THIRD overload, `(buffer, byteOffset?, length?)`,
   // which ALIASES the block rather than copying it. Recognized by the
   // argument's own already-resolved carrier, exactly as the two forms below

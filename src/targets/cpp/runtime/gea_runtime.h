@@ -9129,6 +9129,22 @@ class NativeHandle {
   int id_;
 };
 
+namespace detail {
+/**
+ * A typed-array constructor handle read by its static tag: the id it carries
+ * must be the tag's own constructor identity (`representation/
+ * typed-array-constructors.ts`). A handle retagged to share a Map key type
+ * with its siblings holds another constructor's id, and constructing or
+ * testing through it would use the wrong element type, so this stops instead.
+ */
+template <typename Tag>
+inline void requireTypedArrayConstructor(const NativeHandle<Tag>& handle, int identity) {
+  if (handle.id() == identity) return;
+  std::fprintf(stderr, "gea: a typed-array constructor held under another constructor's type was used as that type\n");
+  gea::detail::abortAfterFlush();
+}
+}  // namespace detail
+
 /**
  * A symbol: one interned id, which is all a program can observe of one.
  *

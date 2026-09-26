@@ -531,7 +531,18 @@ const hostInstanceTestText = (ctx: EmitContext, left: IrOperand, spelling: strin
   return render(left.representation, operandText(ctx, left))
 }
 
+/**
+ * A typed-array constructor on the right is answered by its static tag's
+ * element domain, so one that is not the host class by name is checked first
+ * (`typedArrayConstructorGuardText`).
+ */
 export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOperand, recipe?: ClassInstanceTestRecipe): string => {
+  const guard = typedArrayConstructorGuardText(ctx, right)
+  const text = unguardedInstanceofText(ctx, left, right, recipe)
+  return guard === null ? text : `(${guard}, ${text})`
+}
+
+const unguardedInstanceofText = (ctx: EmitContext, left: IrOperand, right: IrOperand, recipe?: ClassInstanceTestRecipe): string => {
   const constructor = right.representation
   // A right-hand side that is not an Object is the one case the specification
   // answers with no prototype chain at all: 13.10.2 step 3 throws a TypeError
