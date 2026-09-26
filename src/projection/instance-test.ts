@@ -2,19 +2,7 @@ import type { DeclarationId } from '../identity/ids.js'
 import type { Representation, TypedArrayElementDomain } from '../representation/model.js'
 import type { ClassLayout } from './classes.js'
 import { extendsClass } from './dispatch.js'
-
-/** Authenticated constructor protocols map to native payload identities here. */
-export const typedArrayConstructorDomains: ReadonlyMap<string, TypedArrayElementDomain> = new Map([
-  ['Int8ArrayConstructor', 'int8'],
-  ['Uint8ArrayConstructor', 'uint8'],
-  ['Uint8ClampedArrayConstructor', 'uint8-clamped'],
-  ['Int16ArrayConstructor', 'int16'],
-  ['Uint16ArrayConstructor', 'uint16'],
-  ['Int32ArrayConstructor', 'int32'],
-  ['Uint32ArrayConstructor', 'uint32'],
-  ['Float32ArrayConstructor', 'float32'],
-  ['Float64ArrayConstructor', 'float64']
-])
+import { typedArrayConstructorDomains } from '../representation/typed-array-constructors.js'
 
 /** The `typeof` names of right-hand sides that are not Objects. */
 export type NonObjectInstanceTarget = 'undefined' | 'null' | 'boolean' | 'number' | 'bigint' | 'string' | 'symbol'

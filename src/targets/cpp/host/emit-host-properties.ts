@@ -7,6 +7,7 @@ import {
   createCppEmitBlockedError,
   defineValue,
   operandText,
+  typedArrayConstructorGuardText,
   type EmitContext,
   type HostMemberRead,
   type PrototypeMethodRead
@@ -233,7 +234,10 @@ export const nativeHostMemberText = (ctx: EmitContext, receiver: IrOperand, key:
     // though nothing here reads the receiver's text: `String.fromCharCode`
     // is a property access on the `String` class object, not on an instance.
     const receiverText = ctx.hostClassReads.has(receiver.value) ? null : operandText(ctx, receiver)
-    const filled = fillHostTemplate(host.emit, receiverText, [])
+    const template = fillHostTemplate(host.emit, receiverText, [])
+    // `K.BYTES_PER_ELEMENT` is answered by K's tag, which K must then hold.
+    const guard = typedArrayConstructorGuardText(ctx, receiver)
+    const filled = template === null || guard === null ? template : `(${guard}, ${template})`
     if (filled === null) {
       throw createCppEmitBlockedError(
         `host-invocation:${protocol}.${staticKey}`,

@@ -15,6 +15,7 @@ import {
   callableObjectAbi,
   resultAdapterTransportOf,
   boxDiscriminantsOfArm,
+  boxesIntoFunctionArm,
   type BoxDiscriminant,
   conversionRecipeOf,
   boxedAssertionText,
@@ -22,6 +23,7 @@ import {
   dropsUnboundParameters,
   dynamicTagFor,
   promisePayloadConvertible,
+  promiseArmAdoptionOf,
   rebasesRestOverLeadingParameters,
   dictionaryCastableToDictionary,
   recordCastableToDictionary,
@@ -448,7 +450,7 @@ const dynamicCarrierSupported = (representation: Representation, seen = new Set<
     case 'function-family':
     case 'function-value-family':
     case 'function-value-dispatch':
-      return dynamicCallableAbiSupported(representation.abi, nested)
+      return dynamicCallableAbiSupported(representation.abi, nested, false)
     case 'void':
       return true
     default:
@@ -456,9 +458,17 @@ const dynamicCarrierSupported = (representation: Representation, seen = new Set<
   }
 }
 
-const dynamicCallableAbiSupported = (abi: CallableAbi, seen = new Set<Representation>()): boolean => {
+/**
+ * `statesResultAbsence`: whether the adapter being licensed is the top-level
+ * one `unboxedLoadText` renders, which names a `T | null` RESULT's absence to
+ * `DynamicCarrier<CallableObject<...>>` explicitly (`NullResult`). A callable
+ * nested in another frame position is read through the runtime's carrier
+ * policy instead, which knows only undefined-absence.
+ */
+const dynamicCallableAbiSupported = (abi: CallableAbi, seen = new Set<Representation>(), statesResultAbsence = true): boolean => {
   if (abi.receiver !== null && !dynamicCarrierSupported(abi.receiver, seen)) return false
-  if (abi.result.kind !== 'void' && !dynamicCarrierSupported(abi.result, seen)) return false
+  const result = statesResultAbsence && abi.result.kind === 'optional' && abi.result.absence === 'null' ? abi.result.payload : abi.result
+  if (result.kind !== 'void' && !dynamicCarrierSupported(result, seen)) return false
   if (!abi.parameters.every((parameter) => dynamicCarrierSupported(parameter.value, seen))) return false
   if (abi.restFrom === null) return true
   const rest = abi.parameters[abi.restFrom]?.value
@@ -1487,8 +1497,7 @@ const cppConversionTables = (
       }
     }
     const union = target.kind === 'optional' ? target.payload : target
-    if (union.kind !== 'tagged-union') return null
-    if (union.arms.some((arm) => representationKey(arm.value) === sourceKey)) {
+    if (union.kind === 'tagged-union' && union.arms.some((arm) => representationKey(arm.value) === sourceKey)) {
       return {
         classifier: { id: 'gea::TaggedUnion::ofArm', domain: `arm:${sourceKey}` },
         materializer: {
@@ -1498,6 +1507,16 @@ const cppConversionTables = (
           nativeFieldProtocol: 'unused',
           ...nativeClassReferenceIdentityOf(source, target)
         }
+      }
+    }
+    // A typed callable stored where the program declared the broad
+    // `Function` beside other members boxes into that one arm -- the store
+    // `widenedStoreText` renders through the same predicate.
+    if (boxesIntoFunctionArm(target, source)) {
+      const domain = `box:function-arm:${sourceKey}->${representationKey(target)}`
+      return {
+        classifier: { id: 'gea::Value::box', domain },
+        materializer: { id: 'gea::Value::box', domain, allocates: true }
       }
     }
     return null
@@ -1525,6 +1544,15 @@ const cppConversionTables = (
     // and stating that twice is how the census and the printer drift apart.
     if (source.kind === 'promise' && target.kind === 'promise' && promisePayloadConvertible(source.value, target.value)) {
       const domain = `promise-state-adoption:${representationKey(source)}->${representationKey(target)}`
+      return {
+        classifier: { id: 'gea::Promise::state', domain },
+        materializer: { id: 'gea::Promise::adopt-converted', domain, allocates: true }
+      }
+    }
+    // The same adoption into a union's one promise arm -- the pair the
+    // `promise-payload-arm` chain step renders, asked through its own predicate.
+    if (promiseArmAdoptionOf(source, target) !== null) {
+      const domain = `promise-arm-adoption:${representationKey(source)}->${representationKey(target)}`
       return {
         classifier: { id: 'gea::Promise::state', domain },
         materializer: { id: 'gea::Promise::adopt-converted', domain, allocates: true }

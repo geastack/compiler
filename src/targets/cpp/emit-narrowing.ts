@@ -52,6 +52,7 @@ import { cppRegExpNativeTypes, cppStringObjectNativeType } from './regexp-types.
 import { widenedNativeSumText } from './emit-sum-widening.js'
 import { nativeSelectionText } from './emit-native-selection.js'
 import { narrowingReachesTarget } from '../../conversion/build.js'
+import { isTypedArrayConstructorHandle } from '../../representation/typed-array-constructors.js'
 
 /**
  * `native-record-ref` (the String WRAPPER OBJECT, `new String(x)`) -> `string`,
@@ -104,6 +105,27 @@ export const promisePayloadConvertible = (source: Representation, target: Repres
     if (isCppEmitBlockedError(error)) return false
     throw error
   }
+}
+
+/**
+ * The one promise arm of a bare union a DIFFERENT promise adopts into: the
+ * union names exactly one promise arm and no dynamic arm (a box could hold
+ * the promise object too, and choosing between the two would be a guess), and
+ * the payloads reconcile under `promisePayloadConvertible`. An exact arm is
+ * not this pair -- it is an ordinary `ofArm` widening.
+ */
+export const promiseArmAdoptionOf = (
+  source: Representation,
+  target: Representation
+): { readonly index: number; readonly arm: Extract<Representation, { kind: 'promise' }> } | null => {
+  if (source.kind !== 'promise' || target.kind !== 'tagged-union') return null
+  if (target.arms.some((arm) => arm.value.kind === 'dynamic')) return null
+  const indexes = target.arms.flatMap((arm, index) => (arm.value.kind === 'promise' ? [index] : []))
+  if (indexes.length !== 1) return null
+  const index = indexes[0]!
+  const arm = target.arms[index]!.value
+  if (arm.kind !== 'promise' || representationKey(arm) === representationKey(source)) return null
+  return promisePayloadConvertible(source.value, arm.value) ? { index, arm } : null
 }
 
 /** A promise payload that carries no information: `void`, and the `undefined` it is spelled as wherever a value is required. */
@@ -1207,6 +1229,9 @@ export const widenedStoreText = (held: Representation, written: Representation, 
     // a result the arm declares `any`.
     const adaptedArm = resultAdaptedCallableText(written, arm.value, text)
     if (adaptedArm !== null) return `${cppTypeOf(held)}::ofArm<${armIndex}>(${adaptedArm})`
+    if (isBroadFunctionArm(arm) && boxesIntoFunctionArm(held, written)) {
+      return `${cppTypeOf(held)}::ofArm<${armIndex}>(gea::FunctionValue(${boxedText(written, 'Function', text)}))`
+    }
     // A record recasts into a dictionary/array-object ARM the same way
     // `convertedValueText`'s own top level recasts it directly -- identity above never matches an object literal against either.
     // A dictionary reaches a WIDER dictionary arm the same way (`dictionaryCastableToDictionary`);
@@ -2809,6 +2834,46 @@ export const boxDiscriminantsOf = (carrier: Representation): BoxDiscriminant[] |
   ]
 }
 
+/**
+ * The broad `Function` arm a TYPED callable boxes into.
+ *
+ * three's `overrideNode( targetNode, callback = null )` declares `callback`
+ * `{Function|Node|null}` and then writes `callback = () => node` into it: an
+ * arrow with a static ABI stored where the program itself declared the broad,
+ * untyped `Function`. That arm is a dynamic boundary the SOURCE states
+ * (`dynamic(untyped-callable)`, kept as `gea::FunctionValue` so the union
+ * retains its Function-tag discriminator), so boxing the callable there is the
+ * same `Value::box` a `Function`-typed plain cell already performs, one arm
+ * down.
+ *
+ * Only when the sum names exactly one such arm and no typed callable arm
+ * anywhere in its nesting: a typed arm is the value's exact home, reached by
+ * the non-boxing converting constructors `widenedStoreText` asks first, and
+ * boxing past it would store a different carrier than the program chose.
+ * Asked by both the conversion registry and the store render, so the two
+ * cannot disagree about which pairs box.
+ */
+export const boxesIntoFunctionArm = (held: Representation, written: Representation): boolean => {
+  if (held.kind !== 'optional' && held.kind !== 'tagged-union') return false
+  if (dynamicTagFor(written) !== 'Function') return false
+  let broad = 0
+  let typed = false
+  const visit = (carrier: Representation): void => {
+    if (carrier.kind === 'optional') return visit(carrier.payload)
+    if (carrier.kind !== 'tagged-union') return
+    for (const arm of carrier.arms) {
+      if (isBroadFunctionArm(arm)) broad++
+      else if (dynamicTagFor(arm.value) === 'Function') typed = true
+      else visit(arm.value)
+    }
+  }
+  visit(held)
+  return broad === 1 && !typed
+}
+
+const isBroadFunctionArm = (arm: TaggedUnionArm): boolean =>
+  arm.runtimeDiscriminator.kind === 'callable-tag' && arm.value.kind === 'dynamic' && arm.value.reason === 'untyped-callable'
+
 /** The representation arm's carried discriminator and the executable classifier must agree. */
 export const boxDiscriminantsOfArm = (arm: TaggedUnionArm): BoxDiscriminant[] | null => {
   // Broad `Function` is an already-dynamic boundary.  It has no static ABI or
@@ -2867,14 +2932,17 @@ export const unboxedLoadText = (target: Representation, text: string): string | 
     const type = cppTypeOf(target)
     const value = 'gea_callable_value'
     const restFrom = callableAbi.restFrom
+    // `gea::Optional<T>` does not record which absence it means, so a result
+    // declared `T | null` names its absence to the adapter explicitly.
+    const nullResult = callableAbi.result.kind === 'optional' && callableAbi.result.absence === 'null'
     const load =
       restFrom === null
         ? callableAbi.receiver === null
-          ? `gea::detail::DynamicCarrier<${type}>::in(${value}, 0)`
-          : `gea::detail::DynamicCarrier<${type}>::inWithReceiver(${value}, 0)`
+          ? `gea::detail::DynamicCarrier<${type}>::${nullResult ? 'template in<true>' : 'in'}(${value}, 0)`
+          : `gea::detail::DynamicCarrier<${type}>::${nullResult ? 'template inWithReceiver<true>' : 'inWithReceiver'}(${value}, 0)`
         : callableAbi.receiver === null
-          ? `gea::detail::DynamicCarrier<${type}>::template inWithRest<${restFrom}>(${value}, 0)`
-          : `gea::detail::DynamicCarrier<${type}>::template inWithReceiverAndRest<${restFrom + 1}>(${value}, 0)`
+          ? `gea::detail::DynamicCarrier<${type}>::template inWithRest<${restFrom}${nullResult ? ', true' : ''}>(${value}, 0)`
+          : `gea::detail::DynamicCarrier<${type}>::template inWithReceiverAndRest<${restFrom + 1}${nullResult ? ', true' : ''}>(${value}, 0)`
     const members =
       target.kind === 'function'
         ? [target.functionId]
@@ -3356,6 +3424,21 @@ export const conversionChain: readonly ConversionStep[] = [
         ? `${cppTypeOf(target)}(${text})`
         : undefined
   },
+  // One typed-array constructor held where another is declared: tsc's subtype
+  // reduction folds `[ [Int8Array, 'int'], [Int16Array, 'int'] ]` onto ONE
+  // constructor interface, so the Map's key carrier names a constructor its
+  // other keys are not. Every such handle carries its constructor's own
+  // identity in the id (`typedArrayConstructorValueText`), so the retag keeps
+  // the value the program wrote, and `==`/Map keys still compare it. A use
+  // that reads the constructor off the static tag instead -- `new K()`,
+  // `x instanceof K`, `K.BYTES_PER_ELEMENT` -- first checks the id against that
+  // tag (`requireTypedArrayConstructor`) unless the operand is the host class
+  // itself.
+  {
+    id: 'typed-array-constructor-retag',
+    apply: (source, target, text) =>
+      isTypedArrayConstructorHandle(source) && isTypedArrayConstructorHandle(target) ? `${cppTypeOf(target)}(${text}.id())` : undefined
+  },
   { id: 'callable-part', apply: (source, target, text) => claimed(callablePartText(source, target, text)) },
   // An EMPTY array literal flowing into a native array-like carrier. `[]` with
   // no contextual array type checks as the empty tuple, which derives a record
@@ -3712,6 +3795,19 @@ export const conversionChain: readonly ConversionStep[] = [
         `{ ${promiseTargetName}.reject(${promiseRejectionName}); }); ` +
         `return ${promiseTargetName}; }())`
       )
+    }
+  },
+  // The same adoption one arm down: three's `NodeManager.getForRender` is
+  // `@return {NodeBuilderState|Promise<NodeBuilderState>}` and returns a
+  // `.then(...)` whose handler answers an untyped data-map read, so a
+  // `Promise<any>` lands in the union's one promise arm.
+  {
+    id: 'promise-payload-arm',
+    apply: (source, target, text) => {
+      const home = promiseArmAdoptionOf(source, target)
+      if (home === null) return undefined
+      const adopted = convertedValueText(source, home.arm, text)
+      return adopted === null ? undefined : `${cppTypeOf(target)}::ofArm<${home.index}>(${adopted})`
     }
   },
   // A TypeScript boundary does not call an ECMAScript abstract operation. A

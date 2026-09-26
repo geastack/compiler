@@ -59,6 +59,7 @@ class-accessors-viewed-as-record.ts.cpp f390fdd89ddd
 class-arm-into-declared-interface-slot.ts.cpp 1cf8ed753b5b
 class-arrow-field-lazy.ts.cpp 1faacfab4068
 class-cast-through-unknown-is-identity.ts.cpp 2b6430638e1e
+class-constructor-map-keys.runtime.js.cpp 5b41e70db2ca
 class-defaulted-census-slot.runtime.js.cpp d6231db471a1
 class-dynamic-json-reflection.ts.cpp 1ab6016eb6c8
 class-expando-array-method-name.runtime.js.cpp e26fa4d413ad
@@ -94,6 +95,7 @@ closure-written-null-cell-read.runtime.js.cpp 20118f22c8cc
 collection-get-native-union.ts.cpp ea90283c893f
 composed-field-descriptor.runtime.js.cpp a11d2a79f4b4
 computed-class-prototype-method.ts.cpp f1375430414d
+computed-constant-key-record-literal.runtime.js.cpp b39db1e5d75e
 computed-key-enumeration.runtime.js.cpp f6c9f5d040c4
 computed-key-enumeration.ts.cpp 4cfa68dfb67c
 computed-method-value-called-with-its-receiver.ts.cpp 2b2bf4b9b3e1
@@ -106,7 +108,7 @@ constant-table.ts.cpp 71ba3bcbd3b5
 constructor-alias-installed-members-class.runtime.js.cpp 0bd7b7483932
 constructor-alias-installed-members.runtime.js.cpp 19a6cf4855e4
 constructor-reads-arguments.runtime.js.cpp 68f158847348
-contextual-handler-union-return-slot.ts.cpp 6e40af1ea7a2
+contextual-handler-union-return-slot.ts.cpp a7f04d951606
 contextual-pattern-callback.ts.cpp 7664ae43caef
 contradicted-return-tag-record.runtime.js.cpp d1351e69b586
 control-flow-structural-view.ts.cpp 9901c479e84d
@@ -116,6 +118,7 @@ date-setter-argument-coercion.runtime.js.cpp 2235debf782d
 date-setter-time-value-read-first.runtime.js.cpp f8035bab7069
 dead-helper-obligations.runtime.js.cpp 8fc1339f6c8b
 dead-values.ts.cpp 921962c4bff0
+define-property-setter-function-expression.runtime.js.cpp 885f8eb03d54
 delete-symbol-expando-on-class-through-interface.ts.cpp 4d04cd30773e
 derived-class-extends-instantiated-generic-base.ts.cpp d7a3a67ce230
 derived-class-reads-base-private-method-in-closure.ts.cpp a8fe7d67798f
@@ -145,6 +148,7 @@ dynamic-expando-read-into-an-optional-union.ts.cpp 50e2e29bbdc9
 dynamic-fallback-call-bind.js.cpp e354fb71dea9
 dynamic-finite-destructuring-close.ts.cpp a3d4cc28c1db
 dynamic-for-of-iterator-close.ts.cpp 91912cb66fbd
+dynamic-function-into-nullable-result-method.runtime.js.cpp 80869287e9c7
 dynamic-iterator-gather.ts.cpp ccdb8a9f5be5
 dynamic-iterator-header-close.ts.cpp 428657c306cc
 dynamic-optional-absence-mismatch.ts.cpp 7df14bcbd5c2
@@ -252,7 +256,7 @@ hoisted-function-declaration.ts.cpp 27eb208fa439
 hoisted-value-not-moved-in-loop.ts.cpp 2476672d5091
 host-method-alias.runtime.js.cpp 050cfab07ca3
 host-method-read-as-value.ts.cpp 1eb870019631
-host-read-class-field-initializer.ts.cpp 3c87b38b7e81
+host-read-class-field-initializer.ts.cpp 9d5f44915aae
 hot-path-borrowed-tree.ts.cpp ce11f4ca7e3f
 hot-path-closure-identity.ts.cpp 05b1a334b21d
 hot-path-closure-table.ts.cpp 50d3b20c5fa0
@@ -282,6 +286,7 @@ instanceof-regexp-and-arraybuffer-over-union.ts.cpp 8fb7e4a5b890
 instanceof-set-and-dataview-over-union.ts.cpp 0c80b1749d0d
 instanceof-through-structural-parameter.ts.cpp 3e3ad483a51a
 instanceof-typed-array-over-class-ref.ts.cpp b244834e84f0
+instanceof-typed-union-against-undeclared-global.runtime.js.cpp 6f54190efecb
 integer-imul-loop.ts.cpp ab3c6c768415
 integer-imul.ts.cpp 15c93c1dce5d
 integer-index-cells.ts.cpp c2746519796f
@@ -314,6 +319,7 @@ jsdoc-return-open-array-element.runtime.js.cpp b7ee5fa4fc4d
 jsdoc-return-tag-contradicted-by-arrow.runtime.js.cpp 77d8407f51cd
 jsdoc-tag-excluded-by-its-store.runtime.js.cpp 1a0e1f90ebda
 jsdoc-tag-leaves-null-out.runtime.js.cpp 7033bcb07563
+jsdoc-unimported-optional-parameter.runtime.js.cpp 4cae4ab5fd4f
 json-parse-as-a-value.ts.cpp 0ea01b076f42
 json-reader-dispatch.ts.cpp f43e28fc48ee
 json-stringify-nested-literal.ts.cpp 742dc85e30d9
@@ -453,6 +459,7 @@ numeric-dictionary-property-keys.js.cpp 453c57e574aa
 numeric-index-absence-effects.runtime.js.cpp 5f35fd9a8d7a
 numeric-parameter-self-update.runtime.js.cpp dc24846abf14
 numeric-record-reads.js.cpp 3a1a43509eba
+object-assign-class-instance-plain-copy.runtime.js.cpp 8a8116b1aa5f
 object-create-contextual.ts.cpp a1ea4ea40b7f
 object-destructuring-assignment.ts.cpp c0f9e4a7ab05
 object-entries-subclass-through-helper.ts.cpp 326fa9e13f0e
@@ -496,6 +503,7 @@ physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 1d2c5e207449
 printer-drift.txt 7f6242725b17
+promise-any-into-union-promise-arm.runtime.js.cpp 9372b4c219cd
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
 promise-method-read-as-value.ts.cpp d92abcc1e89f
@@ -578,6 +586,7 @@ spread-fixed-arity.ts.cpp 355a4e5a2a88
 spread-into-constructor-union.runtime.js.cpp 6cc180f3d547
 spread-into-untyped-callable.runtime.js.cpp d476762f9a54
 spread-new-reflected-constructor.runtime.js.cpp f64547d3e4fa
+spread-object-typed-context.runtime.js.cpp ad3c80d9d71d
 stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d
 stated-any-collection-field-allocation.runtime.js.cpp 0ba48b0a0d69
@@ -610,6 +619,7 @@ symbol-description.runtime.js.cpp 6eb1a4ca2572
 symbol-key-declared-field.ts.cpp fd171dd519d5
 symbol-keyed-class-field-declarations.ts.cpp 3db41fd4fd08
 symbol-keyed-method-deletes-symbol-expando.ts.cpp 7684e183ecc6
+tagged-union-delete-arms.runtime.js.cpp 25fe4aee40bb
 template-strings-array-identity.ts.cpp 5188be0a20ec
 template-strings-array-structural.ts.cpp 04a6f75360eb
 template-strings-readonly-array.ts.cpp a3aa686bb2ad
@@ -634,10 +644,14 @@ type-query-escapes.ts.cpp 6e9842035b57
 type-query-snapshots.ts.cpp cc537a79b16d
 typed-array-buffer-into-array-buffer-like.ts.cpp cccfdfb3fdfb
 typed-array-constructor-bytes-per-element.ts.cpp 1e0438fda93c
+typed-array-constructor-map-entries.runtime.js.cpp d2dd0a7d0805
+typed-array-constructor-map-keys.runtime.js.cpp 7d7a36f6e3d2
+typed-array-constructor-retagged-construct.runtime.js.cpp aa4e828d0fc2
 typed-array-loop-alias.ts.cpp 1ec2ce6004a7
 typed-array-loop-window.ts.cpp 9c30662c0e78
 typed-array-multiple-windows.ts.cpp 766249933e5b
 typed-array-narrowing-over-class.ts.cpp 069c3279b884
+typed-callable-into-function-arm.runtime.js.cpp 6fa2dff6aff9
 typed-computed-record-read-global.ts.cpp 197ade80cc2d
 typed-computed-record-read.ts.cpp db9ced2d6827
 typed-custom-iterator-close.ts.cpp d82cc3c5b6ee
@@ -659,3 +673,5 @@ value-record-literal-union.ts.cpp ad9d4204d83c
 virtual-call-through-a-base-whose-override-narrows-unknown.ts.cpp 62f0efa5a9a4
 virtual-parameter-widening.ts.cpp 87284ed30699
 void-call-stored-into-union.ts.cpp 9ca89501aa0f
+weak-map-keyed-by-reboxed-record.runtime.js.cpp a4226bda064e
+weak-map-ordinary-property.runtime.js.cpp 7a7211186060

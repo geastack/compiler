@@ -931,6 +931,13 @@ const counterpartOf = (
   const parameter = jsSignature.parameters[index]
   const counterpart = declared.parameters[index]
   if (!parameter || !counterpart || !ts.isIdentifier(parameter.name) || !ts.isIdentifier(counterpart.name)) return null
+  // A rest parameter's type is the array of every argument from here on, an
+  // ordinary one's is one argument: neither describes the other. three's
+  // `FnNode.call( ...params )` met `ShaderNode.call: ( inputs: {...} )` by
+  // name, and the checker read the record as the rest ELEMENT while the
+  // parameter census read it as the whole binding.
+  if ((parameter.dotDotDotToken === undefined) !== (counterpart.dotDotDotToken === undefined)) return null
+  if (namesTypeParameter(counterpart)) return null
   const name = parameter.name.text
   if (counterpart.name.text === name) return counterpart
   if (jsSignature.parameters.length > declared.parameters.length) return null
@@ -938,6 +945,31 @@ const counterpartOf = (
     (other, position) => position !== index && ts.isIdentifier(other.name) && other.name.text === name
   )
   return declaredElsewhere ? null : counterpart
+}
+
+/**
+ * Whether a declared parameter's type names a type parameter: its own
+ * signature's, or an enclosing class's, interface's or alias's.
+ *
+ * The JS has no way to supply one. Spelled bare into JSDoc, `T` binds to
+ * whatever one type the program declares by that name, or to nothing, which
+ * the checker reads as `any`. three's `ShaderNodeInternal.call( rawInputs )`
+ * took `ShaderNode<T>.call`'s `{ [key in keyof T]: ... }` that way: a
+ * string-keyed dictionary for what is always an Array of arguments. A field
+ * falls back on its owner's stated default (`typeArgumentDefaults`); a
+ * parameter is left out, as `accessorKey` leaves out a generic owner's
+ * accessors.
+ */
+const namesTypeParameter = (parameter: ts.ParameterDeclaration): boolean => {
+  if (!parameter.type) return false
+  const inScope = new Set<string>()
+  for (let at: ts.Node | undefined = parameter.parent; at; at = at.parent) {
+    const declared = (at as { readonly typeParameters?: ts.NodeArray<ts.TypeParameterDeclaration> }).typeParameters
+    for (const typeParameter of declared ?? []) inScope.add(typeParameter.name.text)
+  }
+  if (inScope.size === 0) return false
+  const names = typeNamesIn(parameter.type.getText(parameter.getSourceFile()))
+  return names === null || names.some((name) => inScope.has(name))
 }
 
 /**

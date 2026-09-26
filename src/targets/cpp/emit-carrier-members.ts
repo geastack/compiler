@@ -909,12 +909,11 @@ export const keyedCollectionMemberText = (
   const carrier = receiver.representation
   if (carrier.kind !== 'keyed-collection') return null
   const staticKey = ctx.staticKeyTexts.get(key.value)
-  if (staticKey === undefined) {
-    throw createCppEmitBlockedError(
-      'property-access:keyed-collection:get:true',
-      `a ${carrier.family} property access keyed by a non-constant key has no ToPropertyKey or native member table installed`
-    )
-  }
+  // A computed key reads the collection OBJECT's ordinary own properties, not
+  // its entries: `nativeSidecarGetText` answers it through
+  // `gea::keyedCollectionOrdinaryGet`, which refuses a key the collection
+  // would inherit.
+  if (staticKey === undefined) return null
   const strong = carrier.family === 'map' || carrier.family === 'set'
   if (keyedCollectionSizeIsDataProperty(carrier, staticKey)) {
     return `${operandText(ctx, receiver)}${memberAccessOperator(carrier.ownership)}size()`

@@ -653,6 +653,46 @@ export function trailing( count, tag ) { return count; }
   assert.equal(types.get('tag'), 'string')
 })
 
+// three's `FnNode.call( ...params )` met `ShaderNode.call( inputs )` by name:
+// the record the declaration states for ONE argument was published for the
+// array of all of them, and the census and the checker read it differently.
+test('a rest parameter and an ordinary one never take each other type', () => {
+  const source = `
+export function gathered( ...inputs ) { return inputs; }
+export function spread( values ) { return values; }
+export function listed( ...items ) { return items; }
+`
+  const text = overlayRecord('positions', source)
+  const { types } = parameterTypes('positions', text)
+  assert.doesNotMatch(text, /@param \{[^}]*\} (?:inputs|values)\b/)
+  assert.equal(types.get('inputs'), 'any[]')
+  assert.equal(types.get('values'), 'any')
+  // Rest against rest still transfers.
+  assert.equal(types.get('items'), 'string[]')
+})
+
+// three's `ShaderNodeInternal.call( rawInputs )` took `ShaderNode<T>.call`'s
+// `{ [key in keyof T]: ... }` with `T` bound to nothing: a dictionary for what
+// is always an Array.
+test('a declared parameter type naming a type parameter gets nothing', () => {
+  const source = `
+export class Holder {
+  holdValue( value ) {}
+  mapInputs( inputs ) {}
+  takeItem( item ) { return item; }
+  keepCount( count ) {}
+}
+`
+  const text = overlayRecord('positions', source)
+  const { types } = parameterTypes('positions', text)
+  assert.doesNotMatch(text, /@param \{[^}]*\} (?:value|inputs|item)\b/)
+  assert.equal(types.get('value'), 'any')
+  assert.equal(types.get('inputs'), 'any')
+  assert.equal(types.get('item'), 'any')
+  // A sibling that names none keeps its type.
+  assert.equal(types.get('count'), 'number')
+})
+
 test('an Array tag given more type arguments than Array takes yields to the declared tuple', () => {
   const source = `
 export class Angles {

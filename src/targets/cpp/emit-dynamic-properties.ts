@@ -60,9 +60,14 @@ import { nativeAbsentPropertyReadOf } from '../../ir/native-absent-property.js'
  *
  * A numeric key converts through the same `toStringText` every other ToString
  * in this backend goes through, because ToPropertyKey of a Number *is*
- * ToString of it. A carrier that is neither string, symbol nor number is
- * refused by name: `ToPropertyKey` on an arbitrary object runs `ToPrimitive`,
- * which can call user code, and no such dispatch is installed.
+ * ToString of it. A class instance takes the same road: ToPropertyKey is
+ * ToPrimitive with hint string and then ToString, which is exactly ToString
+ * of the object, and `toStringText` already answers that for a `class-ref`
+ * ("[object Object]" when no class up the chain declares `toString`, the
+ * method's own body when one does and nothing overrides it). three's
+ * `ShadowNode` keys a WeakMap's ordinary properties by a Camera that way.
+ * Any other object carrier is refused by name: `ToPropertyKey` on it runs
+ * `ToPrimitive`, which can call user code, and no such dispatch is installed.
  */
 const propertyKeyCarrierText = (ctx: EmitContext, carrier: Representation, text: string, contextDescription: string): string => {
   if (carrier.kind === 'null' || carrier.kind === 'undefined') {
@@ -72,6 +77,10 @@ const propertyKeyCarrierText = (ctx: EmitContext, carrier: Representation, text:
   if (carrier.kind === 'symbol') return `gea::PropertyKey::symbol(${text})`
   if (carrier.kind === 'scalar') {
     if (carrier.domain !== 'boolean' && carrier.domain !== 'bigint') return `gea::PropertyKey::number(static_cast<double>(${text}))`
+    const converted = toStringText(text, carrier, ctx.classes, ctx.deriver)
+    if (converted !== null) return `gea::PropertyKey::string(${converted})`
+  }
+  if (carrier.kind === 'class-ref') {
     const converted = toStringText(text, carrier, ctx.classes, ctx.deriver)
     if (converted !== null) return `gea::PropertyKey::string(${converted})`
   }
@@ -356,7 +365,14 @@ const nativeSidecarReceiver = (ctx: EmitContext, receiver: IrOperand, contextDes
     // writes into it: `finalizeTemplateObject` installs GetTemplateObject's
     // `raw` there. See `arrayAccessText`'s own comment for why that function
     // defers here rather than stating a table exists or does not.
-    representation.kind === 'array-object'
+    representation.kind === 'array-object' ||
+    // A Map/Set/WeakMap/WeakSet OBJECT's ordinary own properties, which are
+    // not its entries: `weakMap[ camera ] = id` is an ordinary [[Set]] of the
+    // key ToPropertyKey(camera) spells, and three's `ShadowNode` does exactly
+    // that. The same identity-keyed table holds them; the read and the write
+    // go through `keyedCollectionOrdinaryGet`/`Set`, which refuse a key the
+    // collection would inherit, since no prototype member is rendered here.
+    representation.kind === 'keyed-collection'
   if (!addressable) return null
   if (representation.ownership !== 'shared-refcount') {
     throw createCppEmitBlockedError(
@@ -1033,7 +1049,9 @@ export const nativeSidecarGetText = (ctx: EmitContext, operation: GetOperation):
   const key = propertyKeyText(ctx, operation.key, site)
   const read = isPatternSidecarReceiver(operation.receiver)
     ? `gea::runtime::regex::dynamicGet(${receiver}, ${key})`
-    : `gea::nativeDynamicGet(${receiver}, ${key})`
+    : operation.receiver.representation.kind === 'keyed-collection'
+      ? `gea::keyedCollectionOrdinaryGet(${receiver}, ${key})`
+      : `gea::nativeDynamicGet(${receiver}, ${key})`
   const prototypeMethod = computedClassPrototypeMethodText(ctx, operation)
   // ONE carrier for the whole read, and it is the prototype arm's when there
   // is a prototype arm. A `?:` has a single type, and the two arms are the two
@@ -1141,9 +1159,11 @@ export const emitNativeSidecarSet = (ctx: EmitContext, lines: string[], operatio
   const generated = generatedNativeSidecarReceiver(ctx, operation.receiver, site)
   const write = isPatternSidecarReceiver(operation.receiver)
     ? `gea::runtime::regex::dynamicSet(${receiver}, ${key}, ${value})`
-    : generated === null
-      ? `gea::nativeDynamicSet(${receiver}, ${key}, ${value})`
-      : generatedNativeWriteText(generated, key, value)
+    : operation.receiver.representation.kind === 'keyed-collection'
+      ? `gea::keyedCollectionOrdinarySet(${receiver}, ${key}, ${value})`
+      : generated === null
+        ? `gea::nativeDynamicSet(${receiver}, ${key}, ${value})`
+        : generatedNativeWriteText(generated, key, value)
   if (operation.kind === 'set' && operation.strict) {
     lines.push(`if (!${write}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read-only property");`)
   } else {
@@ -1370,12 +1390,59 @@ const emitCallableSidecarDelete = (ctx: EmitContext, lines: string[], operation:
   return true
 }
 
+/**
+ * `delete` on a tagged union: one `delete` on whichever arm the value holds.
+ *
+ * Each arm is deleted from exactly as a receiver of that carrier would be --
+ * the arm's own value is an ordinary operand here, so every branch of
+ * `emitDeleteOperation` answers it -- and `ir/certify/property-access.ts`
+ * demands each arm's own recipe for the same reason. The arm's answer lands in
+ * its own boolean, and the operation's strictness and result are applied once,
+ * to the arm the value holds. three's `Renderer.highPrecision` deletes
+ * `modelViewMatrix` off a context value that is a Node or a lighting record.
+ * Only arms the carrier itself tells apart are dispatched, the one test
+ * `.is<i>()` answers.
+ */
+const emitTaggedUnionDelete = (ctx: EmitContext, lines: string[], operation: DeleteOperation): boolean => {
+  const union = operation.receiver.representation
+  if (union.kind !== 'tagged-union' || union.arms.length === 0) return false
+  if (!union.arms.every((arm) => arm.runtimeDiscriminator.kind === 'carrier')) return false
+  const receiver = operandText(ctx, operation.receiver)
+  const answers = union.arms.map((arm, index) => {
+    const value = `${operation.receiver.value}|delete-arm|${index}` as IrValueId
+    if (!ctx.valueNames.has(value)) ctx.valueNames.set(value, `${receiver}.get<${index}>()`)
+    const result = {
+      id: `${value}|result|${ctx.nextValueOrdinal}` as IrValueId,
+      representation: { kind: 'scalar', domain: 'boolean' } as const
+    }
+    const armLines: string[] = []
+    emitDeleteOperation(ctx, armLines, { ...operation, strict: false, receiver: { value, representation: arm.value }, result })
+    return {
+      test: `${receiver}.is<${index}>()`,
+      lines: armLines,
+      answer: operandText(ctx, { value: result.id, representation: result.representation })
+    }
+  })
+  answers.forEach((arm, index) => {
+    const head = index === 0 ? `if (${arm.test}) {` : index === answers.length - 1 ? '} else {' : `} else if (${arm.test}) {`
+    lines.push(head, ...arm.lines)
+  })
+  lines.push('}')
+  const selected = answers.reduceRight<string>(
+    (rest, arm, index) => (index === answers.length - 1 ? arm.answer : `(${arm.test} ? ${arm.answer} : ${rest})`),
+    ''
+  )
+  emitDeleteOutcome(ctx, lines, operation, selected)
+  return true
+}
+
 export const emitDeleteOperation = (ctx: EmitContext, lines: string[], operation: DeleteOperation): void => {
   if (emitDynamicDelete(ctx, lines, operation)) return
   if (emitCallableSidecarDelete(ctx, lines, operation)) return
   if (emitDictionaryDelete(ctx, lines, operation)) return
   if (emitNativeSidecarDelete(ctx, lines, operation)) return
   if (emitNativeHandleDelete(ctx, lines, operation)) return
+  if (emitTaggedUnionDelete(ctx, lines, operation)) return
   // The refusal's key-form suffix names whether the key is one the program
   // wrote, matching the claim every branch above just asked -- `staticKeyTexts`,
   // not `constantTexts`, or a render-time `typeof` fold could make this code

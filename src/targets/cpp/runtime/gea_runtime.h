@@ -6328,6 +6328,22 @@ class NativeHandle {
   int id_;
 };
 
+namespace detail {
+/**
+ * A typed-array constructor handle read by its static tag: the id it carries
+ * must be the tag's own constructor identity (`representation/
+ * typed-array-constructors.ts`). A handle retagged to share a Map key type
+ * with its siblings holds another constructor's id, and constructing or
+ * testing through it would use the wrong element type, so this stops instead.
+ */
+template <typename Tag>
+inline void requireTypedArrayConstructor(const NativeHandle<Tag>& handle, int identity) {
+  if (handle.id() == identity) return;
+  std::fprintf(stderr, "gea: a typed-array constructor held under another constructor's type was used as that type\n");
+  gea::detail::abortAfterFlush();
+}
+}  // namespace detail
+
 /**
  * A symbol: one interned id, which is all a program can observe of one.
  *
@@ -7542,6 +7558,20 @@ inline bool sameValueZero(const K& left, const K& right) {
   } else {
     return left == right;
   }
+}
+
+/**
+ * A class object as a key (three keys a vertex-format table by
+ * `Float16BufferAttribute`): the class identity `===` compares
+ * (`emit-equality.ts`'s `constructorIdentityEqualityText`) -- the class
+ * evaluation's environment where there is one, otherwise the construct
+ * pointer. `ConstructorObject` has no `operator==` because two sides of `===`
+ * may spell different C++ types; a key type is one.
+ */
+template <typename Result, typename... Arguments>
+inline bool sameValueZero(const ConstructorObject<Result(Arguments...)>& left, const ConstructorObject<Result(Arguments...)>& right) {
+  if (left.environment != nullptr) return left.environment == right.environment;
+  return reinterpret_cast<const void*>(left.construct_) == reinterpret_cast<const void*>(right.construct_) && right.environment == nullptr;
 }
 
 /** ECMA-262 SameValue for Number values: NaN equals NaN, while +0 and -0 differ. */
@@ -10054,8 +10084,14 @@ class Value {
    */
   static bool strictEquals(const Value& left, const Value& right);
 
-  /** The address of the held payload -- object identity, and nothing else. Two boxes of the same object share it; two boxes of equal primitives do not. */
-  const void* identity() const { return held_ ? held_.get() : this; }
+  /**
+   * Object identity, and nothing else. Two boxes of the same object share it;
+   * two boxes of equal primitives do not. An Object or Function box answers
+   * `expandoAnchor()`, the address `strictEquals` compares on: `held_` of a
+   * boxed `gea::Ref<T>` is a per-box wrapper, so two boxes of one record would
+   * otherwise be two WeakMap keys.
+   */
+  const void* identity() const;
 
   /**
    * ECMA-262 7.3.14 Call, for the one payload this header can perform it on.
@@ -10199,6 +10235,24 @@ gea::Optional<T>&& presentOrThrow(gea::Optional<T>&& value) {
 }
 
 /**
+ * `new Map(pairs)` (ECMA-262 24.1.1.2 AddEntriesFromIterable) for an Array
+ * whose element is a statically typed `[K, V]` tuple: `add` reads the entry's
+ * "0" and "1" fields, converts each into the Map's own K and V, and sets them,
+ * in element order. A hole reads `undefined`, which is not an Object, so it
+ * throws the TypeError of step 4.d. `emitKeyedCollectionConstruct` renders
+ * `add`; three seeds its typed-array tables this way.
+ */
+template <typename K, typename V, typename E, typename Add>
+inline gea::Ref<gea::Map<K, V>> mapFromPairArray(const gea::Ref<gea::ArrayObject<E>>& source, Add&& add) {
+  auto result = gea::makeRef<gea::Map<K, V>>();
+  for (const auto& slot : source->slots()) {
+    if (!slot.present) gea::host::throwRuntimeError("TypeError", "Iterator value undefined is not an entry object");
+    add(*result, slot.value);
+  }
+  return result;
+}
+
+/**
  * SameValueZero, CanonicalizeKeyedCollectionKey and weak-key identity for the
  * one key carrier that is not a static type: `gea::Value`, the box a position
  * the program itself declared `any`/`unknown` lands in.
@@ -10215,7 +10269,7 @@ gea::Optional<T>&& presentOrThrow(gea::Optional<T>&& value) {
  * first. `canonicalKey` then folds `-0` to `+0` on insertion, so iteration
  * hands back what 23.1.3.9 requires, exactly as it does for a `double` key.
  *
- * `weakKeySame` reads `identity()`, the address of the held payload: for an
+ * `weakKeySame` reads `identity()`, the object's own address: for an
  * object-tagged box that IS the reference identity 24.3/24.4 ask for, shared
  * by every box of the same object. For a box holding a primitive it is a
  * per-box address, so `weakMap.has(1)` answers `false` where the spec throws
@@ -12978,6 +13032,28 @@ struct DynamicRestArgument<gea::Ref<gea::ArrayObject<Element>>> {
 };
 
 /**
+ * A callable result declared `T | null`, read out of a box.
+ *
+ * `Null` is its absence. So is `Undefined`: a typed callable whose frame
+ * returns `Optional<T>` boxes its absent state as `Undefined` whichever
+ * absence its declaration meant (`DynamicCarrier<Optional<T>>::out`), so a
+ * `T | null` function crossing a dynamic boundary and back answers
+ * `Undefined` for its own `null`. This is the same pair of tags
+ * `DynamicCarrier<Optional<T>>::in` accepts for every non-callable read;
+ * anything else must be a `T`.
+ */
+template <typename T>
+struct NullAbsentCallableResult;
+
+template <typename T>
+struct NullAbsentCallableResult<Optional<T>> {
+  static Optional<T> in(const Value& value) {
+    if (value.tag() == Value::Tag::Null || value.tag() == Value::Tag::Undefined) return Optional<T>();
+    return Optional<T>(DynamicCallableCarrier<T>::in(value, 0));
+  }
+};
+
+/**
  * A function value crossing the boundary in the READ direction, and the one
  * carrier for which an exact payload match is not the general case.
  *
@@ -13010,29 +13086,36 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
   static bool accepts(const Value& value) {
     return value.tag() == Value::Tag::Function && value.payloadType() == payloadTypeTagFor<Self>();
   }
-  static Self in(const Value& value, std::size_t position) { return inAs(value, position, false, -1, &adapt); }
+  // `NullResult` states that the frame's `Optional<T>` RESULT means `T | null`.
+  // `Optional<T>` itself cannot say which absence it holds, and the callable
+  // carrier policy reads only `Undefined` as absent, so a Function installed
+  // in three's `@return {?boolean}` `Node.update` slot could not answer
+  // `null`. See `NullAbsentCallableResult` for what it reads.
+  template <bool NullResult = false>
+  static Self in(const Value& value, std::size_t position) { return inAs(value, position, false, -1, &adapt<NullResult>); }
+  template <bool NullResult = false>
   static Self inWithReceiver(const Value& value, std::size_t position) {
     if constexpr (sizeof...(Arguments) == 0) {
       refusePayloadMismatch("a receiver-bearing callable ABI has no physical receiver slot");
     } else {
-      return inAs(value, position, true, -1, &adaptWithReceiver);
+      return inAs(value, position, true, -1, &adaptWithReceiver<NullResult>);
     }
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult = false>
   static Self inWithRest(const Value& value, std::size_t position) {
     static_assert(RestFrom < sizeof...(Arguments), "a rest slot must be a physical callable argument");
     using Rest = std::tuple_element_t<RestFrom, Args>;
     static_assert(DynamicRestArgument<Rest>::supported, "a checked dynamic rest adapter requires ArrayObject<Element>");
-    return inAs(value, position, false, static_cast<int>(RestFrom), &adaptWithRest<RestFrom>);
+    return inAs(value, position, false, static_cast<int>(RestFrom), &adaptWithRest<RestFrom, NullResult>);
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult = false>
   static Self inWithReceiverAndRest(const Value& value, std::size_t position) {
     static_assert(RestFrom > 0 && RestFrom < sizeof...(Arguments), "a receiver-bearing rest slot follows the physical receiver");
     using Rest = std::tuple_element_t<RestFrom, Args>;
     static_assert(DynamicRestArgument<Rest>::supported, "a checked dynamic rest adapter requires ArrayObject<Element>");
-    return inAs(value, position, true, static_cast<int>(RestFrom), &adaptWithReceiverAndRest<RestFrom>);
+    return inAs(value, position, true, static_cast<int>(RestFrom), &adaptWithReceiverAndRest<RestFrom, NullResult>);
   }
 
  private:
@@ -13055,6 +13138,16 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     return adapted;
   }
 
+  template <bool NullResult>
+  static Result readResult(const Value& value) {
+    if constexpr (NullResult) {
+      return NullAbsentCallableResult<Result>::in(value);
+    } else {
+      return DynamicCallableCarrier<Result>::in(value, 0);
+    }
+  }
+
+  template <bool NullResult>
   static Result adapt(void* environment, Arguments... arguments) {
     alignas(void*) unsigned char slot[sizeof(void*)];
     const Value* source = gea::unpackEnvironment<Value>(environment, slot);
@@ -13062,10 +13155,11 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source->callAsFunction(boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source->callAsFunction(boxed), 0);
+      return readResult<NullResult>(source->callAsFunction(boxed));
     }
   }
 
+  template <bool NullResult>
   static Result adaptWithReceiver(void* environment, Arguments... arguments) {
     static_assert(sizeof...(Arguments) > 0, "a receiver-bearing callable ABI has a physical receiver slot");
     alignas(void*) unsigned char slot[sizeof(void*)];
@@ -13083,11 +13177,11 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source->callWithReceiver(receiver, boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source->callWithReceiver(receiver, boxed), 0);
+      return readResult<NullResult>(source->callWithReceiver(receiver, boxed));
     }
   }
 
-  template <std::size_t RestFrom, std::size_t... Fixed>
+  template <std::size_t RestFrom, bool NullResult, std::size_t... Fixed>
   static Result adaptWithRestFrame(const Value& source, const Args& frame, std::index_sequence<Fixed...>) {
     std::vector<Value> boxed{DynamicCallableCarrier<std::tuple_element_t<Fixed, Args>>::out(std::get<Fixed>(frame))...};
     using Rest = std::tuple_element_t<RestFrom, Args>;
@@ -13095,19 +13189,19 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source.callAsFunction(boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source.callAsFunction(boxed), 0);
+      return readResult<NullResult>(source.callAsFunction(boxed));
     }
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult>
   static Result adaptWithRest(void* environment, Arguments... arguments) {
     alignas(void*) unsigned char slot[sizeof(void*)];
     const Value* source = gea::unpackEnvironment<Value>(environment, slot);
     const Args frame(arguments...);
-    return adaptWithRestFrame<RestFrom>(*source, frame, std::make_index_sequence<RestFrom>{});
+    return adaptWithRestFrame<RestFrom, NullResult>(*source, frame, std::make_index_sequence<RestFrom>{});
   }
 
-  template <std::size_t RestFrom, std::size_t... Fixed>
+  template <std::size_t RestFrom, bool NullResult, std::size_t... Fixed>
   static Result adaptWithReceiverAndRestFrame(const Value& source, const Args& frame, std::index_sequence<Fixed...>) {
     using Receiver = std::tuple_element_t<0, Args>;
     using Rest = std::tuple_element_t<RestFrom, Args>;
@@ -13118,16 +13212,16 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source.callWithReceiver(receiver, boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source.callWithReceiver(receiver, boxed), 0);
+      return readResult<NullResult>(source.callWithReceiver(receiver, boxed));
     }
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult>
   static Result adaptWithReceiverAndRest(void* environment, Arguments... arguments) {
     alignas(void*) unsigned char slot[sizeof(void*)];
     const Value* source = gea::unpackEnvironment<Value>(environment, slot);
     const Args frame(arguments...);
-    return adaptWithReceiverAndRestFrame<RestFrom>(*source, frame, std::make_index_sequence<RestFrom - 1>{});
+    return adaptWithReceiverAndRestFrame<RestFrom, NullResult>(*source, frame, std::make_index_sequence<RestFrom - 1>{});
   }
 };
 
@@ -14337,6 +14431,14 @@ inline gea::Ref<void> Value::expandoAnchor() const {
   return owned ? owned : held_;
 }
 
+inline const void* Value::identity() const {
+  if (tag_ == Tag::Object || tag_ == Tag::Function) {
+    const gea::Ref<void> anchor = expandoAnchor();
+    if (anchor) return anchor.get();
+  }
+  return held_ ? held_.get() : this;
+}
+
 /**
  * Integrity state for a statically typed native object.
  *
@@ -14896,6 +14998,27 @@ gea::Ref<Target> recastWithExpando(gea::Ref<Target> target, const gea::Dictionar
 }
 
 /**
+ * The rest of 7.3.25's loop once the emitter has copied a generated source's
+ * declared fields: the own enumerable keys its class never declared, which
+ * live on its identity-keyed sidecar, stored with `Set(target, key, Get(source,
+ * key), true)`. `Object.assign( {}, instance )` copies a class instance into
+ * a plain record this way; the record declares exactly the class's fields, so
+ * none of these keys is one of its fields and each lands on its sidecar.
+ */
+template <typename Target, typename Source>
+void assignNativeExpandoProperties(const gea::Ref<Target>& target, const gea::Ref<Source>& source) {
+  if (!source) return;
+  const gea::Ref<DynamicObject> expando = detail::expandoFor(gea::refCastToVoid(source), false);
+  if (!expando) return;
+  for (const PropertyKey& key : expando->ownKeys()) {
+    const PropertyDescriptor* descriptor = expando->ownProperty(key);
+    if (descriptor == nullptr || !descriptor->enumerable) continue;
+    if (!gea::nativeDynamicSet(target, key, gea::nativeDynamicGet(source, key)))
+      gea::host::throwRuntimeError("TypeError", "Cannot assign to read only property");
+  }
+}
+
+/**
  * The class instance a structural view was built from.
  *
  * A class instance written to an interface is copied into the interface's
@@ -15000,6 +15123,60 @@ bool nativeDynamicHasProperty(const gea::Ref<T>& object, const PropertyKey& key)
     }
   }
   return ordinaryObjectPrototypeHas(key);
+}
+
+/**
+ * Whether a Map/Set/WeakMap/WeakSet object inherits `key`: a member of its
+ * family's prototype (ECMA-262 24.1.3, 24.2.4, 24.3.3, 24.4.3, with the
+ * ES2025 set algebra and `getOrInsert`) or of Object.prototype. The four
+ * families' names are pooled: this answers "refuse", never "absent", so an
+ * over-broad list costs a refusal and an incomplete one a wrong read. Every
+ * symbol key counts as inherited, since `@@iterator` and `@@toStringTag` are.
+ */
+inline bool keyedCollectionInheritedKey(const PropertyKey& key) {
+  if (key.isSymbol()) return true;
+  const std::string& name = key.text();
+  static const char* const members[] = {"get", "set", "has", "delete", "clear", "add", "forEach", "entries", "keys", "values", "size",
+      "getOrInsert", "getOrInsertComputed", "union", "intersection", "difference", "symmetricDifference", "isSubsetOf",
+      "isSupersetOf", "isDisjointFrom"};
+  for (const char* member : members) {
+    if (name == member) return true;
+  }
+  return ordinaryObjectPrototypeHas(key);
+}
+
+[[noreturn]] inline void refuseKeyedCollectionInheritedKey(const char* operation, const PropertyKey& key) {
+  const std::string named = key.isSymbol() ? std::string("a symbol key") : "\"" + key.text() + "\"";
+  std::fprintf(stderr,
+      "gea: %s of %s on a keyed collection names a member it inherits, and no prototype member is rendered through an "
+      "ordinary property access\n",
+      operation, named.c_str());
+  gea::detail::abortAfterFlush();
+}
+
+/**
+ * `[[Get]]` of a keyed collection OBJECT's ordinary property, never one of its
+ * entries. `weakMap[ camera ]` reads the key ToPropertyKey(camera) spells --
+ * "[object Object]" for a class with no `toString` -- and three's
+ * `ShadowNode` keys a WeakMap exactly that way. The own properties live in the
+ * identity-keyed table every native object's expandos do; a key the
+ * collection inherits and has not shadowed aborts by name.
+ */
+template <typename T>
+Value keyedCollectionOrdinaryGet(const gea::Ref<T>& collection, const PropertyKey& key) {
+  if (!collection) gea::host::throwRuntimeError("TypeError", "Cannot read properties of null");
+  Value answer;
+  if (nativeDynamicRead(collection, key, answer)) return answer;
+  if (keyedCollectionInheritedKey(key)) refuseKeyedCollectionInheritedKey("a read", key);
+  return answer;
+}
+
+/** `[[Set]]` of the same ordinary property; see `keyedCollectionOrdinaryGet`. */
+template <typename T>
+bool keyedCollectionOrdinarySet(const gea::Ref<T>& collection, const PropertyKey& key, const Value& value) {
+  if (!collection) gea::host::throwRuntimeError("TypeError", "Cannot set properties of null");
+  if (keyedCollectionInheritedKey(key) && !nativeDynamicHas(collection, key)) refuseKeyedCollectionInheritedKey("a write", key);
+  return nativeDynamicSet(collection, key, value);
 }
 
 template <typename T>
