@@ -662,6 +662,26 @@ export const censusFieldBindings = (
    * field, and an untyped receiver keeps its write out, as before.
    */
   let untypedReceiverWrites: Map<string, ValueWrite[]> | null = null
+  /**
+   * The class a receiver parameter's own `@param` tag names, read through the
+   * same program-wide names as `namedTagTypeOf`, where the checker read the
+   * tag as nothing and no census typed the receiver. three's
+   * `renderObject.pipeline = pipeline` in `Pipelines.getForRender` names
+   * `@param {RenderObject}` from a file that does not import it, and the
+   * census leaves `renderObject` untyped; the layout already reads it as that
+   * class through the same names, so the write belongs to that class's field.
+   */
+  const namedParameterTypeOf = (expression: ts.Expression): ts.Type | null => {
+    if (!ts.isIdentifier(expression)) return null
+    const declarations = checker.getSymbolAtLocation(expression)?.declarations
+    const declaration = declarations?.length === 1 ? declarations[0] : undefined
+    if (!declaration || !ts.isParameter(declaration)) return null
+    const tag = ts.getJSDocType(declaration)
+    if (!tag || !isUnusableEvidence(checker.getTypeFromTypeNode(tag))) return null
+    names ??= programTypeNames(checker, files)
+    const resolved = names.resolve(tag, declaration.getSourceFile().fileName)
+    return 'refused' in resolved ? null : resolved.type
+  }
   const receiverTypedWritesOf = (symbol: ts.Symbol): readonly ts.Expression[] => {
     if (untypedReceiverWrites === null) {
       untypedReceiverWrites = new Map()
@@ -677,7 +697,7 @@ export const censusFieldBindings = (
     const found: ts.Expression[] = []
     for (const write of untypedReceiverWrites.get(symbol.name) ?? []) {
       const access = write.propertyAccess as ts.PropertyAccessExpression
-      const receiver = parameters.typeAt(access.expression)
+      const receiver = parameters.typeAt(access.expression) ?? namedParameterTypeOf(access.expression)
       if (!receiver || !write.value) continue
       if (checker.getPropertyOfType(checker.getNonNullableType(receiver), symbol.name) === symbol) found.push(write.value)
     }
