@@ -2082,6 +2082,22 @@ const emitKeyedCollectionConstruct = (
   if (result.family === 'set' && carrier.kind === 'string' && result.key.kind === 'string') {
     return void lines.push(`${name} = gea::setFromString(${operandText(ctx, argument)});`)
   }
+  // A `Map<any, any>` seeded from an Array of objects: every key and value is
+  // already a boxed `gea::Value`, so no pair lowering is needed -- each
+  // element's "0" and "1" are read with an ordinary [[Get]]
+  // (`mapFromEntryArray`). three's TSLCore seeds its caches this way.
+  if (
+    result.family === 'map' &&
+    result.key.kind === 'dynamic' &&
+    result.value?.kind === 'dynamic' &&
+    carrier.kind === 'array-object' &&
+    !carrier.recursive &&
+    carrier.ownership === 'shared-refcount' &&
+    ((carrier.element.kind === 'array-object' && carrier.element.ownership === 'shared-refcount' && !carrier.element.recursive) ||
+      (carrier.element.kind === 'class-ref' && carrier.element.ownership === 'shared-refcount'))
+  ) {
+    return void lines.push(`${name} = gea::runtime::iterator::mapFromEntryArray(${operandText(ctx, argument)});`)
+  }
   throw createCppEmitBlockedError(
     'call-abi:construct:keyed-collection',
     `constructs a ${result.family}<${representationKey(result.key)}> from a "${representationKey(carrier)}" argument; only the zero-argument form is implemented for every ` +
