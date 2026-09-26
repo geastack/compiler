@@ -522,6 +522,40 @@ export const contextualCollectionTypeAt = (checker: ts.TypeChecker, node: ts.Nod
 }
 
 /**
+ * Whether a bare `new WeakMap()`/`new WeakSet()` (or `Map`/`Set`) is written
+ * straight into a HOST slot typed `any`, so the only thing that ever holds
+ * it is a box.
+ *
+ * `WeakMapConstructor` has no non-generic overload, so with nothing to infer
+ * from, `K` falls to its declared default `WeakKey` -- the bare `object`
+ * keyword, which this compiler lays out as an empty record key. That default
+ * states nothing about the program, and an `any` position states nothing
+ * either; every later reader recovers the collection from the box and names
+ * it by its own type. Three's `ChainMap.set` is the shape:
+ * `map.set( key, new WeakMap() )` into an outer `WeakMap<any, any>`, and
+ * `map = map.get( key )` then reads the level back as that same
+ * `WeakMap<any, any>`. The level kept `WeakMap<record, any>`, and the
+ * identity round trip out of the box (`conversion/derive.ts`) aborts on a
+ * payload of a different type. A slot of the program's own (`f( new
+ * WeakMap() )` into an untyped parameter) is not this shape: the parameter
+ * census types that parameter from this same argument.
+ */
+export const hostDynamicSlotCollectionAt = (checker: ts.TypeChecker, node: ts.Node): boolean => {
+  if (!ts.isNewExpression(node) || node.typeArguments !== undefined || (node.arguments?.length ?? 0) > 0) return false
+  if (!ts.isIdentifier(node.expression) || !['Map', 'Set', 'WeakMap', 'WeakSet'].includes(node.expression.text)) return false
+  const constructor = checker.getSymbolAtLocation(node.expression)?.valueDeclaration
+  if (!constructor || !constructor.getSourceFile().isDeclarationFile) return false
+  const call = node.parent
+  if (!ts.isCallExpression(call) || !call.arguments.includes(node)) return false
+  const contextual = checker.getContextualType(node)
+  if (!contextual || (contextual.flags & ts.TypeFlags.Any) === 0) return false
+  const index = call.arguments.indexOf(node)
+  if (call.arguments.slice(0, index).some(ts.isSpreadElement)) return false
+  const declaration = checker.getResolvedSignature(call)?.getDeclaration()
+  return declaration !== undefined && declaration.getSourceFile().isDeclarationFile
+}
+
+/**
  * The stated type of an expression the checker types as a DYNAMIC collection
  * only because the allocation feeding it stated nothing -- the contextual
  * answer above, followed through the syntax that carries an allocation to

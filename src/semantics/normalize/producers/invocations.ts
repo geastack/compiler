@@ -6,7 +6,12 @@ import { contributeObjectTag } from './object-tag.js'
 import { isIntrinsicAccessorGetterPart } from '../intrinsic-accessor-getter.js'
 import { bagShapeTypeAt } from '../object-bag-bindings.js'
 import { isFabricatedSignatureShape, structuralCallSignatures } from '../structural-callable.js'
-import { contextualArrayConstructTypeAt, contextualCollectionTypeAt, statedCollectionTypeAt } from '../structural-array-element.js'
+import {
+  contextualArrayConstructTypeAt,
+  contextualCollectionTypeAt,
+  hostDynamicSlotCollectionAt,
+  statedCollectionTypeAt
+} from '../structural-array-element.js'
 import { implementationSignatureOf } from '../structural-declarations.js'
 import { physicalGeneratorOverloadResultAt, physicalInheritedCallableReturnAt } from '../physical-overload-result.js'
 import { unsharedArrayResultBodyOf } from '../unshared-array-result.js'
@@ -1251,7 +1256,12 @@ const errorConstructResultOverride = (
 const collectionConstructResultOverride = (context: ProducerContext, node: ts.NewExpression): StructuralTypeId | null => {
   // The second gate is the position's own statement, asked by `typeAt` after
   // the census -- `contextualCollectionTypeAt`'s header says when it answers.
-  if (!context.collections.typeArgumentsAt(node) && !contextualCollectionTypeAt(context.checker, node)) return null
+  if (
+    !context.collections.typeArgumentsAt(node) &&
+    !contextualCollectionTypeAt(context.checker, node) &&
+    !hostDynamicSlotCollectionAt(context.checker, node)
+  )
+    return null
   return context.types.typeAt(node)
 }
 
