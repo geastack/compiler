@@ -219,7 +219,7 @@ export const createCollectionCellPolicy = (checker: ts.TypeChecker, reachable: P
       if (keys.length === 0 && values.length === 0) return null
       const key = keys.length > 0 ? joinCellTypeValues(checker, keys) : null
       const value = values.length > 0 ? joinCellTypeValues(checker, values) : null
-      const arguments_: CollectionTypeArguments = { key, value, valueEvidence: [], valueArrayElement: null }
+      const arguments_: CollectionTypeArguments = { key, value, valueEvidence: [] }
       return { kind: 'collection-arguments', arguments: arguments_ }
     }
   }
