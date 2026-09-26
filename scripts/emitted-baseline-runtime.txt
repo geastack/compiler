@@ -308,9 +308,11 @@ jsdoc-defaulted-class-constructor.runtime.js.cpp ca5226775273
 jsdoc-field-open-array-element.runtime.js.cpp 97302cc25b25
 jsdoc-field-type-contradicted-by-writes.runtime.js.cpp f9608f5b2fc1
 jsdoc-optional-parameter.runtime.js.cpp 2cfb2703873b
+jsdoc-parameter-contradicted-by-callers.runtime.js.cpp c7d3020d3b02
 jsdoc-parameter-open-array-element.runtime.js.cpp cdfc7908b9cc
 jsdoc-return-open-array-element.runtime.js.cpp b7ee5fa4fc4d
 jsdoc-return-tag-contradicted-by-arrow.runtime.js.cpp 77d8407f51cd
+jsdoc-tag-excluded-by-its-store.runtime.js.cpp 1a0e1f90ebda
 jsdoc-tag-leaves-null-out.runtime.js.cpp 7033bcb07563
 json-parse-as-a-value.ts.cpp 0ea01b076f42
 json-reader-dispatch.ts.cpp f43e28fc48ee
@@ -440,6 +442,7 @@ new-on-plain-function.runtime.js.cpp afc0cba3e136
 node-global-is-globalthis.ts.cpp 2794347b2450
 null-default-census-typed-parameter.runtime.js.cpp 99a95750c3a5
 null-default-nested-reference-union.ts.cpp c26fe6988740
+null-default-parameter-callers-say-nothing.runtime.js.cpp ec1309a23809
 null-default-parameter-from-callers.runtime.js.cpp 77b09ed91957
 null-default-untagged-parameter.runtime.js.cpp 18936c198044
 null-defaulted-parameter.runtime.js.cpp 3c2102fca019

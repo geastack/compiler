@@ -324,6 +324,35 @@ export const censusJsDocTypeNames = (
   // could be referring to, and including it would manufacture ambiguity between
   // a public type and somebody's private helper of the same name.
   const byName = new Map<string, Set<ts.Symbol>>()
+  // A class the module keeps to itself but extends into one it exports is part
+  // of that export's type, and did not decline to be named: every instance of
+  // the exported subclass is one of it. three's `renderers/common/Uniform.js`
+  // exports `NumberUniform`, `ColorUniform` and the rest, each `extends
+  // Uniform`, and keeps `Uniform` itself; `renderers/common/UniformsGroup.js`
+  // documents `@param {Uniform} uniform` over the values it then tests with
+  // `uniform.isNumberUniform`. Left out, the one exported `Uniform` in the
+  // program, `core/Uniform.js`'s unrelated class, answered the tag.
+  const privateBasesOf = (exported: ts.Symbol, file: ts.SourceFile): void => {
+    if ((exported.flags & ts.SymbolFlags.Class) === 0) return
+    for (const base of checker.getBaseTypes(checker.getDeclaredTypeOfSymbol(exported) as ts.InterfaceType)) {
+      const symbol = base.getSymbol()
+      if (!symbol || (symbol.flags & ts.SymbolFlags.Class) === 0) continue
+      if (!(symbol.declarations ?? []).every((declaration) => declaration.getSourceFile() === file)) continue
+      const moduleSymbol = checker.getSymbolAtLocation(file)
+      const exportedHere = moduleSymbol
+        ? checker.getExportsOfModule(moduleSymbol).some((candidate) => {
+            const target = (candidate.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(candidate) : candidate
+            return target === symbol
+          })
+        : false
+      if (exportedHere) continue
+      const existing = byName.get(symbol.name)
+      if (existing?.has(symbol)) continue
+      if (existing) existing.add(symbol)
+      else byName.set(symbol.name, new Set([symbol]))
+      privateBasesOf(symbol, file)
+    }
+  }
   for (const file of files) {
     const moduleSymbol = checker.getSymbolAtLocation(file)
     if (!moduleSymbol) continue
@@ -339,6 +368,7 @@ export const censusJsDocTypeNames = (
       const existing = byName.get(exported.name)
       if (existing) existing.add(target)
       else byName.set(exported.name, new Set([target]))
+      privateBasesOf(target, file)
     }
   }
   // A JSDoc `@typedef` is NOT subject to the exports rule above, and treating

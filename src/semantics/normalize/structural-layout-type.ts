@@ -28,6 +28,10 @@ import { emptyParameterBindingCensus, type ParameterBindingCensus } from './para
  * (`isUnannotated`), and the ABI slot already reads that answer
  * (`structural-parts.ts`'s `parameterOf`), so the body's own binding and
  * reads have to read it too, or the two frames disagree.
+ *
+ * This is the one place such a parameter is typed from its callers.
+ * `structural.ts`'s `nullDefaultedParameterReadAt` only adds the `null` a
+ * `null` default binds to whatever answer this gives.
  */
 const absentDefaultParameterOf = (checker: ts.TypeChecker, node: ts.Node): ts.ParameterDeclaration | null => {
   const declaration = ts.isParameter(node) ? node : ts.isIdentifier(node) ? checker.getSymbolAtLocation(node)?.valueDeclaration : undefined
@@ -969,6 +973,11 @@ export const createLayoutTypeResolver = (
       // whose type only ONE authority knows must ask that authority.
       const throughReceiver = memberThroughBoundReceiver(node)
       if (throughReceiver) return throughReceiver
+      // Callers that said nothing usable leave a `null` default's parameter
+      // open, not `null`: the default is what an omitted argument becomes, and
+      // the body still reads whatever a caller did pass
+      // (`null-default-untagged-parameter.runtime.js`).
+      if (absentDefaultParameterOf(checker, node)?.initializer?.kind === ts.SyntaxKind.NullKeyword) return checker.getAnyType()
     }
     // `own` is not `any` itself, but may still be a generic instantiation
     // whose OWN type argument is -- CFA narrowing an `any`-typed value against

@@ -2615,21 +2615,15 @@ const buildMapper = (
    * A parameter defaulted to `null`, whose binding must hold the `null` the
    * default binds whenever a caller omits the argument.
    *
-   * Untagged, the checker types it by its default alone: `ShaderNodeProxy(
-   * NodeClass, scope = null, factor = null, settings = null )` in three's
-   * TSLCore.js is `settings: null`, while its callers pass objects and the body
-   * reads `settings.intent` past a `settings !== null` test the checker then
-   * calls unreachable. A default value is not a type (`parameter-bindings.ts`'s
-   * `isUnannotated` says the same), so the parameter, its ABI slot and each
-   * read of it hold what the callers pass, beside the `null`: the census's
-   * answer when it has one, the dynamic carrier when not.
-   *
-   * Otherwise its answer -- the census's from the call sites, or a tag's
+   * What the parameter holds otherwise is not decided here. Untagged, the
+   * layout resolver types it from its callers (`structural-layout-type.ts`'s
+   * `absentDefaultParameterOf`: three's `ShaderNodeProxy( NodeClass, scope =
+   * null, factor = null, settings = null )`), and tagged, the tag does
    * (`absent-jsdoc-tags.ts` has already widened a tag that leaves the default
-   * out) -- can still lack the `null`: three's `StorageBufferNode( value,
-   * bufferType = null, ... )` is bound `string` from its callers. The
-   * parameter, its slot and its reads then carry the `null` too; a read the
-   * checker narrowed to nothing is the `null` a test found.
+   * out). Either answer can still lack the `null`: three's `StorageBufferNode(
+   * value, bufferType = null, ... )` is bound `string` from its callers. The
+   * parameter, its ABI slot and each read then carry the `null` too; a read
+   * the checker narrowed to nothing is the `null` a test found.
    */
   const nullDefaultedParameterReadAt = (node: ts.Node): ts.Type | null => {
     const declaration = ts.isParameter(node)
@@ -2641,10 +2635,11 @@ const buildMapper = (
     if (declaration.initializer?.kind !== ts.SyntaxKind.NullKeyword) return null
     if (ts.isIdentifier(node) && node === declaration.name) return null
     const stated = absentSubstitutedTypeAt(declaration)
-    if (!declaration.type && !ts.getJSDocType(declaration) && (stated.flags & ts.TypeFlags.Null) !== 0) {
-      const passed = parameters.typeAt(declaration)
-      return passed && !isUnusableEvidence(passed) ? checker.getNullableType(passed, ts.TypeFlags.Null) : checker.getAnyType()
-    }
+    // An answer that left the parameter open is the dynamic carrier, not a
+    // type the `null` joins: the ABI slot holds it too, where it would
+    // otherwise fall back to the checker's own `null` while the body reads
+    // the carrier. The reads already answer it from the layout resolver.
+    if ((stated.flags & ts.TypeFlags.Any) !== 0) return node === declaration ? stated : null
     const admitsNull = (type: ts.Type): boolean =>
       (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Null)) !== 0 ||
       (type.isUnion() && type.types.some((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0))
