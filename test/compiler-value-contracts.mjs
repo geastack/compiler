@@ -960,7 +960,13 @@ test('callable adapters preserve undefined absence and fail closed for nullable 
 
   const nullable = { kind: 'optional', absence: 'null', payload: number }
   assert.equal(registry.functionValueDispatchMaterializer(callable([nullable])), null)
-  assert.equal(registry.functionValueDispatchMaterializer(callable([number], nullable)), null)
+  // A top-level `T | null` RESULT names its absence to the adapter
+  // (`NullAbsentCallableResult`), so it loads. The same callable nested as a
+  // parameter is read through the carrier policy, which knows only undefined,
+  // and stays refused.
+  const nullableResult = callable([number], nullable)
+  assert.ok(registry.functionValueDispatchMaterializer(nullableResult))
+  assert.equal(registry.functionValueDispatchMaterializer(callable([{ kind: 'function-value-dispatch', abi: nullableResult }])), null)
   const optional = { kind: 'optional', absence: 'undefined', payload: number }
   assert.ok(registry.functionValueDispatchMaterializer(callable([optional])))
   assert.ok(registry.functionValueDispatchMaterializer(callable([number], optional)))
