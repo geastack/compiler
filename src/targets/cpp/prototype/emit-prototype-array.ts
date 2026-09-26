@@ -349,8 +349,13 @@ const optionalElementResultText = (
   if (result === null) return text
   const carrier = result.representation
   const produced: Representation = { kind: 'optional', payload: element, absence: 'undefined' }
-  const converted = alignedValueText(ctx, 'prototype/emit-prototype-array.ts:242', produced, carrier, text)
-  if (converted !== null) return converted
+  if (representationKey(produced) === representationKey(carrier)) return text
+  // `text` is the call itself -- `shift`/`pop` remove the element they
+  // answer -- and a conversion out of an optional reads its operand once for
+  // the presence test and again for the payload. So the call runs once, into
+  // a local, and the conversion reads that.
+  const converted = alignedValueText(ctx, 'prototype/emit-prototype-array.ts:242', produced, carrier, 'gea_element_result')
+  if (converted !== null) return `[&]() { auto gea_element_result = ${text}; return ${converted}; }()`
   throw createCppEmitBlockedError(
     `conversion:${representationKey(produced)}->${representationKey(carrier)}`,
     `"Array.prototype.${member}" answers \`undefined\` when there is no such element (ECMA-262 ${clause}), so this backend renders it as an optional ` +
