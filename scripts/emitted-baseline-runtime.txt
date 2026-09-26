@@ -124,6 +124,7 @@ derived-class-reads-base-private-method-in-closure.ts.cpp a8fe7d67798f
 derived-constructor-completion.runtime.js.cpp b59c7081e326
 descriptor-array-splice.js.cpp 96429601e125
 descriptor-function-this-is-the-lookup-receiver.ts.cpp 7ed558c58fe2
+destructured-call-fills-array-fields.runtime.js.cpp 3a5040c115db
 destructured-default-host-options.ts.cpp c11cc6124034
 destructured-key-of-filled-empty-literal.runtime.js.cpp 291be4a22802
 destructuring-defaults.ts.cpp 5b9603fe4315

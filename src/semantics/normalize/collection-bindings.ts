@@ -961,6 +961,71 @@ export const censusCollectionBindings = (
       if (!arrayRoots.has(ownerRoot)) arrayRoots.set(ownerRoot, ownerRoot)
     }
   }
+  // An assignment pattern that fills a tracked array from a call's result
+  // (three's PMREMGenerator `({ lodMeshes: this._lodMeshes, ... } =
+  // _createPlanes( _lodMax ))`) makes the cell hold the array the callee
+  // returned in that slot. `flow` records that write with no value, so no
+  // alias edge reaches it; the slot is named here instead, and only when
+  // every `return` of the callee is an object literal that names that key
+  // with a plain identifier.
+  const returnedSlotDeclarationsOf = (site: ts.Node): ts.Node[] => {
+    if (!(ts.isPropertyAssignment(site) || ts.isShorthandPropertyAssignment(site)) || !ts.isObjectLiteralExpression(site.parent)) return []
+    if (!ts.isIdentifier(site.name) && !ts.isStringLiteral(site.name)) return []
+    const key = site.name.text
+    const assignment = site.parent.parent
+    if (!ts.isBinaryExpression(assignment) || assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken || assignment.left !== site.parent) return []
+    let right: ts.Expression = assignment.right
+    while (ts.isParenthesizedExpression(right)) right = right.expression
+    if (!ts.isCallExpression(right)) return []
+    const callee = checker.getResolvedSignature(right)?.declaration
+    if (
+      !callee ||
+      !(ts.isFunctionDeclaration(callee) || ts.isFunctionExpression(callee) || ts.isArrowFunction(callee) || ts.isMethodDeclaration(callee)) ||
+      !callee.body ||
+      !ts.isBlock(callee.body) ||
+      callee.asteriskToken ||
+      (ts.getCombinedModifierFlags(callee) & ts.ModifierFlags.Async) !== 0
+    ) {
+      return []
+    }
+    const found: ts.Node[] = []
+    let complete = true
+    const visit = (node: ts.Node): void => {
+      if (!complete || ts.isFunctionLike(node) || ts.isClassLike(node)) return
+      if (ts.isReturnStatement(node)) {
+        let value = node.expression
+        while (value && ts.isParenthesizedExpression(value)) value = value.expression
+        if (value && ts.isObjectLiteralExpression(value) && value.properties.some(ts.isSpreadAssignment)) {
+          complete = false
+          return
+        }
+        const slot = value && ts.isObjectLiteralExpression(value)
+          ? value.properties.find((property) => property.name !== undefined && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) && property.name.text === key)
+          : undefined
+        const declaration = !slot
+          ? null
+          : ts.isShorthandPropertyAssignment(slot)
+            ? declNodeOf(checker.getShorthandAssignmentValueSymbol(slot))
+            : ts.isPropertyAssignment(slot) && ts.isIdentifier(slot.initializer)
+              ? declNodeOf(checker.getSymbolAtLocation(slot.initializer))
+              : null
+        if (declaration) found.push(declaration)
+        else complete = false
+        return
+      }
+      ts.forEachChild(node, visit)
+    }
+    ts.forEachChild(callee.body, visit)
+    return complete ? found : []
+  }
+  for (const alias of [...arrayRoots.keys()]) {
+    for (const write of flow.writesToDeclaration(alias)) {
+      if (write.edge !== 'destructuring' || write.slot !== 'whole') continue
+      for (const source of returnedSlotDeclarationsOf(write.site)) {
+        if (arrayRoots.has(source)) arrayRoots.set(rootOf(source), rootOf(alias))
+      }
+    }
+  }
   const arrayComponents = new Map<ts.Node, Set<ts.Node>>()
   for (const alias of arrayRoots.keys()) {
     const root = rootOf(alias)
