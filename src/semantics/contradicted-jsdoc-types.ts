@@ -247,22 +247,37 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
   // number into the "WeakMap" slot and compare one against it. A returned
   // object literal is evidence only through the members it constructs.
   const contradictedReturns = new Map<ts.JSDocReturnTag, ts.Node>()
+  // A tag stating ONLY an absence -- three's `UniformArrayNode.setup`'s
+  // `@return {null}` over `return super.setup( builder )`, a `?Node` -- is
+  // contradicted by any return whose value is present, whatever its type.
+  const returnsPresentValue = (value: ts.Expression): boolean =>
+    valuesWritten(value).some((written) => {
+      const type = checker.getTypeAtLocation(withoutParentheses(written))
+      return !saysNothing(type) && !saysNothing(checker.getNonNullableType(type))
+    })
   for (const { body, tag } of returnTags) {
-    const stated = checker.getNonNullableType(checker.getTypeFromTypeNode(tag.typeExpression.type))
-    if (saysNothing(stated)) continue
+    const whole = checker.getTypeFromTypeNode(tag.typeExpression.type)
+    const onlyAbsence = (whole.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0 && !whole.isUnion()
+    const stated = checker.getNonNullableType(whole)
+    if (saysNothing(stated) && !onlyAbsence) continue
     const visit = (node: ts.Node): void => {
       if (contradictedReturns.has(tag) || ts.isFunctionLike(node) || ts.isClassLike(node)) return
       if (ts.isReturnStatement(node) && node.expression) {
         const store = node
-        const refuted =
-          contradicts(node.expression, stated) ||
-          valuesWritten(node.expression).some((written) => literalContradicts(withoutParentheses(written), stated))
+        const refuted = onlyAbsence
+          ? returnsPresentValue(node.expression)
+          : contradicts(node.expression, stated) ||
+            valuesWritten(node.expression).some((written) => literalContradicts(withoutParentheses(written), stated))
         if (refuted) contradictedReturns.set(tag, store)
       }
       ts.forEachChild(node, visit)
     }
     if (ts.isBlock(body)) ts.forEachChild(body, visit)
-    else if (contradicts(body, stated) || valuesWritten(body).some((written) => literalContradicts(withoutParentheses(written), stated)))
+    else if (
+      onlyAbsence
+        ? returnsPresentValue(body)
+        : contradicts(body, stated) || valuesWritten(body).some((written) => literalContradicts(withoutParentheses(written), stated))
+    )
       contradictedReturns.set(tag, body)
   }
 
