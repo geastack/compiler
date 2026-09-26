@@ -973,14 +973,24 @@ export const censusCollectionBindings = (
     if (!ts.isIdentifier(site.name) && !ts.isStringLiteral(site.name)) return []
     const key = site.name.text
     const assignment = site.parent.parent
-    if (!ts.isBinaryExpression(assignment) || assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken || assignment.left !== site.parent) return []
+    if (
+      !ts.isBinaryExpression(assignment) ||
+      assignment.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
+      assignment.left !== site.parent
+    )
+      return []
     let right: ts.Expression = assignment.right
     while (ts.isParenthesizedExpression(right)) right = right.expression
     if (!ts.isCallExpression(right)) return []
     const callee = checker.getResolvedSignature(right)?.declaration
     if (
       !callee ||
-      !(ts.isFunctionDeclaration(callee) || ts.isFunctionExpression(callee) || ts.isArrowFunction(callee) || ts.isMethodDeclaration(callee)) ||
+      !(
+        ts.isFunctionDeclaration(callee) ||
+        ts.isFunctionExpression(callee) ||
+        ts.isArrowFunction(callee) ||
+        ts.isMethodDeclaration(callee)
+      ) ||
       !callee.body ||
       !ts.isBlock(callee.body) ||
       callee.asteriskToken ||
@@ -999,9 +1009,15 @@ export const censusCollectionBindings = (
           complete = false
           return
         }
-        const slot = value && ts.isObjectLiteralExpression(value)
-          ? value.properties.find((property) => property.name !== undefined && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) && property.name.text === key)
-          : undefined
+        const slot =
+          value && ts.isObjectLiteralExpression(value)
+            ? value.properties.find(
+                (property) =>
+                  property.name !== undefined &&
+                  (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) &&
+                  property.name.text === key
+              )
+            : undefined
         const declaration = !slot
           ? null
           : ts.isShorthandPropertyAssignment(slot)
