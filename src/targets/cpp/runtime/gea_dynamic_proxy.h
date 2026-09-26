@@ -240,16 +240,88 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
     }, nullptr));
     return method;
   }
-  if (key.text() == "toString" || key.text() == "join" || key.text() == "map" || key.text() == "filter" || key.text() == "forEach" || key.text() == "slice") {
+  if (key.text() == "toString" || key.text() == "join" || key.text() == "map" || key.text() == "filter" || key.text() == "forEach" || key.text() == "slice" ||
+      key.text() == "indexOf" || key.text() == "lastIndexOf" || key.text() == "includes" || key.text() == "splice") {
     static const std::map<std::string, Value> methods = [] {
       std::map<std::string, Value> result;
-      for (const char* name : {"join", "map", "filter", "forEach", "slice"}) {
+      for (const char* name : {"join", "map", "filter", "forEach", "slice", "indexOf", "lastIndexOf", "includes", "splice"}) {
         auto callable = Method(+[](void* environment, Value receiver, Args args) -> Value {
           alignas(void*) unsigned char slot[sizeof(void*)];
           const std::string& method = *gea::unpackEnvironment<std::string>(environment, slot);
           const double rawLength = dynamicToNumber(receiver.getProperty(PropertyKey::string("length")));
           const std::size_t length = rawLength > 0 ? static_cast<std::size_t>(std::min(std::floor(rawLength), 9007199254740991.0)) : 0;
           const Value first = args->size() ? args->at(0) : Value();
+          const auto indexKey = [](std::size_t index) { return PropertyKey::string(std::to_string(index)); };
+          // ToIntegerOrInfinity (7.1.5): NaN is 0, and the infinities stay
+          // infinite so a clamp below sends them to either end.
+          const auto integerOf = [](const Value& value) {
+            const double number = dynamicToNumber(value);
+            return std::isnan(number) ? 0.0 : std::trunc(number);
+          };
+          // 23.1.3.17 / 23.1.3.20 / 23.1.3.16: the search methods. `indexOf`
+          // and `lastIndexOf` skip holes and compare strictly; `includes`
+          // reads holes as `undefined` and compares with SameValueZero.
+          if (method == "indexOf" || method == "includes") {
+            const Value fromIndex = args->size() > 1 ? args->at(1) : Value();
+            const double n = fromIndex.tag() == Value::Tag::Undefined ? 0.0 : integerOf(fromIndex);
+            const bool includes = method == "includes";
+            if (n >= static_cast<double>(length)) return includes ? Value::box(Value::Tag::Boolean, false) : Value::box(Value::Tag::Number, -1.0);
+            const std::size_t from = n >= 0 ? static_cast<std::size_t>(n) : static_cast<std::size_t>(std::max(static_cast<double>(length) + n, 0.0));
+            for (std::size_t i = from; i < length; ++i) {
+              const auto index = indexKey(i);
+              if (includes) {
+                if (sameValueZero<Value>(receiver.getProperty(index), first)) return Value::box(Value::Tag::Boolean, true);
+              } else if (receiver.hasProperty(index) && Value::strictEquals(receiver.getProperty(index), first)) {
+                return Value::box(Value::Tag::Number, static_cast<double>(i));
+              }
+            }
+            return includes ? Value::box(Value::Tag::Boolean, false) : Value::box(Value::Tag::Number, -1.0);
+          }
+          if (method == "lastIndexOf") {
+            if (length == 0) return Value::box(Value::Tag::Number, -1.0);
+            const double n = args->size() > 1 ? integerOf(args->at(1)) : static_cast<double>(length) - 1;
+            const double start = n >= 0 ? std::min(n, static_cast<double>(length) - 1) : static_cast<double>(length) + n;
+            for (double k = start; k >= 0; --k) {
+              const auto index = indexKey(static_cast<std::size_t>(k));
+              if (receiver.hasProperty(index) && Value::strictEquals(receiver.getProperty(index), first)) return Value::box(Value::Tag::Number, k);
+            }
+            return Value::box(Value::Tag::Number, -1.0);
+          }
+          // 23.1.3.31, generically over the receiver's own get/set/delete, as
+          // `push` and `pop` above are: the removed elements come back as a
+          // new array, the tail moves, and `length` is set last.
+          if (method == "splice") {
+            const auto clampToLength = [&](double relative) {
+              return static_cast<std::size_t>(relative < 0 ? std::max(static_cast<double>(length) + relative, 0.0) : std::min(relative, static_cast<double>(length)));
+            };
+            const std::size_t start = args->size() ? clampToLength(integerOf(first)) : 0;
+            const std::size_t deleteCount = args->size() == 0 ? 0
+              : args->size() == 1 ? length - start
+              : static_cast<std::size_t>(std::clamp(integerOf(args->at(1)), 0.0, static_cast<double>(length - start)));
+            const std::size_t itemCount = args->size() > 2 ? args->size() - 2 : 0;
+            auto removed = gea::makeRef<ArrayObject<Value>>();
+            for (std::size_t k = 0; k < deleteCount; ++k) {
+              const auto from = indexKey(start + k);
+              if (receiver.hasProperty(from)) removed->push(receiver.getProperty(from));
+              else removed->pushHole();
+            }
+            const auto move = [&](std::size_t fromIndex, std::size_t toIndex) {
+              const auto from = indexKey(fromIndex);
+              const auto to = indexKey(toIndex);
+              if (receiver.hasProperty(from)) receiver.setProperty(to, receiver.getProperty(from));
+              else if (!receiver.deleteProperty(to)) host::throwRuntimeError("TypeError", "Cannot delete array element");
+            };
+            if (itemCount < deleteCount) {
+              for (std::size_t k = start; k < length - deleteCount; ++k) move(k + deleteCount, k + itemCount);
+              for (std::size_t k = length; k > length - deleteCount + itemCount; --k)
+                if (!receiver.deleteProperty(indexKey(k - 1))) host::throwRuntimeError("TypeError", "Cannot delete array element");
+            } else if (itemCount > deleteCount) {
+              for (std::size_t k = length - deleteCount; k > start; --k) move(k + deleteCount - 1, k + itemCount - 1);
+            }
+            for (std::size_t i = 0; i < itemCount; ++i) receiver.setProperty(indexKey(start + i), args->at(i + 2));
+            receiver.setProperty(PropertyKey::string("length"), Value::box(Value::Tag::Number, static_cast<double>(length - deleteCount + itemCount)));
+            return Value::box(Value::Tag::Object, removed);
+          }
           if (method == "join") {
             const std::string separator = first.tag() == Value::Tag::Undefined ? "," : host::detail::toString(first);
             std::string text;
@@ -358,7 +430,7 @@ inline Value dynamicStringPrototypeGet(const PropertyKey& key) {
 inline Ref<ArrayObject<Value>> arrayPrototypeObject() {
   static const Ref<ArrayObject<Value>> prototype = [] {
     auto object = makeRef<ArrayObject<Value>>();
-    for (const char* name : {"push", "pop", "join", "toString", "map", "filter", "forEach", "slice"}) {
+    for (const char* name : {"push", "pop", "join", "toString", "map", "filter", "forEach", "slice", "indexOf", "lastIndexOf", "includes", "splice"}) {
       const auto key = PropertyKey::string(name);
       auto descriptor = PropertyDescriptor::assignment(dynamicArrayPrototypeGet(key));
       descriptor.enumerable = false;
