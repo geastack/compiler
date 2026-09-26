@@ -12978,6 +12978,28 @@ struct DynamicRestArgument<gea::Ref<gea::ArrayObject<Element>>> {
 };
 
 /**
+ * A callable result declared `T | null`, read out of a box.
+ *
+ * `Null` is its absence. So is `Undefined`: a typed callable whose frame
+ * returns `Optional<T>` boxes its absent state as `Undefined` whichever
+ * absence its declaration meant (`DynamicCarrier<Optional<T>>::out`), so a
+ * `T | null` function crossing a dynamic boundary and back answers
+ * `Undefined` for its own `null`. This is the same pair of tags
+ * `DynamicCarrier<Optional<T>>::in` accepts for every non-callable read;
+ * anything else must be a `T`.
+ */
+template <typename T>
+struct NullAbsentCallableResult;
+
+template <typename T>
+struct NullAbsentCallableResult<Optional<T>> {
+  static Optional<T> in(const Value& value) {
+    if (value.tag() == Value::Tag::Null || value.tag() == Value::Tag::Undefined) return Optional<T>();
+    return Optional<T>(DynamicCallableCarrier<T>::in(value, 0));
+  }
+};
+
+/**
  * A function value crossing the boundary in the READ direction, and the one
  * carrier for which an exact payload match is not the general case.
  *
@@ -13010,29 +13032,36 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
   static bool accepts(const Value& value) {
     return value.tag() == Value::Tag::Function && value.payloadType() == payloadTypeTagFor<Self>();
   }
-  static Self in(const Value& value, std::size_t position) { return inAs(value, position, false, -1, &adapt); }
+  // `NullResult` states that the frame's `Optional<T>` RESULT means `T | null`.
+  // `Optional<T>` itself cannot say which absence it holds, and the callable
+  // carrier policy reads only `Undefined` as absent, so a Function installed
+  // in three's `@return {?boolean}` `Node.update` slot could not answer
+  // `null`. See `NullAbsentCallableResult` for what it reads.
+  template <bool NullResult = false>
+  static Self in(const Value& value, std::size_t position) { return inAs(value, position, false, -1, &adapt<NullResult>); }
+  template <bool NullResult = false>
   static Self inWithReceiver(const Value& value, std::size_t position) {
     if constexpr (sizeof...(Arguments) == 0) {
       refusePayloadMismatch("a receiver-bearing callable ABI has no physical receiver slot");
     } else {
-      return inAs(value, position, true, -1, &adaptWithReceiver);
+      return inAs(value, position, true, -1, &adaptWithReceiver<NullResult>);
     }
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult = false>
   static Self inWithRest(const Value& value, std::size_t position) {
     static_assert(RestFrom < sizeof...(Arguments), "a rest slot must be a physical callable argument");
     using Rest = std::tuple_element_t<RestFrom, Args>;
     static_assert(DynamicRestArgument<Rest>::supported, "a checked dynamic rest adapter requires ArrayObject<Element>");
-    return inAs(value, position, false, static_cast<int>(RestFrom), &adaptWithRest<RestFrom>);
+    return inAs(value, position, false, static_cast<int>(RestFrom), &adaptWithRest<RestFrom, NullResult>);
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult = false>
   static Self inWithReceiverAndRest(const Value& value, std::size_t position) {
     static_assert(RestFrom > 0 && RestFrom < sizeof...(Arguments), "a receiver-bearing rest slot follows the physical receiver");
     using Rest = std::tuple_element_t<RestFrom, Args>;
     static_assert(DynamicRestArgument<Rest>::supported, "a checked dynamic rest adapter requires ArrayObject<Element>");
-    return inAs(value, position, true, static_cast<int>(RestFrom), &adaptWithReceiverAndRest<RestFrom>);
+    return inAs(value, position, true, static_cast<int>(RestFrom), &adaptWithReceiverAndRest<RestFrom, NullResult>);
   }
 
  private:
@@ -13055,6 +13084,16 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     return adapted;
   }
 
+  template <bool NullResult>
+  static Result readResult(const Value& value) {
+    if constexpr (NullResult) {
+      return NullAbsentCallableResult<Result>::in(value);
+    } else {
+      return DynamicCallableCarrier<Result>::in(value, 0);
+    }
+  }
+
+  template <bool NullResult>
   static Result adapt(void* environment, Arguments... arguments) {
     alignas(void*) unsigned char slot[sizeof(void*)];
     const Value* source = gea::unpackEnvironment<Value>(environment, slot);
@@ -13062,10 +13101,11 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source->callAsFunction(boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source->callAsFunction(boxed), 0);
+      return readResult<NullResult>(source->callAsFunction(boxed));
     }
   }
 
+  template <bool NullResult>
   static Result adaptWithReceiver(void* environment, Arguments... arguments) {
     static_assert(sizeof...(Arguments) > 0, "a receiver-bearing callable ABI has a physical receiver slot");
     alignas(void*) unsigned char slot[sizeof(void*)];
@@ -13083,11 +13123,11 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source->callWithReceiver(receiver, boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source->callWithReceiver(receiver, boxed), 0);
+      return readResult<NullResult>(source->callWithReceiver(receiver, boxed));
     }
   }
 
-  template <std::size_t RestFrom, std::size_t... Fixed>
+  template <std::size_t RestFrom, bool NullResult, std::size_t... Fixed>
   static Result adaptWithRestFrame(const Value& source, const Args& frame, std::index_sequence<Fixed...>) {
     std::vector<Value> boxed{DynamicCallableCarrier<std::tuple_element_t<Fixed, Args>>::out(std::get<Fixed>(frame))...};
     using Rest = std::tuple_element_t<RestFrom, Args>;
@@ -13095,19 +13135,19 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source.callAsFunction(boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source.callAsFunction(boxed), 0);
+      return readResult<NullResult>(source.callAsFunction(boxed));
     }
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult>
   static Result adaptWithRest(void* environment, Arguments... arguments) {
     alignas(void*) unsigned char slot[sizeof(void*)];
     const Value* source = gea::unpackEnvironment<Value>(environment, slot);
     const Args frame(arguments...);
-    return adaptWithRestFrame<RestFrom>(*source, frame, std::make_index_sequence<RestFrom>{});
+    return adaptWithRestFrame<RestFrom, NullResult>(*source, frame, std::make_index_sequence<RestFrom>{});
   }
 
-  template <std::size_t RestFrom, std::size_t... Fixed>
+  template <std::size_t RestFrom, bool NullResult, std::size_t... Fixed>
   static Result adaptWithReceiverAndRestFrame(const Value& source, const Args& frame, std::index_sequence<Fixed...>) {
     using Receiver = std::tuple_element_t<0, Args>;
     using Rest = std::tuple_element_t<RestFrom, Args>;
@@ -13118,16 +13158,16 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source.callWithReceiver(receiver, boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source.callWithReceiver(receiver, boxed), 0);
+      return readResult<NullResult>(source.callWithReceiver(receiver, boxed));
     }
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult>
   static Result adaptWithReceiverAndRest(void* environment, Arguments... arguments) {
     alignas(void*) unsigned char slot[sizeof(void*)];
     const Value* source = gea::unpackEnvironment<Value>(environment, slot);
     const Args frame(arguments...);
-    return adaptWithReceiverAndRestFrame<RestFrom>(*source, frame, std::make_index_sequence<RestFrom - 1>{});
+    return adaptWithReceiverAndRestFrame<RestFrom, NullResult>(*source, frame, std::make_index_sequence<RestFrom - 1>{});
   }
 };
 

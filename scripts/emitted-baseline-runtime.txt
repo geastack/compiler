@@ -147,6 +147,7 @@ dynamic-expando-read-into-an-optional-union.ts.cpp 50e2e29bbdc9
 dynamic-fallback-call-bind.js.cpp e354fb71dea9
 dynamic-finite-destructuring-close.ts.cpp a3d4cc28c1db
 dynamic-for-of-iterator-close.ts.cpp 91912cb66fbd
+dynamic-function-into-nullable-result-method.runtime.js.cpp 80869287e9c7
 dynamic-iterator-gather.ts.cpp ccdb8a9f5be5
 dynamic-iterator-header-close.ts.cpp 428657c306cc
 dynamic-optional-absence-mismatch.ts.cpp 7df14bcbd5c2

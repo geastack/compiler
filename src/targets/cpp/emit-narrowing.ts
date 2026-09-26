@@ -2910,14 +2910,17 @@ export const unboxedLoadText = (target: Representation, text: string): string | 
     const type = cppTypeOf(target)
     const value = 'gea_callable_value'
     const restFrom = callableAbi.restFrom
+    // `gea::Optional<T>` does not record which absence it means, so a result
+    // declared `T | null` names its absence to the adapter explicitly.
+    const nullResult = callableAbi.result.kind === 'optional' && callableAbi.result.absence === 'null'
     const load =
       restFrom === null
         ? callableAbi.receiver === null
-          ? `gea::detail::DynamicCarrier<${type}>::in(${value}, 0)`
-          : `gea::detail::DynamicCarrier<${type}>::inWithReceiver(${value}, 0)`
+          ? `gea::detail::DynamicCarrier<${type}>::${nullResult ? 'template in<true>' : 'in'}(${value}, 0)`
+          : `gea::detail::DynamicCarrier<${type}>::${nullResult ? 'template inWithReceiver<true>' : 'inWithReceiver'}(${value}, 0)`
         : callableAbi.receiver === null
-          ? `gea::detail::DynamicCarrier<${type}>::template inWithRest<${restFrom}>(${value}, 0)`
-          : `gea::detail::DynamicCarrier<${type}>::template inWithReceiverAndRest<${restFrom + 1}>(${value}, 0)`
+          ? `gea::detail::DynamicCarrier<${type}>::template inWithRest<${restFrom}${nullResult ? ', true' : ''}>(${value}, 0)`
+          : `gea::detail::DynamicCarrier<${type}>::template inWithReceiverAndRest<${restFrom + 1}${nullResult ? ', true' : ''}>(${value}, 0)`
     const members =
       target.kind === 'function'
         ? [target.functionId]

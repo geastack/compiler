@@ -449,7 +449,7 @@ const dynamicCarrierSupported = (representation: Representation, seen = new Set<
     case 'function-family':
     case 'function-value-family':
     case 'function-value-dispatch':
-      return dynamicCallableAbiSupported(representation.abi, nested)
+      return dynamicCallableAbiSupported(representation.abi, nested, false)
     case 'void':
       return true
     default:
@@ -457,9 +457,17 @@ const dynamicCarrierSupported = (representation: Representation, seen = new Set<
   }
 }
 
-const dynamicCallableAbiSupported = (abi: CallableAbi, seen = new Set<Representation>()): boolean => {
+/**
+ * `statesResultAbsence`: whether the adapter being licensed is the top-level
+ * one `unboxedLoadText` renders, which names a `T | null` RESULT's absence to
+ * `DynamicCarrier<CallableObject<...>>` explicitly (`NullResult`). A callable
+ * nested in another frame position is read through the runtime's carrier
+ * policy instead, which knows only undefined-absence.
+ */
+const dynamicCallableAbiSupported = (abi: CallableAbi, seen = new Set<Representation>(), statesResultAbsence = true): boolean => {
   if (abi.receiver !== null && !dynamicCarrierSupported(abi.receiver, seen)) return false
-  if (abi.result.kind !== 'void' && !dynamicCarrierSupported(abi.result, seen)) return false
+  const result = statesResultAbsence && abi.result.kind === 'optional' && abi.result.absence === 'null' ? abi.result.payload : abi.result
+  if (result.kind !== 'void' && !dynamicCarrierSupported(result, seen)) return false
   if (!abi.parameters.every((parameter) => dynamicCarrierSupported(parameter.value, seen))) return false
   if (abi.restFrom === null) return true
   const rest = abi.parameters[abi.restFrom]?.value
