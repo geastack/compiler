@@ -27,6 +27,8 @@ import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import { programTypeNames, type ProgramTypeNames } from './jsdoc-type-names.js'
+import { absentDefaultParameterOf } from './structural-layout-type.js'
+import { isUnreducedTypeForm } from './unreduced-type-form.js'
 
 /**
  * The type an unannotated class FIELD holds, when the program never declares
@@ -991,6 +993,14 @@ export const censusFieldBindings = (
     let silent = 0
     let refused: string | null = null
     for (const write of writes) {
+      // A read of an untagged parameter typed only by its `null` default holds
+      // what the layout resolver types that parameter as
+      // (`absentDefaultParameterOf`): the census's answer from the callers,
+      // with the default's `null`. The checker still answers the default's
+      // bare `null`, and read that way three's `NodeError( message,
+      // stackTrace = null )` laid `stackTrace` out as a carrier that holds
+      // only `null`, into which the `StackTrace` its callers pass was stored.
+      const nullDefault = nullDefaultReadOf(write)
       // A STATED CELL THE UPSTREAM CENSUS NARROWED OUTRANKS THE CHECKER at
       // this write. `known` asks the checker first everywhere else, which is
       // right when the checker's answer is the last word about the value --
@@ -1012,7 +1022,7 @@ export const censusFieldBindings = (
       // `/** @type {Object} */ this.userData = {};` is the measured case:
       // with that write silent, every class's `userData` fell back to the
       // annotation's `any` and boxed the empty object it only ever holds.
-      const type = parameters.statedTypeAt(write) ?? exactEmptyObjectLiteralType(checker, write) ?? known(write) ?? resolveExpr(write)
+      const type = nullDefault ?? parameters.statedTypeAt(write) ?? exactEmptyObjectLiteralType(checker, write) ?? known(write) ?? resolveExpr(write)
       if (type) types.push(type)
       // A write typed `void`/`never` is a real fact stating the storage holds
       // nothing a program can use -- a veto in both phases, exactly as
@@ -1131,6 +1141,14 @@ export const censusFieldBindings = (
     resolvingSymbols.delete(symbol)
     if (result) bound.set(symbol, result)
     return result
+  }
+
+  /** What a write reading a `null`-defaulted untagged parameter holds (see the write loop), or `null` for any other write and where the census has no answer. */
+  const nullDefaultReadOf = (write: ts.Expression): ts.Type | null => {
+    const node = unwrapParens(write)
+    if (!ts.isIdentifier(node) || absentDefaultParameterOf(checker, node)?.initializer?.kind !== ts.SyntaxKind.NullKeyword) return null
+    const bound = parameters.typeAt(node)
+    return bound && !isUnreducedTypeForm(bound) ? checker.getNullableType(bound, ts.TypeFlags.Null) : null
   }
 
   const unwrapParens = (node: ts.Expression): ts.Expression => {

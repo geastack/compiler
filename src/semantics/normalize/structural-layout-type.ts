@@ -34,7 +34,7 @@ import { emptyParameterBindingCensus, type ParameterBindingCensus } from './para
  * `structural.ts`'s `nullDefaultedParameterReadAt` only adds the `null` a
  * `null` default binds to whatever answer this gives.
  */
-const absentDefaultParameterOf = (checker: ts.TypeChecker, node: ts.Node): ts.ParameterDeclaration | null => {
+export const absentDefaultParameterOf = (checker: ts.TypeChecker, node: ts.Node): ts.ParameterDeclaration | null => {
   const declaration = ts.isParameter(node) ? node : ts.isIdentifier(node) ? checker.getSymbolAtLocation(node)?.valueDeclaration : undefined
   if (!declaration || !ts.isParameter(declaration) || declaration.type || !declaration.initializer) return null
   if (!ts.isIdentifier(declaration.name) || declaration.dotDotDotToken) return null
