@@ -2,6 +2,7 @@ import ts from 'typescript'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import type { StructuralShape } from '../model/structural-types.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'
+import { constructSignaturesOf } from './structural-parts.js'
 
 /**
  * The structure a declared name stands for.
@@ -93,7 +94,7 @@ export const createDeclaredBodyResolver = ({ table, typeOf, signatureOf, objectS
     // keeps the signature path below.
     if (type.isUnion()) return table.intern({ kind: 'union', members: type.types.map(typeOf) })
     const callSignatures = type.getCallSignatures()
-    const constructSignatures = type.getConstructSignatures()
+    const constructSignatures = constructSignaturesOf(type)
     if (callSignatures.length > 0 || constructSignatures.length > 0) {
       return table.intern({
         kind: 'signature',

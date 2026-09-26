@@ -940,11 +940,44 @@ export const selfReferentialCallableShapeOf = (
   signatureOf: (signature: ts.Signature) => SignatureShape
 ): { kind: 'signature'; call: SignatureShape[]; construct: SignatureShape[] } | null => {
   const callSignatures = type.getCallSignatures()
-  const constructSignatures = type.getConstructSignatures()
+  const constructSignatures = constructSignaturesOf(type)
   if (callSignatures.length === 0 && constructSignatures.length === 0) return null
   return {
     kind: 'signature',
     call: callSignatures.map((one) => signatureOf(one)),
     construct: constructSignatures.map((one) => signatureOf(one))
   }
+}
+
+/**
+ * The construct signatures a callable type states, less the one the checker
+ * invents for a function it has made a class without a constructor.
+ *
+ * A JavaScript `function` whose body assigns to `this` is a class to the
+ * checker. Declared, or bound to a name, it is a JS constructor function, and
+ * its construct signature is its own: same declaration, same formals. Anywhere
+ * else -- three's `Object.defineProperty( this, 'reflectivity', { set:
+ * function ( reflectivity ) { this.ior = ... } } )` -- the checker falls back
+ * to the default constructor of a class with none, `(): set`, which has no
+ * declaration and takes nothing. That is not the function's `[[Construct]]`:
+ * an ordinary function is constructed through the formals it is called with.
+ * Stating it gave the one body two frames, `( reflectivity )` and `()`, which
+ * no projection can serve, so the setter had no calling convention at all.
+ * Left out, the value is the callable its call signature states, and a `new`
+ * of it finds no construct convention and refuses by name.
+ *
+ * A class has no call signature, so its own default constructor is kept.
+ */
+export const constructSignaturesOf = (type: ts.Type): readonly ts.Signature[] => {
+  const construct = type.getConstructSignatures()
+  if (construct.length === 0 || construct.some((signature) => signature.declaration !== undefined)) return construct
+  const call = type.getCallSignatures()
+  const bodyDeclared =
+    call.length > 0 &&
+    call.every(
+      (signature) =>
+        signature.declaration !== undefined &&
+        (ts.isFunctionExpression(signature.declaration) || ts.isFunctionDeclaration(signature.declaration))
+    )
+  return bodyDeclared ? [] : construct
 }

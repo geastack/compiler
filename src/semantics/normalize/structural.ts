@@ -2850,7 +2850,7 @@ const buildMapper = (
     }
 
     const callSignatures = type.getCallSignatures()
-    const constructSignatures = type.getConstructSignatures()
+    const constructSignatures = constructSignaturesOf(type)
     if (callSignatures.length > 0 || constructSignatures.length > 0) {
       // The type of an overloaded SOURCE function is every declared overload,
       // which is the checker's right answer for resolving a call and the
