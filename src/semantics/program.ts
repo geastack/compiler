@@ -15,6 +15,7 @@ import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } fr
 import { contradictedJsDocTypeBlanks } from './contradicted-jsdoc-types.js'
 import { absentJsDocTagWidenings } from './absent-jsdoc-tags.js'
 import { contradictedJsDocParameterBlanks } from './contradicted-jsdoc-parameters.js'
+import { overArityJsDocArrayRewrites } from './over-arity-jsdoc-arrays.js'
 import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
 import { isUncheckedGuardCopyArtifact, uncheckedGuardArgumentCopies } from './unchecked-guard-argument-copies.js'
 import { knownCallerPredicateParameters } from './known-caller-predicate-parameters.js'
