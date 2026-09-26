@@ -10221,6 +10221,24 @@ gea::Optional<T>&& presentOrThrow(gea::Optional<T>&& value) {
 }
 
 /**
+ * `new Map(pairs)` (ECMA-262 24.1.1.2 AddEntriesFromIterable) for an Array
+ * whose element is a statically typed `[K, V]` tuple: `add` reads the entry's
+ * "0" and "1" fields, converts each into the Map's own K and V, and sets them,
+ * in element order. A hole reads `undefined`, which is not an Object, so it
+ * throws the TypeError of step 4.d. `emitKeyedCollectionConstruct` renders
+ * `add`; three seeds its typed-array tables this way.
+ */
+template <typename K, typename V, typename E, typename Add>
+inline gea::Ref<gea::Map<K, V>> mapFromPairArray(const gea::Ref<gea::ArrayObject<E>>& source, Add&& add) {
+  auto result = gea::makeRef<gea::Map<K, V>>();
+  for (const auto& slot : source->slots()) {
+    if (!slot.present) gea::host::throwRuntimeError("TypeError", "Iterator value undefined is not an entry object");
+    add(*result, slot.value);
+  }
+  return result;
+}
+
+/**
  * SameValueZero, CanonicalizeKeyedCollectionKey and weak-key identity for the
  * one key carrier that is not a static type: `gea::Value`, the box a position
  * the program itself declared `any`/`unknown` lands in.
