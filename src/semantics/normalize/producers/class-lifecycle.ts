@@ -21,6 +21,7 @@ import type { IdentityTable } from '../identities.js'
 import type { ProducerContext } from '../producer-context.js'
 import { isOverloadOmissibleParameter, parameterSlotTypeOf } from '../parameter-slot.js'
 import { declaresExactArms } from './exact-arms.js'
+import { implicitArgumentsSlotOf } from '../implicit-arguments.js'
 import { mintOperationId, mintResult, operand } from './mint.js'
 import { resultOf } from '../../model/operands.js'
 import {
@@ -342,6 +343,16 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
     const written = writtenConstructorOf(node)
     if (!written) return null
     {
+      // A constructor that reads `arguments` has the checker's phantom rest
+      // slot after its written parameters, and its body binds it
+      // (`argumentsObjectValueAt`, bindings.ts) off the same resolved frame.
+      // Leaving it out of the allocation's frame gave the body one physical
+      // parameter more than its convention -- three's `MathNode`
+      // constructor, which counts `arguments.length` for `max`/`min`.
+      const signature = context.checker.getSignatureFromDeclaration(written)
+      const phantom = signature ? implicitArgumentsSlotOf(signature) : null
+      const resolved = phantom && signature ? context.table.get(context.types.resolvedSignatureTypeOf(signature, 'call')).shape : null
+      const phantomParameter = phantom && resolved?.kind === 'signature' ? resolved.call[0]?.parameters[phantom.ordinal] : undefined
       const shape = context.table.intern({
         kind: 'signature',
         call: [
