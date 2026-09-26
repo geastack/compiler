@@ -978,9 +978,10 @@ export const censusFieldBindings = (
         break
       } else silent += 1
     }
-    // Held to its statement: every typed write must be one the tag admits.
+    // Held to its statement: every write must be typed, and each one a type the tag admits.
+    // A silent write (`stack(this.stack)` through an untyped TSL call) is no evidence the tag holds.
     const named = refused === null ? namedTagTypeOf(symbol) : null
-    if (named && types.every((type) => checker.isTypeAssignableTo(type, named))) {
+    if (named && silent === 0 && types.length > 0 && types.every((type) => checker.isTypeAssignableTo(type, named))) {
       resolvingSymbols.delete(symbol)
       bound.set(symbol, named)
       statedBindings.set(symbol, named)
