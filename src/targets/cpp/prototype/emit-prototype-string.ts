@@ -60,6 +60,8 @@ interface StringMethodShape {
   readonly carriers: readonly ('string' | 'number')[]
   /** The `gea::runtime::string` function, when it is not the member's own name. */
   readonly spelling?: string
+  /** A numeric position's value when the operand is present but `undefined`, where it is not `numericArgumentText`'s index default. */
+  readonly absent?: readonly (string | undefined)[]
 }
 
 const stringMethodShapes: ReadonlyMap<string, StringMethodShape> = new Map([
@@ -85,7 +87,8 @@ const stringMethodShapes: ReadonlyMap<string, StringMethodShape> = new Map([
   // The three members `lib.es5.d.ts` declares over `string | RegExp`. These
   // rows are the STRING form only; the pattern form is rendered by
   // `emit-prototype-regexp.ts` and asked first (see `shapedStringMethodText`).
-  ['split', { clause: '22.1.3.21', arities: [1], carriers: ['string'] }],
+  // An undefined `limit` is 2^32 - 1 (step 4), not ToUint32(+Infinity), which is 0.
+  ['split', { clause: '22.1.3.21', arities: [1, 2], carriers: ['string', 'number'], absent: [undefined, '4294967295.0'] }],
   ['replace', { clause: '22.1.3.18', arities: [2], carriers: ['string', 'string'] }],
   ['replaceAll', { clause: '22.1.3.20', arities: [2], carriers: ['string', 'string'] }]
 ])
@@ -123,10 +126,10 @@ const isOptionalNumber = (representation: IrOperand['representation']): boolean 
  * but-undefined end renders through the identical downstream clamp to `len`
  * rather than a second, possibly-disagreeing spelling of the same default.
  */
-const numericArgumentText = (ctx: EmitContext, operand: IrOperand, position: number): string => {
+const numericArgumentText = (ctx: EmitContext, operand: IrOperand, position: number, absent?: string): string => {
   const text = operandText(ctx, operand)
   if (!isOptionalNumber(operand.representation)) return text
-  const fallback = position === 0 ? '0.0' : 'std::numeric_limits<double>::infinity()'
+  const fallback = absent ?? (position === 0 ? '0.0' : 'std::numeric_limits<double>::infinity()')
   return `(${text}.has_value() ? *${text} : ${fallback})`
 }
 
@@ -190,7 +193,11 @@ const shapedStringMethodText =
               : '')
         )
       }
-      rendered.push(wanted === 'number' ? numericArgumentText(ctx, argument, index) : (replacementText ?? operandText(ctx, argument)))
+      rendered.push(
+        wanted === 'number'
+          ? numericArgumentText(ctx, argument, index, shape.absent?.[index])
+          : (replacementText ?? operandText(ctx, argument))
+      )
     }
     if (member === 'charCodeAt' && metadata !== undefined) {
       return {

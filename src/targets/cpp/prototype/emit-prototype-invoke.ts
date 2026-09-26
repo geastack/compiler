@@ -1024,6 +1024,32 @@ export const prototypeMethodCallText = (ctx: EmitContext, operation: CallOperati
 }
 
 /**
+ * `hasOwnProperty`/`propertyIsEnumerable` answer a C++ `bool` whatever the
+ * receiver's carrier. The call publishes whatever the checker typed it as, and
+ * in JavaScript `Object.prototype.hasOwnProperty.call(obj, key)` is typed `any`
+ * (`CallableFunction.call` without `strictBindCallApply`), so the boolean is
+ * reconciled into that carrier -- boxed there -- or refused by name.
+ */
+const ownPropertyTestResult = (ctx: EmitContext, operation: CallOperation, member: string, text: string): string => {
+  const published = operation.result?.representation
+  if (!published) return text
+  const converted = alignedValueText(
+    ctx,
+    'prototype/emit-prototype-invoke.ts:own-property-test',
+    { kind: 'scalar', domain: 'boolean' },
+    published,
+    text
+  )
+  if (converted === null) {
+    throw createCppEmitBlockedError(
+      `host-member-call:Object.prototype.${member}`,
+      `"Object.prototype.${member}" answers a boolean, and this call publishes "${representationKey(published)}", which no conversion reaches`
+    )
+  }
+  return converted
+}
+
+/**
  * One deferred read, spelled against one receiver TEXT.
  *
  * Split from the entry point above so a union arm can be rendered as itself:
@@ -1093,7 +1119,12 @@ const renderPrototypeMethodCall = (
         `"${read.member}" was recorded as a deferred dictionary read with no table spelling`
       )
     }
-    return dictionaryCallText(ctx, read.member, receiverText, read.dictionaryTable, operation.arguments)
+    return ownPropertyTestResult(
+      ctx,
+      operation,
+      read.member,
+      dictionaryCallText(ctx, read.member, receiverText, read.dictionaryTable, operation.arguments)
+    )
   }
   if (read.receiverKind === 'object-shape') {
     if (read.objectShapeFields === undefined || read.objectShapeAccessor === undefined) {
@@ -1102,7 +1133,12 @@ const renderPrototypeMethodCall = (
         `"${read.member}" was recorded as a deferred object-shape read with no field list`
       )
     }
-    return objectShapeCallText(ctx, read.member, receiverText, read.objectShapeAccessor, read.objectShapeFields, operation.arguments)
+    return ownPropertyTestResult(
+      ctx,
+      operation,
+      read.member,
+      objectShapeCallText(ctx, read.member, receiverText, read.objectShapeAccessor, read.objectShapeFields, operation.arguments)
+    )
   }
   if (read.receiverKind === 'native-handle-shape') {
     if (read.intrinsicProtocol === undefined) {
@@ -1111,13 +1147,18 @@ const renderPrototypeMethodCall = (
         `"${read.member}" was recorded as a deferred native-handle read with no protocol name`
       )
     }
-    return nativeHandleShapeCallText(ctx, read.member, read.intrinsicProtocol, operation.arguments)
+    return ownPropertyTestResult(
+      ctx,
+      operation,
+      read.member,
+      nativeHandleShapeCallText(ctx, read.member, read.intrinsicProtocol, operation.arguments)
+    )
   }
   if (read.receiverKind === 'callable-shape') {
-    return callableShapeCallText(ctx, read.member, receiverText, operation.arguments)
+    return ownPropertyTestResult(ctx, operation, read.member, callableShapeCallText(ctx, read.member, receiverText, operation.arguments))
   }
   if (read.receiverKind === 'dynamic-object') {
-    return dynamicObjectCallText(ctx, read.member, receiverText, operation.arguments)
+    return ownPropertyTestResult(ctx, operation, read.member, dynamicObjectCallText(ctx, read.member, receiverText, operation.arguments))
   }
   // The ECMA-262 binary family, rendered in `emit-buffers.ts` -- see that
   // file's header for why its members live together rather than with the
