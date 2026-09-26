@@ -744,7 +744,13 @@ export const censusFieldBindings = (
       const access = write.propertyAccess as ts.PropertyAccessExpression
       const receiver = parameters.typeAt(access.expression) ?? namedParameterTypeOf(access.expression)
       if (!receiver || !write.value) continue
-      if (checker.getPropertyOfType(checker.getNonNullableType(receiver), symbol.name) === symbol) found.push(write.value)
+      // The same field can reach here as a different symbol object than the
+      // receiver class names (see `writesOf`): three's `RenderObject.pipeline`
+      // did, and matched by identity its `Pipelines.js` writes were dropped.
+      // Both name the one assignment that declares the field.
+      const member = checker.getPropertyOfType(checker.getNonNullableType(receiver), symbol.name)
+      if (member === symbol || (member?.declarations ?? []).some((declaration) => symbol.declarations?.includes(declaration)))
+        found.push(write.value)
     }
     return found
   }
