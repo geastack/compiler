@@ -640,6 +640,7 @@ typed-array-loop-alias.ts.cpp 1ec2ce6004a7
 typed-array-loop-window.ts.cpp 9c30662c0e78
 typed-array-multiple-windows.ts.cpp 766249933e5b
 typed-array-narrowing-over-class.ts.cpp 069c3279b884
+typed-callable-into-function-arm.runtime.js.cpp 6fa2dff6aff9
 typed-computed-record-read-global.ts.cpp 197ade80cc2d
 typed-computed-record-read.ts.cpp db9ced2d6827
 typed-custom-iterator-close.ts.cpp d82cc3c5b6ee

@@ -15,6 +15,7 @@ import {
   callableObjectAbi,
   resultAdapterTransportOf,
   boxDiscriminantsOfArm,
+  boxesIntoFunctionArm,
   type BoxDiscriminant,
   conversionRecipeOf,
   boxedAssertionText,
@@ -1487,8 +1488,7 @@ const cppConversionTables = (
       }
     }
     const union = target.kind === 'optional' ? target.payload : target
-    if (union.kind !== 'tagged-union') return null
-    if (union.arms.some((arm) => representationKey(arm.value) === sourceKey)) {
+    if (union.kind === 'tagged-union' && union.arms.some((arm) => representationKey(arm.value) === sourceKey)) {
       return {
         classifier: { id: 'gea::TaggedUnion::ofArm', domain: `arm:${sourceKey}` },
         materializer: {
@@ -1498,6 +1498,16 @@ const cppConversionTables = (
           nativeFieldProtocol: 'unused',
           ...nativeClassReferenceIdentityOf(source, target)
         }
+      }
+    }
+    // A typed callable stored where the program declared the broad
+    // `Function` beside other members boxes into that one arm -- the store
+    // `widenedStoreText` renders through the same predicate.
+    if (boxesIntoFunctionArm(target, source)) {
+      const domain = `box:function-arm:${sourceKey}->${representationKey(target)}`
+      return {
+        classifier: { id: 'gea::Value::box', domain },
+        materializer: { id: 'gea::Value::box', domain, allocates: true }
       }
     }
     return null
