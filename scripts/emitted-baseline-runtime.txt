@@ -663,3 +663,4 @@ value-record-literal-union.ts.cpp ad9d4204d83c
 virtual-call-through-a-base-whose-override-narrows-unknown.ts.cpp 62f0efa5a9a4
 virtual-parameter-widening.ts.cpp 87284ed30699
 void-call-stored-into-union.ts.cpp 9ca89501aa0f
+weak-map-keyed-by-reboxed-record.runtime.js.cpp a4226bda064e

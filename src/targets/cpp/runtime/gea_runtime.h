@@ -10054,8 +10054,14 @@ class Value {
    */
   static bool strictEquals(const Value& left, const Value& right);
 
-  /** The address of the held payload -- object identity, and nothing else. Two boxes of the same object share it; two boxes of equal primitives do not. */
-  const void* identity() const { return held_ ? held_.get() : this; }
+  /**
+   * Object identity, and nothing else. Two boxes of the same object share it;
+   * two boxes of equal primitives do not. An Object or Function box answers
+   * `expandoAnchor()`, the address `strictEquals` compares on: `held_` of a
+   * boxed `gea::Ref<T>` is a per-box wrapper, so two boxes of one record would
+   * otherwise be two WeakMap keys.
+   */
+  const void* identity() const;
 
   /**
    * ECMA-262 7.3.14 Call, for the one payload this header can perform it on.
@@ -10215,7 +10221,7 @@ gea::Optional<T>&& presentOrThrow(gea::Optional<T>&& value) {
  * first. `canonicalKey` then folds `-0` to `+0` on insertion, so iteration
  * hands back what 23.1.3.9 requires, exactly as it does for a `double` key.
  *
- * `weakKeySame` reads `identity()`, the address of the held payload: for an
+ * `weakKeySame` reads `identity()`, the object's own address: for an
  * object-tagged box that IS the reference identity 24.3/24.4 ask for, shared
  * by every box of the same object. For a box holding a primitive it is a
  * per-box address, so `weakMap.has(1)` answers `false` where the spec throws
@@ -14375,6 +14381,14 @@ inline gea::Ref<void> Value::expandoAnchor() const {
   if (metadata_->fields == nullptr) return held_;
   const gea::Ref<void> owned = metadata_->fields->owner(held_.get());
   return owned ? owned : held_;
+}
+
+inline const void* Value::identity() const {
+  if (tag_ == Tag::Object || tag_ == Tag::Function) {
+    const gea::Ref<void> anchor = expandoAnchor();
+    if (anchor) return anchor.get();
+  }
+  return held_ ? held_.get() : this;
 }
 
 /**
