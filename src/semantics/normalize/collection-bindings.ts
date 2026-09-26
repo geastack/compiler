@@ -144,17 +144,6 @@ export interface CollectionTypeArguments {
    * about one storage, and no later layer makes it agree.
    */
   readonly valueEvidence: readonly ts.Expression[]
-  /**
-   * The element of the open array `value` names, when `value` is `never[]`
-   * (alone or beside `null`/`undefined`) and the array census bound one
-   * element for every `.set` value argument. `value` is a checker type and
-   * cannot carry that element (building `T[]` needs the checker's internal
-   * `createArrayType`), so it travels beside it: the map's value slot and
-   * the arrays stored in it are one storage, and a `never` slot beside a
-   * `string[]` cell is two carriers for it (`cache.set( name, keys )` after
-   * `keys = []`; three's `RenderObject` `_protoKeysCache`).
-   */
-  readonly valueArrayElement: ts.Type | null
 }
 
 export interface CollectionBindingCensus {
@@ -586,8 +575,6 @@ export const censusCollectionBindings = (
   const valueRefusal = new Map<ts.Node, string>()
   /** The `.set` value arguments of a collection refused `value-unresolved`, for `CollectionTypeArguments.valueEvidence`. */
   const unresolvedValueArgs = new Map<ts.Node, readonly ts.Expression[]>()
-  /** The `.set` value arguments of a collection whose value this census bound, for `CollectionTypeArguments.valueArrayElement`. */
-  const boundValueArgs = new Map<ts.Node, readonly ts.Expression[]>()
 
   for (const [owner, entry] of byOwner) {
     if (entry.nodes.some((node) => nodeRefusal.has(node))) {
@@ -782,7 +769,6 @@ export const censusCollectionBindings = (
       continue
     }
     boundValue.set(owner, value)
-    boundValueArgs.set(owner, valueArgs)
   }
 
   // --- Array element census -------------------------------------------
@@ -842,24 +828,7 @@ export const censusCollectionBindings = (
     // genuine dynamic boundary; only the checker-created never/any fallback
     // of an uncontextualized `[]` is evidence-free storage this census may
     // replace from its writes.
-    const contextual = checker.getContextualType(node)
-    return contextual === undefined || ((contextual.flags & ts.TypeFlags.Any) !== 0 && assignedIntoUnstatedVariable(node))
-  }
-  // `x = []` into a variable whose `any` nobody wrote: the checker gave it the
-  // `any` of its initializer (three's `RenderObject` `getKeys`, `let protoKeys
-  // = _protoKeysCache.get( ... )` off an untyped `WeakMap`). That contextual
-  // `any` states nothing about the array, exactly as no contextual type does.
-  const assignedIntoUnstatedVariable = (node: ts.ArrayLiteralExpression): boolean => {
-    const parent = node.parent
-    if (!ts.isBinaryExpression(parent) || parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken || parent.right !== node) return false
-    if (!ts.isIdentifier(parent.left)) return false
-    const declaration = checker.getSymbolAtLocation(parent.left)?.valueDeclaration
-    return (
-      declaration !== undefined &&
-      ts.isVariableDeclaration(declaration) &&
-      declaration.type === undefined &&
-      ts.getJSDocType(declaration) === undefined
-    )
+    return checker.getContextualType(node) === undefined
   }
 
   /**
@@ -1273,32 +1242,7 @@ export const censusCollectionBindings = (
     const value = boundValue.get(owner) ?? null
     const valueEvidence = unresolvedValueArgs.get(owner) ?? []
     if (key === null && value === null && valueEvidence.length === 0) return null
-    return { key, value, valueEvidence, valueArrayElement: value ? valueArrayElementOf(owner, value) : null }
-  }
-
-  const isOpenArray = (type: ts.Type): boolean => {
-    if (!checker.isArrayType(type)) return false
-    const [element] = checker.getTypeArguments(type as ts.TypeReference)
-    return element !== undefined && (element.flags & ts.TypeFlags.Never) !== 0
-  }
-  /** See `CollectionTypeArguments.valueArrayElement`. */
-  const valueArrayElementOf = (owner: ts.Node, value: ts.Type): ts.Type | null => {
-    const arms = value.isUnion()
-      ? value.types.filter((member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) === 0)
-      : [value]
-    const [arm] = arms
-    if (arms.length !== 1 || arm === undefined || !isOpenArray(arm)) return null
-    let agreed: ts.Type | null = null
-    for (const argument of boundValueArgs.get(owner) ?? []) {
-      let expression: ts.Expression = argument
-      while (ts.isParenthesizedExpression(expression)) expression = expression.expression
-      const literalOwner = ts.isArrayLiteralExpression(expression) ? arrayNodeOwner.get(expression) : undefined
-      const argumentOwner = literalOwner ?? ownerDeclOfExpr(expression)
-      const element = argumentOwner ? (boundElement.get(argumentOwner) ?? null) : null
-      if (element === null || (agreed !== null && element !== agreed)) return null
-      agreed = element
-    }
-    return agreed
+    return { key, value, valueEvidence }
   }
 
   return {

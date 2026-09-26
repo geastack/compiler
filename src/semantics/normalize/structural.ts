@@ -61,7 +61,6 @@ import {
   contextualArrayConstructTypeAt,
   hostDynamicSlotCollectionAt,
   inferredArrayElementAt,
-  inferredNullableArrayAt,
   statedCollectionTypeAt,
   inferredCollectionTypeArgumentsAt,
   unstatedNeverArray
@@ -2990,20 +2989,11 @@ const buildMapper = (
    */
   const evolvingArrayMemberTypeAt = (node: ts.Node): StructuralTypeId | null => {
     if (!ts.isPropertyAccessExpression(node)) return null
-    // A receiver whose one array arm sits beside `null`/`undefined` reads the
-    // same member off that arm: see `inferredNullableArrayAt`.
-    const nullable = inferredNullableArrayAt(checker, collections, layoutTypeAt, node.expression)
-    const element = inferredArrayElementAt(checker, collections, layoutTypeAt, node.expression) ?? nullable?.element ?? null
+    const element = inferredArrayElementAt(checker, collections, layoutTypeAt, node.expression)
     if (!element || (element.flags & (ts.TypeFlags.Any | ts.TypeFlags.Never)) !== 0) return null
     // The checker's own member type, interned directly: asking `typeAt` of
-    // this same node would re-enter here. A receiver the checker carries as
-    // `any` (a cell initialized from an untyped read) has no member type of
-    // its own; the array arm the census laid it out as has, and the rewrite
-    // below is the same.
-    const checkerMember = checker.getTypeAtLocation(node)
-    const armMember =
-      (checkerMember.flags & ts.TypeFlags.Any) !== 0 && nullable ? checker.getPropertyOfType(nullable.arm, node.name.text) : undefined
-    const declared = typeOf(armMember ? checker.getTypeOfSymbolAtLocation(armMember, node) : checkerMember)
+    // this same node would re-enter here.
+    const declared = typeOf(checker.getTypeAtLocation(node))
     const shape = table.get(declared).shape
     if (shape.kind !== 'signature' || shape.call.length !== 1 || shape.construct.length !== 0) return null
     // `any` for the evolving array the checker gave up on, `never` for the one
@@ -3972,9 +3962,7 @@ const buildMapper = (
       forms: [ts.SyntaxKind.ElementAccessExpression],
       resolve: (node) => {
         const censusedArrayElement = ts.isElementAccessExpression(node)
-          ? (inferredArrayElementAt(checker, collections, layoutTypeAt, node.expression) ??
-            inferredNullableArrayAt(checker, collections, layoutTypeAt, node.expression)?.element ??
-            null)
+          ? inferredArrayElementAt(checker, collections, layoutTypeAt, node.expression)
           : null
         // Read through the receiver's actual structural carrier whenever the
         // checker left the indexed result unstated. A parameter census was the
@@ -4235,11 +4223,7 @@ const buildMapper = (
       resolve: (node) => {
         const inferredElement = inferredArrayElementAt(checker, collections, layoutTypeAt, node)
         if (inferredElement) return table.intern({ kind: 'array', element: typeOf(inferredElement), readonly: false, extension: [] })
-        // The same array beside `null`/`undefined`: see `inferredNullableArrayAt`.
-        const nullable = inferredNullableArrayAt(checker, collections, layoutTypeAt, node)
-        if (!nullable) return null
-        const array = table.intern({ kind: 'array', element: typeOf(nullable.element), readonly: false, extension: [] })
-        return table.intern({ kind: 'union', members: [array, ...nullable.absent.map(typeOf)] })
+        return null
       }
     },
     {
