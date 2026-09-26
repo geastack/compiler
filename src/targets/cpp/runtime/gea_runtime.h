@@ -9053,17 +9053,19 @@ inline void queuePromiseJob(std::function<void()> job) {
 }
 
 inline void drainPromiseJobs() {
-  while (!promiseJobs().empty()) {
-    // Node drains all next ticks before each Promise job. A Promise callback
-    // may enqueue another next tick, so this cannot be a one-time prelude.
+  // Node's `processTicksAndRejections`: every queued next tick, then every
+  // queued Promise job, repeated until a tick round leaves no job behind. A
+  // tick a Promise job queues waits for the rest of that job batch; it does
+  // not preempt the next job.
+  for (;;) {
     drainNextTicks();
-    std::function<void()> job = std::move(promiseJobs().front());
-    promiseJobs().pop_front();
-    if (job) job();
+    if (promiseJobs().empty()) break;
+    while (!promiseJobs().empty()) {
+      std::function<void()> job = std::move(promiseJobs().front());
+      promiseJobs().pop_front();
+      if (job) job();
+    }
   }
-  // Cover a next tick queued by the final Promise job, and the ordinary case
-  // where program entry queued ticks but no Promise work at all.
-  drainNextTicks();
 }
 
 inline void waitForPromise(const std::function<bool()>& settled) {
@@ -24297,20 +24299,17 @@ BoxedPromiseOps boxedPromiseOpsFor() {
       source.observe([fulfilled](const V& value) { fulfilled(boxedSettlement(value)); }, onRejected);
     }
   };
-  static const auto reaction = [](void* environment, gea::Value handler, bool catching) -> gea::Value {
+  // ECMA-262 27.2.5.4 `then(onFulfilled, onRejected)`: each settlement runs
+  // its own handler, and a non-callable one passes the settlement through.
+  // `catch(onRejected)` is `then(undefined, onRejected)` (27.2.5.1).
+  static const auto reaction = [](void* environment, gea::Value onFulfilled, gea::Value onRejected) -> gea::Value {
     alignas(void*) unsigned char slot[sizeof(void*)];
     const P& source = *unpackEnvironment<P>(environment, slot);
     gea::Promise<gea::Value> result;
     observe(
         source,
-        [result, handler, catching](const gea::Value& value) mutable {
-          if (catching) result.resolve(value);
-          else settleThroughHandler(result, handler, value, false);
-        },
-        [result, handler, catching](const gea::Value& reason) mutable {
-          if (catching) settleThroughHandler(result, handler, reason, true);
-          else result.reject(boxedRejection(reason));
-        });
+        [result, onFulfilled](const gea::Value& value) mutable { settleThroughHandler(result, onFulfilled, value, false); },
+        [result, onRejected](const gea::Value& reason) mutable { settleThroughHandler(result, onRejected, reason, true); });
     return DynamicCarrier<gea::Promise<gea::Value>>::out(result);
   };
   return BoxedPromiseOps{
@@ -24320,10 +24319,16 @@ BoxedPromiseOps boxedPromiseOpsFor() {
         const std::string& name = key.text();
         if (name != "then" && name != "catch") return gea::Value();
         const P& promise = unboxAs<P>(self, gea::Value::Tag::Object, "a boxed promise method read");
-        using Invoke = gea::Value (*)(void*, gea::Value);
-        Invoke invoke = name == "then" ? Invoke(+[](void* environment, gea::Value handler) { return reaction(environment, handler, false); })
-                                       : Invoke(+[](void* environment, gea::Value handler) { return reaction(environment, handler, true); });
-        return gea::Value::box(gea::Value::Tag::Function, gea::CallableObject<gea::Value(gea::Value)>(invoke, packEnvironment(promise)));
+        if (name == "then") {
+          using Then = gea::Value (*)(void*, gea::Value, gea::Value);
+          Then then = +[](void* environment, gea::Value onFulfilled, gea::Value onRejected) {
+            return reaction(environment, onFulfilled, onRejected);
+          };
+          return gea::Value::box(gea::Value::Tag::Function, gea::CallableObject<gea::Value(gea::Value, gea::Value)>(then, packEnvironment(promise)));
+        }
+        using Catch = gea::Value (*)(void*, gea::Value);
+        Catch caught = +[](void* environment, gea::Value onRejected) { return reaction(environment, gea::Value(), onRejected); };
+        return gea::Value::box(gea::Value::Tag::Function, gea::CallableObject<gea::Value(gea::Value)>(caught, packEnvironment(promise)));
       },
       [](const gea::Value& self, gea::Promise<gea::Value>& target) {
         const P& promise = unboxAs<P>(self, gea::Value::Tag::Object, "a boxed promise adoption");

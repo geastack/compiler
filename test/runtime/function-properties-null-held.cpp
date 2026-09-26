@@ -32,6 +32,36 @@
 // real facts once asked. `#define private public` is the only way to reach
 // the private `held_` field from outside the class; it is confined to this
 // one translation unit and never touches the shared header.
+// The standard library is included first so the macro reaches only the
+// runtime's own classes: libstdc++'s headers redeclare members across access
+// specifiers and do not compile with `private` spelled `public`.
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <bit>
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <condition_variable>
+#include <coroutine>
+#include <deque>
+#include <exception>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <random>
+#include <regex>
+#include <span>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #define private public
 #include "gea_runtime.h"
 #undef private

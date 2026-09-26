@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import { constantTruthinessOf } from './constant-literal.js'
 import type { NamespacePathCensus } from './namespace-paths.js'
 import {
   operationFamilies,
@@ -437,11 +438,19 @@ export const gatingEdges = (input: GatingInput): readonly SemanticEdge[] => {
 
       if (ts.isIfStatement(node)) {
         visit(node.expression, gates)
+        // A constant condition names no result to gate on; it rules one arm
+        // out statically, and that arm publishes nothing (`constantTruthinessOf`).
+        const constant = constantTruthinessOf(node.expression)
+        if (constant !== null) {
+          const live = constant ? node.thenStatement : node.elseStatement
+          if (live) visit(live, gates)
+          return
+        }
         const guard = guardOf(node.expression, facts)
-        // A condition with no citable result cannot gate anything. The control
-        // producer refuses such a branch outright, so the arms below are already
-        // in a blocked body; descending with the chain unchanged keeps this pass
-        // from inventing a gate it cannot name.
+        // Any other condition with no citable result cannot gate anything. The
+        // control producer refuses such a branch outright, so the arms below
+        // are already in a blocked body; descending with the chain unchanged
+        // keeps this pass from inventing a gate it cannot name.
         visit(node.thenStatement, guard === null ? gates : [...gates, { kind: 'guard', guard, takenWhen: 'truthy' }])
         if (node.elseStatement) visit(node.elseStatement, guard === null ? gates : [...gates, { kind: 'guard', guard, takenWhen: 'falsy' }])
         return
@@ -466,6 +475,11 @@ export const gatingEdges = (input: GatingInput): readonly SemanticEdge[] => {
 
       if (ts.isConditionalExpression(node)) {
         visit(node.condition, gates)
+        const constant = constantTruthinessOf(node.condition)
+        if (constant !== null) {
+          visit(constant ? node.whenTrue : node.whenFalse, gates)
+          return
+        }
         const guard = guardOf(node.condition, facts)
         visit(node.whenTrue, guard === null ? gates : [...gates, { kind: 'guard', guard, takenWhen: 'truthy' }])
         visit(node.whenFalse, guard === null ? gates : [...gates, { kind: 'guard', guard, takenWhen: 'falsy' }])
