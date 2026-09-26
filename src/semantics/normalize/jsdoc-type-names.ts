@@ -483,9 +483,16 @@ export const censusJsDocTypeNames = (
     if (!symbol) return refuse('name-is-ambiguous-program-wide')
     const resolved = checker.getDeclaredTypeOfSymbol(symbol)
     if (!resolved || isUninformative(resolved)) return refuse('resolved-type-is-unreadable')
+    // A `[name]` tag over a parameter with no initializer is the checker's own
+    // optionality fact, so the body can observe the omission: the binding holds
+    // `T | undefined`, exactly the slot `structural-parts.ts`'s `parameterOf`
+    // publishes off the same fact. Publishing the bare `T` made the two frames
+    // disagree and the ABI projection refused the whole body (three's
+    // `getFormat( texture, device )` under `@param {GPUDevice} [device]`).
+    const omittable = ts.isParameter(declaration) && declaration.initializer === undefined && checker.isOptionalParameter(declaration)
     const absent =
       (reference.absences.includes('null') ? ts.TypeFlags.Null : 0) |
-      (reference.absences.includes('undefined') ? ts.TypeFlags.Undefined : 0)
+      (reference.absences.includes('undefined') || omittable ? ts.TypeFlags.Undefined : 0)
     bound.set(declaration, absent === 0 ? resolved : checker.getNullableType(resolved, absent))
   }
 
