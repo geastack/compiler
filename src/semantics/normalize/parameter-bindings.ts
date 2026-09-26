@@ -12,6 +12,7 @@ import { censusArgumentsObjects, type ArgumentsObjectCensus } from './arguments-
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import type { ExplicitThisCallFrame, FlowInvocationOperands, ValueFlowIndex } from './flow/model.js'
 import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
+import { readsAbsentKey } from './absent-key-read.js'
 import { foreignClassDefaultTypeOf } from './foreign-class-default.js'
 import { omissionStatedTypeOf, statedParameterWithOmission } from './omitted-stated-parameter.js'
 import { indexValueFlow } from './flow/value-flow.js'
@@ -1854,27 +1855,9 @@ export const censusParameterBindings = (
       return fallback ? (joinOfWrites(checker, [withoutUndefinedMember(checker, read), fallback]) ?? read) : read
     }
 
-    /**
-     * A key the holder's closed object type declares no member for reads
-     * `undefined` -- ECMA-262 `KeyedBindingInitialization` reads through
-     * `GetV` and finds nothing, so `const { fn = function () {} } = {}` binds
-     * the default. The checker binds the name `any` in a JavaScript file (an
-     * error in TypeScript), which was enough to box the default's own
-     * function type and every `.name`/call on it. Only a single object type
-     * with no member of that name and no index signature of either kind
-     * answers; a union, a primitive, or an open dictionary keeps the ordinary
-     * member read. `getPropertyOfType` sees the apparent members too, so a
-     * `{ toString }` pattern over `{}` still reads `Object.prototype`'s.
-     */
+    /** An absent key's read -- see `absent-key-read.ts` -- with any default resolving it. */
     const absentKeyPatternReadOf = (holder: ts.Type, key: string, element: ts.BindingElement): ts.Type | null => {
-      const nonNull = checker.getNonNullableType(holder)
-      if (isUnusableEvidence(nonNull) || (nonNull.flags & ts.TypeFlags.Object) === 0) return null
-      if (
-        checker.getPropertyOfType(nonNull, key) ||
-        checker.getIndexTypeOfType(nonNull, ts.IndexKind.String) ||
-        checker.getIndexTypeOfType(nonNull, ts.IndexKind.Number)
-      )
-        return null
+      if (!readsAbsentKey(checker, holder, key, element)) return null
       const read = checker.getUndefinedType()
       patternReadTypes.set(element, read)
       if (!element.initializer) return read
@@ -1922,6 +1905,14 @@ export const censusParameterBindings = (
       }
       const ownOf = (holder: ts.Type): ts.Type | null => {
         const nonNull = checker.getNonNullableType(holder)
+        // A union holder is read arm by arm: `c ? tupleOf() : [a, b]` reads
+        // position 0 of each tuple, never the join of every element the
+        // union's numeric index would answer.
+        if (nonNull.isUnion() && nonNull.types.some((arm) => checker.isTupleType(arm))) {
+          const arms = nonNull.types.map(ownOf)
+          if (arms.some((type) => type === null)) return null
+          return joinOfWrites(checker, arms as ts.Type[])
+        }
         if (checker.isTupleType(nonNull)) {
           if (element.dotDotDotToken) return null
           const stated = checker.getTypeArguments(nonNull as ts.TupleTypeReference)[position]
@@ -2011,6 +2002,12 @@ export const censusParameterBindings = (
         // whatever this resolver can make of the pattern's own root.
         const pattern = node.parent
         if (ts.isObjectBindingPattern(pattern)) {
+          // A rest element is no keyed read: it holds the holder minus the
+          // named keys, which is the checker's own type for it.
+          if (node.dotDotDotToken) {
+            const rest = checker.getTypeAtLocation(node)
+            return isUnusableEvidence(rest) ? null : rest
+          }
           const holder = patternHolderOf(pattern)
           const key = node.propertyName ?? node.name
           if (!holder || !(ts.isIdentifier(key) || ts.isStringLiteral(key) || ts.isNumericLiteral(key))) return null

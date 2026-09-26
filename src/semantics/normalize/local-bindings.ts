@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import { readsAbsentKey } from './absent-key-read.js'
 import {
   annotationStatesNothing,
   exactEmptyObjectLiteralType,
@@ -1483,17 +1484,9 @@ export const censusLocalBindings = (
             ? checker.getNullableType(indexed, ts.TypeFlags.Undefined)
             : null
         // A key the holder's closed object type declares no member for reads
-        // `undefined` (`const { fn = function () {} } = {}` binds the default);
-        // the parameter census's `absentKeyPatternReadOf` is the same rule and
-        // states why an index signature or a union keeps the member read.
+        // `undefined` -- see `absent-key-read.ts`.
         const absentRead =
-          keyText !== null &&
-          arrayIndexRead === null &&
-          !isUnusableEvidence(nonNull) &&
-          (nonNull.flags & ts.TypeFlags.Object) !== 0 &&
-          !checker.getPropertyOfType(nonNull, keyText) &&
-          !indexed &&
-          !checker.getIndexTypeOfType(nonNull, ts.IndexKind.String)
+          keyText !== null && arrayIndexRead === null && readsAbsentKey(checker, sourceType, keyText, element)
             ? checker.getUndefinedType()
             : null
         ownType = arrayIndexRead ?? absentRead ?? (keyText !== null ? propertyTypeOf(sourceType, keyText, element) : null)

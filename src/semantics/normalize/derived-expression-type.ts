@@ -1099,6 +1099,12 @@ const literalMayHoldType = (checker: ts.TypeChecker, candidate: ts.Type, record:
  * literal has neither; there is still every other way a program can hand a
  * plain object a new key.
  */
+/** Whether `inner` is `outer` or lies inside it, by node identity. */
+const encloses = (outer: ts.Node, inner: ts.Node): boolean => {
+  for (let current: ts.Node | undefined = inner; current; current = current.parent) if (current === outer) return true
+  return false
+}
+
 const closedLiteralMemberAbsent = (checker: ts.TypeChecker, flow: ValueFlowIndex, record: ts.Type, name: string, at: ts.Node): boolean => {
   const refuse = (reason: string, site?: ts.Node): false => {
     if (closedLiteralAbsenceDebug !== undefined) {
@@ -1140,6 +1146,15 @@ const closedLiteralMemberAbsent = (checker: ts.TypeChecker, flow: ValueFlowIndex
     })
   }
 
+  // In JavaScript a named write DECLARES its member on the receiver's type:
+  // `module.exports.appendStackTrace = f` after `module.exports = codes`. That
+  // receiver type was built from this very write, so it cannot rule out that
+  // the write lands on the literal.
+  const declaredByWrite = (receiver: ts.Expression | null | undefined, site: ts.Node): boolean => {
+    const member = receiver ? checker.getPropertyOfType(typeOf(receiver), name) : undefined
+    return member?.declarations?.some((declaration) => encloses(declaration, site) || encloses(site, declaration)) ?? false
+  }
+
   // Named, keyed and prototype writes.
   for (const write of flow.allWrites) {
     if (write.slot === 'member' && write.member !== null) {
@@ -1150,7 +1165,8 @@ const closedLiteralMemberAbsent = (checker: ts.TypeChecker, flow: ValueFlowIndex
       if (ts.isPropertyAssignment(write.site) || ts.isShorthandPropertyAssignment(write.site)) continue
       if ((write.edge === 'destructuring' || write.edge === 'destructuring-default') && ts.isBindingElement(write.site)) continue
       if (write.member === '__proto__' && mayHold(write.naming)) return refuse('prototype-write', write.site)
-      if (write.member === name && mayHold(write.naming)) return refuse('named-write', write.site)
+      if (write.member === name && (mayHold(write.naming) || declaredByWrite(write.naming, write.site)))
+        return refuse('named-write', write.site)
       continue
     }
     if (write.slot !== 'element' || !KEYED_WRITE_EDGES.has(write.edge)) continue

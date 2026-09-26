@@ -1184,6 +1184,11 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // fresh dictionary, uses the existing CopyDataProperties walk, and deletes
     // the pattern's excluded keys from that result; the source is unchanged.
     'destructuring:rest-element:object-pattern:dictionary',
+    // A boxed source. Into a closed rest record, each field is the keyed
+    // `[[Get]]` a named element of the same pattern performs over the box;
+    // into a boxed rest, a fresh ordinary object filled by object spread's
+    // CopyDataProperties walk, minus the excluded keys.
+    'destructuring:rest-element:object-pattern:dynamic',
     // A class's constructor object is a pointer to the construct function
     // `translation-unit.ts` emits for that class, with no environment: a class
     // declaration captures nothing. A class *expression* inside a closure would,

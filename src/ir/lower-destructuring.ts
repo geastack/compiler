@@ -332,15 +332,13 @@ const lowerTuplePatternRead = (
  * resolve here either.
  *
  * The difference from a lone tuple is the per-arm check: every arm's own
- * record layout must have a field at `index`, and (deliberately as strict as
- * `lowerTuplePatternRead`'s own single-source check, rather than reaching for
- * the C++ backend's `narrowedLoadText` widening) that field's carrier must be
- * the EXACT one this element publishes -- a mismatched arm is refused by name
- * rather than silently routed through a reconciliation this IR layer has no
- * business performing; `emit-union-properties.ts`'s `taggedUnionGetText`
- * still reconciles per arm at emission time for the union's OWN published
- * result, this only has to agree that every arm's raw field is the same
- * shape to begin with.
+ * record layout must have a field at `index`, and that field's carrier must be
+ * the one this element publishes or convert into it. The element's type is
+ * the join of every arm's position (`c ? tupleOf() : [a, true]` binds its
+ * second name `Code | boolean`), so an arm whose position is narrower widens
+ * into it; `emit-union-properties.ts`'s `taggedUnionGetText` performs that per
+ * arm, exactly as it does for `pair[1]` over the same union. An arm with no
+ * installed conversion is refused by name.
  */
 const lowerTaggedUnionTuplePatternRead = (
   ctx: LoweringContext,
@@ -369,11 +367,13 @@ const lowerTaggedUnionTuplePatternRead = (
         `an array-pattern element reads position ${index} of a tagged union whose arm "${representationKey(arm.value)}" has no field keyed "${index}"`
       )
     }
-    if (representationKey(field.value) !== representationKey(representation)) {
+    if (
+      representationKey(field.value) !== representationKey(representation) &&
+      ctx.program.conversions.nodeFor(field.value, representation).capability.kind === 'never'
+    ) {
       throw new IrLoweringBlockedError(
-        `an array-pattern element's own carrier ("${representationKey(representation)}") does not match position ${index} of tagged-union ` +
-          `arm "${representationKey(arm.value)}", carried as "${representationKey(field.value)}" -- not every arm of this union answers this ` +
-          'position with the same carrier, which is a narrowing the source program should have stated'
+        `an array-pattern element's own carrier ("${representationKey(representation)}") is not reachable from position ${index} of tagged-union ` +
+          `arm "${representationKey(arm.value)}", carried as "${representationKey(field.value)}": no conversion is installed between them`
       )
     }
   }
@@ -561,6 +561,22 @@ const lowerObjectPatternRest = (ctx: LoweringContext, block: IrBlockId, operatio
     return
   }
 
+  const fieldRead = (field: { readonly key: string; readonly value: Representation }) => {
+    const key: IrOperand = {
+      value: ctx.builder.constant(block, lineage, field.key, 'string', { kind: 'string' }),
+      representation: { kind: 'string' }
+    }
+    return { key: field.key, value: { value: ctx.builder.get(block, lineage, source, key, field.value), representation: field.value } }
+  }
+  // A dynamic source into a closed rest record: the rest's own type already
+  // names every key it holds, so each field is the keyed `[[Get]]` a named
+  // element of the same pattern performs over the same box, recovering the
+  // field's carrier exactly as that element's does.
+  const restLayout = source.representation.kind === 'dynamic' ? recordLayoutOf(ctx, representation) : null
+  if (restLayout) {
+    registerResult(ctx, operation, ctx.builder.allocateRecord(block, lineage, restLayout.map(fieldRead), representation))
+    return
+  }
   const sourceLayout = recordLayoutOf(ctx, source.representation)
   if (!sourceLayout) {
     throw new IrLoweringBlockedError(
@@ -581,11 +597,7 @@ const lowerObjectPatternRest = (ctx: LoweringContext, block: IrBlockId, operatio
           'carry different carriers -- a mismatch would need a per-field conversion this fast path does not perform'
       )
     }
-    const key: IrOperand = {
-      value: ctx.builder.constant(block, lineage, field.key, 'string', { kind: 'string' }),
-      representation: { kind: 'string' }
-    }
-    return { key: field.key, value: { value: ctx.builder.get(block, lineage, source, key, field.value), representation: field.value } }
+    return fieldRead(field)
   })
   registerResult(ctx, operation, ctx.builder.allocateRecord(block, lineage, fields, representation))
 }

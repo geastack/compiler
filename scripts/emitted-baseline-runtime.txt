@@ -15,6 +15,7 @@ array-pattern-defaults-keep-positions.ts.cpp 9b003f6f7de9
 array-pattern-elision-over-generator.ts.cpp aaabd57a6d24
 array-pattern-over-generator.ts.cpp 3d9b68a0208e
 array-pattern-over-regexp-exec.ts.cpp ad52c2552c47
+array-pattern-over-tuple-or-literal-conditional.runtime.ts.cpp 93def4bc9e0d
 array-rest-target-reassigned-dynamic.runtime.js.cpp b8383e82ff79
 asserted-arm-into-interface-slot.ts.cpp cd6a55833aff
 assign-for-in-generic.ts.cpp 00fa51c20b53
@@ -417,6 +418,7 @@ object-literal-es5-method-receiver.runtime.js.cpp 35067ec88af1
 object-literal-getter-capture.ts.cpp 962dd1d3202c
 object-pattern-numeric-key-over-array.ts.cpp 828ec7992347
 object-prototype-tag.runtime.js.cpp 9b59935bd649
+object-rest-of-boxed-source.runtime.js.cpp 9ff9ee20bbdb
 optional-array-spread-absent.ts.cpp b0bdc61f5949
 optional-array-spread.ts.cpp b2bf6916df44
 optional-chain-array-find.ts.cpp cc4a9341b5cc
@@ -448,7 +450,7 @@ physical-class-ancestry-live.ts.cpp 3191b418595a
 physical-class-ancestry-optional.ts.cpp 1c3a76306a64
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 50f20517ba63
-printer-drift.txt 8bec8e1111bd
+printer-drift.txt 7d873975cded
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp d85168f70bf0
 promise-method-read-as-value.ts.cpp d92abcc1e89f
