@@ -12,6 +12,7 @@ import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } fr
 import { contradictedJsDocTypeBlanks } from './contradicted-jsdoc-types.js'
 import { absentJsDocTagWidenings } from './absent-jsdoc-tags.js'
 import { contradictedJsDocParameterBlanks } from './contradicted-jsdoc-parameters.js'
+import { overArityJsDocArrayRewrites } from './over-arity-jsdoc-arrays.js'
 import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
 import { createUncheckedJavaScriptPolicy, markUnchecked } from './unchecked-javascript.js'
 import { createScopedTypeRealizer, type ScopedTypeRealization } from './scoped-type-realizations.js'
@@ -933,9 +934,12 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
   // Composed onto both, and in place like them (`absent-jsdoc-tags.ts`).
   const blanked = new Map([...prepared, ...contradictions])
   const absences = timing.measure('absent-jsdoc-tags', () => absentJsDocTagWidenings(configured.program, blanked))
-  if (preparation.audit.length > 0 || redeclarations.size > 0 || contradictions.size > 0 || absences.size > 0) {
+  // And in place over all of them (`over-arity-jsdoc-arrays.ts`).
+  const widened = new Map([...blanked, ...absences])
+  const arrays = timing.measure('over-arity-jsdoc-arrays', () => overArityJsDocArrayRewrites(configured.program, widened))
+  if (preparation.audit.length > 0 || redeclarations.size > 0 || contradictions.size > 0 || absences.size > 0 || arrays.size > 0) {
     resolutionDiagnostics.length = 0
-    configured = configuredProgram(input, resolutionDiagnostics, new Map([...blanked, ...absences]), timing, transformed)
+    configured = configuredProgram(input, resolutionDiagnostics, new Map([...widened, ...arrays]), timing, transformed)
   }
   const program = configured.program
   const checker = withStableTypeQueries(program.getTypeChecker())
