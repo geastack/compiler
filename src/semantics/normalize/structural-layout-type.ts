@@ -938,7 +938,12 @@ export const createLayoutTypeResolver = (
       // The fourth: a parameter typed only by its default value, whose
       // checker type is the default's (`false`, `null`), not the domain its
       // callers write -- see `typedOnlyByDefault`.
-      typedOnlyByDefault(checker, node)
+      typedOnlyByDefault(checker, node) ||
+      // The fifth: a read the checker narrowed to `never`. That is a claim the
+      // read is unreachable, not a value type -- an evolving `let v = null`
+      // assigned in one branch is still `never` in the sibling branch that
+      // pushes into it -- so the cell's own answer is what the read holds.
+      (ts.isIdentifier(node) && (own.flags & ts.TypeFlags.Never) !== 0)
     ) {
       // Asked before the parameter census: a literal token is not a value the
       // program left open for its callers to write down. See above.

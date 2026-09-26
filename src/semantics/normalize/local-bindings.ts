@@ -1806,6 +1806,33 @@ export const censusLocalBindings = (
   // type spelling, so it is already the ROOT `census-refusal.ts` asks for.
   // `owner` is the new fact: the declaration's/leaf's own name and source
   // location, the one thing a count could never say.
+  /**
+   * A read of an ARRAY cell holds the cell's own array whatever element type
+   * the checker's flow gives the read. An evolving `let vErrors = null`
+   * assigned `[err0]` in one branch and `[err4]` in another is read as
+   * `err0[]`, as a union of arrays, or as the subtype-reduced `{}[]`, yet it is
+   * one array object: narrowing or widening its element type at a read would
+   * have to copy every element into another layout, losing identity and every
+   * field the other layout does not name. Only the absence narrows: a read the
+   * checker proved present holds the cell without it. A read whose flow type
+   * holds anything but arrays is a real narrowing and keeps its own answer.
+   */
+  const arrayCellRead = (node: ts.Identifier): ts.Type | null => {
+    const declaration = declarationOf(node)
+    const cell = declaration ? bound.get(declaration) : undefined
+    if (!cell) return null
+    const present = checker.getNonNullableType(cell)
+    if (!checker.isArrayType(present)) return null
+    const read = checker.getTypeAtLocation(node)
+    if (read === cell || (read.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) !== 0) return null
+    const parts = read.isUnion() ? read.types : [read]
+    const arrays = parts.filter((part) => (part.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) === 0)
+    if (arrays.length === 0 || !arrays.every((part) => checker.isArrayType(part))) return null
+    return arrays.length === parts.length ? present : cell
+  }
+
+  /** A read narrowed to `never`: an unreachability claim, answered by the cell like an untyped read -- see `structural-layout-type.ts`. */
+  const isNeverRead = (node: ts.Identifier): boolean => (checker.getTypeAtLocation(node).flags & ts.TypeFlags.Never) !== 0
   const refusals: CensusRefusal[] = []
   for (const candidate of candidates) {
     if (bound.has(candidate) || unionArms.has(candidate)) continue
@@ -1821,7 +1848,7 @@ export const censusLocalBindings = (
     bindingTypeAt: (node) => {
       // A checker narrowing belongs to the read; it does not replace the
       // storage contract. Only an untyped read takes the cell's full answer.
-      if (ts.isIdentifier(node) && !isAnyType(checker.getTypeAtLocation(node))) return null
+      if (ts.isIdentifier(node) && !isAnyType(checker.getTypeAtLocation(node)) && !isNeverRead(node)) return null
       const declaration = ts.isVariableDeclaration(node) ? node : ts.isIdentifier(node) ? declarationOf(node) : null
       return declaration ? (bound.get(declaration) ?? null) : null
     },
@@ -1833,6 +1860,8 @@ export const censusLocalBindings = (
     preferredTypeAt: (node) => {
       const observedAbsence = observedIndexedAbsence.get(node)
       if (observedAbsence) return observedAbsence
+      const cellView = ts.isIdentifier(node) ? arrayCellRead(node) : null
+      if (cellView) return cellView
       const element = ts.isBindingElement(node) ? node : ts.isIdentifier(node) ? bindingElementDeclarationOf(node) : null
       if (element?.dotDotDotToken && ts.isObjectBindingPattern(element.parent)) {
         const rest = boundElements.get(element)

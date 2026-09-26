@@ -1,3 +1,4 @@
+import { isNativeCallableCarrier } from '../representation/callable-object.js'
 import type { IrBlockId } from './model.js'
 import { narrowedOperandView } from '../conversion/operand-view.js'
 import { callableOwnPrototypeAt } from '../semantics/callable-origins.js'
@@ -156,7 +157,22 @@ export const lowerProperty = (ctx: LoweringContext, block: IrBlockId, operation:
     }
     case 'set': {
       const key = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'key'))
-      const value = enterRequiredOperand(ctx, block, lineage, operation, namedOperand(operation, 'value'))
+      // A write into dynamic storage -- a callable's own-property table, or a
+      // boxed receiver -- boxes the value. When the member's slot is a TYPED
+      // view rather than the box itself, converting into that view first is a
+      // detour through the checker's type that can only lose what the value
+      // holds (`validate10.errors = vErrors` rebuilt every error record as the
+      // `{}` its subtype-reduced type names), so the value is boxed as it is.
+      // A slot that IS the box stays the ordinary conversion: that conversion
+      // is the boxing, and the reflection facts a boxed callable needs are
+      // demanded from it.
+      const valueOperand = namedOperand(operation, 'value')
+      const dynamicStorage = receiver.representation.kind === 'dynamic' || isNativeCallableCarrier(receiver.representation.kind)
+      const slot = dynamicStorage ? ctx.program.slots.slotOf(operation, valueOperand) : null
+      const value =
+        slot?.kind === 'slot' && slot.representation.kind !== 'dynamic'
+          ? resolveRequiredOperand(ctx, block, lineage, valueOperand)
+          : enterRequiredOperand(ctx, block, lineage, operation, valueOperand)
       registerResult(
         ctx,
         operation,
