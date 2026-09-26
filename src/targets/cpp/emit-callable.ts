@@ -2588,6 +2588,51 @@ export const cppKeyedCollectionConstructorProtocols: readonly string[] = [
   'WeakSetConstructor'
 ]
 
+/**
+ * The body of `new Map(pairs)`'s per-entry step over a statically typed Array
+ * of `[K, V]` tuples, or `null` when the element is not one. A tuple is a
+ * record of "0"/"1" fields (`deriveTuple`); an Array literal of differently
+ * typed tuples is a tagged union of such records, one per arm, so each arm
+ * reads its own two fields. Each is converted into the Map's own K and V by
+ * the recipe a stored value uses -- three's typed-array tables name
+ * `Int16Array` where the checker keyed the Map by `Int8ArrayConstructor` --
+ * and a pair with no recipe refuses by name.
+ */
+const mapPairAddText = (
+  ctx: EmitContext,
+  element: Representation,
+  result: Extract<Representation, { kind: 'keyed-collection' }>
+): string | null => {
+  const value = result.value
+  if (value === null || value === undefined) return null
+  const pairOf = (tuple: Representation, text: string): string | null => {
+    if (tuple.kind !== 'record' || tuple.accessors.length > 0) return null
+    const first = tuple.fields.find((field) => field.key === '0')
+    const second = tuple.fields.find((field) => field.key === '1')
+    if (!first?.required || !second?.required) return null
+    const field = (key: string): string => `${text}${memberAccessOperator(tuple.ownership)}${cppRecordFieldName(key)}`
+    const site = 'emit-callable.ts:map-pairs'
+    const key = alignedValueText(ctx, site, first.value, result.key, field('0'))
+    const held = alignedValueText(ctx, site, second.value, value, field('1'))
+    if (key === null || held === null) {
+      throw createCppEmitBlockedError(
+        `conversion:${representationKey(key === null ? first.value : second.value)}->${representationKey(key === null ? result.key : value)}`,
+        `an entry's own "${representationKey(tuple)}" pair has no conversion into this map's key or value carrier`
+      )
+    }
+    return `gea_map.set(${key}, ${held});`
+  }
+  if (element.kind !== 'tagged-union') return pairOf(element, 'gea_entry')
+  const arms: string[] = []
+  for (const [index, arm] of element.arms.entries()) {
+    if (arm.runtimeDiscriminator.kind !== 'carrier') return null
+    const add = pairOf(arm.value, armAt('gea_entry', index))
+    if (add === null) return null
+    arms.push(index === element.arms.length - 1 ? `{ ${add} }` : `if (${armIs('gea_entry', index)}) { ${add} }`)
+  }
+  return arms.length === 0 ? null : arms.join(' else ')
+}
+
 const emitKeyedCollectionConstruct = (
   ctx: EmitContext,
   lines: string[],
