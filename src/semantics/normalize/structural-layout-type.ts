@@ -8,6 +8,7 @@ import {
   impliedPatternParameterOf,
   impliedPatternTargetOf,
   objectAssignFreshTargetType,
+  plainClassInstanceCopyAt,
   nominalConstructorChoiceTypeAt,
   memberCensusNodeOf,
   constructedClassChoiceTypeAt
@@ -1010,6 +1011,11 @@ export const createLayoutTypeResolver = (
       const deferred = annotationDeferringToInitializer(declaringCell)
       if (deferred) return deferred
     }
+    // `const copy = Object.assign( {}, instance )`: the cell and every read of
+    // it hold the plain object the call makes, not the class the checker
+    // reads it as.
+    const plainCopy = ts.isVariableDeclaration(node) || ts.isIdentifier(node) ? plainClassInstanceCopyAt(checker, node) : null
+    if (plainCopy) return plainCopy
     if (!ts.isObjectLiteralExpression(node) && !ts.isArrayLiteralExpression(node)) return own
     // The `{}` of `Object.assign( {}, ...sources )` is laid out as what the
     // call makes of it, from the same authority the call's result reads.

@@ -1915,8 +1915,14 @@ export const isStandardGlobalValue = (checker: ts.TypeChecker, expression: ts.Ex
  * pass: three's `ShaderNodeProxy( NodeClass, scope = null, factor = null,
  * settings = null )` types `settings` as `null`, so inside `if ( settings !==
  * null )` it is `never`, while the callers do pass records.
+ *
+ * A fresh `{}` copying one class instance is answered first, at the call and
+ * at every read of the `const` it initializes: see `plainClassInstanceCopyAt`.
+ * Every census reads a node through this, so all of them see the copy.
  */
 export const objectAssignTargetType = (checker: ts.TypeChecker, node: ts.Node): ts.Type | null => {
+  const plainCopy = plainClassInstanceCopyAt(checker, node)
+  if (plainCopy) return plainCopy
   if (!isAuthenticatedObjectAssign(checker, node)) return null
   const target = node.arguments[0]
   if (!target) return null
@@ -1961,7 +1967,125 @@ export const objectAssignFreshTargetType = (checker: ts.TypeChecker, literal: ts
   const call = literal.parent
   if (!isAuthenticatedObjectAssign(checker, call) || call.arguments[0] !== literal) return null
   const type = checker.getTypeAtLocation(call)
-  return (type.flags & ts.TypeFlags.Object) !== 0 ? type : null
+  if ((type.flags & ts.TypeFlags.Object) === 0) return null
+  return plainCopyOfClassInstance(checker, call) ?? type
+}
+
+/** The checker's own constructor for an object type from resolved member symbols; the same internal method `field-bindings.ts` builds its dictionary type with. */
+interface AnonymousTypeConstructingChecker {
+  createAnonymousType(
+    symbol: ts.Symbol | undefined,
+    members: ts.SymbolTable,
+    callSignatures: readonly ts.Signature[],
+    constructSignatures: readonly ts.Signature[],
+    indexInfos: readonly ts.IndexInfo[]
+  ): ts.Type
+}
+
+/** One fresh type per call and checker, so the literal's layout and the call's result read one identity across inference rounds. */
+const plainCopyTypes = new WeakMap<ts.TypeChecker, WeakMap<ts.CallExpression, ts.Type | null>>()
+
+/**
+ * The plain object `Object.assign( {}, instance )` makes of ONE class
+ * instance: that instance's own data fields, in the order its constructor
+ * creates them, on an object whose prototype is Object.prototype.
+ *
+ * The checker's `{} & C` reduces to `C`, and publishing `C` allocated the
+ * literal as a class instance, which the copy never is -- it has none of the
+ * class's prototype, so `copy instanceof C` is false and `copy.method` is
+ * undefined. three's `WebGPUTextureUtils.createTexture` copies its
+ * GPUTextureDescriptor this way for the MSAA texture.
+ *
+ * Only a class whose own keys are knowable from its text is answered: no base
+ * class (a base constructor's fields are another body's order), every
+ * constructor statement a plain `this.name = value` (a branch, a loop or an
+ * early `return` could leave a field unmade), and every instance property
+ * either one of those fields, a class field declaration, or a prototype
+ * method or accessor (never an own key, so never copied). Anything else keeps
+ * the checker's `C`, and the allocation stays refused by name.
+ */
+const plainCopyOfClassInstance = (checker: ts.TypeChecker, call: ts.CallExpression): ts.Type | null => {
+  let cache = plainCopyTypes.get(checker)
+  if (!cache) {
+    cache = new WeakMap()
+    plainCopyTypes.set(checker, cache)
+  }
+  if (cache.has(call)) return cache.get(call) ?? null
+  let answer: ts.Type | null = null
+  const source = call.arguments[1]
+  if (call.arguments.length === 2 && source && !ts.isSpreadElement(source)) {
+    const members = classInstanceOwnFields(checker, checker.getTypeAtLocation(source))
+    const constructing = checker as unknown as Partial<AnonymousTypeConstructingChecker>
+    if (members && typeof constructing.createAnonymousType === 'function') {
+      const table: ts.SymbolTable = new Map()
+      for (const member of members) table.set(member.escapedName, member)
+      answer = constructing.createAnonymousType(undefined, table, [], [], [])
+    }
+  }
+  cache.set(call, answer)
+  return answer
+}
+
+/** A class instance type's own fields in creation order, or `null` when that order is not the class's own text -- see `plainCopyOfClassInstance`. */
+const classInstanceOwnFields = (checker: ts.TypeChecker, type: ts.Type): readonly ts.Symbol[] | null => {
+  if (type.isUnionOrIntersection() || (type.flags & ts.TypeFlags.Object) === 0) return null
+  const declaration = type.getSymbol()?.valueDeclaration
+  if (!declaration || !ts.isClassLike(declaration)) return null
+  if (declaration.heritageClauses?.some((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)) return null
+  const order: string[] = []
+  const created = (name: string): void => {
+    if (!order.includes(name)) order.push(name)
+  }
+  for (const member of declaration.members) {
+    if (!ts.isPropertyDeclaration(member) || ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) continue
+    if (!ts.isIdentifier(member.name) && !ts.isStringLiteral(member.name)) return null
+    created(member.name.text)
+  }
+  const constructor = declaration.members.find(ts.isConstructorDeclaration)
+  for (const statement of constructor?.body?.statements ?? []) {
+    const expression = ts.isExpressionStatement(statement) ? statement.expression : null
+    if (
+      !expression ||
+      !ts.isBinaryExpression(expression) ||
+      expression.operatorToken.kind !== ts.SyntaxKind.EqualsToken ||
+      !ts.isPropertyAccessExpression(expression.left) ||
+      expression.left.expression.kind !== ts.SyntaxKind.ThisKeyword ||
+      !ts.isIdentifier(expression.left.name)
+    )
+      return null
+    created(expression.left.name.text)
+  }
+  const fields = new Map<string, ts.Symbol>()
+  for (const property of checker.getPropertiesOfType(type)) {
+    const declarations = property.declarations ?? []
+    const onPrototype = declarations.every(
+      (member) => ts.isMethodDeclaration(member) || ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)
+    )
+    if (declarations.length > 0 && onPrototype) continue
+    if (!order.includes(property.name)) return null
+    fields.set(property.name, property)
+  }
+  const ordered = order.map((name) => fields.get(name))
+  return ordered.every((field) => field !== undefined) ? (ordered as ts.Symbol[]) : null
+}
+
+/**
+ * The plain-object type at `node` when `node` is `Object.assign( {}, instance
+ * )` for a class instance (`plainCopyOfClassInstance`), the `const` cell that
+ * call initializes, or a read of that cell. The checker types all three as
+ * the instance's class, which the copy is not; a `const` has no other write,
+ * so its every read holds the copy.
+ */
+export const plainClassInstanceCopyAt = (checker: ts.TypeChecker, node: ts.Node): ts.Type | null => {
+  const named = ts.isIdentifier(node) ? checker.getSymbolAtLocation(node)?.valueDeclaration : node
+  const cell = named && ts.isVariableDeclaration(named) ? named : null
+  if (cell && (!ts.isVariableDeclarationList(cell.parent) || (cell.parent.flags & ts.NodeFlags.Const) === 0)) return null
+  let expression: ts.Node | undefined = cell ? cell.initializer : node
+  while (expression && ts.isParenthesizedExpression(expression)) expression = expression.expression
+  if (!expression || !isAuthenticatedObjectAssign(checker, expression)) return null
+  const target = expression.arguments[0]
+  if (!target || !ts.isObjectLiteralExpression(target) || target.properties.length !== 0) return null
+  return plainCopyOfClassInstance(checker, expression)
 }
 
 /**

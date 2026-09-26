@@ -256,7 +256,7 @@ hoisted-function-declaration.ts.cpp 27eb208fa439
 hoisted-value-not-moved-in-loop.ts.cpp 2476672d5091
 host-method-alias.runtime.js.cpp 050cfab07ca3
 host-method-read-as-value.ts.cpp 1eb870019631
-host-read-class-field-initializer.ts.cpp 3c87b38b7e81
+host-read-class-field-initializer.ts.cpp 9d5f44915aae
 hot-path-borrowed-tree.ts.cpp ce11f4ca7e3f
 hot-path-closure-identity.ts.cpp 05b1a334b21d
 hot-path-closure-table.ts.cpp 50d3b20c5fa0
@@ -459,6 +459,7 @@ numeric-dictionary-property-keys.js.cpp 453c57e574aa
 numeric-index-absence-effects.runtime.js.cpp 5f35fd9a8d7a
 numeric-parameter-self-update.runtime.js.cpp dc24846abf14
 numeric-record-reads.js.cpp 3a1a43509eba
+object-assign-class-instance-plain-copy.runtime.js.cpp 8a8116b1aa5f
 object-create-contextual.ts.cpp a1ea4ea40b7f
 object-destructuring-assignment.ts.cpp c0f9e4a7ab05
 object-entries-subclass-through-helper.ts.cpp 326fa9e13f0e

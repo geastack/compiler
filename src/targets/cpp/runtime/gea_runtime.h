@@ -14998,6 +14998,27 @@ gea::Ref<Target> recastWithExpando(gea::Ref<Target> target, const gea::Dictionar
 }
 
 /**
+ * The rest of 7.3.25's loop once the emitter has copied a generated source's
+ * declared fields: the own enumerable keys its class never declared, which
+ * live on its identity-keyed sidecar, stored with `Set(target, key, Get(source,
+ * key), true)`. `Object.assign( {}, instance )` copies a class instance into
+ * a plain record this way; the record declares exactly the class's fields, so
+ * none of these keys is one of its fields and each lands on its sidecar.
+ */
+template <typename Target, typename Source>
+void assignNativeExpandoProperties(const gea::Ref<Target>& target, const gea::Ref<Source>& source) {
+  if (!source) return;
+  const gea::Ref<DynamicObject> expando = detail::expandoFor(gea::refCastToVoid(source), false);
+  if (!expando) return;
+  for (const PropertyKey& key : expando->ownKeys()) {
+    const PropertyDescriptor* descriptor = expando->ownProperty(key);
+    if (descriptor == nullptr || !descriptor->enumerable) continue;
+    if (!gea::nativeDynamicSet(target, key, gea::nativeDynamicGet(source, key)))
+      gea::host::throwRuntimeError("TypeError", "Cannot assign to read only property");
+  }
+}
+
+/**
  * The class instance a structural view was built from.
  *
  * A class instance written to an interface is copied into the interface's

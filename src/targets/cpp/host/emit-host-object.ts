@@ -2061,6 +2061,17 @@ const assignSourceText = (ctx: EmitContext, targetView: ObjectView, sourceView: 
     const presence = ownKeyPresenceText('assign', sourceView, field)
     return presence === null ? store : `if (${presence}) ${store}`
   })
+  // A class instance can carry own keys its class never declared, on its
+  // identity's sidecar; the declared fields above are not all of its own keys.
+  // Into a plain record -- `Object.assign( {}, instance )`, three's MSAA texture
+  // descriptor copy -- those keys follow the fields, as the instance lists them.
+  if (
+    targetView.representation.kind === 'record' &&
+    targetView.representation.ownership === 'shared-refcount' &&
+    sourceView.representation.kind === 'class-ref' &&
+    sourceView.representation.ownership === 'shared-refcount'
+  )
+    stores.push(`gea::record::assignNativeExpandoProperties(${targetView.receiver}, ${sourceView.receiver});`)
   return stores.join(' ')
 }
 
