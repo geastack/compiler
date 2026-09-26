@@ -437,11 +437,12 @@ export const returnedCellCollectionTypeAt = (checker: ts.TypeChecker, node: ts.N
   const ownArguments = checker.getTypeArguments(own as ts.TypeReference)
   if (!ownArguments.every((argument) => (argument.flags & (ts.TypeFlags.Any | ts.TypeFlags.NonPrimitive)) !== 0)) return null
   const parent = node.parent
-  const cell = ts.isVariableDeclaration(parent) && parent.initializer === node
-    ? parent.name
-    : ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.right === node
-      ? parent.left
-      : null
+  const cell =
+    ts.isVariableDeclaration(parent) && parent.initializer === node
+      ? parent.name
+      : ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.right === node
+        ? parent.left
+        : null
   if (!cell || !ts.isIdentifier(cell)) return null
   const symbol = checker.getSymbolAtLocation(cell)
   const declaration = symbol?.valueDeclaration
@@ -449,8 +450,10 @@ export const returnedCellCollectionTypeAt = (checker: ts.TypeChecker, node: ts.N
   if ((checker.getTypeAtLocation(declaration.name).flags & ts.TypeFlags.Any) === 0) return null
   const owner = ts.findAncestor(node, ts.isFunctionLike)
   if (!owner || owner !== ts.findAncestor(declaration, ts.isFunctionLike)) return null
-  if (!ts.isFunctionDeclaration(owner) && !ts.isMethodDeclaration(owner) && !ts.isFunctionExpression(owner) && !ts.isArrowFunction(owner)) return null
-  if (owner.asteriskToken || (ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Async) !== 0 || !owner.body || !ts.isBlock(owner.body)) return null
+  if (!ts.isFunctionDeclaration(owner) && !ts.isMethodDeclaration(owner) && !ts.isFunctionExpression(owner) && !ts.isArrowFunction(owner))
+    return null
+  if (owner.asteriskToken || (ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Async) !== 0 || !owner.body || !ts.isBlock(owner.body))
+    return null
   const stated = owner.type ?? ts.getJSDocReturnType(owner)
   if (!stated) return null
   let returned = false

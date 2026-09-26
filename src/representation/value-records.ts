@@ -130,6 +130,10 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
    * VALUE, which `nativeCallOpsFor` then refuses to adapt at all -- aborting
    * the first dynamic call, not merely mis-copying one.
    */
+  const isDynamicType = (id: StructuralTypeId): boolean => {
+    const shape = graph.structuralTypes.get(id)?.shape
+    return shape?.kind === 'primitive' && (shape.primitive === 'any' || shape.primitive === 'unknown')
+  }
   const disqualifyCallable = (id: StructuralTypeId): void => {
     for (const signature of signatureShapesOf(id)) {
       objectCoresOf(graph, signature.result, disqualified)
@@ -192,7 +196,25 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
     // carrier and its copy is the value the language already promises.
     if (operation.family === 'invocation') {
       const target = operation.target
-      if (target.kind === 'exact' && target.target.kind === 'function') continue
+      if (target.kind === 'exact' && target.target.kind === 'function') {
+        // ...unless the function's own parameter is `any`/`unknown`. The
+        // body then compiles against a dynamic slot, the record is boxed into
+        // it BY VALUE, and the body's writes through that slot -- `x.a = 1`
+        // on an `any` receiver, which the property rule above cannot
+        // attribute to this type -- land on the box's copy. The same gate as
+        // the binding rule's: a declared type this compiler never narrows
+        // back to the argument's own shape (plan item 1.15's literal half).
+        const callee = operation.operands.find((operand) => operand.role === 'callee')
+        const [signature] = callee ? signatureShapesOf(callee.type) : []
+        for (const operand of operation.operands) {
+          if (operand.role !== 'argument' || signature === undefined) continue
+          const parameter = signature.parameters[operand.ordinal]
+          if (parameter === undefined || parameter.rest || parameter.type === operand.type || !isDynamicType(parameter.type)) continue
+          objectCoresOf(graph, operand.type, disqualified)
+          disqualifyCallable(operand.type)
+        }
+        continue
+      }
       const receiver = operation.operands.find((operand) => operand.role === 'receiver')
       const carried = receiver ? typeArgumentsOf(graph, receiver.type) : new Set<StructuralTypeId>()
       for (const operand of operation.operands) {

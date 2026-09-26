@@ -12,6 +12,7 @@ array-isarray-identity-conditional.ts.cpp 33c73a99fa8f
 array-literal-gathers-dynamic-into-class.runtime.js.cpp 7294712508f2
 array-multiple-windows.ts.cpp ee13367467b2
 array-mutator-frozen-integrity.ts.cpp f122fdb38185
+array-object-call-argument-aliasing.ts.cpp 06b1170a221c
 array-pattern-defaults-keep-positions.ts.cpp 9b003f6f7de9
 array-pattern-elision-over-generator.ts.cpp fb66b4eed4c6
 array-pattern-over-generator.ts.cpp 3d9b68a0208e
@@ -39,8 +40,9 @@ borrow-helper-chain.ts.cpp bb76b67a3451
 borrow-helper-reentry.ts.cpp 2801005076bd
 borrowed-builtin-call-bind.runtime.js.cpp a77f6865272c
 borrowed-formals.ts.cpp 9aa056d93959
+boxed-array-prototype-search.runtime.js.cpp 2e620bbc9dee
 boxed-payload-scope.ts.cpp 36aa3bc2df5f
-boxed-record-refcount.ts.cpp bf8f0867e314
+boxed-record-refcount.ts.cpp 7ebdba59c65d
 boxed-typed-array-to-primitive.ts.cpp 3d75a95030ab
 builtin-function-name-length.runtime.js.cpp c45d17bae443
 call-overheads-benchmark.ts.cpp 3e49dcd01c36
@@ -56,6 +58,7 @@ callable-own-mutation-guards.runtime.js.cpp 11e6c00455f4
 callable-result-conversion.ts.cpp 94868e63593b
 callback-call-with-this-arg.ts.cpp 8760329cda2f
 captured-cell-branch-assignment.ts.cpp 2d307e995d74
+census-record-parameter-keeps-identity.runtime.js.cpp 83476c4416ab
 class-accessors-viewed-as-record.ts.cpp f390fdd89ddd
 class-arm-into-declared-interface-slot.ts.cpp 1cf8ed753b5b
 class-arrow-field-lazy.ts.cpp 1faacfab4068
@@ -138,7 +141,7 @@ dictionary-index-truthiness.ts.cpp 519009b6c81f
 dictionary-named-absence.ts.cpp dc9ba237a175
 direct-interface-method-receiver.ts.cpp 55d743cf5d7d
 downcast-method-read-absent-on-other-arm.ts.cpp 52495ee800d6
-drift.txt ed53208eb6bf
+drift.txt 8096d5a0fd7f
 dynamic-array-absent-element.ts.cpp 6838ef917ebe
 dynamic-array-literal-gather.runtime.js.cpp 4c1e3d9c21cf
 dynamic-array-projection.ts.cpp 25d0cdd3b0d1
@@ -274,7 +277,7 @@ hot-path-string-append.ts.cpp ebc31f846d6d
 implicit-arguments-number.js.cpp 5a65e7d5b878
 implicit-arguments-returned-member.js.cpp 0e657a482a81
 in-boxed-key-over-string-dictionary.ts.cpp 5bced2f5fe7f
-in-boxed-key.ts.cpp 6dc5a87af0a9
+in-boxed-key.ts.cpp 556b28872879
 in-unique-symbol-key-sidecar.ts.cpp ef0b91f83f40
 indexed-absence-forwarded-cache.runtime.js.cpp 259e8c71adf4
 indexed-record-define-property.ts.cpp eeaa04777ef7
@@ -416,7 +419,7 @@ native-object-freeze.ts.cpp e0d711da4888
 native-optional-call-frame.ts.cpp df33b4e46e0c
 native-optional-record-dynamic-hook.ts.cpp 0c3b4c2d6786
 native-optional-record-presence.ts.cpp c42df7a8353e
-native-parameter-dynamic-forward.runtime.js.cpp d7a29f4fbf78
+native-parameter-dynamic-forward.runtime.js.cpp 754ed16eff43
 native-parameter-union-forward.runtime.js.cpp 3fa6cc12c2d7
 native-presence-query.ts.cpp 7d63605f1889
 native-primitive-brand-guard.runtime.js.cpp a0aa969702d7
@@ -478,7 +481,7 @@ numeric-dictionary-property-keys.js.cpp 453c57e574aa
 numeric-index-absence-effects.runtime.js.cpp 5f35fd9a8d7a
 numeric-parameter-self-update.runtime.js.cpp dc24846abf14
 numeric-record-reads.js.cpp 3a1a43509eba
-object-assign-class-instance-plain-copy.runtime.js.cpp 8a8116b1aa5f
+object-assign-class-instance-plain-copy.runtime.js.cpp 203e5e7cff73
 object-create-contextual.ts.cpp a1ea4ea40b7f
 object-destructuring-assignment.ts.cpp c0f9e4a7ab05
 object-entries-subclass-through-helper.ts.cpp 326fa9e13f0e
@@ -611,6 +614,7 @@ stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d
 stated-any-collection-field-allocation.runtime.js.cpp 0ba48b0a0d69
 stated-collection-field-allocation.runtime.js.cpp d669095a6744
+stated-destination-types-open-array.runtime.js.cpp 69d1cd2e0b98
 stated-open-union-preserves-closed-arms.ts.cpp 878f72cd6f91
 static-intrinsic-reflection.runtime.js.cpp 9a7c2a8500d2
 static-method-as-callback-value.ts.cpp 8ec7c5dfe2ea

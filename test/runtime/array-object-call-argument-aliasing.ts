@@ -46,7 +46,7 @@
 // call-site conversion meant NONE of `fill`'s three pushes reached the
 // caller's own `array`, not even the plain `.push('x')`.
 //
-// RESOLVED, in two parts, and this file now pins the SECOND:
+// RESOLVED, in three parts, and this file now pins the THIRD:
 //
 //  1. `structural-array-element.ts`'s `unstatedNeverArray` grew a PARAMETER
 //     form (and `structural.ts` a `refusedArrayParameterTypeAt` answer for
@@ -59,9 +59,13 @@
 //     leaves it alone -- the caller's box is not permission to overrule a
 //     stated type. The two carriers genuinely disagree, and a conversion
 //     between two `array-object` carriers with different elements can only
-//     ALLOCATE, which for a mutable shared array is never sound. So
-//     `conversions.ts` installs none and the compiler REFUSES. A compile
-//     error is the correct outcome; the silent copy was not.
+//     ALLOCATE, which for a mutable shared array is never sound, so
+//     `conversions.ts` installs none. That used to make the compiler REFUSE.
+//  3. `collection-bindings.ts` now gives an open array whose own writes do not
+//     type it (`JSON.parse` is `any`) the element its stating declarations
+//     agree on, when every typed write fits it: `array` and `fill`'s `arr` are
+//     one `(string | number | boolean)[]` storage, the `any` push is checked
+//     into that element, and `fill`'s pushes reach the caller.
 //
 function fill(arr: (string | number | boolean)[], tag: string) {
   arr.push(tag)
@@ -77,4 +81,4 @@ function make(bad: string) {
 }
 
 console.log(make('1'))
-//! expect-refusal: no runtime conversion is installed from array-object(dynamic
+//! expect: 1,x,1,true
