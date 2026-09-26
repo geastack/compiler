@@ -294,6 +294,16 @@ const CONSTRUCTOR_NAMES: ReadonlyMap<string, CollectionFamily> = new Map([
   ['WeakSet', 'weak-set']
 ])
 
+/** Whether the owner's declaration states a type: an annotation, or a JSDoc `@type` on it or on the statement assigning it (`this.x = ...`). */
+const ownerIsAnnotated = (owner: ts.Node): boolean => {
+  if (
+    (ts.isVariableDeclaration(owner) || ts.isPropertyDeclaration(owner)) &&
+    (owner.type !== undefined || ts.getJSDocType(owner) !== undefined)
+  )
+    return true
+  return ts.isBinaryExpression(owner) && ts.isExpressionStatement(owner.parent) && ts.getJSDocTypeTag(owner.parent) !== undefined
+}
+
 const isUnusableEvidence = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0
 
 interface CollectionEntry {
@@ -601,11 +611,13 @@ export const censusCollectionBindings = (
    * statement (`structural-array-element.ts`'s `contextualCollectionTypeAt`),
    * which types the allocation exactly as the cell.
    *
-   * A statement whose every argument is `any` states nothing (an unannotated
-   * `let m = new Map()` reassigned later is contextually `Map<any, any>`), and
-   * the writes decide, as before.
+   * A statement whose every argument is `any` states something only when the
+   * owner is annotated: `@type {Set<HTMLTexture>}` over a name three never
+   * imports is `Set<any>`, and that is the cell. An unannotated `let m = new
+   * Map()` reassigned later is contextually `Map<any, any>` too, from its own
+   * initializer, and there the writes decide, as before.
    */
-  const statesItsTypeArguments = (entry: CollectionEntry): boolean => {
+  const statesItsTypeArguments = (entry: CollectionEntry, owner: ts.Node): boolean => {
     const family = constructorSymbols.get(entry.family)
     if (!family) return false
     return entry.nodes.every((node) => {
@@ -618,7 +630,7 @@ export const censusCollectionBindings = (
       if (members.length !== 1 || only === undefined || only.getSymbol() !== family) return false
       if (((only as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return false
       const args = checker.getTypeArguments(only as ts.TypeReference)
-      return args.some((argument) => (argument.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0)
+      return args.some((argument) => (argument.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) || ownerIsAnnotated(owner)
     })
   }
 
@@ -705,7 +717,7 @@ export const censusCollectionBindings = (
       )
       continue
     }
-    if (statesItsTypeArguments(entry)) continue
+    if (statesItsTypeArguments(entry, owner)) continue
     const keyArgs: ts.Expression[] = []
     const valueArgs: ts.Expression[] = []
     const aliases = aliasClosureOf(owner)
