@@ -208,6 +208,8 @@ export const spreadSourceCarrierKeyOf = (
       ? `dictionary(${candidate.key}->${receiver.key})`
       : `dictionary(${candidate.key}->${receiver?.kind ?? 'absent'})`
   if (representation.kind === 'dynamic') return `dynamic->${receiver?.kind ?? 'absent'}`
+  // A dynamic receiver walks a typed source through its box (`emit-allocation.ts`).
+  if (receiver?.kind === 'dynamic') return 'boxed->dynamic'
   if (representation.kind === 'dictionary') return dictionaryKind(representation)
   if (!refinableSpreadSourceKinds.has(kind)) return kind
   const copyableKind = (candidate: Representation): string | null =>

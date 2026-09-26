@@ -36,6 +36,7 @@ import {
   arrayPredicateNarrowedElementTypeOf,
   impliedPatternTargetOf,
   isGlobalObjectInterface,
+  isGlobalObjectInterfaceSpread,
   isStandardInterfaceType,
   isUnusableEvidence,
   memberCensusNodeOf,
@@ -1738,6 +1739,12 @@ const buildMapper = (
     if (primitive) return remember(type, table.intern(primitive))
     const literal = literalFor(type)
     if (literal) return remember(type, table.intern(literal))
+    // A literal that spread an `Object`-typed value carries the interface's
+    // members, not its own keys: the same top type, one literal later.
+    const spreadAnchor = type.getSymbol()?.declarations?.[0]
+    if (spreadAnchor && isGlobalObjectInterfaceSpread(checker, spreadAnchor, type)) {
+      return remember(type, table.intern({ kind: 'primitive', primitive: 'any' }))
+    }
     const bag = bagShapeOfType(typeOf, bags, type)
     if (bag) return remember(type, table.intern(bag))
 

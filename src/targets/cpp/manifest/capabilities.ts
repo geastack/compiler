@@ -1476,6 +1476,9 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // mandatory: a dictionary receiver requires a different key-domain
     // contract and remains deliberately unclaimed.
     'protocol:spread:next:dynamic->dynamic',
+    // The same walk over a typed source boxed first -- `boxedValueText` refuses by
+    // name a carrier the box has no tag for.
+    'protocol:spread:next:boxed->dynamic',
     // `yield x` inside a `function*`, and the resume point paired with it.
     //
     // The body is emitted as a C++20 coroutine returning `gea::Iterator<T>`

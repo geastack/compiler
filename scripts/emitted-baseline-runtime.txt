@@ -582,6 +582,7 @@ spread-fixed-arity.ts.cpp 355a4e5a2a88
 spread-into-constructor-union.runtime.js.cpp 6cc180f3d547
 spread-into-untyped-callable.runtime.js.cpp d476762f9a54
 spread-new-reflected-constructor.runtime.js.cpp f64547d3e4fa
+spread-object-typed-context.runtime.js.cpp ad3c80d9d71d
 stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d
 stated-any-collection-field-allocation.runtime.js.cpp 0ba48b0a0d69

@@ -282,7 +282,15 @@ const spreadCopyOf = (
   // fields, rather than emitting a store into a member that does not exist.
   // A target whose shape is not statically known has no field set to scope to,
   // and refuses by name here rather than installing a guess.
-  const target = staticSpreadMembersOf(context, receiverType)
+  //
+  // A DYNAMIC target is the one exception: it has no layout to scope to, so
+  // it takes every member the source states, each at the source's own type.
+  // `{ ...this.context, ...context }` in three's `NodeBuilder.addContext`
+  // is that literal -- `Object`-typed, so `structural.ts` interns it as
+  // `any` -- over a `context` whose own members are known.
+  const receiverShape = context.table.get(receiverType).shape
+  const dynamicTarget = receiverShape.kind === 'primitive' && receiverShape.primitive === 'any'
+  const target = dynamicTarget ? admitted : staticSpreadMembersOf(context, receiverType)
   if ('blocked' in target) {
     return { blocked: `an object spread into a target with no statically known field set cannot place its copies (${target.blocked})` }
   }
