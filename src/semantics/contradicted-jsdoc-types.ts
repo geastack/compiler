@@ -65,7 +65,18 @@ import ts from 'typescript'
  * speaking -- a call's `@returns`, a parameter's `@param`, another field's
  * `@type` -- and one of those being imprecise is not evidence against this
  * one: three's `LightShadow.clone()` states it returns a `LightShadow`, and
- * its subclasses store the clone into a field they state more narrowly. A
+ * its subclasses store the clone into a field they state more narrowly. One
+ * that EXCLUDES this one is: neither type holds the other, as a subtype or a
+ * subclass. Then one of the two statements is false, and the store is what
+ * the program does. three's `InterleavedBufferAttribute` states `@type
+ * {InterleavedBuffer}` over `this.normalized = normalized`, from a
+ * `@param {boolean} [normalized=false]`; `MemberNode` states `@type {Node}`
+ * over the `@param {string} property` it stores; `Node.getUpdateType`
+ * states `@return {NodeUpdateType}`, the constants object, and returns the
+ * `@type {string}` field holding one of its values; `MRTNode.has` states
+ * `@return {NodeBuilder}` and returns a comparison. A host's type on either
+ * side is left to the host boundary, as `contradicted-jsdoc-parameters.ts`
+ * leaves it. A
  * value that is `null` or `undefined` is not evidence either: a
  * non-nullable tag written with absence is a statement about absence, which
  * the existing readers already handle. Where no constructed value contradicts
@@ -156,10 +167,26 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
     if (saysNothing(stated)) return false
     return valuesWritten(value).some((written) => {
       const constructed = withoutParentheses(written)
-      if (!isConstruction(constructed)) return false
       const type = checker.getTypeAtLocation(constructed)
-      return !saysNothing(type) && !checker.isTypeAssignableTo(type, stated) && !derivesFromStatedClass(checker, type, stated)
+      if (saysNothing(type)) return false
+      if (isConstruction(constructed)) return !checker.isTypeAssignableTo(type, stated) && !derivesFromStatedClass(checker, type, stated)
+      return excludesEachOther(type, stated)
     })
+  }
+  // Two statements that exclude each other: neither type holds the other, as a
+  // subtype or as a subclass, and neither is only a host's. One of them is
+  // false, and the store says which one the program acts on.
+  const excludesEachOther = (written: ts.Type, stated: ts.Type): boolean => {
+    const value = checker.getNonNullableType(written)
+    if (
+      (value.flags &
+        (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never | ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !==
+      0
+    )
+      return false
+    if (namesDeclaredOnlyType(checker, value) || namesDeclaredOnlyType(checker, stated)) return false
+    if (checker.isTypeAssignableTo(value, stated) || checker.isTypeAssignableTo(stated, value)) return false
+    return !derivesFromStatedClass(checker, value, stated) && !derivesFromStatedClass(checker, stated, value)
   }
   const literalContradicts = (value: ts.Expression, stated: ts.Type): boolean => {
     if (!ts.isObjectLiteralExpression(value)) return false
