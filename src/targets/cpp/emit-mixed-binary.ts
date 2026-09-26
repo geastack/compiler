@@ -55,6 +55,17 @@ export const mixedDynamicPlusText = (
   deriver: RepresentationDeriver
 ): string | null => {
   const typedAsString = toStringText(typedSide.text, typedSide.representation, classes, deriver)
+  // A typed side that IS a string decides the operator by itself: 13.15.3
+  // concatenates when EITHER primitive is a String, so the dynamic side's
+  // ToPrimitive only chooses its own ToString. Reached when the checker typed
+  // the result `any` (`( value ) => type + value` in TSL's `ConvertType`),
+  // where adding on a non-string dynamic side printed `NaN`.
+  if (typedSide.representation.kind === 'string' && typedAsString !== null) {
+    const joined = dynamicIsLeft
+      ? `gea::host::detail::toString(gea::dynamicToPrimitive(${dynamicSide.text})) + (${typedAsString})`
+      : `(${typedAsString}) + gea::host::detail::toString(gea::dynamicToPrimitive(${dynamicSide.text}))`
+    return `gea::Value::box(gea::Value::Tag::String, std::string(${joined}))`
+  }
   const typedAsNumber = toNumberText(typedSide.text, typedSide.representation)
   if (typedAsString === null || typedAsNumber === null) return null
   const concatenated = dynamicIsLeft

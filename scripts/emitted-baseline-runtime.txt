@@ -564,6 +564,7 @@ string-length-reuse-mutation.ts.cpp ffcdbadc5dcd
 string-length-reuse.ts.cpp cb193b047fb6
 string-object-with-declared-fields.ts.cpp 7d8d9777d147
 string-of-symbol.runtime.js.cpp 596032119eab
+string-plus-dynamic-concatenates.runtime.js.cpp 4f018f734fbd
 string-shared-layout.ts.cpp 81d0e3e69994
 subclass-member-overlay-layout.runtime.js.cpp 4a503e656a3d
 subclass-overlay-presence-storage.js.cpp 93e6f3d3b217
