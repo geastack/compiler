@@ -1432,8 +1432,3 @@ export const withFieldBindings = (
     refusals
   }
 }
-
-/** Whether a type already holds `null`, or states nothing a `null` could be told apart from. */
-const admitsNull = (type: ts.Type): boolean =>
-  (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Null | ts.TypeFlags.Never)) !== 0 ||
-  (type.isUnion() && type.types.some((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0))

@@ -256,7 +256,7 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
   return blanked
 }
 
-const isUncheckedJavaScript = (file: ts.SourceFile): boolean =>
+export const isUncheckedJavaScript = (file: ts.SourceFile): boolean =>
   /\.(?:[cm]?js|jsx)$/i.test(file.fileName) &&
   (file as ts.SourceFile & { readonly checkJsDirective?: { readonly enabled: boolean } }).checkJsDirective?.enabled === false
 
