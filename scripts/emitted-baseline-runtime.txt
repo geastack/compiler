@@ -466,6 +466,7 @@ object-entries-subclass-through-helper.ts.cpp 326fa9e13f0e
 object-literal-empty-array-field-boxed.runtime.js.cpp d224d8d2b229
 object-literal-es5-method-receiver.runtime.js.cpp 35067ec88af1
 object-literal-getter-capture.ts.cpp 962dd1d3202c
+object-literal-null-field-holds-written-object.runtime.js.cpp b036f28f71e2
 object-pattern-numeric-key-over-array.ts.cpp 828ec7992347
 object-prototype-tag.runtime.js.cpp 0bd6e1a6a758
 optional-array-spread-absent.ts.cpp b0bdc61f5949
