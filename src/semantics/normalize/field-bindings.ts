@@ -27,6 +27,8 @@ import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import { programTypeNames, type ProgramTypeNames } from './jsdoc-type-names.js'
+import { absentDefaultParameterOf } from './structural-layout-type.js'
+import { isUnreducedTypeForm } from './unreduced-type-form.js'
 
 /**
  * The type an unannotated class FIELD holds, when the program never declares
@@ -660,6 +662,26 @@ export const censusFieldBindings = (
    * field, and an untyped receiver keeps its write out, as before.
    */
   let untypedReceiverWrites: Map<string, ValueWrite[]> | null = null
+  /**
+   * The class a receiver parameter's own `@param` tag names, read through the
+   * same program-wide names as `namedTagTypeOf`, where the checker read the
+   * tag as nothing and no census typed the receiver. three's
+   * `renderObject.pipeline = pipeline` in `Pipelines.getForRender` names
+   * `@param {RenderObject}` from a file that does not import it, and the
+   * census leaves `renderObject` untyped; the layout already reads it as that
+   * class through the same names, so the write belongs to that class's field.
+   */
+  const namedParameterTypeOf = (expression: ts.Expression): ts.Type | null => {
+    if (!ts.isIdentifier(expression)) return null
+    const declarations = checker.getSymbolAtLocation(expression)?.declarations
+    const declaration = declarations?.length === 1 ? declarations[0] : undefined
+    if (!declaration || !ts.isParameter(declaration)) return null
+    const tag = ts.getJSDocType(declaration)
+    if (!tag || !isUnusableEvidence(checker.getTypeFromTypeNode(tag))) return null
+    names ??= programTypeNames(checker, files)
+    const resolved = names.resolve(tag, declaration.getSourceFile().fileName)
+    return 'refused' in resolved ? null : resolved.type
+  }
   const receiverTypedWritesOf = (symbol: ts.Symbol): readonly ts.Expression[] => {
     if (untypedReceiverWrites === null) {
       untypedReceiverWrites = new Map()
@@ -675,9 +697,15 @@ export const censusFieldBindings = (
     const found: ts.Expression[] = []
     for (const write of untypedReceiverWrites.get(symbol.name) ?? []) {
       const access = write.propertyAccess as ts.PropertyAccessExpression
-      const receiver = parameters.typeAt(access.expression)
+      const receiver = parameters.typeAt(access.expression) ?? namedParameterTypeOf(access.expression)
       if (!receiver || !write.value) continue
-      if (checker.getPropertyOfType(checker.getNonNullableType(receiver), symbol.name) === symbol) found.push(write.value)
+      // The same field can reach here as a different symbol object than the
+      // receiver class names (see `writesOf`): three's `RenderObject.pipeline`
+      // did, and matched by identity its `Pipelines.js` writes were dropped.
+      // Both name the one assignment that declares the field.
+      const member = checker.getPropertyOfType(checker.getNonNullableType(receiver), symbol.name)
+      if (member === symbol || (member?.declarations ?? []).some((declaration) => symbol.declarations?.includes(declaration)))
+        found.push(write.value)
     }
     return found
   }
@@ -946,6 +974,24 @@ export const censusFieldBindings = (
     let silent = 0
     let refused: string | null = null
     for (const write of writes) {
+      // A read of an untagged parameter typed only by its `null` default holds
+      // what the layout resolver types that parameter as
+      // (`absentDefaultParameterOf`): the census's answer from the callers,
+      // with the default's `null`. The checker still answers the default's
+      // bare `null`, and read that way three's `NodeError( message,
+      // stackTrace = null )` laid `stackTrace` out as a carrier that holds
+      // only `null`, into which the `StackTrace` its callers pass was stored.
+      //
+      // Where the callers said nothing usable the resolver holds the
+      // parameter open, and the write states nothing: three's `StackNode(
+      // parent = null )`, filled only through `new NodeClass( ...params )`,
+      // had `parent` laid out as `null`, and every real parent failed to
+      // unbox into it at run time.
+      const nullDefault = nullDefaultReadOf(write)
+      if (nullDefault === 'open') {
+        silent += 1
+        continue
+      }
       // A STATED CELL THE UPSTREAM CENSUS NARROWED OUTRANKS THE CHECKER at
       // this write. `known` asks the checker first everywhere else, which is
       // right when the checker's answer is the last word about the value --
@@ -967,7 +1013,8 @@ export const censusFieldBindings = (
       // `/** @type {Object} */ this.userData = {};` is the measured case:
       // with that write silent, every class's `userData` fell back to the
       // annotation's `any` and boxed the empty object it only ever holds.
-      const type = parameters.statedTypeAt(write) ?? exactEmptyObjectLiteralType(checker, write) ?? known(write) ?? resolveExpr(write)
+      const type =
+        nullDefault ?? parameters.statedTypeAt(write) ?? exactEmptyObjectLiteralType(checker, write) ?? known(write) ?? resolveExpr(write)
       if (type) types.push(type)
       // A write typed `void`/`never` is a real fact stating the storage holds
       // nothing a program can use -- a veto in both phases, exactly as
@@ -1086,6 +1133,14 @@ export const censusFieldBindings = (
     resolvingSymbols.delete(symbol)
     if (result) bound.set(symbol, result)
     return result
+  }
+
+  /** What a write reading a `null`-defaulted untagged parameter holds (see the write loop), `'open'` where the census has no answer, or `null` for any other write. */
+  const nullDefaultReadOf = (write: ts.Expression): ts.Type | 'open' | null => {
+    const node = unwrapParens(write)
+    if (!ts.isIdentifier(node) || absentDefaultParameterOf(checker, node)?.initializer?.kind !== ts.SyntaxKind.NullKeyword) return null
+    const bound = parameters.typeAt(node)
+    return bound && !isUnreducedTypeForm(bound) ? checker.getNullableType(bound, ts.TypeFlags.Null) : 'open'
   }
 
   const unwrapParens = (node: ts.Expression): ts.Expression => {
