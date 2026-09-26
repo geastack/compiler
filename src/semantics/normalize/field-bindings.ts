@@ -3,6 +3,7 @@ import { inheritedAccessorOfAssignment } from '../inherited-accessor.js'
 import {
   annotationStatesNothing,
   containsUnstatedPosition,
+  jsDocTagOpensOnlyArrayElements,
   derivedExpressionType,
   disjointUnionMembersOf,
   exactEmptyObjectLiteralType,
