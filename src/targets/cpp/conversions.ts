@@ -37,6 +37,7 @@ import {
   dropsUnboundParameters,
   dynamicTagFor,
   promisePayloadConvertible,
+  promiseArmAdoptionOf,
   rebasesRestOverLeadingParameters,
   dictionaryCastableToDictionary,
   CONSTRUCTOR_STATIC_VIEW,

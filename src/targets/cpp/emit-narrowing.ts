@@ -147,6 +147,27 @@ export const promisePayloadConvertible = (source: Representation, target: Repres
   }
 }
 
+/**
+ * The one promise arm of a bare union a DIFFERENT promise adopts into: the
+ * union names exactly one promise arm and no dynamic arm (a box could hold
+ * the promise object too, and choosing between the two would be a guess), and
+ * the payloads reconcile under `promisePayloadConvertible`. An exact arm is
+ * not this pair -- it is an ordinary `ofArm` widening.
+ */
+export const promiseArmAdoptionOf = (
+  source: Representation,
+  target: Representation
+): { readonly index: number; readonly arm: Extract<Representation, { kind: 'promise' }> } | null => {
+  if (source.kind !== 'promise' || target.kind !== 'tagged-union') return null
+  if (target.arms.some((arm) => arm.value.kind === 'dynamic')) return null
+  const indexes = target.arms.flatMap((arm, index) => (arm.value.kind === 'promise' ? [index] : []))
+  if (indexes.length !== 1) return null
+  const index = indexes[0]!
+  const arm = target.arms[index]!.value
+  if (arm.kind !== 'promise' || representationKey(arm) === representationKey(source)) return null
+  return promisePayloadConvertible(source.value, arm.value) ? { index, arm } : null
+}
+
 /** A promise payload that carries no information: `void`, and the `undefined` it is spelled as wherever a value is required. */
 const isUnitPromisePayload = (payload: Representation): boolean => payload.kind === 'void' || payload.kind === 'undefined'
 
@@ -4987,6 +5008,19 @@ export const conversionChain: readonly ConversionStep[] = [
         )
       }
       return claimed(promiseAdoptionText(source, target, text, (value) => convertedValueText(source.value, target.value, value)))
+    }
+  },
+  // The same adoption one arm down: three's `NodeManager.getForRender` is
+  // `@return {NodeBuilderState|Promise<NodeBuilderState>}` and returns a
+  // `.then(...)` whose handler answers an untyped data-map read, so a
+  // `Promise<any>` lands in the union's one promise arm.
+  {
+    id: 'promise-payload-arm',
+    apply: (source, target, text) => {
+      const home = promiseArmAdoptionOf(source, target)
+      if (home === null) return undefined
+      const adopted = convertedValueText(source, home.arm, text)
+      return adopted === null ? undefined : `${cppTypeOf(target)}::ofArm<${home.index}>(${adopted})`
     }
   },
   // A TypeScript boundary does not call an ECMAScript abstract operation. A
