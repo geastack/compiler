@@ -99,6 +99,7 @@ computed-overridden-method-value.runtime.js.cpp 1b091e77cc14
 computed-record-union.ts.cpp c03e379dce78
 conditional-any-arm-returned-as-optional.ts.cpp bfbecb95bf43
 console-info-member.ts.cpp 9fd958169daf
+console-warn-member.ts.cpp 15e82e014cd8
 constant-table.ts.cpp 71ba3bcbd3b5
 constructor-alias-installed-members-class.runtime.js.cpp 0bd7b7483932
 constructor-alias-installed-members.runtime.js.cpp 19a6cf4855e4
