@@ -593,6 +593,16 @@ export const censusFieldBindings = (
       if (ts.isBinaryExpression(declaration)) writes.add(declaration.right)
     }
     for (const write of flow.writesToSymbol(symbol)) if (isFieldEvidence(write) && write.value) writes.add(write.value)
+    // The same field reached through a different symbol object. A JavaScript
+    // class's `this.mode = null` names one symbol inside the constructor and
+    // another through an instance (`renderer.mode = gl.POINTS` in three's
+    // WebGLBackend, over `WebGLBufferRenderer`), and each files its writes
+    // under itself; both name the one assignment that declares the field, and
+    // the flow index files every write by that declaration too. Joined per
+    // symbol, the constructor's view held only the `null` and laid the field
+    // out as bare `null`.
+    for (const declaration of symbol.declarations ?? [])
+      for (const write of flow.writesToDeclaration(declaration)) if (isFieldEvidence(write) && write.value) writes.add(write.value)
     for (const write of receiverTypedWritesOf(symbol)) writes.add(write)
     return [...writes]
   }
