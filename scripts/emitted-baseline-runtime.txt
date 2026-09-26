@@ -606,6 +606,7 @@ template-strings-readonly-array.ts.cpp a3aa686bb2ad
 then-callback-returns-value-or-promise-union.ts.cpp c86d58270dc6
 then-handler-value-into-a-void-result.ts.cpp 8fb52f13f20c
 then-over-a-union-of-promises.ts.cpp 78a71a345dc0
+to-number-of-array-arm.runtime.js.cpp 5cae5fd99a6f
 to-string-of-a-class-and-a-union.ts.cpp 348d69161490
 to-string-of-an-error-and-a-typed-array.ts.cpp 1feedd78f698
 top-level-await-dep.ts.cpp 819900fb3403
