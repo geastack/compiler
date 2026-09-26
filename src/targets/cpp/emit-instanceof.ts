@@ -236,7 +236,7 @@ const instanceofTaggedUnionMapText = (
  *
  * Which protocols: the seven error constructors, whose `gea::runtime::Error`
  * handle answers its own inheritance chain through `instanceOf` (see this
- * file's header), plus `RegExp` and `ArrayBuffer`, each of which has exactly
+ * file's header), plus `RegExp`, `ArrayBuffer`, `DataView` and `Set`, each of which has exactly
  * one physical carrier here, so an arm carrying it IS one and an arm carrying
  * anything else is not. `Map` and `Promise` are deliberately absent: their own
  * composite renderers above already claim those keys, and routing them here
@@ -365,7 +365,7 @@ const nativeInstanceLeafText = (ctx: EmitContext, protocol: string, carrier: Rep
     // A `native-record-ref` of a different native layout IS that layout and no
     // other -- one C++ type per native record -- so it settles as flatly as a
     // scalar does.
-    if (matches || carrier.kind === 'native-record-ref' || settledNonNativeCarrier(ctx, carrier)) {
+    if (identity !== undefined && (matches || carrier.kind === 'native-record-ref' || settledNonNativeCarrier(ctx, carrier))) {
       return settledInstanceText(value, matches)
     }
   }
@@ -467,6 +467,7 @@ export const cppInstanceofHelperKeys: ReadonlySet<string> = new Set([
     `computation:instanceof:optional:native-handle(${protocol})`,
     `computation:instanceof:tagged-union:native-handle(${protocol})`
   ]),
+  ...[...physicalIdentityOf.keys()].map((protocol) => `computation:instanceof:native-record-ref:native-handle(${protocol})`),
   // `v instanceof <program class>` -- `constructorFamilyInstanceofText`'s own
   // three renderable left shapes.
   ...constructorFamilyLeftKinds.map((left) => `computation:instanceof:${left}:constructor-family`),
@@ -666,6 +667,12 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
     compositeNativeInstanceProtocols.has(constructor.protocol)
   ) {
     return compositeNativeInstanceText(ctx, left, constructor.protocol)
+  }
+  // A host record against a protocol whose identity is one physical carrier:
+  // the record is its own C++ layout, so the leaf rule settles it without a
+  // read (three's `isTypedArray`: `array instanceof DataView`).
+  if (left.representation.kind === 'native-record-ref' && physicalIdentityOf.has(constructor.protocol)) {
+    return nativeInstanceLeafText(ctx, constructor.protocol, left.representation, operandText(ctx, left))
   }
   if (typedArrayConstructorDomains.has(constructor.protocol)) {
     if (recipe === undefined)
