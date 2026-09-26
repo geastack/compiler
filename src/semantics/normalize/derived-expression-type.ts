@@ -2052,8 +2052,14 @@ export const isStandardGlobalValue = (checker: ts.TypeChecker, expression: ts.Ex
  * pass: three's `ShaderNodeProxy( NodeClass, scope = null, factor = null,
  * settings = null )` types `settings` as `null`, so inside `if ( settings !==
  * null )` it is `never`, while the callers do pass records.
+ *
+ * A fresh `{}` copying one class instance is answered first, at the call and
+ * at every read of the `const` it initializes: see `plainClassInstanceCopyAt`.
+ * Every census reads a node through this, so all of them see the copy.
  */
 export const objectAssignTargetType = (checker: ts.TypeChecker, node: ts.Node): ts.Type | null => {
+  const plainCopy = plainClassInstanceCopyAt(checker, node)
+  if (plainCopy) return plainCopy
   if (!isAuthenticatedObjectAssign(checker, node)) return null
   const target = node.arguments[0]
   if (!target) return null
