@@ -549,6 +549,7 @@ spread-fixed-arity-typed-array.ts.cpp b8a4802269a5
 spread-fixed-arity.ts.cpp 355a4e5a2a88
 stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d
+stated-any-collection-field-allocation.runtime.js.cpp 0ba48b0a0d69
 stated-collection-field-allocation.runtime.js.cpp d669095a6744
 stated-open-union-preserves-closed-arms.ts.cpp 878f72cd6f91
 static-intrinsic-reflection.runtime.js.cpp 9a7c2a8500d2
