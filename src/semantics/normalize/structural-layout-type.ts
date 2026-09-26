@@ -88,6 +88,43 @@ export const createLayoutTypeResolver = (
     // until a test the program actually wrote removes it.
     return ts.isBindingElement(node) ? read : checker.getNullableType(own, ts.TypeFlags.Undefined)
   }
+  const nullOnlyCellOf = (node: ts.Node): ts.VariableDeclaration | null => {
+    const declaration = ts.isVariableDeclaration(node)
+      ? node
+      : ts.isIdentifier(node)
+        ? checker.getSymbolAtLocation(node)?.valueDeclaration
+        : undefined
+    if (!declaration || !ts.isVariableDeclaration(declaration) || declaration.type || !ts.isIdentifier(declaration.name)) return null
+    const declared = checker.getTypeAtLocation(declaration.name)
+    return (declared.flags & ts.TypeFlags.Null) !== 0 && !declared.isUnion() ? declaration : null
+  }
+  // Whether some later `cell = value` stores a value the checker types `any`
+  // into the cell, walked once per declaration over its own file.
+  const untypedCellWrites = new Map<ts.VariableDeclaration, boolean>()
+  const cellTakesUntypedWrite = (declaration: ts.VariableDeclaration): boolean => {
+    const known = untypedCellWrites.get(declaration)
+    if (known !== undefined) return known
+    const symbol = checker.getSymbolAtLocation(declaration.name)
+    let found = false
+    const visit = (node: ts.Node): void => {
+      if (found) return
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(node.left) &&
+        symbol !== undefined &&
+        checker.getSymbolAtLocation(node.left) === symbol &&
+        (checker.getTypeAtLocation(node.right).flags & ts.TypeFlags.Any) !== 0
+      ) {
+        found = true
+        return
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(declaration.getSourceFile())
+    untypedCellWrites.set(declaration, found)
+    return found
+  }
   const arrayPatternElementDeclaring = (node: ts.Identifier): ts.BindingElement | null => {
     const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration
     return declaration && ts.isBindingElement(declaration) ? declaration : null
@@ -904,6 +941,29 @@ export const createLayoutTypeResolver = (
     if (declaredArrayArm) return declaredArrayArm
     const patternRead = arrayPatternReadOutranking(node, own)
     if (patternRead) return patternRead
+    // A cell the checker types `null` only because the value it was
+    // initialized from was: three's `ShaderNodeProxy( NodeClass, scope = null
+    // )` reads `let name = scope`, and the checker's `scope` is the `null`
+    // of its default while callers pass strings. The parameter above is
+    // already laid out from the census (`absentDefaultParameterOf`); a cell it
+    // initializes has to follow, or the store between them converts a
+    // `string | null` into `null`. Only a census answer that still holds
+    // `null` outranks it -- at the declaration and at every read, including
+    // one the checker narrowed from `null` to `never` (`name ? name : ...`),
+    // exactly as the parameter's own reads are.
+    //
+    // A later write the checker could not type (`fn.setName = ( value ) => {
+    // name = value }`, reached only through a function's expando member)
+    // leaves the census silent, and the cell is then as open as that write,
+    // exactly as a `null` default's parameter is below: laid out bare
+    // `null`, every name the program set was unboxed into a carrier that
+    // can hold only `null`.
+    const nullCell = nullOnlyCellOf(node)
+    if (nullCell) {
+      const bound = parameters.typeAt(node)
+      if (bound && bound !== own && !isUnreducedTypeForm(bound) && checker.isTypeAssignableTo(checker.getNullType(), bound)) return bound
+      if (!bound && cellTakesUntypedWrite(nullCell)) return checker.getAnyType()
+    }
     // An `any` here is one of exactly two answers worth a second question. It
     // is the only shape the checker produces that can mean "nothing was
     // written down" rather than "this is what it is, and it is dynamic" -- and
