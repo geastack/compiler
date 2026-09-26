@@ -3286,6 +3286,11 @@ const buildMapper = (
     if (declaration.initializer?.kind !== ts.SyntaxKind.NullKeyword) return null
     if (ts.isIdentifier(node) && node === declaration.name) return null
     const stated = absentSubstitutedTypeAt(declaration)
+    // An answer that left the parameter open is the dynamic carrier, not a
+    // type the `null` joins: the ABI slot holds it too, where it would
+    // otherwise fall back to the checker's own `null` while the body reads
+    // the carrier. The reads already answer it from the layout resolver.
+    if ((stated.flags & ts.TypeFlags.Any) !== 0) return node === declaration ? stated : null
     const admitsNull = (type: ts.Type): boolean =>
       (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Null)) !== 0 ||
       (type.isUnion() && type.types.some((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0))
