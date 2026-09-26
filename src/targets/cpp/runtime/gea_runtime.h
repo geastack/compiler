@@ -16863,6 +16863,39 @@ inline gea::Ref<gea::ArrayObject<std::string>> split(const std::string &s, const
   return result;
 }
 
+/**
+ * The same algorithm with its `limit` argument: `lim` is ToUint32(limit)
+ * (step 4, an undefined limit already resolved to 2^32 - 1 by the call site),
+ * a zero `lim` answers the empty array (step 7), and every step that appends
+ * an element returns as soon as the array holds `lim` of them (steps 8, 13).
+ */
+inline gea::Ref<gea::ArrayObject<std::string>> split(const std::string &s, const std::string &separator, double limit) {
+  auto result = gea::makeRef<gea::ArrayObject<std::string>>();
+  const double truncated = std::isfinite(limit) ? std::trunc(limit) : 0.0;
+  const double modulo = std::fmod(truncated, 4294967296.0);
+  const std::uint32_t lim = static_cast<std::uint32_t>(modulo < 0 ? modulo + 4294967296.0 : modulo);
+  if (lim == 0) return result;
+  if (separator.empty()) {
+    const std::size_t units = std::min<std::size_t>(utf16Length(s), lim);
+    for (std::size_t unit = 0; unit < units; ++unit) result->push(substringUtf16(s, unit, unit + 1));
+    return result;
+  }
+  if (s.empty()) {
+    result->push(s);
+    return result;
+  }
+  std::size_t i = 0;
+  while (true) {
+    const std::size_t j = s.find(separator, i);
+    if (j == std::string::npos) break;
+    result->push(s.substr(i, j - i));
+    if (result->size() == lim) return result;
+    i = j + separator.size();
+  }
+  result->push(s.substr(i));
+  return result;
+}
+
 }  // namespace gea::runtime::string
 
 namespace gea::runtime::regex {
