@@ -3,6 +3,7 @@ import type { NamespacePathCensus } from './normalize/namespace-paths.js'
 import { declaredBaseTypesOf, isAmbientSymbol } from './ambient.js'
 import type { DeclarationId, StructuralTypeId } from '../identity/ids.js'
 import type { TypedArrayElementDomain } from '../representation/model.js'
+import { typedArrayConstructorDomains } from '../representation/typed-array-constructors.js'
 import type { KeyedCollectionFamily, RegExpDeclarationKind, StandardBufferKind } from '../representation/policies.js'
 import type { CensusCandidate } from './normalize/census.js'
 import { isValueReference } from './normalize/census.js'
@@ -563,7 +564,7 @@ export const ambientHostBindings = (
  * The same nine kinds, keyed by the INSTANCE interface's own name.
  *
  * Two tables for two different questions, not one table duplicated.
- * `typedArrayConstructorDomains` below answers "which constructor type is
+ * `typedArrayConstructorDomains` (`representation/typed-array-constructors.ts`) answers "which constructor type is
  * this ambient VALUE?", asked of a seed the program's own text produced;
  * this one answers "which declared TYPE is this?", asked of the standard
  * library directly with no use site at all -- the same independence
@@ -723,24 +724,6 @@ const extendedTypedArrayDeclarations = (
     }
   }
 }
-
-const typedArrayConstructorDomains = new Map<string, TypedArrayElementDomain>([
-  ['Int8ArrayConstructor', 'int8'],
-  ['Uint8ArrayConstructor', 'uint8'],
-  // `Uint8ClampedArray` is admitted with its siblings now that its write rule
-  // has a verified implementation and a carrier of its own to hold it:
-  // ECMA-262 7.1.11 `ToUint8Clamp` -- clamp to [0, 255], round halves to EVEN
-  // -- ported from v1's `gea_cpp_typed_array::coerce_element`
-  // (`runtime/typed_array.h`), specialized on `gea::ClampedUint8` so the rule
-  // is chosen at compile time. See `TypedArrayElementDomain`.
-  ['Uint8ClampedArrayConstructor', 'uint8-clamped'],
-  ['Int16ArrayConstructor', 'int16'],
-  ['Uint16ArrayConstructor', 'uint16'],
-  ['Int32ArrayConstructor', 'int32'],
-  ['Uint32ArrayConstructor', 'uint32'],
-  ['Float32ArrayConstructor', 'float32'],
-  ['Float64ArrayConstructor', 'float64']
-])
 
 /**
  * Which declarations name a standard TypedArray *instance* interface, found
@@ -1063,7 +1046,7 @@ export const mapIteratorDeclarationOf = (
 
 /**
  * The four standard keyed-collection interface names, to the family each one
- * is. Hardcoded for exactly the reason `typedArrayConstructorDomains` above
+ * is. Hardcoded for exactly the reason `typedArrayConstructorDomains` (`representation/`)
  * is: these are core ECMAScript (`lib.es2015.collection.d.ts`), not something
  * a host installs, so there is no table to read them from and nothing
  * framework-shaped about naming them -- the same way `primitiveCarrier`
