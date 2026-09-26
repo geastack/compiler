@@ -239,6 +239,7 @@ generic-record-return-default-instantiation.ts.cpp 8399524c2351
 generic-self-reference-as-mark.ts.cpp ec327e0846cf
 generic-state-function-array.ts.cpp 70e975090ad7
 generic-subclass-constructor-is-not-implicit.ts.cpp f30779599937
+get-or-create-cache-typed-by-its-return.runtime.js.cpp 7d25b6a60e6d
 global-var-constructor-reassigned.ts.cpp 5d52fbeffb6b
 global-var-constructor-redefined-through-global-object.ts.cpp e474834bc06a
 globalthis-as-optional-record.ts.cpp be3ce0b17f1d

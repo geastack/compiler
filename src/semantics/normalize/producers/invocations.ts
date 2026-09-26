@@ -7,6 +7,7 @@ import {
   contextualArrayConstructTypeAt,
   contextualCollectionTypeAt,
   hostDynamicSlotCollectionAt,
+  returnedCellCollectionTypeAt,
   statedCollectionTypeAt
 } from '../structural-array-element.js'
 import { implementationSignatureOf } from '../structural-declarations.js'
@@ -1121,6 +1122,7 @@ const collectionConstructResultOverride = (context: ProducerContext, node: ts.Ne
   if (
     !context.collections.typeArgumentsAt(node) &&
     !contextualCollectionTypeAt(context.checker, node) &&
+    !returnedCellCollectionTypeAt(context.checker, node) &&
     !hostDynamicSlotCollectionAt(context.checker, node)
   )
     return null

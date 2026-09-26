@@ -25,6 +25,7 @@ import {
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import { emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
+import { returnedCellCollectionTypeAt } from './structural-array-element.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
 import {
   arrayAssignmentPatternSourceExpression,
@@ -659,7 +660,10 @@ export const censusLocalBindings = (
     const exported = moduleRecords.exportExpressionAt(node) ?? moduleRecords.requiredExportExpressionAt(node)
     const type = exported
       ? checker.getTypeAtLocation(exported)
-      : (objectAssignTargetType(checker, node) ?? constructedClassChoiceCheckerTypeAt(checker, node) ?? checker.getTypeAtLocation(node))
+      : (objectAssignTargetType(checker, node) ??
+        constructedClassChoiceCheckerTypeAt(checker, node) ??
+        returnedCellCollectionTypeAt(checker, node) ??
+        checker.getTypeAtLocation(node))
     return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) ? null : type
   }
 
