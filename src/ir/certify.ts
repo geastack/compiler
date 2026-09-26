@@ -181,9 +181,13 @@ const nativeBoundaryDemand = (representation: Representation): CapabilityDemand 
  */
 const embeddedNativeBoundaryDemands = (representation: Representation): CapabilityDemand[] => {
   const demands: CapabilityDemand[] = []
+  // Named in the refusal: the handle alone does not say which slot carried it,
+  // and an embedded one is usually a parameter of a callable nobody wrote.
+  const root = representationKey(representation)
+  const within = `embedded in ${root.length > 240 ? `${root.slice(0, 240)}...` : root}`
   forEachEmbeddedRepresentation(representation, (carrier) => {
     const boundary = nativeBoundaryDemand(carrier)
-    if (boundary) demands.push(boundary)
+    if (boundary) demands.push({ ...boundary, detail: within })
   })
   return demands
 }
@@ -597,7 +601,10 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
     const dedupe = `${owner}|${demand.key}`
     if (refused.has(dedupe)) return
     refused.add(dedupe)
-    refusals.push({ stage: 'certify', key: demand.key, owner, reason: decision.reason || `${demand.key} is ${decision.verdict}` })
+    const reason = decision.reason || `${demand.key} is ${decision.verdict}`
+    // A demand carrying its own verdict already reads its detail as the reason.
+    const placed = demand.verdict === undefined && demand.detail !== undefined ? `${reason} (${demand.detail})` : reason
+    refusals.push({ stage: 'certify', key: demand.key, owner, reason: placed })
   }
 
   for (const row of input.slotDrift) {
