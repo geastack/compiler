@@ -1000,7 +1000,17 @@ export const censusFieldBindings = (
       // bare `null`, and read that way three's `NodeError( message,
       // stackTrace = null )` laid `stackTrace` out as a carrier that holds
       // only `null`, into which the `StackTrace` its callers pass was stored.
+      //
+      // Where the callers said nothing usable the resolver holds the
+      // parameter open, and the write states nothing: three's `StackNode(
+      // parent = null )`, filled only through `new NodeClass( ...params )`,
+      // had `parent` laid out as `null`, and every real parent failed to
+      // unbox into it at run time.
       const nullDefault = nullDefaultReadOf(write)
+      if (nullDefault === 'open') {
+        silent += 1
+        continue
+      }
       // A STATED CELL THE UPSTREAM CENSUS NARROWED OUTRANKS THE CHECKER at
       // this write. `known` asks the checker first everywhere else, which is
       // right when the checker's answer is the last word about the value --
@@ -1143,12 +1153,12 @@ export const censusFieldBindings = (
     return result
   }
 
-  /** What a write reading a `null`-defaulted untagged parameter holds (see the write loop), or `null` for any other write and where the census has no answer. */
-  const nullDefaultReadOf = (write: ts.Expression): ts.Type | null => {
+  /** What a write reading a `null`-defaulted untagged parameter holds (see the write loop), `'open'` where the census has no answer, or `null` for any other write. */
+  const nullDefaultReadOf = (write: ts.Expression): ts.Type | 'open' | null => {
     const node = unwrapParens(write)
     if (!ts.isIdentifier(node) || absentDefaultParameterOf(checker, node)?.initializer?.kind !== ts.SyntaxKind.NullKeyword) return null
     const bound = parameters.typeAt(node)
-    return bound && !isUnreducedTypeForm(bound) ? checker.getNullableType(bound, ts.TypeFlags.Null) : null
+    return bound && !isUnreducedTypeForm(bound) ? checker.getNullableType(bound, ts.TypeFlags.Null) : 'open'
   }
 
   const unwrapParens = (node: ts.Expression): ts.Expression => {
