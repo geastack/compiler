@@ -7,3 +7,9 @@ export declare function trailing(count: number, tag: string, extra: boolean): vo
 export declare function gathered(inputs: { count: number }): void
 export declare function spread(...values: number[]): void
 export declare function listed(...items: string[]): void
+export declare class Holder<T = {}> {
+    holdValue(value: T): void
+    mapInputs(inputs: { [key in keyof T]: T[key] }): void
+    takeItem<U>(item: U): U
+    keepCount(count: number): void
+}
