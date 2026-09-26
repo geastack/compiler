@@ -108,7 +108,7 @@ console-warn-member.ts.cpp 15e82e014cd8
 constant-table.ts.cpp 71ba3bcbd3b5
 constructor-alias-installed-members-class.runtime.js.cpp 0bd7b7483932
 constructor-alias-installed-members.runtime.js.cpp 19a6cf4855e4
-constructor-reads-arguments.runtime.js.cpp 68f158847348
+constructor-reads-arguments.runtime.js.cpp 17dec8f7ec26
 constructor-static-flag-not-an-escape.runtime.js.cpp 327ac3d86c18
 contextual-handler-union-return-slot.ts.cpp a7f04d951606
 contextual-pattern-callback.ts.cpp 7664ae43caef
@@ -464,6 +464,7 @@ null-default-cell-renamed-through-expando-setter.runtime.js.cpp 5aa865419a65
 null-default-census-typed-parameter.runtime.js.cpp 99a95750c3a5
 null-default-nested-reference-union.ts.cpp c26fe6988740
 null-default-parameter-callers-say-nothing.runtime.js.cpp ec1309a23809
+null-default-parameter-field-held-from-callers.runtime.js.cpp 11f62f794ce6
 null-default-parameter-from-callers.runtime.js.cpp 77b09ed91957
 null-default-untagged-parameter.runtime.js.cpp 18936c198044
 null-defaulted-parameter.runtime.js.cpp 3c2102fca019
