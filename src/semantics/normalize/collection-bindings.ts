@@ -514,6 +514,41 @@ export const censusCollectionBindings = (
     return isUnusableEvidence(own) ? parameters.typeAt(expr) : own
   }
 
+  /**
+   * Whether the DESTINATION of every bare construction feeding this owner
+   * states the collection's type arguments: `@type {Map<string,Pipeline>}`
+   * on `this.caches = new Map()`. The checker types the `new Map()` itself
+   * `Map<any, any>` (the non-generic `new (): Map<any, any>` overload), while
+   * the field it fills is the stated `Map<string, Pipeline>`. Inferring the
+   * allocation from its writes is then a second opinion beside the program's
+   * own: the cell keeps the stated type, the allocation gets the inferred one
+   * (three's `Pipelines` keys it by an untyped parameter, so `Map<any,
+   * Pipeline>`), and one storage carries two carriers that no conversion can
+   * reconcile without copying the map. Such an owner is left to the position's
+   * statement (`structural-array-element.ts`'s `contextualCollectionTypeAt`),
+   * which types the allocation exactly as the cell.
+   *
+   * A statement whose every argument is `any` states nothing (an unannotated
+   * `let m = new Map()` reassigned later is contextually `Map<any, any>`), and
+   * the writes decide, as before.
+   */
+  const statesItsTypeArguments = (entry: CollectionEntry): boolean => {
+    const family = constructorSymbols.get(entry.family)
+    if (!family) return false
+    return entry.nodes.every((node) => {
+      const contextual = checker.getContextualType(node)
+      if (!contextual) return false
+      const members = (contextual.isUnion() ? contextual.types : [contextual]).filter(
+        (member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
+      )
+      const [only] = members
+      if (members.length !== 1 || only === undefined || only.getSymbol() !== family) return false
+      if (((only as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return false
+      const args = checker.getTypeArguments(only as ts.TypeReference)
+      return args.some((argument) => (argument.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0)
+    })
+  }
+
   // Pass 2: every `.get`/`.set`/`.has`/`.delete`/`.add` KEY/VALUE write that
   // reaches one of the tracked collections above OR any cell in its alias
   // closure -- read from `flow` rather than re-walked, so a receiver spelled
@@ -542,6 +577,7 @@ export const censusCollectionBindings = (
       )
       continue
     }
+    if (statesItsTypeArguments(entry)) continue
     const keyArgs: ts.Expression[] = []
     const valueArgs: ts.Expression[] = []
     for (const decl of aliasClosureOf(owner)) {

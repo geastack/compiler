@@ -115,7 +115,7 @@ derived-constructor-completion.runtime.js.cpp b59c7081e326
 descriptor-array-splice.js.cpp 96429601e125
 descriptor-function-this-is-the-lookup-receiver.ts.cpp 7ed558c58fe2
 destructured-default-host-options.ts.cpp c11cc6124034
-destructured-key-of-filled-empty-literal.runtime.js.cpp 88004e30660b
+destructured-key-of-filled-empty-literal.runtime.js.cpp 291be4a22802
 destructuring-defaults.ts.cpp 5b9603fe4315
 dictionary-define-property-nondefault.ts.cpp ee362b11ee3c
 dictionary-define-property.ts.cpp 294cfc8a7aca
@@ -547,11 +547,12 @@ spread-fixed-arity-typed-array.ts.cpp b8a4802269a5
 spread-fixed-arity.ts.cpp 355a4e5a2a88
 stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d
+stated-collection-field-allocation.runtime.js.cpp d669095a6744
 stated-open-union-preserves-closed-arms.ts.cpp 878f72cd6f91
 static-intrinsic-reflection.runtime.js.cpp 9a7c2a8500d2
 static-method-as-callback-value.ts.cpp 8ec7c5dfe2ea
 static-property-descriptors.runtime.js.cpp d6c981deef9d
-stored-listener-native-flow.js.cpp ad6f1cabef1e
+stored-listener-native-flow.js.cpp 5df0658a3c3b
 strict-delete-module-exports.ts.cpp 155a2051d279
 strict-delete.ts.cpp 85fdced0a04d
 string-field-append.ts.cpp 9fec58e0a12a
