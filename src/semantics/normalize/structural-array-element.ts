@@ -528,7 +528,16 @@ export const inferredCollectionTypeArgumentsAt = (
       ? collections.typeArgumentsForOwner(node)
       : ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)
         ? collections.typeArgumentsForRead(node)
-        : null
+        : // A JavaScript class declares a field by assigning it, `this.flowsData
+          // = new WeakMap()`, so the member's declaration is that assignment
+          // rather than a `PropertyDeclaration`. Asked through its target, which
+          // names the same owner every read of the field names; left to the
+          // checker, the field kept `WeakMap`'s defaulted `object` key while
+          // the allocation and every read carried the census's (three's
+          // `NodeBuilder.flowsData`, `WebGLState.currentDrawbuffers`).
+          ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(node.left)
+          ? collections.typeArgumentsForRead(node.left)
+          : null
   if (!bound) return null
   const generic = table.get(typeOf(own)).shape
   const direct = overriddenCollectionShape(table, typeOf, bags, bound, generic)

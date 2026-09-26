@@ -20,6 +20,7 @@ array-rest-target-reassigned-dynamic.runtime.js.cpp b8383e82ff79
 array-shift-tostring-once.runtime.js.cpp 3b871dab34f1
 asserted-arm-into-interface-slot.ts.cpp ab0d11a21074
 assign-for-in-generic.ts.cpp 00fa51c20b53
+assigned-field-collection-census.runtime.js.cpp 00941ae0191c
 async-integer-result.ts.cpp 40d406729713
 async-return-promise-undefined-into-void.ts.cpp 9f3bd1364eac
 await-over-an-optional-thenable.ts.cpp fdab8693a27f
@@ -302,8 +303,11 @@ iterator-object-destructuring.ts.cpp 5595f0dc7234
 js-constructor-with-statics.js.cpp a70df1026a91
 jsdoc-asserted-class-method.runtime.js.cpp 274ea169260d
 jsdoc-defaulted-class-constructor.runtime.js.cpp ca5226775273
+jsdoc-field-open-array-element.runtime.js.cpp 97302cc25b25
 jsdoc-field-type-contradicted-by-writes.runtime.js.cpp f9608f5b2fc1
 jsdoc-optional-parameter.runtime.js.cpp 2cfb2703873b
+jsdoc-parameter-open-array-element.runtime.js.cpp cdfc7908b9cc
+jsdoc-return-open-array-element.runtime.js.cpp b7ee5fa4fc4d
 jsdoc-tag-leaves-null-out.runtime.js.cpp 7033bcb07563
 json-parse-as-a-value.ts.cpp 0ea01b076f42
 json-reader-dispatch.ts.cpp f43e28fc48ee
