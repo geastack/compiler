@@ -40,6 +40,7 @@ borrow-helper-chain.ts.cpp bb76b67a3451
 borrow-helper-reentry.ts.cpp 2801005076bd
 borrowed-builtin-call-bind.runtime.js.cpp a77f6865272c
 borrowed-formals.ts.cpp 9aa056d93959
+boxed-array-prototype-search.runtime.js.cpp 2e620bbc9dee
 boxed-payload-scope.ts.cpp 36aa3bc2df5f
 boxed-record-refcount.ts.cpp bf8f0867e314
 boxed-typed-array-to-primitive.ts.cpp 3d75a95030ab
