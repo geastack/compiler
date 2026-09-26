@@ -1875,6 +1875,14 @@ export const isStandardGlobalValue = (checker: ts.TypeChecker, expression: ts.Ex
  *
  * A primitive target is excluded because Object.assign first boxes it, and
  * this backend does not implement wrapper-object carriers.
+ *
+ * An `any` target is the same identity: the result is whatever the target
+ * is. The checker agrees (`any & U` is `any`) except where a source is
+ * `never`, and then the call publishes `never` and mints no value for its
+ * consumer to read. That happens under a guard the checker thinks cannot
+ * pass: three's `ShaderNodeProxy( NodeClass, scope = null, factor = null,
+ * settings = null )` types `settings` as `null`, so inside `if ( settings !==
+ * null )` it is `never`, while the callers do pass records.
  */
 export const objectAssignTargetType = (checker: ts.TypeChecker, node: ts.Node): ts.Type | null => {
   if (!isAuthenticatedObjectAssign(checker, node)) return null
@@ -1883,7 +1891,7 @@ export const objectAssignTargetType = (checker: ts.TypeChecker, node: ts.Node): 
   const fresh = ts.isObjectLiteralExpression(target) ? objectAssignFreshTargetType(checker, target) : null
   if (fresh !== null) return fresh
   const type = checker.getTypeAtLocation(target)
-  return (type.flags & ts.TypeFlags.Object) !== 0 ? type : null
+  return (type.flags & (ts.TypeFlags.Object | ts.TypeFlags.Any)) !== 0 ? type : null
 }
 
 /** `Object.assign(...)` on the real global with at least one source, resolved by declaration identity. */
@@ -3780,11 +3788,15 @@ export const censusedTypeAt = (
  * 171 `tagged-union` ones (a carrier kind the same program already selected
  * 2040 times), with `ops` unchanged and 92 FEWER unmet obligations.
  *
- * No flow narrowing is discarded by answering at a read, which is the one
- * thing that could make this unsound and the reason a census's `typeAt` needs
- * an equality guard for its ordinary bindings: a synthesized union arises only
- * where the declaration's own checker type is `any`, and `any` carries no
- * narrowing for a reference to report differently.
+ * A synthesized union arises only where the declaration's own checker type is
+ * `any`, but a guard still narrows `any`: `Array.isArray( value )` to `any[]`,
+ * `typeof value === 'string'` to `string`, `instanceof C` to `C`. Answering the
+ * whole union there would discard that narrowing, which is the one thing that
+ * could make this unsound. So a narrowed read answers the arms the narrowed
+ * type admits: three's `cyrb53( value )` is `string | number[]` from its
+ * callers, and `value[ i ]` under `Array.isArray( value )` reads the array arm
+ * rather than the sum, which has no computed read. A guard that admits no arm,
+ * or every arm, leaves the union as it is.
  *
  * `declarations.length === 1` is the same soleness test every resolver in this
  * module applies -- a name with two declarations is two cells, and answering
@@ -3800,5 +3812,10 @@ export const synthesizedUnionArmsAt = <D extends ts.Declaration>(
   if (!ts.isIdentifier(node)) return null
   const declarations = checker.getSymbolAtLocation(node)?.declarations
   const declaration = declarations && declarations.length === 1 ? declarations[0] : undefined
-  return declaration && owns(declaration) ? (arms.get(declaration) ?? null) : null
+  const all = declaration && owns(declaration) ? (arms.get(declaration) ?? null) : null
+  if (all === null) return null
+  const read = checker.getTypeAtLocation(node)
+  if ((read.flags & ts.TypeFlags.Any) !== 0) return all
+  const admitted = all.filter((arm) => checker.isTypeAssignableTo(arm, read))
+  return admitted.length === 0 ? all : admitted
 }

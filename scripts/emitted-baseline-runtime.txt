@@ -9,6 +9,7 @@ array-dynamic-element-search.ts.cpp 80d32b7cb646
 array-element-string-key.ts.cpp 82836dce1c7b
 array-index-absence.ts.cpp b9f1195e8e0b
 array-isarray-identity-conditional.ts.cpp 33c73a99fa8f
+array-literal-gathers-dynamic-into-class.runtime.js.cpp 7294712508f2
 array-multiple-windows.ts.cpp ee13367467b2
 array-mutator-frozen-integrity.ts.cpp f122fdb38185
 array-pattern-defaults-keep-positions.ts.cpp 9b003f6f7de9
@@ -131,7 +132,7 @@ dictionary-index-truthiness.ts.cpp 519009b6c81f
 dictionary-named-absence.ts.cpp dc9ba237a175
 direct-interface-method-receiver.ts.cpp 55d743cf5d7d
 downcast-method-read-absent-on-other-arm.ts.cpp 52495ee800d6
-drift.txt a9dc31e09729
+drift.txt ed53208eb6bf
 dynamic-array-absent-element.ts.cpp 6838ef917ebe
 dynamic-array-literal-gather.runtime.js.cpp 4c1e3d9c21cf
 dynamic-array-projection.ts.cpp 25d0cdd3b0d1
@@ -243,6 +244,7 @@ globalthis-as-optional-record.ts.cpp be3ce0b17f1d
 globalthis-reads-a-script-var.ts.cpp a6ef65170a56
 grouped-carrier-field-read.runtime.js.cpp 716308dd9372
 grouped-field-read.runtime.js.cpp 09e22eb4a9b9
+guard-narrows-census-union-parameter.runtime.js.cpp 34e98abe8bb2
 guarded-property-class-union.ts.cpp 65553d3e4fa7
 harness-is-writable-shape.runtime.js.cpp 72e0aa13cf5c
 hoisted-function-declaration-dependencies.ts.cpp c825ef865026
@@ -308,6 +310,7 @@ jsdoc-field-type-contradicted-by-writes.runtime.js.cpp f9608f5b2fc1
 jsdoc-optional-parameter.runtime.js.cpp 2cfb2703873b
 jsdoc-parameter-open-array-element.runtime.js.cpp cdfc7908b9cc
 jsdoc-return-open-array-element.runtime.js.cpp b7ee5fa4fc4d
+jsdoc-return-tag-contradicted-by-arrow.runtime.js.cpp 77d8407f51cd
 jsdoc-tag-leaves-null-out.runtime.js.cpp 7033bcb07563
 json-parse-as-a-value.ts.cpp 0ea01b076f42
 json-reader-dispatch.ts.cpp f43e28fc48ee
@@ -569,6 +572,7 @@ spread-call-immediately-invoked.runtime.js.cpp c5ae95452df2
 spread-fixed-arity-three.runtime.js.cpp 978c1dcd93de
 spread-fixed-arity-typed-array.ts.cpp b8a4802269a5
 spread-fixed-arity.ts.cpp 355a4e5a2a88
+spread-into-constructor-union.runtime.js.cpp 6cc180f3d547
 spread-into-untyped-callable.runtime.js.cpp d476762f9a54
 spread-new-reflected-constructor.runtime.js.cpp f64547d3e4fa
 stable-binding-identity.ts.cpp a2bfde725b86
@@ -609,6 +613,7 @@ template-strings-readonly-array.ts.cpp a3aa686bb2ad
 then-callback-returns-value-or-promise-union.ts.cpp c86d58270dc6
 then-handler-value-into-a-void-result.ts.cpp 8fb52f13f20c
 then-over-a-union-of-promises.ts.cpp 78a71a345dc0
+to-number-of-array-arm.runtime.js.cpp 5cae5fd99a6f
 to-string-of-a-class-and-a-union.ts.cpp 348d69161490
 to-string-of-an-error-and-a-typed-array.ts.cpp 1feedd78f698
 top-level-await-dep.ts.cpp 819900fb3403

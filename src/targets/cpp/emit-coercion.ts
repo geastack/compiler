@@ -40,6 +40,15 @@ export const coercionText = (
   }
   const direct = toNumberText(text, source)
   if (direct !== null) return direct
+  // A sum whose arms are not all primitives: each arm takes its own ToNumber
+  // through this function, an object arm through its string. three's
+  // `this.vars[ idNS ] ++` reads a `number | NodeVar[]` dictionary entry.
+  if (source.kind === 'tagged-union') {
+    const arms = source.arms.map((arm, index) => coercionText(operation, `${text}.get<${index}>()`, arm.value, layouts))
+    if (arms.some((arm) => arm === null) || arms.length === 0) return null
+    const texts = arms.map((arm) => `static_cast<double>(${arm})`)
+    return `(${texts.reduceRight((chain, arm, index) => `${text}.is<${index}>() ? ${arm} : ${chain}`)})`
+  }
   if (!toStringOnlyObjectKinds.has(source.kind) || isDateCarrier(source)) return null
   const primitive = toStringTextOver(text, source, layouts)
   return primitive === null ? null : `gea::host::detail::toNumber(std::string(${primitive}))`

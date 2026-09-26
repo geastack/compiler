@@ -2184,9 +2184,63 @@ const constructConventionOf = (representation: Representation): CallableAbi | nu
 }
 
 /**
+ * The rest array one arm of a constructor union binds: the arguments past its
+ * named formals, each converted into the rest element, and, where the site
+ * spreads (`ConstructOperation.spreadTail`), the rest of the spread's list
+ * range-copied in after them. Converted per arm, inside the arm's own branch,
+ * because only the selected arm's element carrier is the one to convert to.
+ */
+const unionRestArgumentText = (
+  ctx: EmitContext,
+  operation: ConstructOperation,
+  abi: CallableAbi,
+  restFrom: number,
+  index: number
+): string => {
+  const rest = abi.parameters[restFrom]?.value
+  if (rest?.kind !== 'array-object') {
+    throw createCppEmitBlockedError(
+      'call-abi:tagged-union-construct',
+      `constructor-union arm ${index} declares a rest slot that is not an array-object`
+    )
+  }
+  const element = rest.element
+  const tail = operation.spreadTail
+  const written =
+    tail === undefined ? operation.arguments.slice(restFrom) : operation.arguments.slice(restFrom, Math.max(restFrom, tail.from))
+  const name = 'gea_union_rest'
+  const lines = [`auto ${name} = gea::makeRef<gea::ArrayObject<${cppTypeOf(element)}>>();`]
+  for (const argument of written) lines.push(`${name}->push(${alignedText(ctx, element, argument, 'union construct rest')});`)
+  if (tail !== undefined) {
+    if (tail.list.representation.kind !== 'array-object') {
+      throw createCppEmitBlockedError('call-abi:tagged-union-construct', 'a spread construction names a list that is not an array-object')
+    }
+    const from = Math.max(0, restFrom - tail.from)
+    const source = tail.list.representation.element
+    if (representationKey(source) === representationKey(element))
+      lines.push(`${name}->appendRange(*${operandText(ctx, tail.list)}, ${from});`)
+    else {
+      const converted = alignedValueText(ctx, 'emit-callable.ts:union-construct-rest', source, element, 'gea_element')
+      if (converted === null) {
+        throw createCppEmitBlockedError(
+          `conversion:${representationKey(source)}->${representationKey(element)}`,
+          `constructor-union arm ${index}'s rest slot holds "${representationKey(element)}", which a spread element carried as "${representationKey(source)}" cannot fill`
+        )
+      }
+      lines.push(
+        `${name}->appendRangeConverted(*${operandText(ctx, tail.list)}, ${from}, [&](const ${cppTypeOf(source)}& gea_element) { return ${converted}; });`
+      )
+    }
+  }
+  return `[&]() { ${lines.join(' ')} return ${name}; }()`
+}
+
+/**
  * `new (condition ? A : B)(...)` where every live alternative is a real
  * constructor carrier. The sum keeps each alternative's frame intact, so the
  * discriminant selects both the construct pointer and the result conversion.
+ * An arm with a rest formal binds its named formals from the arguments and
+ * the rest from what is left (`unionRestArgumentText`).
  */
 const emitTaggedUnionConstruct = (ctx: EmitContext, lines: string[], operation: ConstructOperation): boolean => {
   const callee = operation.callee.representation
@@ -2195,17 +2249,30 @@ const emitTaggedUnionConstruct = (ctx: EmitContext, lines: string[], operation: 
     throw createCppEmitBlockedError('call-abi:tagged-union-construct', 'a constructor union has no live alternatives')
   const branches = callee.arms.map((arm, index) => {
     const abi = constructConventionOf(arm.value)
-    if (abi === null || abi.receiver !== null || abi.restFrom !== null) {
+    if (abi === null || abi.receiver !== null) {
       throw createCppEmitBlockedError(
         'call-abi:tagged-union-construct',
-        `constructor-union arm ${index} carries "${representationKey(arm.value)}", not a fixed receiver-free [[Construct]] convention`
+        `constructor-union arm ${index} carries "${representationKey(arm.value)}", not a receiver-free [[Construct]] convention`
       )
     }
-    const args = receivableArguments(abi, operation.arguments).map((argument, position) =>
-      argumentText(ctx, abi, position, argument, 'union construct')
-    )
+    if (abi.restFrom === null && operation.spreadTail !== undefined && operation.arguments.length < abi.parameters.length) {
+      throw createCppEmitBlockedError(
+        'call-abi:tagged-union-construct',
+        `a spread construction reads fewer positions than arm ${index}'s formals`
+      )
+    }
+    const restFrom = abi.restFrom
+    const named = restFrom === null ? receivableArguments(abi, operation.arguments) : operation.arguments.slice(0, restFrom)
+    const args = named.map((argument, position) => argumentText(ctx, abi, position, argument, 'union construct'))
+    const padded =
+      restFrom === null
+        ? paddedArguments(abi, args, 'union construct')
+        : [
+            ...paddedArguments({ ...abi, parameters: abi.parameters.slice(0, restFrom), restFrom: null }, args, 'union construct'),
+            unionRestArgumentText(ctx, operation, abi, restFrom, index)
+          ]
     const selected = `gea_union_constructor.get<${index}>()`
-    const invocation = `${selected}.construct(${paddedArguments(abi, args, 'union construct').join(', ')})`
+    const invocation = `${selected}.construct(${padded.join(', ')})`
     const converted = convertedConstructInvocationText(ctx, abi.result, operation.result.representation, invocation)
     if (converted === null) {
       throw createCppEmitBlockedError(

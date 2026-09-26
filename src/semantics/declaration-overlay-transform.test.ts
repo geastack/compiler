@@ -653,6 +653,28 @@ export function trailing( count, tag ) { return count; }
   assert.equal(types.get('tag'), 'string')
 })
 
+test('an Array tag given more type arguments than Array takes yields to the declared tuple', () => {
+  const source = `
+export class Angles {
+  /** @param {Array<number,number,number,?string>} array @return {Angles} */
+  fromArray( array ) { return this }
+  /** @param {Array<number>} values @return {Angles} */
+  scale( values ) { return this }
+  /** @param {Array<number,number,number,string>} [target=[]] @return {Array<number>} */
+  toArray( target = [] ) { return target }
+}
+`
+  const text = overlayRecord('tuples', source)
+  const { types } = parameterTypes('tuples', text)
+  // The checker reads `Array<number, ...>` as `number[]`; the declaration's
+  // tuple is what the tag meant.
+  assert.equal(types.get('array'), '[x: number, y: number, z: number, order?: "XYZ" | "YXZ"]')
+  // A well-formed `Array<T>` is a statement of its own, and is left alone.
+  assert.equal(types.get('values'), 'number[]')
+  // A defaulted parameter keeps its tag: `[]` is no tuple of the declared arity.
+  assert.equal(types.get('target'), 'number[]')
+})
+
 test('a record method the declaration types compiles to a native signature', () => {
   const name = 'records'
   const source = `

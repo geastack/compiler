@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
+import { dirname, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import ts from 'typescript'
@@ -82,9 +82,10 @@ test('a plugin states the policy through compile --plugin', () => {
       ],
       { cwd: fixture, encoding: 'utf8', timeout: 120000 }
     )
+  // The CLI prints the checker's file names, which use '/' on every platform.
   const reported = (result) => {
     assert.ifError(result.error)
-    return (file) => result.stderr.includes(`${file}:`)
+    return (file) => result.stderr.includes(`${file.split(sep).join('/')}:`)
   }
   const withPlugin = reported(invoke(['--plugin', './unchecked-plugin.mjs']))
   for (const file of covered) assert.ok(!withPlugin(file), file)

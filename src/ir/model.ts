@@ -521,6 +521,14 @@ export interface ConstructOperation extends IrOperationBase {
    */
   readonly hostFrame?: CallableAbi
   readonly arguments: readonly IrOperand[]
+  /**
+   * A construction through a sum of constructors whose argument list spreads
+   * (`ir/lower-operands.ts`'s `spreadConstructArguments`). `arguments` from
+   * `from` on are reads of `list` at `0, 1, ...`, enough for every arm's
+   * named formals; an arm with a rest formal takes the rest of `list` itself,
+   * whose length is only known at run time.
+   */
+  readonly spreadTail?: { readonly from: number; readonly list: IrOperand }
   readonly result: IrResult
 }
 
