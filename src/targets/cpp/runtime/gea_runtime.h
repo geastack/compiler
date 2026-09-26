@@ -23911,6 +23911,14 @@ Optional<PropertyDescriptor> nativeOwnPropertyDescriptor(const gea::Ref<T>& obje
   return descriptor ? Optional<PropertyDescriptor>(*descriptor) : Optional<PropertyDescriptor>();
 }
 
+inline const void* Value::identity() const {
+  if (tag_ == Tag::Object || tag_ == Tag::Function) {
+    const gea::Ref<void> anchor = expandoAnchor();
+    if (anchor) return anchor.get();
+  }
+  return held_ ? held_.get() : this;
+}
+
 /**
  * Every native own key from the fixed field table, typed index sidecar, and
  * dynamic expando, globally ordered as one ECMAScript object.
