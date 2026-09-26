@@ -1875,6 +1875,14 @@ export const isStandardGlobalValue = (checker: ts.TypeChecker, expression: ts.Ex
  *
  * A primitive target is excluded because Object.assign first boxes it, and
  * this backend does not implement wrapper-object carriers.
+ *
+ * An `any` target is the same identity: the result is whatever the target
+ * is. The checker agrees (`any & U` is `any`) except where a source is
+ * `never`, and then the call publishes `never` and mints no value for its
+ * consumer to read. That happens under a guard the checker thinks cannot
+ * pass: three's `ShaderNodeProxy( NodeClass, scope = null, factor = null,
+ * settings = null )` types `settings` as `null`, so inside `if ( settings !==
+ * null )` it is `never`, while the callers do pass records.
  */
 export const objectAssignTargetType = (checker: ts.TypeChecker, node: ts.Node): ts.Type | null => {
   if (!isAuthenticatedObjectAssign(checker, node)) return null
@@ -1883,7 +1891,7 @@ export const objectAssignTargetType = (checker: ts.TypeChecker, node: ts.Node): 
   const fresh = ts.isObjectLiteralExpression(target) ? objectAssignFreshTargetType(checker, target) : null
   if (fresh !== null) return fresh
   const type = checker.getTypeAtLocation(target)
-  return (type.flags & ts.TypeFlags.Object) !== 0 ? type : null
+  return (type.flags & (ts.TypeFlags.Object | ts.TypeFlags.Any)) !== 0 ? type : null
 }
 
 /** `Object.assign(...)` on the real global with at least one source, resolved by declaration identity. */
