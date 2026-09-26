@@ -2605,18 +2605,17 @@ const buildMapper = (
   }
 
   /**
-   * A parameter defaulted to `null` whose stated type leaves `null` out:
-   * three's `getCacheKey( force = false, ignores = null )` under `@param
-   * {Set<Node>} [ignores=null]`, and `getNodeType( builder, output = null )`
-   * under `@param {string} [output=null]`. three's files are unchecked, so
-   * nothing rejects the default, and the binding really does hold `null`
-   * whenever the caller omits the argument -- the language binds the
-   * initializer's value, whatever the tag says. Typed by the tag alone, the
-   * default had no conversion into the slot, and every `ignores === null`
-   * read would have unwrapped a value the cell does not hold. The parameter,
-   * its ABI slot and each read of it carry the `null` too; a read the checker
-   * narrowed to nothing (`ignores === null` itself) is the `null` the test
-   * found.
+   * An untagged parameter the checker typed by its `null` default alone:
+   * `ShaderNodeProxy( NodeClass, scope = null, factor = null, settings = null )`
+   * in three's TSLCore.js is `settings: null`, while its callers pass objects
+   * and the body reads `settings.intent` past a `settings !== null` test the
+   * checker then calls unreachable. A default value is not a type
+   * (`parameter-bindings.ts`'s `isUnannotated` says the same), so the
+   * parameter, its ABI slot and each read of it hold what the callers pass,
+   * beside the `null`: the census's answer when it has one, the dynamic
+   * carrier when not. A TAGGED parameter's `null` default is the tag's own
+   * statement to correct, and `absent-jsdoc-tags.ts` corrects it before the
+   * checker reads it.
    */
   const nullDefaultedParameterReadAt = (node: ts.Node): ts.Type | null => {
     const declaration = ts.isParameter(node)
@@ -2625,31 +2624,11 @@ const buildMapper = (
         ? checker.getSymbolAtLocation(node)?.valueDeclaration
         : undefined
     if (!declaration || !ts.isParameter(declaration) || declaration.dotDotDotToken) return null
-    if (declaration.initializer?.kind !== ts.SyntaxKind.NullKeyword) return null
+    if (declaration.initializer?.kind !== ts.SyntaxKind.NullKeyword || declaration.type || ts.getJSDocType(declaration)) return null
     if (ts.isIdentifier(node) && node === declaration.name) return null
-    // The tag decides, not the read: a read the checker narrowed past a `null`
-    // test the tag DOES admit (`@param {?string} [node]`) is that narrowing.
-    const stated = absentSubstitutedTypeAt(declaration)
-    // No tag at all, and the checker typed the parameter by its default
-    // alone: `ShaderNodeProxy( NodeClass, scope = null, factor = null,
-    // settings = null )` in three's TSLCore.js is `settings: null`, while its
-    // callers pass objects and the body reads `settings.intent` past a
-    // `settings !== null` test the checker then calls unreachable. A default
-    // value is not a type (`parameter-bindings.ts`'s `isUnannotated` says the
-    // same), so the parameter holds what its callers pass, beside the `null`:
-    // the census's answer when it has one, the dynamic carrier when not.
-    if ((stated.flags & ts.TypeFlags.Null) !== 0 && !declaration.type && !ts.getJSDocType(declaration)) {
-      const passed = parameters.typeAt(declaration)
-      return passed && !isUnusableEvidence(passed) ? checker.getNullableType(passed, ts.TypeFlags.Null) : checker.getAnyType()
-    }
-    const admitsNull = (type: ts.Type): boolean =>
-      (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Null)) !== 0 ||
-      (type.isUnion() && type.types.some((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0))
-    if (admitsNull(stated)) return null
-    const own = node === declaration ? stated : absentSubstitutedTypeAt(node)
-    if (admitsNull(own)) return null
-    if ((own.flags & ts.TypeFlags.Never) !== 0) return ts.isIdentifier(node) ? checker.getNullType() : null
-    return checker.getNullableType(own, ts.TypeFlags.Null)
+    if ((absentSubstitutedTypeAt(declaration).flags & ts.TypeFlags.Null) === 0) return null
+    const passed = parameters.typeAt(declaration)
+    return passed && !isUnusableEvidence(passed) ? checker.getNullableType(passed, ts.TypeFlags.Null) : checker.getAnyType()
   }
 
   /**
@@ -3627,8 +3606,8 @@ const buildMapper = (
   )
   const structuralRules: readonly StructuralRule[] = [
     {
-      // First: the tag's own answer, which every later rule starts from, is
-      // the one that leaves the default's `null` out.
+      // First: the checker's own answer, which every later rule starts from,
+      // is the default's `null` alone.
       name: 'null-defaulted-parameter',
       forms: [ts.SyntaxKind.Parameter, ts.SyntaxKind.Identifier],
       resolve: (node) => {

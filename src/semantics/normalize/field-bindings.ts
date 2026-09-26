@@ -1255,46 +1255,15 @@ export const censusFieldBindings = (
 
   /** The `unionArmsAt` shape asked of `statedBindings` -- the same two symbol-resolving node kinds, a leaf lookup rather than a walk. */
   const statedTypeAt = (node: ts.Node): ts.Type | null => {
+    if (statedBindings.size === 0) return null
     const symbol = ts.isPropertyDeclaration(node)
       ? checker.getSymbolAtLocation(node.name)
       : ts.isPropertyAccessExpression(node)
-        ? statedBindings.size > 0
-          ? memberSymbolAt(node)
-          : checker.getSymbolAtLocation(node)
+        ? memberSymbolAt(node)
         : ts.isElementAccessExpression(node)
           ? checker.getSymbolAtLocation(node)
           : undefined
-    if (!symbol) return null
-    return statedBindings.get(symbol) ?? absenceStoredReadAt(symbol, node)
-  }
-
-  /**
-   * A field whose stated type leaves `null` out while the program stores a
-   * `null` into it: three's `Node._uuid` is tagged `@type {string}` and
-   * initialized `this._uuid = null` until the `uuid` getter fills it, and
-   * `ReferenceNode.name` is the same. The file is unchecked, so nothing
-   * rejects the store, and the field holds `null` until the next one; laid
-   * out by the tag alone the store had no conversion (`null -> string`) and
-   * the getter's `this._uuid === null` test read a value that cannot be null.
-   * The field and each read of it carry the `null` beside the tag's type; a
-   * read the checker narrowed to nothing is the `null` that test found. A
-   * `null` store is the evidence and nothing else is: a tag some other value
-   * contradicts is `contradicted-jsdoc-types.ts`'s question, not this one.
-   */
-  const absenceStored = new Map<ts.Symbol, boolean>()
-  const absenceStoredReadAt = (symbol: ts.Symbol, node: ts.Node): ts.Type | null => {
-    let stored = absenceStored.get(symbol)
-    if (stored === undefined) {
-      const declared = checker.getTypeOfSymbol(symbol)
-      stored =
-        !admitsNull(declared) &&
-        flow.writesToSymbol(symbol).some((write) => isFieldEvidence(write) && write.value?.kind === ts.SyntaxKind.NullKeyword)
-      absenceStored.set(symbol, stored)
-    }
-    if (!stored) return null
-    const own = ts.isPropertyDeclaration(node) ? checker.getTypeOfSymbol(symbol) : checker.getTypeAtLocation(node)
-    if ((own.flags & ts.TypeFlags.Never) !== 0) return checker.getNullType()
-    return admitsNull(own) ? null : checker.getNullableType(own, ts.TypeFlags.Null)
+    return symbol ? (statedBindings.get(symbol) ?? null) : null
   }
 
   return {
@@ -1342,8 +1311,3 @@ export const withFieldBindings = (
     refusals
   }
 }
-
-/** Whether a type already holds `null`, or states nothing a `null` could be told apart from. */
-const admitsNull = (type: ts.Type): boolean =>
-  (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Null | ts.TypeFlags.Never)) !== 0 ||
-  (type.isUnion() && type.types.some((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0))

@@ -10,6 +10,7 @@ import { scriptScopeCollisionsOf } from './script-scope-collisions.js'
 import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
 import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 import { contradictedJsDocTypeBlanks } from './contradicted-jsdoc-types.js'
+import { absentJsDocTagWidenings } from './absent-jsdoc-tags.js'
 import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
 import { createUncheckedJavaScriptPolicy, markUnchecked } from './unchecked-javascript.js'
 import { createScopedTypeRealizer, type ScopedTypeRealization } from './scoped-type-realizations.js'
@@ -922,9 +923,12 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
   // prepared: each of the three blanks bytes in place, so none moves another's
   // offsets (`contradicted-jsdoc-types.ts`).
   const contradictions = timing.measure('contradicted-jsdoc-types', () => contradictedJsDocTypeBlanks(configured.program, prepared))
-  if (preparation.audit.length > 0 || redeclarations.size > 0 || contradictions.size > 0) {
+  // Composed onto both, and in place like them (`absent-jsdoc-tags.ts`).
+  const blanked = new Map([...prepared, ...contradictions])
+  const absences = timing.measure('absent-jsdoc-tags', () => absentJsDocTagWidenings(configured.program, blanked))
+  if (preparation.audit.length > 0 || redeclarations.size > 0 || contradictions.size > 0 || absences.size > 0) {
     resolutionDiagnostics.length = 0
-    configured = configuredProgram(input, resolutionDiagnostics, new Map([...prepared, ...contradictions]), timing, transformed)
+    configured = configuredProgram(input, resolutionDiagnostics, new Map([...blanked, ...absences]), timing, transformed)
   }
   const program = configured.program
   const checker = withStableTypeQueries(program.getTypeChecker())
