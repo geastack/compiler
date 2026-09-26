@@ -122,7 +122,28 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
     const member = memberOf(node)
     if (!member) return null
     const type = checker.getTypeOfSymbol(member)
-    return readsAsAny(type) ? null : type
+    return readsAsAny(type) ? namedFieldTagOf(member) : type
+  }
+  // A JS field's `@type` naming a class its file never imports, read as
+  // `field-bindings.ts` reads it: three's NodeManager stores `/** @type
+  // {Backend} */ this.backend = backend`, so `this.backend.createNodeBuilder(
+  // ... )` is a call of `Backend`'s method, and `renderObject.object` (`@type
+  // {Object3D}` in `RenderObject.js`, which imports no `Object3D`) is an
+  // `Object3D`.
+  const namedFieldTagOf = (member: ts.Symbol): ts.Type | null => {
+    const declarations = member.declarations ?? []
+    if (declarations.length === 0) return null
+    let answer: ts.Type | null = null
+    for (const declaration of declarations) {
+      if (!ts.isBinaryExpression(declaration) || declaration.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return null
+      const tag = ts.getJSDocType(declaration)
+      if (!tag) continue
+      if (!readsAsAny(checker.getTypeFromTypeNode(tag))) return null
+      const resolved = names.resolve(tag, declaration.getSourceFile().fileName)
+      if (!('type' in resolved) || (answer !== null && answer !== resolved.type)) return null
+      answer = resolved.type
+    }
+    return answer
   }
   const memberOf = (access: ts.PropertyAccessExpression): ts.Symbol | null => {
     const owner = typeOfExpression(access.expression)
@@ -135,6 +156,59 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
     if (!readsAsAny(checker.getTypeAtLocation(call.expression.expression))) return undefined
     const declaration = memberOf(call.expression)?.valueDeclaration
     return declaration && ts.isMethodDeclaration(declaration) ? declaration : undefined
+  }
+  // A call of a class method runs whichever override the receiver's class
+  // declares, so its arguments are what each override's parameters hold too.
+  // three's `Backend.createNodeBuilder()` states no parameters at all, and
+  // every caller goes through it (`this.backend.createNodeBuilder(
+  // renderObject.object, this.renderer )`, `( computeNode, ... )`), while
+  // `WebGPUBackend`'s and `WebGLBackend`'s overrides tag `@param
+  // {RenderObject} object`: read only at the base, no caller ever reached
+  // the overrides' tags.
+  let methodsByName: Map<string, ts.MethodDeclaration[]> | undefined
+  const overridesOf = (method: ts.MethodDeclaration): readonly ts.MethodDeclaration[] => {
+    const owner = method.parent
+    if (!ts.isClassLike(owner) || !ts.isIdentifier(method.name) || isStatic(method)) return []
+    const ownerSymbol = owner.name ? checker.getSymbolAtLocation(owner.name) : undefined
+    if (!ownerSymbol) return []
+    if (!methodsByName) {
+      methodsByName = new Map()
+      for (const file of unchecked) {
+        const collect = (node: ts.Node): void => {
+          if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name) && ts.isClassLike(node.parent) && !isStatic(node) && node.body) {
+            const list = methodsByName?.get(node.name.text) ?? []
+            list.push(node)
+            methodsByName?.set(node.name.text, list)
+          }
+          ts.forEachChild(node, collect)
+        }
+        collect(file)
+      }
+    }
+    return (methodsByName.get(method.name.text) ?? []).filter(
+      (candidate) => candidate !== method && derivesFrom(candidate.parent as ts.ClassLikeDeclaration, ownerSymbol)
+    )
+  }
+  const derivesFrom = (subclass: ts.ClassLikeDeclaration, base: ts.Symbol): boolean => {
+    const symbol = subclass.name ? checker.getSymbolAtLocation(subclass.name) : undefined
+    if (!symbol) return false
+    const seen = new Set<ts.Symbol>()
+    let frontier: ts.Type[] = [checker.getDeclaredTypeOfSymbol(symbol)]
+    while (frontier.length > 0) {
+      const next: ts.Type[] = []
+      for (const type of frontier) {
+        if (!type.isClassOrInterface()) continue
+        for (const parent of checker.getBaseTypes(type)) {
+          const parentSymbol = parent.getSymbol()
+          if (!parentSymbol || seen.has(parentSymbol)) continue
+          if (parentSymbol === base) return true
+          seen.add(parentSymbol)
+          next.push(parent)
+        }
+      }
+      frontier = next
+    }
+    return false
   }
 
   const contradicts = (argument: ts.Expression, tag: ts.JSDocParameterTag): boolean => {
@@ -206,35 +280,66 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
     }
   }
 
+  // Every argument that contradicts a tag, kept per tag: which of them still
+  // count is settled once every tag has been read (below).
+  const evidence = new Map<ts.JSDocParameterTag, ts.Expression[]>()
+  const tagOf = (parameter: ts.ParameterDeclaration): ts.JSDocParameterTag | undefined =>
+    ts.getJSDocParameterTags(parameter).find((candidate) => candidate.typeExpression !== undefined)
+  const readArguments = (call: ts.CallExpression | ts.NewExpression, declaration: ts.SignatureDeclaration): void => {
+    call.arguments?.forEach((argument, index) => {
+      if (ts.isSpreadElement(argument)) return
+      const parameter = declaration.parameters[index]
+      if (!parameter || parameter.dotDotDotToken) return
+      if (ts.isObjectLiteralExpression(argument)) contradictMemberTags(parameter, argument)
+      if (parameter.initializer && !isAbsence(checker, parameter.initializer)) return
+      const tag = tagOf(parameter)
+      if (!tag || !contradicts(argument, tag)) return
+      parameterOfTag.set(tag, parameter)
+      evidence.set(tag, [...(evidence.get(tag) ?? []), argument])
+    })
+  }
   for (const file of unchecked) {
     const visit = (node: ts.Node): void => {
       if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && node.arguments && node.arguments.length > 0) {
         const declaration = calleeOf(node)
         if (declaration && !ts.isJSDocSignature(declaration) && isUncheckedJavaScript(declaration.getSourceFile())) {
-          node.arguments.forEach((argument, index) => {
-            if (ts.isSpreadElement(argument)) return
-            const parameter = declaration.parameters[index]
-            if (!parameter || parameter.dotDotDotToken) return
-            if (ts.isObjectLiteralExpression(argument)) contradictMemberTags(parameter, argument)
-            if (parameter.initializer && !isAbsence(checker, parameter.initializer)) return
-            const tag = ts.getJSDocParameterTags(parameter).find((candidate) => candidate.typeExpression !== undefined)
-            if (tag && !contradicted.has(tag) && contradicts(argument, tag)) {
-              contradicted.add(tag)
-              parameterOfTag.set(tag, parameter)
-              if (process.env['GEA_JSDOC_CONTRADICTION_DEBUG']) {
-                const at = (where: ts.Node): string => {
-                  const source = where.getSourceFile()
-                  return `${source.fileName}:${source.getLineAndCharacterOfPosition(where.getStart(source)).line + 1}`
-                }
-                process.stderr.write(`[JSDOC-CONTRADICTED-PARAM] ${at(tag)} ${parameter.name.getText()} by ${at(argument)}\n`)
-              }
-            }
-          })
+          readArguments(node, declaration)
+          if (ts.isMethodDeclaration(declaration)) for (const override of overridesOf(declaration)) readArguments(node, override)
         }
       }
       ts.forEachChild(node, visit)
     }
     visit(file)
+  }
+  // An argument that is a parameter whose own tag is contradicted holds what
+  // that parameter's callers pass, not what its tag states, so it is no
+  // evidence against the next tag down: three's `WebGPUBackend.createNodeBuilder(
+  // object, renderer )` hands its `@param {RenderObject} object` on to `new
+  // WGSLNodeBuilder( object, renderer )` under `@param {Object3D} object`, and
+  // the callers pass an `Object3D`. Read at the first tag, it blanked the
+  // second, whose parameter then held the first tag's `RenderObject`.
+  const blankedParameterOf = (argument: ts.Expression): boolean => {
+    let node = argument
+    while (ts.isParenthesizedExpression(node)) node = node.expression
+    if (!ts.isIdentifier(node)) return false
+    const declarations = checker.getSymbolAtLocation(node)?.declarations ?? []
+    const [declaration] = declarations
+    if (declarations.length !== 1 || !declaration || !ts.isParameter(declaration)) return false
+    const tag = tagOf(declaration)
+    return tag !== undefined && evidence.has(tag)
+  }
+  for (const [tag, arguments_] of evidence) {
+    const counted = arguments_.filter((argument) => !blankedParameterOf(argument))
+    const [first] = counted
+    if (!first) continue
+    contradicted.add(tag)
+    if (process.env['GEA_JSDOC_CONTRADICTION_DEBUG']) {
+      const at = (where: ts.Node): string => {
+        const source = where.getSourceFile()
+        return `${source.fileName}:${source.getLineAndCharacterOfPosition(where.getStart(source)).line + 1}`
+      }
+      process.stderr.write(`[JSDOC-CONTRADICTED-PARAM] ${at(tag)} ${parameterOfTag.get(tag)?.name.getText()} by ${at(first)}\n`)
+    }
   }
 
   // A field the function stores the parameter in, tagged with the very type
@@ -246,6 +351,7 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
   // with the parameter's.
   const blankedTags: ts.JSDocTag[] = [...contradicted]
   for (const [tag, parameter] of parameterOfTag) {
+    if (!contradicted.has(tag)) continue
     const owner = parameter.parent
     const body = 'body' in owner ? owner.body : undefined
     if (!tag.typeExpression || !body || !ts.isBlock(body) || !ts.isIdentifier(parameter.name)) continue
@@ -286,3 +392,5 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
 /** `null`, or a value the checker types `undefined`, written as a default. */
 const isAbsence = (checker: ts.TypeChecker, value: ts.Expression): boolean =>
   value.kind === ts.SyntaxKind.NullKeyword || (checker.getTypeAtLocation(value).flags & ts.TypeFlags.Undefined) !== 0
+
+const isStatic = (member: ts.MethodDeclaration): boolean => (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) !== 0
