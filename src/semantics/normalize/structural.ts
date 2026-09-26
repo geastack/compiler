@@ -2630,6 +2630,18 @@ const buildMapper = (
     // The tag decides, not the read: a read the checker narrowed past a `null`
     // test the tag DOES admit (`@param {?string} [node]`) is that narrowing.
     const stated = absentSubstitutedTypeAt(declaration)
+    // No tag at all, and the checker typed the parameter by its default
+    // alone: `ShaderNodeProxy( NodeClass, scope = null, factor = null,
+    // settings = null )` in three's TSLCore.js is `settings: null`, while its
+    // callers pass objects and the body reads `settings.intent` past a
+    // `settings !== null` test the checker then calls unreachable. A default
+    // value is not a type (`parameter-bindings.ts`'s `isUnannotated` says the
+    // same), so the parameter holds what its callers pass, beside the `null`:
+    // the census's answer when it has one, the dynamic carrier when not.
+    if ((stated.flags & ts.TypeFlags.Null) !== 0 && !declaration.type && !ts.getJSDocType(declaration)) {
+      const passed = parameters.typeAt(declaration)
+      return passed && !isUnusableEvidence(passed) ? checker.getNullableType(passed, ts.TypeFlags.Null) : checker.getAnyType()
+    }
     const admitsNull = (type: ts.Type): boolean =>
       (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Null)) !== 0 ||
       (type.isUnion() && type.types.some((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0))
