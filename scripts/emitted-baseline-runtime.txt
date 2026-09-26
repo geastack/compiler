@@ -22,6 +22,7 @@ array-shift-tostring-once.runtime.js.cpp 3b871dab34f1
 asserted-arm-into-interface-slot.ts.cpp ab0d11a21074
 assign-for-in-generic.ts.cpp 00fa51c20b53
 assigned-field-collection-census.runtime.js.cpp 00941ae0191c
+assignment-declared-array-field.runtime.js.cpp e9b6234a4254
 async-integer-result.ts.cpp 40d406729713
 async-return-promise-undefined-into-void.ts.cpp 9f3bd1364eac
 await-over-an-optional-thenable.ts.cpp fdab8693a27f
