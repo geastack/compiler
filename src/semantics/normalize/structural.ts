@@ -1335,6 +1335,13 @@ const buildMapper = (
   const keyofOfShapeId = createKeyofResolver(table)
 
   function typeOf(type: ts.Type): StructuralTypeId {
+    // A type the host states absent is `never` wherever it is reached -- an
+    // array's element, a field, a signature's result -- not only as a union
+    // arm or a node's own type: `Array<Image>` holds no value an `Image` could
+    // be, and asking for its element carrier demanded a native boundary for a
+    // class that is not there.
+    const present = absent.substituteAbsentType(type)
+    if (present !== type) return typeOf(present)
     // Assignment-connected record views must agree before any layout is
     // interned, including the element reached through an array or tuple.
     const storage = storageTypeOf(type)

@@ -141,7 +141,14 @@ export const mergeIncoming = (
   // no length and no future write, so only a `===` against the arm's own
   // binding could tell them apart -- and that arm previously did not lower at
   // all.
+  //
+  // Except where the arm already holds the merge's own carrier: then there is
+  // nothing to rebuild and the arm's array is the value. A slot typed only by
+  // a host-absent type (`Array<Image>`, `absent-globals.ts`) is `never[]`
+  // while the array a caller passed is a real one it may compare by `===`.
   if (representation.kind === 'array-object' && materialization === 'empty-array') {
+    const held = resolveRequiredOperand(ctx, block, lineage, operand)
+    if (representationKey(held.representation) === representationKey(representation)) return held
     return { value: ctx.builder.allocateArrayObject(block, lineage, [], representation), representation }
   }
   // The same construction where the merge's carrier is a stated-native array

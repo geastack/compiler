@@ -50,6 +50,7 @@ import {
   passingOf,
   representationKey,
   soleArrayPatternCapableArm,
+  soleIterableArmOf,
   type CallableAbi,
   type Representation
 } from './model.js'
@@ -265,7 +266,10 @@ const nativeCursorIteratorOf = (
   // builds this wrapper for exactly the unions that helper admits (and
   // COLLAPSES it for the three carriers that hold their own absence, so a
   // `class-ref`, a `native-handle` and the box never arrive wrapped).
-  const source = derived.kind === 'optional' ? derived.payload : derived
+  // A sum whose one walkable arm is beside primitives walks that arm; the
+  // lowering narrows the source to it first (`soleIterableArmOf`).
+  const walked = (operandOf(operation, 'method') ? null : soleIterableArmOf(derived)) ?? derived
+  const source = walked.kind === 'optional' ? walked.payload : walked
   // A `never` source (`producers/shared.ts`'s `isNeverIterationSource`): its
   // cursor is never built, and what it would yield is the storage-free value.
   if (source.kind === 'void' && source.bottom === true) return sequenceIterator({ kind: 'undefined' })

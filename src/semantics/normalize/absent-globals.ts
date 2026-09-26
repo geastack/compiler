@@ -79,9 +79,11 @@ export interface AbsentGlobalCensus {
    * *before* it is interned needs no such reconstruction at all: every member
    * is already its own independent `ts.Type`, `getNeverType()` is public, and
    * a member that becomes `never` is dropped by the existing structural rule
-   * with no new plumbing. See `structural.ts`'s union case for where this
-   * wants to be called -- `type.types.map(typeOf)` becomes
-   * `type.types.map((member) => typeOf(absent.substituteAbsentType(member)))`.
+   * with no new plumbing. `structural.ts`'s `typeOf` asks it of every type it
+   * interns, so an array's element, a field and a signature's parameter are
+   * answered the same way a union arm is; a real value that reaches such a
+   * slot anyway is refused where it enters (`ir/lower-operands.ts`'s
+   * `dropsValue`), not dropped.
    *
    * Resolution is by SYMBOL, exactly as `typeAt` resolves by symbol rather
    * than by spelling: only a type whose OWN declaration is the standard
@@ -226,8 +228,45 @@ export const platformDeclarationTest =
  * lists.
  */
 const isAbsentAmbientType = (symbol: ts.Symbol | undefined, absent: ReadonlySet<string>, platform: PlatformTest): boolean => {
-  if (!symbol || !absent.has(symbol.getName())) return false
-  return (symbol.declarations ?? []).some((declaration) => isAmbient(declaration) && platform(declaration))
+  if (!symbol) return false
+  if (absent.has(symbol.getName()))
+    return (symbol.declarations ?? []).some((declaration) => isAmbient(declaration) && platform(declaration))
+  return isAbsentValueTypeLiteral(symbol, absent, platform)
+}
+
+/**
+ * Whether a type is the anonymous type an absent ambient VALUE was declared
+ * with -- `typeof Image`, lib.dom's `declare var Image: { new(width?: number,
+ * height?: number): HTMLImageElement }`.
+ *
+ * The type of a value that is not there is a type no value has: the literal
+ * belongs to that one declaration, so nothing else can be of it. It is also a
+ * type a program names without ever mentioning the value, because a JSDoc tag
+ * that names a value resolves to that value's type -- three.js's `@param
+ * {Image} image` and `@type {Array<Image>}` type their slots `typeof Image`,
+ * and each one demanded a constructor carrier whose construction yields an
+ * `HTMLImageElement` native handle.
+ *
+ * Only an anonymous literal written as the declaration's own annotation
+ * answers: `declare var Promise: PromiseConstructor` shares its interface with
+ * every other value of that type, so denying the interface would deny values
+ * that are there.
+ */
+const isAbsentValueTypeLiteral = (symbol: ts.Symbol, absent: ReadonlySet<string>, platform: PlatformTest): boolean => {
+  if ((symbol.flags & ts.SymbolFlags.TypeLiteral) === 0) return false
+  return (symbol.declarations ?? []).some((literal) => {
+    const variable = literal.parent
+    return (
+      ts.isTypeLiteralNode(literal) &&
+      variable !== undefined &&
+      ts.isVariableDeclaration(variable) &&
+      variable.type === literal &&
+      ts.isIdentifier(variable.name) &&
+      absent.has(variable.name.text) &&
+      isAmbient(variable) &&
+      platform(variable)
+    )
+  })
 }
 
 /**
