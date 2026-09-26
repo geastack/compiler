@@ -1411,6 +1411,27 @@ const isHostNamespacePathLike = (input: HostProtocolInput, path: string): boolea
 }
 
 /**
+ * The language's own iteration interfaces (ECMA-262 27.1.1, and TypeScript's
+ * `IterableIterator`/`AsyncIterableIterator` joins of them), by declaration
+ * identity.
+ *
+ * They describe a protocol any object may implement, not an object a host
+ * owns, so a host member that mentions one hands back no host type. lib.dom's
+ * `StylePropertyMapReadOnly.values()` returns
+ * `StylePropertyMapReadOnlyIterator<Iterable<CSSStyleValue>>`, and binding the
+ * `Iterable` it names as a host protocol made every `Iterable` in the program
+ * a null-carrier handle: in three.js, `Array.from`'s and `gl.drawBuffers`'
+ * parameters demanded `native-boundary:Iterable@1`, which nothing can claim.
+ */
+const languageIterationInterfaces = ['Iterable', 'AsyncIterable', 'Iterator', 'AsyncIterator', 'IterableIterator', 'AsyncIterableIterator']
+
+const isLanguageIterationInterface = (input: HostProtocolInput, symbol: ts.Symbol): boolean => {
+  const anchor = input.files[0]
+  if (!anchor) return false
+  return languageIterationInterfaces.some((name) => input.checker.resolveName(name, anchor, ts.SymbolFlags.Interface, false) === symbol)
+}
+
+/**
  * One type a host handed the program, bound as that host's protocol.
  *
  * Shared by both routes into `bindHostObjectClosure` -- what a member yields
@@ -1447,6 +1468,7 @@ const admitHandedType = (
   const object = hostObjectTypeOf(input, candidate)
   const symbol = object?.getSymbol()
   if (!object || !symbol || !isAmbientSymbol(symbol)) return
+  if (isLanguageIterationInterface(input, symbol)) return
   const shape = input.table.get(input.types.typeOf(object))?.shape
   // The same three shapes `bindAmbientValue` admits, and for the reason
   // it states there: a host declared with `interface` + `declare var` hands back

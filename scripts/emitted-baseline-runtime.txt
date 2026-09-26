@@ -293,6 +293,7 @@ invocation-argument-conversions.ts.cpp 7515a53aa95e
 invocation-dynamic-nominal-mismatch.ts.cpp 6d7161958f28
 invocation-dynamic-number-throws.ts.cpp 0e972c2fd810
 isolated-inheritance.ts.cpp c483c0a7f63e
+iterable-beside-a-host-member.ts.cpp 4328a87863d8
 iterate-absent-source-aborts.ts.cpp 4f1f57828b54
 iterate-absent-source.ts.cpp 816e8b5dc992
 iterate-array-arm-of-number-union.ts.cpp 1e51a77a3817
