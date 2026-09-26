@@ -158,3 +158,32 @@ test('a bare reference the file cannot bind but the program exports uniquely sti
   assert.ok(type, 'expected the program-wide Vector3 to resolve')
   assert.equal(census.refusals.length, 0)
 })
+
+test('a class a module keeps to itself but extends into an export is a name, nearest first', () => {
+  // three's `renderers/common/Uniform.js` exports only the subclasses of its
+  // `Uniform`, while `core/Uniform.js` exports an unrelated `Uniform`;
+  // `renderers/common/UniformsGroup.js` means its neighbour's.
+  const group = '/common/Group.js'
+  const { census, entryFile } = censusOf(
+    new Map([
+      ['/core/Uniform.js', `export class Uniform { constructor(value) { this.value = value; } }`],
+      [
+        '/common/Uniform.js',
+        `class Uniform { constructor(name) { this.name = name; } }
+         export class NumberUniform extends Uniform { isNumberUniform = true; }`
+      ],
+      [
+        group,
+        `
+          /** @param {Uniform} uniform */
+          function update(uniform) { return uniform.name; }
+          update(1);
+        `
+      ]
+    ]),
+    group
+  )
+  const type = census.typeAt(declarationNamed(entryFile, 'uniform') as ts.ParameterDeclaration)
+  assert.ok(type, 'expected the neighbouring base class to resolve')
+  assert.equal(resolve(type.getSymbol()?.declarations?.[0]?.getSourceFile().fileName ?? ''), resolve('/common/Uniform.js'))
+})
