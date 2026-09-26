@@ -23,6 +23,22 @@ export const createBagAbsenceResolver = (
     if (ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)) {
       return join([node.initializer ?? null, ...(writesTo.get(node) ?? [])])
     }
+    // A JS field has no `PropertyDeclaration`: its storage is declared by the
+    // `x.field = v` assignment the checker hands back as the field symbol's
+    // declaration. The field holds that write and every later one, and, when
+    // no constructor assigns it, the `undefined` of a field not yet written,
+    // which the checker's own type of the field states. Read as a plain
+    // expression, three's EventDispatcher `_listeners` (written only inside
+    // `addEventListener`) lost that `undefined`, and its `=== undefined` test
+    // folded to false.
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(node.left)) {
+      const field = checker.getSymbolAtLocation(node.left.name)
+      if (field?.declarations?.includes(node)) {
+        const declared = checker.getTypeOfSymbol(field)
+        const absent = declared.isUnion() && declared.types.some((arm) => (arm.flags & ts.TypeFlags.Undefined) !== 0)
+        return [...new Set([...(absent ? ['undefined' as const] : []), ...join([node.right, ...(writesTo.get(node) ?? [])])])]
+      }
+    }
     if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isNonNullExpression(node))
       return visit(node.expression, next)
     if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
