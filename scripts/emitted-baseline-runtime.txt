@@ -130,7 +130,7 @@ dictionary-index-truthiness.ts.cpp 519009b6c81f
 dictionary-named-absence.ts.cpp dc9ba237a175
 direct-interface-method-receiver.ts.cpp 55d743cf5d7d
 downcast-method-read-absent-on-other-arm.ts.cpp 52495ee800d6
-drift.txt a9dc31e09729
+drift.txt dc173b6725be
 dynamic-array-absent-element.ts.cpp 6838ef917ebe
 dynamic-array-literal-gather.runtime.js.cpp 4c1e3d9c21cf
 dynamic-array-projection.ts.cpp 25d0cdd3b0d1

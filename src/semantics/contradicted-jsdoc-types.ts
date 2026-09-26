@@ -56,8 +56,10 @@ import ts from 'typescript'
  *   against the field's type;
  * - `x.field[ k ] = v` with a computed key, against the index signature the
  *   tag states for that key;
- * - either one with `v` an unannotated local, against each value the local is
- *   initialized or assigned with: the local carries those values into the
+ * - `x.field.push( v )` into a field the tag states as an Array, against the
+ *   Array's element;
+ * - any of these with `v` an unannotated local, against each value the local
+ *   is initialized or assigned with: the local carries those values into the
  *   field, and it is the local's own assignment the checker would flag.
  *
  * The values: `new C( ... )` and a primitive literal, whose types are the
@@ -65,8 +67,16 @@ import ts from 'typescript'
  * speaking -- a call's `@returns`, a parameter's `@param`, another field's
  * `@type` -- and one of those being imprecise is not evidence against this
  * one: three's `LightShadow.clone()` states it returns a `LightShadow`, and
- * its subclasses store the clone into a field they state more narrowly. A
- * value that is `null` or `undefined` is not evidence either: a
+ * its subclasses store the clone into a field they state more narrowly.
+ *
+ * An object literal is evidence through what it lacks: a member the tag
+ * requires that the literal does not write at all. Which members a literal
+ * writes is its own construction, not another statement's type -- three's
+ * `Renderer._compilationPromises` states `?Array<Promise>` and pushes
+ * `{ object, material, ... }` work items, which have no `then` to be a
+ * promise with.
+ *
+ * A value that is `null` or `undefined` is not evidence either: a
  * non-nullable tag written with absence is a statement about absence, which
  * the existing readers already handle. Where no constructed value contradicts
  * the tag it stands exactly as written, and a tag on a local or a parameter
@@ -174,17 +184,25 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
       return !saysNothing(type) && !checker.isTypeAssignableTo(type, slot) && !derivesFromStatedClass(checker, type, slot)
     })
   }
+  const refutes = (value: ts.Expression, target: ts.Type): boolean =>
+    contradicts(value, target) || valuesWritten(value).some((written) => literalLacksMember(checker, withoutParentheses(written), target))
   for (const file of files) {
     const visit = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'push') {
+        const owner = fieldAt(withoutParentheses(node.expression.expression))
+        const element = owner ? arrayElementOf(checker, checker.getTypeOfSymbol(owner)) : null
+        if (owner && element && !contradicted.has(owner) && node.arguments.some((argument) => refutes(argument, element)))
+          contradicted.set(owner, node)
+      }
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
         const target = withoutParentheses(node.left)
         const whole = fieldAt(target)
-        if (whole && !contradicted.has(whole) && contradicts(node.right, checker.getTypeOfSymbol(whole))) contradicted.set(whole, node)
+        if (whole && !contradicted.has(whole) && refutes(node.right, checker.getTypeOfSymbol(whole))) contradicted.set(whole, node)
         if (ts.isElementAccessExpression(target) && !isLiteralKey(target.argumentExpression)) {
           const owner = fieldAt(withoutParentheses(target.expression))
           if (owner && !contradicted.has(owner)) {
             const element = indexTypeAt(checker, checker.getTypeOfSymbol(owner), target.argumentExpression)
-            if (element && contradicts(node.right, element)) contradicted.set(owner, node)
+            if (element && refutes(node.right, element)) contradicted.set(owner, node)
           }
         }
       }
@@ -348,6 +366,48 @@ const isConstruction = (value: ts.Expression): boolean => {
     value.kind === ts.SyntaxKind.TrueKeyword ||
     value.kind === ts.SyntaxKind.FalseKeyword
   )
+}
+
+/** The element of the Array a field's tag states, or `null` for anything that is not `Array<T>` itself. */
+const arrayElementOf = (checker: ts.TypeChecker, stated: ts.Type): ts.Type | null => {
+  const array = checker.getNonNullableType(stated)
+  if (array.getSymbol()?.name !== 'Array') return null
+  const element = checker.getIndexTypeOfType(array, ts.IndexKind.Number)
+  return element && !saysNothing(element) ? element : null
+}
+
+/**
+ * Whether an object literal lacks a member every arm of the stated type
+ * requires. A literal with a spread writes members this cannot list, so it is
+ * never evidence.
+ */
+const literalLacksMember = (checker: ts.TypeChecker, value: ts.Expression, target: ts.Type): boolean => {
+  if (!ts.isObjectLiteralExpression(value) || value.properties.some(ts.isSpreadAssignment)) return false
+  const stated = checker.getNonNullableType(target)
+  if (saysNothing(stated)) return false
+  const written = new Set(
+    value.properties.flatMap((property) =>
+      property.name && (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) || ts.isNumericLiteral(property.name))
+        ? [property.name.text]
+        : []
+    )
+  )
+  if (value.properties.some((property) => property.name !== undefined && ts.isComputedPropertyName(property.name))) return false
+  // What every object has anyway -- `toString` and the rest of
+  // `Object.prototype` -- is not missing from it.
+  const inherited = checker.getApparentType(checker.getTypeAtLocation(value))
+  const lacks = (arm: ts.Type): boolean =>
+    !saysNothing(arm) &&
+    (arm.flags & ts.TypeFlags.Object) !== 0 &&
+    checker
+      .getPropertiesOfType(arm)
+      .some(
+        (member) =>
+          (member.flags & ts.SymbolFlags.Optional) === 0 &&
+          !written.has(member.name) &&
+          checker.getPropertyOfType(inherited, member.name) === undefined
+      )
+  return stated.isUnion() ? stated.types.every(lacks) : lacks(stated)
 }
 
 const saysNothing = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) !== 0
