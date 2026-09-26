@@ -618,6 +618,7 @@ symbol-description.runtime.js.cpp 6eb1a4ca2572
 symbol-key-declared-field.ts.cpp fd171dd519d5
 symbol-keyed-class-field-declarations.ts.cpp 3db41fd4fd08
 symbol-keyed-method-deletes-symbol-expando.ts.cpp 7684e183ecc6
+tagged-union-delete-arms.runtime.js.cpp 25fe4aee40bb
 template-strings-array-identity.ts.cpp 5188be0a20ec
 template-strings-array-structural.ts.cpp 04a6f75360eb
 template-strings-readonly-array.ts.cpp a3aa686bb2ad
