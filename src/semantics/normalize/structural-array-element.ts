@@ -220,11 +220,17 @@ const statesItsOwnType = (checker: ts.TypeChecker, node: ts.Identifier | ts.Prop
   const target = symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(symbol) : symbol
   return (target?.declarations ?? []).some(
     (declaration) =>
-      (ts.isVariableDeclaration(declaration) ||
+      ((ts.isVariableDeclaration(declaration) ||
         ts.isParameter(declaration) ||
         ts.isPropertyDeclaration(declaration) ||
         ts.isPropertySignature(declaration)) &&
-      declaration.type !== undefined
+        declaration.type !== undefined) ||
+      // A JavaScript parameter states its type in JSDoc, and `unstatedNeverArray`'s
+      // parameter branch already exempts it: three's `hashArray( array )` under
+      // `@param {Array<number>}` kept its cell at the statement while every read
+      // of it took the caller's box, so the callee disagreed with itself before
+      // any caller was asked.
+      (ts.isParameter(declaration) && (ts.getJSDocType(declaration) !== undefined || ts.getJSDocParameterTags(declaration).length > 0))
   )
 }
 
