@@ -371,10 +371,16 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // the access, and `size`/`clear` are refused on the two WEAK families
     // specifically, because ECMA-262 gives them neither.
     //
-    // A computed key ("get:true") is absent for the same reason
-    // `array-object`'s ordinary half is: there is no runtime member table on
-    // these carriers to dispatch a computed name against.
+    // A computed key reads and writes the collection OBJECT's ordinary own
+    // properties, not its entries -- `weakMap[ camera ]` is the key
+    // ToPropertyKey(camera) spells, which is how three's `ShadowNode` uses
+    // one. They live in the identity-keyed expando table every native object
+    // has (`nativeSidecarGetText`/`emitNativeSidecarSet`), and
+    // `gea::keyedCollectionOrdinaryGet`/`Set` abort by name on a key the
+    // collection inherits, since no prototype member is rendered that way.
     'keyed-collection:get:false',
+    'keyed-collection:get:true',
+    'keyed-collection:set:true',
     // A host singleton (`Math`, `Date`, `String`, ...) has no runtime member
     // table at all -- every key is a qualified `gea::host::<protocol>::<key>`
     // symbol resolved at compile time, so a computed key has nothing to
