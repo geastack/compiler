@@ -697,6 +697,34 @@ const getPrototypeOfText = (ctx: EmitContext, operation: CallOperation): string 
 }
 
 /**
+ * `Object.setPrototypeOf(o, proto)` -- the `[[Prototype]]` slot written, for
+ * the carriers that have one at runtime: a boxed ordinary object or function
+ * object (`gea::host::ObjectConstructor::setPrototypeOf`), with a boxed or
+ * `null` prototype. A statically typed carrier has no slot this backend
+ * models (see `getPrototypeOfText`), so it refuses by name.
+ */
+const setPrototypeOfText = (ctx: EmitContext, operation: CallOperation): string => {
+  const member = 'setPrototypeOf'
+  const [target, proto] = operation.arguments
+  if (target === undefined || proto === undefined) {
+    throw createCppEmitBlockedError('host-member-call:Object.setPrototypeOf', '"Object.setPrototypeOf" takes a target and a prototype')
+  }
+  if (target.representation.kind !== 'dynamic') {
+    return refuseObjectCarrier(
+      member,
+      target.representation,
+      'only a boxed object or function carries a [[Prototype]] slot this backend models'
+    )
+  }
+  if (proto.representation.kind === 'null')
+    return `gea::host::ObjectConstructor::setPrototypeOf(${operandText(ctx, target)}, gea::Value::box(gea::Value::Tag::Null, nullptr))`
+  if (proto.representation.kind !== 'dynamic') {
+    return refuseObjectCarrier(member, proto.representation, 'a prototype must be a boxed object or function, or null')
+  }
+  return `gea::host::ObjectConstructor::setPrototypeOf(${operandText(ctx, target)}, ${operandText(ctx, proto)})`
+}
+
+/**
  * `Object.hasOwn(array, key)` for an Array exotic receiver -- its own
  * dedicated arm for the same reason `keysText` has one: an Array's own keys
  * are never a `RecordField` list `objectViewOf` could hand back, they are its
@@ -2827,6 +2855,7 @@ export const objectMemberText = (ctx: EmitContext, member: string, operation: Ca
   if (member === 'preventExtensions') return integrityText(ctx, member, operation, 'preventExtensions')
   if (member === 'hasOwn') return hasOwnText(ctx, operation)
   if (member === 'getPrototypeOf') return getPrototypeOfText(ctx, operation)
+  if (member === 'setPrototypeOf') return setPrototypeOfText(ctx, operation)
   if (member === 'is') return isText(ctx, operation)
   if (member === 'getOwnPropertyDescriptor') return getOwnPropertyDescriptorText(ctx, operation)
   if (hostMemberTemplateOf('ObjectConstructor', member) === 'object-assign') return assignText(ctx, operation)

@@ -560,6 +560,9 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // than a second severity: `@hono/node-server` writes one on the recoverable
   // client-abort path and refused by name until it existed.
   ['Console.info', { kind: 'method', emit: 'gea::host::console::info({args})', arity: 'variadic' }],
+  // `console.warn` is Node's alias of `console.error`; set-cookie-parser
+  // writes one on its deprecated-option path.
+  ['Console.warn', { kind: 'method', emit: 'gea::host::console::warn({args})', arity: 'variadic' }],
   // `localStorage`. `gea::host::storage` is a singleton table rather than a
   // per-handle one, so no template here names a `{receiver}`.
   ['Storage.getItem', { kind: 'method', emit: 'gea::host::storage::getItem({arg0})', arity: 1 }],
@@ -692,6 +695,21 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // `createError`): each is its own protocol's handle, whose boxed value is
   // the runtime's intrinsic prototype object (`gea::host::intrinsicPrototype`).
   ['ErrorConstructor.prototype', nativeHandleProperty('Error.prototype', 'gea::NativeHandle<gea_native_protocol_Error_prototype_v1>{}')],
+  // V8's stack-trace controls. This target records no frames: the limit is an
+  // ordinary number and `captureStackTrace` installs the header line V8 writes
+  // under a zero limit (see the runtime's `ErrorConstructor` namespace).
+  [
+    'ErrorConstructor.stackTraceLimit',
+    {
+      kind: 'property',
+      emit: 'gea::host::ErrorConstructor::stackTraceLimit',
+      store: 'gea::host::ErrorConstructor::stackTraceLimit = {value}'
+    }
+  ],
+  [
+    'ErrorConstructor.captureStackTrace',
+    { kind: 'method', emit: 'gea::host::ErrorConstructor::captureStackTrace({args})', arity: 'pass-through' }
+  ],
   [
     'EvalErrorConstructor.prototype',
     nativeHandleProperty('EvalError.prototype', 'gea::NativeHandle<gea_native_protocol_EvalError_prototype_v1>{}')
@@ -946,9 +964,8 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // a fixed `emit` string cannot say. `objectMemberText` (emit-host-invoke.ts)
   // states all of them and refuses by name for a carrier neither arm covers.
   //
-  // The claim is per MEMBER, never per protocol: `Object.setPrototypeOf`
-  // and the rest have no row here, so each refuses
-  // at its own access with its own name. See `manifest.ts`'s
+  // The claim is per MEMBER, never per protocol: a member with no row here
+  // refuses at its own access with its own name. See `manifest.ts`'s
   // `ObjectConstructor@1` entry for why each is absent. `Object.getPrototypeOf`
   // is claimed below despite that entry's own comment predating it: the
   // `[[Prototype]]` slot this backend's `DynamicObject` already carries and
@@ -1000,6 +1017,10 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   ['ObjectConstructor.is', { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }],
   [
     'ObjectConstructor.getPrototypeOf',
+    { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }
+  ],
+  [
+    'ObjectConstructor.setPrototypeOf',
     { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }
   ],
   // `ArrayBuffer.isView` is a carrier test: typed arrays and DataViews are

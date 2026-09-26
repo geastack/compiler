@@ -956,6 +956,10 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     'allocation:regexp-object:dynamic(supported-flags)',
     'allocation:regexp-object:native-record-ref(unicode-flags)',
     'allocation:regexp-object:dynamic(unicode-flags)',
+    // `i` with `u` is Canonicalize's simple case folding, which the runtime
+    // states in the compiled source (`unicodeIgnoreCaseSource`).
+    'allocation:regexp-object:native-record-ref(unicode-ignore-case-flags)',
+    'allocation:regexp-object:dynamic(unicode-ignore-case-flags)',
     // The plainest carrier there is: an ordinary `gea::CallableObject<S>`,
     // written by `emitAllocateCallable`'s generic tail as `{invoke,
     // environment}` (or `{invoke, nullptr}` when nothing is captured).
@@ -1464,6 +1468,13 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // `CopyDataProperties`'s own definition, and the present case recurses
     // into the dispatch this file's previous claim already proves.
     'protocol:spread:next:optional(record(copyable))',
+    // A copyable source into a fresh literal laid out as a record: each source
+    // field the receiver declares is a field store (`emitSpreadIntoRecord`),
+    // a present-only store for an optional one.
+    ...['record', 'class-ref', 'native-record-ref'].flatMap((source) => [
+      `protocol:spread:next:${source}(copyable->record)`,
+      `protocol:spread:next:optional(${source}(copyable->record))`
+    ]),
     // `CopyDataProperties` over a genuinely dynamic source and a genuinely
     // dynamic fresh object. `emitSpreadCopy` walks the source's own keys,
     // filters its descriptors for enumerability, gets each value, then creates

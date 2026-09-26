@@ -9,6 +9,7 @@ import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
 import { thisConstructorFamilyOf } from './flow/member-call-forwarding.js'
 import { unwrapErasedExpression } from './producers/erasure.js'
 import {
+  isVacuousArrayType,
   annotationStatesNothing,
   containsUnstatedPosition,
   narrowsOnlyUnstatedPositions,
@@ -692,7 +693,7 @@ export const censusReturnBindings = (
   /** The checker's own answer, when usable -- `annotationStatesNothing` beside `isUnusableEvidence` for the reason `field-bindings.ts`'s `known` documents: a vacuous type dominates a `widestOf` join. */
   const known = (node: ts.Node): ts.Type | null => {
     const type = objectAssignTargetType(checker, node) ?? checker.getTypeAtLocation(node)
-    return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) ? null : type
+    return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) || isVacuousArrayType(checker, type) ? null : type
   }
 
   /**

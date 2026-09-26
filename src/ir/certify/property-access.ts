@@ -575,8 +575,17 @@ const instanceofSideKey = (
 const instanceofRuntimeHelperKey = (operands: readonly IrOperand[], ctx: CertifyContext): string => {
   const left = operands[0]
   const right = operands[1]
+  // OrdinaryHasInstance answers false for a primitive before it reads anything
+  // of the constructor, and no host constructor declares its own @@hasInstance,
+  // so the protocol does not decide this answer.
+  if (left && right?.representation.kind === 'native-handle' && instanceofLeftIsPrimitive(left.representation))
+    return 'computation:instanceof:primitive:native-handle'
   return `computation:instanceof:${instanceofSideKey(ctx, 'left', left, right)}:${instanceofSideKey(ctx, 'right', right, undefined)}`
 }
+
+const instanceofLeftIsPrimitive = (representation: Representation): boolean =>
+  definitelyPrimitive(representation) ||
+  (representation.kind === 'tagged-union' && representation.arms.every((arm) => definitelyPrimitive(arm.value)))
 
 const instanceofDemandsOf = (operands: readonly IrOperand[], ctx: CertifyContext): readonly CapabilityDemand[] => {
   const [left, right] = operands

@@ -1,7 +1,6 @@
-// `m.length` on a `RegExpExecArray` rendered `->length()` -- the inherited
-// `ArrayObject::length()` of the MATCH result -- but `ExecResult` keeps
-// `length` as a data member beside `index` and `input`, so clang refused the
-// call on a `double`. The match result keeps its method.
+// `m.length` on both regular-expression results: each is an Array
+// (ECMA-262 22.2.7.2, 22.1.3.13), and `length` is the inherited
+// `ArrayObject::length()` of the exec result and the match result alike.
 const re = /(\d+)(?:-(\d+))?/
 for (const text of ['12-34', '5', 'none']) {
   const m = re.exec(text)

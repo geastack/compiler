@@ -255,6 +255,269 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
   return Value();
 }
 
+/**
+ * `String.prototype` for a boxed string (ECMA-262 22.1.3), each method over the
+ * runtime's own typed implementation so a boxed and a typed call share one
+ * algorithm. `this` is ToString(RequireObjectCoercible(this)); an argument is
+ * converted the way the method's own steps convert it. A pattern argument is a
+ * boxed `RegExp`; any other object argument is ToString'd, as the spec does for
+ * a non-RegExp search value.
+ */
+namespace detail {
+inline std::string boxedThisString(const Value& receiver) {
+  if (receiver.tag() == Value::Tag::String) return receiver.as<std::string>();
+  if (receiver.tag() == Value::Tag::Null || receiver.tag() == Value::Tag::Undefined)
+    host::throwRuntimeError("TypeError", "String.prototype method called on null or undefined");
+  return dynamicToString(receiver);
+}
+inline const runtime::regex::Pattern* boxedPatternOf(const Value& value) {
+  if (value.tag() != Value::Tag::Object || value.isProxy()) return nullptr;
+  if (value.payloadType() != payloadTypeTagFor<Ref<runtime::regex::Pattern>>()) return nullptr;
+  return value.as<Ref<runtime::regex::Pattern>>().get();
+}
+inline Value boxedStringArray(const Ref<ArrayObject<std::string>>& parts) {
+  auto out = makeRef<ArrayObject<Value>>();
+  for (std::size_t i = 0; i < parts->size(); ++i) out->push(Value::box(Value::Tag::String, parts->at(i)));
+  return Value::box(Value::Tag::Object, out);
+}
+inline double numberOrDefault(const Ref<ArrayObject<Value>>& args, std::size_t index, double fallback) {
+  if (args->size() <= index || args->at(index).tag() == Value::Tag::Undefined) return fallback;
+  return dynamicToNumber(args->at(index));
+}
+inline std::string stringArgument(const Ref<ArrayObject<Value>>& args, std::size_t index) {
+  return host::detail::toString(args->size() > index ? dynamicToPrimitive(args->at(index), ToPrimitiveHint::String) : Value());
+}
+// A match result is a fresh Array holding the match and each capture (a
+// non-participating group as `undefined`), with `index`, `input` and `groups`
+// own properties when the match states them (ECMA-262 22.2.7.2 steps 22-33;
+// a global match's plain list of matches has none).
+inline Value boxedMatchResult(const runtime::regex::MatchResult& matched) {
+  auto elements = makeRef<ArrayObject<Value>>();
+  for (std::size_t i = 0; i < matched.size(); ++i) {
+    const bool present = matched.captureParticipation.empty() || matched.hasCapture(static_cast<double>(i));
+    elements->push(present ? Value::box(Value::Tag::String, matched.at(i)) : Value());
+  }
+  Value boxed = Value::box(Value::Tag::Object, elements);
+  if (matched.index.has_value()) boxed.setProperty(PropertyKey::string("index"), Value::box(Value::Tag::Number, *matched.index));
+  if (matched.input.has_value()) boxed.setProperty(PropertyKey::string("input"), Value::box(Value::Tag::String, *matched.input));
+  if (matched.index.has_value()) {
+    Value groups;
+    if (matched.groups.has_value() && *matched.groups) {
+      auto table = makeRef<Dictionary<Value>>();
+      for (const std::string& name : (*matched.groups)->propertyKeys()) (*table)[name] = Value::box(Value::Tag::String, (*matched.groups)->read(name));
+      groups = Value::box(Value::Tag::Object, table);
+    }
+    boxed.setProperty(PropertyKey::string("groups"), groups);
+  }
+  return boxed;
+}
+// A replacer function is called with the match, each capture (a
+// non-participating one as `undefined`), the position and the whole string
+// (ECMA-262 22.1.3.19 step 6.b / 22.2.6.11 GetSubstitution's callable arm).
+inline Value boxedReplace(const std::string& input, const Value& search, const Value& replacement, bool all) {
+  const bool callable = replacement.tag() == Value::Tag::Function;
+  if (const runtime::regex::Pattern* pattern = boxedPatternOf(search)) {
+    if (all && !pattern->global) host::throwRuntimeError("TypeError", "replaceAll must be called with a global RegExp");
+    if (!callable) {
+      const std::string text = host::detail::toString(dynamicToPrimitive(replacement, ToPrimitiveHint::String));
+      return Value::box(Value::Tag::String, all ? runtime::string::replaceAllByPattern(input, *pattern, text) : runtime::string::replaceByPattern(input, *pattern, text));
+    }
+    if (pattern->global) pattern->resetLastIndex();
+    std::string out;
+    std::size_t cursor = 0;
+    runtime::string::visitMatches(input, *pattern, pattern->global,
+        [&](const std::string& matched, const std::vector<Optional<std::string>>& captures, std::size_t position, std::size_t lengthUnits) {
+          out += runtime::string::substringUtf16(input, cursor, position);
+          std::vector<Value> arguments{Value::box(Value::Tag::String, matched)};
+          for (std::size_t i = 1; i < captures.size(); ++i)
+            arguments.push_back(captures[i].has_value() ? Value::box(Value::Tag::String, *captures[i]) : Value());
+          arguments.push_back(Value::box(Value::Tag::Number, static_cast<double>(position)));
+          arguments.push_back(Value::box(Value::Tag::String, input));
+          out += dynamicToString(replacement.callWithReceiver(Value(), arguments));
+          cursor = position + lengthUnits;
+        });
+    out += runtime::string::substringUtf16(input, cursor, runtime::string::utf16Length(input));
+    return Value::box(Value::Tag::String, out);
+  }
+  const std::string needle = host::detail::toString(dynamicToPrimitive(search, ToPrimitiveHint::String));
+  if (!callable) {
+    const std::string text = host::detail::toString(dynamicToPrimitive(replacement, ToPrimitiveHint::String));
+    return Value::box(Value::Tag::String, all ? runtime::string::replaceAll(input, needle, text) : runtime::string::replace(input, needle, text));
+  }
+  std::string out;
+  std::size_t cursor = 0;
+  const std::size_t length = runtime::string::utf16Length(input);
+  const std::size_t needleLength = runtime::string::utf16Length(needle);
+  double from = 0;
+  for (;;) {
+    const double found = runtime::string::indexOf(input, needle, from);
+    if (found < 0) break;
+    const std::size_t position = static_cast<std::size_t>(found);
+    out += runtime::string::substringUtf16(input, cursor, position);
+    out += dynamicToString(replacement.callWithReceiver(
+        Value(), {Value::box(Value::Tag::String, needle), Value::box(Value::Tag::Number, found), Value::box(Value::Tag::String, input)}));
+    cursor = position + needleLength;
+    if (!all) break;
+    from = static_cast<double>(position + (needleLength == 0 ? 1 : needleLength));
+    if (from > static_cast<double>(length)) break;
+  }
+  out += runtime::string::substringUtf16(input, cursor, length);
+  return Value::box(Value::Tag::String, out);
+}
+}  // namespace detail
+
+inline Value dynamicStringPrototypeGet(const PropertyKey& key) {
+  if (key.isSymbol()) return Value();
+  using Args = gea::Ref<ArrayObject<Value>>;
+  using Method = CallableObject<Value(Value, Args)>;
+  static const std::map<std::string, Value> methods = [] {
+    std::map<std::string, Value> result;
+    for (const char* name :
+         {"charAt", "charCodeAt", "codePointAt", "at", "indexOf", "lastIndexOf", "includes", "startsWith", "endsWith", "slice",
+          "substring", "substr", "toLowerCase", "toUpperCase", "toLocaleLowerCase", "toLocaleUpperCase", "trim", "trimStart",
+          "trimEnd", "trimLeft", "trimRight", "padStart", "padEnd", "repeat", "split", "replace", "replaceAll", "concat",
+          "localeCompare", "toString", "valueOf", "match", "search"}) {
+      auto callable = Method(+[](void* environment, Value receiver, Args args) -> Value {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        const std::string& method = *gea::unpackEnvironment<std::string>(environment, slot);
+        if (method == "toString" || method == "valueOf") {
+          if (receiver.tag() != Value::Tag::String) host::throwRuntimeError("TypeError", "String.prototype." + method + " requires that 'this' be a String");
+          return receiver;
+        }
+        const std::string self = detail::boxedThisString(receiver);
+        const auto text = [](std::string value) { return Value::box(Value::Tag::String, std::move(value)); };
+        const auto number = [](double value) { return Value::box(Value::Tag::Number, value); };
+        const auto boolean = [](bool value) { return Value::box(Value::Tag::Boolean, value); };
+        const double length = static_cast<double>(runtime::string::utf16Length(self));
+        if (method == "charAt") return text(runtime::string::charAt(self, detail::numberOrDefault(args, 0, 0)));
+        if (method == "charCodeAt") return number(runtime::string::charCodeAt(self, detail::numberOrDefault(args, 0, 0)));
+        if (method == "codePointAt") {
+          const auto point = runtime::string::codePointAt(self, detail::numberOrDefault(args, 0, 0));
+          return point.has_value() ? number(*point) : Value();
+        }
+        if (method == "at") {
+          const auto unit = runtime::string::at(self, detail::numberOrDefault(args, 0, 0));
+          return unit.has_value() ? text(*unit) : Value();
+        }
+        if (method == "indexOf") return number(runtime::string::indexOf(self, detail::stringArgument(args, 0), detail::numberOrDefault(args, 1, 0)));
+        if (method == "lastIndexOf") {
+          const double position = detail::numberOrDefault(args, 1, std::numeric_limits<double>::quiet_NaN());
+          return number(std::isnan(position) ? runtime::string::lastIndexOf(self, detail::stringArgument(args, 0))
+                                             : runtime::string::lastIndexOf(self, detail::stringArgument(args, 0), position));
+        }
+        if (method == "includes" || method == "startsWith" || method == "endsWith") {
+          if (args->size() > 0 && detail::boxedPatternOf(args->at(0)) != nullptr)
+            host::throwRuntimeError("TypeError", "First argument to String.prototype." + method + " must not be a regular expression");
+          const std::string needle = detail::stringArgument(args, 0);
+          if (method == "includes") return boolean(runtime::string::includes(self, needle, detail::numberOrDefault(args, 1, 0)));
+          if (method == "startsWith") return boolean(runtime::string::startsWith(self, needle, detail::numberOrDefault(args, 1, 0)));
+          return boolean(runtime::string::endsWith(self, needle, detail::numberOrDefault(args, 1, length)));
+        }
+        if (method == "slice") return text(runtime::string::slice(self, detail::numberOrDefault(args, 0, 0), detail::numberOrDefault(args, 1, length)));
+        if (method == "substring") return text(runtime::string::substring(self, detail::numberOrDefault(args, 0, 0), detail::numberOrDefault(args, 1, length)));
+        if (method == "substr") {
+          if (args->size() <= 1 || args->at(1).tag() == Value::Tag::Undefined) return text(runtime::string::substr(self, detail::numberOrDefault(args, 0, 0)));
+          return text(runtime::string::substr(self, detail::numberOrDefault(args, 0, 0), dynamicToNumber(args->at(1))));
+        }
+        if (method == "toLowerCase" || method == "toLocaleLowerCase") return text(runtime::string::toLowerCase(self));
+        if (method == "toUpperCase" || method == "toLocaleUpperCase") return text(runtime::string::toUpperCase(self));
+        if (method == "trim") return text(runtime::string::trim(self));
+        if (method == "trimStart" || method == "trimLeft") return text(runtime::string::trimStart(self));
+        if (method == "trimEnd" || method == "trimRight") return text(runtime::string::trimEnd(self));
+        if (method == "padStart" || method == "padEnd") {
+          const double target = detail::numberOrDefault(args, 0, 0);
+          const std::string filler = args->size() > 1 && args->at(1).tag() != Value::Tag::Undefined ? detail::stringArgument(args, 1) : std::string(" ");
+          return text(method == "padStart" ? runtime::string::padStart(self, target, filler) : runtime::string::padEnd(self, target, filler));
+        }
+        if (method == "repeat") return text(runtime::string::repeat(self, detail::numberOrDefault(args, 0, 0)));
+        if (method == "concat") {
+          std::string out = self;
+          for (std::size_t i = 0; i < args->size(); ++i) out += detail::stringArgument(args, i);
+          return text(std::move(out));
+        }
+        if (method == "localeCompare") return number(runtime::string::localeCompare(self, detail::stringArgument(args, 0)));
+        if (method == "split") {
+          const Value separator = args->size() > 0 ? args->at(0) : Value();
+          const double limit = detail::numberOrDefault(args, 1, 4294967295.0);
+          if (separator.tag() == Value::Tag::Undefined) {
+            auto whole = makeRef<ArrayObject<std::string>>();
+            if (limit != 0) whole->push(self);
+            return detail::boxedStringArray(whole);
+          }
+          if (const runtime::regex::Pattern* pattern = detail::boxedPatternOf(separator)) {
+            auto parts = runtime::string::splitByPattern(self, *pattern);
+            if (limit < static_cast<double>(parts->size())) {
+              auto limited = makeRef<ArrayObject<std::string>>();
+              const double truncated = std::isfinite(limit) ? std::trunc(limit) : 0.0;
+              const double modulo = std::fmod(truncated, 4294967296.0);
+              const std::uint32_t lim = static_cast<std::uint32_t>(modulo < 0 ? modulo + 4294967296.0 : modulo);
+              for (std::size_t i = 0; i < parts->size() && i < lim; ++i) limited->push(parts->at(i));
+              return detail::boxedStringArray(limited);
+            }
+            return detail::boxedStringArray(parts);
+          }
+          return detail::boxedStringArray(runtime::string::split(self, detail::stringArgument(args, 0), limit));
+        }
+        if (method == "replace" || method == "replaceAll") {
+          return detail::boxedReplace(self, args->size() > 0 ? args->at(0) : Value(), args->size() > 1 ? args->at(1) : Value(), method == "replaceAll");
+        }
+        if (method == "match" || method == "search") {
+          const Value argument = args->size() > 0 ? args->at(0) : Value();
+          const runtime::regex::Pattern* pattern = detail::boxedPatternOf(argument);
+          Ref<runtime::regex::Pattern> built;
+          if (pattern == nullptr) {
+            built = runtime::regex::constructPatternOrThrow(argument.tag() == Value::Tag::Undefined ? std::string() : detail::stringArgument(args, 0));
+            pattern = built.get();
+          }
+          if (method == "search") return number(runtime::string::search(self, *pattern));
+          const auto matched = runtime::string::matchByPattern(self, *pattern);
+          if (!matched.has_value() || !*matched) return Value::box(Value::Tag::Null, nullptr);
+          return detail::boxedMatchResult(**matched);
+        }
+        host::throwRuntimeError("TypeError", "String.prototype." + method + " is not implemented for a boxed string");
+      }, gea::packEnvironment<std::string>(std::string(name)));
+      result.emplace(name, Value::boxMethod<1>(callable));
+    }
+    return result;
+  }();
+  const auto found = methods.find(key.text());
+  return found == methods.end() ? Value() : found->second;
+}
+
+/**
+ * `Number.prototype` for a boxed number (ECMA-262 21.1.3), over the same
+ * formatting the typed calls use.
+ */
+inline Value dynamicNumberPrototypeGet(const PropertyKey& key) {
+  if (key.isSymbol()) return Value();
+  using Args = gea::Ref<ArrayObject<Value>>;
+  using Method = CallableObject<Value(Value, Args)>;
+  static const std::map<std::string, Value> methods = [] {
+    std::map<std::string, Value> result;
+    for (const char* name : {"toString", "toFixed", "toPrecision", "toExponential", "valueOf", "toLocaleString"}) {
+      auto callable = Method(+[](void* environment, Value receiver, Args args) -> Value {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        const std::string& method = *gea::unpackEnvironment<std::string>(environment, slot);
+        if (receiver.tag() != Value::Tag::Number)
+          host::throwRuntimeError("TypeError", "Number.prototype." + method + " requires that 'this' be a Number");
+        const double value = receiver.as<double>();
+        if (method == "valueOf") return receiver;
+        const bool absent = args->size() == 0 || args->at(0).tag() == Value::Tag::Undefined;
+        const auto text = [](std::string out) { return Value::box(Value::Tag::String, std::move(out)); };
+        if (method == "toString" || method == "toLocaleString")
+          return text(absent || method == "toLocaleString" ? host::detail::toString(value) : host::detail::toStringRadix(value, dynamicToNumber(args->at(0))));
+        if (method == "toFixed") return text(host::detail::toFixed(value, absent ? 0.0 : dynamicToNumber(args->at(0))));
+        if (method == "toPrecision") return text(absent ? host::detail::toString(value) : host::detail::toPrecision(value, dynamicToNumber(args->at(0))));
+        return text(host::detail::toExponential(value, absent ? std::numeric_limits<double>::quiet_NaN() : dynamicToNumber(args->at(0))));
+      }, gea::packEnvironment<std::string>(std::string(name)));
+      result.emplace(name, Value::boxMethod<1>(callable));
+    }
+    return result;
+  }();
+  const auto found = methods.find(key.text());
+  return found == methods.end() ? Value() : found->second;
+}
+
 // The intrinsic is one ordinary native array with its own method properties.
 // Identity sidecars already carry descriptors on arrays; a new representation
 // or a boxed array would lose that existing native ownership for no reason.
