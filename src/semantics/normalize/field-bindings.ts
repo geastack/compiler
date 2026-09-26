@@ -593,7 +593,43 @@ export const censusFieldBindings = (
       if (ts.isBinaryExpression(declaration)) writes.add(declaration.right)
     }
     for (const write of flow.writesToSymbol(symbol)) if (isFieldEvidence(write) && write.value) writes.add(write.value)
+    for (const write of receiverTypedWritesOf(symbol)) writes.add(write)
     return [...writes]
+  }
+
+  /**
+   * The writes into `symbol` spelled through a receiver only a census can
+   * type. three's `builder.observer = this.setupObserver( builder )` names
+   * `@param {NodeBuilder} builder` from a file that does not import
+   * `NodeBuilder`, so the checker's receiver is `any`, the write resolves to
+   * no member symbol, and the flow index files it under no field. Joined
+   * without it, `NodeBuilder.observer` held only its constructor's `null` and
+   * was laid out as bare `null`, into which that very write then stored an
+   * instance. The census that bound the parameter says which class the
+   * receiver is; a write counts when that class's member of the name IS this
+   * field, and an untyped receiver keeps its write out, as before.
+   */
+  let untypedReceiverWrites: Map<string, ValueWrite[]> | null = null
+  const receiverTypedWritesOf = (symbol: ts.Symbol): readonly ts.Expression[] => {
+    if (untypedReceiverWrites === null) {
+      untypedReceiverWrites = new Map()
+      for (const write of flow.allWrites) {
+        if (write.target.symbol !== null || !isFieldEvidence(write)) continue
+        const access = write.propertyAccess
+        if (!access || !ts.isPropertyAccessExpression(access) || write.naming !== access) continue
+        const named = untypedReceiverWrites.get(access.name.text) ?? []
+        named.push(write)
+        untypedReceiverWrites.set(access.name.text, named)
+      }
+    }
+    const found: ts.Expression[] = []
+    for (const write of untypedReceiverWrites.get(symbol.name) ?? []) {
+      const access = write.propertyAccess as ts.PropertyAccessExpression
+      const receiver = parameters.typeAt(access.expression)
+      if (!receiver || !write.value) continue
+      if (checker.getPropertyOfType(checker.getNonNullableType(receiver), symbol.name) === symbol) found.push(write.value)
+    }
+    return found
   }
 
   /**

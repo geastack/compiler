@@ -165,6 +165,7 @@ extra-call-arguments.ts.cpp fdeaa29d7b02
 field-census-class-family-narrowing.runtime.js.cpp 183db30cd770
 field-constructor-choice.runtime.js.cpp 4c5adc06cba9
 field-nullish-placeholder-for-of.runtime.js.cpp 23714acc63f4
+field-untyped-receiver-write.runtime.js.cpp 7788e1e170f7
 filter-under-a-type-guard-narrows-its-element.ts.cpp 0cdd79245c69
 fixed-data-definition.js.cpp 0f5f99ceadbf
 fixed-field-assignment-widening.runtime.js.cpp e65d803536e4
