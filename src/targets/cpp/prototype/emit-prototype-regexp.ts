@@ -752,14 +752,21 @@ export const regexpMethodCallText = (
       `"RegExp.prototype.${member}" is spelled for its one string argument (ECMA-262 22.2.6.${member === 'test' ? '16' : '8'}); this call passes ${args.length}`
     )
   }
-  if (input.representation.kind !== 'string') {
+  // ECMA-262 22.2.6.16 step 3 / 22.2.6.8 step 3: `S = ToString(string)` --
+  // the same abstract operation `String(x)` and a template substitution run,
+  // so it reads the one ToString table (`/[a-z]/i.test( name )` over a name
+  // that may still be `null`, three's `ShaderNodeProxy`).
+  const inputText =
+    input.representation.kind === 'string'
+      ? operandText(ctx, input)
+      : toStringText(operandText(ctx, input), input.representation, ctx.classes, ctx.deriver)
+  if (inputText === null) {
     throw createCppEmitBlockedError(
       `host-invocation:RegExp.prototype.${member}`,
-      `"RegExp.prototype.${member}" argument 0 carries "${representationKey(input.representation)}"; the specification ToStrings it, and ToString of an ` +
-        'arbitrary value is what this backend has no box for'
+      `"RegExp.prototype.${member}" argument 0 carries "${representationKey(input.representation)}"; the specification ToStrings it, and ` +
+        'this backend has no ToString for that carrier'
     )
   }
-  const inputText = operandText(ctx, input)
   if (member === 'test') return `${receiverText}->test(${inputText})`
   // The result carrier is checked rather than assumed: 22.2.6.8 answers `null`
   // on no match, so an `exec` whose result was not given an optional carrier

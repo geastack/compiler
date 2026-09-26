@@ -370,6 +370,110 @@ export const contextualCollectionTypeAt = (checker: ts.TypeChecker, node: ts.Nod
 }
 
 /**
+ * Whether a bare `new WeakMap()`/`new WeakSet()` (or `Map`/`Set`) is written
+ * straight into a HOST slot typed `any`, so the only thing that ever holds
+ * it is a box.
+ *
+ * `WeakMapConstructor` has no non-generic overload, so with nothing to infer
+ * from, `K` falls to its declared default `WeakKey` -- the bare `object`
+ * keyword, which this compiler lays out as an empty record key. That default
+ * states nothing about the program, and an `any` position states nothing
+ * either; every later reader recovers the collection from the box and names
+ * it by its own type. Three's `ChainMap.set` is the shape:
+ * `map.set( key, new WeakMap() )` into an outer `WeakMap<any, any>`, and
+ * `map = map.get( key )` then reads the level back as that same
+ * `WeakMap<any, any>`. The level kept `WeakMap<record, any>`, and the
+ * identity round trip out of the box (`conversion/derive.ts`) aborts on a
+ * payload of a different type. A slot of the program's own (`f( new
+ * WeakMap() )` into an untyped parameter) is not this shape: the parameter
+ * census types that parameter from this same argument.
+ */
+export const hostDynamicSlotCollectionAt = (checker: ts.TypeChecker, node: ts.Node): boolean => {
+  if (!ts.isNewExpression(node) || node.typeArguments !== undefined || (node.arguments?.length ?? 0) > 0) return false
+  if (!ts.isIdentifier(node.expression) || !['Map', 'Set', 'WeakMap', 'WeakSet'].includes(node.expression.text)) return false
+  const constructor = checker.getSymbolAtLocation(node.expression)?.valueDeclaration
+  if (!constructor || !constructor.getSourceFile().isDeclarationFile) return false
+  const call = node.parent
+  if (!ts.isCallExpression(call) || !call.arguments.includes(node)) return false
+  const contextual = checker.getContextualType(node)
+  if (!contextual || (contextual.flags & ts.TypeFlags.Any) === 0) return false
+  const index = call.arguments.indexOf(node)
+  if (call.arguments.slice(0, index).some(ts.isSpreadElement)) return false
+  const declaration = checker.getResolvedSignature(call)?.getDeclaration()
+  return declaration !== undefined && declaration.getSourceFile().isDeclarationFile
+}
+
+/**
+ * The type a bare collection allocation takes from the function that
+ * RETURNS it through one cell the checker left `any`.
+ *
+ * `return new WeakMap()` under `@return {WeakMap<Texture, Texture>}` is
+ * inferred from its position. Three's get-or-create caches put one cell in
+ * between: `let rendererCache = _cache.get( renderer )` is `any` (the lookup's
+ * own value type), `rendererCache = new WeakMap()` fills it on a miss, and
+ * `return rendererCache` hands it out under the stated return type
+ * (`PMREMNode.js`'s `_getCache`, `EnvironmentNode.js`'s
+ * `_getPMREMNodeCache`). With nothing to infer from, `K` fell to
+ * `WeakMapConstructor`'s `object` default, and the cell's
+ * `WeakMap<record, any>` met a stated `WeakMap<any, any>` or
+ * `WeakMap<Texture, Texture>` at the return, a conversion no keyed
+ * collection has.
+ *
+ * Only this shape: the allocation's own arguments state nothing (each is
+ * `any` or the `object` default), it is the whole initializer or assigned
+ * value of an unannotated local the checker types `any`, the allocation and
+ * that local belong to one plain (non-async, non-generator) function, some
+ * `return` of that function hands the local back as-is, and the function's
+ * stated return type is that same collection (or it with absences).
+ */
+export const returnedCellCollectionTypeAt = (checker: ts.TypeChecker, node: ts.Node): ts.Type | null => {
+  if (!ts.isNewExpression(node) || node.typeArguments !== undefined || (node.arguments?.length ?? 0) > 0) return null
+  if (!ts.isIdentifier(node.expression) || !['Map', 'Set', 'WeakMap', 'WeakSet'].includes(node.expression.text)) return null
+  const constructor = checker.getSymbolAtLocation(node.expression)?.valueDeclaration
+  if (!constructor || !constructor.getSourceFile().isDeclarationFile) return null
+  const own = checker.getTypeAtLocation(node)
+  const target = genericTargetOf(own)
+  if (!target) return null
+  const ownArguments = checker.getTypeArguments(own as ts.TypeReference)
+  if (!ownArguments.every((argument) => (argument.flags & (ts.TypeFlags.Any | ts.TypeFlags.NonPrimitive)) !== 0)) return null
+  const parent = node.parent
+  const cell = ts.isVariableDeclaration(parent) && parent.initializer === node
+    ? parent.name
+    : ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken && parent.right === node
+      ? parent.left
+      : null
+  if (!cell || !ts.isIdentifier(cell)) return null
+  const symbol = checker.getSymbolAtLocation(cell)
+  const declaration = symbol?.valueDeclaration
+  if (!symbol || !declaration || !ts.isVariableDeclaration(declaration) || declaration.type || ts.getJSDocType(declaration)) return null
+  if ((checker.getTypeAtLocation(declaration.name).flags & ts.TypeFlags.Any) === 0) return null
+  const owner = ts.findAncestor(node, ts.isFunctionLike)
+  if (!owner || owner !== ts.findAncestor(declaration, ts.isFunctionLike)) return null
+  if (!ts.isFunctionDeclaration(owner) && !ts.isMethodDeclaration(owner) && !ts.isFunctionExpression(owner) && !ts.isArrowFunction(owner)) return null
+  if (owner.asteriskToken || (ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Async) !== 0 || !owner.body || !ts.isBlock(owner.body)) return null
+  const stated = owner.type ?? ts.getJSDocReturnType(owner)
+  if (!stated) return null
+  let returned = false
+  const walk = (child: ts.Node): void => {
+    if (returned || (child !== owner.body && ts.isFunctionLike(child))) return
+    if (ts.isReturnStatement(child) && child.expression) {
+      const value = child.expression
+      if (ts.isIdentifier(value) && checker.getSymbolAtLocation(value) === symbol) returned = true
+    }
+    ts.forEachChild(child, walk)
+  }
+  walk(owner.body)
+  if (!returned) return null
+  const statedType = checker.getTypeFromTypeNode(stated)
+  const substantive = (statedType.isUnion() ? statedType.types : [statedType]).filter(
+    (member) => (member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null | ts.TypeFlags.Void)) === 0
+  )
+  const [filled] = substantive
+  if (!filled || substantive.length !== 1 || genericTargetOf(filled) !== target || filled === own) return null
+  return filled
+}
+
+/**
  * The stated type of an expression the checker types as a DYNAMIC collection
  * only because the allocation feeding it stated nothing -- the contextual
  * answer above, followed through the syntax that carries an allocation to
@@ -398,7 +502,7 @@ export const contextualCollectionTypeAt = (checker: ts.TypeChecker, node: ts.Nod
  * answers `null` and the checker's own reading stands, exactly as before.
  */
 export const statedCollectionTypeAt = (checker: ts.TypeChecker, node: ts.Node): ts.Type | null => {
-  if (ts.isNewExpression(node)) return contextualCollectionTypeAt(checker, node)
+  if (ts.isNewExpression(node)) return contextualCollectionTypeAt(checker, node) ?? returnedCellCollectionTypeAt(checker, node)
   if (ts.isParenthesizedExpression(node)) return statedCollectionTypeAt(checker, node.expression)
   if (ts.isBinaryExpression(node)) {
     const operator = node.operatorToken.kind

@@ -573,6 +573,42 @@ const isFlowContainerType = (checker: ts.TypeChecker, anchor: ts.Node, type: ts.
   checker.isArrayType(type) || ['Map', 'Set', 'WeakMap', 'WeakSet'].some((name) => isStandardInterfaceType(checker, anchor, name, type))
 
 /**
+ * A mention of a class or function that uses its STATIC SIDE and hands
+ * nobody the callable: a store on it (`NodeFunction.isNodeFunction = true`)
+ * or a read of a primitive from it (`MaterialNode.COLOR`). Neither result
+ * can be called, so neither is a call site the census failed to count.
+ *
+ * Read as an escape, three's `NodeFunction` constructor was closed to its
+ * `super( type, inputs, name, precision )` callers by its own flag, its
+ * `@param {Array<NodeFunctionInput>}` tag (a name the file cannot bind)
+ * stayed the boxed element, and each subclass's typed array needed a
+ * conversion no backend can render.
+ *
+ * A member that is itself code -- a method, an accessor -- runs with the
+ * callable as `this`, where `new this()` is an uncounted construction, so
+ * those stay escapes; so do `prototype` (whose `constructor` is the callable)
+ * and `bind`/`call`/`apply`.
+ */
+const isStaticSideUse = (checker: ts.TypeChecker, reference: ts.Node): boolean => {
+  const access = reference.parent
+  if (!access || !ts.isPropertyAccessExpression(access) || access.expression !== reference) return false
+  if (['prototype', 'constructor', 'bind', 'call', 'apply'].includes(access.name.text)) return false
+  const member = checker.getSymbolAtLocation(access.name)
+  if ((member?.declarations ?? []).some((declaration) => ts.isAccessor(declaration) || ts.isMethodDeclaration(declaration))) return false
+  const use = access.parent
+  if (use && ts.isBinaryExpression(use) && use.left === access && use.operatorToken.kind === ts.SyntaxKind.EqualsToken) return true
+  const read = checker.getTypeAtLocation(access)
+  const primitive =
+    ts.TypeFlags.StringLike |
+    ts.TypeFlags.NumberLike |
+    ts.TypeFlags.BooleanLike |
+    ts.TypeFlags.BigIntLike |
+    ts.TypeFlags.Null |
+    ts.TypeFlags.Undefined
+  return (read.isUnion() ? read.types : [read]).every((part) => (part.flags & primitive) !== 0)
+}
+
+/**
  * An UNANNOTATED rest parameter this census considers for its own,
  * element-wise join -- see `restElementTypeAt`. Kept separate from
  * `ParameterCandidate`: a rest parameter's physical slot is never one
@@ -1452,6 +1488,7 @@ export const censusParameterBindings = (
       }
       if ((ts.isIdentifier(reference) || ts.isPrivateIdentifier(reference)) && isBindingOnlyReference(reference)) continue
       if (isTypePositionReference(reference)) continue
+      if (isStaticSideUse(checker, reference)) continue
       const parent = reference.parent
       if (parent && (ts.isCallExpression(parent) || ts.isNewExpression(parent)) && isCalleeOf(reference, parent)) continue
       return `function-escapes:${parent ? ts.SyntaxKind[parent.kind] : 'root'}`

@@ -310,15 +310,22 @@ const droppedTagTypeOf = (checker: ts.TypeChecker, declaration: ts.ParameterDecl
   return isUninformative(checker.getTypeAtLocation(declaration)) ? stated : null
 }
 
+/** What a tag the checker cannot read names program-wide: the type, or why there is none. */
+export type ProgramTypeNameAnswer = { readonly type: ts.Type } | { readonly refused: string; readonly detail?: string }
+
 /**
- * Whole-program census of every JSDoc tag whose name the checker could not
- * bind, resolved against the program's own exported types.
+ * The program-wide reading of a tag the checker could not bind, as one
+ * function of the tag's type node and the file it is written in. The census
+ * below is its reader for declarations; `contradicted-jsdoc-parameters.ts` is
+ * its reader for the tags a caller's argument contradicts, which it has to
+ * read as this census will, or it compares an argument against an `any` the
+ * compilation never sees. Both build their own index, on their own program.
  */
-export const censusJsDocTypeNames = (
-  checker: ts.TypeChecker,
-  files: readonly ts.SourceFile[],
-  reachable: ProgramReachability
-): JsDocTypeNameCensus => {
+export interface ProgramTypeNames {
+  readonly resolve: (typeNode: ts.TypeNode, home: string) => ProgramTypeNameAnswer
+}
+
+export const programTypeNames = (checker: ts.TypeChecker, files: readonly ts.SourceFile[]): ProgramTypeNames => {
   // The index is built from EXPORTS rather than from every declaration in the
   // program: a name a module keeps to itself is not one another module's prose
   // could be referring to, and including it would manufacture ambiguity between
@@ -365,9 +372,15 @@ export const censusJsDocTypeNames = (
       const target = (exported.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(exported) : exported
       const declared = checker.getDeclaredTypeOfSymbol(target)
       if (!declared || isUninformative(declared)) continue
-      const existing = byName.get(exported.name)
+      // A default export is referred to by its own declared name: three's
+      // `renderers/common/Pipelines.js` ends `export default Pipelines`, and
+      // `Bindings.js` documents `@type {Pipelines}` over the field it writes
+      // `this.pipelines.bindings = this` through. Keyed only `default`, no
+      // prose name could ever reach it.
+      const name = exported.name === 'default' && target.name !== 'default' ? target.name : exported.name
+      const existing = byName.get(name)
       if (existing) existing.add(target)
-      else byName.set(exported.name, new Set([target]))
+      else byName.set(name, new Set([target]))
       privateBasesOf(target, file)
     }
   }
@@ -403,6 +416,64 @@ export const censusJsDocTypeNames = (
     })
   }
 
+  const refused = (root: string, detail?: string): ProgramTypeNameAnswer =>
+    detail === undefined ? { refused: root } : { refused: root, detail }
+  const resolve = (typeNode: ts.TypeNode, home: string): ProgramTypeNameAnswer => {
+    const reference = referencedNameOf(typeNode)
+    // `typeNode.getText()` is the tag's OWN spelling -- `Window.AudioContext`
+    // (a qualified name; the head `AudioContext` would resolve to THIS FILE's
+    // own class, which is exactly the wrong answer the qualifier exists to
+    // avoid), `Curve<TVector>` (a generic instantiation the declaration
+    // overlay carried over from `@types/three`; see the header's "Anything
+    // but a bare type REFERENCE"). Printing it is strictly prose: it does not
+    // change which shapes refuse, only whether a reader can tell which one
+    // fired without re-deriving it from the source.
+    if (reference === null) return refused('tag-is-not-a-bare-reference', typeNode.getText())
+    // A union arm naming a type this program declares NOWHERE is uninhabited:
+    // no value of it can reach this parameter, so the tag means the arms that
+    // remain. three's `CubeCamera.update( renderer, scene )` is tagged
+    // `{(Renderer|WebGLRenderer)}`, and `Renderer` is exported only from the
+    // WebGPU entry point that this program never imports -- so the checker
+    // resolves that arm to `any`, `any | WebGLRenderer` absorbs to `any`, and
+    // the renderer every caller really passes crosses into a dynamic carrier.
+    // Dropping the empty arm states what the reachable program already proves.
+    // Two arms that BOTH name real types are a genuine union and still refuse:
+    // this census binds one declared type, and picking either would be a guess.
+    const named = reference.names.filter((name) => byName.has(name))
+    // `reference.names` is what the tag itself named (`TypedArray`,
+    // `NodeBuilder`, ...) -- not declared, by any file this program compiles,
+    // under any of those exact spellings. Naming them is the fix
+    // `docs/SEMANTIC-AUTHORITY.md`'s correctness bar asks for when the answer
+    // is "keep refusing": three's own documentation convention, not a fact
+    // this compiler could derive, so print what was looked up rather than
+    // making the next reader grep three's source to find out.
+    if (named.length === 0) return refused('name-is-not-an-exported-type', reference.names.join(' | '))
+    if (named.length > 1) return refused('union-names-more-than-one-program-type')
+    const candidates = byName.get(named[0] as string)
+    if (!candidates) return refused('name-is-not-an-exported-type', named[0])
+    const [only] = candidates
+    const symbol = candidates.size === 1 ? only : nearestCandidate(candidates, home)
+    if (!symbol) return refused('name-is-ambiguous-program-wide')
+    const resolved = checker.getDeclaredTypeOfSymbol(symbol)
+    if (!resolved || isUninformative(resolved)) return refused('resolved-type-is-unreadable')
+    const absent =
+      (reference.absences.includes('null') ? ts.TypeFlags.Null : 0) |
+      (reference.absences.includes('undefined') ? ts.TypeFlags.Undefined : 0)
+    return { type: absent === 0 ? resolved : checker.getNullableType(resolved, absent) }
+  }
+  return { resolve }
+}
+
+/**
+ * Whole-program census of every JSDoc tag whose name the checker could not
+ * bind, resolved against the program's own exported types.
+ */
+export const censusJsDocTypeNames = (
+  checker: ts.TypeChecker,
+  files: readonly ts.SourceFile[],
+  reachable: ProgramReachability
+): JsDocTypeNameCensus => {
+  const names = programTypeNames(checker, files)
   const bound = new Map<ts.Declaration, ts.Type>()
   const refusals: CensusRefusal[] = []
 
@@ -446,54 +517,19 @@ export const censusJsDocTypeNames = (
       if (dropped) bound.set(declaration, dropped)
       return
     }
-    const reference = referencedNameOf(typeNode)
-    // `typeNode.getText()` is the tag's OWN spelling -- `Window.AudioContext`
-    // (a qualified name; the head `AudioContext` would resolve to THIS FILE's
-    // own class, which is exactly the wrong answer the qualifier exists to
-    // avoid), `Curve<TVector>` (a generic instantiation the declaration
-    // overlay carried over from `@types/three`; see the header's "Anything
-    // but a bare type REFERENCE"). Printing it is strictly prose: it does not
-    // change which shapes refuse, only whether a reader can tell which one
-    // fired without re-deriving it from the source.
-    if (reference === null) return refuse('tag-is-not-a-bare-reference', typeNode.getText())
-    // A union arm naming a type this program declares NOWHERE is uninhabited:
-    // no value of it can reach this parameter, so the tag means the arms that
-    // remain. three's `CubeCamera.update( renderer, scene )` is tagged
-    // `{(Renderer|WebGLRenderer)}`, and `Renderer` is exported only from the
-    // WebGPU entry point that this program never imports -- so the checker
-    // resolves that arm to `any`, `any | WebGLRenderer` absorbs to `any`, and
-    // the renderer every caller really passes crosses into a dynamic carrier.
-    // Dropping the empty arm states what the reachable program already proves.
-    // Two arms that BOTH name real types are a genuine union and still refuse:
-    // this census binds one declared type, and picking either would be a guess.
-    const named = reference.names.filter((name) => byName.has(name))
-    // `reference.names` is what the tag itself named (`TypedArray`,
-    // `NodeBuilder`, ...) -- not declared, by any file this program compiles,
-    // under any of those exact spellings. Naming them is the fix
-    // `docs/SEMANTIC-AUTHORITY.md`'s correctness bar asks for when the answer
-    // is "keep refusing": three's own documentation convention, not a fact
-    // this compiler could derive, so print what was looked up rather than
-    // making the next reader grep three's source to find out.
-    if (named.length === 0) return refuse('name-is-not-an-exported-type', reference.names.join(' | '))
-    if (named.length > 1) return refuse('union-names-more-than-one-program-type')
-    const candidates = byName.get(named[0] as string)
-    if (!candidates) return refuse('name-is-not-an-exported-type', named[0])
-    const [only] = candidates
-    const symbol = candidates.size === 1 ? only : nearestCandidate(candidates, declaration.getSourceFile().fileName)
-    if (!symbol) return refuse('name-is-ambiguous-program-wide')
-    const resolved = checker.getDeclaredTypeOfSymbol(symbol)
-    if (!resolved || isUninformative(resolved)) return refuse('resolved-type-is-unreadable')
+    const answer = names.resolve(typeNode, declaration.getSourceFile().fileName)
+    if ('refused' in answer) return refuse(answer.refused, answer.detail)
     // A `[name]` tag over a parameter with no initializer is the checker's own
     // optionality fact, so the body can observe the omission: the binding holds
     // `T | undefined`, exactly the slot `structural-parts.ts`'s `parameterOf`
     // publishes off the same fact. Publishing the bare `T` made the two frames
     // disagree and the ABI projection refused the whole body (three's
     // `getFormat( texture, device )` under `@param {GPUDevice} [device]`).
+    // This is a fact of the DECLARATION, not of the tag's name, so it is added
+    // here rather than in `programTypeNames`, whose other reader
+    // (`contradicted-jsdoc-parameters.ts`) compares arguments against the tag.
     const omittable = ts.isParameter(declaration) && declaration.initializer === undefined && checker.isOptionalParameter(declaration)
-    const absent =
-      (reference.absences.includes('null') ? ts.TypeFlags.Null : 0) |
-      (reference.absences.includes('undefined') || omittable ? ts.TypeFlags.Undefined : 0)
-    bound.set(declaration, absent === 0 ? resolved : checker.getNullableType(resolved, absent))
+    bound.set(declaration, omittable ? checker.getNullableType(answer.type, ts.TypeFlags.Undefined) : answer.type)
   }
 
   const visit = (node: ts.Node): void => {

@@ -3,7 +3,14 @@ import type { StructuralTypeId } from '../../identity/ids.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'
 import type { StructuralShape } from '../model/structural-types.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
-import { disjointUnionTypeOf, isGlobalObjectConstructor, literalMemberNameOf, widestOf } from './derived-expression-type.js'
+import {
+  annotationStatesNothing,
+  disjointUnionTypeOf,
+  isGlobalObjectConstructor,
+  isNullishType,
+  literalMemberNameOf,
+  widestOf
+} from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import type { ValueFlowIndex } from './flow/model.js'
 import { definitelyReturns } from './return-paths.js'
@@ -589,10 +596,17 @@ export const censusObjectBagBindings = (
     return !statesNothing(checker.getTypeOfSymbolAtLocation(symbol, declaration))
   }
 
+  // A bare JSDoc `@type {Object}` over a POPULATED literal states nothing the
+  // literal does not (three's `_childaddedEvent`); the empty-literal path keeps
+  // its measured refusal of it (see `statesNothing`).
+  const statesJsDocType = (owner: ts.Node): boolean => {
+    const tag = ts.getJSDocType(owner)
+    return tag !== undefined && !annotationStatesNothing(checker, tag, checker.getTypeFromTypeNode(tag))
+  }
   const declaresWrittenType = (owner: ts.Node): boolean =>
     ((ts.isVariableDeclaration(owner) || ts.isPropertyDeclaration(owner) || ts.isParameter(owner) || ts.isFunctionLike(owner)) &&
       owner.type !== undefined) ||
-    ts.getJSDocType(owner) !== undefined ||
+    statesJsDocType(owner) ||
     (ts.isFunctionLike(owner) && ts.getJSDocReturnType(owner) !== undefined) ||
     (ts.isParameter(owner) && ts.getJSDocParameterTags(owner).some((tag) => tag.typeExpression !== undefined))
 
@@ -629,7 +643,8 @@ export const censusObjectBagBindings = (
   const initialMembersOf = (node: ts.Node): ReadonlyMap<string, ts.Expression> | null => {
     if (!ts.isObjectLiteralExpression(node) || node.properties.length === 0) return null
     if (ts.isAsExpression(node.parent) || ts.isSatisfiesExpression(node.parent) || ts.isTypeAssertionExpression(node.parent)) return null
-    if (checker.getContextualType(node) !== undefined) return null
+    const contextual = checker.getContextualType(node)
+    if (contextual !== undefined && !annotationStatesNothing(checker, node, contextual)) return null
     const fields = new Map<string, ts.Expression>()
     for (const property of node.properties) {
       if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) return null
@@ -1160,8 +1175,22 @@ export const censusObjectBagBindings = (
     // (`collection-bindings.ts`), answered by the same rule, so a set that
     // census would refuse (a member subsuming another, too many arms) is
     // refused here too.
-    const widest = widestOf(checker, types) ?? disjointUnionTypeOf(checker, types)
+    const widest = widestOf(checker, types) ?? disjointUnionTypeOf(checker, types) ?? nullableJoinOf(types)
     return widest ?? 'disagree'
+  }
+
+  // One stated type beside `null`/`undefined` writes: `widestOf` has no
+  // candidate covering both, and a disjoint union needs two present arms, so
+  // three's `{ child: null }` written an `Object3D` and reset to `null`
+  // disagreed and fell to `any`. The slot holds that type or the nullish
+  // values the program wrote, which is the optional of it.
+  const nullableJoinOf = (types: readonly ts.Type[]): ts.Type | null => {
+    const nullish = types.filter(isNullishType)
+    const present = types.filter((type) => !isNullishType(type))
+    if (nullish.length === 0 || present.length === 0) return null
+    const covering = widestOf(checker, present)
+    const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
+    return covering && typeof constructing.getUnionType === 'function' ? constructing.getUnionType([covering, ...nullish]) : null
   }
 
   /** See `ObjectBagCensus.slotTypeOf` -- the ONE widening, shared by both spellings of a slot. */
@@ -1207,7 +1236,32 @@ export const censusObjectBagBindings = (
     const literals = literalsByOwner.get(root) ?? []
     const populated = literals.some((literal) => initialMembers.has(literal))
     const initialKeys = new Set(literals.flatMap((literal) => [...(initialMembers.get(literal)?.keys() ?? [])]))
-    if (populated && (!evidence || ![...evidence.namedWrites.keys()].some((key) => !initialKeys.has(key)))) continue
+    // A later write to an allocation field also licenses the join when the
+    // literal's own field type does not admit the written value: three's
+    // `const _childaddedEvent = { type: 'childadded', child: null }` is
+    // written `_childaddedEvent.child = object` with an `Object3D`, and the
+    // checker's `child: null` left that store with no conversion at all
+    // (class-ref -> null). The initial value stays in the join, so the slot
+    // becomes the optional class the program actually stores.
+    // The field type asked is the checker's own (widened) one for the
+    // allocation, so `{ count: 4 }` written `count = 6` stays unclaimed.
+    const outgrowsAllocation = (key: string, values: readonly ts.Expression[]): boolean => {
+      const fields = literals.flatMap((literal) => {
+        if (!initialMembers.get(literal)?.has(key)) return []
+        const member = checker.getTypeAtLocation(literal).getProperty(key)
+        return member ? [checker.getTypeOfSymbolAtLocation(member, literal)] : []
+      })
+      if (fields.length === 0 || fields.some(statesNothing)) return false
+      return values.some((value) => {
+        const type = observedType(value)
+        return type !== null && !statesNothing(type) && fields.some((field) => !checker.isTypeAssignableTo(type, field))
+      })
+    }
+    if (
+      populated &&
+      (!evidence || ![...evidence.namedWrites].some(([key, values]) => !initialKeys.has(key) || outgrowsAllocation(key, values)))
+    )
+      continue
     if (!evidence) {
       refuseRoot(root, 'no-uses', 'bag:no-uses')
       continue

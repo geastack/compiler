@@ -59,6 +59,7 @@ import { creationOrderedProperties } from './structural-creation-order.js'
 import {
   collectionMemberResultTypeAt,
   contextualArrayConstructTypeAt,
+  hostDynamicSlotCollectionAt,
   inferredArrayElementAt,
   statedCollectionTypeAt,
   inferredCollectionTypeArgumentsAt,
@@ -4293,6 +4294,22 @@ const buildMapper = (
         const inferredCollection = inferredCollectionTypeArgumentsAt(collections, table, typeOf, bags, layoutTypeAt(node), node)
         if (inferredCollection) return inferredCollection
         return null
+      }
+    },
+    {
+      // A bare collection written straight into a host `any` slot is held
+      // only by a box, and every reader names it through its own dynamic
+      // type: all of its type arguments are `any`, not the constructor's
+      // defaults. See `hostDynamicSlotCollectionAt`.
+      name: 'host-dynamic-slot-collection',
+      forms: [ts.SyntaxKind.NewExpression],
+      resolve: (node) => {
+        if (!hostDynamicSlotCollectionAt(checker, node)) return null
+        const generic = table.get(typeOf(layoutTypeAt(node))).shape
+        if (generic.kind !== 'declared' || generic.typeArguments.length === 0) return null
+        const any = table.intern({ kind: 'primitive', primitive: 'any' })
+        if (generic.typeArguments.every((argument) => argument === any)) return null
+        return table.intern({ ...generic, typeArguments: generic.typeArguments.map(() => any), body: null })
       }
     },
     {

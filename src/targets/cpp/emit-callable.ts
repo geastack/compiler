@@ -2008,14 +2008,16 @@ const emitArrayConstruct = (
  * the construction's own already-resolved result carrier and argument
  * representation instead.
  *
- * Only the zero-argument form, `new Set(T[])`, and `new Map(pairs)` over an
- * Array of tuple records (`mapPairAddText`) are rendered. Every other seeding
- * form refuses by name:
+ * Only the zero-argument form, `new Set(T[])`, `new Map(pairs)` over an Array
+ * of tuple records (`mapPairAddText`), and a `Map<any, any>` seeded from an
+ * Array of objects (`mapFromEntryArray`, an ordinary [[Get]] of "0" and "1"
+ * off each boxed element) are rendered. Every other seeding form refuses by
+ * name:
  *
- * - a WeakMap seeded from entries, or a Map from entries that are not tuple
- *   records of "0"/"1" fields (`derive.ts`'s `deriveTuple`): reading a key and
- *   a value out of anything else is a real lowering, not a spelling, and
- *   guessing at it would be the kind of improvisation `emitArrayConstruct`
+ * - a WeakMap seeded from entries, or a typed Map from entries that are not
+ *   tuple records of "0"/"1" fields (`derive.ts`'s `deriveTuple`): reading a
+ *   key and a value out of anything else is a real lowering, not a spelling,
+ *   and guessing at it would be the kind of improvisation `emitArrayConstruct`
  *   already declines for `new Array(...items)`;
  * - a Set seeded from any iterable that is not an Array needs the dynamic
  *   `@@iterator` protocol this backend does not lower at all
@@ -2139,6 +2141,22 @@ const emitKeyedCollectionConstruct = (
   // here would be a conversion nothing proved.
   if (result.family === 'set' && carrier.kind === 'string' && result.key.kind === 'string') {
     return void lines.push(`${name} = gea::setFromString(${operandText(ctx, argument)});`)
+  }
+  // A `Map<any, any>` seeded from an Array of objects: every key and value is
+  // already a boxed `gea::Value`, so no pair lowering is needed -- each
+  // element's "0" and "1" are read with an ordinary [[Get]]
+  // (`mapFromEntryArray`). three's TSLCore seeds its caches this way.
+  if (
+    result.family === 'map' &&
+    result.key.kind === 'dynamic' &&
+    result.value?.kind === 'dynamic' &&
+    carrier.kind === 'array-object' &&
+    !carrier.recursive &&
+    carrier.ownership === 'shared-refcount' &&
+    ((carrier.element.kind === 'array-object' && carrier.element.ownership === 'shared-refcount' && !carrier.element.recursive) ||
+      (carrier.element.kind === 'class-ref' && carrier.element.ownership === 'shared-refcount'))
+  ) {
+    return void lines.push(`${name} = gea::runtime::iterator::mapFromEntryArray(${operandText(ctx, argument)});`)
   }
   throw createCppEmitBlockedError(
     'call-abi:construct:keyed-collection',

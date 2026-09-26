@@ -750,9 +750,16 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // second opinion here at all.
     const inferredCollection =
       table && declaration ? inferredCollectionTypeArgumentsAt(collections, table, typeOf, bags, declared, declaration) : null
-    const arrayElement = censusNode
-      ? inferredArrayElementAt(checker, collections, (node) => checker.getTypeAtLocation(node), censusNode)
-      : null
+    // A JavaScript field declared by assignment (`this.xs = []`) names its
+    // storage at the assignment's left side, where the checker answers the
+    // write's `any` rather than the member's `any[]`, so the read-keyed
+    // lookup above never runs. The member's own answer is still an array, and
+    // the array census keys that one storage by this very declaration.
+    const arrayElement =
+      (censusNode ? inferredArrayElementAt(checker, collections, (node) => checker.getTypeAtLocation(node), censusNode) : null) ??
+      (declaration && ts.isBinaryExpression(declaration) && checker.isArrayType(checkerAnswer)
+        ? collections.arrayElementForOwner(declaration)
+        : null)
     // An object-literal property filled by an empty `[]` the array census
     // could not bind (`this.structs = { vertex: [], fragment: [] }` in three's
     // NodeBuilder, whose pushes go through a JSDoc `{Object}` the census does

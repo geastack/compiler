@@ -26,6 +26,7 @@ import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
+import { programTypeNames, type ProgramTypeNames } from './jsdoc-type-names.js'
 
 /**
  * The type an unannotated class FIELD holds, when the program never declares
@@ -558,6 +559,28 @@ export const censusFieldBindings = (
   const statedBindings = new Map<ts.Symbol, ts.Type>()
   const refusalOf = new Map<ts.Symbol, string>()
   const resolvingSymbols = new Set<ts.Symbol>()
+  // A JS field's `@type` naming a class its file never imports: three's
+  // `/** @type {?Bindings} */ this.bindings = null` in `Pipelines.js`, filled
+  // `this.pipelines.bindings = this` from `Bindings.js`. The checker reads the
+  // tag as `any`, so the field fell to its one visible write, `null`, and the
+  // store of the Bindings had no conversion (class-ref -> null). The tag is
+  // read through the same program-wide names the parameter census uses.
+  let names: ProgramTypeNames | undefined
+  const namedTagTypeOf = (symbol: ts.Symbol): ts.Type | null => {
+    const declarations = symbol.declarations ?? []
+    if (declarations.length === 0 || !declarations.every(isAssignmentDeclaration)) return null
+    let answer: ts.Type | null = null
+    for (const declaration of declarations) {
+      const tag = ts.getJSDocType(declaration)
+      if (!tag) continue
+      if (!isUnusableEvidence(checker.getTypeFromTypeNode(tag))) return null
+      names ??= programTypeNames(checker, files)
+      const resolved = names.resolve(tag, declaration.getSourceFile().fileName)
+      if ('refused' in resolved || (answer !== null && answer !== resolved.type)) return null
+      answer = resolved.type
+    }
+    return answer
+  }
   /** Whether resolution is in the relaxed retry phase, where a silent write is an absence rather than a veto. See `resolveSymbol`. */
   let lenientPhase = false
 
@@ -954,6 +977,15 @@ export const censusFieldBindings = (
         refused = 'write-states-no-storage'
         break
       } else silent += 1
+    }
+    // Held to its statement: every write must be typed, and each one a type the tag admits.
+    // A silent write (`stack(this.stack)` through an untyped TSL call) is no evidence the tag holds.
+    const named = refused === null ? namedTagTypeOf(symbol) : null
+    if (named && silent === 0 && types.length > 0 && types.every((type) => checker.isTypeAssignableTo(type, named))) {
+      resolvingSymbols.delete(symbol)
+      bound.set(symbol, named)
+      statedBindings.set(symbol, named)
+      return named
     }
     // A bare `field;` nothing ever writes says nothing about its storage --
     // distinct from a disagreement, and left exactly as the checker has it.

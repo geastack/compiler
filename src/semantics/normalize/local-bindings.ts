@@ -25,6 +25,7 @@ import {
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import { emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
+import { returnedCellCollectionTypeAt } from './structural-array-element.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
 import {
   arrayAssignmentPatternSourceExpression,
@@ -659,7 +660,10 @@ export const censusLocalBindings = (
     const exported = moduleRecords.exportExpressionAt(node) ?? moduleRecords.requiredExportExpressionAt(node)
     const type = exported
       ? checker.getTypeAtLocation(exported)
-      : (objectAssignTargetType(checker, node) ?? constructedClassChoiceCheckerTypeAt(checker, node) ?? checker.getTypeAtLocation(node))
+      : (objectAssignTargetType(checker, node) ??
+        constructedClassChoiceCheckerTypeAt(checker, node) ??
+        returnedCellCollectionTypeAt(checker, node) ??
+        checker.getTypeAtLocation(node))
     return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) ? null : type
   }
 
@@ -1186,6 +1190,52 @@ export const censusLocalBindings = (
     let current: ts.Expression = node
     while (ts.isParenthesizedExpression(current)) current = current.expression
     return current
+  }
+
+  /**
+   * An unannotated `let` that walks DOWN through nested containers with
+   * `cell = cell.get( key )`, where the lookup's own type is `any`: the cell
+   * holds `undefined` too, at its declaration and wherever the program tests
+   * it against `undefined`.
+   *
+   * Three's `ChainMap` starts `let map = this._getWeakMap( keys )` and
+   * descends with `map = map.get( keys[ i ] )`, each level a `WeakMap` of the
+   * next, until `if ( map === undefined ) return undefined`. JavaScript lets
+   * the checker keep the initializer's `WeakMap<any, any>` for the cell while
+   * `get` writes `any` into it -- the next level, or `undefined` for a miss.
+   * The level itself comes back through the boxed identity round trip
+   * (`conversion/derive.ts`), and the miss needs a cell that can hold it:
+   * the bare `WeakMap` carrier made the comparison fold and the store of a
+   * miss abort. Every other read keeps the checker's own `WeakMap`, reached
+   * through the ordinary optional narrowing, exactly as
+   * `registerObservedIndexedAbsence` above widens only its observing reads.
+   *
+   * Only this self-descent form: an `any` lookup into a DIFFERENT container
+   * (`let data = cache.get( key )`) states nothing about the cell's own
+   * levels, and the ordinary write join keeps deciding it.
+   */
+  const registerSelfDescent = (declaration: ts.VariableDeclaration): void => {
+    if (declaration.type || ts.getJSDocType(declaration) || !ts.isIdentifier(declaration.name) || !declaration.initializer) return
+    const list = declaration.parent
+    if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) !== 0) return
+    const symbol = checker.getSymbolAtLocation(declaration.name)
+    if (!symbol) return
+    const declared = checker.getTypeAtLocation(declaration.name)
+    if (isUnusableEvidence(declared) || (declared.flags & ts.TypeFlags.Unknown) !== 0) return
+    const descends = flow.writesToSymbol(symbol).some((write) => {
+      if (write.slot !== 'whole' || write.edge !== 'identifier-assignment' || write.value === null) return false
+      const read = unwrapParens(write.value)
+      if (!ts.isCallExpression(read) || !ts.isPropertyAccessExpression(read.expression) || read.expression.name.text !== 'get') return false
+      const receiver = unwrapParens(read.expression.expression)
+      return ts.isIdentifier(receiver) && checker.getSymbolAtLocation(receiver) === symbol && isAnyType(checker.getTypeAtLocation(read))
+    })
+    if (!descends) return
+    const optional = checker.getNullableType(declared, ts.TypeFlags.Undefined)
+    observedIndexedAbsence.set(declaration, optional)
+    observedIndexedAbsence.set(declaration.name, optional)
+    for (const reference of flow.referencesToSymbol(symbol)) {
+      if (directUndefinedComparison(reference)) observedIndexedAbsence.set(reference, optional)
+    }
   }
 
   /** `known(node) ?? resolveExpr(node)`, except at an `as`/`<T>` cast: the checker's own answer there is taken as-is and never read past. */
@@ -1830,6 +1880,7 @@ export const censusLocalBindings = (
     if (reachable.memberIsPruned(node)) return
     if (ts.isVariableDeclaration(node)) {
       registerObservedIndexedAbsence(node)
+      registerSelfDescent(node)
       if (isCandidate(checker, node, flow)) candidates.push(node)
     }
     if (ts.isBindingElement(node) && isElementCandidate(checker, node)) elementCandidates.push(node)
