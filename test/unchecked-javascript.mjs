@@ -175,3 +175,38 @@ test('a checked file keeps a tag that leaves null out, and reports the null', ()
   assert.equal(compiled.program.getSourceFile(absent('strict-lib'))?.text, readFileSync(absent('strict-lib'), 'utf8'))
   assert.ok(errorsIn(compiled, absent('strict-lib')).length > 0)
 })
+
+// `contradicted-jsdoc-parameters.ts`: in an unchecked file, a `@param` tag
+// that an argument at a resolved call contradicts is blanked -- the whole tag,
+// so the parameter is untagged -- and every other tag stays. `params.js`
+// passes a `Uniform` where the tag states a `Node` (another class, however
+// alike), a number where it states a number, a `string` where it states two
+// string literals (a precision of the same domain, not a contradiction), and
+// a `Stack`'s `this` where the tag states its base `Shape`.
+const params = (library) => resolve(fixture, `vendor/${library}/src/params.js`)
+const paramsProgram = () =>
+  createProgram({
+    rootFileNames: [params('loose-lib'), params('strict-lib')],
+    projectFileName: resolve(fixture, 'tsconfig.json'),
+    options: {},
+    uncheckedJavaScript: new Set(['loose-lib/src/**'])
+  })
+
+test('a parameter tag a call contradicts is blanked in place, and no other tag is', () => {
+  const compiled = paramsProgram()
+  const onDisk = readFileSync(params('loose-lib'), 'utf8')
+  const compiledText = compiled.program.getSourceFile(params('loose-lib'))?.text ?? ''
+  const at = onDisk.indexOf('@param {Node} node')
+  const next = onDisk.indexOf('@param {number} hash')
+  assert.equal(compiledText.length, onDisk.length)
+  assert.equal(compiledText.slice(at, next), onDisk.slice(at, next).replace(/[^\n\r]/g, ' '))
+  assert.equal(compiledText.slice(0, at) + onDisk.slice(at, next) + compiledText.slice(next), onDisk)
+  // A subclass passing `this` to its base's method is its base.
+  assert.ok(compiledText.includes('@param {?(string|Shape)} [output=null]'))
+})
+
+test('a checked file keeps a parameter tag a call contradicts, and reports it', () => {
+  const compiled = paramsProgram()
+  assert.equal(compiled.program.getSourceFile(params('strict-lib'))?.text, readFileSync(params('strict-lib'), 'utf8'))
+  assert.ok(errorsIn(compiled, params('strict-lib')).length > 0)
+})

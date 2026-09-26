@@ -314,7 +314,7 @@ const indexTypeAt = (checker: ts.TypeChecker, container: ts.Type, key: ts.Expres
  * signature its base does not admit, and three's `ReflectorNode` is not
  * assignable to the `Node` it extends for exactly that reason.
  */
-const derivesFromStatedClass = (checker: ts.TypeChecker, constructed: ts.Type, stated: ts.Type): boolean => {
+export const derivesFromStatedClass = (checker: ts.TypeChecker, constructed: ts.Type, stated: ts.Type): boolean => {
   const classes = new Set(
     (stated.isUnion() ? stated.types : [stated]).flatMap((arm) => {
       const symbol = arm.getSymbol()
@@ -335,6 +335,15 @@ const derivesFromStatedClass = (checker: ts.TypeChecker, constructed: ts.Type, s
   }
   return false
 }
+
+/** Whether an arm of `type`, or an array element of one, is an object type only declaration files declare. */
+export const namesDeclaredOnlyType = (checker: ts.TypeChecker, type: ts.Type): boolean =>
+  (type.isUnion() ? type.types : [type]).some((arm) => {
+    if (checker.isArrayType(arm))
+      return checker.getTypeArguments(arm as ts.TypeReference).some((element) => namesDeclaredOnlyType(checker, element))
+    const declarations = (arm.flags & ts.TypeFlags.Object) !== 0 ? (arm.getSymbol()?.declarations ?? []) : []
+    return declarations.length > 0 && declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile)
+  })
 
 /** A value whose type is its own construction: `new C( ... )`, or a primitive literal. */
 const isConstruction = (value: ts.Expression): boolean => {
