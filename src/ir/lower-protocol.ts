@@ -1,8 +1,11 @@
-import type { IrBlockId } from './model.js'
+import type { SemanticResultId } from '../identity/ids.js'
+import { soleIterableArmOf } from '../representation/model.js'
+import type { IrBlockId, IrOperand } from './model.js'
 import { operandOf, resultOf } from '../semantics/model/operands.js'
 import type { ProtocolOperation } from '../semantics/model/operations.js'
 import { IrLoweringBlockedError } from './lower-graph.js'
 import {
+  convertTo,
   namedOperand,
   assertedDocumentIterationView,
   nativeBaseReceiverView,
@@ -14,6 +17,25 @@ import {
   type LoweringContext,
   enter
 } from './lower-operands.js'
+
+/**
+ * A `for`-`of` source carried as a sum narrowed to the one arm it can walk
+ * (`soleIterableArmOf`, which the published cursor also reads): the cursor is
+ * that arm's, and on a primitive arm the narrowing's own refusal stops the
+ * program, as `requireIterablePresent` does for an absent source: both are
+ * GetIterator's TypeError (ECMA-262 7.4.2).
+ */
+const iterableArmOf = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operation: ProtocolOperation,
+  target: IrOperand
+): IrOperand => {
+  if (operation.protocol !== 'iterator' || operandOf(operation, 'method')) return target
+  const arm = soleIterableArmOf(target.representation)
+  return arm === null ? target : (convertTo(ctx, block, lineage, target, arm, 'iterable-arm') ?? target)
+}
 
 /**
  * The iteration protocol's steps.

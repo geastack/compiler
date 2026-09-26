@@ -50,6 +50,7 @@ import {
   passingOf,
   representationKey,
   soleArrayPatternCapableArm,
+  soleIterableArmOf,
   type CallableAbi,
   type Representation
 } from './model.js'
