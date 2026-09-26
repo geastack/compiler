@@ -36768,7 +36768,7 @@ inline void log(const std::string& text) {
   std::fputc('\n', stdout);
 }
 
-/** Node routes both `console.warn` and `console.error` to stderr; only `error` has a real call site in the corpus, so only it is implemented. */
+/** Node routes both `console.warn` and `console.error` to stderr; `warn` delegates here (below). */
 inline void error(const std::string& text) {
   std::fputs(text.c_str(), stderr);
   std::fputc('\n', stderr);
@@ -36893,6 +36893,22 @@ inline void info(const gea::Value& first, const std::vector<gea::Value>& rest) {
 inline void info(const std::vector<gea::Value>& values) { log(values); }
 
 inline void info(const gea::Ref<gea::ArrayObject<gea::Value>>& values) { log(values); }
+
+/**
+ * `console.warn` -- stderr, byte for byte what `console.error` writes.
+ *
+ * Node's `warn` is the same stream write as `error` (`lib/internal/console/
+ * constructor.js`: `Console.prototype.warn = Console.prototype.error`), so it
+ * delegates for the reason `info` delegates to `log`, over the same four
+ * arity shapes.
+ */
+inline void warn(const std::string& text) { error(text); }
+
+inline void warn(const gea::Value& first, const std::vector<gea::Value>& rest) { error(first, rest); }
+
+inline void warn(const std::vector<gea::Value>& values) { error(values); }
+
+inline void warn(const gea::Ref<gea::ArrayObject<gea::Value>>& values) { error(values); }
 
 }  // namespace console
 

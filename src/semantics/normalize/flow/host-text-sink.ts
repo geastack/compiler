@@ -1,7 +1,7 @@
 import ts from 'typescript'
 import { unwrapErasedExpression } from '../producers/erasure.js'
 
-const TEXT_SINK_MEMBERS: ReadonlySet<string> = new Set(['log', 'error'])
+const TEXT_SINK_MEMBERS: ReadonlySet<string> = new Set(['log', 'error', 'warn'])
 
 /** The three hooks a ToString/ToPrimitive conversion can reach. */
 const coercionHook = (name: string): boolean => name === 'toString' || name === 'valueOf' || name.startsWith('__@toPrimitive')
@@ -31,12 +31,12 @@ export const coercesWithoutSourceCode = (checker: ts.TypeChecker, type: ts.Type)
 }
 
 /**
- * Whether `reference` is an argument of a `console.log`/`console.error` call on
+ * Whether `reference` is an argument of a `console.log`/`error`/`warn` call on
  * the host's own `console`, and is therefore CONSUMED AS TEXT rather than
  * published.
  *
- * `host-members.ts` claims exactly these two members and lowers them to
- * `gea::host::console::log/error(<text>)`, with `emit-tostring.ts`'s
+ * `host-members.ts` lowers these three members to
+ * `gea::host::console::log/error/warn(<text>)`, with `emit-tostring.ts`'s
  * `consoleArgumentsText` rendering every operand at the call site. The host
  * never receives the object, only characters -- so an argument is not a
  * publication of the value, provided the rendering itself runs no source code.

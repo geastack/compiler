@@ -577,6 +577,10 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   ['gea::runtime::textcodec::TextDecoder.decode', { kind: 'method', emit: '{receiver}.decode({args})', arity: 'pass-through' }],
   ['Console.log', { kind: 'method', emit: 'gea::host::console::log({args})', arity: 'variadic' }],
   ['Console.error', { kind: 'method', emit: 'gea::host::console::error({args})', arity: 'variadic' }],
+  // Node writes `console.warn` to stderr exactly as it writes `error` (the
+  // runtime's `warn` overloads delegate to it). three's logging shim ends in
+  // `console.warn( message, ...params )` beside the `console.error` twin.
+  ['Console.warn', { kind: 'method', emit: 'gea::host::console::warn({args})', arity: 'variadic' }],
   // `console.info` is Node's own alias of `console.log` (see the runtime's own
   // `info` overloads for the citation), so this row buys a real member rather
   // than a second severity: `@hono/node-server` writes one on the recoverable
