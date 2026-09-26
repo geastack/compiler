@@ -9,6 +9,7 @@ import type { IrOperand } from '../../ir/model.js'
 import type { Representation } from '../../representation/model.js'
 import { isOpenDocument, representationKey } from '../../representation/model.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from './emit-context.js'
+import { boxedValueText } from './emit-dynamic-properties.js'
 import { cppClassName, cppScalarType } from './types.js'
 import { cppErrorNativeType, errorConstructorNames, isNativeError } from './error-types.js'
 import { cppRegExpNativeTypes } from './regexp-types.js'
@@ -499,7 +500,9 @@ export const cppInstanceofHelperKeys: ReadonlySet<string> = new Set([
   // general prototype WALK `gea::host::instanceOfDynamicConstructor` renders,
   // over a left operand this same census also boxed (see that function's own
   // doc comment for why the left operand can only ever be `dynamic` too).
-  'computation:instanceof:dynamic:dynamic'
+  'computation:instanceof:dynamic:dynamic',
+  // ...and over a typed left operand boxed for that same walk.
+  'computation:instanceof:boxed:dynamic'
 ])
 
 /**
@@ -571,14 +574,15 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
   // `dynamic` on its own, so the only left operand that can reach a `dynamic`
   // constructor is one this same census also marked `dynamic` -- its own
   // construct signature's return type).
+  //
+  // A TYPED left operand reaches one too: three's
+  // `typeof Float16Array !== 'undefined' && array instanceof Float16Array`
+  // names a global the lib does not declare, so the constructor is `dynamic`
+  // while the typed-array union on the left is not. The left side is boxed
+  // (`boxedValueText`, which refuses by name a carrier the box has no tag
+  // for) and walked the same way.
   if (constructor.kind === 'dynamic') {
-    if (left.representation.kind !== 'dynamic') {
-      throw createCppEmitBlockedError(
-        `runtime-helper:computation:instanceof:${left.representation.kind}:dynamic`,
-        `"instanceof" against a boxed constructor function needs a boxed left operand too, and this one carries "${representationKey(left.representation)}"`
-      )
-    }
-    return `gea::host::instanceOfDynamicConstructor(${operandText(ctx, left)}, ${operandText(ctx, right)})`
+    return `gea::host::instanceOfDynamicConstructor(${boxedValueText(ctx, left, '"instanceof" against a boxed constructor')}, ${operandText(ctx, right)})`
   }
   if (constructor.kind === 'native-record-ref' && constructor.native !== null) {
     const spelling = ctx.hosts.instanceTests.get(constructor.native)

@@ -620,7 +620,13 @@ const instanceofSideKey = (
 const instanceofRuntimeHelperKey = (operands: readonly IrOperand[], ctx: CertifyContext): string => {
   const left = operands[0]
   const right = operands[1]
-  return `computation:instanceof:${instanceofSideKey(ctx, 'left', left, right)}:${instanceofSideKey(ctx, 'right', right, undefined)}`
+  const rightKey = instanceofSideKey(ctx, 'right', right, undefined)
+  // Against a boxed constructor a typed left operand is boxed for the walk
+  // (`emit-instanceof.ts`); what it was carried as no longer matters.
+  const leftKey = instanceofSideKey(ctx, 'left', left, right)
+  if (rightKey === 'dynamic' && leftKey !== 'dynamic' && leftKey !== 'constant' && leftKey !== 'absent')
+    return 'computation:instanceof:boxed:dynamic'
+  return `computation:instanceof:${leftKey}:${rightKey}`
 }
 
 // ---------------------------------------------------------------------------
