@@ -114,7 +114,9 @@ test('a field tag a constructed store contradicts is blanked in place, and no ot
   const contradicted = '@type {Object<string,Object<string,Group>>}'
   const at = onDisk.indexOf(contradicted)
   assert.equal(compiledText.slice(at, at + contradicted.length), ' '.repeat(contradicted.length))
-  assert.equal(compiledText.slice(0, at) + contradicted + compiledText.slice(at + contradicted.length), onDisk)
+  // `this.current = null` under `@type {Group}` is the absence pass's, below.
+  const restored = compiledText.slice(0, at) + contradicted + compiledText.slice(at + contradicted.length)
+  assert.equal(restored.replace('@type{?Group}', '@type {Group}'), onDisk)
   // The checker the compilation keeps no longer reads a dictionary of groups
   // out of `byName[ name ]`.
   const read = compiled.program.getSourceFile(groups('loose-lib'))
@@ -129,4 +131,47 @@ test('a checked file keeps a contradicted tag, and reports it', () => {
   const compiled = groupsProgram()
   assert.equal(compiled.program.getSourceFile(groups('strict-lib'))?.text, readFileSync(groups('strict-lib'), 'utf8'))
   assert.ok(errorsIn(compiled, groups('strict-lib')).length > 0)
+})
+
+// `absent-jsdoc-tags.ts`: in an unchecked file, a tag that leaves `null` out of
+// storage the program writes a literal `null` into is widened in place, `{T}`
+// to `{?T}`, taking the space before the brace. `absent.js` has one of each
+// kind (a `null` argument, a `null` default, a `null` store, a `return null`)
+// beside tags the program never writes `null` into, or that already admit it.
+const absent = (library) => resolve(fixture, `vendor/${library}/src/absent.js`)
+const absentProgram = () =>
+  createProgram({
+    rootFileNames: [absent('loose-lib'), absent('strict-lib')],
+    projectFileName: resolve(fixture, 'tsconfig.json'),
+    options: {},
+    uncheckedJavaScript: new Set(['loose-lib/src/**'])
+  })
+
+test('a tag the program writes a literal null past is widened in place, and no other tag is', () => {
+  const compiled = absentProgram()
+  const onDisk = readFileSync(absent('loose-lib'), 'utf8')
+  const compiledText = compiled.program.getSourceFile(absent('loose-lib'))?.text ?? ''
+  assert.equal(compiledText.length, onDisk.length)
+  const widened = [
+    ['@param {string} name', '@param{?string} name'],
+    ['@param {Set<string>} [seen=null]', '@param{?Set<string>} [seen=null]'],
+    ['@type {string} */\n    this.uuid', '@type{?string} */\n    this.uuid'],
+    ['@return {string} */\n  ternary', '@return{?string} */\n  ternary']
+  ]
+  let expected = onDisk
+  for (const [before, after] of widened) {
+    assert.ok(expected.includes(before), before)
+    expected = expected.replace(before, after)
+  }
+  assert.equal(compiledText, expected)
+  const file = compiled.program.getSourceFile(absent('loose-lib'))
+  const attribute = file.statements.find(ts.isClassDeclaration)
+  const ternary = attribute.members.find((member) => ts.isMethodDeclaration(member) && member.name.getText(file) === 'ternary')
+  assert.equal(compiled.checker.typeToString(compiled.checker.getSignatureFromDeclaration(ternary).getReturnType()), 'string | null')
+})
+
+test('a checked file keeps a tag that leaves null out, and reports the null', () => {
+  const compiled = absentProgram()
+  assert.equal(compiled.program.getSourceFile(absent('strict-lib'))?.text, readFileSync(absent('strict-lib'), 'utf8'))
+  assert.ok(errorsIn(compiled, absent('strict-lib')).length > 0)
 })
