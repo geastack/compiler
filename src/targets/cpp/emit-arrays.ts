@@ -434,13 +434,28 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
       continue
     }
     if (slot.kind === 'gather') {
-      if (representation.element.kind !== 'dynamic' || slot.iterator.representation.kind !== 'dynamic') {
+      if (slot.iterator.representation.kind !== 'dynamic') {
         throw createCppEmitBlockedError(
           `runtime-helper:allocation:array-literal:${representation.element.kind}(dynamic-gather)`,
-          'a generic iterator gather requires a dynamic iterator record and an array with dynamic elements'
+          'a generic iterator gather requires a dynamic iterator record'
         )
       }
-      lines.push(`gea::runtime::iterator::appendGather(*${name}, ${operandText(ctx, slot.iterator)});`)
+      if (representation.element.kind === 'dynamic') {
+        lines.push(`gea::runtime::iterator::appendGather(*${name}, ${operandText(ctx, slot.iterator)});`)
+        continue
+      }
+      // Each drained value is converted into the typed element on the way in,
+      // by the conversion the lowering already checked exists.
+      const converted = alignedValueText(ctx, 'emit-arrays.ts:gather', slot.iterator.representation, representation.element, 'gea_element')
+      if (converted === null) {
+        throw createCppEmitBlockedError(
+          `conversion:${representationKey(slot.iterator.representation)}->${representationKey(representation.element)}`,
+          `a dynamic gather has no per-element conversion into this array's "${representationKey(representation.element)}" element carrier`
+        )
+      }
+      lines.push(
+        `gea::runtime::iterator::appendGatherConverted(*${name}, ${operandText(ctx, slot.iterator)}, [&](const gea::Value& gea_element) { return ${converted}; });`
+      )
       continue
     }
     // An element whose own carrier is not the array's is reconciled on the way
