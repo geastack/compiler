@@ -718,6 +718,31 @@ export const censusCollectionBindings = (
       continue
     }
     if (statesItsTypeArguments(entry, owner)) continue
+    // An object-literal slot holding this collection is a second cell whose
+    // carrier this census never publishes: the bag types it from the
+    // checker's own `Map<any, any>`, so binding the owner gave one storage
+    // two carriers and a conversion no keyed collection has (three's
+    // `TSLCore.js` `cacheMaps = { bool: boolsCacheMap, uint: uintsCacheMap,
+    // ... }`, whose four maps then share `ConvertType`'s one `cacheMap`).
+    const aliases = aliasClosureOf(owner)
+    const literalSlot = [...aliases].find(
+      (decl) =>
+        decl !== owner &&
+        (ts.isPropertyAssignment(decl) || ts.isShorthandPropertyAssignment(decl)) &&
+        ts.isObjectLiteralExpression(decl.parent)
+    )
+    if (literalSlot) {
+      ownerRefusal.set(owner, 'escapes-into-literal-slot')
+      censusRefusals.push(
+        censusRefusal(
+          'collection',
+          'escapes-into-literal-slot',
+          `this collection is also held by the object-literal slot ${describeOwner(literalSlot)}, whose carrier this census does not publish`,
+          describeOwner(owner)
+        )
+      )
+      continue
+    }
     const keyArgs: ts.Expression[] = []
     const valueArgs: ts.Expression[] = []
     const aliases = aliasClosureOf(owner)

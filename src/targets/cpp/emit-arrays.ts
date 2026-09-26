@@ -348,6 +348,23 @@ export const emitAllocateArrayObject = (ctx: EmitContext, lines: string[], opera
           representationKey(first.value) === representationKey(spread.key) &&
           representationKey(second.value) === representationKey(spread.value) &&
           slot.from === 0
+        // A `Map<any, any>` spread: the checker's `[any, any]` pair is laid
+        // out as a dynamic-element array, not a pair record, so each entry is
+        // minted as its own `[k, v]` Array (`appendMapRangeAsArrays`).
+        // three's TSLCore spreads its caches this way.
+        if (
+          !matches &&
+          representation.element.kind === 'array-object' &&
+          representation.element.element.kind === 'dynamic' &&
+          representation.element.ownership === 'shared-refcount' &&
+          !representation.element.recursive &&
+          spread.key.kind === 'dynamic' &&
+          spread.value?.kind === 'dynamic' &&
+          slot.from === 0
+        ) {
+          lines.push(`gea::runtime::iterator::appendMapRangeAsArrays(*${name}, *${operandText(ctx, slot.value)});`)
+          continue
+        }
         if (!matches) {
           throw createCppEmitBlockedError(
             `conversion:map-pair->${representationKey(representation.element)}`,

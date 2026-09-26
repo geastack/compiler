@@ -37427,6 +37427,46 @@ inline void appendGather(gea::ArrayObject<gea::Value>& out, const gea::Value& it
 }
 
 /**
+ * `[...map]` into an array whose element is a two-slot dynamic Array
+ * (ECMA-262 24.1.5.1): the checker types a `Map<any, any>` pair as
+ * `[any, any]`, which is laid out as `ArrayObject<Value>` rather than as a
+ * pair record, so each entry is minted as its own fresh `[key, value]`
+ * Array. The emitter reaches this only for a `Map<any, any>` source, whose
+ * key and value are already boxed, so nothing here converts. three's
+ * TSLCore spreads its `cacheMaps` maps this way.
+ */
+inline void appendMapRangeAsArrays(gea::ArrayObject<gea::Ref<gea::ArrayObject<gea::Value>>>& out, const gea::Map<gea::Value, gea::Value>& source) {
+  for (const auto& entry : source.entries()) {
+    auto pair = gea::makeRef<gea::ArrayObject<gea::Value>>();
+    pair->push(entry.first);
+    pair->push(entry.second);
+    out.push(std::move(pair));
+  }
+}
+
+/**
+ * `new Map(array)` for a `Map<any, any>` (ECMA-262 24.1.1.2
+ * AddEntriesFromIterable): each element is an object whose "0" and "1"
+ * properties are read with an ordinary [[Get]] -- a `[k, v]` Array, or any
+ * other object, whose missing slots read `undefined`. A hole reads
+ * `undefined`, which is not an Object, so it throws the TypeError of step
+ * 4.d. The emitter reaches this only for an array whose element is an object
+ * carrier. three's TSLCore seeds its `cacheMaps` maps this way.
+ */
+template <typename E>
+inline gea::Ref<gea::Map<gea::Value, gea::Value>> mapFromEntryArray(const gea::Ref<gea::ArrayObject<E>>& source) {
+  auto result = gea::makeRef<gea::Map<gea::Value, gea::Value>>();
+  const gea::PropertyKey first = gea::PropertyKey::number(0);
+  const gea::PropertyKey second = gea::PropertyKey::number(1);
+  for (const auto& slot : source->slots()) {
+    if (!slot.present) gea::host::throwRuntimeError("TypeError", "Iterator value undefined is not an entry object");
+    const gea::Value item = gea::Value::box(gea::Value::Tag::Object, slot.value);
+    result->set(item.getProperty(first), item.getProperty(second));
+  }
+  return result;
+}
+
+/**
  * `appendGather` into a typed element: each drained value goes through the
  * element's own conversion before the push. The conversion is the compiler's
  * checked load of a dynamic value into that carrier, not program code, so the
