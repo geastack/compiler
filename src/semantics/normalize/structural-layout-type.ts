@@ -19,6 +19,27 @@ import { emptyAbsentGlobalCensus, type AbsentGlobalCensus } from './absent-globa
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 
 /**
+ * The parameter a node declares or reads when the program typed it only by a
+ * `null` or `undefined` default: no annotation, no JSDoc tag, just
+ * `updateType = null` (three's `uniformGroup( name, order = 1, updateType =
+ * null )`). The checker types it `null`, which every caller that passes a
+ * string contradicts; the default states what an omitted argument becomes,
+ * not what the parameter holds, exactly as a `{}` default states nothing.
+ * The parameter census binds such a parameter from its callers
+ * (`isUnannotated`), and the ABI slot already reads that answer
+ * (`structural-parts.ts`'s `parameterOf`), so the body's own binding and
+ * reads have to read it too, or the two frames disagree.
+ */
+const absentDefaultParameterOf = (checker: ts.TypeChecker, node: ts.Node): ts.ParameterDeclaration | null => {
+  const declaration = ts.isParameter(node) ? node : ts.isIdentifier(node) ? checker.getSymbolAtLocation(node)?.valueDeclaration : undefined
+  if (!declaration || !ts.isParameter(declaration) || declaration.type || !declaration.initializer) return null
+  if (!ts.isIdentifier(declaration.name) || declaration.dotDotDotToken) return null
+  if (ts.getJSDocType(declaration) || ts.getJSDocParameterTags(declaration).length > 0) return null
+  const initializer = checker.getTypeAtLocation(declaration.initializer)
+  return !initializer.isUnion() && (initializer.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0 ? declaration : null
+}
+
+/**
  * Which type an object or array literal is laid out as.
  *
  * Split out of `structural.ts` -- it closes over nothing but the checker, and
@@ -1042,7 +1063,8 @@ export const createLayoutTypeResolver = (
       (own.flags & ts.TypeFlags.Any) !== 0 ||
       annotationStatesNothing(checker, node, own) ||
       impliedPatternParameterOf(checker, node) !== null ||
-      impliedPatternElementRootOf(checker, node) !== null
+      impliedPatternElementRootOf(checker, node) !== null ||
+      absentDefaultParameterOf(checker, node) !== null
     ) {
       // Asked before the parameter census: a literal token is not a value the
       // program left open for its callers to write down. See above.
