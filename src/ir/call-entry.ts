@@ -57,11 +57,25 @@ export const publishOmittedArgumentConversions = (operation: CallOperation | Con
     // A sum invokes the selected arm's convention. Seal its existing native
     // argument/result conversions before provenance and reflection consume
     // them, rather than minting the first citation while printing the arm.
+    // A rest arm's named formals take arguments the same way; its rest slot
+    // takes what is past them, and the rest of a spread's list after that
+    // (`ConstructOperation.spreadTail`), each into the rest element.
     for (const arm of operation.callee.representation.arms) {
       const abi = constructAbiOfCallee(arm.value)
-      if (abi === null || abi.receiver !== null || abi.restFrom !== null) continue
-      for (let index = 0; index < abi.parameters.length; index++)
+      if (abi === null || abi.receiver !== null) continue
+      const named = abi.restFrom ?? abi.parameters.length
+      for (let index = 0; index < named; index++)
         conversions.nodeFor(operation.arguments[index]?.representation ?? { kind: 'undefined' }, abi.parameters[index]!.value)
+      const rest = abi.restFrom === null ? undefined : abi.parameters[abi.restFrom]?.value
+      if (abi.restFrom !== null && rest?.kind === 'array-object') {
+        const tail = operation.spreadTail
+        const written =
+          tail === undefined
+            ? operation.arguments.slice(abi.restFrom)
+            : operation.arguments.slice(abi.restFrom, Math.max(abi.restFrom, tail.from))
+        for (const argument of written) conversions.nodeFor(argument.representation, rest.element)
+        if (tail?.list.representation.kind === 'array-object') conversions.nodeFor(tail.list.representation.element, rest.element)
+      }
       conversions.nodeFor(abi.result, operation.result.representation)
     }
     return
