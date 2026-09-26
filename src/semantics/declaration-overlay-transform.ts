@@ -1921,6 +1921,9 @@ export const declarationOverlayTransform = (input: {
    * writes the tuple it means that way -- `@param {Array<number,number,number,
    * ?string>} array` for `Euler.fromArray`, whose declaration states
    * `EulerTuple` -- and the tag then types the fourth position a number.
+   * Only for a parameter with no default: `toArray( array = [], offset = 0 )`
+   * writes through a runtime offset into an array it may have made itself,
+   * which no fixed-arity tuple describes.
    */
   const isOverAppliedArray = (node: ts.TypeNode): boolean =>
     ts.isTypeReferenceNode(node) &&
@@ -1955,6 +1958,7 @@ export const declarationOverlayTransform = (input: {
       if (!VAGUE_PARAM_TYPES.has(stated) && !isOverAppliedArray(typeNode)) continue
       const index = indexOfParam.get(tag.name.text)
       if (index === undefined) continue
+      if (!VAGUE_PARAM_TYPES.has(stated) && jsSignature.parameters[index]?.initializer !== undefined) continue
       const counterpart = counterpartOf(jsSignature, declared, index)
       if (!counterpart || !counterpart.type || !ts.isIdentifier(counterpart.name)) continue
       // ⛔ Against the DECLARED parameter's own source file, never `file` --

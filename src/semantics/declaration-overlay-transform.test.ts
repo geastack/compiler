@@ -660,6 +660,8 @@ export class Angles {
   fromArray( array ) { return this }
   /** @param {Array<number>} values @return {Angles} */
   scale( values ) { return this }
+  /** @param {Array<number,number,number,string>} [target=[]] @return {Array<number>} */
+  toArray( target = [] ) { return target }
 }
 `
   const text = overlayRecord('tuples', source)
@@ -669,6 +671,8 @@ export class Angles {
   assert.equal(types.get('array'), '[x: number, y: number, z: number, order?: "XYZ" | "YXZ"]')
   // A well-formed `Array<T>` is a statement of its own, and is left alone.
   assert.equal(types.get('values'), 'number[]')
+  // A defaulted parameter keeps its tag: `[]` is no tuple of the declared arity.
+  assert.equal(types.get('target'), 'number[]')
 })
 
 test('a record method the declaration types compiles to a native signature', () => {

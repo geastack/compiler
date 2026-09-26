@@ -4,4 +4,5 @@ export type Triple = [x: number, y: number, z: number, order?: Order]
 export declare class Angles {
   fromArray(array: Triple): Angles
   scale(values: number[]): Angles
+  toArray(target?: Partial<Triple>): Triple
 }
