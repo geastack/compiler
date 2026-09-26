@@ -14,7 +14,7 @@ import {
 import type { PrimitiveFamily } from '../../model/coverage.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { SemanticEdge } from '../../model/edges.js'
-import { normalCompletion, pureEffects, throwingCompletion, type ConstantLiteral, type OperandSource } from '../../model/operands.js'
+import { normalCompletion, pureEffects, throwingCompletion, type OperandSource } from '../../model/operands.js'
 import type { BindingOperation, ReferenceOperation } from '../../model/operations.js'
 import type { CensusCandidate } from '../census.js'
 import { familyOf, isNewTarget } from '../census.js'
@@ -29,26 +29,7 @@ import type { UnresolvableNameCensus } from '../unresolvable-names.js'
 import { argumentsObjectValueAt } from './bindings.js'
 import { calleeAwareTypeAt, isAssignmentOperatorKind } from './shared.js'
 import { isModuleWrapperThis } from '../commonjs-module-record.js'
-
-const literalConstantOf = (expression: ts.Expression): { text: string; literal: ConstantLiteral } | null => {
-  if (ts.isStringLiteralLike(expression)) return { text: expression.text, literal: 'string' }
-  if (ts.isNumericLiteral(expression)) return { text: expression.text, literal: 'number' }
-  if (expression.kind === ts.SyntaxKind.BigIntLiteral)
-    return { text: (expression as ts.BigIntLiteral).text.slice(0, -1), literal: 'bigint' }
-  if (expression.kind === ts.SyntaxKind.TrueKeyword) return { text: 'true', literal: 'boolean' }
-  if (expression.kind === ts.SyntaxKind.FalseKeyword) return { text: 'false', literal: 'boolean' }
-  if (expression.kind === ts.SyntaxKind.NullKeyword) return { text: 'null', literal: 'null' }
-  // `undefined` is spelled as a name, but it is not a binding any program
-  // reads: the global property is non-writable and non-configurable, so every
-  // resolution of the unshadowed name yields the one value. Citing it as a
-  // constant is what `null` already gets, and it is what lets `undefined as
-  // unknown as T` -- the standard ambient-global guard -- publish a value at
-  // all. A program that declares its *own* `undefined` is a different name;
-  // `buildReference` refuses that one by name rather than letting this text
-  // answer for it.
-  if (ts.isIdentifier(expression) && expression.text === 'undefined') return { text: 'undefined', literal: 'undefined' }
-  return null
-}
+import { literalConstantOf } from '../constant-literal.js'
 
 /** Whether a checker type explicitly has an `undefined` constituent. */
 const includesUndefined = (type: ts.Type): boolean => {

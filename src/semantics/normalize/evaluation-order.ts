@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import { constantTruthinessOf } from './constant-literal.js'
 
 /**
  * A node's children in the order the language evaluates them.
@@ -29,7 +30,12 @@ import ts from 'typescript'
 export const alwaysAbrupt = (statement: ts.Statement | undefined): boolean => {
   if (!statement) return false
   if (ts.isBlock(statement)) return statement.statements.some(alwaysAbrupt)
-  if (ts.isIfStatement(statement)) return alwaysAbrupt(statement.thenStatement) && alwaysAbrupt(statement.elseStatement)
+  if (ts.isIfStatement(statement)) {
+    const constant = constantTruthinessOf(statement.expression)
+    if (constant === true) return alwaysAbrupt(statement.thenStatement)
+    if (constant === false) return alwaysAbrupt(statement.elseStatement)
+    return alwaysAbrupt(statement.thenStatement) && alwaysAbrupt(statement.elseStatement)
+  }
   return (
     ts.isBreakStatement(statement) || ts.isReturnStatement(statement) || ts.isThrowStatement(statement) || ts.isContinueStatement(statement)
   )
@@ -75,11 +81,33 @@ export const forEachEvaluationChild = (node: ts.Node, visit: (child: ts.Node) =>
     visit(node.left)
     return
   }
+  // A constant condition rules one arm out statically; that arm is never
+  // evaluated -- see `constantTruthinessOf`.
+  if (ts.isIfStatement(node)) {
+    visit(node.expression)
+    const constant = constantTruthinessOf(node.expression)
+    if (constant !== false) visit(node.thenStatement)
+    if (node.elseStatement && constant !== true) visit(node.elseStatement)
+    return
+  }
+  if (ts.isConditionalExpression(node)) {
+    visit(node.condition)
+    const constant = constantTruthinessOf(node.condition)
+    if (constant !== false) visit(node.whenTrue)
+    if (constant !== true) visit(node.whenFalse)
+    return
+  }
   if (ts.isForStatement(node)) {
     if (node.initializer) visit(node.initializer)
     if (node.condition) visit(node.condition)
+    if (node.condition && constantTruthinessOf(node.condition) === false) return
     visit(node.statement)
     if (node.incrementor) visit(node.incrementor)
+    return
+  }
+  if (ts.isWhileStatement(node)) {
+    visit(node.expression)
+    if (constantTruthinessOf(node.expression) !== false) visit(node.statement)
     return
   }
   ts.forEachChild(node, visit)

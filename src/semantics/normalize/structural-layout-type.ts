@@ -727,8 +727,13 @@ export const createLayoutTypeResolver = (
     // statically typed array is routed through Value.
     if ((declared.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return declared
     const arms = declared.isUnion() ? declared.types : [declared]
+    // `Array.isArray` is true exactly for an Array exotic object, so a readonly
+    // array or a tuple arm is one it selects too, although neither is
+    // assignable to the mutable `any[]` the predicate spells.
     const compatible = arms.filter(
-      (arm) => (arm.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0 && checker.isTypeAssignableTo(arm, own)
+      (arm) =>
+        (arm.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0 &&
+        (checker.isTypeAssignableTo(arm, own) || checker.isArrayLikeType(arm))
     )
     return compatible.length === 1 ? (compatible[0] ?? null) : null
   }

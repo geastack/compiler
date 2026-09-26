@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import { constantTruthinessOf } from '../constant-literal.js'
 import { normalCompletion, pureEffects, type SemanticOperand } from '../../model/operands.js'
 import type { ControlOperation } from '../../model/operations.js'
 import type { CensusCandidate } from '../census.js'
@@ -41,7 +42,13 @@ export const contributePlainLoop = (
   candidate: CensusCandidate,
   condition: ts.Expression | undefined
 ): CandidateContribution => {
-  const resolvedCondition = contributeLoopCondition(context, candidate, condition)
+  // A constant test decides the loop statically (`constantTruthinessOf`): a
+  // truthy one is an unconditional back edge, `while (true)`'s own shape, and a
+  // falsy one exits before the body ever runs, so there is no loop to publish
+  // and the body publishes nothing either (`evaluation-order.ts`).
+  const constant = condition ? constantTruthinessOf(condition) : null
+  if (constant === false) return { kind: 'operations', operations: [], edges: [] }
+  const resolvedCondition = constant === true ? { operand: null } : contributeLoopCondition(context, candidate, condition)
   if ('kind' in resolvedCondition) return resolvedCondition
   const id = mintOperationId(context.ordinals, candidate.id, 'control')
   const operation: ControlOperation = {
