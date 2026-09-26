@@ -1651,12 +1651,59 @@ const emitCallableSidecarDelete = (ctx: EmitContext, lines: string[], operation:
   return true
 }
 
+/**
+ * `delete` on a tagged union: one `delete` on whichever arm the value holds.
+ *
+ * Each arm is deleted from exactly as a receiver of that carrier would be --
+ * the arm's own value is an ordinary operand here, so every branch of
+ * `emitDeleteOperation` answers it -- and `ir/certify/property-access.ts`
+ * demands each arm's own recipe for the same reason. The arm's answer lands in
+ * its own boolean, and the operation's strictness and result are applied once,
+ * to the arm the value holds. three's `Renderer.highPrecision` deletes
+ * `modelViewMatrix` off a context value that is a Node or a lighting record.
+ * Only arms the carrier itself tells apart are dispatched, the one test
+ * `.is<i>()` answers.
+ */
+const emitTaggedUnionDelete = (ctx: EmitContext, lines: string[], operation: DeleteOperation): boolean => {
+  const union = operation.receiver.representation
+  if (union.kind !== 'tagged-union' || union.arms.length === 0) return false
+  if (!union.arms.every((arm) => arm.runtimeDiscriminator.kind === 'carrier')) return false
+  const receiver = operandText(ctx, operation.receiver)
+  const answers = union.arms.map((arm, index) => {
+    const value = `${operation.receiver.value}|delete-arm|${index}` as IrValueId
+    if (!ctx.valueNames.has(value)) ctx.valueNames.set(value, `${receiver}.get<${index}>()`)
+    const result = {
+      id: `${value}|result|${ctx.nextValueOrdinal}` as IrValueId,
+      representation: { kind: 'scalar', domain: 'boolean' } as const
+    }
+    const armLines: string[] = []
+    emitDeleteOperation(ctx, armLines, { ...operation, strict: false, receiver: { value, representation: arm.value }, result })
+    return {
+      test: `${receiver}.is<${index}>()`,
+      lines: armLines,
+      answer: operandText(ctx, { value: result.id, representation: result.representation })
+    }
+  })
+  answers.forEach((arm, index) => {
+    const head = index === 0 ? `if (${arm.test}) {` : index === answers.length - 1 ? '} else {' : `} else if (${arm.test}) {`
+    lines.push(head, ...arm.lines)
+  })
+  lines.push('}')
+  const selected = answers.reduceRight<string>(
+    (rest, arm, index) => (index === answers.length - 1 ? arm.answer : `(${arm.test} ? ${arm.answer} : ${rest})`),
+    ''
+  )
+  emitDeleteOutcome(ctx, lines, operation, selected)
+  return true
+}
+
 export const emitDeleteOperation = (ctx: EmitContext, lines: string[], operation: DeleteOperation): void => {
   if (emitDynamicDelete(ctx, lines, operation)) return
   if (emitCallableSidecarDelete(ctx, lines, operation)) return
   if (emitDictionaryDelete(ctx, lines, operation)) return
   if (emitNativeSidecarDelete(ctx, lines, operation)) return
   if (emitNativeHandleDelete(ctx, lines, operation)) return
+  if (emitTaggedUnionDelete(ctx, lines, operation)) return
   // The refusal's key-form suffix names whether the key is one the program
   // wrote, matching the claim every branch above just asked -- `staticKeyTexts`,
   // not `constantTexts`, or a render-time `typeof` fold could make this code

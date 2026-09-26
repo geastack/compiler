@@ -439,6 +439,21 @@ const accessDemandOf = (operation: AccessOperation, ctx: CertifyContext): readon
   const computed = key !== null && isComputedKey(ctx, key) && !sealedDefinition
   const keyText = key !== null ? constantKeyTextOf(ctx, key) : null
   const access: Access = { receiver: representation.kind, method: operation.kind, computed }
+  // A `delete` on a tagged union is one `delete` on whichever arm the value
+  // holds, and `emit-dynamic-properties.ts`'s `emitTaggedUnionDelete` renders
+  // it as exactly that, so each arm owes its own recipe. Only arms the carrier
+  // tells apart are dispatched there, and only those are split here.
+  if (
+    operation.kind === 'delete' &&
+    representation.kind === 'tagged-union' &&
+    representation.arms.length > 0 &&
+    representation.arms.every((arm) => arm.runtimeDiscriminator.kind === 'carrier')
+  ) {
+    return representation.arms.map((arm) => {
+      const armAccess: Access = { receiver: arm.value.kind, method: 'delete', computed }
+      return { key: `property-access:${receiverKeyOf(ctx, armAccess, arm.value, key, keyText, semanticOp)}:delete:${computed}` }
+    })
+  }
   const receiverKey = receiverKeyOf(ctx, access, representation, key, keyText, semanticOp)
   return [
     { key: `property-access:${receiverKey}:${access.method}:${access.computed}` },
