@@ -220,11 +220,17 @@ const statesItsOwnType = (checker: ts.TypeChecker, node: ts.Identifier | ts.Prop
   const target = symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(symbol) : symbol
   return (target?.declarations ?? []).some(
     (declaration) =>
-      (ts.isVariableDeclaration(declaration) ||
+      ((ts.isVariableDeclaration(declaration) ||
         ts.isParameter(declaration) ||
         ts.isPropertyDeclaration(declaration) ||
         ts.isPropertySignature(declaration)) &&
-      declaration.type !== undefined
+        declaration.type !== undefined) ||
+      // A JavaScript parameter states its type in JSDoc, and `unstatedNeverArray`'s
+      // parameter branch already exempts it: three's `hashArray( array )` under
+      // `@param {Array<number>}` kept its cell at the statement while every read
+      // of it took the caller's box, so the callee disagreed with itself before
+      // any caller was asked.
+      (ts.isParameter(declaration) && (ts.getJSDocType(declaration) !== undefined || ts.getJSDocParameterTags(declaration).length > 0))
   )
 }
 
@@ -327,8 +333,10 @@ export const contextualArrayConstructTypeAt = (checker: ts.TypeChecker, node: ts
  * fills DOES state them, and the checker already checked the allocation
  * against it, so the fill is the type.
  *
- * Asked after `inferredCollectionTypeArgumentsAt`: a census that watched the
- * cell's own writes has looked at more than the position's annotation has.
+ * Asked after `inferredCollectionTypeArgumentsAt`, which answers nothing for
+ * an owner whose position states its arguments (`collection-bindings.ts`'s
+ * `statesItsTypeArguments`): the cell carries that statement, so the
+ * allocation filling it must as well.
  * Asked only for exactly this shape -- no arguments, no explicit type
  * arguments, every inferred type argument `any`, and a contextual type that
  * is the same generic (or a union of it with absences alone) with stated
@@ -353,8 +361,11 @@ export const contextualCollectionTypeAt = (checker: ts.TypeChecker, node: ts.Nod
   )
   const [filled] = substantive
   if (!filled || substantive.length !== 1 || genericTargetOf(filled) !== target) return null
+  // One stated argument is a statement: `Map<string, Object>` in three's JSDoc
+  // types the cell `keyed-collection(map, string, dynamic)`, and the
+  // allocation left at `Map<any, any>` disagreed with it about the key.
   const filledArguments = checker.getTypeArguments(filled as ts.TypeReference)
-  if (filledArguments.some((argument) => (argument.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0)) return null
+  if (filledArguments.every((argument) => (argument.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0)) return null
   return filled
 }
 

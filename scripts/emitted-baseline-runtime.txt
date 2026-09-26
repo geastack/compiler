@@ -5,6 +5,7 @@ annotated-generic-function-alias.ts.cpp 85b2e03d22b0
 app-root-through-factory-and-host-callback.runtime.ts.cpp 68a9f057aff4
 array-assignment-rest-target.ts.cpp 99169090bee7
 array-concat-array-argument.ts.cpp 86c31adb9c34
+array-dynamic-element-search.ts.cpp 80d32b7cb646
 array-element-string-key.ts.cpp 82836dce1c7b
 array-index-absence.ts.cpp b9f1195e8e0b
 array-isarray-identity-conditional.ts.cpp 33c73a99fa8f
@@ -103,6 +104,7 @@ constructor-alias-installed-members.runtime.js.cpp 19a6cf4855e4
 constructor-reads-arguments.runtime.js.cpp 68f158847348
 contextual-handler-union-return-slot.ts.cpp 6e40af1ea7a2
 contextual-pattern-callback.ts.cpp 7664ae43caef
+contradicted-return-tag-record.runtime.js.cpp d1351e69b586
 control-flow-structural-view.ts.cpp 9901c479e84d
 cpn-numeric-computed-keys.runtime.js.cpp d21f394f1e0c
 date-prototype-method-reflection.runtime.js.cpp 89df87bd3921
@@ -117,7 +119,7 @@ derived-constructor-completion.runtime.js.cpp b59c7081e326
 descriptor-array-splice.js.cpp 96429601e125
 descriptor-function-this-is-the-lookup-receiver.ts.cpp 7ed558c58fe2
 destructured-default-host-options.ts.cpp c11cc6124034
-destructured-key-of-filled-empty-literal.runtime.js.cpp 88004e30660b
+destructured-key-of-filled-empty-literal.runtime.js.cpp 291be4a22802
 destructuring-defaults.ts.cpp 5b9603fe4315
 dictionary-define-property-nondefault.ts.cpp ee362b11ee3c
 dictionary-define-property.ts.cpp 294cfc8a7aca
@@ -433,6 +435,7 @@ numeric-record-reads.js.cpp 3a1a43509eba
 object-create-contextual.ts.cpp a1ea4ea40b7f
 object-destructuring-assignment.ts.cpp c0f9e4a7ab05
 object-entries-subclass-through-helper.ts.cpp 326fa9e13f0e
+object-literal-empty-array-field-boxed.runtime.js.cpp d224d8d2b229
 object-literal-es5-method-receiver.runtime.js.cpp 35067ec88af1
 object-literal-getter-capture.ts.cpp 962dd1d3202c
 object-pattern-numeric-key-over-array.ts.cpp 828ec7992347
@@ -554,11 +557,13 @@ spread-into-untyped-callable.runtime.js.cpp d476762f9a54
 spread-new-reflected-constructor.runtime.js.cpp f64547d3e4fa
 stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d
+stated-any-collection-field-allocation.runtime.js.cpp 0ba48b0a0d69
+stated-collection-field-allocation.runtime.js.cpp d669095a6744
 stated-open-union-preserves-closed-arms.ts.cpp 878f72cd6f91
 static-intrinsic-reflection.runtime.js.cpp 9a7c2a8500d2
 static-method-as-callback-value.ts.cpp 8ec7c5dfe2ea
 static-property-descriptors.runtime.js.cpp d6c981deef9d
-stored-listener-native-flow.js.cpp ad6f1cabef1e
+stored-listener-native-flow.js.cpp 5df0658a3c3b
 strict-delete-module-exports.ts.cpp 155a2051d279
 strict-delete.ts.cpp 85fdced0a04d
 string-field-append.ts.cpp 9fec58e0a12a

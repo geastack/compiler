@@ -294,6 +294,16 @@ const CONSTRUCTOR_NAMES: ReadonlyMap<string, CollectionFamily> = new Map([
   ['WeakSet', 'weak-set']
 ])
 
+/** Whether the owner's declaration states a type: an annotation, or a JSDoc `@type` on it or on the statement assigning it (`this.x = ...`). */
+const ownerIsAnnotated = (owner: ts.Node): boolean => {
+  if (
+    (ts.isVariableDeclaration(owner) || ts.isPropertyDeclaration(owner)) &&
+    (owner.type !== undefined || ts.getJSDocType(owner) !== undefined)
+  )
+    return true
+  return ts.isBinaryExpression(owner) && ts.isExpressionStatement(owner.parent) && ts.getJSDocTypeTag(owner.parent) !== undefined
+}
+
 const isUnusableEvidence = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0
 
 interface CollectionEntry {
@@ -418,7 +428,7 @@ export const censusCollectionBindings = (
     'index-assignment',
     'call-argument'
   ])
-  const aliasClosureOf = (owner: ts.Node): ReadonlySet<ts.Node> => {
+  const aliasClosureOf = (owner: ts.Node, stopAt: (node: ts.Node) => boolean = () => false): ReadonlySet<ts.Node> => {
     const seen = new Set<ts.Node>([owner])
     const queue: ts.Node[] = [owner]
     while (queue.length > 0) {
@@ -428,7 +438,7 @@ export const censusCollectionBindings = (
         const target = write.target.declaration
         if (target && !seen.has(target)) {
           seen.add(target)
-          queue.push(target)
+          if (!stopAt(target)) queue.push(target)
         }
       }
     }
@@ -514,6 +524,43 @@ export const censusCollectionBindings = (
     return isUnusableEvidence(own) ? parameters.typeAt(expr) : own
   }
 
+  /**
+   * Whether the DESTINATION of every bare construction feeding this owner
+   * states the collection's type arguments: `@type {Map<string,Pipeline>}`
+   * on `this.caches = new Map()`. The checker types the `new Map()` itself
+   * `Map<any, any>` (the non-generic `new (): Map<any, any>` overload), while
+   * the field it fills is the stated `Map<string, Pipeline>`. Inferring the
+   * allocation from its writes is then a second opinion beside the program's
+   * own: the cell keeps the stated type, the allocation gets the inferred one
+   * (three's `Pipelines` keys it by an untyped parameter, so `Map<any,
+   * Pipeline>`), and one storage carries two carriers that no conversion can
+   * reconcile without copying the map. Such an owner is left to the position's
+   * statement (`structural-array-element.ts`'s `contextualCollectionTypeAt`),
+   * which types the allocation exactly as the cell.
+   *
+   * A statement whose every argument is `any` states something only when the
+   * owner is annotated: `@type {Set<HTMLTexture>}` over a name three never
+   * imports is `Set<any>`, and that is the cell. An unannotated `let m = new
+   * Map()` reassigned later is contextually `Map<any, any>` too, from its own
+   * initializer, and there the writes decide, as before.
+   */
+  const statesItsTypeArguments = (entry: CollectionEntry, owner: ts.Node): boolean => {
+    const family = constructorSymbols.get(entry.family)
+    if (!family) return false
+    return entry.nodes.every((node) => {
+      const contextual = checker.getContextualType(node)
+      if (!contextual) return false
+      const members = (contextual.isUnion() ? contextual.types : [contextual]).filter(
+        (member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
+      )
+      const [only] = members
+      if (members.length !== 1 || only === undefined || only.getSymbol() !== family) return false
+      if (((only as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return false
+      const args = checker.getTypeArguments(only as ts.TypeReference)
+      return args.some((argument) => (argument.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) || ownerIsAnnotated(owner)
+    })
+  }
+
   // Pass 2: every `.get`/`.set`/`.has`/`.delete`/`.add` KEY/VALUE write that
   // reaches one of the tracked collections above OR any cell in its alias
   // closure -- read from `flow` rather than re-walked, so a receiver spelled
@@ -542,6 +589,7 @@ export const censusCollectionBindings = (
       )
       continue
     }
+    if (statesItsTypeArguments(entry, owner)) continue
     const keyArgs: ts.Expression[] = []
     const valueArgs: ts.Expression[] = []
     for (const decl of aliasClosureOf(owner)) {
@@ -855,6 +903,18 @@ export const censusCollectionBindings = (
   // Two allocations that reach the same held reference slot also share its
   // physical element ABI. Join their whole alias component, rather than
   // publishing incompatible answers according to which owner was visited last.
+  //
+  // A PARAMETER that states its type is not such a slot. Its element ABI is
+  // the statement, and every array a caller passes converts into it (an arm of
+  // three's `Float32BufferAttribute( array )`, `@param {(Array<number>|
+  // Float32Array)}`), so it does not make its callers one storage: joining
+  // through it pooled `PlaneGeometry`'s all-number `vertices` with
+  // `BufferGeometry.setFromPoints`' `point.z || 0` pushes and boxed every
+  // geometry's buffers. Its own writes stay evidence for each caller that
+  // reaches it; nothing past it is followed.
+  const statesItsType = (node: ts.Node): boolean =>
+    ts.isParameter(node) && (node.type !== undefined || ts.getJSDocType(node) !== undefined || ts.getJSDocParameterTags(node).length > 0)
+  const boundariesOf = new Map<ts.Node, Set<ts.Node>>()
   const arrayRoots = new Map<ts.Node, ts.Node>()
   const rootOf = (node: ts.Node): ts.Node => {
     const parent = arrayRoots.get(node)
@@ -864,7 +924,13 @@ export const censusCollectionBindings = (
     return root
   }
   for (const owner of arraysByOwner.keys()) {
-    for (const alias of aliasClosureOf(owner)) {
+    for (const alias of aliasClosureOf(owner, statesItsType)) {
+      if (alias !== owner && statesItsType(alias)) {
+        const boundaries = boundariesOf.get(owner) ?? new Set<ts.Node>()
+        boundaries.add(alias)
+        boundariesOf.set(owner, boundaries)
+        continue
+      }
       const ownerRoot = rootOf(owner)
       arrayRoots.set(rootOf(alias), ownerRoot)
       if (!arrayRoots.has(ownerRoot)) arrayRoots.set(ownerRoot, ownerRoot)
@@ -880,7 +946,8 @@ export const censusCollectionBindings = (
 
   for (const [owner, aliases] of arrayComponents) {
     const evidence: ts.Expression[] = []
-    for (const decl of aliases) {
+    const boundaries = new Set([...aliases].flatMap((alias) => [...(boundariesOf.get(alias) ?? [])]))
+    for (const decl of [...aliases, ...boundaries]) {
       for (const write of flow.writesToDeclaration(decl)) {
         if ((write.edge === 'array-append' || write.edge === 'array-fill') && write.value) evidence.push(write.value)
         else if (write.edge === 'index-assignment' && write.slot === 'element' && write.value) evidence.push(write.value)

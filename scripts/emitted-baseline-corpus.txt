@@ -36,7 +36,7 @@ default-parameter-patterns.ts.cpp 850d29a67fbf
 destructure-array-param.ts.cpp fd85e50be66f
 destructure-param.ts.cpp a66d34a74e6a
 dictionary-access.ts.cpp 86b0c6a60779
-drift.txt 496cdc91e9f7
+drift.txt a24cf40ecc14
 dynamic-assertion-store.ts.cpp 24e24cf98a07
 dynamic-instanceof-constructor-family.ts.cpp c44c4596c56d
 dynamic-json.ts.cpp b124cc52de24
