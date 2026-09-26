@@ -50,6 +50,14 @@ export interface ProxyOrigins {
   readonly returning: ReadonlySet<FunctionId>
   /** Parameter positions of source functions a proxy may be passed to: their convention takes `dynamic` there. */
   readonly parameters: ReadonlyMap<FunctionId, ReadonlySet<number>>
+  /**
+   * Source functions whose REST parameter may receive a proxy among the
+   * arguments it gathers: the array is always the fresh one the language binds,
+   * so its elements take `dynamic`, never the array itself.
+   */
+  readonly restElements: ReadonlySet<FunctionId>
+  /** Results that are such a rest array: an array whose elements may hold a proxy. */
+  readonly elementResults: ReadonlySet<SemanticResultId>
   /** The literal member names read off a value that may be a proxy -- the methods that may run with one as `this`. */
   readonly proxyKeys: ReadonlySet<string>
   /** Whether a member is also read off one through a computed key, which may name any member. */
@@ -61,6 +69,8 @@ export const noProxyOrigins: ProxyOrigins = {
   proxies: new Set(),
   returning: new Set(),
   parameters: new Map(),
+  restElements: new Set(),
+  elementResults: new Set(),
   proxyKeys: new Set(),
   computedProxyKey: false
 }
@@ -110,6 +120,23 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
   }
   const reachOf = (operand: SemanticOperand | undefined): Reach | 0 =>
     operand?.source.kind === 'result' ? (reached.get(operand.source.result) ?? 0) : 0
+
+  // Each source function's rest position, off the signature its function
+  // object is allocated with: the arguments from there on land in one fresh
+  // array rather than in a cell each.
+  const restFrom = new Map<FunctionId, number>()
+  for (const operation of graph.operations.values()) {
+    if (operation.family !== 'allocation' || operation.allocated !== 'function-object' || !operation.callable) continue
+    const shape = graph.structuralTypes.get(operation.shape)?.shape
+    const signature = shape?.kind === 'signature' ? shape.call[0] : undefined
+    const rest = signature?.parameters.findIndex((parameter) => parameter.rest) ?? -1
+    if (rest >= 0) restFrom.set(withoutFunctionSpecialization(operation.callable), rest)
+  }
+  // Rest cells whose ELEMENTS a proxy reaches, and the results that read them.
+  const restCells = new Map<DeclarationId, Reach>()
+  const elementReached = new Map<SemanticResultId, Reach>()
+  const elementReachOf = (operand: SemanticOperand | undefined): Reach | 0 =>
+    operand?.source.kind === 'result' ? (elementReached.get(operand.source.result) ?? 0) : 0
 
   const parameterBindings = new Map<FunctionId, Map<number, DeclarationId>>()
   const parameterResults = new Map<FunctionId, Map<number, SemanticResultId>>()
@@ -213,6 +240,15 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
   }
 
   const reachParameter = (owner: FunctionId, ordinal: number, how: Reach): void => {
+    // An argument at or past the rest position is an ELEMENT of the rest
+    // array: the array itself is never the proxy, and treating it as one made
+    // `If( ...params )`'s own `params` a box that no rest slot can pack.
+    const rest = restFrom.get(owner)
+    if (rest !== undefined && ordinal >= rest) {
+      const declaration = parameterBindings.get(owner)?.get(rest)
+      if (declaration !== undefined) raise(restCells, declaration, how)
+      return
+    }
     const declaration = parameterBindings.get(owner)?.get(ordinal)
     if (declaration === undefined) return
     raise(cells, declaration, how)
@@ -245,6 +281,23 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
           }
           const dynamicCallee = callee?.source.kind === 'result' && (calleeReach !== 0 || carriers.dynamic(callee.source.result))
           for (const argument of operation.operands) {
+            // A spread of a rest array whose elements may be proxies hands
+            // those elements on, from its own position to the end of the list.
+            if (argument.role === 'spread') {
+              const elements = elementReachOf(argument)
+              if (elements === 0) continue
+              for (const target of targets) {
+                const owner = withoutFunctionSpecialization(target)
+                const last = Math.max(argument.ordinal, restFrom.get(owner) ?? 0, ...(parameterBindings.get(owner)?.keys() ?? []))
+                for (let ordinal = argument.ordinal; ordinal <= last; ordinal += 1) reachParameter(owner, ordinal, elements)
+              }
+              if (elements === PROXY && targets.length === 0 && dynamicCallee)
+                for (const escaped of boxed) {
+                  const last = Math.max(argument.ordinal, restFrom.get(escaped) ?? 0, ...(parameterBindings.get(escaped)?.keys() ?? []))
+                  for (let ordinal = argument.ordinal; ordinal <= last; ordinal += 1) reachParameter(escaped, ordinal, PROXY)
+                }
+              continue
+            }
             if (argument.role !== 'argument') continue
             const how = reachOf(argument)
             if (how === 0) continue
@@ -267,6 +320,15 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
             const how = reachOf(valueOperandOf(operation))
             if (how !== 0) raise(cells, operation.declaration, how)
           }
+          const elements = restCells.get(operation.declaration)
+          if (elements !== undefined) {
+            if (value) raise(elementReached, value.id, elements)
+            for (const operand of operation.operands) {
+              if (operand.source.kind !== 'result') continue
+              const cited = graph.operations.get(graph.results.get(operand.source.result) ?? ('' as never))
+              if (cited?.family === 'reference' && cited.form === 'identifier') raise(elementReached, operand.source.result, elements)
+            }
+          }
           const how = cells.get(operation.declaration)
           if (how === undefined) break
           reach(value?.id, how)
@@ -281,6 +343,10 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
           break
         }
         case 'property': {
+          // An element read off a rest array a proxy was gathered into may be
+          // that proxy.
+          const elements = elementReachOf(operandOf(operation, 'receiver'))
+          if (elements !== 0 && operation.internalMethod === 'get') reach(value?.id, elements)
           const how = reachOf(operandOf(operation, 'receiver'))
           if (how === 0) break
           // A `[[Set]]` publishes the receiver it wrote into.
@@ -296,7 +362,7 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
           // checker's element and member types are the target's, which the
           // trap need not honor (TSL's builder proxy answers `@@iterator`
           // with a generator yielding `undefined`).
-          if (operation.operands.some((operand) => reachOf(operand) !== 0))
+          if (operation.operands.some((operand) => reachOf(operand) !== 0 || elementReachOf(operand) !== 0))
             for (const result of operation.results) reach(result.id, DYNAMIC)
           break
         default:
@@ -317,6 +383,11 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
     positions.add(parameter.ordinal)
     parameters.set(parameter.owner, positions)
   }
+  const restElements = new Set<FunctionId>()
+  for (const declaration of restCells.keys()) {
+    const parameter = parameterOf.get(declaration)
+    if (parameter) restElements.add(parameter.owner)
+  }
   const proxyKeys = new Set<string>()
   let computedProxyKey = false
   for (const operation of graph.operations.values()) {
@@ -331,6 +402,8 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
     proxies: new Set([...reached].filter(([, how]) => how === PROXY).map(([result]) => result)),
     returning: new Set(returning.keys()),
     parameters,
+    restElements,
+    elementResults: new Set(elementReached.keys()),
     proxyKeys,
     computedProxyKey
   }

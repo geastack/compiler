@@ -15,6 +15,7 @@ array-pattern-over-generator.ts.cpp 3d9b68a0208e
 array-pattern-over-regexp-exec.ts.cpp 6f6b129a1e6c
 array-reduce-accumulator-carrier.ts.cpp 1b6929059b9b
 array-rest-target-reassigned-dynamic.runtime.js.cpp b8383e82ff79
+array-shift-tostring-once.runtime.js.cpp 3b871dab34f1
 asserted-arm-into-interface-slot.ts.cpp ab0d11a21074
 assign-for-in-generic.ts.cpp 00fa51c20b53
 async-integer-result.ts.cpp 40d406729713
@@ -98,6 +99,7 @@ console-info-member.ts.cpp 9fd958169daf
 constant-table.ts.cpp 71ba3bcbd3b5
 constructor-alias-installed-members-class.runtime.js.cpp 0bd7b7483932
 constructor-alias-installed-members.runtime.js.cpp 19a6cf4855e4
+constructor-reads-arguments.runtime.js.cpp 68f158847348
 contextual-handler-union-return-slot.ts.cpp 6e40af1ea7a2
 contextual-pattern-callback.ts.cpp 7664ae43caef
 control-flow-structural-view.ts.cpp 9901c479e84d
@@ -419,6 +421,7 @@ new-array-any-into-typed-slot.ts.cpp 55be689ac257
 new-on-plain-function.runtime.js.cpp afc0cba3e136
 node-global-is-globalthis.ts.cpp 2794347b2450
 null-default-nested-reference-union.ts.cpp c26fe6988740
+null-default-parameter-from-callers.runtime.js.cpp 77b09ed91957
 nullish-union.ts.cpp 8898117b27df
 numeric-dictionary-own-keys.ts.cpp 4122db3e3b16
 numeric-dictionary-property-keys.js.cpp 453c57e574aa
@@ -502,6 +505,7 @@ proxy-get-trap-prototype-method.runtime.js.cpp 885ed317fba7
 proxy-has-trap-prototype-method.runtime.js.cpp f3611b448e13
 proxy-iterator-traps.runtime.js.cpp cf94d54819b3
 proxy-native-slot-refusal.runtime.js.cpp 38c6ceb3e2d4
+proxy-origin-rest-elements.runtime.js.cpp b3a09bc82fb8
 proxy-receiver-generic-copies.runtime.js.cpp e7ecc2a81e2b
 reactive-inherited-cell-no-list-tick.ts.cpp 7699cb1bf2f5
 receiver-ignored-construct.ts.cpp a68d985fdfa2
@@ -544,6 +548,8 @@ spread-call-immediately-invoked.runtime.js.cpp c5ae95452df2
 spread-fixed-arity-three.runtime.js.cpp 978c1dcd93de
 spread-fixed-arity-typed-array.ts.cpp b8a4802269a5
 spread-fixed-arity.ts.cpp 355a4e5a2a88
+spread-into-untyped-callable.runtime.js.cpp d476762f9a54
+spread-new-reflected-constructor.runtime.js.cpp f64547d3e4fa
 stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d
 stated-open-union-preserves-closed-arms.ts.cpp 878f72cd6f91
@@ -560,6 +566,7 @@ string-length-reuse-mutation.ts.cpp ffcdbadc5dcd
 string-length-reuse.ts.cpp cb193b047fb6
 string-object-with-declared-fields.ts.cpp 7d8d9777d147
 string-of-symbol.runtime.js.cpp 596032119eab
+string-plus-dynamic-concatenates.runtime.js.cpp 4f018f734fbd
 string-shared-layout.ts.cpp 81d0e3e69994
 subclass-member-overlay-layout.runtime.js.cpp 4a503e656a3d
 subclass-overlay-presence-storage.js.cpp 93e6f3d3b217

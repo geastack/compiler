@@ -21,6 +21,7 @@ import type { IdentityTable } from '../identities.js'
 import type { ProducerContext } from '../producer-context.js'
 import { parameterSlotTypeOf } from '../parameter-slot.js'
 import { declaresExactArms } from './exact-arms.js'
+import { implicitArgumentsSlotOf } from '../implicit-arguments.js'
 import { mintOperationId, mintResult, operand } from './mint.js'
 import { resultOf } from '../../model/operands.js'
 import {
@@ -340,36 +341,48 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
     const written = writtenConstructorOf(node)
     if (!written) return null
     {
+      // A constructor that reads `arguments` has the checker's phantom rest
+      // slot after its written parameters, and its body binds it
+      // (`argumentsObjectValueAt`, bindings.ts) off the same resolved frame.
+      // Leaving it out of the allocation's frame gave the body one physical
+      // parameter more than its convention -- three's `MathNode`
+      // constructor, which counts `arguments.length` for `max`/`min`.
+      const signature = context.checker.getSignatureFromDeclaration(written)
+      const phantom = signature ? implicitArgumentsSlotOf(signature) : null
+      const resolved = phantom && signature ? context.table.get(context.types.resolvedSignatureTypeOf(signature, 'call')).shape : null
+      const phantomParameter = phantom && resolved?.kind === 'signature' ? resolved.call[0]?.parameters[phantom.ordinal] : undefined
       const shape = context.table.intern({
         kind: 'signature',
         call: [
           {
-            parameters: written.parameters.map((parameter) => {
-              const flags = {
-                optional: parameter.questionToken !== undefined,
-                rest: parameter.dotDotDotToken !== undefined,
-                hasInitializer: parameter.initializer !== undefined
-              }
-              const type = context.types.typeAt(parameter)
-              // Widen the census-aware type itself. A defaulted parameter's
-              // physical slot always admits `undefined`, including when the
-              // census replaced the checker's initializer-derived `{}` with
-              // the record its call sites actually pass. Leaving that replaced
-              // type unwidened makes the constructor ABI require the record
-              // while `contributeDefaultedParameter` correctly reads an
-              // optional raw argument, so the body and its callable allocation
-              // publish different frames and ABI projection must refuse them.
-              return {
-                type,
-                slot: parameterSlotTypeOf(
-                  (members) => context.table.intern({ kind: 'union', members }),
-                  context.types.typeOf(context.checker.getUndefinedType()),
-                  flags,
-                  type
-                ),
-                ...flags
-              }
-            }),
+            parameters: written.parameters
+              .map((parameter) => {
+                const flags = {
+                  optional: parameter.questionToken !== undefined,
+                  rest: parameter.dotDotDotToken !== undefined,
+                  hasInitializer: parameter.initializer !== undefined
+                }
+                const type = context.types.typeAt(parameter)
+                // Widen the census-aware type itself. A defaulted parameter's
+                // physical slot always admits `undefined`, including when the
+                // census replaced the checker's initializer-derived `{}` with
+                // the record its call sites actually pass. Leaving that replaced
+                // type unwidened makes the constructor ABI require the record
+                // while `contributeDefaultedParameter` correctly reads an
+                // optional raw argument, so the body and its callable allocation
+                // publish different frames and ABI projection must refuse them.
+                return {
+                  type,
+                  slot: parameterSlotTypeOf(
+                    (members) => context.table.intern({ kind: 'union', members }),
+                    context.types.typeOf(context.checker.getUndefinedType()),
+                    flags,
+                    type
+                  ),
+                  ...flags
+                }
+              })
+              .concat(phantomParameter ? [phantomParameter] : []),
             minimumArity: written.parameters.filter((parameter) => !parameter.questionToken && !parameter.initializer).length,
             thisParameter: context.types.instanceTypeAt(node),
             result: voidType
