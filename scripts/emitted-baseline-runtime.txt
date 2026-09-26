@@ -275,6 +275,7 @@ instanceof-a-generic-class.ts.cpp dbf0f7bee54e
 instanceof-derived-class.ts.cpp 65c82c25a464
 instanceof-error-over-union-carrier.ts.cpp a6952808bb9c
 instanceof-regexp-and-arraybuffer-over-union.ts.cpp 8fb7e4a5b890
+instanceof-set-and-dataview-over-union.ts.cpp 0c80b1749d0d
 instanceof-through-structural-parameter.ts.cpp 3e3ad483a51a
 instanceof-typed-array-over-class-ref.ts.cpp b244834e84f0
 integer-imul-loop.ts.cpp ab3c6c768415
