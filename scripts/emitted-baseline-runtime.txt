@@ -314,6 +314,7 @@ jsdoc-field-open-array-element.runtime.js.cpp 97302cc25b25
 jsdoc-field-stores-contradicted-parameter.runtime.js.cpp 211918b23ce0
 jsdoc-field-tag-names-an-unimported-default-export.runtime.js.cpp 26c34a1c3013
 jsdoc-field-type-contradicted-by-writes.runtime.js.cpp f9608f5b2fc1
+jsdoc-member-tag-contradicted-by-literal-argument.runtime.js.cpp 5f9647852cdf
 jsdoc-optional-parameter.runtime.js.cpp 2cfb2703873b
 jsdoc-parameter-contradicted-by-callers.runtime.js.cpp c7d3020d3b02
 jsdoc-parameter-contradicted-through-unimported-names.runtime.js.cpp 6658718ea8ee
