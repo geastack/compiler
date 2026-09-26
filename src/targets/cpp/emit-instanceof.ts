@@ -228,7 +228,7 @@ const instanceofTaggedUnionMapText = (
  *
  * Which protocols: the seven error constructors, whose `gea::runtime::Error`
  * handle answers its own inheritance chain through `instanceOf` (see this
- * file's header), plus `RegExp` and `ArrayBuffer`, each of which has exactly
+ * file's header), plus `RegExp`, `ArrayBuffer`, `DataView` and `Set`, each of which has exactly
  * one physical carrier here, so an arm carrying it IS one and an arm carrying
  * anything else is not. `Map` and `Promise` are deliberately absent: their own
  * composite renderers above already claim those keys, and routing them here
@@ -237,7 +237,26 @@ const instanceofTaggedUnionMapText = (
 const compositeNativeInstanceProtocols: ReadonlySet<string> = new Set([
   ...errorConstructorNames.keys(),
   'RegExpConstructor',
-  'ArrayBufferConstructor'
+  'ArrayBufferConstructor',
+  'DataViewConstructor',
+  'SetConstructor'
+])
+
+/**
+ * The protocols of that set whose identity is one physical carrier, and which
+ * one. An arm carrying it IS an instance; every other settled carrier is a
+ * different allocation, and so is a `native-record-ref` of any other layout.
+ * `Set` is the `set` family alone: a WeakSet is not a Set (24.2 and 24.4 are
+ * two constructors, and neither prototype inherits from the other).
+ */
+const physicalIdentityOf: ReadonlyMap<string, (carrier: Representation) => boolean> = new Map([
+  [
+    'RegExpConstructor',
+    (carrier: Representation) => carrier.kind === 'native-record-ref' && carrier.native === cppRegExpNativeTypes.pattern
+  ],
+  ['ArrayBufferConstructor', (carrier: Representation) => carrier.kind === 'array-buffer'],
+  ['DataViewConstructor', (carrier: Representation) => carrier.kind === 'data-view'],
+  ['SetConstructor', (carrier: Representation) => carrier.kind === 'keyed-collection' && carrier.family === 'set']
 ])
 
 /** A settled answer that still evaluates the operand, the way every other constant verdict in this file does. */
@@ -321,15 +340,13 @@ const nativeInstanceLeafText = (ctx: EmitContext, protocol: string, carrier: Rep
     // native record is one C++ layout and not that one.
     const isOtherNativeRecord = carrier.kind === 'native-record-ref' && carrier.native !== cppErrorNativeType
     if (isOtherNativeRecord || settledNonNativeCarrier(ctx, carrier)) return settledInstanceText(value, false)
-  } else if (protocol === 'RegExpConstructor' || protocol === 'ArrayBufferConstructor') {
-    const matches =
-      protocol === 'RegExpConstructor'
-        ? carrier.kind === 'native-record-ref' && carrier.native === cppRegExpNativeTypes.pattern
-        : carrier.kind === 'array-buffer'
+  } else {
+    const identity = physicalIdentityOf.get(protocol)
+    const matches = identity !== undefined && identity(carrier)
     // A `native-record-ref` of a different native layout IS that layout and no
     // other -- one C++ type per native record -- so it settles as flatly as a
     // scalar does.
-    if (matches || carrier.kind === 'native-record-ref' || settledNonNativeCarrier(ctx, carrier)) {
+    if (identity !== undefined && (matches || carrier.kind === 'native-record-ref' || settledNonNativeCarrier(ctx, carrier))) {
       return settledInstanceText(value, matches)
     }
   }
@@ -431,6 +448,7 @@ export const cppInstanceofHelperKeys: ReadonlySet<string> = new Set([
     `computation:instanceof:optional:native-handle(${protocol})`,
     `computation:instanceof:tagged-union:native-handle(${protocol})`
   ]),
+  ...[...physicalIdentityOf.keys()].map((protocol) => `computation:instanceof:native-record-ref:native-handle(${protocol})`),
   // `v instanceof <program class>` -- `constructorFamilyInstanceofText`'s own
   // three renderable left shapes.
   ...constructorFamilyLeftKinds.map((left) => `computation:instanceof:${left}:constructor-family`),
@@ -614,6 +632,12 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
     compositeNativeInstanceProtocols.has(constructor.protocol)
   ) {
     return compositeNativeInstanceText(ctx, left, constructor.protocol)
+  }
+  // A host record against a protocol whose identity is one physical carrier:
+  // the record is its own C++ layout, so the leaf rule settles it without a
+  // read (three's `isTypedArray`: `array instanceof DataView`).
+  if (left.representation.kind === 'native-record-ref' && physicalIdentityOf.has(constructor.protocol)) {
+    return nativeInstanceLeafText(ctx, constructor.protocol, left.representation, operandText(ctx, left))
   }
   if (typedArrayConstructorDomains.has(constructor.protocol)) {
     if (recipe === undefined)

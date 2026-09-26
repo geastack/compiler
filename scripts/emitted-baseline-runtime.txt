@@ -99,6 +99,7 @@ computed-overridden-method-value.runtime.js.cpp 1b091e77cc14
 computed-record-union.ts.cpp c03e379dce78
 conditional-any-arm-returned-as-optional.ts.cpp bfbecb95bf43
 console-info-member.ts.cpp 9fd958169daf
+console-warn-member.ts.cpp 15e82e014cd8
 constant-table.ts.cpp 71ba3bcbd3b5
 constructor-alias-installed-members-class.runtime.js.cpp 0bd7b7483932
 constructor-alias-installed-members.runtime.js.cpp 19a6cf4855e4
@@ -275,6 +276,7 @@ instanceof-a-generic-class.ts.cpp dbf0f7bee54e
 instanceof-derived-class.ts.cpp 65c82c25a464
 instanceof-error-over-union-carrier.ts.cpp a6952808bb9c
 instanceof-regexp-and-arraybuffer-over-union.ts.cpp 8fb7e4a5b890
+instanceof-set-and-dataview-over-union.ts.cpp 0c80b1749d0d
 instanceof-through-structural-parameter.ts.cpp 3e3ad483a51a
 instanceof-typed-array-over-class-ref.ts.cpp b244834e84f0
 integer-imul-loop.ts.cpp ab3c6c768415
@@ -291,6 +293,7 @@ invocation-argument-conversions.ts.cpp 7515a53aa95e
 invocation-dynamic-nominal-mismatch.ts.cpp 6d7161958f28
 invocation-dynamic-number-throws.ts.cpp 0e972c2fd810
 isolated-inheritance.ts.cpp c483c0a7f63e
+iterable-beside-a-host-member.ts.cpp 4328a87863d8
 iterate-absent-source-aborts.ts.cpp 4f1f57828b54
 iterate-absent-source.ts.cpp 816e8b5dc992
 iterate-array-arm-of-number-union.ts.cpp 1e51a77a3817
