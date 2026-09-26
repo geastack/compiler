@@ -43,7 +43,7 @@ import {
 } from './derived-expression-type.js'
 import { createLeafKeying, literalFor, primitiveFor, symbolKeyDeclarationOf } from './structural-leaves.js'
 import { unwrapErasedExpression } from './producers/erasure.js'
-import { createStructuralParts, selfReferentialCallableShapeOf } from './structural-parts.js'
+import { constructSignaturesOf, createStructuralParts, selfReferentialCallableShapeOf } from './structural-parts.js'
 import { bodyReadsThis, createReceiverResolver } from './structural-receiver.js'
 import type { IdentityTable } from './identities.js'
 import { createMemberRules, type MemberMode } from './structural-members.js'
@@ -2225,7 +2225,7 @@ const buildMapper = (
     }
 
     const callSignatures = type.getCallSignatures()
-    const constructSignatures = type.getConstructSignatures()
+    const constructSignatures = constructSignaturesOf(type)
     if (callSignatures.length > 0 || constructSignatures.length > 0) {
       // The type of an overloaded SOURCE function is every declared overload,
       // which is the checker's right answer for resolving a call and the

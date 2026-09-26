@@ -116,6 +116,7 @@ date-setter-argument-coercion.runtime.js.cpp 2235debf782d
 date-setter-time-value-read-first.runtime.js.cpp f8035bab7069
 dead-helper-obligations.runtime.js.cpp 8fc1339f6c8b
 dead-values.ts.cpp 921962c4bff0
+define-property-setter-function-expression.runtime.js.cpp 885f8eb03d54
 delete-symbol-expando-on-class-through-interface.ts.cpp 4d04cd30773e
 derived-class-extends-instantiated-generic-base.ts.cpp d7a3a67ce230
 derived-class-reads-base-private-method-in-closure.ts.cpp a8fe7d67798f
