@@ -20,7 +20,7 @@ import {
   impliedPatternArrayElementAt
 } from './parameter-slot.js'
 import { constructedClassChoiceMemberTypeOf, isUnusableEvidence, memberCensusNodeOf } from './derived-expression-type.js'
-import { inferredArrayElementAt, inferredCollectionTypeArgumentsAt } from './structural-array-element.js'
+import { inferredArrayElementAt, inferredCollectionTypeArgumentsAt, unstatedNeverArray } from './structural-array-element.js'
 import type { IdentityTable } from './identities.js'
 
 /**
@@ -753,7 +753,17 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     const arrayElement = censusNode
       ? inferredArrayElementAt(checker, collections, (node) => checker.getTypeAtLocation(node), censusNode)
       : null
-    const inferredArray = arrayElement ? internArray(typeOf(arrayElement)) : null
+    // An object-literal property filled by an empty `[]` the array census
+    // could not bind (`this.structs = { vertex: [], fragment: [] }` in three's
+    // NodeBuilder, whose pushes go through a JSDoc `{Object}` the census does
+    // not follow): the literal itself is boxed (`unstatedNeverArray`), so the
+    // field it fills is the same box. Left at the checker's `never[]`, one
+    // array had two carriers and the store between them no conversion serves.
+    const boxedLiteral =
+      arrayElement === null && censusNode !== null && ts.isArrayLiteralExpression(censusNode)
+        ? unstatedNeverArray(checker, collections, (node) => checker.getTypeAtLocation(node), censusNode)
+        : false
+    const inferredArray = arrayElement ? internArray(typeOf(arrayElement)) : boxedLiteral ? internArray(typeOf(checker.getAnyType())) : null
     // The field half of an open bag must ask the same owner-keyed census as
     // every read. This matters most for a JavaScript assignment declaration:
     // `this.children = {}` is checker-typed as `{}`, yet its computed writes
