@@ -1,4 +1,5 @@
 import {
+  isVacuousArrayType,
   annotationStatesNothing,
   censusedTypeAt,
   containsUnstatedPosition,
@@ -726,6 +727,9 @@ export const createLayoutTypeResolver = (
     // takes the arm-selection path below and remains a native array; no
     // statically typed array is routed through Value.
     if ((declared.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return declared
+    // A declared `any[]` states nothing about its elements (`isVacuousArrayType`):
+    // it offers no arm to select, and the census answers the read instead.
+    if (isVacuousArrayType(checker, declared)) return null
     const arms = declared.isUnion() ? declared.types : [declared]
     // `Array.isArray` is true exactly for an Array exotic object, so a readonly
     // array or a tuple arm is one it selects too, although neither is
@@ -948,7 +952,10 @@ export const createLayoutTypeResolver = (
       // read is unreachable, not a value type -- an evolving `let v = null`
       // assigned in one branch is still `never` in the sibling branch that
       // pushes into it -- so the cell's own answer is what the read holds.
-      (ts.isIdentifier(node) && (own.flags & ts.TypeFlags.Never) !== 0)
+      (ts.isIdentifier(node) && (own.flags & ts.TypeFlags.Never) !== 0) ||
+      // The sixth: an array of `any`/`unknown`/`never`, which states nothing
+      // about its elements -- see `isVacuousArrayType`.
+      isVacuousArrayType(checker, own)
     ) {
       // Asked before the parameter census: a literal token is not a value the
       // program left open for its callers to write down. See above.

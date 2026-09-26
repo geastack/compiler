@@ -678,6 +678,12 @@ const memberTypeTextsOf = (klass: ts.ClassLikeDeclaration, file: ts.SourceFile):
   const objectShape = new Map<string, ReadonlyMap<string, string>>()
   for (const [name, entry] of state) {
     if (methodNames.has(name)) continue
+    // A constructor that only writes a placeholder (`this.wildcardChild =
+    // null`) establishes no shape: whatever later fills the field is a
+    // different type by construction, so the "later writes preserve the
+    // type" premise above does not hold for it. An absence is not evidence;
+    // the member is left unstated rather than stated as `null`.
+    if (entry.kind === 'text' && entry.texts.every((spelled) => spelled === 'null' || spelled === 'undefined')) continue
     if (entry.kind === 'text') text.set(name, entry.texts)
     else if (entry.kind === 'object') objectShape.set(name, entry.shape)
   }

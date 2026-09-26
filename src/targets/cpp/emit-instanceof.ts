@@ -12,7 +12,7 @@ import { createCppEmitBlockedError, operandText, type EmitContext } from './emit
 import { cppClassName, cppScalarType } from './types.js'
 import { cppErrorNativeType, errorConstructorNames, isNativeError } from './error-types.js'
 import { cppRegExpNativeTypes } from './regexp-types.js'
-import { hostConstructorUnionArms } from '../../ir/certify/instanceof-key.js'
+import { definitelyPrimitive, hostConstructorUnionArms } from '../../ir/certify/instanceof-key.js'
 
 /**
  * `v instanceof C` -- ECMA-262 13.10.2, for the one right-hand side this
@@ -42,16 +42,9 @@ const dynamicNativeInstanceTests: ReadonlyMap<string, string> = new Map([
   ['MapConstructor', 'gea::host::instanceOfMap'],
   ['DateConstructor', 'gea::host::instanceOfDate'],
   ['RegExpConstructor', 'gea::host::instanceOfRegExp'],
-  ['ArrayBufferConstructor', 'gea::host::instanceOfArrayBuffer']
+  ['ArrayBufferConstructor', 'gea::host::instanceOfArrayBuffer'],
+  ['ArrayConstructor', 'gea::host::instanceOfArray']
 ])
-
-/** A carrier that can never hold an object and therefore always fails OrdinaryHasInstance. */
-const definitelyPrimitive = (representation: Representation): boolean =>
-  representation.kind === 'scalar' ||
-  representation.kind === 'string' ||
-  representation.kind === 'symbol' ||
-  representation.kind === 'null' ||
-  representation.kind === 'undefined'
 
 /** Render the hierarchy census's recipe without rediscovering membership. */
 const classInstanceTestText = (test: ClassInstanceTest, text: string): string => {
@@ -352,6 +345,9 @@ const compositeNativeInstanceText = (ctx: EmitContext, left: IrOperand, protocol
   return render(left.representation, operandText(ctx, left))
 }
 
+/** Object carriers with no `DynamicObject` prototype chain for a boxed constructor's prototype to be on. */
+const plainObjectLeftKinds: ReadonlySet<string> = new Set(['record', 'dictionary', 'array-object'])
+
 /**
  * The carrier kinds a left operand can arrive in, for the `undefined`
  * right-hand side below.
@@ -410,8 +406,9 @@ export const cppInstanceofHelperKeys: ReadonlySet<string> = new Set([
   ...cppInstanceofLeftKinds.map((left) => `computation:instanceof:${left}:undefined`),
   ...[...dynamicNativeInstanceTests.keys()].map((protocol) => `computation:instanceof:dynamic:native-handle(${protocol})`),
   ...[...dynamicNativeInstanceTests.keys()].map((protocol) => `computation:instanceof:dictionary:native-handle(${protocol})`),
-  'computation:instanceof:scalar:native-handle(NumberConstructor)',
-  'computation:instanceof:tagged-union(primitive-only):native-handle(NumberConstructor)',
+  // A primitive left operand against any host constructor -- `instanceofText`'s
+  // primitive branch; the certify key names no protocol because none decides it.
+  'computation:instanceof:primitive:native-handle',
   // The native element domain is also sufficient when narrowing has already
   // removed the union: it is the same identity used for each union arm.
   ...[...typedArrayConstructorDomains.keys()].map((protocol) => `computation:instanceof:typed-array:native-handle(${protocol})`),
@@ -459,7 +456,8 @@ export const cppInstanceofHelperKeys: ReadonlySet<string> = new Set([
   // general prototype WALK `gea::host::instanceOfDynamicConstructor` renders,
   // over a left operand this same census also boxed (see that function's own
   // doc comment for why the left operand can only ever be `dynamic` too).
-  'computation:instanceof:dynamic:dynamic'
+  'computation:instanceof:dynamic:dynamic',
+  ...[...plainObjectLeftKinds].map((left) => `computation:instanceof:${left}:dynamic`)
 ])
 
 /**
@@ -541,6 +539,13 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
   // constructor is one this same census also marked `dynamic` -- its own
   // construct signature's return type).
   if (constructor.kind === 'dynamic') {
+    // A plain object literal, dictionary or array has no `DynamicObject`
+    // [[Prototype]] link -- its chain is the unmodelled intrinsic prototypes --
+    // so no boxed function's "prototype" is on it. The constructor is still
+    // checked the way OrdinaryHasInstance checks it for an object operand.
+    if (plainObjectLeftKinds.has(left.representation.kind)) {
+      return `((void)(${operandText(ctx, left)}), gea::host::instanceOfDynamicConstructor(gea::Value(), ${operandText(ctx, right)}))`
+    }
     if (left.representation.kind !== 'dynamic') {
       throw createCppEmitBlockedError(
         `runtime-helper:computation:instanceof:${left.representation.kind}:dynamic`,
@@ -559,6 +564,14 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
       `"instanceof" against a "${representationKey(constructor)}" right-hand side needs a prototype chain, which this backend does not model`
     )
   }
+  // OrdinaryHasInstance answers false for a primitive, and no host constructor
+  // declares its own @@hasInstance. Keep evaluation of the operand.
+  if (
+    definitelyPrimitive(left.representation) ||
+    (left.representation.kind === 'tagged-union' && left.representation.arms.every((arm) => definitelyPrimitive(arm.value)))
+  ) {
+    return `((void)(${operandText(ctx, left)}), false)`
+  }
   if (left.representation.kind === 'dynamic') {
     const nativeTest = dynamicNativeInstanceTests.get(constructor.protocol)
     if (nativeTest !== undefined) return `${nativeTest}(${operandText(ctx, left)})`
@@ -567,19 +580,6 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
   // neither a Map exotic nor a Date/RegExp object. Its static carrier proves
   // the result false; preserve evaluation of the left operand.
   if (left.representation.kind === 'dictionary' && dynamicNativeInstanceTests.has(constructor.protocol)) {
-    return `((void)(${operandText(ctx, left)}), false)`
-  }
-  // OrdinaryHasInstance returns false for a primitive. A scalar carrier is
-  // never a Number wrapper object, including when an erased `as unknown`
-  // assertion was used to write the test. Keep evaluation of the operand.
-  if (constructor.protocol === 'NumberConstructor' && left.representation.kind === 'scalar') {
-    return `((void)(${operandText(ctx, left)}), false)`
-  }
-  if (
-    constructor.protocol === 'NumberConstructor' &&
-    left.representation.kind === 'tagged-union' &&
-    left.representation.arms.every((arm) => definitelyPrimitive(arm.value))
-  ) {
     return `((void)(${operandText(ctx, left)}), false)`
   }
   // A `promise` left operand settles ANY native-handle right-hand side

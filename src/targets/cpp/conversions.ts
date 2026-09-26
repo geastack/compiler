@@ -494,17 +494,38 @@ const dynamicCallableAbiSupported = (abi: CallableAbi, seen = new Set<Representa
  * recovers each argument and boxes the result.
  */
 const wrappedCallableAbiSupported = (abi: CallableAbi): boolean => {
-  if (abi.receiver !== null && !boxable(abi.receiver)) return false
+  if (abi.receiver !== null && !wrappedArgumentBoxes(abi.receiver)) return false
   if (abi.result.kind !== 'void' && !dynamicCarrierSupported(abi.result)) return false
-  if (!abi.parameters.every((parameter) => boxable(parameter.value))) return false
+  if (!abi.parameters.every((parameter) => wrappedArgumentBoxes(parameter.value))) return false
   if (abi.restFrom === null) return true
   const rest = abi.parameters[abi.restFrom]?.value
   return (
     abi.restFrom === abi.parameters.length - 1 &&
     rest?.kind === 'array-object' &&
     rest.ownership === 'shared-refcount' &&
-    boxable(rest.element)
+    wrappedArgumentBoxes(rest.element)
   )
+}
+
+/**
+ * Whether the adapter boxes an argument of this carrier exactly -- the
+ * callable runtime ABI's own `out` direction (`DynamicCallableCarrier<T>`).
+ * Boxing a union needs no classifier to tell its arms apart, since the live
+ * arm boxes itself (the pipeline callback's `Error | null | undefined`), but
+ * it keeps that ABI's limits: a lone `Optional`'s absence boxes as
+ * `undefined`, so a `null`-absent one would reach the callee as the wrong
+ * value, and two class arms one of which extends the other have no exact
+ * physical arm to box from.
+ */
+const wrappedArgumentBoxes = (representation: Representation, seen = new Set<Representation>()): boolean => {
+  if (seen.has(representation)) return true
+  const nested = new Set(seen).add(representation)
+  if (representation.kind === 'optional')
+    return representation.absence === 'undefined' && wrappedArgumentBoxes(representation.payload, nested)
+  if (representation.kind !== 'tagged-union') return dynamicCarrierSupported(representation, seen)
+  if (!representation.arms.every((arm) => wrappedArgumentBoxes(arm.value, nested))) return false
+  const classArms = representation.arms.flatMap((arm) => (arm.value.kind === 'class-ref' ? [arm.value] : []))
+  return !classArms.some((left, index) => classArms.slice(index + 1).some((right) => classRefDomainsOverlap(left, right)))
 }
 
 const dynamicCallablePair = (target: Extract<Representation, { kind: 'function-value-dispatch' }>): ClassifierMaterializerPair => {

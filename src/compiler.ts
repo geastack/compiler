@@ -38,6 +38,7 @@ import { definePropertySourceTransform } from './semantics/define-property-sourc
 import { prototypeInstallSourceTransform } from './semantics/prototype-install-source-transform.js'
 import { prototypeObjectClassSourceTransform } from './semantics/prototype-object-class-source-transform.js'
 import { jsdocNamepathTransform } from './semantics/jsdoc-namepath-transform.js'
+import { jsdocNullishReturnTransform } from './semantics/jsdoc-nullish-return-transform.js'
 import { thisConstructorSourceTransform } from './semantics/this-constructor-source-transform.js'
 import { undefinedDefaultParameterTransform } from './semantics/undefined-default-parameter-transform.js'
 import { symbolKeyedExpandoSourceTransform } from './semantics/symbol-keyed-expando-source-transform.js'
@@ -373,6 +374,10 @@ export const sourceTransformsFor = (
   // scope -- sees the name the program meant rather than a fragment
   // TypeScript stopped reading halfway.
   jsdocNamepathTransform,
+  // An unverified JSDoc `@returns` widened by the `null`/`undefined` its own
+  // body returns, so the checker states what callers receive (see the
+  // transform). After the namepath respelling, so it reads the tag's final text.
+  jsdocNullishReturnTransform,
   // `declarationOverlayTransform` runs next, and for the same reason: a
   // package's own `.d.ts` stating its JS module's parameter types is shipped
   // DATA, not a host's vocabulary. It never overrides what the source itself

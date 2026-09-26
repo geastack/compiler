@@ -55,7 +55,7 @@ import {
 } from '../../model/selected-signature.js'
 import type { SignatureParameter } from '../../model/structural-types.js'
 import { impliedPatternArrayElementAt, parameterSlotTypeOf } from '../parameter-slot.js'
-import { isGlobalObjectConstructor, isStandardGlobalValue, objectAssignTargetType } from '../derived-expression-type.js'
+import { isGlobalObjectConstructor, isStandardGlobalValue, isVacuousArrayType, objectAssignTargetType } from '../derived-expression-type.js'
 import { transparentConstClassAliasTarget } from '../../class-alias.js'
 import { scriptGlobalValueRedefinitionOf } from '../script-global-redefinition.js'
 import { mentionsTypeParameter } from '../return-bindings.js'
@@ -419,8 +419,13 @@ const buildSelectedSignature = (
   // actually asked the same question. One last fallback closes it: the same
   // call-site census, asked directly at this node, so both sides of the
   // comparison below can only ever agree.
+  // An array of `any` states no more than `any` does (`isVacuousArrayType`),
+  // and the layout resolver asks the census for it on the invocation side.
   const siteReturn =
-    censusReturn === null && (returnType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 ? context.types.rawTypeAt(node) : null
+    censusReturn === null &&
+    ((returnType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 || isVacuousArrayType(context.checker, returnType))
+      ? context.types.rawTypeAt(node)
+      : null
   const siteReturnIsUsable =
     siteReturn !== null && (siteReturn.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Void | ts.TypeFlags.Never)) === 0
   const substituted = context.absentGlobals.substituteAbsentType(censusReturn ?? (siteReturnIsUsable ? siteReturn : returnType))

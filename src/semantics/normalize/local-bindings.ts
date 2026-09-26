@@ -1,6 +1,7 @@
 import ts from 'typescript'
 import { readsAbsentKey } from './absent-key-read.js'
 import {
+  isVacuousArrayType,
   annotationStatesNothing,
   exactEmptyObjectLiteralType,
   derivedExpressionType,
@@ -656,7 +657,7 @@ export const censusLocalBindings = (
   const known = (node: ts.Node): ts.Type | null => {
     const exported = moduleRecords.exportExpressionAt(node) ?? moduleRecords.requiredExportExpressionAt(node)
     const type = exported ? checker.getTypeAtLocation(exported) : (objectAssignTargetType(checker, node) ?? checker.getTypeAtLocation(node))
-    return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) ? null : type
+    return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) || isVacuousArrayType(checker, type) ? null : type
   }
 
   /**
@@ -762,8 +763,12 @@ export const censusLocalBindings = (
   const writeAnswers = new Map<ts.Node, ts.Type>()
   // The closed-family fallback is the parameter census's own rule, asked the
   // same way -- see `flow/class-family-member-read.ts`.
-  const propertyTypeOf = (receiver: ts.Type, name: string, at: ts.Node): ts.Type | null =>
-    memberTypeOf(checker, receiver, name, at, flow) ?? classFamilyMemberReadTypeOf(checker, flow, receiver, name, parameters)
+  const propertyTypeOf = (receiver: ts.Type, name: string, at: ts.Node): ts.Type | null => {
+    const member = memberTypeOf(checker, receiver, name, at, flow)
+    if (member) return member
+    const family = classFamilyMemberReadTypeOf(checker, flow, receiver, name, parameters)
+    return family && !isVacuousArrayType(checker, family) ? family : null
+  }
 
   const declarationOf = (node: ts.Identifier): ts.VariableDeclaration | null => {
     const symbol = checker.getSymbolAtLocation(node)

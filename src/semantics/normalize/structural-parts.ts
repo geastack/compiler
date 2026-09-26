@@ -19,7 +19,7 @@ import {
   restParameterUnionOfTuplesElementTypeOf,
   impliedPatternArrayElementAt
 } from './parameter-slot.js'
-import { isUnusableEvidence } from './derived-expression-type.js'
+import { isVacuousArrayType, isUnusableEvidence } from './derived-expression-type.js'
 import { inferredArrayElementAt, inferredCollectionTypeArgumentsAt } from './structural-array-element.js'
 import type { IdentityTable } from './identities.js'
 
@@ -733,7 +733,10 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // discipline `parameter-bindings.ts`'s own `known()` keeps for a bound
     // parameter's narrowed use.
     const censusNode = declaration ? (censusValueNodeOf(declaration) ?? declaration) : null
-    const fromCensus = isUnusableEvidence(checkerAnswer) && censusNode ? parameters.typeAt(censusNode) : null
+    // An array of `any` is no more evidence about the slot than `any` is
+    // (`isVacuousArrayType`): the census that joined its elements answers it.
+    const fromCensus =
+      (isUnusableEvidence(checkerAnswer) || isVacuousArrayType(checker, checkerAnswer)) && censusNode ? parameters.typeAt(censusNode) : null
     // Which of the three sources actually answered one named member. A record
     // that carries ONE dynamic field among 130 gives the reader no way to tell
     // "the checker was fine" from "the census had nothing to add".

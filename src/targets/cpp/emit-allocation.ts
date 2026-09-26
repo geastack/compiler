@@ -19,7 +19,7 @@ import {
   templateObjectCapabilityKeyOf
 } from '../../representation/template-object.js'
 import { fieldPresenceOf, staticOwnFieldsOf } from '../../representation/record-fields.js'
-import { regexpFlagSupportKeyOf, spreadSourceCarrierKeyOf } from '../../ir/certify/carrier-keys.js'
+import { isSpreadRecordReceiver, regexpFlagSupportKeyOf, spreadSourceCarrierKeyOf } from '../../ir/certify/carrier-keys.js'
 import {
   createCppEmitBlockedError,
   defineValue,
@@ -502,13 +502,6 @@ export const emitAllocateRegExp = (ctx: EmitContext, lines: string[], operation:
         'implementation, so this literal is refused rather than being routed through an incompatible character-class grammar'
     )
   }
-  if (operation.flags.includes('u') && operation.flags.includes('i')) {
-    throw createCppEmitBlockedError(
-      `runtime-helper:allocation:regexp-object:${representation.kind}(${regexpFlagSupportKeyOf(operation.flags)})`,
-      `the pattern /${operation.source}/${operation.flags} combines Unicode matching with ignoreCase; std::regex has no ECMAScript Unicode simple-case-folding ` +
-        'table, so this literal is refused rather than claiming locale-dependent case behavior is JavaScript Unicode semantics'
-    )
-  }
   const name = defineValue(ctx, operation.result)
   // `constructPatternOrThrow` rather than `gea::makeRef<Pattern>` directly:
   // it is the ported entry point that runs 22.2.3.2's validation first, so an
@@ -602,10 +595,14 @@ export const emitSpreadCopy = (ctx: EmitContext, lines: string[], operation: Spr
     lines.push('}')
     return
   }
+  if (isSpreadRecordReceiver(receiver)) {
+    emitSpreadIntoRecord(ctx, lines, source, operandText(ctx, operation.source), receiver, operandText(ctx, operation.receiver))
+    return
+  }
   if (receiver.kind !== 'dictionary') {
     throw createCppEmitBlockedError(
       `runtime-helper:protocol:spread:next:${spreadSourceCarrierKeyOf(source.kind, source, receiver, ctx.deriver)}`,
-      `writes a runtime object-spread copy into a "${receiver.kind}" receiver, but this emitter only renders one into a "dictionary"`
+      `writes a runtime object-spread copy into a "${receiver.kind}" receiver, but this emitter only renders one into a "dictionary" or a record`
     )
   }
   if (receiver.ownership === 'borrowed') {
@@ -618,6 +615,64 @@ export const emitSpreadCopy = (ctx: EmitContext, lines: string[], operation: Spr
   const receiverRef = memberAccessOperator(receiver.ownership) === '->' ? `(*${receiverText})` : receiverText
   const sourceText = operandText(ctx, operation.source)
   emitSpreadSourceCopy(ctx, lines, source, sourceText, receiver, receiverRef)
+}
+
+/**
+ * `CopyDataProperties` into a fresh literal laid out as a record: the source
+ * fields the receiver declares, each a field store converted to the
+ * receiver's own field carrier, an optional source field only when present.
+ * Keys the receiver does not declare are not installed, as in the static
+ * spread -- no typed read of the literal can reach one.
+ */
+const emitSpreadIntoRecord = (
+  ctx: EmitContext,
+  lines: string[],
+  source: Representation,
+  sourceText: string,
+  receiver: Representation,
+  receiverText: string
+): void => {
+  const refuse = (): never => {
+    throw createCppEmitBlockedError(
+      `runtime-helper:protocol:spread:next:${spreadSourceCarrierKeyOf(source.kind, source, receiver, ctx.deriver)}`,
+      `copies a "${representationKey(source)}" source into a record receiver; only a record or class shape with no accessor, whose ` +
+        'fields the receiver can hold, is copied field by field'
+    )
+  }
+  if (source.kind === 'optional') {
+    lines.push(`if (${sourceText}.has_value()) {`)
+    emitSpreadIntoRecord(ctx, lines, source.payload, `(*${sourceText})`, receiver, receiverText)
+    lines.push('}')
+    return
+  }
+  const fields = staticOwnFieldsOf(ctx.deriver, source)
+  if (fields === null || (source.kind === 'record' && source.accessors.length > 0)) return refuse()
+  const sourceMember = `${sourceText}${memberAccessOperator(ownershipOfSpreadArm(source))}`
+  const receiverMember = `${receiverText}${memberAccessOperator(ownershipOfSpreadArm(receiver))}`
+  for (const field of fields) {
+    const declared = declaredRecordFieldOf(ctx.deriver, receiver, field.key, ctx.classes)
+    if (!declared) continue
+    if (field.key.startsWith('sym(') || fieldPresenceOf(field) === 'unprovable' || (declared.required && !field.required)) return refuse()
+    const held = declaredFieldRepresentationOf(ctx.deriver, receiver, field.key, ctx.classes) ?? declared.value
+    const converted = alignedValueText(
+      ctx,
+      'emit-allocation.ts:spread-into-record',
+      field.value,
+      held,
+      `${sourceMember}${cppRecordFieldName(field.key)}`
+    )
+    if (converted === null) {
+      throw createCppEmitBlockedError(
+        `conversion:${representationKey(field.value)}->${representationKey(held)}`,
+        `copies a source field "${field.key}" carried as "${representationKey(field.value)}" into a receiver field carried as ` +
+          `"${representationKey(held)}"; no conversion between those is licensed`
+      )
+    }
+    const write =
+      `${receiverMember}${cppRecordFieldName(field.key)} = ${converted};` +
+      (declared.required ? '' : ` ${receiverMember}${cppRecordFieldPresenceName(field.key)} = true;`)
+    lines.push(field.required ? write : `if (${sourceMember}${cppRecordFieldPresenceName(field.key)}) { ${write} }`)
+  }
 }
 
 const emitSpreadSourceCopy = (

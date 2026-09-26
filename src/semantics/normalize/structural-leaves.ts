@@ -74,9 +74,9 @@ export const literalFor = (type: ts.Type): StructuralShape | null => {
  */
 export const symbolKeyDeclarationOf = (checker: ts.TypeChecker, identities: IdentityTable, member: ts.Symbol): ts.Declaration | null => {
   for (const declaration of member.getDeclarations() ?? []) {
-    const name = (declaration as ts.NamedDeclaration).name
-    if (!name || !ts.isComputedPropertyName(name)) continue
-    const keySymbol = checker.getSymbolAtLocation(name.expression)
+    const key = symbolMemberKeyExpressionOf(declaration)
+    if (!key) continue
+    const keySymbol = checker.getSymbolAtLocation(key)
     // Through `identities`, never `keySymbol.getDeclarations()` directly: the
     // name expression is an imported identifier in every real case, so the
     // symbol at that location is the IMPORT SPECIFIER and its first
@@ -89,6 +89,19 @@ export const symbolKeyDeclarationOf = (checker: ts.TypeChecker, identities: Iden
     if (resolved) return resolved
   }
   return null
+}
+
+/**
+ * The key expression a symbol-named member declaration is keyed by: a
+ * computed name's expression, or -- for a JavaScript class, whose members are
+ * declared by their constructor's assignments -- the key of the `this[key] =
+ * value` assignment the checker gives the member as its declaration.
+ */
+export const symbolMemberKeyExpressionOf = (declaration: ts.Declaration): ts.Expression | null => {
+  const name = (declaration as ts.NamedDeclaration).name
+  if (name) return ts.isComputedPropertyName(name) ? name.expression : null
+  const target = ts.isBinaryExpression(declaration) ? declaration.left : declaration
+  return ts.isElementAccessExpression(target) ? target.argumentExpression : null
 }
 
 /**

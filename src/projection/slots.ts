@@ -443,6 +443,27 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
     return coerce('ToNumber')
   }
 
+  /**
+   * Unary `+` is ToNumber of its operand (ECMA-262 13.5.4), and `-`/`~` are
+   * ToNumeric (13.5.5, 13.5.6): ToNumber for every carrier that cannot hold a
+   * BigInt. A number (or, for `-`/`~`, a BigInt) is the operator's own
+   * operand; anything else is converted first, so `+matches[1]` over a string
+   * is StringToNumber rather than an operator the carrier has no spelling for.
+   */
+  const numericUnarySlot = (operation: ComputationOperation, operand: SemanticOperand): SlotAnswer => {
+    if (operation.operator !== '+' && operation.operator !== '-' && operation.operator !== '~') return raw('compute-operand')
+    const carrier = carrierOf(operation, operand)
+    if (!carrier || carrier.kind === 'unresolved') return raw('compute-operand')
+    if (carrier.kind === 'scalar' && (carrier.domain === 'number' || carrier.domain === 'float64')) return raw('compute-operand')
+    if (operation.operator === '+') return coerce('ToNumber')
+    const mayHoldBigInt = (candidate: Representation): boolean =>
+      candidate.kind === 'dynamic' ||
+      (candidate.kind === 'scalar' && candidate.domain === 'bigint') ||
+      (candidate.kind === 'optional' && mayHoldBigInt(candidate.payload)) ||
+      (candidate.kind === 'tagged-union' && candidate.arms.some((arm) => mayHoldBigInt(arm.value)))
+    return mayHoldBigInt(carrier) ? raw('compute-operand') : coerce('ToNumber')
+  }
+
   const invocationSlot = (operation: InvocationOperation, operand: SemanticOperand): SlotAnswer => {
     const role = operand.role
     if (role === 'callee') return raw('callee')
@@ -592,7 +613,8 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
           case 'in':
             return role === 'left' ? raw('key') : role === 'right' ? raw('receiver') : unclassified(`role "${role}" on "in"`)
           case 'unary':
-            return operation.operator === 'void' ? raw('discarded') : raw('compute-operand')
+            if (operation.operator === 'void') return raw('discarded')
+            return numericUnarySlot(operation, operand)
           case 'binary':
             return binarySlot(operation, operand)
           case 'update':

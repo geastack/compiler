@@ -173,6 +173,32 @@ const isCopyableSpreadRecordInto = (
   return fields !== null && (receiver.key === 'string' || fields.length === 0)
 }
 
+/**
+ * A fresh object-literal receiver laid out as a record: the copy installs the
+ * source fields the receiver declares, by field store -- the same scoping the
+ * static spread applies (only the literal's own fields are installed). A
+ * required receiver field must come from a required source field, or the
+ * copy could leave it unset.
+ */
+const isCopyableSpreadRecordIntoRecord = (
+  deriver: RepresentationDeriver,
+  representation: Representation,
+  receiver: Representation | undefined
+): boolean => {
+  if (!receiver || !isCopyableSpreadRecord(deriver, representation) || !isSpreadRecordReceiver(receiver)) return false
+  const fields = staticOwnFieldsOf(deriver, representation)
+  const receiverFields = staticOwnFieldsOf(deriver, receiver)
+  if (fields === null || receiverFields === null) return false
+  return fields.every((field) => {
+    const held = receiverFields.find((candidate) => candidate.key === field.key)
+    return held === undefined || !held.required || field.required
+  })
+}
+
+/** A compiler-owned record carrier a spread may write fields into. */
+export const isSpreadRecordReceiver = (receiver: Representation): boolean =>
+  (receiver.kind === 'record' && receiver.accessors.length === 0) || (receiver.kind === 'native-record-ref' && receiver.native === null)
+
 /** Whether every arm of a tagged-union is a shape `emitSpreadCopy` can copy into this receiver -- see `runtime-helper-key.ts`'s doc. */
 const isCopyableSpreadUnion = (
   deriver: RepresentationDeriver,
@@ -217,7 +243,9 @@ export const spreadSourceCarrierKeyOf = (
         ? dictionaryKind(candidate)
         : isCopyableSpreadRecordInto(deriver, candidate, receiver)
           ? `${candidate.kind}(copyable)`
-          : null
+          : isCopyableSpreadRecordIntoRecord(deriver, candidate, receiver)
+            ? `${candidate.kind}(copyable->record)`
+            : null
   if (representation.kind === 'optional') return `optional(${copyableKind(representation.payload) ?? representation.payload.kind})`
   return copyableKind(representation) ?? kind
 }

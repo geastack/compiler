@@ -10,6 +10,7 @@ import { definitelyReturns } from './return-paths.js'
 import { createBagAbsenceResolver, type BagAbsence } from './bag-absence.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { isObjectLiteralPrototypeSetter } from './assignment-patterns.js'
+import { symbolMemberKeyExpressionOf } from './structural-leaves.js'
 
 /**
  * The members an OPEN PROPERTY BAG carries, inferred from the properties the
@@ -371,6 +372,36 @@ export const censusObjectBagBindings = (
   }
 
   /**
+   * The member `receiver[key]` names when `key` is a unique symbol: the
+   * receiver's symbol-named member keyed by that same symbol. thread-stream
+   * writes `this[kImpl] = {}` and fills it a member at a time; the checker
+   * declares the member by that assignment, exactly as it declares a
+   * JavaScript class's `this.name = {}` field, so the two are one owner kind.
+   * Identity is the symbol's own (`UniqueESSymbolType.symbol`), which every
+   * spelling of the key shares, never the key's text.
+   */
+  const symbolKeyedMemberOf = (access: ts.ElementAccessExpression): ts.Symbol | undefined => {
+    const keyType = checker.getTypeAtLocation(access.argumentExpression)
+    if ((keyType.flags & ts.TypeFlags.UniqueESSymbol) === 0) return undefined
+    const key = (keyType as ts.UniqueESSymbolType).symbol
+    const receiver = observedType(access.expression)
+    if (!receiver) return undefined
+    return checker
+      .getNonNullableType(receiver)
+      .getProperties()
+      .find(
+        (member) =>
+          member.getName().startsWith('__@') &&
+          (member.getDeclarations() ?? []).some((declaration) => {
+            const expression = symbolMemberKeyExpressionOf(declaration)
+            if (!expression) return false
+            const declared = checker.getTypeAtLocation(expression)
+            return (declared.flags & ts.TypeFlags.UniqueESSymbol) !== 0 && (declared as ts.UniqueESSymbolType).symbol === key
+          })
+      )
+  }
+
+  /**
    * An EXPANDO member slot's identity: `x.k` where nothing in the program
    * declares `k`.
    *
@@ -488,6 +519,7 @@ export const censusObjectBagBindings = (
    */
   const ownerDeclOfExpr = (expression: ts.Expression): ts.Node | null => {
     if (ts.isIdentifier(expression)) return flow.targetOf(expression)?.declaration ?? null
+    if (ts.isElementAccessExpression(expression)) return declNodeOf(symbolKeyedMemberOf(expression))
     // The expando slot is consulted only AFTER both the checker and the
     // composed census decline: a slot that has a declaration keeps it, so
     // this adds an identity where there was none rather than replacing one.
@@ -645,9 +677,23 @@ export const censusObjectBagBindings = (
   // admitted as a root while its later replacements are invisible to the proof.
   // Frame/return edges transport values but do not give an inline allocation a
   // stable storage owner; their aliases are handled by the existing closure.
-  const storageWrites = flow.allWrites.filter((write) => write.slot === 'whole')
-  const ownerOfWrite = (write: (typeof storageWrites)[number]): ts.Node | null =>
-    (write.naming && ts.isPropertyAccessExpression(write.naming) ? ownerDeclOfExpr(write.naming) : null) ?? write.target.declaration
+  // The value-flow index names a member only by a literal key, so it records
+  // `o[kImpl] = v` as an element write on `o`. A unique-symbol key names one
+  // member exactly as a literal does (`symbolKeyedMemberOf`), so such a write
+  // is a whole write of that member here.
+  const symbolKeyedAccessOf = (write: (typeof flow.allWrites)[number]): ts.ElementAccessExpression | null =>
+    write.slot === 'element' &&
+    write.propertyAccess !== null &&
+    ts.isElementAccessExpression(write.propertyAccess) &&
+    symbolKeyedMemberOf(write.propertyAccess) !== undefined
+      ? write.propertyAccess
+      : null
+  const storageWrites = flow.allWrites.filter((write) => write.slot === 'whole' || symbolKeyedAccessOf(write) !== null)
+  const ownerOfWrite = (write: (typeof storageWrites)[number]): ts.Node | null => {
+    const symbolKeyed = symbolKeyedAccessOf(write)
+    if (symbolKeyed) return ownerDeclOfExpr(symbolKeyed)
+    return (write.naming && ts.isPropertyAccessExpression(write.naming) ? ownerDeclOfExpr(write.naming) : null) ?? write.target.declaration
+  }
   const allocationOwners = new Map<ts.Expression, ts.Node | null>()
   for (const write of storageWrites) {
     if (

@@ -109,10 +109,10 @@ export const promisePayloadConvertible = (source: Representation, target: Repres
 /** A promise payload that carries no information: `void`, and the `undefined` it is spelled as wherever a value is required. */
 const isUnitPromisePayload = (payload: Representation): boolean => payload.kind === 'void' || payload.kind === 'undefined'
 
-/** `RegExpMatchArray` read through the `Array<string>` base it inherits. */
+/** `RegExpMatchArray` or `RegExpExecArray` read through the `Array<string>` base each inherits. */
 const regexpMatchArrayBaseText = (source: Representation, target: Representation, text: string): string | null =>
   source.kind === 'native-record-ref' &&
-  source.native === cppRegExpNativeTypes['match-result'] &&
+  (source.native === cppRegExpNativeTypes['match-result'] || source.native === cppRegExpNativeTypes['exec-result']) &&
   source.ownership === 'shared-refcount' &&
   target.kind === 'array-object' &&
   target.ownership === 'shared-refcount' &&
@@ -906,6 +906,15 @@ const restFromOf = (representation: Representation): number | null => {
  * handler)` in the program.
  */
 export const boxedText = (representation: Representation, tag: string, text: string): string => {
+  // A shared class reference is the collapsed `T | null`: its empty pointer IS
+  // the null, and it boxes as the null value, never as an object box holding
+  // nothing -- which every later null test would read as present.
+  if (representation.kind === 'class-ref' && representation.ownership === 'shared-refcount' && tag === 'Object') {
+    return (
+      `[](const ${cppTypeOf(representation)}& gea_boxed) { return gea_boxed ? gea::Value::box(gea::Value::Tag::Object, gea_boxed) : ` +
+      `gea::Value::box(gea::Value::Tag::Null, nullptr); }(${text})`
+    )
+  }
   const restFrom = restFromOf(representation)
   const value = `static_cast<${cppTypeOf(representation)}>(${text})`
   const abi = representation.kind === 'function-and-constructor' ? representation.call : 'abi' in representation ? representation.abi : null

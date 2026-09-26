@@ -66,10 +66,21 @@ export const isAmbientDeclaration = (declaration: ts.Declaration): boolean =>
   isInsideAmbientBlock(declaration)
 
 export const isAmbientSymbol = (symbol: ts.Symbol): boolean => {
-  const declarations = symbol.declarations
+  const declarations = symbol.declarations?.filter((declaration) => !isExpandoContainerMark(declaration))
   if (!declarations || declarations.length === 0) return false
   return declarations.every(isAmbientDeclaration)
 }
+
+/**
+ * The JavaScript binder records the `X` of `X.member = value` as a
+ * declaration of `X`, marking it an expando container. It defines nothing
+ * about `X` itself -- only a member of whatever `X` already is -- so
+ * secure-json-parse's `Error.stackTraceLimit = 0` leaves `Error` the host's.
+ */
+const isExpandoContainerMark = (declaration: ts.Declaration): boolean =>
+  ts.isIdentifier(declaration) &&
+  (ts.isPropertyAccessExpression(declaration.parent) || ts.isElementAccessExpression(declaration.parent)) &&
+  declaration.parent.expression === declaration
 
 /**
  * Every declared base of a class or interface type, nearest first.

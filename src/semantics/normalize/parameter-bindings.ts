@@ -31,6 +31,7 @@ import {
 } from './parameter-slot.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
 import {
+  isVacuousArrayType,
   type AliasEvidence,
   annotationStatesNothing,
   exactEmptyObjectLiteralType,
@@ -1604,6 +1605,10 @@ export const censusParameterBindings = (
       // write-set censuses already ask both halves; this asking one was
       // drift. See `field-bindings.ts`'s `known` for the measured case.
       if (isUnusableEvidence(type) || annotationStatesNothing(checker, node, type)) return upstream.typeAt(node)
+      // An array of `any` states nothing about its elements but does state an
+      // array: the weakest evidence, not none. Without it a `[]` argument or
+      // `Array.prototype` leaves the whole call-site join unresolved.
+      if (isVacuousArrayType(checker, type)) return upstream.typeAt(node) ?? type
       // A bound parameter's DECLARED type can be one TypeScript widened from a
       // default value -- `constructor( parameters = {} )` declares `{}`, a type
       // with no members, so every `parameters.canvas` reading through it finds
@@ -1682,13 +1687,13 @@ export const censusParameterBindings = (
       // three's `material.glslVersion` through a `Material`. See
       // `flow/class-family-member-read.ts`.
       const family = answer === null ? classFamilyMemberReadTypeOf(checker, valueFlow, receiver, name, upstream) : null
-      if (family !== null) return family
+      if (family !== null && !isVacuousArrayType(checker, family)) return family
       const written = literalMemberInitializerOf(checker.getPropertyOfType(checker.getApparentType(receiver), name))
       if (written === null || resolvingLiteralMembers.has(written)) return answer
       resolvingLiteralMembers.add(written)
       try {
         const resolved = known(written) ?? resolve(written)
-        return resolved !== null && !isUnusableEvidence(resolved) ? resolved : answer
+        return resolved !== null && !isUnusableEvidence(resolved) && !isVacuousArrayType(checker, resolved) ? resolved : answer
       } finally {
         resolvingLiteralMembers.delete(written)
       }

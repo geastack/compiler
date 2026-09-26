@@ -262,9 +262,8 @@ const resultDataMembers: ReadonlySet<string> = new Set(['index', 'input', 'lengt
  * The three optionals are the two interfaces' own `?`, and they differ by
  * role on purpose: `RegExpExecArray` declares `index`/`input` REQUIRED and
  * `RegExpMatchArray` declares them optional, because a global pattern's match
- * really does answer an array with neither. `length` is `double` on an exec
- * result and the inherited `ArrayObject::length()` on a match result; neither
- * is optional. Keep this in step with `ExecResult`/`MatchResult` in
+ * really does answer an array with neither. `length` is the inherited
+ * `ArrayObject::length()` on both; neither is optional. Keep this in step with `ExecResult`/`MatchResult` in
  * `runtime/gea_runtime.h` -- they are the same two facts, and clang checks
  * only one of them.
  */
@@ -467,11 +466,9 @@ export const regexpMemberText = (
     )
   }
   if (resultDataMembers.has(staticKey)) {
-    // `length` is a DATA member of `ExecResult` (`double length`, beside
-    // `index`/`input`) and the inherited `ArrayObject::length()` of
-    // `MatchResult`; one spelling for both compiled the exec result's read as
-    // a call on a `double`.
-    const member = staticKey === 'length' && role === 'match-result' ? 'length()' : staticKey
+    // Both results are Arrays (22.1.3.13, 22.2.7.2), and `length` is the
+    // inherited `ArrayObject::length()` of each.
+    const member = staticKey === 'length' ? 'length()' : staticKey
     return narrow(staticKey, `${receiverText}->${member}`, resultDataMemberStorage(role, staticKey))
   }
   if (canonicalCaptureSlot(staticKey)) return captureReadText(role, receiverText, staticKey, resultRepresentation)

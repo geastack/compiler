@@ -1,6 +1,8 @@
 import ts from 'typescript'
 import { inheritedAccessorOfAssignment } from '../inherited-accessor.js'
 import {
+  arrayTypeOf,
+  isVacuousArrayType,
   annotationStatesNothing,
   containsUnstatedPosition,
   derivedExpressionType,
@@ -171,36 +173,6 @@ const isAnyType = (type: ts.Type): boolean => (type.flags & ts.TypeFlags.Any) !=
 
 /** Duplicated from `parameter-bindings.ts` (not exported there): `any`/`void`/`never` say nothing about storage. */
 const isUnusableEvidence = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0
-
-/**
- * `never[]` (or `readonly never[]`) -- TypeScript's own answer for `this.x =
- * [];` with no contextual type to narrow it, and no more a fact about the
- * program than the empty object type `{}` is; `annotationStatesNothing`
- * already carries that reasoning for `{}` (see its own comment) but never
- * asked the array-shaped version of the same question, so a field whose only
- * whole-value write is a bare `[]` was read as REAL evidence -- bound to
- * `never[]`, a type nothing can ever be assigned into or read out of, in
- * front of every other write the program plainly makes to it (a `.push`, a
- * computed-index write) elsewhere in the class. Same test
- * `object-bag-bindings.ts`'s `statesNothing` already applies to a bag's own
- * candidacy, asked here of a FIELD's write evidence instead.
- *
- * `any[]` and `unknown[]` are the same statement, and the test asked only the
- * `never` half. `isUnusableEvidence` already refuses a bare `any` because it
- * says nothing about what a slot holds; an array OF `any` says nothing about
- * what its elements hold, and the only difference is one level of nesting.
- * three's `Texture.mipmaps` is the measured case: `@type {Array<Object>}`,
- * where the global `Object` INTERFACE is collapsed to `any` by
- * `structural.ts`'s `isGlobalObjectInterface` for the same reason
- * `annotationStatesNothing` refuses it bare -- so the annotation arrives here
- * as `any[]`, read as REAL evidence, and the field's write set (which the
- * program plainly fills with real mip records) was never consulted at all.
- */
-const isVacuousArrayType = (checker: ts.TypeChecker, type: ts.Type): boolean => {
-  if (!checker.isArrayType(type)) return false
-  const [element] = checker.getTypeArguments(type as ts.TypeReference)
-  return element !== undefined && (element.flags & (ts.TypeFlags.Never | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
-}
 
 /**
  * The internal (undocumented, but present and correct on every TypeScript
@@ -595,6 +567,75 @@ export const censusFieldBindings = (
   }
 
   /**
+   * An EMPTY array literal a field is written with holds what the program
+   * later puts in it, which the collection census has joined for that very
+   * literal (`arrayElementAt`) -- the answer the literal's own allocation is
+   * laid out by. The checker's `any[]`/`never[]` for it states nothing
+   * (`isVacuousArrayType`); reading the literal without the census made the
+   * field `any[]` while the allocation it holds was typed, and every store
+   * between them was an array copy nothing can install (find-my-way's
+   * `this.parametricChildren = []`, filled with `ParametricNode`s).
+   */
+  const emptyArrayLiteralType = (write: ts.Expression): ts.Type | null => {
+    if (!ts.isArrayLiteralExpression(write) || write.elements.length > 0) return null
+    const element = collections.arrayElementAt(write)
+    return element ? arrayTypeOf(checker, element) : null
+  }
+
+  /**
+   * Whether `expression` reads the field `symbol` itself: a member read of
+   * it, or a call to a method whose every `return` is one. Such a read can
+   * only yield a value some write already stored in the field.
+   */
+  const readsOwnField = (expression: ts.Expression, symbol: ts.Symbol, depth = 0): boolean => {
+    let node = expression
+    while (ts.isParenthesizedExpression(node)) node = node.expression
+    if (ts.isPropertyAccessExpression(node)) return sameField(checker.getSymbolAtLocation(node.name), symbol)
+    if (!ts.isCallExpression(node) || node.arguments.length > 0 || depth > 4) return false
+    const declaration = checker.getResolvedSignature(node)?.declaration
+    if (!declaration || !(ts.isMethodDeclaration(declaration) || ts.isFunctionExpression(declaration)) || !declaration.body) return false
+    const returned: ts.Expression[] = []
+    let open = false
+    const visit = (child: ts.Node): void => {
+      if (ts.isFunctionLike(child)) return
+      if (ts.isReturnStatement(child)) {
+        if (child.expression) returned.push(child.expression)
+        else open = true
+      }
+      ts.forEachChild(child, visit)
+    }
+    ts.forEachChild(declaration.body, visit)
+    return !open && returned.length > 0 && returned.every((value) => readsOwnField(value, symbol, depth + 1))
+  }
+  const sameField = (candidate: ts.Symbol | undefined, symbol: ts.Symbol): boolean =>
+    candidate !== undefined &&
+    (candidate === symbol || (candidate.declarations ?? []).some((declaration) => (symbol.declarations ?? []).includes(declaration)))
+
+  /**
+   * The arms of a write that carry values the field does not already hold,
+   * or `null` when the write reads nothing of its own. Fixpoint reading of a
+   * self-referential write: find-my-way's `this.wildcardChild =
+   * this.getWildcardChild() || new WildcardNode()` stores either a value the
+   * field already held or the new node, so the field holds `null` (its
+   * constructor's write) or a `WildcardNode` -- the checker, which types a
+   * JavaScript field from its constructor alone, answers `null`.
+   */
+  const ownValueArmsOf = (write: ts.Expression, symbol: ts.Symbol): readonly ts.Expression[] | null => {
+    let node = write
+    while (ts.isParenthesizedExpression(node)) node = node.expression
+    const arms = ts.isConditionalExpression(node)
+      ? [node.whenTrue, node.whenFalse]
+      : ts.isBinaryExpression(node) &&
+          (node.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
+            node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
+            node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
+        ? [node.left, node.right]
+        : [node]
+    const others = arms.filter((arm) => !readsOwnField(arm, symbol))
+    return others.length === arms.length ? null : others
+  }
+
+  /**
    * The checker's own answer at this node, when it says something usable.
    *
    * `annotationStatesNothing` is part of the test, not just
@@ -878,7 +919,22 @@ export const censusFieldBindings = (
       // `/** @type {Object} */ this.userData = {};` is the measured case:
       // with that write silent, every class's `userData` fell back to the
       // annotation's `any` and boxed the empty object it only ever holds.
-      const type = parameters.statedTypeAt(write) ?? exactEmptyObjectLiteralType(checker, write) ?? known(write) ?? resolveExpr(write)
+      // A write that only re-stores the field's own values adds nothing; a
+      // branching write contributes its other arms -- see `ownValueArmsOf`.
+      const ownArms = ownValueArmsOf(write, symbol)
+      if (ownArms !== null) {
+        const armTypes = ownArms.map((arm) => exactEmptyObjectLiteralType(checker, arm) ?? known(arm) ?? resolveExpr(arm))
+        if (armTypes.every((armType): armType is ts.Type => armType !== null)) {
+          types.push(...armTypes)
+          continue
+        }
+      }
+      const type =
+        parameters.statedTypeAt(write) ??
+        exactEmptyObjectLiteralType(checker, write) ??
+        emptyArrayLiteralType(write) ??
+        known(write) ??
+        resolveExpr(write)
       if (type) types.push(type)
       // A write typed `void`/`never` is a real fact stating the storage holds
       // nothing a program can use -- a veto in both phases, exactly as

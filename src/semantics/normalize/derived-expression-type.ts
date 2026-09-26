@@ -1565,7 +1565,7 @@ export const memberTypeOf = (
     return flow && !calleePosition(at) ? absentClosedObjectLiteralMemberTypeOf(checker, flow, nonNullReceiver, name, at) : null
   }
   const type = checker.getTypeOfSymbolAtLocation(property, at)
-  if (isUnusableEvidence(type)) return null
+  if (isUnusableEvidence(type) || isVacuousArrayType(checker, type)) return null
   return singleConventionAt(checker, type, at)
 }
 
@@ -2778,6 +2778,46 @@ const widenLiteralForm = (checker: ts.TypeChecker, type: ts.Type): ts.Type =>
  * element types, where that is exactly the case; a class family or a declared
  * interface keeps the ordinary join.
  */
+/**
+ * `never[]` (or `readonly never[]`) -- TypeScript's own answer for `this.x =
+ * [];` with no contextual type to narrow it, and no more a fact about the
+ * program than the empty object type `{}` is; `annotationStatesNothing`
+ * already carries that reasoning for `{}` (see its own comment) but never
+ * asked the array-shaped version of the same question, so a field whose only
+ * whole-value write is a bare `[]` was read as REAL evidence -- bound to
+ * `never[]`, a type nothing can ever be assigned into or read out of, in
+ * front of every other write the program plainly makes to it (a `.push`, a
+ * computed-index write) elsewhere in the class. Same test
+ * `object-bag-bindings.ts`'s `statesNothing` already applies to a bag's own
+ * candidacy, asked here of a FIELD's write evidence instead.
+ *
+ * `any[]` and `unknown[]` are the same statement, and the test asked only the
+ * `never` half. `isUnusableEvidence` already refuses a bare `any` because it
+ * says nothing about what a slot holds; an array OF `any` says nothing about
+ * what its elements hold, and the only difference is one level of nesting.
+ * three's `Texture.mipmaps` is the measured case: `@type {Array<Object>}`,
+ * where the global `Object` INTERFACE is collapsed to `any` by
+ * `structural.ts`'s `isGlobalObjectInterface` for the same reason
+ * `annotationStatesNothing` refuses it bare -- so the annotation arrives here
+ * as `any[]`, read as REAL evidence, and the field's write set (which the
+ * program plainly fills with real mip records) was never consulted at all.
+ */
+export const isVacuousArrayType = (checker: ts.TypeChecker, type: ts.Type): boolean => {
+  if (!checker.isArrayType(type)) return false
+  const [element] = checker.getTypeArguments(type as ts.TypeReference)
+  return element !== undefined && (element.flags & (ts.TypeFlags.Never | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
+}
+
+/**
+ * `T[]` for an element type -- through the checker's own constructor, which
+ * the public API does not expose, reached with the same guard as
+ * `getUnionType`. `null` when this checker has no such method.
+ */
+export const arrayTypeOf = (checker: ts.TypeChecker, element: ts.Type): ts.Type | null => {
+  const constructing = checker as unknown as { createArrayType?: (element: ts.Type) => ts.Type }
+  return typeof constructing.createArrayType === 'function' ? constructing.createArrayType(element) : null
+}
+
 const objectLiteralArrayFamilyOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts.Type | null => {
   let observed = 0
   const elements: ts.Type[] = []
@@ -2796,12 +2836,10 @@ const objectLiteralArrayFamilyOf = (checker: ts.TypeChecker, types: readonly ts.
     if (!elements.some(same)) elements.push(element)
   }
   if (elements.length < 2) return null
-  const constructing = checker as unknown as {
-    getUnionType?: (types: readonly ts.Type[]) => ts.Type
-    createArrayType?: (element: ts.Type) => ts.Type
-  }
-  if (typeof constructing.getUnionType !== 'function' || typeof constructing.createArrayType !== 'function') return null
-  const family = constructing.createArrayType(constructing.getUnionType(elements))
+  const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
+  if (typeof constructing.getUnionType !== 'function') return null
+  const family = arrayTypeOf(checker, constructing.getUnionType(elements))
+  if (!family) return null
   return observed === 0 ? family : checker.getNullableType(family, observed)
 }
 

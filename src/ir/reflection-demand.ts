@@ -1166,7 +1166,24 @@ export const reflectionExposureOf = (
       }
     }
   }
+  const producingGet = new Map<IrValueId, Extract<IrOperation, { readonly kind: 'get' }>>()
+  for (const operation of operations) if (operation.kind === 'get') producingGet.set(operation.result.id, operation)
   for (const operation of operations) {
+    // An array method handing its elements to a callback whose convention
+    // takes them boxed (`sort((a, b) => a.isRegex ...)` over a native class
+    // array, the comparator's parameters left untyped) boxes each element
+    // inside the runtime's own template -- no IR conversion states it -- and
+    // the callback then reads fields off those boxes.
+    if (operation.kind === 'call') {
+      const array = operation.receiver ?? producingGet.get(operation.callee.value)?.receiver ?? null
+      if (array !== null && array.representation.kind === 'array-object') {
+        const boxesElements = operation.arguments.some(
+          (argument) =>
+            unwrappedCallableAbi(argument.representation)?.parameters.some((parameter) => parameter.value.kind === 'dynamic') === true
+        )
+        if (boxesElements) promoteFull(array.representation.element, 'array-callback-boxes-element')
+      }
+    }
     currentOperation = operation
     if (operation.kind === 'compute' && operation.form === 'unary' && operation.operator === 'ObjectTag') {
       // The authenticated algorithm reads one well-known symbol. It neither
