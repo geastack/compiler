@@ -106,6 +106,7 @@ constant-table.ts.cpp 71ba3bcbd3b5
 constructor-alias-installed-members-class.runtime.js.cpp 0bd7b7483932
 constructor-alias-installed-members.runtime.js.cpp 19a6cf4855e4
 constructor-reads-arguments.runtime.js.cpp 68f158847348
+constructor-static-flag-not-an-escape.runtime.js.cpp 327ac3d86c18
 contextual-handler-union-return-slot.ts.cpp 6e40af1ea7a2
 contextual-pattern-callback.ts.cpp 7664ae43caef
 contradicted-return-tag-record.runtime.js.cpp d1351e69b586
