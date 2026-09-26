@@ -59,6 +59,7 @@ class-accessors-viewed-as-record.ts.cpp f390fdd89ddd
 class-arm-into-declared-interface-slot.ts.cpp 1cf8ed753b5b
 class-arrow-field-lazy.ts.cpp 1faacfab4068
 class-cast-through-unknown-is-identity.ts.cpp 2b6430638e1e
+class-constructor-map-keys.runtime.js.cpp 5b41e70db2ca
 class-defaulted-census-slot.runtime.js.cpp d6231db471a1
 class-dynamic-json-reflection.ts.cpp 1ab6016eb6c8
 class-expando-array-method-name.runtime.js.cpp e26fa4d413ad

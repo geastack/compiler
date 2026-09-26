@@ -7560,6 +7560,20 @@ inline bool sameValueZero(const K& left, const K& right) {
   }
 }
 
+/**
+ * A class object as a key (three keys a vertex-format table by
+ * `Float16BufferAttribute`): the class identity `===` compares
+ * (`emit-equality.ts`'s `constructorIdentityEqualityText`) -- the class
+ * evaluation's environment where there is one, otherwise the construct
+ * pointer. `ConstructorObject` has no `operator==` because two sides of `===`
+ * may spell different C++ types; a key type is one.
+ */
+template <typename Result, typename... Arguments>
+inline bool sameValueZero(const ConstructorObject<Result(Arguments...)>& left, const ConstructorObject<Result(Arguments...)>& right) {
+  if (left.environment != nullptr) return left.environment == right.environment;
+  return reinterpret_cast<const void*>(left.construct_) == reinterpret_cast<const void*>(right.construct_) && right.environment == nullptr;
+}
+
 /** ECMA-262 SameValue for Number values: NaN equals NaN, while +0 and -0 differ. */
 inline bool sameNumberValue(double left, double right) {
   if (std::isnan(left) && std::isnan(right)) return true;
