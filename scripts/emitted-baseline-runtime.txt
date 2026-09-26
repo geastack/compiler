@@ -12,6 +12,7 @@ array-isarray-identity-conditional.ts.cpp 33c73a99fa8f
 array-literal-gathers-dynamic-into-class.runtime.js.cpp 7294712508f2
 array-multiple-windows.ts.cpp ee13367467b2
 array-mutator-frozen-integrity.ts.cpp f122fdb38185
+array-object-call-argument-aliasing.ts.cpp 06b1170a221c
 array-pattern-defaults-keep-positions.ts.cpp 9b003f6f7de9
 array-pattern-elision-over-generator.ts.cpp fb66b4eed4c6
 array-pattern-over-generator.ts.cpp 3d9b68a0208e
@@ -138,7 +139,7 @@ dictionary-index-truthiness.ts.cpp 519009b6c81f
 dictionary-named-absence.ts.cpp dc9ba237a175
 direct-interface-method-receiver.ts.cpp 55d743cf5d7d
 downcast-method-read-absent-on-other-arm.ts.cpp 52495ee800d6
-drift.txt ed53208eb6bf
+drift.txt 8096d5a0fd7f
 dynamic-array-absent-element.ts.cpp 6838ef917ebe
 dynamic-array-literal-gather.runtime.js.cpp 4c1e3d9c21cf
 dynamic-array-projection.ts.cpp 25d0cdd3b0d1
@@ -606,6 +607,7 @@ stable-binding-identity.ts.cpp a2bfde725b86
 stable-string-read.ts.cpp 712320438b5d
 stated-any-collection-field-allocation.runtime.js.cpp 0ba48b0a0d69
 stated-collection-field-allocation.runtime.js.cpp d669095a6744
+stated-destination-types-open-array.runtime.js.cpp 69d1cd2e0b98
 stated-open-union-preserves-closed-arms.ts.cpp 878f72cd6f91
 static-intrinsic-reflection.runtime.js.cpp 9a7c2a8500d2
 static-method-as-callback-value.ts.cpp 8ec7c5dfe2ea
