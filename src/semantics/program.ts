@@ -14,6 +14,7 @@ import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.j
 import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 import { contradictedJsDocTypeBlanks } from './contradicted-jsdoc-types.js'
 import { absentJsDocTagWidenings } from './absent-jsdoc-tags.js'
+import { contradictedJsDocParameterBlanks } from './contradicted-jsdoc-parameters.js'
 import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
 import { isUncheckedGuardCopyArtifact, uncheckedGuardArgumentCopies } from './unchecked-guard-argument-copies.js'
 import { knownCallerPredicateParameters } from './known-caller-predicate-parameters.js'

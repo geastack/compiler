@@ -347,7 +347,7 @@ const indexTypeAt = (checker: ts.TypeChecker, container: ts.Type, key: ts.Expres
  * signature its base does not admit, and three's `ReflectorNode` is not
  * assignable to the `Node` it extends for exactly that reason.
  */
-const derivesFromStatedClass = (checker: ts.TypeChecker, constructed: ts.Type, stated: ts.Type): boolean => {
+export const derivesFromStatedClass = (checker: ts.TypeChecker, constructed: ts.Type, stated: ts.Type): boolean => {
   const classes = new Set(
     (stated.isUnion() ? stated.types : [stated]).flatMap((arm) => {
       const symbol = arm.getSymbol()
