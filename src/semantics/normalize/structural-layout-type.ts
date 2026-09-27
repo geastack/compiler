@@ -17,6 +17,7 @@ import ts from 'typescript'
 import { inheritedImplementationOf } from './merged-declaration.js'
 import { emptyAbsentGlobalCensus, type AbsentGlobalCensus } from './absent-globals.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
+import type { ObjectBagCensus } from './object-bag-bindings.js'
 
 /**
  * The parameter a node declares or reads when the program typed it only by a
@@ -53,7 +54,8 @@ export const absentDefaultParameterOf = (checker: ts.TypeChecker, node: ts.Node)
 export const createLayoutTypeResolver = (
   checker: ts.TypeChecker,
   parameters: ParameterBindingCensus = emptyParameterBindingCensus,
-  absent: AbsentGlobalCensus = emptyAbsentGlobalCensus
+  absent: AbsentGlobalCensus = emptyAbsentGlobalCensus,
+  bags: ObjectBagCensus | null = null
 ): ((node: ts.Node) => ts.Type) => {
   /**
    * An array-pattern element read past the end of a plain array binds
