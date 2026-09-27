@@ -97,6 +97,7 @@ closure-cycle-lifetime.ts.cpp 86aea6acdbda
 closure-factory-export-never-read.ts.cpp 35b275d3d6f5
 closure-written-null-cell-read.runtime.js.cpp 20118f22c8cc
 collection-get-native-union.ts.cpp ea90283c893f
+collection-value-slot-shares-array-element.runtime.js.cpp 8280a2fe4901
 composed-field-descriptor.runtime.js.cpp a11d2a79f4b4
 computed-class-prototype-method.ts.cpp f1375430414d
 computed-constant-key-record-literal.runtime.js.cpp b39db1e5d75e
@@ -489,6 +490,7 @@ null-defaulted-parameter.runtime.js.cpp 3c2102fca019
 null-only-literal-takes-its-writes.runtime.js.cpp d3b2d11f7caf
 null-stored-tagged-field.runtime.js.cpp 0caa8ee82032
 null-written-number-cell.runtime.js.cpp 123fb3832f9e
+nullable-open-array-census-element.runtime.js.cpp be31231fc44f
 nullish-union.ts.cpp 8898117b27df
 number-isnan-optional-double.runtime.js.cpp a8e896955c0a
 number-parseint-one-argument.runtime.js.cpp 5ecfafad2b4a

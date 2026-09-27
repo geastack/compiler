@@ -144,6 +144,17 @@ export interface CollectionTypeArguments {
    * about one storage, and no later layer makes it agree.
    */
   readonly valueEvidence: readonly ts.Expression[]
+  /**
+   * The element of the open array `value` names, when `value` is `never[]`
+   * (alone or beside `null`/`undefined`) and the array census bound one
+   * element for every `.set` value argument. `value` is a checker type and
+   * cannot carry that element (building `T[]` needs the checker's internal
+   * `createArrayType`), so it travels beside it: the map's value slot and
+   * the arrays stored in it are one storage, and a `never` slot beside a
+   * `string[]` cell is two carriers for it (`cache.set( name, keys )` after
+   * `keys = []`; three's `RenderObject` `_protoKeysCache`).
+   */
+  readonly valueArrayElement: ts.Type | null
 }
 
 export interface CollectionBindingCensus {
@@ -694,6 +705,8 @@ export const censusCollectionBindings = (
   const valueRefusal = new Map<ts.Node, string>()
   /** The `.set` value arguments of a collection refused `value-unresolved`, for `CollectionTypeArguments.valueEvidence`. */
   const unresolvedValueArgs = new Map<ts.Node, readonly ts.Expression[]>()
+  /** The `.set` value arguments of a collection whose value this census bound, for `CollectionTypeArguments.valueArrayElement`. */
+  const boundValueArgs = new Map<ts.Node, readonly ts.Expression[]>()
 
   for (const [owner, entry] of byOwner) {
     if (entry.nodes.some((node) => nodeRefusal.has(node))) {
@@ -889,6 +902,7 @@ export const censusCollectionBindings = (
       continue
     }
     boundValue.set(owner, value)
+    boundValueArgs.set(owner, valueArgs)
   }
 
   // --- Array element census -------------------------------------------
@@ -962,7 +976,33 @@ export const censusCollectionBindings = (
     // genuine dynamic boundary; only the checker-created never/any fallback
     // of an uncontextualized `[]` is evidence-free storage this census may
     // replace from its writes.
-    return checker.getContextualType(node) === undefined
+    const contextual = checker.getContextualType(node)
+    return contextual === undefined || (statesNoElement(contextual) && assignedIntoUnstatedVariable(node))
+  }
+  // The contextual type a variable's own unstated history gives `x = []`:
+  // `any` from an untyped initializer, or the evolving `any[]`/`never[]` of
+  // `let x = []` (three's WebGLState `drawBuffers = []` under `=== undefined`).
+  const statesNoElement = (contextual: ts.Type): boolean => {
+    if ((contextual.flags & ts.TypeFlags.Any) !== 0) return true
+    if (!checker.isArrayType(contextual)) return false
+    const [element] = checker.getTypeArguments(contextual as ts.TypeReference)
+    return element !== undefined && (element.flags & (ts.TypeFlags.Any | ts.TypeFlags.Never)) !== 0
+  }
+  // `x = []` into a variable whose `any` nobody wrote: the checker gave it the
+  // `any` of its initializer (three's `RenderObject` `getKeys`, `let protoKeys
+  // = _protoKeysCache.get( ... )` off an untyped `WeakMap`). That contextual
+  // `any` states nothing about the array, exactly as no contextual type does.
+  const assignedIntoUnstatedVariable = (node: ts.ArrayLiteralExpression): boolean => {
+    const parent = node.parent
+    if (!ts.isBinaryExpression(parent) || parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken || parent.right !== node) return false
+    if (!ts.isIdentifier(parent.left)) return false
+    const declaration = checker.getSymbolAtLocation(parent.left)?.valueDeclaration
+    return (
+      declaration !== undefined &&
+      ts.isVariableDeclaration(declaration) &&
+      declaration.type === undefined &&
+      ts.getJSDocType(declaration) === undefined
+    )
   }
 
   /**
@@ -1071,6 +1111,13 @@ export const censusCollectionBindings = (
   // `BufferGeometry.setFromPoints`' `point.z || 0` pushes and boxed every
   // geometry's buffers. Its own writes stay evidence for each caller that
   // reaches it; nothing past it is followed.
+  /** The tracked array owner a stored value names: a literal the census opened, or a cell. */
+  const arrayOwnerOfValue = (value: ts.Expression): ts.Node | null => {
+    let expression: ts.Expression = value
+    while (ts.isParenthesizedExpression(expression)) expression = expression.expression
+    if (ts.isArrayLiteralExpression(expression)) return arrayNodeOwner.get(expression) ?? null
+    return ownerDeclOfExpr(expression)
+  }
   const boundariesOf = new Map<ts.Node, Set<ts.Node>>()
   const arrayRoots = new Map<ts.Node, ts.Node>()
   const rootOf = (node: ts.Node): ts.Node => {
@@ -1173,6 +1220,19 @@ export const censusCollectionBindings = (
         if (arrayRoots.has(source)) arrayRoots.set(rootOf(source), rootOf(alias))
       }
     }
+  }
+  // A keyed collection's value slot holds the arrays `.set` stores in it, so
+  // it is one more cell of their storage: two arrays stored in one slot share
+  // its physical element, and so does every `.get` read of it (three's
+  // WebGLState `currentDrawbuffers.set( framebuffer, drawBuffers )`). The slot
+  // joins their component only when every stored value is a tracked array.
+  const valueSlotArray = new Map<ts.Node, ts.Node>()
+  for (const [collection, values] of boundValueArgs) {
+    const stored = values.map(arrayOwnerOfValue)
+    const [first] = stored
+    if (!first || stored.some((owner) => owner === null || !arrayRoots.has(owner))) continue
+    for (const owner of stored) arrayRoots.set(rootOf(owner as ts.Node), rootOf(first))
+    valueSlotArray.set(collection, first)
   }
   const arrayComponents = new Map<ts.Node, Set<ts.Node>>()
   for (const alias of arrayRoots.keys()) {
@@ -1555,7 +1615,23 @@ export const censusCollectionBindings = (
     const value = boundValue.get(owner) ?? null
     const valueEvidence = unresolvedValueArgs.get(owner) ?? []
     if (key === null && value === null && valueEvidence.length === 0) return null
-    return { key, value, valueEvidence }
+    return { key, value, valueEvidence, valueArrayElement: value ? valueArrayElementOf(owner, value) : null }
+  }
+
+  const isOpenArray = (type: ts.Type): boolean => {
+    if (!checker.isArrayType(type)) return false
+    const [element] = checker.getTypeArguments(type as ts.TypeReference)
+    return element !== undefined && (element.flags & (ts.TypeFlags.Never | ts.TypeFlags.Any)) !== 0
+  }
+  /** See `CollectionTypeArguments.valueArrayElement`. */
+  const valueArrayElementOf = (owner: ts.Node, value: ts.Type): ts.Type | null => {
+    const arms = value.isUnion()
+      ? value.types.filter((member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) === 0)
+      : [value]
+    const [arm] = arms
+    if (arms.length !== 1 || arm === undefined || !isOpenArray(arm)) return null
+    const stored = valueSlotArray.get(owner)
+    return stored ? (boundElement.get(stored) ?? null) : null
   }
 
   return {
