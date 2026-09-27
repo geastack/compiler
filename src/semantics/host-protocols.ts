@@ -1045,6 +1045,22 @@ export const mapIteratorDeclarationOf = (
 }
 
 /**
+ * The standard `SetIterator<T>` returned by `Set.prototype.values()`/`keys()`:
+ * the Set's own cursor (ECMA-262 24.2.3.10), whose element is the set's key.
+ */
+export const setIteratorDeclarationOf = (
+  checker: ts.TypeChecker,
+  identities: IdentityTable,
+  files: readonly ts.SourceFile[]
+): DeclarationId | null => {
+  const anchor = files[0]
+  if (!anchor) return null
+  const symbol = checker.resolveName('SetIterator', anchor, ts.SymbolFlags.Interface, false)
+  if (!symbol) return null
+  return identities.symbolDeclarationId(symbol, anchor)
+}
+
+/**
  * The four standard keyed-collection interface names, to the family each one
  * is. Hardcoded for exactly the reason `typedArrayConstructorDomains` (`representation/`)
  * is: these are core ECMAScript (`lib.es2015.collection.d.ts`), not something

@@ -342,7 +342,7 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // `keyedCollectionMemberText` (emit-carrier-members.ts) and
     // `keyedCollectionPrototypeMethods` (emit-prototype-invoke.ts), which is
     // the one authority for which members exist per family. Everything else on
-    // these four interfaces -- `forEach`, `keys`/`values`/`entries`, the
+    // these four interfaces -- `forEach`, Set `entries`, the
     // ES2025 set-algebra family, `getOrInsert` -- is still refused by name at
     // the access, and `size`/`clear` are refused on the two WEAK families
     // specifically, because ECMA-262 gives them neither.
@@ -519,6 +519,14 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // difference.
     'dictionary:delete:true',
     'dictionary:delete:false',
+    // A constant-key delete off a primitive or a typed array: neither holds an
+    // ordinary own property this backend could have stored, so the answer is
+    // ECMA-262's `true` with no effect -- except a typed array's in-bounds
+    // index, a non-configurable element, which answers `false`. See
+    // `emitPrimitiveDelete` (emit-dynamic-properties.ts). A computed key is
+    // not claimed: its ToPropertyKey conversion is not rendered there.
+    'scalar:delete:false',
+    'typed-array:delete:false',
     // Reading/writing a STATIC key through a `tagged-union` receiver, over
     // the arms that all declare the field named
     // (`emit-union-properties.ts`'s `taggedUnionGetText`/

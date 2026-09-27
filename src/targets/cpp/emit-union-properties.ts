@@ -36,6 +36,7 @@ import { hasNativeNumericIndexArms, nativeNumericIndexOf } from '../../represent
 import { binaryToStringTagText, typedArrayBufferMemberText, typedArrayPrototypeMethods } from './emit-buffers.js'
 import { typeofTextFor } from './emit-typeof.js'
 import { promisePrototypeMethods } from './prototype/emit-prototype-invoke.js'
+import { arrayInheritedMemberRefusals, arrayMemberRefusals, arrayPrototypeMethods } from './prototype/emit-prototype-array.js'
 import { classConstructorStaticMemberTextFor, classMethodValueText } from './class-properties/emit-class-properties.js'
 import { overriddenMethodValueText } from './class-properties/computed-method-value.js'
 import { propertyKeyText } from './emit-dynamic-properties.js'
@@ -254,7 +255,16 @@ const armRuntimeFieldText = (
         published,
         `${armExprText}->length()`
       )
-    return index === null ? null : arrayArmReadText(armExprText, 'elementAt', index, arm.element, published)
+    if (index !== null) return arrayArmReadText(armExprText, 'elementAt', index, arm.element, published)
+    // Any other name is an ordinary own property of the Array object, which
+    // the expando sidecar below answers -- the one authority a lone array
+    // receiver asks for the same key (`arrayAccessText` hands it to
+    // `nativeSidecarGetText`). Not a name Array.prototype or Object.prototype
+    // answers: the sidecar reads own properties only, and would publish
+    // `undefined` for a value the language reads off the prototype chain.
+    // three's `Backend.compute` reads `dispatchSize.isIndirectStorageBufferAttribute`
+    // off `number | Array<number> | IndirectStorageBufferAttribute`.
+    if (arrayPrototypeMethods.has(key) || arrayMemberRefusals.has(key) || arrayInheritedMemberRefusals.has(key)) return null
   }
   if (arm.kind === 'typed-array') {
     if (key === 'length') {
@@ -282,6 +292,14 @@ const armRuntimeFieldText = (
     // contributes the declared boolean marker.
     if (!objectPrototypeMemberNames.has(key) && published.kind === 'optional' && published.absence === 'undefined') {
       return cppUndefinedIn(published)
+    }
+    // An array index names nothing on a number, boolean or bigint: neither
+    // the wrapper nor any prototype on its chain has an integer-indexed
+    // property. three's `Backend.compute` reads `dispatchSize[ 0 ]` off
+    // `number | Array<number>` after its number branch rewrote the local.
+    if (index !== null) {
+      const absent = cppUndefinedIn(published)
+      if (absent !== null) return absent
     }
   }
   if (arm.kind === 'constructor-family') {

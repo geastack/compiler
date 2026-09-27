@@ -990,6 +990,22 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
   const carrier = source.representation
   if (carrier.kind === 'array-object') return `gea::runtime::array::fromArray(${args})`
   if (carrier.kind === 'iterator') return `gea::runtime::array::fromIterator(${args})`
+  // A Set is its own values iterator (ECMA-262 24.2.3.11, `%Set.prototype%[@@iterator]`
+  // is `values`), so `Array.from(set)` walks the same cursor `for (const v of set)`
+  // and `set.values()` build: `gea::Iterator<K>` over the set's own storage.
+  // A Map's iterator yields a fresh `[k, v]` pair per step, whose carrier comes
+  // from the result's element; it stays refused below until a program needs it.
+  if (carrier.kind === 'keyed-collection' && carrier.family === 'set') {
+    if (!callback && representationKey(result.element) !== representationKey(carrier.key)) {
+      throw createCppEmitBlockedError(
+        'host-member-call:ArrayConstructor.from',
+        `"Array.from" of a set of "${representationKey(carrier.key)}" publishes an array of "${representationKey(result.element)}", ` +
+          'and the set walk yields its own key carrier'
+      )
+    }
+    const cursor = `gea::Iterator<${cppTypeOf(carrier.key)}>(${operandText(ctx, source)})`
+    return `gea::runtime::array::fromIterator(${[cursor, ...(callback ? [operandText(ctx, callback)] : [])].join(', ')})`
+  }
   if (carrier.kind === 'typed-array') return `gea::runtime::array::fromTypedArray(${args})`
   if (carrier.kind === 'string') return `gea::runtime::array::fromString(${args})`
   if (carrier.kind === 'record' || carrier.kind === 'record-with-index' || carrier.kind === 'native-record-ref') {

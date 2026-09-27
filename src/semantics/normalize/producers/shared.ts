@@ -964,10 +964,16 @@ export const isNativeIterableMapType = (context: ProducerContext, type: Structur
   return shape.kind === 'declared' && context.keyedCollections.get(shape.declaration) === 'map'
 }
 
-/** A `Map.prototype.entries()` result is already the native pair cursor. */
+/**
+ * A `Map.prototype.entries()`/`keys()`/`values()` result is already the native
+ * cursor, and so is a `Set.prototype.values()`/`keys()` result.
+ */
 const isNativeMapIteratorType = (context: ProducerContext, type: StructuralTypeId): boolean => {
   const shape = context.table.get(type).shape
-  return shape.kind === 'declared' && shape.declaration === context.mapIteratorDeclaration
+  return (
+    shape.kind === 'declared' &&
+    (shape.declaration === context.mapIteratorDeclaration || shape.declaration === context.setIteratorDeclaration)
+  )
 }
 
 /**

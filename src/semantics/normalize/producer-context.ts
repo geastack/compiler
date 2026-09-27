@@ -350,6 +350,8 @@ export interface ProducerContext {
   readonly asyncGeneratorDeclaration: DeclarationId | null
   /** The standard `MapIterator<T>` declaration returned by `Map.prototype.entries()`. */
   readonly mapIteratorDeclaration: DeclarationId | null
+  /** The standard `SetIterator<T>` declaration returned by `Set.prototype.values()`/`keys()`. */
+  readonly setIteratorDeclaration: DeclarationId | null
   /**
    * The nine standard TypedArray instance declarations, the same identities
    * `representation/derive.ts` carries as `gea::TypedArray<T>`

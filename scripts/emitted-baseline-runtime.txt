@@ -8,6 +8,7 @@ array-assignment-rest-target.ts.cpp 99169090bee7
 array-concat-array-argument.ts.cpp 86c31adb9c34
 array-dynamic-element-search.ts.cpp 80d32b7cb646
 array-element-string-key.ts.cpp 82836dce1c7b
+array-from-set.runtime.js.cpp 51c8a52cb5be
 array-index-absence.ts.cpp b9f1195e8e0b
 array-isarray-identity-conditional.ts.cpp 33c73a99fa8f
 array-literal-gathers-dynamic-into-class.runtime.js.cpp 7294712508f2
@@ -28,6 +29,7 @@ assignment-declared-array-field.runtime.js.cpp e9b6234a4254
 async-integer-result.ts.cpp 40d406729713
 async-return-promise-undefined-into-void.ts.cpp 9f3bd1364eac
 await-over-an-optional-thenable.ts.cpp fdab8693a27f
+bag-slot-method-results-join.runtime.js.cpp aa855aa001c1
 bag-slot-shares-this-reading-literal-record.runtime.js.cpp da215ef74678
 base-typed-derived-dynamic-dictionary.ts.cpp 74bbd1b9fa0d
 base-typed-derived-dynamic-fields.ts.cpp 3291e2cf977d
@@ -561,6 +563,7 @@ physical-class-ancestry-live.ts.cpp 728e6f672df0
 physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 1d2c5e207449
+primitive-delete-arms.runtime.js.cpp 12dcd9499b11
 printer-drift.txt 7f6242725b17
 promise-any-into-union-promise-arm.runtime.js.cpp 9372b4c219cd
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
@@ -638,6 +641,7 @@ returned-generic-spelling.ts.cpp 0be54b91c124
 scalar-roundtrip.ts.cpp c1558853e8f5
 self-reading-branch-write-cell.runtime.js.cpp 85844722e169
 set-constructed-from-a-string.ts.cpp ae1377b3d02f
+set-values-iterator.runtime.js.cpp 785c55074d0a
 sibling-class-return-join.runtime.js.cpp 0876c5f38471
 slot-write-closure.runtime.ts.cpp 9b9ef35c8b5f
 spread-call-immediately-invoked.runtime.js.cpp c5ae95452df2
@@ -724,11 +728,13 @@ typeof-then-discriminates-a-union.ts.cpp 16fe804a602d
 unbox-nullable-union.ts.cpp b8a67b94f69c
 uncallable-member-slot-call.runtime.js.cpp f925ad615e3e
 uncertified.txt ceae5039a20a
+union-array-arm-named-key.runtime.js.cpp f857040bd922
 union-map-receiver-discarded-set.runtime.js.cpp 712af7f12caa
 union-member-absent-on-promise-arm.ts.cpp fb968705a335
 union-method-absent-on-one-arm-discarded.ts.cpp d2bf86271461
 union-of-tuples-array-pattern.ts.cpp aa8e76675555
 union-of-tuples-nested-array-pattern.ts.cpp a33a8e162a03
+union-scalar-arm-index-key.runtime.js.cpp ca9931ea6151
 union-void-arm-is-the-undefined-carrier.ts.cpp 230baa95b904
 unknown-callee-argument-key-narrowing.ts.cpp f037154b942f
 untyped-literal-takes-stated-destination.runtime.js.cpp 60888069f915

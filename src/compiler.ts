@@ -669,7 +669,8 @@ const compileProgram = (request: CompilationRequest): CompilationResult => {
       forDeclaration: (declaration: DeclarationId) =>
         declaration === frontend.generatorDeclaration ||
         declaration === frontend.asyncGeneratorDeclaration ||
-        declaration === frontend.mapIteratorDeclaration
+        declaration === frontend.mapIteratorDeclaration ||
+        declaration === frontend.setIteratorDeclaration
     },
     // `RegExp`/`RegExpExecArray`/`RegExpMatchArray`, resolved by the frontend
     // the same way `promiseDeclaration` and `keyedCollections` are, and

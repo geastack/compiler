@@ -386,6 +386,60 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     return { type, slot: parameterSlotTypeOf(input.internUnion, typeOf(checker.getUndefinedType()), flags, type), ...flags }
   }
 
+  /** The method declarations whose result `slotJoinedResultOf` is joining right now; each answers its own result meanwhile. */
+  const joiningSlotResults = new Set<ts.Declaration>()
+
+  /**
+   * The result of an unannotated method of a literal that shares one bag
+   * slot's record with other literals: the join of that member's result over
+   * every literal of the slot (`ObjectBagCensus.literalSlotGroupOf`).
+   *
+   * They are one record, so the member has one convention, and its own result
+   * alone would make every other literal's method a callable whose result
+   * converts into it -- a covariant return no function-value conversion
+   * takes. three's TSLCore fills `proto` with swizzle literals whose `get()`
+   * returns a SplitNode and index literals whose `get()` returns an
+   * ArrayElementNode: `get` returns either.
+   *
+   * Only when every literal of the slot declares the member as an unannotated
+   * method and every result is a statement (not `any`): a written return
+   * type still wins, and a join with `any` would state nothing.
+   */
+  const slotJoinedResultOf = (declaration: ts.SignatureDeclaration | undefined, own: StructuralTypeId): StructuralTypeId => {
+    if (!declaration || !table || !ts.isMethodDeclaration(declaration) || declaration.type !== undefined) return own
+    if (!ts.isObjectLiteralExpression(declaration.parent) || joiningSlotResults.has(declaration)) return own
+    const nameOf = (method: ts.MethodDeclaration): string | null =>
+      ts.isIdentifier(method.name) || ts.isStringLiteral(method.name) ? method.name.text : null
+    const name = nameOf(declaration)
+    const group = name === null ? null : bags.literalSlotGroupOf(declaration.parent)
+    if (!group) return own
+    const siblings = group.flatMap((literal) =>
+      literal.properties.filter(
+        (property): property is ts.MethodDeclaration =>
+          ts.isMethodDeclaration(property) && property.type === undefined && nameOf(property) === name
+      )
+    )
+    if (siblings.length !== group.length) return own
+    const states = (result: StructuralTypeId): boolean => {
+      const shape = table.get(result).shape
+      return shape.kind !== 'primitive' || (shape.primitive !== 'any' && shape.primitive !== 'unknown')
+    }
+    for (const sibling of siblings) joiningSlotResults.add(sibling)
+    try {
+      const results = new Set<StructuralTypeId>([own])
+      for (const sibling of siblings) {
+        if (sibling === declaration) continue
+        const signature = checker.getSignatureFromDeclaration(sibling)
+        if (!signature) return own
+        results.add(signatureOf(signature).result)
+      }
+      if (results.size === 1 || ![...results].every(states)) return own
+      return input.internUnion([...results])
+    } finally {
+      for (const sibling of siblings) joiningSlotResults.delete(sibling)
+    }
+  }
+
   /**
    * `resultOverride` is how an optional call's callee gets the return its method
    * actually has: the checker's resolved signature carries the chain's added
@@ -636,9 +690,12 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
       result:
         (declaredMemberResult ? typeOf(declaredMemberResult) : null) ??
         (contextualSlotResult ? typeOf(contextualSlotResult) : null) ??
-        bagResult ??
-        collectionResult ??
-        (censusUnionArms ? input.internUnion(censusUnionArms.map(typeOf)) : typeOf(resultOverride ?? censusResult ?? checkerResult))
+        slotJoinedResultOf(
+          resultOverride === undefined ? declaration : undefined,
+          bagResult ??
+            collectionResult ??
+            (censusUnionArms ? input.internUnion(censusUnionArms.map(typeOf)) : typeOf(resultOverride ?? censusResult ?? checkerResult))
+        )
     }
   }
 

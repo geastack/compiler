@@ -777,16 +777,18 @@ export const promisePrototypeMethods: ReadonlySet<string> = new Set(promiseMetho
  *   callback whose `this`-arg and three-parameter frame this backend has no
  *   convention for; `Array.prototype.map` is the one callback-taking method it
  *   does render, and its own renderer below is what that took.
- * - `keys` / `values` -- each returns an iterator whose element carrier is not
- *   currently projected here. Map `entries` is implemented below because its
- *   result already carries the concrete pair type needed by `gea::Iterator`.
+ * - Set `entries` -- it yields a fresh `[v, v]` pair per step, and no pair
+ *   carrier is minted for a Set. Map `entries`, and `keys`/`values` of both
+ *   strong families, are implemented below: each result is an iterator whose
+ *   element the collection already names (the Map pair, `K` or `V`, or the
+ *   Set's own key).
  * - `getOrInsert` / `getOrInsertComputed` (ES2026), the ES2025
  *   `union`/`intersection`/`difference`/`isSubsetOf` family, and `Map.groupBy`
  *   / `Set.prototype.symmetricDifference` -- unbuilt, not refused on
  *   principle.
  */
 const strongMapMethods: ReadonlySet<string> = new Set(['get', 'set', 'has', 'delete', 'clear', 'entries', 'keys', 'values'])
-const strongSetMethods: ReadonlySet<string> = new Set(['add', 'has', 'delete', 'clear'])
+const strongSetMethods: ReadonlySet<string> = new Set(['add', 'has', 'delete', 'clear', 'keys', 'values'])
 const weakMapMethods: ReadonlySet<string> = new Set(['get', 'set', 'has', 'delete'])
 const weakSetMethods: ReadonlySet<string> = new Set(['add', 'has', 'delete'])
 
@@ -918,6 +920,18 @@ const keyedCollectionCallText = (
         `host-invocation:${family}.prototype.${member}`,
         `"${family}.prototype.${member}" publishes "${result ? representationKey(result.representation) : 'nothing'}"; ` +
           'a keyed collection cursor requires the iterator carrier that names its element'
+      )
+    }
+    // The cursor yields the collection's own storage, so the published element
+    // must BE that carrier: a `Set<any>` the census typed `Set<Buffer>` still
+    // publishes `SetIterator<any>` here, and no cursor over the typed storage
+    // is an iterator of boxes.
+    const stored = family === 'set' || member === 'keys' ? carrier.key : carrier.value
+    if (stored === null || representationKey(stored) !== representationKey(result.representation.element)) {
+      throw createCppEmitBlockedError(
+        `host-invocation:${family}.prototype.${member}`,
+        `"${family}.prototype.${member}" publishes an iterator of "${representationKey(result.representation.element)}", ` +
+          `and the collection stores "${stored === null ? 'nothing' : representationKey(stored)}"`
       )
     }
     const element = cppTypeOf(result.representation.element)
