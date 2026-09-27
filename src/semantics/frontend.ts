@@ -101,6 +101,7 @@ import {
   generatorDeclarationOf,
   asyncGeneratorDeclarationOf,
   mapIteratorDeclarationOf,
+  setIteratorDeclarationOf,
   hostProtocolBindings,
   keyedCollectionDeclarationsOf,
   promiseDeclarationOf,
@@ -485,6 +486,8 @@ export interface FrontendResult {
   readonly asyncGeneratorDeclaration: DeclarationId | null
   /** The standard `MapIterator<T>` returned by `Map.prototype.entries()`. */
   readonly mapIteratorDeclaration: DeclarationId | null
+  /** The standard `SetIterator<T>` returned by `Set.prototype.values()`/`keys()`. */
+  readonly setIteratorDeclaration: DeclarationId | null
   /**
    * The declaration identity of each standard `Map`/`Set`/`WeakMap`/`WeakSet`
    * interface this compilation's `lib` installs, valued by which family it is.
@@ -1416,6 +1419,7 @@ const attemptFrontend = (
   const generatorDeclarationEarly = generatorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
   const asyncGeneratorDeclarationEarly = asyncGeneratorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
   const mapIteratorDeclarationEarly = mapIteratorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
+  const setIteratorDeclarationEarly = setIteratorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
   const standardBuffers = standardBufferDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   const wellKnownSymbols = wellKnownSymbolDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   // A computed write key narrowed to a proven finite set -- three's
@@ -1581,6 +1585,7 @@ const attemptFrontend = (
     generatorDeclaration: generatorDeclarationEarly,
     asyncGeneratorDeclaration: asyncGeneratorDeclarationEarly,
     mapIteratorDeclaration: mapIteratorDeclarationEarly,
+    setIteratorDeclaration: setIteratorDeclarationEarly,
     // Filled below, before normalization reads it, the same way `hosts` is.
     typedArrayDeclarations: typedArrayDeclarationSet,
     ...(returns ? { returns } : {})
@@ -1798,6 +1803,7 @@ const attemptFrontend = (
   const generatorDeclaration = generatorDeclarationEarly
   const asyncGeneratorDeclaration = asyncGeneratorDeclarationEarly
   const mapIteratorDeclaration = mapIteratorDeclarationEarly
+  const setIteratorDeclaration = setIteratorDeclarationEarly
   // Resolved the same way and for the same reason as `keyedCollections` above.
   const regexpDeclarations = regexpDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   timing.mark('structural-and-host-censuses')
@@ -1927,6 +1933,7 @@ const attemptFrontend = (
     generatorDeclaration,
     asyncGeneratorDeclaration,
     mapIteratorDeclaration,
+    setIteratorDeclaration,
     keyedCollections,
     regexpDeclarations,
     standardBuffers,

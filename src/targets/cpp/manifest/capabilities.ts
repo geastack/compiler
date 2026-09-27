@@ -342,7 +342,7 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // `keyedCollectionMemberText` (emit-carrier-members.ts) and
     // `keyedCollectionPrototypeMethods` (emit-prototype-invoke.ts), which is
     // the one authority for which members exist per family. Everything else on
-    // these four interfaces -- `forEach`, `keys`/`values`/`entries`, the
+    // these four interfaces -- `forEach`, Set `entries`, the
     // ES2025 set-algebra family, `getOrInsert` -- is still refused by name at
     // the access, and `size`/`clear` are refused on the two WEAK families
     // specifically, because ECMA-262 gives them neither.
