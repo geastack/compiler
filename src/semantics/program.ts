@@ -41,6 +41,8 @@ export interface ProgramInput {
   readonly uncheckedJavaScript?: ReadonlySet<string>
   /** Package-scoped JSDoc type names, bound by the checker -- see `scoped-type-realizations.ts`. */
   readonly scopedTypeRealizations?: readonly ScopedTypeRealization[]
+  /** Ambient globals an installed host states it does not provide (`PluginCapabilities.absentGlobals`, unioned). */
+  readonly absentGlobals?: ReadonlySet<string>
   readonly rootFileNames: readonly string[]
   readonly options: ts.CompilerOptions
   /**

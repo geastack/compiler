@@ -352,3 +352,15 @@ export const censusAbsentGlobals = (
     declarations
   }
 }
+
+/**
+ * Whether a type names an ambient TYPE a host states absent -- the test
+ * `substituteAbsentType` answers `never` for, without a census: the JSDoc
+ * contradiction passes run on the first program, before any census exists
+ * (`contradicted-jsdoc-parameters.ts`).
+ */
+export const hostAbsentTypeTest = (program: ts.Program, absent: ReadonlySet<string>): ((type: ts.Type) => boolean) => {
+  if (absent.size === 0) return () => false
+  const platform = platformDeclarationTest(program)
+  return (type) => isAbsentAmbientType(type.getSymbol() ?? type.aliasSymbol, absent, platform)
+}
