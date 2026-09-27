@@ -25,6 +25,7 @@ import {
 } from './bivariant-slot-parameter.js'
 import { emptyDeclaredMemberCensus, type DeclaredMemberCensus } from './structural-declarations.js'
 import { createLocalUnionResolver } from './structural-local-union.js'
+import { absenceKindsReachingRead, ALL_KINDS, checkerLeftReadOpen, NULL_KIND, PRESENT_KIND, UNDEFINED_KIND } from './stored-local-read.js'
 import { createMutableMethodResolver } from './structural-mutable-method.js'
 import { structuralArrayReadAt } from './structural-array-read.js'
 import { enclosingArgumentsFunction, implicitArgumentsSlotOf, isArgumentsObjectIdentifier } from './implicit-arguments.js'
