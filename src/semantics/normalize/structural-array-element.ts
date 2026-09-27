@@ -285,7 +285,7 @@ export const inferredArrayElementAt = (
   layoutTypeAt: (node: ts.Node) => ts.Type,
   node: ts.Node
 ): ts.Type | null => {
-  if (ts.isArrayLiteralExpression(node)) return collections.arrayElementAt(node)
+  if (ts.isArrayLiteralExpression(node) || ts.isNewExpression(node)) return collections.arrayElementAt(node)
   // THE CELL'S OWN DECLARATION -- neither the literal that filled it nor a
   // read of it, and the node a cell's stored carrier is actually published
   // from. `const uvBuffer = []` types as `never[]` at the

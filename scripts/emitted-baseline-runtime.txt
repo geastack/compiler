@@ -477,6 +477,7 @@ never-constructed-class-deletes-symbol-expando.ts.cpp a880fdd0d514
 never-narrowed-read-takes-cell-carrier.runtime.js.cpp 3e68273dc86c
 never-return-position.ts.cpp c5d5d899012f
 new-array-any-into-typed-slot.ts.cpp 55be689ac257
+new-array-n-takes-index-writes.runtime.js.cpp 622c8024bd29
 new-on-plain-function.runtime.js.cpp afc0cba3e136
 node-global-is-globalthis.ts.cpp 2794347b2450
 null-default-cell-renamed-through-expando-setter.runtime.js.cpp 5f621964b61c

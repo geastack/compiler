@@ -182,9 +182,9 @@ export interface CollectionBindingCensus {
    * census bound (see the "Array element census" section below), or `null`
    * when it did not.
    */
-  readonly arrayElementAt: (node: ts.ArrayLiteralExpression) => ts.Type | null
+  readonly arrayElementAt: (node: ts.ArrayLiteralExpression | ts.NewExpression) => ts.Type | null
   /** Why this particular empty array literal was not bound, or `null` if it was, or if it was never a candidate (including: `settleEvolving`'s territory, not this module's). */
-  readonly arrayRefusalOf: (node: ts.ArrayLiteralExpression) => string | null
+  readonly arrayRefusalOf: (node: ts.ArrayLiteralExpression | ts.NewExpression) => string | null
   /**
    * The element type for a READ of a cell this census bound an array for --
    * `state.probe` and `this.children`, not just the `[]` that filled them.
@@ -992,7 +992,7 @@ export const censusCollectionBindings = (
   // `any` of its initializer (three's `RenderObject` `getKeys`, `let protoKeys
   // = _protoKeysCache.get( ... )` off an untyped `WeakMap`). That contextual
   // `any` states nothing about the array, exactly as no contextual type does.
-  const assignedIntoUnstatedVariable = (node: ts.ArrayLiteralExpression): boolean => {
+  const assignedIntoUnstatedVariable = (node: ts.Expression): boolean => {
     const parent = node.parent
     if (!ts.isBinaryExpression(parent) || parent.operatorToken.kind !== ts.SyntaxKind.EqualsToken || parent.right !== node) return false
     if (!ts.isIdentifier(parent.left)) return false
@@ -1032,7 +1032,7 @@ export const censusCollectionBindings = (
    * complete write set is known, every alias must use that storage element,
    * including an earlier checker read narrowed before publication elsewhere.
    */
-  const arrayOwnerDeclOf = (node: ts.ArrayLiteralExpression): ts.Node | null => {
+  const arrayOwnerDeclOf = (node: ts.Expression): ts.Node | null => {
     const parent = node.parent
     if (ts.isVariableDeclaration(parent) && parent.initializer === node && ts.isIdentifier(parent.name)) {
       return declNodeOf(checker.getSymbolAtLocation(parent.name))
@@ -1046,10 +1046,30 @@ export const censusCollectionBindings = (
     return null
   }
 
+  // `new Array( n )` is n holes (ECMA-262 23.1.1.1): an allocation that states
+  // no element, as an empty literal is. Admitted on the literal's terms, so
+  // its index writes type it (three's Material.copy: `let dstPlanes = null`,
+  // `dstPlanes = new Array( n )`, `dstPlanes[ i ] = srcPlanes[ i ].clone()`).
+  // A position that states the array keeps `contextualArrayConstructTypeAt`.
+  const arraySymbol = checker.resolveName('Array', anchor, ts.SymbolFlags.Value, false)
+  const isUnstatedArrayConstruct = (node: ts.Node): node is ts.NewExpression => {
+    if (!ts.isNewExpression(node) || node.typeArguments !== undefined || node.arguments?.length !== 1) return false
+    if (!ts.isIdentifier(node.expression) || node.expression.text !== 'Array') return false
+    if (!arraySymbol || checker.getSymbolAtLocation(node.expression) !== arraySymbol) return false
+    const [length] = node.arguments
+    if (!length || ts.isSpreadElement(length) || (checker.getTypeAtLocation(length).flags & ts.TypeFlags.NumberLike) === 0) return false
+    const type = checker.getTypeAtLocation(node)
+    if (!checker.isArrayType(type)) return false
+    const [element] = checker.getTypeArguments(type as ts.TypeReference)
+    if (element === undefined || (element.flags & ts.TypeFlags.Any) === 0) return false
+    const contextual = checker.getContextualType(node)
+    return contextual === undefined || (statesNoElement(contextual) && assignedIntoUnstatedVariable(node))
+  }
+
   // Pass 3: every candidate empty array literal, grouped by owning declaration node.
-  const arraysByOwner = new Map<ts.Node, ts.ArrayLiteralExpression[]>()
-  const arrayNodeOwner = new Map<ts.ArrayLiteralExpression, ts.Node>()
-  const arrayNodeRefusal = new Map<ts.ArrayLiteralExpression, string>()
+  const arraysByOwner = new Map<ts.Node, (ts.ArrayLiteralExpression | ts.NewExpression)[]>()
+  const arrayNodeOwner = new Map<ts.ArrayLiteralExpression | ts.NewExpression, ts.Node>()
+  const arrayNodeRefusal = new Map<ts.ArrayLiteralExpression | ts.NewExpression, string>()
 
   const collectArrayLiterals = (node: ts.Node): void => {
     // See the identical guard in `collectConstructions` above: this walk and
@@ -1065,7 +1085,7 @@ export const censusCollectionBindings = (
     // each push into a local array this way -- four false `no-writes`
     // refusals from one missing exclusion, not four different defects.
     if (reachable.memberIsPruned(node)) return
-    if (isUnstatedEmptyArrayLiteral(node)) {
+    if (isUnstatedEmptyArrayLiteral(node) || isUnstatedArrayConstruct(node)) {
       const owner = arrayOwnerDeclOf(node)
       if (owner) {
         arrayNodeOwner.set(node, owner)
@@ -1115,7 +1135,7 @@ export const censusCollectionBindings = (
   const arrayOwnerOfValue = (value: ts.Expression): ts.Node | null => {
     let expression: ts.Expression = value
     while (ts.isParenthesizedExpression(expression)) expression = expression.expression
-    if (ts.isArrayLiteralExpression(expression)) return arrayNodeOwner.get(expression) ?? null
+    if (ts.isArrayLiteralExpression(expression) || ts.isNewExpression(expression)) return arrayNodeOwner.get(expression) ?? null
     return ownerDeclOfExpr(expression)
   }
   const boundariesOf = new Map<ts.Node, Set<ts.Node>>()
@@ -1326,7 +1346,11 @@ export const censusCollectionBindings = (
   for (const [owner, aliases] of arrayComponents) {
     const evidence: ts.Expression[] = []
     const boundaries = new Set([...aliases].flatMap((alias) => [...(boundariesOf.get(alias) ?? [])]))
-    const nullLiterals = [...aliases].flatMap((alias) => (arraysByOwner.get(alias) ?? []).filter((literal) => literal.elements.length > 0))
+    const nullLiterals = [...aliases].flatMap((alias) =>
+      (arraysByOwner.get(alias) ?? []).filter(
+        (literal): literal is ts.ArrayLiteralExpression => ts.isArrayLiteralExpression(literal) && literal.elements.length > 0
+      )
+    )
     for (const literal of nullLiterals) evidence.push(...literal.elements)
     for (const decl of [...aliases, ...boundaries]) {
       for (const write of flow.writesToDeclaration(decl)) {

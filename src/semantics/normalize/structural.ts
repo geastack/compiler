@@ -4227,6 +4227,7 @@ const buildMapper = (
       name: 'inferred-array-element',
       forms: [
         ts.SyntaxKind.ArrayLiteralExpression,
+        ts.SyntaxKind.NewExpression,
         ts.SyntaxKind.VariableDeclaration,
         ts.SyntaxKind.PropertyDeclaration,
         ts.SyntaxKind.Identifier,
