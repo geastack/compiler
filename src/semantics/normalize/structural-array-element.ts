@@ -500,12 +500,15 @@ export const contextualArrayConstructTypeAt = (checker: ts.TypeChecker, node: ts
  * against a cell declared `Map<K, V>`, an unsatisfiable narrowing per site.
  */
 export const contextualCollectionTypeAt = (checker: ts.TypeChecker, node: ts.Node): ts.Type | null => {
-  if (!ts.isNewExpression(node) || node.typeArguments !== undefined || (node.arguments?.length ?? 0) > 0) return null
+  if (!ts.isNewExpression(node) || node.typeArguments !== undefined) return null
+  const entries = (node.arguments?.length ?? 0) === 0 ? null : entryLiteralOf(node)
+  if ((node.arguments?.length ?? 0) > 0 && !entries) return null
   const own = checker.getTypeAtLocation(node)
   const target = genericTargetOf(own)
   if (!target) return null
   const ownArguments = checker.getTypeArguments(own as ts.TypeReference)
-  if (ownArguments.length === 0 || !ownArguments.every((argument) => (argument.flags & ts.TypeFlags.Any) !== 0)) return null
+  if (ownArguments.length === 0) return null
+  if (!entries && !ownArguments.every((argument) => (argument.flags & ts.TypeFlags.Any) !== 0)) return null
   const context = statedContextOf(checker, node)
   if (!context) return null
   const substantive = (context.isUnion() ? context.types : [context]).filter(
@@ -519,6 +522,31 @@ export const contextualCollectionTypeAt = (checker: ts.TypeChecker, node: ts.Nod
   const filledArguments = checker.getTypeArguments(filled as ts.TypeReference)
   if (filledArguments.every((argument) => (argument.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0)) return null
   return filled
+}
+
+/**
+ * The entries literal of `new Map( [[ k, v ], ...] )`, or `null` for any
+ * other argument list.
+ *
+ * A literal of pairs is a fresh write of each entry into the fresh map, the
+ * constructor-argument form of a run of `.set` calls, so the map is the
+ * position's statement exactly as a bare `new Map()` is: three's
+ * `new OverrideContextNode( new Map( [[ targetNode, callback ]] ), flowNode )`
+ * into `@param {Map<Node, Function>}`, where the checker inferred the map
+ * from the entries instead and the two carriers met at the call. Each entry
+ * converts into the stated arguments where the map is built, and one that
+ * cannot is refused there. Any other argument is an iterable this cannot
+ * see into, and keeps the checker's inference.
+ */
+const entryLiteralOf = (node: ts.NewExpression): ts.ArrayLiteralExpression | null => {
+  if (node.arguments?.length !== 1) return null
+  let argument = node.arguments[0] as ts.Expression
+  while (ts.isParenthesizedExpression(argument)) argument = argument.expression
+  if (!ts.isArrayLiteralExpression(argument) || argument.elements.length === 0) return null
+  const pairs = argument.elements.every(
+    (entry) => ts.isArrayLiteralExpression(entry) && entry.elements.length === 2 && !entry.elements.some(ts.isSpreadElement)
+  )
+  return pairs ? argument : null
 }
 
 /**
