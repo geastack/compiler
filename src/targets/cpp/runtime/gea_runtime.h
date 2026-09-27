@@ -23354,6 +23354,24 @@ inline double parseInt(const std::string &value, double radix = 0.0) {
 }
 
 /**
+ * `parseInt` of a read that may be absent, such as an element of a regex match
+ * (`propsMatches[i][0]` in three's GLSLNodeFunction). Step 1 is ToString, and an
+ * absent element is `undefined`, whose string is "undefined".
+ *
+ * ⚠ `gea::Optional` keeps no record of WHICH absence it holds. An absent
+ * `null` should parse as "null", and that string has digits only from radix 24
+ * up, where the two answers differ. Up to radix 23, and with the radix left
+ * out, both strings give NaN, so the answer is exact there.
+ *
+ * A template matched only by the exact carrier, because a plain overload made
+ * `parseInt("12")` ambiguous: a string literal converts to both parameter types.
+ */
+template <typename Absent> requires (std::is_same_v<Absent, gea::Optional<std::string>>)
+inline double parseInt(const Absent &value, double radix = 0.0) {
+  return parseInt(value.has_value() ? *value : std::string("undefined"), radix);
+}
+
+/**
  * ECMA-262 §19.2.4 `parseFloat` (`Number.parseFloat` is 21.1.2.12, the same
  * function object).
  *

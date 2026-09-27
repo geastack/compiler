@@ -480,6 +480,7 @@ null-stored-tagged-field.runtime.js.cpp 0caa8ee82032
 nullish-union.ts.cpp 8898117b27df
 number-isnan-optional-double.runtime.js.cpp a8e896955c0a
 number-parseint-one-argument.runtime.js.cpp 5ecfafad2b4a
+number-parseint-optional-string.runtime.js.cpp 8635f230ae9c
 numeric-dictionary-own-keys.ts.cpp 4122db3e3b16
 numeric-dictionary-property-keys.js.cpp 453c57e574aa
 numeric-index-absence-effects.runtime.js.cpp 5f35fd9a8d7a
