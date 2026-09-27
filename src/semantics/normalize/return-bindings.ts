@@ -1371,6 +1371,18 @@ export const censusReturnBindings = (
     refusalOf.delete(declaration)
     returnRequirements.delete(declaration)
   }
+  // ...and the callback of a `.map` whose fresh result took its
+  // destination's element returns into that element: the array the call
+  // allocates holds what the callback returns, so the two are one slot, and
+  // an untyped result converts into it at the `return`.
+  for (const candidate of candidates) {
+    const element = collections.mapCallbackElementAt?.(candidate)
+    if (!element) continue
+    bound.set(candidate, element)
+    unionArms.delete(candidate)
+    refusalOf.delete(candidate)
+    returnRequirements.delete(candidate)
+  }
   deferredIntrinsicProtocolLedgerOf(flow)?.replace('return-bindings', [...returnRequirements.values()].flat())
 
   const refusals: CensusRefusal[] = []
@@ -1403,6 +1415,12 @@ export const censusReturnBindings = (
       return null
     },
     statedTypeAt: (node) => {
+      // A `.map` call whose fresh result took its destination's statement
+      // (`collection-bindings.ts`, "A map result is a fresh array") is that
+      // array. Answered on this channel because it is read first, over the
+      // checker's `any[]`, at the call and at the const it initializes.
+      const mapped = ts.isCallExpression(node) ? collections.mapResultTypeAt?.(node) : null
+      if (mapped) return mapped
       if (statedReturns.size === 0) return null
       if (isReturnCandidateKind(node)) return statedReturns.get(node) ?? null
       if (ts.isCallExpression(node) || ts.isNewExpression(node)) {

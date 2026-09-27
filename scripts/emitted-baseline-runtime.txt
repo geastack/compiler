@@ -357,6 +357,7 @@ logical-native-merge.ts.cpp eea411f205b3
 logical-object-union-falsy-absence.ts.cpp e82a3a7b3c45
 loop-invariant-ref-argument.ts.cpp 2ff2c84559a5
 loop-move-single-use.ts.cpp b38b117295b4
+map-result-takes-stated-destination.runtime.js.cpp ea5f1151e9fb
 mapped-constraint-callee-copy.ts.cpp 4cd66f302541
 math-direct-rest.ts.cpp 2b05999ee8b2
 math-numeric-constants.ts.cpp 6a954aa857bb
