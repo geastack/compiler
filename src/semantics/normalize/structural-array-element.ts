@@ -234,13 +234,58 @@ const statesItsOwnType = (checker: ts.TypeChecker, node: ts.Identifier | ts.Prop
   )
 }
 
+/**
+ * `inferredArrayElementAt` for a cell whose layout is ONE array arm beside
+ * `null`/`undefined` -- a JavaScript cell that starts empty and is assigned
+ * `[]` later (three's `RenderObject` `getKeys`: `let protoKeys =
+ * cache.get( key )`, then `protoKeys = []` under `=== undefined`). The census
+ * types it `never[] | undefined`, and the `never` arm laid out as an array
+ * that holds nothing while the literal assigned into it carried the census's
+ * element: two carriers for one array, and no conversion between them. The
+ * arm takes the element the plain form would, and the absent arms stay.
+ */
+export const inferredNullableArrayAt = (
+  checker: ts.TypeChecker,
+  collections: CollectionBindingCensus,
+  layoutTypeAt: (node: ts.Node) => ts.Type,
+  node: ts.Node
+): { readonly arm: ts.Type; readonly element: ts.Type; readonly absent: readonly ts.Type[] } | null => {
+  const cell =
+    ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node) || ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)
+  if (!cell) return null
+  const arms = nullableArrayArmsOf(checker, layoutTypeAt(node))
+  if (!arms) return null
+  const { arm, absent } = arms
+  const element = inferredArrayElementAt(checker, collections, (asked) => (asked === node ? arm : layoutTypeAt(asked)), node)
+  return element ? { arm, element, absent } : null
+}
+
+/**
+ * A type that is ONE array arm beside `null`/`undefined`, split into the arm
+ * and the absent arms; `null` for anything else. Shared by the cell form
+ * above and the member layout (`structural-parts.ts`), so both ask the same
+ * question of the same checker answer.
+ */
+export const nullableArrayArmsOf = (
+  checker: ts.TypeChecker,
+  layout: ts.Type
+): { readonly arm: ts.Type; readonly absent: readonly ts.Type[] } | null => {
+  if (!layout.isUnion()) return null
+  const isAbsent = (member: ts.Type): boolean => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0
+  const absent = layout.types.filter(isAbsent)
+  const arms = layout.types.filter((member) => !isAbsent(member))
+  const [arm] = arms
+  if (absent.length === 0 || arms.length !== 1 || arm === undefined || !checker.isArrayType(arm)) return null
+  return { arm, absent }
+}
+
 export const inferredArrayElementAt = (
   checker: ts.TypeChecker,
   collections: CollectionBindingCensus,
   layoutTypeAt: (node: ts.Node) => ts.Type,
   node: ts.Node
 ): ts.Type | null => {
-  if (ts.isArrayLiteralExpression(node)) return collections.arrayElementAt(node)
+  if (ts.isArrayLiteralExpression(node) || ts.isNewExpression(node)) return collections.arrayElementAt(node)
   // THE CELL'S OWN DECLARATION -- neither the literal that filled it nor a
   // read of it, and the node a cell's stored carrier is actually published
   // from. `const uvBuffer = []` types as `never[]` at the
@@ -782,6 +827,14 @@ const boundValueTypeId = (
   bags: ObjectBagCensus,
   bound: CollectionTypeArguments
 ): StructuralTypeId | null => {
+  if (bound.value && bound.valueArrayElement) {
+    // An open array whose element the array census bound: see
+    // `CollectionTypeArguments.valueArrayElement`. The absent arms stay.
+    const array = table.intern({ kind: 'array', element: typeOf(bound.valueArrayElement), readonly: false, extension: [] })
+    if (!bound.value.isUnion()) return array
+    const absent = bound.value.types.filter((member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0)
+    return table.intern({ kind: 'union', members: [array, ...absent.map(typeOf)] })
+  }
   if (bound.value) return typeOf(bound.value)
   if (bound.valueEvidence.length === 0) return null
   let agreed: StructuralTypeId | null = null

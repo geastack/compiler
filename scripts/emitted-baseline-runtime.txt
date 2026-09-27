@@ -97,6 +97,7 @@ closure-cycle-lifetime.ts.cpp 86aea6acdbda
 closure-factory-export-never-read.ts.cpp 35b275d3d6f5
 closure-written-null-cell-read.runtime.js.cpp 20118f22c8cc
 collection-get-native-union.ts.cpp ea90283c893f
+collection-value-slot-shares-array-element.runtime.js.cpp 8280a2fe4901
 composed-field-descriptor.runtime.js.cpp a11d2a79f4b4
 computed-class-prototype-method.ts.cpp f1375430414d
 computed-constant-key-record-literal.runtime.js.cpp b39db1e5d75e
@@ -142,7 +143,7 @@ dictionary-index-truthiness.ts.cpp 519009b6c81f
 dictionary-named-absence.ts.cpp dc9ba237a175
 direct-interface-method-receiver.ts.cpp 55d743cf5d7d
 downcast-method-read-absent-on-other-arm.ts.cpp 52495ee800d6
-drift.txt 8096d5a0fd7f
+drift.txt eda4257fc5fc
 dynamic-array-absent-element.ts.cpp 6838ef917ebe
 dynamic-array-literal-gather.runtime.js.cpp 4c1e3d9c21cf
 dynamic-array-projection.ts.cpp 25d0cdd3b0d1
@@ -321,6 +322,7 @@ iterate-never-source.ts.cpp 77f7522aef1f
 iterator-object-destructuring.ts.cpp 5595f0dc7234
 js-constructor-with-statics.js.cpp a70df1026a91
 jsdoc-array-listing-positions-holds-each.runtime.js.cpp c8c1903fe22f
+jsdoc-array-tag-contradicted-by-push.runtime.js.cpp 95f6eb6a532e
 jsdoc-asserted-class-method.runtime.js.cpp 274ea169260d
 jsdoc-defaulted-class-constructor.runtime.js.cpp ca5226775273
 jsdoc-field-open-array-element.runtime.js.cpp 97302cc25b25
@@ -475,8 +477,10 @@ never-constructed-class-deletes-symbol-expando.ts.cpp a880fdd0d514
 never-narrowed-read-takes-cell-carrier.runtime.js.cpp 3e68273dc86c
 never-return-position.ts.cpp c5d5d899012f
 new-array-any-into-typed-slot.ts.cpp 55be689ac257
+new-array-n-takes-index-writes.runtime.js.cpp 622c8024bd29
 new-on-plain-function.runtime.js.cpp afc0cba3e136
 node-global-is-globalthis.ts.cpp 2794347b2450
+null-cell-written-dynamic-branch-is-dynamic.runtime.js.cpp 62ebae6a2400
 null-default-cell-renamed-through-expando-setter.runtime.js.cpp 5f621964b61c
 null-default-census-typed-parameter.runtime.js.cpp 99a95750c3a5
 null-default-nested-reference-union.ts.cpp c26fe6988740
@@ -489,6 +493,8 @@ null-defaulted-parameter.runtime.js.cpp 3c2102fca019
 null-only-literal-takes-its-writes.runtime.js.cpp d3b2d11f7caf
 null-stored-tagged-field.runtime.js.cpp 0caa8ee82032
 null-written-number-cell.runtime.js.cpp 123fb3832f9e
+nullable-field-takes-component-element.runtime.js.cpp 6da53eb9c926
+nullable-open-array-census-element.runtime.js.cpp be31231fc44f
 nullish-union.ts.cpp 8898117b27df
 number-isnan-optional-double.runtime.js.cpp a8e896955c0a
 number-parseint-one-argument.runtime.js.cpp 5ecfafad2b4a

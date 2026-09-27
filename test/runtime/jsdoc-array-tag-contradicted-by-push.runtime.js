@@ -1,15 +1,15 @@
 // @ts-nocheck
-//! expect-refusal: to optional(array-object(dynamic(declared-any-never-narrowed),shared-refcount),null)
 // three's `Renderer._compilationPromises` (`renderers/common/Renderer.js`)
 // states `?Array<Promise>`, and `_createObjectPipeline` pushes work items into
 // it: object literals with no `then`, which no promise is. In an unchecked
 // file the push contradicts the tag, so the tag is blanked and the field takes
 // what the program writes, rather than allocating a record as a promise.
 //
-// The program then stops where the same class written without the tag stops:
-// the field's writes type it `any[] | null`, while the `[]` it is assigned
-// takes its element from the records pushed through the field, and no
-// conversion joins the two arrays. Pinned so a fix there shows up here.
+// The field's writes type it `any[] | null`, while the `[]` it is assigned
+// takes its element from the records pushed through the field. The field's
+// array arm now takes that same element (the member half of
+// `inferredNullableArrayAt`), so the literal, the field and the local that
+// reads it back are one array and the program runs.
 class Renderer {
   constructor() {
     /**
@@ -39,3 +39,4 @@ class Renderer {
   }
 }
 console.log(new Renderer().compile(['a', 'b']))
+//! expect: ab 2
