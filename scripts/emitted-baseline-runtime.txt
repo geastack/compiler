@@ -96,7 +96,7 @@ clone-idiom-family-dispatch.runtime.js.cpp ffafe4778937
 closed-literal-absent-key-push.runtime.js.cpp 3c1046c8e89c
 closure-cycle-lifetime.ts.cpp 86aea6acdbda
 closure-factory-export-never-read.ts.cpp 35b275d3d6f5
-closure-written-null-cell-read.runtime.js.cpp 20118f22c8cc
+closure-written-null-cell-read.runtime.js.cpp cc46343643ab
 collection-get-native-union.ts.cpp ea90283c893f
 composed-field-descriptor.runtime.js.cpp a11d2a79f4b4
 computed-class-prototype-method.ts.cpp f1375430414d
@@ -371,6 +371,7 @@ map-result-takes-stated-destination.runtime.js.cpp ea5f1151e9fb
 mapped-constraint-callee-copy.ts.cpp 4cd66f302541
 math-direct-rest.ts.cpp 2b05999ee8b2
 math-numeric-constants.ts.cpp 6a954aa857bb
+member-declared-by-ancestor-is-not-restated.runtime.js.cpp 39ab71458797
 merge-arm-callable-arity-join.ts.cpp 74d9fe4b1a09
 merge-arm-dictionary-into-header-union.ts.cpp d01958dd9bed
 merge-arm-empty-array-into-native-array.ts.cpp 31fbf291be9e
