@@ -24,7 +24,7 @@ import {
   constructedClassChoiceCheckerTypeAt
 } from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
-import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
+import { emptyCollectionBindingCensus, nullSlotReadTypeOf, type CollectionBindingCensus } from './collection-bindings.js'
 import { emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
 import { returnedCellCollectionTypeAt } from './structural-array-element.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
@@ -166,6 +166,16 @@ const isAnyType = (type: ts.Type): boolean => (type.flags & ts.TypeFlags.Any) !=
 
 /** Duplicated from `parameter-bindings.ts` (not exported there): `any`/`void`/`never` say nothing about storage. */
 const isUnusableEvidence = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0
+
+/**
+ * The element a read of an array takes when the checker's own element is
+ * `indexed`: that element, unless it states nothing, or is the bare `null` of
+ * a `[ null ]` literal the collection census opened (see
+ * `CollectionBindingCensus.nullSlotElementFor`); the census's element then.
+ */
+const elementOfRead = (collections: CollectionBindingCensus, indexed: ts.Type | undefined, array: ts.Expression): ts.Type | null =>
+  (indexed ? collections.nullSlotElementFor?.(array) : null) ??
+  (indexed && !isUnusableEvidence(indexed) ? indexed : collections.arrayElementForRead(array))
 
 /** Duplicated from `object-assignment.ts` (not exported there): a property name spelled as an identifier or a literal. */
 const staticPropertyName = (name: ts.PropertyName): string | null =>
@@ -680,7 +690,17 @@ export const censusLocalBindings = (
    * one vacuous write out-votes every real one. The layout resolver already
    * asks both halves of the question; a census asking only one is drift.
    */
+  // An element read of a `[ null ]` literal the collection census opened: the
+  // checker answers its bare `null`, the storage holds the census element, and
+  // the read is the storage's (see `CollectionBindingCensus.nullSlotElementFor`).
+  const nullSlotElementAt = (node: ts.Node): ts.Type | null => {
+    if (!ts.isElementAccessExpression(node)) return null
+    const element = collections.nullSlotElementFor?.(node.expression)
+    return element ? nullSlotReadTypeOf(checker, checker.getTypeAtLocation(node), element) : null
+  }
   const known = (node: ts.Node): ts.Type | null => {
+    const nullSlot = nullSlotElementAt(node)
+    if (nullSlot) return nullSlot
     const exported = moduleRecords.exportExpressionAt(node) ?? moduleRecords.requiredExportExpressionAt(node)
     const type = exported
       ? checker.getTypeAtLocation(exported)
@@ -976,7 +996,9 @@ export const censusLocalBindings = (
       ts.isPropertyAccessExpression(initializer) &&
       assertedReceiverArmMayLackMember(checker, initializer, (receiver) => checker.getTypeAtLocation(receiver))
     if (!arrayRead && !dictionaryRead && !assertedRead) return
-    const value = checker.getTypeAtLocation(initializer)
+    // An element read of a `[ null ]` literal the collection census opened is
+    // the census element, not the checker's bare `null` (`nullSlotElementAt`).
+    const value = nullSlotElementAt(initializer) ?? checker.getTypeAtLocation(initializer)
     if (isUnusableEvidence(value) || (value.flags & ts.TypeFlags.Unknown) !== 0) return
     const symbol = checker.getSymbolAtLocation(declaration.name)
     if (!symbol) return
@@ -1382,9 +1404,7 @@ export const censusLocalBindings = (
     const iterable = knownOrResolve(expression)
     if (!iterable) return null
     const nonNull = checker.getNonNullableType(iterable)
-    const indexed = checker.getIndexTypeOfType(nonNull, ts.IndexKind.Number)
-    if (indexed && !isUnusableEvidence(indexed)) return indexed
-    return collections.arrayElementForRead(expression)
+    return elementOfRead(collections, checker.getIndexTypeOfType(nonNull, ts.IndexKind.Number), expression)
   }
 
   /**
@@ -1436,9 +1456,7 @@ export const censusLocalBindings = (
       const iterable = knownOrResolve(parent.expression)
       if (!iterable) return null
       const nonNull = checker.getNonNullableType(iterable)
-      const indexed = checker.getIndexTypeOfType(nonNull, ts.IndexKind.Number)
-      if (indexed && !isUnusableEvidence(indexed)) return indexed
-      return collections.arrayElementForRead(parent.expression)
+      return elementOfRead(collections, checker.getIndexTypeOfType(nonNull, ts.IndexKind.Number), parent.expression)
     }
     if (ts.isForInStatement(parent) && parent.initializer === naming) return checker.getStringType()
     return null
@@ -1503,8 +1521,7 @@ export const censusLocalBindings = (
       const iterable = knownOrResolve(parent.expression)
       if (!iterable) return null
       const nonNull = checker.getNonNullableType(iterable)
-      const indexed = checker.getIndexTypeOfType(nonNull, ts.IndexKind.Number)
-      elementType = indexed && !isUnusableEvidence(indexed) ? indexed : collections.arrayElementForRead(parent.expression)
+      elementType = elementOfRead(collections, checker.getIndexTypeOfType(nonNull, ts.IndexKind.Number), parent.expression)
     } else if (ts.isForInStatement(parent) && parent.initializer === located.root) {
       elementType = checker.getStringType()
     } else {
@@ -1998,6 +2015,7 @@ export const censusLocalBindings = (
   // channel as the call's, since it is the same statement read one hop on.
   // A literal of untyped values the collection census gave its destination's
   // statement (`literalArrayTypeAt`) is held by its const the same way.
+  // So is an element read of a `[ null ]` literal the census opened (`nullSlotElementAt`).
   // A shorthand `{ entries }` names the property at its identifier; the value
   // it reads is the const's (three's `createBindGroupLayout( { entries } )`).
   const readDeclarationOf = (node: ts.Identifier): ts.VariableDeclaration | null => {
@@ -2015,17 +2033,43 @@ export const censusLocalBindings = (
     const narrowed =
       ts.isCallExpression(initializer) || ts.isNewExpression(initializer)
         ? parameters.statedTypeAt(initializer)
-        : collections.literalArrayTypeAt?.(initializer)
-    if (!narrowed) return null
-    if (node === declaration) return narrowed
+        : (collections.literalArrayTypeAt?.(initializer) ?? nullSlotElementAt(initializer))
+    return narrowed ? heldAt(node, declaration, narrowed) : null
+  }
+  /**
+   * What a cell holding `held` answers at `node`, its declaration or a read of it:
+   * `held` itself where the checker reads the cell as declared, and `held`
+   * past the same absence where the checker narrowed the read past some of the
+   * cell's (`x !== null ? x : ...`, which under `noUncheckedIndexedAccess` can
+   * leave the `undefined`); nothing at any other read.
+   */
+  const heldAt = (node: ts.Node, declaration: ts.VariableDeclaration, held: ts.Type): ts.Type | null => {
+    if (node === declaration) return held
     const declared = checker.getTypeAtLocation(declaration)
     const read = checker.getTypeAtLocation(node)
-    if (read === declared) return narrowed
-    // A read the checker narrowed past the cell's absence (`x !== null ? x : ...`)
-    // holds the statement past the same absence.
-    if (read !== checker.getNonNullableType(declared)) return null
-    const present = checker.getNonNullableType(narrowed)
-    return present === narrowed ? null : present
+    if (read === declared) return held
+    const absence = ts.TypeFlags.Null | ts.TypeFlags.Undefined
+    const membersOf = (type: ts.Type): readonly ts.Type[] =>
+      (type.flags & ts.TypeFlags.Never) !== 0 ? [] : type.isUnion() ? type.types : [type]
+    const declaredMembers = membersOf(declared)
+    const readMembers = membersOf(read)
+    if (!readMembers.every((member) => declaredMembers.includes(member))) return null
+    const removed = declaredMembers.filter((member) => !readMembers.includes(member))
+    if (removed.length === 0 || removed.some((member) => (member.flags & absence) === 0)) return null
+    const removedFlags = removed.reduce((flags, member) => flags | (member.flags & absence), 0)
+    const kept = membersOf(held).reduce((flags, member) => flags | (member.flags & absence), 0) & ~removedFlags
+    const present = checker.getNonNullableType(held)
+    const narrowed = kept === 0 ? present : checker.getNullableType(present, kept)
+    return narrowed === held ? null : narrowed
+  }
+  // A `for...of` binding over a `[ null ]` literal the collection census
+  // opened holds the census element, as an element read of it does.
+  const nullSlotBindingAt = (node: ts.Node): ts.Type | null => {
+    const declaration = ts.isVariableDeclaration(node) ? node : ts.isIdentifier(node) ? declarationOf(node) : null
+    if (!declaration || declaration.type || !ts.isIdentifier(declaration.name)) return null
+    const iterable = forOfIterableOf(declaration)
+    const element = iterable ? collections.nullSlotElementFor?.(iterable) : null
+    return element ? heldAt(node, declaration, element) : null
   }
 
   // `root` is the same stable, hand-written reason string this census always
@@ -2058,7 +2102,8 @@ export const censusLocalBindings = (
       if (ts.isBindingElement(node)) return boundElements.get(node) ?? null
       return resolveExpr(node)
     },
-    statedTypeAt: (node) => statedCallInitializerTypeAt(node) ?? collections.literalArrayTypeAt?.(node) ?? null,
+    statedTypeAt: (node) =>
+      statedCallInitializerTypeAt(node) ?? collections.literalArrayTypeAt?.(node) ?? nullSlotElementAt(node) ?? nullSlotBindingAt(node),
     preferredTypeAt: (node) => {
       const observedAbsence = observedIndexedAbsence.get(node)
       if (observedAbsence) return observedAbsence
