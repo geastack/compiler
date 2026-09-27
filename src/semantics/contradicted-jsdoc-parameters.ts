@@ -41,10 +41,12 @@ import { programTypeNames } from './normalize/jsdoc-type-names.js'
  * states and whose class does not extend a class the tag names -- the same
  * test `contradicted-jsdoc-types.ts` applies to a constructed store, with the
  * same carve-out for an unchecked subclass whose override the checker would
- * reject. Unlike a field, every typed argument is evidence and not only a
- * construction: a caller is the one place a parameter's value comes from, so
- * a value the tag excludes is a value the parameter holds, whichever statement
- * typed it on the way.
+ * reject. Nor does an argument whose class is an ANCESTOR of the one the tag
+ * names: it is wider than the tag, not outside it, and the class-ref
+ * conversion downcasts it. Unlike a field, every typed argument is evidence
+ * and not only a construction: a caller is the one place a parameter's value
+ * comes from, so a value the tag excludes is a value the parameter holds,
+ * whichever statement typed it on the way.
  *
  * The whole tag is blanked, name and description too, so the parameter is
  * what it would be had the tag never been written: the call-site census's
@@ -232,14 +234,24 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
   }
   const excludes = (passed: ts.Type, stated: ts.Type): boolean => {
     if (derivesFromStatedClass(checker, passed, stated)) return false
+    // An instance of an ANCESTOR of the class the tag names is a value the
+    // caller may have tested into that class first, as a union arm above: it is
+    // wider than the tag, not outside it, and the class-ref conversion
+    // downcasts it (`conversions.ts`'s `downcastsToDerived`). three's
+    // `WGSLNodeBuilder` constructs `new NodeSampler( name, uniformNode.node )`,
+    // a `UniformNode` stated field, under `@param {TextureNode} textureNode`,
+    // only for texture uniforms. Blanked, the parameter was a `UniformNode`
+    // and `textureNode.value` read `InputNode.value` instead of the texture.
+    const statedArms = stated.isUnion() ? stated.types : [stated]
+    if (statedArms.some((arm) => isClassInstance(arm) && derivesFromStatedClass(checker, arm, passed))) return false
     // A class instance is carried by its class, not by its shape: a `NodeVar`
     // with the one member a `Node` tag's body reads is assignable to it, and
     // still has no conversion into a `Node` handle.
-    if (isClassInstance(passed) && (stated.isUnion() ? stated.types : [stated]).every(isClassInstance)) return true
+    if (isClassInstance(passed) && statedArms.every(isClassInstance)) return true
     if (checker.isTypeAssignableTo(passed, stated)) return false
     // A tag spelling literals (`{('vertex'|'fragment')}`) of the domain the
     // argument has states a precision, not a different storage.
-    const domains = (stated.isUnion() ? stated.types : [stated]).map((arm) => checker.getBaseTypeOfLiteralType(arm))
+    const domains = statedArms.map((arm) => checker.getBaseTypeOfLiteralType(arm))
     return !domains.some((domain) => checker.isTypeAssignableTo(checker.getBaseTypeOfLiteralType(passed), domain))
   }
 
