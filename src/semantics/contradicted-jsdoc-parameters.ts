@@ -1,6 +1,12 @@
-import { resolve } from 'node:path'
 import ts from 'typescript'
-import { derivesFromStatedClass, isClassInstance, isUncheckedJavaScript, namesDeclaredOnlyType } from './contradicted-jsdoc-types.js'
+import {
+  blankedTexts,
+  censusExcludes,
+  isUncheckedJavaScript,
+  statementExcludes,
+  type BlankSpan,
+  type CensusArms
+} from './contradicted-jsdoc-types.js'
 import { programTypeNames } from './normalize/jsdoc-type-names.js'
 
 /**
@@ -43,7 +49,11 @@ import { programTypeNames } from './normalize/jsdoc-type-names.js'
  * same carve-out for an unchecked subclass whose override the checker would
  * reject. Nor does an argument whose class is an ANCESTOR of the one the tag
  * names: it is wider than the tag, not outside it, and the class-ref
- * conversion downcasts it. Unlike a field, every typed argument is evidence
+ * conversion downcasts it. A collection argument that is not a fresh literal
+ * or construction is carried by its element, so one whose element differs
+ * from the tag's is outside it although the checker calls it assignable
+ * (`statementExcludes`, the one test both passes share). Unlike a field,
+ * every typed argument is evidence
  * and not only a construction: a caller is the one place a parameter's value
  * comes from, so a value the tag excludes is a value the parameter holds,
  * whichever statement typed it on the way.
@@ -72,12 +82,25 @@ import { programTypeNames } from './normalize/jsdoc-type-names.js'
  * the default's, and untagged the default would type the body while the
  * census typed the slot (`Vector3.toArray( array = [], offset = 0 )`,
  * `FunctionCallNode( functionNode = null, parameters = {} )`).
+ *
+ * ## Once the binding census has settled
+ *
+ * An argument the checker types `any` says nothing here, before the census.
+ * Run again with the settled census (`census`, `frontend.ts`), such an
+ * argument is what the census says it holds, judged by the same test: three's
+ * `BufferAttributeNode` passes `this.value` -- `InputNode`'s `@type {any}`
+ * field, which the census carries as a `number | BufferAttribute |
+ * Float32Array` -- to `@param {InterleavedBuffer}` parameters.
  */
-export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: ReadonlyMap<string, string>): Map<string, string> => {
-  const blanked = new Map<string, string>()
+export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: ReadonlyMap<string, string>): Map<string, string> =>
+  blankedTexts(prepared, contradictedJsDocParameterSpans(program))
+
+/** The spans of the `@param` tags (and the field tags that go with them) the program's calls contradict -- see `contradictedJsDocParameterBlanks`. */
+export const contradictedJsDocParameterSpans = (program: ts.Program, census?: CensusArms): Map<ts.SourceFile, BlankSpan[]> => {
+  const spans = new Map<ts.SourceFile, BlankSpan[]>()
   const files = program.getSourceFiles().filter((file) => !file.isDeclarationFile)
   const unchecked = files.filter(isUncheckedJavaScript)
-  if (unchecked.length === 0) return blanked
+  if (unchecked.length === 0) return spans
   const checker = program.getTypeChecker()
   const contradicted = new Set<ts.JSDocParameterTag>()
   const parameterOfTag = new Map<ts.JSDocParameterTag, ts.ParameterDeclaration>()
@@ -217,8 +240,11 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
     if (!tag.typeExpression) return false
     const stated = checker.getNonNullableType(typeOfTypeNode(tag.typeExpression.type))
     if ((stated.flags & saysNothing) !== 0) return false
-    if (namesDeclaredOnlyType(checker, stated)) return false
     const site = typeOfExpression(argument)
+    // A collection the call builds takes the parameter's element (I1), so
+    // only one built elsewhere is carried by an element of its own.
+    const invariant = !isFresh(argument)
+    if (census && readsAsAny(site)) return censusExcludes(checker, census, argument, stated, invariant)
     const passed = checker.getNonNullableType(
       (site.flags & ts.TypeFlags.TypeParameter) !== 0 ? (checker.getBaseConstraintOfType(site) ?? site) : site
     )
@@ -230,29 +256,11 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
     // `Object3D.lookAt( x, y, z )` passes its `Vector3 | number` on to
     // `Vector3.set( x, y, z )` only past `x.isVector3`. Every arm has to be
     // one the tag excludes.
-    return arms.every((arm) => excludes(arm, stated))
-  }
-  const excludes = (passed: ts.Type, stated: ts.Type): boolean => {
-    if (derivesFromStatedClass(checker, passed, stated)) return false
-    // An instance of an ANCESTOR of the class the tag names is a value the
-    // caller may have tested into that class first, as a union arm above: it is
-    // wider than the tag, not outside it, and the class-ref conversion
-    // downcasts it (`conversions.ts`'s `downcastsToDerived`). three's
+    // An ancestor of the class the tag names is such a value too: three's
     // `WGSLNodeBuilder` constructs `new NodeSampler( name, uniformNode.node )`,
-    // a `UniformNode` stated field, under `@param {TextureNode} textureNode`,
-    // only for texture uniforms. Blanked, the parameter was a `UniformNode`
-    // and `textureNode.value` read `InputNode.value` instead of the texture.
-    const statedArms = stated.isUnion() ? stated.types : [stated]
-    if (statedArms.some((arm) => isClassInstance(arm) && derivesFromStatedClass(checker, arm, passed))) return false
-    // A class instance is carried by its class, not by its shape: a `NodeVar`
-    // with the one member a `Node` tag's body reads is assignable to it, and
-    // still has no conversion into a `Node` handle.
-    if (isClassInstance(passed) && statedArms.every(isClassInstance)) return true
-    if (checker.isTypeAssignableTo(passed, stated)) return false
-    // A tag spelling literals (`{('vertex'|'fragment')}`) of the domain the
-    // argument has states a precision, not a different storage.
-    const domains = statedArms.map((arm) => checker.getBaseTypeOfLiteralType(arm))
-    return !domains.some((domain) => checker.isTypeAssignableTo(checker.getBaseTypeOfLiteralType(passed), domain))
+    // a `UniformNode` field, under `@param {TextureNode} textureNode`, only
+    // for texture uniforms (`statementExcludes`).
+    return arms.every((arm) => statementExcludes(checker, arm, stated, invariant))
   }
 
   // A member tag -- `@param {T} [parameters.name]` -- states one member of an
@@ -360,7 +368,9 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
         const source = where.getSourceFile()
         return `${source.fileName}:${source.getLineAndCharacterOfPosition(where.getStart(source)).line + 1}`
       }
-      process.stderr.write(`[JSDOC-CONTRADICTED-PARAM] ${at(tag)} ${parameterOfTag.get(tag)?.name.getText()} by ${at(first)}\n`)
+      process.stderr.write(
+        `[JSDOC-CONTRADICTED-PARAM]${census ? ' (census)' : ''} ${at(tag)} ${parameterOfTag.get(tag)?.name.getText()} by ${at(first)}\n`
+      )
     }
   }
 
@@ -390,7 +400,6 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
     }
   }
 
-  const spans = new Map<ts.SourceFile, { readonly at: number; readonly end: number }[]>()
   for (const tag of blankedTags) {
     const file = tag.getSourceFile()
     const fileSpans = spans.get(file) ?? []
@@ -401,14 +410,14 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
     fileSpans.push({ at: tag.getStart(file), end: close < 0 ? tag.end : tag.getStart(file) + close })
     spans.set(file, fileSpans)
   }
-  for (const [file, fileSpans] of spans) {
-    const fileName = resolve(file.fileName)
-    let text = prepared.get(fileName) ?? file.text
-    for (const span of [...fileSpans].sort((left, right) => right.at - left.at))
-      text = text.slice(0, span.at) + text.slice(span.at, span.end).replace(/[^\n\r]/g, ' ') + text.slice(span.end)
-    blanked.set(fileName, text)
-  }
-  return blanked
+  return spans
+}
+
+/** An array literal or a construction: a value the call itself builds. */
+const isFresh = (value: ts.Expression): boolean => {
+  let node = value
+  while (ts.isParenthesizedExpression(node)) node = node.expression
+  return ts.isArrayLiteralExpression(node) || ts.isNewExpression(node) || ts.isObjectLiteralExpression(node)
 }
 
 /** `null`, or a value the checker types `undefined`, written as a default. */

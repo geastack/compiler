@@ -77,6 +77,9 @@ import {
 } from './normalize/reachability.js'
 import { createProgram, defaultCompilerOptions } from './program.js'
 import { createFrontendTiming } from './frontend-timing.js'
+import { resolve as resolvePath } from 'node:path'
+import { contradictedJsDocTypeSpans, type BlankSpan, type CensusArms } from './contradicted-jsdoc-types.js'
+import { contradictedJsDocParameterSpans } from './contradicted-jsdoc-parameters.js'
 import type { DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 // The ambient host-protocol census -- what this program's own declarations
 // say a host owns -- lives in its own module purely for the architecture
@@ -725,7 +728,58 @@ const reachableCodeNamesAny = (files: readonly ts.SourceFile[], reachable: Progr
   return files.some((file) => !file.isDeclarationFile && reachable.statementsOf(file).some(visit))
 }
 
+/**
+ * How many times a settled binding census may send the frontend back to
+ * compile without the stated types it contradicts. Each attempt only adds
+ * blanks, and a stated type is blanked at most once, so this bounds the work
+ * and not the answer: past it, the last attempt's census stands.
+ */
+const censusContradictionAttempts = 4
+
+/**
+ * The frontend, run until its settled binding census contradicts no stated
+ * type. A `@param` or field `@type` that the program's own stores contradict
+ * is blanked before the census (`contradicted-jsdoc-types.ts`,
+ * `contradicted-jsdoc-parameters.ts`) wherever the checker can type the store.
+ * Where the checker types it `any`, only the settled census knows what it
+ * holds, and the same test, asked again with the census's answer, may find
+ * the statement false: three's `BufferAttributeNode` passes `InputNode`'s
+ * `@type {any}` value, a `BufferAttribute` or `Float32Array` by the census,
+ * to `@param {InterleavedBuffer}` parameters. Such a statement is blanked by
+ * compiling again without it, so the census that the rest of the frontend
+ * reads is the one authority over that slot, as it is over a slot never
+ * stated. Each attempt is dropped before the next begins.
+ */
 export const runFrontend = (input: FrontendInput): FrontendResult => {
+  let contradictions = new Map<string, readonly BlankSpan[]>()
+  for (let attempt = 1; ; attempt++) {
+    const outcome = attemptFrontend(input, contradictions, attempt < censusContradictionAttempts)
+    if (!('restart' in outcome)) return outcome
+    const merged = new Map(contradictions)
+    for (const [file, spans] of outcome.restart) {
+      const known = merged.get(file) ?? []
+      const fresh = spans.filter((span) => !known.some((other) => other.at === span.at && other.end === span.end))
+      merged.set(file, [...known, ...fresh])
+    }
+    contradictions = merged
+  }
+}
+
+/** What the settled census says an expression holds, as `CensusArms` asks. */
+const censusArmsOf =
+  (census: ParameterBindingCensus): CensusArms =>
+  (expression) => {
+    const arms = census.unionArmsAt(expression)
+    if (arms && arms.length > 0) return arms
+    const type = census.typeAt(expression)
+    return type ? (type.isUnion() ? type.types : [type]) : null
+  }
+
+const attemptFrontend = (
+  input: FrontendInput,
+  censusContradictions: ReadonlyMap<string, readonly BlankSpan[]>,
+  mayRestart: boolean
+): FrontendResult | { readonly restart: ReadonlyMap<string, readonly BlankSpan[]> } => {
   const timing = createFrontendTiming('phases')
   const compiled = createProgram({
     ...(input.packageSources ? { packageSources: input.packageSources } : {}),
@@ -751,7 +805,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     hostMethodBindings: input.hostMethodBindings ?? new Map(),
     ...(input.statedModuleSet ? { statedModuleSet: true } : {}),
     ...(input.closedScriptScope ? { closedScriptScope: true } : {}),
-    sourceTransforms: input.sourceTransforms ?? []
+    sourceTransforms: input.sourceTransforms ?? [],
+    ...(censusContradictions.size > 0 ? { censusContradictions } : {})
   })
   timing.mark('program-and-diagnostics')
   const hostMethodBindings = input.hostMethodBindings ?? new Map()
@@ -1117,6 +1172,22 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   if (process.env['GEA_ROUNDS_DEBUG'])
     process.stderr.write(`[ROUNDS] ${settled.round} rounds, boundCount ${settled.parameters.boundCount}\n`)
   const parameters: ParameterBindingCensus = settled.parameters
+  if (mayRestart) {
+    const arms = censusArmsOf(parameters)
+    const found = new Map<string, BlankSpan[]>()
+    for (const spans of [contradictedJsDocTypeSpans(compiled.program, arms), contradictedJsDocParameterSpans(compiled.program, arms)])
+      for (const [file, fileSpans] of spans) {
+        const fileName = resolvePath(file.fileName)
+        found.set(fileName, [...(found.get(fileName) ?? []), ...fileSpans])
+      }
+    timing.mark('census-contradictions')
+    if (found.size > 0) {
+      if (process.env['GEA_JSDOC_CONTRADICTION_DEBUG'])
+        process.stderr.write(`[JSDOC-CONTRADICTED] census round: ${[...found.values()].flat().length} tags, compiling again\n`)
+      timing.report()
+      return { restart: found }
+    }
+  }
   // Every one of these is the SETTLING round's own instance, which is what the
   // snapshot exists to guarantee: the structural mapper below and the censuses
   // that produced `parameters` are looking at the identical answers.
