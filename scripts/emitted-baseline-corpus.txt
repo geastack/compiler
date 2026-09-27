@@ -24,7 +24,7 @@ class-named-only-by-type.ts.cpp e775e708e7ca
 class-static-assignment.ts.cpp 63f9c66878d6
 class-upcast-merge.ts.cpp 216f533e669f
 collection-literal-arguments.ts.cpp ebdf2a3bf05c
-collection-member-result.ts.cpp 8ef49341d6eb
+collection-member-result.ts.cpp 83b49d77c83d
 computed-literal-union-keys.ts.cpp 39f71fc6bb74
 conditional-overload-return.ts.cpp 491e31b190e5
 control.ts.cpp fb973e8102ce

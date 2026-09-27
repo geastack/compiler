@@ -10,6 +10,7 @@ import type { ValueFlowIndex } from './flow/model.js'
 import { recordStorageFamilies } from './record-storage-families.js'
 import { emptyDeclaredMemberCensus, type DeclaredMemberCensus } from './structural-declarations.js'
 import { createLocalUnionResolver } from './structural-local-union.js'
+import { absenceKindsReachingRead, ALL_KINDS, checkerLeftReadOpen, NULL_KIND, PRESENT_KIND, UNDEFINED_KIND } from './stored-local-read.js'
 import { createMutableMethodResolver } from './structural-mutable-method.js'
 import { structuralArrayReadAt } from './structural-array-read.js'
 import { enclosingArgumentsFunction, implicitArgumentsSlotOf, isArgumentsObjectIdentifier } from './implicit-arguments.js'
@@ -4575,8 +4576,50 @@ const buildMapper = (
       }
     : undefined
 
+  /**
+   * The absence arms a read's layout keeps: only those some value that
+   * reaches the read can hold (`absenceKindsReachingRead`, the one authority
+   * for which values reach a read). Asked only of a read the checker left
+   * open (`any`, or the declared type) whose layout has a `null`/`undefined`
+   * arm; a read the checker narrowed keeps the checker's narrowing.
+   */
+  const pendingReads = new Set<ts.Node>()
+  const absenceKindsOfLayout = (id: StructuralTypeId): number => {
+    const shape = table.get(id).shape
+    if (shape.kind === 'union') return shape.members.reduce((kinds, member) => kinds | absenceKindsOfLayout(member), 0)
+    if (shape.kind !== 'primitive') return shape.kind === 'unresolved' ? ALL_KINDS : PRESENT_KIND
+    if (shape.primitive === 'null') return NULL_KIND
+    if (shape.primitive === 'undefined' || shape.primitive === 'void') return UNDEFINED_KIND
+    return shape.primitive === 'any' || shape.primitive === 'unknown' ? ALL_KINDS : PRESENT_KIND
+  }
+  const absenceArmOf = (member: StructuralTypeId): number => {
+    const shape = table.get(member).shape
+    if (shape.kind !== 'primitive') return 0
+    return shape.primitive === 'null' ? NULL_KIND : shape.primitive === 'undefined' ? UNDEFINED_KIND : 0
+  }
+  const flowNarrowedRead = (node: ts.Node, answer: StructuralTypeId): StructuralTypeId => {
+    if (!ts.isIdentifier(node) && !(ts.isPropertyAccessExpression(node) && node.expression.kind === ts.SyntaxKind.ThisKeyword))
+      return answer
+    const shape = table.get(answer).shape
+    if (shape.kind !== 'union' || pendingReads.has(node)) return answer
+    if (!shape.members.some((member) => absenceArmOf(member) !== 0)) return answer
+    if (!checkerLeftReadOpen(checker, node)) return answer
+    pendingReads.add(node)
+    try {
+      const kinds = absenceKindsReachingRead(checker, flow, node, (source) => absenceKindsOfLayout(typeAt(source)))
+      if (kinds === null || kinds === 0) return answer
+      const kept = shape.members.filter((member) => {
+        const kind = absenceArmOf(member)
+        return kind === 0 ? (kinds & PRESENT_KIND) !== 0 : (kinds & kind) !== 0
+      })
+      if (kept.length === shape.members.length || kept.length === 0) return answer
+      return kept.length === 1 ? (kept[0] as StructuralTypeId) : table.intern({ kind: 'union', members: kept })
+    } finally {
+      pendingReads.delete(node)
+    }
+  }
   const typeAt = (node: ts.Node): StructuralTypeId =>
-    preparedRules.resolve(node, recordDisagreement) ?? typeOf(absentSubstitutedTypeAt(node))
+    flowNarrowedRead(node, preparedRules.resolve(node, recordDisagreement) ?? typeOf(absentSubstitutedTypeAt(node)))
   const rawTypeAt = (node: ts.Node): ts.Type => {
     // A binding pattern is the reference half of binding its source and has no
     // independent value type. TypeScript does not support every direct

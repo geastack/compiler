@@ -99,7 +99,7 @@ closure-cycle-lifetime.ts.cpp 86aea6acdbda
 closure-factory-export-never-read.ts.cpp 35b275d3d6f5
 closure-written-null-cell-read.runtime.js.cpp cc46343643ab
 collection-get-native-union.ts.cpp ea90283c893f
-collection-value-slot-shares-array-element.runtime.js.cpp 8280a2fe4901
+collection-value-slot-shares-array-element.runtime.js.cpp efb2cfb78469
 composed-field-descriptor.runtime.js.cpp a11d2a79f4b4
 computed-class-prototype-method.ts.cpp f1375430414d
 computed-constant-key-record-literal.runtime.js.cpp b39db1e5d75e
@@ -188,10 +188,11 @@ extra-call-arguments.ts.cpp fdeaa29d7b02
 field-assigned-only-in-method-starts-undefined.runtime.js.cpp 7a82e171467b
 field-census-class-family-narrowing.runtime.js.cpp 183db30cd770
 field-constructor-choice.runtime.js.cpp 4c5adc06cba9
+field-null-after-guard-return.runtime.js.cpp b63632d417c2
 field-nullish-placeholder-for-of.runtime.js.cpp 23714acc63f4
 field-untyped-receiver-write.runtime.js.cpp 7788e1e170f7
 field-written-through-instance.runtime.js.cpp 03ece5f437fc
-field-written-through-tag-typed-receiver.runtime.js.cpp e3b75cdc48af
+field-written-through-tag-typed-receiver.runtime.js.cpp b55c5f98a4f5
 filter-under-a-type-guard-narrows-its-element.ts.cpp 0cdd79245c69
 fixed-data-definition.js.cpp 0f5f99ceadbf
 fixed-field-assignment-widening.runtime.js.cpp e65d803536e4
@@ -256,7 +257,7 @@ generic-record-return-default-instantiation.ts.cpp 8399524c2351
 generic-self-reference-as-mark.ts.cpp ec327e0846cf
 generic-state-function-array.ts.cpp 70e975090ad7
 generic-subclass-constructor-is-not-implicit.ts.cpp f30779599937
-get-or-create-cache-typed-by-its-return.runtime.js.cpp 7d25b6a60e6d
+get-or-create-cache-typed-by-its-return.runtime.js.cpp 3210fc132e87
 global-var-constructor-reassigned.ts.cpp 5d52fbeffb6b
 global-var-constructor-redefined-through-global-object.ts.cpp e474834bc06a
 globalthis-as-optional-record.ts.cpp be3ce0b17f1d
@@ -333,14 +334,14 @@ jsdoc-field-tag-held-by-silent-writes.runtime.js.cpp cd87cd040be8
 jsdoc-field-tag-names-an-unimported-default-export.runtime.js.cpp 26c34a1c3013
 jsdoc-field-type-contradicted-by-writes.runtime.js.cpp f9608f5b2fc1
 jsdoc-generic-argument-name-not-imported.runtime.js.cpp 8c45dfb5a05c
-jsdoc-map-field-value-contradicted-by-set.runtime.js.cpp 80b739976818
+jsdoc-map-field-value-contradicted-by-set.runtime.js.cpp 3e1aeaf1eff6
 jsdoc-member-tag-contradicted-by-literal-argument.runtime.js.cpp 5f9647852cdf
 jsdoc-optional-parameter.runtime.js.cpp 2cfb2703873b
 jsdoc-override-parameter-contradicted-through-base-call.runtime.js.cpp b40673fca3df
 jsdoc-parameter-collection-element-invariant.runtime.js.cpp c3ccfb3a36d3
 jsdoc-parameter-contradicted-by-callers.runtime.js.cpp c7d3020d3b02
 jsdoc-parameter-contradicted-by-census.runtime.js.cpp 410265040ebe
-jsdoc-parameter-contradicted-through-unimported-names.runtime.js.cpp 6658718ea8ee
+jsdoc-parameter-contradicted-through-unimported-names.runtime.js.cpp 8e33283ed143
 jsdoc-parameter-held-by-ancestor-argument.runtime.js.cpp e08548c061fb
 jsdoc-parameter-open-array-element.runtime.js.cpp cdfc7908b9cc
 jsdoc-return-absence-tag-contradicted-by-return.runtime.js.cpp ffbc57ded9b7
@@ -367,6 +368,7 @@ let-read-after-every-write-takes-stored-union.runtime.js.cpp 487a6aab0c54
 literal-member-bag-assigned-from-dynamic-source.runtime.js.cpp 183be52f7788
 literal-slot-caches-stay-any.runtime.js.cpp 2fda56a9584b
 local-iteration.ts.cpp 9f4a7461cb94
+local-refilled-when-lookup-misses.runtime.js.cpp ee2a0f865547
 logical-and-object-left-falsy-arm.ts.cpp 24e43ef8d14b
 logical-native-merge.ts.cpp eea411f205b3
 logical-object-union-falsy-absence.ts.cpp e82a3a7b3c45
@@ -500,8 +502,8 @@ null-defaulted-parameter.runtime.js.cpp 3c2102fca019
 null-only-literal-takes-its-writes.runtime.js.cpp d3b2d11f7caf
 null-stored-tagged-field.runtime.js.cpp 0caa8ee82032
 null-written-number-cell.runtime.js.cpp 123fb3832f9e
-nullable-field-takes-component-element.runtime.js.cpp 6da53eb9c926
-nullable-open-array-census-element.runtime.js.cpp be31231fc44f
+nullable-field-takes-component-element.runtime.js.cpp 165489954544
+nullable-open-array-census-element.runtime.js.cpp 540613e0cd87
 nullish-union.ts.cpp 8898117b27df
 number-isnan-optional-double.runtime.js.cpp a8e896955c0a
 number-parseint-one-argument.runtime.js.cpp 5ecfafad2b4a
@@ -533,7 +535,7 @@ optional-map-property-logical-assign.ts.cpp 37165597e528
 optional-regexp-match-array-union.ts.cpp 7bca824739b6
 optional-strict-equality.ts.cpp a95e22c84a4d
 optional-tagged-union-narrowed-read.ts.cpp f850d7d62914
-optional-union-receiver-method-call.runtime.js.cpp 579710e61a1e
+optional-union-receiver-method-call.runtime.js.cpp 2328344384f2
 optional-void-call-abi.ts.cpp ae3cec960b42
 overload-set-as-value.ts.cpp 250abed126bf
 overloaded-callable-fields.ts.cpp 04420c800d2d
@@ -632,7 +634,7 @@ returned-generic-spelling.ts.cpp 0be54b91c124
 scalar-roundtrip.ts.cpp c1558853e8f5
 self-reading-branch-write-cell.runtime.js.cpp 85844722e169
 set-constructed-from-a-string.ts.cpp ae1377b3d02f
-sibling-class-return-join.runtime.js.cpp 0b997f0cacbf
+sibling-class-return-join.runtime.js.cpp 0876c5f38471
 slot-write-closure.runtime.ts.cpp 9b9ef35c8b5f
 spread-call-immediately-invoked.runtime.js.cpp c5ae95452df2
 spread-fixed-arity-three.runtime.js.cpp 978c1dcd93de
