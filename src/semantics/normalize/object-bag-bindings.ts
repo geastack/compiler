@@ -1563,7 +1563,9 @@ export const bagShapeTypeAt = (
   // filling it is `optional<string>`. The declaration states no type of its
   // own here, so its value IS its initializer's -- asking that one expression
   // is not a new rule, it is the same rule reaching the node that stands for
-  // the same value.
+  // the same value. An object literal's member (`{ spaces: {} }`) is asked with
+  // its PropertyAssignment for the same reason: the member's value IS its
+  // initializer, and every `this.spaces[ k ]` read already took that bag.
   const assignment = ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken ? node : null
   // A literal's member `targets: {}` is the same: the enclosing record's field
   // is asked with the `PropertyAssignment`, every `state.targets[ k ]` with an
