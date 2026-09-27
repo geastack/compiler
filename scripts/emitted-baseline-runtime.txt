@@ -9,6 +9,7 @@ array-concat-array-argument.ts.cpp 86c31adb9c34
 array-dynamic-element-search.ts.cpp 80d32b7cb646
 array-element-string-key.ts.cpp 82836dce1c7b
 array-from-bound-set-takes-its-key.runtime.js.cpp 6cca25d0deb5
+array-from-bound-set-values-takes-its-key.runtime.js.cpp ccbed373861e
 array-from-set.runtime.js.cpp 51c8a52cb5be
 array-index-absence.ts.cpp b9f1195e8e0b
 array-isarray-identity-conditional.ts.cpp 33c73a99fa8f
