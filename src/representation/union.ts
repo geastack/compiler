@@ -123,6 +123,17 @@ export const createUnionDeriver = (
     const stated = [...new Set(shape.members)]
     const members = stated.filter((member) => !isNever(member))
     if (members.length === 0) return { kind: 'void' }
+    // A member carried as the open box (`declared-any-never-narrowed`) already
+    // holds every value the other members could hold: a class instance, a
+    // record, `null`, `undefined`. A sum around it has an arm no runtime test
+    // can tell apart from the rest, so the union is that box, just as
+    // TypeScript reads `T | any` as `any`. three's ContextNode is the case:
+    // `@param {Node|Object} [nodeOrValue={}]` with a `null` default made
+    // `undefined | null | (Object | Node)`, and nothing could convert into it.
+    for (const member of members) {
+      const carrier = derive(member)
+      if (carrier.kind === 'dynamic' && carrier.reason === 'declared-any-never-narrowed') return carrier
+    }
     const absent = members.filter((member) => absenceOf(member) !== null)
     const present = members.filter((member) => absenceOf(member) === null)
     // How many DISTINGUISHABLE absences the union states, not how many members
