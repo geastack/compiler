@@ -693,6 +693,7 @@ union-of-tuples-array-pattern.ts.cpp aa8e76675555
 union-of-tuples-nested-array-pattern.ts.cpp a33a8e162a03
 union-void-arm-is-the-undefined-carrier.ts.cpp 230baa95b904
 unknown-callee-argument-key-narrowing.ts.cpp f037154b942f
+untyped-literal-takes-stated-destination.runtime.js.cpp 60888069f915
 unused-subclass-is-pruned.ts.cpp 904fa5b0cd56
 user-iterable-protocol.ts.cpp 3eea6235cd08
 value-record-literal-union.ts.cpp ad9d4204d83c
