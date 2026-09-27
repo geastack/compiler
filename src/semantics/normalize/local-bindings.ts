@@ -1996,17 +1996,28 @@ export const censusLocalBindings = (
   // initializer produced, so the cell and every read of it the checker did not
   // narrow further carry the call's narrowed type -- published on the same
   // channel as the call's, since it is the same statement read one hop on.
+  // A literal of untyped values the collection census gave its destination's
+  // statement (`literalArrayTypeAt`) is held by its const the same way.
   const statedCallInitializerTypeAt = (node: ts.Node): ts.Type | null => {
     const declaration = ts.isVariableDeclaration(node) ? node : ts.isIdentifier(node) ? declarationOf(node) : null
     if (!declaration?.initializer || !ts.isIdentifier(declaration.name) || declaration.type || ts.getJSDocType(declaration)) return null
     const declarationList = declaration.parent
     if (!ts.isVariableDeclarationList(declarationList) || (declarationList.flags & ts.NodeFlags.Const) === 0) return null
     const initializer = unwrapParens(declaration.initializer)
-    if (!ts.isCallExpression(initializer) && !ts.isNewExpression(initializer)) return null
-    const narrowed = parameters.statedTypeAt(initializer)
+    const narrowed =
+      ts.isCallExpression(initializer) || ts.isNewExpression(initializer)
+        ? parameters.statedTypeAt(initializer)
+        : collections.literalArrayTypeAt?.(initializer)
     if (!narrowed) return null
-    if (node !== declaration && checker.getTypeAtLocation(node) !== checker.getTypeAtLocation(declaration)) return null
-    return narrowed
+    if (node === declaration) return narrowed
+    const declared = checker.getTypeAtLocation(declaration)
+    const read = checker.getTypeAtLocation(node)
+    if (read === declared) return narrowed
+    // A read the checker narrowed past the cell's absence (`x !== null ? x : ...`)
+    // holds the statement past the same absence.
+    if (read !== checker.getNonNullableType(declared)) return null
+    const present = checker.getNonNullableType(narrowed)
+    return present === narrowed ? null : present
   }
 
   // `root` is the same stable, hand-written reason string this census always
@@ -2039,7 +2050,7 @@ export const censusLocalBindings = (
       if (ts.isBindingElement(node)) return boundElements.get(node) ?? null
       return resolveExpr(node)
     },
-    statedTypeAt: statedCallInitializerTypeAt,
+    statedTypeAt: (node) => statedCallInitializerTypeAt(node) ?? collections.literalArrayTypeAt?.(node) ?? null,
     preferredTypeAt: (node) => {
       const observedAbsence = observedIndexedAbsence.get(node)
       if (observedAbsence) return observedAbsence

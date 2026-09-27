@@ -270,6 +270,13 @@ export interface CollectionBindingCensus {
   readonly mapResultTypeAt?: (call: ts.CallExpression) => ts.Type | null
   /** The element that same callback returns into, answered at the callback itself. */
   readonly mapCallbackElementAt?: (callback: ts.Node) => ts.Type | null
+  /**
+   * The stated array a literal of untyped values takes from the statement
+   * its const flows into -- see "A literal of untyped values" below.
+   * Answered at the literal and at the conditional that holds it beside an
+   * absence; `null` everywhere else.
+   */
+  readonly literalArrayTypeAt?: (node: ts.Node) => ts.Type | null
 }
 
 /** A census that binds nothing, for callers that state no program. */
@@ -1478,6 +1485,83 @@ export const censusCollectionBindings = (
     ts.forEachChild(node, collectMapResults)
   }
   for (const file of files) forEachReachableStatement(reachable, file, collectMapResults)
+
+  // A literal of untyped values is a fresh array too. `const gradSnippet =
+  // gradNode ? [ gradNode[ 0 ].build( builder, 'vec2' ), ... ] : null` reads
+  // its elements off an untyped bag, so the checker lays the literal out as
+  // `any[]`, while the parameter the const is passed to states `@param
+  // {?Array<string>}` (three's `TextureNode.generate` into
+  // `generateSnippet`). Every element is untyped, so the statement is the
+  // only fact about the element: the literal takes the stated array, each
+  // element converts into it, and the conditional that holds it beside
+  // `null` keeps its own absence. Only a const initializer, so the literal
+  // is the cell's one array; a component that also holds a tracked literal,
+  // or whose statements disagree, is left to the checker.
+  const literalArrays = new Map<ts.Node, ts.Type>()
+  const isAbsenceLiteral = (node: ts.Expression): boolean => {
+    let bare = node
+    while (ts.isParenthesizedExpression(bare)) bare = bare.expression
+    return bare.kind === ts.SyntaxKind.NullKeyword || (ts.isIdentifier(bare) && bare.text === 'undefined')
+  }
+  const considerUntypedLiteral = (literal: ts.ArrayLiteralExpression): void => {
+    if (literal.elements.length === 0 || literal.elements.some((element) => ts.isSpreadElement(element) || ts.isOmittedExpression(element)))
+      return
+    const checkerType = checker.getTypeAtLocation(literal)
+    if (!checker.isArrayType(checkerType)) return
+    const [checkerElement] = checker.getTypeArguments(checkerType as ts.TypeReference)
+    if (checkerElement === undefined || (checkerElement.flags & ts.TypeFlags.Any) === 0) return
+    if (!literal.elements.every((element) => argumentType(element) === null)) return
+    let holder: ts.Expression = literal
+    while (ts.isParenthesizedExpression(holder.parent)) holder = holder.parent
+    const conditional = ts.isConditionalExpression(holder.parent) ? holder.parent : null
+    if (conditional && conditional.condition === holder) return
+    if (conditional && !isAbsenceLiteral(conditional.whenTrue === holder ? conditional.whenFalse : conditional.whenTrue)) return
+    let initializer: ts.Expression = conditional ?? holder
+    while (ts.isParenthesizedExpression(initializer.parent)) initializer = initializer.parent
+    const declaration = initializer.parent
+    if (!ts.isVariableDeclaration(declaration) || declaration.initializer !== initializer || !ts.isIdentifier(declaration.name)) return
+    if (declaration.type || ts.getJSDocType(declaration)) return
+    if (!ts.isVariableDeclarationList(declaration.parent) || (declaration.parent.flags & ts.NodeFlags.Const) === 0) return
+    const owner = declNodeOf(checker.getSymbolAtLocation(declaration.name))
+    if (!owner) return
+    const aliases: ts.Node[] = []
+    const boundaries: ts.Node[] = []
+    for (const alias of aliasClosureOf(owner, statesItsType)) {
+      if (arrayRoots.has(alias)) return
+      if (alias !== owner && statesItsType(alias)) boundaries.push(alias)
+      else aliases.push(alias)
+    }
+    const element = statedElementOfComponent([...aliases, ...boundaries])
+    if (!element) return
+    for (const decl of [...aliases, ...boundaries]) {
+      for (const write of flow.writesToDeclaration(decl)) {
+        const value =
+          (write.edge === 'array-append' ||
+            write.edge === 'array-fill' ||
+            (write.edge === 'index-assignment' && write.slot === 'element')) &&
+          write.value
+            ? argumentType(write.value)
+            : null
+        if (value && !checker.isTypeAssignableTo(value, element)) return
+      }
+    }
+    const array = [...aliases, ...boundaries].map(statedArrayOf).find((stated) => stated?.element === element)?.array
+    if (!array) return
+    literalArrays.set(literal, array)
+    if (!conditional) return
+    const members = checker.getTypeAtLocation(conditional)
+    const absent = (members.isUnion() ? members.types : [members]).reduce(
+      (flags, member) => flags | (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)),
+      0
+    )
+    literalArrays.set(conditional, absent === 0 ? array : checker.getNullableType(array, absent))
+  }
+  const collectUntypedLiterals = (node: ts.Node): void => {
+    if (reachable.memberIsPruned(node)) return
+    if (ts.isArrayLiteralExpression(node)) considerUntypedLiteral(node)
+    ts.forEachChild(node, collectUntypedLiterals)
+  }
+  for (const file of files) forEachReachableStatement(reachable, file, collectUntypedLiterals)
 
   for (const [node, owner] of arrayNodeOwner) {
     const reason = ownerArrayRefusal.get(owner)
