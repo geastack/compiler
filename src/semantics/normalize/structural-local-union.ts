@@ -4,6 +4,7 @@ import type { StructuralTypeTable } from '../model/structural-type-table.js'
 import type { ValueFlowIndex } from './flow/model.js'
 import type { ParameterBindingCensus } from './parameter-bindings.js'
 import { containsUnstatedPosition } from './derived-expression-type.js'
+import { readFollowsEveryWrite } from './stored-local-read.js'
 
 /**
  * Complete a synthesized local union in the SAME specialization view as its
@@ -103,6 +104,9 @@ export const createLocalUnionResolver = (
         if (arrays.length === 1) return arrays[0] ?? null
       }
     }
+    // A read the checker did not narrow, after every write, reads the stored
+    // union -- see `readFollowsEveryWrite`.
+    if (flow && census.unionArmsAt(declaration) && readFollowsEveryWrite(checker, flow, declaration, node)) return result
     // A real flow narrowing keeps its own type. An erased Function/any at a
     // read is not such a narrowing, but may still prove nullish exclusion.
     if (!sourceRefined.has(declaration) && !containsUnstatedPosition(checker, node, raw)) return null

@@ -3,7 +3,7 @@ import {
   blankedTexts,
   censusExcludes,
   isUncheckedJavaScript,
-  statementExcludes,
+  armsExclude,
   type BlankSpan,
   type CensusArms
 } from './contradicted-jsdoc-types.js'
@@ -252,15 +252,12 @@ export const contradictedJsDocParameterSpans = (program: ts.Program, census?: Ce
     const arms = passed.isUnion() ? passed.types : [passed]
     if (arms.some((arm) => (arm.flags & saysNothing) !== 0)) return false
     // A union the tag admits one arm of is a value the caller may have tested
-    // into that arm first, by a test the checker does not read: three's
-    // `Object3D.lookAt( x, y, z )` passes its `Vector3 | number` on to
-    // `Vector3.set( x, y, z )` only past `x.isVector3`. Every arm has to be
-    // one the tag excludes.
-    // An ancestor of the class the tag names is such a value too: three's
-    // `WGSLNodeBuilder` constructs `new NodeSampler( name, uniformNode.node )`,
-    // a `UniformNode` field, under `@param {TextureNode} textureNode`, only
-    // for texture uniforms (`statementExcludes`).
-    return arms.every((arm) => statementExcludes(checker, arm, stated, invariant))
+    // into that arm first, unless the tag is a union no such test reaches
+    // (`armsExclude`). An ancestor of the class the tag names is such a value
+    // too: three's `WGSLNodeBuilder` constructs `new NodeSampler( name,
+    // uniformNode.node )`, a `UniformNode` field, under `@param {TextureNode}
+    // textureNode`, only for texture uniforms (`statementExcludes`).
+    return armsExclude(checker, arms, stated, invariant)
   }
 
   // A member tag -- `@param {T} [parameters.name]` -- states one member of an
