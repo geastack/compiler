@@ -687,6 +687,7 @@ typeof-then-discriminates-a-union.ts.cpp 16fe804a602d
 unbox-nullable-union.ts.cpp b8a67b94f69c
 uncallable-member-slot-call.runtime.js.cpp f925ad615e3e
 uncertified.txt ceae5039a20a
+union-map-receiver-discarded-set.runtime.js.cpp 712af7f12caa
 union-member-absent-on-promise-arm.ts.cpp fb968705a335
 union-method-absent-on-one-arm-discarded.ts.cpp d2bf86271461
 union-of-tuples-array-pattern.ts.cpp aa8e76675555

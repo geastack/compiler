@@ -1200,7 +1200,14 @@ const renderPrototypeMethodCall = (
     // 13.3.6.1 throws on the absent arm and 23.1.3.20 returns a length nobody
     // reads on the live one -- and it is applied only when an arm really is
     // absent, so a union whose arms all answer keeps the text it had.
-    const discardedWithAbsentArm = operation.result === null && arms.some((armRead) => armRead === null)
+    //
+    // So is a discarded `set` or `add`: 24.1.3.9 and 24.2.3.1 return the
+    // receiver, and each arm's receiver is its own collection, so a `Map<number,
+    // F> | Map<string, F>` parameter's `library.set( type, nodeClass )` (three's
+    // `NodeLibrary.addType`) had one `Ref<Map<double, ...>>` branch and one
+    // `Ref<Map<std::string, ...>>` branch.
+    const discardedWithAbsentArm =
+      operation.result === null && (arms.some((armRead) => armRead === null) || read.member === 'set' || read.member === 'add')
     const branches = arms.map((armRead, index) => {
       const armCarrier = carrier.arms[index]?.value
       if (armRead === null) {
