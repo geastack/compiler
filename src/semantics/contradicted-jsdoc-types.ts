@@ -58,6 +58,9 @@ import ts from 'typescript'
  *   tag states for that key;
  * - `x.field.push( v )` into a field the tag states as an Array, against the
  *   Array's element;
+ * - `x.field.set( k, v )` into a field the tag states as a Map or WeakMap,
+ *   against its value: three's `Renderer._quadCache` states
+ *   `Map<Texture,QuadMesh>` and sets `{ quad, cacheKey }` records into it;
  * - any of these with `v` an unannotated local, against each value the local
  *   is initialized or assigned with: the local carries those values into the
  *   field, and it is the local's own assignment the checker would flag.
@@ -223,6 +226,17 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
         const element = owner ? arrayElementOf(checker, checker.getTypeOfSymbol(owner)) : null
         if (owner && element && !contradicted.has(owner) && node.arguments.some((argument) => refutes(argument, element)))
           contradicted.set(owner, node)
+      }
+      if (
+        ts.isCallExpression(node) &&
+        ts.isPropertyAccessExpression(node.expression) &&
+        node.expression.name.text === 'set' &&
+        node.arguments.length === 2
+      ) {
+        const owner = fieldAt(withoutParentheses(node.expression.expression))
+        const value = owner ? mapValueOf(checker, checker.getTypeOfSymbol(owner)) : null
+        const argument = node.arguments[1]
+        if (owner && value && argument && !contradicted.has(owner) && refutes(argument, value)) contradicted.set(owner, node)
       }
       if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
         const target = withoutParentheses(node.left)
@@ -428,6 +442,15 @@ const arrayElementOf = (checker: ts.TypeChecker, stated: ts.Type): ts.Type | nul
   if (array.getSymbol()?.name !== 'Array') return null
   const element = checker.getIndexTypeOfType(array, ts.IndexKind.Number)
   return element && !saysNothing(element) ? element : null
+}
+
+/** The value of the `Map<K, V>` or `WeakMap<K, V>` a field's tag states, or `null` for anything else. */
+const mapValueOf = (checker: ts.TypeChecker, stated: ts.Type): ts.Type | null => {
+  const map = checker.getNonNullableType(stated)
+  const name = map.getSymbol()?.name
+  if (name !== 'Map' && name !== 'WeakMap') return null
+  const [, value] = checker.getTypeArguments(map as ts.TypeReference)
+  return value && !saysNothing(value) ? value : null
 }
 
 /**
