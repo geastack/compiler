@@ -385,8 +385,8 @@ export const blankedTexts = (
 /**
  * Whether the census's answer for a value the checker types `any` is one the
  * statement excludes: some arm is present (absence is `absent-jsdoc-tags.ts`'s
- * question), none is itself `any`, and `statementExcludes` holds for every
- * present arm, as it must for every arm of a checker union.
+ * question), none is itself `any`, and the present arms are ones the
+ * statement excludes as `armsExclude` reads the arms of a checker union.
  */
 export const censusExcludes = (
   checker: ts.TypeChecker,
@@ -399,7 +399,43 @@ export const censusExcludes = (
   if (!arms) return false
   const present = arms.filter((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0)
   if (present.length === 0 || present.some(saysNothing)) return false
-  return present.every((arm) => statementExcludes(checker, arm, stated, invariant))
+  return armsExclude(checker, present, stated, invariant)
+}
+
+/**
+ * Whether a value with these present arms is outside what `stated` states:
+ * the one reading of a union value both contradiction passes share.
+ *
+ * A value whose every arm `statementExcludes` is outside it, and one with no
+ * such arm is inside it. Between the two, a union the statement admits one
+ * arm of is a value the caller may have tested into that arm first, by a test
+ * the checker does not read: three's `Object3D.lookAt( x, y, z )` passes its
+ * `Vector3 | number` on to `Vector3.set( x, y, z )` only past `x.isVector3`.
+ * Such a value reaches the statement by narrowing, and a narrowing reaches a
+ * union only when each of its arms is one some arm of the value fits
+ * (`conversion/build.ts`'s `narrowingReachesTarget`). So a union statement
+ * with an arm no arm of the value fits is one no test of the value reaches,
+ * and the arm it excludes is a value the slot holds: three's
+ * `WebGLBackend.beginCompute( computeGroup )` passes its `Node | Array<Node>`
+ * to `getTimestampUID( abstractRenderContext )` under `@param
+ * {RenderContext|ComputeNode}`. The `Node` arm is an ancestor of
+ * `ComputeNode`, no arm is a `RenderContext`, and the `Array` arm is the
+ * group of compute nodes the method is handed as well. The statement's arms
+ * are read by domain, so `boolean` or `('vertex'|'fragment')` is one arm.
+ */
+export const armsExclude = (checker: ts.TypeChecker, arms: readonly ts.Type[], stated: ts.Type, invariant: boolean): boolean => {
+  const excluded = arms.filter((arm) => statementExcludes(checker, arm, stated, invariant))
+  if (excluded.length === arms.length) return true
+  if (excluded.length === 0) return false
+  const statedArms = [
+    ...new Set(
+      (stated.isUnion() ? stated.types : [stated])
+        .filter((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0)
+        .map((arm) => checker.getBaseTypeOfLiteralType(arm))
+    )
+  ]
+  if (statedArms.length < 2) return false
+  return statedArms.some((statedArm) => arms.every((arm) => statementExcludes(checker, arm, statedArm, invariant)))
 }
 
 /**
