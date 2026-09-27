@@ -1953,6 +1953,11 @@ export const censusParameterBindings = (
         // element), which is the silhouette `impliedPatternParameterOf`
         // exists to see through; the pattern's own read is the answer.
         if (declaration && ts.isBindingElement(declaration) && impliedPatternElementRootOf(checker, declaration) !== null) return null
+        // A local read the checker did not narrow, after every write, passes
+        // the cell's stored union -- see `readFollowsEveryWrite`.
+        const stored = declaration && ts.isVariableDeclaration(declaration) ? upstream.unionArmsAt(declaration) : null
+        if (stored && readFollowsEveryWrite(checker, valueFlow, declaration as ts.VariableDeclaration, node))
+          return disjointUnionTypeOf(checker, stored) ?? type
       }
       // The checker's `any[]` for an `Array.from` it instantiated over an
       // `any` source is not what the census knows the source holds: the
