@@ -477,6 +477,7 @@ null-default-parameter-from-callers.runtime.js.cpp 77b09ed91957
 null-default-untagged-parameter.runtime.js.cpp 18936c198044
 null-defaulted-parameter.runtime.js.cpp 3c2102fca019
 null-stored-tagged-field.runtime.js.cpp 0caa8ee82032
+null-written-number-cell.runtime.js.cpp 123fb3832f9e
 nullish-union.ts.cpp 8898117b27df
 number-isnan-optional-double.runtime.js.cpp a8e896955c0a
 number-parseint-one-argument.runtime.js.cpp 5ecfafad2b4a
