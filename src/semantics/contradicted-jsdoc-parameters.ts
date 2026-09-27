@@ -8,6 +8,7 @@ import {
   type CensusArms
 } from './contradicted-jsdoc-types.js'
 import { programTypeNames } from './normalize/jsdoc-type-names.js'
+import { hostAbsentTypeTest } from './normalize/absent-globals.js'
 
 /**
  * `@param` types that the program's own calls contradict, in unchecked
@@ -92,11 +93,18 @@ import { programTypeNames } from './normalize/jsdoc-type-names.js'
  * field, which the census carries as a `number | BufferAttribute |
  * Float32Array` -- to `@param {InterleavedBuffer}` parameters.
  */
-export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: ReadonlyMap<string, string>): Map<string, string> =>
-  blankedTexts(prepared, contradictedJsDocParameterSpans(program))
+export const contradictedJsDocParameterBlanks = (
+  program: ts.Program,
+  prepared: ReadonlyMap<string, string>,
+  absentGlobals: ReadonlySet<string> = new Set()
+): Map<string, string> => blankedTexts(prepared, contradictedJsDocParameterSpans(program, undefined, absentGlobals))
 
 /** The spans of the `@param` tags (and the field tags that go with them) the program's calls contradict -- see `contradictedJsDocParameterBlanks`. */
-export const contradictedJsDocParameterSpans = (program: ts.Program, census?: CensusArms): Map<ts.SourceFile, BlankSpan[]> => {
+export const contradictedJsDocParameterSpans = (
+  program: ts.Program,
+  census?: CensusArms,
+  absentGlobals: ReadonlySet<string> = new Set()
+): Map<ts.SourceFile, BlankSpan[]> => {
   const spans = new Map<ts.SourceFile, BlankSpan[]>()
   const files = program.getSourceFiles().filter((file) => !file.isDeclarationFile)
   const unchecked = files.filter(isUncheckedJavaScript)
@@ -236,11 +244,46 @@ export const contradictedJsDocParameterSpans = (program: ts.Program, census?: Ce
     return false
   }
 
+  // A tag naming only a type the host states absent -- the `Image` of
+  // CubeTexture's `@param {Array<Image>} [images=[]]`, lib.dom's, which a
+  // native host lists absent -- states a slot no value on this host can
+  // fill, so a value that is there contradicts it. three's CubeRenderTarget
+  // hands CubeTexture six `{ width, height, depth }` records under that tag.
+  // A host's type the host provides is still the boundary's question
+  // (`statementExcludes`).
+  const hostAbsent = hostAbsentTypeTest(program, absentGlobals)
+  const armsOf = (type: ts.Type): readonly ts.Type[] => (type.isUnion() ? type.types : [type])
+  const absentStatement = (stated: ts.Type): 'value' | 'element' | null => {
+    const arms = armsOf(stated)
+    if (arms.every(hostAbsent)) return 'value'
+    const elements = arms.map((arm) => (checker.isArrayType(arm) ? checker.getTypeArguments(arm as ts.TypeReference)[0] : undefined))
+    return elements.every((element) => element !== undefined && armsOf(checker.getNonNullableType(element)).every(hostAbsent))
+      ? 'element'
+      : null
+  }
+  const holdsPresentValue = (arms: readonly ts.Type[], statement: 'value' | 'element'): boolean => {
+    // An absent argument is what the slot can hold; any other arm the
+    // checker or census cannot state says nothing.
+    const present = arms.filter((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0)
+    if (present.length === 0 || present.some((arm) => (arm.flags & saysNothing) !== 0)) return false
+    return present.every((arm) => {
+      if (statement === 'value') return !hostAbsent(arm)
+      if (!checker.isArrayType(arm)) return false
+      const [element] = checker.getTypeArguments(arm as ts.TypeReference)
+      return element !== undefined && (element.flags & saysNothing) === 0 && !armsOf(element).some(hostAbsent)
+    })
+  }
+
   const contradicts = (argument: ts.Expression, tag: ts.JSDocParameterTag): boolean => {
     if (!tag.typeExpression) return false
     const stated = checker.getNonNullableType(typeOfTypeNode(tag.typeExpression.type))
     if ((stated.flags & saysNothing) !== 0) return false
     const site = typeOfExpression(argument)
+    const statement = absentStatement(stated)
+    if (statement) {
+      const arms = readsAsAny(site) ? (census?.(argument) ?? null) : armsOf(site)
+      return arms !== null && holdsPresentValue(arms, statement)
+    }
     // A collection the call builds takes the parameter's element (I1), so
     // only one built elsewhere is carried by an element of its own.
     const invariant = !isFresh(argument)

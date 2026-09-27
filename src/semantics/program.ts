@@ -35,6 +35,8 @@ export interface ProgramInput {
   readonly uncheckedJavaScript?: ReadonlySet<string>
   /** Package-scoped JSDoc type names, bound by the checker -- see `scoped-type-realizations.ts`. */
   readonly scopedTypeRealizations?: readonly ScopedTypeRealization[]
+  /** Ambient globals an installed host states it does not provide (`PluginCapabilities.absentGlobals`, unioned). */
+  readonly absentGlobals?: ReadonlySet<string>
   readonly rootFileNames: readonly string[]
   readonly options: ts.CompilerOptions
   /**
@@ -939,7 +941,7 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
   const contradictions = new Map([
     ...fieldContradictions,
     ...timing.measure('contradicted-jsdoc-parameters', () =>
-      contradictedJsDocParameterBlanks(configured.program, new Map([...prepared, ...fieldContradictions]))
+      contradictedJsDocParameterBlanks(configured.program, new Map([...prepared, ...fieldContradictions]), input.absentGlobals)
     )
   ])
   // Composed onto both, and in place like them (`absent-jsdoc-tags.ts`).
