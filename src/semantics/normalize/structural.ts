@@ -167,6 +167,14 @@ export interface StructuralMapper {
   readonly mutableMethodStorageTypeAt: (node: ts.MethodDeclaration) => StructuralTypeId | null
   readonly mutableMethodReadTypeAt: (node: ts.Node) => StructuralTypeId | null
   /**
+   * Whether this read's type is the arms of the writes that reach it
+   * (`valuesReachingRead`, `stored-local-read.ts`), not the cell's whole
+   * union: a local read the checker left open, whose reaching writes the
+   * forward walk decided. Only those arms can be in the cell there, so a cell
+   * whose other arms have no conversion into the read still holds this one.
+   */
+  readonly readTakesReachingArms: (node: ts.Node) => boolean
+  /**
    * What a `Function.prototype.bind` call produces -- the bound callable,
    * receiver-less -- or `null` for any other node. One answer for the two
    * places that state a call's result: `typeAt` on the call and the
@@ -4639,6 +4647,7 @@ const buildMapper = (
     typeAt,
     mutableMethodStorageTypeAt: mutableMethods.storageTypeAt,
     mutableMethodReadTypeAt: mutableMethods.readTypeAt,
+    readTakesReachingArms: (node) => ts.isIdentifier(node) && (typeAt(node), localUnionAt.tookReachingArms(node)),
     boundCallResultAt,
     constructResultAt,
     evolvingArrayMemberTypeAt,

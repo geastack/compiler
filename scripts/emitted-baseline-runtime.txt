@@ -599,6 +599,7 @@ proxy-native-slot-refusal.runtime.js.cpp 38c6ceb3e2d4
 proxy-origin-rest-elements.runtime.js.cpp b3a09bc82fb8
 proxy-receiver-generic-copies.runtime.js.cpp e7ecc2a81e2b
 reactive-inherited-cell-no-list-tick.ts.cpp 7699cb1bf2f5
+reassigned-local-argument-reads-initializer.runtime.js.cpp e49470fe41c8
 receiver-ignored-construct.ts.cpp a68d985fdfa2
 record-index-sidecar.ts.cpp e29ea6fdfee3
 record-string-computed-read.runtime.js.cpp aa3c91c13aab

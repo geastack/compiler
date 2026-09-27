@@ -727,6 +727,7 @@ const buildReference = (
     declaration,
     mutable,
     temporalDeadZone,
+    ...(context.types.readTakesReachingArms(node) ? { reachingArms: true as const } : {}),
     ...(context.commonJsBindings.has(declaration)
       ? {
           commonJs: {

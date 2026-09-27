@@ -662,7 +662,14 @@ export const narrowedBindingRead = (
   if (held === null || representationKey(held) === representationKey(representation)) {
     return ctx.builder.bindingRead(block, lineage, declaration, representation, reactive)
   }
-  const node = ctx.program.conversions.nodeFor(held, representation)
+  const pair = ctx.program.conversions.nodeFor(held, representation)
+  // A read the flow walk proved holds only the arms that reach it
+  // (`BindingOperation.reachingArms`) takes its one arm where the census has
+  // no pair: checked at runtime, a `TypeError` if the walk were wrong.
+  const node =
+    pair.capability.kind === 'never' && operation.family === 'binding' && operation.reachingArms === true
+      ? (ctx.program.conversions.exactArmFor(held, representation) ?? pair)
+      : pair
   if (node.capability.kind === 'never') {
     recordDrift(ctx, block, operation.id, 'read', 0, held, representation)
     return ctx.builder.bindingRead(block, lineage, declaration, representation, reactive)
