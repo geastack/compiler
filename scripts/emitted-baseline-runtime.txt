@@ -479,6 +479,7 @@ null-default-parameter-field-through-spread.runtime.js.cpp fd268ab1d76f
 null-default-parameter-from-callers.runtime.js.cpp 77b09ed91957
 null-default-untagged-parameter.runtime.js.cpp 18936c198044
 null-defaulted-parameter.runtime.js.cpp 3c2102fca019
+null-only-literal-takes-its-writes.runtime.js.cpp d3b2d11f7caf
 null-stored-tagged-field.runtime.js.cpp 0caa8ee82032
 nullish-union.ts.cpp 8898117b27df
 numeric-dictionary-own-keys.ts.cpp 4122db3e3b16

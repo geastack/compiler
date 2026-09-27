@@ -277,7 +277,39 @@ export interface CollectionBindingCensus {
    * absence; `null` everywhere else.
    */
   readonly literalArrayTypeAt?: (node: ts.Node) => ts.Type | null
+  /**
+   * The element this census bound for an array whose checker element is only
+   * `null`, read at an expression that names it; `null` for any other.
+   *
+   * A literal of nothing but `null` (three's `const _commandList = [ null ]`)
+   * is opened by the array census and takes its writes, but the checker still
+   * types it `null[]`, so every read of an element -- `_commandList[ 0 ]`, a
+   * `for...of` binding over it -- answered `null`, a type that looks usable
+   * and that no command buffer converts into. A reader that asks the checker's
+   * element first asks this before it takes a bare `null`.
+   */
+  readonly nullSlotElementFor?: (arrayExpression: ts.Expression) => ts.Type | null
 }
+
+/**
+ * Whether the checker typed a read as nothing but a `[ null ]` literal's
+ * `null`: bare, or with the `undefined` an index read adds under
+ * `noUncheckedIndexedAccess`.
+ */
+export const isNullSlotReadType = (read: ts.Type): boolean =>
+  read.flags === ts.TypeFlags.Null ||
+  (read.isUnion() &&
+    read.types.some((member) => member.flags === ts.TypeFlags.Null) &&
+    read.types.every((member) => member.flags === ts.TypeFlags.Null || member.flags === ts.TypeFlags.Undefined))
+
+/**
+ * What a read the checker typed `read` answers when the slot holds
+ * `element` (see `CollectionBindingCensus.nullSlotElementFor`): the element,
+ * with the read's `undefined` where the checker added one; `null` for a read
+ * `isNullSlotReadType` does not admit.
+ */
+export const nullSlotReadTypeOf = (checker: ts.TypeChecker, read: ts.Type, element: ts.Type): ts.Type | null =>
+  !isNullSlotReadType(read) ? null : read.isUnion() ? checker.getNullableType(element, ts.TypeFlags.Undefined) : element
 
 /** A census that binds nothing, for callers that state no program. */
 export const emptyCollectionBindingCensus: CollectionBindingCensus = {
@@ -905,12 +937,26 @@ export const censusCollectionBindings = (
   // own proven-working, declaration-keyed tracking above (`declNodeOf`/
   // `ownerDeclOfExpr`, defined once, near the top of this function, and
   // reused here) and is left untouched.
+  // A literal of nothing but `null` states no more than an empty one: three's
+  // `const _commandList = [ null ]` (WebGPUUtils `submit`) is a one-slot
+  // array the program fills with a command buffer and clears again, and the
+  // checker's `null[]` for it left every `_commandList[ 0 ] = command` with
+  // no carrier to land in. Its `null`s are writes like any other
+  // (they join the component's evidence below), so the element joins them.
+  // A written `null` is evidence of the absent arm, which `argumentType`
+  // reads as no evidence at all.
+  const elementWriteType = (expr: ts.Expression): ts.Type | null =>
+    expr.kind === ts.SyntaxKind.NullKeyword ? checker.getNullType() : argumentType(expr)
+  const isArrayIndexName = (name: string | null): boolean => name !== null && /^(0|[1-9][0-9]*)$/.test(name) && Number(name) < 2 ** 32 - 1
+  const holdsOnlyNull = (node: ts.ArrayLiteralExpression): boolean =>
+    node.elements.every((element) => element.kind === ts.SyntaxKind.NullKeyword)
   const isUnstatedEmptyArrayLiteral = (node: ts.Node): node is ts.ArrayLiteralExpression => {
-    if (!ts.isArrayLiteralExpression(node) || node.elements.length > 0) return false
+    if (!ts.isArrayLiteralExpression(node) || !holdsOnlyNull(node)) return false
     const type = checker.getTypeAtLocation(node)
     if (!checker.isArrayType(type)) return false
     const [element] = checker.getTypeArguments(type as ts.TypeReference)
-    if (element === undefined || (element.flags & (ts.TypeFlags.Never | ts.TypeFlags.Any)) === 0) return false
+    const open = ts.TypeFlags.Never | ts.TypeFlags.Any | (node.elements.length > 0 ? ts.TypeFlags.Null : 0)
+    if (element === undefined || (element.flags & open) === 0) return false
     // A contextual array type is a statement made by the surrounding
     // annotation/signature. In particular, an explicit `any[]` remains a
     // genuine dynamic boundary; only the checker-created never/any fallback
@@ -1220,13 +1266,29 @@ export const censusCollectionBindings = (
   for (const [owner, aliases] of arrayComponents) {
     const evidence: ts.Expression[] = []
     const boundaries = new Set([...aliases].flatMap((alias) => [...(boundariesOf.get(alias) ?? [])]))
+    const nullLiterals = [...aliases].flatMap((alias) => (arraysByOwner.get(alias) ?? []).filter((literal) => literal.elements.length > 0))
+    for (const literal of nullLiterals) evidence.push(...literal.elements)
     for (const decl of [...aliases, ...boundaries]) {
       for (const write of flow.writesToDeclaration(decl)) {
         if ((write.edge === 'array-append' || write.edge === 'array-fill') && write.value) evidence.push(write.value)
         else if (write.edge === 'index-assignment' && write.slot === 'element' && write.value) evidence.push(write.value)
+        // `a[ 0 ] = x` names its index with a literal, so `flow` files it as a
+        // member write, but on an array a canonical index is an element
+        // (ECMA-262 10.4.2): three's `_commandList[ 0 ] = command`. Only for
+        // storage a `[ null ]` literal opened: an empty `[]` filled this way
+        // keeps the evidence it always had, which leaves three's `ChainMap`
+        // keys (`keys[ 0 ] = renderer`) to the `Array<Object>` they reach.
+        else if (
+          nullLiterals.length > 0 &&
+          write.edge === 'index-assignment' &&
+          write.slot === 'member' &&
+          isArrayIndexName(write.member) &&
+          write.value
+        )
+          evidence.push(write.value)
       }
     }
-    const writeTypes = evidence.map(argumentType)
+    const writeTypes = evidence.map(elementWriteType)
     const stated =
       writeTypes.some((type) => type === null) || evidence.length === 0 ? statedElementOfComponent([...aliases, ...boundaries]) : null
     if (stated && writeTypes.every((type) => type === null || checker.isTypeAssignableTo(type, stated))) {
@@ -1255,7 +1317,7 @@ export const censusCollectionBindings = (
     // does not locate it.
     let unresolved: ts.Expression | null = null
     for (const expr of evidence) {
-      const type = argumentType(expr)
+      const type = elementWriteType(expr)
       if (!type) {
         unresolved = expr
         break
@@ -1536,6 +1598,15 @@ export const censusCollectionBindings = (
     },
     mapResultTypeAt: (call) => mapResults.get(call) ?? null,
     mapCallbackElementAt: (callback) => mapCallbacks.get(callback) ?? null,
-    literalArrayTypeAt: (node) => literalArrays.get(node) ?? null
+    literalArrayTypeAt: (node) => literalArrays.get(node) ?? null,
+    nullSlotElementFor: (expression) => {
+      const type = checker.getTypeAtLocation(expression)
+      if (!checker.isArrayType(type)) return null
+      const [checkerElement] = checker.getTypeArguments(type as ts.TypeReference)
+      if (checkerElement === undefined || checkerElement.flags !== ts.TypeFlags.Null) return null
+      const owner = ownerDeclOfExpr(expression)
+      const element = owner ? (boundElement.get(owner) ?? null) : null
+      return element && element !== checkerElement ? element : null
+    }
   }
 }

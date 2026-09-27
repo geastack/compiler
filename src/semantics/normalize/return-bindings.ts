@@ -1,7 +1,12 @@
 import ts from 'typescript'
 import { definitelyReturns } from './return-paths.js'
 import { carriesUnsubstitutedGeneric, emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
-import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
+import {
+  emptyCollectionBindingCensus,
+  isNullSlotReadType,
+  nullSlotReadTypeOf,
+  type CollectionBindingCensus
+} from './collection-bindings.js'
 import { emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
 import type { ValueFlowIndex } from './flow/model.js'
@@ -604,6 +609,8 @@ export const censusReturnBindings = (
   /** Function expressions whose return convention is the slot they are written into -- see `contextualReturnTypeOf`. */
   const contextualReturns = new Map<ReturnCandidateDeclaration, ts.Type>()
   const slotIsWritten = (node: ReturnCandidateDeclaration): boolean => methodSlotIsWritten(flow, node)
+  /** Declarations admitted for a bare `null` return -- see the candidate walk below. */
+  const nullReturns = new Set<ReturnCandidateDeclaration>()
   const visit = (node: ts.Node): void => {
     if ((ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && !hasStatedReturnType(checker, node) && node.body !== undefined) {
       const contextual = contextualReturnTypeOf(checker, node)
@@ -620,7 +627,14 @@ export const censusReturnBindings = (
       // zero. The two questions have to be answered the same way in both
       // places, so this asks `annotationStatesNothing` of the resolved return
       // type as well.
+      // A bare `null` return is the third: a function returning an element of a
+      // `[ null ]` literal the collection census opened (see
+      // `CollectionBindingCensus.nullSlotElementFor`) returns the census element.
       if (returned && (isAnyType(returned) || annotationStatesNothing(checker, node, returned))) candidates.push(node)
+      else if (returned && isNullSlotReadType(returned)) {
+        nullReturns.add(node)
+        candidates.push(node)
+      }
     }
     // ...and the third shape: a STATED return type that is only an upper
     // bound. `hasStatedReturnType` above turns it away, correctly, for the
@@ -805,6 +819,8 @@ export const censusReturnBindings = (
     if (!iterable) return null
     const nonNull = checker.getNonNullableType(iterable)
     const indexed = checker.getIndexTypeOfType(nonNull, ts.IndexKind.Number)
+    const nullSlot = indexed ? collections.nullSlotElementFor?.(expression) : null
+    if (nullSlot) return nullSlot
     if (indexed && !isUnusableEvidence(indexed)) return indexed
     return collections.arrayElementForRead(expression)
   }
@@ -1043,6 +1059,10 @@ export const censusReturnBindings = (
       return propertyTypeOf(receiver, node.name.text, node) ?? bags.slotTypeAt(node) ?? attribute(owner, 'return-member-not-found')
     }
     if (ts.isElementAccessExpression(node) && node.argumentExpression) {
+      // See `CollectionBindingCensus.nullSlotElementFor`.
+      const nullSlotElement = collections.nullSlotElementFor?.(node.expression)
+      const nullSlot = nullSlotElement ? nullSlotReadTypeOf(checker, checker.getTypeAtLocation(node), nullSlotElement) : null
+      if (nullSlot) return nullSlot
       const receiver = knownOrResolve(node.expression, owner)
       if (!receiver) {
         // The receiver itself has no usable evidence -- try the array census
@@ -1421,6 +1441,17 @@ export const censusReturnBindings = (
       // checker's `any[]`, at the call and at the const it initializes.
       const mapped = ts.isCallExpression(node) ? collections.mapResultTypeAt?.(node) : null
       if (mapped) return mapped
+      // A call of a function admitted for its bare `null` return, which the
+      // census found returns more (an element of a `[ null ]` literal the
+      // collection census opened): the checker still answers `null` at the
+      // call, and this channel is read over it. Never at the declaration,
+      // where this channel answers the function value.
+      if (nullReturns.size > 0 && ts.isCallExpression(node) && isNullSlotReadType(checker.getTypeAtLocation(node))) {
+        const declaration = checker.getResolvedSignature(node)?.declaration
+        const returned =
+          declaration && isReturnCandidateKind(declaration) && nullReturns.has(declaration) ? bound.get(declaration) : undefined
+        if (returned && !isNullSlotReadType(returned)) return returned
+      }
       if (statedReturns.size === 0) return null
       if (isReturnCandidateKind(node)) return statedReturns.get(node) ?? null
       if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
