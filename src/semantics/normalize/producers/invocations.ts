@@ -1314,6 +1314,9 @@ const collectionMemberResultOverride = (context: ProducerContext, node: ts.CallE
   // array `collectionArrayFromResultTypeAt` publishes.
   if (context.collections.arrayFromElementAt?.(node)) return context.types.typeAt(node)
   const member = callee.name.text
+  // `s.values()`/`s.keys()` over a Set the census bound: the iterator of its key.
+  if ((member === 'values' || member === 'keys') && node.arguments.length === 0)
+    return context.collections.setKeyForRead?.(callee.expression) ? context.types.typeAt(node) : null
   if (member !== 'get' && member !== 'set' && member !== 'add') return null
   const bound = context.collections.typeArgumentsForRead(callee.expression)
   if (!bound) return null

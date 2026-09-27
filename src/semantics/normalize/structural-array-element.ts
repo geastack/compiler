@@ -1069,6 +1069,8 @@ export const collectionMemberResultTypeAt = (
   const callee = node.expression
   if (!ts.isPropertyAccessExpression(callee)) return null
   const member = callee.name.text
+  if ((member === 'values' || member === 'keys') && node.arguments.length === 0)
+    return setIteratorResultTypeAt(collections, table, typeOf, layoutTypeAt, node)
   if (member !== 'get' && member !== 'set' && member !== 'add') return null
   const receiver = callee.expression
   // `typeArgumentsForRead` resolves the receiver to the DECLARATION that owns
@@ -1111,3 +1113,27 @@ export const collectionArrayFromResultTypeAt = (
   return table.intern({ kind: 'array', element: typeOf(element), readonly: false, extension: [] })
 }
 
+/**
+ * `s.values()`/`s.keys()` over a Set the census bound a key for: the
+ * standard `SetIterator` of that key. Both iterate the Set's keys (ECMA-262
+ * 24.2.3.10, 24.2.3.8: `keys` IS `values`), and the checker instantiates the
+ * iterator from the Set's defaulted `any`, so the cursor stated a dynamic
+ * element over natively keyed storage (three's RenderObject `Array.from(
+ * vertexBuffers.values() )`). Only the element argument is replaced; the
+ * rest of the checker's instantiation stays.
+ */
+const setIteratorResultTypeAt = (
+  collections: CollectionBindingCensus,
+  table: StructuralTypeTable,
+  typeOf: (type: ts.Type) => StructuralTypeId,
+  layoutTypeAt: (node: ts.Node) => ts.Type,
+  node: ts.CallExpression
+): StructuralTypeId | null => {
+  const callee = node.expression as ts.PropertyAccessExpression
+  const key = collections.setKeyForRead?.(callee.expression) ?? null
+  if (key === null) return null
+  const generic = table.get(typeOf(layoutTypeAt(node))).shape
+  if (generic.kind !== 'declared' || generic.typeArguments.length === 0) return null
+  const [, ...rest] = generic.typeArguments
+  return table.intern({ kind: 'declared', declaration: generic.declaration, typeArguments: [typeOf(key), ...rest], body: null })
+}
