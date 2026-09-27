@@ -202,6 +202,7 @@ for-of-array-object.ts.cpp 0b0710a08b19
 for-of-in-bare-identifier-head.ts.cpp d70a5ed6b7b3
 for-of-literal-pattern-head.ts.cpp 825ff605e74d
 for-of-union-of-node-arrays.ts.cpp adc818f4d836
+fresh-map-takes-stated-destination.runtime.js.cpp 023ded3bf3bf
 function-and-constructor-own-properties.ts.cpp dad374b6baff
 function-arm-union-slot-default.ts.cpp 433d5f88a80e
 function-generator-overload-result.ts.cpp 8600bcfb6606

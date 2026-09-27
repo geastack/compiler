@@ -577,6 +577,77 @@ export const censusCollectionBindings = (
     })
   }
 
+  // A PARAMETER that states its type is a boundary of the storage passed to
+  // it, not one more cell of it -- see the array census's `statesItsType`
+  // below, which this is the collection form of.
+  const statesItsType = (node: ts.Node): boolean =>
+    ts.isParameter(node) && (node.type !== undefined || ts.getJSDocType(node) !== undefined || ts.getJSDocParameterTags(node).length > 0)
+
+  /**
+   * Whether a bare collection takes the type arguments of the stated
+   * parameters it is passed to, and if so binds them.
+   *
+   * three's `overrideNodes` fills `const overrideNodesMap = new Map()` with
+   * `.set( node, callback )` from an untyped `overrides`, then passes it to
+   * `@param {Map<Node, Function>} overrideNodes`. The writes type nothing,
+   * so the map was laid out `Map<any, any>` while the parameter holds the
+   * statement: one storage, two carriers, and no conversion between keyed
+   * collections that keeps the map's identity. The statement is the only
+   * fact about the arguments, so the map takes it, exactly as an unstated
+   * `[]` takes the element of the parameter it is passed to (the array
+   * census below), and each untyped write converts into it at the write.
+   *
+   * Only when every stating parameter agrees on one generic of this family
+   * with at least one stated argument, some write is untyped (every write
+   * typed is the ordinary join below), and every typed write fits the
+   * statement. The closure stops at the parameter, so what the callee does
+   * with its own argument is not this storage's question.
+   */
+  const adoptsStatedTypeArguments = (entry: CollectionEntry, owner: ts.Node): boolean => {
+    const familySymbol = constructorSymbols.get(entry.family)
+    if (!familySymbol) return false
+    const cells: ts.Node[] = []
+    const boundaries: ts.Node[] = []
+    for (const alias of aliasClosureOf(owner, statesItsType)) {
+      if (alias !== owner && statesItsType(alias)) boundaries.push(alias)
+      else cells.push(alias)
+    }
+    let stated: readonly ts.Type[] | null = null
+    for (const boundary of boundaries) {
+      const typeNode = (boundary as ts.ParameterDeclaration).type ?? ts.getJSDocType(boundary)
+      if (!typeNode) return false
+      const statement = checker.getTypeFromTypeNode(typeNode)
+      const members = (statement.isUnion() ? statement.types : [statement]).filter(
+        (member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
+      )
+      const [only] = members
+      if (members.length !== 1 || only === undefined || only.getSymbol() !== familySymbol) return false
+      if (((only as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return false
+      const args = checker.getTypeArguments(only as ts.TypeReference)
+      if (args.every((argument) => (argument.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0)) return false
+      if (stated && (stated.length !== args.length || stated.some((argument, index) => argument !== args[index]))) return false
+      stated = args
+    }
+    const [key, value] = stated ?? []
+    if (!key) return false
+    const keyWrites: (ts.Type | null)[] = []
+    const valueWrites: (ts.Type | null)[] = []
+    for (const decl of [...cells, ...boundaries]) {
+      for (const write of flow.writesToDeclaration(decl)) {
+        if (write.edge === 'collection-key' && write.value) keyWrites.push(argumentType(write.value))
+        else if (write.edge === 'collection-value' && write.value) valueWrites.push(argumentType(write.value))
+      }
+    }
+    if (![...keyWrites, ...valueWrites].some((type) => type === null)) return false
+    const fits = (types: readonly (ts.Type | null)[], argument: ts.Type | undefined): boolean =>
+      argument !== undefined && types.every((type) => type === null || checker.isTypeAssignableTo(type, argument))
+    const keyed = entry.family === 'map' || entry.family === 'weak-map'
+    if (!fits(keyWrites, key) || (keyed && !fits(valueWrites, value))) return false
+    boundKey.set(owner, key)
+    if (keyed && value) boundValue.set(owner, value)
+    return true
+  }
+
   // Pass 2: every `.get`/`.set`/`.has`/`.delete`/`.add` KEY/VALUE write that
   // reaches one of the tracked collections above OR any cell in its alias
   // closure -- read from `flow` rather than re-walked, so a receiver spelled
@@ -606,6 +677,7 @@ export const censusCollectionBindings = (
       continue
     }
     if (statesItsTypeArguments(entry, owner)) continue
+    if (adoptsStatedTypeArguments(entry, owner)) continue
     // An object-literal slot holding this collection is a second cell whose
     // carrier this census never publishes: the bag types it from the
     // checker's own `Map<any, any>`, so binding the owner gave one storage
@@ -953,8 +1025,6 @@ export const censusCollectionBindings = (
   // `BufferGeometry.setFromPoints`' `point.z || 0` pushes and boxed every
   // geometry's buffers. Its own writes stay evidence for each caller that
   // reaches it; nothing past it is followed.
-  const statesItsType = (node: ts.Node): boolean =>
-    ts.isParameter(node) && (node.type !== undefined || ts.getJSDocType(node) !== undefined || ts.getJSDocParameterTags(node).length > 0)
   const boundariesOf = new Map<ts.Node, Set<ts.Node>>()
   const arrayRoots = new Map<ts.Node, ts.Node>()
   const rootOf = (node: ts.Node): ts.Node => {
