@@ -358,6 +358,7 @@ key-order-cases.ts.cpp 36f9f7e763c5
 lazy-map-in-logical-or-assignment.ts.cpp 1173673c5bbd
 lazy-subclass-accessor-override.ts.cpp f3d043d1536d
 let-cache-lookup-miss.runtime.js.cpp a8b2966ce67f
+literal-member-bag-assigned-from-dynamic-source.runtime.js.cpp 183be52f7788
 literal-slot-caches-stay-any.runtime.js.cpp 2fda56a9584b
 local-iteration.ts.cpp 9f4a7461cb94
 logical-and-object-left-falsy-arm.ts.cpp 24e43ef8d14b

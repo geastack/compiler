@@ -7,7 +7,7 @@ import type { CallOperation, IrOperand } from '../../../ir/model.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from '../emit-context.js'
 import { canonicalIndexLiteral, memberAccessOperator } from '../emit-carrier-members.js'
 import { classMemberOf, lazyArrowFieldPlanOf } from '../class-layout.js'
-import { alignedValueText, recipeText } from '../emit-narrowing.js'
+import { alignedValueText, recipeText, unboxedLoadText } from '../emit-narrowing.js'
 import {
   getOwnValue,
   objectViewFrom,
@@ -1979,6 +1979,27 @@ const assignSourceText = (ctx: EmitContext, targetView: ObjectView, sourceView: 
     targetView.value.kind === 'dynamic'
   ) {
     return `gea::host::ObjectConstructor::assignInto(${targetView.receiver}, ${sourceView.receiver});`
+  }
+  if (targetView.kind === 'dictionary' && targetView.representation.key === 'string' && sourceView.kind === 'dynamic') {
+    // The same loop as the Document arm above, with the table's own value
+    // type: each source value is the checked unbox every read of a boxed
+    // value into a typed cell performs (`unboxedLoadText`), so a value the
+    // table cannot hold refuses at run time rather than being reinterpreted.
+    // three's `ColorManagement.define( colorSpaces )` copies a parameter no
+    // caller types into its `spaces` table of color-space records.
+    const loaded = unboxedLoadText(targetView.value, '__gea_value')
+    if (loaded !== null) {
+      return (
+        `{ const gea::Value& __gea_source = ${sourceView.receiver}; ` +
+        // 20.1.2.1 step 4.a: a null or undefined source contributes nothing.
+        'if (__gea_source.tag() != gea::Value::Tag::Undefined && __gea_source.tag() != gea::Value::Tag::Null) ' +
+        'for (const std::string& __gea_key : __gea_source.ownEnumerableStringKeys()) { ' +
+        'const gea::Value __gea_value = __gea_source.getProperty(gea::PropertyKey::string(__gea_key)); ' +
+        // 7.3.25 step 8.c.ii: `Set(to, key, value, true)`, as every store above.
+        `if (!${targetView.receiver}.setProperty(__gea_key, ${loaded})) ` +
+        'gea::host::throwRuntimeError("TypeError", "Cannot assign to read only property"); } }'
+      )
+    }
   }
   if (targetView.kind === 'dictionary' || sourceView.kind === 'dictionary') {
     if (
