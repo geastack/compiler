@@ -386,6 +386,37 @@ const hasStatedReturnType = (checker: ts.TypeChecker, declaration: ReturnCandida
 }
 
 /**
+ * The return statement of the base-class method a JavaScript override
+ * replaces, when the override states none of its own.
+ *
+ * Every caller that reaches the override through the base (three's
+ * `Node.getChildren` calling `this._getChildren()` on a `StructNode`) is
+ * typed by the base's statement, so it is the override's contract too: the
+ * two share one return ABI, and the override is held to the same upper bound
+ * the base is. The field form of this rule is `collection-bindings.ts`'s
+ * `inheritedFieldTypeNode`.
+ */
+const overriddenReturnStatementOf = (checker: ts.TypeChecker, declaration: ReturnCandidateDeclaration): ts.TypeNode | undefined => {
+  if (!ts.isMethodDeclaration(declaration) || !ts.isIdentifier(declaration.name)) return undefined
+  if (!ts.isClassLike(declaration.parent) || !isInJavaScriptFile(declaration)) return undefined
+  const classSymbol = declaration.parent.name ? checker.getSymbolAtLocation(declaration.parent.name) : undefined
+  if (!classSymbol) return undefined
+  const instance = checker.getDeclaredTypeOfSymbol(classSymbol)
+  if (!instance.isClassOrInterface()) return undefined
+  for (const base of checker.getBaseTypes(instance)) {
+    const property = checker.getPropertyOfType(base, declaration.name.text)
+    for (const overridden of property?.declarations ?? []) {
+      if (!ts.isMethodDeclaration(overridden) || overridden.body === undefined) continue
+      const statement = overridden.type ?? ts.getJSDocReturnType(overridden)
+      if (statement) return statement
+    }
+  }
+  return undefined
+}
+
+const isInJavaScriptFile = (node: ts.Node): boolean => /\.(?:js|mjs|cjs|jsx)$/.test(node.getSourceFile().fileName)
+
+/**
  * A return type the program DID state, whose statement is still only an UPPER
  * BOUND -- the RETURN form of `parameter-bindings.ts`'s `statedUpperBound`
  * and `field-bindings.ts`'s `statedUpperBoundOfField`, asked of the third
@@ -415,7 +446,7 @@ const hasStatedReturnType = (checker: ts.TypeChecker, declaration: ReturnCandida
 const statedReturnBound = (checker: ts.TypeChecker, declaration: ReturnCandidateDeclaration): ts.Type | null => {
   if (declaration.body === undefined) return null
   if (declaration.getSourceFile().isDeclarationFile) return null
-  const statement = declaration.type ?? ts.getJSDocReturnType(declaration)
+  const statement = declaration.type ?? ts.getJSDocReturnType(declaration) ?? overriddenReturnStatementOf(checker, declaration)
   if (!statement) return null
   const declared = checker.getTypeFromTypeNode(statement)
   if (annotationStatesNothing(checker, statement, declared)) return null

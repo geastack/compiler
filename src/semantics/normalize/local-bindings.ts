@@ -130,6 +130,8 @@ export interface LocalBindingCensus {
   readonly typeAt: (node: ts.Node) => ts.Type | null
   /** This census's settled local-cell answer, without inherited expression inference. */
   readonly bindingTypeAt: (node: ts.Node) => ts.Type | null
+  /** A const cell, and its reads, holding a call whose stated return a census narrowed -- see `statedCallInitializerTypeAt`. */
+  readonly statedTypeAt: (node: ts.Node) => ts.Type | null
   /** A construction-proven local type that deliberately outranks an upstream usable checker answer. */
   readonly preferredTypeAt: (node: ts.Node) => ts.Type | null
   /** The member list for a SYNTHESIZED disjoint-union carrier at this node -- see `ParameterBindingCensus.unionArmsAt`, the same rule asked of a cell's write set instead of a parameter's argument set. */
@@ -152,6 +154,7 @@ export interface LocalBindingCensus {
 export const emptyLocalBindingCensus: LocalBindingCensus = {
   typeAt: () => null,
   bindingTypeAt: () => null,
+  statedTypeAt: () => null,
   preferredTypeAt: () => null,
   unionArmsAt: () => null,
   boundCount: 0,
@@ -1982,6 +1985,30 @@ export const censusLocalBindings = (
     if (bound.size === before) break
   }
 
+  // `const children = super._getChildren()`, where the callee's stated return
+  // (`@returns {Array<Object>}`) was read as an upper bound and the return
+  // census narrowed the call to the array of records it builds. The call is
+  // laid out from that narrowing (`statedTypeAt`), while the const's own
+  // checker type is the statement, which is usable, so no census replaced it:
+  // one array, two carriers, and no conversion between array elements that
+  // keeps its identity (three's `StructNode._getChildren` and
+  // `WebGPUBindingUtils.createBindingsLayout`). A const holds exactly what its
+  // initializer produced, so the cell and every read of it the checker did not
+  // narrow further carry the call's narrowed type -- published on the same
+  // channel as the call's, since it is the same statement read one hop on.
+  const statedCallInitializerTypeAt = (node: ts.Node): ts.Type | null => {
+    const declaration = ts.isVariableDeclaration(node) ? node : ts.isIdentifier(node) ? declarationOf(node) : null
+    if (!declaration?.initializer || !ts.isIdentifier(declaration.name) || declaration.type || ts.getJSDocType(declaration)) return null
+    const declarationList = declaration.parent
+    if (!ts.isVariableDeclarationList(declarationList) || (declarationList.flags & ts.NodeFlags.Const) === 0) return null
+    const initializer = unwrapParens(declaration.initializer)
+    if (!ts.isCallExpression(initializer) && !ts.isNewExpression(initializer)) return null
+    const narrowed = parameters.statedTypeAt(initializer)
+    if (!narrowed) return null
+    if (node !== declaration && checker.getTypeAtLocation(node) !== checker.getTypeAtLocation(declaration)) return null
+    return narrowed
+  }
+
   // `root` is the same stable, hand-written reason string this census always
   // keyed its old count map by (`no-symbol`, `write-unresolved`, one of
   // `noEvidenceReason`'s `no-writes:...` family, ...) -- never node text or a
@@ -2012,6 +2039,7 @@ export const censusLocalBindings = (
       if (ts.isBindingElement(node)) return boundElements.get(node) ?? null
       return resolveExpr(node)
     },
+    statedTypeAt: statedCallInitializerTypeAt,
     preferredTypeAt: (node) => {
       const observedAbsence = observedIndexedAbsence.get(node)
       if (observedAbsence) return observedAbsence
@@ -2109,6 +2137,7 @@ export const withLocalBindings = (
       locals.preferredTypeAt(node) ??
       locals.bindingTypeAt(node) ??
       (locals.unionArmsAt(node) ? null : (parameters.typeAt(node) ?? (parameters.unionArmsAt(node) ? null : locals.typeAt(node)))),
+    statedTypeAt: (node) => parameters.statedTypeAt(node) ?? locals.statedTypeAt(node),
     preferredTypeAt: (node) => locals.preferredTypeAt(node) ?? parameters.preferredTypeAt?.(node) ?? null,
     unionArmsAt: (node) => locals.unionArmsAt(node) ?? parameters.unionArmsAt(node),
     boundCount: parameters.boundCount + locals.boundCount,
