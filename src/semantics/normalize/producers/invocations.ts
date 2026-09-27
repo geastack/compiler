@@ -2025,8 +2025,9 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // that a bag the census resolves through `new` cannot reach the two
     // authorities with only one of them moved, which is the shape that made
     // this producer WITHHOLD when `shapeAt` answered calls unilaterally.
+    const mapResultType = collectionMemberInferredType === null && ts.isCallExpression(node) ? mapResultOverride(context, node) : null
     const bagInferredType =
-      collectionMemberInferredType === null && (ts.isCallExpression(node) || ts.isNewExpression(node))
+      collectionMemberInferredType === null && mapResultType === null && (ts.isCallExpression(node) || ts.isNewExpression(node))
         ? bagResultOverride(context, node)
         : null
     // `Array.from` is an ambient static, never a collection member or a bag.
@@ -2042,6 +2043,7 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     else if (objectFromEntriesAnnotatedType !== null) resultDivergence = { kind: 'object-from-entries-type-annotation' }
     else if (objectAssignTargetType !== null) resultDivergence = { kind: 'object-assign-target-identity' }
     else if (collectionMemberInferredType !== null) resultDivergence = { kind: 'collection-member-type-inference' }
+    else if (mapResultType !== null) resultDivergence = { kind: 'map-result-stated-destination' }
     else if (bagInferredType !== null) resultDivergence = { kind: 'bag-return-inference' }
     else if (arrayFromCopyType !== null) resultDivergence = { kind: 'array-from-copy-inference' }
     // Neither override, and no type is substituted: the published result stays
@@ -2119,6 +2121,7 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
       objectAssignTargetType ??
       objectDescriptorAssertedType ??
       collectionMemberInferredType ??
+      mapResultType ??
       bagInferredType ??
       arrayFromCopyType ??
       censusedReturnType ??

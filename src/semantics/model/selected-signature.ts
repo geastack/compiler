@@ -177,6 +177,17 @@ export type InvocationResultDivergence =
    */
   | { readonly kind: 'collection-member-type-inference' }
   /**
+   * `const nodes = params.map( param => getConstNode( param ) )`: the
+   * checker instantiates `map<U>`'s `U[]` from the callback's own return,
+   * which is `any`, while `collection-bindings.ts` gave the fresh array the
+   * element of the statement it flows into and the callback returns into that
+   * element (its "A map result is a fresh array" pass). The call's published
+   * result is that array; the signature is the half the checker instantiated
+   * before the census answered. See `producers/invocations.ts`'s
+   * `mapResultOverride`.
+   */
+  | { readonly kind: 'map-result-stated-destination' }
+  /**
    * A call that RETURNS an object bag: three's `WebGLProperties.get`, whose
    * body is `let map = properties.get( object ); if ( map === undefined ) {
    * map = {}; ... } return map`. Nothing in the source states that return
