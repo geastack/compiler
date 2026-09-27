@@ -19,6 +19,7 @@ import {
 } from '../deferred-intrinsic-protocols.js'
 import { computedKeySetOf, type ComputedKeySetAuthority } from './computed-key-set.js'
 import { closedCallableAuthorityOf } from './callable-reach.js'
+import { arrayStoredValuesOf } from './array-element-continuation.js'
 import { censusArgumentsObjects } from '../arguments-objects.js'
 
 /**
@@ -742,6 +743,7 @@ const computeClosureRefusal = (
       return callee !== undefined && callee.getSourceFile().isDeclarationFile && !typeMayHold(constructed, family)
     }
     if (ts.isPropertyAccessExpression(value)) return memberExcludesFamily(value.name.text, active)
+    if (ts.isElementAccessExpression(value)) return elementExcludesFamily(value, active)
     if (!ts.isIdentifier(value)) return false
     const declaration = flow.targetOf(value)?.declaration
     if (!declaration || !ts.isVariableDeclaration(declaration)) return false
@@ -755,6 +757,31 @@ const computeClosureRefusal = (
           excludesFamily(write.value, active)
       )
     )
+  }
+  /**
+   * `excludesFamily` for an ELEMENT read: whatever the array ever stored.
+   *
+   * three's `RenderList` recycles `let renderItem = this.renderItems[ i ]`,
+   * a field stated `@type {Array<Object>}`, and writes `renderItem.z = z`
+   * into it. `Object` states nothing about which objects the array holds, so
+   * the checker's type admits every class, and the `z` read on a
+   * `Vector2|Vector3` point in `BufferGeometry.setFromPoints` refused on that
+   * write. The array's own element writes say what it holds: every value
+   * stored into it is `renderItem` again or the `{ id, z, ... }` literal.
+   *
+   * `arrayStoredValuesOf` is the authority for "every value this array ever
+   * stored" (the same one `source-record-data.ts` asks for the same read):
+   * null unless the array's whole family of cells and allocations is closed.
+   * A key that is not a number may name a property that is no element, so it
+   * refuses; a hole or a miss reads `undefined`, which is no family member.
+   */
+  const elementExcludesFamily = (value: ts.ElementAccessExpression, active: Set<ts.Node>): boolean => {
+    const key = value.argumentExpression
+    const numeric = (type: ts.Type): boolean => (type.isUnion() ? type.types.every(numeric) : (type.flags & ts.TypeFlags.NumberLike) !== 0)
+    const authority = completeKeys()
+    if (!numeric(checker.getTypeAtLocation(key)) && !authority.numericKey(key)) return false
+    const stored = arrayStoredValuesOf(checker, flow, value.expression, authority)
+    return stored !== null && stored.every((element) => excludesFamily(element, active))
   }
   /**
    * `excludesFamily` for a MEMBER slot: what can a slot of this name hold,
