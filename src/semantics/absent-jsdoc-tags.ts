@@ -127,7 +127,13 @@ export const absentJsDocTagWidenings = (program: ts.Program, prepared: ReadonlyM
     // its constructor and another through an instance, and both list the
     // assignment that declares it.
     const declarations = new Set<ts.Node>(checker.getSymbolAtLocation(target)?.declarations ?? [])
-    for (const candidate of candidates) if (declarations.has(candidate.declaration) || candidate.declaration === store) widen(candidate.tag)
+    for (const candidate of candidates) {
+      if (!declarations.has(candidate.declaration) && candidate.declaration !== store) continue
+      widen(candidate.tag)
+      // The overlay copies of this declarer's tag onto its ancestors (see
+      // `ancestorOverlaysOf`) state the same value, so they admit the null too.
+      for (const overlay of ancestorOverlaysOf(checker, candidate.declaration, candidates)) widen(overlay.tag)
+    }
   }
   for (const [, candidates] of fieldTags)
     for (const candidate of candidates)
@@ -159,6 +165,52 @@ export const absentJsDocTagWidenings = (program: ts.Program, prepared: ReadonlyM
     if (changed) widened.set(fileName, text)
   }
   return widened
+}
+
+/**
+ * The `@geaSubclassMemberOverlay` fields of the same name on the ancestors of
+ * the class a field tag is declared in.
+ *
+ * `subclass-member-overlay-transform.ts` writes a member some subclasses
+ * declare onto their common ancestors, as the union of the declarers' tags
+ * and `undefined`, and each declarer restates its own tag. It copies the tag
+ * TEXT before this pass runs, so when a declarer's tag is widened for a
+ * `null` store, the copies on the ancestors still leave the `null` out.
+ * three's `ComputeNode` states `@type {number|Array<number>}` over
+ * `this.dispatchSize = null`: its own tag became `{?number|Array<number>}`,
+ * while `Node`'s and `EventDispatcher`'s overlays kept
+ * `{number|Array<number> | undefined}`, and the store took that carrier,
+ * which has no state for `null` (ComputeNode:85). The overlay is the union of
+ * what the declarers hold, and a declarer holds the `null`.
+ */
+const ancestorOverlaysOf = (
+  checker: ts.TypeChecker,
+  declaration: ts.Node,
+  candidates: readonly { readonly declaration: ts.Node; readonly tag: ts.JSDocTypeTag }[]
+): readonly { readonly declaration: ts.Node; readonly tag: ts.JSDocTypeTag }[] => {
+  const ancestors = new Set<ts.Node>()
+  let current: ts.ClassLikeDeclaration | undefined = classOf(declaration)
+  while (current) {
+    const heritage = current.heritageClauses?.find((clause) => clause.token === ts.SyntaxKind.ExtendsKeyword)?.types[0]
+    const named = heritage ? checker.getSymbolAtLocation(heritage.expression) : undefined
+    const symbol = named && (named.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(named) : named
+    const base = symbol?.valueDeclaration
+    current = base && ts.isClassLike(base) && !ancestors.has(base) ? base : undefined
+    if (current) ancestors.add(current)
+  }
+  if (ancestors.size === 0) return []
+  return candidates.filter(
+    (candidate) =>
+      ts.isPropertyDeclaration(candidate.declaration) &&
+      ancestors.has(candidate.declaration.parent) &&
+      ts.getJSDocTags(candidate.declaration).some((tag) => tag.tagName.text === 'geaSubclassMemberOverlay')
+  )
+}
+
+const classOf = (node: ts.Node): ts.ClassLikeDeclaration | undefined => {
+  let current: ts.Node | undefined = node.parent
+  while (current && !ts.isClassLike(current)) current = current.parent
+  return current
 }
 
 /** Whether a function body returns the literal `null` itself, not from a function nested in it. */
