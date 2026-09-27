@@ -11499,6 +11499,20 @@ inline bool sameValueZeroMember(const K& key, const Candidates&... candidates) {
   return (sameValueZeroCandidate(key, candidates) || ...);
 }
 
+/**
+ * A tagged union as a key (three's RenderObject fills a `Set` with
+ * `BufferAttribute | InterleavedBuffer`): the arms are pairwise disjoint at
+ * runtime (`TaggedUnion`), so two keys are the same key only when they hold
+ * the same arm, and then exactly when that arm's values are.
+ */
+template <typename... Arms>
+inline bool sameValueZero(const TaggedUnion<Arms...>& left, const TaggedUnion<Arms...>& right) {
+  if (left.index() != right.index()) return false;
+  return [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
+    return ((left.template is<Indices>() && sameValueZero(left.template get<Indices>(), right.template get<Indices>())) || ...);
+  }(std::index_sequence_for<Arms...>{});
+}
+
 /** ECMA-262 SameValue for Number values: NaN equals NaN, while +0 and -0 differ. */
 inline bool sameNumberValue(double left, double right) {
   if (std::isnan(left) && std::isnan(right)) return true;
