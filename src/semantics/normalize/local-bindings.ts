@@ -1922,8 +1922,16 @@ export const censusLocalBindings = (
   // channel as the call's, since it is the same statement read one hop on.
   // A literal of untyped values the collection census gave its destination's
   // statement (`literalArrayTypeAt`) is held by its const the same way.
+  // A shorthand `{ entries }` names the property at its identifier; the value
+  // it reads is the const's (three's `createBindGroupLayout( { entries } )`).
+  const readDeclarationOf = (node: ts.Identifier): ts.VariableDeclaration | null => {
+    if (!ts.isShorthandPropertyAssignment(node.parent) || node.parent.name !== node) return declarationOf(node)
+    const declarations = checker.getShorthandAssignmentValueSymbol(node.parent)?.declarations
+    const declaration = declarations && declarations.length === 1 ? declarations[0] : undefined
+    return declaration && ts.isVariableDeclaration(declaration) ? declaration : null
+  }
   const statedCallInitializerTypeAt = (node: ts.Node): ts.Type | null => {
-    const declaration = ts.isVariableDeclaration(node) ? node : ts.isIdentifier(node) ? declarationOf(node) : null
+    const declaration = ts.isVariableDeclaration(node) ? node : ts.isIdentifier(node) ? readDeclarationOf(node) : null
     if (!declaration?.initializer || !ts.isIdentifier(declaration.name) || declaration.type || ts.getJSDocType(declaration)) return null
     const declarationList = declaration.parent
     if (!ts.isVariableDeclarationList(declarationList) || (declarationList.flags & ts.NodeFlags.Const) === 0) return null

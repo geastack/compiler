@@ -376,6 +376,7 @@ narrow-to-absent.ts.cpp befbe4fef4d4
 narrow-union-to-descendant-arms.ts.cpp 823583261657
 narrowed-family-intersection.ts.cpp a5320681ade6
 narrowed-stated-return-into-const.runtime.js.cpp ab7d67a02d14
+narrowed-stated-return-shorthand-read.runtime.js.cpp 111f5866a23e
 native-absent-feature.js.cpp b83e88aa0aea
 native-accessor-field-flow.ts.cpp cf8a48152367
 native-apply-fixed-tuple.runtime.ts.cpp 7e2e07c7c73e
