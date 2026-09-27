@@ -996,6 +996,10 @@ const arrayConstructResultOverride = (
   // a second reading here would be a second authority over one allocation --
   // the same division `statedCollectionTypeAt` already keeps below.
   if (contextualArrayConstructTypeAt(context.checker, node)) return context.types.typeAt(node)
+  // The same for an allocation the array census owns (`dst = new Array( n )`
+  // into an unstated cell, typed by its index writes): its structural rule
+  // (`inferred-array-element`) already answers from the census.
+  if (context.collections.arrayElementAt(node)) return context.types.typeAt(node)
   return null
 }
 
