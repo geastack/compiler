@@ -1177,6 +1177,15 @@ const collectionMemberResultOverride = (context: ProducerContext, node: ts.CallE
 }
 
 /**
+ * An `Array.prototype.map` call whose fresh result took the element of the
+ * statement it flows into -- `collection-bindings.ts`'s "A map result is a
+ * fresh array". The GATE only, like the two collection overrides above: the
+ * census answered `typeAt` for this node, and this returns that answer.
+ */
+const mapResultOverride = (context: ProducerContext, node: ts.CallExpression): StructuralTypeId | null =>
+  context.collections.mapResultTypeAt?.(node) ? context.types.typeAt(node) : null
+
+/**
  * A call whose result IS an object bag this census bound.
  *
  * The last of the five overrides, and the only one whose subject is not an
@@ -1784,8 +1793,9 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // that a bag the census resolves through `new` cannot reach the two
     // authorities with only one of them moved, which is the shape that made
     // this producer WITHHOLD when `shapeAt` answered calls unilaterally.
+    const mapResultType = collectionMemberInferredType === null && ts.isCallExpression(node) ? mapResultOverride(context, node) : null
     const bagInferredType =
-      collectionMemberInferredType === null && (ts.isCallExpression(node) || ts.isNewExpression(node))
+      collectionMemberInferredType === null && mapResultType === null && (ts.isCallExpression(node) || ts.isNewExpression(node))
         ? bagResultOverride(context, node)
         : null
     if (jsonParseAssertedType !== null) resultDivergence = { kind: 'json-parse-type-assertion' }
@@ -1795,6 +1805,7 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     else if (objectCreateAnnotatedType !== null) resultDivergence = { kind: 'object-create-type-annotation' }
     else if (objectAssignTargetType !== null) resultDivergence = { kind: 'object-assign-target-identity' }
     else if (collectionMemberInferredType !== null) resultDivergence = { kind: 'collection-member-type-inference' }
+    else if (mapResultType !== null) resultDivergence = { kind: 'map-result-stated-destination' }
     else if (bagInferredType !== null) resultDivergence = { kind: 'bag-return-inference' }
     // Neither override, and no type is substituted: the published result stays
     // the checker's own `unique symbol`. Only the LICENSE is recorded, because
@@ -1868,6 +1879,7 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
       objectAssignTargetType ??
       objectDescriptorAssertedType ??
       collectionMemberInferredType ??
+      mapResultType ??
       bagInferredType ??
       censusedReturnType ??
       checkerResultType

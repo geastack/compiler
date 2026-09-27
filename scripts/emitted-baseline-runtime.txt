@@ -170,6 +170,7 @@ dynamic-union-ambiguous.ts.cpp 65c1819df9c7
 dynamic-union-nominal.ts.cpp c54e10ba695d
 dynamic-union-optional.ts.cpp 83750c186ff5
 empty-pattern-coercible-and-nullish-typeerror.runtime.js.cpp 97080de74be0
+entries-map-takes-stated-destination.runtime.js.cpp 821c8c8dbda8
 entry-join-and-inspect.ts.cpp 15efb6316e8c
 error-intersection-with-code.ts.cpp ad3f01f44ac8
 every-path-returns.ts.cpp 7c0aa5a44980
@@ -202,6 +203,7 @@ for-of-array-object.ts.cpp 0b0710a08b19
 for-of-in-bare-identifier-head.ts.cpp d70a5ed6b7b3
 for-of-literal-pattern-head.ts.cpp 825ff605e74d
 for-of-union-of-node-arrays.ts.cpp adc818f4d836
+fresh-map-takes-stated-destination.runtime.js.cpp 023ded3bf3bf
 function-and-constructor-own-properties.ts.cpp dad374b6baff
 function-arm-union-slot-default.ts.cpp 433d5f88a80e
 function-generator-overload-result.ts.cpp 8600bcfb6606
@@ -325,6 +327,7 @@ jsdoc-field-stores-contradicted-parameter.runtime.js.cpp 211918b23ce0
 jsdoc-field-tag-held-by-silent-writes.runtime.js.cpp cd87cd040be8
 jsdoc-field-tag-names-an-unimported-default-export.runtime.js.cpp 26c34a1c3013
 jsdoc-field-type-contradicted-by-writes.runtime.js.cpp f9608f5b2fc1
+jsdoc-generic-argument-name-not-imported.runtime.js.cpp 8c45dfb5a05c
 jsdoc-map-field-value-contradicted-by-set.runtime.js.cpp 80b739976818
 jsdoc-member-tag-contradicted-by-literal-argument.runtime.js.cpp 5f9647852cdf
 jsdoc-optional-parameter.runtime.js.cpp 2cfb2703873b
@@ -361,6 +364,7 @@ logical-native-merge.ts.cpp eea411f205b3
 logical-object-union-falsy-absence.ts.cpp e82a3a7b3c45
 loop-invariant-ref-argument.ts.cpp 2ff2c84559a5
 loop-move-single-use.ts.cpp b38b117295b4
+map-result-takes-stated-destination.runtime.js.cpp ea5f1151e9fb
 mapped-constraint-callee-copy.ts.cpp 4cd66f302541
 math-direct-rest.ts.cpp 2b05999ee8b2
 math-numeric-constants.ts.cpp 6a954aa857bb
@@ -376,6 +380,8 @@ narrow-nested-union.ts.cpp dbd7d28a7015
 narrow-to-absent.ts.cpp befbe4fef4d4
 narrow-union-to-descendant-arms.ts.cpp 823583261657
 narrowed-family-intersection.ts.cpp a5320681ade6
+narrowed-stated-return-into-const.runtime.js.cpp ab7d67a02d14
+narrowed-stated-return-shorthand-read.runtime.js.cpp 111f5866a23e
 native-absent-feature.js.cpp b83e88aa0aea
 native-accessor-field-flow.ts.cpp cf8a48152367
 native-apply-fixed-tuple.runtime.ts.cpp 7e2e07c7c73e
@@ -478,6 +484,7 @@ null-default-parameter-field-through-spread.runtime.js.cpp fd268ab1d76f
 null-default-parameter-from-callers.runtime.js.cpp 77b09ed91957
 null-default-untagged-parameter.runtime.js.cpp 18936c198044
 null-defaulted-parameter.runtime.js.cpp 3c2102fca019
+null-only-literal-takes-its-writes.runtime.js.cpp d3b2d11f7caf
 null-stored-tagged-field.runtime.js.cpp 0caa8ee82032
 nullish-union.ts.cpp 8898117b27df
 numeric-dictionary-own-keys.ts.cpp 4122db3e3b16
@@ -696,6 +703,7 @@ union-of-tuples-array-pattern.ts.cpp aa8e76675555
 union-of-tuples-nested-array-pattern.ts.cpp a33a8e162a03
 union-void-arm-is-the-undefined-carrier.ts.cpp 230baa95b904
 unknown-callee-argument-key-narrowing.ts.cpp f037154b942f
+untyped-literal-takes-stated-destination.runtime.js.cpp 60888069f915
 unused-subclass-is-pruned.ts.cpp 904fa5b0cd56
 user-iterable-protocol.ts.cpp 3eea6235cd08
 value-record-literal-union.ts.cpp ad9d4204d83c
