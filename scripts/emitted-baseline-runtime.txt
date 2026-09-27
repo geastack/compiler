@@ -170,6 +170,7 @@ dynamic-union-ambiguous.ts.cpp 65c1819df9c7
 dynamic-union-nominal.ts.cpp c54e10ba695d
 dynamic-union-optional.ts.cpp 83750c186ff5
 empty-pattern-coercible-and-nullish-typeerror.runtime.js.cpp 97080de74be0
+entries-map-takes-stated-destination.runtime.js.cpp 821c8c8dbda8
 entry-join-and-inspect.ts.cpp 15efb6316e8c
 error-intersection-with-code.ts.cpp ad3f01f44ac8
 every-path-returns.ts.cpp 7c0aa5a44980
