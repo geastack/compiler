@@ -304,7 +304,17 @@ export const contradictedJsDocParameterBlanks = (program: ts.Program, prepared: 
         const declaration = calleeOf(node)
         if (declaration && !ts.isJSDocSignature(declaration) && isUncheckedJavaScript(declaration.getSourceFile())) {
           readArguments(node, declaration)
-          if (ts.isMethodDeclaration(declaration)) for (const override of overridesOf(declaration)) readArguments(node, override)
+          // `super.m( ... )` is bound to the base method and never dispatches,
+          // so its arguments are no override's. three's `UniformNode.onUpdate`
+          // calls `super.onUpdate( ( frame ) => ..., updateType )`, and read
+          // against `UniformNode.onUpdate` itself (an override of the callee)
+          // the arrow blanked that method's own `(this: this, ...)` callback tag.
+          const viaSuper =
+            ts.isCallExpression(node) &&
+            (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression)) &&
+            node.expression.expression.kind === ts.SyntaxKind.SuperKeyword
+          if (ts.isMethodDeclaration(declaration) && !viaSuper)
+            for (const override of overridesOf(declaration)) readArguments(node, override)
         }
       }
       ts.forEachChild(node, visit)
