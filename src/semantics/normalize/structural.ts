@@ -57,6 +57,7 @@ import { indexedAccessMemberTypes } from './structural-indexed-access.js'
 import { joinedCallableOf, joinedIndexUnionOf } from './structural-joins.js'
 import { creationOrderedProperties } from './structural-creation-order.js'
 import {
+  collectionArrayFromResultTypeAt,
   collectionMemberResultTypeAt,
   contextualArrayConstructTypeAt,
   hostDynamicSlotCollectionAt,
@@ -4374,6 +4375,13 @@ const buildMapper = (
         if (collectionMember) return collectionMember
         return null
       }
+    },
+    {
+      // The same collection read whole: `Array.from( s )` over a Set the census
+      // bound. See `collectionArrayFromResultTypeAt` (`structural-array-element.ts`).
+      name: 'collection-array-from',
+      forms: [ts.SyntaxKind.CallExpression],
+      resolve: (node) => collectionArrayFromResultTypeAt(collections, table, typeOf, node)
     },
     {
       name: 'bag-shape',
