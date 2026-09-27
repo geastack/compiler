@@ -1,5 +1,4 @@
 // @ts-nocheck
-//! expect-refusal: "Array.from" of a "keyed-collection(set,tagged-union
 //! expect: 2
 //! expect: 1 2
 //
@@ -10,9 +9,7 @@
 // `any[]` beside a Set whose key the collection census had bound, and the
 // store into the stated field had no conversion (RenderObject.js:566).
 // The copy now takes the Set's bound key as its element, so the program
-// certifies. What is pinned is the refusal AFTER certification: C++ emission
-// of `Array.from` over a Set is the backend's piece. When it lands, drop the
-// `expect-refusal` line; the `expect` lines are the program's answer.
+// certifies, and `Array.from` over the Set emits through its iterator.
 class A {
   constructor() {
     this.a = 1
