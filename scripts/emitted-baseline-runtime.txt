@@ -372,6 +372,7 @@ mapped-constraint-callee-copy.ts.cpp 4cd66f302541
 math-direct-rest.ts.cpp 2b05999ee8b2
 math-numeric-constants.ts.cpp 6a954aa857bb
 member-declared-by-ancestor-is-not-restated.runtime.js.cpp 39ab71458797
+member-replaced-by-descendant-accessor-is-not-restated.runtime.js.cpp 0a2208a43919
 merge-arm-callable-arity-join.ts.cpp 74d9fe4b1a09
 merge-arm-dictionary-into-header-union.ts.cpp d01958dd9bed
 merge-arm-empty-array-into-native-array.ts.cpp 31fbf291be9e
