@@ -2344,6 +2344,17 @@ export const storedEnvironmentText = (body: string, member: string): string =>
   `gea::storedEnvironment<${cppEnvironmentStructName(body)}>(${member})`
 
 /**
+ * The present view of an optional operand, as `unwrapPresentValue` names it,
+ * without rendering anything. A pre-render claim on a read that `emitGet`
+ * makes through this view has to name the same operand, or the render finds a
+ * claim the walk never recorded. Any other operand is its own view.
+ */
+export const presentViewOf = (operand: IrOperand): IrOperand =>
+  operand.representation.kind === 'optional'
+    ? { value: `${operand.value}:present` as IrValueId, representation: operand.representation.payload }
+    : operand
+
+/**
  * The payload needed to read a property or invoke a nullable carrier.
  * Optional chaining guards this access, but a TypeScript non-null assertion
  * erases and proves nothing at runtime. Check presence before unwrapping so
@@ -2352,7 +2363,7 @@ export const storedEnvironmentText = (body: string, member: string): string =>
  */
 export const unwrapPresentValue = (ctx: EmitContext, lines: string[], operand: IrOperand): IrOperand => {
   if (operand.representation.kind !== 'optional') return operand
-  const value = `${operand.value}:present` as IrValueId
+  const { value } = presentViewOf(operand)
   // The narrowed view's own deferral is already stated by `hostMemberReadsOf`,
   // which names the `<value>:present` twin of every read it claims -- the same
   // unconditional statement `hostClassReadsOf` makes just below, and for the

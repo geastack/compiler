@@ -9,6 +9,7 @@ import {
   createCppEmitBlockedError,
   defineValueAlias,
   operandText,
+  presentViewOf,
   wellKnownSymbolMemberOf,
   type EmitContext,
   type PrototypeMethodRead,
@@ -1370,7 +1371,12 @@ export const unionMethodReadsOf = (ctx: EmitContext, body: IrBody): ReadonlyMap<
   for (const block of body.blocks.values()) {
     for (const operation of allOperationsOf(block)) {
       if (operation.kind !== 'get') continue
-      const claim = deferredUnionMethodClaim(ctx, operation.receiver, operation.key)
+      // `emitGet` reads an optional receiver through its present view and asks
+      // the claim there (three's NodeMaterial `alphaTestNode.add(...)` on a
+      // `let` first written `null`). Asking on the optional here instead
+      // recorded nothing, so the read rendered as a deferred dispatch and the
+      // call found no dispatch to render: a read of a value never defined.
+      const claim = deferredUnionMethodClaim(ctx, presentViewOf(operation.receiver), operation.key)
       if (claim !== null) reads.set(operation.result.id, claim)
     }
   }

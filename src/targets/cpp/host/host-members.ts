@@ -735,10 +735,12 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // specification defines as *the same function objects* the globals name.
   // `method`, not `property`: the runtime spells them as free functions, since
   // `parseInt`'s second parameter is optional and a `CallableObject`'s C++
-  // signature is one fixed arity. `arity: 2` is the declaration's own frame --
-  // `parseInt(string, radix?)` -- and the absent radix arrives as the `0` the
-  // clause's step 7 means by "absent", not as a guess.
-  ['NumberConstructor.parseInt', { kind: 'method', emit: 'gea::host::NumberConstructor::parseInt({arg0}, {arg1})', arity: 2 }],
+  // signature is one fixed arity. `pass-through`, not `arity: 2`, for the
+  // reason `TextDecoder.decode` is: `parseInt(string, radix?)` is legally
+  // called with one argument (three's GLSLNodeFunction does), and a fixed 2
+  // refused that call. An omitted radix is the runtime's default `0`, which is
+  // what the clause's step 7 means by "absent", so C++ fills it, not a guess.
+  ['NumberConstructor.parseInt', { kind: 'method', emit: 'gea::host::NumberConstructor::parseInt({args})', arity: 'pass-through' }],
   ['NumberConstructor.parseFloat', { kind: 'method', emit: 'gea::host::NumberConstructor::parseFloat({arg0})', arity: 1 }],
   // The five `NumberConstructor` data properties -- 21.1.2.1 `EPSILON`, .6
   // `MAX_SAFE_INTEGER`, .7 `MAX_VALUE`, .8 `MIN_SAFE_INTEGER`, .9 `MIN_VALUE`.

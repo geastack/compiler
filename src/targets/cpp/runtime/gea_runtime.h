@@ -23235,6 +23235,8 @@ bool isFinite(bool) = delete;
 
 /** 21.1.2.4 `Number.isNaN`. Not the global `isNaN`, which ToNumber-coerces its argument first: this one answers `false` for anything that is not already a Number, which is exactly what the deleted `bool` overload enforces. */
 inline bool isNaN(double value) { return std::isnan(value); }
+/** A cell laid out as an optional number (`let v = x ? n : null`) holds `null` or `undefined` when absent, and neither is a Number, so the answer is `false`. */
+inline bool isNaN(const gea::Optional<double>& value) { return value.has_value() && std::isnan(*value); }
 bool isNaN(bool) = delete;
 
 /** 21.1.2.5 `Number.isSafeInteger`: an integer whose magnitude is at most 2**53 - 1, the largest one a double represents with no other integer sharing its bits. */
@@ -23349,6 +23351,24 @@ inline double parseInt(const std::string &value, double radix = 0.0) {
     }
   }
   return negative ? -magnitude : magnitude;
+}
+
+/**
+ * `parseInt` of a read that may be absent, such as an element of a regex match
+ * (`propsMatches[i][0]` in three's GLSLNodeFunction). Step 1 is ToString, and an
+ * absent element is `undefined`, whose string is "undefined".
+ *
+ * ⚠ `gea::Optional` keeps no record of WHICH absence it holds. An absent
+ * `null` should parse as "null", and that string has digits only from radix 24
+ * up, where the two answers differ. Up to radix 23, and with the radix left
+ * out, both strings give NaN, so the answer is exact there.
+ *
+ * A template matched only by the exact carrier, because a plain overload made
+ * `parseInt("12")` ambiguous: a string literal converts to both parameter types.
+ */
+template <typename Absent> requires (std::is_same_v<Absent, gea::Optional<std::string>>)
+inline double parseInt(const Absent &value, double radix = 0.0) {
+  return parseInt(value.has_value() ? *value : std::string("undefined"), radix);
 }
 
 /**

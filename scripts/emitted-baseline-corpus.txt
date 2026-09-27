@@ -159,5 +159,5 @@ uninstantiated-generic.ts.cpp 6b5540eea079
 union-absent-class-arm.js.cpp d0ca29cc246e
 union-no-discriminant.ts.cpp 7b032835dca3
 update.ts.cpp 3d975c6429db
-user-collection-method-names.ts.cpp 3b5f653006ce
+user-collection-method-names.ts.cpp fd8e03bfb24a
 valueless-return.ts.cpp de709e981ef5
