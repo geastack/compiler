@@ -282,6 +282,19 @@ export interface ObjectBagCensus {
    * and the conversion it needs, as before.
    */
   readonly literalSlotLayoutOf: (literal: ts.ObjectLiteralExpression) => ts.Type | null
+  /**
+   * Every literal laid out as one shared bag slot's record, the slot's own
+   * declaring literal first, or `null` when `literal` shares no slot.
+   *
+   * The group `literalSlotLayoutOf` builds, read back from the slot: the
+   * slot's declaring literal and each literal it lays out as that record. They
+   * are one record, so a method member of it has one convention -- and its
+   * result is what any of them returns. three's TSLCore fills `proto` with
+   * swizzle literals whose `get()` returns a SplitNode and index literals
+   * whose `get()` returns an ArrayElementNode; `structural-parts.ts` joins
+   * the member's result over this group.
+   */
+  readonly literalSlotGroupOf: (literal: ts.ObjectLiteralExpression) => readonly ts.ObjectLiteralExpression[] | null
   /** How many DISTINCT bags (by owning declaration) this census bound. */
   readonly boundCount: number
   /**
@@ -319,6 +332,7 @@ export const emptyObjectBagCensus: ObjectBagCensus = {
   slotTypeAt: () => null,
   slotTypeOf: (type) => type,
   literalSlotLayoutOf: () => null,
+  literalSlotGroupOf: () => null,
   boundCount: 0,
   refusals: [],
   refusalOf: () => null,
@@ -1394,6 +1408,67 @@ export const censusObjectBagBindings = (
     return bag ? { ...bag, absences: absencesAt(node) } : null
   }
 
+  /** The bag slot a literal is stored whole into (`bag.k = {...}` or `bag[ k ] = {...}`): its bag root and its slot type. */
+  const literalSlotWriteOf = (literal: ts.ObjectLiteralExpression): { readonly root: ts.Node | null; readonly slot: ts.Type } | null => {
+    const write = literal.parent
+    if (!ts.isBinaryExpression(write) || write.operatorToken.kind !== ts.SyntaxKind.EqualsToken || write.right !== literal) return null
+    const target = write.left
+    const named = ts.isPropertyAccessExpression(target)
+    if (!named && !ts.isElementAccessExpression(target)) return null
+    const root = bagRootOf(target.expression)
+    const bag = valueShape(root, target.expression)
+    if (!bag) return null
+    const key = named ? target.name.text : literalMemberNameOf(target)
+    const slot = (key === null ? undefined : bag.members.get(key)) ?? bag.index
+    if (!slot || (slot.flags & ts.TypeFlags.Object) === 0) return null
+    return { root: root ?? null, slot }
+  }
+
+  const literalSlotLayoutOf = (literal: ts.ObjectLiteralExpression): ts.Type | null => {
+    const write = literalSlotWriteOf(literal)
+    if (!write) return null
+    const slot = write.slot
+    const own = checker.getTypeAtLocation(literal)
+    if (own === slot || (own.flags & ts.TypeFlags.Object) === 0) return null
+    const slotDeclaration = slot.getSymbol()?.declarations?.[0]
+    if (!slotDeclaration || !ts.isObjectLiteralExpression(slotDeclaration)) return null
+    const names = (type: ts.Type): string =>
+      type
+        .getProperties()
+        .map((property) => property.name)
+        .sort()
+        .join(' ')
+    if (names(own) !== names(slot)) return null
+    return checker.isTypeAssignableTo(own, slot) && checker.isTypeAssignableTo(slot, own) ? slot : null
+  }
+
+  // A chained store `bag[ a ] = bag[ b ] = {...}` writes the literal into both slots.
+  const storedLiteralOf = (value: ts.Expression): ts.ObjectLiteralExpression | null => {
+    let current: ts.Expression = value
+    while (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.EqualsToken) current = current.right
+    return ts.isObjectLiteralExpression(current) ? current : null
+  }
+
+  const literalSlotGroups = new Map<ts.Type, readonly ts.ObjectLiteralExpression[] | null>()
+  const literalSlotGroupOf = (literal: ts.ObjectLiteralExpression): readonly ts.ObjectLiteralExpression[] | null => {
+    const write = literalSlotWriteOf(literal)
+    if (!write) return null
+    const slotDeclaration = write.slot.getSymbol()?.declarations?.[0]
+    if (!slotDeclaration || !ts.isObjectLiteralExpression(slotDeclaration)) return null
+    if (literal !== slotDeclaration && literalSlotLayoutOf(literal) !== write.slot) return null
+    const cached = literalSlotGroups.get(write.slot)
+    if (cached !== undefined) return cached
+    const evidence = write.root ? evidenceOf.get(write.root) : undefined
+    const members = new Set<ts.ObjectLiteralExpression>([slotDeclaration])
+    for (const value of [...(evidence?.namedWrites.values() ?? [])].flat().concat(evidence?.indexWrites ?? [])) {
+      const stored = storedLiteralOf(value)
+      if (stored && !members.has(stored) && literalSlotLayoutOf(stored) === write.slot) members.add(stored)
+    }
+    const group = members.size > 1 ? [...members] : null
+    literalSlotGroups.set(write.slot, group)
+    return group
+  }
+
   return {
     identity: { roots: new Set(literalsByOwner.keys()), bagOf, returnsBag, conflicted, ungrounded },
     shapeForType: (type) => shapesByType.get(type) ?? null,
@@ -1440,30 +1515,8 @@ export const censusObjectBagBindings = (
       return key !== null && bag.required?.has(key) ? slot : widenSlot(slot)
     },
     slotTypeOf: widenSlot,
-    literalSlotLayoutOf: (literal) => {
-      const write = literal.parent
-      if (!ts.isBinaryExpression(write) || write.operatorToken.kind !== ts.SyntaxKind.EqualsToken || write.right !== literal) return null
-      const target = write.left
-      const named = ts.isPropertyAccessExpression(target)
-      if (!named && !ts.isElementAccessExpression(target)) return null
-      const bag = valueShape(bagRootOf(target.expression), target.expression)
-      if (!bag) return null
-      const key = named ? target.name.text : literalMemberNameOf(target)
-      const slot = (key === null ? undefined : bag.members.get(key)) ?? bag.index
-      if (!slot || (slot.flags & ts.TypeFlags.Object) === 0) return null
-      const own = checker.getTypeAtLocation(literal)
-      if (own === slot || (own.flags & ts.TypeFlags.Object) === 0) return null
-      const slotDeclaration = slot.getSymbol()?.declarations?.[0]
-      if (!slotDeclaration || !ts.isObjectLiteralExpression(slotDeclaration)) return null
-      const names = (type: ts.Type): string =>
-        type
-          .getProperties()
-          .map((property) => property.name)
-          .sort()
-          .join(' ')
-      if (names(own) !== names(slot)) return null
-      return checker.isTypeAssignableTo(own, slot) && checker.isTypeAssignableTo(slot, own) ? slot : null
-    },
+    literalSlotLayoutOf,
+    literalSlotGroupOf,
     shapeForOwner: (declaration) => {
       const root = bagOf.get(declaration)
       return valueShape(root, declaration)
