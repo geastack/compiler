@@ -293,6 +293,14 @@ const armRuntimeFieldText = (
     if (!objectPrototypeMemberNames.has(key) && published.kind === 'optional' && published.absence === 'undefined') {
       return cppUndefinedIn(published)
     }
+    // An array index names nothing on a number, boolean or bigint: neither
+    // the wrapper nor any prototype on its chain has an integer-indexed
+    // property. three's `Backend.compute` reads `dispatchSize[ 0 ]` off
+    // `number | Array<number>` after its number branch rewrote the local.
+    if (index !== null) {
+      const absent = cppUndefinedIn(published)
+      if (absent !== null) return absent
+    }
   }
   if (arm.kind === 'constructor-family') {
     return classConstructorStaticMemberTextFor(ctx, arm, key, published, () => armExprText)

@@ -728,6 +728,7 @@ union-member-absent-on-promise-arm.ts.cpp fb968705a335
 union-method-absent-on-one-arm-discarded.ts.cpp d2bf86271461
 union-of-tuples-array-pattern.ts.cpp aa8e76675555
 union-of-tuples-nested-array-pattern.ts.cpp a33a8e162a03
+union-scalar-arm-index-key.runtime.js.cpp ca9931ea6151
 union-void-arm-is-the-undefined-carrier.ts.cpp 230baa95b904
 unknown-callee-argument-key-narrowing.ts.cpp f037154b942f
 untyped-literal-takes-stated-destination.runtime.js.cpp 60888069f915
