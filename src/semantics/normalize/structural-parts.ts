@@ -839,7 +839,25 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
       arrayElement === null && censusNode !== null && ts.isArrayLiteralExpression(censusNode)
         ? unstatedNeverArray(checker, collections, (node) => checker.getTypeAtLocation(node), censusNode)
         : false
-    const inferredArray = arrayElement ? internArray(typeOf(arrayElement)) : boxedLiteral ? internArray(typeOf(checker.getAnyType())) : null
+    // The same field beside `null`/`undefined` (three's Renderer
+    // `_compilationPromises`: `= null` in the constructor, `= compilationPromises`
+    // in `compileAsync`). The checker answers `never[] | null`, and the `never`
+    // arm laid the field out as an array that holds nothing while the literal
+    // stored into it carried the census's element: two carriers for one array.
+    // The arm takes the component's element, the absent arms stay -- the member
+    // half of `inferredNullableArrayAt`.
+    const nullableArray =
+      arrayElement === null && !boxedLiteral && declaration && ts.isBinaryExpression(declaration)
+        ? nullableArrayArmsOf(checker, declared)
+        : null
+    const nullableElement = nullableArray ? collections.arrayElementForOwner(declaration!) : null
+    const inferredArray = arrayElement
+      ? internArray(typeOf(arrayElement))
+      : boxedLiteral
+        ? internArray(typeOf(checker.getAnyType()))
+        : nullableArray && nullableElement
+          ? input.internUnion([internArray(typeOf(nullableElement)), ...nullableArray.absent.map(typeOf)])
+          : null
     // The field half of an open bag must ask the same owner-keyed census as
     // every read. This matters most for a JavaScript assignment declaration:
     // `this.children = {}` is checker-typed as `{}`, yet its computed writes
