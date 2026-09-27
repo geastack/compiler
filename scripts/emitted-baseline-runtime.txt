@@ -557,6 +557,7 @@ physical-class-ancestry-live.ts.cpp 728e6f672df0
 physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 1d2c5e207449
+primitive-delete-arms.runtime.js.cpp 12dcd9499b11
 printer-drift.txt 7f6242725b17
 promise-any-into-union-promise-arm.runtime.js.cpp 9372b4c219cd
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416

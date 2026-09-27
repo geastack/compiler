@@ -519,6 +519,14 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // difference.
     'dictionary:delete:true',
     'dictionary:delete:false',
+    // A constant-key delete off a primitive or a typed array: neither holds an
+    // ordinary own property this backend could have stored, so the answer is
+    // ECMA-262's `true` with no effect -- except a typed array's in-bounds
+    // index, a non-configurable element, which answers `false`. See
+    // `emitPrimitiveDelete` (emit-dynamic-properties.ts). A computed key is
+    // not claimed: its ToPropertyKey conversion is not rendered there.
+    'scalar:delete:false',
+    'typed-array:delete:false',
     // Reading/writing a STATIC key through a `tagged-union` receiver, over
     // the arms that all declare the field named
     // (`emit-union-properties.ts`'s `taggedUnionGetText`/
