@@ -122,6 +122,7 @@ date-prototype-method-reflection.runtime.js.cpp 89df87bd3921
 date-setter-argument-coercion.runtime.js.cpp 2235debf782d
 date-setter-time-value-read-first.runtime.js.cpp f8035bab7069
 dead-helper-obligations.runtime.js.cpp 8fc1339f6c8b
+dead-or-arm-into-class-union.runtime.js.cpp 82422ef997ba
 dead-values.ts.cpp 921962c4bff0
 define-property-setter-function-expression.runtime.js.cpp 885f8eb03d54
 delete-symbol-expando-on-class-through-interface.ts.cpp 4d04cd30773e
@@ -456,7 +457,7 @@ negative-zero-storage.ts.cpp 797579dc0a04
 negative-zero.ts.cpp db9cf54df813
 nested-dynamic-operand-roles.ts.cpp 15ac506240eb
 nested-typed-array-union-narrowing.ts.cpp 28167130b69a
-nested-union-arm-recast-keeps-inner-discriminant.ts.cpp 002df74b5618
+nested-union-arm-recast-keeps-inner-discriminant.ts.cpp 7b598de91ee7
 nested-weakmap-self-descent.runtime.js.cpp 1ade3c79e3d5
 never-arm-conditional-merge.ts.cpp 226e37bb927f
 never-array-sentinel.ts.cpp 699b40b17e86
