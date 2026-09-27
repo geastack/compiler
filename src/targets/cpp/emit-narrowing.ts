@@ -5056,7 +5056,11 @@ export const conversionChain: readonly ConversionStep[] = [
   // The other direction is a read flow analysis proved yields `undefined` out
   // of a cell that holds a value on every other path: the value is
   // discarded, not converted. A carrier that CAN hold an absence -- an
-  // optional, a sum, a box -- is `widened-store`'s to fill with one.
+  // optional, a box, a sum with an arm for one -- is `widened-store`'s to fill
+  // with one. A sum of class instances has no such arm: three's
+  // `this.specularNode || materialSpecular` over a field only ever written
+  // `null` keeps a dead `undefined` into a union of the node classes, and
+  // `widened-store` finds no arm to put it in.
   {
     id: 'unreachable-value',
     apply: (source, target, text) => {
