@@ -171,7 +171,7 @@ dynamic-union-ambiguous.ts.cpp 65c1819df9c7
 dynamic-union-nominal.ts.cpp c54e10ba695d
 dynamic-union-optional.ts.cpp 83750c186ff5
 empty-pattern-coercible-and-nullish-typeerror.runtime.js.cpp 97080de74be0
-entries-map-takes-stated-destination.runtime.js.cpp 821c8c8dbda8
+entries-map-takes-stated-destination.runtime.js.cpp 7b5bbf88de33
 entry-join-and-inspect.ts.cpp 15efb6316e8c
 error-intersection-with-code.ts.cpp ad3f01f44ac8
 every-path-returns.ts.cpp 7c0aa5a44980
@@ -204,7 +204,7 @@ for-of-array-object.ts.cpp 0b0710a08b19
 for-of-in-bare-identifier-head.ts.cpp d70a5ed6b7b3
 for-of-literal-pattern-head.ts.cpp 825ff605e74d
 for-of-union-of-node-arrays.ts.cpp adc818f4d836
-fresh-map-takes-stated-destination.runtime.js.cpp 023ded3bf3bf
+fresh-map-takes-stated-destination.runtime.js.cpp 103b7174a043
 function-and-constructor-own-properties.ts.cpp dad374b6baff
 function-arm-union-slot-default.ts.cpp 433d5f88a80e
 function-generator-overload-result.ts.cpp 8600bcfb6606
@@ -506,7 +506,7 @@ object-literal-empty-array-field-boxed.runtime.js.cpp d224d8d2b229
 object-literal-es5-method-receiver.runtime.js.cpp 35067ec88af1
 object-literal-getter-capture.ts.cpp 962dd1d3202c
 object-literal-null-field-holds-written-object.runtime.js.cpp 1f28e202c596
-object-or-node-param-null-default.runtime.js.cpp 603efd41bd54
+object-or-node-param-null-default.runtime.js.cpp 09236c765486
 object-pattern-numeric-key-over-array.ts.cpp 828ec7992347
 object-prototype-tag.runtime.js.cpp 0bd6e1a6a758
 optional-array-spread-absent.ts.cpp b0bdc61f5949
