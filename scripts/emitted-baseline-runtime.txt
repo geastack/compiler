@@ -325,11 +325,15 @@ jsdoc-field-stores-contradicted-parameter.runtime.js.cpp 211918b23ce0
 jsdoc-field-tag-held-by-silent-writes.runtime.js.cpp cd87cd040be8
 jsdoc-field-tag-names-an-unimported-default-export.runtime.js.cpp 26c34a1c3013
 jsdoc-field-type-contradicted-by-writes.runtime.js.cpp f9608f5b2fc1
+jsdoc-map-field-value-contradicted-by-set.runtime.js.cpp 80b739976818
 jsdoc-member-tag-contradicted-by-literal-argument.runtime.js.cpp 5f9647852cdf
 jsdoc-optional-parameter.runtime.js.cpp 2cfb2703873b
 jsdoc-override-parameter-contradicted-through-base-call.runtime.js.cpp b40673fca3df
+jsdoc-parameter-collection-element-invariant.runtime.js.cpp c3ccfb3a36d3
 jsdoc-parameter-contradicted-by-callers.runtime.js.cpp c7d3020d3b02
+jsdoc-parameter-contradicted-by-census.runtime.js.cpp 410265040ebe
 jsdoc-parameter-contradicted-through-unimported-names.runtime.js.cpp 6658718ea8ee
+jsdoc-parameter-held-by-ancestor-argument.runtime.js.cpp e08548c061fb
 jsdoc-parameter-open-array-element.runtime.js.cpp cdfc7908b9cc
 jsdoc-return-absence-tag-contradicted-by-return.runtime.js.cpp ffbc57ded9b7
 jsdoc-return-open-array-element.runtime.js.cpp b7ee5fa4fc4d
@@ -685,6 +689,7 @@ typeof-then-discriminates-a-union.ts.cpp 16fe804a602d
 unbox-nullable-union.ts.cpp b8a67b94f69c
 uncallable-member-slot-call.runtime.js.cpp f925ad615e3e
 uncertified.txt ceae5039a20a
+union-map-receiver-discarded-set.runtime.js.cpp 712af7f12caa
 union-member-absent-on-promise-arm.ts.cpp fb968705a335
 union-method-absent-on-one-arm-discarded.ts.cpp d2bf86271461
 union-of-tuples-array-pattern.ts.cpp aa8e76675555

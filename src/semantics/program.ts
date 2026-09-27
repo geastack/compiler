@@ -9,7 +9,7 @@ import { withoutBareWrapperRedeclarations } from './commonjs-wrapper.js'
 import { scriptScopeCollisionsOf } from './script-scope-collisions.js'
 import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
 import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
-import { contradictedJsDocTypeBlanks } from './contradicted-jsdoc-types.js'
+import { blankSpans, contradictedJsDocTypeBlanks, type BlankSpan } from './contradicted-jsdoc-types.js'
 import { absentJsDocTagWidenings } from './absent-jsdoc-tags.js'
 import { contradictedJsDocParameterBlanks } from './contradicted-jsdoc-parameters.js'
 import { overArityJsDocArrayRewrites } from './over-arity-jsdoc-arrays.js'
@@ -122,6 +122,15 @@ export interface ProgramInput {
     /** Every source file this program's roots reach -- see `programSourceClosure`. */
     readonly programFiles?: ReadonlySet<string>
   }) => string | null)[]
+  /**
+   * Stated types an earlier frontend attempt's settled binding census
+   * contradicted (`contradictedJsDocTypeSpans`, `contradictedJsDocParameterSpans`),
+   * as spans of each file's TRANSFORMED text. Blanked as the file is parsed,
+   * after every transform, so the first program and every pass that reads it
+   * already compile without them. Every pass blanks in place, so a span read
+   * off the earlier attempt's final text is the same span here.
+   */
+  readonly censusContradictions?: ReadonlyMap<string, readonly BlankSpan[]>
 }
 
 export interface CompiledProgram {
@@ -692,6 +701,8 @@ const transformingHost = (
       }
       transformed.set(resolve(fileName), { input: untransformed, declarationFileName, roots: rootsKey, output: text })
     }
+    const contradicted = input.censusContradictions?.get(resolve(fileName))
+    if (contradicted) text = blankSpans(text, contradicted)
     const rewritten =
       text === file.text ? file : ts.createSourceFile(fileName, text, languageVersionOrOptions, true, scriptKindOf(fileName))
     // Asked of the TRANSFORMED file, not the one on disk: a plugin (or the
