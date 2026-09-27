@@ -23235,6 +23235,8 @@ bool isFinite(bool) = delete;
 
 /** 21.1.2.4 `Number.isNaN`. Not the global `isNaN`, which ToNumber-coerces its argument first: this one answers `false` for anything that is not already a Number, which is exactly what the deleted `bool` overload enforces. */
 inline bool isNaN(double value) { return std::isnan(value); }
+/** A cell laid out as an optional number (`let v = x ? n : null`) holds `null` or `undefined` when absent, and neither is a Number, so the answer is `false`. */
+inline bool isNaN(const gea::Optional<double>& value) { return value.has_value() && std::isnan(*value); }
 bool isNaN(bool) = delete;
 
 /** 21.1.2.5 `Number.isSafeInteger`: an integer whose magnitude is at most 2**53 - 1, the largest one a double represents with no other integer sharing its bits. */
