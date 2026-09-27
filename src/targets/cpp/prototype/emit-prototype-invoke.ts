@@ -1055,6 +1055,18 @@ const keyedCollectionCallText = (
           'a keyed collection cursor requires the iterator carrier that names its element'
       )
     }
+    // The cursor yields the collection's own storage, so the published element
+    // must BE that carrier: a `Set<any>` the census typed `Set<Buffer>` still
+    // publishes `SetIterator<any>` here, and no cursor over the typed storage
+    // is an iterator of boxes.
+    const stored = family === 'set' || member === 'keys' ? carrier.key : carrier.value
+    if (stored === null || representationKey(stored) !== representationKey(result.representation.element)) {
+      throw createCppEmitBlockedError(
+        `host-invocation:${family}.prototype.${member}`,
+        `"${family}.prototype.${member}" publishes an iterator of "${representationKey(result.representation.element)}", ` +
+          `and the collection stores "${stored === null ? 'nothing' : representationKey(stored)}"`
+      )
+    }
     const element = cppTypeOf(result.representation.element)
     // A Set's `keys` IS its `values` (24.2.3.8): one storage, and the element
     // is the collection's key either way.

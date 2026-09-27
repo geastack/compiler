@@ -2037,6 +2037,7 @@ const attemptFrontend = (
   const generatorDeclaration = generatorDeclarationEarly
   const asyncGeneratorDeclaration = asyncGeneratorDeclarationEarly
   const mapIteratorDeclaration = mapIteratorDeclarationEarly
+  const setIteratorDeclaration = setIteratorDeclarationEarly
   // Resolved the same way and for the same reason as `keyedCollections` above.
   const regexpDeclarations = regexpDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   timing.mark('structural-and-host-censuses')
