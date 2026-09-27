@@ -605,6 +605,7 @@ recursive-callable-alias.ts.cpp b4790f8e56d1
 recursive-derived-parameter-access.runtime.js.cpp 70a7a4f027fe
 recursive-jsdoc-typedef.runtime.js.cpp 10afd030a337
 recursive-union-alias.ts.cpp f4753b1869f6
+recycled-array-element-write-keeps-class-family.runtime.js.cpp 5960b7e42a2a
 ref-virtual-base-address.ts.cpp ab724d570479
 reflect-native-boundary.ts.cpp 22950f295e6b
 reflect-native-operations.ts.cpp 95b27190af99
