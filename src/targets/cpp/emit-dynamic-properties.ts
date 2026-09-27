@@ -1613,6 +1613,39 @@ const emitNativeHandleDelete = (ctx: EmitContext, lines: string[], operation: De
 }
 
 /**
+ * `delete` of a compile-time-constant key off a receiver that holds no
+ * ordinary own property this backend could ever have stored: a `scalar`
+ * primitive or a `typed-array`.
+ *
+ * - A `scalar` (number, boolean, bigint) is ToObject'd first (ECMA-262
+ *   13.5.1.2), and a Number, Boolean or BigInt wrapper has no own property
+ *   at all -- every member lives on its prototype -- so `OrdinaryDelete`
+ *   step 2 returns `true` and nothing changes.
+ * - A `typed-array` (10.4.5.5 `[[Delete]]`): a key that is a canonical
+ *   numeric string answers `false` only for a valid integer index, an element
+ *   that is present and non-configurable; every other numeric key answers
+ *   `true`. Any other key goes to `OrdinaryDelete`, and this carrier has no
+ *   ordinary-property table (`typed-array:set:false` refuses a named write,
+ *   and a boxed view has no expando), so it holds no such key: `true`.
+ *   `length`/`byteLength`/`byteOffset` are `%TypedArray%.prototype`
+ *   accessors, not own properties, so they answer `true` too.
+ *
+ * three's `Renderer.highPrecision` deletes `modelViewMatrix` off a Node's
+ * `value`, whose family union has a number and a Float32Array arm. A
+ * computed key stays refused: its ToPropertyKey conversion is not rendered.
+ */
+const emitPrimitiveDelete = (ctx: EmitContext, lines: string[], operation: DeleteOperation): boolean => {
+  const representation = operation.receiver.representation
+  if (representation.kind !== 'scalar' && representation.kind !== 'typed-array') return false
+  const staticKey = ctx.staticKeyTexts.get(operation.key.value)
+  if (staticKey === undefined) return false
+  const index = representation.kind === 'typed-array' ? canonicalIndexLiteral(staticKey) : null
+  const answer = index === null ? 'true' : `(${operandText(ctx, operation.receiver)}->length() <= ${index}.0)`
+  emitDeleteOutcome(ctx, lines, operation, answer)
+  return true
+}
+
+/**
  * `[[Delete]]` and `[[HasProperty]]` as IR operations, with their refusals.
  *
  * Four receivers have an answer for a key to remove: a `gea::Value`, whether
@@ -1703,6 +1736,7 @@ export const emitDeleteOperation = (ctx: EmitContext, lines: string[], operation
   if (emitDictionaryDelete(ctx, lines, operation)) return
   if (emitNativeSidecarDelete(ctx, lines, operation)) return
   if (emitNativeHandleDelete(ctx, lines, operation)) return
+  if (emitPrimitiveDelete(ctx, lines, operation)) return
   if (emitTaggedUnionDelete(ctx, lines, operation)) return
   // The refusal's key-form suffix names whether the key is one the program
   // wrote, matching the claim every branch above just asked -- `staticKeyTexts`,
