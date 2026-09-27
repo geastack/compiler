@@ -1267,7 +1267,20 @@ export const censusLocalBindings = (
             : null
           if (carried) unionArms.set(declaration, carried)
           else {
-            const widest = joinOfWrites(types)
+            // A DYNAMIC write beside nothing but absences is the cell's
+            // answer: `branchArmsOf` contributes a dynamic operand's `any`
+            // precisely so the cell goes dynamic. `joinOfWrites` cannot see
+            // that, because `any` is assignable to every candidate, so it
+            // answered the `null` placeholder: three's NodeMaterial
+            // `let alphaTestNode = null`, later written `... ? float( x ) :
+            // materialAlphaTest`, was laid out as bare `null` and the store of
+            // the material node refused (NodeMaterial.js:888).
+            const dynamicWrite = types.find((type) => (type.flags & ts.TypeFlags.Any) !== 0)
+            const onlyAbsenceBeside =
+              dynamicWrite !== undefined &&
+              types.some((type) => (type.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0) &&
+              types.every((type) => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0)
+            const widest = onlyAbsenceBeside ? dynamicWrite : joinOfWrites(types)
             if (widest) {
               result = widest
             } else {
