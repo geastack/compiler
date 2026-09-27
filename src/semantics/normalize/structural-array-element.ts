@@ -253,15 +253,30 @@ export const inferredNullableArrayAt = (
   const cell =
     ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node) || ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)
   if (!cell) return null
-  const layout = layoutTypeAt(node)
+  const arms = nullableArrayArmsOf(checker, layoutTypeAt(node))
+  if (!arms) return null
+  const { arm, absent } = arms
+  const element = inferredArrayElementAt(checker, collections, (asked) => (asked === node ? arm : layoutTypeAt(asked)), node)
+  return element ? { arm, element, absent } : null
+}
+
+/**
+ * A type that is ONE array arm beside `null`/`undefined`, split into the arm
+ * and the absent arms; `null` for anything else. Shared by the cell form
+ * above and the member layout (`structural-parts.ts`), so both ask the same
+ * question of the same checker answer.
+ */
+export const nullableArrayArmsOf = (
+  checker: ts.TypeChecker,
+  layout: ts.Type
+): { readonly arm: ts.Type; readonly absent: readonly ts.Type[] } | null => {
   if (!layout.isUnion()) return null
   const isAbsent = (member: ts.Type): boolean => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0
   const absent = layout.types.filter(isAbsent)
   const arms = layout.types.filter((member) => !isAbsent(member))
   const [arm] = arms
   if (absent.length === 0 || arms.length !== 1 || arm === undefined || !checker.isArrayType(arm)) return null
-  const element = inferredArrayElementAt(checker, collections, (asked) => (asked === node ? arm : layoutTypeAt(asked)), node)
-  return element ? { arm, element, absent } : null
+  return { arm, absent }
 }
 
 export const inferredArrayElementAt = (
