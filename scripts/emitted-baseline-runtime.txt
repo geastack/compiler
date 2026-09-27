@@ -27,6 +27,7 @@ assignment-declared-array-field.runtime.js.cpp e9b6234a4254
 async-integer-result.ts.cpp 40d406729713
 async-return-promise-undefined-into-void.ts.cpp 9f3bd1364eac
 await-over-an-optional-thenable.ts.cpp fdab8693a27f
+bag-slot-shares-this-reading-literal-record.runtime.js.cpp da215ef74678
 base-typed-derived-dynamic-dictionary.ts.cpp 74bbd1b9fa0d
 base-typed-derived-dynamic-fields.ts.cpp 3291e2cf977d
 bind-method-value-to-receiver.ts.cpp d1df1b6343b5

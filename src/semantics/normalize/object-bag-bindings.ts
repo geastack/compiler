@@ -262,6 +262,26 @@ export interface ObjectBagCensus {
    * was spelled by hand.
    */
   readonly slotTypeOf: (type: ts.Type) => ts.Type
+  /**
+   * The slot type an object LITERAL is laid out as when it is the whole value
+   * stored into a bag slot whose join is ANOTHER literal's type, or `null`.
+   *
+   * `joined` covers the writes of one slot with `widestOf`, so three's
+   * `proto[ property ] = { get() { ... }, set( value ) { ... } }` and
+   * `proto[ i ] = { get() { ... }, set( value ) { ... } }` (TSLCore.js) share
+   * the first literal's type as the index value. For a pure-data literal the
+   * two are one structural record anyway. A literal whose methods read `this`
+   * is not: `structural.ts` anchors it by its OWN declaration, so each is a
+   * distinct native record held by reference, and the second store needs a
+   * record-to-record conversion that cannot exist without copying the object.
+   * The slot already states that the two are one value set; the literal is
+   * the fresh object filling it, so it is allocated as the slot's record.
+   *
+   * Only for literals the join could not tell apart: the same member names,
+   * each type assignable to the other. Anything narrower keeps its own layout
+   * and the conversion it needs, as before.
+   */
+  readonly literalSlotLayoutOf: (literal: ts.ObjectLiteralExpression) => ts.Type | null
   /** How many DISTINCT bags (by owning declaration) this census bound. */
   readonly boundCount: number
   /**
@@ -298,6 +318,7 @@ export const emptyObjectBagCensus: ObjectBagCensus = {
   returnShapeOf: () => null,
   slotTypeAt: () => null,
   slotTypeOf: (type) => type,
+  literalSlotLayoutOf: () => null,
   boundCount: 0,
   refusals: [],
   refusalOf: () => null,
@@ -1410,6 +1431,30 @@ export const censusObjectBagBindings = (
       return key !== null && bag.required?.has(key) ? slot : widenSlot(slot)
     },
     slotTypeOf: widenSlot,
+    literalSlotLayoutOf: (literal) => {
+      const write = literal.parent
+      if (!ts.isBinaryExpression(write) || write.operatorToken.kind !== ts.SyntaxKind.EqualsToken || write.right !== literal) return null
+      const target = write.left
+      const named = ts.isPropertyAccessExpression(target)
+      if (!named && !ts.isElementAccessExpression(target)) return null
+      const bag = valueShape(bagRootOf(target.expression), target.expression)
+      if (!bag) return null
+      const key = named ? target.name.text : literalMemberNameOf(target)
+      const slot = (key === null ? undefined : bag.members.get(key)) ?? bag.index
+      if (!slot || (slot.flags & ts.TypeFlags.Object) === 0) return null
+      const own = checker.getTypeAtLocation(literal)
+      if (own === slot || (own.flags & ts.TypeFlags.Object) === 0) return null
+      const slotDeclaration = slot.getSymbol()?.declarations?.[0]
+      if (!slotDeclaration || !ts.isObjectLiteralExpression(slotDeclaration)) return null
+      const names = (type: ts.Type): string =>
+        type
+          .getProperties()
+          .map((property) => property.name)
+          .sort()
+          .join(' ')
+      if (names(own) !== names(slot)) return null
+      return checker.isTypeAssignableTo(own, slot) && checker.isTypeAssignableTo(slot, own) ? slot : null
+    },
     shapeForOwner: (declaration) => {
       const root = bagOf.get(declaration)
       return valueShape(root, declaration)

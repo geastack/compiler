@@ -17,6 +17,7 @@ import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import ts from 'typescript'
 import { emptyAbsentGlobalCensus, type AbsentGlobalCensus } from './absent-globals.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
+import type { ObjectBagCensus } from './object-bag-bindings.js'
 
 /**
  * The parameter a node declares or reads when the program typed it only by a
@@ -53,7 +54,8 @@ export const absentDefaultParameterOf = (checker: ts.TypeChecker, node: ts.Node)
 export const createLayoutTypeResolver = (
   checker: ts.TypeChecker,
   parameters: ParameterBindingCensus = emptyParameterBindingCensus,
-  absent: AbsentGlobalCensus = emptyAbsentGlobalCensus
+  absent: AbsentGlobalCensus = emptyAbsentGlobalCensus,
+  bags: ObjectBagCensus | null = null
 ): ((node: ts.Node) => ts.Type) => {
   /**
    * An array-pattern element read past the end of a plain array binds
@@ -1138,6 +1140,11 @@ export const createLayoutTypeResolver = (
     if (ts.isObjectLiteralExpression(node)) {
       const freshTarget = objectAssignFreshTargetType(checker, node)
       if (freshTarget) return freshTarget
+      // A literal stored whole into a bag slot the join shares with another
+      // literal is allocated as that slot's record -- see
+      // `ObjectBagCensus.literalSlotLayoutOf`, the one authority for it.
+      const bagSlot = bags?.literalSlotLayoutOf(node)
+      if (bagSlot) return bagSlot
     }
     // AN EMPTY ARRAY LITERAL NESTED IN ANOTHER LITERAL takes its element from
     // the position it fills, not from its own inference. `[]` alone infers
