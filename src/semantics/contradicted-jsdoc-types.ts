@@ -94,12 +94,32 @@ import ts from 'typescript'
  * expression body returns that expression: three's `overloadingFn = (
  * functionNodes ) => ( ...params ) => ...` states `@returns
  * {FunctionOverloadingNode}` and returns an arrow, which no node is.
+ *
+ * ## Once the binding census has settled
+ *
+ * A value the checker types `any` -- an untyped parameter or local, a field
+ * stated `@type {any}` -- says nothing to the checker, and the binding census
+ * knows what it holds: the join of what the program stores along the way,
+ * which is the carrier the store converts from. `frontend.ts` runs this pass
+ * and `contradicted-jsdoc-parameters.ts` a second time with that census
+ * (`CensusArms`), asked only where the checker says `any`, and a value whose
+ * every present arm `statementExcludes` is a store no conversion carries: the
+ * statement is the one that is false. three's `StructType` constructor stores
+ * its untyped `members` into the overlay's `{ name, type, atomic }[]`, and
+ * `OutputStructNode` builds those layouts with an `index` and no `atomic`.
+ * The tags that round finds are blanked by compiling again without them
+ * (`ProgramInput.censusContradictions`), so the census that runs next is the
+ * one authority over those slots, as it is over a slot never stated.
  */
-export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: ReadonlyMap<string, string>): Map<string, string> => {
-  const blanked = new Map<string, string>()
+export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: ReadonlyMap<string, string>): Map<string, string> =>
+  blankedTexts(prepared, contradictedJsDocTypeSpans(program))
+
+/** The spans of the field and `@return` tags the program's stores contradict -- see `contradictedJsDocTypeBlanks`. */
+export const contradictedJsDocTypeSpans = (program: ts.Program, census?: CensusArms): Map<ts.SourceFile, BlankSpan[]> => {
+  const spans = new Map<ts.SourceFile, BlankSpan[]>()
   const files = program.getSourceFiles().filter((file) => !file.isDeclarationFile)
   const unchecked = files.filter(isUncheckedJavaScript)
-  if (unchecked.length === 0) return blanked
+  if (unchecked.length === 0) return spans
   const checker = program.getTypeChecker()
 
   const tagsOf = new Map<ts.Symbol, ts.JSDocTypeTag[]>()
@@ -131,7 +151,7 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
   for (const symbol of [...tagsOf.keys()]) {
     if (!(symbol.declarations ?? []).every((declaration) => isUncheckedJavaScript(declaration.getSourceFile()))) tagsOf.delete(symbol)
   }
-  if (tagsOf.size === 0 && returnTags.length === 0) return blanked
+  if (tagsOf.size === 0 && returnTags.length === 0) return spans
 
   /** Each contradicted field, with the store that proves it -- for the debug line below. */
   const contradicted = new Map<ts.Symbol, ts.Node>()
@@ -176,7 +196,7 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
     return valuesWritten(value).some((written) => {
       const constructed = withoutParentheses(written)
       const type = checker.getTypeAtLocation(constructed)
-      if (saysNothing(type)) return false
+      if (saysNothing(type)) return census !== undefined && censusExcludes(checker, census, constructed, stated, true)
       if (isConstruction(constructed)) return !checker.isTypeAssignableTo(type, stated) && !derivesFromStatedClass(checker, type, stated)
       return excludesEachOther(type, stated)
     })
@@ -295,7 +315,7 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
       contradictedReturns.set(tag, body)
   }
 
-  const spans = new Map<ts.SourceFile, { readonly at: number; readonly end: number }[]>()
+  const round = census ? ' (census)' : ''
   for (const [tag, store] of contradictedReturns) {
     const file = tag.getSourceFile()
     const fileSpans = spans.get(file) ?? []
@@ -305,7 +325,7 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
       const line = file.getLineAndCharacterOfPosition(tag.pos).line + 1
       const storeLine = file.getLineAndCharacterOfPosition(store.getStart(file)).line + 1
       process.stderr.write(
-        `[JSDOC-CONTRADICTED] ${file.fileName}:${line} @return: ${tag.typeExpression?.getText(file)} by line ${storeLine}\n`
+        `[JSDOC-CONTRADICTED]${round} ${file.fileName}:${line} @return: ${tag.typeExpression?.getText(file)} by line ${storeLine}\n`
       )
     }
   }
@@ -320,20 +340,166 @@ export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: Reado
         const storeFile = store.getSourceFile()
         const storeLine = storeFile.getLineAndCharacterOfPosition(store.getStart(storeFile)).line + 1
         process.stderr.write(
-          `[JSDOC-CONTRADICTED] ${file.fileName}:${line} ${symbol.name}: ${tag.typeExpression.getText(file)} by ${storeFile.fileName}:${storeLine}\n`
+          `[JSDOC-CONTRADICTED]${round} ${file.fileName}:${line} ${symbol.name}: ${tag.typeExpression.getText(file)} by ${storeFile.fileName}:${storeLine}\n`
         )
       }
     }
   }
+  return spans
+}
+
+/**
+ * What the settled binding census says an expression holds, as the arms of
+ * that type (one arm for a type that is no union), or `null` where the census
+ * says nothing. Asked only where the checker answers `any`.
+ */
+export type CensusArms = (expression: ts.Expression) => readonly ts.Type[] | null
+
+/** A span of a file's text to blank: comment bytes only, so every offset stays put. */
+export interface BlankSpan {
+  readonly at: number
+  readonly end: number
+}
+
+/** `text` with every span's bytes but line breaks turned into spaces. */
+export const blankSpans = (text: string, spans: readonly BlankSpan[]): string => {
+  let blanked = text
+  for (const span of [...spans].sort((left, right) => right.at - left.at))
+    blanked = blanked.slice(0, span.at) + blanked.slice(span.at, span.end).replace(/[^\n\r]/g, ' ') + blanked.slice(span.end)
+  return blanked
+}
+
+/** Each file's prepared text (its own text where nothing prepared it) with its spans blanked, keyed as `prepared` is. */
+export const blankedTexts = (
+  prepared: ReadonlyMap<string, string>,
+  spans: ReadonlyMap<ts.SourceFile, readonly BlankSpan[]>
+): Map<string, string> => {
+  const blanked = new Map<string, string>()
   for (const [file, fileSpans] of spans) {
     const fileName = resolve(file.fileName)
-    let text = prepared.get(fileName) ?? file.text
-    for (const span of [...fileSpans].sort((left, right) => right.at - left.at))
-      text = text.slice(0, span.at) + text.slice(span.at, span.end).replace(/[^\n\r]/g, ' ') + text.slice(span.end)
-    blanked.set(fileName, text)
+    blanked.set(fileName, blankSpans(prepared.get(fileName) ?? file.text, fileSpans))
   }
   return blanked
 }
+
+/**
+ * Whether the census's answer for a value the checker types `any` is one the
+ * statement excludes: some arm is present (absence is `absent-jsdoc-tags.ts`'s
+ * question), none is itself `any`, and `statementExcludes` holds for every
+ * present arm, as it must for every arm of a checker union.
+ */
+export const censusExcludes = (
+  checker: ts.TypeChecker,
+  census: CensusArms,
+  value: ts.Expression,
+  stated: ts.Type,
+  invariant: boolean
+): boolean => {
+  const arms = census(value)
+  if (!arms) return false
+  const present = arms.filter((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0)
+  if (present.length === 0 || present.some(saysNothing)) return false
+  return present.every((arm) => statementExcludes(checker, arm, stated, invariant))
+}
+
+/**
+ * Whether a value of type `passed` -- one arm -- is outside what `stated`
+ * states: the one test both contradiction passes apply to a value that is not
+ * its own construction, before the census and after it.
+ *
+ * - A class that extends a class the statement names is inside it, whatever
+ *   the checker's structural relation says: an unchecked subclass is free to
+ *   override a member with a signature its base does not admit.
+ * - So is an ANCESTOR of a class the statement names: that value is wider than
+ *   the statement, not outside it, and the class-ref conversion downcasts it
+ *   (`conversions.ts`'s `downcastsToDerived`). three's `WGSLNodeBuilder`
+ *   constructs `new NodeSampler( name, uniformNode.node )`, a `UniformNode`
+ *   stated field, under `@param {TextureNode} textureNode`, only for texture
+ *   uniforms.
+ * - A class instance is carried by its class, not by its shape: a `NodeVar`
+ *   with the one member a `Node` tag's body reads is assignable to it, and
+ *   still has no conversion into a `Node` handle.
+ * - A collection is invariant where `invariant` holds (a value that is not a
+ *   fresh `[]` or `new Map()`, which takes its destination's element): gea
+ *   carries an `Array`, `Map`, `Set`, `WeakMap` or `WeakSet` by its element
+ *   (key, value) carriers and has no conversion that changes one, while the
+ *   checker calls `Map<number, F>` assignable to `Map<number|string, F>`.
+ *   three's `NodeLibrary.addType( nodeClass, type, library )` states `@param
+ *   {Map<string|number, Node.constructor>} library` and is passed both its
+ *   `Map<number, ...>` and its `Map<string, ...>` field. An element the
+ *   statement leaves `any` states nothing about that element.
+ * - A statement naming a type only a declaration file declares -- a host's,
+ *   like the `Image` of `@param {Array<Image>} [images=[]]` -- is the host
+ *   boundary's statement, not the program's: whether a value the program
+ *   builds can cross it is the boundary's question
+ *   (`absent-host-type-value-reaches.runtime.js`). A collection whose
+ *   carriers differ from the statement's in an element neither side of which
+ *   is a host's is outside it all the same: `Map` itself is declared only in
+ *   the standard library, and `Function` too.
+ * - A statement spelling literals (`{('vertex'|'fragment')}`) of the domain
+ *   the value has states a precision, not a different storage.
+ */
+export const statementExcludes = (checker: ts.TypeChecker, passed: ts.Type, stated: ts.Type, invariant: boolean): boolean => {
+  const collection = invariant ? collectionVerdict(checker, passed, stated) : null
+  if (collection !== null) return collection
+  if (namesDeclaredOnlyType(checker, stated)) return false
+  if (derivesFromStatedClass(checker, passed, stated)) return false
+  const statedArms = stated.isUnion() ? stated.types : [stated]
+  if (statedArms.some((arm) => isClassInstance(arm) && derivesFromStatedClass(checker, arm, passed))) return false
+  if (isClassInstance(passed) && statedArms.every(isClassInstance)) return true
+  if (checker.isTypeAssignableTo(passed, stated)) return false
+  const domains = statedArms.map((arm) => checker.getBaseTypeOfLiteralType(arm))
+  return !domains.some((domain) => checker.isTypeAssignableTo(checker.getBaseTypeOfLiteralType(passed), domain))
+}
+
+const collectionKinds = new Set(['Array', 'Map', 'Set', 'WeakMap', 'WeakSet'])
+
+/** The kind and type arguments of an `Array`, `Map`, `Set`, `WeakMap` or `WeakSet` reference; `null` for anything else. */
+const collectionOf = (checker: ts.TypeChecker, type: ts.Type): { readonly kind: string; readonly elements: readonly ts.Type[] } | null => {
+  const kind = type.getSymbol()?.name
+  if (!kind || !collectionKinds.has(kind) || (type.flags & ts.TypeFlags.Object) === 0) return null
+  if (((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return null
+  return { kind, elements: checker.getTypeArguments(type as ts.TypeReference) }
+}
+
+/**
+ * What invariance says of a collection value against a statement naming
+ * collections of its kind: `false` where one of them has the value's
+ * carriers, `true` where each differs from it in an element that is no
+ * host's, `null` where it says nothing (no collection, no such arm, or an arm
+ * that differs only where a host's type is -- the boundary's question).
+ */
+const collectionVerdict = (checker: ts.TypeChecker, passed: ts.Type, stated: ts.Type): boolean | null => {
+  const collection = collectionOf(checker, passed)
+  if (!collection) return null
+  const sameKind = (stated.isUnion() ? stated.types : [stated]).flatMap((arm) => {
+    const other = collectionOf(checker, arm)
+    return other && other.kind === collection.kind ? [other] : []
+  })
+  if (sameKind.length === 0) return null
+  const differing = sameKind.map((other) => differingElements(checker, collection.elements, other.elements))
+  if (differing.some((pairs) => pairs.length === 0)) return false
+  const program = (type: ts.Type): boolean => !namesDeclaredOnlyType(checker, type)
+  return differing.every((pairs) => pairs.some(([left, right]) => program(left) && program(right))) ? true : null
+}
+
+/**
+ * The element pairs at which two collections' type arguments name different
+ * carriers: not mutually assignable, an `any` on either side taken as saying
+ * nothing.
+ */
+const differingElements = (
+  checker: ts.TypeChecker,
+  passed: readonly ts.Type[],
+  stated: readonly ts.Type[]
+): (readonly [ts.Type, ts.Type])[] =>
+  passed.flatMap((element, index) => {
+    const statedElement = stated[index]
+    if (!statedElement || saysNothing(statedElement) || saysNothing(element)) return []
+    const left = checker.getBaseTypeOfLiteralType(element)
+    const right = checker.getBaseTypeOfLiteralType(statedElement)
+    return checker.isTypeAssignableTo(left, right) && checker.isTypeAssignableTo(right, left) ? [] : [[element, statedElement] as const]
+  })
 
 export const isUncheckedJavaScript = (file: ts.SourceFile): boolean =>
   /\.(?:[cm]?js|jsx)$/i.test(file.fileName) &&

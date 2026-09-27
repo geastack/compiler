@@ -84,6 +84,9 @@ import {
 } from './normalize/reachability.js'
 import { createProgram, defaultCompilerOptions } from './program.js'
 import { createFrontendTiming } from './frontend-timing.js'
+import { resolve as resolvePath } from 'node:path'
+import { contradictedJsDocTypeSpans, type BlankSpan, type CensusArms } from './contradicted-jsdoc-types.js'
+import { contradictedJsDocParameterSpans } from './contradicted-jsdoc-parameters.js'
 import type { DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 // The ambient host-protocol census -- what this program's own declarations
 // say a host owns -- lives in its own module purely for the architecture
@@ -881,6 +884,35 @@ const nativeConstructorCandidatesOf = (file: ts.SourceFile): readonly (ts.ClassD
 }
 
 export const runFrontend = (input: FrontendInput): FrontendResult => {
+  let contradictions = new Map<string, readonly BlankSpan[]>()
+  for (let attempt = 1; ; attempt++) {
+    const outcome = attemptFrontend(input, contradictions, attempt < censusContradictionAttempts)
+    if (!('restart' in outcome)) return outcome
+    const merged = new Map(contradictions)
+    for (const [file, spans] of outcome.restart) {
+      const known = merged.get(file) ?? []
+      const fresh = spans.filter((span) => !known.some((other) => other.at === span.at && other.end === span.end))
+      merged.set(file, [...known, ...fresh])
+    }
+    contradictions = merged
+  }
+}
+
+/** What the settled census says an expression holds, as `CensusArms` asks. */
+const censusArmsOf =
+  (census: ParameterBindingCensus): CensusArms =>
+  (expression) => {
+    const arms = census.unionArmsAt(expression)
+    if (arms && arms.length > 0) return arms
+    const type = census.typeAt(expression)
+    return type ? (type.isUnion() ? type.types : [type]) : null
+  }
+
+const attemptFrontend = (
+  input: FrontendInput,
+  censusContradictions: ReadonlyMap<string, readonly BlankSpan[]>,
+  mayRestart: boolean
+): FrontendResult | { readonly restart: ReadonlyMap<string, readonly BlankSpan[]> } => {
   const timing = createFrontendTiming('phases')
   const compiled = createProgram({
     ...(input.packageSources ? { packageSources: input.packageSources } : {}),
@@ -907,7 +939,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     hostMethodBindings: input.hostMethodBindings ?? new Map(),
     ...(input.statedModuleSet ? { statedModuleSet: true } : {}),
     ...(input.closedScriptScope ? { closedScriptScope: true } : {}),
-    sourceTransforms: input.sourceTransforms ?? []
+    sourceTransforms: input.sourceTransforms ?? [],
+    ...(censusContradictions.size > 0 ? { censusContradictions } : {})
   })
   timing.mark('program-and-diagnostics')
   const hostMethodBindings = input.hostMethodBindings ?? new Map()
@@ -1309,6 +1342,22 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   if (process.env['GEA_ROUNDS_DEBUG'])
     process.stderr.write(`[ROUNDS] ${settled.round} rounds, boundCount ${settled.parameters.boundCount}\n`)
   const parameters: ParameterBindingCensus = settled.parameters
+  if (mayRestart) {
+    const arms = censusArmsOf(parameters)
+    const found = new Map<string, BlankSpan[]>()
+    for (const spans of [contradictedJsDocTypeSpans(compiled.program, arms), contradictedJsDocParameterSpans(compiled.program, arms)])
+      for (const [file, fileSpans] of spans) {
+        const fileName = resolvePath(file.fileName)
+        found.set(fileName, [...(found.get(fileName) ?? []), ...fileSpans])
+      }
+    timing.mark('census-contradictions')
+    if (found.size > 0) {
+      if (process.env['GEA_JSDOC_CONTRADICTION_DEBUG'])
+        process.stderr.write(`[JSDOC-CONTRADICTED] census round: ${[...found.values()].flat().length} tags, compiling again\n`)
+      timing.report()
+      return { restart: found }
+    }
+  }
   // Every one of these is the SETTLING round's own instance, which is what the
   // snapshot exists to guarantee: the structural mapper below and the censuses
   // that produced `parameters` are looking at the identical answers.
