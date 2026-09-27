@@ -1357,11 +1357,23 @@ export const createSubclassMemberOverlayTransform =
         for (const name of ancestor.ownObjectShapes.keys()) inherited.add(name)
         ancestorName = ancestor.baseName
       }
+      // A descendant that declares the member in its class body (an accessor,
+      // a method or a field) replaces it for its own instances: this class's writes
+      // run the descendant's setter there, and its reads the getter. The
+      // restated type -- this class's own writes -- is then not what a read
+      // through this class holds. three's `InputNode.value` (`@type {any}`)
+      // under `TextureNode`'s `get value()`/`set value()` made
+      // `InputNode`'s own `this.value = value` a store into the Texture
+      // setter. Such a member keeps the base union.
+      const replacedBelow = new Set<string>()
+      for (const descendant of transitiveSubclassesOf(index, info.name))
+        for (const name of descendant.declaredNames) replacedBelow.add(name)
       const out: string[] = []
       for (const name of [...info.ownMembers.keys()].sort()) {
         if (!index.externallyReadNames.has(name)) continue
         if (declaredHere.has(name)) continue
         if (inherited.has(name)) continue
+        if (replacedBelow.has(name)) continue
         const texts = info.ownMembers.get(name)
         if (!texts || texts.length !== 1) continue
         const text = texts[0] as string
