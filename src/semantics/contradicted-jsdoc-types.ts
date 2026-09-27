@@ -289,6 +289,51 @@ export const contradictedJsDocTypeSpans = (program: ts.Program, census?: CensusA
       const type = checker.getTypeAtLocation(withoutParentheses(written))
       return !saysNothing(type) && !saysNothing(checker.getNonNullableType(type))
     })
+  // A promise the function builds resolves with what reaches its executor's
+  // `resolve`, so a `@return {Promise<T>}` tag is contradicted by a callee
+  // that calls `resolve` with a value outside `T`. three's `yieldToMain`
+  // states `@return {Promise<void>}` and returns `new Promise( resolve => {
+  // requestAnimationFrame( resolve ) } )`, and the host calls `resolve` with
+  // the frame time, a number. Read at the tag, `resolve` takes `void`, and
+  // no conversion carries it into the host's `( time: number ) => void`
+  // callback; an adapter that dropped the number would resolve the promise
+  // with `undefined` where JS resolves it with the frame time.
+  const resolvedOutside = (value: ts.Expression, stated: ts.Type): boolean => {
+    if (!ts.isNewExpression(value) || !ts.isIdentifier(value.expression) || value.expression.text !== 'Promise') return false
+    if (stated.getSymbol()?.name !== 'Promise' || (stated.flags & ts.TypeFlags.Object) === 0) return false
+    if (((stated as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return false
+    const [promised] = checker.getTypeArguments(stated as ts.TypeReference)
+    const executor = value.arguments?.[0] && withoutParentheses(value.arguments[0])
+    if (!promised || saysNothing(promised) || !executor || !(ts.isArrowFunction(executor) || ts.isFunctionExpression(executor)))
+      return false
+    const resolve = executor.parameters[0]
+    const symbol = resolve && ts.isIdentifier(resolve.name) ? checker.getSymbolAtLocation(resolve.name) : undefined
+    if (!symbol) return false
+    const outside = (call: ts.CallExpression | ts.NewExpression, index: number): boolean => {
+      const signature = checker.getResolvedSignature(call)
+      const parameter = signature?.getParameters()[Math.min(index, (signature?.getParameters().length ?? 1) - 1)]
+      if (!parameter) return false
+      const callback = checker.getNonNullableType(checker.getTypeOfSymbolAtLocation(parameter, call))
+      return callback.getCallSignatures().some((callbackSignature) => {
+        const [first] = callbackSignature.getParameters()
+        if (!first) return false
+        const passed = checker.getTypeOfSymbolAtLocation(first, call)
+        return !saysNothing(passed) && !checker.isTypeAssignableTo(passed, promised)
+      })
+    }
+    const visit = (node: ts.Node): boolean =>
+      ((ts.isCallExpression(node) || ts.isNewExpression(node)) &&
+        (node.arguments ?? []).some(
+          (argument, index) => ts.isIdentifier(argument) && checker.getSymbolAtLocation(argument) === symbol && outside(node, index)
+        )) ||
+      ts.forEachChild(node, visit) === true
+    return visit(executor.body)
+  }
+  const returnRefutes = (value: ts.Expression, stated: ts.Type): boolean =>
+    contradicts(value, stated) ||
+    valuesWritten(value).some(
+      (written) => literalContradicts(withoutParentheses(written), stated) || resolvedOutside(withoutParentheses(written), stated)
+    )
   for (const { body, tag } of returnTags) {
     const whole = checker.getTypeFromTypeNode(tag.typeExpression.type)
     const onlyAbsence = (whole.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0 && !whole.isUnion()
@@ -298,21 +343,13 @@ export const contradictedJsDocTypeSpans = (program: ts.Program, census?: CensusA
       if (contradictedReturns.has(tag) || ts.isFunctionLike(node) || ts.isClassLike(node)) return
       if (ts.isReturnStatement(node) && node.expression) {
         const store = node
-        const refuted = onlyAbsence
-          ? returnsPresentValue(node.expression)
-          : contradicts(node.expression, stated) ||
-            valuesWritten(node.expression).some((written) => literalContradicts(withoutParentheses(written), stated))
+        const refuted = onlyAbsence ? returnsPresentValue(node.expression) : returnRefutes(node.expression, stated)
         if (refuted) contradictedReturns.set(tag, store)
       }
       ts.forEachChild(node, visit)
     }
     if (ts.isBlock(body)) ts.forEachChild(body, visit)
-    else if (
-      onlyAbsence
-        ? returnsPresentValue(body)
-        : contradicts(body, stated) || valuesWritten(body).some((written) => literalContradicts(withoutParentheses(written), stated))
-    )
-      contradictedReturns.set(tag, body)
+    else if (onlyAbsence ? returnsPresentValue(body) : returnRefutes(body, stated)) contradictedReturns.set(tag, body)
   }
 
   const round = census ? ' (census)' : ''
