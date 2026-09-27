@@ -31,6 +31,7 @@ import { defaultOwnershipPolicy } from './representation/derive.js'
 import { publishRepresentations } from './representation/publish.js'
 import { valueRecordTypesOf } from './representation/value-records.js'
 import { createAmbientTypeRealizationTransform } from './semantics/ambient-type-realization-transform.js'
+import { jsdocNameImportTransform } from './semantics/jsdoc-name-import-transform.js'
 import { declarationOverlayTransform } from './semantics/declaration-overlay-transform.js'
 import { createSubclassMemberOverlayTransform, type DeclarerReader } from './semantics/subclass-member-overlay-transform.js'
 import { aliasThisFieldDeclarationTransform } from './semantics/alias-this-field-declaration-transform.js'
@@ -421,6 +422,12 @@ export const sourceTransformsFor = (
       )
     )
   ),
+  // `jsdocNameImportTransform` runs last of the program's own tier: a JSDoc
+  // type name the file never imports (`@param {Array<BindGroup>}`) is bound
+  // with an `@import` of the one module declaring it, after the overlay and
+  // the realization above have written or imported every name they supply,
+  // so it adds only what neither did (see the transform's module comment).
+  jsdocNameImportTransform,
   ...plugins.flatMap((plugin) => (plugin.transformSource ? [plugin.transformSource] : []))
 ]
 

@@ -333,7 +333,7 @@ const jsExportsOf = (fileName: string, depth = 0): ReadonlySet<string> => {
  * module cannot be read is refused by the caller rather than assumed safe.
  */
 const reachabilityCache = new Map<string, ReadonlySet<string>>()
-const modulesReachableFrom = (start: string): ReadonlySet<string> => {
+export const modulesReachableFrom = (start: string): ReadonlySet<string> => {
   const cached = reachabilityCache.get(start)
   if (cached) return cached
   const seen = new Set<string>()
