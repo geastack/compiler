@@ -129,6 +129,50 @@ export const createLayoutTypeResolver = (
     if (!narrowed.every(exotic)) return null
     return held.some((arm) => checker.isTypeAssignableTo(arm, own)) ? null : checker.getNeverType()
   }
+  // The other half of the same split: a cell the checker types from its
+  // initializer as a bare primitive, which the program later sets to `null`
+  // (three's GLSLNodeFunction, `let count = Number.parseInt( ... )` then
+  // `else count = null`). The checker keeps the initializer's `number` and
+  // calls the write an error, so the cell was laid out as a `double` that the
+  // `null` has no conversion into. A primitive carrier cannot hold the
+  // absence; the census's join of the writes, the same primitive with the
+  // `null`, can.
+  const nullWrittenCells = new Map<ts.VariableDeclaration, boolean>()
+  const nullWrittenPrimitiveCellOf = (node: ts.Node): ts.VariableDeclaration | null => {
+    const declaration = ts.isVariableDeclaration(node)
+      ? node
+      : ts.isIdentifier(node)
+        ? checker.getSymbolAtLocation(node)?.valueDeclaration
+        : undefined
+    if (!declaration || !ts.isVariableDeclaration(declaration) || declaration.type || !ts.isIdentifier(declaration.name)) return null
+    if (ts.getJSDocType(declaration)) return null
+    const declared = checker.getTypeAtLocation(declaration.name)
+    const primitive = ts.TypeFlags.NumberLike | ts.TypeFlags.StringLike | ts.TypeFlags.BooleanLike
+    const arms = declared.isUnion() ? declared.types : [declared]
+    if (!arms.every((arm) => (arm.flags & primitive) !== 0)) return null
+    const known = nullWrittenCells.get(declaration)
+    if (known !== undefined) return known ? declaration : null
+    const symbol = checker.getSymbolAtLocation(declaration.name)
+    let found = false
+    const visit = (child: ts.Node): void => {
+      if (found) return
+      if (
+        ts.isBinaryExpression(child) &&
+        child.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(child.left) &&
+        child.right.kind === ts.SyntaxKind.NullKeyword &&
+        symbol !== undefined &&
+        checker.getSymbolAtLocation(child.left) === symbol
+      ) {
+        found = true
+        return
+      }
+      ts.forEachChild(child, visit)
+    }
+    visit(declaration.getSourceFile())
+    nullWrittenCells.set(declaration, found)
+    return found ? declaration : null
+  }
   const arrayPatternElementDeclaring = (node: ts.Identifier): ts.BindingElement | null => {
     const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration
     return declaration && ts.isBindingElement(declaration) ? declaration : null
@@ -1063,6 +1107,18 @@ export const createLayoutTypeResolver = (
       const bound = parameters.typeAt(node)
       if (bound && bound !== own && !isUnreducedTypeForm(bound) && checker.isTypeAssignableTo(checker.getNullType(), bound)) return bound
       if (!bound && cellTakesUntypedWrite(nullCell)) return checker.getAnyType()
+    }
+    const nullWrittenCell = nullWrittenPrimitiveCellOf(node)
+    if (nullWrittenCell) {
+      const bound = parameters.typeAt(node)
+      const withNull = checker.getNullableType(checker.getTypeAtLocation(nullWrittenCell.name), ts.TypeFlags.Null)
+      if (
+        bound &&
+        !isUnreducedTypeForm(bound) &&
+        checker.isTypeAssignableTo(bound, withNull) &&
+        checker.isTypeAssignableTo(withNull, bound)
+      )
+        return bound
     }
     // An `any` here is one of exactly two answers worth a second question. It
     // is the only shape the checker produces that can mean "nothing was
