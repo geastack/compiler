@@ -786,6 +786,7 @@ const attemptFrontend = (
     ...(input.declarationModules ? { declarationModules: input.declarationModules } : {}),
     ...(input.uncheckedJavaScript ? { uncheckedJavaScript: input.uncheckedJavaScript } : {}),
     ...(input.scopedTypeRealizations ? { scopedTypeRealizations: input.scopedTypeRealizations } : {}),
+    ...(input.absentGlobals ? { absentGlobals: input.absentGlobals } : {}),
     rootFileNames: input.rootFileNames,
     options: input.javaScriptSources
       ? // `maxNodeModuleJsDepth` alongside `allowJs` for the reason `program.ts`'s
@@ -1175,7 +1176,10 @@ const attemptFrontend = (
   if (mayRestart) {
     const arms = censusArmsOf(parameters)
     const found = new Map<string, BlankSpan[]>()
-    for (const spans of [contradictedJsDocTypeSpans(compiled.program, arms), contradictedJsDocParameterSpans(compiled.program, arms)])
+    for (const spans of [
+      contradictedJsDocTypeSpans(compiled.program, arms),
+      contradictedJsDocParameterSpans(compiled.program, arms, input.absentGlobals)
+    ])
       for (const [file, fileSpans] of spans) {
         const fileName = resolvePath(file.fileName)
         found.set(fileName, [...(found.get(fileName) ?? []), ...fileSpans])
