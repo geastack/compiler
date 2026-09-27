@@ -151,10 +151,24 @@ const isKeyedCollectionReceiver = (checker: ts.TypeChecker, receiver: ts.Express
  * asked of the APPARENT type so `<T extends number[]>(xs: T)` resolves `T`
  * to its constraint first, for the same reason `matchesStandardInterfaceTransitively`
  * does.
+ *
+ * `null` and `undefined` members of a union are not receivers: a call that
+ * runs was made on the array, so `T[] | null` appends to `T[]`. The census
+ * types a JavaScript cell that starts `null` and is later assigned `[]` that
+ * way (three's `Renderer._compilationPromises`, `RenderObject`'s `protoKeys`),
+ * and its `.push` was otherwise no write at all.
  */
 const isArrayReceiver = (checker: ts.TypeChecker, type: ts.Type): boolean => {
-  const apparent = checker.getApparentType(type)
-  return checker.isArrayType(apparent) || checker.isTupleType(apparent)
+  const members = (type.isUnion() ? type.types : [type]).filter(
+    (member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
+  )
+  return (
+    members.length > 0 &&
+    members.every((member) => {
+      const apparent = checker.getApparentType(member)
+      return checker.isArrayType(apparent) || checker.isTupleType(apparent)
+    })
+  )
 }
 
 /**
