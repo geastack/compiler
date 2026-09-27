@@ -282,6 +282,26 @@ export interface CollectionBindingCensus {
   /** The element that same callback returns into, answered at the callback itself. */
   readonly mapCallbackElementAt?: (callback: ts.Node) => ts.Type | null
   /**
+   * The element of the fresh array `Array.from( s )` (or `Array.from(
+   * s.values() )`, `Array.from( s.keys() )`) builds, when `s` reads a bare
+   * `new Set()` this census bound a key for; `null` for any other call.
+   *
+   * A Set's elements are its keys, and its keys and values iterators yield
+   * them in insertion order (ECMA-262 24.2.3.8, 24.2.3.10, 24.2.3.11), so the
+   * array holds exactly what the `.add` calls stored. The checker types the
+   * call from the Set's DEFAULTED argument (`Set<any>` for a bare `new
+   * Set()`), which left three's `this.vertexBuffers = Array.from(
+   * vertexBuffers.values() )` (RenderObject) an `any[]` beside a Set whose
+   * key this census had bound: one storage, two carriers.
+   */
+  readonly arrayFromElementAt?: (call: ts.CallExpression) => ts.Type | null
+  /**
+   * The key this census bound for the `new Set()` a read names, and only for a
+   * Set: its elements, what `s.values()`/`s.keys()` iterate and
+   * `Array.from( s )` copies. `null` for any other read.
+   */
+  readonly setKeyForRead?: (expression: ts.Expression) => ts.Type | null
+  /**
    * The stated array a literal of untyped values takes from the statement
    * its const flows into -- see "A literal of untyped values" below.
    * Answered at the literal and at the conditional that holds it beside an
@@ -1871,6 +1891,29 @@ export const censusCollectionBindings = (
     if (arms.length !== 1 || arm === undefined || !isOpenArray(arm)) return null
     const stored = valueSlotArray.get(owner)
     return stored ? (boundElement.get(stored) ?? null) : null
+  }
+
+  /** See `CollectionBindingCensus.arrayFromElementAt`. */
+  const arrayFromElementAt = (call: ts.CallExpression): ts.Type | null => {
+    const callee = call.expression
+    if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'from' || call.arguments.length !== 1) return null
+    if (!isStandardGlobalValue(checker, callee.expression, 'Array')) return null
+    let source = call.arguments[0]!
+    if (ts.isSpreadElement(source)) return null
+    if (
+      ts.isCallExpression(source) &&
+      source.arguments.length === 0 &&
+      ts.isPropertyAccessExpression(source.expression) &&
+      (source.expression.name.text === 'values' || source.expression.name.text === 'keys')
+    )
+      source = source.expression.expression
+    return setKeyForRead(source)
+  }
+  /** See `CollectionBindingCensus.setKeyForRead`. */
+  const setKeyForRead = (expression: ts.Expression): ts.Type | null => {
+    const owner = ownerDeclOfExpr(expression)
+    if (!owner || byOwner.get(owner)?.family !== 'set') return null
+    return boundKey.get(owner) ?? null
   }
 
   return {

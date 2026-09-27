@@ -1310,6 +1310,9 @@ const collectionMemberResultOverride = (context: ProducerContext, node: ts.CallE
   // or an assignment the checker reads dynamically -- the same gate, asked
   // of `typeAt`'s other source (`statedCollectionTypeAt`'s header).
   if (statedCollectionTypeAt(context.checker, node)) return context.types.typeAt(node)
+  // `Array.from( s )` over a Set the census bound: the same gate, for the
+  // array `collectionArrayFromResultTypeAt` publishes.
+  if (context.collections.arrayFromElementAt?.(node)) return context.types.typeAt(node)
   const member = callee.name.text
   if (member !== 'get' && member !== 'set' && member !== 'add') return null
   const bound = context.collections.typeArgumentsForRead(callee.expression)

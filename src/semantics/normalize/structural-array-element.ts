@@ -1091,3 +1091,23 @@ export const collectionMemberResultTypeAt = (
   if (value === null) return null
   return table.intern({ kind: 'union', members: [value, table.intern({ kind: 'primitive', primitive: 'undefined' })] })
 }
+
+/**
+ * What `Array.from( s )` publishes when `s` reads a Set the census bound a
+ * key for: a fresh array of that key (`CollectionBindingCensus.
+ * arrayFromElementAt`). The checker's `any[]` comes from the Set's defaulted
+ * argument, not from the program, and a cell filled with it held a dynamic
+ * element beside a natively keyed Set (three's RenderObject `vertexBuffers`).
+ */
+export const collectionArrayFromResultTypeAt = (
+  collections: CollectionBindingCensus,
+  table: StructuralTypeTable,
+  typeOf: (type: ts.Type) => StructuralTypeId,
+  node: ts.Node
+): StructuralTypeId | null => {
+  if (!ts.isCallExpression(node)) return null
+  const element = collections.arrayFromElementAt?.(node) ?? null
+  if (element === null) return null
+  return table.intern({ kind: 'array', element: typeOf(element), readonly: false, extension: [] })
+}
+
