@@ -17632,7 +17632,15 @@ struct Pattern {
   std::regex::flag_type stdFlags() const {
     auto value = std::regex::ECMAScript;
     if (ignoreCase) value |= std::regex::icase;
+#if defined(_MSVC_STL_VERSION)
+    // MSVC's <regex> never implemented C++17's `regex_constants::multiline` --
+    // its `syntax_option_type` has no such enumerator -- so `/m` cannot be
+    // forwarded to std::regex here. Dropping the flag makes `^`/`$` match only
+    // at the subject's ends, which is wrong for `/m` patterns; this guard exists
+    // to unblock the Win32 build, not to fix multiline on Windows.
+#else
     if (multiline) value |= std::regex_constants::multiline;
+#endif
     return value;
   }
 
