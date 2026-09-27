@@ -5829,6 +5829,31 @@ const buildMapper = (
         const member = unplacedHoistedMemberReadAt(node)
         return member ? typeOf(member) : null
       }
+    },
+    {
+      // Last: the receiver of a member read that the checker narrowed to
+      // `never`, where no rule above gave it a type. `never`'s carrier is
+      // `undefined`, which a cell holding its own absence (`null`) has no
+      // conversion into, although the read converts nothing: it is the value
+      // the cell holds, and the member is read off it. three's
+      // WebGLBackend.compute tests `count && typeof count === 'object' &&
+      // count.isIndirectStorageBufferAttribute` on a `?number`. The read is
+      // dead, but `dead-typeof-guards.ts` does not trust the checker's `never`
+      // to prove that, so the code stays and the receiver takes the cell's
+      // carrier. A `never` read that is itself the value keeps `never`'s
+      // stand-in, which is what an iteration over it builds its dead cursor
+      // from (`iterate-never-source`).
+      name: 'never-narrowed-receiver',
+      forms: [ts.SyntaxKind.Identifier],
+      resolve: (node) => {
+        const parent = node.parent
+        if (!(ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) || parent.expression !== node) return null
+        if (absentSubstitutedTypeAt(node).flags !== ts.TypeFlags.Never) return null
+        const declaration = checker.getSymbolAtLocation(node)?.valueDeclaration
+        if (!declaration || (!ts.isParameter(declaration) && !ts.isVariableDeclaration(declaration))) return null
+        if (!ts.isIdentifier(declaration.name) || declaration.name === node) return null
+        return typeAt(declaration)
+      }
     }
   ]
 
