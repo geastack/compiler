@@ -636,6 +636,7 @@ stated-any-collection-field-allocation.runtime.js.cpp 0ba48b0a0d69
 stated-collection-field-allocation.runtime.js.cpp d669095a6744
 stated-destination-types-open-array.runtime.js.cpp 69d1cd2e0b98
 stated-open-union-preserves-closed-arms.ts.cpp 878f72cd6f91
+static-block-prototype-flag-keeps-class-family.runtime.js.cpp 0e25644f2336
 static-intrinsic-reflection.runtime.js.cpp 9a7c2a8500d2
 static-method-as-callback-value.ts.cpp 8ec7c5dfe2ea
 static-property-descriptors.runtime.js.cpp d6c981deef9d
