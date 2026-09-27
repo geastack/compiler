@@ -4,7 +4,24 @@ import type { StructuralTypeTable } from '../model/structural-type-table.js'
 import type { ValueFlowIndex } from './flow/model.js'
 import type { ParameterBindingCensus } from './parameter-bindings.js'
 import { containsUnstatedPosition } from './derived-expression-type.js'
-import { readFollowsEveryWrite } from './stored-local-read.js'
+import {
+  checkerLeftReadOpen,
+  NULL_KIND,
+  PRESENT_KIND,
+  readFollowsEveryWrite,
+  UNDEFINED_KIND,
+  valuesReachingRead
+} from './stored-local-read.js'
+
+/**
+ * The resolver, and the reads it answered with the arms of the writes that
+ * reach them (`valuesReachingRead`) rather than the whole stored union.
+ */
+export interface LocalUnionResolver {
+  (node: ts.Node): StructuralTypeId | null
+  /** Whether this resolver answered `node` with the reaching writes' arms; asked after the read's type. */
+  readonly tookReachingArms: (node: ts.Node) => boolean
+}
 
 /**
  * Complete a synthesized local union in the SAME specialization view as its
@@ -20,7 +37,8 @@ export const createLocalUnionResolver = (
   flow: ValueFlowIndex | undefined,
   read: (node: ts.Node) => StructuralTypeId,
   refinedSourceAt: (node: ts.Node) => StructuralTypeId | null = () => null
-): ((node: ts.Node) => StructuralTypeId | null) => {
+): LocalUnionResolver => {
+  const reachingReads = new Set<ts.Node>()
   const memo = new Map<ts.VariableDeclaration, StructuralTypeId | null>()
   const pending = new Set<ts.VariableDeclaration>()
   const sourceRefined = new Set<ts.VariableDeclaration>()
@@ -67,7 +85,30 @@ export const createLocalUnionResolver = (
     memo.set(declaration, result)
     return result
   }
-  return (node) => {
+  const absenceOf = (id: StructuralTypeId): number => {
+    const shape = table.get(id).shape
+    if (shape.kind !== 'primitive') return PRESENT_KIND
+    return shape.primitive === 'null' ? NULL_KIND : shape.primitive === 'undefined' ? UNDEFINED_KIND : PRESENT_KIND
+  }
+  /** The union of the arms the reaching writes store, each with only the absences its guards allow; `null` when undecided. */
+  const reachingArmsOf = (node: ts.Identifier): StructuralTypeId | null => {
+    const values = valuesReachingRead(checker, flow, node)
+    if (!values) return null
+    const members: StructuralTypeId[] = []
+    for (const value of values) {
+      if (value.source === null) return null
+      const stored = ts.isVariableDeclaration(value.source)
+        ? table.intern({ kind: 'primitive', primitive: 'undefined' })
+        : read(value.source)
+      const shape = table.get(stored).shape
+      const arms = shape.kind === 'union' ? shape.members : [stored]
+      members.push(...arms.filter((arm) => (absenceOf(arm) & value.kinds) !== 0))
+    }
+    if (members.length === 0) return null
+    const unique = [...new Set(members)]
+    return unique.length === 1 ? (unique[0] ?? null) : table.intern({ kind: 'union', members: unique })
+  }
+  const resolver = (node: ts.Node): StructuralTypeId | null => {
     if (ts.isVariableDeclaration(node)) return resolve(node)
     if (!ts.isIdentifier(node)) return null
     const declarations = checker.getSymbolAtLocation(node)?.declarations
@@ -104,6 +145,18 @@ export const createLocalUnionResolver = (
         if (arrays.length === 1) return arrays[0] ?? null
       }
     }
+    // A read the checker did not narrow takes the arms of the writes that
+    // reach it, with the absences their guards allow -- see
+    // `valuesReachingRead`. Only those can be in the cell there: the
+    // `attributeData` passed to `new DualAttributeData( attributeData, ... )`
+    // is the initializer's record, never the DualAttributeData it becomes.
+    if (flow && census.unionArmsAt(declaration) && checkerLeftReadOpen(checker, node)) {
+      const reaching = reachingArmsOf(node)
+      if (reaching) {
+        reachingReads.add(node)
+        return reaching
+      }
+    }
     // A read the checker did not narrow, after every write, reads the stored
     // union -- see `readFollowsEveryWrite`.
     if (flow && census.unionArmsAt(declaration) && readFollowsEveryWrite(checker, flow, declaration, node)) return result
@@ -126,4 +179,5 @@ export const createLocalUnionResolver = (
     })
     return kept.length === 1 ? (kept[0] ?? null) : table.intern({ kind: 'union', members: kept })
   }
+  return Object.assign(resolver, { tookReachingArms: (node: ts.Node) => reachingReads.has(node) })
 }

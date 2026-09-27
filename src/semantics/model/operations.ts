@@ -172,6 +172,16 @@ export interface BindingOperation extends SemanticOperationBase {
   /** This initializes a direct body-level function declaration during FunctionDeclarationInstantiation. */
   readonly hoistedFunctionInitialization?: boolean
   /**
+   * Set only on a 'read' whose values are exactly the writes that reach it
+   * (`StructuralMapper.readTakesReachingArms`): the flow walk proved which of
+   * the cell's arms can be live here, and the read's type is those arms. A
+   * lowering whose census has no conversion from the cell into that type --
+   * an arm beside it with no home there (`conversions.ts`'s
+   * `classArmWithoutHome`) -- may take the read's one arm, checked at
+   * runtime, as it does for an author's `as T` (`SemanticOperand.asserted`).
+   */
+  readonly reachingArms?: true
+  /**
    * Set only on the 'declare' introduction of an ambient value declaration: a
    * cell this program names but never writes, because a host supplies the
    * value from outside it. `linkageName` is the ABI contract with that host,
