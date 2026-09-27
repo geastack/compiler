@@ -506,6 +506,7 @@ optional-map-property-logical-assign.ts.cpp 37165597e528
 optional-regexp-match-array-union.ts.cpp 7bca824739b6
 optional-strict-equality.ts.cpp a95e22c84a4d
 optional-tagged-union-narrowed-read.ts.cpp f850d7d62914
+optional-union-receiver-method-call.runtime.js.cpp 579710e61a1e
 optional-void-call-abi.ts.cpp ae3cec960b42
 overload-set-as-value.ts.cpp 250abed126bf
 overloaded-callable-fields.ts.cpp 04420c800d2d
