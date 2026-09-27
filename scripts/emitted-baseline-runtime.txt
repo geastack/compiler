@@ -27,6 +27,7 @@ assignment-declared-array-field.runtime.js.cpp e9b6234a4254
 async-integer-result.ts.cpp 40d406729713
 async-return-promise-undefined-into-void.ts.cpp 9f3bd1364eac
 await-over-an-optional-thenable.ts.cpp fdab8693a27f
+bag-slot-shares-this-reading-literal-record.runtime.js.cpp da215ef74678
 base-typed-derived-dynamic-dictionary.ts.cpp 74bbd1b9fa0d
 base-typed-derived-dynamic-fields.ts.cpp 3291e2cf977d
 bind-method-value-to-receiver.ts.cpp d1df1b6343b5
@@ -95,7 +96,7 @@ clone-idiom-family-dispatch.runtime.js.cpp ffafe4778937
 closed-literal-absent-key-push.runtime.js.cpp 3c1046c8e89c
 closure-cycle-lifetime.ts.cpp 86aea6acdbda
 closure-factory-export-never-read.ts.cpp 35b275d3d6f5
-closure-written-null-cell-read.runtime.js.cpp 20118f22c8cc
+closure-written-null-cell-read.runtime.js.cpp cc46343643ab
 collection-get-native-union.ts.cpp ea90283c893f
 collection-value-slot-shares-array-element.runtime.js.cpp 8280a2fe4901
 composed-field-descriptor.runtime.js.cpp a11d2a79f4b4
@@ -360,6 +361,7 @@ key-order-cases.ts.cpp 36f9f7e763c5
 lazy-map-in-logical-or-assignment.ts.cpp 1173673c5bbd
 lazy-subclass-accessor-override.ts.cpp f3d043d1536d
 let-cache-lookup-miss.runtime.js.cpp a8b2966ce67f
+literal-member-bag-assigned-from-dynamic-source.runtime.js.cpp 183be52f7788
 literal-slot-caches-stay-any.runtime.js.cpp 2fda56a9584b
 local-iteration.ts.cpp 9f4a7461cb94
 logical-and-object-left-falsy-arm.ts.cpp 24e43ef8d14b
@@ -371,6 +373,8 @@ map-result-takes-stated-destination.runtime.js.cpp ea5f1151e9fb
 mapped-constraint-callee-copy.ts.cpp 4cd66f302541
 math-direct-rest.ts.cpp 2b05999ee8b2
 math-numeric-constants.ts.cpp 6a954aa857bb
+member-declared-by-ancestor-is-not-restated.runtime.js.cpp 39ab71458797
+member-replaced-by-descendant-accessor-is-not-restated.runtime.js.cpp 0a2208a43919
 merge-arm-callable-arity-join.ts.cpp 74d9fe4b1a09
 merge-arm-dictionary-into-header-union.ts.cpp d01958dd9bed
 merge-arm-empty-array-into-native-array.ts.cpp 31fbf291be9e
@@ -641,6 +645,7 @@ stated-any-collection-field-allocation.runtime.js.cpp 0ba48b0a0d69
 stated-collection-field-allocation.runtime.js.cpp d669095a6744
 stated-destination-types-open-array.runtime.js.cpp 69d1cd2e0b98
 stated-open-union-preserves-closed-arms.ts.cpp 878f72cd6f91
+static-block-prototype-flag-keeps-class-family.runtime.js.cpp 0e25644f2336
 static-intrinsic-reflection.runtime.js.cpp 9a7c2a8500d2
 static-method-as-callback-value.ts.cpp 8ec7c5dfe2ea
 static-property-descriptors.runtime.js.cpp d6c981deef9d

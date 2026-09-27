@@ -9,7 +9,7 @@ import {
 import { outermostErasureOf, unwrapErasedExpression } from '../producers/erasure.js'
 import { isTypePositionReference, namespaceMemberDeclarationOf, resolveFlowSymbolAlias, unwrapNaming } from './targets.js'
 import { sourceClassHasDefaultInstanceOfShape } from './source-class-instanceof.js'
-import { sourceClassStaticDataUseOf } from './source-class-static-data.js'
+import { sourceClassStaticDataUseOf, sourcePrototypeDataInstallUseOf } from './source-class-static-data.js'
 import { sourcePrototypeMethodIdentityUseOf } from './source-prototype-method-identity.js'
 import { seededOriginSolver, isVacuousOrigin, type SeededOriginNode } from './seeded-origins.js'
 import { nodePathToken } from './node-path-token.js'
@@ -486,6 +486,11 @@ const classConstructorKeepsInstanceUncached = (checker: ts.TypeChecker, flow: Va
         if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent) || ts.isExportSpecifier(parent))
           continue
         if (sourceClassStaticDataUseOf(checker, flow, use)) continue
+        if (
+          (ts.isClassDeclaration(cell.declaration) || ts.isClassExpression(cell.declaration)) &&
+          sourcePrototypeDataInstallUseOf(checker, use, cell.declaration, type)
+        )
+          continue
         if (sourcePrototypeMethodIdentityUseOf(checker, flow, use, type)) continue
         if (staticMethodCallReceiverUse(checker, use)) continue
         // Constructor identity tests neither invoke coercion hooks nor publish

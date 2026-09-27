@@ -2486,7 +2486,7 @@ const buildMapper = (
     return id
   }
 
-  const layoutTypeAt = createLayoutTypeResolver(checker, parameters, absent)
+  const layoutTypeAt = createLayoutTypeResolver(checker, parameters, absent, bags)
 
   /**
    * The type at a node, with an absent host type collapsed -- and with that

@@ -51,3 +51,61 @@ export const sourceClassStaticDataUseOf = (checker: ts.TypeChecker, flow: ValueF
     )
   )
 }
+
+/** A literal that evaluates to a primitive and runs no code. */
+const primitiveLiteral = (expression: ts.Expression): boolean => {
+  let value = expression
+  while (ts.isParenthesizedExpression(value)) value = value.expression
+  return (
+    ts.isNumericLiteral(value) ||
+    ts.isStringLiteralLike(value) ||
+    value.kind === ts.SyntaxKind.TrueKeyword ||
+    value.kind === ts.SyntaxKind.FalseKeyword ||
+    value.kind === ts.SyntaxKind.NullKeyword
+  )
+}
+
+/**
+ * `static { C.prototype.isC = true }` inside `C`'s own declaration: three's
+ * `Vector2`/`Vector3`/`Vector4` and `Matrix2`/`Matrix3`/`Matrix4` type flags.
+ * The statement installs one primitive data value on the prototype while the
+ * class is being defined, before any instance exists, and hands the
+ * constructor and the prototype nowhere: the prototype is read only to store
+ * into it. So this mention of the class binding is not a publication of the
+ * constructor.
+ *
+ * The key must not name a method or accessor anywhere the checker sees it on
+ * the instance, so a proof that reads a method slot as the class's own body
+ * (`sourcePrototypeMethodIdentityUseOf`, the callable member plan) is never
+ * contradicted by this store. Reading the installed key is the ordinary data
+ * member plan: the checker gives the instance type the member, declared by
+ * this very assignment.
+ */
+export const sourcePrototypeDataInstallUseOf = (
+  checker: ts.TypeChecker,
+  reference: ts.Expression,
+  owner: ts.ClassLikeDeclaration,
+  instance: ts.Type
+): boolean => {
+  const prototype = reference.parent
+  if (!ts.isPropertyAccessExpression(prototype) || prototype.expression !== reference || prototype.name.text !== 'prototype') return false
+  const slot = prototype.parent
+  if (!ts.isPropertyAccessExpression(slot) || slot.expression !== prototype) return false
+  const store = slot.parent
+  if (!ts.isBinaryExpression(store) || store.left !== slot || store.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return false
+  if (!primitiveLiteral(store.right)) return false
+  const statement = store.parent
+  if (!ts.isExpressionStatement(statement)) return false
+  const block = statement.parent
+  if (!ts.isBlock(block) || !ts.isClassStaticBlockDeclaration(block.parent) || block.parent.parent !== owner) return false
+  const member = checker.getPropertyOfType(instance, slot.name.text)
+  return (
+    member?.declarations?.every(
+      (declaration) =>
+        !ts.isMethodDeclaration(declaration) &&
+        !ts.isGetAccessorDeclaration(declaration) &&
+        !ts.isSetAccessorDeclaration(declaration) &&
+        !ts.isFunctionLike(declaration)
+    ) ?? true
+  )
+}

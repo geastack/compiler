@@ -451,3 +451,19 @@ test('mutually recursive forwarding converges instead of answering an in-progres
     'a leak anywhere in the cycle still refuses'
   )
 })
+
+test("a class's own static block installing a primitive on its prototype keeps the instance", () => {
+  // three's `static { Vector2.prototype.isVector2 = true }`: the class
+  // binding is read only to store a primitive into its prototype while the
+  // class is defined, so the constructor is handed nowhere.
+  assert.equal(keepsInstance(`class Owner { static { Owner.prototype.isOwner = true } } void new Owner()`), true, 'a flag')
+  assert.equal(keepsInstance(`class Owner { static { Owner.prototype.label = 'owner' } } void new Owner()`), true, 'a string')
+  for (const [why, program] of [
+    ['a value that runs code', `declare function make(): number; class Owner { static { Owner.prototype.count = make() } }`],
+    ['the constructor itself stored', `class Owner { static { Owner.prototype.self = Owner } }`],
+    ['a method slot replaced by data', `class Owner { static { Owner.prototype.draw = 1 } draw() { return 0 } }`],
+    ["another class's static block", `class Owner {} class Other { static { Owner.prototype.isOwner = true } }`],
+    ['a store outside the class', `class Owner {} Owner.prototype.isOwner = true`]
+  ] as const)
+    assert.equal(keepsInstance(`${program} void new Owner()`), false, why)
+})

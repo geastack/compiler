@@ -1291,10 +1291,44 @@ export const createSubclassMemberOverlayTransform =
       if (!info.baseName || !index.classesByName.has(info.baseName)) return []
       if (index.untrustedClassNames.has(info.name)) return []
       const declaredHere = new Set(statement.members.map((member) => (member.name && ts.isIdentifier(member.name) ? member.name.text : '')))
+      // A restatement narrows what THIS class's reads see of a member whose
+      // base declaration is an overlay union. Where an ancestor declares the
+      // member in its own source, there is no overlay to narrow: the member
+      // is the ancestor's, one storage slot every subclass write fills, and
+      // the checker already joins the subclass's own `@type` into it. A
+      // second declaration here splits that one slot into two symbols -- the
+      // subclass's reads and writes take its restated type while the storage
+      // stays the ancestor's. three's `Node.name` (`@type {string}`) and
+      // `ReferenceNode`'s `this.name = null` (`@type {?string}`) became a
+      // `null` stored into a `std::string`. The same ancestor walk the
+      // overlay itself uses keeps inherited declarations authoritative.
+      const inherited = new Set<string>()
+      for (let ancestorName: string | null = info.baseName; ancestorName !== null; ) {
+        const ancestor = index.classesByName.get(ancestorName)
+        if (!ancestor || inherited.has(`class:${ancestorName}`)) break
+        inherited.add(`class:${ancestorName}`)
+        for (const name of ancestor.declaredNames) inherited.add(name)
+        for (const name of ancestor.ownMembers.keys()) inherited.add(name)
+        for (const name of ancestor.ownObjectShapes.keys()) inherited.add(name)
+        ancestorName = ancestor.baseName
+      }
+      // A descendant that declares the member in its class body (an accessor,
+      // a method or a field) replaces it for its own instances: this class's writes
+      // run the descendant's setter there, and its reads the getter. The
+      // restated type -- this class's own writes -- is then not what a read
+      // through this class holds. three's `InputNode.value` (`@type {any}`)
+      // under `TextureNode`'s `get value()`/`set value()` made
+      // `InputNode`'s own `this.value = value` a store into the Texture
+      // setter. Such a member keeps the base union.
+      const replacedBelow = new Set<string>()
+      for (const descendant of transitiveSubclassesOf(index, info.name))
+        for (const name of descendant.declaredNames) replacedBelow.add(name)
       const out: string[] = []
       for (const name of [...info.ownMembers.keys()].sort()) {
         if (!index.externallyReadNames.has(name)) continue
         if (declaredHere.has(name)) continue
+        if (inherited.has(name)) continue
+        if (replacedBelow.has(name)) continue
         const texts = info.ownMembers.get(name)
         if (!texts || texts.length !== 1) continue
         const text = texts[0] as string
