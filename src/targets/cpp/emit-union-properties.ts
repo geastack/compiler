@@ -1,4 +1,5 @@
 import { hostMemberOf } from './host/host-members.js'
+import { canonicalCaptureSlot, regexpRoleOf } from './prototype/emit-prototype-regexp.js'
 import type { Representation } from '../../representation/model.js'
 import { dictionaryKeyDomainOf, representationKey } from '../../representation/model.js'
 import { typedArrayUnionOnly } from '../../representation/host-templates.js'
@@ -20,7 +21,15 @@ import {
   type UnionMethodRead
 } from './emit-context.js'
 import { functionSourceReadClaimOf } from './function-source-reads.js'
-import { cppBodyName, cppRecordFieldName, cppRecordFieldPresenceName, cppStringLiteral, cppTypeOf, cppUndefinedIn } from './types.js'
+import {
+  cppBodyName,
+  cppRecordFieldName,
+  cppRecordFieldPresenceName,
+  cppStringLiteral,
+  cppTypeOf,
+  cppUndefinedIn,
+  cppUndefinedValue
+} from './types.js'
 import { declaredFieldRepresentationOf, declaredRecordFieldOf } from './records.js'
 import { absentCapableNumericElementText, keyedTableKeyText, memberAccessOperator } from './emit-carrier-members.js'
 import { alignedValueText, classFamilyLoadText, receiverBoundFieldText, widenedStoreText } from './emit-narrowing.js'
@@ -39,7 +48,7 @@ import { typeofTextFor } from './emit-typeof.js'
 import { promisePrototypeMethods } from './prototype/emit-prototype-invoke.js'
 import { classConstructorStaticMemberTextFor, classMethodValueText } from './class-properties/emit-class-properties.js'
 import { overriddenMethodValueText } from './class-properties/computed-method-value.js'
-import { propertyKeyText } from './emit-dynamic-properties.js'
+import { callableArmStaticReadText, propertyKeyText } from './emit-dynamic-properties.js'
 import { toStringTextOver } from './emit-tostring.js'
 import { recordLayoutPolicyOf } from '../../projection/fields.js'
 
@@ -298,6 +307,8 @@ const armRuntimeFieldText = (
     return classConstructorStaticMemberTextFor(ctx, arm, key, published, () => armExprText)
   }
   if (objectPrototypeMemberNames.has(key)) return null
+  const callable = callableArmStaticReadText(arm, armExprText, key, propertyKey, published)
+  if (callable !== null) return callable
   // A promise's member set is CLOSED, which is what makes absence provable
   // here rather than merely unrendered. ECMA-262 27.2.5 gives
   // `Promise.prototype` exactly `then`, `catch`, `finally` and
@@ -368,9 +379,28 @@ const armRuntimeFieldText = (
     // (`GetOperation.absentClassArms`): the language's answer is `undefined`.
     if (operation.absentClassArms?.includes(arm.declaration)) return absentArmText(published, key, 'class')
   }
+  // A match or exec result's element is a capture slot (22.2.7.2), which the
+  // native result holds with its participation -- not a sidecar entry.
+  const regexpRole = regexpRoleOf(arm)
+  if ((regexpRole === 'match-result' || regexpRole === 'exec-result') && canonicalCaptureSlot(key)) {
+    const slot: Representation = { kind: 'optional', payload: { kind: 'string' }, absence: 'undefined' }
+    return alignedValueText(ctx, 'emit-union-properties.ts:capture-slot', slot, published, `${armExprText}->capturedOrAbsent(${key})`)
+  }
   const accessors =
     arm.kind === 'record' ? arm.accessors : arm.kind === 'native-record-ref' ? recordAccessorsOfShape(ctx.deriver, arm.shapeId) : null
   if (accessors?.some((accessor) => accessor.key === key)) return null
+  // A by-value record has no identity, so no expando table: its own keys are
+  // exactly its fields, and a key none of them names and `Object.prototype`
+  // does not answer is `undefined` -- ret's `elem.type === CHAR ? elem.value
+  // : ...` over a union of token records, `value` absent from the RANGE arm.
+  if (
+    arm.kind === 'record' &&
+    arm.ownership === 'owned' &&
+    arm.accessors.length === 0 &&
+    !arm.fields.some((field) => field.key === key) &&
+    !objectPrototypeMemberNames.has(key)
+  )
+    return absentArmText(published, key, 'record')
   if (sidecarArm(arm)) {
     return alignedValueText(ctx, 'emit-union-properties.ts:201', boxed, published, `gea::nativeDynamicGet(${armExprText}, ${propertyKey})`)
   }
@@ -858,6 +888,9 @@ const deferredUnionMethodArmsOf = (ctx: EmitContext, representation: Representat
     }
     return nested
   }
+  // A boxed arm (thread-stream's `WeakRef | FakeWeakRef`) calls whatever its
+  // own [[Get]] finds, with itself as the receiver.
+  if (representation.kind === 'dynamic') return [{ path: [], receiverRepresentation: representation, callable: null }]
   if (representation.kind !== 'class-ref') return null
   const site = classMemberOf(ctx.classes, representation.declaration, key)
   if (site === null || site.kind !== 'method' || site.method.callable === null) return null
@@ -913,6 +946,10 @@ export const deferredUnionToStringClaim = (ctx: EmitContext, receiver: IrOperand
   const carrier = receiver.representation
   if (carrier.kind !== 'tagged-union') return null
   if (ctx.staticKeyTexts.get(key.value) !== 'toString') return null
+  // Every arm naming its own `toString` body is the union-method claim's, which
+  // `taggedUnionGetText` asks first; answering the same read here too left
+  // that claim's read unconsumed at the call.
+  if (deferredUnionMethodClaim(ctx, receiver, key) !== null) return null
   for (const arm of carrier.arms) {
     if (arm.value.kind === 'null' || arm.value.kind === 'undefined' || arm.value.kind === 'optional') return null
   }
@@ -938,8 +975,29 @@ export const deferredUnionMethodClaim = (ctx: EmitContext, receiver: IrOperand, 
   const staticKey = ctx.staticKeyTexts.get(key.value)
   if (staticKey === undefined) return null
   const arms = deferredUnionMethodArmsOf(ctx, receiver.representation, staticKey)
-  return arms === null ? null : { receiver, arms }
+  // Only with a class arm to dispatch: a union of boxes alone is one box's read.
+  return arms === null || arms.every((arm) => arm.callable === null) ? null : { receiver, key: staticKey, arms }
 }
+
+/** Whether a symbol, boolean or number arm's `[[Get]]` provably finds nothing under `key`, per the mutation census's `primitivePrototypeKeys`. */
+export const primitiveArmLacks = (ctx: EmitContext, arm: Representation, key: string): boolean => {
+  const primitive =
+    arm.kind === 'symbol'
+      ? 'symbol'
+      : arm.kind === 'scalar' && arm.domain === 'boolean'
+        ? 'boolean'
+        : arm.kind === 'scalar' && arm.domain === 'number'
+          ? 'number'
+          : null
+  if (primitive === null) return false
+  const keys = ctx.hosts.primitivePrototypeKeys?.get(primitive)
+  return keys !== undefined && keys !== null && !keys.has(key)
+}
+
+const primitiveArmAbsenceText = (ctx: EmitContext, arm: Representation, key: string, published: Representation): string | null =>
+  primitiveArmLacks(ctx, arm, key)
+    ? alignedValueText(ctx, 'emit-union-properties.ts:primitive-arm-absence', { kind: 'undefined' }, published, cppUndefinedValue)
+    : null
 
 /**
  * Reading a STATIC key off a tagged-union receiver, or `null` when this is not
@@ -960,6 +1018,25 @@ export const deferredUnionMethodClaim = (ctx: EmitContext, receiver: IrOperand, 
  * every value that happened to be that arm, which is worse than refusing to
  * compile.
  */
+/**
+ * The TypeError a mixed-union method read raises on a nullish arm, at the read
+ * itself: GetValue throws before the call evaluates a single argument, so the
+ * fused call cannot be where it happens. Nested sums guard through their arm.
+ */
+const nullishArmReadGuards = (receiverText: string, read: PrototypeMethodRead): string[] => {
+  const carrier = read.mixedUnionCarrier
+  if (!carrier) return []
+  return carrier.arms.flatMap((arm, index) => {
+    const test = `${receiverText}.is<${index}>()`
+    if (arm.value.kind === 'null' || arm.value.kind === 'undefined')
+      return [`if (${test}) (void)gea::host::throwGetPropertyOfNullish<bool>("${arm.value.kind}");`]
+    const nested = read.mixedUnionArms?.[index]
+    if (nested?.receiverKind !== 'mixed-union') return []
+    const inner = nullishArmReadGuards(`${receiverText}.get<${index}>()`, nested)
+    return inner.length === 0 ? [] : [`if (${test}) { ${inner.join(' ')} }`]
+  })
+}
+
 export const taggedUnionGetText = (ctx: EmitContext, lines: string[], operation: GetOperation): string | null => {
   const receiver = operation.receiver.representation
   if (receiver.kind !== 'tagged-union') return null
@@ -1023,7 +1100,9 @@ export const taggedUnionGetText = (ctx: EmitContext, lines: string[], operation:
   // `typeof` renders the dispatch and this renders nothing at all. Settled by
   // `unionMemberTypeofReadsOf`, which is where the conditions live.
   if (ctx.unionMemberTypeofReads.has(operation.result.id)) return ''
-  if (ctx.prototypeMethodReads.get(operation.result.id)?.receiverKind === 'mixed-union') {
+  const mixedRead = ctx.prototypeMethodReads.get(operation.result.id)
+  if (mixedRead?.receiverKind === 'mixed-union') {
+    lines.push(...nullishArmReadGuards(receiverText, mixedRead))
     // A heterogeneous union whose arms disagree about this member: the walk
     // recorded one answer PER ARM (`mixedUnionClaimOf`), and the call fusion
     // spells the dispatch. Asked of the recorded fact rather than re-derived,
@@ -1037,12 +1116,17 @@ export const taggedUnionGetText = (ctx: EmitContext, lines: string[], operation:
     if (site === null) {
       const native = armRuntimeFieldText(ctx, leaf.representation, leaf.text, key, operation)
       if (native !== null) return native
+      // A primitive arm reads through its own prototype chain, whose keys the
+      // mutation census bounds (`primitivePrototypeKeys`): a key outside them
+      // is `undefined` -- semver's `this.semver.version` over its `ANY` symbol.
+      const absent = primitiveArmAbsenceText(ctx, leaf.representation, key, published)
+      if (absent !== null) return absent
       // No native recipe is not proof of absence: a prototype or accessor
       // may answer this key. Keep that case visible instead of inventing an
       // undefined result or boxing the typed receiver.
       throw createCppEmitBlockedError(
         'property-access:tagged-union:get:false',
-        `a "get" of "${key}" on a tagged union reaches an arm carried as "${representationKey(leaf.representation)}" with no native property recipe ` +
+        `a "get" of "${key}" on a tagged union "${representationKey(receiver)}" reaches an arm carried as "${representationKey(leaf.representation)}" with no native property recipe ` +
           `producing "${representationKey(published)}"; boxing a typed receiver is not a property implementation`
       )
     }
@@ -1162,6 +1246,17 @@ const unionLeafSetText = (
   }
   if (sidecarArm(leaf.representation) && boxedValue !== null) {
     return `gea::nativeDynamicSet(${leaf.text}, ${propertyKey}, ${boxedValue});`
+  }
+  // A function is an object, and a data property a program sets on it lands
+  // in its own-property table (`callableDynamicSet`, the lone callable's
+  // write): ajv's `validate.errors = null` over `ValidateFunction |
+  // AsyncValidateFunction`. `prototype` needs the constructor's own
+  // materialization first and stays with the lone-callable path.
+  if (leaf.representation.kind === 'function-value-dispatch' && operation.kind === 'set' && key !== 'prototype' && boxedValue !== null) {
+    const write = `gea::callableDynamicSet(${leaf.text}, ${propertyKey}, ${boxedValue})`
+    return operation.strict
+      ? `if (!${write}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read-only Function own property");`
+      : `(void)${write};`
   }
   throw createCppEmitBlockedError(
     `property-access:tagged-union:${operation.kind}:false`,

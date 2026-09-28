@@ -2,6 +2,10 @@ import type { GetOperation, IrBody, IrOperand } from '../../../ir/model.js'
 import { allOperationsOf } from '../../../ir/model.js'
 import type { IrValueId } from '../../../identity/ids.js'
 import type { EmitContext, PrototypeMethodRead } from '../emit-context.js'
+import { dynamicCarrierBoxText } from '../emit-narrowing.js'
+import { recordFieldsOfShape, recordIndexesOfShape } from '../../../projection/fields.js'
+import { classBoxable } from '../class-layout.js'
+import { isCanonicalNumberPropertyKeyText } from '../../../representation/model.js'
 import {
   deferredArrayMethodClaim,
   deferredDictionaryMethodClaim,
@@ -13,9 +17,10 @@ import {
   deferredTypedArrayMethodClaim
 } from '../emit-carrier-members.js'
 import { deferredArrayBufferMethodClaim, deferredDataViewMethodClaim } from '../emit-buffers.js'
-import { deferredTypedArrayUnionMethodClaim, deferredUnionToStringClaim } from '../emit-union-properties.js'
+import { deferredTypedArrayUnionMethodClaim, deferredUnionToStringClaim, primitiveArmLacks } from '../emit-union-properties.js'
 import { isDeclaredStringPrototypeKey } from '../emit-carrier-members.js'
 import { objectPrototypeMemberNames } from '../../../representation/record-fields.js'
+import { objectShapePrototypeMethods } from '../../../projection/callee.js'
 import type { Representation } from '../../../representation/model.js'
 
 import { deferredCallableShapeMethodClaim } from '../emit-dynamic-properties.js'
@@ -97,6 +102,21 @@ const claimOf = (ctx: EmitContext, receiver: IrOperand, operation: GetOperation)
 }
 
 /**
+ * Whether a record carrier declares no member named `key` and has nowhere else
+ * to hold one: no string-keyed index sidecar (a number-keyed one holds only
+ * canonical numeric keys) and no expando table.
+ */
+const closedRecordLacks = (ctx: EmitContext, carrier: Representation, key: string): boolean => {
+  if (carrier.kind === 'record') return carrier.accessors.length === 0 && !carrier.fields.some((field) => field.key === key)
+  if (carrier.kind !== 'native-record-ref' || carrier.native === null) return false
+  const fields = recordFieldsOfShape(ctx.deriver, carrier.shapeId)
+  const indexesHold = recordIndexesOfShape(ctx.deriver, carrier.shapeId).some(
+    (index) => index.key === 'string' || (index.key === 'number' && isCanonicalNumberPropertyKeyText(key))
+  )
+  return fields !== null && !indexesHold && !fields.some((field) => field.key === key)
+}
+
+/**
  * A prototype-method read off a HETEROGENEOUS tagged union.
  *
  * `deferredTypedArrayUnionMethodClaim` above claims a union whose every arm
@@ -123,7 +143,7 @@ const mixedUnionClaimOf = (ctx: EmitContext, receiver: IrOperand, operation: Get
   const carrier = receiver.representation
   if (carrier.kind !== 'tagged-union') return null
   const member = ctx.staticKeyTexts.get(operation.key.value)
-  if (member === undefined || objectPrototypeMemberNames.has(member)) return null
+  if (member === undefined || (objectPrototypeMemberNames.has(member) && !objectShapePrototypeMethods.has(member))) return null
   const arms: (PrototypeMethodRead | null)[] = []
   let answered = 0
   for (const arm of carrier.arms) {
@@ -133,8 +153,55 @@ const mixedUnionClaimOf = (ctx: EmitContext, receiver: IrOperand, operation: Get
       answered += 1
       continue
     }
-    if (!armHasNoCallableMember(arm.value, member)) return null
-    arms.push(null)
+    // A nullish arm throws at the READ (6.2.5.5 GetValue over ToObject), which
+    // `taggedUnionGetText` spells at the read's own position; the call never
+    // reaches this arm.
+    if (arm.value.kind === 'null' || arm.value.kind === 'undefined') {
+      arms.push(null)
+      continue
+    }
+    // `Object.prototype.hasOwnProperty.call(schema, k)` over ajv's `boolean |
+    // SchemaObject`: a Boolean, Number or Symbol wrapper has no own property
+    // at all (20.3.4, 21.1.3, 20.4.3 define only prototype members), so the
+    // arm's answer is `false` whatever the key.
+    if (
+      objectShapePrototypeMethods.has(member) &&
+      (arm.value.kind === 'symbol' || (arm.value.kind === 'scalar' && (arm.value.domain === 'boolean' || arm.value.domain === 'number')))
+    ) {
+      arms.push({ receiverKind: 'primitive-own-property', member, receiver: { kind: 'operand', operand: receiver }, receiverElement: null })
+      answered += 1
+      continue
+    }
+    // A nested sum (`undefined | null | (string | {parts})`) answers per arm
+    // of its own, through the same claim; the render recurses into it.
+    if (arm.value.kind === 'tagged-union') {
+      const nested = mixedUnionClaimOf(ctx, { value: receiver.value, representation: arm.value }, operation)
+      if (nested === null) return null
+      arms.push(nested)
+      answered += 1
+      continue
+    }
+    if (armHasNoCallableMember(arm.value, member) || primitiveArmLacks(ctx, arm.value, member)) {
+      arms.push(null)
+      continue
+    }
+    // A closed record that declares no such member holds none: its own keys
+    // are its fields, and the key is not Object.prototype's (checked above).
+    // secure-json-parse's `text.charCodeAt` over a string or a Buffer.
+    if (closedRecordLacks(ctx, arm.value, member)) {
+      arms.push(null)
+      continue
+    }
+    // An arm that may hold it calls whatever its own [[Get]] finds, through
+    // the arm boxed: already a box, a runtime-typed object whose box answers
+    // its own prototype (a typed array), or a class instance a box may hold
+    // (the reflection census installed its prototype hooks).
+    const boxable =
+      arm.value.kind === 'dynamic' ||
+      arm.value.kind === 'typed-array' ||
+      (arm.value.kind === 'class-ref' && classBoxable(ctx.classes, arm.value.declaration))
+    if (!boxable || dynamicCarrierBoxText(arm.value, 'gea_arm') === null) return null
+    arms.push({ receiverKind: 'boxed-arm', member, receiver: { kind: 'operand', operand: receiver }, receiverElement: null })
   }
   if (answered === 0) return null
   return {

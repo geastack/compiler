@@ -7,8 +7,8 @@ array-literal-index.ts.cpp 5f6067e481b3
 arrow-captures-receiver.ts.cpp 67db4646315b
 arrow.ts.cpp a002418c26bc
 assign.ts.cpp ac04a6ebee45
-async-iteration-class.ts.cpp 595dc05d6c82
-await-basic.ts.cpp 20eee25c1dd8
+async-iteration-class.ts.cpp 68847894b939
+await-basic.ts.cpp 2b5903942511
 bag-member-disjoint-writes.js.cpp 9c01bbd74d04
 base-placeholder-unknown.ts.cpp 46266d6875c8
 bigint-constructor-repro.ts.cpp 699e4591ff26
@@ -40,7 +40,7 @@ drift.txt 58626e536057
 dynamic-assertion-store.ts.cpp ec89f1ce4983
 dynamic-instanceof-constructor-family.ts.cpp dad8c100c520
 dynamic-json.ts.cpp d5cc8e84bf2b
-dynamic-optional-absence.ts.cpp 00fa65a35c0a
+dynamic-optional-absence.ts.cpp 7478e5717458
 dynamic-to-discriminated-repro.ts.cpp eaf0b9c4ef35
 embedded-null-string.ts.cpp d7f60bfd08b6
 explicit-void-this.ts.cpp e6582572a9ce
@@ -50,8 +50,8 @@ for-in-narrowed-optional-field.ts.cpp ff73929c9116
 function-call-rewrite.ts.cpp 3a76d216813f
 function-typed-value.ts.cpp 6917ac36ed9a
 function-value-dispatch-get-repro.ts.cpp 12485ead08be
-generator-method-receiver.ts.cpp 71f1c5bd5aad
-generic-arrow-declaration.ts.cpp 28b167b3e318
+generator-method-receiver.ts.cpp 26700ea78da9
+generic-arrow-declaration.ts.cpp b822854a98ae
 generic-forwards-to-generic.ts.cpp 62dd7f961b07
 generic-function-in-binding.ts.cpp c0cdf84fd995
 generic-overload-implementation.ts.cpp 8e92e51fe73c
@@ -68,7 +68,7 @@ index-signature-only.ts.cpp eaf0b9c4ef35
 initializer-write-attribution-repro.js.cpp af393d5d6ab1
 instanceof-constructor-family-repro.ts.cpp 017237b6a3d4
 intersection-conditional-member.ts.cpp 0b5b62af97de
-iterable-return-carrier.ts.cpp 979fc8eca408
+iterable-return-carrier.ts.cpp 51dbe6b3edd4
 json-stringify-fill-aliasing.ts.cpp c6101927f2a9
 jsx-component.tsx.cpp 3d2157509818
 jsx-element.tsx.cpp b0783b76d3c7
@@ -81,7 +81,7 @@ logical-guard-optional-instance.ts.cpp 8c3d20d337c7
 logical-merge-boolean-left.ts.cpp 5a785828251a
 logical-merge-nullable-reference.ts.cpp 775729538a92
 logical.ts.cpp 2ed188a35726
-loop-iteration-helper-repro.ts.cpp 5d7179452284
+loop-iteration-helper-repro.ts.cpp b1b0da96ce71
 merge-array-materialization.ts.cpp d7717c56a7ea
 method.ts.cpp 569708a8e26e
 namespace-generic-member.ts.cpp ef449d22eea7
@@ -101,11 +101,11 @@ object-literal-accessors.ts.cpp 893f4b45c6e6
 object-members.ts.cpp 63fa60d87c83
 object-spread-class-source.ts.cpp 8306a96f4fc0
 object-spread-dynamic-source.ts.cpp 9f90926930a5
-object-spread-key-order.ts.cpp 3a5f535293db
+object-spread-key-order.ts.cpp 85dd63d48b5b
 object-union-literal-layout.ts.cpp f490652a750e
 object.ts.cpp 291ece4b4bab
-optional-call-sequence.ts.cpp 62eb554f3f94
-optional-call.ts.cpp 396764a6cefc
+optional-call-sequence.ts.cpp 5d5047f3d547
+optional-call.ts.cpp 758e382726c4
 optional-callable-prefix.ts.cpp 57706ab6f95a
 optional-chain-as-guard.ts.cpp b1dccf77bdf6
 optional-chain-boundaries.ts.cpp d51bc3d9ddbb
@@ -117,7 +117,7 @@ optional-union-to-discriminated-repro.ts.cpp eaf0b9c4ef35
 overload-implementation-signature.ts.cpp e7da9e7a2774
 owned-record-union.ts.cpp fd60d2effb10
 physical-class-ancestry-declared.ts.cpp 463b1d64679b
-printer-drift.txt cd534937d9da
+printer-drift.txt 087fe849026c
 property-access-unresolved-repro.ts.cpp 2fba20056787
 record-into-named-layout.ts.cpp 149c5239e874
 record-round-trip-through-box.ts.cpp 5eac3323568a
@@ -150,11 +150,11 @@ typed-array-intersection-carrier.ts.cpp 287e39d45149
 typeof-narrowed-union-field-store.js.cpp fdca91c3354a
 typeof-narrowed-union-field-store.ts.cpp 5922bd4088fa
 uncertified.txt c50fb8985c71
-uniform-value-union.ts.cpp 614817a51806
+uniform-value-union.ts.cpp 62f9b1fa28e7
 uninhabited-intersection-branch.ts.cpp 58a589c38ab8
 uninstantiated-generic.ts.cpp 2706a8e3a2ca
 union-absent-class-arm.js.cpp 874ff2cff335
 union-no-discriminant.ts.cpp 126686f9b053
 update.ts.cpp 3d975c6429db
 user-collection-method-names.ts.cpp 6e0bda1e99b2
-valueless-return.ts.cpp d49521011a27
+valueless-return.ts.cpp fe3bc229f6f1

@@ -316,7 +316,19 @@ export const createIdentityTable = (
     if ((symbol.flags & ts.SymbolFlags.Alias) === 0) return symbol
     if ((symbol.declarations ?? []).some((declaration) => ts.isVariableDeclaration(declaration) || ts.isBindingElement(declaration)))
       return symbol
-    return checker.getAliasedSymbol(symbol)
+    const target = checker.getAliasedSymbol(symbol)
+    // The same holds for `import * as equal from 'fast-deep-equal'` over a
+    // module whose export is a VALUE (`module.exports = function equal ...`,
+    // `export =`): the checker aliases the name to that value's own
+    // declaration -- a function expression's name, which binds nothing
+    // outside itself -- while the import's binding is the cell holding the
+    // module's exports. A namespace import of a module is left to the module.
+    if (
+      (symbol.declarations ?? []).some(ts.isNamespaceImport) &&
+      !(target.declarations ?? []).some((declaration) => ts.isSourceFile(declaration) || ts.isModuleDeclaration(declaration))
+    )
+      return symbol
+    return target
   }
 
   const declarationOfSymbol = (symbol: ts.Symbol): ts.Declaration | null => {

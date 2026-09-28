@@ -88,9 +88,28 @@ const preDerivationHandList: readonly string[] = [
  */
 const extraBeyondHandList: readonly string[] = ['gea::runtime::textcodec::TextEncoder@1', 'gea::runtime::textcodec::TextDecoder@1']
 
-test('cppNativeProtocolsOf reproduces the pre-derivation hand list exactly, plus the two documented extras', () => {
+/**
+ * Protocols rows added to `coreHostMembers` after the hand list was frozen,
+ * each backed by its own table entry: the intrinsic prototypes the error
+ * constructors and `Promise` answer as opaque host handles
+ * (`nativeHandleProperty('Error.prototype', ...)`), and `FunctionConstructor`
+ * for `Function.call`/`Function.apply`.
+ */
+const addedSinceHandList: readonly string[] = [
+  'Error.prototype@1',
+  'EvalError.prototype@1',
+  'RangeError.prototype@1',
+  'ReferenceError.prototype@1',
+  'SyntaxError.prototype@1',
+  'TypeError.prototype@1',
+  'URIError.prototype@1',
+  'Promise.prototype@1',
+  'FunctionConstructor@1'
+]
+
+test('cppNativeProtocolsOf reproduces the pre-derivation hand list exactly, plus the documented extras', () => {
   const derived = [...cppNativeProtocolsOf(coreHostMembers)].sort()
-  const expected = [...preDerivationHandList, ...extraBeyondHandList].sort()
+  const expected = [...preDerivationHandList, ...extraBeyondHandList, ...addedSinceHandList].sort()
   assert.deepEqual(derived, expected)
 })
 

@@ -200,8 +200,8 @@ const narrowsArms = (source: Representation, target: Representation): boolean =>
   return [...kept].every((key) => arms.has(key))
 }
 
-const viewedClassesOf = (bodies: readonly IrBody[]): ReadonlySet<DeclarationId> => {
-  const viewed = new Set<DeclarationId>()
+const viewedClassesOf = (bodies: readonly IrBody[]): ReadonlyMap<DeclarationId, ReadonlySet<string>> => {
+  const viewed = new Map<DeclarationId, Set<string>>()
   for (const body of bodies)
     for (const block of body.blocks.values())
       for (const operation of block.operations) {
@@ -217,7 +217,13 @@ const viewedClassesOf = (bodies: readonly IrBody[]): ReadonlySet<DeclarationId> 
         // not viewed: `HeadersInit` into a wider `HeadersInit` keeps its
         // `Headers` arm beside the dictionary one.
         const kept = new Set(target.flatMap((carrier) => (carrier.kind === 'class-ref' ? [carrier.declaration] : [])))
-        for (const declaration of classes) if (!kept.has(declaration)) viewed.add(declaration)
+        const views = target.flatMap((carrier) => (classViewCarrierKinds.has(carrier.kind) ? [representationKey(carrier)] : []))
+        for (const declaration of classes) {
+          if (kept.has(declaration)) continue
+          const known = viewed.get(declaration) ?? new Set<string>()
+          for (const view of views) known.add(view)
+          viewed.set(declaration, known)
+        }
       }
   return viewed
 }
@@ -503,7 +509,7 @@ const rewriteBody = (
   callableMembers: ReadonlyMap<IrValueId, CallCalleeIdentity>,
   observed: ReadonlySet<IrValueId>,
   prototypes: ReadonlySet<DeclarationId>,
-  viewed: ReadonlySet<DeclarationId>,
+  viewed: ReadonlyMap<DeclarationId, ReadonlySet<string>>,
   conversions?: Pick<ConversionCensus, 'nodeById'>
 ): IrBody => {
   const producers = producerMapOf(body)
@@ -522,7 +528,24 @@ const rewriteBody = (
                 viewed
               })
             : undefined
-        if (classInstanceTest === undefined) return operation
+        if (classInstanceTest === undefined) {
+          const arms =
+            left &&
+            right &&
+            right.representation.kind === 'tagged-union' &&
+            right.representation.arms.every((arm) => arm.value.kind === 'constructor-family')
+              ? right.representation.arms.map((arm) =>
+                  classInstanceTestOf(left.representation, arm.value, classes, {
+                    prototypeOf: classPrototypeOf(left.value, producers, classes),
+                    materialized: prototypes,
+                    viewed
+                  })
+                )
+              : null
+          if (arms === null || arms.length === 0 || arms.some((arm) => arm === undefined)) return operation
+          blockChanged = true
+          return { ...operation, classInstanceTestArms: arms as readonly NonNullable<(typeof arms)[number]>[] }
+        }
         blockChanged = true
         return { ...operation, classInstanceTest }
       }

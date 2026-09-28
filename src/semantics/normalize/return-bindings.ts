@@ -1,3 +1,4 @@
+import { censusReselectedCallResult, censusRetypedExpressionType } from './overload-reselection.js'
 import ts from 'typescript'
 import { definitelyReturns } from './return-paths.js'
 import { carriesUnsubstitutedGeneric, emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
@@ -26,7 +27,8 @@ import {
   memberTypeOf,
   objectAssignTargetType,
   unwrapExplicitThisCall,
-  widestOf
+  widestOf,
+  exactEmptyObjectLiteralType
 } from './derived-expression-type.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
@@ -149,6 +151,12 @@ export interface ReturnBindingCensus {
    * so the guarded census fallback never fires.
    */
   readonly statedTypeAt: (node: ts.Node) => ts.Type | null
+  /**
+   * The value of a CALL of a declaration whose checker-stated return this
+   * census replaced (`replacedReturns`): a usable checker answer the binding
+   * outranks. Never the declaration's own node, whose value is the function.
+   */
+  readonly preferredTypeAt: (node: ts.Node) => ts.Type | null
   /** How many declarations this census bound a return type for, for measurement. */
   readonly boundCount: number
   /** Why each declaration this census could not bind was refused, one entry per declaration and each carrying its own owner -- see `census-refusal.ts`. */
@@ -161,6 +169,7 @@ export interface ReturnBindingCensus {
 export const emptyReturnBindingCensus: ReturnBindingCensus = {
   typeAt: () => null,
   statedTypeAt: () => null,
+  preferredTypeAt: () => null,
   unionArmsAt: () => null,
   boundCount: 0,
   refusals: [],
@@ -501,6 +510,78 @@ const hasPhysicalReturnAssertion = (checker: ts.TypeChecker, declaration: Return
 }
 
 /**
+ * A JavaScript function whose JSDoc `@returns` its own body contradicts:
+ * pino's `normalizeDestFileDescriptor` states `@returns {Number}` and returns
+ * its string argument when it is not numeric. The checker reads the tag as the
+ * function's type and never verifies the body; a checked file would have
+ * reported the contradiction, so meeting one proves the statement unverified,
+ * and what the body returns is the function's return -- D91's rule
+ * (`jsdoc-nullish-return-transform.ts`) for any value, not only a literal
+ * absence. A return the checker cannot type contradicts nothing.
+ */
+const hasUnverifiedJsDocReturn = (checker: ts.TypeChecker, declaration: ReturnCandidateDeclaration): boolean => {
+  const fileName = declaration.getSourceFile().fileName
+  if (!fileName.endsWith('.js') && !fileName.endsWith('.cjs') && !fileName.endsWith('.mjs')) return false
+  const tag = ts.getJSDocReturnTag(declaration)?.typeExpression?.type
+  const body = declaration.body
+  if (!tag || !body || !ts.isBlock(body)) return false
+  if (declaration.asteriskToken || (ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Async) !== 0) return false
+  const stated = checker.getTypeFromTypeNode(tag)
+  if (isUnusableEvidence(stated)) return false
+  let found = false
+  const walk = (node: ts.Node): void => {
+    if (found || (node !== body && isScopeBoundary(node))) return
+    if (ts.isReturnStatement(node) && node.expression) {
+      const returned = checker.getTypeAtLocation(node.expression)
+      found = !isUnusableEvidence(returned) && !checker.isTypeAssignableTo(returned, stated)
+      return
+    }
+    ts.forEachChild(node, walk)
+  }
+  ts.forEachChild(body, walk)
+  return found
+}
+
+/**
+ * Whether a `return` of the function's own body hands back a call whose
+ * overload the census re-selects (`censusReselectedCallResult`), or any other
+ * expression the census re-types (a cell initialized from such a call --
+ * thread-stream's `let offset = current; ...; return offset`): the checker
+ * inferred the function's return from its blind choice, which is no more a
+ * statement than an inferred `any`.
+ */
+const returnsReselectedCall = (
+  checker: ts.TypeChecker,
+  declaration: ReturnCandidateDeclaration,
+  typeOf: (expression: ts.Expression) => ts.Type | null,
+  retyped: (call: ts.CallExpression) => boolean,
+  retypedExpression: (expression: ts.Expression) => boolean = () => false
+): boolean => {
+  const body = declaration.body
+  if (!body) return false
+  const reselected = (expression: ts.Expression): boolean => {
+    while (ts.isParenthesizedExpression(expression)) expression = expression.expression
+    return (
+      censusReselectedCallResult(checker, expression, typeOf) !== null ||
+      (ts.isCallExpression(expression) && retyped(expression)) ||
+      retypedExpression(expression)
+    )
+  }
+  if (!ts.isBlock(body)) return reselected(body)
+  let found = false
+  const walk = (node: ts.Node): void => {
+    if (found || (node !== body && isScopeBoundary(node))) return
+    if (ts.isReturnStatement(node) && node.expression) {
+      found = reselected(node.expression)
+      return
+    }
+    ts.forEachChild(node, walk)
+  }
+  ts.forEachChild(body, walk)
+  return found
+}
+
+/**
  * Whole-program census of what every unannotated function actually returns.
  *
  * `parameters` is the ALREADY-SETTLED output of `censusParameterBindings`
@@ -550,7 +631,14 @@ export const censusReturnBindings = (
    * type is a plain `ts.Type` even though the bag's shape is not. See that
    * accessor's own header for the refusal it removes.
    */
-  bags: ObjectBagCensus = emptyObjectBagCensus
+  bags: ObjectBagCensus = emptyObjectBagCensus,
+  /**
+   * The prior outer composed view, asked for what domains composed after
+   * this census already settled: the argument evidence an overload
+   * re-selection needs (as the local census's `retypedExpressionOf` asks it)
+   * and the cells they re-typed (`preferredTypeAt`).
+   */
+  prior: ParameterBindingCensus = emptyParameterBindingCensus
 ): ReturnBindingCensus => {
   const candidates: ReturnCandidateDeclaration[] = []
   /** Stated functions whose explicit unknown assertion changes only the type-system view, never runtime storage. */
@@ -563,6 +651,20 @@ export const censusReturnBindings = (
   const returnRequirements = new Map<ReturnCandidateDeclaration, readonly IntrinsicProtocolRequirement[]>()
   /** Function expressions whose return convention is the slot they are written into -- see `contextualReturnTypeOf`. */
   const contextualReturns = new Map<ReturnCandidateDeclaration, ts.Type>()
+  /**
+   * Declarations whose checker-stated return this census replaces -- an
+   * inference from an overload the census re-selected or found blind
+   * (`returnsReselectedCall`), or a JSDoc `@returns` the body contradicts
+   * (`hasUnverifiedJsDocReturn`). See `preferredTypeAt`.
+   */
+  const replacedReturns = new Set<ReturnCandidateDeclaration>()
+  /** Unannotated declarations whose inferred return the checker states usably -- the pool `replacedReturns` is drawn from. */
+  const inferredReturns: ReturnCandidateDeclaration[] = []
+  /** The declaration a call runs when its inferred return is one `replacedReturns` re-types. */
+  const retypedCallee = (call: ts.CallExpression): ReturnCandidateDeclaration | null => {
+    const callee = checker.getResolvedSignature(call)?.declaration
+    return callee !== undefined && isReturnCandidateKind(callee) && replacedReturns.has(callee) ? callee : null
+  }
   const visit = (node: ts.Node): void => {
     if ((ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && !hasStatedReturnType(checker, node) && node.body !== undefined) {
       const contextual = contextualReturnTypeOf(checker, node)
@@ -580,6 +682,7 @@ export const censusReturnBindings = (
       // places, so this asks `annotationStatesNothing` of the resolved return
       // type as well.
       if (returned && (isAnyType(returned) || annotationStatesNothing(checker, node, returned))) candidates.push(node)
+      else if (returned) inferredReturns.push(node)
     }
     // ...and the third shape: a STATED return type that is only an upper
     // bound. `hasStatedReturnType` above turns it away, correctly, for the
@@ -587,6 +690,10 @@ export const censusReturnBindings = (
     // different question `statedReturnBound` states, and a declaration
     // admitted here is held to its annotation rather than replacing it.
     if (isReturnCandidateKind(node)) {
+      if (hasUnverifiedJsDocReturn(checker, node)) {
+        replacedReturns.add(node)
+        candidates.push(node)
+      }
       if (hasPhysicalReturnAssertion(checker, node)) {
         physicalAssertionReturns.add(node)
         candidates.push(node)
@@ -600,6 +707,33 @@ export const censusReturnBindings = (
     ts.forEachChild(node, visit)
   }
   for (const file of files) forEachReachableStatement(reachable, file, visit)
+  // An inferred return that rests on a re-selected overload, directly or
+  // through a call of a declaration whose own return did, is admitted: the
+  // closure runs until no further declaration is reached.
+  const returnsCensusRetypedCall = (declaration: ReturnCandidateDeclaration): boolean =>
+    returnsReselectedCall(
+      checker,
+      declaration,
+      (argument) => parameters.typeAt(argument) ?? prior.typeAt(argument),
+      (call) => retypedCallee(call) !== null,
+      (expression) =>
+        (prior.preferredTypeAt?.(expression) ?? null) !== null ||
+        censusRetypedExpressionType(
+          checker,
+          expression,
+          (argument) => parameters.typeAt(argument) ?? prior.typeAt(argument),
+          (at) => parameters.preferredTypeAt?.(at) ?? null
+        ) !== null
+    )
+  for (let grew = true; grew;) {
+    grew = false
+    for (const declaration of inferredReturns) {
+      if (replacedReturns.has(declaration) || !returnsCensusRetypedCall(declaration)) continue
+      replacedReturns.add(declaration)
+      candidates.push(declaration)
+      grew = true
+    }
+  }
 
   /**
    * Whole-program evidence this module used to gather for itself with a
@@ -692,7 +826,25 @@ export const censusReturnBindings = (
   /** The checker's own answer at this node, when it says something usable. */
   /** The checker's own answer, when usable -- `annotationStatesNothing` beside `isUnusableEvidence` for the reason `field-bindings.ts`'s `known` documents: a vacuous type dominates a `widestOf` join. */
   const known = (node: ts.Node): ts.Type | null => {
-    const type = objectAssignTargetType(checker, node) ?? checker.getTypeAtLocation(node)
+    // A call of a declaration whose inferred return this census re-types is
+    // resolved from that declaration, below -- the checker's answer is the
+    // inference being replaced.
+    if (ts.isCallExpression(node) && retypedCallee(node) !== null) return null
+    // An overload the checker chose for an `any` argument is no evidence; the
+    // one the census's argument types select is, as `local-bindings.ts` reads it.
+    // A cell the prior round re-typed (`preferredTypeAt`: a local whose
+    // declared type is the checker's inference from a re-typed initializer)
+    // holds that answer; its checker type is the inference being replaced.
+    const type =
+      objectAssignTargetType(checker, node) ??
+      prior.preferredTypeAt?.(node) ??
+      censusRetypedExpressionType(
+        checker,
+        node,
+        (argument) => parameters.typeAt(argument) ?? prior.typeAt(argument),
+        (at) => parameters.preferredTypeAt?.(at) ?? null
+      ) ??
+      checker.getTypeAtLocation(node)
     return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) || isVacuousArrayType(checker, type) ? null : type
   }
 
@@ -1078,6 +1230,14 @@ export const censusReturnBindings = (
       if (signatures.length !== 1) return attribute(owner, 'return-depends-on-overloaded-call')
       const signature = signatures[0] as ts.Signature
       const unwrapped = ts.isCallExpression(node) ? unwrapExplicitThisCall(checker, node) : null
+      const retyped = ts.isCallExpression(node) ? retypedCallee(node) : null
+      if (retyped !== null) {
+        if (retyped === owner || resolving.has(retyped)) {
+          refusalOf.set(owner, censusRefusal('return', 'return-recursive', 'return-recursive', ownerOf(owner)))
+          return null
+        }
+        return resolveDeclarationReturn(retyped)
+      }
       const returned = explicitThisCallReturnType(signature, unwrapped ? knownOrResolve(unwrapped.callee, owner) : null)
       if ((returned.flags & (ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0) return attribute(owner, 'return-depends-on-void-call')
       if (!isAnyType(returned)) return returned
@@ -1147,6 +1307,7 @@ export const censusReturnBindings = (
     if (!ts.isBlock(body)) return knownOrResolve(body, declaration)
 
     const collected: ts.Type[] = []
+    const emptyLiterals = new Set<ts.Type>()
     let refused = false
     let sawReturn = false
     let sawBareReturn = false
@@ -1160,11 +1321,13 @@ export const censusReturnBindings = (
           refused = true
           return
         }
-        const type = knownOrResolve(node.expression, declaration)
+        const empty = exactEmptyObjectLiteralType(checker, unwrapParens(node.expression))
+        const type = knownOrResolve(node.expression, declaration) ?? empty
         if (!type) {
           refused = true
           return
         }
+        if (empty) emptyLiterals.add(type)
         collected.push(type)
         return
       }
@@ -1196,6 +1359,18 @@ export const censusReturnBindings = (
       )
       return null
     }
+    // `return {}` is a fresh object with no members, and it is a value of
+    // every type that requires none. Beside a return whose type is one --
+    // find-my-way's `getRouteMetaData` returns `{}` when nothing is asked and
+    // otherwise the dictionary it filled -- it adds nothing to the join; left
+    // in, its type covers every object type there is and became the slot.
+    const accepting = collected.filter((type) => !emptyLiterals.has(type))
+    if (
+      accepting.length > 0 &&
+      accepting.length < collected.length &&
+      [...emptyLiterals].every((empty) => accepting.some((type) => checker.isTypeAssignableTo(empty, type)))
+    )
+      collected.splice(0, collected.length, ...accepting)
     const widest = widestOf(checker, collected)
     if (widest) return widest
     // No single covering type. Before refusing, ask whether the disagreement
@@ -1329,6 +1504,12 @@ export const censusReturnBindings = (
     refusalOf.delete(declaration)
     returnRequirements.delete(declaration)
   }
+  // The checker inferred these returns from an overload the census proved
+  // wrong or found blind (`returnsReselectedCall`). Where the census states no
+  // better one, the return is unresolved -- never the inference it replaces.
+  for (const declaration of replacedReturns) {
+    if (!bound.has(declaration) && !unionArms.has(declaration)) bound.set(declaration, checker.getAnyType())
+  }
   deferredIntrinsicProtocolLedgerOf(flow)?.replace('return-bindings', [...returnRequirements.values()].flat())
 
   const refusals: CensusRefusal[] = []
@@ -1368,6 +1549,13 @@ export const censusReturnBindings = (
         if (declaration && isReturnCandidateKind(declaration)) return statedReturns.get(declaration) ?? null
       }
       return null
+    },
+    // A call only: its value IS the return. The declaration's own node is a
+    // function value, whose signature reads the return through `typeAt`.
+    preferredTypeAt: (node) => {
+      const declaration =
+        ts.isCallExpression(node) || ts.isNewExpression(node) ? checker.getResolvedSignature(node)?.declaration : undefined
+      return declaration && isReturnCandidateKind(declaration) && replacedReturns.has(declaration) ? (bound.get(declaration) ?? null) : null
     },
     boundCount: bound.size + unionArms.size,
     refusals,
@@ -1426,9 +1614,11 @@ export const composeReturnBindings = (
   /** The whole-program value-flow index -- see `censusReturnBindings`'s own parameter. */
   flow: ValueFlowIndex,
   /** The same-round property-bag census -- see `censusReturnBindings`'s own parameter. */
-  bags: ObjectBagCensus = emptyObjectBagCensus
+  bags: ObjectBagCensus = emptyObjectBagCensus,
+  /** The prior outer composed view -- see `censusReturnBindings`'s own parameter. */
+  prior: ParameterBindingCensus = emptyParameterBindingCensus
 ): { readonly view: ParameterBindingCensus; readonly returns: ReturnBindingCensus } => {
-  const returns = censusReturnBindings(checker, files, reachable, parameters, collections, flow, bags)
+  const returns = censusReturnBindings(checker, files, reachable, parameters, collections, flow, bags, prior)
   // Both sides already publish `CensusRefusal[]` -- a plain concat forwards
   // every one of the upstream census's refusals undiminished, rather than
   // collapsing them into counts the way this composition used to (`return:
@@ -1439,8 +1629,15 @@ export const composeReturnBindings = (
   return {
     view: {
       ...parameters,
-      typeAt: (node) => parameters.typeAt(node) ?? returns.typeAt(node),
+      // A call of a declaration this census binds returns what it bound: the
+      // parameter census's expression resolver would answer the checker's
+      // inferred return, the very answer the binding replaces.
+      typeAt: (node) =>
+        ts.isCallExpression(node) || ts.isNewExpression(node)
+          ? (returns.typeAt(node) ?? parameters.typeAt(node))
+          : (parameters.typeAt(node) ?? returns.typeAt(node)),
       statedTypeAt: (node) => parameters.statedTypeAt(node) ?? returns.statedTypeAt(node),
+      preferredTypeAt: (node) => parameters.preferredTypeAt?.(node) ?? returns.preferredTypeAt(node),
       unionArmsAt: (node) => parameters.unionArmsAt(node) ?? returns.unionArmsAt(node),
       boundCount: parameters.boundCount + returns.boundCount,
       refusals

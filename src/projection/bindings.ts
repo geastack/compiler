@@ -1,5 +1,6 @@
 import type { DeclarationId, FunctionId, RegionId } from '../identity/ids.js'
 import type { Representation } from '../representation/model.js'
+import type { CoercionOperation } from '../conversion/algebra.js'
 import type { SealedRepresentationPlan } from '../representation/plan.js'
 import type { HostNamespaceTable } from '../targets/cpp/host/host-members.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
@@ -32,8 +33,12 @@ import { resultOf } from '../semantics/model/operands.js'
  */
 
 export type BindingStorage =
-  /** A cell owned by one callable frame. */
-  | { readonly kind: 'local'; readonly owner: FunctionId }
+  /**
+   * A cell owned by one callable frame, or by a run-once region's own frame
+   * when the cell is one a loop in it re-creates each iteration: only code
+   * inside that loop names it, so it is that region body's local.
+   */
+  | { readonly kind: 'local'; readonly owner: FunctionId | RegionId }
   /** A cell owned by a region that runs once: a module body, an initializer, a static block. */
   | { readonly kind: 'region'; readonly owner: RegionId }
   /**
@@ -113,7 +118,13 @@ export type BindingStorage =
    * be a global variable that no object file defines. The read renders
    * nothing; the call it feeds renders the host's own spelling.
    */
-  | { readonly kind: 'host-function'; readonly linkageName: string; readonly emit: string }
+  | {
+      readonly kind: 'host-function'
+      readonly linkageName: string
+      readonly emit: string
+      /** The coercion the function applies to each argument itself, by position -- see `coreHostFunctionArgumentCoercions`. */
+      readonly argumentCoercions?: readonly (CoercionOperation | null)[]
+    }
   /**
    * A name the host defines as a NAMESPACE: a path, not a value.
    *
@@ -171,6 +182,8 @@ export interface BindingPlacementInput {
    * the STANDARD LIBRARY declared it -- see `standardLibraryExternals`.
    */
   readonly coreGlobalFunctions?: ReadonlyMap<string, string>
+  /** Argument coercions for the flat `hostFunctions` table's language builtins -- see `BindingStorage`'s `host-function`. */
+  readonly hostFunctionArgumentCoercions?: ReadonlyMap<string, readonly (CoercionOperation | null)[]>
 
   /**
    * The language's own CLASS OBJECTS -- names whose value is a constructor
@@ -279,7 +292,10 @@ const hostStorageOf = (
   const declared = file === undefined ? undefined : input.hostFunctionsByDeclaration?.get(file)?.get(linkageName)
   if (declared !== undefined) return { kind: 'host-function', linkageName, emit: declared }
   const hostFunction = input.hostFunctions?.get(linkageName)
-  if (hostFunction !== undefined) return { kind: 'host-function', linkageName, emit: hostFunction }
+  if (hostFunction !== undefined) {
+    const argumentCoercions = input.hostFunctionArgumentCoercions?.get(linkageName)
+    return { kind: 'host-function', linkageName, emit: hostFunction, ...(argumentCoercions ? { argumentCoercions } : {}) }
+  }
   // A language builtin, last of the three function routes and gated on the
   // declaration being the standard library's own: an installed host that
   // claims one of these names has already won above, which is the right
@@ -464,7 +480,9 @@ export const projectBindingPlacements = (input: BindingPlacementInput): Readonly
           })
         : operation.caller.kind === 'function'
           ? { kind: 'local', owner: operation.caller.functionId }
-          : { kind: 'region', owner: operation.caller.regionId }
+          : operation.family === 'binding' && operation.iterationScoped
+            ? { kind: 'local', owner: operation.caller.regionId }
+            : { kind: 'region', owner: operation.caller.regionId }
     record(operation.declaration, storage, representation)
   }
 

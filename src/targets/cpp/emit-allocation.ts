@@ -19,7 +19,14 @@ import {
   templateObjectCapabilityKeyOf
 } from '../../representation/template-object.js'
 import { fieldPresenceOf, staticOwnFieldsOf } from '../../representation/record-fields.js'
-import { isSpreadRecordReceiver, regexpFlagSupportKeyOf, spreadSourceCarrierKeyOf } from '../../ir/certify/carrier-keys.js'
+import {
+  isSpreadRecordReceiver,
+  openRecordBox,
+  regexpFlagSupportKeyOf,
+  spreadCopiesThroughOpenRecord,
+  spreadSourceCarrierKeyOf,
+  unionSpreadArmPairsOf
+} from '../../ir/certify/carrier-keys.js'
 import {
   createCppEmitBlockedError,
   defineValue,
@@ -449,13 +456,18 @@ export const emitAllocateTemplateObject = (ctx: EmitContext, lines: string[], op
  * some other carrier ever reached here the honest answer is a refusal, not a
  * construction of a type the value is not held in.
  */
+const databaseFreeUnicodeProperties: ReadonlySet<string> = new Set(['ASCII', 'ASCII_Hex_Digit', 'Any'])
+
 /**
  * Whether a pattern source contains an ES2018 Unicode PROPERTY ESCAPE
- * (`\p{...}` / `\P{...}`).
+ * (`\p{...}` / `\P{...}`) the runtime cannot translate.
  *
  * `std::regex` has no such construct or Unicode Character Database. The
- * runtime rejects a computed source at construction; a LITERAL's source is
- * known here, so the honest answer is a refusal at build time instead.
+ * runtime's `unicodeRegexSource` spells only the properties that are fixed
+ * ranges (`databaseFreeUnicodePropertyRanges`: `ASCII`, `ASCII_Hex_Digit`,
+ * `Any`), and not a complemented one inside a class; it rejects every other
+ * computed source at construction. A LITERAL's source is known here, so the
+ * honest answer for the rest is a refusal at build time instead.
  *
  * Only when the pattern is in Unicode mode: outside it, Annex B B.1.2 makes
  * `\p` an IdentityEscape for the letter `p`, which `std::regex` matches
@@ -466,10 +478,20 @@ export const emitAllocateTemplateObject = (ctx: EmitContext, lines: string[], op
  */
 const namesAUnicodePropertyEscape = (source: string, flags: string): boolean => {
   if (!flags.includes('u') && !flags.includes('v')) return false
+  let inClass = false
   for (let index = 0; index < source.length; index += 1) {
-    if (source.charCodeAt(index) !== 92) continue
+    if (source.charCodeAt(index) !== 92) {
+      if (source.charAt(index) === '[') inClass = true
+      else if (source.charAt(index) === ']') inClass = false
+      continue
+    }
     const marker = source.charAt(index + 1)
-    if ((marker === 'p' || marker === 'P') && source.charAt(index + 2) === '{') return true
+    if ((marker === 'p' || marker === 'P') && source.charAt(index + 2) === '{') {
+      const close = source.indexOf('}', index + 3)
+      if (close === -1 || !databaseFreeUnicodeProperties.has(source.slice(index + 3, close)) || (inClass && marker === 'P')) return true
+      index = close
+      continue
+    }
     // Every other escape consumes its own next character, so `\\p{L}` -- an
     // escaped backslash followed by a literal `p` -- is not one of these.
     index += 1
@@ -521,6 +543,26 @@ export const emitAllocateRegExp = (ctx: EmitContext, lines: string[], operation:
 // conversion already lives; this file has nothing to do with allocation.
 export { emitToNumericCoercion } from './emit-tonumber.js'
 
+/** `CopyDataProperties` over a boxed source into a boxed receiver: each own enumerable key, defined through the receiver's box. */
+const emitDynamicSpreadWalk = (lines: string[], sourceText: string, receiverText: string): void => {
+  lines.push('{')
+  lines.push(`const auto& __gea_spread_source = ${sourceText};`)
+  lines.push('if (__gea_spread_source.tag() != gea::Value::Tag::Null && __gea_spread_source.tag() != gea::Value::Tag::Undefined) {')
+  lines.push('for (const gea::PropertyKey& __gea_spread_key : __gea_spread_source.ownPropertyKeys()) {')
+  lines.push('gea::PropertyDescriptor __gea_spread_descriptor;')
+  lines.push(
+    'if (!__gea_spread_source.ownDescriptor(__gea_spread_key, __gea_spread_descriptor) || !__gea_spread_descriptor.enumerable) continue;'
+  )
+  lines.push(
+    `if (!${receiverText}.defineProperty(__gea_spread_key, gea::PropertyDescriptor::assignment(__gea_spread_source.getProperty(__gea_spread_key)))) {`
+  )
+  lines.push('gea::host::throwRuntimeError("TypeError", "object spread target rejected a property");')
+  lines.push('}')
+  lines.push('}')
+  lines.push('}')
+  lines.push('}')
+}
+
 /**
  * Object spread's `CopyDataProperties` for a source whose own-property set is
  * not known until this runs -- `SpreadCopyOperation` (ir/model.ts), lowered
@@ -562,6 +604,52 @@ export { emitToNumericCoercion } from './emit-tonumber.js'
 export const emitSpreadCopy = (ctx: EmitContext, lines: string[], operation: SpreadCopyOperation): void => {
   const receiver = operation.receiver.representation
   const source = operation.source.representation
+  const armPairs = unionSpreadArmPairsOf(ctx.deriver, source, receiver, operation.overwrittenKeys ?? [])
+  if (armPairs !== null && source.kind === 'tagged-union' && receiver.kind === 'tagged-union') {
+    const sourceText = operandText(ctx, operation.source)
+    const receiverText = operandText(ctx, operation.receiver)
+    for (const pair of armPairs) {
+      const sourceArm = source.arms[pair.source]!.value
+      const receiverArm = receiver.arms[pair.receiver]!.value
+      const structName =
+        (receiverArm.kind === 'native-record-ref' ? receiverArm.native : null) ??
+        cppRecordStructName((receiverArm as Extract<Representation, { shapeId: string }>).shapeId)
+      const built = `__gea_spread_arm_${pair.receiver}`
+      lines.push(`if (${armIs(sourceText, pair.source)}) {`)
+      lines.push(`auto ${built} = gea::makeRef<${structName}>();`)
+      emitSpreadIntoRecord(ctx, lines, sourceArm, armAt(sourceText, pair.source), receiverArm, built, operation.overwrittenKeys ?? [])
+      const injected = alignedValueText(ctx, 'emit-allocation.ts:spread-arm-to-arm', receiverArm, receiver, built)
+      if (injected === null) {
+        throw createCppEmitBlockedError(
+          'runtime-helper:protocol:spread:next:tagged-union(arm-to-arm)',
+          `builds a "${representationKey(receiverArm)}" arm that does not inject into its union "${representationKey(receiver)}"`
+        )
+      }
+      lines.push(`${receiverText} = ${injected};`)
+      lines.push('}')
+    }
+    return
+  }
+  if (spreadCopiesThroughOpenRecord(ctx.deriver, source, receiver)) {
+    const boxedOf = (representation: Representation, text: string): string => {
+      const boxed =
+        representation.kind === 'dynamic'
+          ? text
+          : alignedValueText(ctx, 'emit-allocation.ts:spread-through-open-record', representation, openRecordBox, text)
+      if (boxed === null) {
+        throw createCppEmitBlockedError(
+          'runtime-helper:protocol:spread:next:boxed->open-record',
+          `copies a "${representationKey(source)}" source into a "${representationKey(receiver)}" receiver through their boxes, but a "${representationKey(representation)}" does not box`
+        )
+      }
+      return boxed
+    }
+    lines.push('{')
+    lines.push(`gea::Value __gea_spread_target = ${boxedOf(receiver, operandText(ctx, operation.receiver))};`)
+    emitDynamicSpreadWalk(lines, boxedOf(source, operandText(ctx, operation.source)), '__gea_spread_target')
+    lines.push('}')
+    return
+  }
   if (source.kind === 'dynamic' && receiver.kind !== 'dynamic') {
     throw createCppEmitBlockedError(
       `runtime-helper:protocol:spread:next:${spreadSourceCarrierKeyOf(source.kind, source, receiver, ctx.deriver)}`,
@@ -569,34 +657,34 @@ export const emitSpreadCopy = (ctx: EmitContext, lines: string[], operation: Spr
     )
   }
   if (receiver.kind === 'dynamic') {
-    if (source.kind !== 'dynamic') {
+    // A typed source copies through its own box (merge-json-schemas'
+    // `{ ...keywordsResolvers, ...options.resolvers }`, a record of resolvers
+    // beside an untyped one): the box's field dispatcher and expando table
+    // are its own keys, descriptors and values, so the dynamic walk below is
+    // CopyDataProperties over it exactly.
+    const boxedSource =
+      source.kind === 'dynamic'
+        ? operandText(ctx, operation.source)
+        : alignedValueText(ctx, 'emit-allocation.ts:spread-into-dynamic', source, receiver, operandText(ctx, operation.source))
+    if (boxedSource === null) {
       throw createCppEmitBlockedError(
         `runtime-helper:protocol:spread:next:${spreadSourceCarrierKeyOf(source.kind, source, receiver, ctx.deriver)}`,
-        `writes a dynamic object-spread receiver from a "${representationKey(source)}" source; this runtime-key walk is installed only for a dynamic source`
+        `writes a dynamic object-spread receiver from a "${representationKey(source)}" source, which does not box`
       )
     }
-    const receiverText = operandText(ctx, operation.receiver)
-    const sourceText = operandText(ctx, operation.source)
-    lines.push('{')
-    lines.push(`const auto& __gea_spread_source = ${sourceText};`)
-    lines.push('if (__gea_spread_source.tag() != gea::Value::Tag::Null && __gea_spread_source.tag() != gea::Value::Tag::Undefined) {')
-    lines.push('for (const gea::PropertyKey& __gea_spread_key : __gea_spread_source.ownPropertyKeys()) {')
-    lines.push('gea::PropertyDescriptor __gea_spread_descriptor;')
-    lines.push(
-      'if (!__gea_spread_source.ownDescriptor(__gea_spread_key, __gea_spread_descriptor) || !__gea_spread_descriptor.enumerable) continue;'
-    )
-    lines.push(
-      `if (!${receiverText}.defineProperty(__gea_spread_key, gea::PropertyDescriptor::assignment(__gea_spread_source.getProperty(__gea_spread_key)))) {`
-    )
-    lines.push('gea::host::throwRuntimeError("TypeError", "object spread target rejected a property");')
-    lines.push('}')
-    lines.push('}')
-    lines.push('}')
-    lines.push('}')
+    emitDynamicSpreadWalk(lines, boxedSource, operandText(ctx, operation.receiver))
     return
   }
   if (isSpreadRecordReceiver(receiver)) {
-    emitSpreadIntoRecord(ctx, lines, source, operandText(ctx, operation.source), receiver, operandText(ctx, operation.receiver))
+    emitSpreadIntoRecord(
+      ctx,
+      lines,
+      source,
+      operandText(ctx, operation.source),
+      receiver,
+      operandText(ctx, operation.receiver),
+      operation.overwrittenKeys ?? []
+    )
     return
   }
   if (receiver.kind !== 'dictionary') {
@@ -630,18 +718,19 @@ const emitSpreadIntoRecord = (
   source: Representation,
   sourceText: string,
   receiver: Representation,
-  receiverText: string
+  receiverText: string,
+  overwrittenKeys: readonly string[]
 ): void => {
   const refuse = (): never => {
     throw createCppEmitBlockedError(
-      `runtime-helper:protocol:spread:next:${spreadSourceCarrierKeyOf(source.kind, source, receiver, ctx.deriver)}`,
+      `runtime-helper:protocol:spread:next:${spreadSourceCarrierKeyOf(source.kind, source, receiver, ctx.deriver, overwrittenKeys)}`,
       `copies a "${representationKey(source)}" source into a record receiver; only a record or class shape with no accessor, whose ` +
         'fields the receiver can hold, is copied field by field'
     )
   }
   if (source.kind === 'optional') {
     lines.push(`if (${sourceText}.has_value()) {`)
-    emitSpreadIntoRecord(ctx, lines, source.payload, `(*${sourceText})`, receiver, receiverText)
+    emitSpreadIntoRecord(ctx, lines, source.payload, `(*${sourceText})`, receiver, receiverText, overwrittenKeys)
     lines.push('}')
     return
   }
@@ -652,7 +741,12 @@ const emitSpreadIntoRecord = (
   for (const field of fields) {
     const declared = declaredRecordFieldOf(ctx.deriver, receiver, field.key, ctx.classes)
     if (!declared) continue
-    if (field.key.startsWith('sym(') || fieldPresenceOf(field) === 'unprovable' || (declared.required && !field.required)) return refuse()
+    if (
+      field.key.startsWith('sym(') ||
+      fieldPresenceOf(field) === 'unprovable' ||
+      (declared.required && !field.required && !overwrittenKeys.includes(field.key))
+    )
+      return refuse()
     const held = declaredFieldRepresentationOf(ctx.deriver, receiver, field.key, ctx.classes) ?? declared.value
     const converted = alignedValueText(
       ctx,

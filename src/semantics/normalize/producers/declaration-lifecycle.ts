@@ -1,8 +1,8 @@
 import ts from 'typescript'
 import type { DeclarationId, OperationId } from '../../../identity/ids.js'
-import { operationId, regionId } from '../../../identity/ids.js'
+import { operationId, regionId, semanticResultId } from '../../../identity/ids.js'
 import type { SemanticEdge } from '../../model/edges.js'
-import type { BindingOperation, DeclarationLifecycleOperation } from '../../model/operations.js'
+import type { AllocationOperation, BindingOperation, DeclarationLifecycleOperation, PropertyOperation } from '../../model/operations.js'
 import type { CompletionBehavior, EffectBehavior, SemanticCaller, SemanticOperand, SemanticResult } from '../../model/operands.js'
 import { normalCompletion, throwingCompletion } from '../../model/operands.js'
 import type { CensusCandidate } from '../census.js'
@@ -10,7 +10,7 @@ import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'
 import type { SpecializationCensus } from '../specialization.js'
 import { mintOperationId, mintResult, operand } from './mint.js'
-import { asBlocked, resultEdge } from './shared.js'
+import { asBlocked, resultEdge, valueEdgesInto } from './shared.js'
 import { citeExpressionResult } from './references.js'
 
 /**
@@ -478,11 +478,280 @@ export const createDeclarationLifecycleProducer = (context: ProducerContext): Fa
     const edges: SemanticEdge[] = []
     const valueEdge = resultEdge(cited.source, id, 'initializer', 0)
     if (valueEdge) edges.push(valueEdge)
-    return { kind: 'operations', operations: [operation], edges }
+    const published = commonJsDefaultExportOf(candidate, node, cited.source, valueType)
+    return {
+      kind: 'operations',
+      operations: [operation, ...published.operations],
+      edges: [...edges, ...published.edges]
+    }
+  }
+
+  /**
+   * The CommonJS wrapper's `module` declaration, as a reference to `module`
+   * in `file` would resolve it: the same declaration a JavaScript module's
+   * `module.exports` names, whether or not any such reference exists.
+   */
+  const commonJsModuleWrapperOf = (file: ts.SourceFile): DeclarationId | undefined => {
+    const indexed = [...context.commonJsBindings].find(([, global]) => global === 'module')?.[0]
+    if (indexed !== undefined) return indexed
+    const symbol = context.checker.resolveName('module', file, ts.SymbolFlags.Value, false)
+    const declaration = symbol?.valueDeclaration
+    return declaration && declaration.getSourceFile().isDeclarationFile ? context.identities.declarationIdOf(declaration) : undefined
+  }
+
+  /**
+   * An ES module a CommonJS `require` names is a module record too, and Node's
+   * rule for a builtin is that its ES `default` export IS its `module.exports`
+   * (`require('events')` is `EventEmitter`). node-compat's builtins are ES
+   * modules, so `export default X` in one that some `require` reaches also
+   * stores `module.exports = X` through the record's own `module` binding.
+   */
+  const commonJsDefaultExportOf = (
+    candidate: CensusCandidate,
+    node: ts.ExportAssignment,
+    value: SemanticOperand['source'],
+    valueType: SemanticResult['type']
+  ): { readonly operations: readonly (BindingOperation | PropertyOperation)[]; readonly edges: readonly SemanticEdge[] } => {
+    const file = node.getSourceFile()
+    if (node.isExportEquals || !context.commonJsModules.has(file) || !ts.isExternalModule(file)) return { operations: [], edges: [] }
+    const moduleDeclaration = commonJsModuleWrapperOf(file)
+    if (moduleDeclaration === undefined) return { operations: [], edges: [] }
+    const owner = regionId(context.identities.nodeIdOf(file), 'module-body')
+    const anyType = context.types.typeOf(context.checker.getAnyType())
+    const stringType = context.types.typeOf(context.checker.getStringType())
+    const readId = mintOperationId(context.ordinals, candidate.id, 'declaration-lifecycle')
+    const read: BindingOperation = {
+      id: readId,
+      family: 'binding',
+      action: 'read',
+      declaration: moduleDeclaration,
+      mutable: true,
+      temporalDeadZone: false,
+      commonJs: { global: 'module', owner },
+      caller: candidate.caller,
+      operands: [],
+      results: [mintResult(readId, 'value', anyType)],
+      completion: normalCompletion,
+      effects: { readsMutableState: true, writesMutableState: false, allocates: false, callsUserCode: false },
+      evaluationOrdinal: context.evaluationOrdinals.next(candidate.caller)
+    }
+    const setId = mintOperationId(context.ordinals, candidate.id, 'declaration-lifecycle')
+    const setOperands: SemanticOperand[] = [
+      operand('receiver', 0, { kind: 'result', result: semanticResultId(readId, 'value') }, anyType),
+      operand('key', 0, { kind: 'constant', text: 'exports', literal: 'string' }, stringType),
+      operand('value', 0, value, valueType)
+    ]
+    const set: PropertyOperation = {
+      id: setId,
+      family: 'property',
+      internalMethod: 'set',
+      strict: true,
+      keyIsComputed: false,
+      descriptor: null,
+      caller: candidate.caller,
+      operands: setOperands,
+      results: [mintResult(setId, 'value', valueType)],
+      completion: throwingCompletion,
+      effects: { readsMutableState: false, writesMutableState: true, allocates: false, callsUserCode: true },
+      evaluationOrdinal: context.evaluationOrdinals.next(candidate.caller)
+    }
+    const edges: SemanticEdge[] = [...valueEdgesInto(setId, setOperands), { kind: 'evaluation', from: readId, to: setId }]
+    return { operations: [read, set], edges }
+  }
+
+  /**
+   * The exports of an ES module some CommonJS `require` names and that has no
+   * `export default` (which is its `module.exports` when present, see
+   * `commonJsDefaultExportOf`), defined onto the module's own `exports`
+   * object, as TypeScript's CommonJS emit writes them -- `require('node:util')`
+   * answers an object of util's functions. Defined at the module's end-of-file
+   * position, after every export is initialized. The object is the one the
+   * module already holds, so a module that also writes `exports.x` itself
+   * (`export {}` beside CommonJS code) keeps what it wrote.
+   */
+  const contributeCommonJsNamespace = (candidate: CensusCandidate, node: ts.Node): CandidateContribution => {
+    const none: CandidateContribution = { kind: 'operations', operations: [], edges: [] }
+    const file = node.getSourceFile()
+    if (!context.commonJsModules.has(file) || !ts.isExternalModule(file) || file.isDeclarationFile || !/\.[cm]?tsx?$/.test(file.fileName))
+      return none
+    const moduleSymbol = context.checker.getSymbolAtLocation(file)
+    const moduleDeclaration = commonJsModuleWrapperOf(file)
+    if (!moduleSymbol || moduleDeclaration === undefined) return none
+    const exported = context.checker.getExportsOfModule(moduleSymbol)
+    if (exported.some((symbol) => symbol.escapedName === 'default')) return none
+    const owner = regionId(context.identities.nodeIdOf(file), 'module-body')
+    const anyType = context.types.typeOf(context.checker.getAnyType())
+    const stringType = context.types.typeOf(context.checker.getStringType())
+    const operations: (AllocationOperation | BindingOperation | PropertyOperation)[] = []
+    const edges: SemanticEdge[] = []
+    let previous: OperationId | null = null
+    const append = (operation: AllocationOperation | BindingOperation | PropertyOperation): void => {
+      operations.push(operation)
+      edges.push(...valueEdgesInto(operation.id, operation.operands))
+      if (previous !== null) edges.push({ kind: 'evaluation', from: previous, to: operation.id })
+      previous = operation.id
+    }
+    const namespaceId = mintOperationId(context.ordinals, candidate.id, 'declaration-lifecycle')
+    append({
+      id: namespaceId,
+      family: 'binding',
+      action: 'read',
+      declaration: moduleDeclaration,
+      mutable: true,
+      temporalDeadZone: false,
+      commonJs: { global: 'exports', owner },
+      caller: candidate.caller,
+      operands: [],
+      results: [mintResult(namespaceId, 'value', anyType)],
+      completion: normalCompletion,
+      effects: { readsMutableState: true, writesMutableState: false, allocates: false, callsUserCode: false },
+      evaluationOrdinal: candidate.evaluationOrdinal
+    })
+    const namespace = semanticResultId(namespaceId, 'value')
+    for (const symbol of exported) {
+      if (!denotesValue(context.checker, symbol)) continue
+      // The value's declaration: an overloaded function's implementation, the
+      // one that allocates the function object, not its first signature.
+      const declarationNode = context.identities.valueDeclarationOfSymbol(symbol)
+      if (!declarationNode || namesUninstantiatedGeneric(context.specializations, declarationNode)) continue
+      const valueType = context.types.valueTypeAt(declarationNode)
+      const readId = mintOperationId(context.ordinals, candidate.id, 'declaration-lifecycle')
+      append({
+        id: readId,
+        family: 'binding',
+        action: 'read',
+        declaration: context.identities.declarationIdOf(declarationNode),
+        mutable: true,
+        temporalDeadZone: false,
+        caller: candidate.caller,
+        operands: [],
+        results: [mintResult(readId, 'value', valueType)],
+        completion: normalCompletion,
+        effects: { readsMutableState: true, writesMutableState: false, allocates: false, callsUserCode: false },
+        evaluationOrdinal: candidate.evaluationOrdinal
+      })
+      const defineId = mintOperationId(context.ordinals, candidate.id, 'declaration-lifecycle')
+      append({
+        id: defineId,
+        family: 'property',
+        internalMethod: 'define-own-property',
+        strict: true,
+        keyIsComputed: false,
+        descriptor: { writable: true, enumerable: true, configurable: true },
+        caller: candidate.caller,
+        operands: [
+          operand('receiver', 0, { kind: 'result', result: namespace }, anyType),
+          operand('key', 0, { kind: 'constant', text: String(symbol.escapedName), literal: 'string' }, stringType),
+          operand('value', 0, { kind: 'result', result: semanticResultId(readId, 'value') }, valueType)
+        ],
+        results: [mintResult(defineId, 'value', anyType)],
+        completion: normalCompletion,
+        effects: { readsMutableState: false, writesMutableState: true, allocates: false, callsUserCode: false },
+        evaluationOrdinal: candidate.evaluationOrdinal
+      })
+    }
+    return { kind: 'operations', operations, edges }
+  }
+
+  /**
+   * `enum E { A, B = 'b' }` evaluates, where it stands, to one ordinary object
+   * bound to `E`: each member's constant under its name, and a numeric
+   * member's name under its value (the reverse mapping TypeScript's own
+   * emit installs). The checker folds every member's initializer to its
+   * constant, which is why the census records the declaration without walking
+   * the initializers. A merged declaration (a second `enum E` block adding to
+   * the first object) and a member with no constant value are not modelled.
+   */
+  const contributeEnum = (candidate: CensusCandidate, node: ts.EnumDeclaration): CandidateContribution => {
+    const symbol = context.checker.getSymbolAtLocation(node.name)
+    if ((symbol?.declarations ?? []).filter(ts.isEnumDeclaration).length > 1)
+      return asBlocked(candidate.id, 'declaration-lifecycle', 'an enum merged across several declarations is not modelled', null)
+    const members: { readonly name: string; readonly value: string | number }[] = []
+    for (const member of node.members) {
+      const value = context.checker.getConstantValue(member)
+      if (value === undefined || (typeof value === 'number' && !Number.isFinite(value)))
+        return asBlocked(candidate.id, 'declaration-lifecycle', 'an enum member without a finite constant value is not modelled', null)
+      members.push({ name: member.name.getText(), value })
+    }
+    const objectType = context.types.valueTypeAt(node)
+    const stringType = context.types.typeOf(context.checker.getStringType())
+    const numberType = context.types.typeOf(context.checker.getNumberType())
+    const operations: (AllocationOperation | BindingOperation | PropertyOperation)[] = []
+    const edges: SemanticEdge[] = []
+    let previous: OperationId | null = null
+    const append = (operation: AllocationOperation | BindingOperation | PropertyOperation): void => {
+      operations.push(operation)
+      edges.push(...valueEdgesInto(operation.id, operation.operands))
+      if (previous !== null) edges.push({ kind: 'evaluation', from: previous, to: operation.id })
+      previous = operation.id
+    }
+    const objectId = mintOperationId(context.ordinals, candidate.id, 'declaration-lifecycle')
+    append({
+      id: objectId,
+      family: 'allocation',
+      caller: candidate.caller,
+      allocated: 'object-literal',
+      shape: objectType,
+      callable: null,
+      operands: [],
+      results: [mintResult(objectId, 'value', objectType)],
+      completion: normalCompletion,
+      effects: { readsMutableState: false, writesMutableState: false, allocates: true, callsUserCode: false },
+      evaluationOrdinal: candidate.evaluationOrdinal
+    })
+    const object = semanticResultId(objectId, 'value')
+    const define = (key: string, value: string | number): void => {
+      const defineId = mintOperationId(context.ordinals, candidate.id, 'declaration-lifecycle')
+      append({
+        id: defineId,
+        family: 'property',
+        internalMethod: 'define-own-property',
+        strict: true,
+        keyIsComputed: false,
+        descriptor: { writable: true, enumerable: true, configurable: true },
+        caller: candidate.caller,
+        operands: [
+          operand('receiver', 0, { kind: 'result', result: object }, objectType),
+          operand('key', 0, { kind: 'constant', text: key, literal: 'string' }, stringType),
+          operand(
+            'value',
+            0,
+            { kind: 'constant', text: String(value), literal: typeof value === 'number' ? 'number' : 'string' },
+            typeof value === 'number' ? numberType : stringType
+          )
+        ],
+        results: [mintResult(defineId, 'value', objectType)],
+        completion: normalCompletion,
+        effects: { readsMutableState: false, writesMutableState: true, allocates: false, callsUserCode: false },
+        evaluationOrdinal: candidate.evaluationOrdinal
+      })
+    }
+    for (const member of members) {
+      define(member.name, member.value)
+      if (typeof member.value === 'number') define(String(member.value), member.name)
+    }
+    const bindId = mintOperationId(context.ordinals, candidate.id, 'declaration-lifecycle')
+    append({
+      id: bindId,
+      family: 'binding',
+      action: 'initialize',
+      declaration: context.identities.declarationIdOf(node),
+      mutable: true,
+      temporalDeadZone: false,
+      caller: candidate.caller,
+      operands: [operand('initializer', 0, { kind: 'result', result: object }, objectType)],
+      results: [mintResult(bindId, 'value', objectType)],
+      completion: normalCompletion,
+      effects: { readsMutableState: false, writesMutableState: true, allocates: false, callsUserCode: false },
+      evaluationOrdinal: candidate.evaluationOrdinal
+    })
+    return { kind: 'operations', operations, edges }
   }
 
   const contribute = (candidate: CensusCandidate): CandidateContribution => {
     const { node } = candidate
+    if (node.kind === ts.SyntaxKind.EndOfFileToken) return contributeCommonJsNamespace(candidate, node)
+    if (ts.isEnumDeclaration(node)) return contributeEnum(candidate, node)
     if (ts.isImportDeclaration(node)) return contributeImport(candidate, node)
     if (ts.isExportDeclaration(node)) return contributeExportDeclaration(candidate, node)
     if (ts.isExportAssignment(node)) return contributeExportAssignment(candidate, node)

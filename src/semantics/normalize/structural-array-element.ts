@@ -254,6 +254,13 @@ export const inferredArrayElementAt = (
     if (!checker.isArrayType(declared)) return null
     return collections.arrayElementForOwner(node)
   }
+  // A parameter an array reaches through a `call-argument` edge is one more
+  // name for the caller's storage; unstated, it holds what that storage does.
+  if (ts.isParameter(node)) {
+    if (node.type !== undefined || ts.getJSDocType(node) !== undefined || ts.getJSDocParameterTags(node).length > 0) return null
+    if (node.dotDotDotToken || !checker.isArrayType(layoutTypeAt(node))) return null
+    return collections.arrayElementForOwner(node)
+  }
   if (!ts.isIdentifier(node) && !ts.isPropertyAccessExpression(node)) return null
   const own = layoutTypeAt(node)
   if (!checker.isArrayType(own)) return null
@@ -516,13 +523,25 @@ export const inferredCollectionTypeArgumentsAt = (
 ): StructuralTypeId | null => {
   const bound: CollectionTypeArguments | null = ts.isNewExpression(node)
     ? collections.typeArgumentsAt(node)
-    : ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)
+    : ts.isVariableDeclaration(node) ||
+        ts.isPropertyDeclaration(node) ||
+        (ts.isParameter(node) &&
+          node.type === undefined &&
+          ts.getJSDocType(node) === undefined &&
+          ts.getJSDocParameterTags(node).length === 0 &&
+          !node.dotDotDotToken)
       ? collections.typeArgumentsForOwner(node)
       : ts.isIdentifier(node) || ts.isPropertyAccessExpression(node)
         ? collections.typeArgumentsForRead(node)
         : null
   if (!bound) return null
-  const generic = table.get(typeOf(own)).shape
+  // A collection still being interned is reached through its own element
+  // (`listeners: Map<string, ((event: {target?: Resource}) => void)[]>` inside
+  // `Resource`): its arguments are the stated ones in progress, not a vacuous
+  // set to override, and the open anchor has no shape to read yet.
+  const ownId = typeOf(own)
+  if (table.isOpen(ownId)) return null
+  const generic = table.get(ownId).shape
   const direct = overriddenCollectionShape(table, typeOf, bags, bound, generic)
   if (direct !== null) return direct
   // A cell the program lets go ABSENT holds the collection inside a union,
@@ -546,7 +565,7 @@ export const inferredCollectionTypeArgumentsAt = (
   // payload. A union with a second substantive member is a genuinely
   // different value in each arm and is refused, exactly as before -- there
   // is no single collection for the census's answer to be about.
-  if (generic.kind !== 'union') return null
+  if (generic.kind !== 'union' || generic.members.some((member) => table.isOpen(member))) return null
   const members = generic.members.map((member) => ({ id: member, shape: table.get(member).shape }))
   const payloads = members.filter((member) => member.shape.kind !== 'primitive' || !isAbsenceKeyword(member.shape.primitive))
   const payload = payloads.length === 1 ? payloads[0]! : null

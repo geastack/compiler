@@ -16,7 +16,8 @@ import {
   isGeneratorType,
   isNativeIterableSetType,
   isNativeIterableStringType,
-  staticSpreadMembersOf,
+  keysWrittenAfter,
+  spreadCopiesStatically,
   valueEdgesInto
 } from './shared.js'
 import { iteratorMethodSymbolOf, iteratorRecordTypesOf, iteratorYieldStructuralType } from './iteration-yield.js'
@@ -118,7 +119,15 @@ const iterationElementType = (
   const nonNullish = iterationPayloadArm(context, sourceType)
   const effectiveType = nonNullish ?? sourceType
   const shape = context.table.get(effectiveType).shape
-  if (shape.kind === 'array') return shape.element
+  // A `never[]` states no element (the `iteration-over-a-never-array` rule,
+  // normalize/structural.ts): its steps yield whatever it holds, as its
+  // binding does.
+  if (shape.kind === 'array') {
+    const element = context.table.get(shape.element).shape
+    return element.kind === 'primitive' && element.primitive === 'never'
+      ? context.table.intern({ kind: 'primitive', primitive: 'any' })
+      : shape.element
+  }
   if (shape.kind === 'tuple') return context.table.intern({ kind: 'union', members: shape.elements.map((element) => element.type) })
   if (shape.kind === 'unresolved') return effectiveType
   // A string yields STRINGS -- one code point per step (ECMA-262 22.1.3.36),
@@ -627,7 +636,7 @@ const contributeObjectSpread = (context: ProducerContext, candidate: CensusCandi
   // plain array takes below, decided by the same shared predicate both halves
   // read (`shared.ts`'s `staticSpreadMembersOf`) so the two can never disagree
   // about which sources it covers.
-  if (!('blocked' in staticSpreadMembersOf(context, context.types.typeAt(node.expression)))) {
+  if (spreadCopiesStatically(context, node)) {
     return { kind: 'operations', operations: [], edges: [] }
   }
   const source = resolveExpressionOperand(context, node.expression)
@@ -663,6 +672,7 @@ const contributeObjectSpread = (context: ProducerContext, candidate: CensusCandi
     id,
     protocol: 'spread',
     step: 'next',
+    overwrittenKeys: [...keysWrittenAfter(context, node)],
     caller: candidate.caller,
     operands,
     // `CopyDataProperties` returns nothing a JS consumer ever reads, but the

@@ -7,7 +7,10 @@ import {
   enumerateGetIteratorCarrierKeyOf,
   iteratorMethodCarrierKeyOf,
   regexpFlagSupportKeyOf,
-  spreadSourceCarrierKeyOf
+  openRecordBox,
+  spreadCopiesThroughOpenRecord,
+  spreadSourceCarrierKeyOf,
+  unionSpreadArmPairsOf
 } from './carrier-keys.js'
 
 /**
@@ -141,8 +144,28 @@ const ownKindDemandsOf = (operation: IrOperation, ctx: CertifyContext): readonly
       const semantic = ctx.semanticOperationOf(operation.lineage)
       if (semantic?.family === 'protocol' && semantic.protocol === 'spread') {
         const source = operation.source.representation
-        const carrier = spreadSourceCarrierKeyOf(source.kind, source, operation.receiver.representation, ctx.deriver)
-        return [helper(`protocol:spread:next:${carrier}`)]
+        // A typed source spread into a dynamic receiver copies through its own
+        // box: `emitSpreadCopy` boxes it and runs the dynamic walk.
+        const boxed =
+          operation.receiver.representation.kind === 'dynamic' &&
+          source.kind !== 'dynamic' &&
+          ctx.conversions.nodeFor(source, operation.receiver.representation).capability.kind !== 'never'
+        const carrier = boxed
+          ? 'boxed->dynamic'
+          : unionSpreadArmPairsOf(ctx.deriver, source, operation.receiver.representation, operation.overwrittenKeys ?? []) !== null
+            ? 'tagged-union(arm-to-arm)'
+            : spreadCopiesThroughOpenRecord(ctx.deriver, source, operation.receiver.representation) &&
+                [source, operation.receiver.representation].every(
+                  (side) => side.kind === 'dynamic' || ctx.conversions.nodeFor(side, openRecordBox).capability.kind !== 'never'
+                )
+              ? 'boxed->open-record'
+              : spreadSourceCarrierKeyOf(source.kind, source, operation.receiver.representation, ctx.deriver, operation.overwrittenKeys)
+        return [
+          {
+            ...helper(`protocol:spread:next:${carrier}`),
+            detail: `copies a "${representationKey(source)}" source into a "${representationKey(operation.receiver.representation)}" receiver`
+          }
+        ]
       }
       // The dictionary half of an object-pattern rest ("{...rest}") reuses
       // object spread's own copy primitive (`lower-destructuring.ts`'s
@@ -210,7 +233,9 @@ const ownKindDemandsOf = (operation: IrOperation, ctx: CertifyContext): readonly
     // Allocations
     // -----------------------------------------------------------------------
     case 'allocate-ordinary-object':
-      return [helper(`allocation:object-literal:${operation.result.representation.kind}`)]
+      return [
+        helper(`allocation:object-literal:${operation.result.representation.kind}${operation.builtBySpread ? '(built-by-spread)' : ''}`)
+      ]
     case 'allocate-array-object': {
       const semantic = ctx.semanticOperationOf(operation.lineage)
       if (semantic?.family === 'allocation') {

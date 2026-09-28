@@ -39,7 +39,7 @@ import {
   cppTypeOf,
   cppUndefinedIn
 } from '../types.js'
-import { alignedValueText, receiverBoundFieldText } from '../emit-narrowing.js'
+import { alignedValueText, callableObjectAbi, classFamilyLoadText, receiverBoundFieldText } from '../emit-narrowing.js'
 import { computedOverriddenMethodValueText } from './computed-method-value.js'
 import { nativePrototypeMethodFallbackText } from './native-prototype.js'
 import { classMethodValueArmsOf, classPrototypeMethodKeysOf, classPrototypeMethodValueArmsOf } from '../../../projection/dispatch.js'
@@ -156,6 +156,31 @@ const methodEnvironmentText = (ctx: EmitContext, callable: FunctionId, what: str
  * no receiver and needs no correction -- this helper is only ever called from
  * the instance-member path below.
  */
+/**
+ * A method read whose value escapes receiver-free -- into a detached cell
+ * (`const { asString } = serializer`), never only as its own call's callee --
+ * is that published convention, with the object bound in by
+ * `receiverBoundFieldText` below. ECMAScript calls a detached method with
+ * `this` undefined, so binding the object is the same call exactly when the
+ * body never reads it; a body that does is refused by name.
+ */
+const detachedMethodValueRepresentation = (
+  ctx: EmitContext,
+  operation: GetOperation,
+  method: ClassLayout['methods'][number]
+): Representation | null => {
+  const representation = operation.result.representation
+  if (representation.kind !== 'function-value-dispatch' || representation.abi.receiver !== null) return null
+  if (ctx.calleeOnlyValues.has(operation.result.id) || method.callable === null) return null
+  if (ctx.captures.readsReceiver(method.callable))
+    throw createCppEmitBlockedError(
+      'call-abi:bind-callable',
+      'detaches a method whose body reads `this`: the language calls a detached method with no receiver, so binding the object ' +
+        'it was read from would answer where the program would have thrown'
+    )
+  return representation
+}
+
 const boundMethodValueRepresentation = (operation: GetOperation): Representation => {
   const representation = operation.result.representation
   if (representation.kind !== 'function-value-dispatch') {
@@ -215,6 +240,52 @@ export interface ComputedPrototypeMethodValue extends ClassMemberValue {
 }
 
 /**
+ * A method whose published convention differs from its body's only in a
+ * result the class table narrows: ajv's `ParentNode.optimizeNames(): this |
+ * undefined` read through a `ChildNode` arm publishes the union the checker
+ * instantiates `this` at, while the body returns its declaring class. The
+ * value is the body, its result narrowed per call by allocation identity
+ * (`classFamilyLoadText`) -- a table the ctx-free callable adapter cannot see.
+ */
+const classResultNarrowedMethodText = (ctx: EmitContext, body: Representation, published: Representation, text: string): string | null => {
+  const from = callableObjectAbi(body)
+  const to = callableObjectAbi(published)
+  if (!from || !to || from.receiver === null || to.receiver === null || from.restFrom !== to.restFrom) return null
+  if (from.parameters.length !== to.parameters.length) return null
+  // The published receiver may be the method's root class while the body is a
+  // descendant's: the value is only ever called on an instance of that
+  // descendant (it was read off one), so the receiver narrows to it.
+  const fromReceiver = from.receiver
+  const toReceiver = to.receiver
+  const receiverActual =
+    cppTypeOf(fromReceiver) === cppTypeOf(toReceiver)
+      ? 'gea_adapt_receiver'
+      : fromReceiver.kind === 'class-ref' &&
+          toReceiver.kind === 'class-ref' &&
+          fromReceiver.ownership === 'shared-refcount' &&
+          toReceiver.ownership === 'shared-refcount' &&
+          fromReceiver.ancestors.includes(toReceiver.declaration)
+        ? `gea::host::downcastClassRef<${cppClassName(fromReceiver.declaration)}>(gea_adapt_receiver)`
+        : null
+  if (receiverActual === null) return null
+  if (from.parameters.some((parameter, index) => cppAbiParameterType(parameter) !== cppAbiParameterType(to.parameters[index]!))) return null
+  const converted = classFamilyLoadText(ctx, from.result, to.result, 'gea_adapt_result')
+  if (converted === null) return null
+  const formals = [
+    'void* gea_adapt_environment',
+    `${cppTypeOf(toReceiver)} gea_adapt_receiver`,
+    ...to.parameters.map((parameter, index) => `${cppAbiParameterType(parameter)} gea_adapt_arg_${index}`)
+  ]
+  const actuals = [receiverActual, ...to.parameters.map((_, index) => `gea_adapt_arg_${index}`)]
+  const sourceType = cppTypeOf(body)
+  return (
+    `${cppTypeOf(published)}::adaptSource(${sourceType}{${text}}, [](${formals.join(', ')}) -> ${cppResultTypeOf(to.result)} { ` +
+    `${cppTypeOf(from.result)} gea_adapt_result = static_cast<${sourceType}*>(gea_adapt_environment)->call(${actuals.join(', ')}); ` +
+    `return ${converted}; })`
+  )
+}
+
+/**
  * One prototype method materialised at the callable convention a particular
  * property read publishes.
  *
@@ -232,7 +303,8 @@ export const classMethodValueText = (
   // read, or the read's own `dynamic` carrier for a computed key the census
   // could not type (`d[String(k)]()`), which boxes the method with
   // `receivesThis` so the call's `callWithReceiver` hands the instance back.
-  valueRepresentation: Representation = boundMethodValueRepresentation(operation),
+  valueRepresentation: Representation = detachedMethodValueRepresentation(ctx, operation, method) ??
+    boundMethodValueRepresentation(operation),
   receiverText: string = operandText(ctx, operation.receiver),
   receiverRepresentation: Representation = operation.receiver.representation
 ): { readonly text: string; readonly type: string; readonly environment: string } => {
@@ -279,7 +351,8 @@ export const classMethodValueText = (
     // which TypeScript admits through a method-declared member) would see the
     // read's receiver where the language gives `undefined`. hono writes the
     // two shapes that are exact: the call, and `router.match.bind(router)`.
-    receiverBoundFieldText(ctx, bodyRepresentation, valueRepresentation, bodyValue, receiverRepresentation, heldReceiver)
+    receiverBoundFieldText(ctx, bodyRepresentation, valueRepresentation, bodyValue, receiverRepresentation, heldReceiver) ??
+    classResultNarrowedMethodText(ctx, bodyRepresentation, valueRepresentation, bodyValue)
   if (materialized === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(bodyRepresentation)}->${representationKey(valueRepresentation)}`,
@@ -674,7 +747,11 @@ export const classMemberText = (ctx: EmitContext, operation: GetOperation): Clas
     return { text: `${cppBodyName(site.accessor.getter)}(${operandText(ctx, operation.receiver)})`, spelling: null }
   }
   if (overriding.length > 0 && !isSuperAccess && !ctx.virtualCallees.has(operation.result.id)) {
-    const selected = computedOverriddenMethodValueText(ctx, operation, key, (method) => classMethodValueText(ctx, operation, key, method))
+    const value =
+      operation.result.representation.kind === 'dynamic' ? operation.result.representation : boundMethodValueRepresentation(operation)
+    const selected = computedOverriddenMethodValueText(ctx, operation, key, (method) =>
+      classMethodValueText(ctx, operation, key, method, value)
+    )
     return { text: selected.text, spelling: selected.type }
   }
   // An ABSTRACT declaration roots the family and owns no body, so there is no
@@ -721,7 +798,19 @@ export const classMemberText = (ctx: EmitContext, operation: GetOperation): Clas
       'std::abort();'
     return { text: `[]() -> ${carrier} { ${failure} }()`, spelling: carrier }
   }
-  const materialized = classMethodValueText(ctx, operation, key, site.method)
+  // A method whose declared overloads join no convention is read as the box
+  // the opt-in gives it (ajv's `this.ajv.compile`), which the computed-key
+  // path above already materializes with its receiver.
+  const published = operation.result.representation
+  const materialized = classMethodValueText(
+    ctx,
+    operation,
+    key,
+    site.method,
+    published.kind === 'dynamic'
+      ? published
+      : (detachedMethodValueRepresentation(ctx, operation, site.method) ?? boundMethodValueRepresentation(operation))
+  )
   // Keep the receiver beside the exact method value this property read
   // publishes. An immediate `object.method()` call can need it even when the
   // method is not eligible for the body-by-name optimization below: the
@@ -1158,6 +1247,28 @@ export const classConstructorStaticMemberTextFor = (
         `"length" reads as "number" and this receiver's result is stored as "${representationKey(result)}"; no conversion is installed between them`
       )
     }
+  }
+  // `C.call`/`C.apply` with no static member shadowing it is Function.prototype's,
+  // and a class constructor's [[Call]] throws (10.2.1 step 2): the function read
+  // is one whose every invocation is that TypeError (light-my-request's
+  // `Readable.call(this, ...)` over node-compat's `class Readable`).
+  if (key === 'call' || key === 'apply') {
+    const named = receiver.members.map((declaration) => ctx.classes.get(declaration)?.name ?? null).find((name) => name !== null)
+    const message = `Class constructor ${named ?? ''} cannot be invoked without 'new'`
+    const thrower =
+      'gea::Value::boxMethod<-1>(gea::CallableObject<gea::Value()>{+[](void*) -> gea::Value { ' +
+      `gea::host::throwRuntimeError("TypeError", ${cppStringLiteral(message)}); }, nullptr})`
+    const converted =
+      result.kind === 'dynamic'
+        ? thrower
+        : alignedValueText(
+            ctx,
+            'class-properties/emit-class-properties.ts:call',
+            { kind: 'dynamic', reason: 'declared-any-never-narrowed' },
+            result,
+            thrower
+          )
+    if (converted !== null) return converted
   }
   throw createCppEmitBlockedError(
     `property-access:${representationKey(receiver)}:get:false`,

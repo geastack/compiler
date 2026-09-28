@@ -3,7 +3,7 @@ import type { NativeSelectionHelper } from './native-selection-helpers.js'
 import { stableBorrowActualsOf } from '../../ir/borrowed-call-arguments.js'
 import { owningConversionInputText } from './owning-conversion-input.js'
 import type { StableBorrowEntry } from './borrowed-call-entry.js'
-import { boxedValueText } from './emit-dynamic-properties.js'
+import { boxedValueText, propertyKeyText } from './emit-dynamic-properties.js'
 import { emitYieldDelegate } from './emit-yield-delegate.js'
 import { ownedDyingValuesOf, ownedFormalInputsOf, transfersFormalConversion } from '../../ir/transfer.js'
 import type { FunctionId, DeclarationId, IrValueId } from '../../identity/ids.js'
@@ -86,7 +86,12 @@ import type { HoistPlan } from '../../ir/hoist.js'
 import { bodyValueOriginsOf, irBodyCensusOf } from '../../ir/facts.js'
 import { emitGetIterator, emitIteratorClose, emitIteratorDone, emitIteratorNext, renderIteratorCloseRegion } from './emit-iterator.js'
 import { absenceComparisonText, booleanTestText, definedTestText, presenceTestText } from './emit-presence.js'
-import { callableIdentityEqualityText, constantStringComparisonText, strictEqualityText } from './emit-equality.js'
+import {
+  callableIdentityEqualityText,
+  constantStringComparisonText,
+  looseDynamicEqualityText,
+  strictEqualityText
+} from './emit-equality.js'
 import { nativeEqualityText } from './emit-native-equality.js'
 import { denseRemainderCompanion, integerBitwiseOperators, integerBoundedComparison, remainderText } from './emit-integers.js'
 import { instanceofText } from './emit-instanceof.js'
@@ -202,7 +207,7 @@ type CppOperatorSpelling = { readonly kind: 'infix'; readonly text: string } | {
  * which is refused rather than approximated.
  *
  * `%` and `**` have no infix spelling on `double` in C++, so they are library
- * calls (`gea::remainder`/`std::pow`, below) -- and so are `&`/`|`/`^`/`<<`/`>>`/
+ * calls (`gea::remainder`/`gea::exponentiate`, below) -- and so are `&`/`|`/`^`/`<<`/`>>`/
  * `>>>`, for a different reason: ECMAScript defines every one of them through
  * `ToInt32`/`ToUint32` (ECMA-262 7.1.6/7.1.7) of the operand, never through the
  * IEEE-754 double the plan actually carries. `a & b` truncates and wraps each
@@ -218,7 +223,7 @@ type CppOperatorSpelling = { readonly kind: 'infix'; readonly text: string } | {
  * `runtime/gea_runtime.h` -- reusing the identical modulo-2**32 wraparound the
  * TypedArray element store already performs there
  * (`detail::typedArrayIntegerModulo`) -- and are called here as
- * `CppOperatorSpelling`s of kind `'call'`, exactly like `gea::remainder`/`std::pow`.
+ * `CppOperatorSpelling`s of kind `'call'`, exactly like `gea::remainder`/`gea::exponentiate`.
  *
  * Only the `number`/`float64` domain gets a bitwise spelling. `bigint` looks
  * like it belongs in the same table -- ECMAScript spells the identical six
@@ -259,7 +264,7 @@ const numericBinaryOperators: ReadonlyMap<string, CppOperatorSpelling> = new Map
   ['*', { kind: 'infix', text: '*' }],
   ['/', { kind: 'infix', text: '/' }],
   ['%', { kind: 'call', text: 'gea::remainder' }],
-  ['**', { kind: 'call', text: 'std::pow' }],
+  ['**', { kind: 'call', text: 'gea::exponentiate' }],
   ['<', { kind: 'infix', text: '<' }],
   ['>', { kind: 'infix', text: '>' }],
   ['<=', { kind: 'infix', text: '<=' }],
@@ -279,6 +284,29 @@ const numericBinaryOperators: ReadonlyMap<string, CppOperatorSpelling> = new Map
   ['<<', { kind: 'call', text: 'gea::leftShift' }],
   ['>>', { kind: 'call', text: 'gea::signedRightShift' }],
   ['>>>', { kind: 'call', text: 'gea::unsignedRightShift' }]
+])
+
+/** `gea::dynamicNumeric`'s operator for each operator two dynamic operands can meet (every one but `+`, `dynamicAdd`'s). */
+const dynamicNumericOperators: ReadonlyMap<string, string> = new Map([
+  ['-', 'Subtract'],
+  ['*', 'Multiply'],
+  ['/', 'Divide'],
+  ['%', 'Remainder'],
+  ['**', 'Exponent'],
+  ['<<', 'LeftShift'],
+  ['>>', 'SignedRightShift'],
+  ['>>>', 'UnsignedRightShift'],
+  ['&', 'BitAnd'],
+  ['|', 'BitOr'],
+  ['^', 'BitXor']
+])
+
+/** IsLessThan's four spellings over two boxes (ECMA-262 13.10.1). */
+const dynamicRelationalHelpers: ReadonlyMap<string, string> = new Map([
+  ['<', 'dynamicLess'],
+  ['>', 'dynamicGreater'],
+  ['<=', 'dynamicLessEqual'],
+  ['>=', 'dynamicGreaterEqual']
 ])
 
 /** The relational operators `mixedRelationalText` answers -- IsLessThan's own four spellings, never `===`/`==` (a different rule, `emit-equality.ts`). */
@@ -546,6 +574,27 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
       return
     }
     if (operation.operator === 'ToNumeric') return emitToNumericCoercion(ctx, lines, first, operation.result)
+    // `-x`/`~x` over a box: ToNumeric first (13.5.5, 13.5.6), then the BigInt
+    // or Number operation on what it holds -- the unary half of
+    // `gea::dynamicNumeric`.
+    if (first.representation.kind === 'dynamic' && (operation.operator === '-' || operation.operator === '~')) {
+      const helper = operation.operator === '-' ? 'dynamicNegate' : 'dynamicBitwiseNot'
+      const dynamic: Representation = { kind: 'dynamic', reason: 'opt-in-fallback' }
+      const text = alignedValueText(
+        ctx,
+        'emit.ts:dynamic-unary',
+        dynamic,
+        operation.result.representation,
+        `gea::${helper}(${operandText(ctx, first)})`
+      )
+      if (text === null)
+        throw createCppEmitBlockedError(
+          `conversion:dynamic->${representationKey(operation.result.representation)}`,
+          'dynamic negation result has no checked conversion'
+        )
+      lines.push(`${defineValue(ctx, operation.result)} = ${text};`)
+      return
+    }
     const spelling = unaryOperatorFor(operation.operator, first.representation)
     if (!spelling) {
       throw createCppEmitBlockedError(
@@ -636,7 +685,9 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
         `an "instanceof" with ${operands.length} operand(s) has no C++ spelling`
       )
     }
-    lines.push(`${defineValue(ctx, operation.result)} = ${instanceofText(ctx, first, constructor, operation.classInstanceTest)};`)
+    lines.push(
+      `${defineValue(ctx, operation.result)} = ${instanceofText(ctx, first, constructor, operation.classInstanceTest, operation.classInstanceTestArms)};`
+    )
     return
   }
 
@@ -714,7 +765,10 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
   // which the generic path below cannot reach: two different carriers hit its
   // mixed-carrier refusal, and two identical sums hit `binaryOperatorFor`,
   // which has no `==` for a byte buffer. Answered here, before both.
-  const equality = sides[0] && sides[1] ? strictEqualityText(operation.operator, sides[0], sides[1]) : null
+  const equality =
+    sides[0] && sides[1]
+      ? (strictEqualityText(operation.operator, sides[0], sides[1]) ?? looseDynamicEqualityText(operation.operator, sides[0], sides[1]))
+      : null
   if (equality !== null) {
     lines.push(`${defineValue(ctx, operation.result)} = ${equality};`)
     return
@@ -807,6 +861,52 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
       )
     lines.push(`${defineValue(ctx, operation.result)} = ${text};`)
     return
+  }
+  // Two dynamic operands of any other arithmetic, bitwise or relational
+  // operator: nothing typed is boxed, and the operation is the language's own
+  // dispatch over what the two boxes hold at run time -- ToNumeric and the
+  // BigInt/Number split (`gea::dynamicNumeric`), or IsLessThan
+  // (`gea::dynamicLess`...). The census coerces a MIXED pair before it gets
+  // here (`projection/slots.ts`'s `binarySlot`); an identical dynamic pair is
+  // left to this dispatch.
+  if (first.representation.kind === 'dynamic' && second.representation.kind === 'dynamic') {
+    const left = operandText(ctx, first)
+    const right = operandText(ctx, second)
+    const relational = dynamicRelationalHelpers.get(operation.operator)
+    if (relational !== undefined) {
+      const text = alignedValueText(
+        ctx,
+        'emit.ts:dynamic-relational',
+        { kind: 'scalar', domain: 'boolean' },
+        operation.result.representation,
+        `gea::${relational}(${left}, ${right})`
+      )
+      if (text === null)
+        throw createCppEmitBlockedError(
+          `conversion:scalar(boolean)->${representationKey(operation.result.representation)}`,
+          'a dynamic comparison produces a boolean'
+        )
+      lines.push(`${defineValue(ctx, operation.result)} = ${text};`)
+      return
+    }
+    const numeric = dynamicNumericOperators.get(operation.operator)
+    if (numeric !== undefined) {
+      const dynamic: Representation = { kind: 'dynamic', reason: 'opt-in-fallback' }
+      const text = alignedValueText(
+        ctx,
+        'emit.ts:dynamic-numeric',
+        dynamic,
+        operation.result.representation,
+        `gea::dynamicNumeric(gea::DynamicNumericOperator::${numeric}, ${left}, ${right})`
+      )
+      if (text === null)
+        throw createCppEmitBlockedError(
+          `conversion:dynamic->${representationKey(operation.result.representation)}`,
+          'dynamic arithmetic result has no checked conversion'
+        )
+      lines.push(`${defineValue(ctx, operation.result)} = ${text};`)
+      return
+    }
   }
   // A function compared against a function IDENTITY. Not a coercion this file
   // invents: the identity IS what `CallableObject::operator==` compares, so
@@ -1357,6 +1457,19 @@ const emitOperationStatements = (ctx: EmitContext, lines: string[], operation: I
       emitFieldStore(ctx, classTableLines(ctx, lines, operation.receiver.value), operation, 'set')
       return
     case 'define-own-property': {
+      if (operation.attributes.accessor !== undefined) {
+        // A native receiver's own shape already installed the accessor at its
+        // allocation; only a dynamic object takes it as a definition.
+        if (operation.receiver.representation.kind !== 'dynamic') return
+        const install = operation.attributes.accessor === 'get' ? 'setDescriptorGetter' : 'setDescriptorSetter'
+        lines.push(
+          `{ gea::PropertyDescriptor gea_accessor; gea::detail::${install}(gea_accessor, ${boxedValueText(ctx, operation.value, 'an accessor function')}); ` +
+            `gea_accessor.hasEnumerable = true; gea_accessor.enumerable = ${operation.attributes.enumerable}; ` +
+            `gea_accessor.hasConfigurable = true; gea_accessor.configurable = ${operation.attributes.configurable}; ` +
+            `${operandText(ctx, operation.receiver)}.asDynamicObject()->defineOwnProperty(${propertyKeyText(ctx, operation.key, 'an accessor key')}, gea_accessor); }`
+        )
+        return
+      }
       const owner = operation.onlyIfOwnedBy
       if (owner === undefined) {
         emitFieldStore(ctx, classTableLines(ctx, lines, operation.receiver.value), operation, 'define-own-property')
@@ -1390,6 +1503,11 @@ const emitOperationStatements = (ctx: EmitContext, lines: string[], operation: I
       emitHasProperty(ctx, lines, operation)
       return
     case 'allocate-ordinary-object':
+      // The leading spread allocates the arm it builds; the union starts empty.
+      if (operation.builtBySpread && operation.result.representation.kind === 'tagged-union') {
+        lines.push(`${defineValue(ctx, operation.result)} = ${cppTypeOf(operation.result.representation)}{};`)
+        return
+      }
       lines.push(`${defineValue(ctx, operation.result)} = gea::Value::object();`)
       return
     case 'allocate-record':
@@ -1951,7 +2069,8 @@ export const emitBody = (
   callableIdentityDemand: CallableIdentityDemand = observesEveryCallableIdentity,
   nativeIntegrityRestricted = true,
   fixedFieldStateConstant = false,
-  newTargetReaders: ReadonlySet<FunctionId> = new Set()
+  newTargetReaders: ReadonlySet<FunctionId> = new Set(),
+  constructorOverrideClasses: ReadonlySet<DeclarationId> = new Set()
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -2068,7 +2187,8 @@ export const emitBody = (
     callableIdentityDemand,
     nativeIntegrityRestricted,
     fixedFieldStateConstant,
-    newTargetReaders
+    newTargetReaders,
+    constructorOverrideClasses
   )
   // `ownedValues` stays a genuine render-time OUTPUT buffer (`EmitContext`'s
   // own doc: `defineValue` grows it as each operation's result is named) --
@@ -2543,7 +2663,9 @@ export const emitBody = (
   if (carriedUnionMethods.length > 0) {
     throw createCppEmitBlockedError(
       'call-abi:tagged-union-method',
-      `takes ${carriedUnionMethods.length} tagged-union method value(s) without calling them; each union arm has its own receiver convention, so no single callable carrier can preserve them`
+      `takes ${carriedUnionMethods.length} tagged-union method value(s) without calling them ` +
+        `(${carriedUnionMethods.map((value) => ctx.unionMethodReads.get(value)?.key ?? value).join(', ')}); ` +
+        'each union arm has its own receiver convention, so no single callable carrier can preserve them'
     )
   }
   // Declarations come last because they are only complete once every block has

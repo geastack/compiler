@@ -32,6 +32,8 @@ import {
 import { createKeyofResolver, type KeyofOutcome } from './keyof.js'
 import { constructorInstalledMemberDeclarationsOf } from './flow/source-class-data.js'
 import {
+  isEmptyObjectType,
+  isVacuousArrayType,
   arityAdmittedSignature,
   arrayPredicateNarrowedElementTypeOf,
   impliedPatternTargetOf,
@@ -171,6 +173,10 @@ export interface StructuralMapper {
   readonly boundCallResultAt: (node: ts.Node) => StructuralTypeId | null
   /** The result of every native constructor alternative, shared with the invocation's selected return. */
   readonly constructResultAt: (node: ts.Node) => StructuralTypeId | null
+  /** A call's census-typed collection result (`collection-returning-call`), shared with the invocation's selected return. */
+  readonly collectionCallResultAt: (node: ts.Node) => StructuralTypeId | null
+  /** A callable type with the receivers that name a class instance removed (`bound-call-result`'s detached method cells). */
+  readonly withoutClassReceiver: (id: StructuralTypeId) => StructuralTypeId
   /** The carrier of the value a declaration binds, which for a class is its constructor object rather than its instances. */
   readonly valueTypeAt: (node: ts.Declaration) => StructuralTypeId
   /**
@@ -249,6 +255,13 @@ export interface StructuralMapper {
    * different answer for one node.
    */
   readonly rawTypeAt: (node: ts.Node) => ts.Type
+  /**
+   * The composed census's type for an expression the checker types `any` --
+   * a member of a symbol-keyed bag (`this[kImpl].dataBuf`) -- which is the
+   * evidence an overload chosen for that `any` argument is reselected by, as
+   * `local-bindings.ts` asks it for the cell such a call fills.
+   */
+  readonly censusArgumentTypeAt: (node: ts.Node) => ts.Type | null
   /** The census's pre-default read type of an array-pattern element, when it bound one -- see `ParameterBindingCensus.patternReadTypeAt`. */
   readonly patternReadTypeAt: (element: ts.BindingElement) => ts.Type | null
   /**
@@ -664,12 +677,24 @@ const buildMapper = (
   // `getMinArgumentCount` is checker-internal. The public answer is the count of
   // leading parameters the call site must supply: everything before the first
   // optional, defaulted, or rest parameter.
+  // Every member some `delete x.member` names -- ret's `delete lastGroup.stack`
+  // -- by declaration, so a transient member symbol finds it too.
+  const deletedMemberDeclarations = new Set<ts.Declaration>()
+  for (const write of flow?.allWrites ?? []) {
+    if (write.edge !== 'delete' || !write.propertyAccess || !ts.isPropertyAccessExpression(write.propertyAccess)) continue
+    for (const declaration of checker.getSymbolAtLocation(write.propertyAccess)?.declarations ?? [])
+      deletedMemberDeclarations.add(declaration)
+  }
   const { signatureOf, memberOf, indexesOf, tupleElementsOf } = createStructuralParts({
     parameters,
     checker,
     identities,
     typeOf: (type) => typeOf(type),
-    parameterOverrideAt: (parameter) => refusedArrayParameterTypeAt(parameter) ?? prototypeObjectParameterTypeAt(parameter),
+    parameterOverrideAt: (parameter) =>
+      refusedArrayParameterTypeAt(parameter) ??
+      inferredArrayParameterTypeAt(parameter) ??
+      inferredCollectionTypeArgumentsAt(collections, table, typeOf, bags, layoutTypeAt(parameter), parameter) ??
+      prototypeObjectParameterTypeAt(parameter),
     implicitReceiverOf,
     declaredMemberSignatureOf,
     declaredMembers,
@@ -688,6 +713,8 @@ const buildMapper = (
     // The bag census the collection value slot needs -- see
     // `StructuralPartsInput.bags`.
     bags,
+    deletedMember: (symbol) =>
+      deletedMemberDeclarations.size > 0 && (symbol.declarations ?? []).some((declaration) => deletedMemberDeclarations.has(declaration)),
     unstatedNeverArrayAt: (node) => unstatedNeverArray(checker, collections, layoutTypeAt, node)
   })
 
@@ -728,10 +755,27 @@ const buildMapper = (
       const reference = type as ts.TupleTypeReference
       return { kind: 'tuple', elements: tupleElementsOf(reference), readonly: reference.target.readonly }
     }
-    if (!checker.isArrayType(type)) return null
+    if (!checker.isArrayType(type)) return commonJsArrayExportsCloneOf(type)
     const element = checker.getTypeArguments(type as ts.TypeReference)[0]
     if (!element) return { kind: 'unresolved', reason: 'array type without an element type argument' }
     return { kind: 'array', element: typeOf(element), readonly: false, extension: [] }
+  }
+
+  /**
+   * A JavaScript `module.exports = someArray` types `module.exports` as an
+   * anonymous copy of the array's members carrying `Array`'s own symbol (the
+   * checker clones an exported value's type so later `module.exports.x = ...`
+   * writes can extend it). `isArrayType` rejects the copy, and shaped as the
+   * `Array` interface it became a record no Array converts into:
+   * find-my-way's `module.exports = httpMethods`. The copy is the array.
+   */
+  const commonJsArrayExportsCloneOf = (type: ts.Type): StructuralShape | null => {
+    const symbol = type.getSymbol()
+    const anchor = symbol?.declarations?.[0]
+    if (!anchor || ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Anonymous) === 0) return null
+    if (!isStandardInterfaceType(checker, anchor, 'Array', type)) return null
+    const element = checker.getIndexTypeOfType(type, ts.IndexKind.Number)
+    return element ? { kind: 'array', element: typeOf(element), readonly: false, extension: [] } : null
   }
 
   /**
@@ -1555,7 +1599,12 @@ const buildMapper = (
   const selfReferentialLiteralShapeOf = (type: ts.Type): StructuralShape | null => {
     const symbol = type.getSymbol()
     const location = symbol ? identities.declarationOfSymbol(symbol) : null
-    return location && ts.isObjectLiteralExpression(location) ? objectShapeOf(type, location) : null
+    // The same frame answers an anonymous object TYPE spelled in a
+    // declaration (a type literal, or a mapped type's instantiation): ajv's
+    // `JSONSchemaType<T>`, whose `if`/`then`/`else` members are the type again.
+    return location && (ts.isObjectLiteralExpression(location) || ts.isTypeLiteralNode(location) || ts.isMappedTypeNode(location))
+      ? objectShapeOf(type, location)
+      : null
   }
 
   function typeOfWalk(type: ts.Type): StructuralTypeId {
@@ -2160,6 +2209,17 @@ const buildMapper = (
         .map(substituteTypeParameter)
         .find((candidate) => candidate.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown))
       if (absorbing) return remember(type, typeOf(absorbing))
+      // An Array on one path and an ordinary object on another, neither
+      // stating an element or a member: fast-json-stringify's
+      // `cloneOriginSchema` keeps `Array.isArray(schema) ? [] : {}` and fills
+      // it by computed keys. As `never[] | {}` the Array arm holds no element
+      // and the object arm no member, so every store refused; the value is a
+      // container of either kind holding anything, which is a dynamic value.
+      const stated = type.types.filter((member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) === 0)
+      const unstatedArrays = stated.filter((member) => isVacuousArrayType(checker, member))
+      const unstatedObjects = stated.filter((member) => !checker.isArrayType(member) && isEmptyObjectType(member))
+      if (unstatedArrays.length > 0 && unstatedObjects.length > 0 && unstatedArrays.length + unstatedObjects.length === stated.length)
+        return remember(type, typeOf(checker.getAnyType()))
       // An arm naming a type the host says is ABSENT is not an arm this
       // program can ever take. `absentGlobals` already folds the VALUE
       // (`typeof HTMLImageElement !== 'undefined'` is `false` on a headless
@@ -2547,7 +2607,21 @@ const buildMapper = (
     return id
   }
 
-  const layoutTypeAt = createLayoutTypeResolver(checker, parameters, absent)
+  const familyOfView = (type: ts.Type): string | null => {
+    const member = type.isIntersection() ? narrowedFamilyMemberOf(type) : type
+    const anchor = member === null ? null : declaredAnchorOf(member)
+    const family =
+      anchor?.kind === 'declared' && ts.isInterfaceDeclaration(anchor.declarationNode) ? families.familyOf(anchor.declaration) : null
+    return family === null ? null : String(family.key)
+  }
+  const layoutTypeAt = createLayoutTypeResolver(
+    checker,
+    parameters,
+    absent,
+    familyOfView,
+    moduleRecords.importedExportExpressionOf,
+    moduleRecords.requiredDefaultExportAt
+  )
 
   /**
    * The type at a node, with an absent host type collapsed -- and with that
@@ -2962,6 +3036,59 @@ const buildMapper = (
    * result or a nested callback stays the checker's, since nothing here is
    * asked about it and a wrong guess there is a silent miscompile.
    */
+  /**
+   * The element a local array cell's read holds against the element the
+   * checker's flow gives that read, when the flow's is one arm of the cell's
+   * join: fastify's `let vErrors = null` assigned `[err0]` and, in a later
+   * `if`, pushed `err1` -- the flow reads `err0[]` there, while the read holds
+   * the cell's `(err0 | err1)[]` (`local-bindings.ts`'s `arrayCellRead`), and
+   * `push` instantiated over the flow's element takes no `err1`.
+   */
+  const narrowedCellArrayElementsAt = (
+    receiver: ts.Expression
+  ): { readonly flow: StructuralTypeId; readonly cell: StructuralTypeId } | null => {
+    if (!ts.isIdentifier(receiver)) return null
+    const read = checker.getNonNullableType(checker.getTypeAtLocation(receiver))
+    if (!checker.isArrayType(read)) return null
+    const [flowElement] = checker.getTypeArguments(read as ts.TypeReference)
+    if (!flowElement || (flowElement.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) !== 0) return null
+    const flow = typeOf(flowElement)
+    const held = table.get(typeAt(receiver)).shape
+    const arrays = (held.kind === 'union' ? held.members : [typeAt(receiver)])
+      .map((member) => table.get(member).shape)
+      .filter((member) => member.kind === 'array')
+    const [array] = arrays
+    if (arrays.length !== 1 || !array || array.kind !== 'array' || array.element === flow) return null
+    const cellElement = table.get(array.element).shape
+    return cellElement.kind === 'union' && cellElement.members.includes(flow) ? { flow, cell: array.element } : null
+  }
+
+  /**
+   * A method read off an array cell the local census holds as a join the
+   * checker's flow only sees part of: at a third `vErrors.push(err2)` the flow
+   * reads `err0[] | err1[]`, and the checker types `push` over a UNION of
+   * arrays with the intersection of their elements -- a record no write ever
+   * built. The read holds the cell (`local-bindings.ts`'s `arrayCellRead`), so
+   * its member is the cell's own array's member, instantiated over the join.
+   * Non-generic single-signature members only (`push`, `unshift`, `indexOf`,
+   * ...), whose frame the receiver's element alone decides.
+   */
+  const cellArrayMemberTypeAt = (node: ts.PropertyAccessExpression): StructuralTypeId | null => {
+    if (!ts.isIdentifier(node.expression)) return null
+    const cell = parameters.preferredTypeAt?.(node.expression) ?? null
+    if (!cell) return null
+    const array = checker.getNonNullableType(cell)
+    if (!checker.isArrayType(array)) return null
+    const read = checker.getNonNullableType(checker.getTypeAtLocation(node.expression))
+    if (read === array || !read.isUnion() || !read.types.every((member) => checker.isArrayType(member))) return null
+    const property = checker.getPropertyOfType(array, node.name.text)
+    if (!property) return null
+    const member = checker.getTypeOfSymbolAtLocation(property, node)
+    const [signature, ...more] = member.getCallSignatures()
+    if (!signature || more.length > 0 || (signature.getTypeParameters()?.length ?? 0) > 0) return null
+    return typeOf(member)
+  }
+
   const evolvingArrayMemberTypeAt = (node: ts.Node): StructuralTypeId | null => {
     if (!ts.isPropertyAccessExpression(node)) return null
     const inferred = inferredArrayElementAt(checker, collections, layoutTypeAt, node.expression)
@@ -2973,21 +3100,28 @@ const buildMapper = (
         : unstatedNeverArray(checker, collections, layoutTypeAt, node.expression)
           ? checker.getAnyType()
           : null
-    if (!element) return null
+    if (!element) {
+      const cellMember = cellArrayMemberTypeAt(node)
+      if (cellMember) return cellMember
+    }
+    const narrowed = element ? null : narrowedCellArrayElementsAt(node.expression)
+    if (!element && !narrowed) return null
     // The checker's own member type, interned directly: asking `typeAt` of
     // this same node would re-enter here.
     const declared = typeOf(checker.getTypeAtLocation(node))
     const shape = table.get(declared).shape
     if (shape.kind !== 'signature' || shape.call.length !== 1 || shape.construct.length !== 0) return null
     // `any` for the evolving array the checker gave up on, `never` for the one
-    // it is still tracking (`push` off a fresh `[]` is `(...items: never[])`).
+    // it is still tracking (`push` off a fresh `[]` is `(...items: never[])`);
+    // the flow's narrower element for a cell read as its joined array.
     const unstated = new Set<StructuralTypeId>()
-    for (const primitive of ['any', 'never'] as const) {
-      const id = table.intern({ kind: 'primitive', primitive })
+    for (const id of narrowed
+      ? [narrowed.flow]
+      : (['any', 'never'] as const).map((primitive) => table.intern({ kind: 'primitive', primitive }))) {
       unstated.add(id)
       unstated.add(table.intern({ kind: 'array', element: id, readonly: false, extension: [] }))
     }
-    const elementId = typeOf(element)
+    const elementId = narrowed ? narrowed.cell : typeOf(element!)
     const elementArray = table.intern({ kind: 'array', element: elementId, readonly: false, extension: [] })
     const substitute = (id: StructuralTypeId): StructuralTypeId => {
       if (!unstated.has(id)) return id
@@ -3513,6 +3647,14 @@ const buildMapper = (
     })
   }
 
+  // The same side of `inferred-array-element`'s parameter form: a parameter
+  // in an array's resolved alias component holds the element the component
+  // joined, as the caller's cell does.
+  const inferredArrayParameterTypeAt = (parameter: ts.ParameterDeclaration): StructuralTypeId | null => {
+    const element = inferredArrayElementAt(checker, collections, layoutTypeAt, parameter)
+    return element ? table.intern({ kind: 'array', element: typeOf(element), readonly: false, extension: [] }) : null
+  }
+
   /** A callable type with the receiver its signatures state removed: what `Function.prototype.bind` produces. */
   const withoutReceiver = (id: StructuralTypeId): StructuralTypeId => {
     const shape = table.get(id).shape
@@ -3521,8 +3663,158 @@ const buildMapper = (
     return table.intern({ ...shape, call: shape.call.map((call) => ({ ...call, thisParameter: null })) })
   }
 
-  const boundCallResultAt = (node: ts.Node): StructuralTypeId | null =>
-    ts.isCallExpression(node) && builtinBindSignatureAt(node.expression) ? withoutReceiver(typeOf(checker.getTypeAtLocation(node))) : null
+  /** See the `collection-returning-call` rule. */
+  const collectionCallResultAt = (node: ts.Node): StructuralTypeId | null => {
+    if (!ts.isCallExpression(node)) return null
+    const signature = checker.getResolvedSignature(node)
+    const declaration = signature?.declaration
+    if (!signature || !declaration || ts.isJSDocSignature(declaration) || declaration.type !== undefined) return null
+    if (signature.typeParameters?.length) return null
+    const returned = checker.getReturnTypeOfSignature(signature)
+    const anchor = returned.getSymbol()?.declarations?.[0]
+    if (!anchor || !['Map', 'Set', 'WeakMap', 'WeakSet'].some((name) => isStandardInterfaceType(checker, anchor, name, returned)))
+      return null
+    const statedId = typeOf(returned)
+    const stated = table.get(statedId).shape
+    if (stated.kind !== 'declared') return null
+    const published = signatureOf(signature).result
+    if (published === statedId) return null
+    const shape = table.get(published).shape
+    return shape.kind === 'declared' && shape.declaration === stated.declaration ? published : null
+  }
+
+  /** `withoutReceiver`, for the receivers that name a class instance only. */
+  const withoutClassReceiver = (id: StructuralTypeId): StructuralTypeId => {
+    if (table.isOpen(id)) return id
+    const shape = table.get(id).shape
+    if (shape.kind === 'union') {
+      const members = shape.members.map(withoutClassReceiver)
+      return members.every((member, index) => member === shape.members[index]) ? id : table.intern({ ...shape, members })
+    }
+    if (shape.kind !== 'signature') return id
+    const classReceiver = (call: (typeof shape.call)[number]): boolean =>
+      call.thisParameter !== null && !table.isOpen(call.thisParameter) && table.get(call.thisParameter).shape.kind === 'class-instance'
+    if (!shape.call.some(classReceiver)) return id
+    return table.intern({ ...shape, call: shape.call.map((call) => (classReceiver(call) ? { ...call, thisParameter: null } : call)) })
+  }
+
+  /**
+   * A class method a call hands back, other than a method called on a class
+   * instance: whoever receives it calls it with no receiver, so the value in
+   * that position is the method bound (@fastify/ajv-compiler's
+   * `validatorPool.get(key)` beside the `.bind(compiler)` it pooled). The
+   * checker's type for the call still names the class; `derive.ts`'s result
+   * rule for such a signature is the same fact on the callee's side.
+   */
+  const methodReturnedByCallAt = (node: ts.CallExpression): StructuralTypeId | null => {
+    const callee = node.expression
+    if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
+      const owner = checker.getNonNullableType(checker.getTypeAtLocation(callee.expression)).getSymbol()
+      if (owner && (owner.flags & ts.SymbolFlags.Class) !== 0) return null
+    }
+    const id = typeOf(parameters.typeAt(node) ?? checker.getTypeAtLocation(node))
+    const freed = withoutClassReceiver(id)
+    return freed === id ? null : freed
+  }
+
+  /**
+   * A cell holding a class instance's method detached from it --
+   * `const { asString } = serializer` (fastify's generated error serializer)
+   * or `const f = obj.method` -- is called with no receiver, as the language
+   * calls a detached method. Its type is the method's without the class
+   * receiver; the read that fills it binds the object only where the body
+   * never reads `this` (`emit-callable.ts`'s `receiverBoundCallableText`).
+   */
+  const detachedMethodCellAt = (node: ts.Node): StructuralTypeId | null => {
+    // The read that initializes such a cell is the cell's value (a `const`
+    // read once is forwarded as that read).
+    const initialized = ts.isPropertyAccessExpression(node) && ts.isVariableDeclaration(node.parent) && node.parent.initializer === node
+    const declaration = ts.isIdentifier(node)
+      ? checker.getSymbolAtLocation(node)?.valueDeclaration
+      : initialized
+        ? node.parent
+        : ts.isPropertyAccessExpression(node)
+          ? undefined
+          : node
+    if (!declaration) return null
+    const constDeclaration = (candidate: ts.Node | undefined): boolean =>
+      candidate !== undefined && ts.isVariableDeclaration(candidate) && (ts.getCombinedNodeFlags(candidate) & ts.NodeFlags.Const) !== 0
+    let source: ts.Expression | undefined
+    let member: string | undefined
+    if (ts.isBindingElement(declaration) && ts.isObjectBindingPattern(declaration.parent) && !declaration.dotDotDotToken) {
+      const owner = declaration.parent.parent
+      const name = declaration.propertyName ?? declaration.name
+      if (!constDeclaration(owner) || !ts.isVariableDeclaration(owner) || !ts.isIdentifier(name)) return null
+      source = owner.initializer
+      member = name.text
+    } else if (constDeclaration(declaration) && ts.isVariableDeclaration(declaration) && declaration.type === undefined) {
+      const initializer = declaration.initializer
+      if (!initializer || !ts.isPropertyAccessExpression(initializer)) return null
+      source = initializer.expression
+      member = initializer.name.text
+    }
+    if (!source || member === undefined) return null
+    const owner = checker.getNonNullableType(checker.getTypeAtLocation(source))
+    if (((owner.getSymbol()?.flags ?? 0) & ts.SymbolFlags.Class) === 0) return null
+    // The source must hold the instance itself: `(body as Stream).getReader`
+    // over a `string | Stream` reads the method or nothing, and that read's
+    // own carrier stands.
+    const held = mapper.typeAt(unwrapErasedExpression(source))
+    if (table.isOpen(held) || table.get(held).shape.kind !== 'class-instance') return null
+    const property = checker.getPropertyOfType(owner, member)
+    if (!property?.valueDeclaration || !ts.isMethodDeclaration(property.valueDeclaration)) return null
+    // A body that reads `this` is not called without its object by anything
+    // the program can rely on (a saved method reinstalled, `.call(obj)`): its
+    // value keeps the method's own convention.
+    const body = property.valueDeclaration.body
+    if (!body || bodyReadsThis(body, true)) return null
+    const id = typeOf(checker.getTypeOfSymbolAtLocation(property, source))
+    const freed = withoutClassReceiver(id)
+    return freed === id ? null : freed
+  }
+
+  /**
+   * A cell holding `Object.prototype`'s own-property test --
+   * `const { hasOwnProperty } = Object.prototype` (safe-stable-stringify),
+   * `const has = Object.prototype.hasOwnProperty` -- holds the intrinsic
+   * function object, which answers for whatever `this` a later `.call`
+   * passes. The standard library states it receiver-free, so its value is the
+   * box that is that object.
+   */
+  const intrinsicOwnPropertyTestCellAt = (node: ts.Node): StructuralTypeId | null => {
+    const declaration = ts.isIdentifier(node) ? checker.getSymbolAtLocation(node)?.valueDeclaration : node
+    if (!declaration) return null
+    let source: ts.Expression | undefined
+    let member: string | undefined
+    if (ts.isBindingElement(declaration) && ts.isObjectBindingPattern(declaration.parent) && !declaration.dotDotDotToken) {
+      const owner = declaration.parent.parent
+      const name = declaration.propertyName ?? declaration.name
+      if (!ts.isVariableDeclaration(owner) || (ts.getCombinedNodeFlags(owner) & ts.NodeFlags.Const) === 0 || !ts.isIdentifier(name))
+        return null
+      source = owner.initializer
+      member = name.text
+    } else if (
+      ts.isVariableDeclaration(declaration) &&
+      (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) !== 0 &&
+      declaration.type === undefined &&
+      declaration.initializer &&
+      ts.isPropertyAccessExpression(declaration.initializer)
+    ) {
+      source = declaration.initializer.expression
+      member = declaration.initializer.name.text
+    }
+    if (!source || (member !== 'hasOwnProperty' && member !== 'propertyIsEnumerable')) return null
+    const prototype = unwrapErasedExpression(source)
+    if (!ts.isPropertyAccessExpression(prototype) || prototype.name.text !== 'prototype') return null
+    const owner = checker.getTypeAtLocation(prototype.expression)
+    const anchor = owner.getSymbol()?.declarations?.[0]
+    return anchor && isStandardInterfaceType(checker, anchor, 'ObjectConstructor', owner) ? mapper.typeOf(checker.getAnyType()) : null
+  }
+
+  const boundCallResultAt = (node: ts.Node): StructuralTypeId | null => {
+    if (!ts.isCallExpression(node)) return null
+    return builtinBindSignatureAt(node.expression) ? withoutReceiver(typeOf(checker.getTypeAtLocation(node))) : methodReturnedByCallAt(node)
+  }
 
   /**
    * `const readFile = host.readFile.bind(host)`: the cell, and every read of
@@ -3680,6 +3972,96 @@ const buildMapper = (
 
   const structuralRules: readonly StructuralRule[] = [
     {
+      // `for (const x of xs)` where the checker's element is `never` --
+      // JavaScript's `never[]` for an empty literal the program later pushes
+      // into (`{ onRoute: [] }`): the binding holds the elements of `xs` as
+      // `xs` is structured, which carries the writes the checker never saw.
+      name: 'iteration-over-a-never-array',
+      forms: [ts.SyntaxKind.Identifier, ts.SyntaxKind.VariableDeclaration],
+      resolve: (node) => {
+        const declaration = ts.isVariableDeclaration(node) ? node : checker.getSymbolAtLocation(node)?.valueDeclaration
+        if (!declaration || !ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name)) return null
+        const list = declaration.parent
+        const loop = ts.isVariableDeclarationList(list) ? list.parent : undefined
+        if (!loop || !ts.isForOfStatement(loop) || loop.initializer !== list || loop.awaitModifier) return null
+        if ((checker.getTypeAtLocation(declaration.name).flags & ts.TypeFlags.Never) === 0) return null
+        const iterable = table.get(mapper.typeAt(loop.expression)).shape
+        if (iterable.kind !== 'array') return null
+        // A `never[]` states no element at all (the checker's empty literal,
+        // written where it cannot see), so the binding holds whatever the
+        // array does: `derive.ts` boxes such an element under the opt-in.
+        const element = table.get(iterable.element).shape
+        return element.kind === 'primitive' && element.primitive === 'never' ? mapper.typeOf(checker.getAnyType()) : iterable.element
+      }
+    },
+    {
+      // An element read off a `never[]` holds whatever the array does, as its
+      // iteration binding does (the rule above).
+      name: 'element-of-a-never-array',
+      forms: [ts.SyntaxKind.ElementAccessExpression],
+      resolve: (node) => {
+        if (!ts.isElementAccessExpression(node)) return null
+        const receiver = checker.getTypeAtLocation(node.expression)
+        if (!checker.isArrayType(receiver)) return null
+        const element = checker.getTypeArguments(receiver as ts.TypeReference)[0]
+        return element !== undefined && (element.flags & ts.TypeFlags.Never) !== 0 ? mapper.typeOf(checker.getAnyType()) : null
+      }
+    },
+    {
+      // `C.call(this, ...)` / `C.apply(...)` off a class: a class constructor's
+      // [[Call]] throws (10.2.1 step 2), so the read is the function whose
+      // invocation is that TypeError and the call yields nothing it states
+      // (light-my-request's `Readable.call(this, ...)` over `class Readable`).
+      name: 'call-of-a-class-constructor',
+      forms: [ts.SyntaxKind.CallExpression, ts.SyntaxKind.PropertyAccessExpression],
+      resolve: (node) => {
+        const read = ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) ? node.expression : node
+        if (!ts.isPropertyAccessExpression(read) || (read.name.text !== 'call' && read.name.text !== 'apply')) return null
+        const owner = checker.getTypeAtLocation(read.expression)
+        const symbol = owner.getSymbol()
+        if (!symbol || (symbol.flags & ts.SymbolFlags.Class) === 0 || owner.getConstructSignatures().length === 0) return null
+        if (checker.getPropertyOfType(owner, read.name.text)?.valueDeclaration?.parent === symbol.valueDeclaration) return null
+        return mapper.typeOf(checker.getAnyType())
+      }
+    },
+    {
+      // `a.concat(b)` handed an item that is not the receiver's element, which
+      // 23.1.3.2 permits (concat is generic over its items) and the ambient
+      // `(T | ConcatArray<T>)[]` cannot state: pino's `[].concat(levels)`,
+      // proxy-addr's `[i, 1].concat(names)`. What it returns holds elements the
+      // checker never named, so the method read and its call are dynamic.
+      name: 'concat-of-foreign-items',
+      forms: [ts.SyntaxKind.CallExpression, ts.SyntaxKind.PropertyAccessExpression],
+      resolve: (node) => {
+        const call = ts.isCallExpression(node)
+          ? node
+          : ts.isPropertyAccessExpression(node) && ts.isCallExpression(node.parent) && node.parent.expression === node
+            ? node.parent
+            : null
+        if (!call || !ts.isPropertyAccessExpression(call.expression) || call.expression.name.text !== 'concat') return null
+        if (call.arguments.length === 0 || call.arguments.some((argument) => ts.isSpreadElement(argument))) return null
+        if (!checker.isArrayType(checker.getNonNullableType(checker.getTypeAtLocation(call.expression.expression)))) return null
+        const rest = checker.getResolvedSignature(call)?.getParameters()[0]
+        if (!rest?.valueDeclaration) return null
+        const items = checker.getTypeOfSymbolAtLocation(rest, call)
+        const item = checker.isArrayType(items) ? checker.getIndexTypeOfType(items, ts.IndexKind.Number) : undefined
+        if (!item) return null
+        const foreign = call.arguments.some((argument) => !checker.isTypeAssignableTo(checker.getTypeAtLocation(argument), item))
+        return foreign ? mapper.typeOf(checker.getAnyType()) : null
+      }
+    },
+    {
+      // A reference to a `const` holding a `require`d ES module's default
+      // (`commonjs-module-record.ts`'s `requiredDefaultExportAt`): the checker
+      // types each reference as the namespace, a record the cell never holds.
+      name: 'required-es-default',
+      forms: [ts.SyntaxKind.Identifier],
+      resolve: (node) => {
+        const exported = moduleRecords.requiredDefaultExportAt(node)
+        return exported ? mapper.typeAt(exported) : null
+      }
+    },
+    {
       // A reference to the host constructor global itself -- `Error`, not a
       // value typed `ErrorConstructor` -- is exactly that one object, so it
       // keeps its own handle where `typeOf` answers the family union
@@ -3783,7 +4165,10 @@ const buildMapper = (
         ts.SyntaxKind.CallExpression
       ],
       resolve: (node) => {
-        const exported = moduleRecords.exportExpressionAt(node) ?? moduleRecords.requiredExportExpressionAt(node)
+        const exported =
+          moduleRecords.exportExpressionAt(node) ??
+          moduleRecords.requiredExportExpressionAt(node) ??
+          moduleRecords.requiredDefaultExportAt(node)
         if (exported) return mapper.typeAt(exported)
         return null
       }
@@ -3969,9 +4354,16 @@ const buildMapper = (
       // convention, or every slot it enters would be asked to bind the receiver
       // a second time. The absence of an optional link is kept as above.
       name: 'bound-call-result',
-      forms: [ts.SyntaxKind.CallExpression, ts.SyntaxKind.VariableDeclaration, ts.SyntaxKind.Identifier],
+      forms: [
+        ts.SyntaxKind.CallExpression,
+        ts.SyntaxKind.VariableDeclaration,
+        ts.SyntaxKind.BindingElement,
+        ts.SyntaxKind.Identifier,
+        ts.SyntaxKind.PropertyAccessExpression
+      ],
       resolve: (node) => {
-        const bound = boundCallResultAt(node) ?? boundCellResultAt(node)
+        const bound =
+          boundCallResultAt(node) ?? boundCellResultAt(node) ?? detachedMethodCellAt(node) ?? intrinsicOwnPropertyTestCellAt(node)
         if (bound !== null) return bound
         return null
       }
@@ -4306,6 +4698,7 @@ const buildMapper = (
       forms: [
         ts.SyntaxKind.ArrayLiteralExpression,
         ts.SyntaxKind.VariableDeclaration,
+        ts.SyntaxKind.Parameter,
         ts.SyntaxKind.PropertyDeclaration,
         ts.SyntaxKind.Identifier,
         ts.SyntaxKind.PropertyAccessExpression
@@ -4370,7 +4763,7 @@ const buildMapper = (
       // allocation or read -- so this does not take work away from bags
       // generally, only where both describe one storage.
       name: 'inferred-collection-type-arguments',
-      // Every one of these five is also a form `bag-shape` serves, which is what
+      // Every one of these is also a form `bag-shape` serves, which is what
       // makes the collection-before-bag order above load-bearing rather than
       // incidental: on exactly these kinds both rules can answer for one node.
       // The prose said so; the two form lists now make it checkable.
@@ -4378,6 +4771,7 @@ const buildMapper = (
         ts.SyntaxKind.NewExpression,
         ts.SyntaxKind.VariableDeclaration,
         ts.SyntaxKind.PropertyDeclaration,
+        ts.SyntaxKind.Parameter,
         ts.SyntaxKind.Identifier,
         ts.SyntaxKind.PropertyAccessExpression
       ],
@@ -4432,6 +4826,16 @@ const buildMapper = (
         if (collectionMember) return collectionMember
         return null
       }
+    },
+    {
+      // A direct call of an unannotated function whose `return`s the
+      // collection census typed (safe-stable-stringify's
+      // `getUniqueReplacerSet`: a `new Set()` filled by `add(String(v))`)
+      // yields the callee's published result; the checker's `Set<any>` for
+      // the call is the one the census already refined.
+      name: 'collection-returning-call',
+      forms: [ts.SyntaxKind.CallExpression],
+      resolve: (node) => collectionCallResultAt(node)
     },
     {
       name: 'bag-shape',
@@ -4621,6 +5025,8 @@ const buildMapper = (
     mutableMethodStorageTypeAt: mutableMethods.storageTypeAt,
     mutableMethodReadTypeAt: mutableMethods.readTypeAt,
     boundCallResultAt,
+    collectionCallResultAt,
+    withoutClassReceiver,
     constructResultAt,
     evolvingArrayMemberTypeAt,
     objectDescriptorReturnTypeAt,
@@ -4749,6 +5155,15 @@ const buildMapper = (
         construct: kind === 'construct' ? [signatureOf(signature, resultOverride)] : []
       }),
     rawTypeAt,
+    censusArgumentTypeAt: (node) => {
+      const census = parameters.typeAt(node)
+      if (census && (census.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) return census
+      if (!ts.isPropertyAccessExpression(node)) return null
+      // The holder is a bag by reference or by its checker type: `this[kImpl]`
+      // is typed as the `{}` literal it was assigned.
+      const bag = bags.shapeAt(node.expression) ?? bags.shapeForType(checker.getTypeAtLocation(node.expression))
+      return bag?.members.get(node.name.text) ?? null
+    },
     patternReadTypeAt: (element) => parameters.patternReadTypeAt?.(element) ?? null,
     structuralDisagreements: disagreements,
     structuralFormViolations: preparedRules.formViolations,

@@ -3,6 +3,7 @@ import { representationKey, walkRepresentation, type CallableAbi, type RecordFie
 import type { SealedRepresentationPlan } from '../representation/plan.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
+import type { SemanticOperation } from '../semantics/model/operations.js'
 import { symbolPropertyKeyDeclarationOf, type StructuralType } from '../semantics/model/structural-types.js'
 import type { NativeClassStorage } from './class-storage.js'
 import { operandOf, resultOf, type SemanticOperand } from '../semantics/model/operands.js'
@@ -1018,12 +1019,31 @@ export const publishClassMethodOverrides = (
     }
     return false
   }
+  // `Object.setPrototypeOf(o, C.prototype)` and `Object.create(C.prototype)`
+  // only LINK to the prototype: the runtime reaches it through the class's
+  // prototype facade and writes nothing to it, so it is not an escape. As
+  // `setPrototypeOf`'s target instead, a native prototype has no slot to
+  // change and the runtime refuses by name (`prototypeSlotOf`).
+  const linksPrototype = (operation: SemanticOperation, operand: SemanticOperand): boolean => {
+    if (operation.family !== 'invocation' || operation.internalMethod !== 'call' || operand.role !== 'argument') return false
+    const callee = operandOf(operation, 'callee')
+    const producerId = callee?.source.kind === 'result' ? input.graph.results.get(callee.source.result) : undefined
+    const producer = producerId === undefined ? undefined : input.graph.operations.get(producerId)
+    if (producer?.family !== 'property' || producer.internalMethod !== 'get' || producer.keyIsComputed) return false
+    const receiver = operandOf(producer, 'receiver')
+    const key = operandOf(producer, 'key')
+    if (receiver?.source.kind !== 'result' || key?.source.kind !== 'constant') return false
+    const held = input.plan.selected.get(receiver.source.result)
+    if (held?.kind !== 'native-handle' || (held.native ?? held.protocol) !== 'ObjectConstructor') return false
+    return key.source.text === 'setPrototypeOf' || key.source.text === 'create'
+  }
   for (const operation of input.graph.operations.values()) {
     for (const operand of operation.operands) {
       if (operand.source.kind !== 'result') continue
       const origins = prototypes.get(operand.source.result)
       if (!origins?.size) continue
       if (operation.family === 'binding' || operation.family === 'reference') continue
+      if (linksPrototype(operation, operand)) continue
       if (
         operation.family === 'computation' &&
         (operation.form === 'conditional' ||

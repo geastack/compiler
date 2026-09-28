@@ -51,6 +51,7 @@ import {
 } from './derive.js'
 import { isArrayPatternCapable, representationKey, soleArrayPatternCapableArm, type Representation } from './model.js'
 import { literalDestinationsOf } from './literal-destination.js'
+import { receiverFree } from './collections.js'
 import type { RepresentationConflict, SealedRepresentationPlan } from './plan.js'
 import { createRepresentationPlanBuilder } from './plan.js'
 import type { RepresentationViolation } from './verify.js'
@@ -261,6 +262,12 @@ const nativeCursorIteratorOf = (
   // COLLAPSES it for the three carriers that hold their own absence, so a
   // `class-ref`, a `native-handle` and the box never arrive wrapped).
   const source = derived.kind === 'optional' ? derived.payload : derived
+  // A boxed source's iterator record is a box too: the runtime performs
+  // GetMethod, the call and the result checks on the live value (7.4.2), which
+  // is the general protocol a declared-`any` source already reaches through
+  // its own record type. A source boxed by `--dynamic-fallback` keeps the
+  // checker's `Iterator` record type, which states a layout the box never has.
+  if (derived.kind === 'dynamic' && !operandOf(operation, 'method')) return derived
   if (source.kind === 'array-object') return sequenceIterator(source.element)
   // A `string`'s own iteration (ECMA-262 22.1.3.36) is the third fixed walk
   // with no `@@iterator` lookup behind it, and the one whose snapshot is
@@ -448,7 +455,10 @@ const dynamicCallableReadOf = (
     carrier.kind === 'function' ||
     carrier.kind === 'function-family' ||
     carrier.kind === 'function-value-family' ||
-    carrier.kind === 'function-value-dispatch'
+    carrier.kind === 'function-value-dispatch' ||
+    // `typeof value.toJSON === 'function'` narrows the read to `Function`,
+    // whose carrier states identity only; the box read is still the box.
+    carrier.kind === 'callable-identity'
   )
     return { kind: 'dynamic', reason: 'opt-in-fallback' }
   return null
@@ -494,6 +504,37 @@ const shadowedCallableBuiltinReadOf = (
   // conversion from `f`'s own frame (fastify's `router.prepareRoute.call`).
   const resolution = callableBuiltinResolution(facts(), origin === undefined ? null : withoutFunctionSpecialization(origin), member)
   return resolution === 'builtin' ? null : { kind: 'dynamic', reason: 'shadowed-callable-builtin' }
+}
+
+/**
+ * A `Map`'s `get` hands back what the map holds, and a callable held there
+ * states no receiver (`receiverFree`, `collections.ts`). The call's own type
+ * is the value type's, whose convention may name the class a stored bound
+ * method was declared on; the result is the stored carrier instead, when
+ * dropping that receiver is all that separates the two.
+ */
+const keyedCollectionGetOf = (
+  graph: SemanticGraph,
+  operation: SemanticOperation | undefined,
+  result: SemanticResult,
+  deriver: RepresentationDeriver
+): Representation | null => {
+  if (operation?.family !== 'invocation' || operation.internalMethod !== 'call') return null
+  const callee = operandOf(operation, 'callee')
+  if (callee?.source.kind !== 'result') return null
+  const readId = graph.results.get(callee.source.result)
+  const read = readId === undefined ? undefined : graph.operations.get(readId)
+  if (read?.family !== 'property' || read.internalMethod !== 'get' || read.keyIsComputed) return null
+  const key = operandOf(read, 'key')
+  const receiver = operandOf(read, 'receiver')
+  if (key?.source.kind !== 'constant' || key.source.text !== 'get' || !receiver) return null
+  const collection = deriver.derive(receiver.type)
+  if (collection.kind !== 'keyed-collection' || collection.family !== 'map' || collection.value === null) return null
+  const derived = deriver.derive(result.type)
+  const free = receiverFree(derived)
+  if (free === derived) return null
+  const stored = free.kind === 'optional' ? free.payload : free
+  return representationKey(stored) === representationKey(collection.value) ? free : null
 }
 
 /** A semantic value proven to be one exact Function object selected for fallback storage. */
@@ -728,6 +769,7 @@ export const publishRepresentations = (
     // Every other result is completely unaffected -- `override` is `null` for
     // all of them, and this degrades to exactly the unconditional `exact`
     // publish this loop always did.
+    const collectionGet = keyedCollectionGetOf(graph, operation, result, deriver)
     const override =
       commonJsBoundaryOf(graph, operation) ??
       shadowedCallableBuiltinReadOf(operation, callableOrigins, facts) ??
@@ -737,6 +779,7 @@ export const publishRepresentations = (
       patternSourceSnapshotOf(graph.structuralTypes, regexp, operation, result, deriver) ??
       patternSourceArmOf(operation, result, deriver) ??
       literalDestinations.get(resultId) ??
+      collectionGet ??
       null
     // A `binding` operation's result is not a transient expression value --
     // it *is* the cell (`initialize`/`declare` introduce it, `read`/`write`
@@ -795,7 +838,9 @@ export const publishRepresentations = (
                   ? 'dynamic-callable-identity'
                   : dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables)
                     ? 'dynamic-call-frame'
-                    : 'protocol-array-fast-path',
+                    : override === collectionGet
+                      ? 'keyed-collection-get'
+                      : 'protocol-array-fast-path',
         joinsClosedFamily: false
       })
     }

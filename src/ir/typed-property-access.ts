@@ -218,6 +218,44 @@ export const typedComputedWriteRecipeOf = (
   return { kind: 'closed-record', receiver: representationKey(receiver), keys }
 }
 
+/**
+ * A computed DELETE whose semantic key is a finite set of string literals,
+ * none of which names a required field of a plain record.
+ *
+ * The runtime dispatcher (`gea::nativeDynamicDelete` over the record's
+ * generated `gea_deleteOwnField`) is already right for both things such a key
+ * can name: an optional field, whose value member and presence bit it clears
+ * together, and a key the record does not declare, which only its expando
+ * table can hold. What keeps a runtime-only key unclaimed is the third
+ * possibility -- a REQUIRED field, whose presence bit no typed read consults,
+ * so clearing it would make direct reads and reflective key queries disagree.
+ * A closed key set that names no required field rules that case out; ajv's
+ * `for (const opt of META_IGNORE_OPTIONS) delete metaOpts[opt]` names three
+ * optional options. The recipe only certifies; the route is the ordinary one.
+ */
+export interface TypedComputedDeleteRecipe {
+  readonly kind: 'closed-record'
+  readonly receiver: string
+  readonly keys: readonly string[]
+}
+
+export const typedComputedDeleteRecipeOf = (
+  graph: SemanticGraph,
+  operation: PropertyOperation,
+  receiver: Representation,
+  deriver: RepresentationDeriver,
+  classes: ReadonlyMap<DeclarationId, ClassLayout>
+): TypedComputedDeleteRecipe | null => {
+  if (operation.internalMethod !== 'delete' || !operation.keyIsComputed) return null
+  if (receiver.kind !== 'record' || receiver.accessors.length !== 0) return null
+  const keyOperand = operandOf(operation, 'key')
+  if (!keyOperand) return null
+  const keys = stringLiteralTextsOf(graph, keyOperand.type)
+  if (keys === null || keys.length === 0 || keys.some((key) => key.startsWith('sym('))) return null
+  if (keys.some((key) => declaredRecordFieldOf(deriver, receiver, key, classes)?.required === true)) return null
+  return { kind: 'closed-record', receiver: representationKey(receiver), keys }
+}
+
 /** Every accessor key on a class and its bases -- the exclusion above, asked once. */
 const classAccessorKeysOf = (classes: ReadonlyMap<DeclarationId, ClassLayout>, declaration: DeclarationId): ReadonlySet<string> => {
   const keys = new Set<string>()

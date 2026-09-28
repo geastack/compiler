@@ -352,7 +352,12 @@ export const createDestructuringProducer = (context: ProducerContext): FamilyPro
     // numeric key over a plain array reads `T | undefined` whether or not a
     // default follows, and the name's bound type has no arm for the absence.
     const censused = context.types.patternReadTypeAt(element)
-    if (censused) return context.types.typeOf(censused)
+    // A detached class method is read receiver-free (`bound-call-result`):
+    // the census's read of the member states the method's own convention.
+    if (censused) {
+      const read = context.types.typeOf(censused)
+      return context.types.withoutClassReceiver(read) === bound ? bound : read
+    }
     if (!element.initializer) return bound
     const name = element.propertyName ?? element.name
     const key = ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name) ? name.text : null

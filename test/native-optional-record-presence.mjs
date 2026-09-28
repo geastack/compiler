@@ -39,20 +39,23 @@ test('optional record fields distinguish absence from present undefined and dele
   assert.equal(execFileSync(binary, { encoding: 'utf8' }), execFileSync(process.execPath, [file], { encoding: 'utf8' }))
 })
 
-test('deleting a required native record field remains fail-closed', () => {
+test('deleting a field lays it out with presence, so the delete is exact', () => {
+  // A member some `delete` names carries a presence flag in its layout
+  // (`structural.ts`'s `deletedMember`, which ret's `delete lastGroup.stack`
+  // needed), so the delete renders natively and answers as node does.
+  const file = resolve(root, 'test/runtime/native-required-record-delete.js')
   const result = compile({
-    rootFileNames: [resolve(root, 'test/runtime/native-required-record-delete.js')],
+    rootFileNames: [file],
     projectFileName: resolve(root, 'test/runtime/inferred-return-union.tsconfig.json'),
     javaScriptSources: true
   })
-  assert.equal(result.certificate, null)
-  // Site-level capabilities are certified off the IR and refused as
-  // `CompileResult.refusals`, not as diagnostics (diagnostics/sweep.ts): the
-  // required field's constant-key delete demands the plain `record:delete`
-  // row, which the manifest does not claim (`deleteNamesRecordExpandoKey`,
-  // ir/certify/property-access.ts).
-  assert.ok(
-    result.refusals.some((refusal) => refusal.stage === 'certify' && refusal.key === 'property-access:record:delete:false'),
-    JSON.stringify(result.refusals)
+  assert.ok(result.certificate, JSON.stringify(result.refusals))
+  assert.ok(result.source)
+  const binary = resolve(root, `measurements/native-required-record-delete${executableSuffix}`)
+  execFileSync(
+    'clang++',
+    ['-std=c++20', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
+    { input: `${result.source}\nint main() { __gea_top_level(); }\n` }
   )
+  assert.equal(execFileSync(binary, { encoding: 'utf8' }), execFileSync(process.execPath, [file], { encoding: 'utf8' }))
 })

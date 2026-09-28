@@ -12,6 +12,7 @@ import {
   registerResult,
   requireLineage,
   requireResultRepresentation,
+  enterRequiredOperand,
   resolveRequiredOperand,
   type LoweringContext
 } from './lower-operands.js'
@@ -529,7 +530,8 @@ const lowerArrayPatternRest = (ctx: LoweringContext, block: IrBlockId, operation
  */
 const lowerObjectPatternRest = (ctx: LoweringContext, block: IrBlockId, operation: DestructuringOperation): void => {
   const lineage = requireLineage(operation)
-  const source = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'base'))
+  // Entered through its slot: a typed source of a dynamic rest is boxed there.
+  const source = enterRequiredOperand(ctx, block, lineage, operation, namedOperand(operation, 'base'))
   const representation = requireResultRepresentation(ctx, operation, 'value', 'an object-pattern rest element')
 
   // CopyDataProperties over an open dictionary is a runtime key walk. Reuse

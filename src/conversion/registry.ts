@@ -110,6 +110,8 @@ export interface ConversionRuntimeRegistry {
    * each call.
    */
   readonly functionValueDispatchMaterializer: (abi: CallableAbi) => ClassifierMaterializerPair | null
+  /** A boxed function adapted to a `function-and-constructor` convention, both hooks called through the box; `null` where either frame cannot box. */
+  readonly callableConstructorMaterializer: (call: CallableAbi, construct: CallableAbi) => ClassifierMaterializerPair | null
 
   /**
    * The exact runtime tag that marks an `Optional`'s absent case as `absence`,
@@ -142,6 +144,15 @@ export interface ConversionRuntimeRegistry {
    * their element/value carrier, not by a layout in the sealed table.
    */
   readonly boxedIdentityMaterializer: (target: Representation) => ClassifierMaterializerPair | null
+
+  /**
+   * One class's constructor read back out of a box. A boxed constructor
+   * records its exact convention type, whose result names the class it
+   * constructs, so the payload test is the class's identity and the load hands
+   * back the constructor that was boxed -- never a constructor rediscovered
+   * from a shape. A family of several classes has no single payload to test.
+   */
+  readonly constructorIdentityMaterializer: (target: Representation) => ClassifierMaterializerPair | null
 
   /**
    * The executable discriminator that selects one dynamic tagged-union arm.

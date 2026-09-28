@@ -115,9 +115,106 @@ export const prototypeMutatedConstructorTypes = (
       selected.add(types.typeOf(checker.getReturnTypeOfSignature(signature)))
     }
   }
+  // A compiled class keeps its own native prototype, which a dynamic read
+  // reaches through the class's prototype facade (`nativePrototypeFacade`),
+  // and a host constructor its intrinsic one:
+  // `Object.setPrototypeOf(proto, EventEmitter.prototype)` (pino) and
+  // `ServerResponse.prototype.write.call(this, ...)` (light-my-request) read it
+  // and write nothing to it. Only a write through `C.prototype` -- replacing it
+  // or assigning one of its members -- needs the dynamic table.
+  const readsClassPrototypeOnly = (access: ts.PropertyAccessExpression): boolean => {
+    let symbol = checker.getSymbolAtLocation(access.expression)
+    if (symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0) symbol = checker.getAliasedSymbol(symbol)
+    // An intrinsic error constructor (`Error`, declared in a library file)
+    // keeps its intrinsic prototype object exactly as a compiled class keeps
+    // its own -- named directly or through a value typed as it (@fastify/
+    // error's `Base = Error` parameter). Other host constructors are not
+    // exempt: their instance types (`any[]` from `Array.prototype`) are the
+    // fallback's own program-wide choice.
+    const typeSymbol = checker.getTypeAtLocation(access.expression).getSymbol()
+    const intrinsicError =
+      typeSymbol !== undefined &&
+      /^(Aggregate|Eval|Range|Reference|Syntax|Type|URI)?ErrorConstructor$/.test(typeSymbol.name) &&
+      (typeSymbol.declarations ?? []).every((declaration) => declaration.getSourceFile().isDeclarationFile)
+    // The class named directly, or a value typed as its constructor (`const
+    // Base = Greeter`, `const { EventEmitter } = require(...)`).
+    const isClass = (declaration: ts.Declaration | undefined): boolean => declaration !== undefined && ts.isClassDeclaration(declaration)
+    const compiledClass = isClass(symbol?.valueDeclaration) || isClass(typeSymbol?.valueDeclaration)
+    if (!compiledClass && !intrinsicError) return false
+    const parent = access.parent
+    const assigned = (target: ts.Node): boolean =>
+      ts.isBinaryExpression(target.parent) &&
+      target.parent.left === target &&
+      target.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+    if (assigned(access)) return false
+    return !(
+      (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+      parent.expression === access &&
+      assigned(parent)
+    )
+  }
+  // A value that holds or becomes a [[Prototype]] link must be a real object
+  // with that slot, which only the dynamic object's table is. A reference
+  // types an accessor as a data member, so the literal a `const` holds is
+  // marked by its own allocated shape too. A compiled class's `C.prototype`
+  // links through its facade instead and keeps its class's layout.
+  const markLinked = (expression: ts.Expression): void => {
+    if (ts.isPropertyAccessExpression(expression) && expression.name.text === 'prototype' && readsClassPrototypeOnly(expression)) return
+    selected.add(types.typeAt(expression))
+    const declaration = ts.isIdentifier(expression) ? checker.getSymbolAtLocation(expression)?.valueDeclaration : undefined
+    if (
+      declaration &&
+      ts.isVariableDeclaration(declaration) &&
+      declaration.initializer &&
+      ts.isObjectLiteralExpression(declaration.initializer)
+    )
+      selected.add(types.typeAt(declaration.initializer))
+  }
+  const objectMemberCall = (node: ts.Node, member: string): node is ts.CallExpression =>
+    ts.isCallExpression(node) &&
+    ts.isPropertyAccessExpression(node.expression) &&
+    node.expression.name.text === member &&
+    ts.isIdentifier(node.expression.expression) &&
+    node.expression.expression.text === 'Object'
+  // An Array given an own property that is not an index -- ipaddr's CIDR pair,
+  // `Object.defineProperty(parsed, 'toString', ...)` -- is an ordinary object
+  // with keys no array layout holds, so the array it is and the literals that
+  // allocate it keep a real property table.
+  const isArrayIndexKey = (text: string): boolean => /^(?:0|[1-9]\d*)$/.test(text) && Number(text) < 4294967295
+  const markKeyedArray = (target: ts.Expression): void => {
+    selected.add(types.typeAt(target))
+    const symbol = ts.isIdentifier(target) ? checker.getSymbolAtLocation(target) : undefined
+    const declaration = symbol?.valueDeclaration
+    if (!symbol || !declaration) return
+    const scope = ts.findAncestor(declaration, (node) => ts.isFunctionLike(node) || ts.isSourceFile(node)) ?? declaration.getSourceFile()
+    const visitWrites = (node: ts.Node): void => {
+      if (ts.isVariableDeclaration(node) && node === declaration && node.initializer && ts.isArrayLiteralExpression(node.initializer))
+        selected.add(types.typeAt(node.initializer))
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(node.left) &&
+        ts.isArrayLiteralExpression(node.right) &&
+        checker.getSymbolAtLocation(node.left) === symbol
+      )
+        selected.add(types.typeAt(node.right))
+      ts.forEachChild(node, visitWrites)
+    }
+    visitWrites(scope)
+  }
   const visit = (node: ts.Node): void => {
+    if (objectMemberCall(node, 'defineProperty')) {
+      const [target, key] = node.arguments
+      if (target && key && ts.isStringLiteralLike(key) && !isArrayIndexKey(key.text)) {
+        const type = checker.getTypeAtLocation(target)
+        if (checker.isArrayType(type) || checker.isTupleType(type)) markKeyedArray(target)
+      }
+    }
+    if (objectMemberCall(node, 'setPrototypeOf')) for (const argument of node.arguments.slice(0, 2)) markLinked(argument)
+    if (objectMemberCall(node, 'create') && node.arguments[0] !== undefined && node.arguments[0].kind !== ts.SyntaxKind.NullKeyword)
+      markLinked(node.arguments[0])
     if (ts.isPropertyAccessExpression(node) && !ts.isPrivateIdentifier(node.name) && node.name.text === 'prototype') {
-      markConstructorAndInstances(node.expression)
+      if (!readsClassPrototypeOnly(node)) markConstructorAndInstances(node.expression)
       const assignment = node.parent
       if (ts.isBinaryExpression(assignment) && assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken && assignment.left === node) {
         selected.add(types.typeAt(assignment.right))

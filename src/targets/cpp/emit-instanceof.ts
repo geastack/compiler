@@ -9,7 +9,7 @@ import type { IrOperand } from '../../ir/model.js'
 import type { Representation } from '../../representation/model.js'
 import { representationKey } from '../../representation/model.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from './emit-context.js'
-import { cppClassName, cppScalarType } from './types.js'
+import { cppClassName, cppScalarType, cppTypeOf } from './types.js'
 import { cppErrorNativeType, errorConstructorNames, isNativeError } from './error-types.js'
 import { cppRegExpNativeTypes } from './regexp-types.js'
 import { definitelyPrimitive, hostConstructorUnionArms } from '../../ir/certify/instanceof-key.js'
@@ -43,6 +43,7 @@ const dynamicNativeInstanceTests: ReadonlyMap<string, string> = new Map([
   ['DateConstructor', 'gea::host::instanceOfDate'],
   ['RegExpConstructor', 'gea::host::instanceOfRegExp'],
   ['ArrayBufferConstructor', 'gea::host::instanceOfArrayBuffer'],
+  ['DataViewConstructor', 'gea::host::instanceOfDataView'],
   ['ArrayConstructor', 'gea::host::instanceOfArray']
 ])
 
@@ -250,6 +251,18 @@ const settledInstanceText = (value: string, answer: boolean): string => `((void)
  * and answering `false` for `new NativeFailure() instanceof Error` would be
  * exactly the plausibly-shaped wrong answer this file exists to refuse.
  */
+/** Whether a program class's chain ends in the intrinsic Error layout -- the one native base this compiler links. */
+const extendsNativeError = (ctx: EmitContext, declaration: DeclarationId): boolean => {
+  let layout = ctx.classes.get(declaration)
+  const seen = new Set<DeclarationId>()
+  while (layout !== undefined && !seen.has(layout.declaration)) {
+    if (layout.nativeBase !== null) return isNativeError(layout.nativeBase.instance)
+    seen.add(layout.declaration)
+    layout = layout.base === null ? undefined : ctx.classes.get(layout.base)
+  }
+  return false
+}
+
 const extendsNativeClass = (ctx: EmitContext, declaration: DeclarationId): boolean => {
   let layout = ctx.classes.get(declaration)
   const seen = new Set<DeclarationId>()
@@ -291,6 +304,14 @@ const settledNonNativeCarrier = (ctx: EmitContext, carrier: Representation): boo
     case 'data-view':
     case 'array-buffer':
     case 'shared-array-buffer':
+    // A function object: its chain is Function.prototype's (ajv's `fmtDef
+    // instanceof RegExp` over a `Format` union holding validators).
+    case 'function':
+    case 'function-family':
+    case 'function-value-family':
+    case 'function-value-dispatch':
+    case 'function-and-constructor':
+    case 'generic-function-set':
       return true
     case 'class-ref':
       return !extendsNativeClass(ctx, carrier.declaration)
@@ -308,6 +329,10 @@ const nativeInstanceLeafText = (ctx: EmitContext, protocol: string, carrier: Rep
     if (errorName !== undefined) return `gea::host::instanceOfError(${value}, "${errorName}")`
   } else if (errorName !== undefined) {
     if (isNativeError(carrier)) return `(${value})->instanceOf("${errorName}")`
+    // `class E extends Error`: the instance's Error base subobject is its own
+    // front (`native-error-base.ts`), and answers for the whole object.
+    if (carrier.kind === 'class-ref' && carrier.ownership === 'shared-refcount' && extendsNativeError(ctx, carrier.declaration))
+      return `((${value}) ? static_cast<const ${cppErrorNativeType}&>(*(${value})).instanceOf("${errorName}") : false)`
     // A `gea::runtime::Error` held some other way than by a counted handle has
     // no `instanceOf` to call through, and `false` would be a wrong answer for
     // the one carrier that certainly IS an error. Refuse, so the defect is
@@ -403,6 +428,7 @@ const constructorFamilyLeftKinds: readonly string[] = [
 export const cppInstanceofHelperKeys: ReadonlySet<string> = new Set([
   ...[...errorConstructorNames.keys()].map((protocol) => `computation:instanceof:dynamic:native-handle(${protocol})`),
   ...[...errorConstructorNames.keys()].map((protocol) => `computation:instanceof:native-record-ref:native-handle(${protocol})`),
+  ...[...errorConstructorNames.keys()].map((protocol) => `computation:instanceof:class-ref:native-handle(${protocol})`),
   ...cppInstanceofLeftKinds.map((left) => `computation:instanceof:${left}:undefined`),
   ...[...dynamicNativeInstanceTests.keys()].map((protocol) => `computation:instanceof:dynamic:native-handle(${protocol})`),
   ...[...dynamicNativeInstanceTests.keys()].map((protocol) => `computation:instanceof:dictionary:native-handle(${protocol})`),
@@ -457,6 +483,7 @@ export const cppInstanceofHelperKeys: ReadonlySet<string> = new Set([
   // over a left operand this same census also boxed (see that function's own
   // doc comment for why the left operand can only ever be `dynamic` too).
   'computation:instanceof:dynamic:dynamic',
+  'computation:instanceof:dynamic:function-and-constructor',
   ...[...plainObjectLeftKinds].map((left) => `computation:instanceof:${left}:dynamic`)
 ])
 
@@ -490,8 +517,25 @@ const hostInstanceTestText = (ctx: EmitContext, left: IrOperand, spelling: strin
   return render(left.representation, operandText(ctx, left))
 }
 
-export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOperand, recipe?: ClassInstanceTestRecipe): string => {
+export const instanceofText = (
+  ctx: EmitContext,
+  left: IrOperand,
+  right: IrOperand,
+  recipe?: ClassInstanceTestRecipe,
+  armRecipes?: readonly ClassInstanceTestRecipe[]
+): string => {
   const constructor = right.representation
+  // A union of program classes on the right: the live arm names the class,
+  // and each arm carries its own membership recipe from the hierarchy census.
+  if (constructor.kind === 'tagged-union' && armRecipes !== undefined && armRecipes.length === constructor.arms.length) {
+    const rightText = operandText(ctx, right)
+    const leftText = operandText(ctx, left)
+    const lastIndex = armRecipes.length - 1
+    return armRecipes.reduceRight<string>((otherwise, armRecipe, index) => {
+      const armTest = classInstanceTestText(armRecipe.test, leftText)
+      return index === lastIndex ? `(${armTest})` : `(${rightText}.is<${index}>() ? (${armTest}) : ${otherwise})`
+    }, '')
+  }
   // A right-hand side that is not an Object is the one case the specification
   // answers with no prototype chain at all: 13.10.2 step 3 throws a TypeError
   // before `[[HasInstance]]` is consulted. It arises when a host has declared a
@@ -553,6 +597,13 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
       )
     }
     return `gea::host::instanceOfDynamicConstructor(${operandText(ctx, left)}, ${operandText(ctx, right)})`
+  }
+  // A function value with both hooks and no class behind it (ipaddr's IIFE
+  // result): the same prototype walk, over the function boxed as itself --
+  // an adapter from a box shares the box's function object, so its
+  // `prototype` is the one `new` linked the left operand to.
+  if (constructor.kind === 'function-and-constructor' && left.representation.kind === 'dynamic') {
+    return `gea::host::instanceOfDynamicConstructor(${operandText(ctx, left)}, gea::detail::DynamicCarrier<${cppTypeOf(constructor)}>::out(${operandText(ctx, right)}))`
   }
   if (constructor.kind === 'native-record-ref' && constructor.native !== null) {
     const spelling = ctx.hosts.instanceTests.get(constructor.native)
@@ -643,6 +694,13 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
     )
   }
   if (isNativeError(left.representation)) return `(${operandText(ctx, left)})->instanceOf("${name}")`
+  // `class E extends Error`: the instance's own Error base subobject records
+  // which intrinsic it was initialized as, and answers for the whole object.
+  const held = left.representation
+  if (held.kind === 'class-ref' && held.ownership === 'shared-refcount' && extendsNativeError(ctx, held.declaration)) {
+    const value = operandText(ctx, left)
+    return `((${value}) ? static_cast<const ${cppErrorNativeType}&>(*(${value})).instanceOf("${name}") : false)`
+  }
   if (left.representation.kind !== 'dynamic') {
     // A statically typed left operand is a question the checker already
     // answered, and answering it again from a carrier would be a second

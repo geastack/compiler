@@ -13,8 +13,8 @@ import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import type { ExplicitThisCallFrame, FlowInvocationOperands, ValueFlowIndex } from './flow/model.js'
 import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
 import { readsAbsentKey } from './absent-key-read.js'
-import { foreignClassDefaultTypeOf } from './foreign-class-default.js'
-import { omissionStatedTypeOf, statedParameterWithOmission } from './omitted-stated-parameter.js'
+import { foreignClassArgumentTypeOf, foreignClassDefaultTypeOf } from './foreign-class-default.js'
+import { omissionStatedTypeOf, widenedStatedParameter } from './omitted-stated-parameter.js'
 import { indexValueFlow } from './flow/value-flow.js'
 import { closedArrayCalleeAuthorityOf, hasClosedMemberCallableUses } from './flow/callable-reach.js'
 import type { CallableArrayOriginAuthority } from './flow/callable-array-origins.js'
@@ -31,6 +31,8 @@ import {
 } from './parameter-slot.js'
 import { iteratorYieldTypesOf } from './producers/iteration-yield.js'
 import {
+  isLiteralAbsenceMember,
+  libraryViewNarrowingCarrier,
   isVacuousArrayType,
   type AliasEvidence,
   annotationStatesNothing,
@@ -66,6 +68,7 @@ import {
 } from './derived-expression-type.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
+import { censusRetypedExpressionType } from './overload-reselection.js'
 
 /**
  * The type a parameter the program never annotated is actually called with.
@@ -602,6 +605,29 @@ interface ParameterCandidate {
   readonly stated: ts.Type | null
   /** The open dynamic object boundary whose flow-narrowed physical arms must remain distinct. */
   readonly flowCarrierUpperBound: ts.Type | null
+  /** A stated object type every caller fills with a function object -- see `statedCallableHolderOf`. */
+  readonly callablesOnly?: boolean
+}
+
+/**
+ * A stated OBJECT type with members and no call or construct signature
+ * (`f: {code: string}`), which TypeScript lets a caller fill with a function
+ * object carrying those members -- and no record layout can hold a function.
+ * ajv's `useFunc(gen, f: {code: string})` is handed six functions with a
+ * `code` expando (`ucs2length.code = ...`). When every call site passes such
+ * a function, what the parameter holds is those functions: the census joins
+ * the callers' own types (a disjoint union when they differ), each held to
+ * the statement.
+ */
+const statedCallableHolderOf = (checker: ts.TypeChecker, parameter: ts.ParameterDeclaration): ts.Type | null => {
+  if (parameter.dotDotDotToken || !ts.isIdentifier(parameter.name) || !parameter.type) return null
+  const declared = checker.getTypeFromTypeNode(parameter.type)
+  if ((declared.flags & ts.TypeFlags.Object) === 0 || declared.getProperties().length === 0) return null
+  // A class's instances are what its statement names; a sibling a caller
+  // passes structurally is `foreignClassDefaultTypeOf`'s question.
+  if ((declared.symbol?.flags ?? 0) & ts.SymbolFlags.Class) return null
+  if (declared.getCallSignatures().length > 0 || declared.getConstructSignatures().length > 0) return null
+  return annotationStatesNothing(checker, parameter.type, declared) ? null : declared
 }
 
 /**
@@ -663,6 +689,12 @@ export interface ParameterBindingProgramIndex {
   }[]
   /** Stated parameters whose default is an instance of a class the statement does not name -- see `foreign-class-default.ts`. */
   readonly foreignDefaultSites: readonly { readonly parameter: ts.ParameterDeclaration; readonly type: ts.Type }[]
+  /** Stated parameters a caller may hand a foreign class instance -- see `foreignClassArgumentTypeOf`. */
+  readonly foreignArgumentSites: readonly {
+    readonly declaration: ts.SignatureDeclaration
+    readonly parameter: ts.ParameterDeclaration
+    readonly index: number
+  }[]
   readonly assigned: ReadonlySet<ts.Symbol>
   /**
    * What each in-body assignment writes into a reassigned parameter's own
@@ -703,6 +735,7 @@ export const indexParameterBindingProgram = (
   const restParameterCandidates: RestParameterCandidate[] = []
   const omissionSites: { declaration: ts.SignatureDeclaration; parameter: ts.ParameterDeclaration; index: number; stated: ts.Type }[] = []
   const foreignDefaultSites: { parameter: ts.ParameterDeclaration; type: ts.Type }[] = []
+  const foreignArgumentSites: { declaration: ts.SignatureDeclaration; parameter: ts.ParameterDeclaration; index: number }[] = []
   const assigned = new Set<ts.Symbol>()
   // An update, logical assignment, destructuring assignment, or loop binding
   // also replaces a parameter. Sharing the write inventory prevents the
@@ -784,11 +817,22 @@ export const indexParameterBindingProgram = (
                 flowCarrierUpperBound
               })
             else {
+              const callableHolder = statedCallableHolderOf(checker, parameter)
+              if (callableHolder)
+                candidates.push({
+                  declaration: node,
+                  parameter,
+                  index,
+                  stated: callableHolder,
+                  flowCarrierUpperBound: null,
+                  callablesOnly: true
+                })
               // Not inferred -- but a caller may still leave it out.
               const omissionStated = omissionStatedTypeOf(checker, parameter)
               if (omissionStated) omissionSites.push({ declaration: node, parameter, index, stated: omissionStated })
               const foreignDefault = foreignClassDefaultTypeOf(checker, parameter)
               if (foreignDefault) foreignDefaultSites.push({ parameter, type: foreignDefault })
+              else if (parameter.type !== undefined) foreignArgumentSites.push({ declaration: node, parameter, index })
             }
           }
         })
@@ -971,6 +1015,7 @@ export const indexParameterBindingProgram = (
     notReassigned,
     reassigned,
     omissionSites,
+    foreignArgumentSites,
     foreignDefaultSites,
     assigned,
     assignedEvidence,
@@ -1593,9 +1638,20 @@ export const censusParameterBindings = (
       }
       const argument = implicitArgumentsReadTypeAt(checker, node, (owner) => upstream.implicitArgumentsTupleAt?.(owner) ?? null)
       if (argument) return argument
+      // A call argument the census re-types -- thread-stream's
+      // `write(stream, leftover, cb)` with `leftover = data.length - writeIndex`
+      // over a re-selected `Atomics.load` -- is asked of the same authority the
+      // local and return censuses ask; the checker's type there is the blind
+      // overload pick carried through the arithmetic.
       const type =
         (node.kind === ts.SyntaxKind.ThisKeyword ? concreteThisTypeOf(node) : null) ??
         objectAssignTargetType(checker, node) ??
+        censusRetypedExpressionType(
+          checker,
+          node,
+          (argument) => upstream.typeAt(argument),
+          (at) => upstream.preferredTypeAt?.(at) ?? null
+        ) ??
         checker.getTypeAtLocation(node)
       // `annotationStatesNothing` beside `isUnusableEvidence`, both halves of
       // the one shared rule: a vacuous type (`Object`, `{}`, bare `object`)
@@ -1605,6 +1661,9 @@ export const censusParameterBindings = (
       // write-set censuses already ask both halves; this asking one was
       // drift. See `field-bindings.ts`'s `known` for the measured case.
       if (isUnusableEvidence(type) || annotationStatesNothing(checker, node, type)) return upstream.typeAt(node)
+      // A box narrowed to a library view interface stays the box it is
+      // (`libraryViewNarrowingCarrier`); its narrowed type is no carrier.
+      if (libraryViewNarrowingCarrier(checker, node, type)) return upstream.typeAt(node)
       // An array of `any` states nothing about its elements but does state an
       // array: the weakest evidence, not none. Without it a `[]` argument or
       // `Array.prototype` leaves the whole call-site join unresolved.
@@ -1656,7 +1715,10 @@ export const censusParameterBindings = (
     const literalMemberInitializerOf = (member: ts.Symbol | undefined): ts.Expression | null => {
       const declaration = member?.valueDeclaration
       if (!declaration) return null
-      if (ts.isPropertyAssignment(declaration)) return declaration.initializer
+      // A literal member initialized with an absence is filled later, and the
+      // field census answers it; the absence is not what it holds.
+      if (ts.isPropertyAssignment(declaration))
+        return isLiteralAbsenceMember(declaration as ts.Declaration) ? null : declaration.initializer
       if (ts.isShorthandPropertyAssignment(declaration)) return declaration.name
       return null
     }
@@ -2263,7 +2325,8 @@ export const censusParameterBindings = (
     parameter: ts.ParameterDeclaration,
     index: number,
     excludeBackEdges: boolean,
-    skipSilentSites: boolean
+    skipSilentSites: boolean,
+    forwarded: readonly { readonly call: ts.CallExpression | ts.NewExpression; readonly args: readonly ts.Expression[] }[] = []
   ):
     | {
         readonly passed: readonly ts.Type[]
@@ -2283,8 +2346,8 @@ export const censusParameterBindings = (
       if (known === undefined) argumentsByParameter.set(parameter, new Set([argument]))
       else known.add(argument)
     }
-    for (const call of calls) {
-      const effectiveArguments = invocationOperands.get(call)!.args
+    const sites = [...calls.map((call) => ({ call, args: invocationOperands.get(call)!.args })), ...forwarded]
+    for (const { call, args: effectiveArguments } of sites) {
       // `describe( ...args )` where `args` is a rest parameter DECLARED as a
       // closed tuple hands this position exactly the tuple's element there.
       // `producers/tuple-spread.ts` expands that spread into constant-index
@@ -2388,18 +2451,22 @@ export const censusParameterBindings = (
       }
     | { readonly refused: string } => {
     const calls = callsByDeclaration.get(declaration) ?? []
-    const contracts = contractsFor(declaration) ?? []
+    const allContracts = contractsFor(declaration) ?? []
+    const contracts = allContracts.filter((contract) => contract.kind === 'signature')
+    const forwarded = allContracts.flatMap((contract) =>
+      contract.kind === 'forwarded' ? [{ call: contract.location, args: contract.arguments }] : []
+    )
     const contractTypes: ts.Type[] = []
     for (const contract of contracts) {
       const type = callbackContractParameterType(checker, contract, parameterIndex)
       if (!type) return { refused: 'callback-contract-has-no-parameter' }
       contractTypes.push(type)
     }
-    if (calls.length === 0 && contractTypes.length === 0) return { refused: 'no-call-site' }
+    if (calls.length === 0 && forwarded.length === 0 && contractTypes.length === 0) return { refused: 'no-call-site' }
     // A typed boundary must not turn a partially observed direct caller set
     // into a closed one. Unresolved direct inputs remain a refusal here.
     const allowSilentDirectSites = skipSilentSites && contracts.length === 0
-    const excluding = collectPassedArguments(calls, declaration, parameter, parameterIndex, true, allowSilentDirectSites)
+    const excluding = collectPassedArguments(calls, declaration, parameter, parameterIndex, true, allowSilentDirectSites, forwarded)
     if ('refused' in excluding) return excluding
     // A back edge is worth excluding only where doing so buys something:
     // real, independent evidence survives once it is set aside. Where the
@@ -2419,7 +2486,7 @@ export const censusParameterBindings = (
     const resolution =
       excluding.passed.length > 0 || !excluding.sawBackEdge
         ? excluding
-        : collectPassedArguments(calls, declaration, parameter, parameterIndex, false, allowSilentDirectSites)
+        : collectPassedArguments(calls, declaration, parameter, parameterIndex, false, allowSilentDirectSites, forwarded)
     if ('refused' in resolution) return resolution
     // Reachable for a second reason once silent sites are dropped: every site
     // was silent -- no evidence at all, named for what actually happened.
@@ -2922,7 +2989,9 @@ export const censusParameterBindings = (
       const inferCandidate = (): boolean => {
         const escaped = escapeReason(candidate.declaration)
         if (escaped) {
-          lastRefusal.set(candidate.parameter, escaped)
+          // A stated object no caller is shown to fill with a function is
+          // outside that rule, not refused by it: the statement stands.
+          if (!candidate.callablesOnly) lastRefusal.set(candidate.parameter, escaped)
           return false
         }
         // Narrowing a declared upper bound needs complete call-site evidence.
@@ -2941,6 +3010,27 @@ export const censusParameterBindings = (
         // disjoint union is refused outright: those arms are a member LIST this
         // census builds for `table.intern`, never a `ts.Type` the statement can
         // be tested against, so there is nothing to hold it to.
+        if (candidate.stated && candidate.callablesOnly) {
+          const stated = candidate.stated
+          const arms = 'type' in answer ? [answer.type] : 'unionArms' in answer ? answer.unionArms : null
+          const held =
+            arms !== null &&
+            !('refused' in answer) &&
+            answer.deferredRecursiveArguments.length === 0 &&
+            arms.every((arm) => arm.getCallSignatures().length > 0 && checker.isTypeAssignableTo(arm, stated))
+          if (!held) {
+            if (arms?.some((arm) => arm.getCallSignatures().length > 0))
+              lastRefusal.set(candidate.parameter, 'refused' in answer ? answer.refused : 'stated-object-not-filled-by-callables')
+            return false
+          }
+          if ('type' in answer) {
+            const narrowed = withDeclaredAbsence(candidate.parameter, answer.type)
+            bindings.set(candidate.parameter, narrowed)
+            statedBindings.set(candidate.parameter, narrowed)
+          } else if ('unionArms' in answer)
+            unionArms.set(candidate.parameter, withDeclaredAbsenceArms(candidate.parameter, answer.unionArms))
+          return true
+        }
         if (candidate.stated) {
           if (!('type' in answer)) {
             lastRefusal.set(candidate.parameter, 'unionArms' in answer ? 'stated-parameter-synthesized-union' : answer.refused)
@@ -3175,9 +3265,10 @@ export const censusParameterBindings = (
     lastRefusal.delete(candidate.parameter)
   }
   // A stated JS parameter the census does not infer can still be left out by
-  // a caller: three's `colorBuffer.setClear( 0, 0, 0, 1 )` against the
-  // overlay's `@param {boolean} premultipliedAlpha`. Its cell then holds the
-  // statement plus `undefined` -- see `omitted-stated-parameter.ts`. Asked of
+  // a caller, or passed something the tag does not admit: three's
+  // `colorBuffer.setClear( 0, 0, 0, 1 )` against the overlay's `@param
+  // {boolean} premultipliedAlpha`. Its cell then holds the statement plus
+  // what the callers pass outside it -- see `omitted-stated-parameter.ts`. Asked of
   // the settled attribution after every withdrawal, so no argument binding it
   // reads can still be taken back; the closure proof runs under the ledger
   // like any inference, and its obligations are kept with the binding.
@@ -3185,7 +3276,7 @@ export const censusParameterBindings = (
   // `GEA_STATED_OMISSION_OFF` keeps the arm without this rule runnable, the way `GEA_BAG_OFF` is.
   for (const site of process.env['GEA_STATED_OMISSION_OFF'] ? [] : index.omissionSites) {
     if (bindings.has(site.parameter) || unionArms.has(site.parameter)) continue
-    const answer = statedParameterWithOmission(
+    const answer = widenedStatedParameter(
       checker,
       site.stated,
       site.index,
@@ -3222,6 +3313,37 @@ export const censusParameterBindings = (
     if (bindings.has(site.parameter) || unionArms.has(site.parameter)) continue
     bindings.set(site.parameter, site.type)
     statedBindings.set(site.parameter, site.type)
+  }
+  // A stated class parameter a caller hands a foreign class instance holds
+  // that instance too (`foreignClassArgumentTypeOf`).
+  for (const site of index.foreignArgumentSites) {
+    if (bindings.has(site.parameter) || unionArms.has(site.parameter)) continue
+    const argumentTypes = (callsByDeclaration.get(site.declaration) ?? []).flatMap((call) => {
+      const argument = invocationOperands.get(call)?.args[site.index]
+      return argument === undefined || ts.isSpreadElement(argument) ? [] : [checker.getTypeAtLocation(argument)]
+    })
+    const widened = foreignClassArgumentTypeOf(checker, site.parameter, argumentTypes)
+    if (widened === null) continue
+    bindings.set(site.parameter, widened)
+    statedBindings.set(site.parameter, widened)
+  }
+  // An unannotated parameter, named by an identifier, whose only type is an
+  // EMPTY literal default (`opts = {}`), and whose callers this census could not type (pino's
+  // `normalizeArgs`, reached through a spread), holds whatever those callers
+  // pass: `{}` states no storage, so its empty record is no carrier for them.
+  // Bound `any` rather than left to the checker's `{}`, for the slot and the
+  // body alike.
+  for (const candidate of index.candidates) {
+    const parameter = candidate.parameter
+    if (!ts.isIdentifier(parameter.name)) continue
+    if (candidate.stated !== null || bindings.has(parameter) || unionArms.has(parameter) || !lastRefusal.has(parameter)) continue
+    let initializer = parameter.initializer
+    while (initializer && ts.isParenthesizedExpression(initializer)) initializer = initializer.expression
+    const emptyLiteral =
+      initializer !== undefined &&
+      ((ts.isObjectLiteralExpression(initializer) && initializer.properties.length === 0) ||
+        (ts.isArrayLiteralExpression(initializer) && initializer.elements.length === 0))
+    if (emptyLiteral) bindings.set(parameter, checker.getAnyType())
   }
   for (const [parameter, reason] of lastRefusal) refuse(reason, describeParameter(parameter))
   /**

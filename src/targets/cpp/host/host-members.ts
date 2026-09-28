@@ -2,6 +2,7 @@ import type { DeclarationId, FunctionId, RegionId } from '../../../identity/ids.
 import type { ReactiveDependency } from '../reactive-dependencies.js'
 import type { HostIntrinsicMember } from '../../../semantics/host-protocols.js'
 import type { Representation } from '../../../representation/model.js'
+import type { CoercionOperation } from '../../../conversion/algebra.js'
 /**
  * What a host protocol's members lower to.
  *
@@ -85,6 +86,13 @@ export type HostMember =
       readonly arity: 'call-site'
       readonly receiver?: 'host' | 'raw'
       readonly result?: 'dynamic'
+      /**
+       * The coercion the member applies to an argument as its own first step,
+       * by position -- the same statement `coreHostFunctionArgumentCoercions`
+       * makes for a global function. A dynamic argument keeps its carrier: the
+       * renderer converts it in the order the algorithm does.
+       */
+      readonly argumentCoercions?: readonly (CoercionOperation | null)[]
     }
   // A member whose host spelling takes the call's arguments through, in order
   // and each in its own carrier, however many there are. `{args}` is the slot,
@@ -433,6 +441,8 @@ export interface ReactiveCellPlan {
 }
 
 export interface HostSpellings {
+  /** The frontend's `primitivePrototypeKeys`: what a primitive's `[[Get]]` can find, or `null` when unbounded. */
+  readonly primitivePrototypeKeys?: ReadonlyMap<'boolean' | 'symbol' | 'number', ReadonlySet<string> | null>
   readonly members: HostMemberTable
   readonly constructors: HostConstructorTable
   readonly invocations: HostInvocationTable
@@ -517,9 +527,42 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // Atomics is a finite language primitive, not an any-shaped Node shim. The
   // call-site renderer verifies the concrete typed-array element carrier and
   // names the one native operation; methods omitted here fail at the property.
-  ...['load', 'store', 'add', 'sub', 'and', 'or', 'xor', 'exchange', 'compareExchange', 'isLockFree', 'wait', 'notify'].map(
-    (member) => [`Atomics.${member}`, { kind: 'method', emit: '/* atomics call-site renderer */', arity: 'call-site' }] as const
+  // Every argument after the view is a Number the algorithm converts first:
+  // ToIndex's ToIntegerOrInfinity for the index, ToIntegerOrInfinity or
+  // ToNumber for a value, expected value, timeout or count (ECMA-262 25.4).
+  ...(
+    [
+      ['load', 1],
+      ['store', 2],
+      ['add', 2],
+      ['sub', 2],
+      ['and', 2],
+      ['or', 2],
+      ['xor', 2],
+      ['exchange', 2],
+      ['compareExchange', 3],
+      ['wait', 3],
+      ['waitAsync', 3],
+      ['notify', 2]
+    ] as const
+  ).map(
+    ([member, numbers]) =>
+      [
+        `Atomics.${member}`,
+        {
+          kind: 'method',
+          emit: '/* atomics call-site renderer */',
+          arity: 'call-site',
+          argumentCoercions: [null, ...Array.from({ length: numbers }, () => 'ToNumber' as const)]
+        }
+      ] as const
   ),
+  ['Atomics.isLockFree', { kind: 'method', emit: '/* atomics call-site renderer */', arity: 'call-site' }],
+  // `Function.call(thisArg, ...args)` and `Function.apply(thisArg, list)` are
+  // `Function(...args)` (ECMA-262 20.2.3.1/20.2.3.3, the receiver ignored as
+  // the constructor ignores it): rendered as the same CreateDynamicFunction.
+  ['FunctionConstructor.call', { kind: 'method', emit: '/* function-constructor call-site renderer */', arity: 'call-site' }],
+  ['FunctionConstructor.apply', { kind: 'method', emit: '/* function-constructor call-site renderer */', arity: 'call-site' }],
   // `console`. Only `log`/`error` are claimed -- the two members any real
   // corpus program actually calls (`citations.md` section 2a) -- not
   // `lib.dom.d.ts`'s full ~18-member interface. `{args}` is the one join of
@@ -710,6 +753,18 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
     'ErrorConstructor.captureStackTrace',
     { kind: 'method', emit: 'gea::host::ErrorConstructor::captureStackTrace({args})', arity: 'pass-through' }
   ],
+  // V8's stack formatter hook: an ordinary writable property, `undefined` until
+  // a program stores one, that reads back what was stored. A target that
+  // records no frames has none to hand it, so it is never called.
+  [
+    'ErrorConstructor.prepareStackTrace',
+    {
+      kind: 'property',
+      emit: 'gea::host::ErrorConstructor::prepareStackTrace',
+      store: 'gea::host::ErrorConstructor::prepareStackTrace = {value}',
+      resultRepresentation: { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+    }
+  ],
   [
     'EvalErrorConstructor.prototype',
     nativeHandleProperty('EvalError.prototype', 'gea::NativeHandle<gea_native_protocol_EvalError_prototype_v1>{}')
@@ -785,10 +840,10 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // specification defines as *the same function objects* the globals name.
   // `method`, not `property`: the runtime spells them as free functions, since
   // `parseInt`'s second parameter is optional and a `CallableObject`'s C++
-  // signature is one fixed arity. `arity: 2` is the declaration's own frame --
-  // `parseInt(string, radix?)` -- and the absent radix arrives as the `0` the
-  // clause's step 7 means by "absent", not as a guess.
-  ['NumberConstructor.parseInt', { kind: 'method', emit: 'gea::host::NumberConstructor::parseInt({arg0}, {arg1})', arity: 2 }],
+  // signature is one fixed arity. The call's own arguments pass through --
+  // `parseInt(string, radix?)` -- and an absent radix is the runtime's default
+  // `0`, which is what the clause's step 7 means by "absent", not a guess.
+  ['NumberConstructor.parseInt', { kind: 'method', emit: 'gea::host::NumberConstructor::parseInt({args})', arity: 'pass-through' }],
   ['NumberConstructor.parseFloat', { kind: 'method', emit: 'gea::host::NumberConstructor::parseFloat({arg0})', arity: 1 }],
   // The five `NumberConstructor` data properties -- 21.1.2.1 `EPSILON`, .6
   // `MAX_SAFE_INTEGER`, .7 `MAX_VALUE`, .8 `MIN_SAFE_INTEGER`, .9 `MIN_VALUE`.
@@ -886,6 +941,10 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // `PromiseResolve` is a carrier question only the emitter can answer, so the
   // renderer hands the runtime a lambda rather than a fixed spelling.
   ['PromiseConstructor.all', { kind: 'method', emit: '/* unused: see promiseAllText, emit-host-invoke.ts */', arity: 'call-site' }],
+  [
+    'PromiseConstructor.withResolvers',
+    { kind: 'method', emit: '/* unused: see promiseWithResolversText, emit-host-invoke.ts */', arity: 'call-site' }
+  ],
   // `Promise.race` -- 27.2.4.5, `call-site` for the same reason `all` is: the
   // promise it mints is typed by the call's own `Awaited<T>` and the per-element
   // registration is a carrier question only the emitter can answer, so the
@@ -929,13 +988,19 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // there complete.
   //
   // This table is still an arbitrary SUBSET of the runtime's own
-  // `WellKnownSymbol` enum -- `hasInstance`, `isConcatSpreadable`, `matchAll`,
+  // `WellKnownSymbol` enum -- `isConcatSpreadable`, `matchAll`,
   // `replace`, `search`, `species`, `split` and `unscopables` remain absent
   // with no stated reason. Each needs the same one-line row plus evidence that
   // whatever consumes it exists; they are left out here rather than added
   // blind, because a readable property whose behaviour is not implemented
   // turns a clean refusal into a wrong answer.
   ['SymbolConstructor.match', { kind: 'property', store: null, emit: 'gea::wellKnownSymbol(gea::detail::WellKnownSymbol::Match)' }],
+  // `instanceof` against a boxed constructor consults it first
+  // (`gea::host::instanceOfDynamicConstructor`, ECMA-262 13.10.2 steps 2-3).
+  [
+    'SymbolConstructor.hasInstance',
+    { kind: 'property', store: null, emit: 'gea::wellKnownSymbol(gea::detail::WellKnownSymbol::HasInstance)' }
+  ],
   [
     'SymbolConstructor.toPrimitive',
     { kind: 'property', store: null, emit: 'gea::wellKnownSymbol(gea::detail::WellKnownSymbol::ToPrimitive)' }
@@ -980,6 +1045,10 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   ['ObjectConstructor.entries', { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }],
   [
     'ObjectConstructor.getOwnPropertyNames',
+    { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }
+  ],
+  [
+    'ObjectConstructor.getOwnPropertySymbols',
     { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }
   ],
   ['ObjectConstructor.assign', { kind: 'method', emit: '/* unused: see objectMemberText, emit-host-invoke.ts */', arity: 'call-site' }],
@@ -1129,6 +1198,26 @@ export const coreHostFunctions: HostFunctionTable = new Map<string, string>([
   ['parseFloat', 'gea::host::NumberConstructor::parseFloat'],
   ['isNaN', 'gea::host::globalIsNaN'],
   ['isFinite', 'gea::host::globalIsFinite']
+])
+
+/**
+ * The coercion each of those functions applies to an argument as its own first
+ * step, by position -- ECMA-262 19.2.5 `parseInt` (ToString), 19.2.4
+ * `parseFloat` (ToString), 19.2.3 `isNaN` and 19.2.2 `isFinite` (ToNumber).
+ * A call passes whatever the program holds (`parseInt(octet, 10)` over a
+ * number), and converting it at the call is exactly the step the function
+ * performs, so the argument's slot is that coercion rather than an exact
+ * carrier. `parseInt`'s radix (ToInt32) is not listed: every caller passes a
+ * number.
+ */
+export const coreHostFunctionArgumentCoercions: ReadonlyMap<string, readonly (CoercionOperation | null)[]> = new Map<
+  string,
+  readonly (CoercionOperation | null)[]
+>([
+  ['parseInt', ['ToString']],
+  ['parseFloat', ['ToString']],
+  ['isNaN', ['ToNumber']],
+  ['isFinite', ['ToNumber']]
 ])
 
 /**

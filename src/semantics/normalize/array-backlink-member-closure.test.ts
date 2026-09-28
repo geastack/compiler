@@ -152,12 +152,14 @@ test('a sibling instance handed to unknown code opens its methods parameters', (
   assert.ok(refused(inputType(`${setup} const sibling = new A(); globalThis.unknownConsumer(sibling);`)))
 })
 
-test('a native class-typed slot refuses an unrelated instance or a look-alike record end to end', () => {
+test('a native class-typed slot never enters one class on another, and refuses a look-alike record end to end', () => {
   // The invariant the receiver walk's declared-type arms rest on: a class-ref
   // carrier is nominal. A JSDoc `@param {A}` handed an unrelated `new B()` with
-  // the same members, or a record that looks like an `A`, has no conversion
-  // into `A`'s carrier, so certification refuses the program rather than
-  // emitting a call that enters `A.m` on a `B`.
+  // the same members holds both classes -- the statement is widened by the
+  // foreign instance its caller passes, and each call dispatches on the live
+  // arm, so `B.m` runs on the `B` -- never a `B` converted into `A`'s carrier.
+  // A record that looks like an `A` is no class instance at all and has no
+  // conversion into `A`'s carrier, so certification refuses that program.
   const file = resolve('test/runtime/nominal-class-carrier.js')
   const certify = (lines: readonly string[]) =>
     compile({
@@ -177,13 +179,7 @@ test('a native class-typed slot refuses an unrelated instance or a look-alike re
   const control = certify([...declare('A', 1, 'x + 1'), ...run])
   assert.ok(control.certificate && control.source, JSON.stringify(control.refusals))
   const unrelated = certify([...declare('A', 1, 'x + 1'), ...declare('B', 2, 'x * 2'), ...run, 'console.log(run(new B()))'])
-  assert.equal(unrelated.certificate, null)
-  assert.ok(
-    unrelated.refusals.some(
-      (refusal) => refusal.stage === 'certify' && /no runtime conversion is installed from class-ref/.test(refusal.reason)
-    ),
-    JSON.stringify(unrelated.refusals)
-  )
+  assert.ok(unrelated.certificate && unrelated.source, JSON.stringify(unrelated.refusals))
   const lookAlike = certify([
     ...declare('A', 1, 'x + 1'),
     ...run,

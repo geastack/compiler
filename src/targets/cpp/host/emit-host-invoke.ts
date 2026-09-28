@@ -1,9 +1,17 @@
+import { boxedValueText } from '../emit-dynamic-properties.js'
 import type { CallableAbi, Representation } from '../../../representation/model.js'
-import type { StructuralTypeId } from '../../../identity/ids.js'
+import type { IrValueId, StructuralTypeId } from '../../../identity/ids.js'
 import { representationKey } from '../../../representation/model.js'
 import { hostMemberTemplateOf, isArrayConstantOf } from '../../../representation/host-templates.js'
 import type { CallOperation, IrOperand } from '../../../ir/model.js'
-import { createCppEmitBlockedError, internSymbolKey, operandText, paddedArguments, type EmitContext } from '../emit-context.js'
+import {
+  createCppEmitBlockedError,
+  internSymbolKey,
+  isCppEmitBlockedError,
+  operandText,
+  paddedArguments,
+  type EmitContext
+} from '../emit-context.js'
 import { consoleArgumentsText, toStringRefusal, toStringText } from '../emit-tostring.js'
 import { toNumberRefusal, toNumberText } from '../emit-tonumber.js'
 import { booleanTestText } from '../emit-presence.js'
@@ -27,10 +35,12 @@ import { objectMemberText } from './emit-host-object.js'
 import { armAt, armIs } from '../emit-union-properties.js'
 import { memberAccessOperator } from '../emit-carrier-members.js'
 import { recordFieldsOfShape } from '../records.js'
+import { withResolversRecordText } from './promise-with-resolvers.js'
 import { typedArrayTargetSpelling } from '../emit-buffers.js'
-import { alignedValueText } from '../emit-narrowing.js'
+import { alignedValueText, dynamicCarrierBoxText } from '../emit-narrowing.js'
 import { thrownValueCarrier } from '../../../ir/lower-exceptions.js'
-import { atomicsCallSupport } from './atomics.js'
+import { atomicsCallSupport, waitAsyncResultArmsOf, type AtomicsCallSupport, type WaitAsyncArm } from './atomics.js'
+import { declaredRecordFieldOf } from '../../../projection/fields.js'
 
 /**
  * `[[Call]]`/`[[Construct]]` on a `native-handle` receiver -- the invoke path
@@ -133,12 +143,26 @@ const errorCauseTargetName = 'gea_error_with_cause'
  * `cause` at all -- which `gea::runtime::Error::gea_readOwnField` answers from
  * its own flag.
  */
+/** Carriers holding no Object, so no `cause` an Error's options could install (20.5.8.1). */
+const primitiveErrorOptionKinds: ReadonlySet<Representation['kind']> = new Set(['undefined', 'null', 'string', 'scalar', 'symbol'])
+
 const errorCauseInstall = (ctx: EmitContext, options: IrOperand): { guard: string | null; text: string } | null => {
   const carrier = options.representation
   const optionsText = operandText(ctx, options)
   const outerGuard = carrier.kind === 'optional' ? `${optionsText}.has_value()` : null
   const payload = carrier.kind === 'optional' ? carrier.payload : carrier
   const payloadText = carrier.kind === 'optional' ? `(*${optionsText})` : optionsText
+  // 20.5.8.1 InstallErrorCause reads `cause` only off an Object that has it.
+  if (payload.kind === 'dynamic')
+    return {
+      guard: [
+        outerGuard,
+        `gea::runtime::iterator::isObject(${payloadText}) && ${payloadText}.hasProperty(gea::PropertyKey::string("cause"))`
+      ]
+        .filter((guard): guard is string => guard !== null)
+        .join(' && '),
+      text: `${payloadText}.getProperty(gea::PropertyKey::string("cause"))`
+    }
   if (payload.kind !== 'record' && payload.kind !== 'record-with-index' && payload.kind !== 'native-record-ref') return null
   const fields =
     payload.kind === 'native-record-ref'
@@ -155,6 +179,31 @@ const errorCauseInstall = (ctx: EmitContext, options: IrOperand): { guard: strin
   return { guard: guards.length > 0 ? guards.join(' && ') : null, text: `${payloadText}${access}${cppRecordFieldName('cause')}` }
 }
 
+const errorMessageText = (ctx: EmitContext, message: IrOperand | undefined): string =>
+  message === undefined
+    ? 'gea::Optional<std::string>{}'
+    : message.representation.kind === 'dynamic'
+      ? `gea::host::runtimeErrorMessageOf(${operandText(ctx, message)})`
+      : operandText(ctx, message)
+
+/**
+ * An intrinsic error constructed with at most a message, held as the native
+ * error carrier or as a box of it. Needs no convention from the checker: the
+ * intrinsic error object is the whole result (20.5.1.1), and the message
+ * follows step 3 whatever its carrier.
+ */
+export const intrinsicErrorText = (
+  ctx: EmitContext,
+  protocol: string,
+  args: readonly IrOperand[],
+  result: Representation
+): string | null => {
+  const name = errorConstructorNames.get(protocol)
+  if (name === undefined || args.length > 1 || (result.kind !== 'dynamic' && !isNativeError(result))) return null
+  const created = `gea::host::createRuntimeError("${name}", ${errorMessageText(ctx, args[0])})`
+  return result.kind === 'dynamic' ? `gea::Value::box(gea::Value::Tag::Object, ${created})` : created
+}
+
 const renderErrorCreate = ({ ctx, protocol, abi, args, role, result }: HostInvocationRequest): string => {
   // The struct this construction MINTS is the one the program holds, not the
   // one the declaration names: `create<ErrorRecord>` is a template, and an
@@ -163,18 +212,22 @@ const renderErrorCreate = ({ ctx, protocol, abi, args, role, result }: HostInvoc
   // The declaration's carrier is the fallback for a call whose graph published
   // no result at all -- `new Error(m)` as a bare statement.
   const minted = result ?? abi.result
-  if (isNativeError(minted)) {
+  // A program that holds its errors dynamically (`--dynamic-fallback` opting
+  // the error type out of a native carrier) still gets the intrinsic error
+  // object, boxed: the box answers `name`/`message`/`stack`/`cause` through the
+  // error's own field table.
+  const boxes = minted.kind === 'dynamic'
+  if (isNativeError(minted) || boxes) {
     const name = errorConstructorNames.get(protocol)
     if (name === undefined)
       throw createCppEmitBlockedError(
         `host-invocation:${protocol}${role === 'call' ? '.call' : ''}`,
         `no intrinsic error constructor is registered for ${protocol}`
       )
-    const message = args[0]
-    const text = message === undefined ? 'gea::Optional<std::string>{}' : operandText(ctx, message)
-    const created = `gea::host::createRuntimeError("${name}", ${text})`
+    const created = `gea::host::createRuntimeError("${name}", ${errorMessageText(ctx, args[0])})`
+    const boxed = (native: string): string => (boxes ? `gea::Value::box(gea::Value::Tag::Object, ${native})` : native)
     const options = args[1]
-    if (options === undefined || options.representation.kind === 'undefined') return created
+    if (options === undefined || primitiveErrorOptionKinds.has(options.representation.kind)) return boxed(created)
     const install = errorCauseInstall(ctx, options)
     if (install === null) {
       throw createCppEmitBlockedError(
@@ -186,7 +239,7 @@ const renderErrorCreate = ({ ctx, protocol, abi, args, role, result }: HostInvoc
     // and the installation is a statement -- the guard cannot be folded into a
     // conditional operator without evaluating `createRuntimeError` twice.
     const statement = `${install.guard === null ? '' : `if (${install.guard}) `}${errorCauseTargetName}->setCause(${install.text});`
-    return `([&]() { auto ${errorCauseTargetName} = ${created}; ${statement} return ${errorCauseTargetName}; }())`
+    return boxed(`([&]() { auto ${errorCauseTargetName} = ${created}; ${statement} return ${errorCauseTargetName}; }())`)
   }
   // Two carrier kinds spell one C++ type here. `native-record-ref` names a
   // shape the deriver registered; `record` carries the fields inline -- which
@@ -317,14 +370,12 @@ const renderToNumber = ({ ctx, protocol, abi, args, role }: HostInvocationReques
   const argument = args[0]
   if (!argument) return cppConstantLiteral('0', 'number', { kind: 'scalar', domain: 'number' })
   const carrier = argument.representation
-  // Number() explicitly permits BigInt-to-Number; ordinary ToNumber does not.
-  if (carrier.kind === 'scalar' && carrier.domain === 'bigint') return `(${operandText(ctx, argument)}).toNumber()`
   // One table, `emit-tonumber.ts`, for every carrier -- including the two this
   // used to refuse outright. An `optional` states which absence it carries and
   // a `tagged-union` states its arms, so both convert by dispatching on what
   // the carrier already knows rather than by boxing the value to ask it at run
-  // time.
-  const converted = toNumberText(operandText(ctx, argument), carrier)
+  // time. Number() converts a BigInt where ordinary ToNumber throws.
+  const converted = toNumberText(operandText(ctx, argument), carrier, 'number')
   if (converted === null)
     throw createCppEmitBlockedError(`host-invocation:${protocol}${role === 'call' ? '.call' : ''}`, toNumberRefusal(carrier))
   return converted
@@ -562,7 +613,20 @@ const promiseRaceText = (ctx: EmitContext, operation: CallOperation): string => 
   )
 }
 
+/** `Promise.withResolvers()` over the call's own result -- see `withResolversRecordText`. */
+const promiseWithResolversText = (ctx: EmitContext, operation: CallOperation): string => {
+  const result = operation.result?.representation
+  const text = result === undefined ? null : withResolversRecordText(ctx.deriver, ctx.classes, result)
+  if (text === null)
+    throw createCppEmitBlockedError(
+      'host-member-call:PromiseConstructor.withResolvers',
+      'Promise.withResolvers produces a shared record of required `promise`, `resolve` and `reject` fields'
+    )
+  return text
+}
+
 const promiseConstructorText = (ctx: EmitContext, member: string, operation: CallOperation): string => {
+  if (member === 'withResolvers') return promiseWithResolversText(ctx, operation)
   if (member === 'all') return promiseAllText(ctx, operation)
   if (member === 'race') return promiseRaceText(ctx, operation)
   if (member === 'reject') {
@@ -972,6 +1036,12 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
     )
   }
   const result = operation.result?.representation
+  // Held dynamically: the general protocol over the boxed items (a Map or Set
+  // rfdc clones, a box of unknown kind), yielding a box of the new array.
+  if (result?.kind === 'dynamic') {
+    const mapper = operation.arguments[1]
+    return `gea::runtime::iterator::arrayFromDynamic(${boxedValueText(ctx, source, 'Array.from items')}, ${mapper ? boxedValueText(ctx, mapper, 'Array.from mapper') : 'gea::Value()'})`
+  }
   if (!result || result.kind !== 'array-object') {
     throw createCppEmitBlockedError(
       'host-member-call:ArrayConstructor.from',
@@ -981,6 +1051,17 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
   const callback = operation.arguments[1]
   const args = [operandText(ctx, source), ...(callback ? [operandText(ctx, callback)] : [])].join(', ')
   const carrier = source.representation
+  if (carrier.kind === 'dynamic') {
+    const walked = `gea::runtime::iterator::arrayFromDynamic(${operandText(ctx, source)}, ${callback ? boxedValueText(ctx, callback, 'Array.from mapper') : 'gea::Value()'})`
+    const loaded = alignedValueText(
+      ctx,
+      'host/emit-host-invoke.ts:array-from-box',
+      { kind: 'dynamic', reason: 'opt-in-fallback' },
+      result,
+      walked
+    )
+    if (loaded !== null) return loaded
+  }
   if (carrier.kind === 'array-object') return `gea::runtime::array::fromArray(${args})`
   if (carrier.kind === 'iterator') return `gea::runtime::array::fromIterator(${args})`
   if (carrier.kind === 'typed-array') return `gea::runtime::array::fromTypedArray(${args})`
@@ -1059,79 +1140,203 @@ const isArrayBufferViewText = (ctx: EmitContext, operation: CallOperation): stri
       )
       return dispatched === null ? 'false' : `(${dispatched})`
     }
-    if (representation.kind === 'dynamic') {
-      throw createCppEmitBlockedError(
-        'host-member-call:ArrayBufferConstructor.isView',
-        '"ArrayBuffer.isView" of a dynamic value needs a runtime TypedArray/DataView brand, which gea::Value does not carry'
-      )
-    }
+    if (representation.kind === 'dynamic') return `gea::host::isArrayBufferView(${valueText})`
     return 'false'
   }
   return answer(argument.representation, operandText(ctx, argument))
 }
 
-/** The finite, checker-authenticated Atomics surface. No dynamic receiver is admitted. */
+/**
+ * The finite, checker-authenticated Atomics surface. A dynamic view is
+ * validated first, then each dynamic index or value is ToNumber'd in argument
+ * order, the order ValidateAtomicAccess and the value conversion run in.
+ */
 const atomicsText = (ctx: EmitContext, member: string, operation: CallOperation): string => {
   const args = operation.arguments
+  const result = operation.result?.representation ?? null
+  const fieldOf = (record: Representation, name: string) => declaredRecordFieldOf(ctx.deriver, record, name, ctx.classes)
   const support = atomicsCallSupport(
     member,
-    args.map((argument) => argument.representation)
+    args.map((argument) => argument.representation),
+    result,
+    fieldOf
   )
   if (!support.supported) throw createCppEmitBlockedError(`host-member-call:Atomics.${member}`, support.reason)
-  const number = (position: number): string => operandText(ctx, args[position]!)
-  if (support.kind === 'is-lock-free') return `gea::runtime::atomics::isLockFree(${number(0)})`
-  const view = args[0]!
-  const viewText = operandText(ctx, view)
-  if (support.kind === 'fixed') {
-    return `gea::runtime::atomics::${support.runtimeMember}(${viewText}, ${args
-      .slice(1)
-      .map((_argument, position) => number(position + 1))
-      .join(', ')})`
-  }
-  if (support.kind === 'wait') {
-    return `gea::runtime::atomics::wait(${viewText}, ${number(1)}, ${number(2)}, ${args[3] ? number(3) : 'std::numeric_limits<double>::infinity()'})`
-  }
-  return `gea::runtime::atomics::notify(${viewText}, ${number(1)}, ${args[2] ? number(2) : 'std::numeric_limits<double>::infinity()'})`
+  const arms = waitAsyncResultArmsOf(result, fieldOf)
+  const text = atomicsCallText(ctx, support, args, arms === null || result === null ? null : { union: result, arms })
+  if (support.kind === 'wait-async') return text
+  const produced: Representation =
+    support.kind === 'wait' ? { kind: 'string' } : { kind: 'scalar', domain: support.kind === 'is-lock-free' ? 'boolean' : 'number' }
+  if (result?.kind !== 'dynamic') return text
+  const boxed = dynamicCarrierBoxText(produced, text)
+  if (boxed === null) throw createCppEmitBlockedError(`host-member-call:Atomics.${member}`, `Atomics.${member}'s result has no box`)
+  return boxed
 }
 
-export const hostMemberRenderers: ReadonlyMap<string, (ctx: EmitContext, member: string, operation: CallOperation) => string> = new Map([
-  ['Atomics', atomicsText],
-  ['PromiseConstructor', promiseConstructorText],
-  ['SymbolConstructor', symbolMemberText],
-  // `Object`'s statics, in their own module: every one of them renders from
-  // the RECEIVER's carrier -- a known shape's field list, or a real
-  // enumeration of a real own-property table -- which is a different question
-  // from the ones the two renderers above answer, and one that runs through
-  // all ten claimed members. See `emit-host-object.ts`'s own header.
-  ['ObjectConstructor', objectMemberText],
-  // `Date.parse`/`Date.UTC`. Their spelling is decided by the call's own
-  // argument count (`Date.UTC` takes one to seven), which is exactly what a
-  // fixed-arity template row cannot state. `Date.now` is not routed here: it
-  // is a `property` row over a real callable.
-  ['DateConstructor', dateConstructorCallText],
-  // `Array.isArray`, whose whole answer is the argument's carrier -- see
-  // `isArrayText`. `ArrayConstructor` has no other claimed member.
-  [
-    'ArrayConstructor',
-    (ctx, member, operation) =>
-      hostMemberTemplateOf('ArrayConstructor', member) === 'array-is-array' ? isArrayText(ctx, operation) : arrayFromText(ctx, operation)
-  ],
-  ['Int8ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
-  ['Uint8ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
-  ['Uint8ClampedArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
-  ['Int16ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
-  ['Uint16ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
-  ['Int32ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
-  ['Uint32ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
-  ['Float32ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
-  ['Float64ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
-  ['ArrayBufferConstructor', (ctx, _member, operation) => isArrayBufferViewText(ctx, operation)]
-])
+/**
+ * `waitAsync`'s typed result built from the runtime's outcome: the arm whose
+ * `value` is the outcome string when it did not wait, else the arm whose
+ * `value` is the promise.
+ */
+const waitAsyncRecordText = (
+  union: Representation,
+  arms: { readonly immediate: WaitAsyncArm; readonly pending: WaitAsyncArm },
+  outcome: string
+): string => {
+  const arm = (held: WaitAsyncArm, async: boolean, value: string): string =>
+    `auto __gea_record = gea::makeRef<${cppRecordStructName(held.record.shapeId)}>(); ` +
+    `__gea_record->${cppRecordFieldName('async')} = ${async}; __gea_record->${cppRecordFieldName('value')} = ${value}; ` +
+    `return ${cppTypeOf(union)}::ofArm<${held.index}>(__gea_record);`
+  return (
+    `([&]() -> ${cppTypeOf(union)} { auto __gea_outcome = ${outcome}; ` +
+    `if (__gea_outcome.pending) { ${arm(arms.pending, true, '__gea_outcome.promise')} } ` +
+    `${arm(arms.immediate, false, 'std::string(__gea_outcome.immediate)')} })()`
+  )
+}
+
+const atomicsCallText = (
+  ctx: EmitContext,
+  support: AtomicsCallSupport & { readonly supported: true },
+  args: CallOperation['arguments'],
+  typedWaitAsync: {
+    readonly union: Representation
+    readonly arms: { readonly immediate: WaitAsyncArm; readonly pending: WaitAsyncArm }
+  } | null
+): string => {
+  if (support.kind === 'is-lock-free') return `gea::runtime::atomics::isLockFree(${operandText(ctx, args[0]!)})`
+  const view = args[0]!
+  const rest = args.slice(1)
+  const numbers = rest.map((argument, position) =>
+    argument.representation.kind === 'dynamic' ? `__gea_atomics_${position + 1}` : operandText(ctx, argument)
+  )
+  const infinity = 'std::numeric_limits<double>::infinity()'
+  const call = (viewText: string): string =>
+    support.kind === 'fixed'
+      ? `gea::runtime::atomics::${support.runtimeMember}(${viewText}, ${numbers.join(', ')})`
+      : support.kind === 'wait-async' && typedWaitAsync !== null
+        ? waitAsyncRecordText(
+            typedWaitAsync.union,
+            typedWaitAsync.arms,
+            `gea::runtime::atomics::waitAsyncOutcome<std::string>(${viewText}, ${numbers[0]}, ${numbers[1]}, ${numbers[2] ?? infinity})`
+          )
+        : support.kind === 'wait' || support.kind === 'wait-async'
+          ? `gea::runtime::atomics::${support.kind === 'wait' ? 'wait' : 'waitAsync'}(${viewText}, ${numbers[0]}, ${numbers[1]}, ${numbers[2] ?? infinity})`
+          : `gea::runtime::atomics::notify(${viewText}, ${numbers[0]}, ${numbers[1] ?? infinity})`
+  const conversions = rest
+    .map((argument, position) =>
+      argument.representation.kind === 'dynamic'
+        ? `const double __gea_atomics_${position + 1} = gea::dynamicToNumber(${operandText(ctx, argument)}); `
+        : ''
+    )
+    .join('')
+  if (support.view === 'dynamic') {
+    const over = support.kind === 'fixed' ? 'overIntegerView' : 'overWaitableView'
+    return `gea::runtime::atomics::${over}(${operandText(ctx, view)}, [&](const auto& __gea_view) { ${conversions}return ${call('__gea_view')}; })`
+  }
+  const viewText = support.view === 'optional' ? `gea::runtime::atomics::presentView(${operandText(ctx, view)})` : operandText(ctx, view)
+  if (conversions === '') return call(viewText)
+  return `([&]() { const auto& __gea_view = ${viewText}; ${conversions}return ${call('__gea_view')}; })()`
+}
+
+/**
+ * `Function.call(thisArg, ...sources)` / `Function.apply(thisArg, list)`:
+ * CreateDynamicFunction over the sources, exactly what `Function(...sources)`
+ * renders. Both arrive as the receiver and one list -- `call`'s rest sources
+ * are packed by its own `...argArray` frame -- read in order as
+ * CreateListFromArrayLike reads it; no list is no sources.
+ */
+const functionConstructorMemberText = (ctx: EmitContext, member: string, operation: CallOperation): string => {
+  if (!ctx.deriver.dynamicFallback)
+    throw createCppEmitBlockedError(`host-member-call:FunctionConstructor.${member}`, 'Function construction requires --dynamic-fallback')
+  if (operation.result !== null && operation.result.representation.kind !== 'dynamic')
+    throw createCppEmitBlockedError(`host-member-call:FunctionConstructor.${member}`, 'Function construction produces a dynamic callable')
+  const list = operation.arguments[1]
+  if (list === undefined) return 'gea::Eval::constructFunction({})'
+  const element = list.representation.kind === 'array-object' ? list.representation.element : null
+  if (operation.arguments.length !== 2 || element === null || (element.kind !== 'string' && element.kind !== 'dynamic'))
+    throw createCppEmitBlockedError(
+      `host-member-call:FunctionConstructor.${member}`,
+      `Function.${member} requires an array of string or dynamic sources`
+    )
+  return `gea::Eval::constructFunctionFrom(${operandText(ctx, list)})`
+}
+
+type HostMemberRenderer = (ctx: EmitContext, member: string, operation: CallOperation) => string
+let hostMemberRendererTable: ReadonlyMap<string, HostMemberRenderer> | null = null
+/**
+ * Built on first use rather than at module load: its renderers live in
+ * modules that import this one back, and a table read at load time would see
+ * them uninitialized.
+ */
+export const hostMemberRenderers = (): ReadonlyMap<string, HostMemberRenderer> =>
+  (hostMemberRendererTable ??= new Map<string, HostMemberRenderer>([
+    ['FunctionConstructor', functionConstructorMemberText],
+    ['Atomics', atomicsText],
+    ['PromiseConstructor', promiseConstructorText],
+    ['SymbolConstructor', symbolMemberText],
+    // `Object`'s statics, in their own module: every one of them renders from
+    // the RECEIVER's carrier -- a known shape's field list, or a real
+    // enumeration of a real own-property table -- which is a different question
+    // from the ones the two renderers above answer, and one that runs through
+    // all ten claimed members. See `emit-host-object.ts`'s own header.
+    ['ObjectConstructor', objectMemberText],
+    // `Date.parse`/`Date.UTC`. Their spelling is decided by the call's own
+    // argument count (`Date.UTC` takes one to seven), which is exactly what a
+    // fixed-arity template row cannot state. `Date.now` is not routed here: it
+    // is a `property` row over a real callable.
+    ['DateConstructor', dateConstructorCallText],
+    // `Array.isArray`, whose whole answer is the argument's carrier -- see
+    // `isArrayText`. `ArrayConstructor` has no other claimed member.
+    [
+      'ArrayConstructor',
+      (ctx, member, operation) =>
+        hostMemberTemplateOf('ArrayConstructor', member) === 'array-is-array' ? isArrayText(ctx, operation) : arrayFromText(ctx, operation)
+    ],
+    ['Int8ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
+    ['Uint8ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
+    ['Uint8ClampedArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
+    ['Int16ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
+    ['Uint16ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
+    ['Int32ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
+    ['Uint32ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
+    ['Float32ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
+    ['Float64ArrayConstructor', (ctx, _member, operation) => typedArrayFromText(ctx, operation)],
+    ['ArrayBufferConstructor', (ctx, _member, operation) => isArrayBufferViewText(ctx, operation)]
+  ]))
 
 /**
  * The call/construct text for a `native-handle` invocation, or a thrown
  * refusal naming exactly what is missing.
  */
+/**
+ * A host handle's own call (`Number(x)`), applied to one value held in the C++
+ * name `valueText` -- for a host function handed over as a callback, which
+ * the language calls with that value first. The invocation renders exactly as
+ * a direct call with that argument would (`nativeHandleInvocationText`), its
+ * operand named by a value id bound to `valueText`; `null` when the call has
+ * no spelling, or when its result does not reach `resultTarget`.
+ */
+export const hostHandleCallText = (
+  ctx: EmitContext,
+  handle: Extract<Representation, { readonly kind: 'native-handle' }>,
+  valueRepresentation: Representation,
+  valueText: string,
+  resultTarget: Representation | null
+): string | null => {
+  if (handle.call === null || handle.call.parameters.length === 0) return null
+  const value = `${valueText}:host-callback-argument` as IrValueId
+  ctx.valueNames.set(value, valueText)
+  const result = resultTarget ?? handle.call.result
+  try {
+    const called = nativeHandleInvocationText(ctx, handle, handle.call, [{ value, representation: valueRepresentation }], 'call', result)
+    if (resultTarget === null || cppTypeOf(resultTarget) === cppTypeOf(handle.call.result)) return called
+    return alignedValueText(ctx, 'host/emit-host-invoke.ts:hostHandleCallText', handle.call.result, resultTarget, called)
+  } catch (error) {
+    if (isCppEmitBlockedError(error)) return null
+    throw error
+  }
+}
+
 export const nativeHandleInvocationText = (
   ctx: EmitContext,
   callee: Extract<Representation, { readonly kind: 'native-handle' }>,
@@ -1320,7 +1525,7 @@ export const hostCallText = (ctx: EmitContext, operation: CallOperation): string
   // a row marked `call-site` on a protocol nothing here renders refuses by
   // name rather than falling through to an arity check it has no arity for.
   if (host.arity === 'call-site') {
-    const render = hostMemberRenderers.get(read.protocol)
+    const render = hostMemberRenderers().get(read.protocol)
     if (render === undefined) {
       throw createCppEmitBlockedError(
         `host-invocation:${read.protocol}.${read.member}`,

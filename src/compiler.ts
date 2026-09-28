@@ -37,8 +37,11 @@ import { aliasThisFieldDeclarationTransform } from './semantics/alias-this-field
 import { definePropertySourceTransform } from './semantics/define-property-source-transform.js'
 import { prototypeInstallSourceTransform } from './semantics/prototype-install-source-transform.js'
 import { prototypeObjectClassSourceTransform } from './semantics/prototype-object-class-source-transform.js'
+import { jsonNamespaceImportSourceTransform } from './semantics/json-namespace-import-source-transform.js'
 import { jsdocNamepathTransform } from './semantics/jsdoc-namepath-transform.js'
 import { jsdocNullishReturnTransform } from './semantics/jsdoc-nullish-return-transform.js'
+import { closureWrittenAutoTypeTransform } from './semantics/closure-written-auto-type-transform.js'
+import { jsdocNullMemberTransform } from './semantics/jsdoc-null-member-transform.js'
 import { thisConstructorSourceTransform } from './semantics/this-constructor-source-transform.js'
 import { undefinedDefaultParameterTransform } from './semantics/undefined-default-parameter-transform.js'
 import { symbolKeyedExpandoSourceTransform } from './semantics/symbol-keyed-expando-source-transform.js'
@@ -73,6 +76,7 @@ import { createCppTargetManifest } from './targets/cpp/manifest.js'
 import {
   coreHostConstants,
   coreHostFunctions,
+  coreHostFunctionArgumentCoercions,
   coreHostMembers,
   type HostMemberTable,
   type HostSpellings
@@ -338,6 +342,9 @@ const declarerReaderFor = (plugins: readonly PluginInstance[]): DeclarerReader =
 export const sourceTransformsFor = (
   plugins: readonly PluginInstance[]
 ): readonly ((input: { readonly fileName: string; readonly text: string }) => string | null)[] => [
+  // A namespace import of a JSON module binds the document it names, as its
+  // CommonJS `require` does (see the transform).
+  jsonNamespaceImportSourceTransform,
   // A prototype object instantiated with `Object.create` becomes its class
   // first, so the installs and re-parenting below see a class prototype.
   prototypeObjectClassSourceTransform,
@@ -378,6 +385,12 @@ export const sourceTransformsFor = (
   // body returns, so the checker states what callers receive (see the
   // transform). After the namepath respelling, so it reads the tag's final text.
   jsdocNullishReturnTransform,
+  // An unverified typedef `@property` widened by the `null` a literal declared
+  // at that typedef initializes it with (see the transform).
+  jsdocNullMemberTransform,
+  // A variable the checker auto-types from its own flow, that a closure writes,
+  // stated `any`: the flow never credits the closure's writes (see the transform).
+  closureWrittenAutoTypeTransform,
   // `declarationOverlayTransform` runs next, and for the same reason: a
   // package's own `.d.ts` stating its JS module's parameter types is shipped
   // DATA, not a host's vocabulary. It never overrides what the source itself
@@ -797,6 +810,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // two authorities, which is why the renderer is consulted only when no row
   // claims the protocol.
   const hosts: HostSpellings = {
+    primitivePrototypeKeys: frontend.primitivePrototypeKeys,
     members: hostMembers,
     intrinsicMembers,
     voidResults: new Set(plugins.flatMap((plugin) => [...plugin.capabilities.hostMemberVoidResults])),
@@ -900,6 +914,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     // another's.
     hostConstantsByDeclaration: new Map(plugins.flatMap((plugin) => [...plugin.capabilities.hostConstantsByDeclaration])),
     hostFunctions: new Map([...plugins.flatMap((plugin) => [...plugin.capabilities.hostFunctions]), ...coreHostFunctions]),
+    hostFunctionArgumentCoercions: coreHostFunctionArgumentCoercions,
     hostFunctionsByDeclaration: new Map(plugins.flatMap((plugin) => [...plugin.capabilities.hostFunctionsByDeclaration])),
     // The backend's own table, unioned in the same way `coreHostMembers` is
     // above and for the same reason: `btoa`/`encodeURIComponent` are language

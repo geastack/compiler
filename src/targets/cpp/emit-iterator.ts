@@ -415,14 +415,15 @@ export const emitGetIterator = (ctx: EmitContext, lines: string[], operation: Ge
   // native cursor assertion: the static cursor branch below is for a typed
   // value and must never be widened into this dynamic path.
   if (representation.kind === 'dynamic') {
-    if (operation.protocol !== 'iterator' || operation.receiver.representation.kind !== 'dynamic') {
+    if (operation.protocol === 'enumerate' || operation.receiver.representation.kind !== 'dynamic') {
       throw createCppEmitBlockedError(
-        'runtime-helper:protocol:iterator:get-iterator:dynamic',
-        'uses a dynamic iterator record outside the synchronous genuinely-dynamic source path'
+        `runtime-helper:protocol:${operation.protocol}:get-iterator:dynamic`,
+        'uses a dynamic iterator record outside the genuinely-dynamic source path'
       )
     }
     const name = defineValue(ctx, operation.result)
-    lines.push(`${name} = gea::runtime::iterator::getIterator(${operandText(ctx, operation.receiver)});`)
+    const getter = operation.protocol === 'async-iterator' ? 'getAsyncIterator' : 'getIterator'
+    lines.push(`${name} = gea::runtime::iterator::${getter}(${operandText(ctx, operation.receiver)});`)
     const doneState = `v${ctx.nextValueOrdinal++}`
     ctx.declarations.push({ name: doneState, type: 'bool' })
     lines.push(`${doneState} = false;`)
@@ -497,7 +498,22 @@ export const emitGetIterator = (ctx: EmitContext, lines: string[], operation: Ge
   // keeps every non-table payload on an unclaimed `optional(<kind>)` key.
   const absent = carried.kind === 'optional'
   const target = absent ? carried.payload : carried
-  if (operation.protocol === 'enumerate' && (carried.kind === 'undefined' || carried.kind === 'null')) {
+  // A Boolean, Number or BigInt enumerates nothing either: ToObject's
+  // wrapper has no enumerable own key and neither has its prototype -- present
+  // or absent alike (fastify's generated validator walks `for (k in data10)`
+  // over a cell its coercions may leave `true`, `null` or a number).
+  const primitiveSource = (source: Representation): boolean =>
+    source.kind === 'scalar' ||
+    source.kind === 'null' ||
+    source.kind === 'undefined' ||
+    (source.kind === 'tagged-union' && source.arms.every((arm) => primitiveSource(arm.value)))
+  if (
+    operation.protocol === 'enumerate' &&
+    (carried.kind === 'undefined' ||
+      carried.kind === 'null' ||
+      primitiveSource(carried) ||
+      (carried.kind === 'optional' && primitiveSource(carried.payload)))
+  ) {
     // ForIn/OfHeadEvaluation skips nullish enumeration. Keep evaluation of
     // the source even when a deferred call supplies this known-empty cursor.
     const name = defineValue(ctx, operation.result)
@@ -1267,6 +1283,9 @@ export const enumerateHelperClaims: readonly string[] = [
   'protocol:enumerate:get-iterator:native-sum',
   'protocol:enumerate:get-iterator:undefined',
   'protocol:enumerate:get-iterator:null',
+  'protocol:enumerate:get-iterator:scalar',
+  'protocol:enumerate:get-iterator:optional(scalar)',
+  'protocol:enumerate:get-iterator:primitive-sum',
   'protocol:enumerate:get-iterator:record',
   'protocol:enumerate:get-iterator:record-with-index',
   'protocol:enumerate:get-iterator:class-ref',
@@ -1378,6 +1397,10 @@ export const dynamicIteratorHelperClaims: readonly string[] = [
   ...generalIteratorHelperShapes.map((shape) => `protocol:iterator:${shape}`),
   ...generalIteratorHelperShapes.map((shape) => `protocol:async-iterator:${shape}`),
   ...dynamicValueIteratorHelperShapes.map((shape) => `protocol:iterator:${shape}`),
+  // `for await` over a boxed source: `getAsyncIterator` hands back a record
+  // whose `next` and `return` settle their promises, so the same step and close
+  // walk it.
+  ...dynamicValueIteratorHelperShapes.map((shape) => `protocol:async-iterator:${shape}`),
   'protocol:iterator:close:record',
   'protocol:iterator:close:native-record-ref',
   'protocol:iterator:close:iterator'

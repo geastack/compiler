@@ -4,10 +4,11 @@ import type { CallableAbi, Representation } from '../representation/model.js'
 import type { ConstantLiteral } from '../semantics/model/operands.js'
 import type { SemanticTargetProof } from '../semantics/model/operations.js'
 import type { HostMethodBinding } from '../semantics/host-methods.js'
-import type { TypedComputedReadRecipe, TypedComputedWriteRecipe } from './typed-property-access.js'
+import type { TypedComputedDeleteRecipe, TypedComputedReadRecipe, TypedComputedWriteRecipe } from './typed-property-access.js'
 import { irBlockId } from './model.js'
 import { successorsOfTerminator } from './queries.js'
 import type {
+  AllocateCallableOperation,
   CallOperation,
   ComputeOperation,
   ConversionUseId,
@@ -92,7 +93,9 @@ export interface IrBodyBuilder {
     receiver: IrOperand,
     key: IrOperand,
     strict: boolean,
-    representation: Representation | null
+    representation: Representation | null,
+    /** See `DeleteOperation.typedComputedDelete`. */
+    typedComputedDelete?: TypedComputedDeleteRecipe
   ) => IrValueId | null
   readonly hasProperty: (
     block: IrBlockId,
@@ -117,7 +120,13 @@ export interface IrBodyBuilder {
    * known own-property set. See `SpreadCopyOperation` (model.ts). No result:
    * `CopyDataProperties` publishes nothing a JS consumer ever reads.
    */
-  readonly spreadCopy: (block: IrBlockId, lineage: SemanticResultId, receiver: IrOperand, source: IrOperand) => void
+  readonly spreadCopy: (
+    block: IrBlockId,
+    lineage: SemanticResultId,
+    receiver: IrOperand,
+    source: IrOperand,
+    overwrittenKeys?: readonly string[]
+  ) => void
 
   readonly call: (
     block: IrBlockId,
@@ -277,7 +286,12 @@ export interface IrBodyBuilder {
     defaultTarget: IrBlockId
   ) => void
 
-  readonly allocateOrdinaryObject: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
+  readonly allocateOrdinaryObject: (
+    block: IrBlockId,
+    lineage: SemanticResultId,
+    representation: Representation,
+    builtBySpread?: boolean
+  ) => IrValueId
   readonly allocateArrayObject: (
     block: IrBlockId,
     lineage: SemanticResultId,
@@ -289,7 +303,9 @@ export interface IrBodyBuilder {
     lineage: SemanticResultId,
     functionId: FunctionId,
     captures: readonly IrOperand[],
-    representation: Representation
+    representation: Representation,
+    /** See `AllocateCallableOperation.functionKind`. */
+    functionKind?: AllocateCallableOperation['functionKind']
   ) => IrValueId
   readonly bindCallable: (
     block: IrBlockId,
@@ -567,9 +583,17 @@ export const createIrBodyBuilder = (
     return result?.id ?? null
   }
 
-  const deleteProperty: IrBodyBuilder['delete'] = (block, lineage, receiver, key, strict, representation) => {
+  const deleteProperty: IrBodyBuilder['delete'] = (block, lineage, receiver, key, strict, representation, typedComputedDelete) => {
     const result = mintOptionalResult(representation)
-    append(block, { kind: 'delete', lineage, receiver, key, strict, result })
+    append(block, {
+      kind: 'delete',
+      lineage,
+      receiver,
+      key,
+      strict,
+      result,
+      ...(typedComputedDelete === undefined ? {} : { typedComputedDelete })
+    })
     return result?.id ?? null
   }
 
@@ -609,8 +633,8 @@ export const createIrBodyBuilder = (
     return result?.id ?? null
   }
 
-  const spreadCopy: IrBodyBuilder['spreadCopy'] = (block, lineage, receiver, source) => {
-    append(block, { kind: 'spread-copy', lineage, receiver, source })
+  const spreadCopy: IrBodyBuilder['spreadCopy'] = (block, lineage, receiver, source, overwrittenKeys) => {
+    append(block, { kind: 'spread-copy', lineage, receiver, source, ...(overwrittenKeys?.length ? { overwrittenKeys } : {}) })
   }
 
   const call: IrBodyBuilder['call'] = (
@@ -798,9 +822,9 @@ export const createIrBodyBuilder = (
     terminate(block, { kind: 'switch', lineage, discriminant, cases, defaultTarget })
   }
 
-  const allocateOrdinaryObject: IrBodyBuilder['allocateOrdinaryObject'] = (block, lineage, representation) => {
+  const allocateOrdinaryObject: IrBodyBuilder['allocateOrdinaryObject'] = (block, lineage, representation, builtBySpread) => {
     const result = mintResult(representation)
-    append(block, { kind: 'allocate-ordinary-object', lineage, result })
+    append(block, { kind: 'allocate-ordinary-object', lineage, result, ...(builtBySpread ? { builtBySpread: true as const } : {}) })
     return result.id
   }
 
@@ -810,9 +834,16 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
-  const allocateCallable: IrBodyBuilder['allocateCallable'] = (block, lineage, functionId, captures, representation) => {
+  const allocateCallable: IrBodyBuilder['allocateCallable'] = (block, lineage, functionId, captures, representation, functionKind) => {
     const result = mintResult(representation)
-    append(block, { kind: 'allocate-callable', lineage, functionId, captures, result })
+    append(block, {
+      kind: 'allocate-callable',
+      lineage,
+      functionId,
+      captures,
+      result,
+      ...(functionKind === undefined ? {} : { functionKind })
+    })
     return result.id
   }
 

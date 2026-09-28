@@ -131,6 +131,9 @@ export const bodyReadsThis = (node: ts.Node, includeSuper = false): boolean => {
  * `deriveObject` does not have and this function cannot manufacture.
  */
 import { emptyDeclaredMemberCensus, type DeclaredMemberCensus } from './structural-declarations.js'
+import { isStandardInterfaceType } from './derived-expression-type.js'
+
+const receiverTakingStandardMembers: ReadonlyMap<string, ReadonlySet<string>> = new Map([['PropertyDescriptor', new Set(['get', 'set'])]])
 
 export const createReceiverResolver = (
   checker: ts.TypeChecker,
@@ -533,6 +536,24 @@ export const createReceiverResolver = (
     // protocols, which carry their receiver separately from a JavaScript
     // callable's frame, and its declaration is the open `Map<K, V>` rather than
     // the instantiated receiver at a use site.
+    // Standard-library members whose function VALUE is the one a program
+    // calls with a receiver of its choosing: the standard `PropertyDescriptor`'s
+    // `get`/`set` accessor pair, which [[Get]]/[[Set]] (10.1.8.1, 10.1.9.2)
+    // call with the object read or written, and `Object.prototype`'s own-property
+    // tests, which answer for their `this` (`hasOwnProperty.call(o, k)`). The
+    // declarations spell no `this`, but the function is entered with one.
+    if (ts.isInterfaceDeclaration(parent) && ts.isMethodSignature(declaration) && parent.getSourceFile().hasNoDefaultLib) {
+      const declared = checker.getSymbolAtLocation(parent.name)
+      const key = ts.isIdentifier(declaration.name) ? declaration.name.text : null
+      const interfaceName = [...receiverTakingStandardMembers].find(
+        ([name, keys]) =>
+          key !== null &&
+          keys.has(key) &&
+          declared !== undefined &&
+          isStandardInterfaceType(checker, parent, name, checker.getDeclaredTypeOfSymbol(declared))
+      )
+      if (interfaceName) return checker.getAnyType()
+    }
     if (ts.isInterfaceDeclaration(parent) && ts.isMethodSignature(declaration) && !parent.getSourceFile().hasNoDefaultLib) {
       const member = checker.getSymbolAtLocation(declaration.name)
       if (member && declaredMembers.implementationReadsReceiver(member)) {

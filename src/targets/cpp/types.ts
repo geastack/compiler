@@ -781,7 +781,7 @@ export const cppCommonJsModuleName = (owner: string): string => `gea_commonjs_mo
 export const cppCommonJsRecordName = (owner: string): string => `gea_commonjs_record_${sanitizeForCppIdentifier(owner)}`
 
 /** The tag type spelled inside `gea::NativeHandle<...>` for one versioned host protocol. */
-const cppNativeHandleTag = (protocol: string, version: number): string =>
+export const cppNativeHandleTag = (protocol: string, version: number): string =>
   `gea_native_protocol_${sanitizeForCppIdentifier(protocol)}_v${version}`
 
 // `ScalarDomain | TypedArrayElementDomain`: this is also the one authority a

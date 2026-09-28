@@ -522,6 +522,26 @@ export const emitDateConstruct = (
       lines.push(`${name} = gea::makeRef<${cppDateType}>(${operandText(ctx, first)});`)
       return
     }
+    // An absent string or number: `new Date(undefined)` is ToNumber(undefined),
+    // NaN -- an invalid date (21.4.2.1 step 4.b) -- and a present one is the
+    // case above (cookie's `new Date(val)` after `if (!val) break`).
+    if (
+      carrier.kind === 'optional' &&
+      carrier.absence === 'undefined' &&
+      (carrier.payload.kind === 'string' || (carrier.payload.kind === 'scalar' && carrier.payload.domain === 'number'))
+    ) {
+      const text = operandText(ctx, first)
+      lines.push(
+        `${name} = (${text}).has_value() ? gea::makeRef<${cppDateType}>(*(${text})) : gea::makeRef<${cppDateType}>(std::numeric_limits<double>::quiet_NaN());`
+      )
+      return
+    }
+    // A box: whether it is a Date (copied by time value), a string or a
+    // number is its own run-time fact (`gea::dateFromValue`).
+    if (carrier.kind === 'dynamic') {
+      lines.push(`${name} = gea::dateFromValue(${operandText(ctx, first)});`)
+      return
+    }
     throw createCppEmitBlockedError(
       'host-invocation:Date.construct',
       `constructs a Date from a single "${representationKey(carrier)}" argument; ECMA-262 21.4.2.1 step 4 applies ` +

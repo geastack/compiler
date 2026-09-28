@@ -264,6 +264,7 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
         ? {
             functionSource: callable.getText(),
             generatorFunction: 'asteriskToken' in callable && callable.asteriskToken !== undefined,
+            asyncFunction: (ts.getCombinedModifierFlags(callable) & ts.ModifierFlags.Async) !== 0,
             ...(declaresExactArms(callable) ? { exactArms: true } : {}),
             ...(ownPrototypePropertyOf(callable) === null ? {} : { ownPrototypeProperty: ownPrototypePropertyOf(callable) === true }),
             ...(isNamedCallableMember(callable)
@@ -364,6 +365,7 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
         classConstructorBodyOf: context.identities.declarationIdOf(node),
         functionSource: written.getText(),
         generatorFunction: 'asteriskToken' in written && written.asteriskToken !== undefined,
+        asyncFunction: (ts.getCombinedModifierFlags(written) & ts.ModifierFlags.Async) !== 0,
         ...(declaresExactArms(written) ? { exactArms: true } : {}),
         ...(ownPrototypePropertyOf(written) === null ? {} : { ownPrototypeProperty: ownPrototypePropertyOf(written) === true }),
         caller: candidate.caller,

@@ -175,12 +175,25 @@ export interface BindingOperation extends SemanticOperationBase {
   readonly mutable: boolean
   /** A read before initialization is a TDZ throw, which is observable behavior. */
   readonly temporalDeadZone: boolean
+  /**
+   * This introduces a lexical binding a loop creates afresh each iteration
+   * (`isIterationScopedDeclaration`): a closure made in one iteration keeps
+   * that iteration's cell, so at module scope it is not a run-once global.
+   */
+  readonly iterationScoped?: true
   /** This initializes a formal parameter before the enclosing body's declarations and statements. */
   readonly parameterInitialization?: boolean
   /** This initializes a rest parameter: its value is the fresh Array the call's argument packing built. */
   readonly restPacked?: boolean
   /** This initializes a direct body-level function declaration during FunctionDeclarationInstantiation. */
   readonly hoistedFunctionInitialization?: boolean
+  /**
+   * A read the program's own type assertion wraps (`(handler as Handler)(…)`):
+   * the author stating which arm of the cell's union the value holds, exactly
+   * as `SemanticOperand.asserted` states it for an operand. Read only where
+   * the cell's carrier has no conversion into the read's for every arm.
+   */
+  readonly asserted?: true
   /**
    * Set only on the 'declare' introduction of an ambient value declaration: a
    * cell this program names but never writes, because a host supplies the
@@ -333,6 +346,21 @@ export interface AllocationOperation extends SemanticOperationBase {
    */
   readonly generatorFunction?: boolean
   /**
+   * Whether the declaration is an `async` function -- with
+   * `generatorFunction`, which intrinsic its `constructor` names
+   * (`%AsyncFunction%`, `%GeneratorFunction%`, `%AsyncGeneratorFunction%` or
+   * `%Function%`). A fact of the declaration: the carrier of an `async` body
+   * and of an ordinary function returning a promise is the same. Present
+   * under the same condition as `functionSource`.
+   */
+  readonly asyncFunction?: boolean
+  /**
+   * An object literal whose first member is a spread copied at run time
+   * (`spreadCopiesStatically`): its value is whatever that copy builds, before
+   * any other member is installed.
+   */
+  readonly leadingRuntimeSpread?: true
+  /**
    * Whether the declaration carries `@gea-exact-arms`: inside this body, a
    * tagged-union value entering a slot that is EXACTLY one of its arms
    * projects that arm and throws a `TypeError` on any other, instead of the
@@ -452,6 +480,8 @@ export interface PropertyDescriptorShape {
   readonly writable: boolean
   readonly enumerable: boolean
   readonly configurable: boolean
+  /** An accessor half the definition installs (its value is the function), not a data property. */
+  readonly accessor?: 'get' | 'set'
 }
 
 /** Operators and coercions. */
@@ -529,6 +559,13 @@ export interface ProtocolOperation extends SemanticOperationBase {
   readonly family: 'protocol'
   readonly protocol: 'iterator' | 'async-iterator' | 'spread' | 'enumerate' | 'dispose' | 'async-dispose'
   readonly step: 'get-method' | 'get-iterator' | 'next' | 'close' | 'return' | 'throw'
+  /**
+   * An object spread's keys that a LATER member of the same literal writes
+   * unconditionally -- a named member, or a required key of a later spread
+   * whose source cannot be absent. A required receiver field the copy may
+   * leave unset is set before anything can read the literal.
+   */
+  readonly overwrittenKeys?: readonly string[]
 }
 
 /** Exception regions, labelled targets, and generator/async resume channels. */

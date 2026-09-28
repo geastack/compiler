@@ -13,7 +13,7 @@ import { resolveExpressionOperand } from './boundary.js'
 import type { IdentityTable } from '../identities.js'
 import type { ProducerContext } from '../producer-context.js'
 import { isDynamicIterationSource, mintIteratorSteps } from './protocol.js'
-import { hasNativeEnumerationCursor, hasNativeIterationCursor, isGeneratorType, valueEdgesInto } from './shared.js'
+import { hasNativeEnumerationCursor, hasNativeIterationCursor, isAsyncGeneratorType, isGeneratorType, valueEdgesInto } from './shared.js'
 import { alwaysAbrupt } from '../evaluation-order.js'
 
 /**
@@ -244,7 +244,7 @@ const contributeForOfIn = (
     ? !isAwait && hasNativeIterationCursor(context, source.type)
     : hasNativeEnumerationCursor(context, source.type)
   const dynamicSource = isDynamicIterationSource(context, source.type)
-  const nativeGeneratorSource = isForOf && !isAwait && isGeneratorType(context, source.type)
+  const nativeGeneratorSource = isForOf && (isAwait ? isAsyncGeneratorType(context, source.type) : isGeneratorType(context, source.type))
   // Every general synchronous iterator record needs IteratorClose routing.
   // Native array/string/set cursors keep their storage walk and are never
   // boxed; a typed custom iterable reaches the same protected region through
@@ -256,7 +256,7 @@ const contributeForOfIn = (
     protocol,
     { ...source, iterated: node.expression },
     {
-      includeGetMethod: !arrayFastPath && isForOf && !dynamicSource,
+      includeGetMethod: !arrayFastPath && isForOf && !dynamicSource && !(isAwait && nativeGeneratorSource),
       includeClose: isForOf && !isAwait && (!arrayFastPath || nativeGeneratorSource)
     }
   )

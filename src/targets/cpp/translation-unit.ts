@@ -809,7 +809,9 @@ const constructionsOf = (
   linkage: CppLinkage,
   bodyAbis: ReadonlyMap<string, CallableAbi | null>,
   /** The classes whose struct holds `gea_method_state` statically -- `cppRecordDeclarations`' own report, never re-derived here. */
-  staticMethodStateClasses: ReadonlySet<DeclarationId> = new Set()
+  staticMethodStateClasses: ReadonlySet<DeclarationId> = new Set(),
+  /** The classes whose constructor may hand back a replacement object (`constructorOverrideClassesOf`). */
+  constructorOverrideClasses: ReadonlySet<DeclarationId> = new Set()
 ): readonly ClassConstruction[] => {
   // Layout-only classes publish no requested construction. Every runtime
   // construction still passes the complete ABI/initialization checks below.
@@ -900,6 +902,11 @@ const constructionsOf = (
         allocation,
         ...(staticState ? [] : [`${cppReceiverName}->gea_method_state = ${adoptedState};`]),
         ...initialization,
+        ...(constructorOverrideClasses.has(layout.declaration)
+          ? [
+              `if (gea::Ref<void> gea_override = gea::detail::takeConstructorOverride()) return gea_override.template staticCast<${className}>();`
+            ]
+          : []),
         `return ${cppReceiverName};`,
         '}'
       ].join('\n'),
@@ -924,6 +931,40 @@ const constructionsOf = (
  * need no prototype there: each is defined before any body, and its thunk
  * follows it directly.
  */
+/**
+ * The classes whose constructor body returns an object other than its own
+ * receiver ([[Construct]] step 10.a), limited to a base class nothing
+ * extends: through `super(...)` the replacement would also become the
+ * subclass constructor's `this`, which the slot does not model.
+ */
+const constructorOverrideClassesOf = (
+  bodies: readonly IrBody[],
+  classes: ReadonlyMap<DeclarationId, ClassLayout>
+): ReadonlySet<DeclarationId> => {
+  const extended = new Set([...classes.values()].flatMap((layout) => (layout.base === null ? [] : [layout.base])))
+  const bodyOf = new Map(bodies.map((body) => [String(body.sourceOwner), body]))
+  const overriding = new Set<DeclarationId>()
+  for (const layout of classes.values()) {
+    if (layout.constructor === null || layout.base !== null || extended.has(layout.declaration)) continue
+    const body = bodyOf.get(String(layout.constructor))
+    if (!body) continue
+    const blocks = [...body.blocks.values()]
+    const receivers = new Set(
+      blocks.flatMap((block) => block.operations.flatMap((operation) => (operation.kind === 'receiver' ? [operation.result.id] : [])))
+    )
+    const returnsReplacement = blocks.some(
+      (block) =>
+        block.terminator.kind === 'return' &&
+        block.terminator.value !== undefined &&
+        block.terminator.value !== null &&
+        block.terminator.value.representation.kind === 'class-ref' &&
+        !receivers.has(block.terminator.value.value)
+    )
+    if (returnsReplacement) overriding.add(layout.declaration)
+  }
+  return overriding
+}
+
 const constructDefinitionsOf = (constructions: readonly ClassConstruction[]): readonly string[] => [
   ...constructions.flatMap((construction) => (construction.initializerPrototype === null ? [] : [construction.initializerPrototype])),
   ...constructions.flatMap((construction) => construction.definitions)
@@ -1717,6 +1758,7 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
   // set has to come from the carriers rather than from the operations -- see
   // `recordAccessorBodiesOf`.
   const captures = buildCaptureIndex(input.bodies, input.placements, recordAccessorBodiesOf(emissionRepresentations, input.deriver))
+  const constructorOverrideClasses = constructorOverrideClassesOf(input.bodies, input.classes)
   const newTargetReaders = new Set(
     input.bodies.flatMap((body) =>
       [...body.blocks.values()].some((block) => block.operations.some((operation) => operation.kind === 'new-target'))
@@ -2340,9 +2382,26 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
   // Taken from every body, not only the ones a thunk was rendered for: the tag
   // is named at the ALLOCATION site, and a body can reach one without
   // `thunkOf` producing a thunk of its own.
-  const declarationTags = [...new Set(input.bodies.map((body) => cppCallableDeclarationTagName(body.sourceOwner)))].map(
-    (name) => `inline constexpr char ${name} = 0;`
-  )
+  // A declaration that is not an ordinary function registers its kind against
+  // the same tag, once, at static initialization: the runtime reads which
+  // intrinsic a function object's `constructor` names from the declaration
+  // identity it was allocated with (`gea::functionConstructorOf`).
+  const kindOfTag = new Map<string, string>()
+  for (const body of input.bodies) {
+    const kind = body.async === true ? (body.generator === true ? 'AsyncGenerator' : 'Async') : body.generator === true ? 'Generator' : null
+    if (kind !== null) kindOfTag.set(cppCallableDeclarationTagName(body.sourceOwner), kind)
+  }
+  const declarationTags = [...new Set(input.bodies.map((body) => cppCallableDeclarationTagName(body.sourceOwner)))].flatMap((name) => {
+    const kind = kindOfTag.get(name)
+    return [
+      `inline constexpr char ${name} = 0;`,
+      ...(kind === undefined
+        ? []
+        : [
+            `inline const bool ${name}_kind = gea::detail::registerFunctionKind(gea::detail::callableDeclarationTagFor<&${name}>(), gea::FunctionKind::${kind});`
+          ])
+    ]
+  })
 
   // A refused body is an answer, not a crash. Emission is the last stage that
   // can discover a missing capability, and the discovery has to travel back as
@@ -2369,7 +2428,16 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
   // resolves it concretely through the plugin's render bridge, so raising it
   // here failed 40-odd programs that had nothing wrong with them.
 
-  const constructions = constructionsOf(programSite, deriver, input.classes, refused, linkage, abiByBody, structs.staticMethodStateClasses)
+  const constructions = constructionsOf(
+    programSite,
+    deriver,
+    input.classes,
+    refused,
+    linkage,
+    abiByBody,
+    structs.staticMethodStateClasses,
+    constructorOverrideClasses
+  )
 
   // One intern table for the whole program, shared by every body: two bodies
   // that name the same `Symbol.for` key must reach the same static, and a
@@ -2428,7 +2496,8 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
         callableIdentityDemand,
         nativeIntegrityRestricted,
         fixedFieldStateConstant,
-        newTargetReaders
+        newTargetReaders,
+        constructorOverrideClasses
       )
       const stableEntry = stableBorrowEntries.get(cppBodyName(body.sourceOwner))
       const commonJsScope =

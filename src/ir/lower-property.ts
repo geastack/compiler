@@ -8,7 +8,7 @@ import { IrLoweringBlockedError } from './lower-graph.js'
 import { pendingShortCircuitOf } from './lower-short-circuit.js'
 import { methodValueOriginOf } from '../projection/callee.js'
 import { propertyReadResultRepresentationOf } from '../projection/fields.js'
-import { typedComputedReadRecipeOf, typedComputedWriteRecipeOf } from './typed-property-access.js'
+import { typedComputedDeleteRecipeOf, typedComputedReadRecipeOf, typedComputedWriteRecipeOf } from './typed-property-access.js'
 import {
   namedOperand,
   optionalResultRepresentation,
@@ -151,7 +151,15 @@ export const lowerProperty = (ctx: LoweringContext, block: IrBlockId, operation:
       registerResult(
         ctx,
         operation,
-        ctx.builder.delete(block, lineage, receiver, key, operation.strict, optionalResultRepresentation(ctx, operation, 'value'))
+        ctx.builder.delete(
+          block,
+          lineage,
+          receiver,
+          key,
+          operation.strict,
+          optionalResultRepresentation(ctx, operation, 'value'),
+          typedComputedDeleteRecipeOf(ctx.graph, operation, receiver.representation, ctx.constantDeriver, ctx.program.classes) ?? undefined
+        )
       )
       return
     }
@@ -211,7 +219,12 @@ export const lowerProperty = (ctx: LoweringContext, block: IrBlockId, operation:
           receiver,
           key,
           value,
-          { writable: descriptor.writable, enumerable: descriptor.enumerable, configurable: descriptor.configurable },
+          {
+            writable: descriptor.writable,
+            enumerable: descriptor.enumerable,
+            configurable: descriptor.configurable,
+            ...(descriptor.accessor === undefined ? {} : { accessor: descriptor.accessor })
+          },
           optionalResultRepresentation(ctx, operation, 'value'),
           owner ? resolveRequiredOperand(ctx, block, lineage, owner) : undefined
         )

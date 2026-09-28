@@ -23,6 +23,7 @@ import {
   calleeRenderingOf,
   constructAbiOfCallee,
   deferredCalleeOf,
+  directHostMemberCallOf,
   isClosedContiguousTupleRecord,
   returnPayloadOf
 } from './callee.js'
@@ -414,16 +415,45 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
    *   side is a String). A BigInt beside a Number is a `never` coercion, the
    *   TypeError the language throws, refused by name at certification.
    */
+  const mayHoldBigInt = (candidate: Representation): boolean =>
+    candidate.kind === 'dynamic' ||
+    (candidate.kind === 'scalar' && candidate.domain === 'bigint') ||
+    (candidate.kind === 'optional' && mayHoldBigInt(candidate.payload)) ||
+    (candidate.kind === 'tagged-union' && candidate.arms.some((arm) => mayHoldBigInt(arm.value)))
+
+  const isOptionalNumber = (carrier: Representation): boolean =>
+    carrier.kind === 'optional' &&
+    carrier.absence === 'undefined' &&
+    carrier.payload.kind === 'scalar' &&
+    (carrier.payload.domain === 'number' || carrier.payload.domain === 'float64')
+
   const binarySlot = (operation: ComputationOperation, operand: SemanticOperand): SlotAnswer => {
     const left = operandOf(operation, 'left')
     const right = operandOf(operation, 'right')
     const leftCarrier = left ? carrierOf(operation, left) : null
     const rightCarrier = right ? carrierOf(operation, right) : null
-    if (!leftCarrier || !rightCarrier || representationKey(leftCarrier) === representationKey(rightCarrier)) return raw('compute-operand')
+    if (!leftCarrier || !rightCarrier) return raw('compute-operand')
+    // Two identical carriers meet the operator as they are -- except a number
+    // that may be absent, which no operator spells: ToNumber(undefined) is NaN.
+    if (representationKey(leftCarrier) === representationKey(rightCarrier) && !isOptionalNumber(leftCarrier)) return raw('compute-operand')
     if (operand.role !== 'left' && operand.role !== 'right') return raw('compute-operand')
     const leftString = provablyStringPrimitive(leftCarrier, input.deriver)
     const rightString = provablyStringPrimitive(rightCarrier, input.deriver)
-    if (relationalOperators.has(operation.operator)) return leftString && rightString ? coerce('ToString') : coerce('ToNumber')
+    // IsLessThan compares a BigInt with a Number or a String mathematically
+    // (7.2.13); ToNumber would throw for the BigInt instead.
+    if (relationalOperators.has(operation.operator)) {
+      if (leftString && rightString) return coerce('ToString')
+      // One boxed side: the box's live type decides between the string,
+      // BigInt and numeric comparisons, which the dynamic IsLessThan
+      // (`gea::dynamicLess`...) decides at run time -- so the other side is
+      // boxed to meet it rather than converted by a guess.
+      const dynamicSide = leftCarrier.kind === 'dynamic' ? leftCarrier : rightCarrier.kind === 'dynamic' ? rightCarrier : null
+      if (dynamicSide !== null) {
+        const own = operand.role === 'left' ? leftCarrier : rightCarrier
+        return own.kind === 'dynamic' ? raw('compute-operand') : slot(dynamicSide, 'dynamic')
+      }
+      return mayHoldBigInt(leftCarrier) || mayHoldBigInt(rightCarrier) ? raw('compute-operand') : coerce('ToNumber')
+    }
     if (operation.operator === '+') {
       if (resultCarrier(operation, 'value')?.kind === 'string') return raw('compute-operand')
       // A tagged union's live arm is as unknown here as a dynamic operand's
@@ -451,17 +481,47 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
    * is StringToNumber rather than an operator the carrier has no spelling for.
    */
   const numericUnarySlot = (operation: ComputationOperation, operand: SemanticOperand): SlotAnswer => {
+    // `x++`/`--x` apply ToNumeric first (13.4.2.1 step 2), exactly as `-x` does.
+    if (operation.form === 'update') {
+      const carrier = carrierOf(operation, operand)
+      return carrier && isOptionalNumber(carrier) ? coerce('ToNumber') : raw('compute-operand')
+    }
     if (operation.operator !== '+' && operation.operator !== '-' && operation.operator !== '~') return raw('compute-operand')
     const carrier = carrierOf(operation, operand)
     if (!carrier || carrier.kind === 'unresolved') return raw('compute-operand')
     if (carrier.kind === 'scalar' && (carrier.domain === 'number' || carrier.domain === 'float64')) return raw('compute-operand')
     if (operation.operator === '+') return coerce('ToNumber')
-    const mayHoldBigInt = (candidate: Representation): boolean =>
-      candidate.kind === 'dynamic' ||
-      (candidate.kind === 'scalar' && candidate.domain === 'bigint') ||
-      (candidate.kind === 'optional' && mayHoldBigInt(candidate.payload)) ||
-      (candidate.kind === 'tagged-union' && candidate.arms.some((arm) => mayHoldBigInt(arm.value)))
     return mayHoldBigInt(carrier) ? raw('compute-operand') : coerce('ToNumber')
+  }
+
+  /**
+   * The coercion a language builtin applies to this argument itself
+   * (`coreHostFunctionArgumentCoercions`), stated on the callee's
+   * `host-function` placement. An argument already of the coercion's target
+   * carrier keeps its ordinary slot.
+   */
+  const hostFunctionArgumentCoercionOf = (operation: InvocationOperation, operand: SemanticOperand): SlotAnswer | null => {
+    const callee = operandOf(operation, 'callee')
+    if (callee?.source.kind !== 'result') return null
+    const producerId = input.graph.results.get(callee.source.result)
+    const producer = producerId === undefined ? undefined : input.graph.operations.get(producerId)
+    if (producer?.family !== 'binding' || producer.action !== 'read') return null
+    const storage = input.placements.get(producer.declaration)?.storage
+    const coercion = storage?.kind === 'host-function' ? storage.argumentCoercions?.[operand.ordinal] : undefined
+    if (!coercion) return null
+    const carrier = carrierOf(operation, operand)
+    const target = coercionTargetOf(coercion)
+    return carrier !== null && representationKey(carrier) === representationKey(target) ? null : coerce(coercion)
+  }
+
+  /** The same step stated on the row of the host member a call reads directly. */
+  const hostMemberArgumentCoercionOf = (operation: InvocationOperation, operand: SemanticOperand): SlotAnswer | null => {
+    const row = directHostMemberCallOf(input, operation)?.row
+    const coercion = row?.kind === 'method' && row.arity === 'call-site' ? row.argumentCoercions?.[operand.ordinal] : undefined
+    if (!coercion) return null
+    const carrier = carrierOf(operation, operand)
+    if (carrier === null || carrier.kind === 'dynamic') return null
+    return representationKey(carrier) === representationKey(coercionTargetOf(coercion)) ? null : coerce(coercion)
   }
 
   const invocationSlot = (operation: InvocationOperation, operand: SemanticOperand): SlotAnswer => {
@@ -508,6 +568,7 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
     // convention (`calleeRenderingOf`): its receiver is the template's own
     // subject and its arguments enter C++ overloads in their own carriers.
     if (operation.internalMethod === 'call' && calleeRenderingOf(input, operation) === 'template') {
+      if (role === 'argument') return hostMemberArgumentCoercionOf(operation, operand) ?? raw('host-overload')
       return role === 'receiver' ? raw('receiver') : role === 'spread-argument' ? raw('spread-range') : raw('host-overload')
     }
     const constructs = operation.internalMethod === 'construct' || operation.resultDivergence.kind === 'super-constructor-initialization'
@@ -518,7 +579,7 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
       return raw('discarded')
     }
     if (role === 'spread-argument') return raw('spread-range')
-    if (role === 'argument') return callArgumentSlotOf(abi, callee, operand.ordinal)
+    if (role === 'argument') return hostFunctionArgumentCoercionOf(operation, operand) ?? callArgumentSlotOf(abi, callee, operand.ordinal)
     return unclassified(`role "${role}" on an invocation`)
   }
 
@@ -618,6 +679,7 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
           case 'binary':
             return binarySlot(operation, operand)
           case 'update':
+            return numericUnarySlot(operation, operand)
           case 'equality':
           case 'typeof':
           case 'instanceof':
@@ -741,12 +803,20 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
           }
           case 'array-pattern-close':
             return raw('iterator-record')
-          case 'rest-element':
+          case 'rest-element': {
+            // A dynamic rest object is CopyDataProperties onto a fresh ordinary
+            // object, which walks the source's own keys at run time: a typed
+            // source is boxed to be walked (its box answers its own fields).
+            const rest = resultCarrier(operation, 'value')
+            const base = role === 'base' ? carrierOf(operation, operand) : null
+            if (rest?.kind === 'dynamic' && base !== null && base.kind !== 'dynamic' && base.kind !== 'iterator')
+              return slot(rest, 'dynamic')
             return role === 'base'
               ? raw('receiver')
               : role === 'excluded-key'
                 ? raw('key')
                 : unclassified(`role "${role}" on a rest element`)
+          }
           case 'default-value': {
             const result = resultCarrier(operation, 'value')
             return result ? slot(result, 'phi') : unclassified('a default-value step with no result carrier')

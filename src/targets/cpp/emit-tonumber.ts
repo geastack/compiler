@@ -26,7 +26,12 @@ import { createCppEmitBlockedError, defineValue, operandText, type EmitContext }
  * `null` is returned for a carrier this has no conversion for; the caller
  * names the refusal.
  */
-export const toNumberText = (text: string, carrier: Representation): string | null => {
+/**
+ * `bigint` says which algorithm is asked: ToNumber proper (7.1.4), whose
+ * answer for a BigInt is a TypeError -- `1 - 1n`, `isNaN(1n)`, `+1n` all throw
+ * it -- or the `Number(value)` constructor (21.1.1.1), which converts one.
+ */
+export const toNumberText = (text: string, carrier: Representation, bigint: 'type-error' | 'number' = 'type-error'): string | null => {
   // Wrapped in `std::string(...)` even when `text` is already one: a STRING
   // CONSTANT's text is a bare C++ literal (`"10"`, type `const char*`), and
   // `toNumber` is overloaded on `bool` as well as `const std::string&` --
@@ -46,10 +51,7 @@ export const toNumberText = (text: string, carrier: Representation): string | nu
   if (carrier.kind === 'dynamic') return dynamicToNumberText(text)
   if (carrier.kind === 'scalar') {
     if (carrier.domain === 'boolean') return `gea::host::detail::toNumber(static_cast<bool>(${text}))`
-    // ToNumber of a BigInt is a TypeError in the language, and the separate
-    // `ToNumeric` path that does convert one needs arbitrary-precision digits
-    // this backend has not got. Neither is guessed at.
-    if (carrier.domain === 'bigint') return null
+    if (carrier.domain === 'bigint') return bigint === 'number' ? `(${text}).toNumber()` : `gea::host::detail::toNumberOfBigInt(${text})`
     // Already a number: ECMAScript's ToNumber of a Number is the identity, so
     // only the widening every numeric domain does to reach `double` is left.
     return `static_cast<double>(${text})`
@@ -61,7 +63,7 @@ export const toNumberText = (text: string, carrier: Representation): string | nu
   // once. `text` is an SSA name (`vN`), so reading it twice in one conditional
   // has no effect to duplicate.
   if (carrier.kind === 'optional') {
-    const present = toNumberText(`(*${text})`, carrier.payload)
+    const present = toNumberText(`(*${text})`, carrier.payload, bigint)
     if (present === null) return null
     const absent = carrier.absence === 'null' ? 'gea::host::detail::toNumberNull()' : 'gea::host::detail::toNumberUndefined()'
     return `(${text}.has_value() ? static_cast<double>(${present}) : static_cast<double>(${absent}))`
@@ -74,7 +76,7 @@ export const toNumberText = (text: string, carrier: Representation): string | nu
   if (carrier.kind === 'tagged-union') {
     const arms: string[] = []
     for (const [index, arm] of carrier.arms.entries()) {
-      const converted = toNumberText(`${text}.get<${index}>()`, arm.value)
+      const converted = toNumberText(`${text}.get<${index}>()`, arm.value, bigint)
       if (converted === null) return null
       arms.push(`static_cast<double>(${converted})`)
     }
@@ -110,10 +112,9 @@ const unconvertibleToNumberCarrier = (carrier: Representation): Representation =
 export const toNumberRefusal = (outer: Representation): string => {
   const carrier = unconvertibleToNumberCarrier(outer)
   const within = representationKey(carrier) === representationKey(outer) ? '' : ` (inside a "${representationKey(outer)}")`
-  return carrier.kind === 'scalar' && carrier.domain === 'bigint'
-    ? `ToNumber of a bigint${within} is a lossy conversion the language defines separately, and it is not implemented`
-    : `ToNumber of a "${representationKey(carrier)}" carrier${within} needs ToPrimitive, which can call user code and is ` +
-        'not implemented'
+  return (
+    `ToNumber of a "${representationKey(carrier)}" carrier${within} needs ToPrimitive, which can call user code and is ` + 'not implemented'
+  )
 }
 
 /**

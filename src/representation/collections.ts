@@ -109,6 +109,27 @@ export const hasReferenceIdentity = (representation: Representation): boolean =>
  * how a carrier for "some Map" would get minted. Same guard as v1's
  * `checkerArguments.length !== TYPE_ARGUMENT_COUNT[family]`.
  */
+/**
+ * A function held in a collection is called through the value `get`, `keys`
+ * or iteration hands back, which supplies no receiver. The checker types a
+ * stored bound method (`@fastify/ajv-compiler`'s
+ * `validatorPool.set(key, compiler.buildValidatorFunction.bind(compiler))`)
+ * with the method's own type, whose convention names the class it was
+ * declared on; stored under that convention, two pools of two classes' bound
+ * methods could not meet in one return slot. The stored convention states no
+ * receiver, and an unbound method value stored there would have to supply
+ * one, which no conversion invents.
+ */
+export const receiverFree = (carrier: Representation): Representation => {
+  if (carrier.kind === 'function-value-dispatch' && carrier.abi.receiver !== null)
+    return { ...carrier, abi: { ...carrier.abi, receiver: null } }
+  if (carrier.kind === 'optional') {
+    const payload = receiverFree(carrier.payload)
+    return payload === carrier.payload ? carrier : { ...carrier, payload }
+  }
+  return carrier
+}
+
 export const deriveKeyedCollection = (
   family: KeyedCollectionFamily,
   shape: Extract<StructuralShape, { kind: 'declared' }>,
@@ -129,8 +150,8 @@ export const deriveKeyedCollection = (
   // `typedJsCollectionMapValueCarrier`/`typedJsCollectionSetElementCarrier`
   // promotion for the identical reason (a record or callable held in a
   // collection has exactly one legal physical storage form).
-  const key = deriveStored(shape.typeArguments[0]!)
-  const value = pair ? deriveStored(shape.typeArguments[1]!) : null
+  const key = receiverFree(deriveStored(shape.typeArguments[0]!))
+  const value = pair ? receiverFree(deriveStored(shape.typeArguments[1]!)) : null
   if (key.kind === 'unresolved') return unresolved(`a ${family} key carries no representation: ${key.reason}`)
   if (value?.kind === 'unresolved') return unresolved(`a ${family} value carries no representation: ${value.reason}`)
   // A weak collection's key must be a REFERENCE. ECMA-262 24.3/24.4 admit

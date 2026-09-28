@@ -283,8 +283,13 @@ export const toStringTextOver = (
   // required comma separator, hole handling and per-element ToString. Admit
   // exactly the element carriers that renderer accepts, so an array whose
   // elements need arbitrary user-code coercion still refuses here instead of
-  // being boxed or guessed.
-  if (carrier.kind === 'array-object' && (carrier.element.kind === 'string' || carrier.element.kind === 'scalar')) {
+  // being boxed or guessed. A boxed element is one it accepts: its own
+  // ToString is the dynamic boundary's ToPrimitive, and a nullish one
+  // contributes nothing, as step 3.d says.
+  if (
+    carrier.kind === 'array-object' &&
+    (carrier.element.kind === 'string' || carrier.element.kind === 'scalar' || carrier.element.kind === 'dynamic')
+  ) {
     return `gea::runtime::array::join(${text})`
   }
   // ECMA-262 23.2.3.18 gives TypedArray the same comma-joined ToString shape

@@ -66,3 +66,37 @@ const inheritsFrom = (checker: ts.TypeChecker, derived: ts.InterfaceType, base: 
     return parentClass !== null && inheritsFrom(checker, parentClass, base, depth + 1)
   })
 }
+
+/**
+ * The same union for a stated parameter a CALLER hands a foreign class
+ * instance: ajv's `cxt.block$data(nil, loopAllRequired)` passes the `_Code`
+ * `nil` where `block$data(valid: Name, ...)` states `Name`. `argumentTypes`
+ * are the types of what the program's attributed callers pass at this
+ * position; `null` unless one of them is an instance of a class that is
+ * neither a statement arm nor a subclass of one.
+ */
+export const foreignClassArgumentTypeOf = (
+  checker: ts.TypeChecker,
+  parameter: ts.ParameterDeclaration,
+  argumentTypes: readonly ts.Type[]
+): ts.Type | null => {
+  if (!parameter.type || parameter.dotDotDotToken || !ts.isIdentifier(parameter.name)) return null
+  const stated = checker.getTypeFromTypeNode(parameter.type)
+  const arms = (stated.isUnion() ? stated.types : [stated]).filter(
+    (arm) => (arm.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null)) === 0
+  )
+  const armClasses = arms.map(classOfInstance)
+  if (armClasses.length === 0 || armClasses.some((armClass) => armClass === null)) return null
+  const foreign: ts.Type[] = []
+  for (const argument of argumentTypes) {
+    const argumentClass = classOfInstance(argument)
+    if (!argumentClass || !checker.isTypeAssignableTo(argument, stated)) continue
+    if (armClasses.some((armClass) => armClass !== null && inheritsFrom(checker, argumentClass, armClass))) continue
+    if (!foreign.includes(argument)) foreign.push(argument)
+  }
+  if (foreign.length === 0) return null
+  const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
+  if (typeof constructing.getUnionType !== 'function') return null
+  const slot = [stated, ...foreign, ...(parameter.initializer || parameter.questionToken ? [checker.getUndefinedType()] : [])]
+  return constructing.getUnionType(slot)
+}

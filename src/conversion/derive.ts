@@ -206,15 +206,19 @@ const deriveAt = (target: Representation, context: ConversionDerivationContext, 
         never('no checked, semantics-preserving object/dictionary view exists; a snapshot cast is forbidden')
       )
     case 'keyed-collection':
-      // Same gap as `dictionary` above, one step further out. Recovering a
-      // `Map<K, V>` from a box would need a runtime brand check plus a
-      // per-entry checked conversion of BOTH positions, and this registry
-      // installs no such classifier -- v1 spelled that route as
-      // `gea_cpp_typed_js_map::from_dynamic_checked`, which is exactly the
-      // boxed round trip this compiler declines to build.
-      return never(
-        'no checked Map/Set materializer is installed; recovering a keyed collection from a dynamic value needs a runtime ' +
-          'brand check plus a per-entry checked conversion of both key and value'
+      // The round trip first, as for `dictionary` above: a `Map<K, V>` or
+      // `Set<T>` THIS program boxed comes back as itself -- its payload type
+      // is its brand, and the handle is the collection (ret's `setTokens`
+      // held in a box and read back as its `Map`). Anything else would need
+      // a per-entry checked conversion of both positions into a NEW
+      // collection, which would not be the object the program holds, and
+      // stays refused.
+      return (
+        maybeAtom(context.registry.boxedIdentityMaterializer(target)) ??
+        never(
+          'no checked Map/Set materializer is installed; recovering a keyed collection from a dynamic value needs a runtime ' +
+            'brand check plus a per-entry checked conversion of both key and value'
+        )
       )
     case 'function':
       return atomFrom(
@@ -227,8 +231,18 @@ const deriveAt = (target: Representation, context: ConversionDerivationContext, 
       )
     case 'constructor-family':
     case 'constructor-value-dispatch':
+      return (
+        maybeAtom(context.registry.constructorIdentityMaterializer(target)) ??
+        never('constructor identity is nominal authority; no runtime materializer can rediscover it from a dynamic value')
+      )
+    // A function value with both hooks names no class: calling and
+    // constructing it through the box is the language's own Call and
+    // Construct on the value, which throw where they would.
     case 'function-and-constructor':
-      return never('constructor identity is nominal authority; no runtime materializer can rediscover it from a dynamic value')
+      return atomFrom(
+        context.registry.callableConstructorMaterializer(target.call, target.construct),
+        'no checked dynamic function-and-constructor adapter is installed for these conventions'
+      )
     case 'function-value-family':
       return never('family membership and optional absence require exact tag authority that no runtime materializer can supply')
     case 'generic-function-set':
@@ -338,9 +352,21 @@ const deriveTaggedUnion = (
   // Collect every arm's classifier before deriving any payload capability, so disjointness is proved
   // from the classifiers' own domains -- never inferred from the order the arms happen to be declared in.
   const classified: { readonly tag: string; readonly classifier: ClassifierContract; readonly value: Representation }[] = []
+  // A dynamic arm holds whatever box no other arm claims -- the printer tests
+  // every other arm first and hands the box itself to this one
+  // (`emit-narrowing.ts`'s `unboxedLoadText` catch-all). Its classifier is that
+  // complement, disjoint from the others by construction; two such arms
+  // would leave the remainder ambiguous.
+  const remainders = target.arms.filter((arm) => arm.value.kind === 'dynamic' && arm.value.reason !== 'untyped-callable')
+  if (remainders.length > 1) return never('tagged-union has two dynamic arms, so the remainder of the other arms names no single arm')
   for (const arm of target.arms) {
+    if (remainders.includes(arm)) {
+      classified.push({ tag: arm.tag, classifier: { id: 'gea::Value::remainder', domain: `remainder:${arm.tag}` }, value: arm.value })
+      continue
+    }
     const classifier = context.registry.taggedUnionArmClassifier(arm)
-    if (!classifier) return never(`no installed disjointness-proving classifier for tagged-union arm "${arm.tag}"`)
+    if (!classifier)
+      return never(`no installed disjointness-proving classifier for tagged-union arm "${arm.tag}" (${representationKey(arm.value)})`)
     classified.push({ tag: arm.tag, classifier, value: arm.value })
   }
 

@@ -1,3 +1,3 @@
 function noop () {}
-var overridden = globalThis.hasOwnProperty('__override')
+Object.assign(globalThis, JSON.parse('{}'))
 noop()

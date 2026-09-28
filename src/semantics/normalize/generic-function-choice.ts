@@ -28,8 +28,9 @@ import ts from 'typescript'
  * publishes the `closed-family` target those copies form.
  */
 export const genericFunctionChoiceMembersOf = (checker: ts.TypeChecker, node: ts.Node): readonly ts.FunctionDeclaration[] | null => {
-  const leaves = leavesOf(checker, node, new Set())
-  if (!leaves || leaves.length < 2) return null
+  const destructured = { reached: false }
+  const leaves = leavesOf(checker, node, new Set(), destructured)
+  if (!leaves || leaves.length < (destructured.reached ? 1 : 2)) return null
   return leaves
 }
 
@@ -73,32 +74,67 @@ const unwrap = (node: ts.Node): ts.Node => {
   }
 }
 
-const leavesOf = (checker: ts.TypeChecker, node: ts.Node, seen: Set<ts.Node>): readonly ts.FunctionDeclaration[] | null => {
+const leavesOf = (
+  checker: ts.TypeChecker,
+  node: ts.Node,
+  seen: Set<ts.Node>,
+  destructured: { reached: boolean }
+): readonly ts.FunctionDeclaration[] | null => {
   const real = unwrap(node)
   if (seen.has(real)) return null
   seen.add(real)
-  if (ts.isConditionalExpression(real)) return join(leavesOf(checker, real.whenTrue, seen), leavesOf(checker, real.whenFalse, seen))
+  if (ts.isConditionalExpression(real))
+    return join(leavesOf(checker, real.whenTrue, seen, destructured), leavesOf(checker, real.whenFalse, seen, destructured))
   if (
     ts.isBinaryExpression(real) &&
     (real.operatorToken.kind === ts.SyntaxKind.BarBarToken || real.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
   ) {
-    return join(leavesOf(checker, real.left, seen), leavesOf(checker, real.right, seen))
+    return join(leavesOf(checker, real.left, seen, destructured), leavesOf(checker, real.right, seen, destructured))
   }
   if (ts.isVariableDeclaration(real)) {
     const list = real.parent
     if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return null
     if (real.type !== undefined || real.initializer === undefined || !ts.isIdentifier(real.name)) return null
-    return leavesOf(checker, real.initializer, seen)
+    return leavesOf(checker, real.initializer, seen, destructured)
+  }
+  // `const { addAbortSignal } = require('node:stream')` (light-my-request):
+  // a `const` pattern leaf holding one member of what it destructures. Unlike
+  // `const alias = f`, which forks with its target, a pattern leaf is one
+  // cell written by the pattern -- so even ONE generic member is a choice
+  // the cell holds as a tag, and each call through it runs that call's copy.
+  if (ts.isBindingElement(real)) {
+    const pattern = real.parent
+    const holder = pattern.parent
+    if (!ts.isObjectBindingPattern(pattern) || real.dotDotDotToken !== undefined || real.initializer !== undefined) return null
+    if (!ts.isVariableDeclaration(holder) || holder.initializer === undefined) return null
+    const list = holder.parent
+    if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return null
+    const key = real.propertyName ?? real.name
+    if (!ts.isIdentifier(key) && !ts.isStringLiteral(key)) return null
+    const property = checker.getTypeAtLocation(holder.initializer).getProperty(key.text)
+    if (!property) return null
+    const resolved = property.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(property) : property
+    const declaration = resolved.valueDeclaration ?? resolved.getDeclarations()?.[0]
+    const member = declaration ? genericSourceFunctionDeclarationOf(declaration) : null
+    if (!member) return null
+    destructured.reached = true
+    return [member]
   }
   if (ts.isIdentifier(real) && ts.isVariableDeclaration(real.parent) && real.parent.name === real)
-    return leavesOf(checker, real.parent, seen)
+    return leavesOf(checker, real.parent, seen, destructured)
+  if (ts.isIdentifier(real) && ts.isBindingElement(real.parent) && real.parent.name === real)
+    return leavesOf(checker, real.parent, seen, destructured)
   if (ts.isIdentifier(real) || ts.isPropertyAccessExpression(real)) {
     const symbol = checker.getSymbolAtLocation(ts.isIdentifier(real) ? real : real.name)
     if (!symbol) return null
+    // A JavaScript `const { f } = require('m')` leaf is an ALIAS symbol to the
+    // checker, which would resolve straight past the cell to the export.
+    const own = symbol.declarations?.[0]
+    if (own && ts.isBindingElement(own)) return leavesOf(checker, own, seen, destructured)
     const resolved = symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol
     const declaration = resolved.valueDeclaration ?? resolved.getDeclarations()?.[0]
     if (!declaration) return null
-    if (ts.isVariableDeclaration(declaration)) return leavesOf(checker, declaration, seen)
+    if (ts.isVariableDeclaration(declaration) || ts.isBindingElement(declaration)) return leavesOf(checker, declaration, seen, destructured)
     const member = genericSourceFunctionDeclarationOf(declaration)
     return member ? [member] : null
   }

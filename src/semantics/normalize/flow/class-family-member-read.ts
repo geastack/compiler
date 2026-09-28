@@ -6,6 +6,7 @@ import { unwrapNaming } from './targets.js'
 import {
   annotationStatesNothing,
   isGlobalObjectConstructor,
+  isLiteralAbsenceMember,
   isStandardGlobalValue,
   isUnusableEvidence
 } from '../derived-expression-type.js'
@@ -998,7 +999,7 @@ const isClosedRecordType = (checker: ts.TypeChecker, type: ts.Type): boolean => 
  */
 const literalMemberCarrierOf = (checker: ts.TypeChecker, type: ts.Type, name: string): ts.Type | null => {
   const member = checker.getPropertyOfType(type, name)
-  if (!member?.valueDeclaration) return null
+  if (!member?.valueDeclaration || isLiteralAbsenceMember(member.valueDeclaration)) return null
   const memberType = checker.getTypeOfSymbolAtLocation(member, member.valueDeclaration)
   if (isUnusableEvidence(memberType) || (memberType.flags & ts.TypeFlags.Unknown) !== 0 || carriesTypeParameter(memberType)) return null
   return memberType

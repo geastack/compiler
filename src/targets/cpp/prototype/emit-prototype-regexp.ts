@@ -285,7 +285,7 @@ const resultDataMemberStorage = (role: RegExpDeclarationKind, key: string): Repr
 }
 
 /** Whether `text` is a canonical array index -- a run of digits with no sign, point, or leading zero. */
-const canonicalCaptureSlot = (text: string): boolean => {
+export const canonicalCaptureSlot = (text: string): boolean => {
   if (text.length === 0) return false
   if (text.length > 1 && text.charCodeAt(0) === 48) return false
   for (let index = 0; index < text.length; index += 1) {
@@ -749,14 +749,17 @@ export const regexpMethodCallText = (
       `"RegExp.prototype.${member}" is spelled for its one string argument (ECMA-262 22.2.6.${member === 'test' ? '16' : '8'}); this call passes ${args.length}`
     )
   }
-  if (input.representation.kind !== 'string') {
+  // Step 3 of both is ToString(S), through the language's one ToString table.
+  const inputText =
+    input.representation.kind === 'string'
+      ? operandText(ctx, input)
+      : toStringText(operandText(ctx, input), input.representation, ctx.classes, ctx.deriver)
+  if (inputText === null) {
     throw createCppEmitBlockedError(
       `host-invocation:RegExp.prototype.${member}`,
-      `"RegExp.prototype.${member}" argument 0 carries "${representationKey(input.representation)}"; the specification ToStrings it, and ToString of an ` +
-        'arbitrary value is what this backend has no box for'
+      `"RegExp.prototype.${member}" argument 0 carries "${representationKey(input.representation)}", which this backend has no ToString for`
     )
   }
-  const inputText = operandText(ctx, input)
   if (member === 'test') return `${receiverText}->test(${inputText})`
   // The result carrier is checked rather than assumed: 22.2.6.8 answers `null`
   // on no match, so an `exec` whose result was not given an optional carrier
@@ -816,7 +819,11 @@ const requirePatternArgument = (ctx: EmitContext, member: string, clause: string
 
 /** ECMA-262 22.1.3.11 `String.prototype.match(regexp)` -> 22.2.6.8, answering `RegExpMatchArray | null`. */
 export const regexpMatchText = (ctx: EmitContext, receiverText: string, args: readonly IrOperand[], result: IrResult | null): string => {
-  const pattern = requirePatternArgument(ctx, 'match', '22.1.3.11', args)
+  const boxedPattern = args.length === 1 && args[0]?.representation.kind === 'dynamic' ? args[0] : null
+  const pattern =
+    boxedPattern !== null
+      ? `*gea::runtime::regex::matcherOf(${operandText(ctx, boxedPattern)})`
+      : requirePatternArgument(ctx, 'match', '22.1.3.11', args)
   const carrier = result?.representation
   const payload = carrier === undefined ? null : carrier.kind === 'optional' ? carrier.payload : carrier
   if (payload !== null && regexpRoleOf(payload) !== 'match-result') {

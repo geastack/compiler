@@ -1,4 +1,5 @@
 import type { NativeSelectionHelper } from './native-selection-helpers.js'
+import { hostRecordViewText } from './host/host-record-view.js'
 import { classRefTransportKind, constructorUpcastMember } from './class-ref-transport.js'
 import type { AbiParameter, CallableAbi, RecordField, Representation, TaggedUnionArm } from '../../representation/model.js'
 import {
@@ -39,6 +40,7 @@ import {
   cppAbiType,
   cppClassName,
   cppConstantLiteral,
+  cppNativeHandleTag,
   cppRecordFieldName,
   cppRecordFieldPresenceName,
   cppRecordStructName,
@@ -97,7 +99,8 @@ export const promisePayloadConvertible = (source: Representation, target: Repres
   // is declared `Promise<undefined | void>` and both callers `return` its
   // promise from an async function whose own result is `Promise<void>`.
   if (target.kind === 'void') return isUnitPromisePayload(source)
-  if (source.kind === 'void') return source.bottom === true || isUnitPromisePayload(target)
+  // A box holds the `undefined` a void promise fulfils with, as any value.
+  if (source.kind === 'void') return source.bottom === true || isUnitPromisePayload(target) || target.kind === 'dynamic'
   try {
     return convertedValueText(source, target, 'gea_promise_payload') !== null
   } catch (error) {
@@ -170,22 +173,30 @@ export const classFamilyLoadText = (ctx: ConversionSite, held: Representation, r
   if (heldClass === null) return null
   const { source, value } = heldClass
   const arms = targetUnion.arms.map((arm) => arm.value)
-  if (!arms.every((arm) => arm.kind === 'class-ref' && arm.ownership === source.ownership && arm.ancestors.includes(source.declaration)))
-    return null
-  const classes = arms as readonly Extract<Representation, { kind: 'class-ref' }>[]
+  if (!arms.every((arm) => arm.kind === 'class-ref' && arm.ownership === source.ownership)) return null
+  const classArms = arms as readonly Extract<Representation, { kind: 'class-ref' }>[]
+  // Only an arm at or below the source class can hold a value of it, so an
+  // unrelated arm -- ajv's `ChildNode` union holds leaf nodes beside the
+  // `ParentNode` family its `optimizeNames(): this` returns -- is never the
+  // one selected. An arm ABOVE the source could hold it as well, which leaves
+  // the choice open, and declines.
+  if (classArms.some((arm) => arm.declaration !== source.declaration && source.ancestors.includes(arm.declaration))) return null
+  const related = classArms.flatMap((arm, index) =>
+    arm.declaration === source.declaration || arm.ancestors.includes(source.declaration) ? [{ arm, index }] : []
+  )
+  if (related.length === 0) return null
+  const classes = related.map((entry) => entry.arm)
   // A target may retain both an ancestor and one of its descendants (Three's
   // WebGLRenderTarget | WebGLCubeRenderTarget flow does). JS unions do not
   // preserve which syntactic arm produced an object, so allocation identity
   // supplies the canonical answer: test the most-specific family first and
   // retain each arm's original target-union index when rebuilding it.
-  const ordered = classes
-    .map((arm, index) => ({ arm, index }))
-    .sort((left, right) => {
-      const leftBelowRight = isOrDescendsFrom(ctx, left.arm.declaration, right.arm.declaration)
-      const rightBelowLeft = isOrDescendsFrom(ctx, right.arm.declaration, left.arm.declaration)
-      if (leftBelowRight !== rightBelowLeft) return leftBelowRight ? -1 : 1
-      return left.index - right.index
-    })
+  const ordered = related.slice().sort((left, right) => {
+    const leftBelowRight = isOrDescendsFrom(ctx, left.arm.declaration, right.arm.declaration)
+    const rightBelowLeft = isOrDescendsFrom(ctx, right.arm.declaration, left.arm.declaration)
+    if (leftBelowRight !== rightBelowLeft) return leftBelowRight ? -1 : 1
+    return left.index - right.index
+  })
 
   const unionType = cppTypeOf(targetUnion)
   const armText = (arm: Extract<Representation, { kind: 'class-ref' }>, index: number): string =>
@@ -261,10 +272,17 @@ const taggedUnionArmText = (union: Extract<Representation, { kind: 'tagged-union
   // A union target that some arm only WIDENS into is a recast, not a
   // narrowing: the narrowing proved nothing about which arm is live, so every
   // arm needs its home or the read would rebuild a live arm as another.
+  // A callable target over a union of callables is one convention for several
+  // live functions (fastify's `withResolvers`: the host's bound method or the
+  // module's own fallback): no guard the program can write kills one callable
+  // arm by its convention, so a callable arm with no home would be silently
+  // never called -- its slot read as another arm's function.
+  const homeless = (kind: Representation['kind']): boolean =>
+    union.arms.some((arm, index) => arm.value.kind === kind && !candidates.some((candidate) => candidate.index === index))
+  const adapted = candidates.some((candidate) => !exact.includes(candidate))
   const partialWidening =
-    target.kind === 'tagged-union' &&
-    candidates.some((candidate) => !exact.includes(candidate)) &&
-    union.arms.some((arm, index) => arm.value.kind === 'record' && !candidates.some((candidate) => candidate.index === index))
+    (adapted && target.kind === 'tagged-union' && homeless('record')) ||
+    (target.kind === 'function-value-dispatch' && homeless('function-value-dispatch'))
   if (!last || partialWidening) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(union)}->${targetKey}`,
@@ -435,6 +453,16 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
   // `conversions.ts`'s `gea::ArrayObject::identity` recast states for the
   // bare pair.
   if (sameArrayUpToExtension(inner, read)) return unwrapped
+  // A function that is also a constructor, read as the constructor alone
+  // (ipaddr's `ipaddr.IPv4` held with both halves, read where only `new`
+  // applies): the same construct pointer and environment, without the call.
+  if (
+    inner.kind === 'function-and-constructor' &&
+    read.kind === 'constructor-value-dispatch' &&
+    abiKey(inner.construct) === abiKey(read.abi)
+  ) {
+    return `[](const auto& gea_both) { return ${cppTypeOf(read)}{gea_both.construct_, gea::PackedEnvironment{gea_both.environment, gea_both.environmentOwner}}; }(${unwrapped})`
+  }
   // The guard proved the cell ABSENT: `if ( dstArray === null )` and every read
   // inside that branch. There is nothing in the cell to load -- the read's
   // carrier has one inhabitant -- so this produces the constant, and must be
@@ -805,6 +833,10 @@ export const dynamicTagFor = (representation: Representation): string | null => 
     // widenings `targets/cpp/conversions.ts`'s `widening` registry asks this
     // exact function about.
     case 'typed-array':
+    // A `gea::DataView` is a JS Object on the same terms, and its C++ type is
+    // likewise its constructor identity: `Value::box` records it as the
+    // payload type `instanceof DataView` on a box reads back.
+    case 'data-view':
       return 'Object'
     // A `gea::Promise<T>` is a JS Object too -- `typeof new Promise(...) ===
     // 'object'` -- and `Value::box` needs nothing case-specific to hold one:
@@ -821,6 +853,10 @@ export const dynamicTagFor = (representation: Representation): string | null => 
     // registry both ask this exact function, and both got `null` for a
     // pairing this runtime already has every primitive to satisfy.
     case 'promise':
+      return 'Object'
+    // A generator object is an Object; its box answers `next`, `return` and
+    // `[Symbol.iterator]` (`BoxedCollectionOpsFactory<gea::Iterator>`).
+    case 'iterator':
       return 'Object'
     case 'function':
     case 'function-family':
@@ -905,6 +941,46 @@ const restFromOf = (representation: Representation): number | null => {
  * hono's `this[method] = (args1, ...args) => ...` is every `app.get(path,
  * handler)` in the program.
  */
+/**
+ * A callable about to be boxed whose parameter is itself a callable with a
+ * receiver or a rest slot. The box's thunk converts each argument by its C++
+ * type alone, and `(this: T, ...args: A) => R` spells the same type as `(a: T,
+ * args: A) => R`, so a JavaScript function handed through the box would be
+ * adapted as the positional convention -- the `this` it is later called with
+ * arriving as its first argument. The payload instead takes that parameter as
+ * a `gea::Value` and loads it with the parameter's own ABI; name, length and
+ * identity stay the source's (`adaptSource`).
+ */
+export const parameterAbiStatingText = (abi: CallableAbi, type: string, text: string): string => {
+  const statesAbi = (parameter: AbiParameter): boolean => {
+    const own = callableObjectAbi(parameter.value)
+    return own !== null && (own.receiver !== null || own.restFrom !== null)
+  }
+  if (!abi.parameters.some(statesAbi)) return text
+  const loads = abi.parameters.map((parameter, ordinal) =>
+    statesAbi(parameter) ? unboxedLoadText(parameter.value, adapterFormalName(ordinal)) : adapterFormalName(ordinal)
+  )
+  if (loads.some((load) => load === null)) return text
+  const receiver = abi.receiver === null ? [] : [`${cppTypeOf(abi.receiver)} ${adapterReceiverName}`]
+  const formals = [
+    `void* ${adapterEnvironmentName}`,
+    ...receiver,
+    ...abi.parameters.map(
+      (parameter, ordinal) => `${statesAbi(parameter) ? 'gea::Value' : cppAbiParameterType(parameter)} ${adapterFormalName(ordinal)}`
+    )
+  ]
+  const boxedSignature = [
+    ...(abi.receiver === null ? [] : [cppTypeOf(abi.receiver)]),
+    ...abi.parameters.map((parameter) => (statesAbi(parameter) ? 'gea::Value' : cppAbiParameterType(parameter)))
+  ]
+  const actuals = [...(abi.receiver === null ? [] : [adapterReceiverName]), ...loads]
+  return (
+    `gea::CallableObject<${cppResultTypeOf(abi.result)}(${boxedSignature.join(', ')})>::adaptSource(${type}{${text}}, ` +
+    `[](${formals.join(', ')}) -> ${cppResultTypeOf(abi.result)} { ` +
+    `return static_cast<${type}*>(${adapterEnvironmentName})->call(${actuals.join(', ')}); })`
+  )
+}
+
 export const boxedText = (representation: Representation, tag: string, text: string): string => {
   // A shared class reference is the collapsed `T | null`: its empty pointer IS
   // the null, and it boxes as the null value, never as an object box holding
@@ -915,9 +991,18 @@ export const boxedText = (representation: Representation, tag: string, text: str
       `gea::Value::box(gea::Value::Tag::Null, nullptr); }(${text})`
     )
   }
+  // An intrinsic constructor (`Array`, `Number`, ...) is one object to the
+  // language: every box of its handle is the same box, so `ctor === Array`
+  // compares identity as 7.2.16 IsStrictlyEqual does.
+  if (representation.kind === 'native-handle' && tag === 'Object' && representation.protocol.endsWith('Constructor'))
+    return `gea::detail::intrinsicConstructorBox<${cppNativeHandleTag(representation.protocol, representation.version)}>()`
   const restFrom = restFromOf(representation)
-  const value = `static_cast<${cppTypeOf(representation)}>(${text})`
   const abi = representation.kind === 'function-and-constructor' ? representation.call : 'abi' in representation ? representation.abi : null
+  const callable = callableObjectAbi(representation)
+  const value =
+    callable === null
+      ? `static_cast<${cppTypeOf(representation)}>(${text})`
+      : parameterAbiStatingText(callable, cppTypeOf(representation), `static_cast<${cppTypeOf(representation)}>(${text})`)
   if (abi?.receiver) return `gea::Value::boxMethod<${restFrom === null ? -1 : restFrom + 1}>(${value})`
   if (restFrom === null) return `gea::Value::box(gea::Value::Tag::${tag}, ${value})`
   return `gea::Value::boxCallable<${restFrom}>(${value})`
@@ -943,7 +1028,7 @@ export const boxedText = (representation: Representation, tag: string, text: str
  * answer that this carrier needs no widening at all.
  */
 export const dynamicCarrierBoxText = (carrier: Representation, storage: string): string | null =>
-  widenedStoreText({ kind: 'dynamic', reason: 'declared-any-never-narrowed' }, carrier, storage)
+  carrier.kind === 'dynamic' ? storage : widenedStoreText({ kind: 'dynamic', reason: 'declared-any-never-narrowed' }, carrier, storage)
 
 /**
  * A `dynamic` value an async body returns, settled into its `Promise<V>`
@@ -1160,11 +1245,28 @@ export const widenedStoreText = (held: Representation, written: Representation, 
       const inner = widenedStoreText(arm.value, written.payload, derefText)
       if (inner !== null) return `${cppTypeOf(held)}::ofArm<${armIndex}>(${inner})`
     }
-    return null
+    // A `dynamic` arm holds the optional whole, its absence boxed as the
+    // value it spells rather than spent (proxy-addr's `val = IP_RANGES[val]`
+    // into an `Array | String` cell): the same fallback a present value takes
+    // below.
+    const dynamicIndex = held.arms.findIndex((arm) => arm.value.kind === 'dynamic')
+    const dynamicArm = held.arms[dynamicIndex]
+    const boxed = dynamicArm ? widenedStoreText(dynamicArm.value, written, text) : null
+    return boxed === null ? null : `${cppTypeOf(held)}::ofArm<${dynamicIndex}>(${boxed})`
   }
   const writtenKey = representationKey(written)
   const index = held.arms.findIndex((arm) => representationKey(arm.value) === writtenKey)
   if (index >= 0) return `${cppTypeOf(held)}::ofArm<${index}>(${text})`
+  // A promise into the sum's one promise arm, by state adoption
+  // (`conversions.ts`'s `promise-arm-adoption`).
+  if (written.kind === 'promise') {
+    const promiseArms = held.arms.flatMap((arm, armIndex) => (arm.value.kind === 'promise' ? [{ arm: arm.value, armIndex }] : []))
+    const [only] = promiseArms
+    if (promiseArms.length === 1 && only !== undefined && promisePayloadConvertible(written.value, only.arm.value)) {
+      const adopted = convertedValueText(written, only.arm, text)
+      if (adopted !== null) return `${cppTypeOf(held)}::ofArm<${only.armIndex}>(${adopted})`
+    }
+  }
   // A join can nest: `string | number | boolean | null | undefined` derives as
   // an outer union over the two absence arms and an *inner* union over the
   // three value arms, so a written `bool` is an arm of an arm and reaches its
@@ -1305,6 +1407,9 @@ export const sumIntoPayloadText = (
   return `(${result})`
 }
 
+const isAbsenceCarrier = (representation: Representation): boolean =>
+  representation.kind === 'undefined' || representation.kind === 'null' || representation.kind === 'void'
+
 export const recastedUnionText = (
   source: Extract<Representation, { kind: 'tagged-union' }>,
   target: Extract<Representation, { kind: 'tagged-union' }>,
@@ -1363,6 +1468,12 @@ export const recastedUnionText = (
     }
     const homes: RecastUnionHome[] = []
     for (const [candidateIndex, candidate] of target.arms.entries()) {
+      // An absence arm homes only the same absence, which the exact match
+      // above already found. `convertedValueText` answers any value into
+      // `undefined`/`void` by discarding it -- right for a discarded result,
+      // never for a live arm: a callable recast into `undefined` handed the
+      // callee no callback at all.
+      if (isAbsenceCarrier(candidate.value) && !isAbsenceCarrier(arm.value)) continue
       // `convertedValueText` and not `widenedStoreText` alone: an arm can
       // reach its home by a recast rather than a widening -- two records that
       // declare the same fields under two interned shapes, which is what
@@ -1671,6 +1782,11 @@ const recordRecastAnswers = new WeakMap<Representation, WeakMap<Representation, 
 const recordsRecastableIn = (source: Representation, target: Representation, seen: Set<string> | null): boolean => {
   if (source.kind !== 'record' || target.kind !== 'record') return false
   if (source.accessors.length > 0 || target.accessors.length > 0) return false
+  // A recast builds the target struct from the source's fields, so a
+  // zero-field target (the `object` keyword's, or `{}`'s) would be a fresh
+  // empty object: every own key and the identity gone, which
+  // `JSON.stringify`, `Object.keys` and `===` all observe.
+  if (target.fields.length === 0 && source.fields.length > 0) return false
   if (seen !== null) {
     const pairKey = `${representationKey(source)}->${representationKey(target)}`
     if (seen.has(pairKey)) return true
@@ -2160,11 +2276,12 @@ export const boxedAssertionText = (source: Representation, target: Representatio
   return tryCandidateText(() => convertedValueText({ kind: 'dynamic', reason: 'declared-any-never-narrowed' }, target, boxed))
 }
 
-/** The slot parameters from `first` on, packed into the source's rest Array -- see `restPack` in `resultAdapterOf`. */
-const restPackedActual = (slots: readonly AbiParameter[], first: number, element: Representation): string | null => {
+/** The slot parameters from `first` on, packed into the source's rest Array, the last one the slot's own rest Array when `trailingRest` -- see `restPack` in `resultAdapterOf`. */
+const restPackedActual = (slots: readonly AbiParameter[], first: number, element: Representation, trailingRest = false): string | null => {
   const elementType = cppTypeOf(element)
   const elements: string[] = []
-  for (const [offset, slot] of slots.entries()) {
+  const fixed = trailingRest ? slots.slice(0, -1) : slots
+  for (const [offset, slot] of fixed.entries()) {
     const formal = adapterFormalName(first + offset)
     if (cppTypeOf(slot.value) === elementType) {
       elements.push(formal)
@@ -2179,7 +2296,27 @@ const restPackedActual = (slots: readonly AbiParameter[], first: number, element
       throw error
     }
   }
-  return `gea::arrayOf<${elementType}>({${elements.join(', ')}})`
+  const packed = `gea::arrayOf<${elementType}>({${elements.join(', ')}})`
+  if (!trailingRest) return packed
+  const restSlot = slots[slots.length - 1]?.value
+  const convert = restSlot?.kind === 'array-object' ? restElementConversion(restSlot.element, element) : null
+  if (convert === null) return null
+  const rest = adapterFormalName(first + fixed.length)
+  const append =
+    convert === ''
+      ? `gea_adapt_packed->appendRange(*${rest}, 0)`
+      : `gea_adapt_packed->appendRangeConverted(*${rest}, 0, [](const ${cppTypeOf(restSlot!.kind === 'array-object' ? restSlot!.element : element)}& gea_adapt_element) { return ${convert}; })`
+  return `([&]() { auto gea_adapt_packed = ${packed}; if (${rest}) ${append}; return gea_adapt_packed; })()`
+}
+
+/**
+ * How one element of a slot's rest Array enters the source's rest Array: `''`
+ * when both are one C++ type, else the conversion over `gea_adapt_element`,
+ * or `null` where no conversion is installed.
+ */
+const restElementConversion = (slotElement: Representation, sourceElement: Representation): string | null => {
+  if (cppTypeOf(slotElement) === cppTypeOf(sourceElement)) return ''
+  return tryCandidateText(() => convertedValueText(slotElement, sourceElement, 'gea_adapt_element'))
 }
 
 /** The lambda's own names, kept out of every body-local namespace this text can be spliced into. */
@@ -2251,10 +2388,11 @@ const recastUnionAliasName = 'GeaRecastArm'
  *   adapter may ignore target arguments after the source's declared prefix,
  *   just as an ordinary JavaScript call does; it never invents arguments the
  *   source declared but the target does not supply.
- * - A void source result flowing anywhere except void or dynamic. Calling a
- *   JavaScript function that returns no value produces `undefined`, so a
- *   genuinely dynamic result receives the runtime's default Undefined box;
- *   no other concrete carrier may be invented from it.
+ * - A void source result flowing into a carrier that cannot hold `undefined`.
+ *   Calling a JavaScript function that returns no value produces
+ *   `undefined`, so a dynamic result receives the runtime's default Undefined
+ *   box and any other carrier its own `undefined` (`cppUndefinedIn`); no
+ *   other value may be invented from it.
  * - A pair whose parameters and result already share C++ spellings. It needs
  *   no adapter and must not get one, or an identity store would allocate.
  */
@@ -2318,11 +2456,24 @@ const resultAdapterOf = (
   // are the arguments the source's Array binds, so the adapter packs them.
   // An optional slot parameter is packed even when a caller omitted it, so
   // the Array's length counts every slot position.
+  // A slot with a rest of its own LATER than the source's -- pino's
+  // `hookWrappedLog(...args)` returned where `LOG(o, ...n)` is -- packs the
+  // same way, the slot's rest Array appended after its fixed parameters:
+  // the source is called with the slot's whole argument list.
   const restParameter = from.restFrom === null ? undefined : from.parameters[from.restFrom]
+  const slotRest = to.restFrom === null ? undefined : to.parameters[to.restFrom]
+  const trailingRest =
+    from.restFrom !== null &&
+    to.restFrom !== null &&
+    to.restFrom > from.restFrom &&
+    to.parameters.length === to.restFrom + 1 &&
+    slotRest?.value.kind === 'array-object' &&
+    restParameter?.value.kind === 'array-object' &&
+    restElementConversion(slotRest.value.element, restParameter.value.element) !== null
   const restPack =
     !restSpread &&
     from.restFrom !== null &&
-    to.restFrom === null &&
+    (to.restFrom === null || trailingRest) &&
     from.parameters.length === from.restFrom + 1 &&
     to.parameters.length >= from.restFrom &&
     restParameter?.value.kind === 'array-object' &&
@@ -2358,7 +2509,7 @@ const resultAdapterOf = (
       continue
     }
     if (restPack && ordinal === from.restFrom && parameter.value.kind === 'array-object') {
-      const packed = restPackedActual(to.parameters.slice(ordinal), ordinal, parameter.value.element)
+      const packed = restPackedActual(to.parameters.slice(ordinal), ordinal, parameter.value.element, trailingRest)
       if (packed === null) return null
       actuals.push(packed)
       continue
@@ -2389,8 +2540,14 @@ const resultAdapterOf = (
   if (to.result.kind === 'void') {
     convertedResult = null
   } else if (from.result.kind === 'void') {
-    if (to.result.kind !== 'dynamic') return null
-    convertedResult = `${cppTypeOf(to.result)}()`
+    // A function that returns nothing returns `undefined`: a box's default,
+    // or the `undefined` any other result carrier states it can hold (the
+    // absent side of a `T | undefined`, the undefined arm of
+    // `void | PromiseLike<void>`) -- `cppUndefinedIn`, the same authority an
+    // omitted argument is padded by. A carrier with no `undefined` refuses.
+    const undefinedText = to.result.kind === 'dynamic' ? `${cppTypeOf(to.result)}()` : cppUndefinedIn(to.result)
+    if (undefinedText === null) return null
+    convertedResult = undefinedText
   } else if (cppTypeOf(from.result) === cppTypeOf(to.result)) {
     convertedResult = adapterResultName
   } else {
@@ -2420,6 +2577,104 @@ const resultAdapterOf = (
     ? { from, to, receiverActual, actuals, convertedResult, nativeFieldProtocolUnused }
     : null
 }
+
+/**
+ * A callable whose result reaches `target`'s result only as a structural view
+ * of one record as another: the same receiver-free frame, the result rebuilt
+ * through the plan `viewPlanFor` builds (fastify's `Promise.withResolvers.bind
+ * (Promise)`, returning the host's `PromiseWithResolvers`, stored where its
+ * module's own fallback's convention is expected). `resultAdapterOf` answers
+ * every pair it can without layouts; this is only the pair it cannot. The
+ * census installs it on this predicate and the printer renders from it.
+ */
+export const callableResultViewOf = (
+  layouts: RecordLayoutPolicy,
+  source: Representation,
+  target: Representation
+): { readonly from: CallableAbi; readonly to: CallableAbi } | null => {
+  if (source.kind !== 'function-value-dispatch' || target.kind !== 'function-value-dispatch') return null
+  const from = callableObjectAbi(source)
+  const to = callableObjectAbi(target)
+  if (!from || !to || from.receiver !== null || to.receiver !== null || from.restFrom !== to.restFrom) return null
+  if (from.parameters.length !== to.parameters.length) return null
+  if (from.parameters.some((parameter, ordinal) => cppAbiParameterType(parameter) !== cppAbiParameterType(to.parameters[ordinal]!)))
+    return null
+  if (from.result.kind === 'void' || to.result.kind === 'void' || resultAdapterOf(source, target) !== null) return null
+  return viewPlanFor(layouts, from.result, to.result) === null ? null : { from, to }
+}
+
+const callableResultViewText = (ctx: ConversionSite, source: Representation, target: Representation, text: string): string | null => {
+  const plan = callableResultViewOf(ctx.layouts, source, target)
+  if (plan === null) return null
+  const result = structuralRecordViewText(ctx, plan.from.result, plan.to.result, adapterResultName)
+  if (result === null) return null
+  const formals = [
+    `void* ${adapterEnvironmentName}`,
+    ...plan.to.parameters.map((parameter, ordinal) => `${cppAbiParameterType(parameter)} ${adapterFormalName(ordinal)}`)
+  ]
+  const actuals = plan.to.parameters.map((_, ordinal) => adapterFormalName(ordinal))
+  return (
+    `${cppTypeOf(target)}::adaptSource(${cppTypeOf(source)}{${text}}, [](${formals.join(', ')}) -> ${cppResultTypeOf(plan.to.result)} { ` +
+    `${cppTypeOf(plan.from.result)} ${adapterResultName} = static_cast<${cppTypeOf(source)}*>(${adapterEnvironmentName})->call(${actuals.join(', ')}); ` +
+    `return ${result}; })`
+  )
+}
+
+/**
+ * A union of callables read as one callable convention, when some arm is homed
+ * only by `callableResultViewOf`: every arm keeps a home -- the target itself,
+ * the chain's own adapter, or the result view -- and the union's tag selects
+ * the live arm's. `null` when an arm has none, or when the chain homes every
+ * arm alone (`taggedUnionArmText` dispatches that case).
+ */
+export const callableUnionDispatchOf = (
+  layouts: RecordLayoutPolicy,
+  source: Representation,
+  target: Representation
+): readonly ('exact' | 'chain' | 'view')[] | null => {
+  if (source.kind !== 'tagged-union' || target.kind !== 'function-value-dispatch') return null
+  if (!source.arms.every((arm) => arm.value.kind === 'function-value-dispatch')) return null
+  const homes = source.arms.map((arm) =>
+    representationKey(arm.value) === representationKey(target)
+      ? 'exact'
+      : tryCandidateText(() => convertedValueText(arm.value, target, 'gea_arm_probe')) !== null
+        ? 'chain'
+        : callableResultViewOf(layouts, arm.value, target) !== null
+          ? 'view'
+          : null
+  )
+  if (homes.some((home) => home === null) || !homes.includes('view')) return null
+  return homes as readonly ('exact' | 'chain' | 'view')[]
+}
+
+const callableUnionDispatchText = (ctx: ConversionSite, source: Representation, target: Representation, text: string): string | null => {
+  const homes = callableUnionDispatchOf(ctx.layouts, source, target)
+  if (homes === null || source.kind !== 'tagged-union') return null
+  const texts = source.arms.map((arm, index) => {
+    const slot = `gea_callable_union.get<${index}>()`
+    const home = homes[index]
+    return home === 'exact'
+      ? slot
+      : home === 'chain'
+        ? convertedValueText(arm.value, target, slot)
+        : callableResultViewText(ctx, arm.value, target, slot)
+  })
+  if (texts.some((armText) => armText === null)) return null
+  let chosen = texts[texts.length - 1]!
+  for (let index = texts.length - 2; index >= 0; index -= 1) chosen = `gea_callable_union.is<${index}>() ? ${texts[index]} : (${chosen})`
+  return `([&]() -> ${cppTypeOf(target)} { const auto& gea_callable_union = ${text}; return ${chosen}; })()`
+}
+
+/** Whether every callable arm of `source` has a home in the callable `target` through the chain alone -- `taggedUnionArmText`'s own refusal condition. */
+export const callableArmsHomedByChain = (source: Representation, target: Representation): boolean =>
+  source.kind !== 'tagged-union' ||
+  target.kind !== 'function-value-dispatch' ||
+  source.arms.every(
+    (arm) =>
+      arm.value.kind !== 'function-value-dispatch' ||
+      representationKey(arm.value) === representationKey(target) ||
+      tryCandidateText(() => convertedValueText(arm.value, target, 'gea_arm_probe')) !== null
+  )
 
 /** Whether `source` reaches `target` through a result adapter -- see `resultAdapterOf`. Exported so `conversions.ts` asks the identical question the render below answers. */
 export const adaptsResultIntoTarget = (source: Representation, target: Representation): boolean => resultAdapterOf(source, target) !== null
@@ -2879,7 +3134,18 @@ export const boxDiscriminantsOfArm = (arm: TaggedUnionArm): BoxDiscriminant[] | 
       : null
   }
   const discriminants = boxDiscriminantsOf(arm.value)
-  if (arm.runtimeDiscriminator.kind === 'unverifiable-callable') return null
+  // An evaluated callable ABI names no function, so its tag proves only that
+  // the box is callable -- which is all a union needs when it is the ONLY
+  // arm answering to the Function tag (ajv's `vRef as AnyValidateFunction`,
+  // a validate function beside a record arm). The pairwise collision check
+  // refuses it beside any other callable arm, as it does `callable-tag`; the
+  // payload is the checked dynamic Function adapter the arm's own carrier
+  // derives, never an identity it cannot prove.
+  if (arm.runtimeDiscriminator.kind === 'unverifiable-callable') {
+    return arm.value.kind === 'function-value-dispatch' || arm.value.kind === 'function-and-constructor'
+      ? [{ tag: 'Function', payload: null, nominal: null, callableMembers: null }]
+      : null
+  }
   if (discriminants === null) return null
   if (arm.runtimeDiscriminator.kind === 'carrier') {
     return discriminants.some((entry) => entry.callableMembers !== null) ? null : discriminants
@@ -2919,6 +3185,14 @@ export const unboxedLoadText = (target: Representation, text: string): string | 
   // adapter described in gea_runtime.h. This is deliberately separate from
   // the generic `unboxValue<T>` below: that exact-payload load cannot adapt a
   // callable whose source and reader ABIs differ.
+  if (target.kind === 'function-and-constructor') {
+    const type = cppTypeOf(target)
+    const load = target.call.receiver === null ? 'in' : 'inWithReceiver'
+    return `gea::detail::DynamicCarrier<${type}>::${load}(${text}, 0)`
+  }
+  // A constructor read out of a box: the box's own payload when it is one,
+  // else the function object constructed through its own [[Construct]].
+  if (target.kind === 'constructor-value-dispatch') return `gea::detail::DynamicCarrier<${cppTypeOf(target)}>::in(${text}, 0)`
   const callableAbi = callableObjectAbi(target)
   if (callableAbi !== null) {
     const type = cppTypeOf(target)
@@ -3293,6 +3567,53 @@ const callableConstructEntryText = (source: Representation, target: Representati
 }
 
 /**
+ * A function with both hooks whose `[[Call]]` names no receiver, stored where
+ * the same function is read with one -- avvio's
+ * `Object.defineProperty(server, 'then', { get: thenify.bind(instance) })`,
+ * a bound function in a getter slot, which the language calls with the
+ * object as `this`. A bound function ignores `this`, and so does a call
+ * convention without a receiver: the adapter drops it and keeps the
+ * construct entry and the function object as they are. The call frames must
+ * otherwise be the same frame, and the construct frames the same.
+ */
+export const receiverDroppedCallableConstructor = (source: Representation, target: Representation): boolean =>
+  source.kind === 'function-and-constructor' &&
+  target.kind === 'function-and-constructor' &&
+  source.call.receiver === null &&
+  target.call.receiver !== null &&
+  abiKey(source.construct) === abiKey(target.construct) &&
+  abiKey(source.call) === abiKey({ ...target.call, receiver: null })
+
+/**
+ * An ordinary function value stored where a constructor is expected: `new`
+ * through it creates an object whose `[[Prototype]]` is the function's own
+ * `prototype` and runs the body (`gea::detail::ConstructThroughFunction`).
+ * The cookie package's `NullObject` -- `function () {}` whose `prototype` it
+ * replaces with `Object.create(null)`, asserted to `{ new (): any }`. The
+ * body must name no receiver (a `this`-reading body has a construct signature
+ * of its own and a both-hooks carrier), the construct frame's parameters must
+ * be the call frame's, and the constructed value is dynamic.
+ */
+export const constructThroughFunction = (source: Representation, target: Representation): boolean =>
+  source.kind === 'function-value-dispatch' &&
+  target.kind === 'constructor-value-dispatch' &&
+  source.abi.receiver === null &&
+  source.abi.restFrom === null &&
+  target.abi.restFrom === null &&
+  target.abi.result.kind === 'dynamic' &&
+  abiKey({ ...source.abi, result: target.abi.result }) === abiKey(target.abi)
+
+const constructThroughFunctionText = (source: Representation, target: Representation, text: string): string | null =>
+  constructThroughFunction(source, target)
+    ? `gea::detail::ConstructThroughFunction<${cppTypeOf(target)}, ${cppTypeOf(source)}>::adapt(${text})`
+    : null
+
+const receiverDroppedCallableConstructorText = (source: Representation, target: Representation, text: string): string | null =>
+  receiverDroppedCallableConstructor(source, target)
+    ? `gea::detail::ReceiverDroppingCallableConstructor<${cppTypeOf(target)}, ${cppTypeOf(source)}>::adapt(${text})`
+    : null
+
+/**
  * One step of the conversion chain. `undefined` means the step does not
  * claim the pair and the chain continues; `null` means it claims the pair
  * and cannot render it, which ends the chain with no rendering (the chain's
@@ -3329,6 +3650,11 @@ export const conversionChain: readonly ConversionStep[] = [
   { id: 'empty-array-sentinel', apply: (source, target, text) => claimed(emptyArraySentinelText(source, target, text)) },
   { id: 'callable-identity', apply: (source, target, text) => claimed(callableIdentityText(source, target, text)) },
   { id: 'callable-construct-entry', apply: (source, target, text) => claimed(callableConstructEntryText(source, target, text)) },
+  { id: 'construct-through-function', apply: (source, target, text) => claimed(constructThroughFunctionText(source, target, text)) },
+  {
+    id: 'callable-constructor-receiver-dropped',
+    apply: (source, target, text) => claimed(receiverDroppedCallableConstructorText(source, target, text))
+  },
   {
     id: 'constructor-upcast',
     apply: (source, target, text) => {
@@ -3721,13 +4047,14 @@ export const conversionChain: readonly ConversionStep[] = [
       if (source.kind !== 'promise' || target.kind !== 'promise') return undefined
       const bottomSource = source.value.kind === 'void' && source.value.bottom === true
       if (!bottomSource && (source.value.kind === 'void' || target.value.kind === 'void')) {
-        if (!isUnitPromisePayload(source.value) || !isUnitPromisePayload(target.value)) return undefined
+        const boxedUnit = source.value.kind === 'void' && target.value.kind === 'dynamic'
+        if (!isUnitPromisePayload(source.value) || !(boxedUnit || isUnitPromisePayload(target.value))) return undefined
         return (
           `([&]() -> ${cppTypeOf(target)} { const auto& ${promiseSourceName} = ${text}; ` +
           `if (${promiseSourceName}.rejected()) return ${cppTypeOf(target)}::rejected_with(${promiseSourceName}.rejection()); ` +
           `${cppTypeOf(target)} ${promiseTargetName}; ` +
           `${promiseSourceName}.observe([${promiseTargetName}](auto&&...) mutable ` +
-          `{ ${promiseTargetName}.resolve(${target.value.kind === 'void' ? '' : cppUndefinedValue}); }, ` +
+          `{ ${promiseTargetName}.resolve(${target.value.kind === 'void' ? '' : boxedUnit ? 'gea::Value()' : cppUndefinedValue}); }, ` +
           `[${promiseTargetName}](const std::exception_ptr& ${promiseRejectionName}) mutable ` +
           `{ ${promiseTargetName}.reject(${promiseRejectionName}); }); ` +
           `return ${promiseTargetName}; }())`
@@ -4000,6 +4327,12 @@ export const recipeText = (ctx: ConversionSite, node: ConversionNode, text: stri
     const view = viewPlanFor(ctx.layouts, node.source, node.target)
     if (view !== null && recordViewDispatchesArms(view)) return structuralRecordViewText(ctx, node.source, node.target, text)
   }
+  if (node.capability.kind === 'static' && node.capability.materializer.id === 'callable-union-dispatch')
+    return callableUnionDispatchText(ctx, node.source, node.target, text)
+  if (node.capability.kind === 'static' && node.capability.materializer.id === 'callable-result-view')
+    return callableResultViewText(ctx, node.source, node.target, text)
+  if (node.capability.kind === 'static' && node.capability.materializer.id === 'host-record-view')
+    return hostRecordViewText(ctx.layouts, node.source, node.target, text)
   return convertedValueText(node.source, node.target, text) ?? structuralRecordViewText(ctx, node.source, node.target, text)
 }
 

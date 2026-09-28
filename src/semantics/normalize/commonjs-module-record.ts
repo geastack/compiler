@@ -13,13 +13,25 @@ export interface CommonJsModuleRecordCensus {
   readonly exportExpressionAt: (node: ts.Node) => ts.Expression | null
   readonly requiredExportExpressionAt: (node: ts.Node) => ts.Expression | null
   readonly moduleExportExpressionAt: (node: ts.Node) => ts.Expression | null
+  /** The proven exports expression of the CommonJS module an ES import names, resolved to its runtime source. */
+  readonly importedExportExpressionOf: (declaration: ts.ImportDeclaration) => ts.Expression | null
+  /**
+   * The `export default` expression of the ES module a static `require` names
+   * -- asked of the call, of a `const` it initializes, or of a reference to
+   * that `const`: the value `module.exports` holds at run time
+   * (`producers/declaration-lifecycle.ts`'s `commonJsDefaultExportOf`), which
+   * the checker types as the module's namespace instead.
+   */
+  readonly requiredDefaultExportAt: (node: ts.Node) => ts.Expression | null
 }
 
 export const emptyCommonJsModuleRecordCensus: CommonJsModuleRecordCensus = {
   exportExpressionOf: () => null,
   exportExpressionAt: () => null,
   requiredExportExpressionAt: () => null,
-  moduleExportExpressionAt: () => null
+  moduleExportExpressionAt: () => null,
+  importedExportExpressionOf: () => null,
+  requiredDefaultExportAt: () => null
 }
 
 const unwrapExpression = (expression: ts.Expression): ts.Expression => {
@@ -338,5 +350,44 @@ export const censusCommonJsModuleRecords = (
     const file = target === null ? null : sourceFileOf(target)
     return file ? exportExpressionOf(file) : null
   }
-  return { exportExpressionOf, exportExpressionAt, requiredExportExpressionAt, moduleExportExpressionAt }
+  const importedExportExpressionOf = (declaration: ts.ImportDeclaration): ts.Expression | null => {
+    if (!ts.isStringLiteralLike(declaration.moduleSpecifier)) return null
+    const target = runtimeModuleTargetOf(declaration.moduleSpecifier.text, declaration.getSourceFile().fileName, 'import')
+    const file = target === null ? null : sourceFileOf(target)
+    return file ? exportExpressionOf(file) : null
+  }
+  const requiredDefaultOfCall = (node: ts.Node): ts.Expression | null => {
+    if (!ts.isCallExpression(node) || require.statusOf(node.expression) !== 'static') return null
+    const argument = node.arguments[0]
+    if (node.arguments.length !== 1 || !argument || !ts.isStringLiteralLike(argument)) return null
+    const target = runtimeModuleTargetOf(argument.text, node.getSourceFile().fileName, 'require')
+    const file = target === null ? null : sourceFileOf(target)
+    if (!file || file.isDeclarationFile || !ts.isExternalModule(file) || !/\.[cm]?tsx?$/.test(file.fileName)) return null
+    for (const statement of file.statements) if (ts.isExportAssignment(statement) && !statement.isExportEquals) return statement.expression
+    return null
+  }
+  // The call, a `const` it initializes, and a reference to that `const` all
+  // hold the one default value.
+  const requiredDefaultExportAt = (node: ts.Node): ts.Expression | null => {
+    if (ts.isCallExpression(node)) return requiredDefaultOfCall(node)
+    // In JavaScript the checker binds `const x = require(...)` as an alias,
+    // whose declaration is the variable but which has no value declaration.
+    const symbol = ts.isIdentifier(node) ? checker.getSymbolAtLocation(node) : undefined
+    const declaration = ts.isVariableDeclaration(node)
+      ? node
+      : (symbol?.valueDeclaration ?? symbol?.declarations?.find(ts.isVariableDeclaration))
+    if (!declaration || !ts.isVariableDeclaration(declaration) || !declaration.initializer || !ts.isIdentifier(declaration.name))
+      return null
+    const list = declaration.parent
+    if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return null
+    return requiredDefaultOfCall(unwrapExpression(declaration.initializer))
+  }
+  return {
+    exportExpressionOf,
+    exportExpressionAt,
+    requiredExportExpressionAt,
+    moduleExportExpressionAt,
+    importedExportExpressionOf,
+    requiredDefaultExportAt
+  }
 }

@@ -47,6 +47,11 @@ import { toStringText } from './emit-tostring.js'
  * implements (a BigInt domain, chiefly) -- the caller falls back to the
  * boxed `gea::dynamicAdd` path rather than silently dropping one arm.
  */
+const mayHoldBigInt = (carrier: Representation): boolean =>
+  (carrier.kind === 'scalar' && carrier.domain === 'bigint') ||
+  (carrier.kind === 'optional' && mayHoldBigInt(carrier.payload)) ||
+  (carrier.kind === 'tagged-union' && carrier.arms.some((arm) => mayHoldBigInt(arm.value)))
+
 export const mixedDynamicPlusText = (
   dynamicSide: { readonly text: string },
   typedSide: { readonly text: string; readonly representation: Representation },
@@ -54,6 +59,9 @@ export const mixedDynamicPlusText = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   deriver: RepresentationDeriver
 ): string | null => {
+  // A typed side that may hold a BigInt adds as a BigInt when the dynamic
+  // side is one too, which only `gea::dynamicAdd`'s whole dispatch decides.
+  if (mayHoldBigInt(typedSide.representation)) return null
   const typedAsString = toStringText(typedSide.text, typedSide.representation, classes, deriver)
   const typedAsNumber = toNumberText(typedSide.text, typedSide.representation)
   if (typedAsString === null || typedAsNumber === null) return null

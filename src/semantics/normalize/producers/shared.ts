@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import { censusReselectedSignature } from '../overload-reselection.js'
 import type { SpecializationPath } from '../identities.js'
 import { genericFunctionSetMembersOf, runtimeSymbolMemberIndexOf } from '../../model/structural-types.js'
 import { isFabricatedSignatureShape } from '../structural-callable.js'
@@ -470,9 +471,27 @@ const instanceCopyOfMethodReceiver = (
   return [...enclosing, { owner, ordinal: copy.ordinal }]
 }
 
+/**
+ * The overload a call selects: the checker's, or the one the census's argument
+ * types reselect for an argument the checker saw as `any`
+ * (`censusReselectedSignature`). The callee and the invocation both ask this,
+ * so the callee's frame is the invocation's -- thread-stream's
+ * `Buffer.from(this[kImpl].dataBuf)` over a bag member the checker types `any`.
+ */
+export const callSelectedSignature = (context: ProducerContext, call: ts.CallLikeExpression): ts.Signature | undefined => {
+  const checkerResolved = context.checker.getResolvedSignature(call)
+  if (!ts.isCallExpression(call)) return checkerResolved
+  return (
+    censusReselectedSignature(context.checker, call, (argument) => {
+      const raw = context.types.rawTypeAt(argument)
+      return (raw.flags & ts.TypeFlags.Any) !== 0 ? (context.types.censusArgumentTypeAt(argument) ?? raw) : raw
+    }) ?? checkerResolved
+  )
+}
+
 export const resolvedCalleeSignatureType = (context: ProducerContext, node: ts.Expression): StructuralTypeId | null => {
   const call = enclosingCallIfCallee(node)
-  const signature = call ? context.checker.getResolvedSignature(call) : undefined
+  const signature = call ? callSelectedSignature(context, call) : undefined
   if (!call || !signature) return null
   const mutableMethod = context.types.mutableMethodReadTypeAt(node)
   if (mutableMethod !== null) return mutableMethod
@@ -502,6 +521,19 @@ export const resolvedCalleeSignatureType = (context: ProducerContext, node: ts.E
   // the callee's carrier disagree with the cell it was just read from at every
   // call. The value's own type is the frame; the call converts to it.
   if (isGenericCallableValue(context.checker, unwrapErasedExpression(node))) return plainType
+  // A class method called through a name that holds it detached (`const {
+  // asString } = serializer; asString(v)`) runs with no receiver: the frame
+  // is the value's own receiver-free type (`bound-call-result`), not the
+  // method declaration's, which names the class.
+  const called = unwrapErasedExpression(node)
+  if (
+    ts.isIdentifier(called) &&
+    signature.declaration !== undefined &&
+    ts.isMethodDeclaration(signature.declaration) &&
+    ts.isClassLike(signature.declaration.parent) &&
+    context.types.withoutClassReceiver(plainType) === plainType
+  )
+    return plainType
   // `node`'s own declared type is a property of ITS declaration, not of the
   // caller's specialization frame -- the same leak `buildSelectedSignature`
   // (`producers/invocations.ts`) fixes for a signature's parameters/return,
@@ -804,6 +836,51 @@ export const isPlainArrayType = (context: ProducerContext, type: StructuralTypeI
 }
 
 /**
+ * The keys a later member of the same literal writes unconditionally, by the
+ * key each installs: `{ ...opts, strict: x }` defines `strict` after the spread
+ * copied it, so the copy is dead and its value never observable.
+ *
+ * A named member counts by its static key -- a computed key names a key the
+ * program chooses at run time. A later SPREAD counts only for the members it
+ * is certain to own: the required own data members `staticSpreadMembersOf`
+ * admits of a source that cannot be absent (ajv's `{...opts,
+ * ...requiredOptions(opts)}`); an optional member, a prototype method, or a
+ * source that may be `null`/`undefined` writes nothing it can be held to. The
+ * key is the property key the member installs, the domain `CopyDataProperties`
+ * copies over. Both object-spread paths ask this: the static copy skips such a
+ * member, and the runtime copy (`producers/protocol.ts`) may leave a required
+ * receiver field to the member that sets it.
+ */
+export const keysWrittenAfter = (context: ProducerContext, property: ts.SpreadAssignment): ReadonlySet<string> => {
+  const literal = property.parent
+  const keys = new Set<string>()
+  for (const later of literal.properties.slice(literal.properties.indexOf(property) + 1)) {
+    if (ts.isSpreadAssignment(later)) {
+      const admitted = staticSpreadMembersOf(context, context.types.typeAt(later.expression))
+      if (!('blocked' in admitted)) {
+        for (const member of admitted.members) if (member.key.kind !== 'symbol' && !member.optional) keys.add(String(member.key.value))
+        continue
+      }
+      // A later source this literal copies at run time still writes every
+      // REQUIRED property its type states: ajv's `{...opts,
+      // ...requiredOptions(opts)}` fills each required instance option the
+      // first spread may lack, through a mapped type the static copy declines.
+      const written = context.checker.getNonNullableType(context.checker.getTypeAtLocation(later.expression))
+      if ((written.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) continue
+      for (const property of context.checker.getPropertiesOfType(written))
+        if ((property.flags & ts.SymbolFlags.Optional) === 0 && !property.getName().startsWith('__@')) keys.add(property.getName())
+      continue
+    }
+    if (later.name === undefined) continue
+    const name = ts.isComputedPropertyName(later.name) ? later.name.expression : later.name
+    if (ts.isIdentifier(name) || ts.isPrivateIdentifier(name)) keys.add(name.text)
+    else if (ts.isStringLiteralLike(name)) keys.add(name.text)
+    else if (ts.isNumericLiteral(name)) keys.add(String(Number(name.text)))
+  }
+  return keys
+}
+
+/**
  * The members an object spread copies, when the source's own-property set is
  * statically known -- or the reason it is not.
  *
@@ -925,6 +1002,37 @@ export const staticSpreadMembersOf = (
     }
   }
   return role === 'target' ? { members: shape.members, index: shape.index } : { members: shape.members }
+}
+
+/**
+ * Whether an object-literal spread is copied field by field
+ * (`staticSpreadMembersOf`) or by the runtime `CopyDataProperties` step. A
+ * union source spread into a literal whose own type is a union of arms with
+ * different key sets is the runtime copy: ajv's `{ ...def, type, schemaType }`
+ * over `KeywordDefinition` is one of three records, chosen by which arm `def`
+ * holds, and one merged member set would write keys the chosen arm does not
+ * have. Both spread producers ask this, so they cannot disagree.
+ */
+export const spreadCopiesStatically = (context: ProducerContext, spread: ts.SpreadAssignment): boolean => {
+  const source = context.types.typeAt(spread.expression)
+  if ('blocked' in staticSpreadMembersOf(context, source)) return false
+  const armsOf = (type: StructuralTypeId): readonly StructuralTypeId[] | null => {
+    const outer = context.table.get(type).shape
+    const shape = outer.kind === 'declared' && outer.body !== null ? context.table.get(outer.body).shape : outer
+    return shape.kind === 'union' ? shape.members : null
+  }
+  const targetArms = armsOf(context.types.typeAt(spread.parent))
+  if (armsOf(source) === null || targetArms === null) return true
+  const keySets = targetArms.map((arm) => {
+    const admitted = staticSpreadMembersOf(context, arm, 'target')
+    return 'blocked' in admitted
+      ? null
+      : admitted.members
+          .flatMap((member) => (member.key.kind === 'symbol' ? [] : [String(member.key.value)]))
+          .sort()
+          .join('\0')
+  })
+  return keySets.every((keys) => keys !== null && keys === keySets[0])
 }
 
 /**
@@ -1402,6 +1510,16 @@ export const hasNativeEnumerationCursor = (context: ProducerContext, type: Struc
  * reason `isNativeIterableSetType` states about `Set`: the deriver reads the
  * SAME identity, so the two cannot disagree about which declaration is meant.
  */
+/**
+ * An async generator object: its own async iterator, whose `next()` hands back
+ * a result this runtime has already settled (`producers/control.ts`), so a
+ * `for await` over one walks the same cursor a `for...of` over a generator does.
+ */
+export const isAsyncGeneratorType = (context: ProducerContext, type: StructuralTypeId): boolean => {
+  const shape = context.table.get(type).shape
+  return shape.kind === 'declared' && context.asyncGeneratorDeclaration !== null && shape.declaration === context.asyncGeneratorDeclaration
+}
+
 export const isGeneratorType = (context: ProducerContext, type: StructuralTypeId): boolean => {
   const shape = context.table.get(type).shape
   if (shape.kind !== 'declared') return false
@@ -1708,3 +1826,14 @@ export const ownPrototypePropertyOf = (node: ts.Node): boolean | null => {
   if (!ts.isFunctionDeclaration(node) && !ts.isFunctionExpression(node)) return false
   return node.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) !== true
 }
+
+/**
+ * Whether a CommonJS module's `module.exports = <expression>` proves the native
+ * module record both its `module` binding and every `require` of it lower
+ * through. Not when the opt-in boxes the exported value (a constructor
+ * function whose prototype the program writes): the record's one field would
+ * be a box, and the boxed module lives in the dynamic registry instead, which
+ * the binding and its requires must then agree on.
+ */
+export const provesNativeModuleRecord = (context: ProducerContext, exported: ts.Expression | null): boolean =>
+  exported !== null && !context.dynamicFallbackTypes.has(context.types.typeAt(exported))

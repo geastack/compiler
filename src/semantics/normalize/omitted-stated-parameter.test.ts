@@ -59,8 +59,14 @@ test('a statement with an unstated position is left to the JSDoc name census', (
   assert.equal(bindingOf('setClear( 0 ); setClear( 1, [ 1 ] );', 'Array<*>').parameter, null)
 })
 
-test('a passed argument outside the statement refuses', () => {
-  assert.equal(bindingOf('setClear( 0 ); setClear( 1, "yes" );').parameter, null)
+test('a passed argument outside the statement joins the cell', () => {
+  assert.deepEqual(bindingOf('setClear( 0 ); setClear( 1, "yes" );').parameter, ['false', 'string', 'true', 'undefined'])
+  // With no caller omitting it: pino's `@param {string}` called with a Number.
+  const { parameter, read } = bindingOf('setClear( 0, 1 ); setClear( 1, true );')
+  assert.deepEqual(parameter, ['false', 'number', 'true'])
+  assert.deepEqual(read, ['false', 'number', 'true'])
+  // Beside an argument nothing types, the disproven statement states nothing.
+  assert.deepEqual(bindingOf('setClear( 0, 1 ); setClear( 1, JSON.parse( "true" ) );').parameter, ['any'])
 })
 
 test('an open caller set still holds the omission a visible caller makes', () => {

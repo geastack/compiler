@@ -3,6 +3,27 @@ import { representationKey, type Representation } from '../representation/model.
 import type { ClassLayout } from './classes.js'
 
 /** Native, method-only prototype identity reads do not expose instance fields. */
+/**
+ * The class whose prototype a DYNAMIC read of `C.prototype` boxes as its
+ * facade (`gea::detail::nativePrototypeFacade`): the one link a dynamic chain
+ * inherits the class's methods through. The facade is an ordinary object, so
+ * the native prototype's escape restrictions do not apply to it.
+ */
+export const classPrototypeFacadeOf = (classes: ReadonlyMap<DeclarationId, ClassLayout>, receiver: Representation): ClassLayout | null => {
+  if (receiver.kind !== 'constructor-family' || receiver.members.length !== 1) return null
+  const layout = classes.get(receiver.members[0]!)
+  if (!layout || layout.instance?.kind !== 'class-ref') return null
+  const seen = new Set<DeclarationId>()
+  for (let declaration: DeclarationId | null = layout.declaration; declaration !== null;) {
+    if (seen.has(declaration)) return null
+    seen.add(declaration)
+    const ancestor = classes.get(declaration)
+    if (!ancestor || ancestor.nativeBase !== null) return null
+    declaration = ancestor.base
+  }
+  return layout
+}
+
 export const classPrototypeReadOf = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   receiver: Representation,

@@ -87,6 +87,38 @@ const lowerDeferredFunctionBind = (
  * `deferredFunctionCallCalleeOf`'s comment for why this is a rewrite and not
  * an ordinary call through `.call`'s own declared signature.
  */
+/**
+ * `Object.hasOwnProperty.call(o, k)`: the callee is `Object.prototype`'s own
+ * property test read off a host object -- typed a receiver-less `(v:
+ * PropertyKey) => boolean`, but a method that tests `this`, so `.call`'s
+ * this-argument is the object it answers for, not an ignored value.
+ */
+const readsHostOwnPropertyTest = (ctx: LoweringContext, callee: SemanticOperand): boolean => {
+  if (callee.source.kind !== 'result') return false
+  const producerId = ctx.graph.results.get(callee.source.result)
+  const producer = producerId === undefined ? undefined : ctx.graph.operations.get(producerId)
+  if (producer?.family !== 'property' || producer.internalMethod !== 'get' || producer.keyIsComputed) return false
+  const key = operandOf(producer, 'key')
+  if (key?.source.kind !== 'constant' || (key.source.text !== 'hasOwnProperty' && key.source.text !== 'propertyIsEnumerable')) return false
+  const receiver = operandOf(producer, 'receiver')
+  return receiver?.source.kind === 'result' && ctx.plan.selected.get(receiver.source.result)?.kind === 'native-handle'
+}
+
+/**
+ * The callable a deferred `.call`/`.apply` invokes: the read's receiver, or
+ * its payload when the receiver may be absent -- reading `.call` off an
+ * absent value is the TypeError, so the call only ever runs the payload.
+ */
+const presentCallee = (ctx: LoweringContext, block: IrBlockId, lineage: SemanticResultId, callee: IrOperand): IrOperand => {
+  if (callee.representation.kind !== 'optional') return callee
+  const present = convertTo(ctx, block, lineage, callee, callee.representation.payload, 'present-callee')
+  if (present === null)
+    throw new IrLoweringBlockedError(
+      `"Function.prototype.call" of a ${representationKey(callee.representation)} callable has no installed narrowing to its payload`
+    )
+  return present
+}
+
 const lowerDeferredFunctionCall = (
   ctx: LoweringContext,
   block: IrBlockId,
@@ -94,7 +126,7 @@ const lowerDeferredFunctionCall = (
   operation: InvocationOperation,
   deferred: { readonly receiver: SemanticOperand; readonly abi: CallableAbi; readonly frame: 'native' | 'boxed' }
 ): void => {
-  const realCallee = resolveRequiredOperand(ctx, block, lineage, deferred.receiver)
+  const realCallee = presentCallee(ctx, block, lineage, resolveRequiredOperand(ctx, block, lineage, deferred.receiver))
   const evaluated = argumentSlotsOf(ctx, block, lineage, operation)
   const [thisArgSlot, ...tailSlots] = evaluated
   if (!thisArgSlot) {
@@ -114,7 +146,7 @@ const lowerDeferredFunctionCall = (
   // parameter) ignores whatever `.call` passed for it, exactly as the
   // language does: `add.call(x, 3, 4)` calls `add(3, 4)` and `x` is never
   // observed.
-  const receiver = deferred.abi.receiver !== null ? thisArgSlot.value : null
+  const receiver = deferred.abi.receiver !== null || readsHostOwnPropertyTest(ctx, deferred.receiver) ? thisArgSlot.value : null
   // A BOXED frame is not packed here: `Value::callWithReceiver` takes the flat
   // ECMA-262 argument list and the callee's own thunk fills its rest slot from
   // it. Packing against `deferred.abi` -- the underlying callable's PHYSICAL
@@ -161,7 +193,7 @@ const lowerDeferredFunctionApply = (
   operation: InvocationOperation,
   deferred: { readonly receiver: SemanticOperand; readonly abi: CallableAbi }
 ): void => {
-  const realCallee = resolveRequiredOperand(ctx, block, lineage, deferred.receiver)
+  const realCallee = presentCallee(ctx, block, lineage, resolveRequiredOperand(ctx, block, lineage, deferred.receiver))
   const evaluated = argumentSlotsOf(ctx, block, lineage, operation)
   const [thisArgSlot, argsArraySlot, ...overflow] = evaluated
   if (!thisArgSlot) {

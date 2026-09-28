@@ -1355,6 +1355,12 @@ class Eval {
   }
   static FunctionArgument functionArgument(std::string value) { return FunctionArgument(std::move(value)); }
   static FunctionArgument functionArgument(Value value) { return FunctionArgument(std::move(value)); }
+  template <typename Element>
+  static Value constructFunctionFrom(const Ref<ArrayObject<Element>>& list) {
+    std::vector<FunctionArgument> arguments;
+    for (std::size_t i = 0; i < list->size(); ++i) arguments.push_back(functionArgument(list->elementAt(static_cast<double>(i))));
+    return constructFunction(arguments);
+  }
   static Value constructFunction(const std::vector<FunctionArgument>& arguments) {
     // The compiler has one process-wide ECMAScript realm. Adapt its open
     // global dictionary into Eval without copying it: every generated

@@ -1,5 +1,5 @@
 'use strict'
 function noop () {}
-const overridden = globalThis.hasOwnProperty('__override')
+Object.assign(globalThis, JSON.parse('{}'))
 noop()
-module.exports = { noop, overridden }
+module.exports = { noop }

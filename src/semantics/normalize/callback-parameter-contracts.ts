@@ -3,10 +3,24 @@ import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { classifyCallableMention } from './flow/callable-reach.js'
 import { isModuleExportedDeclaration } from './flow/targets.js'
 
-export interface CallbackParameterContract {
+export interface SignatureCallbackContract {
+  readonly kind: 'signature'
   readonly signature: ts.Signature
   readonly location: ts.CallExpression | ts.NewExpression
 }
+
+/**
+ * A receiving call that hands the callback exactly the arguments written after
+ * it: `setImmediate(nextFlush, this)` is the call `nextFlush(this)`. Its
+ * evidence is those argument expressions, joined as a call site's are.
+ */
+export interface ForwardedCallbackContract {
+  readonly kind: 'forwarded'
+  readonly location: ts.CallExpression | ts.NewExpression
+  readonly arguments: readonly ts.Expression[]
+}
+
+export type CallbackParameterContract = SignatureCallbackContract | ForwardedCallbackContract
 
 /** Resolve at the receiving call so instantiated generic contracts stay instantiated. */
 export const callbackContractParameterType = (
@@ -14,10 +28,36 @@ export const callbackContractParameterType = (
   contract: CallbackParameterContract,
   position: number
 ): ts.Type | null => {
+  if (contract.kind === 'forwarded') return null
   const parameter = contract.signature.parameters[position]
   const declaration = parameter?.valueDeclaration ?? parameter?.declarations?.[0]
   if (!parameter || !declaration || !ts.isParameter(declaration) || declaration.dotDotDotToken) return null
   return checker.getTypeOfSymbolAtLocation(parameter, contract.location)
+}
+
+/**
+ * The index of the receiving declaration's rest parameter when the callback at
+ * `position` is stated as `(...args: T) => R` over the very type parameter
+ * that rest is stated as -- `setImmediate<TArgs>(callback: (...args: TArgs) =>
+ * void, ...args: TArgs)`. The statement is the forwarding: whatever the call
+ * writes after the callback is what the callback is called with. The
+ * checker's instantiation cannot say so for an untyped callback, because it
+ * infers `TArgs` from the callback's own implicit `any` before the arguments.
+ */
+const forwardingRestIndexOf = (checker: ts.TypeChecker, signature: ts.Signature, position: number): number | null => {
+  const declaration = signature.declaration
+  if (!declaration || ts.isJSDocSignature(declaration)) return null
+  const parameters = declaration.parameters
+  const restIndex = parameters.length - 1
+  const rest = parameters[restIndex]
+  if (!rest?.dotDotDotToken || !rest.type || position >= restIndex) return null
+  const forwarded = checker.getTypeFromTypeNode(rest.type)
+  if ((forwarded.flags & ts.TypeFlags.TypeParameter) === 0) return null
+  const callback = parameters[position]?.type
+  if (!callback || !ts.isFunctionTypeNode(callback) || callback.parameters.length !== 1) return null
+  const received = callback.parameters[0]!
+  if (!received.dotDotDotToken || !received.type || checker.getTypeFromTypeNode(received.type) !== forwarded) return null
+  return restIndex
 }
 
 /**
@@ -51,7 +91,9 @@ export const callbackParameterContractsFor = (
     if (position < 0) return null
     const signature = checker.getResolvedSignature(call)
     const parameter = signature?.parameters[position]
-    if (!parameter) return null
+    if (!signature || !parameter) return null
+    const restIndex = forwardingRestIndexOf(checker, signature, position)
+    if (restIndex !== null) return [{ kind: 'forwarded', location: call, arguments: args.slice(restIndex) }]
     const parameterDeclaration = parameter.valueDeclaration ?? parameter.declarations?.[0]
     if (!parameterDeclaration || !ts.isParameter(parameterDeclaration) || parameterDeclaration.dotDotDotToken) return null
     const type = checker.getTypeOfSymbolAtLocation(parameter, call)
@@ -64,7 +106,7 @@ export const callbackParameterContractsFor = (
       if ((arm.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.TypeParameter)) !== 0) return null
       const calls = checker.getSignaturesOfType(arm, ts.SignatureKind.Call)
       if (calls.length === 0) return null
-      result.push(...calls.map((signature) => ({ signature, location: call })))
+      result.push(...calls.map((signature) => ({ kind: 'signature' as const, signature, location: call })))
     }
     return result.length === 0 ? null : result
   }

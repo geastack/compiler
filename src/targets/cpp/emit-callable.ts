@@ -18,7 +18,14 @@ import type { DeclarationId, FunctionId } from '../../identity/ids.js'
 import type { CallableAbi, Representation } from '../../representation/model.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import { abiKey, representationKey } from '../../representation/model.js'
-import { alignedValueText, bindsReceiver, callableObjectAbi, movedValueText, unboxedLoadText } from './emit-narrowing.js'
+import {
+  alignedValueText,
+  bindsReceiver,
+  callableObjectAbi,
+  movedValueText,
+  parameterAbiStatingText,
+  unboxedLoadText
+} from './emit-narrowing.js'
 import { memberAccessOperator, reactiveRevisionText } from './emit-carrier-members.js'
 import { structuralRecordViewText } from './emit-record-view.js'
 import { emitDateConstruct, isDateCarrier } from './prototype/emit-prototype-date.js'
@@ -44,11 +51,18 @@ import {
   type EmitContext,
   captureFieldText
 } from './emit-context.js'
-import { classMemberOf, classStaticMemberOf, cppFieldInitializerStatements, lazyArrowFieldPlanOf } from './class-layout.js'
+import {
+  classMemberOf,
+  classStaticFieldStorageKeysOf,
+  classStaticMemberOf,
+  cppFieldInitializerStatements,
+  lazyArrowFieldPlanOf
+} from './class-layout.js'
+import { classConstructorStaticMemberTextFor } from './class-properties/emit-class-properties.js'
 import { declaredRecordFieldOf } from './records.js'
 import { hostArityCallLines, hostResultText } from './host/emit-host-arity.js'
 import { hostMemberOf } from './host/host-members.js'
-import { hostCallText, nativeHandleInvocationText } from './host/emit-host-invoke.js'
+import { hostCallText, intrinsicErrorText, nativeHandleInvocationText } from './host/emit-host-invoke.js'
 import { nativeReflectCallText } from './host/emit-host-reflect.js'
 import { jsonStringifyFillLines } from './emit-json.js'
 import { withheldCellOf } from './deferral-safety.js'
@@ -70,6 +84,8 @@ import { armAt, armIs } from './emit-union-properties.js'
 import {
   cppAbiType,
   cppBodyName,
+  cppGlobalName,
+  cppStringLiteral,
   cppBoxedType,
   cppCallableDeclarationTagName,
   cppClassName,
@@ -476,6 +492,23 @@ const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallO
       armText = armAt(armText, step)
     }
     const armTest = tests.length === 0 ? 'true' : tests.join(' && ')
+    if (arm.callable === null) {
+      const boxedArguments = operation.arguments.map((argument) => boxedValueText(ctx, argument, 'union method argument')).join(', ')
+      const invocation = `[&]() { const gea::Value& gea_arm = ${armText}; return gea_arm.getProperty(gea::PropertyKey::string(${cppStringLiteral(read.key)})).callWithReceiver(gea_arm, {${boxedArguments}}); }()`
+      const dynamicResult: Representation = { kind: 'dynamic', reason: 'opt-in-fallback' }
+      const converted =
+        operation.result === null || operation.result.representation.kind === 'void'
+          ? null
+          : alignedValueText(ctx, 'emit-callable.ts:union-method-box', dynamicResult, operation.result.representation, invocation)
+      if (operation.result !== null && operation.result.representation.kind !== 'void' && converted === null) {
+        throw createCppEmitBlockedError(
+          `conversion:dynamic->${representationKey(operation.result.representation)}`,
+          'a boxed union arm method result cannot fill the published result'
+        )
+      }
+      const body = converted === null ? `${invocation}; return;` : `return ${converted};`
+      return index === arms.length - 1 ? body : `if (${armTest}) { ${body} }`
+    }
     const abi = ctx.abiOfCallable(arm.callable)
     if (abi === null || abi.receiver === null) {
       throw createCppEmitBlockedError(
@@ -968,7 +1001,8 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
       if (!abi || abi.receiver !== null || abi.restFrom !== null) {
         throw createCppEmitBlockedError(
           'call-abi:generic-function-set',
-          `generic function set member ${member} needs a fixed, receiver-free calling convention`
+          `generic function set member ${member} needs a fixed, receiver-free calling convention (copy ${target.functionId} ` +
+            `${!abi ? 'has none' : abi.receiver !== null ? 'takes a receiver' : 'takes a rest'})`
         )
       }
       const args = receivableArguments(abi, operation.arguments).map((argument, position) => argumentText(ctx, abi, position, argument))
@@ -1035,6 +1069,13 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
         return index === callee.arms.length - 1 ? body : `if (gea_union_callee.is<${index}>()) { ${body} }`
       }
       const abi = callableObjectAbi(arm.value)
+      // A non-callable arm (`disableRequestLogging: boolean | (req) => boolean`)
+      // is a live value this call cannot invoke: 7.3.14 Call throws a
+      // TypeError when that arm is the one held.
+      if (abi === null && nonCallableArm(arm.value)) {
+        const body = 'gea::host::throwRuntimeError("TypeError", "value is not a function");'
+        return index === callee.arms.length - 1 ? body : `if (gea_union_callee.is<${index}>()) { ${body} }`
+      }
       if (!abi || abi.receiver !== null || abi.restFrom !== null) {
         throw createCppEmitBlockedError(
           'call-abi:tagged-union-call',
@@ -1177,18 +1218,35 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   // expects it, is a frame mismatch and not something to paper over. A direct
   // class method's recorded receiver above is part of that convention, not a
   // manufactured value.
-  if ((abi.receiver === null) !== (declaredReceiverOperand === null)) {
+  // A plain call of a callee whose convention takes a DYNAMIC receiver
+  // (`(this: unknown, ...) => R`) is not a frame mismatch: the call supplies
+  // `undefined` as this-argument (10.2.1.2 OrdinaryCallBindThis, strict), which
+  // is a value the slot's own carrier holds.
+  const undefinedReceiver =
+    declaredReceiverOperand === null && abi.receiver?.kind === 'dynamic' && physicalFrame.receiver?.kind === 'dynamic'
+  // A class method called directly through a name that holds it detached
+  // (`const f = obj.method; f(v)`) runs with `this` undefined; a body that
+  // never reads `this` (`captures.ts`'s `readsReceiver`) observes nothing in
+  // its receiver slot, so the slot is filled empty.
+  const unreadReceiver =
+    declaredReceiverOperand === null &&
+    abi.receiver?.kind === 'class-ref' &&
+    operation.target?.kind === 'direct' &&
+    !ctx.captures.readsReceiver(operation.target.functionId)
+  if (!undefinedReceiver && !unreadReceiver && (abi.receiver === null) !== (declaredReceiverOperand === null)) {
     const propertyOrigin = ctx.propertyReadOrigins.get(operation.callee.value)
+    const readOf = ctx.bindingReadDeclarations.get(operation.callee.value)
     const originText =
       propertyOrigin === undefined
-        ? 'no property-read origin'
+        ? `no property-read origin${readOf === undefined ? '' : ` (a read of ${readOf})`}`
         : `property-read origin ${representationKey(propertyOrigin.receiver.representation)}.${ctx.staticKeyTexts.get(propertyOrigin.key.value) ?? '<computed>'}`
     throw createCppEmitBlockedError(
       'call-abi:receiver-mismatch',
       declaredReceiverOperand
         ? 'passes a receiver to a callee whose convention declares none'
         : `omits the receiver its callee's convention declares (callee ${operation.callee.value} is ${representationKey(callee)}; ${originText}; ` +
-            `${boundReceiverOperand === undefined ? 'no recorded method receiver' : 'recorded method receiver present'})`
+            `${boundReceiverOperand === undefined ? 'no recorded method receiver' : 'recorded method receiver present'}; ` +
+            `target ${operation.target?.kind ?? 'none'})`
     )
   }
   // A host's own free function is called as a function, not through a
@@ -1278,7 +1336,13 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     return
   }
   const args = [
-    ...(declaredReceiverOperand ? [receiverArgumentText(ctx, physicalFrame, declaredReceiverOperand)] : []),
+    ...(declaredReceiverOperand
+      ? [receiverArgumentText(ctx, physicalFrame, declaredReceiverOperand)]
+      : undefinedReceiver
+        ? ['gea::Value()']
+        : unreadReceiver && physicalFrame.receiver !== null
+          ? [`${cppTypeOf(physicalFrame.receiver)}{}`]
+          : []),
     ...receivableArguments(physicalFrame, operation.arguments).map((argument, position) => argumentText(ctx, directAbi, position, argument))
   ]
   // A callee whose environment is `nullptr` is called by name. The carrier is
@@ -1714,6 +1778,7 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
   const identified = (payloadText: string): string =>
     payloadCarrier.kind === 'function-and-constructor' ||
     payloadCarrier.kind === 'dynamic' ||
+    operation.functionKind !== undefined ||
     ctx.callableIdentityDemand.observes(payloadCarrier)
       ? `gea::identifyCallable<&${cppCallableDeclarationTagName(operation.functionId)}>(${payloadText})`
       : payloadText
@@ -1741,7 +1806,7 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
     }
     const callableType = `gea::CallableObject<${cppAbiType(abi)}>`
     const boxText = (payloadText: string): string => {
-      const callable = identified(payloadText)
+      const callable = parameterAbiStatingText(abi, callableType, identified(payloadText))
       if (abi.receiver !== null) return `gea::Value::boxMethod<${abi.restFrom === null ? -1 : abi.restFrom + 1}>(${callable})`
       if (abi.restFrom === null) return `gea::Value::box(gea::Value::Tag::Function, ${callable})`
       return `gea::Value::boxCallable<${abi.restFrom}>(${callable})`
@@ -1826,6 +1891,18 @@ const emitTypedArrayConstruct = (
   const first = operation.arguments[0]
   if (first?.representation.kind === 'array-buffer' || first?.representation.kind === 'shared-array-buffer') {
     emitTypedArrayBufferConstruct(ctx, lines, operation, target)
+    return
+  }
+  // A POSSIBLY-ABSENT buffer: present, the buffer overload's view over the
+  // whole block; absent, `undefined` is not an Object, so 23.2.5.1 takes the
+  // length form with ToIndex(undefined) = 0 -- an empty array.
+  const absentable = first?.representation.kind === 'optional' ? first.representation.payload : null
+  if (first && operation.arguments.length === 1 && (absentable?.kind === 'array-buffer' || absentable?.kind === 'shared-array-buffer')) {
+    const source = operandText(ctx, first)
+    const factory = absentable.kind === 'shared-array-buffer' ? 'fromSharedBuffer' : 'fromBuffer'
+    lines.push(
+      `${defineValue(ctx, operation.result)} = ${source}.has_value() ? gea::makeRef<${target}>(${target}::${factory}(*${source}, 0, (*${source})->size() / sizeof(${target}::value_type))) : gea::makeRef<${target}>();`
+    )
     return
   }
   const name = defineValue(ctx, operation.result)
@@ -1973,15 +2050,36 @@ const emitArrayConstruct = (
     lines.push(`${name} = gea::makeRef<${target}>();`)
     return
   }
+  // Several arguments are the elements (23.1.1.1 step 5), each converted into
+  // the array's element carrier or refused by name.
   if (operation.arguments.length > 1) {
-    throw createCppEmitBlockedError(
-      'call-abi:construct:array',
-      `constructs an Array from ${operation.arguments.length} arguments; only the zero- and length-argument forms of ` +
-        'ECMA-262 23.1.1.1 are implemented, because the element form owes each item a conversion to the array element ' +
-        'carrier that only lowering states (see emitArrayConstruct)'
+    const elements = operation.arguments.map((element) =>
+      alignedValueText(ctx, 'emit-callable.ts:array-construct-element', element.representation, result.element, operandText(ctx, element))
     )
+    const refused = operation.arguments.find((_, index) => elements[index] === null)
+    if (refused !== undefined) {
+      throw createCppEmitBlockedError(
+        'call-abi:construct:array',
+        `constructs an Array whose element "${representationKey(refused.representation)}" does not enter its element carrier "${representationKey(result.element)}"`
+      )
+    }
+    lines.push(`${name} = gea::makeRef<${target}>();`)
+    for (const element of elements) lines.push(`${name}->push(${element});`)
+    return
   }
   const carrier = argument.representation
+  // A boxed argument decides the form at run time: a Number is a length (a
+  // RangeError unless it is a uint32), anything else the sole element.
+  if (carrier.kind === 'dynamic') {
+    const text = operandText(ctx, argument)
+    lines.push(`${name} = gea::makeRef<${target}>();`)
+    lines.push(
+      `if (${text}.tag() == gea::Value::Tag::Number) { const double gea_count = ${text}.as<double>(); ` +
+        'if (gea_count < 0 || gea_count > 4294967295.0 || gea_count != std::floor(gea_count)) gea::host::throwRuntimeError("RangeError", "Invalid array length"); ' +
+        `${name}->setLength(gea_count); } else ${name}->push(gea::detail::DynamicCarrier<${cppTypeOf(result.element)}>::in(${text}, 0));`
+    )
+    return
+  }
   if (carrier.kind !== 'scalar' || carrier.domain !== 'number') {
     throw createCppEmitBlockedError(
       'call-abi:construct:array',
@@ -2071,6 +2169,28 @@ const emitKeyedCollectionConstruct = (
     )
   }
   const carrier = argument.representation
+  // A boxed iterable (24.1.1.1/24.2.1.1): the general protocol over the live
+  // value, each value -- or each entry's "0"/"1" -- entering the collection's
+  // own key and value carriers; `undefined`/`null` seed nothing.
+  const valueCarrier = result.value
+  const walksBoxes = result.family === 'set' || (result.family === 'map' && valueCarrier !== null)
+  const walkBoxed = (itemsText: string): void => {
+    const key = cppTypeOf(result.key)
+    const add =
+      result.family === 'set'
+        ? `gea_collection->add(gea::detail::DynamicCarrier<${key}>::in(gea_step.value, 0));`
+        : `if (gea_step.value.tag() != gea::Value::Tag::Object) gea::host::throwRuntimeError("TypeError", "Iterator value is not an entry object"); ` +
+          `gea_collection->set(gea::detail::DynamicCarrier<${key}>::in(gea_step.value.getProperty(gea::PropertyKey::string("0")), 0), ` +
+          `gea::detail::DynamicCarrier<${cppTypeOf(valueCarrier ?? result.key)}>::in(gea_step.value.getProperty(gea::PropertyKey::string("1")), 1));`
+    lines.push(
+      `${name} = ([&]() { auto gea_collection = gea::makeRef<${target}>(); const gea::Value& gea_items = ${itemsText}; ` +
+        `if (gea_items.tag() == gea::Value::Tag::Undefined || gea_items.tag() == gea::Value::Tag::Null) return gea_collection; ` +
+        `const gea::Value gea_iterator = gea::runtime::iterator::getIterator(gea_items); ` +
+        `for (;;) { auto gea_step = gea::runtime::iterator::step(gea_iterator); if (gea_step.done) break; ` +
+        `try { ${add} } catch (...) { gea::runtime::iterator::closePreservingThrow(gea_iterator); throw; } } return gea_collection; })();`
+    )
+  }
+  if (carrier.kind === 'dynamic' && walksBoxes) return walkBoxed(operandText(ctx, argument))
   if (result.family === 'set' && carrier.kind === 'array-object' && representationKey(carrier.element) === representationKey(result.key)) {
     return void lines.push(`${name} = gea::setFromArray<${cppTypeOf(result.key)}>(${operandText(ctx, argument)});`)
   }
@@ -2086,6 +2206,24 @@ const emitKeyedCollectionConstruct = (
   if (result.family === 'set' && carrier.kind === 'string' && result.key.kind === 'string') {
     return void lines.push(`${name} = gea::setFromString(${operandText(ctx, argument)});`)
   }
+  // A Map seeded from an Array of `[key, value]` entries (ECMA-262 24.1.1.1
+  // AddEntriesFromIterable): a tuple is carried as a record of "0"/"1"
+  // fields, so each entry's two fields are read, converted into the map's
+  // own key and value, and set in order; a hole is the `undefined` entry
+  // AddEntriesFromIterable throws a TypeError for.
+  const entries = result.family === 'map' ? mapEntriesPlanOf(ctx, carrier, result) : null
+  if (entries !== null) {
+    lines.push(
+      `${name} = ([&]() { auto gea_map = gea::makeRef<${target}>(); const auto& gea_entries = ${operandText(ctx, argument)}; ` +
+        `for (std::size_t gea_index = 0; gea_entries && gea_index < gea_entries->size(); ++gea_index) { ` +
+        `if (!gea_entries->present(gea_index)) gea::host::throwRuntimeError("TypeError", "Iterator value undefined is not an entry object"); ` +
+        `const auto& gea_entry = gea_entries->at(gea_index); gea_map->set(${entries.key}, ${entries.value}); } return gea_map; })();`
+    )
+    return
+  }
+  // An Array whose elements no typed plan above reads (boxed entries, say) is
+  // the same Array held in a box, walked by the general protocol.
+  if (carrier.kind === 'array-object' && walksBoxes) return walkBoxed(boxedValueText(ctx, argument, `"new ${result.family}" iterable`))
   throw createCppEmitBlockedError(
     'call-abi:construct:keyed-collection',
     `constructs a ${result.family}<${representationKey(result.key)}> from a "${representationKey(carrier)}" argument; only the zero-argument form is implemented for every ` +
@@ -2114,8 +2252,10 @@ const emitKeyedCollectionConstruct = (
  * so that 22.2.3.2 `RegExpInitialize`'s flag and source validation runs and an
  * unknown or repeated flag throws where the language says it throws.
  */
-const emitRegExpConstruct = (ctx: EmitContext, lines: string[], operation: ConstructOperation): void => {
+const emitRegExpConstruct = (ctx: EmitContext, lines: string[], operation: ConstructOperation, boxed = false): void => {
   const args = operation.arguments
+  // A program holding the new RegExp dynamically holds the same pattern object, boxed.
+  const held = (text: string): string => (boxed ? `gea::Value::box(gea::Value::Tag::Object, ${text})` : text)
   if (args.length > 2) {
     throw createCppEmitBlockedError(
       'call-abi:construct:regexp',
@@ -2123,7 +2263,7 @@ const emitRegExpConstruct = (ctx: EmitContext, lines: string[], operation: Const
     )
   }
   if (args.length === 0) {
-    lines.push(`${defineValue(ctx, operation.result)} = ${cppConstructPatternEntry}(std::string());`)
+    lines.push(`${defineValue(ctx, operation.result)} = ${held(`${cppConstructPatternEntry}(std::string())`)};`)
     return
   }
   const spellingOf = (argument: IrOperand, position: number): string => {
@@ -2131,6 +2271,11 @@ const emitRegExpConstruct = (ctx: EmitContext, lines: string[], operation: Const
     if (carrier.kind === 'dynamic') return operandText(ctx, argument)
     if (carrier.kind === 'string') return operandText(ctx, argument)
     if (position === 0 && regexpRoleOf(carrier) === 'pattern') return operandText(ctx, argument)
+    // 22.2.3.1 RegExpInitialize step 3: undefined flags are the empty String.
+    if (position === 1 && carrier.kind === 'optional' && carrier.absence === 'undefined' && carrier.payload.kind === 'string') {
+      const text = operandText(ctx, argument)
+      return `(${text}.has_value() ? *${text} : std::string())`
+    }
     throw createCppEmitBlockedError(
       `conversion:${representationKey(carrier)}->string`,
       `"new RegExp" argument ${position} carries "${representationKey(carrier)}"; this backend spells it for a string` +
@@ -2148,17 +2293,17 @@ const emitRegExpConstruct = (ctx: EmitContext, lines: string[], operation: Const
   // choosing between the object's own `source`/`flags` and a ToString of it.
   const fromObject = regExpConstructionFromObject(ctx, patternArgument, flag ?? null)
   if (fromObject !== null) {
-    lines.push(`${defineValue(ctx, operation.result)} = ${fromObject};`)
+    lines.push(`${defineValue(ctx, operation.result)} = ${held(fromObject)};`)
     return
   }
   const pattern = spellingOf(patternArgument, 0)
-  const rendered = flag ? spellingOf(flag, 1) : null
+  const rendered = flag && flag.representation.kind !== 'undefined' ? spellingOf(flag, 1) : null
   const name = defineValue(ctx, operation.result)
   if (rendered === null) {
-    lines.push(`${name} = ${cppConstructPatternEntry}(${pattern});`)
+    lines.push(`${name} = ${held(`${cppConstructPatternEntry}(${pattern})`)};`)
     return
   }
-  lines.push(`${name} = ${cppConstructPatternEntry}(${pattern}, ${rendered});`)
+  lines.push(`${name} = ${held(`${cppConstructPatternEntry}(${pattern}, ${rendered})`)};`)
 }
 
 /** Reconcile one [[Construct]] branch's declared result with the carrier selected for the `new` expression. */
@@ -2198,6 +2343,27 @@ const emitTaggedUnionConstruct = (ctx: EmitContext, lines: string[], operation: 
   if (callee.arms.length === 0)
     throw createCppEmitBlockedError('call-abi:tagged-union-construct', 'a constructor union has no live alternatives')
   const branches = callee.arms.map((arm, index) => {
+    const last = index === callee.arms.length - 1
+    // A boxed arm (thread-stream's `global.WeakRef || FakeWeakRef`) constructs
+    // through its own [[Construct]] (`Value::construct`), as a boxed callee does.
+    if (arm.value.kind === 'dynamic' && operation.argumentsAreSpread !== true) {
+      const list = operation.arguments.map((argument) => boxedValueText(ctx, argument, 'dynamic construction argument')).join(', ')
+      const invocation = `gea_union_constructor.get<${index}>().construct({${list}})`
+      const converted = alignedValueText(
+        ctx,
+        'emit-callable.ts:union-construct-box',
+        arm.value,
+        operation.result.representation,
+        invocation
+      )
+      if (converted === null) {
+        throw createCppEmitBlockedError(
+          `conversion:${representationKey(arm.value)}->${representationKey(operation.result.representation)}`,
+          `constructor-union arm ${index} constructs a box, which cannot fill "${representationKey(operation.result.representation)}"`
+        )
+      }
+      return last ? `return ${converted};` : `if (gea_union_constructor.is<${index}>()) { return ${converted}; }`
+    }
     const abi = constructConventionOf(arm.value)
     if (abi === null || abi.receiver !== null || abi.restFrom !== null) {
       throw createCppEmitBlockedError(
@@ -2347,6 +2513,37 @@ export const emitConstruct = (ctx: EmitContext, lines: string[], operation: Cons
       emitRegExpConstruct(ctx, lines, operation)
       return
     }
+    if (result.kind === 'dynamic' && callee.protocol === 'RegExpConstructor') {
+      emitRegExpConstruct(ctx, lines, operation, true)
+      return
+    }
+    // `new Array(n)` the program holds dynamically: the same array, of boxes.
+    if (result.kind === 'dynamic' && callee.protocol === 'ArrayConstructor') {
+      const [length] = operation.arguments
+      const typedLength =
+        operation.arguments.length === 1 && length?.representation.kind === 'scalar' && length.representation.domain === 'number'
+      // 23.1.1.1: one Number argument is a length (a RangeError unless it is a
+      // uint32); any other single argument, or several, are the elements.
+      const sized = typedLength
+        ? `gea_array->setLength(${operandText(ctx, length)}); `
+        : operation.arguments.length === 1 && length?.representation.kind === 'dynamic'
+          ? `{ const gea::Value& gea_length = ${operandText(ctx, length)}; if (gea_length.tag() == gea::Value::Tag::Number) { ` +
+            'const double gea_count = gea_length.as<double>(); ' +
+            'if (gea_count < 0 || gea_count > 4294967295.0 || gea_count != std::floor(gea_count)) gea::host::throwRuntimeError("RangeError", "Invalid array length"); ' +
+            'gea_array->setLength(gea_count); } else gea_array->push(gea_length); } '
+          : operation.arguments
+              .map((argument) => `gea_array->push(${boxedValueText(ctx, argument, 'Array constructor element')}); `)
+              .join('')
+      lines.push(
+        `${defineValue(ctx, operation.result)} = [&]() { auto gea_array = gea::makeRef<gea::ArrayObject<gea::Value>>(); ${sized}return gea::Value::box(gea::Value::Tag::Object, gea_array); }();`
+      )
+      return
+    }
+    const intrinsicError = callee.construct ? null : intrinsicErrorText(ctx, callee.protocol, operation.arguments, result)
+    if (intrinsicError !== null) {
+      lines.push(`${defineValue(ctx, operation.result)} = ${intrinsicError};`)
+      return
+    }
     if (!callee.construct) {
       throw createCppEmitBlockedError(
         `host-invocation:${callee.native ?? callee.protocol}`,
@@ -2377,6 +2574,37 @@ export const emitConstruct = (ctx: EmitContext, lines: string[], operation: Cons
         ? `gea::argumentListOf(${operandText(ctx, packed)})`
         : `{${operation.arguments.map((argument) => boxedValueText(ctx, argument, 'dynamic construction argument')).join(', ')}}`
     lines.push(`${name} = ${operandText(ctx, operation.callee)}.construct(${list});`)
+    return
+  }
+  // An ordinary function the checker did not take for a constructor (it writes
+  // no `this.x`: light-my-request's `_CustomLMRRequest` only `Object.assign`s
+  // into itself, cookie's `NullObject` is `function () {}`) is constructed by
+  // the language's own [[Construct]] (10.2.2) over its box -- the same
+  // `Value::construct` the dynamic carrier above goes through. Normalization's
+  // target proof is what says the source function HAS a [[Construct]]; the
+  // carrier is shared with arrows and methods, which have none.
+  const constructableTarget =
+    (operation.target.kind === 'exact' && operation.target.target.kind === 'function' && operation.target.target.constructable) ||
+    (operation.target.kind === 'closed-family' &&
+      operation.target.targets.length > 0 &&
+      operation.target.targets.every((target) => target.kind === 'function' && target.constructable))
+  if (callee.kind === 'function-value-dispatch' && constructableTarget && operation.argumentsAreSpread !== true) {
+    const boxedCallee = boxedValueText(ctx, operation.callee, 'a plain function constructed through its box')
+    const list = operation.arguments.map((argument) => boxedValueText(ctx, argument, 'dynamic construction argument')).join(', ')
+    const constructed = `${boxedCallee}.construct({${list}})`
+    const converted = alignedValueText(
+      ctx,
+      'emit-callable.ts:boxed-construct',
+      { kind: 'dynamic', reason: 'opt-in-fallback' },
+      operation.result.representation,
+      constructed
+    )
+    if (converted === null)
+      throw createCppEmitBlockedError(
+        `conversion:dynamic->${representationKey(operation.result.representation)}`,
+        `a construction through a plain function's box yields a box, and this "new" publishes "${representationKey(operation.result.representation)}"`
+      )
+    lines.push(`${defineValue(ctx, operation.result)} = ${converted};`)
     return
   }
   if (callee.kind !== 'constructor-family' && callee.kind !== 'constructor-value-dispatch' && callee.kind !== 'function-and-constructor') {
@@ -2419,9 +2647,44 @@ export const emitConstruct = (ctx: EmitContext, lines: string[], operation: Cons
           `static_cast<gea::NativeClassMethodState*>(${operandText(ctx, operation.callee)}.environment)`,
           ...paddedArguments(abi, args, 'construct')
         ].join(', ')})`
+  // The `new` expression's own carrier can be wider than the class instance
+  // the convention returns -- a CommonJS-required class constructed where the
+  // checker types the result `any`.
+  const held = operation.result.representation
+  const reconciled =
+    representationKey(abi.result) === representationKey(held) ? invocation : constructResultText(ctx, abi.result, held, invocation)
+  if (reconciled === null) {
+    throw createCppEmitBlockedError(
+      `conversion:${representationKey(abi.result)}->${representationKey(held)}`,
+      `a [[Construct]] returns "${representationKey(abi.result)}" where the new expression holds "${representationKey(held)}", and no conversion joins them`
+    )
+  }
   const name = defineValue(ctx, operation.result)
-  lines.push(`${name} = ${invocation};`)
+  lines.push(`${name} = ${reconciled};`)
 }
+
+/** A carrier no value of which is callable, so a call through it is a TypeError. */
+const nonCallableArm = (carrier: Representation): boolean =>
+  carrier.kind === 'scalar' ||
+  carrier.kind === 'string' ||
+  carrier.kind === 'symbol' ||
+  carrier.kind === 'undefined' ||
+  carrier.kind === 'null' ||
+  carrier.kind === 'record' ||
+  carrier.kind === 'array-object' ||
+  // Ordinary objects with no [[Call]] (10.1): a callable value is carried as a
+  // callable, never as a record layout, a native struct (a RegExp -- ajv's
+  // `Format` union), a class instance, a collection, a promise or a buffer.
+  carrier.kind === 'record-with-index' ||
+  carrier.kind === 'native-record-ref' ||
+  carrier.kind === 'class-ref' ||
+  carrier.kind === 'dictionary' ||
+  carrier.kind === 'keyed-collection' ||
+  carrier.kind === 'promise' ||
+  carrier.kind === 'typed-array' ||
+  carrier.kind === 'array-buffer' ||
+  carrier.kind === 'shared-array-buffer' ||
+  carrier.kind === 'data-view'
 
 /**
  * Class evaluation allocates a native prototype owner, even when its methods
@@ -2458,4 +2721,120 @@ export const emitAllocateConstructor = (ctx: EmitContext, lines: string[], opera
         : `gea::nativeClassMethodStateFromEnvironment(${operandText(ctx, heritageOperand)}.environment)`
   const environment = `gea::allocateNativeClassMethodEnvironment<${cppClassName(operation.declaration)}>(${parent})`
   lines.push(`${name} = ${cppTypeOf(operation.result.representation)}{&${cppConstructThunkName(operation.declaration)}, ${environment}};`)
+  const statics = classStaticReaderText(ctx, operation)
+  if (statics !== null)
+    lines.push(
+      `gea::detail::registerClassStatics(gea::detail::payloadTypeTagFor<${cppTypeOf(operation.result.representation)}>(), ${statics});`
+    )
+  const nativeBase = nativeBaseFactoryText(ctx, operation)
+  if (nativeBase !== null) lines.push(nativeBase)
+}
+
+/**
+ * The zero-argument construction a dynamic object inheriting this class runs
+ * on the first inherited method call (`gea::detail::nativeBaseOf`): the class
+ * constructed as `new C()`, which a constructor whose every parameter may be
+ * absent admits. A module-scope class only, whose value the reader names.
+ */
+const nativeBaseFactoryText = (ctx: EmitContext, operation: AllocateConstructorOperation): string | null => {
+  // A dynamic chain links a class as a native base only under the opt-in, as
+  // `classStaticReaderText` above states for its reader.
+  if (!ctx.deriver.dynamicFallback) return null
+  const receiver = operation.result.representation
+  const placement = ctx.placements.get(operation.declaration)
+  if (receiver.kind !== 'constructor-family' || receiver.members.length !== 1 || placement?.storage.kind !== 'region') return null
+  if (receiver.abi.restFrom !== null) return null
+  const absentArguments: string[] = []
+  for (const parameter of receiver.abi.parameters) {
+    const value = parameter.value
+    if (value.kind !== 'optional' && value.kind !== 'undefined') return null
+    absentArguments.push(`${cppTypeOf(value)}{}`)
+  }
+  const constructed = `${cppGlobalName(operation.declaration)}.construct(${absentArguments.join(', ')})`
+  return (
+    `gea::detail::registerNativeBaseFactory(&gea::detail::RefOperationsFor<${cppClassName(operation.declaration)}>::table, ` +
+    `+[]() -> gea::Ref<void> { return gea::refCastToVoid(${constructed}); });`
+  )
+}
+
+/**
+ * What a boxed class constructor answers for its own static members: the
+ * reader `Value::getProperty` asks for a class object that reached a box
+ * (`require('events')` is the `EventEmitter` class, and `const { once } =
+ * require('events')` reads a static through it). Each member is rendered by
+ * the same per-key renderer a static read uses, boxed. Built for a class whose
+ * value lives in a module-scope cell, which the reader names; a member with no
+ * boxed rendering aborts when read rather than answering `undefined`.
+ */
+const classStaticReaderText = (ctx: EmitContext, operation: AllocateConstructorOperation): string | null => {
+  const receiver = operation.result.representation
+  const placement = ctx.placements.get(operation.declaration)
+  // Only a boxed constructor reads its statics through the box, and only the
+  // opt-in boxes a class constructor.
+  if (!ctx.deriver.dynamicFallback) return null
+  if (receiver.kind !== 'constructor-family' || placement?.storage.kind !== 'region') return null
+  const keys = new Set<string>()
+  const walked = new Set<DeclarationId>()
+  for (let current: DeclarationId | null = operation.declaration; current !== null && !walked.has(current);) {
+    walked.add(current)
+    const layout = ctx.classes.get(current)
+    if (!layout) break
+    for (const field of layout.staticFields) keys.add(field.key)
+    for (const method of layout.staticMethods) keys.add(method.key)
+    for (const accessor of layout.staticAccessors) keys.add(accessor.key)
+    for (const key of classStaticFieldStorageKeysOf(ctx.classes, current)) keys.add(key)
+    current = layout.base
+  }
+  const boxed: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+  const self = cppGlobalName(operation.declaration)
+  const arms = [...keys].map((key) => {
+    let text: string | null = null
+    try {
+      text = classConstructorStaticMemberTextFor(ctx, receiver, key, boxed, () => self)
+    } catch (error) {
+      if (!isCppEmitBlockedError(error)) throw error
+    }
+    const answer = text ?? `(gea::detail::refuseBoxedClassStatic(${cppStringLiteral(key)}), gea::Value())`
+    return `if (gea_key.text() == ${cppStringLiteral(key)}) { gea_out = ${answer}; return true; }`
+  })
+  // `C.prototype` through the box is the link a dynamic chain inherits the
+  // class's methods through (`gea::detail::nativePrototypeFacade`).
+  let prototype: string | null = null
+  const instance = ctx.classes.get(operation.declaration)?.instance
+  try {
+    const object = instance ? classConstructorStaticMemberTextFor(ctx, receiver, 'prototype', instance, () => self) : null
+    prototype = object === null || !instance ? null : alignedValueText(ctx, 'emit-callable.ts:class-prototype-box', instance, boxed, object)
+  } catch (error) {
+    if (!isCppEmitBlockedError(error)) throw error
+  }
+  if (prototype !== null)
+    arms.push(`if (gea_key.text() == "prototype") { gea_out = gea::detail::nativePrototypeFacade(${prototype}); return true; }`)
+  if (arms.length === 0) return null
+  return `+[](const gea::PropertyKey& gea_key, gea::Value& gea_out) -> bool { if (gea_key.isSymbol()) return false; ${arms.join(' ')} return false; }`
+}
+
+/** The key and value texts of one `[key, value]` entry record for `new Map(entries)`, over `gea_entry`, or `null` for any other carrier. */
+const mapEntriesPlanOf = (
+  ctx: EmitContext,
+  carrier: Representation,
+  result: Extract<Representation, { kind: 'keyed-collection' }>
+): { readonly key: string; readonly value: string } | null => {
+  if (carrier.kind !== 'array-object' || carrier.ownership !== 'shared-refcount') return null
+  const entry = carrier.element
+  const fields =
+    entry.kind === 'record'
+      ? entry.fields
+      : entry.kind === 'native-record-ref' && entry.native === null
+        ? ctx.layouts.forShape(entry.shapeId)
+        : null
+  if (fields === null || fields === undefined || (entry.kind !== 'record' && entry.kind !== 'native-record-ref')) return null
+  const first = fields.find((field) => field.key === '0')
+  const second = fields.find((field) => field.key === '1')
+  if (first === undefined || second === undefined || !first.required || !second.required || result.value === null) return null
+  const access = memberAccessOperator(entry.ownership)
+  const read = (field: typeof first, target: Representation): string | null =>
+    alignedValueText(ctx, 'emit-callable.ts:mapEntriesPlanOf', field.value, target, `gea_entry${access}${cppRecordFieldName(field.key)}`)
+  const key = read(first, result.key)
+  const value = read(second, result.value)
+  return key === null || value === null ? null : { key, value }
 }

@@ -1298,8 +1298,18 @@ export const censusSpecializations = (
       // initializer then cited -- measured: `respond: Respond = <T extends
       // object>(value: T) => ...` handed `box.respond({ hello })` a closure
       // over `{}` and the call refused the conversion to its own copy.
+      //
+      // An unannotated class FIELD is the exception: its stored callable is
+      // the one value every call reaching it through the field runs, whatever
+      // it instantiates -- `cached = <Key extends keyof R>(key: Key) => ...`
+      // is stored as one closure whose result is the union of every payload,
+      // and the copy of one instantiation answers every other `key` in its own
+      // carrier. The closure over the constraints is that value; calls fused
+      // with the lazy field (`emit-callable.ts`) still run their own copies.
       if (
-        (ts.isVariableDeclaration(parent) || ts.isPropertyDeclaration(parent) || ts.isPropertyAssignment(parent)) &&
+        (ts.isVariableDeclaration(parent) ||
+          (ts.isPropertyDeclaration(parent) && parent.type !== undefined) ||
+          ts.isPropertyAssignment(parent)) &&
         parent.initializer === node
       ) {
         return null

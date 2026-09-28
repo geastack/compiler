@@ -1,7 +1,7 @@
 import type { DeclarationId } from '../../../identity/ids.js'
 import type { Representation } from '../../../representation/model.js'
 import type { ClassLayout } from '../../../projection/classes.js'
-import { classPrototypeReadOf } from '../../../projection/class-prototype.js'
+import { classPrototypeFacadeOf, classPrototypeReadOf } from '../../../projection/class-prototype.js'
 import { classMethodOverrideOf, classPrototypeMethodMutableOf, classPrototypeMethodFamilyMutableOf } from '../../../projection/fields.js'
 import { createCppEmitBlockedError, type EmitContext } from '../emit-context.js'
 import { alignedValueText } from '../emit-narrowing.js'
@@ -26,7 +26,8 @@ export const nativePrototypeObjectText = (
   ) => { text: string; representation: Representation }
 ): string => {
   if (receiver.members.length > 1) return familyPrototypeObjectText(ctx, receiver, result, receiverText, originalMethod)
-  const layout = classPrototypeReadOf(ctx.classes, receiver, 'prototype', result)
+  const facade = result.kind === 'dynamic' ? classPrototypeFacadeOf(ctx.classes, receiver) : null
+  const layout = facade ?? classPrototypeReadOf(ctx.classes, receiver, 'prototype', result)
   if (layout === null || layout.instance?.kind !== 'class-ref') {
     const reasons = receiver.members.length === 1 ? ctx.classes.get(receiver.members[0]!)?.prototypeUnsupportedUses : undefined
     if (reasons?.length) throw createCppEmitBlockedError('property-access:class-prototype:method-only', reasons.join('; '))
@@ -50,7 +51,13 @@ export const nativePrototypeObjectText = (
       : []
   for (const entry of chain) {
     if (entry.instance?.kind === 'class-ref') {
-      for (const field of ctx.layouts.forShape(entry.instance.shapeId) ?? []) clear.add(field.key)
+      // A required field's presence is a static member of the struct when no
+      // field's state can change (`ctx.fixedFieldStateConstant`): clearing it
+      // on the prototype object would clear it for every instance.
+      // Two classes can share one structural shape and still store different
+      // fields; the struct is emitted from the class's own storage.
+      for (const field of entry.nativeStorage?.fields ?? ctx.layouts.forShape(entry.instance.shapeId) ?? [])
+        if (!(field.required && ctx.fixedFieldStateConstant)) clear.add(field.key)
     }
     // Semantic class accessors dispatch through bodies and need not allocate
     // record-property slots. Only the shared physical layout owns these bits.
@@ -72,8 +79,9 @@ export const nativePrototypeObjectText = (
     initialize.push(`gea_prototype->${cppRecordFieldPresenceName(method.key)} = true;`)
     initialize.push(`gea_prototype->${cppRecordFieldAttributesName(method.key)}.enumerable = false;`)
   }
-  const prototype = `gea::nativeClassPrototype<${cppClassName(declaration)}>(gea::nativeClassMethodStateFromEnvironment(${receiverText}.environment), [&](const auto& gea_prototype) { ${initialize.join(' ')} })`
-  const converted = alignedValueText(ctx, 'native-prototype:result', layout.instance, result, prototype)
+  const prototype = `gea::nativeClassPrototype<${cppClassName(declaration)}>(static_cast<gea::NativeClassMethodState*>(${receiverText}.environment), [&](const auto& gea_prototype) { ${initialize.join(' ')} })`
+  const boxed = alignedValueText(ctx, 'native-prototype:result', layout.instance, result, prototype)
+  const converted = facade !== null && boxed !== null ? `gea::detail::nativePrototypeFacade(${boxed})` : boxed
   if (converted === null)
     throw createCppEmitBlockedError(
       'property-access:class-prototype:result',

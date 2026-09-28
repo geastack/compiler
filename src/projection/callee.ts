@@ -3,7 +3,7 @@ import { narrowedOperandView } from '../conversion/operand-view.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { abiKey, type CallableAbi, type Representation } from '../representation/model.js'
 import type { SealedRepresentationPlan } from '../representation/plan.js'
-import { hostMemberOf, type HostMemberTable } from '../targets/cpp/host/host-members.js'
+import { hostMemberOf, type HostMember, type HostMemberTable } from '../targets/cpp/host/host-members.js'
 import type { BindingPlacement } from './bindings.js'
 import type { ClassLayout } from './classes.js'
 import { classMemberOf, classMethodOverrideOf, classStaticMemberOf } from './fields.js'
@@ -241,7 +241,7 @@ export const deferredCalleeOf = (input: DeferredCalleeInput, operation: Invocati
   if (!callableBuiltinIsUnshadowed(facts, functionId, member)) return null
   // Read off the receiver's own carrier, which is what decides how the call
   // renders -- see `DeferredCallee.frame`.
-  const frame = representation.kind === 'dynamic' ? 'boxed' : 'native'
+  const frame = (representation.kind === 'optional' ? representation.payload : representation).kind === 'dynamic' ? 'boxed' : 'native'
   if (member === 'bind') {
     // `functionId` names the checker-authenticated DECLARATION a `dynamic`
     // receiver's own-property facts are read off -- needed only to recover a
@@ -266,11 +266,12 @@ export const deferredCalleeOf = (input: DeferredCalleeInput, operation: Invocati
         : bindAbiOfCallableReceiver(representation)
     return abi ? { member, receiver, abi, functionId, frame, receiverCarrier: representation } : null
   }
-  if (functionId === null && representation.kind !== 'function-value-dispatch') return null
+  // `.call` read off an optional callable reads it off the payload: the read
+  // itself throws when the value is absent.
+  const callable = representation.kind === 'optional' ? representation.payload : representation
+  if (functionId === null && callable.kind !== 'function-value-dispatch') return null
   const abi =
-    representation.kind === 'dynamic' && functionId !== null
-      ? (input.abis.get(functionId) ?? null)
-      : callAbiOfCallableReceiver(representation)
+    callable.kind === 'dynamic' && functionId !== null ? (input.abis.get(functionId) ?? null) : callAbiOfCallableReceiver(callable)
   return abi ? { member, receiver, abi, functionId, frame, receiverCarrier: representation } : null
 }
 
@@ -323,11 +324,11 @@ export interface CalleeRenderingInput {
   readonly hostMembers?: HostMemberTable
 }
 
-/** A direct read of a host callable whose numeric rest frame need not escape to an array. */
-export const numericRestHostCallOf = (
+/** A call whose callee is a constant-key read of a host member off a host handle: `Atomics.load(...)`. */
+export const directHostMemberCallOf = (
   input: CalleeRenderingInput,
   operation: InvocationOperation
-): { readonly protocol: string; readonly member: string } | null => {
+): { readonly protocol: string; readonly member: string; readonly row: HostMember } | null => {
   if (operation.internalMethod !== 'call' || operation.optionalChain || !input.hostMembers) return null
   const callee = operandOf(operation, 'callee')
   if (callee?.source.kind !== 'result') return null
@@ -341,8 +342,17 @@ export const numericRestHostCallOf = (
   if (held?.kind !== 'native-handle') return null
   const protocol = held.native ?? held.protocol
   const member = key.source.text
-  const host = hostMemberOf(input.hostMembers, protocol, member)
-  return host?.kind === 'property' && host.numericRestCall !== undefined ? { protocol, member } : null
+  const row = hostMemberOf(input.hostMembers, protocol, member)
+  return row === undefined ? null : { protocol, member, row }
+}
+
+/** A direct read of a host callable whose numeric rest frame need not escape to an array. */
+export const numericRestHostCallOf = (
+  input: CalleeRenderingInput,
+  operation: InvocationOperation
+): { readonly protocol: string; readonly member: string } | null => {
+  const call = directHostMemberCallOf(input, operation)
+  return call?.row.kind === 'property' && call.row.numericRestCall !== undefined ? { protocol: call.protocol, member: call.member } : null
 }
 
 /**
@@ -530,6 +540,10 @@ export const calleeRenderingOf = (input: CalleeRenderingInput, operation: Invoca
   const knownObjectShape =
     carrier.kind === 'record' || carrier.kind === 'class-ref' || (carrier.kind === 'native-record-ref' && carrier.native === null)
   if (staticKey !== null && knownObjectShape && objectShapePrototypeMethods.has(staticKey)) return 'template'
+  // An Array method the census reads as a box (`concat` handed foreign items,
+  // `structural.ts`'s `concat-of-foreign-items`) is that box, called with the
+  // array as its receiver; the template is typed by the receiver's element.
+  if (carrier.kind === 'array-object' && input.plan.selected.get(callee.source.result)?.kind === 'dynamic') return 'callable'
   if (carrier.kind === 'native-record-ref') return carrier.native === null ? 'callable' : 'template'
   return templateReceiverKinds.has(carrier.kind) ? 'template' : 'callable'
 }

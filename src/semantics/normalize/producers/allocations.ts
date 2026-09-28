@@ -13,6 +13,8 @@ import {
   hasNativeIterationCursor,
   staticPropertyKeyTextOf,
   isRuntimeSymbolMember,
+  keysWrittenAfter,
+  spreadCopiesStatically,
   staticSpreadMembersOf,
   staticFunctionNameOf,
   staticClassNameOf,
@@ -232,29 +234,6 @@ const methodValueOf = (
  * ordinals are consecutive within `(node, 'property')` exactly as
  * `operationsOfNode` (normalize/gating.ts) requires.
  */
-/**
- * The keys a later member of the same literal writes unconditionally, by the
- * key each installs: `{ ...opts, strict: x }` defines `strict` after the spread
- * copied it, so the copy is dead and its value never observable.
- *
- * Only a member whose key is statically known counts -- a later spread writes
- * only the keys its source happens to own, and a computed key names a key the
- * program chooses at run time -- and the key is the property key the member
- * installs, the same domain `CopyDataProperties` copies over.
- */
-const keysWrittenAfter = (property: ts.SpreadAssignment): ReadonlySet<string> => {
-  const literal = property.parent
-  const keys = new Set<string>()
-  for (const later of literal.properties.slice(literal.properties.indexOf(property) + 1)) {
-    if (ts.isSpreadAssignment(later) || later.name === undefined) continue
-    const name = ts.isComputedPropertyName(later.name) ? later.name.expression : later.name
-    if (ts.isIdentifier(name) || ts.isPrivateIdentifier(name)) keys.add(name.text)
-    else if (ts.isStringLiteralLike(name)) keys.add(name.text)
-    else if (ts.isNumericLiteral(name)) keys.add(String(Number(name.text)))
-  }
-  return keys
-}
-
 const spreadCopyOf = (
   property: ts.SpreadAssignment,
   receiver: SemanticResultId,
@@ -267,7 +246,7 @@ const spreadCopyOf = (
   | { readonly deferred: OperationId } => {
   const sourceType = context.types.typeAt(property.expression)
   const admitted = staticSpreadMembersOf(context, sourceType)
-  if ('blocked' in admitted) {
+  if ('blocked' in admitted || !spreadCopiesStatically(context, property)) {
     // A source with no statically known own-property set is not a refusal
     // here any more -- `producers/protocol.ts`'s `contributeObjectSpread`
     // mints a `protocol: 'spread'` operation for this EXACT `SpreadAssignment`
@@ -320,7 +299,7 @@ const spreadCopyOf = (
   const operations: PropertyOperation[] = []
   const edges: SemanticEdge[] = []
   const spreadNode = context.identities.nodeIdOf(property)
-  const overwritten = keysWrittenAfter(property)
+  const overwritten = keysWrittenAfter(context, property)
   for (const member of admitted.members) {
     // Every member reaching here was admitted by `staticSpreadMembersOf`
     // above -- data-only, non-accessor, string- or number-keyed -- so the key
@@ -463,6 +442,44 @@ const definePropertiesOf = (
             'an object literal accessor whose allocated shape declares the member as ordinary data has nowhere to install its body; ' +
             'reading it would call an unset slot'
         }
+      }
+      // A literal the program holds as a dynamic object (`--dynamic-fallback`:
+      // pino's prototype, given a [[Prototype]] link) has no shape to hold the
+      // accessor, so the definition installs it: the value is the accessor's
+      // own function object, and the descriptor says which half it is.
+      if (context.dynamicFallbackTypes.has(receiverType)) {
+        const key = objectLiteralKeyOperand(context, property.name, stringType, receiverType)
+        if ('blocked' in key) return key
+        const id = mintOperationId(context.ordinals, context.identities.nodeIdOf(property), 'property')
+        const allocationId = operationId(context.identities.nodeIdOf(property), 'allocation', 0)
+        const operands: SemanticOperand[] = [
+          operand('receiver', 0, { kind: 'result', result: receiver }, receiverType, { kind: 'provenance' }),
+          key.operand,
+          operand('value', 0, { kind: 'result', result: semanticResultId(allocationId, 'value') }, context.types.typeAt(property))
+        ]
+        operations.push({
+          id,
+          family: 'property',
+          internalMethod: 'define-own-property',
+          strict: true,
+          keyIsComputed: key.computed,
+          // 13.2.5.5 MethodDefinitionEvaluation: an enumerable, configurable accessor.
+          descriptor: {
+            writable: false,
+            enumerable: true,
+            configurable: true,
+            accessor: ts.isGetAccessorDeclaration(property) ? 'get' : 'set'
+          },
+          caller: candidate.caller,
+          operands,
+          results: [mintResult(id, 'value', receiverType)],
+          completion: normalCompletion,
+          effects: { readsMutableState: false, writesMutableState: true, allocates: false, callsUserCode: false },
+          evaluationOrdinal: candidate.evaluationOrdinal
+        })
+        edges.push(...valueEdgesInto(id, operands))
+        if (previous) edges.push({ kind: 'evaluation', from: previous, to: id })
+        previous = id
       }
       continue
     }
@@ -618,12 +635,12 @@ const isBodyLevelFunctionDeclaration = (node: AllocationNode): node is ts.Functi
  * `definePropertiesOf`, not a binding any scope resolves.
  */
 const nameBindingOf = (
-  node: CallableAllocationNode,
+  node: CallableAllocationNode | ts.ClassExpression,
   allocation: AllocationOperation,
   candidate: CensusCandidate,
   context: ProducerContext
 ): readonly BindingOperation[] => {
-  if (!(ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) || !node.name) return []
+  if (!(ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node) || ts.isClassExpression(node)) || !node.name) return []
   const value = allocation.results[0]
   if (!value) return []
   const id = mintOperationId(context.ordinals, candidate.id, 'binding')
@@ -953,9 +970,16 @@ export const createAllocationProducer = (context: ProducerContext): FamilyProduc
             functionName: staticFunctionNameOf(node),
             functionLength: expectedParameterCountOf(node),
             generatorFunction: 'asteriskToken' in node && node.asteriskToken !== undefined,
+            asyncFunction: (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Async) !== 0,
             ...(declaresExactArms(node) ? { exactArms: true } : {}),
             ...(ownPrototypePropertyOf(node) === null ? {} : { ownPrototypeProperty: ownPrototypePropertyOf(node) === true })
           }
+        : {}),
+      ...(ts.isObjectLiteralExpression(node) &&
+      node.properties[0] !== undefined &&
+      ts.isSpreadAssignment(node.properties[0]) &&
+      !spreadCopiesStatically(context, node.properties[0])
+        ? { leadingRuntimeSpread: true as const }
         : {}),
       // A class expression's constructor object names its class and its
       // `[[Name]]` (`const A = class {}` is "A"), exactly as
@@ -988,6 +1012,17 @@ export const createAllocationProducer = (context: ProducerContext): FamilyProduc
         kind: 'operations',
         operations: [operation, ...nameBindingOf(node, operation, candidate, context)],
         edges: valueEdgesInto(operationIdentity, operands)
+      }
+    }
+
+    // A named class expression binds its own name to the class object, as a
+    // named function expression does (`module.exports = class Serializer {
+    // static restoreFromState(state) { return new Serializer(state) } }`).
+    if (ts.isClassExpression(node) && node.name) {
+      return {
+        kind: 'operations',
+        operations: [...expansions, operation, ...nameBindingOf(node, operation, candidate, context)],
+        edges: [...expansionEdges, ...valueEdgesInto(operationIdentity, operands)]
       }
     }
 

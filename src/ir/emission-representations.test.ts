@@ -48,7 +48,8 @@ const emptyConversions = (nodes = new Map<string, ConversionNode>()): Conversion
   },
   exactArmFor: () => null,
   nodeById: (id) => nodes.get(id) ?? null,
-  minted: nodes
+  minted: nodes,
+  eager: new Map()
 })
 
 const deriverOf = (layouts: ReadonlyMap<string, Representation> = new Map()): RepresentationDeriver =>

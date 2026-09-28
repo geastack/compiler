@@ -339,6 +339,13 @@ export interface FrontendResult {
    * declaration file is never walked at all, so nothing publishes one for it.
    */
   readonly externalBindings: ReadonlyMap<DeclarationId, string>
+  /**
+   * Every key a boolean, symbol or number primitive's prototype chain can hold
+   * (its intrinsic prototype, `Object.prototype`, and whatever the sealed
+   * mutation census saw written onto either), or `null` for a primitive whose
+   * chain the census could not bound. A key outside the set reads `undefined`.
+   */
+  readonly primitivePrototypeKeys: ReadonlyMap<'boolean' | 'symbol' | 'number', ReadonlySet<string> | null>
   /** Ambient declarations the installed host authenticated as CommonJS wrapper parameters. */
   readonly commonJsBindings: ReadonlyMap<DeclarationId, 'require' | 'exports' | 'module'>
   /** Ambient values authenticated as host singletons by complete declaration identity. */
@@ -1069,7 +1076,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       ),
       collectionsThisRound,
       valueFlow,
-      bagsThisRound
+      bagsThisRound,
+      upstream ?? emptyParameterBindingCensus
     )
     const parameters = withJsDocTypeNames(
       compiled.checker,
@@ -1099,8 +1107,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   /**
    * What the CHECKER answers, at one line of the TRANSFORMED source.
    *
-   * `GEA_TYPE_AT=<file substring>#<line>` prints every identifier and member
-   * access on that line with its type and the file:line of each declaration
+   * `GEA_TYPE_AT=<file substring>#<line>[,<file substring>#<line>...]` prints
+   * every identifier and member access on each such line with its type and the file:line of each declaration
    * its symbol resolves to; `GEA_SRC_SPAN=<from>-<to>` beside it prints the
    * transformed text itself.
    *
@@ -1117,32 +1125,35 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
    * visible at once. Two commits came out of exactly that.
    */
   if (process.env['GEA_TYPE_AT']) {
-    const [want, lineText] = String(process.env['GEA_TYPE_AT']).split('#')
-    const wantLine = Number(lineText)
-    for (const file of compiled.sourceFiles) {
-      if (!file.fileName.includes(String(want))) continue
-      if (process.env['GEA_SRC_SPAN']) {
-        const [a, b] = String(process.env['GEA_SRC_SPAN']).split('-').map(Number)
-        const lines = file.getFullText().split('\n')
-        for (let i = (a ?? 1) - 1; i < Math.min(b ?? 0, lines.length); i++) process.stderr.write(`[SRC] ${i + 1}| ${lines[i]}\n`)
-      }
-      const visit = (node: ts.Node): void => {
-        const line = file.getLineAndCharacterOfPosition(node.getStart()).line + 1
-        if (line === wantLine && (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node))) {
-          const sym = compiled.checker.getSymbolAtLocation(node)
-          const decls = (sym?.declarations ?? [])
-            .map((d) => {
-              const f = d.getSourceFile()
-              return `${f.fileName.split('/').slice(-2).join('/')}:${f.getLineAndCharacterOfPosition(d.getStart()).line + 1}`
-            })
-            .join(',')
-          process.stderr.write(
-            `[TYPE] ${line} ${ts.SyntaxKind[node.kind]} ${node.getText().slice(0, 40)} :: ${compiled.checker.typeToString(compiled.checker.getTypeAtLocation(node))} @[${decls}]\n`
-          )
+    for (const [want, lineText] of String(process.env['GEA_TYPE_AT'])
+      .split(',')
+      .map((spec) => spec.split('#'))) {
+      const wantLine = Number(lineText)
+      for (const file of compiled.sourceFiles) {
+        if (!file.fileName.includes(String(want))) continue
+        if (process.env['GEA_SRC_SPAN']) {
+          const [a, b] = String(process.env['GEA_SRC_SPAN']).split('-').map(Number)
+          const lines = file.getFullText().split('\n')
+          for (let i = (a ?? 1) - 1; i < Math.min(b ?? 0, lines.length); i++) process.stderr.write(`[SRC] ${i + 1}| ${lines[i]}\n`)
         }
-        ts.forEachChild(node, visit)
+        const visit = (node: ts.Node): void => {
+          const line = file.getLineAndCharacterOfPosition(node.getStart()).line + 1
+          if (line === wantLine && (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node))) {
+            const sym = compiled.checker.getSymbolAtLocation(node)
+            const decls = (sym?.declarations ?? [])
+              .map((d) => {
+                const f = d.getSourceFile()
+                return `${f.fileName.split('/').slice(-2).join('/')}:${f.getLineAndCharacterOfPosition(d.getStart()).line + 1}`
+              })
+              .join(',')
+            process.stderr.write(
+              `[TYPE] ${line} ${ts.SyntaxKind[node.kind]} ${node.getText().slice(0, 40)} :: ${compiled.checker.typeToString(compiled.checker.getTypeAtLocation(node))} @[${decls}]\n`
+            )
+          }
+          ts.forEachChild(node, visit)
+        }
+        visit(file)
       }
-      visit(file)
     }
   }
   // A round is settled only when its actual input queries retain their answers.
@@ -1220,25 +1231,28 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // `typeof`-narrowed `string` read that reaches the field as a number is a
   // disagreement between these two lines, and only seeing both locates it.
   if (process.env['GEA_TYPE_AT']) {
-    const [want, lineText] = String(process.env['GEA_TYPE_AT']).split('#')
-    const wantLine = Number(lineText)
-    for (const file of compiled.sourceFiles) {
-      if (!file.fileName.includes(String(want))) continue
-      const visit = (node: ts.Node): void => {
-        const line = file.getLineAndCharacterOfPosition(node.getStart()).line + 1
-        if (line === wantLine && (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isVariableDeclaration(node))) {
-          const answer = parameters.typeAt(node)
-          const stated = parameters.statedTypeAt(node)
-          const arms = parameters.unionArmsAt(node)
-          process.stderr.write(
-            `[CENSUS] ${line} ${ts.SyntaxKind[node.kind]} ${node.getText().slice(0, 40)} :: ` +
-              `${answer ? compiled.checker.typeToString(answer) : '(null)'} stated=${stated ? compiled.checker.typeToString(stated) : '-'}` +
-              `${arms ? ` arms=[${arms.map((arm) => compiled.checker.typeToString(arm)).join(' | ')}]` : ''}\n`
-          )
+    for (const [want, lineText] of String(process.env['GEA_TYPE_AT'])
+      .split(',')
+      .map((spec) => spec.split('#'))) {
+      const wantLine = Number(lineText)
+      for (const file of compiled.sourceFiles) {
+        if (!file.fileName.includes(String(want))) continue
+        const visit = (node: ts.Node): void => {
+          const line = file.getLineAndCharacterOfPosition(node.getStart()).line + 1
+          if (line === wantLine && (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node) || ts.isVariableDeclaration(node))) {
+            const answer = parameters.typeAt(node)
+            const stated = parameters.statedTypeAt(node)
+            const arms = parameters.unionArmsAt(node)
+            process.stderr.write(
+              `[CENSUS] ${line} ${ts.SyntaxKind[node.kind]} ${node.getText().slice(0, 40)} :: ` +
+                `${answer ? compiled.checker.typeToString(answer) : '(null)'} stated=${stated ? compiled.checker.typeToString(stated) : '-'}` +
+                `${arms ? ` arms=[${arms.map((arm) => compiled.checker.typeToString(arm)).join(' | ')}]` : ''}\n`
+            )
+          }
+          ts.forEachChild(node, visit)
         }
-        ts.forEachChild(node, visit)
+        visit(file)
       }
-      visit(file)
     }
   }
   // Before the mapper, which lays every family member out as the one layout
@@ -1306,24 +1320,31 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   }
   // The STRUCTURAL half of `GEA_TYPE_AT`: the mapper's own answer, which is
   // what every producer publishes -- a `[CENSUS]` union-arms line and a
-  // `[STRUCT]` line that disagree locate a reduction between the two.
-  if (process.env['GEA_TYPE_AT']) {
-    const [want, lineText] = String(process.env['GEA_TYPE_AT']).split('#')
-    const wantLine = Number(lineText)
-    for (const file of compiled.sourceFiles) {
-      if (!file.fileName.includes(String(want))) continue
-      const visit = (node: ts.Node): void => {
-        const line = file.getLineAndCharacterOfPosition(node.getStart()).line + 1
-        if (line === wantLine && (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node))) {
-          let shape = '(throws)'
-          try {
-            shape = structuralShapeKey(table.get(types.typeAt(node)).shape)
-          } catch {}
-          process.stderr.write(`[STRUCT] ${line} ${ts.SyntaxKind[node.kind]} ${node.getText().slice(0, 40)} :: ${shape.slice(0, 600)}\n`)
+  // `[STRUCT]` line that disagree locate a reduction between the two. Opt-in
+  // (`GEA_TYPE_AT_STRUCT`): `types.typeAt` interns and memoizes, and asking
+  // it here, ahead of the fallback censuses that read the mapper, can change
+  // what they see -- a traced fastify build once came out unresolved where
+  // the untraced one was clean.
+  if (process.env['GEA_TYPE_AT'] && process.env['GEA_TYPE_AT_STRUCT']) {
+    for (const [want, lineText] of String(process.env['GEA_TYPE_AT'])
+      .split(',')
+      .map((spec) => spec.split('#'))) {
+      const wantLine = Number(lineText)
+      for (const file of compiled.sourceFiles) {
+        if (!file.fileName.includes(String(want))) continue
+        const visit = (node: ts.Node): void => {
+          const line = file.getLineAndCharacterOfPosition(node.getStart()).line + 1
+          if (line === wantLine && (ts.isIdentifier(node) || ts.isPropertyAccessExpression(node))) {
+            let shape = '(throws)'
+            try {
+              shape = structuralShapeKey(table.get(types.typeAt(node)).shape)
+            } catch {}
+            process.stderr.write(`[STRUCT] ${line} ${ts.SyntaxKind[node.kind]} ${node.getText().slice(0, 40)} :: ${shape.slice(0, 600)}\n`)
+          }
+          ts.forEachChild(node, visit)
         }
-        ts.forEachChild(node, visit)
+        visit(file)
       }
-      visit(file)
     }
   }
   const prototypeFallback = input.dynamicFallback
@@ -1604,8 +1625,14 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // `dynamicIntrinsicDeclarationsOf`.
   const dynamicIntrinsics = input.dynamicFallback
     ? dynamicIntrinsicDeclarationsOf(compiled.checker, identities, compiled.sourceFiles, input.dynamicIntrinsics ?? new Set())
-    : { carried: new Set<DeclarationId>(), singletons: new Set<DeclarationId>() }
-  for (const singleton of dynamicIntrinsics.singletons) hosts.hostSingletonBindings.add(singleton)
+    : { carried: new Set<DeclarationId>(), singletons: new Map<DeclarationId, string>() }
+  // Each is a standard-library binding the host defines under its own name,
+  // whichever route reads it (`WeakRef`, or `globalThis.WeakRef`).
+  for (const [singleton, name] of dynamicIntrinsics.singletons) {
+    hosts.hostSingletonBindings.add(singleton)
+    if (!hosts.externals.has(singleton)) hosts.externals.set(singleton, name)
+    hosts.standardLibrary.add(singleton)
+  }
   const hostGlobalBindings = new Set<DeclarationId>([...hosts.hostSingletonBindings, ...hosts.hostNamespaceBindings])
   // The mutation census must see the exact identities whose representation
   // policy carries them outside `globalThis`: typed-array instances and native
@@ -1859,7 +1886,41 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   const locationOfDeclaration = (declaration: DeclarationId): DiagnosticLocation | null =>
     locationOfFound(sourceNodeOfDeclaration(declaration))
 
+  // After the mutation census sealed (`hostMutationFactsSealed`), against its
+  // final taint, as `computedKeyTextsOf` reads it.
+  const primitivePrototypeKeys = new Map<'boolean' | 'symbol' | 'number', ReadonlySet<string> | null>()
+  {
+    const anchor = compiled.sourceFiles[0]
+    const prototypeOf = (name: string): ts.Symbol | undefined => {
+      const constructor = anchor ? compiled.checker.resolveName(name, anchor, ts.SymbolFlags.Value, false) : undefined
+      return constructor && anchor ? compiled.checker.getTypeOfSymbolAtLocation(constructor, anchor).getProperty('prototype') : undefined
+    }
+    const objectPrototype = prototypeOf('Object')
+    const surface = globalHostMutationTaint.surfaceKeys
+    const objectOwn = objectPrototypeDeclaration === null ? undefined : globalHostMutationTaint.keysOf(objectPrototypeDeclaration)
+    const unbounded = globalHostMutationTaint.has('*') || surface.every || surface.numeric || objectOwn?.every || objectOwn?.numeric
+    for (const [primitive, name] of [
+      ['boolean', 'Boolean'],
+      ['symbol', 'Symbol'],
+      ['number', 'Number']
+    ] as const) {
+      const prototype = prototypeOf(name)
+      const declaration = prototype ? identities.symbolDeclarationId(prototype) : null
+      const own = declaration === null ? undefined : globalHostMutationTaint.keysOf(declaration)
+      if (!prototype || !objectPrototype || !anchor || unbounded || own?.every || own?.numeric) {
+        primitivePrototypeKeys.set(primitive, null)
+        continue
+      }
+      const keys = new Set<string>()
+      for (const holder of [prototype, objectPrototype])
+        for (const member of compiled.checker.getTypeOfSymbolAtLocation(holder, anchor).getProperties()) keys.add(member.getName())
+      for (const written of [surface.names, objectOwn?.names ?? [], own?.names ?? []]) for (const key of written) keys.add(key)
+      primitivePrototypeKeys.set(primitive, keys)
+    }
+  }
+
   return {
+    primitivePrototypeKeys,
     dynamicFallbackTypes,
     dynamicWrittenTypes,
     dynamicFallbackCallables: prototypeFallback.callables,

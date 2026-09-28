@@ -4,13 +4,14 @@
 // Included inside namespace gea after NativeClassMethodState. This is native
 // object storage, not a boxed JS value. No source constructor/initializer runs.
 template <typename NativeClass, typename Initialize>
-Ref<NativeClass> nativeClassPrototype(const Ref<NativeClassMethodState>& state, Initialize initialize) {
+Ref<NativeClass> nativeClassPrototype(NativeClassMethodState* state, Initialize initialize) {
   if (!state || state->declaration != &nativeClassMethodDeclaration<NativeClass>)
     detail::refusePayloadMismatch("native prototype read has no matching class evaluation");
   if (!state->prototypeObject) {
     auto prototype = makeRef<NativeClass>();
-    prototype->gea_method_state = state;
+    prototype->gea_method_state = Ref<NativeClassMethodState>::adopt(state, true);
     state->prototypeObject = prototype.template staticCast<void>();
+    detail::nativePrototypeObjects().insert(prototype.get());
     initialize(prototype);
   }
   return state->prototypeObject.template staticCast<NativeClass>();

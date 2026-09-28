@@ -327,8 +327,10 @@ export const prototypeReadHooks = (
   capturesNothing: (callable: FunctionId) => boolean,
   readDynamically: (declaration: DeclarationId) => boolean
 ): PrototypeReadHooks => {
-  // A method read yields a fresh function object over the body: a dynamic
-  // read is followed by a call, and nothing on that path compares identities.
+  // A method read yields the prototype's one function object for that key
+  // (`o.on === C.prototype.on`), boxed once over the body: the thunk captures
+  // nothing and takes its receiver as an argument, so every read is the same
+  // value.
   const methods = (layout: ClassLayout): { readonly key: string; readonly text: string }[] =>
     layout.methods.flatMap((method) => {
       if (method.callable === null || !capturesNothing(method.callable)) return []
@@ -343,7 +345,9 @@ export const prototypeReadHooks = (
       const actuals = ['gea_receiver', ...abi.parameters.map((_, i) => cppFormalName(i))]
       const thunk = `+[](void*, ${formals.join(', ')}) -> ${cppResultTypeOf(abi.result)} { return ${cppBodyName(method.callable)}(${actuals.join(', ')}); }`
       const boxed = dynamicCarrierBoxText(value, `${cppTypeOf(value)}{${thunk}, nullptr}`)
-      return boxed === null ? [] : [{ key: method.key, text: boxed }]
+      return boxed === null
+        ? []
+        : [{ key: method.key, text: `[]() -> const gea::Value& { static const gea::Value gea_method = ${boxed}; return gea_method; }()` }]
     })
   const readable = (layout: ClassLayout): { readonly key: string; readonly text: string }[] => [
     ...layout.accessors.flatMap((accessor) => {

@@ -101,6 +101,23 @@ export const objectPrototypeMemberNames: ReadonlySet<string> = new Set([
   '__lookupSetter__'
 ])
 
+/**
+ * `%Function.prototype%`'s own string-keyed members (ECMA-262 20.2.3), which
+ * every function object reaches through its prototype chain before
+ * `%Object.prototype%`'s.
+ */
+export const functionPrototypeMemberNames: ReadonlySet<string> = new Set([
+  'apply',
+  'bind',
+  'call',
+  'toString',
+  'length',
+  'name',
+  'arguments',
+  'caller',
+  'constructor'
+])
+
 /** What a layout can prove about one statically-written key: `[[HasProperty]]`'s answer, or that it has none. */
 export type StaticKeyPresence = 'present' | 'flagged' | 'unprovable'
 

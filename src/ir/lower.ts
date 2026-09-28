@@ -1559,7 +1559,10 @@ export const lowerToIr = (input: IrLoweringInput): IrLoweringResult => {
   const groups = groupOperationsByOwner(input.graph)
   const bodies = new Map<PhysicalBodyId, IrBody>()
   const blocked: IrLoweringBlocker[] = []
-  const functionFacts = new Map<FunctionId, { functionSource: string; functionName: string; functionLength: number; generator: boolean }>()
+  const functionFacts = new Map<
+    FunctionId,
+    { functionSource: string; functionName: string; functionLength: number; generator: boolean; async: boolean }
+  >()
   // Owners whose declaration states `@gea-exact-arms`. Kept apart from
   // `functionFacts`, which is spread onto the emitted body: the tag changes
   // how the body LOWERS and is nothing the body needs to carry afterwards.
@@ -1575,7 +1578,8 @@ export const lowerToIr = (input: IrLoweringInput): IrLoweringResult => {
         functionSource: operation.functionSource,
         functionName: operation.functionName ?? '',
         functionLength: operation.functionLength ?? 0,
-        generator: operation.generatorFunction === true
+        generator: operation.generatorFunction === true,
+        async: operation.asyncFunction === true
       })
       if (operation.exactArms === true) exactArmOwners.add(operation.callable)
     }

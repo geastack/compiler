@@ -930,11 +930,24 @@ export const censusObjectBagBindings = (
       // the return census's exit proof and keep every bare return in the join.
       if (!owner.body || !ts.isBlock(owner.body) || !definitelyReturns(owner.body.statements)) continue
       if ((ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Async) !== 0 || ('asteriskToken' in owner && owner.asteriskToken)) continue
-      const roots = expressions.map((expression) => (expression ? bagRootOf(expression) : null))
+      // A `return {}` no cell owns is a fresh allocation with no members, and
+      // it can be one more allocation of whatever bag the other returns
+      // name: find-my-way's `getRouteMetaData` returns `{}` when nothing is
+      // asked and otherwise the dictionary it filled. It joins that bag
+      // below; alone, or beside no bag, it names none.
+      const freshEmpty = (expression: ts.Expression | null): expression is ts.ObjectLiteralExpression =>
+        expression !== null && isBareEmptyLiteral(expression) && !literalOwner.has(expression)
+      const named = expressions.filter((expression) => !freshEmpty(expression))
+      const roots = named.map((expression) => (expression ? bagRootOf(expression) : null))
       const [first] = roots
       // Every `return` must be the same bag: a function returning a bag on one
       // path and something else on another has no single storage to name.
       if (!first || roots.some((root) => root !== first)) continue
+      for (const expression of expressions) {
+        if (!freshEmpty(expression)) continue
+        literalOwner.set(expression, first)
+        literalsByOwner.get(first)?.push(expression)
+      }
       const existing = returnsBag.get(owner)
       if (existing === first) continue
       if (existing) {
@@ -1197,6 +1210,15 @@ export const censusObjectBagBindings = (
       if (!type || statesNothing(type)) return 'states-nothing'
       types.push(type)
     }
+    // AN ABSENCE IS NOT EVIDENCE -- the rule `local-bindings.ts` and
+    // `field-bindings.ts` apply to a cell written only `null`/`undefined`.
+    // light-my-request allocates `_lightMyRequest = { headers: null, ... }` and
+    // fills `headers` through `response._lightMyRequest.headers = ...` from a
+    // function whose receiver chain this census does not resolve; typing the
+    // slot `null` from the allocation alone made every later store into the
+    // headers a property write on `null`.
+    if (types.length > 0 && types.every((type) => (type.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0))
+      return 'states-nothing'
     // When no one write covers the others, the disagreement can still be the
     // answer: three's renderer writes `materialProperties.lightProbeGrid` as a
     // boolean at program acquisition and as a grid-or-null per object, and the
