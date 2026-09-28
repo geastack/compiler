@@ -120,7 +120,7 @@ optional-union-to-discriminated-repro.ts.cpp 1994825df37b
 overload-implementation-signature.ts.cpp d5e10f250b7a
 owned-record-union.ts.cpp e788814333aa
 physical-class-ancestry-declared.ts.cpp 492b223d9a66
-printer-drift.txt b65efbb3a43d
+printer-drift.txt 21bd9a32895f
 property-access-unresolved-repro.ts.cpp 634811649cc8
 record-into-named-layout.ts.cpp 099fdfaaae11
 record-round-trip-through-box.ts.cpp 8e77a9618a7f

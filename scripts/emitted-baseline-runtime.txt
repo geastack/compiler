@@ -151,7 +151,7 @@ dictionary-index-truthiness.ts.cpp 519009b6c81f
 dictionary-named-absence.ts.cpp dc9ba237a175
 direct-interface-method-receiver.ts.cpp 55d743cf5d7d
 downcast-method-read-absent-on-other-arm.ts.cpp 52495ee800d6
-drift.txt eda4257fc5fc
+drift.txt 4991c249f4dc
 dynamic-array-absent-element.ts.cpp 6838ef917ebe
 dynamic-array-literal-gather.runtime.js.cpp 4c1e3d9c21cf
 dynamic-array-projection.ts.cpp 25d0cdd3b0d1
@@ -198,7 +198,7 @@ field-census-class-family-narrowing.runtime.js.cpp 183db30cd770
 field-constructor-choice.runtime.js.cpp 4c5adc06cba9
 field-null-after-guard-return.runtime.js.cpp b63632d417c2
 field-nullish-placeholder-for-of.runtime.js.cpp 23714acc63f4
-field-untyped-receiver-write.runtime.js.cpp 7788e1e170f7
+field-untyped-receiver-write.runtime.js.cpp 35f89c7fd5c4
 field-written-through-instance.runtime.js.cpp 03ece5f437fc
 field-written-through-tag-typed-receiver.runtime.js.cpp b55c5f98a4f5
 filter-under-a-type-guard-narrows-its-element.ts.cpp 0cdd79245c69
@@ -339,7 +339,7 @@ jsdoc-defaulted-class-constructor.runtime.js.cpp ca5226775273
 jsdoc-field-open-array-element.runtime.js.cpp 97302cc25b25
 jsdoc-field-stores-contradicted-parameter.runtime.js.cpp 211918b23ce0
 jsdoc-field-tag-held-by-silent-writes.runtime.js.cpp cd87cd040be8
-jsdoc-field-tag-names-an-unimported-default-export.runtime.js.cpp 26c34a1c3013
+jsdoc-field-tag-names-an-unimported-default-export.runtime.js.cpp 5ce3bd165c89
 jsdoc-field-type-contradicted-by-writes.runtime.js.cpp f9608f5b2fc1
 jsdoc-generic-argument-name-not-imported.runtime.js.cpp 8c45dfb5a05c
 jsdoc-host-absent-parameter-contradicted-by-value.runtime.js.cpp 829b28cb786b
@@ -359,16 +359,17 @@ jsdoc-return-open-array-element.runtime.js.cpp b7ee5fa4fc4d
 jsdoc-return-tag-contradicted-by-arrow.runtime.js.cpp 77d8407f51cd
 jsdoc-tag-excluded-by-its-store.runtime.js.cpp 1a0e1f90ebda
 jsdoc-tag-leaves-null-out.runtime.js.cpp 7033bcb07563
-jsdoc-unimported-optional-parameter.runtime.js.cpp 4cae4ab5fd4f
+jsdoc-unimported-optional-parameter.runtime.js.cpp 64bac0a1e827
 jsdoc-union-parameter-no-narrowing-reaches.runtime.js.cpp 6750eb60a167
 json-parse-as-a-value.ts.cpp 0ea01b076f42
 json-reader-dispatch.ts.cpp f43e28fc48ee
 json-stringify-nested-literal.ts.cpp 742dc85e30d9
 json-stringify-replacer.ts.cpp 027f3871f9d3
 jsx-class-map.tsx.cpp 933edb2655e6
-jsx-reactive-list-row-style.tsx.cpp 77d9cb5ad889
-jsx-reactive-style-slot.tsx.cpp 58a929ed432b
-jsx-stateless-component.tsx.cpp bf0fdf5dde35
+jsx-conditional-reactive-class.tsx.cpp 3cd9e311a9fc
+jsx-reactive-list-row-style.tsx.cpp 0a378542ab7e
+jsx-reactive-style-slot.tsx.cpp 39a7e2d2ef3b
+jsx-stateless-component.tsx.cpp d082f3940587
 jump-threading.ts.cpp 35065f7450fa
 key-order-cases.ts.cpp 36f9f7e763c5
 lazy-map-in-logical-or-assignment.ts.cpp 1173673c5bbd
@@ -571,7 +572,7 @@ physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 1d2c5e207449
 primitive-delete-arms.runtime.js.cpp 12dcd9499b11
-printer-drift.txt 7f6242725b17
+printer-drift.txt 23a49e1e7ae8
 promise-any-into-union-promise-arm.runtime.js.cpp 9372b4c219cd
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
@@ -610,7 +611,7 @@ proxy-iterator-traps.runtime.js.cpp cf94d54819b3
 proxy-native-slot-refusal.runtime.js.cpp 38c6ceb3e2d4
 proxy-origin-rest-elements.runtime.js.cpp b3a09bc82fb8
 proxy-receiver-generic-copies.runtime.js.cpp e7ecc2a81e2b
-reactive-inherited-cell-no-list-tick.ts.cpp 7699cb1bf2f5
+reactive-inherited-cell-no-list-tick.ts.cpp 937c40b5564e
 reassigned-local-argument-reads-initializer.runtime.js.cpp e49470fe41c8
 receiver-ignored-construct.ts.cpp a68d985fdfa2
 record-index-sidecar.ts.cpp e29ea6fdfee3
@@ -735,7 +736,7 @@ typeof-runtime-string.ts.cpp 5b4c672dec2a
 typeof-then-discriminates-a-union.ts.cpp 16fe804a602d
 unbox-nullable-union.ts.cpp b8a67b94f69c
 uncallable-member-slot-call.runtime.js.cpp f925ad615e3e
-uncertified.txt ceae5039a20a
+uncertified.txt 893f0f8a202a
 union-array-arm-named-key.runtime.js.cpp f857040bd922
 union-map-receiver-discarded-set.runtime.js.cpp 712af7f12caa
 union-member-absent-on-promise-arm.ts.cpp fb968705a335
