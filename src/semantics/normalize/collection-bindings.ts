@@ -4,6 +4,7 @@ import { disjointUnionTypeOf, isStandardInterfaceType, joinOfWrites, widestOf } 
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
+import { absenceKindsReachingRead, ALL_KINDS, checkerLeftReadOpen, NULL_KIND, PRESENT_KIND, UNDEFINED_KIND } from './stored-local-read.js'
 
 /**
  * The type arguments a bare `new Map()`/`new Set()`/`new WeakMap()`/`new
@@ -673,8 +674,47 @@ export const censusCollectionBindings = (
       return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(arms) : null
     }
     const own = checker.getTypeAtLocation(expr)
-    return isUnusableEvidence(own) ? parameters.typeAt(expr) : own
+    return isUnusableEvidence(own) ? (parameters.typeAt(expr) ?? storedUnionReadAt(expr)) : own
   }
+  // A local the census holds as a synthesized union answers `typeAt` with
+  // nothing: its carrier travels in `unionArmsAt`, beside the checker's `any`.
+  // A read the checker left open holds a value of that stored union, the one
+  // sound answer for it whatever writes reach it (`readFollowsEveryWrite`),
+  // less the absences no reaching value holds (`absenceKindsReachingRead`).
+  // Pushed into an array, it is what the array stores: `let a; a =
+  // g.getAttribute( n ); if ( a === undefined ) continue; list.push( a )`
+  // stores each arm `getAttribute` states but `undefined`. Unread, the push
+  // stated nothing, and the storage took whatever tag a cell it reaches
+  // states in its place.
+  const storedUnionReadAt = (expr: ts.Expression): ts.Type | null => {
+    let read = expr
+    while (ts.isParenthesizedExpression(read)) read = read.expression
+    if (!ts.isIdentifier(read) || storedReadsPending.has(read) || !checkerLeftReadOpen(checker, read)) return null
+    const declarations = checker.getSymbolAtLocation(read)?.declarations
+    const declaration = declarations?.length === 1 ? declarations[0] : undefined
+    if (!declaration || !ts.isVariableDeclaration(declaration)) return null
+    const stored = parameters.unionArmsAt(declaration)
+    if (!stored) return null
+    storedReadsPending.add(read)
+    const reaching = absenceKindsReachingRead(checker, flow, read, (source) => absenceKindsOfType(argumentType(source))) ?? ALL_KINDS
+    storedReadsPending.delete(read)
+    const kept = stored.filter((arm) => (absenceKindsOfType(arm) & reaching) !== 0)
+    return kept.length === 0 ? null : disjointUnionTypeOf(checker, kept)
+  }
+  const storedReadsPending = new Set<ts.Identifier>()
+  const absenceKindsOfType = (type: ts.Type | null): number =>
+    type === null || isUnusableEvidence(type)
+      ? ALL_KINDS
+      : (type.isUnion() ? type.types : [type]).reduce(
+          (kinds, arm) =>
+            kinds |
+            ((arm.flags & ts.TypeFlags.Null) !== 0
+              ? NULL_KIND
+              : (arm.flags & ts.TypeFlags.Undefined) !== 0
+                ? UNDEFINED_KIND
+                : PRESENT_KIND),
+          0
+        )
 
   /**
    * Whether the DESTINATION of every bare construction feeding this owner
