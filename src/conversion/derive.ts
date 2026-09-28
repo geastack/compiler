@@ -280,6 +280,16 @@ const deriveRecord = (
   return { kind: 'product', fields, materializer }
 }
 
+/** Whether an element carrier is an Array, or can hold one as an optional's payload or a union's arm. */
+const holdsArrayObject = (element: Representation, visiting: ReadonlySet<Representation> = new Set()): boolean => {
+  if (element.kind === 'array-object') return true
+  if (visiting.has(element)) return false
+  const inner = new Set(visiting).add(element)
+  if (element.kind === 'optional') return holdsArrayObject(element.payload, inner)
+  if (element.kind === 'tagged-union') return element.arms.some((arm) => holdsArrayObject(arm.value, inner))
+  return false
+}
+
 const deriveArrayObject = (
   target: Extract<Representation, { kind: 'array-object' }>,
   context: ConversionDerivationContext,
@@ -298,6 +308,14 @@ const deriveArrayObject = (
     // installed domain that drops either is not the domain the architecture calls for, so it fails closed.
     return never('installed array domain does not preserve hole and shared-identity semantics required for array-object')
   }
+  // Refused at the outer Array rather than as a `never` element: the
+  // certificate reads a conversion node's own kind, and a `collection` over
+  // a refused element would still read as installed there.
+  if (!domain.recoversNestedArrays && holdsArrayObject(target.element))
+    return never(
+      'an Array nested in a dynamically recovered Array is handed back only when its box holds exactly this carrier; ' +
+        'the same JavaScript Array carried differently has no recovery that keeps its identity'
+    )
 
   const element = deriveAt(target.element, context, `${path}[]`)
   return { kind: 'collection', element, domain }
