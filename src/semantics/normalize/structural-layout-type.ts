@@ -13,7 +13,8 @@ import {
   memberCensusNodeOf,
   constructedClassChoiceTypeAt,
   defaultOnlyParameterOf,
-  emptyArrayDefaultParameterOf
+  emptyArrayDefaultParameterOf,
+  statesNoArrayElement
 } from './derived-expression-type.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import ts from 'typescript'
@@ -1043,6 +1044,18 @@ export const createLayoutTypeResolver = (
     // exactly as it should, taking the invocation AND the binding it
     // initialized out of the plan as withheld. The guard was right; the split
     // was here.
+    //
+    // A call the checker types as an Array whose element it left `never` or
+    // `any` -- a function returning an unstated `[]` it fills -- is the same
+    // split one step later. The return census reads such a return as bound
+    // storage (`return-bindings.ts`), the selected signature takes that answer
+    // (`producers/invocations.ts`), and the call's result must agree with it
+    // or `validateInvocationResult` withholds the call. The census answers
+    // `null` where it has no proof, and then the checker's type stands.
+    if ((ts.isCallExpression(node) || ts.isNewExpression(node)) && statesNoArrayElement(checker, own)) {
+      const bound = parameters.typeAt(node)
+      if (bound && !isUnreducedTypeForm(bound)) return bound
+    }
     // A destructured parameter's implied pattern type is the third spelling
     // of "the program stated nothing here" -- see `impliedPatternParameterOf`.
     if (
