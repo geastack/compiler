@@ -514,7 +514,7 @@ null-default-untagged-parameter.runtime.js.cpp 18936c198044
 null-defaulted-parameter.runtime.js.cpp 3c2102fca019
 null-only-literal-takes-its-writes.runtime.js.cpp d3b2d11f7caf
 null-stored-tagged-field.runtime.js.cpp 0caa8ee82032
-null-written-number-cell.runtime.js.cpp 123fb3832f9e
+null-written-number-cell.runtime.js.cpp c228d43234ad
 nullable-field-takes-component-element.runtime.js.cpp 165489954544
 nullable-open-array-census-element.runtime.js.cpp 540613e0cd87
 nullish-union.ts.cpp 8898117b27df
@@ -573,7 +573,7 @@ physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 1d2c5e207449
 primitive-delete-arms.runtime.js.cpp 12dcd9499b11
-printer-drift.txt de8cf079e822
+printer-drift.txt 724dd9866a7c
 promise-any-into-union-promise-arm.runtime.js.cpp 9372b4c219cd
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
