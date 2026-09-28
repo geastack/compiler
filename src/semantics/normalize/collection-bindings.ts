@@ -733,12 +733,30 @@ export const censusCollectionBindings = (
    * `[]` takes the element of the parameter it is passed to (the array
    * census below), and each untyped write converts into it at the write.
    *
+   * A typed write the statement is narrower than takes it too. In three the
+   * `overrides` are not untyped but loosely stated, `@param {Map<Node,
+   * (Function|Node)>|Array<Array<Node|Function|Node>>}`, so each key `node`
+   * is a `Node | Function`: the ordinary join below lays the map out keyed by
+   * that union, which the `Node`-keyed parameter can never take. Such a
+   * write is a value the program may have tested into the statement's arm
+   * first, the reading `armsExclude` gives a union argument of a parameter
+   * that states one of its arms, and it narrows into the statement at the
+   * write (`narrowsInto`).
+   *
    * Only when every stating parameter agrees on one generic of this family
-   * with at least one stated argument, some write is untyped (every write
-   * typed is the ordinary join below), and every typed write fits the
-   * statement. The closure stops at the parameter, so what the callee does
-   * with its own argument is not this storage's question.
+   * with at least one stated argument, some write is untyped or narrowed
+   * (every write typed and fitting is the ordinary join below), and every
+   * typed write fits the statement or narrows into it. The closure stops at
+   * the parameter, so what the callee does with its own argument is not this
+   * storage's question.
    */
+  const narrowsInto = (type: ts.Type, argument: ts.Type): boolean => {
+    if (!type.isUnion() || checker.isTypeAssignableTo(type, argument)) return false
+    const targets = (argument.isUnion() ? argument.types : [argument]).filter(
+      (arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
+    )
+    return targets.length > 0 && targets.every((target) => type.types.some((arm) => checker.isTypeAssignableTo(arm, target)))
+  }
   const adoptsStatedTypeArguments = (entry: CollectionEntry, owner: ts.Node): boolean => {
     const familySymbol = constructorSymbols.get(entry.family)
     if (!familySymbol) return false
@@ -774,10 +792,14 @@ export const censusCollectionBindings = (
         else if (write.edge === 'collection-value' && write.value) valueWrites.push(argumentType(write.value))
       }
     }
-    if (![...keyWrites, ...valueWrites].some((type) => type === null)) return false
-    const fits = (types: readonly (ts.Type | null)[], argument: ts.Type | undefined): boolean =>
-      argument !== undefined && types.every((type) => type === null || checker.isTypeAssignableTo(type, argument))
     const keyed = entry.family === 'map' || entry.family === 'weak-map'
+    const narrowed =
+      keyWrites.some((type) => type !== null && narrowsInto(type, key)) ||
+      (keyed && value !== undefined && valueWrites.some((type) => type !== null && narrowsInto(type, value)))
+    if (!narrowed && ![...keyWrites, ...valueWrites].some((type) => type === null)) return false
+    const fits = (types: readonly (ts.Type | null)[], argument: ts.Type | undefined): boolean =>
+      argument !== undefined &&
+      types.every((type) => type === null || checker.isTypeAssignableTo(type, argument) || narrowsInto(type, argument))
     if (!fits(keyWrites, key) || (keyed && !fits(valueWrites, value))) return false
     boundKey.set(owner, key)
     if (keyed && value) boundValue.set(owner, value)
