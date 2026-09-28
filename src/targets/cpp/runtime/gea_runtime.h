@@ -22896,6 +22896,127 @@ bool nativeCopiedKeysInOrder(const T& self, NativeOwnKeyOrder& order, std::vecto
   return true;
 }
 
+struct NativeMapOps {
+  double (*size)(const void* payload);
+  bool (*find)(const void* payload, const Value& key, Value* value);
+  void (*set)(void* payload, const Value& key, const Value& value);
+  bool (*remove)(void* payload, const Value& key);
+  void (*clear)(void* payload);
+  bool (*entry)(const void* payload, std::size_t index, Value& key, Value& value);
+};
+
+/** Whether a carrier can hold a function value, under any callable spelling. */
+template <typename T>
+struct CarrierHoldsFunctions : std::false_type {};
+template <>
+struct CarrierHoldsFunctions<Value> : std::true_type {};
+template <>
+struct CarrierHoldsFunctions<FunctionValue> : std::true_type {};
+template <typename Result, typename... Arguments>
+struct CarrierHoldsFunctions<CallableObject<Result(Arguments...)>> : std::true_type {};
+template <typename Result, typename... Arguments>
+struct CarrierHoldsFunctions<ConstructorObject<Result(Arguments...)>> : std::true_type {};
+template <typename T>
+struct CarrierHoldsFunctions<Optional<T>> : CarrierHoldsFunctions<T> {};
+template <typename... Arms>
+struct CarrierHoldsFunctions<TaggedUnion<Arms...>> : std::bool_constant<(CarrierHoldsFunctions<Arms>::value || ...)> {};
+
+/** A boxed Map written with a key or value its own native carrier cannot hold. */
+[[noreturn]] inline void refuseBoxedMapStore(const char* position) {
+  std::fprintf(stderr, "gea: Map.prototype.set through a dynamic value stored a %s this Map's native carrier cannot hold\n", position);
+  gea::detail::abortAfterFlush();
+}
+
+/**
+ * The one lookup key a boxed Map cannot answer: a function its key carrier
+ * does not claim. A callable keeps its identity across carriers
+ * (`Value::box`'s function-object arm), so a stored key under another
+ * callable spelling may be this very function, and "absent" could be wrong.
+ */
+[[noreturn]] inline void refuseBoxedMapFunctionKey() {
+  std::fprintf(stderr, "gea: a dynamic Map lookup used a function key whose callable carrier this Map's key carrier does not name\n");
+  gea::detail::abortAfterFlush();
+}
+
+template <typename T>
+struct NativeMapOpsFor {
+  static const NativeMapOps* table() { return nullptr; }
+};
+
+/**
+ * A lookup key that the key carrier does not claim is absent, which is exact
+ * for every value but a function (`refuseBoxedMapFunctionKey`): a class
+ * instance, an Array, a record and a primitive each have one runtime identity
+ * or tag, and `DynamicCarrier<K>::accepts` answers for it.
+ */
+template <typename K, typename V>
+struct NativeMapOpsFor<gea::Ref<Map<K, V>>> {
+  using Held = gea::Ref<Map<K, V>>;
+  template <typename Found>
+  static bool withKey(const Value& key, Found&& found) {
+    if (DynamicCarrier<K>::accepts(key)) return found(DynamicCarrier<K>::in(key, 0));
+    if constexpr (CarrierHoldsFunctions<K>::value) {
+      if (key.tag() == Value::Tag::Function) refuseBoxedMapFunctionKey();
+    }
+    return false;
+  }
+  static const NativeMapOps* table() {
+    if constexpr (!DynamicCarrier<K>::supported || !DynamicCarrier<V>::supported) {
+      return nullptr;
+    } else {
+      static const NativeMapOps ops{
+          [](const void* payload) -> double {
+            const Held& map = *static_cast<const Held*>(payload);
+            return map ? map->size() : 0;
+          },
+          [](const void* payload, const Value& key, Value* value) -> bool {
+            const Held& map = *static_cast<const Held*>(payload);
+            if (!map) return false;
+            return withKey(key, [&](const K& native) {
+              for (const std::pair<K, V>& entry : map->entries()) {
+                if (!sameValueZero(entry.first, native)) continue;
+                if (value != nullptr) *value = DynamicCarrier<V>::out(entry.second);
+                return true;
+              }
+              return false;
+            });
+          },
+          [](void* payload, const Value& key, const Value& value) {
+            const Held& map = *static_cast<const Held*>(payload);
+            if (!map) gea::host::throwRuntimeError("TypeError", "Map.prototype.set called on an absent Map");
+            if (!DynamicCarrier<K>::accepts(key)) refuseBoxedMapStore("key");
+            if (!DynamicCarrier<V>::accepts(value)) refuseBoxedMapStore("value");
+            map->set(DynamicCarrier<K>::in(key, 0), DynamicCarrier<V>::in(value, 1));
+          },
+          [](void* payload, const Value& key) -> bool {
+            const Held& map = *static_cast<const Held*>(payload);
+            return map && withKey(key, [&](const K& native) { return map->remove(native); });
+          },
+          [](void* payload) {
+            const Held& map = *static_cast<const Held*>(payload);
+            if (map) map->clear();
+          },
+          // By position into the live entry list, as the typed Map iterator
+          // reads it (`Iterator(gea::Ref<Map<K, V>>)`): an entry added while
+          // a walk is under way is still visited.
+          [](const void* payload, std::size_t index, Value& key, Value& value) -> bool {
+            const Held& map = *static_cast<const Held*>(payload);
+            if (!map || index >= map->entries().size()) return false;
+            const std::pair<K, V>& entry = map->entries()[index];
+            key = DynamicCarrier<K>::out(entry.first);
+            value = DynamicCarrier<V>::out(entry.second);
+            return true;
+          }};
+      return &ops;
+    }
+  }
+};
+
+template <typename T>
+const NativeMapOps* nativeMapOpsFor() {
+  return NativeMapOpsFor<T>::table();
+}
+
 /**
  * The own enumerable string keys of a record that has no creation-order log:
  * its present declared fields in layout order, which is its enumeration order.
@@ -26179,6 +26300,14 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
     const Ref<DynamicObject>& properties = functionProperties();
     if (properties && properties->hasProperty(key)) return properties->get(key, receiver);
     return dynamicFunctionPrototypeGet(key);
+  }
+  // A Map has no own properties a box could have given it -- a write through
+  // one still refuses below -- so every read is `Map.prototype`'s, and a key
+  // that falls through to an unmodelled `Object.prototype` member keeps the
+  // opaque refusal rather than answering `undefined` for a real method.
+  if (metadata_->keyed != nullptr) {
+    Value answer;
+    if (dynamicMapPrototypeGet(key, receiver, answer)) return answer;
   }
   if (tag_ == Tag::Object) {
     Value method;
