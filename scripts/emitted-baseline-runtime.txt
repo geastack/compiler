@@ -178,6 +178,7 @@ dynamic-tostring.ts.cpp e9c14d335a12
 dynamic-union-ambiguous.ts.cpp 65c1819df9c7
 dynamic-union-nominal.ts.cpp c54e10ba695d
 dynamic-union-optional.ts.cpp 83750c186ff5
+empty-array-default-parameter-takes-callers.runtime.js.cpp caf292d0177a
 empty-pattern-coercible-and-nullish-typeerror.runtime.js.cpp 97080de74be0
 entries-map-takes-stated-destination.runtime.js.cpp 7b5bbf88de33
 entry-join-and-inspect.ts.cpp 15efb6316e8c

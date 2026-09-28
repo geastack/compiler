@@ -4018,3 +4018,37 @@ export const synthesizedUnionArmsAt = <D extends ts.Declaration>(
   const admitted = all.filter((arm) => checker.isTypeAssignableTo(arm, read))
   return admitted.length === 0 ? all : admitted
 }
+
+/**
+ * The same parameter typed only by an EMPTY ARRAY default: three's
+ * `CubeTexture( images = [] )` once the program's own callers contradict its
+ * `@param` (`contradicted-jsdoc-parameters.ts`). The checker widens the
+ * default into an array that states no element -- `any[]` in JavaScript,
+ * `never[]` in TypeScript -- while the callers pass six `{ width, height,
+ * depth }` records. An empty array holds no element to disagree with the
+ * callers' (`representation/merge.ts` builds it in whatever array carrier
+ * the parameter has), so, as for a `null` default, the parameter is what its
+ * callers pass. Asked only where the checker still answers that element-free
+ * array: a read it narrowed keeps its narrowing.
+ */
+export const emptyArrayDefaultParameterOf = (checker: ts.TypeChecker, node: ts.Node, own: ts.Type): ts.ParameterDeclaration | null => {
+  const declaration = defaultOnlyParameterOf(checker, node)
+  if (!declaration) return null
+  let initializer: ts.Expression = declaration.initializer
+  while (ts.isParenthesizedExpression(initializer)) initializer = initializer.expression
+  if (!ts.isArrayLiteralExpression(initializer) || initializer.elements.length > 0 || !checker.isArrayType(own)) return null
+  const [element] = checker.getTypeArguments(own as ts.TypeReference)
+  return element !== undefined && (element.flags & (ts.TypeFlags.Any | ts.TypeFlags.Never)) !== 0 ? declaration : null
+}
+
+/** A plain parameter the program typed by nothing but its default: no annotation, no JSDoc tag, not a pattern or a rest. */
+export const defaultOnlyParameterOf = (
+  checker: ts.TypeChecker,
+  node: ts.Node
+): (ts.ParameterDeclaration & { readonly initializer: ts.Expression }) | null => {
+  const declaration = ts.isParameter(node) ? node : ts.isIdentifier(node) ? checker.getSymbolAtLocation(node)?.valueDeclaration : undefined
+  if (!declaration || !ts.isParameter(declaration) || declaration.type || !declaration.initializer) return null
+  if (!ts.isIdentifier(declaration.name) || declaration.dotDotDotToken) return null
+  if (ts.getJSDocType(declaration) || ts.getJSDocParameterTags(declaration).length > 0) return null
+  return declaration as ts.ParameterDeclaration & { readonly initializer: ts.Expression }
+}

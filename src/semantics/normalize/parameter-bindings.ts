@@ -63,7 +63,8 @@ import {
   widestOf,
   impliedPatternElementRootOf,
   impliedPatternParameterOf,
-  constructedClassChoiceCheckerTypeAt
+  constructedClassChoiceCheckerTypeAt,
+  emptyArrayDefaultParameterOf
 } from './derived-expression-type.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import { readFollowsEveryWrite } from './stored-local-read.js'
@@ -1646,6 +1647,15 @@ export const censusParameterBindings = (
       if (ts.isIdentifier(node)) {
         const declaration = declarationOf(node)
         if (declaration && ts.isParameter(declaration) && bindings.has(declaration)) {
+          if (checker.getTypeAtLocation(declaration) === type) return null
+        }
+        // Not yet bound, a parameter typed only by an empty `[]` default
+        // still says nothing: the checker's element-free array is the
+        // default's, not the callers' (`emptyArrayDefaultParameterOf`). Taken
+        // as an answer, it bound the next parameter down before this one's
+        // callers were read -- three's `CubeTexture( images = [] )` hands
+        // `images` to `Texture( image )`, which was bound `any[]` for good.
+        if (declaration && ts.isParameter(declaration) && emptyArrayDefaultParameterOf(checker, node, type) !== null) {
           if (checker.getTypeAtLocation(declaration) === type) return null
         }
         // A name bound by a parameter's implied pattern is typed by the

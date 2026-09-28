@@ -125,7 +125,13 @@ const mergeStatesElement = (checker: ts.TypeChecker, layoutTypeAt: (node: ts.Nod
       (parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken ||
         parent.operatorToken.kind === ts.SyntaxKind.BarBarToken ||
         parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken) &&
-      (parent.left === arm || parent.right === arm))
+      (parent.left === arm || parent.right === arm)) ||
+    // A parameter's default is the other arm of the same merge: the binding
+    // holds the argument when one was passed and the default when not.
+    // three's CubeTexture writes `constructor( images = [] )`, and once its
+    // callers bind the cell `Array<{ width, height, depth }>`, the default
+    // boxed as an unstated array had no conversion into it.
+    (ts.isParameter(parent) && parent.initializer === arm)
   if (!isMergeArm) return false
   // The off switch exists so both arms of the gate that landed this run
   // against ONE dist -- see this repo's `GEA_BAG_OFF`/`GEA_FLOW_CENSUS_OFF`.
