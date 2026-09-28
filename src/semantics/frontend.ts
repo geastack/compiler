@@ -85,7 +85,7 @@ import {
 import { createProgram, defaultCompilerOptions } from './program.js'
 import { createFrontendTiming } from './frontend-timing.js'
 import { resolve as resolvePath } from 'node:path'
-import { contradictedJsDocTypeSpans, type BlankSpan, type CensusArms } from './contradicted-jsdoc-types.js'
+import { contradictedJsDocTypeSpans, type BlankSpan, type CensusArms, type CensusArrayElement } from './contradicted-jsdoc-types.js'
 import { contradictedJsDocParameterSpans } from './contradicted-jsdoc-parameters.js'
 import type { DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 // The ambient host-protocol census -- what this program's own declarations
@@ -908,6 +908,14 @@ const censusArmsOf =
     return type ? (type.isUnion() ? type.types : [type]) : null
   }
 
+/** What the settled array census says an array value holds, as `CensusArrayElement` asks. */
+const censusArrayElementOf =
+  (collections: CollectionBindingCensus): CensusArrayElement =>
+  (expression) =>
+    ts.isArrayLiteralExpression(expression) || ts.isNewExpression(expression)
+      ? collections.arrayElementAt(expression)
+      : collections.arrayElementForRead(expression)
+
 const attemptFrontend = (
   input: FrontendInput,
   censusContradictions: ReadonlyMap<string, readonly BlankSpan[]>,
@@ -1347,7 +1355,7 @@ const attemptFrontend = (
     const arms = censusArmsOf(parameters)
     const found = new Map<string, BlankSpan[]>()
     for (const spans of [
-      contradictedJsDocTypeSpans(compiled.program, arms),
+      contradictedJsDocTypeSpans(compiled.program, arms, censusArrayElementOf(settled.facts.collections)),
       contradictedJsDocParameterSpans(compiled.program, arms, input.absentGlobals)
     ])
       for (const [file, fileSpans] of spans) {
