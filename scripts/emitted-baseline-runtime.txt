@@ -167,6 +167,7 @@ dynamic-for-of-iterator-close.ts.cpp 91912cb66fbd
 dynamic-function-into-nullable-result-method.runtime.js.cpp 80869287e9c7
 dynamic-iterator-gather.ts.cpp ccdb8a9f5be5
 dynamic-iterator-header-close.ts.cpp 428657c306cc
+dynamic-map-in-object-parameter.runtime.js.cpp faf84cd36c11
 dynamic-optional-absence-mismatch.ts.cpp 7df14bcbd5c2
 dynamic-regexp.ts.cpp 12643c082bd9
 dynamic-table-hash-index.ts.cpp 83a10528c965

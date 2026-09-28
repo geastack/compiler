@@ -327,6 +327,142 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
   return Value();
 }
 
+namespace detail {
+
+/**
+ * A `%MapIteratorPrototype%` walk over a boxed Map, ECMA-262 24.1.5. The
+ * cursor holds the box (so the Map lives as long as the walk) and a position
+ * into its live entry list, exactly as `Iterator(gea::Ref<Map<K, V>>)` walks
+ * a typed one; once exhausted it stays exhausted, as 24.1.5.2 step 12 says.
+ */
+enum class BoxedMapIteration { Entries, Keys, Values };
+
+struct BoxedMapCursor {
+  Value map;
+  std::size_t position = 0;
+  BoxedMapIteration kind = BoxedMapIteration::Entries;
+  bool done = false;
+  friend void geaTraceRefs(const BoxedMapCursor& value, RefVisitor& visitor) { traceRefs(value.map, visitor); }
+};
+
+struct BoxedMapIteratorState {
+  gea::Ref<BoxedMapCursor> cursor;
+  friend void geaTraceRefs(const BoxedMapIteratorState& value, RefVisitor& visitor) { traceRefs(value.cursor, visitor); }
+};
+
+inline Value boxedMapIterator(const Value& map, BoxedMapIteration kind) {
+  auto cursor = gea::makeRef<BoxedMapCursor>();
+  cursor->map = map;
+  cursor->kind = kind;
+  CallableObject<Value()> next(
+      +[](void* environment) -> Value {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        BoxedMapCursor& state = *unpackEnvironment<BoxedMapIteratorState>(environment, slot)->cursor;
+        Value key;
+        Value value;
+        if (state.done || !state.map.nativeMapEntry(state.position, key, value)) {
+          state.done = true;
+          return runtime::iterator::result(Value(), true);
+        }
+        state.position += 1;
+        if (state.kind == BoxedMapIteration::Keys) return runtime::iterator::result(key, false);
+        if (state.kind == BoxedMapIteration::Values) return runtime::iterator::result(value, false);
+        auto pair = gea::makeRef<ArrayObject<Value>>();
+        pair->push(key);
+        pair->push(value);
+        return runtime::iterator::result(Value::box(Value::Tag::Object, pair), false);
+      },
+      packEnvironment(BoxedMapIteratorState{cursor}));
+  CallableObject<Value(Value)> self(+[](void*, Value receiver) -> Value { return receiver; }, nullptr);
+  Value object = Value::object();
+  object.setProperty(PropertyKey::string("next"), Value::box(Value::Tag::Function, next));
+  object.setProperty(PropertyKey::symbol(wellKnownSymbol(WellKnownSymbol::Iterator)), Value::boxMethod(self));
+  return object;
+}
+
+inline const Value& requireBoxedMap(const Value& receiver, const char* method) {
+  if (!receiver.hasNativeMapOperations())
+    host::throwRuntimeError("TypeError", std::string("Method Map.prototype.") + method + " called on incompatible receiver");
+  return receiver;
+}
+
+}  // namespace detail
+
+/**
+ * `[[Get]]` on a boxed native Map: `Map.prototype`'s members over the Map's
+ * recorded operations (`NativeMapOps`). Every method is one function object,
+ * so `m.get === m.get` holds and `@@iterator` is `entries` itself (24.1.3.12).
+ *
+ * `false` means the key names an `Object.prototype` member this runtime does
+ * not model on a Map; `Value::getProperty` then keeps the opaque refusal. Any
+ * other key is on neither prototype and a Map has no own properties, so it
+ * reads `undefined`.
+ */
+inline bool dynamicMapPrototypeGet(const PropertyKey& key, const Value& receiver, Value& out) {
+  using Args = gea::Ref<ArrayObject<Value>>;
+  using Method = CallableObject<Value(Value, Args)>;
+  const PropertyKey iteratorKey = PropertyKey::symbol(wellKnownSymbol(detail::WellKnownSymbol::Iterator));
+  const PropertyKey tagKey = PropertyKey::symbol(wellKnownSymbol(detail::WellKnownSymbol::ToStringTag));
+  if (key.isSymbol()) {
+    if (key == tagKey) out = Value::box(Value::Tag::String, std::string("Map"));
+    else if (key == iteratorKey) return dynamicMapPrototypeGet(PropertyKey::string("entries"), receiver, out);
+    else out = Value();
+    return true;
+  }
+  const std::string& name = key.text();
+  if (name == "size") {
+    out = Value::box(Value::Tag::Number, detail::requireBoxedMap(receiver, "size").nativeMapSize());
+    return true;
+  }
+  static const std::map<std::string, Value> methods = [] {
+    std::map<std::string, Value> result;
+    for (const char* member : {"get", "has", "set", "delete", "clear", "forEach", "entries", "keys", "values"}) {
+      auto callable = Method(+[](void* environment, Value receiver, Args args) -> Value {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        const std::string& method = *gea::unpackEnvironment<std::string>(environment, slot);
+        const Value& map = detail::requireBoxedMap(receiver, method.c_str());
+        const Value first = args->size() ? args->at(0) : Value();
+        if (method == "get") {
+          Value value;
+          return map.nativeMapFind(first, &value) ? value : Value();
+        }
+        if (method == "has") return Value::box(Value::Tag::Boolean, map.nativeMapFind(first, nullptr));
+        if (method == "set") {
+          map.nativeMapSet(first, args->size() > 1 ? args->at(1) : Value());
+          return receiver;
+        }
+        if (method == "delete") return Value::box(Value::Tag::Boolean, map.nativeMapDelete(first));
+        if (method == "clear") {
+          map.nativeMapClear();
+          return Value();
+        }
+        if (method == "forEach") {
+          // 24.1.3.5: the callback runs over the live entry list, so an entry
+          // it adds is visited too.
+          if (first.tag() != Value::Tag::Function) host::throwRuntimeError("TypeError", "Map.prototype.forEach callback must be callable");
+          const Value thisArg = args->size() > 1 ? args->at(1) : Value();
+          Value key;
+          Value value;
+          for (std::size_t index = 0; map.nativeMapEntry(index, key, value); ++index) first.callWithReceiver(thisArg, {value, key, map});
+          return Value();
+        }
+        return detail::boxedMapIterator(map, method == "keys" ? detail::BoxedMapIteration::Keys
+                                             : method == "values" ? detail::BoxedMapIteration::Values
+                                                                  : detail::BoxedMapIteration::Entries);
+      }, gea::packEnvironment<std::string>(std::string(member)));
+      result.emplace(member, Value::boxMethod<1>(callable));
+    }
+    return result;
+  }();
+  if (const auto found = methods.find(name); found != methods.end()) {
+    out = found->second;
+    return true;
+  }
+  if (ordinaryObjectPrototypeHas(key)) return false;
+  out = Value();
+  return true;
+}
+
 // The intrinsic is one ordinary native array with its own method properties.
 // Identity sidecars already carry descriptors on arrays; a new representation
 // or a boxed array would lose that existing native ownership for no reason.
