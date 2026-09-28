@@ -57,6 +57,37 @@ export const createLocalUnionResolver = (
     if (shape.kind === 'object') return shape.members.every((member) => concreteRefinement(member.type, visited))
     return shape.kind !== 'unresolved'
   }
+  /**
+   * What a write stores: its value's type -- or, for a conditional the
+   * checker left `any`, the union of its two branches, one of which is the
+   * value (ECMA-262 13.14.1). three's `const bufferAttribute =
+   * attribute.isInterleavedBufferAttribute ? attribute.data : attribute` is
+   * `any` to the checker while each branch is a member read the census typed.
+   * Asked only where the whole answers `any`, so a conditional with a type
+   * keeps it.
+   */
+  const storedValueOf = (value: ts.Expression): StructuralTypeId => {
+    const whole = read(value)
+    let conditional: ts.Expression = value
+    while (ts.isParenthesizedExpression(conditional)) conditional = conditional.expression
+    if (!ts.isConditionalExpression(conditional)) return whole
+    const shape = table.get(whole).shape
+    if (shape.kind !== 'primitive' || shape.primitive !== 'any') return whole
+    const branches = [storedValueOf(conditional.whenTrue), storedValueOf(conditional.whenFalse)]
+    const members = branches.flatMap((id) => {
+      const branch = table.get(id).shape
+      return branch.kind === 'union' ? branch.members : [id]
+    })
+    if (
+      members.some((id) => {
+        const member = table.get(id).shape
+        return member.kind === 'primitive' && member.primitive === 'any'
+      })
+    )
+      return whole
+    const unique = [...new Set(members)]
+    return unique.length === 1 ? (unique[0] ?? whole) : table.intern({ kind: 'union', members: unique })
+  }
   const resolve = (declaration: ts.VariableDeclaration): StructuralTypeId | null => {
     if (!flow || declaration.type || !ts.isIdentifier(declaration.name)) return null
     if (memo.has(declaration)) return memo.get(declaration) ?? null
@@ -83,7 +114,7 @@ export const createLocalUnionResolver = (
       }
       sourceRefined.add(declaration)
     }
-    const members = writes.map((write) => read(write.value as ts.Expression))
+    const members = writes.map((write) => storedValueOf(write.value as ts.Expression))
     pending.delete(declaration)
     // An uninitialized lexical binding holds undefined until its first write.
     if (!declaration.initializer) members.push(table.intern({ kind: 'primitive', primitive: 'undefined' }))
@@ -105,7 +136,7 @@ export const createLocalUnionResolver = (
       if (value.source === null) return null
       const stored = ts.isVariableDeclaration(value.source)
         ? table.intern({ kind: 'primitive', primitive: 'undefined' })
-        : read(value.source)
+        : storedValueOf(value.source)
       const shape = table.get(stored).shape
       const arms = shape.kind === 'union' ? shape.members : [stored]
       members.push(...arms.filter((arm) => (absenceOf(arm) & value.kinds) !== 0))
