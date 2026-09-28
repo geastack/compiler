@@ -74,15 +74,18 @@ import { hostAbsentTypeTest } from './normalize/absent-globals.js'
  * `node.build( builder, this )` under `@param {?(string|Node)} [output=null]`,
  * and a `StackNode` is a `Node`.
  *
- * A tag naming a type only a declaration file declares -- a host's, like the
- * `Image` of `@param {Array<Image>} [images=[]]` -- is the host boundary's
- * statement, not the program's: whether a value the program builds can cross
- * it is the boundary's question (`absent-host-type-value-reaches.runtime.js`),
- * so such a tag is left too. So are a checked file, a tag no call contradicts,
- * a rest parameter, and a parameter whose default is a value: its tag is also
- * the default's, and untagged the default would type the body while the
- * census typed the slot (`Vector3.toArray( array = [], offset = 0 )`,
- * `FunctionCallNode( functionNode = null, parameters = {} )`).
+ * A tag naming a type only a declaration file declares -- a host's -- is the
+ * host boundary's statement, not the program's: whether a value the program
+ * builds can cross it is the boundary's question, so such a tag is left too,
+ * unless the host states that type absent and a value is passed (`hostAbsent`
+ * below). So are a checked file, a tag no call contradicts, a rest parameter,
+ * and a parameter whose default is a value: its tag is also the default's,
+ * and untagged the default would type the body while the census typed the
+ * slot (`Vector3.toArray( array = [], offset = 0 )`, `FunctionCallNode(
+ * functionNode = null, parameters = {} )`). An empty `[]` default under a
+ * tag stating only an absent element is no such value: it holds no element
+ * for the tag to state (`holdsNoElement`, `CubeTexture( images = [] )` under
+ * `@param {Array<Image>}`, `absent-host-type-value-reaches.runtime.js`).
  *
  * ## Once the binding census has settled
  *
@@ -274,6 +277,19 @@ export const contradictedJsDocParameterSpans = (
     })
   }
 
+  // A value default is the tag's too, so it keeps the tag against callers
+  // (below) -- except an empty `[]` under a tag stating only an absent
+  // element: that default holds no element, so the tag states nothing of it,
+  // and the elements the callers pass are the tag's whole subject. three's
+  // CubeTexture writes `@param {Array<Image>} [images=[]]`, and the six
+  // records CubeRenderTarget passes never reached the absent-host test.
+  const holdsNoElement = (initializer: ts.Expression, tag: ts.JSDocParameterTag): boolean => {
+    let value = initializer
+    while (ts.isParenthesizedExpression(value)) value = value.expression
+    if (!ts.isArrayLiteralExpression(value) || value.elements.length > 0 || !tag.typeExpression) return false
+    return absentStatement(checker.getNonNullableType(typeOfTypeNode(tag.typeExpression.type))) === 'element'
+  }
+
   const contradicts = (argument: ts.Expression, tag: ts.JSDocParameterTag): boolean => {
     if (!tag.typeExpression) return false
     const stated = checker.getNonNullableType(typeOfTypeNode(tag.typeExpression.type))
@@ -351,9 +367,10 @@ export const contradictedJsDocParameterSpans = (
       const parameter = declaration.parameters[index]
       if (!parameter || parameter.dotDotDotToken) return
       if (ts.isObjectLiteralExpression(argument)) contradictMemberTags(parameter, argument)
-      if (parameter.initializer && !isAbsence(checker, parameter.initializer)) return
       const tag = tagOf(parameter)
-      if (!tag || !contradicts(argument, tag)) return
+      if (!tag) return
+      if (parameter.initializer && !isAbsence(checker, parameter.initializer) && !holdsNoElement(parameter.initializer, tag)) return
+      if (!contradicts(argument, tag)) return
       parameterOfTag.set(tag, parameter)
       evidence.set(tag, [...(evidence.get(tag) ?? []), argument])
     })
