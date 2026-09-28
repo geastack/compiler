@@ -29,6 +29,7 @@ import {
   isUnusableEvidence,
   joinOfWrites,
   jsDocTypeStatesNothing,
+  statesNoArrayElement,
   literalMemberNameOf,
   memberTypeOf,
   objectAssignedValueTypeOf,
@@ -638,7 +639,15 @@ export const censusReturnBindings = (
       // A bare `null` return is the third: a function returning an element of a
       // `[ null ]` literal the collection census opened (see
       // `CollectionBindingCensus.nullSlotElementFor`) returns the census element.
-      if (returned && (isAnyType(returned) || annotationStatesNothing(checker, node, returned))) candidates.push(node)
+      // An Array whose element the checker left `never` or `any` is the fourth:
+      // the checker joined its returns' evolving-array flow types, which say
+      // nothing of what the array stores, while `censusArrayAt` below reads a
+      // returned array the collection census bound as its storage. Left to the
+      // checker, the result slot was `array-object(dynamic)` under every
+      // `return list` of an `array-object(E)`: three's
+      // `RenderObject.getAttributes`, once its false `@return` is blanked.
+      if (returned && (isAnyType(returned) || annotationStatesNothing(checker, node, returned) || statesNoArrayElement(checker, returned)))
+        candidates.push(node)
       else if (returned && isNullSlotReadType(returned)) {
         nullReturns.add(node)
         candidates.push(node)

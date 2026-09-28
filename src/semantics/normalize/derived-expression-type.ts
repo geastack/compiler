@@ -2312,6 +2312,18 @@ export const withoutVacuousMembers = (checker: ts.TypeChecker, anchor: ts.Node |
   return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(kept) : null
 }
 
+/**
+ * An Array whose element the checker left `never` or `any`: what it infers
+ * for an unstated `[]` the program fills, and for a function that returns one.
+ * The collection census types such an array from its writes, so this says
+ * nothing about the element the array stores.
+ */
+export const statesNoArrayElement = (checker: ts.TypeChecker, type: ts.Type): boolean => {
+  if (!checker.isArrayType(type)) return false
+  const [element] = checker.getTypeArguments(type as ts.TypeReference)
+  return element !== undefined && (element.flags & (ts.TypeFlags.Any | ts.TypeFlags.Never)) !== 0
+}
+
 export const annotationStatesNothing = (checker: ts.TypeChecker, anchor: ts.Node, type: ts.Type): boolean => {
   const bare = (part: ts.Type): boolean => statesNothingPart(checker, anchor, part)
   if (bare(type)) return true
