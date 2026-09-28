@@ -21,11 +21,13 @@ import { declaresExactArms } from './exact-arms.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import {
   calleeAwareTypeAt,
+  iterationProtocolArgumentsOf,
   objectDescriptorReturnTypeAt,
   resolvedCalleeSignatureType,
   sourceForValue,
   unwrapErased,
-  valueEdgesInto
+  valueEdgesInto,
+  withIterationProtocolArguments
 } from './shared.js'
 import type { CitedBranch } from './references.js'
 import { isShortCircuitingCall, optionalChainGuardOf, optionalCallGuardOf, presentReturnTypeOf } from './optional-chain.js'
@@ -272,7 +274,13 @@ const buildSelectedSignature = (
       )
     : null
 
-  const parameters = signature.getParameters().map((parameter) => parameterShapeOf(context, parameter, declaration))
+  // The callee's frame at this call retypes the same slots from the same
+  // arguments (`resolvedCalleeSignatureType`), so the two halves agree.
+  const parameters = withIterationProtocolArguments(
+    context,
+    signature.getParameters().map((parameter) => parameterShapeOf(context, parameter, declaration)),
+    iterationProtocolArgumentsOf(context, node, signature)
+  )
 
   const writtenTypeArguments = node.typeArguments
   const typeParameters = typeParametersOf(declaration)

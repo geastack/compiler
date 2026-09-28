@@ -14,6 +14,9 @@ import { citeExpressionResult, type CitedBranch } from './references.js'
 import { isShortCircuitingCall, presentReturnTypeOf } from './optional-chain.js'
 import { enclosingCallIfCallee } from './erasure.js'
 import { implementationSignatureOf, physicalOverloadTypeAt } from '../structural-declarations.js'
+import { isLanguageIterationInterface } from '../../language-iteration-interfaces.js'
+import { parameterSlotTypeOf } from '../parameter-slot.js'
+import type { SignatureParameter, SignatureShape } from '../../model/structural-types.js'
 export { unwrapErasedExpression as unwrapErased } from './erasure.js'
 import { unwrapErasedExpression } from './erasure.js'
 
@@ -465,6 +468,104 @@ const instanceCopyOfMethodReceiver = (
   return [...enclosing, { owner, ordinal: copy.ordinal }]
 }
 
+/**
+ * The argument types that ARE one call's parameter slots, where the slot is
+ * an ambient declaration's language iteration interface: argument position to
+ * the argument's own type.
+ *
+ * `Iterable<T>` states how a callee will use a value, never what the value is
+ * (`language-iteration-interfaces.ts`), so no carrier can be derived from the
+ * slot alone -- its body is a `[Symbol.iterator]` method and nothing else,
+ * and interned as a layout it is an empty record that no array, Set or
+ * generator converts into. A source callee's slot is answered by the
+ * parameter census from what its callers pass. An AMBIENT callee has no
+ * census and needs none: it has no program body, the program holds no
+ * function value of it, and its frame exists only at this call -- so the one
+ * value the slot ever holds is this argument, and its type is the slot's.
+ * lib.dom's WebIDL `sequence<T>` parameters are the measured case:
+ * `gl.drawBuffers(buffers)` resolves the `(buffers: Iterable<GLenum>)`
+ * overload lib.dom.iterable merges ahead of `(buffers: GLenum[])`, and the
+ * array argument had nowhere to go.
+ *
+ * Overload selection is deliberately not the lever: the checker's resolved
+ * signature is read by every pass of the frontend, and an ambient API may
+ * declare nothing but the `Iterable<T>` form.
+ *
+ * Only where the callee NAMES the ambient declaration (`gl.drawBuffers`),
+ * never through a program binding or member typed by one, whose value may be
+ * a program function with a frame of its own. Only an argument the checker
+ * accepts for the stated slot, read through the censuses (an unchecked JS
+ * array is `any[]` to the checker and an array of numbers here), and never
+ * `any`/`unknown`, which would state nothing. Positions stop at the first
+ * spread argument or rest parameter, past which an argument names no slot.
+ */
+export const iterationProtocolArgumentsOf = (
+  context: ProducerContext,
+  call: ts.CallExpression | ts.NewExpression | ts.TaggedTemplateExpression,
+  signature: ts.Signature
+): ReadonlyMap<number, StructuralTypeId> => {
+  const found = new Map<number, StructuralTypeId>()
+  const declaration = signature.declaration
+  if (ts.isTaggedTemplateExpression(call) || !declaration || !declaration.getSourceFile().isDeclarationFile) return found
+  const callee = unwrapErasedExpression(call.expression)
+  const named = ts.isPropertyAccessExpression(callee) ? callee.name : ts.isIdentifier(callee) ? callee : null
+  const calleeSymbol = named ? context.checker.getSymbolAtLocation(named) : undefined
+  if (!calleeSymbol?.declarations?.includes(declaration)) return found
+  const parameters = signature.getParameters()
+  const passed = call.arguments ?? []
+  for (let index = 0; index < passed.length && index < parameters.length; index += 1) {
+    const argument = passed[index]!
+    const parameter = parameters[index]!
+    const parameterDeclaration = parameter.valueDeclaration
+    if (
+      ts.isSpreadElement(argument) ||
+      (parameterDeclaration && ts.isParameter(parameterDeclaration) && parameterDeclaration.dotDotDotToken)
+    )
+      break
+    const stated = context.checker.getNonNullableType(
+      context.checker.getTypeOfSymbolAtLocation(parameter, parameterDeclaration ?? declaration)
+    )
+    const protocol = stated.getSymbol()
+    if (!protocol || !isLanguageIterationInterface(context.checker, call, protocol)) continue
+    const own = context.types.rawTypeAt(argument)
+    if (own.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) || !context.checker.isTypeAssignableTo(own, stated)) continue
+    found.set(index, context.types.typeAt(argument))
+  }
+  return found
+}
+
+/** `parameters` with each position `iterationProtocolArgumentsOf` answered retyped to its argument, the slot re-widened by the same rule. */
+export const withIterationProtocolArguments = (
+  context: ProducerContext,
+  parameters: readonly SignatureParameter[],
+  arguments_: ReadonlyMap<number, StructuralTypeId>
+): readonly SignatureParameter[] => {
+  if (arguments_.size === 0) return parameters
+  const undefinedType = context.types.typeOf(context.checker.getUndefinedType())
+  return parameters.map((parameter, index) => {
+    const type = arguments_.get(index)
+    if (type === undefined) return parameter
+    const slot = parameterSlotTypeOf((members) => context.table.intern({ kind: 'union', members }), undefinedType, parameter, type)
+    return { ...parameter, type, slot }
+  })
+}
+
+/** A resolved call signature's interned frame with its iteration-protocol slots retyped (`iterationProtocolArgumentsOf`). */
+const withIterationProtocolFrame = (
+  context: ProducerContext,
+  frame: StructuralTypeId,
+  arguments_: ReadonlyMap<number, StructuralTypeId>
+): StructuralTypeId => {
+  if (arguments_.size === 0) return frame
+  const shape = context.table.get(frame).shape
+  if (shape.kind !== 'signature') return frame
+  const retype = (signature: SignatureShape): SignatureShape => ({
+    ...signature,
+    parameters: withIterationProtocolArguments(context, signature.parameters, arguments_)
+  })
+  return context.table.intern({ kind: 'signature', call: shape.call.map(retype), construct: shape.construct.map(retype) })
+}
+
 export const resolvedCalleeSignatureType = (context: ProducerContext, node: ts.Expression): StructuralTypeId | null => {
   const call = enclosingCallIfCallee(node)
   const signature = call ? context.checker.getResolvedSignature(call) : undefined
@@ -755,7 +856,8 @@ export const resolvedCalleeSignatureType = (context: ProducerContext, node: ts.E
   // on the other branch. Believing the augmented return here would build a
   // callee carrier the real method has no store into.
   const presentReturn = isShortCircuitingCall(call) ? presentReturnTypeOf(context.checker, signature) : undefined
-  return calleeTypes.resolvedSignatureTypeOf(signature, ts.isNewExpression(call) ? 'construct' : 'call', presentReturn)
+  const frame = calleeTypes.resolvedSignatureTypeOf(signature, ts.isNewExpression(call) ? 'construct' : 'call', presentReturn)
+  return withIterationProtocolFrame(context, frame, iterationProtocolArgumentsOf(context, call, signature))
 }
 
 export const calleeAwareTypeAt = (context: ProducerContext, node: ts.Expression): StructuralTypeId => {
