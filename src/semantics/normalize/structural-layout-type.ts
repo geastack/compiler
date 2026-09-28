@@ -36,10 +36,8 @@ import type { ObjectBagCensus } from './object-bag-bindings.js'
  * `null` default binds to whatever answer this gives.
  */
 export const absentDefaultParameterOf = (checker: ts.TypeChecker, node: ts.Node): ts.ParameterDeclaration | null => {
-  const declaration = ts.isParameter(node) ? node : ts.isIdentifier(node) ? checker.getSymbolAtLocation(node)?.valueDeclaration : undefined
-  if (!declaration || !ts.isParameter(declaration) || declaration.type || !declaration.initializer) return null
-  if (!ts.isIdentifier(declaration.name) || declaration.dotDotDotToken) return null
-  if (ts.getJSDocType(declaration) || ts.getJSDocParameterTags(declaration).length > 0) return null
+  const declaration = defaultOnlyParameterOf(checker, node)
+  if (!declaration) return null
   const initializer = checker.getTypeAtLocation(declaration.initializer)
   return !initializer.isUnion() && (initializer.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0 ? declaration : null
 }
@@ -1149,7 +1147,8 @@ export const createLayoutTypeResolver = (
       annotationStatesNothing(checker, node, own) ||
       impliedPatternParameterOf(checker, node) !== null ||
       impliedPatternElementRootOf(checker, node) !== null ||
-      absentDefaultParameterOf(checker, node) !== null
+      absentDefaultParameterOf(checker, node) !== null ||
+      emptyArrayDefaultParameterOf(checker, node, own) !== null
     ) {
       // Asked before the parameter census: a literal token is not a value the
       // program left open for its callers to write down. See above.
