@@ -680,11 +680,12 @@ export const erasedAnyCopyFrameAt = (
  *
  * Only where the callee NAMES the ambient declaration (`gl.drawBuffers`),
  * never through a program binding or member typed by one, whose value may be
- * a program function with a frame of its own. Only an argument the checker
- * accepts for the stated slot, read through the censuses (an unchecked JS
- * array is `any[]` to the checker and an array of numbers here), and never
- * `any`/`unknown`, which would state nothing. Positions stop at the first
- * spread argument or rest parameter, past which an argument names no slot.
+ * a program function with a frame of its own. Only an argument that is a
+ * value of the stated slot, read through the censuses: the checker's
+ * acceptance where the checker typed the argument, and otherwise
+ * (`censusIteratesAsStated`) the census's own answer. Never `unknown`,
+ * which states nothing. Positions stop at the first spread argument or rest
+ * parameter, past which an argument names no slot.
  */
 export const iterationProtocolArgumentsOf = (
   context: ProducerContext,
@@ -715,10 +716,54 @@ export const iterationProtocolArgumentsOf = (
     const protocol = stated.getSymbol()
     if (!protocol || !isLanguageIterationInterface(context.checker, call, protocol)) continue
     const own = context.types.rawTypeAt(argument)
-    if (own.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown) || !context.checker.isTypeAssignableTo(own, stated)) continue
-    found.set(index, context.types.typeAt(argument))
+    if (own.flags & ts.TypeFlags.Unknown) continue
+    const type = context.types.typeAt(argument)
+    const accepted = checkerStatesNothingOf(context.checker, own)
+      ? censusIteratesAsStated(context, call, protocol, stated, type)
+      : context.checker.isTypeAssignableTo(own, stated)
+    if (!accepted) continue
+    found.set(index, type)
   }
   return found
+}
+
+/**
+ * Whether the checker's type for an argument vouches for nothing it holds:
+ * `any` itself, or an array of `any` -- what an unchecked JS local reads as
+ * once `let xs = []` is reassigned from a `Map`'s `get` (three's
+ * `WebGLState.drawBuffers`). Either is assignable to every `Iterable<T>`,
+ * so its acceptance is not evidence.
+ */
+const checkerStatesNothingOf = (checker: ts.TypeChecker, type: ts.Type): boolean =>
+  (type.flags & ts.TypeFlags.Any) !== 0 ||
+  (checker.isArrayType(type) && (checker.getTypeArguments(type as ts.TypeReference)[0]?.flags ?? 0) & ts.TypeFlags.Any) !== 0
+
+/**
+ * Where the checker could vouch for nothing, whether the census's type for
+ * the argument is itself a value of the stated `Iterable<T>`: a plain array
+ * or a standard `Set` -- sources that iterate their own storage with no
+ * `@@iterator` lookup -- whose element is EXACTLY the stated element.
+ *
+ * Only `Iterable` (an array is no `Iterator`), and only an exact element:
+ * the slot is retyped to this argument, so a census answer the slot does not
+ * state (`string[]` into `Iterable<number>`) keeps the refusal rather than
+ * carrying it into the call.
+ */
+const censusIteratesAsStated = (
+  context: ProducerContext,
+  anchor: ts.Node,
+  protocol: ts.Symbol,
+  stated: ts.Type,
+  type: StructuralTypeId
+): boolean => {
+  if (context.checker.resolveName('Iterable', anchor, ts.SymbolFlags.Interface, false) !== protocol) return false
+  if (!(stated.flags & ts.TypeFlags.Object) || ((stated as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return false
+  const statedElement = context.checker.getTypeArguments(stated as ts.TypeReference)[0]
+  if (!statedElement || statedElement.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) return false
+  const element = context.types.typeOf(statedElement)
+  const shape = context.table.get(type).shape
+  if (shape.kind === 'array') return shape.element === element
+  return isNativeIterableSetType(context, type) && shape.kind === 'declared' && shape.typeArguments[0] === element
 }
 
 /** `parameters` with each position `iterationProtocolArgumentsOf` answered retyped to its argument, the slot re-widened by the same rule. */
