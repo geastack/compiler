@@ -8,6 +8,7 @@ import {
   type CollectionBindingCensus
 } from './collection-bindings.js'
 import { emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
+import { inferredArrayElementAt } from './structural-array-element.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
 import type { ValueFlowIndex } from './flow/model.js'
 import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
@@ -1189,7 +1190,40 @@ export const censusReturnBindings = (
     // was just read out of. hono's `get [GET_MATCH_RESULT](): Result<[unknown,
     // RouterRoute]> { return this.#matchResult }` is the measured case -- the
     // field census had already narrowed that field, and the checker had not.
-    return parameters.statedTypeAt(node) ?? known(node) ?? resolveExpr(node, owner)
+    return parameters.statedTypeAt(node) ?? censusArrayAt(unwrapped) ?? known(node) ?? resolveExpr(node, owner)
+  }
+
+  /**
+   * A read of an array the collection census bound is a read of its STORAGE,
+   * whose type is the census's element at every read alike.
+   *
+   * The checker's answer at the read is its evolving-array flow type, which
+   * says only what the pushes seen so far on this path produced: `any[]` at
+   * an early `return list` ahead of every push, and `any[]` again after
+   * pushes of values it types `any`. `structural.ts`'s
+   * `inferred-array-element` rule lays every such read out from the census
+   * element instead, so the value a `return` hands back carried
+   * `array-object(E)` while the checker's `any[]`, joined here, made the
+   * function's result slot `array-object(dynamic)` -- one storage, two
+   * carriers, and no conversion exists between two `array-object`s whose
+   * elements differ. three's `NodeMaterial.setupMaterialLightings`
+   * (`return materialLightsNode`, early and late) is the measured case.
+   *
+   * Asked through `inferredArrayElementAt`, the rule the mapper asks, so the
+   * two cannot disagree about which reads are the storage's. `E[]` is built
+   * by the checker's internal `createArrayType`, the same guarded reach
+   * `disjointUnionTypeOf` makes for `getUnionType`, because this census's
+   * contract is a `ts.Type`: the checker interns array references by
+   * element, so this is the identical object it would itself name `E[]`, and
+   * it interns to the structural array the mapper builds from `E`. A checker
+   * without it answers `null`, and the read falls through to the checker's
+   * own answer exactly as before.
+   */
+  const censusArrayAt = (node: ts.Expression): ts.Type | null => {
+    const element = inferredArrayElementAt(checker, collections, (asked) => checker.getTypeAtLocation(asked), node)
+    if (!element) return null
+    const constructing = checker as unknown as { createArrayType?: (element: ts.Type) => ts.Type }
+    return typeof constructing.createArrayType === 'function' ? constructing.createArrayType(element) : null
   }
 
   const computeReturnType = (declaration: ReturnCandidateDeclaration): ts.Type | null => {
@@ -1530,7 +1564,17 @@ export const composeReturnBindings = (
   return {
     view: {
       ...parameters,
-      typeAt: (node) => parameters.typeAt(node) ?? returns.typeAt(node),
+      // A call's result is not a parameter binding. The parameter census
+      // answers one only through `resolvedReturnTypeOf`, its own looser read
+      // of the callee's `return`s for arguments inside its fixpoint, while
+      // `producers/invocations.ts` takes the selected signature's return from
+      // THIS census (`context.returns`). Where both answer and differ, the
+      // call's value and its signature were two authorities, and
+      // `validateInvocationResult` withheld the call; so for the two node
+      // shapes this census answers at all, its answer is read first. A
+      // collection-bound `return list` is the measured case: this census
+      // answers the storage's `E[]`, the looser one the checker's `any[]`.
+      typeAt: (node) => returns.typeAt(node) ?? parameters.typeAt(node),
       statedTypeAt: (node) => parameters.statedTypeAt(node) ?? returns.statedTypeAt(node),
       unionArmsAt: (node) => parameters.unionArmsAt(node) ?? returns.unionArmsAt(node),
       boundCount: parameters.boundCount + returns.boundCount,
