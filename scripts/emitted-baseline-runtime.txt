@@ -64,6 +64,7 @@ callable-own-mutation-guards.runtime.js.cpp 11e6c00455f4
 callable-result-conversion.ts.cpp 94868e63593b
 callback-call-with-this-arg.ts.cpp 8760329cda2f
 captured-cell-branch-assignment.ts.cpp 2d307e995d74
+census-array-early-return.runtime.js.cpp cc6b4ae287db
 census-record-parameter-keeps-identity.runtime.js.cpp 83476c4416ab
 class-accessors-viewed-as-record.ts.cpp f390fdd89ddd
 class-arm-into-declared-interface-slot.ts.cpp 1cf8ed753b5b
