@@ -364,6 +364,12 @@ export const valuesReachingRead = (
     return result ?? undecided()
   }
   const holds = (node: ts.Node): boolean => node === read || contains(node, read)
+  /** Whether the reference is a `let`/`const` this loop body declares, and so a new binding at each of its iterations. */
+  const declaredFreshIn = (body: ts.Statement): boolean => {
+    if (reference.kind !== 'local' || !ts.isBlock(body) || !contains(body, reference.declaration)) return false
+    const list = reference.declaration.parent
+    return ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.BlockScoped) !== 0
+  }
   /** The values at the read, somewhere inside `statement`. */
   const atInStatement = (statement: ts.Statement, state: State): State => {
     if (ts.isBlock(statement)) return atInStatements(statement.statements, state)
@@ -387,6 +393,15 @@ export const valuesReachingRead = (
       const { whenTrue, whenFalse } = narrow(statement.expression, state)
       if (holds(statement.thenStatement)) return atInStatement(statement.thenStatement, whenTrue)
       return statement.elseStatement ? atInStatement(statement.elseStatement, whenFalse) : undecided()
+    }
+    // A `let` or `const` declared in a loop's body is a fresh binding in every
+    // iteration (each evaluation of a Block makes a new declarative
+    // environment, ECMA-262 14.2.2), so nothing one iteration writes into it
+    // reaches another: `for ( const name of names ) { let attribute;
+    // attribute = geometry.getAttribute( name ); ... }`. The body is then
+    // straight-line code from that declaration to the read.
+    if (ts.isIterationStatement(statement, false) && holds(statement.statement) && declaredFreshIn(statement.statement)) {
+      return atInStatement(statement.statement, state)
     }
     // Inside a loop or another compound statement that writes the reference,
     // the values at the read depend on the iteration; not followed.
