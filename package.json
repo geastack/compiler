@@ -47,6 +47,7 @@
     "test:cli-plugins": "node --test test/cli-plugins.mjs",
     "test:webgl-plugin-off": "node --test test/webgl-plugin-off.mjs",
     "test:unchecked-javascript": "node --test test/unchecked-javascript.mjs",
+    "test:attribute-layout": "node --test test/attribute-layout.mjs",
     "test:scoped-type-realization": "node --test test/scoped-type-realization.mjs",
     "test:allocation-runtime": "node test/allocation-runtime.mjs",
     "test:compact-runtime": "node test/compact-runtime.mjs",
