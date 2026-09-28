@@ -72,6 +72,7 @@ import {
   widestOf,
   impliedPatternElementRootOf,
   impliedPatternParameterOf,
+  statesNoArrayElement,
   constructedClassChoiceCheckerTypeAt,
   emptyArrayDefaultParameterOf
 } from './derived-expression-type.js'
@@ -2453,6 +2454,10 @@ export const censusParameterBindings = (
         // already-derived record for the same call -- two authorities on one
         // invocation, which `model/selected-signature.ts` catches fail-closed
         // and pays for by withholding the call AND every binding it feeds.
+        // An Array of `never`/`any` is the same non-statement one level down:
+        // the return census types it from the array's own writes, and this
+        // answer, read first, would shadow that one.
+        if (statesNoArrayElement(checker, returned)) return null
         if (!isAnyType(returned)) return returned
         // The return type was not written down either. A function's `return`
         // expressions are the same kind of evidence a call's arguments are,

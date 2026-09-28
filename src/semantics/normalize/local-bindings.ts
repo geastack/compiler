@@ -16,6 +16,7 @@ import {
   objectAssignTargetType,
   isEmptyObjectType,
   speaksOnlyNullish,
+  statesNoArrayElement,
   closedLiteralMemberAbsent,
   synthesizedUnionArmsAt,
   unwrapExplicitThisCall,
@@ -1863,6 +1864,15 @@ export const censusLocalBindings = (
       const unwrapped = ts.isCallExpression(node) ? unwrapExplicitThisCall(checker, node) : null
       const returned = explicitThisCallReturnType(signature, unwrapped ? knownOrResolve(unwrapped.callee) : null)
       if ((returned.flags & (ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0) return null
+      // A callee whose return the checker left an Array of `never`/`any` has
+      // its element in the return census, bound at the declaration. `upstream`
+      // above cannot reach it when the checker never resolved this call (the
+      // receiver is `any` to the checker and only this census typed it), so it
+      // is asked here, at the declaration the callee's own signature names.
+      if (statesNoArrayElement(checker, returned) && signature.declaration) {
+        const bound = parameters.typeAt(signature.declaration)
+        if (bound) return bound
+      }
       // `any` is not the only way a callee can state nothing about what it
       // returns, and a structurally EMPTY object type is the other way --
       // which is the answer the checker gives for a factory that builds a bag
