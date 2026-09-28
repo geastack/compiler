@@ -121,12 +121,28 @@ import ts from 'typescript'
  * The tags that round finds are blanked by compiling again without them
  * (`ProgramInput.censusContradictions`), so the census that runs next is the
  * one authority over those slots, as it is over a slot never stated.
+ *
+ * An empty `[]` the program fills says nothing to the checker either: it is
+ * `never[]` or `any[]` there, an object type, so the `any` question above is
+ * never asked of it, while the array census knows its element from the
+ * values pushed into it (`CensusArrayElement`). Stored whole into a field or
+ * returned, that array is the store, and gea carries an Array by its element
+ * with no conversion that changes one: an element no Array the tag states
+ * holds is a store no conversion carries. three's `RenderObject.getAttributes`
+ * fills `const attributes = []` with each geometry attribute, an
+ * `InterleavedBufferAttribute` among them, and states `@return
+ * {Array<BufferAttribute>}` over `return attributes` and `@type
+ * {?Array<BufferAttribute>}` over `this.attributes = attributes`.
  */
 export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: ReadonlyMap<string, string>): Map<string, string> =>
   blankedTexts(prepared, contradictedJsDocTypeSpans(program))
 
 /** The spans of the field and `@return` tags the program's stores contradict -- see `contradictedJsDocTypeBlanks`. */
-export const contradictedJsDocTypeSpans = (program: ts.Program, census?: CensusArms): Map<ts.SourceFile, BlankSpan[]> => {
+export const contradictedJsDocTypeSpans = (
+  program: ts.Program,
+  census?: CensusArms,
+  censusElement?: CensusArrayElement
+): Map<ts.SourceFile, BlankSpan[]> => {
   const spans = new Map<ts.SourceFile, BlankSpan[]>()
   const files = program.getSourceFiles().filter((file) => !file.isDeclarationFile)
   const unchecked = files.filter(isUncheckedJavaScript)
@@ -208,6 +224,10 @@ export const contradictedJsDocTypeSpans = (program: ts.Program, census?: CensusA
       const constructed = withoutParentheses(written)
       const type = checker.getTypeAtLocation(constructed)
       if (saysNothing(type)) return census !== undefined && censusExcludes(checker, census, constructed, stated, true)
+      if (censusElement !== undefined && isOpenArray(checker, type)) {
+        const element = censusElement(constructed)
+        return element !== null && censusElementExcludes(checker, element, stated)
+      }
       if (isConstruction(constructed)) return !checker.isTypeAssignableTo(type, stated) && !derivesFromStatedClass(checker, type, stated)
       return excludesEachOther(type, stated)
     })
@@ -402,6 +422,41 @@ export const contradictedJsDocTypeSpans = (program: ts.Program, census?: CensusA
  * says nothing. Asked only where the checker answers `any`.
  */
 export type CensusArms = (expression: ts.Expression) => readonly ts.Type[] | null
+
+/**
+ * The element the settled array census gives an array value -- an empty
+ * literal it typed from its writes, or a read of a cell holding one -- or
+ * `null` where it says nothing. Asked only where the checker's own element is
+ * `never` or `any`.
+ */
+export type CensusArrayElement = (expression: ts.Expression) => ts.Type | null
+
+/** An Array whose element the checker left `never` or `any`: the `[]` nobody stated. */
+const isOpenArray = (checker: ts.TypeChecker, type: ts.Type): boolean => {
+  if (!checker.isArrayType(type)) return false
+  const [element] = checker.getTypeArguments(type as ts.TypeReference)
+  return element !== undefined && saysNothing(element)
+}
+
+/**
+ * Whether an array holding `element` is outside every arm `stated` states:
+ * each is an Array whose element differs from it where neither is a host's,
+ * which is `collectionVerdict`'s reading of an array value, asked of the
+ * element because the census's array has no `ts.Type` of its own.
+ */
+const censusElementExcludes = (checker: ts.TypeChecker, element: ts.Type, stated: ts.Type): boolean => {
+  if (saysNothing(element)) return false
+  const arms = stated.isUnion() ? stated.types : [stated]
+  const arrays = arms.flatMap((arm) => {
+    const collection = collectionOf(checker, arm)
+    return collection?.kind === 'Array' ? [collection] : []
+  })
+  if (arrays.length === 0 || arrays.length !== arms.length) return false
+  const program = (type: ts.Type): boolean => !namesDeclaredOnlyType(checker, type)
+  return arrays.every((array) =>
+    differingElements(checker, [element], array.elements).some(([left, right]) => program(left) && program(right))
+  )
+}
 
 /** A span of a file's text to blank: comment bytes only, so every offset stays put. */
 export interface BlankSpan {
