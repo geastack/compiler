@@ -9,7 +9,8 @@ import {
 import type { ValueFlowIndex } from './flow/model.js'
 import { recordStorageFamilies } from './record-storage-families.js'
 import { emptyDeclaredMemberCensus, type DeclaredMemberCensus } from './structural-declarations.js'
-import { createLocalUnionResolver } from './structural-local-union.js'
+import { createLocalUnionResolver, type GuardedArms } from './structural-local-union.js'
+import { armPassesMemberGuards, memberGuardsOf } from './member-guard-narrowing.js'
 import { absenceKindsReachingRead, ALL_KINDS, checkerLeftReadOpen, NULL_KIND, PRESENT_KIND, UNDEFINED_KIND } from './stored-local-read.js'
 import { createMutableMethodResolver } from './structural-mutable-method.js'
 import { structuralArrayReadAt } from './structural-array-read.js'
@@ -2710,7 +2711,22 @@ const buildMapper = (
     parameters,
     flow,
     (node) => mapper.typeAt(node),
-    (node) => (ts.isExpression(node) ? objectDescriptorReturnTypeAt(unwrapErasedExpression(node)) : null)
+    (node) => (ts.isExpression(node) ? objectDescriptorReturnTypeAt(unwrapErasedExpression(node)) : null),
+    (node): GuardedArms | null => {
+      // The census's arms, asked the one way `local-bindings.ts` asks them
+      // for the member read behind the same tests.
+      if (!flow) return null
+      const guards = memberGuardsOf(checker, node)
+      if (guards.length === 0) return null
+      const declaration = checker.getSymbolAtLocation(node)?.declarations?.[0]
+      const arms = declaration ? parameters.unionArmsAt(declaration) : null
+      if (!arms) return null
+      const dropped = new Set<StructuralTypeId>()
+      for (const arm of arms.flatMap((type) => (type.isUnion() ? type.types : [type]))) {
+        if (!armPassesMemberGuards(checker, flow, parameters, guards, arm)) dropped.add(typeOf(arm))
+      }
+      return { dropped }
+    }
   )
   const callResultAt = createStructuralCallResultResolver(checker, table, (node) => mapper.typeAt(node))
   const constructResultAt = createStructuralConstructResultResolver(table, (node) => mapper.typeAt(node))

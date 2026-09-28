@@ -13,6 +13,11 @@ import {
   valuesReachingRead
 } from './stored-local-read.js'
 
+/** The arms of a stored union a guarded read cannot hold -- see `createLocalUnionResolver`'s `guarded`. */
+export interface GuardedArms {
+  readonly dropped: ReadonlySet<StructuralTypeId>
+}
+
 /**
  * The resolver, and the reads it answered with the arms of the writes that
  * reach them (`valuesReachingRead`) rather than the whole stored union.
@@ -36,7 +41,8 @@ export const createLocalUnionResolver = (
   census: ParameterBindingCensus,
   flow: ValueFlowIndex | undefined,
   read: (node: ts.Node) => StructuralTypeId,
-  refinedSourceAt: (node: ts.Node) => StructuralTypeId | null = () => null
+  refinedSourceAt: (node: ts.Node) => StructuralTypeId | null = () => null,
+  guardedArmsAt: (node: ts.Identifier) => GuardedArms | null = () => null
 ): LocalUnionResolver => {
   const reachingReads = new Set<ts.Node>()
   const memo = new Map<ts.VariableDeclaration, StructuralTypeId | null>()
@@ -108,9 +114,34 @@ export const createLocalUnionResolver = (
     const unique = [...new Set(members)]
     return unique.length === 1 ? (unique[0] ?? null) : table.intern({ kind: 'union', members: unique })
   }
+  /**
+   * A read behind member tests of its const binding holds only the arms
+   * those tests let through, and never `undefined` or `null`, whose member
+   * read would have thrown -- see `member-guard-narrowing.ts`. The read then
+   * takes those arms the way a reaching-write read does.
+   */
+  const guarded = (node: ts.Identifier, answer: StructuralTypeId | null): StructuralTypeId | null => {
+    if (answer === null) return null
+    const shape = table.get(answer).shape
+    if (shape.kind !== 'union') return answer
+    const guards = guardedArmsAt(node)
+    if (!guards) return answer
+    const kept = shape.members.filter((id) => !guards.dropped.has(id) && absenceOf(id) === PRESENT_KIND)
+    if (kept.length === 0 || kept.length === shape.members.length) return answer
+    reachingReads.add(node)
+    return kept.length === 1 ? (kept[0] ?? null) : table.intern({ kind: 'union', members: kept })
+  }
   const resolver = (node: ts.Node): StructuralTypeId | null => {
     if (ts.isVariableDeclaration(node)) return resolve(node)
     if (!ts.isIdentifier(node)) return null
+    const answer = readAnswer(node)
+    const declarations = checker.getSymbolAtLocation(node)?.declarations
+    const declaration = declarations?.length === 1 ? declarations[0] : undefined
+    if (!declaration || !ts.isVariableDeclaration(declaration) || node === declaration.name) return answer
+    if (ts.isCallExpression(node.parent) && node.parent.expression === node) return answer
+    return guarded(node, answer)
+  }
+  const readAnswer = (node: ts.Identifier): StructuralTypeId | null => {
     const declarations = checker.getSymbolAtLocation(node)?.declarations
     const declaration = declarations?.length === 1 ? declarations[0] : undefined
     if (!declaration || !ts.isVariableDeclaration(declaration)) return null

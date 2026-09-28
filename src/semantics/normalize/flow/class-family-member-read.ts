@@ -1098,13 +1098,20 @@ const literalMemberCarrierOf = (checker: ts.TypeChecker, type: ts.Type, name: st
  * declare `name` -- see this module's header. `null` whenever the checker
  * already answers, the receiver is not a union of source class instances,
  * or any closure proof fails.
+ *
+ * `admitsNoDeclarer` lets a family in which NO class declares `name` answer
+ * `undefined` under the same proof a lacking class in a mixed family pays. A
+ * binding census still refuses that read (a key no class names is no member
+ * to lay out); a member test asks it to learn that an arm cannot pass
+ * (`member-guard-narrowing.ts`).
  */
 export const classFamilyMemberReadTypeOf = (
   checker: ts.TypeChecker,
   flow: ValueFlowIndex,
   receiver: ts.Type,
   name: string,
-  census?: FamilyReceiverCensus
+  census?: FamilyReceiverCensus,
+  admitsNoDeclarer = false
 ): ts.Type | null => {
   // The measurement arm, kept runnable the way `GEA_BAG_OFF` is.
   if (process.env['GEA_FAMILY_MEMBER_OFF']) return null
@@ -1150,7 +1157,7 @@ export const classFamilyMemberReadTypeOf = (
   )
   if (!plan) return refuse('no-key-read-plan')
   if (!plan.codeFree) return refuse('member-runs-code')
-  if (plan.carriers.length === 0) return refuse('no-declarer')
+  if (plan.carriers.length === 0 && (!admitsNoDeclarer || !plan.needsDefaultPrototype)) return refuse('no-declarer')
   // See "The Object obligation": an absent class's `undefined` rests on
   // Object.prototype lacking exactly this key. It is admitted by default when
   // every Object obligation the plan published is that per-key question; a

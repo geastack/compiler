@@ -36,6 +36,7 @@ import {
 } from './assignment-patterns.js'
 import type { ValueFlowIndex } from './flow/model.js'
 import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
+import { armsPassingMemberGuards } from './member-guard-narrowing.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { emptyCommonJsModuleRecordCensus, type CommonJsModuleRecordCensus } from './commonjs-module-record.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
@@ -1740,7 +1741,13 @@ export const censusLocalBindings = (
     if (ts.isPropertyAccessExpression(node)) {
       const upstream = parameters.typeAt(node)
       if (upstream) return upstream
-      const unionMember = unionArmsForResolution(node.expression)
+      const allArms = unionArmsForResolution(node.expression)
+      // Only the arms the read's member tests let through reach this member
+      // read -- see `member-guard-narrowing.ts`.
+      const unionMember =
+        allArms && ts.isIdentifier(node.expression)
+          ? (armsPassingMemberGuards(checker, flow, parameters, node.expression, allArms) ?? allArms)
+          : allArms
       if (unionMember) {
         const projected = unionMemberTypeOf(unionMember, node.name.text, node)
         if (projected) return projected

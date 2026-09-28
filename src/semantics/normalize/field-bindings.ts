@@ -24,6 +24,7 @@ import { carriesUnsubstitutedGeneric, emptyParameterBindingCensus, type Paramete
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
+import { receiverPassingMemberGuards } from './member-guard-narrowing.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import { programTypeNames, type ProgramTypeNames } from './jsdoc-type-names.js'
@@ -1188,7 +1189,10 @@ export const censusFieldBindings = (
     if (ts.isPropertyAccessExpression(node)) {
       const symbol = checker.getSymbolAtLocation(node)
       if (symbol && isCandidateSymbol(checker, symbol)) return resolveSymbol(symbol)
-      const receiver = receiverTypeOf(node.expression)
+      // Only the arms the read's member tests let through reach this read --
+      // see `member-guard-narrowing.ts`.
+      const held = receiverTypeOf(node.expression)
+      const receiver = held ? receiverPassingMemberGuards(checker, flow, parameters, node.expression, held) : null
       if (!receiver) return null
       // A named read through an index signature is answered as a union by
       // `unionArmsAt` (see `indexMemberArmsAt`); a single type here would
