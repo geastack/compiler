@@ -7,8 +7,10 @@ import {
   annotationStatesNothing,
   isGlobalObjectConstructor,
   isStandardGlobalValue,
-  isUnusableEvidence
+  isUnusableEvidence,
+  memberCensusNodeOf
 } from '../derived-expression-type.js'
+import { isUnreducedTypeForm } from '../unreduced-type-form.js'
 import { createPropertyKeyDomains, type PropertyKeyDomain } from '../property-key-domain.js'
 import { objectPrototypeMemberNames } from '../../../representation/record-fields.js'
 import {
@@ -1169,15 +1171,22 @@ export const classFamilyMemberReadTypeOf = (
   )
     return refuse('absent-class-needs-object-prototype')
   const carriers: ts.Type[] = []
-  for (const { owner, type } of plan.carriers) {
-    if (
-      isUnusableEvidence(type) ||
-      (type.flags & ts.TypeFlags.Unknown) !== 0 ||
-      annotationStatesNothing(checker, owner, type) ||
-      carriesTypeParameter(type)
-    )
+  const statesNoCarrier = (type: ts.Type, owner: ts.Node): boolean =>
+    isUnusableEvidence(type) ||
+    (type.flags & ts.TypeFlags.Unknown) !== 0 ||
+    annotationStatesNothing(checker, owner, type) ||
+    carriesTypeParameter(type)
+  for (const { owner, declaration, type } of plan.carriers) {
+    // A member whose tag names a class its module never imports is `any` to
+    // the checker, while the field census joined every write reaching it --
+    // three's `/** @type {InterleavedBuffer} */ this.data = interleavedBuffer`.
+    // That answer is the member's storage (`structural-parts.ts`'s `memberOf`
+    // lays the field out from it), so the read takes it too; the census
+    // answers `null` where it has no proof, and the refusal stands.
+    const carrier = statesNoCarrier(type, owner) ? (census?.typeAt(memberCensusNodeOf(declaration)) ?? null) : type
+    if (carrier === null || statesNoCarrier(carrier, owner) || (carrier !== type && isUnreducedTypeForm(carrier)))
       return refuse('declarer-carrier-unknown', owner)
-    carriers.push(type)
+    carriers.push(carrier)
   }
   const instances = new Map<SourceClass, ts.InterfaceType>()
   const lacking = new Set<SourceClass>()
