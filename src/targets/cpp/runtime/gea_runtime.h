@@ -7588,6 +7588,17 @@ inline bool sameValueZero(const TaggedUnion<Arms...>& left, const TaggedUnion<Ar
   }(std::index_sequence_for<Arms...>{});
 }
 
+/**
+ * `T | undefined` as a key (a `Set` filled with `item.data` over a union one
+ * of whose arms has no `data`, and so reads `undefined`): `undefined` is one
+ * key, and it is never the same key as any `T`.
+ */
+template <typename T>
+inline bool sameValueZero(const Optional<T>& left, const Optional<T>& right) {
+  if (left.has_value() != right.has_value()) return false;
+  return !left.has_value() || sameValueZero(*left, *right);
+}
+
 /** ECMA-262 SameValue for Number values: NaN equals NaN, while +0 and -0 differ. */
 inline bool sameNumberValue(double left, double right) {
   if (std::isnan(left) && std::isnan(right)) return true;
@@ -7603,6 +7614,12 @@ inline K canonicalKey(const K& key) {
   } else {
     return key;
   }
+}
+
+/** A present `-0` inside `number | undefined` is the `+0` key too. */
+template <typename T>
+inline Optional<T> canonicalKey(const Optional<T>& key) {
+  return key.has_value() ? Optional<T>(canonicalKey(*key)) : key;
 }
 
 /**
