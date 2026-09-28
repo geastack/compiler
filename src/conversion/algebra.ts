@@ -115,6 +115,14 @@ export interface CollectionDomain {
   readonly preservesHoles: boolean
   /** The converted value must keep the source Array's identity, not copy it. */
   readonly preservesIdentity: boolean
+  /**
+   * Whether an element that is itself an Array (directly, or as an arm of an
+   * optional or union element) is recovered the way the outer Array is. When
+   * it is not, the backend hands such an element back only when its box holds
+   * exactly the target carrier, and an inner Array of the same JavaScript type
+   * carried differently has no recovery that keeps its identity.
+   */
+  readonly recoversNestedArrays: boolean
 }
 
 export type ConversionCapability =
