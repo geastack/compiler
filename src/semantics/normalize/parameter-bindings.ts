@@ -2386,7 +2386,9 @@ export const censusParameterBindings = (
       if (ts.isPropertyAccessExpression(node)) {
         const receiver = known(node.expression) ?? resolve(node.expression)
         if (!receiver) return null
-        return propertyTypeOf(receiver, node.name.text, node)
+        // Only the arms the read's member tests let through reach this read --
+        // see `member-guard-narrowing.ts`.
+        return propertyTypeOf(receiverPassingMemberGuards(checker, valueFlow, upstream, node.expression, receiver), node.name.text, node)
       }
       if (ts.isElementAccessExpression(node) && node.argumentExpression) {
         const receiver = known(node.expression) ?? resolve(node.expression)
