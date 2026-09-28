@@ -524,13 +524,40 @@ const assertedArmEntry = (
   operand: SemanticOperand,
   resolved: IrOperand,
   slot: Representation
+): IrOperand | null => (operand.asserted === true ? assertedArmConversion(ctx, block, lineage, resolved, slot) : null)
+
+/**
+ * The asserted arm of `resolved`'s union, in `slot`'s carrier: the arm the
+ * slot is, projected; or else the ONE arm that converts into the slot at all,
+ * projected and then converted. hono's `(handler as Handler<R>)(c, next)`
+ * over a `Handler | Middleware` cell reads the slot's convention, which the
+ * `Handler` arm reaches through its result adapter and the `Middleware` arm
+ * does not reach at all -- so the assertion can only be naming the first, and
+ * the projection's own check is what answers a false one. Several arms with a
+ * home leave the assertion naming none of them in particular: `null`.
+ */
+const assertedArmConversion = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  resolved: IrOperand,
+  slot: Representation
 ): IrOperand | null => {
-  if (operand.asserted !== true) return null
-  const node = ctx.program.conversions.exactArmFor(resolved.representation, slot)
-  if (node === null) return null
-  const value = ctx.builder.convert(block, lineage, node.id, resolved, slot)
-  traceSpeculativeLoad(lineage, 'asserted-arm', node, value)
-  return { value, representation: slot }
+  const arm = assertedArmOf(ctx, resolved.representation, slot)
+  if (arm === null) return null
+  const projected = ctx.builder.convert(block, lineage, arm.id, resolved, arm.target)
+  traceSpeculativeLoad(lineage, 'asserted-arm', arm, projected)
+  const held = { value: projected, representation: arm.target }
+  return arm.target === slot ? held : convertTo(ctx, block, lineage, held, slot, 'asserted-arm')
+}
+
+/** The exact-arm projection `assertedArmConversion` takes, or `null` where the assertion names no arm it can take. */
+const assertedArmOf = (ctx: LoweringContext, source: Representation, slot: Representation): ConversionNode | null => {
+  const conversions = ctx.program.conversions
+  const exact = conversions.exactArmFor(source, slot)
+  if (exact !== null || source.kind !== 'tagged-union') return exact
+  const homed = source.arms.filter((arm) => conversions.nodeFor(arm.value, slot).capability.kind !== 'never')
+  return homed.length === 1 ? conversions.exactArmFor(source, homed[0]!.value) : null
 }
 
 /** The row `LoweringProgram.drift` keeps for a pair the census has no recipe for. */
@@ -642,6 +669,11 @@ export const narrowedBindingRead = (
   }
   const node = ctx.program.conversions.nodeFor(held, representation)
   if (node.capability.kind === 'never') {
+    if (operation.family === 'binding' && operation.asserted === true && assertedArmOf(ctx, held, representation) !== null) {
+      const raw = { value: ctx.builder.bindingRead(block, lineage, declaration, held, reactive), representation: held }
+      const asserted = assertedArmConversion(ctx, block, lineage, raw, representation)
+      if (asserted !== null) return asserted.value
+    }
     recordDrift(ctx, block, operation.id, 'read', 0, held, representation)
     return ctx.builder.bindingRead(block, lineage, declaration, representation, reactive)
   }

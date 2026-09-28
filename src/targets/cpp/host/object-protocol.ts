@@ -792,6 +792,15 @@ export const nativeHandleShapeCallText = (ctx: EmitContext, member: string, prot
  */
 export const dynamicObjectPrototypeMethods: ReadonlySet<string> = new Set(['hasOwnProperty'])
 
+/**
+ * An Array's own properties are its elements, `length` and whatever the
+ * program installed on it; its box answers `[[GetOwnProperty]]` over all of
+ * them, so the same own-property test serves (find-my-way's
+ * `httpMethods.hasOwnProperty(i)` under `for...in`).
+ */
+const boxedArrayReceiver = (representation: Representation): boolean =>
+  representation.kind === 'array-object' && representation.ownership === 'shared-refcount'
+
 /** The claim, asked at the `[[Get]]` -- the dynamic-receiver twin of `objectShapePrototypeMemberRead` above. */
 export const deferredDynamicObjectMethodClaim = (
   staticKeyTexts: ReadonlyMap<IrValueId, string>,
@@ -800,7 +809,7 @@ export const deferredDynamicObjectMethodClaim = (
 ): PrototypeMethodRead | null => {
   const staticKey = staticKeyTexts.get(key.value)
   if (staticKey === undefined || !dynamicObjectPrototypeMethods.has(staticKey)) return null
-  if (receiver.representation.kind !== 'dynamic') return null
+  if (receiver.representation.kind !== 'dynamic' && !boxedArrayReceiver(receiver.representation)) return null
   return { receiverKind: 'dynamic-object', member: staticKey, receiver: { kind: 'operand', operand: receiver }, receiverElement: null }
 }
 

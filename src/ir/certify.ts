@@ -457,6 +457,16 @@ const registered = (installed: boolean, family: CapabilityFamily, discriminator:
  */
 const verdictOf = (demand: CapabilityDemand, ctx: CertifyContext): Decision => {
   if (demand.verdict !== undefined) return { verdict: demand.verdict, reason: demand.detail ?? '' }
+  const decision = manifestVerdictOf(demand, ctx)
+  // An undecided demand's detail names the operands behind a flat key -- the
+  // two carriers a `protocol:spread:next:record` row copied between -- which
+  // the key alone does not.
+  return decision.verdict === 'missing' && demand.detail !== undefined
+    ? { verdict: decision.verdict, reason: `${decision.reason} (${demand.detail})` }
+    : decision
+}
+
+const manifestVerdictOf = (demand: CapabilityDemand, ctx: CertifyContext): Decision => {
   const family = familyOf(demand.key)
   const discriminator = discriminatorOf(demand.key)
   const manifest = ctx.manifest
@@ -571,11 +581,17 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
   const demanded = new Set<CapabilityKey>()
   const refusals: Refusal[] = []
   const refused = new Set<string>()
-  const decide = (owner: string, demand: CapabilityDemand, ctx: CertifyContext): void => {
+  const sitesOf = new Map<string, string[]>()
+  const decide = (owner: string, demand: CapabilityDemand, ctx: CertifyContext, site?: string): void => {
     demanded.add(demand.key)
     const decision = verdictOf(demand, ctx)
     if (decision.verdict === 'installed') return
     const dedupe = `${owner}|${demand.key}`
+    if (site !== undefined) {
+      const sites = sitesOf.get(dedupe)
+      if (sites === undefined) sitesOf.set(dedupe, [site])
+      else if (!sites.includes(site)) sites.push(site)
+    }
     if (refused.has(dedupe)) return
     refused.add(dedupe)
     refusals.push({ stage: 'certify', key: demand.key, owner, reason: decision.reason || `${demand.key} is ${decision.verdict}` })
@@ -616,14 +632,18 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
       const block = body.blocks.get(blockId)
       if (!block) continue
       for (const operation of allOperationsOf(block)) {
-        for (const demand of capabilityKeysOf(operation, ctx)) decide(owner, demand, ctx)
+        for (const demand of capabilityKeysOf(operation, ctx)) decide(owner, demand, ctx, String(operation.lineage))
       }
     }
   }
 
+  const sited = refusals.map((refusal) => {
+    const sites = sitesOf.get(`${refusal.owner}|${refusal.key}`)
+    return sites === undefined ? refusal : { ...refusal, sites: Object.freeze(sites) }
+  })
   return Object.freeze({
     certified: refusals.length === 0 && input.blocked.length === 0,
-    refusals: Object.freeze(refusals),
+    refusals: Object.freeze(sited),
     demanded: Object.freeze([...demanded].sort())
   })
 }

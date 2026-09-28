@@ -1,11 +1,14 @@
 import ts from 'typescript'
 import { readsAbsentKey } from './absent-key-read.js'
+import { censusRetypedExpressionType } from './overload-reselection.js'
 import {
   isVacuousArrayType,
   annotationStatesNothing,
+  arrayTypeOf,
   exactEmptyObjectLiteralType,
   derivedExpressionType,
   disjointUnionMembersOf,
+  disjointUnionTypeOf,
   indexedTypeOf,
   explicitThisCallReturnType,
   overloadInvariantReturnTypeAt,
@@ -16,6 +19,7 @@ import {
   normalizedArrayConditionalType,
   objectAssignTargetType,
   isEmptyObjectType,
+  isForeignClassInstance,
   synthesizedUnionArmsAt,
   unwrapExplicitThisCall,
   withoutUndefinedMember,
@@ -158,6 +162,107 @@ export const emptyLocalBindingCensus: LocalBindingCensus = {
 
 const isAnyType = (type: ts.Type): boolean => (type.flags & ts.TypeFlags.Any) !== 0
 
+/**
+ * Whether some read of the cell is typed, by the checker's own flow
+ * narrowing, as a value no joined write can be: a constituent of the read's
+ * type that is neither assignable to nor from any joined type -- or whether
+ * the program stores a property into the cell's value while every joined
+ * type is a primitive. Only uses in the scope that declares the cell are
+ * asked; a read the checker leaves `any`, `unknown` or `never` states nothing.
+ */
+const readDisprovesJoin = (
+  checker: ts.TypeChecker,
+  symbol: ts.Symbol,
+  declaration: ts.VariableDeclaration,
+  joined: readonly ts.Type[]
+): boolean => {
+  const scope = ts.findAncestor(declaration, (node) => ts.isFunctionLike(node) || ts.isSourceFile(node))
+  if (!scope || joined.length === 0) return false
+  const overlaps = (read: ts.Type): boolean =>
+    joined.some((type) => checker.isTypeAssignableTo(read, type) || checker.isTypeAssignableTo(type, read))
+  let disproved = false
+  const visit = (node: ts.Node): void => {
+    if (disproved) return
+    if (ts.isIdentifier(node) && node !== declaration.name && checker.getSymbolAtLocation(node) === symbol) {
+      const parent = node.parent
+      // A store INTO the cell's value -- light-my-request's generated
+      // validator writes `data0["protocol"] = coerced1` into a cell whose
+      // speaking writes are strings -- names an object the join cannot hold
+      // when every joined type is a primitive.
+      const storedInto =
+        (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
+        parent.expression === node &&
+        ts.isBinaryExpression(parent.parent) &&
+        parent.parent.left === parent &&
+        parent.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      if (
+        storedInto &&
+        joined.every(
+          (type) =>
+            (type.flags &
+              (ts.TypeFlags.StringLike |
+                ts.TypeFlags.NumberLike |
+                ts.TypeFlags.BigIntLike |
+                ts.TypeFlags.BooleanLike |
+                ts.TypeFlags.ESSymbolLike |
+                ts.TypeFlags.Null |
+                ts.TypeFlags.Undefined)) !==
+            0
+        )
+      ) {
+        disproved = true
+        return
+      }
+      // An element read off a number or boolean -- dequal's `len[1]` over a
+      // cell whose speaking writes are lengths and whose silent one iterates
+      // a Map's entries -- reads a property no such primitive has.
+      // A nullish member (a declaration's own `undefined`, D303) has no
+      // property either -- the read throws on it -- so it does not keep the
+      // join alive.
+      const indexed = ts.isElementAccessExpression(parent) && parent.expression === node
+      const primitive = (type: ts.Type): boolean =>
+        (type.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.BooleanLike | ts.TypeFlags.BigIntLike)) !== 0
+      if (
+        indexed &&
+        joined.some(primitive) &&
+        joined.every((type) => primitive(type) || (type.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0)
+      ) {
+        disproved = true
+        return
+      }
+      // Compared by identity with a value no joined type overlaps -- dequal's
+      // `ctor === Date` over a cell whose speaking write is a for-in key --
+      // names a value the cell holds that the join does not.
+      const strictlyCompared =
+        ts.isBinaryExpression(parent) &&
+        (parent.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+          parent.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken)
+      if (strictlyCompared) {
+        const other = checker.getTypeAtLocation(parent.left === node ? parent.right : parent.left)
+        if (
+          (other.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never | ts.TypeFlags.Null | ts.TypeFlags.Undefined)) ===
+            0 &&
+          !overlaps(other)
+        ) {
+          disproved = true
+          return
+        }
+      }
+      const assigned = ts.isBinaryExpression(parent) && parent.left === node && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      const type = checker.getTypeAtLocation(node)
+      if (!assigned && (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) === 0) {
+        const constituents = (type.isUnion() ? type.types : [type]).filter(
+          (member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) === 0
+        )
+        if (constituents.some((member) => !overlaps(member))) disproved = true
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  ts.forEachChild(scope, visit)
+  return disproved
+}
+
 /** Duplicated from `parameter-bindings.ts` (not exported there): `any`/`void`/`never` say nothing about storage. */
 const isUnusableEvidence = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Void | ts.TypeFlags.Never)) !== 0
 
@@ -249,7 +354,27 @@ const annotationIsGenuinelyStated = (checker: ts.TypeChecker, typeNode: ts.TypeN
   return (resolved.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0
 }
 
-const isCandidate = (checker: ts.TypeChecker, declaration: ts.VariableDeclaration, flow: ValueFlowIndex): boolean => {
+/**
+ * Whether some later assignment writes a cell with a value its checker type --
+ * an inference from its initializer -- does not carry, nominal class identity
+ * included (`isForeignClassInstance`).
+ */
+const hasDivergentAssignment = (checker: ts.TypeChecker, symbol: ts.Symbol, declared: ts.Type, flow: ValueFlowIndex): boolean =>
+  flow.writesToSymbol(symbol).some((write) => {
+    if (write.slot !== 'whole' || write.edge !== 'identifier-assignment' || write.value === null) return false
+    const assigned = checker.getTypeAtLocation(write.value)
+    return (
+      !isUnusableEvidence(assigned) &&
+      (!checker.isTypeAssignableTo(assigned, declared) || isForeignClassInstance(checker, assigned, declared))
+    )
+  })
+
+const isCandidate = (
+  checker: ts.TypeChecker,
+  declaration: ts.VariableDeclaration,
+  flow: ValueFlowIndex,
+  retyped: (expression: ts.Expression) => boolean = () => false
+): boolean => {
   if (declaration.type && annotationIsGenuinelyStated(checker, declaration.type)) return false
   if (!ts.isIdentifier(declaration.name)) return false
   const jsDocType = ts.getJSDocType(declaration)
@@ -262,12 +387,10 @@ const isCandidate = (checker: ts.TypeChecker, declaration: ts.VariableDeclaratio
       if (!ts.isVariableDeclarationList(declarationList) || (declarationList.flags & ts.NodeFlags.Const) !== 0) return false
       const symbol = checker.getSymbolAtLocation(declaration.name)
       if (!symbol) return false
-      const hasDivergentAssignment = flow.writesToSymbol(symbol).some((write) => {
-        if (write.slot !== 'whole' || write.edge !== 'identifier-assignment' || write.value === null) return false
-        const assigned = checker.getTypeAtLocation(write.value)
-        return !isUnusableEvidence(assigned) && !checker.isTypeAssignableTo(assigned, declared)
-      })
-      if (!hasDivergentAssignment) return false
+      // A declared type the checker inferred from an initializer the census
+      // re-typed is that inference, not a statement.
+      if (retyped(declaration.initializer)) return true
+      if (!hasDivergentAssignment(checker, symbol, declared, flow)) return false
     }
   }
   return true
@@ -298,6 +421,44 @@ const isElementCandidate = (checker: ts.TypeChecker, element: ts.BindingElement)
   if (element.dotDotDotToken && ts.isObjectBindingPattern(element.parent)) return true
   if (element.dotDotDotToken) return false
   return isUnusableEvidence(checker.getTypeAtLocation(element.name))
+}
+
+/**
+ * The assignments a mutable pattern leaf receives after its pattern binds it
+ * -- find-my-way's `let [major, minor, patch] = version.split('.', 3)`
+ * followed by `major = Number(major)`. A leaf this module types holds them as
+ * well as the read that initialized it, exactly as a declared cell holds its
+ * writes. Empty for a `const` pattern, a rest or a nested pattern.
+ */
+const mutableElementWrites = (checker: ts.TypeChecker, element: ts.BindingElement, flow: ValueFlowIndex): readonly ts.Expression[] => {
+  if (!ts.isIdentifier(element.name) || element.dotDotDotToken) return []
+  let root: ts.Node = element
+  while (ts.isBindingElement(root) || ts.isArrayBindingPattern(root) || ts.isObjectBindingPattern(root)) root = root.parent
+  if (!ts.isVariableDeclaration(root) || !ts.isVariableDeclarationList(root.parent) || (root.parent.flags & ts.NodeFlags.Const) !== 0)
+    return []
+  const symbol = checker.getSymbolAtLocation(element.name)
+  if (!symbol) return []
+  return flow
+    .writesToSymbol(symbol)
+    .flatMap((write) => (write.slot === 'whole' && write.edge === 'identifier-assignment' && write.value !== null ? [write.value] : []))
+}
+
+/**
+ * Whether a leaf the checker DOES type is written with something that type
+ * does not carry: the leaf's type is then the checker's inference from the
+ * pattern's source, not a statement, as a `VariableDeclaration`'s is
+ * (`isCandidate`'s divergent-assignment rule), and the leaf is this module's.
+ */
+const writesDiverge = (checker: ts.TypeChecker, element: ts.BindingElement, writes: readonly ts.Expression[]): boolean => {
+  const declared = checker.getTypeAtLocation(element.name)
+  if (isUnusableEvidence(declared)) return false
+  return writes.some((value) => {
+    const assigned = checker.getTypeAtLocation(value)
+    return (
+      !isUnusableEvidence(assigned) &&
+      (!checker.isTypeAssignableTo(assigned, declared) || isForeignClassInstance(checker, assigned, declared))
+    )
+  })
 }
 
 /** A function-like declaration whose own `return` statements this module may read. Duplicated from `return-bindings.ts` (not exported there) -- see its own copy's comment. */
@@ -454,7 +615,9 @@ export const censusLocalBindings = (
    * The prior OUTER composed view. `parameters` above is the newly rebuilt
    * parameter+return stage and intentionally contains only those domains; it
    * cannot carry this local census's own synthesized arms back to itself.
-   * This input is used only as the previous element of the local arm lattice.
+   * This input is the previous element of the local arm lattice, and the
+   * argument evidence an overload re-selection needs from domains composed
+   * after this census (`retypedExpressionOf`).
    */
   prior: ParameterBindingCensus = emptyParameterBindingCensus,
   /** Exact, authenticated `module.exports = callable` proofs for this program's CommonJS modules. */
@@ -638,6 +801,8 @@ export const censusLocalBindings = (
   }
 
   const bound = new Map<ts.VariableDeclaration, ts.Type>()
+  /** Candidates admitted because the checker's declared type is its inference from a re-typed initializer -- see `preferredTypeAt`. */
+  const retypedDeclarations = new Set<ts.VariableDeclaration>()
   /** The synthesized union arms for a cell whose writes disagree but disjointly -- see `resolveDeclaration`. */
   const unionArms = new Map<ts.VariableDeclaration, readonly ts.Type[]>()
   const refusalOf = new Map<ts.VariableDeclaration, string>()
@@ -655,10 +820,34 @@ export const censusLocalBindings = (
    * asks both halves of the question; a census asking only one is drift.
    */
   const known = (node: ts.Node): ts.Type | null => {
-    const exported = moduleRecords.exportExpressionAt(node) ?? moduleRecords.requiredExportExpressionAt(node)
-    const type = exported ? checker.getTypeAtLocation(exported) : (objectAssignTargetType(checker, node) ?? checker.getTypeAtLocation(node))
+    const exported =
+      moduleRecords.exportExpressionAt(node) ??
+      moduleRecords.requiredExportExpressionAt(node) ??
+      moduleRecords.requiredDefaultExportAt(node)
+    const type = exported
+      ? checker.getTypeAtLocation(exported)
+      : (objectAssignTargetType(checker, node) ?? retypedExpressionOf(node) ?? preferredOf(node) ?? checker.getTypeAtLocation(node))
     return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) || isVacuousArrayType(checker, type) ? null : type
   }
+  // The field census publishes a literal member it could not type as `any`,
+  // never the initializer's absence; it runs after this census in each round,
+  // so its answer is the prior composed round's.
+  const preferredOf = (node: ts.Node): ts.Type | null => parameters.preferredTypeAt?.(node) ?? prior.preferredTypeAt?.(node) ?? null
+  // An overload the checker chose for an `any` argument is no evidence; the
+  // one the census's argument types select is (`censusReselectedSignature`,
+  // the same answer the call's own layout reads). The argument is asked of
+  // the prior composed round too: this census runs before the field census
+  // in each round, and thread-stream's `Atomics.load(stream[kImpl].state, i)`
+  // reads a field -- asked of `parameters` alone the view was blind, the
+  // cell kept the checker's `bigint` pick, and the layout read `number`.
+  const retypedExpressionOf = (node: ts.Node): ts.Type | null =>
+    censusRetypedExpressionType(
+      checker,
+      node,
+      (argument) => parameters.typeAt(argument) ?? prior.typeAt(argument),
+      (at) => parameters.preferredTypeAt?.(at) ?? null
+    )
+  const isRetyped = (expression: ts.Expression): boolean => retypedExpressionOf(expression) !== null
 
   /**
    * Materialize an already-proved synthesized union for INTERNAL resolution.
@@ -953,7 +1142,7 @@ export const censusLocalBindings = (
     if (already) return already
     const synthesized = unionTypeOf(unionArms.get(declaration) ?? null)
     if (synthesized) return synthesized
-    if (!isCandidate(checker, declaration, flow)) return null
+    if (!isCandidate(checker, declaration, flow, isRetyped)) return null
     if (refusalOf.has(declaration)) return null
     if (resolvingDeclarations.has(declaration)) return null
     resolvingDeclarations.add(declaration)
@@ -990,6 +1179,9 @@ export const censusLocalBindings = (
         const priorArms = parameters.unionArmsAt(declaration) ?? prior.unionArmsAt(declaration)
         const types: ts.Type[] = priorArms ? priorArms.flatMap((type) => (type.isUnion() ? type.types : [type])) : []
         let silent = 0
+        // Silent writes the checker types as an array of `any`: a real array
+        // whose elements nothing states (see the join below).
+        let vacuousArrays = 0
         let refused: string | null = null
         for (const write of writes) {
           // A loop-head pattern write already carries its own resolved type
@@ -1020,8 +1212,19 @@ export const censusLocalBindings = (
           else if (statesNoStorage(write.node)) {
             refused = 'write-states-no-storage'
             break
-          } else silent += 1
+          } else {
+            silent += 1
+            if (isVacuousArrayType(checker, checker.getTypeAtLocation(write.node))) vacuousArrays += 1
+          }
         }
+        // A declaration with no initializer binds `undefined` until its first
+        // write (14.3.1.2, 14.3.2.1) -- a write of its own, which a read
+        // before any assignment observes: ipaddr's `let zoneId` set only on
+        // one path. A loop head's binding is written by the loop instead.
+        const loopHead =
+          ts.isVariableDeclarationList(declaration.parent) &&
+          (ts.isForOfStatement(declaration.parent.parent) || ts.isForInStatement(declaration.parent.parent))
+        if (!declaration.initializer && !loopHead && !refused) types.push(checker.getUndefinedType())
         // EVIDENCE EXHAUSTED -- the same rule, the same order, as
         // `parameter-bindings.ts`'s `skipSilentSites` phase and
         // `field-bindings.ts`'s twin of this loop: a write that states
@@ -1114,6 +1317,20 @@ export const censusLocalBindings = (
           // write makes it -- honest, and the boxing this costs closes when
           // that write's own type is recovered.
           attribute(declaration, 'writes-state-only-absence')
+        } else if (lenientPhase && silent > 0 && readDisprovesJoin(checker, symbol, declaration, types)) {
+          // A READ THAT NAMES WHAT THE JOIN LEAVES OUT.
+          //
+          // The relaxed join trusts the writes that speak on the premise that
+          // the silent ones will agree once they land. The program itself can
+          // say otherwise: pino's `let value = obj[key]` is also written
+          // `null` and a stringifier's string, and then read under `switch
+          // (typeof value) { case 'number': ... }`. That read is typed
+          // `number` by the checker's own narrowing, and no joined write can
+          // be a number -- so the silent `obj[key]` stores values the join
+          // cannot hold, and the checked conversion at that write would fail
+          // for every number pino logs. The cell holds what its untyped
+          // write holds: `any`.
+          result = checker.getAnyType()
         } else {
           // Keep a carried synthesized union in its canonical arm channel.
           // Feeding its arms through `joinOfWrites` can materialize one
@@ -1132,7 +1349,12 @@ export const censusLocalBindings = (
           else {
             const widest = joinOfWrites(types)
             if (widest) {
-              result = widest
+              // A silent write that stores an array of unknown elements
+              // (@fastify/proxy-addr's `trust = val.slice()` over an `Array`
+              // parameter, beside `trust = [val]`) is still an array the cell
+              // must hold as it is: an array's elements cannot be converted in
+              // place, so the joined array holds any element.
+              result = vacuousArrays > 0 && checker.isArrayType(widest) ? (arrayTypeOf(checker, checker.getAnyType()) ?? widest) : widest
             } else {
               // The join found no single covering type. Before refusing, ask
               // whether the disagreement is itself a sound answer -- see
@@ -1160,6 +1382,10 @@ export const censusLocalBindings = (
   const knownOrResolve = (node: ts.Expression): ts.Type | null => {
     const unwrapped = unwrapParens(node)
     if (ts.isAsExpression(unwrapped) || ts.isTypeAssertionExpression(unwrapped)) return known(unwrapped)
+    // An unresolved answer from the authority over this read is final: past it
+    // lies only the member's declared absence, which every write contradicts.
+    const preferred = preferredOf(node)
+    if (preferred && isUnusableEvidence(preferred)) return null
     return known(node) ?? resolveExpr(node)
   }
 
@@ -1539,6 +1765,17 @@ export const censusLocalBindings = (
         result = ownType
       }
     }
+    // A leaf holds its later writes as well as the read that initialized it;
+    // a write no census can type leaves it unbound.
+    const writes = elementWrites.get(element)
+    if (result && writes) {
+      const written = writes.map((value) => knownOrResolve(value))
+      if (written.some((type) => type === null)) result = null
+      else {
+        const types = [result, ...(written as ts.Type[])].flatMap((type) => (type.isUnion() ? type.types : [type]))
+        result = joinOfWrites(types) ?? disjointUnionTypeOf(checker, types)
+      }
+    }
     resolvingElements.delete(element)
     if (result) boundElements.set(element, result)
     else elementRefusalOf.set(element, sourceType ? 'element-unresolved' : 'source-unresolved')
@@ -1747,6 +1984,10 @@ export const censusLocalBindings = (
   // query.
   const candidates: ts.VariableDeclaration[] = []
   const elementCandidates: ts.BindingElement[] = []
+  /** Mutable pattern leaves whose later writes their checker type does not carry -- see `writesDiverge`. */
+  const divergentElements = new Set<ts.BindingElement>()
+  /** A candidate leaf's own later writes, joined with its source read -- see `mutableElementWrites`. */
+  const elementWrites = new Map<ts.BindingElement, readonly ts.Expression[]>()
   /**
    * ⛔ The single largest `no-writes` bucket -- 127 of 127 measured on
    * the three.js app, every one of them `no-writes:initializer-unseen` -- was never a
@@ -1780,9 +2021,32 @@ export const censusLocalBindings = (
     if (reachable.memberIsPruned(node)) return
     if (ts.isVariableDeclaration(node)) {
       registerObservedIndexedAbsence(node)
-      if (isCandidate(checker, node, flow)) candidates.push(node)
+      if (isCandidate(checker, node, flow, isRetyped)) {
+        candidates.push(node)
+        // A cell whose checker type is an inference the census replaces -- a
+        // re-typed initializer, or a write the type does not carry -- has reads
+        // that carry the same inference, so they take the census's answer too.
+        // A cell with no initializer keeps the checker's narrowings at its
+        // reads.
+        const declared = checker.getTypeAtLocation(node)
+        const symbol = ts.isIdentifier(node.name) ? checker.getSymbolAtLocation(node.name) : undefined
+        if (
+          node.initializer &&
+          (isRetyped(node.initializer) ||
+            (!isUnusableEvidence(declared) && symbol !== undefined && hasDivergentAssignment(checker, symbol, declared, flow)))
+        )
+          retypedDeclarations.add(node)
+      }
     }
-    if (ts.isBindingElement(node) && isElementCandidate(checker, node)) elementCandidates.push(node)
+    if (ts.isBindingElement(node)) {
+      const writes = mutableElementWrites(checker, node, flow)
+      const divergent = writesDiverge(checker, node, writes)
+      if (divergent) divergentElements.add(node)
+      if (divergent || isElementCandidate(checker, node)) {
+        elementCandidates.push(node)
+        if (writes.length > 0) elementWrites.set(node, writes)
+      }
+    }
     ts.forEachChild(node, visit)
   }
   for (const file of files) forEachReachableStatement(reachable, file, visit)
@@ -1863,11 +2127,26 @@ export const censusLocalBindings = (
       return resolveExpr(node)
     },
     preferredTypeAt: (node) => {
+      // A cell whose declared type was the checker's inference from a
+      // re-typed initializer holds what this census bound, at its declaration
+      // and at every read -- the reads carry the same usable-looking inference.
+      const retypedCell = ts.isVariableDeclaration(node) ? node : ts.isIdentifier(node) ? declarationOf(node) : null
+      const retypedStorage =
+        retypedCell && retypedDeclarations.has(retypedCell)
+          ? (bound.get(retypedCell) ?? unionTypeOf(unionArms.get(retypedCell) ?? null) ?? undefined)
+          : undefined
+      if (retypedStorage) return retypedStorage
       const observedAbsence = observedIndexedAbsence.get(node)
       if (observedAbsence) return observedAbsence
       const cellView = ts.isIdentifier(node) ? arrayCellRead(node) : null
       if (cellView) return cellView
       const element = ts.isBindingElement(node) ? node : ts.isIdentifier(node) ? bindingElementDeclarationOf(node) : null
+      // A leaf this census joins with its later writes answers ahead of an
+      // upstream census's read of the pattern's source.
+      if (element && (divergentElements.has(element) || elementWrites.has(element))) {
+        const joined = boundElements.get(element)
+        if (joined) return joined
+      }
       if (element?.dotDotDotToken && ts.isObjectBindingPattern(element.parent)) {
         const rest = boundElements.get(element)
         if (rest) return rest

@@ -451,8 +451,54 @@ const instanceTypingOf = (
   return { fieldMembers, instantiationIsTyped }
 }
 
+/**
+ * Every name a top-level statement of `file` binds to a value this file does
+ * not declare the class of -- a `require`/`import`, a variable, a function --
+ * destructured bindings included. A class the file declares is not among
+ * them: the rewrite's re-parenting onto it is checked where the class is
+ * known (`prototype-reparenting.ts`).
+ */
+const topLevelNamesOf = (file: ts.SourceFile): ReadonlySet<string> => {
+  const names = new Set<string>()
+  const bind = (name: ts.BindingName): void => {
+    if (ts.isIdentifier(name)) names.add(name.text)
+    else for (const element of name.elements) if (!ts.isOmittedExpression(element)) bind(element.name)
+  }
+  for (const statement of file.statements) {
+    if (ts.isVariableStatement(statement)) for (const declaration of statement.declarationList.declarations) bind(declaration.name)
+    else if (ts.isFunctionDeclaration(statement) && statement.name) names.add(statement.name.text)
+    else if (ts.isImportDeclaration(statement) && statement.importClause) {
+      if (statement.importClause.name) names.add(statement.importClause.name.text)
+      const bindings = statement.importClause.namedBindings
+      if (bindings && ts.isNamespaceImport(bindings)) names.add(bindings.name.text)
+      else if (bindings) for (const element of bindings.elements) names.add(element.name.text)
+    }
+  }
+  return names
+}
+
+/**
+ * Whether a re-parenting names a host global's or this file's own class's
+ * prototype (`Request.prototype`), the cases the class rewrite exists for. A
+ * class reached through a `require`/`import` (`EventEmitter.prototype` from
+ * `require('node:events')`) may carry instance state the class form cannot
+ * inherit soundly, while the literal as written links to it through the
+ * class's prototype facade.
+ */
+const reparentsOntoHostGlobal = (call: ts.CallExpression, local: ReadonlySet<string>): boolean => {
+  const parent = call.arguments[1]
+  return (
+    parent !== undefined &&
+    ts.isPropertyAccessExpression(parent) &&
+    parent.name.text === 'prototype' &&
+    ts.isIdentifier(parent.expression) &&
+    !local.has(parent.expression.text)
+  )
+}
+
 /** Every use of `name` in the file, or `null` when one is not a prototype-surgery argument. */
 const usesOf = (file: ts.SourceFile, name: string, declaration: ts.VariableDeclaration): Use[] | null => {
+  const local = topLevelNamesOf(file)
   const uses: Use[] = []
   let refused = false
   const visit = (node: ts.Node): void => {
@@ -468,7 +514,7 @@ const usesOf = (file: ts.SourceFile, name: string, declaration: ts.VariableDecla
         ts.isCallExpression(parent) &&
         parent.arguments[0] === node &&
         ((isObjectMember(parent.expression, 'defineProperty') && parent.arguments.length === 3) ||
-          (isObjectMember(parent.expression, 'setPrototypeOf') && parent.arguments.length === 2))
+          (isObjectMember(parent.expression, 'setPrototypeOf') && parent.arguments.length === 2 && reparentsOntoHostGlobal(parent, local)))
       )
         uses.push({ kind: 'target', node })
       else if (ts.isCallExpression(parent) && isObjectMember(parent.expression, 'create') && parent.arguments.length === 1)

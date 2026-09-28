@@ -25,15 +25,18 @@ import {
   taggedUnionArmsHaveNativeSidecar
 } from './property-access-keys.js'
 import {
+  classViewFreeRecordRef,
   generatedObjectCarrier,
   generatedSharedObjectCarrier,
   generatedSharedRecordCarrier,
   layoutAnswerSuffix,
   recordAnswerFor,
-  resolvedLayoutOf
+  resolvedLayoutOf,
+  sidecarOptionalKey
 } from './has-property-key.js'
 import { definitelyPrimitive, hostConstructorUnionArms, mapTestable } from './instanceof-key.js'
 import { atomicsCallSupport } from '../../targets/cpp/host/atomics.js'
+import { declaredRecordFieldOf } from '../../projection/fields.js'
 import { regexpRoleOf } from '../../targets/cpp/prototype/emit-prototype-regexp.js'
 import { nativeRecordIndexHasPropertyOf } from '../native-record-index-transport.js'
 import type { CapabilityDemand, CertifyContext } from '../certify.js'
@@ -264,6 +267,14 @@ const receiverKeyOf = (
     disjointNativeRecordIndexOf(ctx.deriver, representation, key.representation, keyText ?? undefined)
   )
     return 'record(disjoint-index)'
+  // `delete` through a possibly-absent object is ToObject's presence check
+  // and then the payload's own delete (`emitDeleteOperation`).
+  if (access.method === 'delete' && representation.kind === 'optional' && representation.payload.kind !== 'scalar')
+    return receiverKeyOf(ctx, { ...access, receiver: representation.payload.kind }, representation.payload, key, keyText, semanticOp)
+  // `delete` on a Boolean, Number or BigInt (possibly absent): the printer's
+  // `emitPrimitiveDelete`.
+  if (access.method === 'delete' && representation.kind === 'optional' && representation.payload.kind === 'scalar')
+    return 'optional(scalar)'
   if (access.method === 'delete' && deleteNamesOptionalGeneratedField(representation, keyText, ctx.deriver)) return 'record(optional-field)'
   if (access.method === 'delete' && deleteNamesRecordExpandoKey(representation, keyText, ctx.deriver)) return 'record(expando-key)'
   if (access.method === 'delete' && deleteNamesNativeIndexEntry(representation, keyText, ctx.deriver))
@@ -342,6 +353,20 @@ const receiverKeyOf = (
   if (access.receiver === 'function-value-dispatch' && access.method === 'get' && !access.computed && callableMemberIs(keyText, 'name')) {
     return 'function-value-dispatch(name)'
   }
+  // `fn.constructor`: the intrinsic its declaration's kind names
+  // (`gea::functionConstructorOf`), read off the function object's identity.
+  if (
+    (access.receiver === 'function-value-dispatch' ||
+      access.receiver === 'function-and-constructor' ||
+      access.receiver === 'function' ||
+      access.receiver === 'function-family' ||
+      access.receiver === 'function-value-family') &&
+    access.method === 'get' &&
+    !access.computed &&
+    callableMemberIs(keyText, 'constructor')
+  ) {
+    return `${access.receiver}(constructor)`
+  }
   if (access.receiver === 'function-value-dispatch' && access.method === 'get' && !access.computed && callableMemberIs(keyText, 'length')) {
     return 'function-value-dispatch(length)'
   }
@@ -401,6 +426,12 @@ const receiverKeyOf = (
   return access.receiver
 }
 
+/** `typedComputedDeleteRecipeOf`'s certificate, still describing the receiver it rides on. */
+const closedDeleteRecipeHolds = (operation: DeleteOperation): boolean => {
+  const recipe = operation.typedComputedDelete
+  return recipe !== undefined && recipe.keys.length > 0 && recipe.receiver === representationKey(operation.receiver.representation)
+}
+
 const accessDemandOf = (operation: AccessOperation, ctx: CertifyContext): readonly CapabilityDemand[] => {
   // A receiver inside a proven-dead `typeof` guard's consequent, or one whose
   // semantic type is `never`, is never actually accessed on this host --
@@ -414,7 +445,12 @@ const accessDemandOf = (operation: AccessOperation, ctx: CertifyContext): readon
   const computed = key !== null && isComputedKey(ctx, key)
   const keyText = key !== null ? constantKeyTextOf(ctx, key) : null
   const access: Access = { receiver: representation.kind, method: operation.kind, computed }
-  const receiverKey = receiverKeyOf(ctx, access, representation, key, keyText, semanticOp)
+  const receiverKey =
+    operation.kind === 'delete' && computed && closedDeleteRecipeHolds(operation)
+      ? 'record(closed-optional-keys)'
+      : operation.kind === 'delete' && computed && representation.kind === 'record' && representation.accessors.length === 0
+        ? 'record(required-non-configurable)'
+        : receiverKeyOf(ctx, access, representation, key, keyText, semanticOp)
   return [
     { key: `property-access:${receiverKey}:${access.method}:${access.computed}` },
     ...(operation.kind === 'get' && !computed && keyText !== null ? hostMemberReadDemandOf(representation, keyText) : [])
@@ -502,9 +538,18 @@ const hasPropertyRuntimeHelperKey = (operation: HasPropertyOperation, ctx: Certi
     const layout = resolvedLayoutOf(payload, ctx.deriver).layout
     if (recordAnswerFor(layout, key.text) === 'record(unproven)') return `computation:in:${keyForm}:${optionalPrefix('record(sidecar)')}`
   }
-  if (key === null && keyForm === 'string' && generatedSharedRecordCarrier(payload)) {
+  if (
+    key === null &&
+    (keyForm === 'string' || keyForm === 'number' || sidecarOptionalKey(operation.key.representation)) &&
+    (generatedSharedRecordCarrier(payload) || classViewFreeRecordRef(payload, ctx.conversions))
+  ) {
     return `computation:in:${keyForm}:${optionalPrefix('record(sidecar)')}`
   }
+  // A runtime string key over a by-value record: no identity, so no expando
+  // table -- its own keys are exactly its fields, and what it inherits is
+  // `Object.prototype` (`emit-in.ts`'s `byValueRecordInText`).
+  if (key === null && keyForm === 'string' && payload.kind === 'record' && payload.ownership === 'owned' && payload.accessors.length === 0)
+    return `computation:in:${keyForm}:${optionalPrefix('record(by-value)')}`
   // A SYMBOL key, which is never a name the program spelled -- `staticInKeyOf`
   // recognizes string and number literals only, because a symbol has no
   // literal form at all; `cacheKey in res` reads a `unique symbol` binding.
@@ -638,7 +683,9 @@ const atomicsDemandOf = (operation: CallOperation, ctx: CertifyContext): readonl
   const name = member.slice('Atomics.'.length)
   const support = atomicsCallSupport(
     name,
-    operation.arguments.map((argument) => argument.representation)
+    operation.arguments.map((argument) => argument.representation),
+    operation.result?.representation ?? null,
+    (record, field) => declaredRecordFieldOf(ctx.deriver, record, field, ctx.classes)
   )
   return [
     support.supported
@@ -717,7 +764,12 @@ export const propertyAccessKeysOf = (operation: IrOperation, ctx: CertifyContext
     case 'own-property-keys':
       return accessDemandOf(operation, ctx)
     case 'has-property':
-      return [{ key: `runtime-helper:${hasPropertyRuntimeHelperKey(operation, ctx)}` }]
+      return [
+        {
+          key: `runtime-helper:${hasPropertyRuntimeHelperKey(operation, ctx)}`,
+          detail: `a "${representationKey(operation.key.representation)}" key in a "${representationKey(operation.receiver.representation)}" receiver`
+        }
+      ]
     case 'compute':
       return operation.form === 'instanceof' ? instanceofDemandsOf(operation.operands, ctx) : []
     case 'call':

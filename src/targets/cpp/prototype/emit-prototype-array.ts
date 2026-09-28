@@ -5,6 +5,8 @@ import { createCppEmitBlockedError, operandText, type EmitContext } from '../emi
 import { alignedValueText, convertedEvaluationText, type ConversionSite } from '../emit-narrowing.js'
 import { toStringRefusal, toStringText } from '../emit-tostring.js'
 import { cppConstantLiteral, cppTypeOf } from '../types.js'
+import { hostHandleCallText } from '../host/emit-host-invoke.js'
+import { boxedValueText } from '../emit-dynamic-properties.js'
 
 /**
  * `Array.prototype`, as this backend renders it.
@@ -131,23 +133,37 @@ const call = (ctx: EmitContext, member: string, receiverText: string, args: read
  */
 export const arrayBulkAppendMethodName = 'push'
 
+/** `push`/`unshift` over an argument list no rest frame packed: each operand enters the receiver's element carrier. */
+export const unpackedInsertText = (
+  ctx: EmitContext,
+  member: 'push' | 'unshift',
+  receiverText: string,
+  element: Representation,
+  args: readonly IrOperand[]
+): string => {
+  if (args.length === 0) return `${receiverText}->length()`
+  const converted = args.map((argument) =>
+    alignedValueText(ctx, 'prototype/emit-prototype-array.ts:unpacked-insert', argument.representation, element, operandText(ctx, argument))
+  )
+  const refused = args.find((_, index) => converted[index] === null)
+  if (refused !== undefined)
+    throw createCppEmitBlockedError(
+      `runtime-helper:element:${member}:${elementKey(element)}`,
+      `"Array.prototype.${member}" argument "${representationKey(refused.representation)}" does not enter the receiver's element "${elementKey(element)}"`
+    )
+  return `gea::runtime::array::${member}(${[receiverText, ...converted].join(', ')})`
+}
+
 const bulkInsertText =
-  (member: 'push' | 'unshift', clause: string, spelling: 'appendRange' | 'prependRange'): ArrayCallRenderer =>
+  (member: 'push' | 'unshift', spelling: 'appendRange' | 'prependRange'): ArrayCallRenderer =>
   (ctx, receiverText, element, args): string => {
     const packed = args[0]
-    if (args.length !== 1 || !packed) {
-      throw createCppEmitBlockedError(
-        `runtime-helper:element:${member}:${elementKey(element)}`,
-        `"Array.prototype.${member}" (ECMA-262 ${clause}) expects its rest argument already packed into one array-object by ir/lower.ts's ` +
-          `packRestArguments; this call arrives with ${args.length} operand(s)`
-      )
-    }
-    if (packed.representation.kind !== 'array-object') {
-      throw createCppEmitBlockedError(
-        `runtime-helper:element:${member}:${elementKey(element)}`,
-        `"Array.prototype.${member}"'s packed rest argument carries a "${packed.representation.kind}" carrier, not "array-object"`
-      )
-    }
+    // No rest frame packed the arguments -- the callee's convention names none
+    // (a boxed method read off a union's Array arm: fastify's `body.push(chunk)`
+    // over `let body = asString ? '' : []`) -- so the operands are the
+    // arguments themselves.
+    if (args.length !== 1 || !packed || packed.representation.kind !== 'array-object')
+      return unpackedInsertText(ctx, member, receiverText, element, args)
     // The pack the lowering built exists only to be drained back out here, and
     // where the census withheld it (`EmitContext.pendingPacks`) its elements are
     // written straight into the receiver instead -- one allocation and one
@@ -204,7 +220,7 @@ const bulkInsertText =
  */
 const callbackMethodText =
   (member: string, clause: string): ArrayCallRenderer =>
-  (ctx, receiverText, _element, args): string => {
+  (ctx, receiverText, _element, args, result): string => {
     const callback = args[0]
     if (args.length !== 1 || !callback) {
       throw createCppEmitBlockedError(
@@ -213,8 +229,44 @@ const callbackMethodText =
           (args.length > 1 ? `, and ECMA-262 ${clause}'s second parameter is a thisArg a CallableObject has nothing to bind` : '')
       )
     }
-    return `gea::runtime::array::${member}(${receiverText}, ${elementAdaptedCallbackText(ctx, member, clause, _element, callback)})`
+    const built = member === 'map' && result?.representation.kind === 'array-object' ? result.representation.element : null
+    const text = `gea::runtime::array::${member}(${receiverText}, ${elementAdaptedCallbackText(ctx, member, clause, _element, callback, built)})`
+    return member === 'map' ? mapResultText(ctx, callback, built, result, text) : text
   }
+
+/**
+ * `map`'s fresh array holds what each callback call hands back
+ * (`array::map`'s element is the callable's own result type), converted per
+ * element into the call's result element by `elementAdaptedCallbackText`. What
+ * remains is checked here: an array of any other shape refuses by name rather
+ * than failing in C++.
+ */
+const mapResultText = (
+  ctx: EmitContext,
+  callback: IrOperand,
+  built: Representation | null,
+  result: IrResult | null,
+  text: string
+): string => {
+  const carrier = callback.representation
+  if (result === null || carrier.kind !== 'function-value-dispatch' || carrier.abi.result.kind === 'void') return text
+  const produced: Representation = {
+    kind: 'array-object',
+    element: built ?? carrier.abi.result,
+    ownership: 'shared-refcount',
+    extension: null
+  }
+  if (cppTypeOf(produced) === cppTypeOf(result.representation)) return text
+  // A result the program holds as a box holds this same fresh array.
+  if (result.representation.kind === 'dynamic') {
+    const boxed = alignedValueText(ctx, 'prototype/emit-prototype-array.ts:map-box', produced, result.representation, text)
+    if (boxed !== null) return boxed
+  }
+  throw createCppEmitBlockedError(
+    `conversion:${representationKey(produced)}->${representationKey(result.representation)}`,
+    `"Array.prototype.map" builds "${representationKey(produced)}", which is not the call's "${representationKey(result.representation)}"`
+  )
+}
 
 /**
  * The callback, as the runtime's per-element call can invoke it.
@@ -258,36 +310,49 @@ const elementAdaptedCallbackText = (
   member: string,
   clause: string,
   element: Representation,
-  callback: IrOperand
+  callback: IrOperand,
+  resultTarget: Representation | null = null
 ): string => {
   const text = operandText(ctx, callback)
   const carrier = callback.representation
+  // A host constructor handed over as the callback -- `strings.map(Number)`,
+  // `values.filter(Boolean)`: the function it is when called, applied to the
+  // element (`hostHandleCallText`, the same spelling `Number(x)` renders).
+  if (carrier.kind === 'native-handle' && carrier.call !== null) {
+    const called = hostHandleCallText(ctx, carrier, element, '__gea_element', resultTarget)
+    if (called === null) {
+      throw createCppEmitBlockedError(
+        `runtime-helper:callback:${member}:${elementKey(element)}`,
+        `"Array.prototype.${member}" (ECMA-262 ${clause}) is handed the host function "${carrier.protocol}", whose call has no spelling over "${elementKey(element)}"`
+      )
+    }
+    return `[](const ${cppTypeOf(element)}& __gea_element) { return ${called}; }`
+  }
   if (carrier.kind !== 'function-value-dispatch' || carrier.abi.receiver !== null) return text
   const [first, index, array, ...beyond] = carrier.abi.parameters
-  if (!first || representationKey(first.value) === representationKey(element)) return text
+  const adaptsElement = first !== undefined && representationKey(first.value) !== representationKey(element)
+  const convertsResult =
+    resultTarget !== null && carrier.abi.result.kind !== 'void' && representationKey(carrier.abi.result) !== representationKey(resultTarget)
+  if (!adaptsElement && !convertsResult) return text
   const refuse = (detail: string): never => {
     throw createCppEmitBlockedError(
       `runtime-helper:callback:${member}:${elementKey(element)}`,
       `"Array.prototype.${member}" (ECMA-262 ${clause}) hands its callback the receiver's element "${elementKey(element)}" and the callback's ` +
-        `first parameter carries "${representationKey(first.value)}"; ${detail}`
+        `first parameter carries "${first ? representationKey(first.value) : 'nothing'}"; ${detail}`
     )
   }
   if (carrier.abi.restFrom !== null || beyond.length > 0)
     refuse('a callback with more parameters than element, index and array has no runtime call shape')
-  const converted = alignedValueText(
-    ctx,
-    'prototype/emit-prototype-array.ts:elementAdaptedCallbackText',
-    element,
-    first.value,
-    '__gea_element'
-  )
+  const converted = adaptsElement
+    ? alignedValueText(ctx, 'prototype/emit-prototype-array.ts:elementAdaptedCallbackText', element, first!.value, '__gea_element')
+    : '__gea_element'
   if (converted === null) refuse('no installed conversion reconciles them')
   if (index && representationKey(index.value) !== 'scalar(number)')
     refuse(`its index parameter carries "${representationKey(index.value)}", and the runtime passes a number`)
   if (array && (array.value.kind !== 'array-object' || representationKey(array.value.element) !== representationKey(element)))
     refuse(`its array parameter carries "${representationKey(array.value)}", and the runtime passes the receiver itself`)
-  const formals = [`const ${cppTypeOf(element)}& __gea_element`]
-  const actuals = [converted as string]
+  const formals = first ? [`const ${cppTypeOf(element)}& __gea_element`] : []
+  const actuals = first ? [converted as string] : []
   if (index) {
     formals.push('double __gea_index')
     actuals.push('__gea_index')
@@ -296,7 +361,15 @@ const elementAdaptedCallbackText = (
     formals.push(`const ${cppTypeOf(array.value)}& __gea_array`)
     actuals.push('__gea_array')
   }
-  return `[__gea_fn = ${text}](${formals.join(', ')}) { return __gea_fn(${actuals.join(', ')}); }`
+  const called = `__gea_fn(${actuals.join(', ')})`
+  // The value each call hands back, in the carrier the built array holds
+  // (`map`'s result element): converted here, per element, because the array
+  // it lands in is new and has no other carrier to be read through.
+  const returned = convertsResult
+    ? (alignedValueText(ctx, 'prototype/emit-prototype-array.ts:elementAdaptedCallbackText', carrier.abi.result, resultTarget!, called) ??
+      refuse(`its result "${representationKey(carrier.abi.result)}" has no conversion into "${representationKey(resultTarget!)}"`))
+    : called
+  return `[__gea_fn = ${text}](${formals.join(', ')}) { return ${returned}; }`
 }
 
 /**
@@ -539,24 +612,89 @@ const flatText: ArrayCallRenderer = (ctx, receiverText, element, args) => {
   )
 }
 
+/**
+ * A search for a boxed value among primitive elements: SameValueZero
+ * (`includes`) and IsStrictlyEqual (`indexOf`, `lastIndexOf`) both answer
+ * false for a value of another type, so a needle the element carrier does not
+ * accept is found nowhere and one it does is searched for as that carrier.
+ * find-my-way's `httpMethods.includes(method)` with an untyped `method`.
+ */
+const searchedMembers: ReadonlyMap<string, string> = new Map([
+  ['includes', 'false'],
+  ['indexOf', '-1.0'],
+  ['lastIndexOf', '-1.0']
+])
+const boxedNeedleSearchText = (
+  ctx: EmitContext,
+  member: string,
+  receiverText: string,
+  element: Representation,
+  args: readonly IrOperand[]
+) => {
+  const notFound = searchedMembers.get(member)
+  const [needle, ...rest] = args
+  const primitive =
+    element.kind === 'string' || (element.kind === 'scalar' && (element.domain === 'number' || element.domain === 'boolean'))
+  if (notFound === undefined || needle?.representation.kind !== 'dynamic' || !primitive) return null
+  for (let ordinal = 0; ordinal < rest.length; ordinal += 1) requireNumber(member, ordinal + 1, args)
+  const carrier = `gea::detail::DynamicCarrier<${cppTypeOf(element)}>`
+  const searched = [receiverText, `${carrier}::in(__gea_needle, 0)`, ...rest.map((argument) => operandText(ctx, argument))].join(', ')
+  return (
+    `([&]() { const gea::Value& __gea_needle = ${operandText(ctx, needle)}; ` +
+    `return ${carrier}::accepts(__gea_needle) ? gea::runtime::array::${member}(${searched}) : ${notFound}; })()`
+  )
+}
+
 /** The ranged, index-argument members: every argument is a position and the runtime overload for this arity supplies the spec's own default for the rest. */
 const rangedMethodText =
   (member: string, clause: string, arities: readonly number[], elementOrdinal: number | null): ArrayCallRenderer =>
   (ctx, receiverText, element, args): string => {
     requireArity(member, clause, arities, args)
-    for (let ordinal = 0; ordinal < args.length; ordinal += 1) {
+    const boxedSearch = elementOrdinal === 0 ? boxedNeedleSearchText(ctx, member, receiverText, element, args) : null
+    if (boxedSearch !== null) return boxedSearch
+    const texts = args.map((argument, ordinal) => {
+      // A typed needle searched for among boxes is compared as the box it would be.
+      if (ordinal === elementOrdinal && element.kind === 'dynamic' && argument.representation.kind !== 'dynamic')
+        return boxedValueText(ctx, argument, `"Array.prototype.${member}" search value`)
       if (ordinal === elementOrdinal) requireElement(member, ordinal, element, args)
-      else requireNumber(member, ordinal, args)
-    }
-    return call(ctx, member, receiverText, args)
+      // A boxed position is ToNumber-ed here; the runtime overload applies
+      // ToIntegerOrInfinity to the number, as it does to a typed argument. An
+      // undefined `end` is the length (23.1.3.28 step 5), not ToNumber's NaN.
+      else if (argument.representation.kind === 'dynamic') {
+        const text = operandText(ctx, argument)
+        const isEnd = (member === 'slice' && ordinal === 1) || (member === 'fill' && ordinal === 2)
+        return isEnd
+          ? `(${text}.tag() == gea::Value::Tag::Undefined ? std::numeric_limits<double>::infinity() : gea::dynamicToNumber(${text}))`
+          : `gea::dynamicToNumber(${text})`
+      } else requireNumber(member, ordinal, args)
+      return operandText(ctx, argument)
+    })
+    return `gea::runtime::array::${member}(${[receiverText, ...texts].join(', ')})`
   }
 
 /** The reducers: `reduce(cb)` and `reduce(cb, initialValue)` are two physical arities and two runtime overloads; the no-initial form's empty-array TypeError lives in the runtime. */
 const reduceText =
   (member: 'reduce' | 'reduceRight', clause: string): ArrayCallRenderer =>
-  (ctx, receiverText, _element, args): string => {
+  (ctx, receiverText, _element, args, result): string => {
     requireArity(member, clause, [1, 2], args)
-    return call(ctx, member, receiverText, args)
+    const [callback, initial] = args
+    if (callback === undefined || initial === undefined || result === null || result.representation.kind === 'void')
+      return call(ctx, member, receiverText, args)
+    // The runtime's accumulator type is deduced from the initial value, so it
+    // is spelled as the call's own result carrier: a `''` literal is a
+    // `const char*` in C++, which no callback returning a string accumulates.
+    const accumulator = result.representation
+    const text = operandText(ctx, initial)
+    const aligned =
+      representationKey(initial.representation) === representationKey(accumulator)
+        ? text
+        : alignedValueText(ctx, 'prototype/emit-prototype-array.ts:reduce-initial', initial.representation, accumulator, text)
+    if (aligned === null)
+      throw createCppEmitBlockedError(
+        `conversion:${representationKey(initial.representation)}->${representationKey(accumulator)}`,
+        `"Array.prototype.${member}"'s initial value "${representationKey(initial.representation)}" does not enter its accumulator "${representationKey(accumulator)}"`
+      )
+    return `gea::runtime::array::${member}(${receiverText}, ${operandText(ctx, callback)}, ${cppTypeOf(accumulator)}(${aligned}))`
   }
 
 /** `pop`/`shift`: no arguments at all, and an optional element for a result -- the receiver is the whole call. */
@@ -629,8 +767,8 @@ const atText: ArrayCallRenderer = (ctx, receiverText, element, args, result) => 
 
 /** `emit-carrier-members.ts`'s `arrayAccessText` defers exactly these keys off an `array-object` receiver -- one authority for "is this method implemented". */
 export const arrayMethods: ReadonlyMap<string, ArrayCallRenderer> = new Map<string, ArrayCallRenderer>([
-  [arrayBulkAppendMethodName, bulkInsertText(arrayBulkAppendMethodName, '23.1.3.23', 'appendRange')],
-  ['unshift', bulkInsertText('unshift', '23.1.3.37', 'prependRange')],
+  [arrayBulkAppendMethodName, bulkInsertText(arrayBulkAppendMethodName, 'appendRange')],
+  ['unshift', bulkInsertText('unshift', 'prependRange')],
   ['map', callbackMethodText('map', '23.1.3.21')],
   ['filter', filterText],
   ['forEach', callbackMethodText('forEach', '23.1.3.15')],

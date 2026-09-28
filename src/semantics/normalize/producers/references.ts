@@ -1,6 +1,6 @@
 import ts from 'typescript'
 import { isScriptGlobalObjectPropertyDeclaration } from '../script-global-redefinition.js'
-import { enclosingCallIfCallee, unwrapErasedExpression } from './erasure.js'
+import { assertsType, enclosingCallIfCallee, outermostErasureOf, unwrapErasedExpression } from './erasure.js'
 import { publishesShortCircuit } from './optional-chain.js'
 import {
   operationId,
@@ -27,7 +27,7 @@ import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import { valueSymbolAt } from '../unresolvable-names.js'
 import type { UnresolvableNameCensus } from '../unresolvable-names.js'
 import { argumentsObjectValueAt } from './bindings.js'
-import { calleeAwareTypeAt, isAssignmentOperatorKind } from './shared.js'
+import { calleeAwareTypeAt, isAssignmentOperatorKind, provesNativeModuleRecord } from './shared.js'
 import { isModuleWrapperThis } from '../commonjs-module-record.js'
 import { literalConstantOf } from '../constant-literal.js'
 
@@ -714,12 +714,15 @@ const buildReference = (
     declaration,
     mutable,
     temporalDeadZone,
+    ...(assertsType(outermostErasureOf(node) as ts.Expression, context.checker) ? { asserted: true as const } : {}),
     ...(context.commonJsBindings.has(declaration)
       ? {
           commonJs: {
             global: context.commonJsBindings.get(declaration) as 'require' | 'exports' | 'module',
             owner: regionId(context.identities.nodeIdOf(node.getSourceFile()), 'module-body'),
-            ...(context.commonJsModuleRecords.moduleExportExpressionAt(node) ? { nativeRecord: true as const } : {})
+            ...(provesNativeModuleRecord(context, context.commonJsModuleRecords.moduleExportExpressionAt(node))
+              ? { nativeRecord: true as const }
+              : {})
           }
         }
       : {}),

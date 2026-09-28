@@ -478,6 +478,9 @@ const bindAmbientGlobalMember = (
   if (namespace) census.hostNamespaceBindings.add(id)
   census.externals.set(id, symbol.name)
   census.externalFiles.set(id, declaration.getSourceFile().fileName)
+  // As `bindAmbientValue` records it for a bare reference: `globalThis.WeakRef`
+  // reads the same standard-library binding `WeakRef` does.
+  if (declaration.getSourceFile().hasNoDefaultLib) census.standardLibrary.add(id)
 
   const type = input.checker.getTypeOfSymbolAtLocation(symbol, node)
   const typeId = input.types.typeOf(type)
@@ -1014,9 +1017,9 @@ export const dynamicIntrinsicDeclarationsOf = (
   identities: IdentityTable,
   files: readonly ts.SourceFile[],
   names: ReadonlySet<string>
-): { readonly carried: ReadonlySet<DeclarationId>; readonly singletons: ReadonlySet<DeclarationId> } => {
+): { readonly carried: ReadonlySet<DeclarationId>; readonly singletons: ReadonlyMap<DeclarationId, string> } => {
   const carried = new Set<DeclarationId>()
-  const singletons = new Set<DeclarationId>()
+  const singletons = new Map<DeclarationId, string>()
   const anchor = files[0]
   if (!anchor) return { carried, singletons }
   const standard = (symbol: ts.Symbol | undefined): symbol is ts.Symbol =>
@@ -1039,7 +1042,7 @@ export const dynamicIntrinsicDeclarationsOf = (
     if (slotDeclaration?.getSourceFile().hasNoDefaultLib) carried.add(identities.declarationIdOf(slotDeclaration))
     if (!standard(value)) continue
     const singleton = identities.symbolValueDeclarationId(value, anchor)
-    if (singleton) singletons.add(singleton)
+    if (singleton) singletons.set(singleton, name)
   }
   return { carried, singletons }
 }
@@ -1699,7 +1702,18 @@ const bindAmbientValue = (
   // every other layer resolves to as well -- so following the alias is what
   // makes this walk's answer and the reference producer's the same answer.
   const symbol = (local.flags & ts.SymbolFlags.Alias) !== 0 ? input.checker.getAliasedSymbol(local) : local
-  if ((symbol.flags & ts.SymbolFlags.Value) === 0 || !isAmbientSymbol(symbol)) return null
+  if ((symbol.flags & ts.SymbolFlags.Value) === 0) return null
+  // The wrapper is asked before ambience: a CommonJS module's own expando
+  // write onto it (abstract-logging's `Object.defineProperty(module,
+  // 'exports', ...)`) joins a program declaration to the host's symbol, which
+  // the wrapper authentication admits and the ambient test would not.
+  const classified = commonJsIdentity.classify(reference)
+  const wrapperDeclaration = symbol.declarations?.find((candidate) => candidate.getSourceFile().isDeclarationFile)
+  if (classified.kind === 'wrapper' && wrapperDeclaration) {
+    census.commonJsBindings.set(input.identities.declarationIdOf(symbol.valueDeclaration ?? wrapperDeclaration), classified.global)
+    return null
+  }
+  if (!isAmbientSymbol(symbol)) return null
   const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0]
   if (!declaration) return null
 

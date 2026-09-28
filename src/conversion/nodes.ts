@@ -71,6 +71,8 @@ export interface ConversionCensus {
   readonly nodeById: (id: ConversionNodeId) => ConversionNode | null
   /** Every node minted through `nodeFor` that the eager graph did not already hold. */
   readonly minted: ReadonlyMap<ConversionNodeId, ConversionNode>
+  /** The eager graph's own nodes: every carrier a dynamic value or a narrowing can land on. */
+  readonly eager: ReadonlyMap<ConversionNodeId, ConversionNode>
 }
 
 export interface ConversionCensusInput {
@@ -194,7 +196,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
   const nodeById = (id: ConversionNodeId): ConversionNode | null =>
     input.nodes.get(id) ?? minted.get(id) ?? coercions.get(id) ?? exactArms.get(id) ?? null
 
-  return { nodeFor, coercionFor, exactArmFor, nodeById, minted }
+  return { nodeFor, coercionFor, exactArmFor, nodeById, minted, eager: input.nodes }
 }
 
 /** The materializer id every exact-arm node carries; the printer dispatches its recipe on it. */

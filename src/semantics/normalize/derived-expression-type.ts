@@ -419,6 +419,10 @@ export const indexedTypeOf = (
     ? (checker.getIndexTypeOfType(nonNullReceiver, ts.IndexKind.Number) ?? checker.getIndexTypeOfType(nonNullReceiver, ts.IndexKind.String))
     : checker.getIndexTypeOfType(nonNullReceiver, ts.IndexKind.String)
   if (indexed) return isUnusableEvidence(indexed) ? null : indexed
+  // A symbol key reads no string- or number-keyed property, and one the
+  // literal does not declare may be its instances' own (pino's prototype
+  // getters read `this[levelValSym]`): the literal's members answer nothing.
+  if ((key.flags & ts.TypeFlags.ESSymbolLike) !== 0) return null
   return (
     closedObjectLiteralIndexTypeOf(checker, nonNullReceiver, at) ??
     (flow ? absentNumericIndexTypeOf(checker, flow, nonNullReceiver, key, census) : null)
@@ -1149,10 +1153,24 @@ const closedLiteralMemberAbsent = (checker: ts.TypeChecker, flow: ValueFlowIndex
   // In JavaScript a named write DECLARES its member on the receiver's type:
   // `module.exports.appendStackTrace = f` after `module.exports = codes`. That
   // receiver type was built from this very write, so it cannot rule out that
-  // the write lands on the literal.
+  // the write lands on the literal -- unless that type is another object
+  // literal's own (`const other = {}; other.x = 1`), whose identity the write
+  // did not build: a different literal is a different object.
   const declaredByWrite = (receiver: ts.Expression | null | undefined, site: ts.Node): boolean => {
-    const member = receiver ? checker.getPropertyOfType(typeOf(receiver), name) : undefined
-    return member?.declarations?.some((declaration) => encloses(declaration, site) || encloses(site, declaration)) ?? false
+    if (!receiver) return false
+    const receiverType = typeOf(receiver)
+    const member = checker.getPropertyOfType(receiverType, name)
+    if (!(member?.declarations?.some((declaration) => encloses(declaration, site) || encloses(site, declaration)) ?? false)) return false
+    // A JavaScript expando container's type is its variable's own symbol, so
+    // the literal is that declaration's initializer.
+    const literals = (receiverType.getSymbol()?.declarations ?? []).flatMap((declaration) =>
+      ts.isObjectLiteralExpression(declaration)
+        ? [declaration]
+        : ts.isVariableDeclaration(declaration) && declaration.initializer && ts.isObjectLiteralExpression(declaration.initializer)
+          ? [declaration.initializer]
+          : []
+    )
+    return literals.length === 0 || literals.some((literal) => declarations.includes(literal))
   }
 
   // Named, keyed and prototype writes.
@@ -1517,6 +1535,28 @@ export const overloadInvariantReturnTypeAt = (
   return signatures.every((signature) => signature.getReturnType() === returned) ? returned : null
 }
 
+/**
+ * A JavaScript object literal's member initialized with an absence --
+ * fastify's `{ ..., printPlugins: null }`, avvio's `{ resolve: null }` -- that
+ * the program fills later. The checker types the member as the initializer's
+ * own `null`, which no statement makes and every later write contradicts: laid
+ * out that way the record could hold nothing but `null`, and a write of a
+ * function was refused or, boxed, asserted into `std::nullptr_t` at run time.
+ * The initializer is the member's first write and is joined with the rest.
+ */
+export const isLiteralAbsenceMember = (declaration: ts.Declaration): declaration is ts.PropertyAssignment => {
+  if (!ts.isPropertyAssignment(declaration) || !ts.isObjectLiteralExpression(declaration.parent)) return false
+  const fileName = declaration.getSourceFile().fileName
+  if (!fileName.endsWith('.js') && !fileName.endsWith('.cjs') && !fileName.endsWith('.mjs')) return false
+  let initializer = declaration.initializer
+  while (ts.isParenthesizedExpression(initializer)) initializer = initializer.expression
+  return (
+    initializer.kind === ts.SyntaxKind.NullKeyword ||
+    ts.isVoidExpression(initializer) ||
+    (ts.isIdentifier(initializer) && initializer.text === 'undefined')
+  )
+}
+
 /** Whether `node` (through any parentheses) is the expression a call or `new` invokes. */
 const calleePosition = (node: ts.Node): boolean => {
   let current: ts.Node = node
@@ -1564,6 +1604,11 @@ export const memberTypeOf = (
     // rendering off a "record(...)"`), exactly as before absence existed.
     return flow && !calleePosition(at) ? absentClosedObjectLiteralMemberTypeOf(checker, flow, nonNullReceiver, name, at) : null
   }
+  // A literal member initialized with an absence is filled later; its
+  // declared `null` is the one value every such write contradicts, and the
+  // field census is the authority on what it holds.
+  const declarations = property.declarations ?? []
+  if (declarations.length > 0 && declarations.every(isLiteralAbsenceMember)) return null
   const type = checker.getTypeOfSymbolAtLocation(property, at)
   if (isUnusableEvidence(type) || isVacuousArrayType(checker, type)) return null
   return singleConventionAt(checker, type, at)
@@ -1923,10 +1968,19 @@ const isAuthenticatedObjectAssign = (checker: ts.TypeChecker, node: ts.Node): no
  * own shape -- it states one -- and so does a literal under an assertion.
  */
 export const objectAssignFreshTargetType = (checker: ts.TypeChecker, literal: ts.ObjectLiteralExpression): ts.Type | null => {
-  if (literal.properties.length !== 0) return null
   const call = literal.parent
   if (!isAuthenticatedObjectAssign(checker, call) || call.arguments[0] !== literal) return null
   const type = checker.getTypeAtLocation(call)
+  // A source the program left `any` may copy any key over any member the
+  // literal states (fastify's `Object.assign({ buildValidator: null },
+  // opts?.compilersFactory)`), so the allocation holds what the call's
+  // `T & any` does -- a dynamic object -- populated literal or not.
+  if (
+    (type.flags & ts.TypeFlags.Any) !== 0 &&
+    call.arguments.slice(1).some((source) => (checker.getTypeAtLocation(source).flags & ts.TypeFlags.Any) !== 0)
+  )
+    return type
+  if (literal.properties.length !== 0) return null
   return (type.flags & ts.TypeFlags.Object) !== 0 ? type : null
 }
 
@@ -2277,6 +2331,36 @@ export const isDistinctClassConstructorPair = (a: ts.Type, b: ts.Type): boolean 
   return first !== null && second !== null && first !== second
 }
 
+/**
+ * Whether `value` is an instance of a program class that is neither
+ * `holder`'s class nor derived from it, `holder` itself being a class
+ * instance type. A class reference is nominal: ajv's `_Code` is structurally
+ * assignable to its sibling `Name` (which declares no private member), but a
+ * cell laid out as `Name` cannot hold one, so a join or a divergence test that
+ * took assignability for carriage stored a `_Code` into a `Name`.
+ */
+export const isForeignClassInstance = (checker: ts.TypeChecker, value: ts.Type, holder: ts.Type): boolean => {
+  const classOf = (type: ts.Type): ts.Symbol | null => {
+    const symbol = type.getSymbol()
+    return symbol !== undefined && (symbol.flags & ts.SymbolFlags.Class) !== 0 && type.getConstructSignatures().length === 0 ? symbol : null
+  }
+  const held = classOf(holder)
+  const written = classOf(value)
+  if (held === null || written === null || held === written) return false
+  const derives = (symbol: ts.Symbol, seen: Set<ts.Symbol>): boolean => {
+    if (symbol === held) return true
+    if (seen.has(symbol)) return false
+    seen.add(symbol)
+    const declared = checker.getDeclaredTypeOfSymbol(symbol)
+    if (!declared.isClassOrInterface()) return false
+    return checker.getBaseTypes(declared).some((base) => {
+      const baseSymbol = base.getSymbol()
+      return baseSymbol !== undefined && derives(baseSymbol, seen)
+    })
+  }
+  return !derives(written, new Set())
+}
+
 /** Shape subtyping cannot discard the identity of a class constructor selected at runtime. */
 export const nominalConstructorChoiceTypeAt = (
   checker: ts.TypeChecker,
@@ -2302,6 +2386,7 @@ export const widestOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts
     // as "the" type made the other's default convert into it --
     // `[cls = class {}, xCls = class X {}]` read `xCls.name` as `"cls"`.
     if (isDistinctClassConstructorPair(other, candidate)) return false
+    if (isForeignClassInstance(checker, other, candidate)) return false
     if (!checker.isTypeAssignableTo(other, candidate)) return false
     // Assignability is not carriage, the same reason the nominal veto above
     // exists. A union with a VACUOUS member alongside real ones -- hono's
@@ -2809,6 +2894,18 @@ export const isVacuousArrayType = (checker: ts.TypeChecker, type: ts.Type): bool
 }
 
 /**
+ * `Map<any, any>` / `Set<any>` (and the weak pair): what `new Map()`'s
+ * zero-argument overload returns, stating nothing about the entries -- the
+ * collection-shaped `isVacuousArrayType`.
+ */
+export const isVacuousCollectionType = (checker: ts.TypeChecker, type: ts.Type): boolean => {
+  const name = type.getSymbol()?.name
+  if (name !== 'Map' && name !== 'Set' && name !== 'WeakMap' && name !== 'WeakSet') return false
+  const typeArguments = checker.getTypeArguments(type as ts.TypeReference)
+  return typeArguments.length > 0 && typeArguments.every((argument) => (argument.flags & ts.TypeFlags.Any) !== 0)
+}
+
+/**
  * `T[]` for an element type -- through the checker's own constructor, which
  * the public API does not expose, reached with the same guard as
  * `getUnionType`. `null` when this checker has no such method.
@@ -2864,6 +2961,11 @@ const isObjectLiteralRecord = (type: ts.Type): boolean => {
 }
 
 export const joinOfWrites = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts.Type | null => {
+  // A dynamic member is evidence that the cell is dynamic (`branchArmsOf`'s
+  // `value || 'u'` over an `any` operand), and it must be asked first: `any`
+  // is assignable to every candidate, so `widestOf` below would let pino's
+  // `null` write "cover" it and bind `let value` to `null`.
+  if (types.some((type) => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0)) return checker.getAnyType()
   const family = objectLiteralArrayFamilyOf(checker, types)
   if (family) return family
   const direct = widestOf(checker, types)
@@ -2949,6 +3051,9 @@ export const disjointArmsOf = (checker: ts.TypeChecker, types: readonly ts.Type[
       // Two different classes' constructor objects are disjoint by identity,
       // whatever the checker says of their shapes -- `widestOf`'s rule.
       if (isDistinctClassConstructorPair(type, existing)) continue
+      // So are two unrelated classes' instances (`isForeignClassInstance` both
+      // ways): an `instanceof` tells them apart whatever their shapes share.
+      if (isForeignClassInstance(checker, type, existing) && isForeignClassInstance(checker, existing, type)) continue
       const forward = checker.isTypeAssignableTo(type, existing)
       const backward = checker.isTypeAssignableTo(existing, type)
       if (forward && backward) {
@@ -2989,6 +3094,9 @@ export const disjointUnionMembersOf = (checker: ts.TypeChecker, types: readonly 
   const atomsOf = (type: ts.Type): readonly ts.Type[] => (type.isUnion() ? type.types.flatMap(atomsOf) : [type])
   for (const type of types)
     for (const atom of atomsOf(type)) {
+      // `any` absorbs every other member (`any | null` is `any`): a write set
+      // holding one is a dynamic cell, never a union with a dynamic arm.
+      if ((atom.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return null
       const widened = widenLiteralForm(checker, atom)
       if (isNullishType(widened)) {
         if (!nullish.some((seen) => seen.flags === widened.flags)) nullish.push(widened)
@@ -3642,4 +3750,38 @@ export const synthesizedUnionArmsAt = <D extends ts.Declaration>(
   const declarations = checker.getSymbolAtLocation(node)?.declarations
   const declaration = declarations && declarations.length === 1 ? declarations[0] : undefined
   return declaration && owns(declaration) ? (arms.get(declaration) ?? null) : null
+}
+
+/**
+ * The dynamic carrier behind a narrowing to a standard-library interface no
+ * constructor makes, or `null`.
+ *
+ * `ArrayBuffer.isView(value)` narrows an untyped `value` to `ArrayBufferView`
+ * (fastify's `deepFreezeObject`, rfdc's `copyBuffer(cur)`). No program record
+ * is one, and the lib declares no value by that name, so no `instanceof` can
+ * have produced the narrowing: the box holds a host typed array or DataView,
+ * which a record layout would read as a struct. A narrowing to an interface a
+ * constructor makes (`Map`, `Promise`, `Date`) is a real carrier and is left
+ * alone. Asked by the layout resolver for the read and by the parameter
+ * census for a call-site argument, so the slot and the value agree.
+ */
+export const libraryViewNarrowingCarrier = (checker: ts.TypeChecker, node: ts.Node, own: ts.Type): ts.Type | null => {
+  if (!ts.isIdentifier(node)) return null
+  const symbol = checker.getSymbolAtLocation(node)
+  const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0]
+  if (!symbol || !declaration) return null
+  const declared = checker.getTypeOfSymbolAtLocation(symbol, declaration)
+  if ((declared.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) return null
+  const parts = own.isUnion() ? own.types : [own]
+  const libraryView = parts.every((part) => {
+    const viewed = part.getSymbol()
+    return (
+      viewed !== undefined &&
+      (viewed.flags & ts.SymbolFlags.Interface) !== 0 &&
+      (viewed.flags & ts.SymbolFlags.Value) === 0 &&
+      (viewed.declarations ?? []).length > 0 &&
+      (viewed.declarations ?? []).every((viewedDeclaration) => viewedDeclaration.getSourceFile().hasNoDefaultLib)
+    )
+  })
+  return libraryView ? declared : null
 }

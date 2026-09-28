@@ -72,6 +72,11 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     'null:get:true',
     'void:get:false',
     'void:get:true',
+    // PutValue through a nullish base throws the same TypeError
+    // (`emitFieldStore`).
+    'undefined:set:false',
+    'null:set:false',
+    'void:set:false',
     // A receiver carried as an optional, accessed on a branch that proved it
     // present -- see `unwrapPresentValue` (emit-context.ts) for why the
     // language admits no other kind of access through one, on either the read
@@ -186,6 +191,12 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // with `record`/`native-record-ref`) and the sidecar store both exist.
     'record-with-index:set:false',
     'record-with-index:set:true',
+    // A runtime key no index domain of the receiver names (pino's
+    // `o[k] = ...` with `k: string | symbol` over `{ [sym]: ... }`): the
+    // generated struct's own dispatcher answers a field or an index entry the
+    // key does name, and the identity-keyed expando takes the rest
+    // (`emitNativeSidecarSet`, `gea::nativeDynamicSet`).
+    'record-with-index(no-index-domain):set:true',
     // Object-literal definitions use a fully permissive data descriptor.
     // The named half reaches the ordinary struct store, while an unmatched or
     // computed key reaches `emitRecordIndexSidecarStore`; both preserve the
@@ -493,6 +504,18 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // but no typed read consults it, and this row claimed for ten days what
     // the emitter refused by the same name.
     'record(expando-key):delete:false',
+    // A computed key whose sealed literal set names no required field
+    // (`typedComputedDeleteRecipeOf`, ir/typed-property-access.ts): every key
+    // it can be is an optional field or an expando key, the two cases the
+    // generated dispatcher `nativeDynamicDelete` reaches answers exactly.
+    'record(closed-optional-keys):delete:true',
+    // Any other computed key over a plain record: the dispatcher answers an
+    // optional field and an expando key exactly, and a REQUIRED field --
+    // which no typed read would see disappear -- as a non-configurable
+    // property, `false` (a TypeError in strict code), the answer
+    // `nativeDynamicDelete` already gives a fixed field it cannot reset
+    // (`emitNativeSidecarDelete`'s required-key guard).
+    'record(required-non-configurable):delete:true',
     // Generated class instances dispatch deletion through their concrete
     // own-field table and identity sidecar, including base-typed receivers.
     'class-ref:delete:false',
@@ -514,6 +537,17 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // difference.
     'dictionary:delete:true',
     'dictionary:delete:false',
+    // `delete` on a Boolean, Number or BigInt, possibly absent, or on a
+    // definite `null`/`undefined` (`emitPrimitiveDelete`): ToObject throws for an absent one, and the
+    // wrapper of a present one owns no property to refuse.
+    'scalar:delete:false',
+    'scalar:delete:true',
+    'optional(scalar):delete:false',
+    'optional(scalar):delete:true',
+    'null:delete:false',
+    'null:delete:true',
+    'undefined:delete:false',
+    'undefined:delete:true',
     // Reading/writing a STATIC key through a `tagged-union` receiver, over
     // the arms that all declare the field named
     // (`emit-union-properties.ts`'s `taggedUnionGetText`/
@@ -529,6 +563,9 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // below under their own refined keys instead of widening this one.
     'tagged-union:get:false',
     'tagged-union:set:false',
+    // A fresh literal's own member onto a union of records: the same per-arm
+    // field store as `set`, refused at emission when an arm lacks the field.
+    'tagged-union:define-own-property:false',
     // The computed key IS written for the two union shapes that owe no
     // ARM-KIND reconciliation: every arm a `typed-array`
     // (`emit-union-properties.ts`'s `taggedUnionElementText` /
@@ -648,6 +685,15 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // site reads -- `.prototype`/`.bind` and any other `Function.prototype`
     // member off the same receiver kind stay correctly unclaimed.
     'function-value-dispatch(name):get:false',
+    // `fn.constructor` -- `gea::functionConstructorOf` over the function
+    // object's declaration identity: `%Function%`, `%AsyncFunction%`,
+    // `%GeneratorFunction%` or `%AsyncGeneratorFunction%`, modeled for
+    // reflection (fastify's `fn.constructor.name === 'AsyncFunction'`).
+    'function-value-dispatch(constructor):get:false',
+    'function-and-constructor(constructor):get:false',
+    'function(constructor):get:false',
+    'function-family(constructor):get:false',
+    'function-value-family(constructor):get:false',
     'function-value-dispatch(length):get:false',
     // The same two rows for a callable with no calling convention. Nothing
     // else is claimed off `callable-identity`: it has no `.call`/`.apply`/
@@ -927,6 +973,9 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // is written afterward as an ordinary `define-own-property`/`set`, which
     // `record-with-index:set:false`/`record-with-index:set:true` above claim.
     'allocation:object-literal:record-with-index',
+    // The literal's leading union spread chooses and allocates its arm
+    // (`protocol:spread:next:tagged-union(arm-to-arm)`); nothing precedes it.
+    'allocation:object-literal:tagged-union(built-by-spread)',
     // An object literal whose DECLARED type has an index signature
     // (`{ [key: string]: T }`, a `Record<K, V>`) derives a `dictionary`
     // carrier, not a record, so the literal's members are keyed stores rather
@@ -1286,6 +1335,11 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // one is an assignment (`emit-iterator.ts`) rather than a construction, and
     // `next` walks the coroutine frame `gea::Iterator<E>::promise_type` owns.
     'protocol:iterator:get-iterator:iterator',
+    // An async generator under `for await`: its own async iterator, whose
+    // `next()` result this runtime has already settled, so the same cursor
+    // (`producers/control.ts`'s `nativeGeneratorSource`).
+    'protocol:async-iterator:get-iterator:iterator',
+    'protocol:async-iterator:next:iterator',
     // The four native cursors again, this time over a POSSIBLY-ABSENT source
     // (`T[] | undefined`, `Set<T> | null`, ...). Iterating an absent value is
     // a runtime `TypeError` in the language itself -- ECMA-262 7.4.2
@@ -1482,6 +1536,15 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // mandatory: a dictionary receiver requires a different key-domain
     // contract and remains deliberately unclaimed.
     'protocol:spread:next:dynamic->dynamic',
+    // A typed source spread into a dynamic receiver, copied through its box.
+    'protocol:spread:next:boxed->dynamic',
+    // An open-keyed source spread into a shared record whose string index
+    // holds any value, copied through both boxes.
+    'protocol:spread:next:boxed->open-record',
+    // A union source spread into a literal laid out as a union of records:
+    // each source arm builds the one receiver arm `unionSpreadArmPairsOf`
+    // names, field by field.
+    'protocol:spread:next:tagged-union(arm-to-arm)',
     // `yield x` inside a `function*`, and the resume point paired with it.
     //
     // The body is emitted as a C++20 coroutine returning `gea::Iterator<T>`

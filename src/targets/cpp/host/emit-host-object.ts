@@ -1,3 +1,4 @@
+import { unaddressableNativeSymbolKeyOf } from '../native-symbol-keys.js'
 import { errorPrototypeProtocols } from '../error-types.js'
 import type { CallableAbi, Ownership, RecordField, Representation } from '../../../representation/model.js'
 import { passingOf, representationKey } from '../../../representation/model.js'
@@ -33,6 +34,7 @@ import {
   cppRecordFieldName,
   cppRecordFieldPresenceName,
   cppRecordStructName,
+  cppScalarType,
   cppStringLiteral,
   cppTypeOf,
   cppUndefinedValue
@@ -288,16 +290,22 @@ const valuesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectVi
           'the length of the array would then depend on a presence flag this arm does not test'
       )
     }
-    if (representationKey(field.value) !== element) {
+  }
+  // One array has one element type: a field of another carrier enters it
+  // through its own licensed conversion (a box, for an array of `any`).
+  const reads = ordered.map((field) => {
+    const read = getOwnValue(ctx, view, field).text
+    if (representationKey(field.value) === element) return read
+    const converted = alignedValueText(ctx, 'emit-host-object.ts:values', field.value, result.element, read)
+    if (converted === null) {
       throw createCppEmitBlockedError(
         'host-member-call:Object.values',
         `"Object.values" would build a std::vector<${cppTypeOf(result.element)}> from the field "${field.key}", which ` +
-          `carries "${representationKey(field.value)}" -- one array has one element type, and converting each field into ` +
-          "the result's element carrier is a per-field conversion this arm does not write"
+          `carries "${representationKey(field.value)}", and no conversion into the result's element carrier is licensed`
       )
     }
-  }
-  const reads = ordered.map((field) => getOwnValue(ctx, view, field).text)
+    return converted
+  })
   return `gea::detail::hostArrayResult(std::vector<${cppTypeOf(result.element)}>{${reads.join(', ')}})`
 }
 
@@ -683,7 +691,14 @@ const integrityText = (
  */
 const getPrototypeOfText = (ctx: EmitContext, operation: CallOperation): string => {
   const member = 'getPrototypeOf'
-  const view = objectViewOf(ctx, member, targetOf(ctx, member, operation), 'object')
+  const target = targetOf(ctx, member, operation)
+  if (target.representation.kind === 'typed-array') {
+    // A view's [[Prototype]] is its kind's intrinsic prototype, whatever the
+    // view: nothing can re-link a typed carrier's chain.
+    const prototype = `gea::intrinsics::typedArrayKindPrototype<${cppScalarType(target.representation.element)}>()`
+    if (operation.result === null || operation.result.representation.kind === 'dynamic') return prototype
+  }
+  const view = objectViewOf(ctx, member, target, 'object')
   if (view.kind === 'dynamic') return `gea::host::ObjectConstructor::getPrototypeOf(${view.receiver})`
   if (view.kind === 'dictionary') {
     return refuseDictionaryArm(member, view, 'a native Dictionary carries no [[Prototype]] slot this backend models')
@@ -703,6 +718,26 @@ const getPrototypeOfText = (ctx: EmitContext, operation: CallOperation): string 
  * `null` prototype. A statically typed carrier has no slot this backend
  * models (see `getPrototypeOfText`), so it refuses by name.
  */
+/**
+ * A compiled class's prototype object handed in as a prototype -- proven by
+ * the read that produced it, `C.prototype` off the class's constructor -- boxed
+ * for the runtime to link through the class's prototype facade
+ * (`prototypeLinkOf`). Any other native carrier has no link to give.
+ */
+const compiledPrototypeBoxText = (ctx: EmitContext, proto: IrOperand): string | null => {
+  if (proto.representation.kind !== 'class-ref') return null
+  const origin = ctx.propertyReadOrigins.get(proto.value)
+  if (origin === undefined || origin.receiver.representation.kind !== 'constructor-family') return null
+  if (ctx.staticKeyTexts.get(origin.key.value) !== 'prototype') return null
+  return alignedValueText(
+    ctx,
+    'host/emit-host-object.ts:compiled-prototype',
+    proto.representation,
+    { kind: 'dynamic', reason: 'opt-in-fallback' },
+    operandText(ctx, proto)
+  )
+}
+
 const setPrototypeOfText = (ctx: EmitContext, operation: CallOperation): string => {
   const member = 'setPrototypeOf'
   const [target, proto] = operation.arguments
@@ -718,6 +753,8 @@ const setPrototypeOfText = (ctx: EmitContext, operation: CallOperation): string 
   }
   if (proto.representation.kind === 'null')
     return `gea::host::ObjectConstructor::setPrototypeOf(${operandText(ctx, target)}, gea::Value::box(gea::Value::Tag::Null, nullptr))`
+  const compiled = compiledPrototypeBoxText(ctx, proto)
+  if (compiled !== null) return `gea::host::ObjectConstructor::setPrototypeOf(${operandText(ctx, target)}, ${compiled})`
   if (proto.representation.kind !== 'dynamic') {
     return refuseObjectCarrier(member, proto.representation, 'a prototype must be a boxed object or function, or null')
   }
@@ -814,6 +851,17 @@ const hasOwnText = (ctx: EmitContext, operation: CallOperation): string => {
   // key text `constantTexts` only holds because the render minted it (e.g. a
   // folded `typeof` result reaching here as the tested key).
   const spelled = ctx.staticKeyTexts.get(key.value)
+  // A computed string key over a plain record (proxy-addr's
+  // `Object.hasOwn(IP_RANGES, val)`): its own keys are exactly its fields, each
+  // present by its own bit, so the answer is a comparison against each.
+  if (spelled === undefined && view.representation.kind === 'record') {
+    const tests = view.fields.map(
+      (field) => `(gea_key.text() == ${cppStringLiteral(field.key)} && ${ownKeyPresenceText('hasOwn', view, field) ?? 'true'})`
+    )
+    // ToPropertyKey of the argument; a symbol names no string-keyed field.
+    const keyed = `const gea::PropertyKey gea_key = ${propertyKeyText(ctx, 'hasOwn', key)}; if (gea_key.isSymbol()) return false;`
+    return `([&]() -> bool { ${keyed} return ${tests.length === 0 ? 'false' : tests.join(' || ')}; }())`
+  }
   if (spelled === undefined) {
     return refuseObjectCarrier(
       'hasOwn',
@@ -932,6 +980,7 @@ const descriptorAggregateBuilder = (
   readonly aggregateOf: (overrides: Readonly<Record<string, string>>, present: Readonly<Record<string, string>>) => string
   readonly convertValueField: (source: Representation, text: string) => string
   readonly attributeText: (key: string, has: string, value: string) => string
+  readonly accessorFieldText: (key: 'get' | 'set', text: string) => Readonly<Record<string, string>>
   readonly valueFieldRepresentation: Representation | null
 } => {
   const optional = resultRepresentation.kind === 'optional' ? resultRepresentation : null
@@ -1058,7 +1107,22 @@ const descriptorAggregateBuilder = (
     }
     return converted
   }
-  return { resultType, someText, absentText, aggregateOf, convertValueField, attributeText, valueFieldRepresentation }
+  // A runtime descriptor's accessor is the boxed function it holds
+  // (`getterValue`/`setterValue`); a record declaring no such field has
+  // nowhere to put one, and one that does takes it through the box.
+  const accessorFieldText = (key: 'get' | 'set', text: string): Readonly<Record<string, string>> => {
+    const field = fields.find((candidate) => candidate.key === key)
+    if (field === undefined) return {}
+    const converted = alignedValueText(ctx, 'host/emit-host-object.ts:accessor', dynamicCarrier, field.value, text)
+    if (converted === null)
+      throw createCppEmitBlockedError(
+        'host-member-call:Object.getOwnPropertyDescriptor',
+        `${contextLabel} would store a boxed accessor into the descriptor's "${key}" field carried as ` +
+          `"${representationKey(field.value)}", and no installed conversion performs that`
+      )
+    return { [key]: converted }
+  }
+  return { resultType, someText, absentText, aggregateOf, convertValueField, attributeText, accessorFieldText, valueFieldRepresentation }
 }
 
 /**
@@ -1513,10 +1577,10 @@ const knownDescriptorText = (
  * "states false" and "states nothing" are different, so a bare `bool` read
  * would silently invent an attribute the descriptor never claimed).
  *
- * `get`/`set` are left at their default absent: converting a native
- * `std::function` accessor into this record's `Optional<CallableObject<...>>`
- * field needs a std::function-to-CallableObject bridge this arm does not
- * build, and no consumer in this probe reads a descriptor's accessors.
+ * `get`/`set` are the boxed accessor functions the descriptor holds
+ * (`getterValue`/`setterValue`), converted into the record's fields through
+ * the box -- safe-stable-stringify reads `%TypedArray%.prototype`'s
+ * `@@toStringTag` getter this way and calls it on every value it stringifies.
  */
 const dynamicDescriptorConversionText = (
   ctx: EmitContext,
@@ -1532,7 +1596,7 @@ const dynamicDescriptorConversionText = (
       `"Object.${member}" of a dynamic receiver published no result to build a descriptor into`
     )
   }
-  const { resultType, someText, absentText, aggregateOf, attributeText, convertValueField } = descriptorAggregateBuilder(
+  const { resultType, someText, absentText, aggregateOf, attributeText, accessorFieldText, convertValueField } = descriptorAggregateBuilder(
     ctx,
     resultRepresentation,
     `"Object.${member}" of a dynamic receiver`
@@ -1540,6 +1604,8 @@ const dynamicDescriptorConversionText = (
   const nativeCall = `gea::host::ObjectConstructor::${member}(${receiver}, ${propertyKeyText(ctx, member, key)})`
   const aggregate = aggregateOf(
     {
+      ...accessorFieldText('get', '__gea_native->getterValue'),
+      ...accessorFieldText('set', '__gea_native->setterValue'),
       // The runtime's own descriptor keeps `value` boxed (`gea::Value`) even
       // though the call-site result may have narrowed the field to a typed
       // carrier -- exactly the widening `nativeHandleDescriptorText`'s `boxed`
@@ -1554,6 +1620,8 @@ const dynamicDescriptorConversionText = (
     {
       value: '__gea_native->hasValue',
       writable: '__gea_native->hasWritable',
+      get: '__gea_native->hasGet',
+      set: '__gea_native->hasSet',
       enumerable: '__gea_native->hasEnumerable',
       configurable: '__gea_native->hasConfigurable'
     }
@@ -1791,8 +1859,21 @@ const createText = (ctx: EmitContext, operation: CallOperation): string => {
       '"Object.create" takes a prototype argument, and this call passes none'
     )
   }
-  if (operation.arguments.length > 1 || proto.representation.kind !== 'null') return linkedCreateText(ctx, operation, proto)
   const result = operation.result?.representation ?? null
+  // A `null` the argument slot boxed (`Object.create(null)` under the opt-in)
+  // is still the null prototype a table is exactly; any other box would be an
+  // object the table cannot link to, which is refused where it is found.
+  if (
+    operation.arguments.length === 1 &&
+    proto.representation.kind === 'dynamic' &&
+    result !== null &&
+    (result.kind === 'dictionary' || result.kind === 'record')
+  ) {
+    const storage = cppTypeOf(result, 'owned')
+    const fresh = result.ownership === 'shared-refcount' ? `gea::makeRef<${storage}>()` : `${storage}{}`
+    return `([&]() { if (${operandText(ctx, proto)}.tag() != gea::Value::Tag::Null) gea::detail::refuseLinkedObjectCreate(); return ${fresh}; }())`
+  }
+  if (operation.arguments.length > 1 || proto.representation.kind !== 'null') return linkedCreateText(ctx, operation, proto)
   // The result's own carrier, whenever the program stated one. 20.1.2.2 makes
   // this call an OrdinaryObjectCreate with a null prototype and no own
   // properties -- and an empty `gea::Dictionary<V>` and a value-initialized
@@ -1836,7 +1917,7 @@ const linkedCreateText = (ctx: EmitContext, operation: CallOperation, proto: IrO
     carrier.kind === 'null' ||
     (carrier.kind === 'native-handle' && carrier.native === null && errorPrototypeProtocols.has(carrier.protocol)) ||
     (carrier.kind === 'tagged-union' && carrier.arms.every((arm) => linkable(arm.value)))
-  if (!linkable(proto.representation)) {
+  if (!linkable(proto.representation) && compiledPrototypeBoxText(ctx, proto) === null) {
     throw createCppEmitBlockedError(
       'host-member-call:Object.create',
       `"Object.create" was passed a prototype carried as "${representationKey(proto.representation)}"; only a null, boxed or ` +
@@ -1844,7 +1925,7 @@ const linkedCreateText = (ctx: EmitContext, operation: CallOperation, proto: IrO
     )
   }
   const properties = operation.arguments[1]
-  const prototypeText = boxedObjectArgumentText(ctx, 'create', proto, 'prototype')
+  const prototypeText = compiledPrototypeBoxText(ctx, proto) ?? boxedObjectArgumentText(ctx, 'create', proto, 'prototype')
   return `gea::runtime::object::create(${prototypeText}, ${properties === undefined ? 'gea::Value()' : boxedObjectArgumentText(ctx, 'create', properties, 'properties object')})`
 }
 
@@ -2038,6 +2119,17 @@ const assignSourceText = (ctx: EmitContext, targetView: ObjectView, sourceView: 
       // [[Set]] path and no typed target is boxed.
       return `gea::record::assignDynamicProperties(${targetView.receiver}, ${sourceView.receiver});`
     }
+    // A string-keyed table copied into a box: 7.3.25 over the table's own
+    // enumerable keys in creation order, each an ordinary `[[Set]]` on the box
+    // (fast-uri's `Object.assign(target, headers)`).
+    if (sourceView.kind === 'dictionary' && sourceView.representation.key === 'string' && targetView.kind === 'dynamic') {
+      const value = cppTypeOf(sourceView.value)
+      return (
+        `{ const auto& gea_assign_source = ${sourceView.receiver}; if (gea_assign_source) for (const std::string& gea_assign_key : ` +
+        `*gea_assign_source->enumerableKeySnapshot()) ${targetView.receiver}.setProperty(gea::PropertyKey::string(gea_assign_key), ` +
+        `gea::detail::DynamicCarrier<${value}>::out(gea_assign_source->read(gea_assign_key))); }`
+      )
+    }
     const table = targetView.kind === 'dictionary' ? targetView : sourceView
     if (table.kind !== 'dictionary')
       throw createCppEmitBlockedError('host-member-call:Object.assign', '"Object.assign" reached a dictionary arm with no dictionary side')
@@ -2076,6 +2168,26 @@ const assignSourceText = (ctx: EmitContext, targetView: ObjectView, sourceView: 
       `gea::nativeDynamicSet(${targetView.receiver}, gea::PropertyKey::string(__gea_key), ` +
       `__gea_source.getProperty(gea::PropertyKey::string(__gea_key))); }`
     )
+  }
+  if (targetView.kind === 'dynamic' && sourceView.kind === 'known') {
+    // The mirror of the arm above: the source's own keys are known here and
+    // the target is an ordinary object, so each present field is one
+    // `[[Set]]` (7.3.25 8.c.ii) of its boxed value on the target's own table.
+    const stores = ownKeyFields(sourceView).map((field) => {
+      const value = getOwnValue(ctx, sourceView, field)
+      const boxed = alignedValueText(ctx, 'host/emit-host-object.ts:assign-into-dynamic', value.representation, dynamicCarrier, value.text)
+      if (boxed === null) {
+        return refuseObjectCarrier(
+          'assign',
+          sourceView.representation,
+          `the source field "${field.key}" carries "${representationKey(value.representation)}", which does not box into the dynamic target`
+        )
+      }
+      const store = `__gea_target.setProperty(gea::PropertyKey::string(${cppStringLiteral(field.key)}), ${boxed});`
+      const presence = ownKeyPresenceText('assign', sourceView, field)
+      return presence === null ? store : `if (${presence}) ${store}`
+    })
+    return `{ gea::Value __gea_target = ${targetView.receiver}; ${stores.join(' ')} }`
   }
   if (targetView.kind === 'dynamic' || sourceView.kind === 'dynamic') {
     const known = targetView.kind === 'known' ? targetView : sourceView
@@ -2843,8 +2955,80 @@ const isText = (ctx: EmitContext, operation: CallOperation): string => {
   )
 }
 
+/**
+ * The statements binding `__gea_keys` to a target's own property keys, or
+ * `null` when its carrier has no native own-key protocol: a box's own table, or
+ * the generated field dispatcher and sidecar of a compiler-owned shared object.
+ * `nonObject` is what a box that is not an object answers -- `Reflect.ownKeys`'
+ * TypeError, or `getOwnPropertySymbols`' ToObject (a TypeError for `null` and
+ * `undefined`, an empty list for any other primitive).
+ */
+export const ownKeysPreparationOf = (
+  ctx: EmitContext,
+  target: IrOperand,
+  site: string,
+  nonObject: 'throw' | 'to-object'
+): string | null => {
+  const representation = target.representation
+  const receiver = operandText(ctx, target)
+  const generated =
+    representation.kind === 'record' ||
+    representation.kind === 'record-with-index' ||
+    representation.kind === 'class-ref' ||
+    (representation.kind === 'native-record-ref' && representation.native === null)
+  if (representation.kind === 'dynamic') {
+    const check =
+      nonObject === 'throw'
+        ? `if (!gea::isObjectValue(__gea_target)) gea::host::throwRuntimeError("TypeError", "${site} target must be an object"); const auto __gea_keys = __gea_target.ownPropertyKeys(); `
+        : `if (__gea_target.tag() == gea::Value::Tag::Undefined || __gea_target.tag() == gea::Value::Tag::Null) gea::host::throwRuntimeError("TypeError", "Cannot convert undefined or null to object"); ` +
+          `const auto __gea_keys = gea::isObjectValue(__gea_target) ? __gea_target.ownPropertyKeys() : decltype(__gea_target.ownPropertyKeys()){}; `
+    return `const auto& __gea_target = ${receiver}; ${check}`
+  }
+  if ((generated && representation.ownership === 'shared-refcount') || regexpRoleOf(representation) === 'pattern')
+    return `const auto& __gea_target = ${receiver}; if (!__gea_target) gea::host::throwRuntimeError("TypeError", "${site} target must be an object"); const auto __gea_keys = gea::nativeOwnPropertyKeys(__gea_target); `
+  return null
+}
+
+/**
+ * `Object.getOwnPropertySymbols` -- the symbol half of the same own-key list
+ * `Reflect.ownKeys` reads, in its order (ECMA-262 20.1.2.11's
+ * GetOwnPropertyKeys(O, symbol)). A string or number has no symbol keys.
+ */
+export const ownPropertySymbolsText = (ctx: EmitContext, operation: CallOperation): string => {
+  const target = operation.arguments[0]
+  const site = 'Object.getOwnPropertySymbols'
+  const refuse = (reason: string): never => {
+    throw createCppEmitBlockedError(`host-member-call:${site}`, reason)
+  }
+  if (!target || operation.argumentsAreSpread) return refuse('own-key enumeration requires a known target operand')
+  const unsupportedSymbol = unaddressableNativeSymbolKeyOf(ctx, target.representation)
+  if (unsupportedSymbol !== null) return refuse(`fixed symbol key ${unsupportedSymbol} has no retained runtime identity`)
+  const result = operation.result?.representation
+  if (result !== undefined && (result.kind !== 'array-object' || result.ownership !== 'shared-refcount'))
+    return refuse('the key list has no native array carrier')
+  const element = result?.kind === 'array-object' ? result.element : null
+  const primitive = target.representation.kind === 'string' || target.representation.kind === 'scalar'
+  const preparation = primitive ? '' : ownKeysPreparationOf(ctx, target, site, 'to-object')
+  if (preparation === null) return refuse('the target has no supported native own-key protocol')
+  if (element === null) return primitive ? `(void)(${operandText(ctx, target)})` : `([&]() { ${preparation}(void)__gea_keys; })()`
+  const symbolKey = alignedValueText(
+    ctx,
+    site,
+    { kind: 'symbol' },
+    element,
+    'gea::Symbol(static_cast<std::uint32_t>(__gea_key.symbolId()))'
+  )
+  if (symbolKey === null) return refuse('the key element cannot retain a symbol')
+  if (primitive) return `((void)(${operandText(ctx, target)}), gea::makeRef<gea::ArrayObject<${cppTypeOf(element)}>>())`
+  return (
+    `([&]() -> ${cppTypeOf(result!)} { ${preparation}auto __gea_result = gea::makeRef<gea::ArrayObject<${cppTypeOf(element)}>>(); ` +
+    `for (const auto& __gea_key : __gea_keys) if (__gea_key.isSymbol()) __gea_result->push(${symbolKey}); return __gea_result; })()`
+  )
+}
+
 export const objectMemberText = (ctx: EmitContext, member: string, operation: CallOperation): string => {
   if (member === 'keys' || member === 'getOwnPropertyNames') return keysText(ctx, member, operation)
+  if (member === 'getOwnPropertySymbols') return ownPropertySymbolsText(ctx, operation)
   if (member === 'values') return valuesText(ctx, operation)
   if (member === 'entries') return entriesText(ctx, operation)
   if (member === 'freeze') return integrityText(ctx, member, operation, 'freeze')

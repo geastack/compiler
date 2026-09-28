@@ -284,6 +284,33 @@ export const callableIdentityEqualityText = (
   return operator === '!==' || operator === '!=' ? `!${equal}` : equal
 }
 
+/**
+ * One side of a comparison against a box, boxed to meet it: boxing records the
+ * JavaScript type the carrier already had (`dynamicTagFor`), so the comparison
+ * is the language's over the two live types. `null` for a carrier with no box.
+ */
+const boxedSideText = (side: { readonly text: string; readonly representation: Representation }, against: Representation): string | null =>
+  side.representation.kind === 'dynamic' ? side.text : widenedStoreText(against, side.representation, side.text)
+
+/**
+ * `==`/`!=` with a box on either side: IsLooselyEqual (7.2.14) is decided by
+ * the two live types, so the concrete side is boxed to meet it -- which records
+ * the JavaScript type it already had -- and the runtime runs the algorithm.
+ */
+export const looseDynamicEqualityText = (
+  operator: string,
+  left: { readonly text: string; readonly representation: Representation },
+  right: { readonly text: string; readonly representation: Representation }
+): string | null => {
+  if (operator !== '==' && operator !== '!=') return null
+  if (left.representation.kind !== 'dynamic' && right.representation.kind !== 'dynamic') return null
+  const leftText = boxedSideText(left, right.representation)
+  const rightText = boxedSideText(right, left.representation)
+  if (leftText === null || rightText === null) return null
+  const equal = `gea::dynamicLooselyEqual(${leftText}, ${rightText})`
+  return operator === '!=' ? `!${equal}` : equal
+}
+
 export const strictEqualityText = (
   operator: string,
   left: { readonly text: string; readonly representation: Representation },
@@ -306,10 +333,8 @@ export const strictEqualityText = (
   // answer that is not a guess.
   const dynamicSide = left.representation.kind === 'dynamic' || right.representation.kind === 'dynamic'
   if (dynamicSide) {
-    const box = (side: typeof left, against: Representation): string | null =>
-      side.representation.kind === 'dynamic' ? side.text : widenedStoreText(against, side.representation, side.text)
-    const leftText = box(left, right.representation)
-    const rightText = box(right, left.representation)
+    const leftText = boxedSideText(left, right.representation)
+    const rightText = boxedSideText(right, left.representation)
     if (leftText === null || rightText === null) return null
     return negate(operator, `gea::Value::strictEquals(${leftText}, ${rightText})`)
   }
@@ -427,7 +452,17 @@ export const strictEqualityText = (
   // memcmp of the storage, which would compare padding, and rather than a
   // single `index()` test, which would call two different strings equal.
   if (leftUnion && rightUnion) {
-    if (representationKey(left.representation) !== representationKey(right.representation)) return null
+    // Two differently shaped sums: each live left arm is a concrete value
+    // against the right sum, which the branch below already answers.
+    if (representationKey(left.representation) !== representationKey(right.representation)) {
+      const nested: string[] = []
+      for (const [index, arm] of leftUnion.arms.entries()) {
+        const compared = strictEqualityText('===', { text: `${left.text}.get<${index}>()`, representation: arm.value }, right)
+        if (compared === null) return null
+        if (compared !== 'false') nested.push(`(${left.text}.is<${index}>() && (${compared}))`)
+      }
+      return negate(operator, nested.length ? `(${nested.join(' || ')})` : 'false')
+    }
     const arms: string[] = []
     for (const [index, arm] of leftUnion.arms.entries()) {
       const compared = armEqualityText(arm.value, `${left.text}.get<${index}>()`, `${right.text}.get<${index}>()`)

@@ -54,12 +54,14 @@ import {
 import { alignedValueText, classFamilyLoadText, movedValueText, narrowedLoadText } from './emit-narrowing.js'
 import { namespaceMemberStore } from './emit-namespaces.js'
 import {
+  boxedValueText,
   callableSidecarGetText,
   isNativeCallableCarrier,
   dynamicGetText,
   emitDynamicSet,
   emitNativeSidecarSet,
-  nativeSidecarGetText
+  nativeSidecarGetText,
+  unboxedReadText
 } from './emit-dynamic-properties.js'
 import { dynamicObjectPrototypeMemberRead, objectShapePrototypeMemberRead } from './host/object-protocol.js'
 import {
@@ -213,7 +215,23 @@ export const dictionaryTableOf = (
  * not be more truthful -- it would not compile, because the carrier the rest
  * of the program agreed on has no way to hold an absence.
  */
+/**
+ * A symbol key on a string-keyed table: the table holds only its string keys,
+ * and the object's symbol-keyed properties live in its identity-keyed expando
+ * table -- fastify's `this.request[kRequestSignal]` over a request held as a
+ * dictionary.
+ */
+const symbolKeyedDictionaryMember = (operation: GetOperation | SetOperation | DefineOwnPropertyOperation): boolean =>
+  operation.receiver.representation.kind === 'dictionary' &&
+  operation.receiver.representation.key !== 'symbol' &&
+  operation.receiver.representation.ownership === 'shared-refcount' &&
+  operation.key.representation.kind === 'symbol'
+
 const dictionaryReadText = (ctx: EmitContext, operation: GetOperation): string | null => {
+  if (symbolKeyedDictionaryMember(operation)) {
+    const read = `gea::nativeDynamicGet(${operandText(ctx, operation.receiver)}, gea::PropertyKey::symbol(${operandText(ctx, operation.key)}))`
+    return unboxedReadText(operation.result.representation, read, 'a symbol-keyed read of a string-keyed table')
+  }
   const table = dictionaryTableOf(ctx, operation.receiver, operation.key)
   if (table === null) return null
   if (operation.receiver.representation.kind !== 'dictionary') return null
@@ -671,6 +689,7 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
   }
   const symbolMember = symbolMemberText(ctx, operation.receiver, operation.key, operation.result)
   if (symbolMember !== null) {
+    if (symbolMember === '') return
     const name = defineValue(ctx, operation.result)
     lines.push(`${name} = ${symbolMember};`)
     return
@@ -1169,6 +1188,15 @@ export const emitFieldStore = (
   operation: SetOperation | DefineOwnPropertyOperation,
   label: string
 ): void => {
+  // PutValue step 5.a over a nullish base: ToObject throws a TypeError, as
+  // `emitGet`'s read through one does. Such a receiver is typed `never`
+  // (after a call that cannot return, or in a branch the types rule out), so
+  // the store is unreachable in practice; throwing is what the language says.
+  const nullish = operation.receiver.representation.kind
+  if (operation.kind === 'set' && (nullish === 'undefined' || nullish === 'null' || nullish === 'void')) {
+    lines.push(`gea::host::throwGetPropertyOfNullish<bool>("${nullish === 'null' ? 'null' : 'undefined'}", "set");`)
+    return
+  }
   emitFieldStoreLines(ctx, lines, operation, label)
   // REPLACING a revision-backed field, before the store-INTO-it rule below.
   // `this.pageAnchors = builder.anchors` is the largest change such a field can
@@ -1550,6 +1578,13 @@ const emitFieldStoreLines = (
         : `if (${dense.flag}) gea::TypedArray<${cppScalarType(operation.receiver.representation.element)}>::writeInBounds(${dense.pointer}, ${dense.index}, ${value}); else ${general}`
     )
     finishTypedArrayStore()
+    return
+  }
+  if (operation.kind === 'set' && symbolKeyedDictionaryMember(operation)) {
+    const stored = `gea::nativeDynamicSet(${operandText(ctx, operation.receiver)}, gea::PropertyKey::symbol(${operandText(ctx, operation.key)}), ${boxedValueText(ctx, operation.value, 'a symbol-keyed store into a string-keyed table')})`
+    lines.push(
+      operation.strict ? `if (!${stored}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read only property");` : `${stored};`
+    )
     return
   }
   const dictionaryTarget = dictionaryTableOf(ctx, operation.receiver, operation.key)

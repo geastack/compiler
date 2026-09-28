@@ -1,5 +1,9 @@
+import { censusReselectedCallResult, censusRetypedExpressionType } from './overload-reselection.js'
 import {
+  isStandardInterfaceType,
+  libraryViewNarrowingCarrier,
   isVacuousArrayType,
+  isVacuousCollectionType,
   annotationStatesNothing,
   censusedTypeAt,
   containsUnstatedPosition,
@@ -14,7 +18,13 @@ import {
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import ts from 'typescript'
 import { emptyAbsentGlobalCensus, type AbsentGlobalCensus } from './absent-globals.js'
-import { emptyParameterBindingCensus, typedOnlyByDefault, type ParameterBindingCensus } from './parameter-bindings.js'
+import {
+  carriesUnsubstitutedGeneric,
+  emptyParameterBindingCensus,
+  typedOnlyByDefault,
+  type ParameterBindingCensus
+} from './parameter-bindings.js'
+import { unwrapErasedExpression } from './producers/erasure.js'
 
 /**
  * Which type an object or array literal is laid out as.
@@ -26,7 +36,20 @@ import { emptyParameterBindingCensus, typedOnlyByDefault, type ParameterBindingC
 export const createLayoutTypeResolver = (
   checker: ts.TypeChecker,
   parameters: ParameterBindingCensus = emptyParameterBindingCensus,
-  absent: AbsentGlobalCensus = emptyAbsentGlobalCensus
+  absent: AbsentGlobalCensus = emptyAbsentGlobalCensus,
+  /**
+   * The interface family a type is a view of -- a member, or an intersection
+   * narrowing one (`structural.ts`'s `familyMemberNarrowedBy`) -- by the
+   * family's key, or `null`. Every view of a family is one layout.
+   */
+  familyOfView: (type: ts.Type) => string | null = () => null,
+  /**
+   * The proven `module.exports` expression of the CommonJS module an import
+   * declaration names (`commonjs-module-record.ts`), or `null`.
+   */
+  commonJsExportOfImport: (declaration: ts.ImportDeclaration) => ts.Expression | null = () => null,
+  /** The `export default` expression of the ES module a static `require` call names (`commonjs-module-record.ts`), or `null`. */
+  requiredDefaultExportAt: (node: ts.Node) => ts.Expression | null = () => null
 ): ((node: ts.Node) => ts.Type) => {
   /**
    * An array-pattern element read past the end of a plain array binds
@@ -629,6 +652,85 @@ export const createLayoutTypeResolver = (
   }
 
   /**
+   * A FRESH EMPTY COLLECTION takes the type of the slot it fills.
+   *
+   * `MapConstructor`'s zero-argument overload is `new (): Map<any, any>`, so
+   * `new Map()` states nothing about what it will hold -- the same
+   * non-statement an empty array's `never[]` is (`emptyArrayPositionTypeOf`).
+   * Stored straight into a declared slot, the allocation is that slot's value:
+   * ajv's `vs = this._values[prefix] = new Map()` fills a `Map<unknown,
+   * ValueScopeName>`, and laying the allocation out as `Map<any, any>` left a
+   * conversion between two map carriers nothing can install. Only the same
+   * collection (by symbol) with stated arguments is taken.
+   */
+  const emptyCollectionSlotTypeOf = (node: ts.Node, own: ts.Type): ts.Type | null => {
+    if (!ts.isNewExpression(node) || (node.arguments?.length ?? 0) > 0 || !isVacuousCollectionType(checker, own)) return null
+    const collection = own.getSymbol()
+    const ownArguments = checker.getTypeArguments(own as ts.TypeReference)
+    const contextual = checker.getContextualType(node)
+    if (!contextual) return null
+    const slot = checker.getNonNullableType(contextual)
+    if (slot.getSymbol() !== collection) return null
+    const slotArguments = checker.getTypeArguments(slot as ts.TypeReference)
+    if (slotArguments.length !== ownArguments.length || slotArguments.every((argument) => (argument.flags & ts.TypeFlags.Any) !== 0))
+      return null
+    return slot
+  }
+
+  /**
+   * A stated collection with a fresh empty one as its fallback is that stated
+   * collection: `existing || new Map()` (ajv's `usedValues[prefix] =
+   * usedValues[prefix] || new Map()`), and the assignment and `const` that
+   * hold it. The checker's union reduction keeps only the fresh
+   * `Map<any, any>`, which states nothing, while the fresh allocation itself
+   * already takes the stated slot's type (`emptyCollectionSlotTypeOf`); laying
+   * the cell out as `Map<any, any>` left a conversion between two map
+   * carriers nothing can install.
+   */
+  const freshCollectionFallbackTypeOf = (node: ts.Node, own: ts.Type, depth = 0): ts.Type | null => {
+    if (depth > 4 || !isVacuousCollectionType(checker, own)) return null
+    const collection = own.getSymbol()
+    const stated = (type: ts.Type): ts.Type | null => {
+      const present = checker.getNonNullableType(type)
+      return present.getSymbol() === collection && !isVacuousCollectionType(checker, present) ? present : null
+    }
+    const isFreshEmpty = (expression: ts.Expression): boolean => {
+      const inner = unwrapErasedExpression(expression)
+      return (
+        ts.isNewExpression(inner) &&
+        (inner.arguments?.length ?? 0) === 0 &&
+        isVacuousCollectionType(checker, checker.getTypeAtLocation(inner))
+      )
+    }
+    let expression: ts.Node = node
+    if (ts.isIdentifier(expression)) {
+      const declaration = boundSymbolOf(expression)?.valueDeclaration
+      if (!declaration || !ts.isVariableDeclaration(declaration) || declaration.name === expression) return null
+      const list = declaration.parent
+      if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return null
+      expression = declaration
+    }
+    if (ts.isVariableDeclaration(expression)) {
+      if (!expression.initializer || expression.type !== undefined) return null
+      return freshCollectionFallbackTypeOf(expression.initializer, checker.getTypeAtLocation(expression.initializer), depth + 1)
+    }
+    if (!ts.isExpression(expression)) return null
+    const inner = unwrapErasedExpression(expression)
+    if (!ts.isBinaryExpression(inner)) return null
+    const operator = inner.operatorToken.kind
+    if (operator === ts.SyntaxKind.EqualsToken) {
+      return (
+        freshCollectionFallbackTypeOf(inner.right, checker.getTypeAtLocation(inner.right), depth + 1) ??
+        (isFreshEmpty(inner.right) ? stated(checker.getTypeAtLocation(inner.left)) : null)
+      )
+    }
+    if (operator !== ts.SyntaxKind.BarBarToken && operator !== ts.SyntaxKind.QuestionQuestionToken) return null
+    if (isFreshEmpty(inner.right)) return stated(checker.getTypeAtLocation(inner.left))
+    if (isFreshEmpty(inner.left)) return stated(checker.getTypeAtLocation(inner.right))
+    return null
+  }
+
+  /**
    * The one array carrier a spread-only conditional requires when one arm is
    * syntactically empty: `...(condition ? [value] : [])`.
    *
@@ -698,6 +800,43 @@ export const createLayoutTypeResolver = (
    * declared as such also returns the same type, so genuinely dynamic arrays
    * remain dynamic.
    */
+  /**
+   * A FRESH ARRAY LITERAL takes the array type of the slot it fills, when every
+   * element it writes fits that slot's element: the allocation is not yet
+   * shared, so laying it out as the slot's own array is the same value, and an
+   * Array carrier cannot be converted into another after the fact.
+   * @fastify/merge-json-schemas' `let result = [[]]` fills a cell the census
+   * joins with `temp` (an array of anything); ret's `return [tokens,
+   * regexp.lastIndex]` fills a return its JSDoc states as a mixed array.
+   */
+  const allocatedArrayLiteralSlotTypeOf = (node: ts.Node): ts.Type | null => {
+    if (
+      !ts.isArrayLiteralExpression(node) ||
+      node.elements.some((element) => ts.isSpreadElement(element) || ts.isOmittedExpression(element))
+    )
+      return null
+    let slot: ts.Type | null = null
+    let holder: ts.Node = node
+    while (ts.isParenthesizedExpression(holder.parent)) holder = holder.parent
+    const parent = holder.parent
+    if (ts.isVariableDeclaration(parent) && parent.initializer === holder && parent.type === undefined) slot = layoutTypeAt(parent)
+    else if (ts.isBinaryExpression(parent) && parent.right === holder && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken)
+      slot = layoutTypeAt(parent.left)
+    else if (ts.isReturnStatement(parent)) {
+      // The return census answers a function-like declaration with the
+      // return it bound -- the ABI's own result -- ahead of the checker's.
+      const owner = ts.findAncestor(parent, ts.isFunctionLike)
+      const signature = owner ? checker.getSignatureFromDeclaration(owner as ts.SignatureDeclaration) : undefined
+      slot = (owner ? parameters.typeAt(owner) : null) ?? (signature ? checker.getReturnTypeOfSignature(signature) : null)
+    }
+    if (slot === null) return null
+    const present = checker.getNonNullableType(slot)
+    if (!checker.isArrayType(present)) return null
+    const element = checker.getTypeArguments(present as ts.TypeReference)[0]
+    if (!element || (element.flags & ts.TypeFlags.Never) !== 0) return null
+    return node.elements.every((written) => checker.isTypeAssignableTo(checker.getTypeAtLocation(written), element)) ? present : null
+  }
+
   const soleDeclaredArrayArm = (node: ts.Node, own: ts.Type): ts.Type | null => {
     if (!checker.isArrayType(own)) return null
     const [element] = checker.getTypeArguments(own as ts.TypeReference)
@@ -840,6 +979,177 @@ export const createLayoutTypeResolver = (
     return structuralOnly ? declared : null
   }
 
+  const declaredDynamicLibraryViewCarrier = (node: ts.Node, own: ts.Type): ts.Type | null => libraryViewNarrowingCarrier(checker, node, own)
+
+  /**
+   * An intersection of object types that is itself just an object type: ajv's
+   * `RequiredInstanceOptions` is a mapped type `& { code: InstanceCodeOptions }`,
+   * and the literal `requiredOptions` returns is laid out as it. An intersection
+   * carrying a `ThisType<T>` marker (`PropertyDescriptorMap & ThisType<any>`)
+   * or a type parameter states something about the literal's methods, not its
+   * storage, and keeps the literal's own type. So does a literal built by a
+   * spread (`({ ...base, ...extra })` against `Named & { age: number }`): its
+   * copies are placed into the flat field set it writes, which an
+   * intersection-shaped layout does not state.
+   */
+  const isPlainObjectIntersection = (type: ts.Type, anchor: ts.Node): boolean =>
+    type.isIntersection() &&
+    !(ts.isObjectLiteralExpression(anchor) && anchor.properties.some(ts.isSpreadAssignment)) &&
+    type.types.every(
+      (member) =>
+        (member.flags & ts.TypeFlags.Object) !== 0 &&
+        !isStandardInterfaceType(checker, anchor, 'ThisType', member) &&
+        !carriesUnsubstitutedGeneric(checker, member)
+    )
+
+  /**
+   * The operand of `x as (typeof x & Extra)`: an assertion that names the
+   * operand's own type and adds members to it is the same object, stated to
+   * hold more. ajv's `(uri as URI).code = ...` over the `fast-uri` namespace,
+   * then `export default uri as URI`: laid out as the assertion's intersection
+   * it was a second record, copied from the namespace, and the write landed on
+   * the copy. The object keeps its carrier; an added member it does not
+   * declare lives where any undeclared own property of it does.
+   */
+  const ownValueAssertionOperandOf = (node: ts.Node): ts.Expression | null => {
+    let inner = node
+    while (ts.isParenthesizedExpression(inner)) inner = inner.expression
+    if (!ts.isAsExpression(inner) && !ts.isTypeAssertionExpression(inner)) return null
+    const asserted = checker.getTypeAtLocation(inner)
+    if (!asserted.isIntersection()) return null
+    const operand = checker.getTypeAtLocation(inner.expression)
+    return asserted.types.includes(operand) ? inner.expression : null
+  }
+
+  /**
+   * A namespace import of a CommonJS module is its `module.exports` value:
+   * ajv's `import * as uri from "fast-uri"` is `require("fast-uri")`, the
+   * `fastUri` object. The checker types the binding and every reference to it
+   * as a synthetic namespace carrying a `default`, a second record the value
+   * never is. The binding and its references take the proven exports
+   * expression's layout.
+   */
+  const commonJsNamespaceExportOf = (node: ts.Node): ts.Expression | null => {
+    if (!ts.isIdentifier(node)) return null
+    const named = checker.getSymbolAtLocation(node)
+    if (!named || (named.flags & ts.SymbolFlags.Alias) === 0) return null
+    const namespaceImport = named.declarations?.find(ts.isNamespaceImport)
+    const declaration = namespaceImport?.parent.parent
+    return declaration && ts.isImportDeclaration(declaration) ? commonJsExportOfImport(declaration) : null
+  }
+
+  /**
+   * A namespace import of a CommonJS module is that module's exported value:
+   * ajv's `import * as uri from "fast-uri"` is `require("fast-uri")`, whose
+   * `module.exports = fastUri` makes the alias resolve to fast-uri's own
+   * `const fastUri`. The checker types each reference as the synthesized
+   * exports view instead (the object plus the `default` and `fastUri` members
+   * the module writes onto it), a second record the cell never holds. A
+   * reference is laid out as the cell it reads.
+   */
+  const namespaceImportValueTypeOf = (node: ts.Node): ts.Type | null => {
+    if (!ts.isIdentifier(node)) return null
+    const named = checker.getSymbolAtLocation(node)
+    if (!named || (named.flags & ts.SymbolFlags.Alias) === 0 || !named.declarations?.some(ts.isNamespaceImport)) return null
+    const cell = checker.getAliasedSymbol(named).valueDeclaration
+    return cell && ts.isVariableDeclaration(cell) && !cell.getSourceFile().isDeclarationFile ? layoutTypeAt(cell) : null
+  }
+
+  /** An import of a module's `export default x as (typeof x & Extra)`: it holds that same object. */
+  const importedOwnValueAssertionOf = (node: ts.Node): ts.Expression | null => {
+    if (!ts.isIdentifier(node)) return null
+    const named = checker.getSymbolAtLocation(node)
+    if (!named || (named.flags & ts.SymbolFlags.Alias) === 0) return null
+    const exported = checker.getAliasedSymbol(named).declarations?.find(ts.isExportAssignment)
+    return exported ? ownValueAssertionOperandOf(exported.expression) : null
+  }
+
+  /**
+   * A literal that spreads a source with a string index signature holds every
+   * key the source holds at run time -- `CopyDataProperties` enumerates them
+   * -- but the checker's type for it keeps an index signature only when every
+   * part of the literal has one, so `{ additionalProperties: x,
+   * ...shared(root) }` over ajv's `SchemaObject` names the literal's own keys
+   * alone and a layout built from it drops the rest. The literal is laid out
+   * as its own members beside the source's index. A context that is itself
+   * indexed already holds the keys and keeps its own rule.
+   */
+  const openedLiterals = new Map<ts.ObjectLiteralExpression, ts.Type | null>()
+  const spreadOpenedLiteralTypeOf = (node: ts.ObjectLiteralExpression, own: ts.Type): ts.Type | null => {
+    if (openedLiterals.has(node)) return openedLiterals.get(node) ?? null
+    const opened = (() => {
+      if (checker.getIndexInfosOfType(own).length > 0) return null
+      const context = checker.getContextualType(node)
+      if (context && (context.flags & ts.TypeFlags.Object) !== 0 && checker.getIndexInfosOfType(context).length > 0) return null
+      const indexes: ts.Type[] = []
+      for (const property of node.properties) {
+        if (!ts.isSpreadAssignment(property)) continue
+        const source = checker.getNonNullableType(checker.getTypeAtLocation(property.expression))
+        if ((source.flags & ts.TypeFlags.Object) === 0 || source.isUnion()) return null
+        const index = checker.getIndexInfoOfType(source, ts.IndexKind.String)
+        if (index) indexes.push(index.type)
+      }
+      const [value] = indexes
+      if (value === undefined || indexes.some((type) => type !== value)) return null
+      const constructing = checker as unknown as Partial<{
+        createIndexInfo(keyType: ts.Type, type: ts.Type, isReadonly: boolean): ts.IndexInfo
+        createAnonymousType(
+          symbol: ts.Symbol | undefined,
+          members: ts.SymbolTable,
+          callSignatures: readonly ts.Signature[],
+          constructSignatures: readonly ts.Signature[],
+          indexInfos: readonly ts.IndexInfo[]
+        ): ts.Type
+      }>
+      if (typeof constructing.createIndexInfo !== 'function' || typeof constructing.createAnonymousType !== 'function') return null
+      const members: ts.SymbolTable = new Map(checker.getPropertiesOfType(own).map((member) => [member.escapedName, member]))
+      const type = constructing.createAnonymousType(
+        own.getSymbol(),
+        members,
+        [],
+        [],
+        [constructing.createIndexInfo(checker.getStringType(), value, false)]
+      )
+      return checker.getIndexInfosOfType(type).length > 0 ? type : null
+    })()
+    openedLiterals.set(node, opened)
+    return opened
+  }
+
+  /**
+   * `fn.constructor` off a function: the checker answers `FunctionConstructor`
+   * for every function, but the language answers the intrinsic the
+   * declaration's kind names -- `%AsyncFunction%` for an `async` one, which is
+   * what fastify's `fn.constructor.name === 'AsyncFunction'` asks. Which one
+   * is a fact of the function object read at run time
+   * (`gea::functionConstructorOf`), so the read is the dynamic value that
+   * intrinsic is, not the host handle the checker's type would lay out.
+   */
+  const functionConstructorReadType = (node: ts.Node, own: ts.Type): ts.Type | null => {
+    if (!ts.isPropertyAccessExpression(node) || node.name.text !== 'constructor') return null
+    const intrinsic = own.getSymbol()
+    const standard =
+      (intrinsic?.declarations ?? []).length > 0 &&
+      (intrinsic?.declarations ?? []).every((declaration) => declaration.getSourceFile().hasNoDefaultLib)
+    if (intrinsic?.getName() !== 'FunctionConstructor' || !standard) return null
+    const receiver = checker.getNonNullableType(checker.getTypeAtLocation(node.expression))
+    return receiver.getCallSignatures().length > 0 ? checker.getAnyType() : null
+  }
+
+  /**
+   * `export default Foo` binds the VALUE `Foo` names. The checker resolves an
+   * export assignment's identifier with every meaning it has and answers a
+   * class's instance type there, so the read of the class -- a constructor --
+   * was typed as an instance and had no conversion out of its own cell (ajv's
+   * `export default Ajv`). The value meaning's type is the answer.
+   */
+  const exportedValueTypeAt = (node: ts.Node): ts.Type | null => {
+    if (!ts.isIdentifier(node) || !ts.isExportAssignment(node.parent) || node.parent.expression !== node) return null
+    const named = checker.getSymbolAtLocation(node)
+    const symbol = named && (named.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(named) : named
+    return symbol && (symbol.flags & ts.SymbolFlags.Value) !== 0 ? checker.getTypeOfSymbolAtLocation(symbol, node) : null
+  }
+
   const layoutTypeOf = (node: ts.Node): ts.Type => {
     // Asked FIRST, and unconditionally. A host stating that it does not provide
     // an ambient global contradicts an answer the checker is confident about --
@@ -849,6 +1159,14 @@ export const createLayoutTypeResolver = (
     // are one cell. See `absent-globals.ts`.
     const absentType = absent.typeAt(node)
     if (absentType) return absentType
+    const ownValueAssertion =
+      ownValueAssertionOperandOf(node) ??
+      importedOwnValueAssertionOf(node) ??
+      commonJsNamespaceExportOf(node) ??
+      requiredDefaultExportAt(node)
+    if (ownValueAssertion) return layoutTypeAt(ownValueAssertion)
+    const namespaceValue = namespaceImportValueTypeOf(node)
+    if (namespaceValue) return namespaceValue
     const constructorChoice = nominalConstructorChoiceTypeAt(checker, node, layoutTypeAt)
     if (constructorChoice) return constructorChoice
     // A narrowly scoped construction proof can outrank a checker answer that
@@ -906,8 +1224,9 @@ export const createLayoutTypeResolver = (
     // reason `censusedTypeAt`'s own contract is: it only ever fires where the
     // checker had nothing. Keep asking the checker here; let the guarded
     // fallback below be the one census consultation for this value.
-    const own = settleEvolving(node, checker.getTypeAtLocation(node))
-    const dynamicCarrier = declaredDynamicStructuralCarrier(node, own)
+    const own = settleEvolving(node, exportedValueTypeAt(node) ?? checker.getTypeAtLocation(node))
+    const dynamicCarrier =
+      declaredDynamicStructuralCarrier(node, own) ?? declaredDynamicLibraryViewCarrier(node, own) ?? functionConstructorReadType(node, own)
     if (dynamicCarrier) return dynamicCarrier
     const classCarrier = declaredClassCarrier(node, own)
     if (classCarrier) return classCarrier
@@ -915,6 +1234,8 @@ export const createLayoutTypeResolver = (
     if (dictionaryAlias) return dictionaryAlias
     const declaredArrayArm = soleDeclaredArrayArm(node, own)
     if (declaredArrayArm) return declaredArrayArm
+    const allocatedArraySlot = allocatedArrayLiteralSlotTypeOf(node)
+    if (allocatedArraySlot) return allocatedArraySlot
     const patternRead = arrayPatternReadOutranking(node, own)
     if (patternRead) return patternRead
     // An `any` here is one of exactly two answers worth a second question. It
@@ -1029,12 +1350,16 @@ export const createLayoutTypeResolver = (
       const deferred = annotationDeferringToInitializer(declaringCell)
       if (deferred) return deferred
     }
+    const emptyCollection = emptyCollectionSlotTypeOf(node, own) ?? freshCollectionFallbackTypeOf(node, own)
+    if (emptyCollection) return emptyCollection
     if (!ts.isObjectLiteralExpression(node) && !ts.isArrayLiteralExpression(node)) return own
     // The `{}` of `Object.assign( {}, ...sources )` is laid out as what the
     // call makes of it, from the same authority the call's result reads.
     if (ts.isObjectLiteralExpression(node)) {
       const freshTarget = objectAssignFreshTargetType(checker, node)
       if (freshTarget) return freshTarget
+      const opened = spreadOpenedLiteralTypeOf(node, own)
+      if (opened) return opened
     }
     // AN EMPTY ARRAY LITERAL NESTED IN ANOTHER LITERAL takes its element from
     // the position it fills, not from its own inference. `[]` alone infers
@@ -1117,8 +1442,15 @@ export const createLayoutTypeResolver = (
         : null
     if (parentLiteral && layoutTypeAt(parentLiteral) === checker.getTypeAtLocation(parentLiteral)) return own
     const contextual = narrowedSlot ?? narrowedCallSlot ?? checkerContext ?? inferredDeclarationContext
-    if (!contextual || contextual.isIntersection()) return own
+    if (!contextual || (contextual.isIntersection() && !isPlainObjectIntersection(contextual, node))) return own
     let candidate = contextual.isUnion() ? soleShapedArm(contextual) : contextual
+    // A union of views of ONE interface family is one layout -- the family's
+    // record, whichever view the literal is (ajv's `{ ...def, type, schemaType }`
+    // against `KeywordDefinition & { type: JSONType[]; schemaType: JSONType[] }`).
+    if (candidate === null && contextual.isUnion()) {
+      const [first, ...rest] = contextual.types.map(familyOfView)
+      if (first !== null && first !== undefined && rest.every((family) => family === first)) candidate = contextual
+    }
     if (candidate === null && contextual.isUnion() && ts.isObjectLiteralExpression(node)) {
       // A union can contain several object shapes while this literal satisfies
       // exactly one of them. TypeScript has already checked that relation; ask
@@ -1204,7 +1536,15 @@ export const createLayoutTypeResolver = (
       )
       candidate = fitted.length === 1 ? (fitted[0] ?? null) : null
     }
-    if (candidate === null || !(candidate.flags & ts.TypeFlags.Object)) return own
+    if (
+      candidate === null ||
+      !(
+        candidate.flags & ts.TypeFlags.Object ||
+        isPlainObjectIntersection(candidate, node) ||
+        (candidate.isUnion() && candidate === contextual)
+      )
+    )
+      return own
     if (isVacuousObjectType(node, candidate)) return own
     if (statesNoStorageBeyondTheLiteral(node, candidate, own)) return own
     if (discardsLiteralAccessor(node, candidate, own)) return own
@@ -1322,10 +1662,23 @@ export const createLayoutTypeResolver = (
       // a literal member the declaration does NOT accept is a mis-inference
       // the declared shape is there to correct, and must keep correcting.
       if (!checker.isTypeAssignableTo(ownType, declaredType)) return false
+      // A lib container over a PROGRAM shape (`Record<K, RuleGroup>`, ajv's
+      // `getRules`) states that shape's identity for the member, which the
+      // literal has none of: the same nominal identity the rule keeps for a
+      // program interface declared directly.
+      if (namesProgramShape(declaredType)) return false
       if (!checker.isTypeAssignableTo(declaredType, ownType)) widened = true
     }
     return widened
   }
+
+  const namesProgramShape = (type: ts.Type): boolean =>
+    type.isUnion()
+      ? type.types.some(namesProgramShape)
+      : (type.getSymbol()?.declarations ?? []).some(
+          (declaration) =>
+            !declaration.getSourceFile().hasNoDefaultLib && (ts.isInterfaceDeclaration(declaration) || ts.isClassLike(declaration))
+        )
 
   /**
    * The carrier of an annotated cell whose annotation is one the literal
@@ -1468,10 +1821,52 @@ export const createLayoutTypeResolver = (
   // A resolver closes over one checker and one census snapshot. Reusing an
   // answer here cannot cross binding-fixpoint rounds or checker lifetimes.
   const answers = new WeakMap<ts.Node, ts.Type>()
+  /**
+   * The result of the overload a call selects under the census's argument
+   * types (`censusReselectedSignature`, asked by the invocation producer
+   * too), of a numeric operator over such a result, and of the one cell such
+   * an expression fills: an unannotated `const` holds exactly its
+   * initializer's value, and every read of it that value. One authority,
+   * `censusRetypedExpressionType`, answers all three, as it does for the local
+   * census.
+   */
+  const retyping = new Set<ts.Node>()
+  const reselectedResultOf = (node: ts.Node): ts.Type | null => {
+    if (ts.isCallExpression(node)) return censusReselectedCallResult(checker, node, layoutTypeAt)
+    const preferredAt = (at: ts.Node): ts.Type | null => parameters.preferredTypeAt?.(at) ?? null
+    const retypedAt = (expression: ts.Node): ts.Type | null => {
+      if (retyping.has(expression)) return null
+      retyping.add(expression)
+      try {
+        return censusRetypedExpressionType(checker, expression, layoutTypeAt, preferredAt)
+      } finally {
+        retyping.delete(expression)
+      }
+    }
+    if (ts.isBinaryExpression(node) || ts.isPrefixUnaryExpression(node)) return retypedAt(node)
+    const declaration = ts.isVariableDeclaration(node)
+      ? node
+      : ts.isIdentifier(node)
+        ? checker.getSymbolAtLocation(node)?.valueDeclaration
+        : undefined
+    if (
+      !declaration ||
+      !ts.isVariableDeclaration(declaration) ||
+      declaration.type !== undefined ||
+      !ts.isIdentifier(declaration.name) ||
+      !declaration.initializer ||
+      !ts.isVariableDeclarationList(declaration.parent) ||
+      (declaration.parent.flags & ts.NodeFlags.Const) === 0
+    )
+      return null
+    return retypedAt(declaration.initializer)
+  }
+
   const layoutTypeAt = (node: ts.Node): ts.Type => {
     const known = answers.get(node)
     if (known) return known
-    const answer = layoutTypeOf(node)
+    const reselected = reselectedResultOf(node)
+    const answer = reselected ?? layoutTypeOf(node)
     const selected = armsLiveUnderMemberNarrowing(node, answer) ?? answer
     answers.set(node, selected)
     return selected

@@ -152,15 +152,27 @@ export const emitSharedArrayBufferConstruct = (
     )
   }
   const argument = operation.arguments[0]
-  if (!argument || argument.representation.kind !== 'scalar' || argument.representation.domain !== 'number') {
+  const carrier = argument?.representation
+  const text = argument ? operandText(ctx, argument) : ''
+  // 7.1.22 ToIndex: `undefined` is 0, anything else ToIntegerOrInfinity(ToNumber).
+  const length =
+    carrier?.kind === 'scalar' && carrier.domain === 'number'
+      ? text
+      : carrier?.kind === 'dynamic'
+        ? `(${text}.tag() == gea::Value::Tag::Undefined ? 0.0 : gea::dynamicToNumber(${text}))`
+        : carrier?.kind === 'optional' &&
+            carrier.absence === 'undefined' &&
+            carrier.payload.kind === 'scalar' &&
+            carrier.payload.domain === 'number'
+          ? `(${text}.has_value() ? *${text} : 0.0)`
+          : null
+  if (length === null) {
     throw createCppEmitBlockedError(
       'call-abi:construct:shared-array-buffer',
       'constructs a SharedArrayBuffer from a non-number byte length'
     )
   }
-  lines.push(
-    `${defineValue(ctx, operation.result)} = gea::makeRef<gea::SharedArrayBuffer>(gea::detail::typedArrayLengthIndex(${operandText(ctx, argument)}));`
-  )
+  lines.push(`${defineValue(ctx, operation.result)} = gea::makeRef<gea::SharedArrayBuffer>(gea::detail::typedArrayLengthIndex(${length}));`)
 }
 
 /**

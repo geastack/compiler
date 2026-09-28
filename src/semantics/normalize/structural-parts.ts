@@ -133,6 +133,13 @@ export interface StructuralPartsInput {
    */
   readonly bags?: ObjectBagCensus
   /**
+   * Whether the program `delete`s this member somewhere (`structural.ts`
+   * collects the targets from the value-flow index). A deleted member can be
+   * absent at run time whatever its declaration says, so it is laid out with
+   * its presence tracked, as an optional member is.
+   */
+  readonly deletedMember?: (symbol: ts.Symbol) => boolean
+  /**
    * Whether an array literal is the unstated empty `[]` that `structural.ts`'s
    * `unstated-never-array` rule lays out as an array of boxes. A member holding
    * one is stored the same way, not as the checker's `never[]`.
@@ -399,9 +406,12 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
    * function being called (`producers/optional-chain.ts`).
    */
   const signatureOf = (signature: ts.Signature, resultOverride?: ts.Type): SignatureShape => {
-    const thisParameter = signature.thisParameter
-    const written = thisParameter ? typeOfSymbolAt(thisParameter, thisParameter.valueDeclaration) : null
     const declaration = signature.getDeclaration()
+    // The checker hands a contextually typed arrow its context's `this`
+    // parameter, but an arrow binds no `this` (10.2.1.2 OrdinaryCallBindThis
+    // ignores the thisArgument of a lexical-this function): it has no receiver.
+    const thisParameter = declaration && ts.isArrowFunction(declaration) ? undefined : signature.thisParameter
+    const written = thisParameter ? typeOfSymbolAt(thisParameter, thisParameter.valueDeclaration) : null
     const receiver = written ?? (declaration ? implicitReceiverOf(declaration) : null)
     // The checker gives a union call signature its first declaration, but that
     // declaration does not own every possible method receiver. Preserve the
@@ -733,6 +743,20 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // discipline `parameter-bindings.ts`'s own `known()` keeps for a bound
     // parameter's narrowed use.
     const censusNode = declaration ? (censusValueNodeOf(declaration) ?? declaration) : null
+    // A census asked of a function-valued member's own node can answer the
+    // function's RESULT (the return census) rather than the function value the
+    // member holds -- `valueTypeAt` rebuilds such a value from its signature
+    // for the same reason. A census answer that is not callable there is that
+    // result, and the checker's callable answer stands; a callable one (a
+    // function carrying expando members) is the value.
+    const functionValued =
+      censusNode !== null &&
+      (ts.isFunctionDeclaration(censusNode) ||
+        ts.isFunctionExpression(censusNode) ||
+        ts.isArrowFunction(censusNode) ||
+        ts.isMethodDeclaration(censusNode))
+    const valueOf = (answer: ts.Type | null | undefined): ts.Type | null =>
+      answer && functionValued && checker.getSignaturesOfType(answer, ts.SignatureKind.Call).length === 0 ? null : (answer ?? null)
     // An array of `any` is no more evidence about the slot than `any` is
     // (`isVacuousArrayType`): the census that joined its elements answers it.
     const fromCensus =
@@ -761,7 +785,18 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // the annotation while every read of it "publishes" the narrowing, which
     // is a refusal at the store and again at the return that hands it back.
     const narrowedByStatement = censusNode ? parameters.statedTypeAt(censusNode) : null
-    const declared = narrowedByStatement ?? fromCensus ?? checkerAnswer
+    // A member whose checker answer is only its initializer's own type, which
+    // the census replaced with what every write stores (`field-bindings.ts`'s
+    // `isLiteralAbsenceMember`).
+    // A literal member's value takes the census's answer for the expression it
+    // was written with, as a cell's read does (a re-typed call, a closure-
+    // written local the checker reads as absence).
+    const preferred = declaration
+      ? (parameters.preferredTypeAt?.(declaration) ??
+        (censusNode && censusNode !== declaration ? parameters.preferredTypeAt?.(censusNode) : null) ??
+        null)
+      : null
+    const declared = valueOf(narrowedByStatement) ?? valueOf(preferred) ?? valueOf(fromCensus) ?? checkerAnswer
     // A member initialized with a function literal carries the LITERAL's one
     // convention, not its annotation's overload set -- see
     // `physicalInitializerTypeOf`. `null` for every other member, which is
@@ -795,7 +830,7 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // creates two carriers for one cell and turns that finite recurrence into
     // an unresolved expression/binding cycle downstream.
     const inferredBag = table && declaration ? bagShapeTypeAt(table, typeOf, bags, declaration) : null
-    const optional = (symbol.getFlags() & ts.SymbolFlags.Optional) !== 0
+    const optional = (symbol.getFlags() & ts.SymbolFlags.Optional) !== 0 || (input.deletedMember?.(symbol) ?? false)
     const arraySlot = inferredArray && optional ? input.internUnion([inferredArray, typeOf(checker.getUndefinedType())]) : inferredArray
     // ⛔ An optional member's ABSENCE is a state of its own and has to be in
     // the member's TYPE, because that type is the only thing

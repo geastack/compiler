@@ -6,7 +6,7 @@ import { regexpRoleOf } from '../prototype/emit-prototype-regexp.js'
 import { declaredRecordFieldOf } from '../records.js'
 import { cppTypeOf } from '../types.js'
 import { alignedValueText } from '../emit-narrowing.js'
-import { getOwnPropertyDescriptorText } from './emit-host-object.js'
+import { getOwnPropertyDescriptorText, ownKeysPreparationOf } from './emit-host-object.js'
 import { unaddressableNativeSymbolKeyOf } from '../native-symbol-keys.js'
 
 const ownKeysCallText = (ctx: EmitContext, operation: CallOperation): string => {
@@ -19,18 +19,8 @@ const ownKeysCallText = (ctx: EmitContext, operation: CallOperation): string => 
   const representation = target.representation
   const unsupportedSymbol = unaddressableNativeSymbolKeyOf(ctx, representation)
   if (unsupportedSymbol !== null) return refuse(`fixed symbol key ${unsupportedSymbol} has no retained runtime identity`)
-  const receiver = operandText(ctx, target)
-  const generated =
-    representation.kind === 'record' ||
-    representation.kind === 'record-with-index' ||
-    representation.kind === 'class-ref' ||
-    (representation.kind === 'native-record-ref' && representation.native === null)
-  let preparation: string
-  if (representation.kind === 'dynamic') {
-    preparation = `const auto& __gea_target = ${receiver}; if (!gea::isObjectValue(__gea_target)) gea::host::throwRuntimeError("TypeError", "Reflect.ownKeys target must be an object"); const auto __gea_keys = __gea_target.ownPropertyKeys(); `
-  } else if ((generated && representation.ownership === 'shared-refcount') || regexpRoleOf(representation) === 'pattern') {
-    preparation = `const auto& __gea_target = ${receiver}; if (!__gea_target) gea::host::throwRuntimeError("TypeError", "Reflect.ownKeys target must be an object"); const auto __gea_keys = gea::nativeOwnPropertyKeys(__gea_target); `
-  } else return refuse('the target has no supported native own-key protocol')
+  const preparation = ownKeysPreparationOf(ctx, target, site, 'throw')
+  if (preparation === null) return refuse('the target has no supported native own-key protocol')
   if (!operation.result) return `([&]() { ${preparation}(void)__gea_keys; })()`
   const result = operation.result.representation
   if (result.kind !== 'array-object' || result.ownership !== 'shared-refcount') return refuse('the key list has no native array carrier')

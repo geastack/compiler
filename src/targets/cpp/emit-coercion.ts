@@ -40,6 +40,15 @@ export const coercionText = (
   }
   const direct = toNumberText(text, source)
   if (direct !== null) return direct
+  // A union is ToNumber of whichever arm is live, each by its own rule
+  // (ipaddr's `expandIPv6` compares its `parts` before reassigning it).
+  if (source.kind === 'tagged-union') {
+    const arms = source.arms.map((arm, index) => coercionText(operation, `gea_tonumber_arm.get<${index}>()`, arm.value, layouts))
+    if (arms.some((arm) => arm === null)) return null
+    let chosen = arms[arms.length - 1]!
+    for (let index = arms.length - 2; index >= 0; index -= 1) chosen = `gea_tonumber_arm.is<${index}>() ? ${arms[index]} : (${chosen})`
+    return `([&]() -> double { const auto& gea_tonumber_arm = ${text}; return ${chosen}; })()`
+  }
   if (!toStringOnlyObjectKinds.has(source.kind) || isDateCarrier(source)) return null
   const primitive = toStringTextOver(text, source, layouts)
   return primitive === null ? null : `gea::host::detail::toNumber(std::string(${primitive}))`

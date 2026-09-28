@@ -2,6 +2,8 @@ import type { IrOperand, IrResult } from '../../../ir/model.js'
 import { representationKey } from '../../../representation/model.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from '../emit-context.js'
 import { toStringText } from '../emit-tostring.js'
+import { boxedValueText } from '../emit-dynamic-properties.js'
+import { callableObjectAbi } from '../emit-narrowing.js'
 import { matchAllRefusal, regexpMatchText, regexpReplaceText, regexpSearchText, regexpSplitText } from './emit-prototype-regexp.js'
 
 /**
@@ -75,10 +77,12 @@ const stringMethodShapes: ReadonlyMap<string, StringMethodShape> = new Map([
   ['toUpperCase', { clause: '22.1.3.31', arities: [0], carriers: [] }],
   ['charCodeAt', { clause: '22.1.3.3', arities: [1], carriers: ['number'] }],
   ['charAt', { clause: '22.1.3.2', arities: [1], carriers: ['number'] }],
-  ['indexOf', { clause: '22.1.3.9', arities: [1, 2], carriers: ['string', 'number'] }],
+  // An undefined position is ToIntegerOrInfinity(undefined), 0, not the
+  // trailing-index +Infinity `numericAbsentText` defaults to.
+  ['indexOf', { clause: '22.1.3.9', arities: [1, 2], carriers: ['string', 'number'], absent: [undefined, '0.0'] }],
   ['lastIndexOf', { clause: '22.1.3.10', arities: [1, 2], carriers: ['string', 'number'] }],
-  ['includes', { clause: '22.1.3.8', arities: [1, 2], carriers: ['string', 'number'] }],
-  ['startsWith', { clause: '22.1.3.23', arities: [1, 2], carriers: ['string', 'number'] }],
+  ['includes', { clause: '22.1.3.8', arities: [1, 2], carriers: ['string', 'number'], absent: [undefined, '0.0'] }],
+  ['startsWith', { clause: '22.1.3.23', arities: [1, 2], carriers: ['string', 'number'], absent: [undefined, '0.0'] }],
   ['endsWith', { clause: '22.1.3.7', arities: [1, 2], carriers: ['string', 'number'] }],
   ['padStart', { clause: '22.1.3.16', arities: [1, 2], carriers: ['number', 'string'] }],
   ['padEnd', { clause: '22.1.3.15', arities: [1, 2], carriers: ['number', 'string'] }],
@@ -129,8 +133,54 @@ const isOptionalNumber = (representation: IrOperand['representation']): boolean 
 const numericArgumentText = (ctx: EmitContext, operand: IrOperand, position: number, absent?: string): string => {
   const text = operandText(ctx, operand)
   if (!isOptionalNumber(operand.representation)) return text
-  const fallback = absent ?? (position === 0 ? '0.0' : 'std::numeric_limits<double>::infinity()')
-  return `(${text}.has_value() ? *${text} : ${fallback})`
+  return `(${text}.has_value() ? *${text} : ${numericAbsentText(position, absent)})`
+}
+
+const numericAbsentText = (position: number, absent?: string): string =>
+  absent ?? (position === 0 ? '0.0' : 'std::numeric_limits<double>::infinity()')
+
+/**
+ * `replace`/`replaceAll` whose search value is a box: whether it is a RegExp
+ * or a value to ToString is the box's own fact, decided at run time
+ * (`gea::runtime::string::replaceByDynamic`). A replacement this backend
+ * cannot ToString natively is left to the refusal below.
+ */
+const dynamicSearchReplaceText = (
+  member: 'replace' | 'replaceAll',
+  ctx: EmitContext,
+  receiverText: string,
+  args: readonly IrOperand[]
+): string | null => {
+  const [search, replacement] = args
+  if (args.length !== 2 || search?.representation.kind !== 'dynamic' || !replacement) return null
+  // A boxed or callable replacement is decided at run time: called per match
+  // when it is a function, ToString'd once otherwise.
+  const decidedAtRunTime = replacement.representation.kind === 'dynamic' || callableObjectAbi(replacement.representation) !== null
+  const substitution = decidedAtRunTime
+    ? boxedValueText(ctx, replacement, 'a replace callback')
+    : toStringText(operandText(ctx, replacement), replacement.representation, ctx.classes, ctx.deriver)
+  if (substitution === null) return null
+  return `gea::runtime::string::replaceByDynamic(${member === 'replaceAll'}, ${receiverText}, ${operandText(ctx, search)}, ${substitution})`
+}
+
+/** `split(separator)` with a boxed separator, decided at run time (`gea::runtime::string::splitByDynamic`). */
+const dynamicSeparatorSplitText = (ctx: EmitContext, receiverText: string, args: readonly IrOperand[]): string | null => {
+  const [separator] = args
+  if (args.length !== 1 || separator?.representation.kind !== 'dynamic') return null
+  return `gea::runtime::string::splitByDynamic(${receiverText}, ${operandText(ctx, separator)})`
+}
+
+/**
+ * A boxed argument at a position the method ToString-s or ToNumber-s (the
+ * position's declared carrier says which). A boxed `undefined` at a number
+ * position takes the position's absent default, exactly as an absent
+ * `optional` does. `includes`/`startsWith`/`endsWith` first reject a RegExp
+ * (22.1.3.8 step 4), which a box may hold, so their search is not coerced.
+ */
+const boxedArgumentText = (member: string, wanted: string | undefined, absent: string, text: string): string | null => {
+  if (wanted === 'number') return `(${text}.tag() == gea::Value::Tag::Undefined ? ${absent} : gea::dynamicToNumber(${text}))`
+  if (wanted !== 'string' || member === 'includes' || member === 'startsWith' || member === 'endsWith') return null
+  return `gea::dynamicToString(${text})`
 }
 
 /**
@@ -163,6 +213,13 @@ const shapedStringMethodText =
           ? regexpReplaceText(member, ctx, receiverText, args)
           : null
     if (byPattern !== null) return byPattern
+    const byBox =
+      member === 'replace' || member === 'replaceAll'
+        ? dynamicSearchReplaceText(member, ctx, receiverText, args)
+        : member === 'split'
+          ? dynamicSeparatorSplitText(ctx, receiverText, args)
+          : null
+    if (byBox !== null) return byBox
     if (!shape.arities.includes(args.length)) {
       throw createCppEmitBlockedError(
         `runtime-helper:element:${member}:string`,
@@ -181,7 +238,9 @@ const shapedStringMethodText =
       const replacementText =
         argument && wanted === 'string' && (member === 'replace' || member === 'replaceAll') && index === 1
           ? toStringText(operandText(ctx, argument), argument.representation, ctx.classes, ctx.deriver)
-          : null
+          : argument?.representation.kind === 'dynamic'
+            ? boxedArgumentText(member, wanted, numericAbsentText(index, shape.absent?.[index]), operandText(ctx, argument))
+            : null
       if (!argument || !wanted || (!carrierMatches(argument, wanted) && replacementText === null)) {
         throw createCppEmitBlockedError(
           `runtime-helper:element:${member}:string`,
@@ -194,7 +253,7 @@ const shapedStringMethodText =
         )
       }
       rendered.push(
-        wanted === 'number'
+        wanted === 'number' && replacementText === null
           ? numericArgumentText(ctx, argument, index, shape.absent?.[index])
           : (replacementText ?? operandText(ctx, argument))
       )

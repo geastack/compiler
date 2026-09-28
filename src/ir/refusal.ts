@@ -42,6 +42,12 @@ export interface Refusal {
   readonly key: RefusalKey
   readonly reason: string
   readonly owner: string
+  /**
+   * The operations behind a certify row whose owner is a whole function: one
+   * row stands for every site of that function demanding the same key, and
+   * the owner alone does not say which of its operations asked.
+   */
+  readonly sites?: readonly string[]
 }
 
 export const refusalsOf = (

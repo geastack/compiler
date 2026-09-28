@@ -15,7 +15,9 @@ import { declaresExactArms } from './exact-arms.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import {
   calleeAwareTypeAt,
+  callSelectedSignature,
   objectDescriptorReturnTypeAt,
+  provesNativeModuleRecord,
   resolvedCalleeSignatureType,
   sourceForValue,
   unwrapErased,
@@ -55,7 +57,14 @@ import {
 } from '../../model/selected-signature.js'
 import type { SignatureParameter } from '../../model/structural-types.js'
 import { impliedPatternArrayElementAt, parameterSlotTypeOf } from '../parameter-slot.js'
-import { isGlobalObjectConstructor, isStandardGlobalValue, isVacuousArrayType, objectAssignTargetType } from '../derived-expression-type.js'
+import {
+  isGlobalObjectConstructor,
+  isStandardGlobalValue,
+  isVacuousArrayType,
+  isVacuousCollectionType,
+  objectAssignTargetType
+} from '../derived-expression-type.js'
+import { censusOverloadIsBlind } from '../overload-reselection.js'
 import { transparentConstClassAliasTarget } from '../../class-alias.js'
 import { scriptGlobalValueRedefinitionOf } from '../script-global-redefinition.js'
 import { mentionsTypeParameter } from '../return-bindings.js'
@@ -298,7 +307,14 @@ const buildSelectedSignature = (
   // `validateInvocationResult` compares it against a `resultType` that
   // agrees for the same reason (both now un-awaited). See citations.md
   // finding 2.
-  const returnType = isShortCircuitingCall(node) ? presentReturnTypeOf(context.checker, signature) : signature.getReturnType()
+  // A blind overload pick states no return (`censusOverloadIsBlind`); the
+  // call's own type reads the same answer.
+  const returnType =
+    ts.isCallExpression(node) && censusOverloadIsBlind(context.checker, node, (argument) => context.types.rawTypeAt(argument))
+      ? context.checker.getAnyType()
+      : isShortCircuitingCall(node)
+        ? presentReturnTypeOf(context.checker, signature)
+        : signature.getReturnType()
   // ONE authority on what this callee returns.
   //
   // The invocation RESULT below is `context.types.typeAt(node)`, which reaches
@@ -372,6 +388,20 @@ const buildSelectedSignature = (
       returnType: descriptorReturn
     }
   }
+  // A callee whose `return`s the collection census typed: both sides read
+  // `collectionCallResultAt`, as they read `physicalGeneratorOverloadResultAt`.
+  const collectionReturn = context.types.collectionCallResultAt(node)
+  if (collectionReturn !== null) {
+    return {
+      declaration: declarationId,
+      provenance,
+      parameters,
+      minimumArity: minimumArityOf(context, signature),
+      thisParameter,
+      typeArguments,
+      returnType: collectionReturn
+    }
+  }
   // `host.readFile.bind(host)`: the mapper states the bound callable's
   // convention, receiver-less; the checker's own return type is the method's.
   const nativeResult = context.types.boundCallResultAt(node) ?? context.types.constructResultAt(node)
@@ -423,7 +453,9 @@ const buildSelectedSignature = (
   // and the layout resolver asks the census for it on the invocation side.
   const siteReturn =
     censusReturn === null &&
-    ((returnType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 || isVacuousArrayType(context.checker, returnType))
+    ((returnType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 ||
+      isVacuousArrayType(context.checker, returnType) ||
+      isVacuousCollectionType(context.checker, returnType))
       ? context.types.rawTypeAt(node)
       : null
   const siteReturnIsUsable =
@@ -1448,7 +1480,7 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
         const ownerFile = node.getSourceFile()
         const owner = regionId(context.identities.nodeIdOf(ownerFile), 'module-body')
         const target = regionId(context.identities.nodeIdOf(targetFile), 'module-body')
-        const nativeRecord = context.commonJsModuleRecords.requiredExportExpressionAt(node) !== null
+        const nativeRecord = provesNativeModuleRecord(context, context.commonJsModuleRecords.requiredExportExpressionAt(node))
         // A module record is the one deliberately dynamic host boundary
         // (`publish.ts`'s `commonJsBoundaryOf`), and its structural type has to
         // say so too: in checked JavaScript the checker types `require('./m')`
@@ -1525,7 +1557,11 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // after it. Overriding the RESULT below, rather than the ORDER here,
     // keeps every call site's evaluation identical to before except the one
     // this fix targets.
-    const resolvedSignature: ts.Signature | undefined = context.checker.getResolvedSignature(node)
+    const checkerResolvedSignature: ts.Signature | undefined = context.checker.getResolvedSignature(node)
+    // The same overload the call's own type reads (`censusReselectedSignature`,
+    // asked by the layout resolver with the identical argument types).
+    const resolvedSignature: ts.Signature | undefined =
+      (ts.isCallExpression(node) || ts.isNewExpression(node) ? callSelectedSignature(context, node) : undefined) ?? checkerResolvedSignature
     // A call resolved against one declared overload of an overloaded SOURCE
     // function runs the implementation, whose frame is the only one that
     // exists: `pad("a")` resolves `(value: string): string` and invokes

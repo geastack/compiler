@@ -65,7 +65,15 @@ const capturelessHostThunkText = (
   const result = cppResultTypeOf(abi.result)
   const call = callText(names, abi)
   if (call === null) return null
-  const body = abi.result.kind === 'void' ? `${call};` : `return ${call};`
+  // A host call that returns nothing answers `undefined`, which a boxed
+  // result holds (`Logger.log(...): unknown` over `console.log`); whether the
+  // host's C++ returns `void` is the call's own type.
+  const body =
+    abi.result.kind === 'void'
+      ? `${call};`
+      : abi.result.kind === 'dynamic'
+        ? `return gea::detail::hostResultOrUndefined([&]() { return ${call}; });`
+        : `return ${call};`
   const signature = `${result}(${abi.parameters.map(cppAbiParameterType).join(', ')})`
   return `gea::CallableObject<${signature}>(+[](void*${formals.map((formal) => `, ${formal}`).join('')}) -> ${result} { ${body} }, nullptr)`
 }
@@ -193,6 +201,16 @@ const jsonRuntimeDeclaredCarrier = (representation: Representation): boolean =>
  */
 export const hostJsonMemberValueText = (member: string, representation: Representation): string | null => {
   if (member !== 'parse' && member !== 'stringify') return null
+  // Held as a box (`serialize = JSON.stringify`, @pinojs/redact): the function
+  // object over the box's own writer. At the top level `undefined`, a function
+  // and a symbol serialize to `undefined` (25.5.2.2 SerializeJSONProperty).
+  if (representation.kind === 'dynamic' && member === 'stringify') {
+    return (
+      'gea::Value::box(gea::Value::Tag::Function, gea::CallableObject<gea::Value(gea::Value)>{+[](void*, gea::Value gea_value) -> gea::Value { ' +
+      'if (gea_value.tag() == gea::Value::Tag::Undefined || gea_value.tag() == gea::Value::Tag::Function || gea_value.tag() == gea::Value::Tag::Symbol) return gea::Value(); ' +
+      'std::string gea_json_out; gea_json_write(gea_json_out, gea_value); return gea::Value::box(gea::Value::Tag::String, gea_json_out); }, nullptr})'
+    )
+  }
   if (representation.kind !== 'function-value-dispatch') return null
   // The thunk's convention is the member's REQUIRED parameter, not every slot
   // `lib.es5.d.ts` declares. `JSON.parse(text, reviver?)` carries two, and a

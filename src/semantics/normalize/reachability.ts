@@ -852,6 +852,14 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     const whole = entries.has(file) && ts.isExternalModule(file)
     for (const statement of file.statements) if (whole || !isPrunableDeclaration(input.checker, statement)) openStatement(statement)
     for (const target of moduleTargetsOf(input.checker, file)) fileQueue.push(target)
+    // A whole entry's RE-EXPORTS are exports too, and so roots: a CommonJS
+    // `require` of node-compat's `url.ts` builds its namespace from every
+    // exported value, `export { domainToASCII, ... } from './generated/facades/url'`
+    // included, while the walk below never follows an export declaration.
+    if (whole) {
+      const moduleSymbol = input.checker.getSymbolAtLocation(file)
+      for (const exported of moduleSymbol ? input.checker.getExportsOfModule(moduleSymbol) : []) markSymbol(exported)
+    }
   }
 
   const spellKey = (text: string): void => {
@@ -1075,6 +1083,16 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
         markReferences(member)
       }
       return
+    }
+    // A default-exported class is what a CommonJS `require` of its module
+    // returns (`producers/declaration-lifecycle.ts`'s `commonJsDefaultExportOf`),
+    // and what code on that side reads off it -- `require('events').once` --
+    // names its statics through a value the checker types as the namespace.
+    if (ts.isExportAssignment(node) && !node.isExportEquals) {
+      const exported = input.checker.getSymbolAtLocation(node.expression)
+      for (const declaration of exported ? declarationsOf(input.checker, exported) : [])
+        if (ts.isClassDeclaration(declaration))
+          for (const member of declaration.members) if (memberIsDeferrable(member) && memberIsStatic(member)) openMember(member)
     }
     if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node) || ts.isImportEqualsDeclaration(node)) return
     if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return

@@ -157,6 +157,21 @@ inline double dynamicToNumber(const Value& input) {
   }
 }
 
+/**
+ * 21.4.2.1 step 4, `new Date(value)` over a box: a Date object gives its time
+ * value to a NEW Date (never an alias of it); anything else is ToPrimitive'd,
+ * then a string is parsed and every other primitive ToNumber'd.
+ */
+inline gea::Ref<runtime::Date> dateFromValue(const Value& value) {
+  if (value.tag() == Value::Tag::Object && value.payloadType() == detail::payloadTypeTagFor<gea::Ref<runtime::Date>>()) {
+    const gea::Ref<runtime::Date>& date = value.as<gea::Ref<runtime::Date>>();
+    return gea::makeRef<runtime::Date>(date ? date->getTime() : std::numeric_limits<double>::quiet_NaN());
+  }
+  const Value primitive = dynamicToPrimitive(value);
+  if (primitive.tag() == Value::Tag::String) return gea::makeRef<runtime::Date>(primitive.as<std::string>());
+  return gea::makeRef<runtime::Date>(dynamicToNumber(primitive));
+}
+
 inline Value dynamicAdd(const Value& left, const Value& right) {
   const Value a = dynamicToPrimitive(left);
   const Value b = dynamicToPrimitive(right);
@@ -168,6 +183,430 @@ inline Value dynamicAdd(const Value& left, const Value& right) {
     return Value::box(Value::Tag::BigInt, a.as<BigInt>() + b.as<BigInt>());
   return Value::box(Value::Tag::Number, dynamicToNumber(a) + dynamicToNumber(b));
 }
+
+/** ToNumeric (ECMA-262 7.1.3): ToPrimitive with hint Number, then a BigInt as it is and ToNumber of anything else. */
+inline Value dynamicToNumeric(const Value& input) {
+  const Value primitive = dynamicToPrimitive(input, ToPrimitiveHint::Number);
+  if (primitive.tag() == Value::Tag::BigInt) return primitive;
+  return Value::box(Value::Tag::Number, dynamicToNumber(primitive));
+}
+
+enum class DynamicNumericOperator { Subtract, Multiply, Divide, Remainder, Exponent, LeftShift, SignedRightShift, UnsignedRightShift, BitAnd, BitOr, BitXor };
+
+/**
+ * ApplyStringOrNumericBinaryOperator (ECMA-262 13.15.3) for every operator but
+ * `+` (`dynamicAdd`): both operands ToNumeric'd left to right, BigInt
+ * arithmetic when both are BigInts, a TypeError when one is, and the Number
+ * operation otherwise -- through the same helpers the typed Number carrier
+ * spells.
+ */
+inline Value dynamicNumeric(DynamicNumericOperator op, const Value& left, const Value& right) {
+  const Value a = dynamicToNumeric(left);
+  const Value b = dynamicToNumeric(right);
+  const bool bigA = a.tag() == Value::Tag::BigInt;
+  const bool bigB = b.tag() == Value::Tag::BigInt;
+  if (bigA != bigB) host::throwRuntimeError("TypeError", "Cannot mix BigInt and other types, use explicit conversions");
+  if (bigA) {
+    const BigInt& x = a.as<BigInt>();
+    const BigInt& y = b.as<BigInt>();
+    BigInt out;
+    switch (op) {
+      case DynamicNumericOperator::Subtract: out = x - y; break;
+      case DynamicNumericOperator::Multiply: out = x * y; break;
+      case DynamicNumericOperator::Divide: out = x / y; break;
+      case DynamicNumericOperator::Remainder: out = x % y; break;
+      case DynamicNumericOperator::Exponent: out = BigInt::pow(x, y); break;
+      case DynamicNumericOperator::LeftShift: out = x << y; break;
+      case DynamicNumericOperator::SignedRightShift: out = x >> y; break;
+      case DynamicNumericOperator::UnsignedRightShift: host::throwRuntimeError("TypeError", "BigInts have no unsigned right shift, use >> instead");
+      case DynamicNumericOperator::BitAnd: out = x & y; break;
+      case DynamicNumericOperator::BitOr: out = x | y; break;
+      case DynamicNumericOperator::BitXor: out = x ^ y; break;
+    }
+    return Value::box(Value::Tag::BigInt, out);
+  }
+  const double x = a.as<double>();
+  const double y = b.as<double>();
+  double out = 0;
+  switch (op) {
+    case DynamicNumericOperator::Subtract: out = x - y; break;
+    case DynamicNumericOperator::Multiply: out = x * y; break;
+    case DynamicNumericOperator::Divide: out = x / y; break;
+    case DynamicNumericOperator::Remainder: out = remainder(x, y); break;
+    case DynamicNumericOperator::Exponent: out = exponentiate(x, y); break;
+    case DynamicNumericOperator::LeftShift: out = leftShift(x, y); break;
+    case DynamicNumericOperator::SignedRightShift: out = signedRightShift(x, y); break;
+    case DynamicNumericOperator::UnsignedRightShift: out = unsignedRightShift(x, y); break;
+    case DynamicNumericOperator::BitAnd: out = bitwiseAnd(x, y); break;
+    case DynamicNumericOperator::BitOr: out = bitwiseOr(x, y); break;
+    case DynamicNumericOperator::BitXor: out = bitwiseXor(x, y); break;
+  }
+  return Value::box(Value::Tag::Number, out);
+}
+
+/** Unary `-` (13.5.5): BigInt::unaryMinus or Number::unaryMinus of ToNumeric(value). */
+inline Value dynamicNegate(const Value& value) {
+  const Value numeric = dynamicToNumeric(value);
+  if (numeric.tag() == Value::Tag::BigInt) return Value::box(Value::Tag::BigInt, -numeric.as<BigInt>());
+  return Value::box(Value::Tag::Number, -numeric.as<double>());
+}
+
+/** Unary `~` (13.5.6): BigInt::bitwiseNOT (`-x - 1`) or Number::bitwiseNOT of ToNumeric(value). */
+inline Value dynamicBitwiseNot(const Value& value) {
+  const Value numeric = dynamicToNumeric(value);
+  if (numeric.tag() == Value::Tag::BigInt) return Value::box(Value::Tag::BigInt, -numeric.as<BigInt>() - BigInt(1));
+  return Value::box(Value::Tag::Number, bitwiseNot(numeric.as<double>()));
+}
+
+namespace dynamic_detail {
+/** StringToBigInt (7.1.14) with its `undefined` for text that is no integer literal. */
+inline std::optional<BigInt> stringToBigInt(const std::string& text) {
+  try {
+    return BigInt::parse(runtime::string::trim(text));
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+/** Whether BigInt `x` is less than Number `y`, exactly (6.1.6.2.12's mathematical comparison). */
+inline std::optional<bool> bigIntLessThanNumber(const BigInt& x, double y) {
+  if (std::isnan(y)) return std::nullopt;
+  if (std::isinf(y)) return y > 0;
+  const double floor = std::floor(y);
+  return floor == y ? x < BigInt(y) : !(BigInt(floor) < x);
+}
+/** Whether Number `x` is less than BigInt `y`, exactly. */
+inline std::optional<bool> numberLessThanBigInt(double x, const BigInt& y) {
+  if (std::isnan(x)) return std::nullopt;
+  if (std::isinf(x)) return x < 0;
+  const double ceil = std::ceil(x);
+  return ceil == x ? BigInt(x) < y : !(y < BigInt(ceil));
+}
+}  // namespace dynamic_detail
+
+/** IsLessThan (ECMA-262 7.2.13) over two boxes; `nullopt` is its `undefined`. */
+inline std::optional<bool> dynamicIsLessThan(const Value& x, const Value& y, bool leftFirst) {
+  Value px;
+  Value py;
+  if (leftFirst) {
+    px = dynamicToPrimitive(x, ToPrimitiveHint::Number);
+    py = dynamicToPrimitive(y, ToPrimitiveHint::Number);
+  } else {
+    py = dynamicToPrimitive(y, ToPrimitiveHint::Number);
+    px = dynamicToPrimitive(x, ToPrimitiveHint::Number);
+  }
+  if (px.tag() == Value::Tag::String && py.tag() == Value::Tag::String) return px.as<std::string>() < py.as<std::string>();
+  if (px.tag() == Value::Tag::BigInt && py.tag() == Value::Tag::String) {
+    const auto ny = dynamic_detail::stringToBigInt(py.as<std::string>());
+    if (!ny) return std::nullopt;
+    return px.as<BigInt>() < *ny;
+  }
+  if (px.tag() == Value::Tag::String && py.tag() == Value::Tag::BigInt) {
+    const auto nx = dynamic_detail::stringToBigInt(px.as<std::string>());
+    if (!nx) return std::nullopt;
+    return *nx < py.as<BigInt>();
+  }
+  const Value nx = dynamicToNumeric(px);
+  const Value ny = dynamicToNumeric(py);
+  const bool bigX = nx.tag() == Value::Tag::BigInt;
+  const bool bigY = ny.tag() == Value::Tag::BigInt;
+  if (bigX && bigY) return nx.as<BigInt>() < ny.as<BigInt>();
+  if (bigX) return dynamic_detail::bigIntLessThanNumber(nx.as<BigInt>(), ny.as<double>());
+  if (bigY) return dynamic_detail::numberLessThanBigInt(nx.as<double>(), ny.as<BigInt>());
+  const double a = nx.as<double>();
+  const double b = ny.as<double>();
+  if (std::isnan(a) || std::isnan(b)) return std::nullopt;
+  return a < b;
+}
+
+/** IsLooselyEqual (ECMA-262 7.2.14) over two boxes; the [[IsHTMLDDA]] step has no object that carries it here. */
+inline bool dynamicLooselyEqual(const Value& x, const Value& y) {
+  using Tag = Value::Tag;
+  if (x.tag() == y.tag()) return Value::strictEquals(x, y);
+  const auto nullish = [](const Value& value) { return value.tag() == Tag::Undefined || value.tag() == Tag::Null; };
+  if (nullish(x) || nullish(y)) return nullish(x) && nullish(y);
+  if (x.tag() == Tag::Number && y.tag() == Tag::String) return x.as<double>() == host::detail::toNumber(y.as<std::string>());
+  if (x.tag() == Tag::String && y.tag() == Tag::Number) return host::detail::toNumber(x.as<std::string>()) == y.as<double>();
+  if (x.tag() == Tag::BigInt && y.tag() == Tag::String) {
+    const auto n = dynamic_detail::stringToBigInt(y.as<std::string>());
+    return n.has_value() && x.as<BigInt>() == *n;
+  }
+  if (x.tag() == Tag::String && y.tag() == Tag::BigInt) return dynamicLooselyEqual(y, x);
+  if (x.tag() == Tag::Boolean) return dynamicLooselyEqual(Value::box(Tag::Number, x.as<bool>() ? 1.0 : 0.0), y);
+  if (y.tag() == Tag::Boolean) return dynamicLooselyEqual(x, Value::box(Tag::Number, y.as<bool>() ? 1.0 : 0.0));
+  if (!isObjectValue(x) && isObjectValue(y)) return dynamicLooselyEqual(x, dynamicToPrimitive(y));
+  if (isObjectValue(x) && !isObjectValue(y)) return dynamicLooselyEqual(dynamicToPrimitive(x), y);
+  if ((x.tag() == Tag::BigInt && y.tag() == Tag::Number) || (x.tag() == Tag::Number && y.tag() == Tag::BigInt)) {
+    const BigInt& big = x.tag() == Tag::BigInt ? x.as<BigInt>() : y.as<BigInt>();
+    const double number = x.tag() == Tag::Number ? x.as<double>() : y.as<double>();
+    if (std::isnan(number) || std::isinf(number)) return false;
+    const std::optional<bool> below = dynamic_detail::bigIntLessThanNumber(big, number);
+    const std::optional<bool> above = dynamic_detail::numberLessThanBigInt(number, big);
+    return below.has_value() && above.has_value() && !*below && !*above;
+  }
+  return false;
+}
+
+/** The four relational operators (13.10.1) over IsLessThan. */
+inline bool dynamicLess(const Value& x, const Value& y) { return dynamicIsLessThan(x, y, true).value_or(false); }
+inline bool dynamicGreater(const Value& x, const Value& y) { return dynamicIsLessThan(y, x, false).value_or(false); }
+inline bool dynamicLessEqual(const Value& x, const Value& y) {
+  const auto r = dynamicIsLessThan(y, x, false);
+  return r.has_value() && !*r;
+}
+inline bool dynamicGreaterEqual(const Value& x, const Value& y) {
+  const auto r = dynamicIsLessThan(x, y, true);
+  return r.has_value() && !*r;
+}
+
+namespace detail {
+/**
+ * The rest of Array.prototype for a boxed receiver: each ECMA-262 23.1.3
+ * algorithm as the specification writes it, over the receiver's own
+ * `length`, [[HasProperty]], [[Get]], [[Set]] and [[Delete]], so an array
+ * box, an array-like dynamic object and a proxy all answer through their own
+ * internal methods. An unknown name answers `undefined`.
+ */
+inline constexpr const char* dynamicArrayGenericMethodNames[] = {
+    "indexOf", "lastIndexOf", "includes", "find", "findIndex", "findLast", "findLastIndex", "some", "every", "reduce", "reduceRight",
+    "concat", "splice", "shift", "unshift", "reverse", "fill", "at", "sort", "flat", "flatMap"};
+
+inline Value dynamicArrayGenericMethod(const std::string& name) {
+  using Args = gea::Ref<ArrayObject<Value>>;
+  using Method = CallableObject<Value(Value, Args)>;
+  static const std::map<std::string, Value> methods = [] {
+    std::map<std::string, Value> result;
+    for (const char* entry : dynamicArrayGenericMethodNames) {
+      auto callable = Method(+[](void* environment, Value receiver, Args args) -> Value {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        const std::string& method = *gea::unpackEnvironment<std::string>(environment, slot);
+        if (receiver.tag() == Value::Tag::Undefined || receiver.tag() == Value::Tag::Null)
+          host::throwRuntimeError("TypeError", "Array.prototype." + method + " called on null or undefined");
+        const auto at = [](std::size_t index) { return PropertyKey::string(std::to_string(index)); };
+        const auto argument = [&](std::size_t index) { return index < args->size() ? args->at(index) : Value(); };
+        const auto number = [](double value) { return Value::box(Value::Tag::Number, value); };
+        const double rawLength = dynamicToNumber(receiver.getProperty(PropertyKey::string("length")));
+        const double length = std::isnan(rawLength) || rawLength <= 0 ? 0.0 : std::min(std::floor(rawLength), 9007199254740991.0);
+        // 23.1.3's relative-index fold: negative counts back from the end, and
+        // the result lands in [0, length].
+        const auto relative = [&](const Value& value, double fallback) {
+          if (value.tag() == Value::Tag::Undefined) return fallback;
+          const double integer = gea::detail::toIntegerOrInfinity(dynamicToNumber(value));
+          return integer < 0 ? std::max(length + integer, 0.0) : std::min(integer, length);
+        };
+        const auto callback = [&]() {
+          const Value first = argument(0);
+          if (first.tag() != Value::Tag::Function) host::throwRuntimeError("TypeError", first.tag() == Value::Tag::Undefined ? "undefined is not a function" : "Array callback must be callable");
+          return first;
+        };
+        const auto setLength = [&](double value) { receiver.setProperty(PropertyKey::string("length"), number(value)); };
+        const auto move = [&](double from, double to) {
+          const auto source = at(static_cast<std::size_t>(from));
+          if (receiver.hasProperty(source)) receiver.setProperty(at(static_cast<std::size_t>(to)), receiver.getProperty(source));
+          else receiver.deleteProperty(at(static_cast<std::size_t>(to)));
+        };
+        if (method == "indexOf" || method == "includes") {
+          const bool includes = method == "includes";
+          if (length == 0) return includes ? Value::box(Value::Tag::Boolean, false) : number(-1);
+          const Value search = argument(0);
+          for (double k = relative(argument(1), 0.0); k < length; ++k) {
+            const auto index = at(static_cast<std::size_t>(k));
+            if (includes) {
+              if (gea::sameValueZero<Value>(receiver.getProperty(index), search)) return Value::box(Value::Tag::Boolean, true);
+            } else if (receiver.hasProperty(index) && Value::strictEquals(receiver.getProperty(index), search)) {
+              return number(k);
+            }
+          }
+          return includes ? Value::box(Value::Tag::Boolean, false) : number(-1);
+        }
+        if (method == "lastIndexOf") {
+          if (length == 0) return number(-1);
+          const double n = args->size() > 1 ? gea::detail::toIntegerOrInfinity(dynamicToNumber(args->at(1))) : length - 1;
+          for (double k = n >= 0 ? std::min(n, length - 1) : length + n; k >= 0; --k) {
+            const auto index = at(static_cast<std::size_t>(k));
+            if (receiver.hasProperty(index) && Value::strictEquals(receiver.getProperty(index), argument(0))) return number(k);
+          }
+          return number(-1);
+        }
+        if (method == "find" || method == "findIndex" || method == "findLast" || method == "findLastIndex") {
+          const Value predicate = callback();
+          const bool last = method == "findLast" || method == "findLastIndex";
+          const bool wantsIndex = method == "findIndex" || method == "findLastIndex";
+          for (double step = 0; step < length; ++step) {
+            const double k = last ? length - 1 - step : step;
+            const Value item = receiver.getProperty(at(static_cast<std::size_t>(k)));
+            if (host::detail::toBoolean(predicate.callWithReceiver(argument(1), {item, number(k), receiver}))) return wantsIndex ? number(k) : item;
+          }
+          return wantsIndex ? number(-1) : Value();
+        }
+        if (method == "some" || method == "every") {
+          const Value predicate = callback();
+          const bool some = method == "some";
+          for (double k = 0; k < length; ++k) {
+            const auto index = at(static_cast<std::size_t>(k));
+            if (!receiver.hasProperty(index)) continue;
+            const bool passed = host::detail::toBoolean(predicate.callWithReceiver(argument(1), {receiver.getProperty(index), number(k), receiver}));
+            if (passed == some) return Value::box(Value::Tag::Boolean, some);
+          }
+          return Value::box(Value::Tag::Boolean, !some);
+        }
+        if (method == "reduce" || method == "reduceRight") {
+          const Value reducer = callback();
+          const bool right = method == "reduceRight";
+          double step = 0;
+          const auto position = [&](double s) { return right ? length - 1 - s : s; };
+          Value accumulator;
+          if (args->size() >= 2) {
+            accumulator = args->at(1);
+          } else {
+            bool found = false;
+            for (; step < length && !found; ++step) {
+              const auto index = at(static_cast<std::size_t>(position(step)));
+              if (receiver.hasProperty(index)) { accumulator = receiver.getProperty(index); found = true; }
+            }
+            if (!found) host::throwRuntimeError("TypeError", "Reduce of empty array with no initial value");
+          }
+          for (; step < length; ++step) {
+            const double k = position(step);
+            const auto index = at(static_cast<std::size_t>(k));
+            if (receiver.hasProperty(index)) accumulator = reducer.callWithReceiver(Value(), {accumulator, receiver.getProperty(index), number(k), receiver});
+          }
+          return accumulator;
+        }
+        if (method == "concat" || method == "flat" || method == "flatMap") {
+          auto output = gea::makeRef<ArrayObject<Value>>();
+          // 23.1.3.13.1 FlattenIntoArray over one source, to `depth` levels.
+          std::function<void(const Value&, double)> flatten = [&](const Value& source, double depth) {
+            const double sourceLength = std::max(0.0, dynamicToNumber(source.getProperty(PropertyKey::string("length"))));
+            for (double k = 0; k < sourceLength; ++k) {
+              const auto index = at(static_cast<std::size_t>(k));
+              if (!source.hasProperty(index)) continue;
+              const Value item = source.getProperty(index);
+              if (depth > 0 && item.isArrayPayload()) flatten(item, depth - 1);
+              else output->push(item);
+            }
+          };
+          if (method == "concat") {
+            // 23.1.3.2: an Array is spread, holes kept; anything else is one element.
+            std::vector<Value> items{receiver};
+            for (std::size_t i = 0; i < args->size(); ++i) items.push_back(args->at(i));
+            for (const Value& item : items) {
+              if (!item.isArrayPayload()) { output->push(item); continue; }
+              const double itemLength = std::max(0.0, dynamicToNumber(item.getProperty(PropertyKey::string("length"))));
+              for (double k = 0; k < itemLength; ++k) {
+                const auto index = at(static_cast<std::size_t>(k));
+                if (item.hasProperty(index)) output->push(item.getProperty(index));
+                else output->pushHole();
+              }
+            }
+          } else if (method == "flat") {
+            const Value depth = argument(0);
+            flatten(receiver, depth.tag() == Value::Tag::Undefined ? 1.0 : gea::detail::toIntegerOrInfinity(dynamicToNumber(depth)));
+          } else {
+            const Value mapper = callback();
+            for (double k = 0; k < length; ++k) {
+              const auto index = at(static_cast<std::size_t>(k));
+              if (!receiver.hasProperty(index)) continue;
+              const Value mapped = mapper.callWithReceiver(argument(1), {receiver.getProperty(index), number(k), receiver});
+              if (mapped.isArrayPayload()) flatten(mapped, 0);
+              else output->push(mapped);
+            }
+          }
+          return Value::box(Value::Tag::Object, output);
+        }
+        if (method == "splice") {
+          const double start = relative(argument(0), 0.0);
+          const double deleteCount = args->size() == 0 ? 0.0
+            : args->size() == 1 ? length - start
+            : std::clamp(gea::detail::toIntegerOrInfinity(dynamicToNumber(args->at(1))), 0.0, length - start);
+          const double itemCount = args->size() > 2 ? static_cast<double>(args->size() - 2) : 0.0;
+          auto removed = gea::makeRef<ArrayObject<Value>>();
+          for (double k = 0; k < deleteCount; ++k) {
+            const auto index = at(static_cast<std::size_t>(start + k));
+            if (receiver.hasProperty(index)) removed->push(receiver.getProperty(index));
+            else removed->pushHole();
+          }
+          if (itemCount < deleteCount) {
+            for (double k = start; k < length - deleteCount; ++k) move(k + deleteCount, k + itemCount);
+            for (double k = length; k > length - deleteCount + itemCount; --k) receiver.deleteProperty(at(static_cast<std::size_t>(k - 1)));
+          } else if (itemCount > deleteCount) {
+            for (double k = length - deleteCount; k > start; --k) move(k + deleteCount - 1, k + itemCount - 1);
+          }
+          for (double i = 0; i < itemCount; ++i) receiver.setProperty(at(static_cast<std::size_t>(start + i)), args->at(static_cast<std::size_t>(i) + 2));
+          setLength(length - deleteCount + itemCount);
+          return Value::box(Value::Tag::Object, removed);
+        }
+        if (method == "shift") {
+          if (length == 0) { setLength(0); return Value(); }
+          const Value first = receiver.getProperty(at(0));
+          for (double k = 1; k < length; ++k) move(k, k - 1);
+          receiver.deleteProperty(at(static_cast<std::size_t>(length - 1)));
+          setLength(length - 1);
+          return first;
+        }
+        if (method == "unshift") {
+          const double count = static_cast<double>(args->size());
+          if (count > 0) {
+            for (double k = length; k > 0; --k) move(k - 1, k + count - 1);
+            for (std::size_t j = 0; j < args->size(); ++j) receiver.setProperty(at(j), args->at(j));
+          }
+          setLength(length + count);
+          return number(length + count);
+        }
+        if (method == "reverse") {
+          for (double lower = 0, upper = length - 1; lower < upper; ++lower, --upper) {
+            const auto low = at(static_cast<std::size_t>(lower));
+            const auto high = at(static_cast<std::size_t>(upper));
+            const bool hasLow = receiver.hasProperty(low);
+            const bool hasHigh = receiver.hasProperty(high);
+            const Value lowValue = hasLow ? receiver.getProperty(low) : Value();
+            const Value highValue = hasHigh ? receiver.getProperty(high) : Value();
+            if (hasHigh) receiver.setProperty(low, highValue); else receiver.deleteProperty(low);
+            if (hasLow) receiver.setProperty(high, lowValue); else receiver.deleteProperty(high);
+          }
+          return receiver;
+        }
+        if (method == "fill") {
+          const double end = relative(argument(2), length);
+          for (double k = relative(argument(1), 0.0); k < end; ++k) receiver.setProperty(at(static_cast<std::size_t>(k)), argument(0));
+          return receiver;
+        }
+        if (method == "at") {
+          const double integer = gea::detail::toIntegerOrInfinity(dynamicToNumber(argument(0)));
+          const double k = integer >= 0 ? integer : length + integer;
+          return k < 0 || k >= length ? Value() : receiver.getProperty(at(static_cast<std::size_t>(k)));
+        }
+        // 23.1.3.30 sort: present values sorted, then undefineds, then holes.
+        const Value compare = argument(0);
+        if (compare.tag() != Value::Tag::Undefined && compare.tag() != Value::Tag::Function)
+          host::throwRuntimeError("TypeError", "The comparison function must be either a function or undefined");
+        std::vector<Value> present;
+        std::size_t undefinedCount = 0;
+        for (double k = 0; k < length; ++k) {
+          const auto index = at(static_cast<std::size_t>(k));
+          if (!receiver.hasProperty(index)) continue;
+          const Value item = receiver.getProperty(index);
+          if (item.tag() == Value::Tag::Undefined) ++undefinedCount;
+          else present.push_back(item);
+        }
+        std::stable_sort(present.begin(), present.end(), [&](const Value& left, const Value& right) {
+          if (compare.tag() == Value::Tag::Undefined) return host::detail::toString(left) < host::detail::toString(right);
+          const double order = dynamicToNumber(compare.callWithReceiver(Value(), {left, right}));
+          return order < 0;
+        });
+        std::size_t k = 0;
+        for (const Value& item : present) receiver.setProperty(at(k++), item);
+        for (std::size_t i = 0; i < undefinedCount; ++i) receiver.setProperty(at(k++), Value());
+        for (; static_cast<double>(k) < length; ++k) receiver.deleteProperty(at(k));
+        return receiver;
+      }, gea::packEnvironment<std::string>(std::string(entry)));
+      result.emplace(entry, Value::boxMethod<1>(callable));
+    }
+    return result;
+  }();
+  const auto found = methods.find(name);
+  return found == methods.end() ? Value() : found->second;
+}
+}  // namespace detail
 
 inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
   if (key.isSymbol()) return Value();
@@ -252,7 +691,7 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
     }();
     return methods.at(key.text() == "toString" ? "join" : key.text());
   }
-  return Value();
+  return detail::dynamicArrayGenericMethod(key.text());
 }
 
 /**
@@ -524,12 +963,14 @@ inline Value dynamicNumberPrototypeGet(const PropertyKey& key) {
 inline Ref<ArrayObject<Value>> arrayPrototypeObject() {
   static const Ref<ArrayObject<Value>> prototype = [] {
     auto object = makeRef<ArrayObject<Value>>();
-    for (const char* name : {"push", "pop", "join", "toString", "map", "filter", "forEach", "slice"}) {
+    const auto install = [&](const char* name) {
       const auto key = PropertyKey::string(name);
       auto descriptor = PropertyDescriptor::assignment(dynamicArrayPrototypeGet(key));
       descriptor.enumerable = false;
       nativeDynamicDefineProperty(object, key, descriptor);
-    }
+    };
+    for (const char* name : {"push", "pop", "join", "toString", "map", "filter", "forEach", "slice"}) install(name);
+    for (const char* name : detail::dynamicArrayGenericMethodNames) install(name);
     return object;
   }();
   return prototype;
@@ -685,6 +1126,9 @@ inline std::vector<PropertyKey> Value::ownPropertyKeys() const {
     const gea::Ref<gea::Dictionary<gea::Value>>& dictionary = as<gea::Ref<gea::Dictionary<gea::Value>>>();
     if (dictionary)
       for (const std::string& key : dictionary->enumerableKeys()) keys.push_back(PropertyKey::string(key));
+    if (const auto expando = detail::expandoFor(expandoAnchor(), false))
+      for (const PropertyKey& key : expando->ownKeys())
+        if (key.isSymbol()) keys.push_back(key);
     return detail::ordinaryOwnPropertyKeyOrder(std::move(keys));
   }
   if (tag_ == Tag::String) {
@@ -759,7 +1203,10 @@ inline bool Value::defineProperty(const PropertyKey& key, const PropertyDescript
   // through here) silently wrote a key nothing else ever reads: a direct
   // `dictionary->read(key)` afterwards still saw the old table, unmodified.
   if (metadata_->payloadType == detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<gea::Value>>>()) {
-    if (key.isSymbol() || descriptor.isAccessor()) return false;
+    // A symbol key lives in the box's expando sidecar, the one table that can
+    // hold it (`getProperty`'s arm reads it back from there).
+    if (key.isSymbol()) return detail::expandoFor(expandoAnchor(), true)->defineOwnProperty(key, descriptor);
+    if (descriptor.isAccessor()) return false;
     const gea::Ref<gea::Dictionary<gea::Value>>& dictionary = as<gea::Ref<gea::Dictionary<gea::Value>>>();
     if (!dictionary) return false;
     runtime::refuseNativelyBoundGlobal(dictionary.get(), key.text());
@@ -821,7 +1268,13 @@ inline bool Value::ownDescriptor(const PropertyKey& key, PropertyDescriptor& out
   // have or `Reflect.set`'s existence check (and `for`-`in`/`Object.keys`,
   // which filter through `ownDescriptor`) never see what the table holds.
   if (metadata_->payloadType == detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<gea::Value>>>()) {
-    if (key.isSymbol()) return false;
+    if (key.isSymbol()) {
+      const auto expando = detail::expandoFor(expandoAnchor(), false);
+      const auto* descriptor = expando ? expando->ownProperty(key) : nullptr;
+      if (!descriptor) return false;
+      out = *descriptor;
+      return true;
+    }
     const gea::Ref<gea::Dictionary<gea::Value>>& dictionary = as<gea::Ref<gea::Dictionary<gea::Value>>>();
     if (!dictionary || !dictionary->has(key.text())) return false;
     out = PropertyDescriptor::assignment(dictionary->read(key.text()));

@@ -107,6 +107,15 @@ const lexicalSymbolBehindExportSynthesis = (checker: ts.TypeChecker, node: ts.Id
   if (!isExportSynthesis(symbol)) return null
   if ((symbol.declarations ?? []).some((declaration) => ts.isVariableDeclaration(declaration) || ts.isParameter(declaration))) return null
   const scoped = checker.resolveName(node.text, node, ts.SymbolFlags.Value, false)
+  // A function or class carrying expando writes (`Request.props = []` beside
+  // `function Request`) is flagged as an assignment too: when it has that
+  // declaration and the name's own scope resolves to it, it is the lexical
+  // binding. (`module` in `module.exports = X` resolves to its synthesis too,
+  // and has no such declaration.)
+  const declaresLexically = (symbol.declarations ?? []).some(
+    (declaration) => ts.isFunctionDeclaration(declaration) || ts.isClassDeclaration(declaration)
+  )
+  if (declaresLexically && scoped === symbol) return null
   const lexical =
     scoped !== undefined && !isExportSynthesis(scoped) ? scoped : checker.resolveName(node.text, undefined, ts.SymbolFlags.Value, false)
   return lexical ?? null

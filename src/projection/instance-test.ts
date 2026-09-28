@@ -1,5 +1,6 @@
 import type { DeclarationId } from '../identity/ids.js'
 import type { Representation, TypedArrayElementDomain } from '../representation/model.js'
+import { representationKey } from '../representation/model.js'
 import type { ClassLayout } from './classes.js'
 import { extendsClass } from './dispatch.js'
 
@@ -61,11 +62,13 @@ export interface ClassPrototypeFacts {
   readonly materialized: ReadonlySet<DeclarationId>
   /**
    * Every class whose instances the program converts into a structural view
-   * (`classViewCarrierKinds`). A view is a different allocation that no
-   * longer carries its class, so an `instanceof` over a view carrier can
-   * answer `false` only when no class of the tested family is ever viewed.
+   * (`classViewCarrierKinds`), with the view carriers (by representation key)
+   * each conversion could have produced. A view is a different allocation that
+   * no longer carries its class, so an `instanceof` over a view carrier can
+   * answer `false` only when no class of the tested family is ever viewed as
+   * that carrier.
    */
-  readonly viewed?: ReadonlySet<DeclarationId>
+  readonly viewed?: ReadonlyMap<DeclarationId, ReadonlySet<string>>
 }
 
 /** The object carriers a class instance can be converted into while losing its class (`targets/cpp/conversions.ts`'s record view). */
@@ -76,7 +79,7 @@ export const classViewCarrierKinds: ReadonlySet<Representation['kind']> = new Se
   'dictionary'
 ])
 
-export const noClassPrototypes: ClassPrototypeFacts = { prototypeOf: null, materialized: new Set(), viewed: new Set() }
+export const noClassPrototypes: ClassPrototypeFacts = { prototypeOf: null, materialized: new Set(), viewed: new Map() }
 
 /** A carrier that can hold only a primitive, never an Object. */
 const nonObjectTargetOf = (right: Representation): NonObjectInstanceTarget | null => {
@@ -124,15 +127,17 @@ export const classInstanceTestOf = (
   // A view carrier holds a family member only if some instance of it exists
   // and was converted into a view -- through its own class-ref or through an
   // ancestor's, which may hold it. A prototype object may be viewed as well.
-  const mayBeViewed = (): boolean => {
+  const mayBeViewed = (view: Representation): boolean => {
     const viewed = prototypes.viewed
     if (viewed === undefined) return true
+    const key = representationKey(view)
     // A materialized prototype travels as its class's own class-ref, so a
-    // view of it is a view the census already counted for that class.
+    // view of it is a view the census already counted for that class; an
+    // instance held as an ancestor's class-ref is viewed as that ancestor.
     return extension.some(
       (member) =>
         (prototypes.materialized.has(member) || !classes.get(member)?.uninstantiable) &&
-        (viewed.has(member) || [...viewed].some((holder) => extendsClass(classes, member, holder)))
+        [...viewed].some(([holder, views]) => views.has(key) && (holder === member || extendsClass(classes, member, holder)))
     )
   }
   let native = true
@@ -163,7 +168,7 @@ export const classInstanceTestOf = (
     if (value.kind === 'optional') return { kind: 'optional', payload: plan(value.payload) }
     // A view of a family member would answer `false` for a `true` value. An
     // unknown view census proves nothing, so it refuses too.
-    if (classViewCarrierKinds.has(value.kind) && mayBeViewed()) {
+    if (classViewCarrierKinds.has(value.kind) && mayBeViewed(value)) {
       // Only a shared view has an identity to remember its origin under; the
       // origin is tested as a box, which tells a prototype object apart.
       const shared = 'ownership' in value && value.ownership === 'shared-refcount' && value.kind !== 'dictionary'

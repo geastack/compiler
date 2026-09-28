@@ -1,3 +1,4 @@
+import { deferredDynamicObjectMethodClaim } from './host/object-protocol.js'
 import { canonicalIndexLiteral } from '../../representation/array-index.js'
 import { disjointNativeRecordIndexOf, nativeRecordIndexReadCarrierOf } from '../../ir/native-record-index.js'
 import type { DefineOwnPropertyOperation, GetOperation, IrOperand, IrResult, SetOperation } from '../../ir/model.js'
@@ -302,6 +303,7 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
         `"${staticKey}" is an Array.prototype member this backend states no rendering for: ${stated}`
       )
     }
+    if (deferredDynamicObjectMethodClaim(ctx.staticKeyTexts, receiver, key) !== null) return ''
     if (arrayInheritedMemberRefusals.has(staticKey)) {
       throw createCppEmitBlockedError(
         'property-access:array-object:get:false',
@@ -337,6 +339,31 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
   // object's own ordinary properties, which no element access reads.
   if (key.representation.kind === 'string') {
     const indexText = `gea::detail::arrayIndexFromKeyText(${operandText(ctx, key)})`
+    return (
+      absentCapableElementText(ctx, receiverText, 'elementAt', indexText, receiver.representation.element, result) ??
+      reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->elementAt(${indexText})`)
+    )
+  }
+  // A boxed or possibly-absent key is ToPropertyKey'd (7.1.19) and read as the
+  // string key above is: semver's `re[t.PRERELEASE]`, whose `t` table the
+  // opt-in boxes (an absent key is the property "undefined", no index).
+  const boxedKey =
+    key.representation.kind === 'dynamic'
+      ? operandText(ctx, key)
+      : key.representation.kind === 'optional'
+        ? alignedValueText(
+            ctx,
+            'emit-carrier-members.ts:array-key',
+            key.representation,
+            { kind: 'dynamic', reason: 'declared-any-never-narrowed' },
+            operandText(ctx, key)
+          )
+        : null
+  if (boxedKey !== null) {
+    const indexText =
+      `([&]() -> double { std::size_t gea_index = 0; ` +
+      `return gea::detail::arrayIndexOfKey(gea::host::toPropertyKey(${boxedKey}), gea_index) ` +
+      '? static_cast<double>(gea_index) : 4294967295.0; }())'
     return (
       absentCapableElementText(ctx, receiverText, 'elementAt', indexText, receiver.representation.element, result) ??
       reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->elementAt(${indexText})`)
@@ -526,9 +553,9 @@ export const isDeclaredStringPrototypeKey = (key: string): boolean => stringProt
  * string given otherwise, which is exactly the `gea::Optional<std::string>`
  * `gea::symbolDescription` answers and the `optional(string)` carrier the
  * checker's `string | undefined` derives to. test262's `propertyHelper.js`
- * reads it for every symbol-keyed `verifyProperty`. The other
- * `Symbol.prototype` members (`toString`, `valueOf`, `[@@toPrimitive]`) are
- * methods and refuse by name until an invocation asks for them.
+ * reads it for every symbol-keyed `verifyProperty`. `toString` and `valueOf`
+ * are deferred to the call that fuses with them (`deferredScalarMethodClaim`);
+ * `[@@toPrimitive]` refuses by name.
  */
 export const symbolMemberText = (ctx: EmitContext, receiver: IrOperand, key: IrOperand, result: IrResult | null): string | null => {
   if (receiver.representation.kind !== 'symbol') return null
@@ -546,6 +573,7 @@ export const symbolMemberText = (ctx: EmitContext, receiver: IrOperand, key: IrO
     }
     return converted
   }
+  if (result !== null && deferredScalarMethodClaim(ctx.staticKeyTexts, receiver, key) !== null) return ''
   throw createCppEmitBlockedError(
     `property-access:symbol:get:${String(staticKey === undefined)}`,
     `"${staticKey ?? '<computed>'}" is not a member this backend renders on a symbol receiver; only "description" is`
@@ -671,6 +699,15 @@ export const stringIndexText = (receiverText: string, indexText: string, result:
   // by becoming `Optional<std::string>()`.
   const isOptionalString = (representation: Representation): boolean =>
     representation.kind === 'optional' && representation.absence === 'undefined' && representation.payload.kind === 'string'
+  // Held as a box, the read is the absence-capable one, boxed: `undefined`
+  // past the end (10.4.3.5 StringGetOwnProperty), a one-unit string before it.
+  if (result !== null && result.representation.kind === 'dynamic')
+    return `gea::detail::DynamicCarrier<gea::Optional<std::string>>::out(${stringIndexText(
+      receiverText,
+      indexText,
+      { ...result, representation: { kind: 'optional', absence: 'undefined', payload: { kind: 'string' } } },
+      staticKey
+    )})`
   const wantsAbsence = result !== null && isOptionalString(result.representation)
   if (result !== null && result.representation.kind !== 'string' && !wantsAbsence) {
     throw createCppEmitBlockedError(
@@ -1385,8 +1422,9 @@ export const emitRecordIndexSidecarStore = (
 }
 
 /**
- * Whether a scalar member read is a deferred `Number`/`BigInt.prototype`
- * method read. Stated once; the renderer and the walk both ask it.
+ * Whether a scalar or symbol member read is a deferred
+ * `Number`/`BigInt`/`Symbol.prototype` method read. Stated once; the renderer
+ * and the walk both ask it.
  */
 export const deferredScalarMethodClaim = (
   staticKeyTexts: ReadonlyMap<IrValueId, string>,
@@ -1394,10 +1432,14 @@ export const deferredScalarMethodClaim = (
   key: IrOperand
 ): PrototypeMethodRead | null => {
   const carrier = receiver.representation
-  if (carrier.kind !== 'scalar') return null
+  if (carrier.kind !== 'scalar' && carrier.kind !== 'symbol') return null
   const staticKey = staticKeyTexts.get(key.value)
   if (staticKey === undefined) return null
   const operand = { kind: 'operand', operand: receiver } as const
+  if (carrier.kind === 'symbol')
+    return staticKey === 'toString' || staticKey === 'valueOf'
+      ? { receiverKind: 'symbol', member: staticKey, receiver: operand, receiverElement: null }
+      : null
   if (carrier.domain === 'number' && numberPrototypeMethods.has(staticKey))
     return { receiverKind: 'number', member: staticKey, receiver: operand, receiverElement: null }
   if (carrier.domain === 'bigint' && (staticKey === 'toString' || staticKey === 'valueOf'))

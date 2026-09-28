@@ -2,7 +2,7 @@ import ts from 'typescript'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import { disjointUnionTypeOf, joinOfWrites, widestOf } from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
-import type { ValueFlowIndex } from './flow/model.js'
+import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 
 /**
@@ -418,12 +418,57 @@ export const censusCollectionBindings = (
     'index-assignment',
     'call-argument'
   ])
+  // Every write whose value is exactly one call, keyed by that call.
+  let writesOfCall: Map<ts.Node, ValueWrite[]> | null = null
+  const writesWhoseValueIs = (call: ts.Node): readonly ValueWrite[] => {
+    if (writesOfCall === null) {
+      writesOfCall = new Map()
+      for (const write of flow.allWrites) {
+        let value: ts.Node | null = write.value
+        while (value && ts.isParenthesizedExpression(value)) value = value.expression
+        if (!value || !ts.isCallExpression(value)) continue
+        const known = writesOfCall.get(value)
+        if (known) known.push(write)
+        else writesOfCall.set(value, [write])
+      }
+    }
+    return writesOfCall.get(call) ?? []
+  }
+  /**
+   * The writes a local reaches by being RETURNED: every `return local` of the
+   * function that declares it hands the same reference to each call of that
+   * function, so a cell a call initializes or an argument a call fills holds
+   * it too (`const seen = new Set(); ...; return seen` beside
+   * `walk(unique(items))`). Only a local whose every `return` names it.
+   */
+  const returnedWritesOf = (declaration: ts.Node): readonly ValueWrite[] => {
+    if (!ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name)) return []
+    const symbol = checker.getSymbolAtLocation(declaration.name)
+    const owner = ts.findAncestor(declaration.parent, (node) => ts.isFunctionLike(node))
+    if (!symbol || !owner || !ts.isFunctionLike(owner) || !('body' in owner) || !owner.body || !ts.isBlock(owner.body)) return []
+    let returnsIt = false
+    let returnsOther = false
+    const visit = (node: ts.Node): void => {
+      if (node !== owner.body && ts.isFunctionLike(node)) return
+      if (ts.isReturnStatement(node)) {
+        let expression: ts.Node | undefined = node.expression
+        while (expression && ts.isParenthesizedExpression(expression)) expression = expression.expression
+        if (expression && ts.isIdentifier(expression) && checker.getSymbolAtLocation(expression) === symbol) returnsIt = true
+        else returnsOther = true
+        return
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(owner.body)
+    if (!returnsIt || returnsOther) return []
+    return flow.calls.filter((site) => site.targets.includes(owner)).flatMap((site) => writesWhoseValueIs(site.call))
+  }
   const aliasClosureOf = (owner: ts.Node): ReadonlySet<ts.Node> => {
     const seen = new Set<ts.Node>([owner])
     const queue: ts.Node[] = [owner]
     while (queue.length > 0) {
       const current = queue.shift() as ts.Node
-      for (const write of flow.flowsFromDeclaration(current)) {
+      for (const write of [...flow.flowsFromDeclaration(current), ...returnedWritesOf(current)]) {
         if (write.slot !== 'whole' || !ALIAS_EDGES.has(write.edge)) continue
         const target = write.target.declaration
         if (target && !seen.has(target)) {
@@ -433,6 +478,34 @@ export const censusCollectionBindings = (
       }
     }
     return seen
+  }
+
+  /**
+   * Whether a local or property cell in `owner`'s alias closure is also
+   * assigned something that did not come from the closure.
+   *
+   * Such a cell holds this collection AND another one, so both must share one
+   * carrier -- and the evidence gathered through it types this owner alone.
+   * @pinojs/redact's `buildPathStructure` walks `let current = pathStructure`
+   * down `current = current.get(part)`: `current.set(part, new Map())` typed
+   * `pathStructure` as `Map<string, Map<any, any>>` while `current`, holding
+   * both it and its values, could only be `Map<any, any>`, and no conversion
+   * joins two collection identities. A parameter is exempt: every argument
+   * passed to it is its own owner's evidence, and its carrier is that
+   * census's question.
+   */
+  const aliasHoldsAnotherCollection = (owner: ts.Node, closure: ReadonlySet<ts.Node>): boolean => {
+    const fromClosure = new Set<ValueWrite>()
+    for (const member of closure)
+      for (const write of [...flow.flowsFromDeclaration(member), ...returnedWritesOf(member)]) fromClosure.add(write)
+    for (const member of closure) {
+      if (member === owner || ts.isParameter(member)) continue
+      for (const write of flow.writesToDeclaration(member)) {
+        if (write.slot !== 'whole' || write.value === null || !ALIAS_EDGES.has(write.edge)) continue
+        if (!fromClosure.has(write)) return true
+      }
+    }
+    return false
   }
 
   /**
@@ -542,9 +615,22 @@ export const censusCollectionBindings = (
       )
       continue
     }
+    const closure = aliasClosureOf(owner)
+    if (aliasHoldsAnotherCollection(owner, closure)) {
+      ownerRefusal.set(owner, 'alias-holds-another-collection')
+      censusRefusals.push(
+        censusRefusal(
+          'collection',
+          'alias-holds-another-collection',
+          'a cell this collection flows into is also assigned a value that is not this collection, so one carrier would have to hold both',
+          describeOwner(owner)
+        )
+      )
+      continue
+    }
     const keyArgs: ts.Expression[] = []
     const valueArgs: ts.Expression[] = []
-    for (const decl of aliasClosureOf(owner)) {
+    for (const decl of closure) {
       for (const write of flow.writesToDeclaration(decl)) {
         if (write.edge === 'collection-key' && write.value) keyArgs.push(write.value)
         else if (write.edge === 'collection-value' && write.value) valueArgs.push(write.value)
@@ -639,7 +725,8 @@ export const censusCollectionBindings = (
       }
       return joined
     })()
-    if (key) boundKey.set(owner, key)
+    // Every name in the closure holds the one collection.
+    if (key) for (const alias of closure) boundKey.set(alias, key)
 
     if (entry.family !== 'map' && entry.family !== 'weak-map') continue
     if (valueArgs.length === 0) {
@@ -671,7 +758,7 @@ export const censusCollectionBindings = (
       // because the resolver downstream must agree about ALL of them or
       // answer nothing: a value slot half-derived from this census and half
       // from the checker would be a second authority over one storage.
-      unresolvedValueArgs.set(owner, valueArgs)
+      for (const alias of closure) unresolvedValueArgs.set(alias, valueArgs)
       censusRefusals.push(
         censusRefusal(
           'collection',
@@ -695,7 +782,7 @@ export const censusCollectionBindings = (
       )
       continue
     }
-    boundValue.set(owner, value)
+    for (const alias of closure) boundValue.set(alias, value)
   }
 
   // --- Array element census -------------------------------------------

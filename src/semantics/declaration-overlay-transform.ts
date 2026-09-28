@@ -365,7 +365,28 @@ const declarationPathFor = (fileName: string): string | null => {
   const relative = rest.slice(packageName.length + 1)
   const typesName = scoped ? `@types/${packageName.slice(1).replace('/', '__')}` : `@types/${packageName}`
   const candidate = join(modules, typesName, relative.replace(/\.m?js$/, '.d.ts'))
-  return existsSync(candidate) ? candidate : null
+  if (existsSync(candidate)) return candidate
+  return compiledSiblingDeclarationOf(fileName)
+}
+
+/**
+ * The `.d.ts` beside a JS file tsc emitted from TypeScript, whose own source
+ * map names a `.ts` source: the two are one compilation's output, so the
+ * declaration states what the JS's JSDoc was copied from -- with the imports
+ * tsc left out of the JS (ret's `@param {Set} set`, which without
+ * `import { Set } from './types'` names the global `Set`). A hand-written
+ * declaration beside a hand-written JS proves no such thing and is not used.
+ */
+const compiledSiblingDeclarationOf = (fileName: string): string | null => {
+  const declaration = fileName.replace(/\.m?js$/, '.d.ts')
+  const map = `${fileName}.map`
+  if (declaration === fileName || !existsSync(declaration) || !existsSync(map)) return null
+  try {
+    const sources: unknown = (JSON.parse(readFileSync(map, 'utf8')) as { sources?: unknown }).sources
+    return Array.isArray(sources) && sources.length === 1 && typeof sources[0] === 'string' && /\.ts$/.test(sources[0]) ? declaration : null
+  } catch {
+    return null
+  }
 }
 
 const nameOf = (node: ts.Node): string | null => {
@@ -1458,6 +1479,7 @@ export const declarationOverlayTransform = (input: {
   if (!overlay || (overlay.signatures.size === 0 && overlay.accessors.size === 0 && overlay.records.signatures.size === 0)) return null
   const declaredPath = input.declarationFileName ?? declarationPathFor(input.fileName)
   if (!declaredPath) return null
+  const compiledSibling = declaredPath === compiledSiblingDeclarationOf(input.fileName)
   const file = ts.createSourceFile(input.fileName, input.text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
   /** The JS file's own directory, in the frame every specifier this module writes is expressed in -- see `rebased`. */
   const here = dirname(declaredPath)
@@ -2113,10 +2135,33 @@ export const declarationOverlayTransform = (input: {
   const considerStatedType = (typeNode: ts.TypeNode): void => {
     if (declaredAccessorTypes.has(typeNode)) return
     const stated = statedTypeTextOf(typeNode, file)
+    const imported = compiledSibling ? importedSpellingOf(stated) : null
+    if (imported !== null) {
+      edits.push({ at: typeNode.getStart(file), end: typeNode.getEnd(), text: imported })
+      return
+    }
     for (const name of typeNamesIn(stated) ?? []) canSupply(name)
     const spelled = respell(stated)
     if (spelled === null || spelled === stated || spelled.includes('*/')) return
     edits.push({ at: typeNode.getStart(file), end: typeNode.getEnd(), text: spelled })
+  }
+  /**
+   * A tag tsc copied from the `.ts` source names what that source imported,
+   * which the declaration imports too and the JS does not (`compiledSiblingDeclarationOf`):
+   * ret's `@param {Set} set` is `import('./types').Set`, not the global. The
+   * specifier is the declaration's own, relative to the one directory both
+   * files share.
+   */
+  const importedSpellingOf = (stated: string): string | null => {
+    let spelled = stated
+    for (const name of new Set(typeNamesIn(stated) ?? [])) {
+      const specifier = overlay.importedFrom.get(name)
+      if (specifier === undefined || boundHere.has(name) || !specifier.slice(1, -1).startsWith('.')) continue
+      const next = respelledName(spelled, name, `import(${specifier}).${name}`)
+      if (next === null) return null
+      spelled = next
+    }
+    return spelled === stated ? null : spelled
   }
   const scanJsDoc = (node: ts.Node): void => {
     for (const tag of ts.getJSDocTags(node)) {

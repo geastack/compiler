@@ -12,11 +12,11 @@ import {
   type EmitContext
 } from './emit-context.js'
 import { cellValueText } from './emit-bindings.js'
-import { dynamicCarrierBoxText } from './emit-narrowing.js'
+import { alignedValueText, dynamicCarrierBoxText } from './emit-narrowing.js'
 import { classBoxable } from './class-layout.js'
 import { readsCell } from './deferral-safety.js'
 import { cppDateType } from './prototype/emit-prototype-date.js'
-import { recordFieldsOfShape } from './records.js'
+import { recordFieldsOfShape, recordIndexesOfShape } from './records.js'
 import { cppRecordFieldName, cppRecordFieldPresenceName, cppRecordStructName, cppStringLiteral, cppTypeOf } from './types.js'
 import { armAt, armIs } from './emit-union-properties.js'
 
@@ -246,6 +246,11 @@ const jsonUnsupportedReason = (
       // answers instead is a `TypeError` this backend does not raise.
       if (visiting.has(structName)) return null
       if (collected.structs.has(structName)) return null
+      // The overload pair walks named fields; an index signature's sidecar
+      // holds the rest of the object's keys, which it would silently drop.
+      if (recordIndexesOfShape(deriver, representation.shapeId).length > 0) {
+        return `shape ${representation.shapeId} carries an index signature, whose sidecar keys the field-by-field JSON overload cannot write or read`
+      }
       const fields = recordFieldsOfShape(deriver, representation.shapeId)
       if (fields === null) return `no record layout could be derived for shape ${representation.shapeId}`
       const stillVisiting = new Set(visiting)
@@ -833,6 +838,24 @@ export const jsonCallText = (ctx: EmitContext, member: 'stringify' | 'parse', op
       )
     }
     return `[&]() { std::string gea_json_out; gea_json_write(gea_json_out, ${valueText}); return gea_json_out; }()`
+  }
+  // With a reviver (25.5.1 step 11) the value is parsed into a box and walked
+  // by `gea::json::reviveParsed`; what the reviver answers is a box too.
+  if (operation.arguments.length === 2 && operation.result !== null) {
+    const boxed: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+    const reviver = operation.arguments[1] as IrOperand
+    const reviverText =
+      reviver.representation.kind === 'dynamic'
+        ? operandText(ctx, reviver)
+        : alignedValueText(ctx, 'emit-json.ts:reviver', reviver.representation, boxed, operandText(ctx, reviver))
+    const revived =
+      reviverText === null
+        ? null
+        : `[&]() { const std::string& gea_json_text = ${operandText(ctx, operation.arguments[0] as IrOperand)}; gea::json::Reader gea_json_reader(gea_json_text); ` +
+          `gea::Value gea_json_result{}; gea_json_read(gea_json_reader, gea_json_result); return gea::json::reviveParsed(gea_json_result, ${reviverText}); }()`
+    const converted =
+      revived === null ? null : alignedValueText(ctx, 'emit-json.ts:revived', boxed, operation.result.representation, revived)
+    if (converted !== null) return converted
   }
   if (operation.arguments.length !== 1) {
     throw createCppEmitBlockedError(

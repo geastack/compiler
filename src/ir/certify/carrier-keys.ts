@@ -45,6 +45,15 @@ export const enumerateGetIteratorCarrierKeyOf = (kind: string, representation: R
     nativeEnumerationPlanOf(representation)
   )
     return 'native-sum'
+  // A union of primitives, possibly absent, enumerates nothing whichever arm
+  // is live (`emit-iterator.ts`'s known-empty cursor).
+  const primitive = (candidate: Representation): boolean =>
+    candidate.kind === 'scalar' ||
+    candidate.kind === 'null' ||
+    candidate.kind === 'undefined' ||
+    (candidate.kind === 'tagged-union' && candidate.arms.every((arm) => primitive(arm.value)))
+  const sum = representation?.kind === 'optional' ? representation.payload : representation
+  if (sum?.kind === 'tagged-union' && primitive(sum)) return 'primitive-sum'
   if (kind === 'dictionary') return representation?.kind === 'dictionary' ? `dictionary(${representation.key})` : kind
   if (kind === 'optional') {
     const payload = representation?.kind === 'optional' ? representation.payload : null
@@ -178,12 +187,14 @@ const isCopyableSpreadRecordInto = (
  * source fields the receiver declares, by field store -- the same scoping the
  * static spread applies (only the literal's own fields are installed). A
  * required receiver field must come from a required source field, or the
- * copy could leave it unset.
+ * copy could leave it unset -- unless a later member of the literal writes it
+ * (`overwrittenKeys`) before anything can read the literal.
  */
 const isCopyableSpreadRecordIntoRecord = (
   deriver: RepresentationDeriver,
   representation: Representation,
-  receiver: Representation | undefined
+  receiver: Representation | undefined,
+  overwrittenKeys: readonly string[]
 ): boolean => {
   if (!receiver || !isCopyableSpreadRecord(deriver, representation) || !isSpreadRecordReceiver(receiver)) return false
   const fields = staticOwnFieldsOf(deriver, representation)
@@ -191,7 +202,7 @@ const isCopyableSpreadRecordIntoRecord = (
   if (fields === null || receiverFields === null) return false
   return fields.every((field) => {
     const held = receiverFields.find((candidate) => candidate.key === field.key)
-    return held === undefined || !held.required || field.required
+    return held === undefined || !held.required || field.required || overwrittenKeys.includes(field.key)
   })
 }
 
@@ -215,6 +226,82 @@ const isCopyableSpreadUnion = (
 /** The source carrier kinds `spreadSourceCarrierKeyOf` refines beyond their bare `.kind` -- see `runtime-helper-key.ts`'s doc. */
 const refinableSpreadSourceKinds: ReadonlySet<string> = new Set(['tagged-union', 'optional', 'record', 'class-ref', 'native-record-ref'])
 
+const sharedIndexedLayoutOf = (deriver: RepresentationDeriver, representation: Representation) => {
+  if (representation.kind === 'record-with-index') return representation.ownership === 'shared-refcount' ? representation : null
+  if (representation.kind !== 'native-record-ref' || representation.native !== null || representation.ownership !== 'shared-refcount')
+    return null
+  const layout = deriver.layoutOf(representation.shapeId as StructuralTypeId)
+  return layout.kind === 'record-with-index' ? layout : null
+}
+
+/**
+ * Which arm of a union-laid-out literal each arm of a union spread source
+ * builds, or `null` when some source arm has no single answer. A receiver arm
+ * is built from a source arm when it declares every key the source arm holds
+ * that no later member rewrites, and every key it requires is one the source
+ * arm requires or a later member writes (`overwrittenKeys`). Only record arms
+ * whose field lists are static answer; the copy is field by field.
+ */
+export const unionSpreadArmPairsOf = (
+  deriver: RepresentationDeriver,
+  source: Representation,
+  receiver: Representation,
+  overwrittenKeys: readonly string[]
+): readonly { readonly source: number; readonly receiver: number }[] | null => {
+  if (source.kind !== 'tagged-union' || receiver.kind !== 'tagged-union') return null
+  const recordFields = (value: Representation) =>
+    value.kind === 'record' || (value.kind === 'native-record-ref' && value.ownership === 'shared-refcount')
+      ? staticOwnFieldsOf(deriver, value)
+      : null
+  const receiverFields = receiver.arms.map((arm) => recordFields(arm.value))
+  if (receiverFields.some((fields) => fields === null)) return null
+  const pairs: { readonly source: number; readonly receiver: number }[] = []
+  for (const [index, arm] of source.arms.entries()) {
+    const fields = recordFields(arm.value)
+    if (fields === null) return null
+    const copied = fields.filter((field) => !overwrittenKeys.includes(field.key))
+    const suppliedKeys = new Set([...fields.filter((field) => field.required).map((field) => field.key), ...overwrittenKeys])
+    const candidates = receiverFields.flatMap((declared, at) =>
+      declared !== null &&
+      copied.every((field) => declared.some((candidate) => candidate.key === field.key)) &&
+      declared.every((candidate) => !candidate.required || suppliedKeys.has(candidate.key))
+        ? [at]
+        : []
+    )
+    if (candidates.length !== 1) return null
+    pairs.push({ source: index, receiver: candidates[0]! })
+  }
+  return pairs
+}
+
+/**
+ * Whether an object spread copies through the boxes of both sides: a source
+ * whose keys are open (a dynamic value, a dictionary, or a shared record with
+ * an index signature, possibly absent) into a shared record with a string
+ * index that holds what the source's index holds. Every key the source
+ * enumerates then has a place in the receiver -- its own named field or its
+ * sidecar -- so `CopyDataProperties` is the dynamic walk over the source's
+ * box, defining each key through the receiver's.
+ */
+export const spreadCopiesThroughOpenRecord = (
+  deriver: RepresentationDeriver,
+  source: Representation,
+  receiver: Representation
+): boolean => {
+  const sidecar = sharedIndexedLayoutOf(deriver, receiver)?.indexes.find((index) => index.key === 'string')?.value
+  if (!sidecar) return false
+  const holds = (value: Representation): boolean => sidecar.kind === 'dynamic' || representationKey(value) === representationKey(sidecar)
+  if (source.kind === 'dynamic') return sidecar.kind === 'dynamic'
+  const present = source.kind === 'optional' ? source.payload : source
+  if (present.kind === 'dictionary') return present.key === 'string' && present.ownership === 'shared-refcount' && holds(present.value)
+  const own = sharedIndexedLayoutOf(deriver, present)?.indexes
+  const index = own?.find((entry) => entry.key === 'string')
+  return own !== undefined && own.length === 1 && index !== undefined && holds(index.value)
+}
+
+/** The box both sides of `spreadCopiesThroughOpenRecord` are viewed through. */
+export const openRecordBox: Representation = { kind: 'dynamic', reason: 'opt-in-fallback' }
+
 /**
  * `CopyDataProperties`'s source carrier, refined the way a `dictionary`'s key
  * domain, a `tagged-union`'s per-arm copyability, and an `optional`'s present
@@ -226,7 +313,8 @@ export const spreadSourceCarrierKeyOf = (
   kind: string,
   representation: Representation | undefined,
   receiver: Representation | undefined,
-  deriver: RepresentationDeriver
+  deriver: RepresentationDeriver,
+  overwrittenKeys: readonly string[] = []
 ): string => {
   if (!representation) return kind
   const dictionaryKind = (candidate: Extract<Representation, { kind: 'dictionary' }>): string =>
@@ -243,7 +331,7 @@ export const spreadSourceCarrierKeyOf = (
         ? dictionaryKind(candidate)
         : isCopyableSpreadRecordInto(deriver, candidate, receiver)
           ? `${candidate.kind}(copyable)`
-          : isCopyableSpreadRecordIntoRecord(deriver, candidate, receiver)
+          : isCopyableSpreadRecordIntoRecord(deriver, candidate, receiver, overwrittenKeys)
             ? `${candidate.kind}(copyable->record)`
             : null
   if (representation.kind === 'optional') return `optional(${copyableKind(representation.payload) ?? representation.payload.kind})`

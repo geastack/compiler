@@ -1,4 +1,6 @@
+import { firstNeverReasonOf } from '../../conversion/algebra.js'
 import type { Ownership, Representation } from '../../representation/model.js'
+import { symbolPropertyKeyDeclarationOf } from '../../semantics/model/structural-types.js'
 import { representationKey } from '../../representation/model.js'
 import { isNativeCallableCarrier } from '../../representation/callable-object.js'
 import type { DeclarationId, IrValueId } from '../../identity/ids.js'
@@ -10,7 +12,15 @@ import type {
   IrOperand,
   SetOperation
 } from '../../ir/model.js'
-import { createCppEmitBlockedError, defineValue, operandText, type EmitContext, type PrototypeMethodRead } from './emit-context.js'
+import {
+  createCppEmitBlockedError,
+  defineValue,
+  operandText,
+  staticPropertyKeyText,
+  unwrapPresentValue,
+  type EmitContext,
+  type PrototypeMethodRead
+} from './emit-context.js'
 import { cppAbiParameterType, cppRecordFieldName, cppResultTypeOf, cppStringLiteral, cppTypeOf } from './types.js'
 import { intrinsicMemberValueOf } from './host/emit-host-object.js'
 import { toStringText } from './emit-tostring.js'
@@ -105,7 +115,15 @@ const propertyKeyCarrierText = (ctx: EmitContext, carrier: Representation, text:
 
 export const propertyKeyText = (ctx: EmitContext, key: IrOperand, contextDescription: string): string => {
   const staticKey = ctx.constantTexts.get(key.value)
-  if (staticKey !== undefined) return `gea::PropertyKey::string(${cppStringLiteral(staticKey)})`
+  if (staticKey !== undefined) {
+    // A program symbol whose declaring cell may never have been kept (every
+    // use a static key) is spelled so its stores and reads agree either way
+    // (`gea::detail::dynamicDeclaredSymbolKey`).
+    const declaration = symbolPropertyKeyDeclarationOf(staticKey) as DeclarationId | null
+    if (declaration !== null && !ctx.wellKnownSymbols.has(declaration))
+      return `gea::detail::dynamicDeclaredSymbolKey(${cppStringLiteral(staticKey)})`
+    return staticPropertyKeyText(ctx.wellKnownSymbols, staticKey)
+  }
   return propertyKeyCarrierText(ctx, key.representation, operandText(ctx, key), contextDescription)
 }
 
@@ -195,10 +213,12 @@ export const dynamicGetText = (ctx: EmitContext, operation: GetOperation): strin
     materialized
   )
   if (converted !== null) return `[](const gea::Value& ${materialized}) -> ${cppTypeOf(produced)} { return ${converted}; }(${read})`
+  const boxed: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+  const reason = firstNeverReasonOf(ctx.conversions.nodeFor(boxed, produced).capability)
   throw createCppEmitBlockedError(
-    `conversion:${representationKey({ kind: 'dynamic', reason: 'declared-any-never-narrowed' })}->${representationKey(produced)}`,
-    `a "get" on a dynamic receiver publishes a "${produced.kind}" carrier; unboxing a dynamic property read into a concrete ` +
-      'carrier needs a tag-checked conversion, which is not installed'
+    `conversion:${representationKey(boxed)}->${representationKey(produced)}`,
+    `a "get" on a dynamic receiver publishes "${representationKey(produced)}"; unboxing a dynamic property read into a concrete ` +
+      `carrier needs a tag-checked conversion, which is not installed${reason === null ? '' : ` (${reason})`}`
   )
 }
 
@@ -247,6 +267,22 @@ export const emitDynamicSet = (ctx: EmitContext, lines: string[], operation: Set
   const receiver = dynamicReceiverText(ctx, operation.receiver)
   if (receiver === null) return false
   const key = propertyKeyText(ctx, operation.key, 'a "set" on a dynamic receiver')
+  // A CommonJS namespace member that is a host namespace -- `require('buffer')`
+  // over node-compat's `Buffer`, a path to the host's spellings with no object
+  // behind it -- is defined as an accessor whose read stops by name: the
+  // namespace itself is real, and only a program that reads that member needs
+  // what does not exist.
+  const hostNamespace = operation.kind === 'define-own-property' ? ctx.hostNamespaceReads.get(operation.value.value) : undefined
+  if (hostNamespace !== undefined) {
+    const message = `gea: "${hostNamespace}" is a host namespace with no object at run time, read as a value through a CommonJS namespace\n`
+    lines.push(
+      `{ gea::PropertyDescriptor gea_descriptor; gea_descriptor.hasGet = gea_descriptor.hasEnumerable = gea_descriptor.hasConfigurable = true; ` +
+        `gea_descriptor.enumerable = gea_descriptor.configurable = true; ` +
+        `gea_descriptor.get = [](const gea::Value&) -> gea::Value { std::fprintf(stderr, ${cppStringLiteral(message)}); std::abort(); }; ` +
+        `(void)gea::runtime::object::defineOwnProperty(${receiver}, ${key}, gea_descriptor); }`
+    )
+    return true
+  }
   const set = `${receiver}.reflectSet(${key}, ${boxedValueText(ctx, operation.value, 'a "set" on a dynamic receiver')}, ${receiver})`
   if (operation.kind === 'set' && operation.strict) {
     lines.push(`if (!${set}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read-only property");`)
@@ -358,7 +394,7 @@ export const emitUnaryDelete = (ctx: EmitContext, lines: string[], result: strin
  * the sidecar table to key on, and giving one a private sidecar per copy would
  * be a plausible-looking wrong answer.
  */
-const nativeSidecarReceiver = (ctx: EmitContext, receiver: IrOperand, contextDescription: string): string | null => {
+const nativeSidecarReceiver = (ctx: EmitContext, receiver: IrOperand, contextDescription: string, reads = false): string | null => {
   const representation = receiver.representation
   const addressable =
     representation.kind === 'class-ref' ||
@@ -373,6 +409,10 @@ const nativeSidecarReceiver = (ctx: EmitContext, receiver: IrOperand, contextDes
     // defers here rather than stating a table exists or does not.
     representation.kind === 'array-object'
   if (!addressable) return null
+  // A read of a by-value record consults only its own fields
+  // (`nativeDynamicGetOwned`); there is no sidecar to key.
+  if (reads && representation.ownership === 'owned' && representation.kind !== 'array-object' && representation.kind !== 'class-ref')
+    return operandText(ctx, receiver)
   if (representation.ownership !== 'shared-refcount') {
     throw createCppEmitBlockedError(
       `native-boundary:dynamic-property-sidecar:${representation.ownership}`,
@@ -476,7 +516,7 @@ const callableSidecarReceiver = (ctx: EmitContext, receiver: IrOperand): string 
   isNativeCallableCarrier(receiver.representation.kind) ? operandText(ctx, receiver) : null
 
 /** Function.prototype names that this compiler either defers or still refuses, never treats as an expando. */
-const nonExpandoFunctionMemberNames = new Set(['call', 'apply', 'bind', 'toString', 'constructor', 'caller', 'arguments', 'prototype'])
+const nonExpandoFunctionMemberNames = new Set(['call', 'apply', 'bind', 'toString', 'caller', 'arguments', 'prototype'])
 
 /**
  * A fixed own Function property or a statically named callable expando.
@@ -585,7 +625,11 @@ export const callableSidecarGetText = (ctx: EmitContext, operation: GetOperation
       'a Function own-property read of "prototype"'
     )
   }
-  const fixed = key === 'name' || key === 'length' || (representation.kind === 'function-and-constructor' && key === 'prototype')
+  const fixed =
+    key === 'name' ||
+    key === 'length' ||
+    key === 'constructor' ||
+    (representation.kind === 'function-and-constructor' && key === 'prototype')
   if (!fixed && nonExpandoFunctionMemberNames.has(key) && key !== 'call' && key !== 'apply' && key !== 'bind') return null
   const site = fixed ? `a Function own-property read of "${key}"` : 'a static callable expando read'
   // Unless the program shadowed it, `fn.apply` is Function.prototype's own
@@ -603,6 +647,26 @@ export const callableSidecarGetText = (ctx: EmitContext, operation: GetOperation
     `gea::callableDynamicGet(${operandText(ctx, operation.receiver)}, ${propertyKeyText(ctx, operation.key, site)})`,
     site
   )
+}
+
+/**
+ * A statically named own read off one callable arm of a union -- ajv's
+ * `useFunc(gen, f: {code: string})` over `ucs2length | equal`, each carrying
+ * its `code` expando. It reads the arm's identity table the way
+ * `callableSidecarGetText` reads a lone callable's, and declines every name
+ * that table does not answer as an own data property.
+ */
+export const callableArmStaticReadText = (
+  arm: Representation,
+  armText: string,
+  key: string,
+  propertyKey: string,
+  produced: Representation
+): string | null => {
+  if (arm.kind !== 'function-value-dispatch' && arm.kind !== 'function-and-constructor') return null
+  if (nonExpandoFunctionMemberNames.has(key) || objectShapePrototypeMethods.has(key)) return null
+  const site = key === 'name' || key === 'length' ? `a Function own-property read of "${key}"` : 'a static callable expando read'
+  return unboxedReadText(produced, `gea::callableDynamicGet(${armText}, ${propertyKey})`, site)
 }
 
 const builtinCallableMethodText = (produced: Representation, key: string, read: () => string): string | null => {
@@ -1034,12 +1098,15 @@ export const nativeSidecarGetText = (ctx: EmitContext, operation: GetOperation):
   const site = staticKey === undefined ? 'a computed "get" on a native receiver' : 'a dynamic-view "get" on a native receiver'
   const finiteUnion = finiteRecordUnionGetText(ctx, operation, operandText(ctx, operation.receiver))
   if (finiteUnion !== null) return { text: finiteUnion, spelling: null }
-  const receiver = nativeSidecarReceiver(ctx, operation.receiver, site)
+  const receiver = nativeSidecarReceiver(ctx, operation.receiver, site, true)
   if (receiver === null) return null
   const key = propertyKeyText(ctx, operation.key, site)
+  const owned = 'ownership' in operation.receiver.representation && operation.receiver.representation.ownership === 'owned'
   const read = isPatternSidecarReceiver(operation.receiver)
     ? `gea::runtime::regex::dynamicGet(${receiver}, ${key})`
-    : `gea::nativeDynamicGet(${receiver}, ${key})`
+    : owned
+      ? `gea::nativeDynamicGetOwned(${receiver}, ${key})`
+      : `gea::nativeDynamicGet(${receiver}, ${key})`
   const prototypeMethod = computedClassPrototypeMethodText(ctx, operation)
   // ONE carrier for the whole read, and it is the prototype arm's when there
   // is a prototype arm. A `?:` has a single type, and the two arms are the two
@@ -1059,7 +1126,7 @@ export const nativeSidecarGetText = (ctx: EmitContext, operation: GetOperation):
   const own =
     result.kind === 'dynamic' || isPatternSidecarReceiver(operation.receiver)
       ? decoded
-      : `gea::nativeFieldGet<${cppTypeOf(result)}>(${receiver}, ${key}, [&]() { return ${decoded}; })`
+      : `gea::${owned ? 'nativeFieldGetOwned' : 'nativeFieldGet'}<${cppTypeOf(result)}>(${receiver}, ${key}, [&]() { return ${decoded}; })`
   if (prototypeMethod === null) return { text: own, spelling: null }
   // OrdinaryGetOwnProperty runs before the prototype walk.  The native field
   // table and the identity-keyed expando are precisely this object's own
@@ -1256,11 +1323,41 @@ const emitNativeSidecarDelete = (ctx: EmitContext, lines: string[], operation: D
   }
   const receiver = nativeSidecarReceiver(ctx, operation.receiver, site)
   if (receiver === null) return false
-  const key = propertyKeyText(ctx, operation.key, site)
   const generated = generatedNativeSidecarReceiver(ctx, operation.receiver, site)
-  const call = generated === null ? `gea::nativeDynamicDelete(${receiver}, ${key})` : generatedNativeDeleteText(generated, key)
-  emitDeleteOutcome(ctx, lines, operation, call)
+  const deleteText = (key: string): string =>
+    generated === null ? `gea::nativeDynamicDelete(${receiver}, ${key})` : generatedNativeDeleteText(generated, key)
+  const required = requiredKeysGuardedAtRuntime(ctx, operation)
+  if (required.length === 0) {
+    emitDeleteOutcome(ctx, lines, operation, deleteText(propertyKeyText(ctx, operation.key, site)))
+    return true
+  }
+  // A runtime key over a plain record may name a REQUIRED field, whose
+  // presence no typed read consults: it answers as non-configurable rather
+  // than disappearing from the reflective view alone.
+  const named = required.map((field) => `__gea_delete_key.text() == ${cppStringLiteral(field)}`).join(' || ')
+  emitDeleteOutcome(
+    ctx,
+    lines,
+    operation,
+    `([&]() -> bool { const gea::PropertyKey __gea_delete_key = ${propertyKeyText(ctx, operation.key, site)}; ` +
+      `if (!__gea_delete_key.isSymbol() && (${named})) return false; return ${deleteText('__gea_delete_key')}; })()`
+  )
   return true
+}
+
+/**
+ * The required fields a computed `delete` over a plain record must answer as
+ * non-configurable -- `record(required-non-configurable)` in the manifest.
+ * None when the key is a program constant (certification already sorted
+ * that case) or when a sealed closed key set proved no key names one
+ * (`DeleteOperation.typedComputedDelete`).
+ */
+const requiredKeysGuardedAtRuntime = (ctx: EmitContext, operation: DeleteOperation): readonly string[] => {
+  const representation = operation.receiver.representation
+  if (representation.kind !== 'record' || ctx.staticKeyTexts.get(operation.key.value) !== undefined) return []
+  const recipe = operation.typedComputedDelete
+  if (recipe !== undefined && recipe.receiver === representationKey(representation)) return []
+  return representation.fields.filter((field) => field.required && !field.key.startsWith('sym(')).map((field) => field.key)
 }
 
 /**
@@ -1376,8 +1473,38 @@ const emitCallableSidecarDelete = (ctx: EmitContext, lines: string[], operation:
   return true
 }
 
+/**
+ * `delete v[k]` on a Boolean, Number or BigInt, possibly absent, or on a
+ * definite `null`/`undefined`: ToObject
+ * (ECMA-262 13.5.1.2) throws a TypeError for `undefined`/`null`, and the
+ * wrapper of a present primitive owns no property, so `[[Delete]]` answers
+ * `true` without removing anything. The key is still converted, in order.
+ */
+const emitPrimitiveDelete = (ctx: EmitContext, lines: string[], operation: DeleteOperation): boolean => {
+  const receiver = operation.receiver.representation
+  const absent = receiver.kind === 'null' || receiver.kind === 'undefined'
+  const primitive = absent || receiver.kind === 'scalar' || (receiver.kind === 'optional' && receiver.payload.kind === 'scalar')
+  if (!primitive) return false
+  const keyText = propertyKeyText(ctx, operation.key, 'a "delete" on a primitive')
+  const throwAbsent = 'gea::host::throwRuntimeError("TypeError", "Cannot convert undefined or null to object")'
+  const present = absent
+    ? `((void)(${operandText(ctx, operation.receiver)}), ${throwAbsent}, false)`
+    : receiver.kind === 'optional'
+      ? `(${operandText(ctx, operation.receiver)}.has_value() ? true : (${throwAbsent}, false))`
+      : `((void)(${operandText(ctx, operation.receiver)}), true)`
+  emitDeleteOutcome(ctx, lines, operation, `(${present} && ((void)(${keyText}), true))`)
+  return true
+}
+
 export const emitDeleteOperation = (ctx: EmitContext, lines: string[], operation: DeleteOperation): void => {
   if (emitDynamicDelete(ctx, lines, operation)) return
+  if (emitPrimitiveDelete(ctx, lines, operation)) return
+  // A possibly-absent object: ToObject throws for the absence, and a present
+  // payload deletes as itself (ret's `delete lastGroup.stack` after a `pop()`).
+  if (operation.receiver.representation.kind === 'optional') {
+    emitDeleteOperation(ctx, lines, { ...operation, receiver: unwrapPresentValue(ctx, lines, operation.receiver) })
+    return
+  }
   if (emitCallableSidecarDelete(ctx, lines, operation)) return
   if (emitDictionaryDelete(ctx, lines, operation)) return
   if (emitNativeSidecarDelete(ctx, lines, operation)) return

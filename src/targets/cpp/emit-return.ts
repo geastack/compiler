@@ -41,6 +41,24 @@ const constructorCompletionText = (ctx: EmitContext, value: IrOperand | null): s
     if (!owning.derived) return null
     return `(void)(${operandText(ctx, value)}); gea::host::throwRuntimeError("TypeError", "Derived constructors may only return object or undefined");`
   }
+  // A base class nothing extends returning an instance of itself (semver's
+  // `if (version instanceof SemVer) return version`): the object replaces the
+  // allocated one, handed to the construct function through the runtime's slot.
+  if (
+    !owning.derived &&
+    value.representation.kind === 'class-ref' &&
+    ctx.constructorOverrideClasses.has(owning.layout.declaration) &&
+    owning.layout.instance !== null
+  ) {
+    const replacement = alignedValueText(
+      ctx,
+      'emit-return.ts:constructor-override',
+      value.representation,
+      owning.layout.instance,
+      operandText(ctx, value)
+    )
+    if (replacement !== null) return `gea::detail::constructorOverride() = gea::refCastToVoid(${replacement}); return;`
+  }
   throw createCppEmitBlockedError(
     'call-abi:constructor-return-override',
     `a constructor of class ${owning.layout.declaration} returns a "${representationKey(value.representation)}" value, which would ` +

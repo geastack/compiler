@@ -12,12 +12,17 @@ import {
 import { keyedTableKeyText, memberAccessOperator } from './emit-carrier-members.js'
 import { emitDynamicHasProperty, propertyKeyText } from './emit-dynamic-properties.js'
 import { armAt, armIs } from './emit-union-properties.js'
-import { objectPrototypeMemberNames } from '../../representation/record-fields.js'
-import { cppRecordFieldPresenceName } from './types.js'
+import { functionPrototypeMemberNames, objectPrototypeMemberNames } from '../../representation/record-fields.js'
+import { cppRecordFieldPresenceName, cppStringLiteral } from './types.js'
 import { classPrototypeMemberIsPresent, symbolKeyedMemberIsDeclared } from '../../projection/class-property-presence.js'
 import { binaryToStringTagText } from './emit-buffers.js'
+import { isNativeError } from './error-types.js'
 import { regexpRoleOf } from './prototype/emit-prototype-regexp.js'
 import { nativeRecordIndexHasPropertyOf } from '../../ir/native-record-index-transport.js'
+import { classViewFreeRecordRef, sidecarOptionalKey } from '../../ir/certify/has-property-key.js'
+
+/** Error.prototype's own keys (ECMA-262 20.5.3). */
+const errorPrototypeMemberNames: ReadonlySet<string> = new Set(['constructor', 'message', 'name', 'toString'])
 
 /** A shape-named or inline record carrier's ownership, which decides whether its fields are reached through `.` or `->`. */
 const ownershipOf = (carrier: Representation): Ownership =>
@@ -232,12 +237,33 @@ const layoutAnswerFor = (ctx: EmitContext, carrier: Representation, receiverText
     const property = propertyKeyText(ctx, key, 'an "in" test on Pattern')
     return `((void)(${operandText(ctx, key)}), ${receiver} ? gea::runtime::regex::dynamicHas(${receiver}, ${property}) : (gea::host::throwInPropertyNonObject(), false))`
   }
+  // A host handle's own members are exactly the ones its host declares
+  // (`intrinsicMembers`, what `Object.getOwnPropertyNames` of it reads), and
+  // behind them sit Function.prototype -- for a handle that can be called or
+  // constructed -- and Object.prototype. So a static key is decided here:
+  // fastify's `'asyncDispose' in Symbol`.
+  if (staticKey !== null && carrier.kind === 'native-handle') {
+    const protocol = carrier.native ?? carrier.protocol
+    const own = (ctx.hosts.intrinsicMembers.get(protocol) ?? []).some((member) => member.name === staticKey)
+    const callable = carrier.call !== null || carrier.construct !== null || protocol.endsWith('Constructor')
+    const present = own || objectPrototypeMemberNames.has(staticKey) || (callable && functionPrototypeMemberNames.has(staticKey))
+    return `((void)(${operandText(ctx, key)}), (void)(${receiverText()}), ${present ? 'true' : 'false'})`
+  }
   if (staticKey !== null && carrier.kind === 'class-ref' && classPrototypeMemberIsPresent(ctx.classes, carrier.declaration, staticKey)) {
     const present =
       ownershipOf(carrier) === 'shared-refcount'
         ? `(${receiverText()} ? true : (gea::host::throwInPropertyNonObject(), false))`
         : `((void)(${receiverText()}), true)`
     return `((void)(${operandText(ctx, key)}), ${present})`
+  }
+  // The intrinsic error object answers its own keys through its field table
+  // (`cause` only once installed, 20.5.8.1); what it inherits is
+  // Error.prototype's and Object.prototype's.
+  if (staticKey !== null && isNativeError(carrier)) {
+    const inherited = errorPrototypeMemberNames.has(staticKey) || objectPrototypeMemberNames.has(staticKey)
+    const receiver = receiverText()
+    const own = `[&]() { gea::PropertyDescriptor __gea_own; return ${receiver}->gea_ownFieldDescriptor(gea::PropertyKey::string(${cppStringLiteral(staticKey)}), __gea_own); }()`
+    return `((void)(${operandText(ctx, key)}), ${receiver} ? ${inherited ? 'true' : own} : (gea::host::throwInPropertyNonObject(), false))`
   }
   const fields = fieldsOf(ctx, carrier)
   const field = staticKey === null ? undefined : fields?.find((candidate) => candidate.key === staticKey)
@@ -283,10 +309,40 @@ const layoutAnswerFor = (ctx: EmitContext, carrier: Representation, receiverText
     const keyText = propertyKeyText(ctx, key, 'an "in" test with a symbol key on a native receiver')
     return `(${receiver} ? gea::nativeDynamicHas(${receiver}, ${keyText}) : (gea::host::throwInPropertyNonObject(), false))`
   }
-  if (staticKey === null && key.representation.kind === 'string' && generatedSharedRecordCarrier(carrier)) {
+  // A runtime Number key is its canonical string (ToPropertyKey), which no
+  // Object.prototype member spells: the same lookup as a string key.
+  if (
+    staticKey === null &&
+    (key.representation.kind === 'string' ||
+      (key.representation.kind === 'scalar' && key.representation.domain !== 'boolean' && key.representation.domain !== 'bigint') ||
+      sidecarOptionalKey(key.representation)) &&
+    (generatedSharedRecordCarrier(carrier) || classViewFreeRecordRef(carrier, ctx.conversions))
+  ) {
     const receiver = receiverText()
     const keyText = propertyKeyText(ctx, key, 'an "in" test on a native record')
     return `(${receiver} ? gea::nativeDynamicHasProperty(${receiver}, ${keyText}) : (gea::host::throwInPropertyNonObject(), false))`
+  }
+  // A by-value record's own keys are its fields -- it has no identity, so no
+  // expando table -- and a key it does not name is answered by
+  // `Object.prototype` (json-schema-traverse's `key in traverse.arrayKeywords`).
+  if (
+    staticKey === null &&
+    key.representation.kind === 'string' &&
+    carrier.kind === 'record' &&
+    carrier.ownership === 'owned' &&
+    carrier.accessors.length === 0
+  ) {
+    const receiver = receiverText()
+    const member = memberAccessOperator(carrier.ownership)
+    const fieldTests = carrier.fields
+      .filter((field) => !field.key.startsWith('sym('))
+      .map((field) =>
+        field.required
+          ? `__gea_key == ${cppStringLiteral(field.key)}`
+          : `(__gea_key == ${cppStringLiteral(field.key)} && ${receiver}${member}${cppRecordFieldPresenceName(field.key)})`
+      )
+    const inherited = [...objectPrototypeMemberNames].map((name) => `__gea_key == ${cppStringLiteral(name)}`)
+    return `([&]() -> bool { const std::string __gea_key = ${operandText(ctx, key)}; return ${[...fieldTests, ...inherited].join(' || ') || 'false'}; })()`
   }
   // An `array-object` keeps its own presence bit per index (a hole is a real
   // ECMA-262 distinction, not merely a stored `undefined` -- see
@@ -402,6 +458,9 @@ export const emitHasProperty = (ctx: EmitContext, lines: string[], operation: Ha
  */
 export const hasPropertyHelperClaims: readonly string[] = [
   'computation:in:static-string:class(prototype-member)',
+  // A static key over a host handle -- the `native-handle` branch of `layoutAnswerFor`.
+  'computation:in:static-string:native-handle',
+  'computation:in:static-number:native-handle',
   'computation:in:static-number:class(prototype-member)',
   'computation:in:static-string:optional(class(prototype-member))',
   'computation:in:static-number:optional(class(prototype-member))',
@@ -419,6 +478,10 @@ export const hasPropertyHelperClaims: readonly string[] = [
   'computation:in:static-string:record(sidecar)',
   'computation:in:static-number:record(sidecar)',
   'computation:in:string:record(sidecar)',
+  // A runtime string key over a by-value record: its fields, then `Object.prototype`.
+  'computation:in:string:record(by-value)',
+  'computation:in:number:record(sidecar)',
+  'computation:in:optional:record(sidecar)',
   // A SYMBOL key over the same shared sidecar -- `layoutAnswerFor`'s own
   // `key.representation.kind === 'symbol'` branch above, gated on the layout
   // declaring no symbol-keyed slot of its own so the sidecar's verdict is the
@@ -430,6 +493,8 @@ export const hasPropertyHelperClaims: readonly string[] = [
   'computation:in:static-string:optional(record(sidecar))',
   'computation:in:static-number:optional(record(sidecar))',
   'computation:in:string:optional(record(sidecar))',
+  'computation:in:number:optional(record(sidecar))',
+  'computation:in:optional:optional(record(sidecar))',
   'computation:in:static-string:optional(record(optional-field))',
   'computation:in:static-number:optional(record(optional-field))',
   'computation:in:static-string:dictionary(string)',
@@ -446,6 +511,10 @@ export const hasPropertyHelperClaims: readonly string[] = [
   'computation:in:string:dynamic',
   'computation:in:symbol:dynamic',
   'computation:in:number:dynamic',
+  // `undefined`/`null` keys: ToPropertyKey gives "undefined"/"null", which
+  // `propertyKeyCarrierText` already spells (pino's `defaultLevel in labels`).
+  'computation:in:undefined:dynamic',
+  'computation:in:null:dynamic',
   // A boxed KEY over a boxed receiver -- `propertyKeyText`'s own `dynamic`
   // branch, which renders ToPropertyKey (7.1.19) off the box's tag.
   'computation:in:dynamic:dynamic',

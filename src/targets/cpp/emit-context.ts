@@ -7,6 +7,7 @@ import { nodeOfOperation, operationOfResult, withoutSpecialization } from '../..
 import type { BindingPlacement } from '../../projection/bindings.js'
 import type { ClassLayout } from '../../projection/classes.js'
 import { recordLayoutPolicyOf } from '../../projection/fields.js'
+import { withResolversRecordRefusal, withResolversRecordText } from './host/promise-with-resolvers.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
 import type {
   CallOperation,
@@ -36,6 +37,7 @@ import {
   cppRecordFieldKeyIsSymbol,
   cppStringLiteral,
   cppStringViewLiteral,
+  cppResultTypeOf,
   cppTypeOf,
   cppUndefinedIn
 } from './types.js'
@@ -47,7 +49,7 @@ import {
   hostMemberValueText
 } from './host/emit-host-value.js'
 import type { HostMethodAlias } from './host/host-method-aliases.js'
-import type { PrinterDrift } from './emit-narrowing.js'
+import { unboxedLoadText, type PrinterDrift } from './emit-narrowing.js'
 import { createConversionNodes, type ConversionCensus } from '../../conversion/nodes.js'
 import { createCppConversionRegistry } from './conversions.js'
 
@@ -357,12 +359,14 @@ export interface VirtualCallee {
 export interface UnionMethodArm {
   readonly path: readonly number[]
   readonly receiverRepresentation: Representation
-  readonly callable: FunctionId
+  /** The body a class arm calls, or `null` for a boxed arm, which calls what its own [[Get]] finds. */
+  readonly callable: FunctionId | null
 }
 
 /** A method read through a tagged union, by the union it was read through and the arms that answer it. */
 export interface UnionMethodRead {
   readonly receiver: IrOperand
+  readonly key: string
   readonly arms: readonly UnionMethodArm[]
 }
 
@@ -408,6 +412,8 @@ export interface PrototypeMethodRead {
     | 'string'
     | 'number'
     | 'bigint'
+    | 'symbol'
+    | 'boxed-arm'
     | 'array-object'
     | 'promise'
     | 'keyed-collection'
@@ -423,6 +429,7 @@ export interface PrototypeMethodRead {
     | 'dictionary'
     | 'iterator'
     | 'object-shape'
+    | 'primitive-own-property'
     | 'native-handle-shape'
     | 'callable-shape'
     | 'dynamic-object'
@@ -1372,6 +1379,8 @@ export interface EmitContext {
   readonly fixedFieldStateConstant: boolean
   /** Functions whose body reads `new.target`: their allocation marks the function object so `[[Construct]]` publishes it. */
   readonly newTargetReaders: ReadonlySet<FunctionId>
+  /** Classes whose constructor returns an object that replaces the instance (`translation-unit.ts`'s `constructorOverrideClassesOf`). */
+  readonly constructorOverrideClasses: ReadonlySet<DeclarationId>
   /** Settled from `EmitBodyFacts.classTableRoots` -- see that type's own doc. */
   readonly classTableRoots: ReadonlyMap<IrValueId, IrValueId>
   /** One candidate table's withheld lines, keyed by the table's own value. See `classTableRoots`. */
@@ -1740,7 +1749,8 @@ export const createEmitContext = (
   callableIdentityDemand: CallableIdentityDemand = observesEveryCallableIdentity,
   nativeIntegrityRestricted = true,
   fixedFieldStateConstant = false,
-  newTargetReaders: ReadonlySet<FunctionId> = new Set()
+  newTargetReaders: ReadonlySet<FunctionId> = new Set(),
+  constructorOverrideClasses: ReadonlySet<DeclarationId> = new Set()
 ): { readonly ctx: EmitContext; readonly prepass: EmitBodyPrepassFacts } => {
   const admission = captures.of(owner)
   const layouts = recordLayoutPolicyOf(deriver, classes)
@@ -1838,6 +1848,7 @@ export const createEmitContext = (
     nativeIntegrityRestricted,
     fixedFieldStateConstant,
     newTargetReaders,
+    constructorOverrideClasses,
     functionSourceReads: bodyFacts.functionSourceReads,
     functionSourceSnapshotNames: bodyFacts.functionSourceSnapshotNames,
     callCallees: bodyFacts.callCallees,
@@ -2144,6 +2155,27 @@ export const operandText = (ctx: EmitContext, operand: IrOperand): string => {
           'generated per CALL site and so does not exist for a read'
       )
     }
+    // Read as a box, it is the runtime's own function object over boxes.
+    if (host.protocol === 'PromiseConstructor' && host.member === 'withResolvers' && operand.representation.kind === 'dynamic')
+      return 'gea::host::PromiseConstructor::withResolversFunction()'
+    // `Promise.withResolvers` renders per result layout rather than from a
+    // template, so its read is a captureless thunk over the same builder.
+    if (
+      host.protocol === 'PromiseConstructor' &&
+      host.member === 'withResolvers' &&
+      operand.representation.kind === 'function-value-dispatch'
+    ) {
+      const abi = operand.representation.abi
+      const built =
+        abi.parameters.length === 0 && abi.receiver === null ? withResolversRecordText(ctx.deriver, ctx.classes, abi.result) : null
+      if (built !== null)
+        return `${cppTypeOf(operand.representation)}(+[](void*) -> ${cppResultTypeOf(abi.result)} { return ${built}; }, static_cast<void*>(nullptr))`
+      if (abi.parameters.length === 0 && abi.receiver === null)
+        throw createCppEmitBlockedError(
+          `host-invocation:${host.protocol}.${host.member}:value`,
+          `"Promise.withResolvers" read as a value builds its result record, and ${withResolversRecordRefusal(ctx.deriver, ctx.classes, abi.result)}`
+        )
+    }
     const row = hostMemberOf(ctx.hosts.members, host.protocol, host.member)
     if (row) {
       const thunk = hostMemberValueText(operand.representation, row, recordLayoutPolicyOf(ctx.deriver, ctx.classes))
@@ -2192,6 +2224,38 @@ export const operandText = (ctx: EmitContext, operand: IrOperand): string => {
     )
   }
   const prototypeMethod = ctx.prototypeMethodReads.get(operand.value)
+  // `Object.prototype.hasOwnProperty` held as a value is the intrinsic function
+  // object, in a carrier that keeps its receiver: a box, or a convention whose
+  // receiver is dynamic (`has.call(o, k)` then hands it `o`).
+  if (
+    prototypeMethod?.member === 'hasOwnProperty' &&
+    (prototypeMethod.receiverKind === 'native-handle-shape' || prototypeMethod.receiverKind === 'dynamic-object')
+  ) {
+    // Off a box, the chain's own `hasOwnProperty` wins when it has one; an
+    // ordinary object of this runtime links no Object.prototype of its own, so
+    // otherwise the read is the intrinsic.
+    const boxed = prototypeMethod.receiverKind === 'dynamic-object' && prototypeMethod.receiver.kind === 'operand'
+    const owner = boxed ? operandText(ctx, prototypeMethod.receiver.operand) : null
+    const intrinsic =
+      owner === null
+        ? 'gea::host::ObjectConstructor::prototypeHasOwnPropertyFunction()'
+        : `([&]() -> gea::Value { const gea::PropertyKey gea_key = gea::PropertyKey::string("hasOwnProperty"); ` +
+          `return (${owner}).hasProperty(gea_key) ? (${owner}).getProperty(gea_key) : gea::host::ObjectConstructor::prototypeHasOwnPropertyFunction(); }())`
+    if (operand.representation.kind === 'dynamic') return intrinsic
+    const held = operand.representation
+    const loaded = held.kind === 'function-value-dispatch' ? unboxedLoadText(held, intrinsic) : null
+    if (loaded !== null) return loaded
+  }
+  // An Array.prototype method held as a value is the intrinsic's one function
+  // object (`trust.splice.apply(trust, args)`, proxy-addr): the generic
+  // algorithm the boxed prototype carries, which works on any receiver.
+  if (prototypeMethod?.receiverKind === 'array-object') {
+    const intrinsic = `gea::dynamicArrayPrototypeGet(gea::PropertyKey::string(${cppStringLiteral(prototypeMethod.member)}))`
+    const held = operand.representation
+    const loaded = held.kind === 'dynamic' ? intrinsic : held.kind === 'function-value-dispatch' ? unboxedLoadText(held, intrinsic) : null
+    if (loaded !== null)
+      return `([&]() { if (${intrinsic}.tag() != gea::Value::Tag::Function) gea::detail::refuseBoxedArrayMethod(${cppStringLiteral(prototypeMethod.member)}); return ${loaded}; }())`
+  }
   if (prototypeMethod) {
     throw createCppEmitBlockedError(
       `property-access:${prototypeMethod.receiverKind}:get:false:value`,

@@ -501,7 +501,7 @@ export const impliedPatternElementOfArms = (
 }
 
 /** The internal union constructor; the public checker exposes none (the same reach `field-bindings.ts` takes). */
-const unionTypeOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts.Type | null => {
+export const unionTypeOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts.Type | null => {
   const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
   return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(types) : null
 }

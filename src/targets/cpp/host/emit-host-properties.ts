@@ -72,10 +72,13 @@ export const declaredHostMethodRead = (ctx: EmitContext, operation: GetOperation
  * the SAME runtime path an ordinary dynamic function does, with no runtime
  * change needed. The underlying callable is never invoked by anything this
  * probe's own reflection questions reach -- `describe` never calls its `obj`
- * argument -- so a captureless no-op stub is what it wraps; a program that DID
- * call it back would need a real per-member ABI this table does not have.
+ * argument. A program that DID call it back would need a real per-member ABI
+ * this table does not have, so the callable throws a TypeError naming the
+ * member rather than returning as if it had run.
  */
 const dynamicHostFunctionValueText = (protocol: string, member: string, arity: number | null): string => {
+  // A member the runtime implements over boxes is that function object.
+  if (protocol === 'PromiseConstructor' && member === 'withResolvers') return 'gea::host::PromiseConstructor::withResolversFunction()'
   const nameProperty =
     `gea::PropertyDescriptor{.hasValue = true, .hasWritable = true, .hasEnumerable = true, .hasConfigurable = true, ` +
     `.value = gea::Value::box(gea::Value::Tag::String, std::string(${cppStringLiteral(member)})), ` +
@@ -86,7 +89,8 @@ const dynamicHostFunctionValueText = (protocol: string, member: string, arity: n
     '.writable = false, .enumerable = false, .configurable = true}'
   return (
     '([&]() -> gea::Value { ' +
-    'auto __gea_fn = gea::Value::box(gea::Value::Tag::Function, gea::CallableObject<void()>(+[](void*) {}, nullptr)); ' +
+    'auto __gea_fn = gea::Value::box(gea::Value::Tag::Function, gea::CallableObject<void()>(+[](void*) { ' +
+    `gea::host::throwRuntimeError("TypeError", ${cppStringLiteral(`${protocol}.${member} read as a value has no native calling convention`)}); }, nullptr)); ` +
     `__gea_fn.functionProperties()->defineOwnProperty(gea::PropertyKey::string("name"), ${nameProperty}); ` +
     `__gea_fn.functionProperties()->defineOwnProperty(gea::PropertyKey::string("length"), ${lengthProperty}); ` +
     `return __gea_fn; })() /* "${protocol}.${member}" -- see dynamicHostFunctionValueText */`
@@ -354,7 +358,13 @@ export const emitNativeHostStore = (
       `writing "${protocol}.${staticKey}" is claimed by no host member table as a settable property, so there is no host symbol to assign through`
     )
   }
-  const filled = fillHostTemplate(host.store, receiverText, [], null, operandText(ctx, operation.value))
+  // A member the host holds as a box (`Error.prepareStackTrace`) stores the
+  // value boxed, whatever carrier the checker gave the write.
+  const written =
+    host.resultRepresentation?.kind === 'dynamic'
+      ? boxedValueText(ctx, operation.value, `writing "${protocol}.${staticKey}"`)
+      : operandText(ctx, operation.value)
+  const filled = fillHostTemplate(host.store, receiverText, [], null, written)
   if (filled === null) {
     throw createCppEmitBlockedError(
       `host-invocation:${protocol}.${staticKey}.write`,

@@ -45,6 +45,7 @@ export const mapTestable = (representation: Representation): boolean => {
 export const hostConstructorUnionArms = (representation: Representation): readonly Representation[] | null =>
   representation.kind === 'tagged-union' &&
   representation.arms.length > 0 &&
-  representation.arms.every((arm) => arm.value.kind === 'native-handle')
+  (representation.arms.every((arm) => arm.value.kind === 'native-handle') ||
+    representation.arms.every((arm) => arm.value.kind === 'constructor-family'))
     ? representation.arms.map((arm) => arm.value)
     : null

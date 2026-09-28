@@ -87,6 +87,31 @@ test('generic receiving callbacks use the instantiated signature rather than its
   }
 })
 
+test('a receiver stating its callback over its own rest type forwards exactly the arguments written after the callback', () => {
+  const forwarding = `
+    function schedule<A extends unknown[]>(task: (...args: A) => void, ...args: A) {}
+    const event: Event = { target: { id: 2 } };
+    schedule(callback, event);
+  `
+  const { checker, file, callback, result } = contracts(forwarding)
+  const forwarded = result?.filter((contract) => contract.kind === 'forwarded') ?? []
+  assert.equal(forwarded.length, 1)
+  assert.deepEqual(
+    forwarded.flatMap((contract) => (contract.kind === 'forwarded' ? contract.arguments.map((argument) => argument.getText()) : [])),
+    ['event']
+  )
+  const type = censusParameterBindings(checker, [file], wholeProgram).typeAt(callback.parameters[0]!)
+  assert.ok(type && checker.getPropertyOfType(type, 'target'))
+})
+
+test('a callback typed apart from the receiver rest is not a forwarding', () => {
+  const { result } = contracts(`
+    function schedule<A extends unknown[]>(task: (...args: [Event]) => void, ...args: A) {}
+    schedule(callback, 1);
+  `)
+  assert.ok(result && result.every((contract) => contract.kind === 'signature'))
+})
+
 test('parameter census infers a callback with no direct calls from its closed listener contract', () => {
   const { checker, file, callback } = contracts()
   const census = censusParameterBindings(checker, [file], wholeProgram)

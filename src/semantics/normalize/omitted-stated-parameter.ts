@@ -1,5 +1,12 @@
 import ts from 'typescript'
-import { annotationStatesNothing, containsUnstatedPosition, isUnusableEvidence, jsDocTypeStatesNothing } from './derived-expression-type.js'
+import {
+  isForeignClassInstance,
+  annotationStatesNothing,
+  containsUnstatedPosition,
+  isUnusableEvidence,
+  jsDocTypeStatesNothing
+} from './derived-expression-type.js'
+import { unionTypeOf } from './parameter-slot.js'
 
 /**
  * A JavaScript parameter whose JSDoc states its type, but which some caller
@@ -24,13 +31,18 @@ import { annotationStatesNothing, containsUnstatedPosition, isUnusableEvidence, 
  * argument the call does not pass.
  *
  * The parameter's real value set is the statement's values plus that
- * `undefined` when at least one caller omits the argument and every argument
- * a caller does pass is a value the statement admits. A passed value outside
- * the statement is a disagreement this rule does not paper over, and an
- * argument a spread may or may not supply is unknown; both refuse. A caller
+ * `undefined` when at least one caller omits the argument, plus the type of
+ * every argument a caller passes that the statement does not admit. No
+ * checker verifies a JavaScript file's tag against its callers, so a caller
+ * passing something else disproves it for that caller exactly as an omission
+ * does: pino's `@param {string} destination` on `normalizeDestFileDescriptor`,
+ * called with the Number `process.stdout.fd`. An argument a spread may or may
+ * not supply, or one no census can type, is unknown, and refuses -- except
+ * that an untyped argument beside a disproving one leaves the cell `any`,
+ * since nothing states it any more. A caller
  * set the census cannot close does NOT: a caller it cannot see is held to the
  * statement exactly as it is when this rule is silent, so it adds nothing the
- * widened type lacks, and cannot remove the omission a visible caller makes.
+ * widened type lacks, and cannot remove what a visible caller passes.
  * A DEFAULTED parameter is not this case (the default answers the omission),
  * nor an OPTIONAL one (`withDeclaredAbsence` already joins the absence), nor a
  * rest or destructured one.
@@ -59,16 +71,15 @@ export const omissionStatedTypeOf = (checker: ts.TypeChecker, parameter: ts.Para
 }
 
 /**
- * `stated | undefined` when some caller in the (already closed) caller set
- * omits the argument at `index`.
+ * The statement joined with what the (already closed) caller set passes
+ * outside it: `undefined` where a caller omits the argument at `index`, and
+ * the widened type of each argument the statement does not admit.
  *
- * `null` when no caller provably omits it -- every caller passes it, or there
- * is no attributed caller at all -- so the statement stands as written and
- * this rule has nothing to say (and nothing to refuse). Omission is decided
- * first for that reason: only a parameter some call really leaves out is
- * this rule's business.
+ * `null` when every caller passes a value the statement admits -- or there is
+ * no attributed caller at all -- so the statement stands as written and this
+ * rule has nothing to say (and nothing to refuse).
  */
-export const statedParameterWithOmission = (
+export const widenedStatedParameter = (
   checker: ts.TypeChecker,
   stated: ts.Type,
   index: number,
@@ -80,15 +91,34 @@ export const statedParameterWithOmission = (
   const argumentLists = calls.map((call) => argumentsOf(call) ?? [])
   // A spread at or before the position may or may not reach it.
   const reachedBySpread = (args: readonly ts.Expression[]): boolean => args.slice(0, index + 1).some(ts.isSpreadElement)
-  if (!argumentLists.some((args) => args[index] === undefined && !reachedBySpread(args))) return null
+  const omitted = argumentLists.some((args) => args[index] === undefined && !reachedBySpread(args))
+  const outside: ts.Type[] = []
+  let unknown: string | null = null
   for (const args of argumentLists) {
-    if (reachedBySpread(args)) return { refused: 'stated-omission-spread-argument' }
+    if (reachedBySpread(args)) {
+      unknown ??= 'stated-omission-spread-argument'
+      continue
+    }
     const argument = args[index]
     if (!argument) continue
     const type = argumentType(argument)
-    if (!type || isUnusableEvidence(type) || (type.flags & ts.TypeFlags.Unknown) !== 0)
-      return { refused: 'stated-omission-argument-unresolved' }
-    if (!checker.isTypeAssignableTo(type, stated)) return { refused: 'stated-omission-argument-not-assignable' }
+    if (!type || isUnusableEvidence(type) || (type.flags & ts.TypeFlags.Unknown) !== 0) {
+      unknown ??= 'stated-omission-argument-unresolved'
+      continue
+    }
+    // Structural assignability is not carriage for a class instance: ajv's
+    // `block$data(valid: Name, ...)` is called with `nil`, a `_Code` -- a
+    // sibling class the checker accepts for its shape, and a different
+    // nominal carrier to this compiler (`isForeignClassInstance`).
+    if (!checker.isTypeAssignableTo(type, stated) || isForeignClassInstance(checker, type, stated))
+      outside.push(checker.getBaseTypeOfLiteralType(type))
   }
-  return { type: checker.getNullableType(stated, ts.TypeFlags.Undefined) }
+  if (!omitted && outside.length === 0) return null
+  // A statement a visible caller disproves says nothing about an argument no
+  // census can type, so the cell holds whatever that argument holds.
+  if (unknown !== null)
+    return outside.length > 0 && unknown === 'stated-omission-argument-unresolved' ? { type: checker.getAnyType() } : { refused: unknown }
+  const joined = outside.length === 0 ? stated : unionTypeOf(checker, [stated, ...outside])
+  if (joined === null) return { refused: 'stated-parameter-union-unavailable' }
+  return { type: omitted ? checker.getNullableType(joined, ts.TypeFlags.Undefined) : joined }
 }

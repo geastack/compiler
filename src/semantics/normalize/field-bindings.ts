@@ -3,6 +3,7 @@ import { inheritedAccessorOfAssignment } from '../inherited-accessor.js'
 import {
   arrayTypeOf,
   isVacuousArrayType,
+  isLiteralAbsenceMember,
   annotationStatesNothing,
   containsUnstatedPosition,
   derivedExpressionType,
@@ -132,6 +133,8 @@ export interface FieldBindingCensus {
   readonly typeAt: (node: ts.Node) => ts.Type | null
   /** The member list for a SYNTHESIZED disjoint-union carrier at this node -- see `ParameterBindingCensus.unionArmsAt`, the same rule asked of a field's write set instead of a parameter's argument set. */
   readonly unionArmsAt: (node: ts.Node) => readonly ts.Type[] | null
+  /** The storage of a JavaScript literal member initialized with an absence and written later -- see `isLiteralAbsenceMember`. */
+  readonly preferredTypeAt: (node: ts.Node) => ts.Type | null
   /**
    * The narrowed type of a field whose ANNOTATION this census read as an upper
    * bound -- the field form of `ParameterBindingCensus.statedTypeAt`, and
@@ -161,6 +164,7 @@ export interface FieldBindingCensus {
 export const emptyFieldBindingCensus: FieldBindingCensus = {
   typeAt: () => null,
   unionArmsAt: () => null,
+  preferredTypeAt: () => null,
   statedTypeAt: () => null,
   boundCount: 0,
   refusals: [],
@@ -447,10 +451,22 @@ const assignmentStatesCompleteJsDocType = (checker: ts.TypeChecker, declaration:
  * program DID state something, or another authority already answers it, and
  * this module defers.
  */
+/**
+ * The member a symbol is when `isLiteralAbsenceMember` admits it: its one
+ * literal declaration, beside any number of the `x.member = value`
+ * assignment declarations a JavaScript file records for the later writes.
+ */
+const isLiteralAbsenceMemberSymbol = (symbol: ts.Symbol): boolean => {
+  const declarations = symbol.declarations ?? []
+  const literal = declarations.filter((declaration) => !isAssignmentDeclaration(declaration))
+  return literal.length === 1 && isLiteralAbsenceMember(literal[0]!)
+}
+
 const isCandidateSymbol = (checker: ts.TypeChecker, symbol: ts.Symbol): boolean => {
   if (inheritedAccessorOfAssignment(checker, symbol)) return false
   const declarations = symbol.declarations
   if (!declarations || declarations.length === 0) return false
+  if (isLiteralAbsenceMemberSymbol(symbol)) return true
   if (declarations.every(isAssignmentDeclaration)) {
     // A SOLE assignment whose own JSDoc tag already states its storage
     // completely defers to the checker's (JSDoc-informed) answer instead of
@@ -557,10 +573,21 @@ export const censusFieldBindings = (
    * `field;` they are the indexed writes. Deduplicated by node, because the
    * two sources overlap exactly on the first shape.
    */
+  /**
+   * `x.member = value` writes the checker cannot attribute -- `x` is `any` to
+   * it -- that this census's own settled answers do: toad-cache's
+   * `this.last.next = item` (a field this census typed as the entry literal),
+   * fastq's `current.next = queueHead` (a `Task` a parameter census typed).
+   * Keyed by the member declaration written, filled by the late pass below.
+   */
+  const lateWrites = new Map<ts.Declaration, ts.Expression[]>()
+
   const writesOf = (symbol: ts.Symbol): readonly ts.Expression[] => {
     const writes = new Set<ts.Expression>()
     for (const declaration of symbol.declarations ?? []) {
       if (ts.isBinaryExpression(declaration)) writes.add(declaration.right)
+      if (isLiteralAbsenceMember(declaration)) writes.add(declaration.initializer)
+      for (const written of lateWrites.get(declaration) ?? []) writes.add(written)
     }
     for (const write of flow.writesToSymbol(symbol)) if (isFieldEvidence(write) && write.value) writes.add(write.value)
     return [...writes]
@@ -653,7 +680,7 @@ export const censusFieldBindings = (
    * was drift, now closed.
    */
   const known = (node: ts.Node): ts.Type | null => {
-    const type = objectAssignTargetType(checker, node) ?? checker.getTypeAtLocation(node)
+    const type = objectAssignTargetType(checker, node) ?? parameters.preferredTypeAt?.(node) ?? checker.getTypeAtLocation(node)
     return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) || isVacuousArrayType(checker, type) ? null : type
   }
 
@@ -740,11 +767,21 @@ export const censusFieldBindings = (
   /** The member symbol a census-resolved receiver declares under `name` -- the symbol a read through an `any` receiver could not name itself. */
   const memberSymbolOf = (receiver: ts.Type, name: string): ts.Symbol | null =>
     checker.getPropertyOfType(checker.getNonNullableType(receiver), name) ?? null
+  // A member read through a union of literals is a symbol the checker
+  // synthesizes over each arm's own member; a write through it writes
+  // whichever arm the receiver holds, so it is a write to each of them.
+  const writtenMembersOf = (member: ts.Symbol): readonly ts.Symbol[] => {
+    if (isCandidateSymbol(checker, member)) return [member]
+    const declarations = member.declarations ?? []
+    if (declarations.length < 2 || !declarations.every((declaration) => ts.isPropertyAssignment(declaration))) return []
+    const arms = declarations.map((declaration) => checker.getSymbolAtLocation((declaration as ts.PropertyAssignment).name))
+    return arms.every((arm): arm is ts.Symbol => arm !== undefined && arm !== member && isCandidateSymbol(checker, arm)) ? arms : []
+  }
   /** The expression a literal member was written with -- `{ depth: depthBuffer }` or shorthand `{ depthBuffer }` -- or `null` for any other declaration kind. */
   const literalMemberInitializerOf = (member: ts.Symbol | null): ts.Expression | null => {
     const declaration = member?.valueDeclaration
     if (!declaration) return null
-    if (ts.isPropertyAssignment(declaration)) return declaration.initializer
+    if (ts.isPropertyAssignment(declaration)) return isLiteralAbsenceMember(declaration as ts.Declaration) ? null : declaration.initializer
     if (ts.isShorthandPropertyAssignment(declaration)) return declaration.name
     return null
   }
@@ -1120,6 +1157,11 @@ export const censusFieldBindings = (
       // then went through dynamic lookup and threw on the first frame.
       const member = symbol ? null : memberSymbolOf(receiver, node.name.text)
       if (member && isCandidateSymbol(checker, member)) return resolveSymbol(member)
+      const arms = member ? writtenMembersOf(member) : []
+      if (arms.length > 0) {
+        const [first, ...rest] = arms.map(resolveSymbol)
+        return first && rest.every((type) => type === first) ? first : null
+      }
       const typed = propertyTypeOf(receiver, node.name.text, node)
       if (typed) return typed
       // An OBJECT-LITERAL member the checker types `any` still has the one
@@ -1224,6 +1266,82 @@ export const censusFieldBindings = (
     if (bound.size === before) break
   }
 
+  // THE LATE PASS. Every field is now bound as far as its checker-attributed
+  // writes take it, so a receiver the checker saw as `any` may have a census
+  // type: attribute its writes to the member that type names, and re-resolve
+  // exactly the members that gained writes. Rounds repeat, because a member
+  // typed by one round types more receivers in the next; each round only
+  // ever adds writes, so the pass stops.
+  const assignments: ts.BinaryExpression[] = []
+  const collectAssignments = (node: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(node.left) &&
+      checker.getSymbolAtLocation(node.left) === undefined
+    )
+      assignments.push(node)
+    ts.forEachChild(node, collectAssignments)
+  }
+  for (const file of files) forEachReachableStatement(reachable, file, collectAssignments)
+  for (let round = 0; round < 4 && assignments.length > 0; round += 1) {
+    const gained = new Set<ts.Symbol>()
+    for (const assignment of assignments) {
+      const target = assignment.left as ts.PropertyAccessExpression
+      const receiver = knownOrResolve(target.expression)
+      const member = receiver && !isUnusableEvidence(receiver) ? memberSymbolOf(receiver, target.name.text) : null
+      for (const written of member ? writtenMembersOf(member) : []) {
+        for (const declaration of written.declarations ?? []) {
+          const known = lateWrites.get(declaration) ?? []
+          if (known.includes(assignment.right)) continue
+          lateWrites.set(declaration, [...known, assignment.right])
+          gained.add(written)
+        }
+      }
+    }
+    if (gained.size === 0) break
+    for (const symbol of gained) {
+      candidateSymbols.add(symbol)
+      bound.delete(symbol)
+      unionArms.delete(symbol)
+      refusalOf.delete(symbol)
+    }
+    nodeMemo.clear()
+    for (const symbol of gained) resolveSymbol(symbol)
+  }
+
+  // A literal member the join could not state is unresolved -- never the
+  // initializer's `null` the writes contradict (`isLiteralAbsenceMember`).
+  const literalAbsenceMembers = new Set([...candidateSymbols].filter(isLiteralAbsenceMemberSymbol))
+  // Keyed by the literal's own member declaration: a read through the
+  // literal's widened type names a transient symbol carrying the same
+  // declaration, never the one the write resolved to (`sameField`).
+  const literalAbsenceByDeclaration = new Map<ts.Declaration, ts.Symbol>()
+  for (const symbol of literalAbsenceMembers) {
+    for (const declaration of symbol.declarations ?? []) {
+      if (isLiteralAbsenceMember(declaration)) literalAbsenceByDeclaration.set(declaration, symbol)
+    }
+  }
+  for (const symbol of literalAbsenceMembers) {
+    if (!bound.has(symbol) && !unionArms.has(symbol)) bound.set(symbol, checker.getAnyType())
+  }
+  // The same rule for a JavaScript class field every declaration of which is
+  // a `this.x = value` assignment: when the join stated nothing past the
+  // absence it is initialized with, the checker's type is that absence alone
+  // (toad-cache's `this.last = null`, written with entries whose own type
+  // reads `this.last` back), and a store through the field -- `this.last.next =
+  // item` -- would be a store on `null`. Unresolved, never the absence.
+  const absentOnly = (type: ts.Type): boolean =>
+    (type.isUnion() ? type.types : [type]).every((part) => (part.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) !== 0)
+  for (const symbol of candidateSymbols) {
+    if (bound.has(symbol) || unionArms.has(symbol) || refusalOf.get(symbol) !== 'writes-state-only-absence') continue
+    const declarations = symbol.declarations ?? []
+    if (declarations.length === 0 || !declarations.every(isAssignmentDeclaration)) continue
+    if (!absentOnly(checker.getTypeOfSymbol(symbol))) continue
+    bound.set(symbol, checker.getAnyType())
+    for (const declaration of declarations) literalAbsenceByDeclaration.set(declaration, symbol)
+  }
+
   /**
    * A refusal's `owner` for a field SYMBOL: its own name and where the
    * program first declares/writes it -- the same rendering
@@ -1281,10 +1399,27 @@ export const censusFieldBindings = (
     return symbol ? (statedBindings.get(symbol) ?? null) : null
   }
 
+  /** The storage of a literal member `isLiteralAbsenceMember` admits, or of a class field initialized with an absence the join could not widen, at its declaration and at every member access naming it. */
+  const preferredTypeAt = (node: ts.Node): ts.Type | null => {
+    if (literalAbsenceByDeclaration.size === 0) return null
+    const declarations =
+      ts.isPropertyAssignment(node) || isAssignmentDeclaration(node as ts.Declaration)
+        ? [node as ts.Declaration]
+        : ts.isPropertyAccessExpression(node)
+          ? (memberSymbolAt(node)?.declarations ?? [])
+          : []
+    for (const declaration of declarations) {
+      const symbol = literalAbsenceByDeclaration.get(declaration)
+      if (symbol) return bound.get(symbol) ?? null
+    }
+    return null
+  }
+
   return {
     typeAt: (node) => resolveExpr(node),
     unionArmsAt,
     statedTypeAt,
+    preferredTypeAt,
     boundCount: bound.size + unionArms.size,
     refusals,
     refusalOf: (symbol) => refusalOf.get(symbol) ?? null
@@ -1321,6 +1456,7 @@ export const withFieldBindings = (
     ...parameters,
     typeAt: (node) => parameters.typeAt(node) ?? fields.typeAt(node),
     statedTypeAt: (node) => parameters.statedTypeAt(node) ?? fields.statedTypeAt(node),
+    preferredTypeAt: (node) => parameters.preferredTypeAt?.(node) ?? fields.preferredTypeAt(node),
     unionArmsAt: (node) => parameters.unionArmsAt(node) ?? fields.unionArmsAt(node),
     boundCount: parameters.boundCount + fields.boundCount,
     refusals

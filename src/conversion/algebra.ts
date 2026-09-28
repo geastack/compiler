@@ -167,6 +167,32 @@ export const never = (reason: string): ConversionCapability => ({ kind: 'never',
 
 export const isNever = (capability: ConversionCapability): boolean => capability.kind === 'never'
 
+/** The first `never` reason anywhere inside a capability, with the path to it -- what a refusal names. */
+export const firstNeverReasonOf = (capability: ConversionCapability, path = ''): string | null => {
+  switch (capability.kind) {
+    case 'never':
+      return path === '' ? capability.reason : `${path}: ${capability.reason}`
+    case 'optional':
+      return firstNeverReasonOf(capability.payload, `${path}?`)
+    case 'collection':
+      return firstNeverReasonOf(capability.element, `${path}[]`)
+    case 'product':
+      for (const field of capability.fields) {
+        const found = firstNeverReasonOf(field.capability, `${path}.${field.key}`)
+        if (found !== null) return found
+      }
+      return null
+    case 'sum':
+      for (const arm of capability.arms) {
+        const found = firstNeverReasonOf(arm.capability, `${path}|${arm.tag}`)
+        if (found !== null) return found
+      }
+      return null
+    default:
+      return null
+  }
+}
+
 /**
  * Whether a capability can actually run.
  *

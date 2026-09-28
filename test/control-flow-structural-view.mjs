@@ -18,10 +18,11 @@ test('present optional unions and multi-implementor structural views remain nati
   // closed on, so each struct carries the full dynamic protocol. Its
   // descriptor hook holds exactly one `gea::Value gea_descriptor_value` per
   // struct (records.ts, composed from the read hook since 1d4bf32f4): the
-  // reflection protocol's own carrier, not a typed value boxed. Every other
-  // boxing signal, including the per-field boxing that commit removed, must
-  // still be absent.
-  assert.doesNotMatch(result.source, /gea_cpp_value|gea::Value (?!gea_descriptor_value\b)(?:gea_|v\d|b\d)|nativeDynamicGet/)
+  // reflection protocol's own carrier, not a typed value boxed; so is the
+  // prototype hook's one function object per method (`gea_method`, the value
+  // `o.m === C.prototype.m` compares). Every other boxing signal, including
+  // the per-field boxing that commit removed, must still be absent.
+  assert.doesNotMatch(result.source, /gea_cpp_value|gea::Value (?!gea_descriptor_value\b|gea_method\b)(?:gea_|v\d|b\d)|nativeDynamicGet/)
   assert.match(result.source, /gea::record::classStructuralView|gea_view_this|packEnvironment/)
 
   const binary = resolve(root, `measurements/control-flow-structural-view${executableSuffix}`)

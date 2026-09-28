@@ -1,3 +1,4 @@
+import type { ConversionCensus } from '../../conversion/nodes.js'
 import type { Representation } from '../../representation/model.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
@@ -87,6 +88,33 @@ export const generatedSharedObjectCarrier = (representation: Representation): bo
 export const generatedSharedRecordCarrier = (representation: Representation): boolean =>
   (representation.kind === 'record' || representation.kind === 'record-with-index') && representation.ownership === 'shared-refcount'
 
+/**
+ * A generated `native-record-ref` no class instance was ever viewed as.
+ *
+ * A class instance written to a structural interface is materialized as a
+ * record view (`conversions.ts`), and `in` consults the prototype that view
+ * leaves behind -- the soundness question `in-operator-class-through-interface.ts`
+ * pins. A shape the program never converts a class into holds ordinary objects
+ * only, so its field dispatcher, expando table and `Object.prototype` answer a
+ * runtime key exactly as they do for a `record` (json-schema-traverse's
+ * `key in traverse.arrayKeywords`). Read off the conversion census, whose
+ * eager graph and minted table together hold every conversion the program's
+ * operations request.
+ */
+export const classViewFreeRecordRef = (
+  representation: Representation,
+  conversions: Pick<ConversionCensus, 'eager' | 'minted'>
+): boolean => {
+  if (representation.kind !== 'native-record-ref' || representation.native !== null || representation.ownership !== 'shared-refcount')
+    return false
+  for (const node of [...conversions.eager.values(), ...conversions.minted.values()]) {
+    if (node.source.kind !== 'class-ref' || node.capability.kind === 'never') continue
+    const target = node.target
+    if ((target.kind === 'native-record-ref' || target.kind === 'record') && target.shapeId === representation.shapeId) return false
+  }
+  return true
+}
+
 /** Any compiler-owned ordinary object carrier, including by-value records with no expando identity. */
 export const generatedObjectCarrier = (representation: Representation): boolean =>
   representation.kind === 'record' ||
@@ -122,3 +150,12 @@ export const layoutAnswerSuffix = (layout: Representation, key: string | null, d
   }
   return layout.kind
 }
+
+/**
+ * An optional string or number key: ToPropertyKey of its absence is
+ * `"undefined"` (7.1.19), so it asks the same sidecar lookup a present key
+ * does -- ipaddr's `let octet` read as `octet in zerotable`.
+ */
+export const sidecarOptionalKey = (key: Representation): boolean =>
+  key.kind === 'optional' &&
+  (key.payload.kind === 'string' || (key.payload.kind === 'scalar' && key.payload.domain !== 'boolean' && key.payload.domain !== 'bigint'))

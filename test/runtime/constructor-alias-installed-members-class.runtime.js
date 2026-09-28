@@ -1,7 +1,7 @@
 // @ts-nocheck
 //! expect: true 1 2
-//! emitted-has: gea::Ref<gea_record_type_31> shadowMap;
-//! emitted-has: ((*gea_e->c0))->shadowMap = ((*gea_e->c1));
+//! emitted-has: gea::Ref<gea_record_type_32> shadowMap;
+//! emitted-has: ((*gea_e->c0))->shadowMap = ((*((*gea_e->c1))));
 //! emitted-has: static inline bool gea_present_shadowMap = true;
 //! emitted-lacks: gea_writeOwnField(
 //! emitted-lacks: gea::nativeDynamicSet

@@ -436,6 +436,11 @@ export const familyOf = (node: ts.Node, paths: NamespacePathCensus): OperationFa
   if (ts.isSpreadElement(node) || ts.isSpreadAssignment(node)) return 'protocol'
   if (ts.isCatchClause(node)) return 'boundary'
   if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node) || ts.isExportAssignment(node)) return 'declaration-lifecycle'
+  if (ts.isEnumDeclaration(node) && !isAmbientDeclaration(node)) return 'declaration-lifecycle'
+  // An ES module's end: where a CommonJS `require` of it reads its exports
+  // (`producers/declaration-lifecycle.ts`'s `contributeCommonJsNamespace`).
+  if (node.kind === ts.SyntaxKind.EndOfFileToken && ts.isSourceFile(node.parent) && ts.isExternalModule(node.parent))
+    return 'declaration-lifecycle'
   return null
 }
 
@@ -654,6 +659,13 @@ export const censusProgram = (
       // named overload had no child that evaluates, which is why it never
       // showed the same refusal.
       if (isFunctionLikeWithoutBody(node) && !isAbstractClassMember(node)) return
+      // An enum's member initializers are constants the checker folds
+      // (`producers/declaration-lifecycle.ts`'s `contributeEnum`); none of
+      // them is evaluated as an expression of its own.
+      if (ts.isEnumDeclaration(node)) {
+        record(node, path, path)
+        return
+      }
       // A static method nothing in the program NAMES. The class around it is
       // live -- its layout is what a live reference reaches -- but a body only
       // `C.m` can reach, with no `C.m` anywhere, is dead exactly as an
@@ -756,6 +768,9 @@ export const censusProgram = (
     // above has none. `reachability.ts` is the one authority on which those
     // are, and every other whole-program walk asks the same one.
     for (const node of evaluatedStatementsOf(reachable.statementsOf(file))) visit(node, rootSpecialization)
+    // After every statement: a CommonJS `require` of this module reads its
+    // exports once its body has run (see `familyOf`'s end-of-file rule).
+    if (ts.isExternalModule(file)) record(file.endOfFileToken, rootSpecialization, rootSpecialization)
   }
 
   const byFamily = new Map<OperationFamily, CensusCandidate[]>()

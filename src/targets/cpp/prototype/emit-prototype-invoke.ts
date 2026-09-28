@@ -1,9 +1,10 @@
+import { boxedValueText } from '../emit-dynamic-properties.js'
 import type { CallOperation, IrOperand, IrResult } from '../../../ir/model.js'
 import type { CallableAbi, Representation } from '../../../representation/model.js'
 import { dictionaryKeyDomainOf, representationKey } from '../../../representation/model.js'
 import { hasReferenceIdentity } from '../../../representation/collections.js'
 import { thrownValueCarrier } from '../../../ir/lower-exceptions.js'
-import { alignedValueText, callableObjectAbi, convertedEvaluationText } from '../emit-narrowing.js'
+import { alignedValueText, callableObjectAbi, convertedEvaluationText, dynamicCarrierBoxText } from '../emit-narrowing.js'
 import { cppConstantLiteral, cppStringLiteral, cppTypeOf, cppUndefinedValue } from '../types.js'
 import {
   createCppEmitBlockedError,
@@ -12,7 +13,7 @@ import {
   type EmitContext,
   type PrototypeMethodRead
 } from '../emit-context.js'
-import { arrayMethods } from './emit-prototype-array.js'
+import { arrayMethods, unpackedInsertText } from './emit-prototype-array.js'
 import { dateCallText } from './emit-prototype-date.js'
 import { nativeErrorCallText } from './emit-prototype-error.js'
 import { unionToStringCallText } from '../emit-union-properties.js'
@@ -1017,6 +1018,28 @@ const dictionaryCallText = (
 export const prototypeMethodCallText = (ctx: EmitContext, operation: CallOperation): string | NativeScalarCall | null => {
   const read = ctx.prototypeMethodReads.get(operation.callee.value)
   if (!read) return null
+  // An Array method the census reads as a box is called as that box (the
+  // intrinsic's generic algorithm, `emit-context.ts`'s value rendering); the
+  // fused template is typed by the receiver's element.
+  if (read.receiverKind === 'array-object' && operation.callee.representation.kind === 'dynamic') return null
+  // `Object.hasOwnProperty.call(o, k)`: the method read off the `Object`
+  // constructor is `Object.prototype`'s (the constructor inherits it), and
+  // `.call` runs it on its this-argument, never on the object it was read from.
+  if (
+    operation.receiver !== null &&
+    read.receiverKind === 'native-handle-shape' &&
+    (read.member === 'hasOwnProperty' || read.member === 'propertyIsEnumerable')
+  ) {
+    // A typed this-argument is tested as the box it would be (the
+    // dynamic-object rendering boxes it): a boxed native record answers its
+    // own keys through its own field table.
+    return renderPrototypeMethodCall(
+      ctx,
+      { ...read, receiverKind: 'dynamic-object', receiver: { kind: 'operand', operand: operation.receiver } },
+      operandText(ctx, operation.receiver),
+      operation
+    )
+  }
   // Spelled here, not at the access that recorded the read: the record names
   // the receiver's operand (`PrototypeMethodReceiver`) and this is the call
   // that fuses with it.
@@ -1070,6 +1093,18 @@ const renderPrototypeMethodCall = (
     return radix === undefined || radix.representation.kind === 'undefined'
       ? `(${receiverText}).toString()`
       : `gea::host::BigIntConstructor::toStringRadix(${receiverText}, ${operandText(ctx, radix)})`
+  }
+  if (read.receiverKind === 'symbol') {
+    const source: Representation = read.member === 'valueOf' ? { kind: 'symbol' } : { kind: 'string' }
+    const text = read.member === 'valueOf' ? receiverText : `gea::symbolToString(${receiverText})`
+    if (!operation.result) return text
+    const aligned = alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:symbol-method', source, operation.result.representation, text)
+    if (aligned === null)
+      throw createCppEmitBlockedError(
+        `host-invocation:Symbol.prototype.${read.member}`,
+        `"Symbol.prototype.${read.member}" answers a "${source.kind}", which reaches no "${representationKey(operation.result.representation)}" result`
+      )
+    return aligned
   }
   if (read.receiverKind === 'string') {
     const render = stringMethods.get(read.member)
@@ -1126,6 +1161,7 @@ const renderPrototypeMethodCall = (
       dictionaryCallText(ctx, read.member, receiverText, read.dictionaryTable, operation.arguments)
     )
   }
+  if (read.receiverKind === 'primitive-own-property') return ownPropertyTestResult(ctx, operation, read.member, 'false')
   if (read.receiverKind === 'object-shape') {
     if (read.objectShapeFields === undefined || read.objectShapeAccessor === undefined) {
       throw createCppEmitBlockedError(
@@ -1158,7 +1194,11 @@ const renderPrototypeMethodCall = (
     return ownPropertyTestResult(ctx, operation, read.member, callableShapeCallText(ctx, read.member, receiverText, operation.arguments))
   }
   if (read.receiverKind === 'dynamic-object') {
-    return ownPropertyTestResult(ctx, operation, read.member, dynamicObjectCallText(ctx, read.member, receiverText, operation.arguments))
+    const boxed =
+      read.receiver.kind === 'operand' && read.receiver.operand.representation.kind !== 'dynamic'
+        ? boxedValueText(ctx, read.receiver.operand, `"Object.prototype.${read.member}"`)
+        : receiverText
+    return ownPropertyTestResult(ctx, operation, read.member, dynamicObjectCallText(ctx, read.member, boxed, operation.arguments))
   }
   // The ECMA-262 binary family, rendered in `emit-buffers.ts` -- see that
   // file's header for why its members live together rather than with the
@@ -1254,6 +1294,11 @@ const renderPrototypeMethodCall = (
     // reads on the live one -- and it is applied only when an arm really is
     // absent, so a union whose arms all answer keeps the text it had.
     const discardedWithAbsentArm = operation.result === null && arms.some((armRead) => armRead === null)
+    // A call that publishes a box meets every live arm's result in it: beside
+    // a boxed arm, and beside an absent arm whose throw is typed as the box.
+    const boxesResult =
+      operation.result?.representation.kind === 'dynamic' &&
+      arms.some((armRead) => armRead === null || armRead.receiverKind === 'boxed-arm')
     const branches = arms.map((armRead, index) => {
       const armCarrier = carrier.arms[index]?.value
       if (armRead === null) {
@@ -1265,6 +1310,27 @@ const renderPrototypeMethodCall = (
           `${cppStringLiteral(armCarrier ? representationKey(armCarrier) : 'arm')})`
         )
       }
+      if (armRead.receiverKind === 'boxed-arm' && armCarrier !== undefined) {
+        const boxedArm = dynamicCarrierBoxText(armCarrier, `${receiverText}.get<${index}>()`)
+        const boxedArguments = operation.arguments
+          .map((argument) => boxedValueText(ctx, argument, 'a boxed union arm call argument'))
+          .join(', ')
+        const call = `[&]() { const gea::Value gea_arm = ${boxedArm}; return gea_arm.getProperty(gea::PropertyKey::string(${cppStringLiteral(read.member)})).callWithReceiver(gea_arm, {${boxedArguments}}); }()`
+        if (operation.result === null || operation.result.representation.kind === 'void') return `(void)(${call})`
+        const converted = alignedValueText(
+          ctx,
+          'prototype/emit-prototype-invoke.ts:boxed-arm',
+          { kind: 'dynamic', reason: 'opt-in-fallback' },
+          operation.result.representation,
+          call
+        )
+        if (converted === null)
+          throw createCppEmitBlockedError(
+            `host-invocation:union.${read.member}`,
+            `a boxed union arm's "${read.member}" result cannot fill "${representationKey(operation.result.representation)}"`
+          )
+        return converted
+      }
       const text = renderPrototypeMethodCall(ctx, armRead, `${receiverText}.get<${index}>()`, operation)
       if (typeof text !== 'string') {
         throw createCppEmitBlockedError(
@@ -1272,7 +1338,12 @@ const renderPrototypeMethodCall = (
           `a mixed-union arm's "${read.member}" renders as a native scalar call, which has no per-arm spelling here`
         )
       }
-      return discardedWithAbsentArm ? `(void)(${text})` : text
+      if (discardedWithAbsentArm) return `(void)(${text})`
+      // Beside a boxed arm the call publishes a box, so a native arm's own
+      // result is boxed by its C++ type to meet it.
+      return boxesResult
+        ? `[&](auto&& gea_native) { return gea::detail::DynamicCarrier<std::decay_t<decltype(gea_native)>>::out(gea_native); }(${text})`
+        : text
     })
     return branches.reduceRight<string>(
       (rest, branch, index) => (index === branches.length - 1 ? branch : `${receiverText}.is<${index}>() ? ${branch} : (${rest})`),
@@ -1340,5 +1411,14 @@ const renderPrototypeMethodCall = (
         'that no longer has the receiver'
     )
   }
+  // A `push` read with an `any` key (`refs[event].push(ref)`) is a dynamic
+  // or identity-only callee, which the lowering packs no rest frame for: each operand is one
+  // element (a spread made the whole list one boxed array, which is flagged).
+  if (
+    (read.member === 'push' || read.member === 'unshift') &&
+    (operation.callee.representation.kind === 'dynamic' || operation.callee.representation.kind === 'callable-identity') &&
+    !operation.argumentsAreSpread
+  )
+    return unpackedInsertText(ctx, read.member, receiverText, read.arrayCarrier.element, operation.arguments)
   return render(ctx, receiverText, read.arrayCarrier.element, operation.arguments, operation.result)
 }

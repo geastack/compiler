@@ -6,7 +6,7 @@ import type { SemanticTargetProof } from '../semantics/model/operations.js'
 import type { VirtualMemberRole } from '../projection/dispatch.js'
 import type { NativeEqualityRecipe } from './native-equality.js'
 import type { FixedDataDefinitionRecipe } from './fixed-data-definition.js'
-import type { TypedComputedReadRecipe, TypedComputedWriteRecipe } from './typed-property-access.js'
+import type { TypedComputedDeleteRecipe, TypedComputedReadRecipe, TypedComputedWriteRecipe } from './typed-property-access.js'
 
 /**
  * The typed IR: verified SSA values and a closed operation union.
@@ -217,6 +217,7 @@ export interface DeleteOperation extends IrOperationBase {
   readonly receiver: IrOperand
   readonly key: IrOperand
   readonly result: IrResult | null
+  readonly typedComputedDelete?: TypedComputedDeleteRecipe
 }
 
 export interface HasPropertyOperation extends IrOperationBase {
@@ -237,6 +238,8 @@ export interface IrPropertyAttributes {
   readonly writable: boolean
   readonly enumerable: boolean
   readonly configurable: boolean
+  /** An accessor half the definition installs (its value is the function), not a data property. */
+  readonly accessor?: 'get' | 'set'
 }
 
 export interface DefineOwnPropertyOperation extends IrOperationBase {
@@ -268,6 +271,8 @@ export interface SpreadCopyOperation extends IrOperationBase {
   readonly kind: 'spread-copy'
   readonly receiver: IrOperand
   readonly source: IrOperand
+  /** Keys a later member of the same literal writes -- see `ProtocolOperation.overwrittenKeys`. */
+  readonly overwrittenKeys?: readonly string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -733,6 +738,12 @@ export interface ComputeOperation extends IrOperationBase {
   readonly nativeEquality?: NativeEqualityRecipe
   readonly classInstanceTest?: import('../projection/instance-test.js').ClassInstanceTestRecipe
   /**
+   * One recipe per arm of a right-hand side that is a union of program
+   * classes (ajv's `n instanceof N1` over `typeof If | typeof For | ...`):
+   * the live arm names which class the left operand is tested against.
+   */
+  readonly classInstanceTestArms?: readonly import('../projection/instance-test.js').ClassInstanceTestRecipe[]
+  /**
    * `update` is the arithmetic half of `++`/`--`: the store it feeds is a
    * separate binding-write or property-set operation, so this instruction only
    * ever computes the number that gets stored.
@@ -844,6 +855,12 @@ export interface SwitchOperation extends IrOperationBase {
 export interface AllocateOrdinaryObjectOperation extends IrOperationBase {
   readonly kind: 'allocate-ordinary-object'
   readonly result: IrResult
+  /**
+   * A literal laid out as a union of records whose first member is a runtime
+   * spread of a union source: the copy that follows chooses the arm and
+   * allocates it, so nothing is allocated here.
+   */
+  readonly builtBySpread?: true
 }
 
 /**
@@ -912,6 +929,13 @@ export interface AllocateCallableOperation extends IrOperationBase {
    */
   readonly captures: readonly IrOperand[]
   readonly result: IrResult
+  /**
+   * The declaration's kind when it is not an ordinary function: which
+   * intrinsic its `constructor` names. Such a callable is always identified
+   * with its declaration, since that identity is what the runtime reads the
+   * kind from.
+   */
+  readonly functionKind?: 'async' | 'generator' | 'async-generator'
 }
 
 /** A native `Function.prototype.bind` result with its receiver and leading arguments captured once. */
@@ -1409,6 +1433,8 @@ export interface IrBody {
    * cursor a generator does, and only the former spells `return`.
    */
   readonly generator?: boolean
+  /** Whether this body is an `async` function -- the declaration's fact, carried like `generator`. */
+  readonly async?: boolean
   /**
    * Where `FunctionDeclarationInstantiation`'s own work ends inside this
    * generator's entry -- `null` for a non-generator, and for a generator

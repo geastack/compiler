@@ -127,7 +127,12 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
         carrier.kind === 'record-with-index'
       const allocate = native
         ? ctx.builder.allocateRecord(block, lineage, [], representation)
-        : ctx.builder.allocateOrdinaryObject(block, lineage, representation)
+        : ctx.builder.allocateOrdinaryObject(
+            block,
+            lineage,
+            representation,
+            carrier.kind === 'tagged-union' && operation.leadingRuntimeSpread === true
+          )
       registerResult(ctx, operation, allocate)
       return
     }
@@ -278,7 +283,7 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
       const shape = ctx.graph.structuralTypes.get(operation.shape)?.shape
       if (!shape || shape.kind !== 'class-constructor') {
         throw new IrLoweringBlockedError(
-          'a class-constructor-object allocation has no class-constructor shape to recover its declaration from'
+          `a class-constructor-object allocation has no class-constructor shape to recover its declaration from (its shape is ${shape ? `"${shape.kind}"${shape.kind === 'declared' ? ` of ${shape.declaration}` : ''}` : 'absent'}, for ${operation.classDeclaration ?? 'no class'})`
         )
       }
       const captures = orderedOperandsOf(operation, 'capture').map((operand) => resolveRequiredOperand(ctx, block, lineage, operand))
@@ -348,7 +353,15 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
       // over nothing carries none, and that is the whole capture set, not a
       // partial one this layer would have to complete from elsewhere.
       const captures = orderedOperandsOf(operation, 'capture').map((operand) => resolveRequiredOperand(ctx, block, lineage, operand))
-      registerResult(ctx, operation, ctx.builder.allocateCallable(block, lineage, callable, captures, representation))
+      const functionKind =
+        operation.asyncFunction === true
+          ? operation.generatorFunction === true
+            ? 'async-generator'
+            : 'async'
+          : operation.generatorFunction === true
+            ? 'generator'
+            : undefined
+      registerResult(ctx, operation, ctx.builder.allocateCallable(block, lineage, callable, captures, representation, functionKind))
       return
     }
     case 'template-object': {

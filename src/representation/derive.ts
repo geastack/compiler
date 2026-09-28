@@ -21,7 +21,7 @@ import {
 import { widestSubsumingAbi } from './host-abi.js'
 import { primitiveCarrier, storedCarrier, unresolved } from './primitives.js'
 import { createUnionDeriver } from './union.js'
-import { deriveKeyedCollection } from './collections.js'
+import { deriveKeyedCollection, receiverFree } from './collections.js'
 import type {
   DateDeclarationPolicy,
   HostBindingPolicy,
@@ -222,6 +222,12 @@ export interface RepresentationDeriver {
  * what makes it the one thing an invocation lowering has to reach for instead
  * of a joined lowest-common-denominator carrier it was never going to get.
  */
+
+const classMethodReceiverOf = (carrier: Representation): boolean => {
+  const callable = carrier.kind === 'optional' ? carrier.payload : carrier
+  return callable.kind === 'function-value-dispatch' && callable.abi.receiver?.kind === 'class-ref'
+}
+
 export const signatureShapeOfSelectedSignature = (signature: SelectedSignature): SignatureShape => ({
   parameters: signature.parameters,
   minimumArity: signature.minimumArity,
@@ -549,6 +555,13 @@ export const createRepresentationDeriver = (
         const body = recursiveBodyIds.get(id)
         if (body !== undefined && body !== id) memo.set(body, definition)
         return definition
+      // A body that is a box has no layout for the recursion to pass
+      // through: the equation's answer is the box, and every back edge reads
+      // the same one (the dependents that held the reference are provisional,
+      // so they are derived again against this answer).
+      case 'dynamic':
+        recursiveReferences.set(id, representation)
+        return representation
       default:
         guardFired += 1
         return unresolved(`recursive type ${id} closed through non-container carrier ${representation.kind}`)
@@ -753,9 +766,23 @@ export const createRepresentationDeriver = (
     return { kind: 'native-record-ref', shapeId: id, ownership: closed.ownership, native: null }
   }
 
+  // A shape the opt-in boxes still has the body a class struct is laid out
+  // from: every empty class shares `{}`'s body with a literal that is linked
+  // into a prototype chain, and the literal's values being boxed says nothing
+  // about the fields a class-ref's struct declares.
+  const fallbackLayouts = new Map<StructuralTypeId, Representation>()
   const layoutOf = (id: StructuralTypeId): Representation => {
     const carrier = derive(id)
-    return definitions.get(id) ?? carrier
+    const defined = definitions.get(id)
+    if (defined) return defined
+    if (!dynamicFallback || !dynamicFallbackTypes.has(id) || carrier.kind !== 'dynamic') return carrier
+    const known = fallbackLayouts.get(id)
+    if (known) return known
+    const shape = shapeOf(id)
+    const body = shape ? deriveShape(id, shape) : carrier
+    const layout = body.kind === 'record' || body.kind === 'record-with-index' ? body : carrier
+    fallbackLayouts.set(id, layout)
+    return layout
   }
 
   /**
@@ -801,10 +828,20 @@ export const createRepresentationDeriver = (
       parameters.push({ value, ownership: parameterOwnership, passing: passingOf(value, parameterOwnership) })
     }
     const declaredReceiver = signature.thisParameter ? derive(signature.thisParameter) : null
+    const result = derive(signature.result)
     return {
       parameters,
       restFrom,
-      result: derive(signature.result),
+      // A class method handed back by a plain function or a collection is
+      // called by whoever receives it, with no receiver: the value in that
+      // position is the method bound (`validatorPool.get(key)` beside the
+      // `.bind(compiler)` it pooled). An unbound method has no conversion into
+      // it, so a program returning one to call it with `.call` refuses rather
+      // than dropping the receiver. A signature run on a class instance keeps
+      // the method's: a field initializer returns the method it installs on
+      // that same object (`lookup = lookup`), and a function expression is
+      // installed as another object's method (pino's `genLog`).
+      result: declaredReceiver?.kind !== 'class-ref' && classMethodReceiverOf(result) ? receiverFree(result) : result,
       // `this: void` is TypeScript's declaration that a function does not use
       // or require a receiver. It is not an `undefined` value passed in a
       // hidden receiver slot. BSON's optional WASM helpers deliberately use
@@ -2705,7 +2742,16 @@ export const createRepresentationDeriver = (
         // has none of them. Selecting a buffer is a separate, proven decision.
         const extension = arrayExtensionFieldsOf(shape.extension)
         if (typeof extension === 'string') return unresolved(extension)
-        return { kind: 'array-object', element: deriveStored(shape.element), ownership: ownership.forShape(shape, id), extension }
+        // `never[]` is the checker's empty literal with no element write it
+        // could see (`refs[event].push(ref)` through an `any` key); under the
+        // opt-in the elements it does hold are boxed.
+        return {
+          kind: 'array-object',
+          element:
+            dynamicFallback && isNeverType(shape.element) ? { kind: 'dynamic', reason: 'opt-in-fallback' } : deriveStored(shape.element),
+          ownership: ownership.forShape(shape, id),
+          extension
+        }
       case 'tuple':
         return deriveTuple(id, shape)
       case 'union':

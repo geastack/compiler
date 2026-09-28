@@ -167,7 +167,7 @@ export const cppNativeProtocolsOf = (members: HostMemberTable): ReadonlySet<stri
     rememberPrototypeSidecar(member)
   }
   for (const protocol of hostInvocations.keys()) names.add(protocol)
-  for (const protocol of hostMemberRenderers.keys()) names.add(protocol)
+  for (const protocol of hostMemberRenderers().keys()) names.add(protocol)
   for (const protocol of errorConstructorNames.keys()) names.add(protocol)
   for (const protocol of cppKeyedCollectionConstructorProtocols) names.add(protocol)
   for (const protocol of cppBinaryBufferFamilyConstructorProtocols) names.add(protocol)

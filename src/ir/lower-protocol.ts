@@ -39,7 +39,7 @@ export const lowerProtocol = (ctx: LoweringContext, block: IrBlockId, operation:
     const lineage = requireLineage(operation)
     const receiver = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'receiver'))
     const source = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'source'))
-    ctx.builder.spreadCopy(block, lineage, receiver, source)
+    ctx.builder.spreadCopy(block, lineage, receiver, source, operation.overwrittenKeys)
     return
   }
   // `enumerate` -- `for`-`in` -- lowers through the identical three primitives,

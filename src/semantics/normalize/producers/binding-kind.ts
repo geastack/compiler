@@ -31,6 +31,9 @@ export interface BindingKind {
  */
 export const bindingKindOf = (declaration: ts.Node): BindingKind => {
   if (ts.isFunctionExpression(declaration) && declaration.name) return { mutable: false, temporalDeadZone: false }
+  // A class expression's own name, bound to the class in the class scope
+  // (15.7.14 ClassDefinitionEvaluation) before any element runs.
+  if (ts.isClassExpression(declaration) && declaration.name) return { mutable: false, temporalDeadZone: false }
   const list = ts.isVariableDeclaration(declaration) ? declaration.parent : undefined
   if (!list || !ts.isVariableDeclarationList(list)) return { mutable: true, temporalDeadZone: false }
   const isConst = (list.flags & ts.NodeFlags.Const) !== 0
@@ -47,4 +50,27 @@ export const bindingKindOf = (declaration: ts.Node): BindingKind => {
 export const bindingKindOfElement = (element: ts.BindingElement): BindingKind => {
   const owner = element.parent.parent
   return ts.isVariableDeclaration(owner) ? bindingKindOf(owner) : { mutable: true, temporalDeadZone: false }
+}
+
+/**
+ * Whether a `let`/`const` declaration is one a loop creates afresh on every
+ * iteration: declared in an iteration statement's body, or in a `for`/
+ * `for-in`/`for-of` head, with no function boundary in between. ECMA-262
+ * evaluates such a declaration in a new declarative environment per
+ * iteration (14.7.4.2 CreatePerIterationEnvironment, 14.7.5.6
+ * ForIn/OfBodyEvaluation step 5), so a closure made in one iteration keeps
+ * that iteration's binding.
+ */
+export const isIterationScopedDeclaration = (declaration: ts.Node): boolean => {
+  let list: ts.Node = declaration
+  while (!ts.isVariableDeclarationList(list)) {
+    if (ts.isSourceFile(list) || !list.parent) return false
+    list = list.parent
+  }
+  if ((list.flags & (ts.NodeFlags.Const | ts.NodeFlags.Let)) === 0) return false
+  for (let node: ts.Node = list; node.parent; node = node.parent) {
+    if (ts.isFunctionLike(node) || ts.isClassStaticBlockDeclaration(node) || ts.isSourceFile(node)) return false
+    if (ts.isIterationStatement(node.parent, false)) return true
+  }
+  return false
 }

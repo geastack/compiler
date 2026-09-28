@@ -1,4 +1,5 @@
 import type { ClassifierMaterializerPair, CoercionOperation, ConversionRuntimeRegistry } from '../../conversion/registry.js'
+import { hostRecordViewOf } from './host/host-record-view.js'
 import { coercionText } from './emit-coercion.js'
 import { classRefTransportKind, constructorUpcastMember } from './class-ref-transport.js'
 import type { ClassifierContract, CollectionDomain, MaterializerContract } from '../../conversion/algebra.js'
@@ -11,6 +12,8 @@ import type { RecordLayoutPolicy } from '../../representation/policies.js'
 import { defaultRecordLayoutPolicy } from '../../representation/policies.js'
 import { abiKey, arrayExtensionKey, representationKey, carriesUndefined } from '../../representation/model.js'
 import {
+  constructThroughFunction,
+  receiverDroppedCallableConstructor,
   isSpellable,
   callableObjectAbi,
   resultAdapterTransportOf,
@@ -30,7 +33,10 @@ import {
   recordsRecastable,
   sameArrayUpToExtension,
   sumIntoPayloadText,
-  widensResultIntoArm
+  widensResultIntoArm,
+  callableArmsHomedByChain,
+  callableResultViewOf,
+  callableUnionDispatchOf
 } from './emit-narrowing.js'
 import { cppTypeOf } from './types.js'
 import { nativeSumWidenable } from '../../conversion/native-sum.js'
@@ -459,6 +465,8 @@ const dynamicCarrierSupported = (representation: Representation, seen = new Set<
       return representation.ownership === 'shared-refcount'
     case 'promise':
       return dynamicCarrierSupported(representation.value, nested)
+    case 'iterator':
+      return representation.source === 'generator' && dynamicCarrierSupported(representation.element, nested)
     case 'function':
     case 'function-family':
     case 'function-value-family':
@@ -466,10 +474,26 @@ const dynamicCarrierSupported = (representation: Representation, seen = new Set<
       return dynamicCallableAbiSupported(representation.abi, nested)
     case 'void':
       return true
+    // An error constructor's host handle boxes as the intrinsic constructor
+    // function object and reads back from exactly that object
+    // (`DynamicCarrier<NativeHandle<P>>`); no other host handle has a box.
+    case 'native-handle':
+      return errorConstructorProtocols.has(representation.protocol)
     default:
       return false
   }
 }
+
+/** The host protocols whose handle is an error constructor -- `gea::detail::IntrinsicErrorConstructor`'s seven rows. */
+const errorConstructorProtocols: ReadonlySet<string> = new Set([
+  'ErrorConstructor',
+  'EvalErrorConstructor',
+  'RangeErrorConstructor',
+  'ReferenceErrorConstructor',
+  'SyntaxErrorConstructor',
+  'TypeErrorConstructor',
+  'URIErrorConstructor'
+])
 
 const dynamicCallableAbiSupported = (abi: CallableAbi, seen = new Set<Representation>()): boolean => {
   if (abi.receiver !== null && !dynamicCarrierSupported(abi.receiver, seen)) return false
@@ -705,6 +729,15 @@ const cppConversionTables = (
     const target = { kind: 'function-value-dispatch' as const, abi }
     return wrappedCallableAbiSupported(abi) ? dynamicCallablePair(target) : null
   },
+  callableConstructorMaterializer: (call, construct) => {
+    if (call.restFrom !== null || construct.restFrom !== null || construct.receiver !== null) return null
+    if (!wrappedCallableAbiSupported(call) || !wrappedCallableAbiSupported(construct)) return null
+    const domain = `dynamic-callable-constructor:${representationKey({ kind: 'function-and-constructor', call, construct })}`
+    return {
+      classifier: { id: 'gea::Value::tag', domain },
+      materializer: { id: 'gea::detail::DynamicCarrier::in', domain, allocates: true }
+    }
+  },
   functionMaterializer: (functionId, abi) => {
     if (!dynamicCallableAbiSupported(abi)) return null
     const domain = `dynamic-callable-identity:${functionId}:${representationKey({ kind: 'function', functionId, abi })}`
@@ -893,11 +926,22 @@ const cppConversionTables = (
    */
   boxedIdentityMaterializer: (target) => {
     const eligible =
-      (target.kind === 'dictionary' || target.kind === 'record-with-index' || target.kind === 'typed-array') &&
+      (target.kind === 'dictionary' ||
+        target.kind === 'record-with-index' ||
+        target.kind === 'typed-array' ||
+        target.kind === 'keyed-collection') &&
       target.ownership === 'shared-refcount'
     if (!eligible && target.kind !== 'array-buffer' && target.kind !== 'shared-array-buffer') return null
     if (dynamicTagFor(target) === null) return null
     const domain = `boxed-identity:${representationKey(target)}`
+    return {
+      classifier: { id: 'gea::Value::payloadType', domain },
+      materializer: { id: 'gea::detail::unboxValue', domain, allocates: false }
+    }
+  },
+  constructorIdentityMaterializer: (target) => {
+    if (target.kind !== 'constructor-family' || new Set(target.members).size !== 1) return null
+    const domain = `constructor-identity:${representationKey(target)}`
     return {
       classifier: { id: 'gea::Value::payloadType', domain },
       materializer: { id: 'gea::detail::unboxValue', domain, allocates: false }
@@ -976,6 +1020,10 @@ const cppConversionTables = (
     // it to produce. Asking the one authoritative type mapping keeps this from
     // becoming a second opinion about what is spellable.
     if (!isSpellable(target)) return null
+    // Selecting one callable of a union of callables is not a narrowing any
+    // guard licenses: every callable arm needs a home (`taggedUnionArmText`),
+    // and a pair the chain cannot home is `staticRecipe`'s to dispatch or refuse.
+    if (!callableArmsHomedByChain(source, target)) return null
     // A borrowed target is refused, and not for lack of syntax. `gea::Optional`
     // and `gea::TaggedUnion` both own their contents, so the reference a load
     // would hand back points into the cell -- which outlives nothing the caller
@@ -1253,6 +1301,20 @@ const cppConversionTables = (
     if (identity) return identity
     const constructEntry = callableConstructEntryPair(source, target)
     if (constructEntry) return constructEntry
+    if (constructThroughFunction(source, target)) {
+      const domain = `construct-through-function:${representationKey(source)}->${representationKey(target)}`
+      return {
+        classifier: { id: 'gea::CallableObject::identity', domain },
+        materializer: { id: 'gea::detail::ConstructThroughFunction', domain, allocates: true }
+      }
+    }
+    if (receiverDroppedCallableConstructor(source, target)) {
+      const domain = `callable-constructor-receiver-dropped:${representationKey(source)}->${representationKey(target)}`
+      return {
+        classifier: { id: 'gea::CallableConstructorObject::identity', domain },
+        materializer: { id: 'gea::detail::ReceiverDroppingCallableConstructor', domain, allocates: true }
+      }
+    }
     // `Function` promises only callability, so crossing into an evaluated
     // callable slot needs the same checked ABI adapter as the generic dynamic
     // materializer above. This pair is proposed explicitly by
@@ -1647,6 +1709,22 @@ const cppConversionTables = (
       return {
         classifier: { id: 'gea::Promise::state', domain },
         materializer: { id: 'gea::Promise::adopt-converted', domain, allocates: true }
+      }
+    }
+    // The same adoption into a sum whose one promise arm takes it: avvio's
+    // `let res` holds `undefined | null | Promise<any>` and is assigned
+    // `Promise.resolve()`. The arm is the only home a promise has in the sum.
+    if (source.kind === 'promise' && target.kind === 'tagged-union') {
+      const promiseArms = target.arms.map((arm) => arm.value).filter((arm) => arm.kind === 'promise')
+      const [arm] = promiseArms
+      if (promiseArms.length === 1 && arm?.kind === 'promise' && representationKey(arm) !== representationKey(source)) {
+        if (promisePayloadConvertible(source.value, arm.value)) {
+          const domain = `promise-arm-adoption:${representationKey(source)}->${representationKey(target)}`
+          return {
+            classifier: { id: 'gea::Promise::state', domain },
+            materializer: { id: 'gea::Promise::adopt-converted', domain, allocates: true }
+          }
+        }
       }
     }
     if (source.kind === 'record' && target.kind === 'tagged-union' && ownedRecordMaterializationPlan(source, target, layouts) !== null) {
@@ -2177,6 +2255,15 @@ const cppConversionTables = (
   staticRecipe: (source: Representation, target: Representation) => {
     if (!isSpellable(source) || !isSpellable(target)) return null
     if (classArmWithoutHome(layouts, source, target)) return null
+    // Callables whose results meet only through a record view -- one, or each
+    // arm of a union of them (`callableResultViewOf`, `callableUnionDispatchOf`).
+    if (callableUnionDispatchOf(layouts, source, target) !== null)
+      return { id: 'callable-union-dispatch', domain: 'static:callable-union-dispatch', allocates: true }
+    if (callableResultViewOf(layouts, source, target) !== null)
+      return { id: 'callable-result-view', domain: 'static:callable-result-view', allocates: true }
+    // A host object as an interface of its own methods (`hostRecordViewOf`).
+    if (hostRecordViewOf(layouts, source, target) !== null)
+      return { id: 'host-record-view', domain: 'static:host-record-view', allocates: true }
     // A sum some arm of which reaches the record-shaped target only through
     // the structural view is that view's `dispatch` plan, asked BEFORE the
     // chain: the chain answers the pair too, by selecting the exact arm, and
