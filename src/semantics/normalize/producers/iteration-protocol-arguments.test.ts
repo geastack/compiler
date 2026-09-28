@@ -12,12 +12,13 @@ import { compile } from '../../../compiler.js'
 // frame an ambient callee has, so the slot is the array the call passes.
 
 const fixture = resolve('test/runtime/iteration-protocol-arguments-probe.ts')
+const scriptFixture = resolve('test/runtime/iteration-protocol-arguments-probe.js')
 
-const compileSource = (source: string) =>
+const compileSource = (source: string, root = fixture) =>
   compile({
-    rootFileNames: [fixture],
+    rootFileNames: [root],
     projectFileName: null,
-    sourceOverlay: new Map([[fixture, source]]),
+    sourceOverlay: new Map([[root, source]]),
     // The built-in WebGL host lowers `getContext` itself; this test is about
     // the lib.dom declaration the checker resolves, not that host.
     webglPlugin: false
@@ -53,4 +54,43 @@ test('an array passed to an ES Iterable<T> overload still enters', () => {
 
   assert.deepEqual(conversionRefusals(result), [], JSON.stringify(result.refusals))
   assert.ok(result.certificate, JSON.stringify(result.refusals))
+})
+
+// three's WebGLState.drawBuffers: in unchecked JS `let drawBuffers = []`
+// reassigned from a WeakMap's `get` is `any` to the checker at the call, so
+// its acceptance vouches for nothing; the census's array is the evidence, and
+// only when its element is the element the slot states.
+const drawBuffersState = (element: string) => `// @ts-nocheck
+class State {
+  /** @param {WebGL2RenderingContext | null} gl */
+  constructor(gl) { this.gl = gl; this.current = new WeakMap() }
+  update(key, count) {
+    const { gl } = this
+    let drawBuffers = []
+    drawBuffers = this.current.get(key)
+    if (drawBuffers === undefined) { drawBuffers = []; this.current.set(key, drawBuffers) }
+    for (let i = 0; i < count; i++) drawBuffers[i] = ${element}
+    if (gl) gl.drawBuffers(drawBuffers)
+    return drawBuffers.length
+  }
+}
+console.log(new State(document.createElement('canvas').getContext('webgl2')).update({}, 2))
+`
+
+test('an any-typed JS argument enters an Iterable<T> slot as the array its census holds', () => {
+  const result = compileSource(drawBuffersState('36064 + i'), scriptFixture)
+
+  assert.deepEqual(conversionRefusals(result), [], JSON.stringify(result.refusals))
+  assert.ok(result.certificate, JSON.stringify(result.refusals))
+  assert.match(result.source ?? '', /CallableObject<void\(gea::Ref<gea::ArrayObject<double>>\)>/)
+})
+
+test('an any-typed JS argument whose census element is not the stated element keeps its refusal', () => {
+  const result = compileSource(drawBuffersState("'back'"), scriptFixture)
+
+  assert.equal(result.certificate, null)
+  assert.ok(
+    conversionRefusals(result).some((row) => row.key.startsWith('conversion:array-object(string,')),
+    JSON.stringify(result.refusals)
+  )
 })
