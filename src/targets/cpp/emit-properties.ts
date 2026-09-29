@@ -1302,6 +1302,21 @@ const emitFieldStoreLines = (
     emitFieldStoreLines(ctx, lines, { ...operation, receiver: present }, label)
     return
   }
+  // The store counterpart of `emitGet`'s nullish receiver: PutValue calls
+  // ToObject on the base (ECMA-262 6.2.5.6), which throws a TypeError for
+  // `undefined` and `null`. The site is unreachable rather than a real store
+  // through nothing: certification skips a receiver whose semantic type is
+  // `never` (`receiverIsUnreachable`), and `derive.ts` gives such a receiver
+  // `never`'s storage-free carrier -- three's `parameters.length =
+  // inputs.length` under `Array.isArray( parameters )` over a dictionary
+  // (`isDictionaryNarrowedToArray`). Refusing it blocked emission of code that
+  // cannot run, after the certificate had already been minted for it.
+  const receiverKind = operation.receiver.representation.kind
+  if (receiverKind === 'undefined' || receiverKind === 'null' || receiverKind === 'void') {
+    lines.push(`gea::host::throwGetPropertyOfNullish<void>("${receiverKind === 'null' ? 'null' : 'undefined'}", "set");`)
+    if (operation.result) defineValueAlias(ctx, operation.result, operandText(ctx, operation.receiver))
+    return
+  }
   if (!isDefaultDataDescriptor(operation)) {
     // Generated indexed records carry descriptor bits for both fixed slots
     // and each sidecar entry. Their fixed-first dispatcher can therefore
