@@ -14,7 +14,7 @@ array-from-bound-set-values-takes-its-key.runtime.js.cpp ccbed373861e
 array-from-set.runtime.js.cpp 51c8a52cb5be
 array-index-absence.ts.cpp b9f1195e8e0b
 array-isarray-identity-conditional.ts.cpp 33c73a99fa8f
-array-literal-gathers-dynamic-into-class.runtime.js.cpp 7294712508f2
+array-literal-gathers-dynamic-into-class.runtime.js.cpp 85892098c404
 array-multiple-windows.ts.cpp ee13367467b2
 array-mutator-frozen-integrity.ts.cpp f122fdb38185
 array-object-call-argument-aliasing.ts.cpp 06b1170a221c
@@ -130,8 +130,8 @@ cpn-numeric-computed-keys.runtime.js.cpp d21f394f1e0c
 date-prototype-method-reflection.runtime.js.cpp 89df87bd3921
 date-setter-argument-coercion.runtime.js.cpp 2235debf782d
 date-setter-time-value-read-first.runtime.js.cpp f8035bab7069
-dead-helper-obligations.runtime.js.cpp 8fc1339f6c8b
-dead-or-arm-into-class-union.runtime.js.cpp 82422ef997ba
+dead-helper-obligations.runtime.js.cpp 344e28e58bc0
+dead-or-arm-into-class-union.runtime.js.cpp edb8fd86e900
 dead-values.ts.cpp 921962c4bff0
 define-property-setter-function-expression.runtime.js.cpp 885f8eb03d54
 delete-symbol-expando-on-class-through-interface.ts.cpp 4d04cd30773e
@@ -200,8 +200,8 @@ field-constructor-choice.runtime.js.cpp 4c5adc06cba9
 field-null-after-guard-return.runtime.js.cpp b63632d417c2
 field-nullish-placeholder-for-of.runtime.js.cpp 23714acc63f4
 field-untyped-receiver-write.runtime.js.cpp 35f89c7fd5c4
-field-written-through-instance.runtime.js.cpp 03ece5f437fc
-field-written-through-tag-typed-receiver.runtime.js.cpp b55c5f98a4f5
+field-written-through-instance.runtime.js.cpp 650abb7bf1a9
+field-written-through-tag-typed-receiver.runtime.js.cpp 74a5f79757a4
 filter-under-a-type-guard-narrows-its-element.ts.cpp 0cdd79245c69
 fixed-data-definition.js.cpp 0f5f99ceadbf
 fixed-field-assignment-widening.runtime.js.cpp e65d803536e4
@@ -339,9 +339,9 @@ jsdoc-asserted-class-method.runtime.js.cpp 274ea169260d
 jsdoc-defaulted-class-constructor.runtime.js.cpp ca5226775273
 jsdoc-field-open-array-element.runtime.js.cpp 97302cc25b25
 jsdoc-field-stores-contradicted-parameter.runtime.js.cpp 211918b23ce0
-jsdoc-field-tag-held-by-silent-writes.runtime.js.cpp cd87cd040be8
+jsdoc-field-tag-held-by-silent-writes.runtime.js.cpp f198d8ece776
 jsdoc-field-tag-names-an-unimported-default-export.runtime.js.cpp 5ce3bd165c89
-jsdoc-field-type-contradicted-by-writes.runtime.js.cpp f9608f5b2fc1
+jsdoc-field-type-contradicted-by-writes.runtime.js.cpp 1d6c8b9e79c4
 jsdoc-generic-argument-name-not-imported.runtime.js.cpp 8c45dfb5a05c
 jsdoc-host-absent-parameter-contradicted-by-value.runtime.js.cpp 829b28cb786b
 jsdoc-map-field-value-contradicted-by-set.runtime.js.cpp 3e1aeaf1eff6
@@ -352,7 +352,7 @@ jsdoc-parameter-collection-element-invariant.runtime.js.cpp c3ccfb3a36d3
 jsdoc-parameter-contradicted-by-callers.runtime.js.cpp c7d3020d3b02
 jsdoc-parameter-contradicted-by-census.runtime.js.cpp 410265040ebe
 jsdoc-parameter-contradicted-through-unimported-names.runtime.js.cpp 8e33283ed143
-jsdoc-parameter-held-by-ancestor-argument.runtime.js.cpp e08548c061fb
+jsdoc-parameter-held-by-ancestor-argument.runtime.js.cpp 86216fcca2f2
 jsdoc-parameter-open-array-element.runtime.js.cpp cdfc7908b9cc
 jsdoc-promise-void-return-contradicted-by-resolve.runtime.js.cpp 84c223750106
 jsdoc-return-absence-tag-contradicted-by-return.runtime.js.cpp ffbc57ded9b7
@@ -387,6 +387,7 @@ logical-object-union-falsy-absence.ts.cpp e82a3a7b3c45
 loop-invariant-ref-argument.ts.cpp 2ff2c84559a5
 loop-move-single-use.ts.cpp b38b117295b4
 loosely-stated-map-writes-narrow-into-destination.runtime.js.cpp 24bba60d5376
+map-callback-typed-into-dynamic-result.runtime.js.cpp f1ed77ef37a5
 map-result-takes-stated-destination.runtime.js.cpp ea5f1151e9fb
 mapped-constraint-callee-copy.ts.cpp 4cd66f302541
 math-direct-rest.ts.cpp 2b05999ee8b2
@@ -406,7 +407,7 @@ narrow-to-absent.ts.cpp befbe4fef4d4
 narrow-union-to-descendant-arms.ts.cpp 823583261657
 narrowed-family-intersection.ts.cpp a5320681ade6
 narrowed-stated-return-into-const.runtime.js.cpp ab7d67a02d14
-narrowed-stated-return-shorthand-read.runtime.js.cpp 111f5866a23e
+narrowed-stated-return-shorthand-read.runtime.js.cpp 191bf38575d1
 native-absent-feature.js.cpp b83e88aa0aea
 native-accessor-field-flow.ts.cpp cf8a48152367
 native-apply-fixed-tuple.runtime.ts.cpp 7e2e07c7c73e
@@ -573,7 +574,7 @@ physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 1d2c5e207449
 primitive-delete-arms.runtime.js.cpp 12dcd9499b11
-printer-drift.txt 724dd9866a7c
+printer-drift.txt fe646ca5d091
 promise-any-into-union-promise-arm.runtime.js.cpp 9372b4c219cd
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
@@ -611,7 +612,7 @@ proxy-has-trap-prototype-method.runtime.js.cpp f3611b448e13
 proxy-iterator-traps.runtime.js.cpp cf94d54819b3
 proxy-native-slot-refusal.runtime.js.cpp 38c6ceb3e2d4
 proxy-origin-rest-elements.runtime.js.cpp b3a09bc82fb8
-proxy-receiver-generic-copies.runtime.js.cpp e7ecc2a81e2b
+proxy-receiver-generic-copies.runtime.js.cpp 35b703061f88
 reactive-inherited-cell-no-list-tick.ts.cpp 937c40b5564e
 reassigned-local-argument-reads-initializer.runtime.js.cpp e49470fe41c8
 receiver-ignored-construct.ts.cpp a68d985fdfa2
@@ -626,7 +627,7 @@ recycled-array-element-write-keeps-class-family.runtime.js.cpp 5960b7e42a2a
 ref-virtual-base-address.ts.cpp ab724d570479
 reflect-native-boundary.ts.cpp 22950f295e6b
 reflect-native-operations.ts.cpp 95b27190af99
-reflect-receiver-native-target.runtime.js.cpp 15ba43988234
+reflect-receiver-native-target.runtime.js.cpp 2f84114e4352
 regexp-boolean-object-prototype-reflection.runtime.js.cpp 9254238f31d5
 regexp-clone-unsupported-flags.ts.cpp 338f1e437d93
 regexp-exec-result-length.ts.cpp 1383aa7a8c38
@@ -652,7 +653,7 @@ self-reading-branch-write-cell.runtime.js.cpp 85844722e169
 set-constructed-from-a-string.ts.cpp ae1377b3d02f
 set-of-class-union-keys.runtime.js.cpp 600ca2048a17
 set-values-iterator.runtime.js.cpp 785c55074d0a
-sibling-class-return-join.runtime.js.cpp 0876c5f38471
+sibling-class-return-join.runtime.js.cpp 3765bd0325b7
 slot-write-closure.runtime.ts.cpp 9b9ef35c8b5f
 spread-call-immediately-invoked.runtime.js.cpp c5ae95452df2
 spread-fixed-arity-three.runtime.js.cpp 978c1dcd93de
