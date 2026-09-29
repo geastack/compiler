@@ -144,6 +144,7 @@ destructured-call-fills-array-fields.runtime.js.cpp 3a5040c115db
 destructured-default-host-options.ts.cpp c11cc6124034
 destructured-key-of-filled-empty-literal.runtime.js.cpp e25fac4043e4
 destructuring-defaults.ts.cpp 5b9603fe4315
+dictionary-array-predicate-dead-arm.runtime.js.cpp 8de0ac66640a
 dictionary-define-property-nondefault.ts.cpp ee362b11ee3c
 dictionary-define-property.ts.cpp 294cfc8a7aca
 dictionary-index-optional-destination.ts.cpp 84854291e47b
@@ -572,7 +573,7 @@ physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 1d2c5e207449
 primitive-delete-arms.runtime.js.cpp 12dcd9499b11
-printer-drift.txt b76f5e7c342c
+printer-drift.txt de8cf079e822
 promise-any-into-union-promise-arm.runtime.js.cpp 9372b4c219cd
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0

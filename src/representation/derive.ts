@@ -1394,6 +1394,42 @@ export const createRepresentationDeriver = (
   }
 
   /**
+   * `D & any[]` for a string-keyed DICTIONARY `D`: what `Array.isArray( d )`
+   * narrows a dictionary-typed `d` to in its true branch. TypeScript
+   * intersects rather than answering `never` (see `arrayPredicateNarrowedTypeOf`),
+   * and `substantiveMembersOf` then drops the `any[]` as the identity of `&`,
+   * so the branch read the plain dictionary and every write in it was a
+   * dictionary store: three's `FunctionCallNode.generate` tests
+   * `Array.isArray( parameters )` over `@type {Object<string, Node>}` and then
+   * writes `parameters.length = inputs.length`, a number into the `Node` slot
+   * (`conversion:scalar(number)->class-ref(Node)`).
+   *
+   * No value is both. No array is assignable to a string index signature
+   * (TS2322, "Index signature for type 'string' is missing"), and a dictionary
+   * carrier is not an Array exotic object: `Array.isArray` of one is the
+   * constant `false` (`host-templates.ts`'s `isArrayConstantOf`, which the
+   * printer spells), so the branch never runs. A value slot of `any` or
+   * `unknown` is out: `{ [k: string]: any }` does admit an array, and a
+   * number-keyed index is an array's own view.
+   */
+  const isDictionaryNarrowedToArray = (members: readonly StructuralTypeId[]): boolean => {
+    const flattened = flattenedIntersectionMembers(members).filter((member) => !isVacuousBrand(member) && !isIdentityMember(member))
+    if (!flattened.some(isAnyArrayMember) || flattened.some((member) => isArrayShapedMember(member) && !isAnyArrayMember(member)))
+      return false
+    return flattened.some((member) => {
+      const body = bodyShapeOf(member)
+      const index = body?.kind === 'object' ? dictionaryIndexOf(body) : null
+      if (index === null || index.key !== 'string') return false
+      const value = shapeOf(index.value)
+      return (
+        value !== undefined &&
+        value !== null &&
+        !(value.kind === 'primitive' && (value.primitive === 'any' || value.primitive === 'unknown'))
+      )
+    })
+  }
+
+  /**
    * The carrier of an intersection whose every member is a declared name for
    * the SAME interned object body, or `null` when the members name more than
    * one layout. Same body id means same struct: the deriver's declared path
@@ -1449,6 +1485,10 @@ export const createRepresentationDeriver = (
     // record shape": they never were one, and answering that question about
     // them is what produced a refusal for a primitive that has its own
     // perfectly good carrier.
+    // Uninhabited, so it carries what `never` carries -- see the uninhabited
+    // branch below. Asked before the members are reduced, because the
+    // reduction drops the `any[]` that states it.
+    if (isDictionaryNarrowedToArray(shape.members)) return { kind: 'void' }
     const substantive = substantiveMembersOf(shape.members)
     if (substantive.length === 0) {
       // Nothing but identity members (`unknown & unknown`): the intersection
@@ -2708,7 +2748,7 @@ export const createRepresentationDeriver = (
     // fact; consumers asking about REACHABILITY have to be told too, or a
     // provably dead branch keeps owing conversions for loads it never performs.
     if (shape?.kind !== 'intersection') return false
-    return isUninhabitedIntersection(substantiveMembersOf(shape.members))
+    return isUninhabitedIntersection(substantiveMembersOf(shape.members)) || isDictionaryNarrowedToArray(shape.members)
   }
 
   // An OPEN tuple derives `array-object` already and is answered by its kind;
