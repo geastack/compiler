@@ -31974,6 +31974,39 @@ auto map(const gea::Ref<ArrayObject<E>>& array, const Callable& fn) {
   return mapped;
 }
 
+/**
+ * The same 23.1.3.21, for a call whose published element is not the one the
+ * callback returns.
+ *
+ * `map` deduces its element from the callback, which is exact whenever the
+ * compiler published the call's result from that same callback. It need not
+ * have: the call's result carrier comes from the checker's `U[]`, and the
+ * callback's own result from its body, so an untyped callback whose body the
+ * compiler typed (`(item) => item.name` over a field it proved a string)
+ * returns `std::string` into a result published as an array of dynamic
+ * values. The steps are identical -- holes stay holes, 23.1.3.21 step 7.c's
+ * `kPresent` test -- and each produced value passes through `project` on its
+ * way in.
+ *
+ * The projection is supplied by the emitter for `filterNarrowed`'s reason:
+ * which pairs convert, and how, is the conversion authority's answer, and this
+ * template only states that it happens once per mapped element.
+ */
+template <typename R, typename E, typename Callable, typename Project>
+gea::Ref<ArrayObject<R>> mapPublished(const gea::Ref<ArrayObject<E>>& array, const Callable& fn, const Project& project) {
+  auto mapped = gea::makeRef<ArrayObject<R>>();
+  if (!array) return mapped;
+  mapped->reserve(array->size());
+  for (std::size_t index = 0; index < array->size(); ++index) {
+    if (!array->present(index)) {
+      mapped->pushHole();
+      continue;
+    }
+    mapped->push(project(mapCall(fn, array->at(index), static_cast<double>(index), array)));
+  }
+  return mapped;
+}
+
 /** Array.from's callback receives `(element, index)` and no source array. */
 template <typename Callable, typename E>
 auto fromCall(const Callable& fn, const E& element, double index) {
