@@ -6,7 +6,7 @@
 //   GEA_CORE_DIR=<an installed @geastack/core> \
 //     node scripts/three-webgpu-coverage.mjs [--three <dir>] [--native-webgpu <dir>]
 //     [--gea-core <dir>] [--gea-plugin <host-shims>] [--out <dir>] [--memory-limit-gb <n>]
-//     [--summarize <coverage.json>]
+//     [--summarize <coverage.json>] [--refusals-only]
 //
 // The program is `test/fixtures/three-webgpu/entry.ts`: a scene, a camera, a
 // box with a node material, and `renderer.render(scene, camera)`. No real app
@@ -68,6 +68,12 @@
 // the same compiler print the same groups; only the header (date, time,
 // memory) moves. `--summarize` re-reads a `coverage.json` without compiling.
 //
+// `--refusals-only` stops after the build's compile: the refusals come from it
+// (`GEA_REFUSALS_JSON`), so the second, coverage compile, which adds only the
+// codes, derived rows, ABI rows and boxed carriers, is skipped. It writes
+// `pipeline.log` and a `run.json` without the coverage fields, and prints the
+// build's lines of the summary; there is no `coverage.json` or `summary.*`.
+//
 // One compile takes several GB. The working set of the whole process tree is
 // sampled every few seconds, a status line is printed every 30 s, and the tree
 // is stopped above `--memory-limit-gb` (default 11); the peak each compile
@@ -116,6 +122,9 @@ const geaPluginOverride = () => {
 
 const outDir = resolve(option('--out') ?? join(root, 'measurements/three-webgpu'))
 const summarizeOnly = option('--summarize')
+const refusalsOnly = process.argv.includes('--refusals-only')
+if (summarizeOnly && refusalsOnly)
+  fail('--summarize and --refusals-only are incompatible: one reads a coverage report, the other writes none')
 
 const gitHead = () => {
   const result = spawnSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: root, encoding: 'utf8' })
@@ -454,6 +463,36 @@ const compileOnce = async () => {
   for (let index = 0; index < geatscArgv.length; index += 1)
     if (geatscArgv[index] === '--plugin' || geatscArgv[index] === '--plugin-option') pluginArgs.push(geatscArgv[index], geatscArgv[++index])
 
+  const run = {
+    date: new Date().toISOString(),
+    compiler: gitHead(),
+    machine: `${hostname()}, ${process.platform} ${process.arch}, ${cpus()[0]?.model.trim() ?? '?'} x${cpus().length}, ${(totalmem() / 1024 ** 3).toFixed(0)} GB, node ${process.version}`,
+    three: `${three.version} (${three.dir})`,
+    nativeWebgpu: `${webgpu.version} (${webgpu.dir})`,
+    geaCore: `${core.version} (${core.dir})`,
+    geaPlugin: geaPlugin ?? 'installed @geastack/geatsc-plugin-gea/host-shims',
+    packageDirs,
+    pipeline: {
+      args: pipelineArgs,
+      exitCode: pipeline.exit.code,
+      killedAboveBytes: pipeline.killed,
+      wallMs: pipeline.wallMs,
+      sampledTreePeakBytes: pipeline.sampledPeak,
+      moduleGraph: describeGraph(graphFile, packageDirs),
+      geatsc: {
+        argv: graphGeatsc.argv,
+        peakRssBytes: graphGeatsc.maxRssBytes,
+        heapAtExit: { totalBytes: graphGeatsc.heapTotalBytes, usedBytes: graphGeatsc.heapUsedBytes },
+        stages: stagesIn(pipeline.stderr)
+      },
+      ...reported
+    }
+  }
+  if (refusalsOnly) {
+    writeFileSync(join(outDir, 'run.json'), `${JSON.stringify(run, null, 2)}\n`)
+    return { record: run, reportFile: null }
+  }
+
   const args = [
     '--max-old-space-size=16384',
     peakImport,
@@ -479,29 +518,7 @@ const compileOnce = async () => {
   const coveragePeak = peaksIn(coverage.stderr).find((peak) => isGeatsc(peak, 'coverage'))
 
   const record = {
-    date: new Date().toISOString(),
-    compiler: gitHead(),
-    machine: `${hostname()}, ${process.platform} ${process.arch}, ${cpus()[0]?.model.trim() ?? '?'} x${cpus().length}, ${(totalmem() / 1024 ** 3).toFixed(0)} GB, node ${process.version}`,
-    three: `${three.version} (${three.dir})`,
-    nativeWebgpu: `${webgpu.version} (${webgpu.dir})`,
-    geaCore: `${core.version} (${core.dir})`,
-    geaPlugin: geaPlugin ?? 'installed @geastack/geatsc-plugin-gea/host-shims',
-    packageDirs,
-    pipeline: {
-      args: pipelineArgs,
-      exitCode: pipeline.exit.code,
-      killedAboveBytes: pipeline.killed,
-      wallMs: pipeline.wallMs,
-      sampledTreePeakBytes: pipeline.sampledPeak,
-      moduleGraph: describeGraph(graphFile, packageDirs),
-      geatsc: {
-        argv: graphGeatsc.argv,
-        peakRssBytes: graphGeatsc.maxRssBytes,
-        heapAtExit: { totalBytes: graphGeatsc.heapTotalBytes, usedBytes: graphGeatsc.heapUsedBytes },
-        stages: stagesIn(pipeline.stderr)
-      },
-      ...reported
-    },
+    ...run,
     // The coverage compile's own fields keep the names the summary has always
     // read, so `--summarize` over an older run.json still renders.
     exitCode: coverage.exit.code,
@@ -716,6 +733,10 @@ if (summarizeOnly) {
   if (existsSync(beside)) record = JSON.parse(readFileSync(beside, 'utf8'))
 } else {
   ;({ record, reportFile } = await compileOnce())
+}
+if (reportFile === null) {
+  process.stdout.write(`${renderPipeline(record, null).slice(0, -1).join('\n')}\n`)
+  process.exit(0)
 }
 let report
 try {
