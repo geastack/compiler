@@ -151,9 +151,13 @@ test('an unguarded keyed store or a keyed store through an untyped receiver refu
   // The key must stay genuinely unresolvable: a bare literal here (`"x"`) is
   // itself a proof that this write can never spell `glslVersion`, and a
   // computed-key-set consultation now grants that -- correctly, since it is
-  // no longer this write that is untyped, only the receiver.
+  // no longer this write that is untyped, only the receiver. The receiver is
+  // a global the value graph cannot place: one it can place is the next
+  // test's.
   assert.equal(
-    program({ extra: 'function poke( target, key ) { target[ key ] = 1; } poke( {}, String( Date.now() ) );' }).readOf('glslVersion'),
+    program({ extra: 'function poke( target, key ) { target[ key ] = 1; } poke( globalThis.box, String( Date.now() ) );' }).readOf(
+      'glslVersion'
+    ),
     null
   )
   // A numeric key can never spell `glslVersion`.
@@ -165,12 +169,33 @@ test('an unguarded keyed store or a keyed store through an untyped receiver refu
   )
 })
 
+test('an untyped store receiver whose every value the value graph enumerates as a foreign allocation discharges it', () => {
+  const poke = 'function poke( target, key ) { target[ key ] = 1; }'
+  const key = 'String( Date.now() )'
+  // Every caller passes a literal.
+  assert.deepEqual(program({ extra: `${poke} poke( {}, ${key} ); poke( [], ${key} );` }).readOf('glslVersion'), [
+    'null',
+    'string',
+    'undefined'
+  ])
+  // The record a WeakMap hands back, and a dictionary stored on it.
+  const cached = `const cache = new WeakMap();
+    /** @param {Object} owner @return {Object} */
+    function dataOf( owner ) { let data = cache.get( owner ); if ( data === undefined ) { data = {}; cache.set( owner, data ); } return data; }
+    const data = dataOf( {} ); if ( data.stages === undefined ) data.stages = {}; data.stages[ ${key} ] = true;`
+  assert.deepEqual(program({ extra: cached }).readOf('glslVersion'), ['null', 'string', 'undefined'])
+  // One caller hands over a family member lacking the key: the store can create it.
+  assert.equal(program({ extra: `${poke} poke( {}, ${key} ); poke( new MeshBasicMaterial( {} ), ${key} );` }).readOf('glslVersion'), null)
+  // A caller the graph cannot place leaves the receiver open.
+  assert.equal(program({ extra: `${poke} poke( {}, ${key} ); poke( globalThis.box, ${key} );` }).readOf('glslVersion'), null)
+})
+
 test('a settled census that types an untyped store receiver as a foreign dictionary discharges it', () => {
   // The key stays non-literal for the same reason as the previous test: this
   // test isolates the RECEIVER-typing question, and a literal key would let
   // the computed-key-set consultation discharge the write on its own.
   const extra =
-    '/** @type {Record<string, number>} */ const dictionary = {}; function poke( target, key ) { target[ key ] = 1; } poke( {}, String( Date.now() ) );'
+    '/** @type {Record<string, number>} */ const dictionary = {}; function poke( target, key ) { target[ key ] = 1; } poke( globalThis.box, String( Date.now() ) );'
   const built = program({ extra })
   let target: ts.Identifier | undefined
   let dictionary: ts.Identifier | undefined

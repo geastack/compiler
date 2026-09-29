@@ -21,6 +21,7 @@ import { computedKeySetOf, type ComputedKeySetAuthority } from './computed-key-s
 import { closedCallableAuthorityOf } from './callable-reach.js'
 import { arrayStoredValuesOf } from './array-element-continuation.js'
 import { censusArgumentsObjects } from '../arguments-objects.js'
+import { sourceValueSessionOf } from './source-value-session.js'
 
 /**
  * A member read through a receiver whose static class does not declare the
@@ -243,6 +244,8 @@ const PRIMITIVE_FLAGS =
   ts.TypeFlags.Never
 
 const skipParentheses = (expression: ts.Expression): ts.Expression => unwrapNaming(expression)
+/** `a ??= b` yields `b`, not a primitive: a value-graph leaf spelled as an assignment is not trusted to be one. */
+const isAssignmentOperator = (kind: ts.SyntaxKind): boolean => kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment
 
 const debugName = process.env['GEA_FAMILY_MEMBER_DEBUG']
 const debugAllName = process.env['GEA_FAMILY_MEMBER_DEBUG_ALL']
@@ -841,8 +844,65 @@ const computeClosureRefusal = (
     for (const write of origins) if (!cannotBeFamily(write.value)) return traced('origin-unproven', write.site)
     return true
   }
+  /**
+   * `excludesFamily` answered from the whole-program value graph
+   * (`source-value-session.ts`) rather than from the receiver's spelling.
+   *
+   * three's blocking stores go through receivers no syntactic origin reaches:
+   * `nodeData.stages[ stage ] = ...` on the record a `WeakMap` hands back,
+   * `data.interleavedBuffers[ uuid ] = ...` on a `@param {Object}` whose
+   * callers pass `{}`, `this.memory[ prop ] = 0` on a field the checker
+   * types `Object`. `memberExcludesFamily` asks such a slot by NAME, over
+   * every object in the program, and any open-keyed store anywhere that may
+   * put a family instance under some key poisons that union. The graph asks
+   * the same question per allocation: it follows cells, fields, parameters
+   * through their complete frames, collections and completions, and answers
+   * only when it can enumerate EVERY value the expression holds -- otherwise
+   * `null`, and the receiver still may hold anything.
+   *
+   * Each answer is a leaf: an allocation (a literal, a function, a `new`), a
+   * primitive, or `undefined`. Only a `new` can be a family instance, and it
+   * is asked exactly as `excludesFamily` asks one. An allocation is an
+   * instance, never a prototype, so a proven target is not a family's
+   * prototype either. Obligations the graph leaned on (`Array.prototype`, a
+   * native collection's protocol) enter the ledger capture `closureRefusalOf`
+   * holds open, and are published with the answer they support.
+   */
+  const graphExcludesFamily = (expression: ts.Expression): boolean => {
+    const values = sourceValueSessionOf(checker, flow).valuesOf(expression)
+    if (values === null) {
+      if (listing) {
+        const causes = sourceValueSessionOf(checker, flow)
+          .explainValue(expression)
+          .slice(0, 3)
+          .map((cause) =>
+            cause.kind === 'opaque'
+              ? `${cause.cause.reason}${describeAt(cause.cause.node)}`
+              : `${cause.kind}${describeAt((cause.kind === 'incomplete-node' ? cause.root : cause.members[0])?.node)}`
+          )
+        console.error(`[FAMILY-MEMBER-GRAPH] ${name} open${describeAt(expression)} :: ${causes.join(' | ')}`)
+      }
+      return false
+    }
+    return values.every((held) => {
+      if (ts.isFunctionLike(held)) return true
+      if (ts.isNewExpression(held)) return excludesFamily(held)
+      return (
+        ts.isObjectLiteralExpression(held) ||
+        ts.isArrayLiteralExpression(held) ||
+        ts.isLiteralExpression(held) ||
+        held.kind === ts.SyntaxKind.NullKeyword ||
+        held.kind === ts.SyntaxKind.TrueKeyword ||
+        held.kind === ts.SyntaxKind.FalseKeyword ||
+        ts.isTypeOfExpression(held) ||
+        ts.isVoidExpression(held) ||
+        (ts.isBinaryExpression(held) && !isAssignmentOperator(held.operatorToken.kind))
+      )
+    })
+  }
   const mayHold = (expression: ts.Expression | null, targets: ReadonlySet<SourceClass>): boolean =>
-    expression === null || (targets.size > 0 && typeMayHold(typeOf(expression), targets) && !excludesFamily(expression))
+    expression === null ||
+    (targets.size > 0 && typeMayHold(typeOf(expression), targets) && !excludesFamily(expression) && !graphExcludesFamily(expression))
   /** A key typed purely number/symbol can never spell an identifier-shaped `name` (numeric names are refused up front). */
   const keyCannotName = (key: ts.Expression): boolean => {
     const type = typeOf(key)
