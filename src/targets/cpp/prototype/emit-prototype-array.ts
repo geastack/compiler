@@ -700,6 +700,50 @@ const filterText: ArrayCallRenderer = (ctx, receiverText, element, args, result)
   )
 }
 
+/**
+ * ECMA-262 23.1.3.21 `map(callbackfn)`, where the call's published element and
+ * the callback's own result disagree.
+ *
+ * `callbackMethodText` leaves the result element to the runtime template, which
+ * deduces it from the callback. That is exact only while the plan published
+ * the call's result from the same fact, and the two have different sources:
+ * the result carrier is the checker's `U[]`, the callback's result is its
+ * body's. A callback the checker left `any` whose body the compiler typed
+ * answers `std::string` into a result published as dynamic elements, and the
+ * deduced `ArrayObject<std::string>` then fails to become the published
+ * `ArrayObject<gea::Value>` at the C++ step, after certification.
+ *
+ * So each mapped value is converted into the published element through
+ * `alignedValueText`, the one authority on which pairs convert, and refused
+ * BY NAME when none does. A `void` callback is left to `StoredElement`, which
+ * already stores `undefined` for it, and a callable whose result the plan
+ * does not state is left as it was.
+ */
+const mapText: ArrayCallRenderer = (ctx, receiverText, element, args, result) => {
+  const plain = (): string => callbackMethodText('map', '23.1.3.21')(ctx, receiverText, element, args, result)
+  const published = result?.representation
+  const callback = args[0]
+  if (!published || published.kind !== 'array-object' || args.length !== 1 || !callback) return plain()
+  const carrier = callback.representation
+  if (carrier.kind !== 'function-value-dispatch') return plain()
+  const returned = carrier.abi.result
+  if (returned.kind === 'void' || representationKey(returned) === representationKey(published.element)) return plain()
+  const projected = alignedValueText(ctx, 'prototype/emit-prototype-array.ts:mapText', returned, published.element, '__gea_mapped')
+  if (projected === null) {
+    throw createCppEmitBlockedError(
+      `runtime-helper:result:map:${representationKey(returned)}`,
+      `"Array.prototype.map" (ECMA-262 23.1.3.21) stores what its callback returns, "${representationKey(returned)}", into a result ` +
+        `published with "${representationKey(published.element)}" elements, and no installed conversion carries one into the other`
+    )
+  }
+  const publishedType = cppTypeOf(published.element)
+  const mapper = elementAdaptedCallbackText(ctx, 'map', '23.1.3.21', element, callback)
+  return (
+    `gea::runtime::array::mapPublished<${publishedType}>(${receiverText}, ${mapper}, ` +
+    `+[](const ${cppTypeOf(returned)}& __gea_mapped) -> ${publishedType} { return ${projected}; })`
+  )
+}
+
 const findText: ArrayCallRenderer = (ctx, receiverText, element, args, result) => {
   const text = callbackMethodText('find', '23.1.3.9')(ctx, receiverText, element, args, result)
   return optionalElementResultText(ctx, 'find', '23.1.3.9', element, result, text)
@@ -715,7 +759,7 @@ const atText: ArrayCallRenderer = (ctx, receiverText, element, args, result) => 
 export const arrayMethods: ReadonlyMap<string, ArrayCallRenderer> = new Map<string, ArrayCallRenderer>([
   [arrayBulkAppendMethodName, bulkInsertText(arrayBulkAppendMethodName, '23.1.3.23', 'appendRange')],
   ['unshift', bulkInsertText('unshift', '23.1.3.37', 'prependRange')],
-  ['map', callbackMethodText('map', '23.1.3.21')],
+  ['map', mapText],
   ['filter', filterText],
   ['forEach', callbackMethodText('forEach', '23.1.3.15')],
   ['findIndex', callbackMethodText('findIndex', '23.1.3.10')],
