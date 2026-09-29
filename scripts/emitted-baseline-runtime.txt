@@ -151,7 +151,7 @@ dictionary-index-truthiness.ts.cpp 519009b6c81f
 dictionary-named-absence.ts.cpp dc9ba237a175
 direct-interface-method-receiver.ts.cpp 55d743cf5d7d
 downcast-method-read-absent-on-other-arm.ts.cpp 52495ee800d6
-drift.txt 4991c249f4dc
+drift.txt 56f5dd7bcb62
 dynamic-array-absent-element.ts.cpp 6838ef917ebe
 dynamic-array-literal-gather.runtime.js.cpp 4c1e3d9c21cf
 dynamic-array-projection.ts.cpp 25d0cdd3b0d1
@@ -572,7 +572,7 @@ physical-class-ancestry-optional.ts.cpp 1f126ab304d0
 plain-function-returns-generator.runtime.js.cpp 1fafaf583642
 populated-record-late-fields.js.cpp 1d2c5e207449
 primitive-delete-arms.runtime.js.cpp 12dcd9499b11
-printer-drift.txt 23a49e1e7ae8
+printer-drift.txt b76f5e7c342c
 promise-any-into-union-promise-arm.runtime.js.cpp 9372b4c219cd
 promise-cache-keyed-by-a-generic-key.ts.cpp 41bfac1f6416
 promise-executor-arrow-body-discards-its-result.ts.cpp 2681d86c55f0
@@ -736,7 +736,7 @@ typeof-runtime-string.ts.cpp 5b4c672dec2a
 typeof-then-discriminates-a-union.ts.cpp 16fe804a602d
 unbox-nullable-union.ts.cpp b8a67b94f69c
 uncallable-member-slot-call.runtime.js.cpp f925ad615e3e
-uncertified.txt 893f0f8a202a
+uncertified.txt 5135bc83ea35
 union-array-arm-named-key.runtime.js.cpp f857040bd922
 union-map-receiver-discarded-set.runtime.js.cpp 712af7f12caa
 union-member-absent-on-promise-arm.ts.cpp fb968705a335
