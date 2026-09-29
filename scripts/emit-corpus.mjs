@@ -42,10 +42,18 @@ if (runtime) {
       })
     }
 } else {
-  const cfg = process.env.GEA_EXTERNAL_APP_TSCONFIG ?? `${process.cwd()}/projects/external-app.tsconfig.json`
-  const raw = ts.readConfigFile(cfg, ts.sys.readFile)
-  const parsed = ts.parseJsonConfigFileContent(raw.config, ts.sys, cfg.replace(/\/[^/]+$/, ''))
-  targets.push({ name: 'taurus-display', files: parsed.fileNames, project: cfg })
+  // The external app's project file is tracked in no commit, so most checkouts
+  // lack it. The absence stays a row, spelled as the checkout names the file:
+  // the compiler's error carries the absolute path, which moved this report in
+  // every checkout but the one its baseline was taken in.
+  const project = process.env.GEA_EXTERNAL_APP_TSCONFIG ?? 'projects/external-app.tsconfig.json'
+  const cfg = process.env.GEA_EXTERNAL_APP_TSCONFIG ?? `${process.cwd()}/${project}`
+  if (!existsSync(cfg)) targets.push({ name: 'taurus-display', absent: project })
+  else {
+    const raw = ts.readConfigFile(cfg, ts.sys.readFile)
+    const parsed = ts.parseJsonConfigFileContent(raw.config, ts.sys, cfg.replace(/\/[^/]+$/, ''))
+    targets.push({ name: 'taurus-display', files: parsed.fileNames, project: cfg })
+  }
   for (const f of readdirSync('test/fixtures'))
     if (isProgram(f)) targets.push({ name: basename(f), files: [join('test/fixtures', f)], project: null })
   for (const sub of ['jsx', 'jsx-factory']) {
@@ -67,6 +75,10 @@ const cpuBefore = process.cpuUsage()
 const timings = []
 for (const t of targets) {
   if (only !== null && !t.name.includes(only)) continue
+  if (t.absent) {
+    uncertified.push(`${t.name}\tabsent: project file ${t.absent} does not exist`)
+    continue
+  }
   let r
   const compileStarted = performance.now()
   try {

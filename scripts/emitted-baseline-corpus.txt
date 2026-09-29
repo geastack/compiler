@@ -152,7 +152,7 @@ typed-array-index.ts.cpp e516cc5a7c8f
 typed-array-intersection-carrier.ts.cpp 71bcdc69b3e5
 typeof-narrowed-union-field-store.js.cpp 3c4aba5cc263
 typeof-narrowed-union-field-store.ts.cpp 808e0f6cf760
-uncertified.txt 94ba914aee1b
+uncertified.txt 3bbcd93f2f1b
 uniform-value-union.ts.cpp 2ee92a0d9d2e
 uninhabited-intersection-branch.ts.cpp 65a48829ae60
 uninstantiated-generic.ts.cpp 6b5540eea079
