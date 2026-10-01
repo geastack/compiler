@@ -11,7 +11,9 @@ const assertNativeOperations = (source) => {
   // Classes expose an unused adapter for reads through genuinely dynamic
   // values. Check executable program operations, including console arguments,
   // without mistaking that adapter's definition for a typed value being boxed.
-  const operations = source.replace(/  (?:virtual )?bool gea_readOwnField\([^]*?\n  }/g, '')
+  const operations = source
+    .replace(/^  (?:virtual )?bool gea_(?:readOwnField|ownFieldDescriptor)\([^\n]*\{\n[^]*?\n  }$/gm, '')
+    .replace(/^bool \w+::gea_(?:readOwnField|ownFieldDescriptor)\([^\n]*\{\n[^]*?\n}$/gm, '')
   assert.ok(!/gea_cpp_value|gea::Value::box/.test(operations), 'typed program operations must not introduce boxed values')
 }
 

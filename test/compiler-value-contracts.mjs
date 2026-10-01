@@ -1637,7 +1637,11 @@ test('inferred dictionary types retain identity across census rounds', async () 
   const second = censusFieldBindings(checker, [file], wholeProgram, undefined, undefined, flow).typeAt(field)
   assert.ok(first)
   assert.equal(first, second)
-  assert.equal(checker.getIndexTypeOfType(first, ts.IndexKind.String), checker.getNumberType())
+  // A key no write stored reads `undefined`, so the inferred slot carries it.
+  assert.equal(
+    checker.getIndexTypeOfType(first, ts.IndexKind.String),
+    checker.getNullableType(checker.getNumberType(), ts.TypeFlags.Undefined)
+  )
 })
 
 test('checker union writes and carried local arms converge to one publication', async () => {

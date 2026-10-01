@@ -407,6 +407,22 @@ const packedArgumentList = (
   return { value: ctx.builder.allocateArrayObject(block, lineage, elements, representation), representation }
 }
 
+/**
+ * A spread whose value is a box but whose source is not the GetIterator record
+ * the producer acquires for a dynamic source (`producers/spread-arguments.ts`):
+ * a typed iterable the plan carries boxed -- node-compat's `assert(...args)`
+ * forwarding `ok(...args)` over an `unknown[]`. The gather that drains a boxed
+ * spread steps an iterator, so this one acquires its own first.
+ */
+const boxedSpreadNeedsIterator = (ctx: LoweringContext, operand: SemanticOperand, resolved: IrOperand): boolean => {
+  if (resolved.representation.kind !== 'dynamic' || operand.source.kind !== 'result') return false
+  const source = operand.source.result
+  const producerId = ctx.graph.results.get(source)
+  const produced = producerId === undefined ? undefined : ctx.graph.operations.get(producerId)
+  const result = produced?.results.find((candidate) => candidate.id === source)
+  return !(produced?.family === 'protocol' && result?.role === 'iterator-record')
+}
+
 const argumentSlotsOf = (
   ctx: LoweringContext,
   block: IrBlockId,
@@ -419,7 +435,15 @@ const argumentSlotsOf = (
   ].sort((left, right) => left.ordinal - right.ordinal)
   return merged.map((entry) => {
     const resolved = resolveRequiredOperand(ctx, block, lineage, entry.operand)
-    const value = entry.kind === 'value' ? enter(ctx, block, lineage, operation, entry.operand, resolved) : resolved
+    const value =
+      entry.kind === 'value'
+        ? enter(ctx, block, lineage, operation, entry.operand, resolved)
+        : boxedSpreadNeedsIterator(ctx, entry.operand, resolved)
+          ? {
+              value: ctx.builder.getIterator(block, lineage, 'iterator', resolved, null, resolved.representation),
+              representation: resolved.representation
+            }
+          : resolved
     return entry.operand.from === undefined ? { kind: entry.kind, value } : { kind: entry.kind, value, from: entry.operand.from }
   })
 }

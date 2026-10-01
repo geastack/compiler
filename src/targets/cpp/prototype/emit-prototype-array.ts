@@ -673,6 +673,53 @@ const rangedMethodText =
   }
 
 /** The reducers: `reduce(cb)` and `reduce(cb, initialValue)` are two physical arities and two runtime overloads; the no-initial form's empty-array TypeError lives in the runtime. */
+/**
+ * A reducer handed the receiver's element in its item position: when the
+ * callback's item parameter carries another carrier (ajv's codegen reduces an
+ * `Optional<A | B>` array through a callback typed over a wider sum), each call
+ * converts the element on the way in -- the reducer's shape of
+ * `elementAdaptedCallbackText`. The accumulator, index and array reach the
+ * callback as the runtime passes them.
+ */
+const reducerAdaptedCallbackText = (
+  ctx: EmitContext,
+  member: string,
+  clause: string,
+  element: Representation,
+  callback: IrOperand
+): string => {
+  const text = operandText(ctx, callback)
+  const carrier = callback.representation
+  if (carrier.kind !== 'function-value-dispatch' || carrier.abi.receiver !== null || carrier.abi.restFrom !== null) return text
+  const [accumulator, item, index, array, ...beyond] = carrier.abi.parameters
+  if (accumulator === undefined || item === undefined || beyond.length > 0) return text
+  if (representationKey(item.value) === representationKey(element)) return text
+  const converted = alignedValueText(
+    ctx,
+    'prototype/emit-prototype-array.ts:reducerAdaptedCallbackText',
+    element,
+    item.value,
+    '__gea_element'
+  )
+  if (converted === null)
+    throw createCppEmitBlockedError(
+      `runtime-helper:callback:${member}:${elementKey(element)}`,
+      `"Array.prototype.${member}" (ECMA-262 ${clause}) hands its callback the receiver's element "${elementKey(element)}" and the callback's ` +
+        `item parameter carries "${representationKey(item.value)}"; no installed conversion reconciles them`
+    )
+  const formals = [`const ${cppTypeOf(accumulator.value)}& __gea_accumulator`, `const ${cppTypeOf(element)}& __gea_element`]
+  const actuals = ['__gea_accumulator', converted]
+  if (index) {
+    formals.push('double __gea_index')
+    actuals.push('__gea_index')
+  }
+  if (array) {
+    formals.push(`const ${cppTypeOf(array.value)}& __gea_array`)
+    actuals.push('__gea_array')
+  }
+  return `[__gea_fn = ${text}](${formals.join(', ')}) { return __gea_fn(${actuals.join(', ')}); }`
+}
+
 const reduceText =
   (member: 'reduce' | 'reduceRight', clause: string): ArrayCallRenderer =>
   (ctx, receiverText, _element, args, result): string => {
@@ -694,7 +741,7 @@ const reduceText =
         `conversion:${representationKey(initial.representation)}->${representationKey(accumulator)}`,
         `"Array.prototype.${member}"'s initial value "${representationKey(initial.representation)}" does not enter its accumulator "${representationKey(accumulator)}"`
       )
-    return `gea::runtime::array::${member}(${receiverText}, ${operandText(ctx, callback)}, ${cppTypeOf(accumulator)}(${aligned}))`
+    return `gea::runtime::array::${member}(${receiverText}, ${reducerAdaptedCallbackText(ctx, member, clause, _element, callback)}, ${cppTypeOf(accumulator)}(${aligned}))`
   }
 
 /** `pop`/`shift`: no arguments at all, and an optional element for a result -- the receiver is the whole call. */

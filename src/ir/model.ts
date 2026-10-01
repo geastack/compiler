@@ -936,6 +936,14 @@ export interface AllocateCallableOperation extends IrOperationBase {
    * kind from.
    */
   readonly functionKind?: 'async' | 'generator' | 'async-generator'
+  /**
+   * The declaration is an ordinary `function`, which MakeConstructor (ECMA-262
+   * 10.2.5) gives an own `prototype` at creation. Published to the runtime
+   * with the declaration identity, so a `prototype` read through a value whose
+   * origin no census proved (`util.inherits(ctor, ...)`'s `ctor`) still
+   * answers the object the specification says exists.
+   */
+  readonly ordinaryConstructor?: true
 }
 
 /** A native `Function.prototype.bind` result with its receiver and leading arguments captured once. */

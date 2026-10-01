@@ -1,5 +1,5 @@
 import type { DeclarationId, FunctionId } from '../identity/ids.js'
-import type { CallableAbi, Ownership, Representation, ScalarDomain, TaggedUnionArm } from '../representation/model.js'
+import type { CallableAbi, Ownership, RecordField, Representation, ScalarDomain, TaggedUnionArm } from '../representation/model.js'
 import type { ClassifierContract, CoercionOperation, CollectionDomain, MaterializerContract } from './algebra.js'
 
 export type { CoercionOperation } from './algebra.js'
@@ -90,6 +90,15 @@ export interface ConversionRuntimeRegistry {
    * product's identity-preserving fast path, not its capability claim.
    */
   readonly recordRefMaterializer: (shapeId: string, ownership: Ownership) => ClassifierMaterializerPair | null
+
+  /**
+   * The data fields of a named record shape this compiler lays out itself,
+   * or `null` for a shape with accessors, an index sidecar, or no record
+   * layout. A `native-record-ref` with no host type is a compiler-owned
+   * record carried by name, so a dynamic object materializes it through the
+   * same checked product `recordMaterializer` builds for an inline `record`.
+   */
+  readonly namedRecordFields: (shapeId: string) => readonly RecordField[] | null
 
   /**
    * The installed materializable-ordinary-Array domain, narrower than a bare

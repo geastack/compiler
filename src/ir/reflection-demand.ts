@@ -1031,6 +1031,16 @@ export const reflectionExposureOf = (
     if (representation.kind === 'borrowed-ref') return unwrappedCallableAbi(representation.referent)
     return callableAbiOf(representation)
   }
+  // A native callable that becomes dynamically invocable -- boxed, or read
+  // through (`f.call`, `f.apply`, `f.bind`) -- takes its inputs from dynamic
+  // values, and a record input is rebuilt through its own field protocol
+  // (`gea::detail::rebuildDynamicRecord`).
+  const promoteDynamicCallInputs = (representation: Representation): void => {
+    const abi = unwrappedCallableAbi(representation)
+    if (abi === null) return
+    if (abi.receiver !== null) promoteFull(abi.receiver, 'dynamic-callable-input')
+    for (const parameter of abi.parameters) promoteFull(parameter.value, 'dynamic-callable-input')
+  }
   // An adapter invokes a compiler-owned source body through its own sealed
   // convention. Its FunctionId alone cannot certify the adapted call frame;
   // follow the conversion's transport proof and check the held entry instead.
@@ -1320,8 +1330,10 @@ export const reflectionExposureOf = (
     }
     if (operation.kind === 'convert' && operation.result.representation.kind === 'dynamic') {
       promoteFull(operation.source.representation, 'object-to-dynamic-conversion')
+      promoteDynamicCallInputs(operation.source.representation)
       continue
     }
+    if (operation.kind === 'get') promoteDynamicCallInputs(operation.receiver.representation)
     if (operation.kind === 'convert') {
       const node = options.conversions?.nodeById(operation.conversionUse)
       if (

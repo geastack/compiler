@@ -373,6 +373,74 @@ export const createLayoutTypeResolver = (
    * the last time this resolver answered ahead of the checker for nodes other
    * producers derive independently.
    */
+  /**
+   * Whether a binding is destructured out of a parameter whose statement the
+   * census widened to `any` (fastify's `route({ options, isFastify })`): the
+   * binding reads the box the parameter holds, not the member the statement
+   * declares.
+   */
+  /** The declaration an identifier reads; a shorthand member's name reads the binding it names, not the member. */
+  const valueDeclarationRead = (node: ts.Identifier): ts.Declaration | undefined =>
+    (ts.isShorthandPropertyAssignment(node.parent) && node.parent.name === node
+      ? checker.getShorthandAssignmentValueSymbol(node.parent)
+      : checker.getSymbolAtLocation(node)
+    )?.valueDeclaration
+
+  const destructuredFromStatedBox = (node: ts.Node): boolean => {
+    const declaration = ts.isBindingElement(node) ? node : ts.isIdentifier(node) ? valueDeclarationRead(node) : undefined
+    if (!declaration || !ts.isBindingElement(declaration)) return false
+    let pattern: ts.BindingPattern = declaration.parent
+    while (ts.isBindingElement(pattern.parent)) pattern = pattern.parent.parent
+    const parameter = pattern.parent
+    return ts.isParameter(parameter) && ((parameters.statedTypeAt(parameter)?.flags ?? 0) & ts.TypeFlags.Any) !== 0
+  }
+
+  /**
+   * Whether an unannotated JavaScript `const` holds an initializer that lays
+   * out `any` while the checker still types it: `const opts = { ...options }`
+   * over a box (`destructuredFromStatedBox`). The binding is its initializer.
+   */
+  const constHoldsBoxedInitializer = (node: ts.Node): boolean => {
+    const declaration = ts.isVariableDeclaration(node) ? node : ts.isIdentifier(node) ? valueDeclarationRead(node) : undefined
+    if (!declaration || !ts.isVariableDeclaration(declaration) || !ts.isIdentifier(declaration.name)) return false
+    if (!declaration.initializer || declaration.type || (declaration.flags & ts.NodeFlags.JavaScriptFile) === 0) return false
+    if (!ts.isVariableDeclarationList(declaration.parent) || (declaration.parent.flags & ts.NodeFlags.Const) === 0) return false
+    if ((checker.getTypeAtLocation(declaration.name).flags & ts.TypeFlags.Any) !== 0) return false
+    // An initializer that reads its own binding (`const f = () => f`) asks
+    // this again for the same declaration; that inner read stays the checker's.
+    if (boxedInitializersInProgress.has(declaration)) return false
+    boxedInitializersInProgress.add(declaration)
+    try {
+      return (layoutTypeAt(declaration.initializer).flags & ts.TypeFlags.Any) !== 0
+    } finally {
+      boxedInitializersInProgress.delete(declaration)
+    }
+  }
+  const boxedInitializersInProgress = new Set<ts.VariableDeclaration>()
+
+  // A member's layout may consult its enclosing literal (its contextual
+  // type), which asks this again for the same literal; that inner ask answers
+  // no box.
+  const literalsInProgress = new Set<ts.ObjectLiteralExpression>()
+  const literalHoldsBox = (node: ts.ObjectLiteralExpression): boolean => {
+    if ((checker.getTypeAtLocation(node).flags & ts.TypeFlags.Any) !== 0) return false
+    if (literalsInProgress.has(node)) return false
+    literalsInProgress.add(node)
+    try {
+      return node.properties.some((property) => {
+        const value = ts.isShorthandPropertyAssignment(property)
+          ? property.name
+          : ts.isPropertyAssignment(property)
+            ? property.initializer
+            : null
+        if (value === null || (checker.getTypeAtLocation(value).flags & ts.TypeFlags.Any) !== 0) return false
+        return (layoutTypeAt(value).flags & ts.TypeFlags.Any) !== 0
+      })
+    } finally {
+      literalsInProgress.delete(node)
+    }
+  }
+
   const receiverChainWasNarrowedByStatement = (node: ts.Node): boolean => {
     let current: ts.Node = node
     for (let depth = 0; depth < 8; depth += 1) {
@@ -1173,6 +1241,25 @@ export const createLayoutTypeResolver = (
     // is usable but wider than every value the initializer can produce. The
     // local-binding census currently publishes only the authenticated
     // `Array.isArray(slot) ? slot : [slot]` invariant through this channel.
+    // Asked before a destination's preference: a literal holding a box is a
+    // box, and its destination converts it.
+    // `{ ...value }` over a value TypeScript types `any` is `any`, and that is
+    // the checker's own spread rule applied to the census's answer: a widened
+    // stated parameter is `any` here while the checker still types it by its
+    // statement (light-my-request's `{ ...options, Request: undefined }`).
+    if (
+      ts.isObjectLiteralExpression(node) &&
+      node.properties.some(
+        (property) => ts.isSpreadAssignment(property) && (layoutTypeAt(property.expression).flags & ts.TypeFlags.Any) !== 0
+      ) &&
+      (checker.getTypeAtLocation(node).flags & ts.TypeFlags.Any) === 0
+    )
+      return checker.getAnyType()
+    // A JavaScript literal holding a member that lays out as a box while the
+    // checker still types it is a box too: no field can state that member
+    // (`{ path, isFastify }` over a widened `route` parameter's `isFastify`).
+    if (ts.isObjectLiteralExpression(node) && (node.flags & ts.NodeFlags.JavaScriptFile) !== 0 && literalHoldsBox(node))
+      return checker.getAnyType()
     const preferred = parameters.preferredTypeAt?.(node)
     if (preferred) return preferred
     // A STATED ANNOTATION THAT WAS ONLY EVER AN UPPER BOUND, and the one
@@ -1190,6 +1277,7 @@ export const createLayoutTypeResolver = (
     // authority, not a safer one.
     const narrowedByStatement = parameters.statedTypeAt(node)
     if (narrowedByStatement) return narrowedByStatement
+    if (destructuredFromStatedBox(node) || constHoldsBoxedInitializer(node)) return checker.getAnyType()
     const spreadConditionalArray = spreadConditionalArrayTypeOf(node)
     if (spreadConditionalArray) return spreadConditionalArray
     // ...and the member reads THROUGH it. A narrowed parameter that nothing
@@ -1206,6 +1294,14 @@ export const createLayoutTypeResolver = (
     if (receiverChainWasNarrowedByStatement(node)) {
       const throughStatement = memberThroughBoundReceiver(node)
       if (throughStatement) return throughStatement
+      // A statement the census widened to `any` holds the box it was handed
+      // (`omitted-stated-parameter.ts`), so a member read through it reads
+      // that box, not the member the statement declares.
+      if (
+        (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+        (layoutTypeAt(node.expression).flags & ts.TypeFlags.Any) !== 0
+      )
+        return checker.getAnyType()
     }
     // HOLDS, and yet deliberately asked of the checker FIRST, not through
     // `censusedTypeAt`. Tried census-first here and measured it directly

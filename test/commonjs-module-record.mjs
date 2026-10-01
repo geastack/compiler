@@ -417,6 +417,44 @@ test("a module's own this is the wrapper's this-value, the initial exports objec
   compileAndRun(result, 'commonjs-module-this')
 })
 
+test('a callable field of the exports record is written through the exports box', () => {
+  // fast-querystring: `module.exports = { parse, stringify }` and then
+  // `module.exports.parse = parse`, a dynamic store onto the native record's
+  // callable field, which the generated hook refused.
+  const result = compilePhysicalFixture('record-callable-field-rewrite-require.js')
+  compileAndRun(result, 'commonjs-callable-field-rewrite')
+})
+
+test('exports = module.exports = {} rebinds the wrapper exports the later writes use', () => {
+  // semver's internal/re.js. Checked JavaScript resolves the assigned `exports`
+  // to the module's own symbol, so the write to the wrapper binding was lost
+  // and `exports.re = []` wrote the discarded initial object.
+  const result = compilePhysicalFixture('record-exports-rebind-require.js')
+  compileAndRun(result, 'commonjs-exports-rebind')
+})
+
+test('a CommonJS module runs when a require reaches it, never as a script', () => {
+  // Every CommonJS file was also a root of the evaluation order, run up front
+  // in file order: a module nothing requires ran, and a require cycle started
+  // from whichever file came first (@fastify/ajv-compiler's standalone.js
+  // before the index.js that Node loads first).
+  const result = compilePhysicalFixture('record-lazy-require.js')
+  compileAndRun(result, 'commonjs-lazy-require')
+})
+
+test("a UMD wrapper's root parameter holds the initial exports object, not the module's final exports", () => {
+  // ipaddr.js: `(function (root) { ... }(this))`. The checker types `root` as
+  // the module's final exports; the value is the empty initial exports object.
+  const result = compile({
+    rootFileNames: [fixture('record-module-this-umd-require.js')],
+    projectFileName: null,
+    javaScriptSources: true,
+    dynamicFallback: true,
+    plugins: [commonJsHost()]
+  })
+  compileAndRun(result, 'commonjs-module-this-umd')
+})
+
 test("a file writing through its own module name leaves every other file's wrapper authenticated", () => {
   // abstract-logging's whole body is `Object.defineProperty(module, 'exports',
   // { get() {...} })`. Checked JavaScript records that as a declaration of the

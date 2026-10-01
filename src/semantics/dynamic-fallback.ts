@@ -2,6 +2,7 @@ import ts from 'typescript'
 import type { FunctionId, StructuralTypeId } from '../identity/ids.js'
 import type { IdentityTable } from './normalize/identities.js'
 import type { StructuralMapper } from './normalize/structural.js'
+import { isModuleWrapperThis } from './normalize/commonjs-module-record.js'
 
 export interface PrototypeConstructorFallback {
   /** Object/instance/prototype-value shapes that genuinely require dynamic property storage. */
@@ -122,8 +123,8 @@ export const prototypeMutatedConstructorTypes = (
   // `ServerResponse.prototype.write.call(this, ...)` (light-my-request) read it
   // and write nothing to it. Only a write through `C.prototype` -- replacing it
   // or assigning one of its members -- needs the dynamic table.
-  const readsClassPrototypeOnly = (access: ts.PropertyAccessExpression): boolean => {
-    let symbol = checker.getSymbolAtLocation(access.expression)
+  const keepsOwnPrototype = (constructor: ts.Expression): boolean => {
+    let symbol = checker.getSymbolAtLocation(constructor)
     if (symbol && (symbol.flags & ts.SymbolFlags.Alias) !== 0) symbol = checker.getAliasedSymbol(symbol)
     // An intrinsic error constructor (`Error`, declared in a library file)
     // keeps its intrinsic prototype object exactly as a compiled class keeps
@@ -131,7 +132,7 @@ export const prototypeMutatedConstructorTypes = (
     // error's `Base = Error` parameter). Other host constructors are not
     // exempt: their instance types (`any[]` from `Array.prototype`) are the
     // fallback's own program-wide choice.
-    const typeSymbol = checker.getTypeAtLocation(access.expression).getSymbol()
+    const typeSymbol = checker.getTypeAtLocation(constructor).getSymbol()
     const intrinsicError =
       typeSymbol !== undefined &&
       /^(Aggregate|Eval|Range|Reference|Syntax|Type|URI)?ErrorConstructor$/.test(typeSymbol.name) &&
@@ -139,20 +140,21 @@ export const prototypeMutatedConstructorTypes = (
     // The class named directly, or a value typed as its constructor (`const
     // Base = Greeter`, `const { EventEmitter } = require(...)`).
     const isClass = (declaration: ts.Declaration | undefined): boolean => declaration !== undefined && ts.isClassDeclaration(declaration)
-    const compiledClass = isClass(symbol?.valueDeclaration) || isClass(typeSymbol?.valueDeclaration)
-    if (!compiledClass && !intrinsicError) return false
-    const parent = access.parent
+    return isClass(symbol?.valueDeclaration) || isClass(typeSymbol?.valueDeclaration) || intrinsicError
+  }
+  const writesThrough = (access: ts.PropertyAccessExpression): boolean => {
     const assigned = (target: ts.Node): boolean =>
       ts.isBinaryExpression(target.parent) &&
       target.parent.left === target &&
       target.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
-    if (assigned(access)) return false
-    return !(
-      (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) &&
-      parent.expression === access &&
-      assigned(parent)
+    const parent = access.parent
+    return (
+      assigned(access) ||
+      ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === access && assigned(parent))
     )
   }
+  const readsClassPrototypeOnly = (access: ts.PropertyAccessExpression): boolean =>
+    keepsOwnPrototype(access.expression) && !writesThrough(access)
   // A value that holds or becomes a [[Prototype]] link must be a real object
   // with that slot, which only the dynamic object's table is. A reference
   // types an accessor as a data member, so the literal a `const` holds is
@@ -202,7 +204,47 @@ export const prototypeMutatedConstructorTypes = (
     }
     visitWrites(scope)
   }
+  // A callee that reaches `.prototype` through its own parameter
+  // (node-compat's `util.inherits(ctor, superCtor)`) reaches it through the
+  // function each call passes there, exactly as `F.prototype` would.
+  const prototypeParameters = new Map<ts.SignatureDeclaration, ReadonlyMap<number, readonly ts.PropertyAccessExpression[]>>()
+  const prototypeAccessesByParameter = (callee: ts.SignatureDeclaration): ReadonlyMap<number, readonly ts.PropertyAccessExpression[]> => {
+    const known = prototypeParameters.get(callee)
+    if (known) return known
+    const byParameter = new Map<number, ts.PropertyAccessExpression[]>()
+    prototypeParameters.set(callee, byParameter)
+    const body = 'body' in callee ? callee.body : undefined
+    if (!body) return byParameter
+    const parameterIndex = new Map<ts.Symbol, number>()
+    callee.parameters.forEach((parameter, index) => {
+      const symbol = ts.isIdentifier(parameter.name) && !parameter.dotDotDotToken ? checker.getSymbolAtLocation(parameter.name) : undefined
+      if (symbol) parameterIndex.set(symbol, index)
+    })
+    const collect = (node: ts.Node): void => {
+      if (ts.isPropertyAccessExpression(node) && !ts.isPrivateIdentifier(node.name) && node.name.text === 'prototype') {
+        const symbol = ts.isIdentifier(node.expression) ? checker.getSymbolAtLocation(node.expression) : undefined
+        const index = symbol === undefined ? undefined : parameterIndex.get(symbol)
+        if (index !== undefined) byParameter.set(index, [...(byParameter.get(index) ?? []), node])
+      }
+      ts.forEachChild(node, collect)
+    }
+    collect(body)
+    return byParameter
+  }
+  const markPrototypeArguments = (call: ts.CallExpression | ts.NewExpression): void => {
+    const callee = checker.getResolvedSignature(call)?.declaration
+    if (!callee || ts.isJSDocSignature(callee)) return
+    for (const [index, accesses] of prototypeAccessesByParameter(callee)) {
+      const argument = call.arguments?.[index]
+      if (!argument) continue
+      // As for `C.prototype` above: a compiled class or an intrinsic error
+      // keeps its own prototype unless the callee writes through it.
+      if (keepsOwnPrototype(argument) && !accesses.some(writesThrough)) continue
+      markConstructorAndInstances(argument)
+    }
+  }
   const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) || ts.isNewExpression(node)) markPrototypeArguments(node)
     if (objectMemberCall(node, 'defineProperty')) {
       const [target, key] = node.arguments
       if (target && key && ts.isStringLiteralLike(key) && !isArrayIndexKey(key.text)) {
@@ -400,6 +442,98 @@ export const proxyFallbackTypes = (
   while (changed) {
     changed = false
     for (const file of files) propagate(file)
+  }
+  return selected
+}
+
+/** The lib intrinsics whose instances are native objects a program interface cannot rebuild as a record. */
+const nativeInstanceConstructors: ReadonlySet<string> = new Set(['RegExpConstructor', 'DateConstructor'])
+
+/**
+ * A program-declared object type a lib RegExp or Date instance is stored into.
+ *
+ * ajv's `RegExpLike` (`{ test(s: string): boolean }`) is what its default
+ * engine `(str, flags) => new RegExp(str, flags)` returns, and ajv keys its
+ * pattern cache on `rx.toString()`. A record view of the RegExp keeps only
+ * `test` and answers `toString` as `[object Object]` -- one cache key for every
+ * pattern, the first compiled regex reused for all. The interface is boxed
+ * instead, so the value it holds stays the RegExp itself, whose own members the
+ * box answers (`Pattern`'s prototype table). The instance is recognized as
+ * `ProxyConstructor` is above: by its constructor's lib-declared identity, read
+ * off the `new` expression.
+ */
+export const nativeInstanceInterfaceTypes = (
+  files: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+  types: StructuralMapper
+): ReadonlySet<StructuralTypeId> => {
+  const selected = new Set<StructuralTypeId>()
+  const programObjectType = (type: ts.Type): boolean => {
+    if ((type.flags & ts.TypeFlags.Object) === 0) return false
+    const declarations = type.getSymbol()?.declarations ?? []
+    return (
+      declarations.length > 0 &&
+      declarations.every(
+        (declaration) =>
+          !declaration.getSourceFile().hasNoDefaultLib && (ts.isInterfaceDeclaration(declaration) || ts.isTypeLiteralNode(declaration))
+      )
+    )
+  }
+  const visit = (node: ts.Node): void => {
+    if (ts.isNewExpression(node)) {
+      const constructor = checker.getTypeAtLocation(node.expression).getSymbol()
+      if (
+        constructor !== undefined &&
+        nativeInstanceConstructors.has(constructor.name) &&
+        (constructor.declarations ?? []).some((declaration) => declaration.getSourceFile().hasNoDefaultLib)
+      ) {
+        // Only an arm the instance can land in is its storage: none when the
+        // union already names the native type (`format = new RegExp(format)`
+        // over ajv's `Format`, whose `RegExp` arm holds it), otherwise the
+        // program interfaces the instance is assignable to.
+        const contextual = checker.getContextualType(node)
+        const instance = checker.getTypeAtLocation(node)
+        const arms = contextual === undefined ? [] : contextual.isUnion() ? contextual.types : [contextual]
+        if (!arms.some((arm) => arm.getSymbol() === instance.getSymbol()))
+          for (const arm of arms) if (programObjectType(arm) && checker.isTypeAssignableTo(instance, arm)) selected.add(types.typeOf(arm))
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  for (const file of files) visit(file)
+  return selected
+}
+
+/**
+ * The type the checker gives a CommonJS module wrapper's own this-value.
+ *
+ * TypeScript types a module-level `this` in a CommonJS file as the module's
+ * declared exports: the FINAL `module.exports`. The value is the INITIAL
+ * exports object (`isModuleWrapperThis`), which is empty when the body starts
+ * and stays empty when the module reassigns `module.exports`. ipaddr.js's UMD
+ * wrapper `(function (root) { ... }(this))` binds that object to `root`, whose
+ * contextual type is `typeof ipaddr`; a record laid out from it asserts fields
+ * the object never gets. The type has an inhabitant its layout cannot hold, so
+ * it is boxed.
+ */
+export const moduleWrapperThisTypes = (
+  commonJsFiles: readonly ts.SourceFile[],
+  checker: ts.TypeChecker,
+  types: StructuralMapper
+): ReadonlySet<StructuralTypeId> => {
+  const selected = new Set<StructuralTypeId>()
+  // The checker answers a script's module-level `this` with `typeof
+  // globalThis`, whose symbol it synthesizes without a declaration; a module's
+  // exports are declared by the file or by the value assigned to them.
+  const declaredObject = (type: ts.Type): boolean =>
+    (type.flags & ts.TypeFlags.Object) !== 0 && (type.getSymbol()?.declarations?.length ?? 0) > 0
+  for (const file of commonJsFiles) {
+    const visit = (node: ts.Node): void => {
+      if (node.kind === ts.SyntaxKind.ThisKeyword && isModuleWrapperThis(node) && declaredObject(checker.getTypeAtLocation(node)))
+        selected.add(types.typeAt(node))
+      ts.forEachChild(node, visit)
+    }
+    visit(file)
   }
   return selected
 }

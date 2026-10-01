@@ -772,7 +772,7 @@ export const fileEvaluates = (reachable: ProgramReachability, file: ts.SourceFil
     )
   })
 
-export const moduleEvaluationOrder = (input: ReachabilityInput): readonly ts.SourceFile[] => {
+export const moduleEvaluationOrder = (input: ReachabilityInput, commonJs: ReadonlySet<ts.SourceFile>): readonly ts.SourceFile[] => {
   const compiled = new Set(input.files)
   const order: ts.SourceFile[] = []
   const started = new Set<ts.SourceFile>()
@@ -783,7 +783,28 @@ export const moduleEvaluationOrder = (input: ReachabilityInput): readonly ts.Sou
     if (evaluatesNothing(file)) return
     order.push(file)
   }
-  for (const file of input.files) if (!ts.isExternalModule(file) && !file.isDeclarationFile) visit(file)
+  // A CommonJS module is not a script: it runs when a `require` (or an ES
+  // import) first reaches it, and a cycle it closes observes whichever module
+  // started first partially initialized.
+  // That holds for one an ES module imports as well, which `commonJs` (the
+  // files reached only through `require`) leaves out: fastify.js, imported by
+  // the entry, ran here ahead of every ES module, and its
+  // `require('node:http')` evaluated node-compat's `http.ts` before the
+  // `stream.ts` it imports.
+  const isScript = (file: ts.SourceFile): boolean =>
+    !ts.isExternalModule(file) &&
+    !file.isDeclarationFile &&
+    !commonJs.has(file) &&
+    (file as { commonJsModuleIndicator?: ts.Node }).commonJsModuleIndicator === undefined
+  for (const file of input.files) if (isScript(file)) visit(file)
+  // An ES module a `require` reaches runs when required, but what it IMPORTS
+  // is ES evaluation, which runs before it (`require(esm)` evaluates the
+  // graph first): ajv-formats' `src/index.ts` reads ajv's `Name` class from
+  // `codegen/code.ts` at load. This order is what runs an ES module body
+  // exactly once, so the imports are scheduled here and the required module
+  // itself stays with its `require`.
+  for (const file of input.files)
+    if (commonJs.has(file) && ts.isExternalModule(file)) for (const target of moduleTargetsOf(input.checker, file)) visit(target)
   for (const entry of input.entries) visit(entry)
   return order
 }

@@ -14,6 +14,7 @@ import type {
   IrOperand,
   SuperInitializeOperation
 } from '../../ir/model.js'
+import type { BindingPlacement } from '../../projection/bindings.js'
 import type { DeclarationId, FunctionId } from '../../identity/ids.js'
 import type { CallableAbi, Representation } from '../../representation/model.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
@@ -24,6 +25,8 @@ import {
   callableObjectAbi,
   movedValueText,
   parameterAbiStatingText,
+  resultAbsentIsNull,
+  tupleRestBoxText,
   unboxedLoadText
 } from './emit-narrowing.js'
 import { memberAccessOperator, reactiveRevisionText } from './emit-carrier-members.js'
@@ -1139,8 +1142,20 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     // The call answers a box; what the program holds may be narrower -- `const
     // ok: boolean = fn()` is the checker's answer to a call whose callee is
     // `any`, and the box has to be read back into it.
+    // Bound to a lambda parameter: a load may repeat its source text (a
+    // presence test and then the payload), and the source here is the call,
+    // so repeating it ran the call twice -- ret's `regexp.exec(str)` advanced
+    // `lastIndex` twice per match (`emit-dynamic-properties.ts`'s `get`
+    // states the same invariant for a property read).
     const held = operation.result.representation
-    const converted = held.kind === 'dynamic' ? text : alignedValueText(ctx, 'emit-callable.ts:1017', callee, held, text)
+    const result = 'gea_call_result'
+    const load = held.kind === 'dynamic' ? null : alignedValueText(ctx, 'emit-callable.ts:1017', callee, held, result)
+    const converted =
+      held.kind === 'dynamic'
+        ? text
+        : load === null
+          ? null
+          : `[](const gea::Value& ${result}) -> ${cppTypeOf(held)} { return ${load}; }(${text})`
     if (converted === null) {
       throw createCppEmitBlockedError(
         `conversion:${representationKey(callee)}->${representationKey(held)}`,
@@ -1780,7 +1795,7 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
     payloadCarrier.kind === 'dynamic' ||
     operation.functionKind !== undefined ||
     ctx.callableIdentityDemand.observes(payloadCarrier)
-      ? `gea::identifyCallable<&${cppCallableDeclarationTagName(operation.functionId)}>(${payloadText})`
+      ? `gea::identifyCallable<&${cppCallableDeclarationTagName(operation.functionId)}${operation.ordinaryConstructor ? ', true' : ''}>(${payloadText})`
       : payloadText
   // A function whose OWN structural type the `--dynamic-fallback` prototype
   // census marked (`prototypeMutatedConstructorTypes`, dynamic-fallback.ts)
@@ -1806,10 +1821,16 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
     }
     const callableType = `gea::CallableObject<${cppAbiType(abi)}>`
     const boxText = (payloadText: string): string => {
+      const tupleRest = tupleRestBoxText(abi, callableType, identified(payloadText))
+      if (tupleRest !== null) return tupleRest
       const callable = parameterAbiStatingText(abi, callableType, identified(payloadText))
-      if (abi.receiver !== null) return `gea::Value::boxMethod<${abi.restFrom === null ? -1 : abi.restFrom + 1}>(${callable})`
-      if (abi.restFrom === null) return `gea::Value::box(gea::Value::Tag::Function, ${callable})`
-      return `gea::Value::boxCallable<${abi.restFrom}>(${callable})`
+      const boxed =
+        abi.receiver !== null
+          ? `gea::Value::boxMethod<${abi.restFrom === null ? -1 : abi.restFrom + 1}>(${callable})`
+          : abi.restFrom === null
+            ? `gea::Value::box(gea::Value::Tag::Function, ${callable})`
+            : `gea::Value::boxCallable<${abi.restFrom}>(${callable})`
+      return resultAbsentIsNull(abi) ? `${boxed}.withNullAbsentResult()` : boxed
     }
     // A body that reads `new.target` is told so on its function object, which
     // is what makes `Value::construct` publish the new target to it.
@@ -2731,6 +2752,17 @@ export const emitAllocateConstructor = (ctx: EmitContext, lines: string[], opera
 }
 
 /**
+ * Whether the class's own name is a module-scope cell the unit declares and
+ * the class value is stored in -- the cell the two capture-free readers below
+ * name. A class EXPRESSION's name binds only inside the class
+ * (`const constructor = class Pino {}`): its placement carries no carrier, the
+ * unit declares no cell for it, and the value lives in whatever the
+ * expression was assigned to.
+ */
+const holdsClassValueInModuleCell = (placement: BindingPlacement | undefined): boolean =>
+  placement?.storage.kind === 'region' && placement.representation !== null
+
+/**
  * The zero-argument construction a dynamic object inheriting this class runs
  * on the first inherited method call (`gea::detail::nativeBaseOf`): the class
  * constructed as `new C()`, which a constructor whose every parameter may be
@@ -2742,7 +2774,7 @@ const nativeBaseFactoryText = (ctx: EmitContext, operation: AllocateConstructorO
   if (!ctx.deriver.dynamicFallback) return null
   const receiver = operation.result.representation
   const placement = ctx.placements.get(operation.declaration)
-  if (receiver.kind !== 'constructor-family' || receiver.members.length !== 1 || placement?.storage.kind !== 'region') return null
+  if (receiver.kind !== 'constructor-family' || receiver.members.length !== 1 || !holdsClassValueInModuleCell(placement)) return null
   if (receiver.abi.restFrom !== null) return null
   const absentArguments: string[] = []
   for (const parameter of receiver.abi.parameters) {
@@ -2772,7 +2804,7 @@ const classStaticReaderText = (ctx: EmitContext, operation: AllocateConstructorO
   // Only a boxed constructor reads its statics through the box, and only the
   // opt-in boxes a class constructor.
   if (!ctx.deriver.dynamicFallback) return null
-  if (receiver.kind !== 'constructor-family' || placement?.storage.kind !== 'region') return null
+  if (receiver.kind !== 'constructor-family' || !holdsClassValueInModuleCell(placement)) return null
   const keys = new Set<string>()
   const walked = new Set<DeclarationId>()
   for (let current: DeclarationId | null = operation.declaration; current !== null && !walked.has(current);) {

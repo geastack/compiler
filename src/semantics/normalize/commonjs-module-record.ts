@@ -23,6 +23,21 @@ export interface CommonJsModuleRecordCensus {
    * the checker types as the module's namespace instead.
    */
   readonly requiredDefaultExportAt: (node: ts.Node) => ts.Expression | null
+  /**
+   * Whether the file assigns its wrapper's exports itself (`module.exports =
+   * exports = Ajv`): an ES module written for TypeScript's CommonJS emit,
+   * whose ES exports that emit writes onto whatever `exports` then holds.
+   */
+  readonly assignsWrapperExports: (file: ts.SourceFile) => boolean
+  /**
+   * Whether a `require` of this ES module answers the object TypeScript's
+   * CommonJS emit builds -- its exports, `default` among them -- rather than
+   * the builtin rule's `module.exports = default`: every ES module
+   * that is not a configured builtin source, or that assigns its own exports.
+   * ajv's `runtime/equal.ts` stands in for the shipped `dist/runtime/equal.js`,
+   * whose `exports.default = equal` is what `require(...).default` reads.
+   */
+  readonly followsTypeScriptEmit: (file: ts.SourceFile) => boolean
 }
 
 export const emptyCommonJsModuleRecordCensus: CommonJsModuleRecordCensus = {
@@ -31,7 +46,9 @@ export const emptyCommonJsModuleRecordCensus: CommonJsModuleRecordCensus = {
   requiredExportExpressionAt: () => null,
   moduleExportExpressionAt: () => null,
   importedExportExpressionOf: () => null,
-  requiredDefaultExportAt: () => null
+  requiredDefaultExportAt: () => null,
+  assignsWrapperExports: () => false,
+  followsTypeScriptEmit: () => false
 }
 
 const unwrapExpression = (expression: ts.Expression): ts.Expression => {
@@ -129,7 +146,8 @@ export const censusCommonJsModuleRecords = (
   files: readonly ts.SourceFile[],
   globals: ReadonlyMap<string, CommonJsWrapperDeclaration>,
   runtimeModuleTargetOf: (specifier: string, containingFile: string, mode: 'import' | 'require') => string | null,
-  sourceFileOf: (fileName: string) => ts.SourceFile | null
+  sourceFileOf: (fileName: string) => ts.SourceFile | null,
+  isBuiltinModuleSource: (file: ts.SourceFile) => boolean = () => true
 ): CommonJsModuleRecordCensus => {
   if (globals.size === 0) return emptyCommonJsModuleRecordCensus
   const identity = createCommonJsWrapperIdentity(checker, files, globals)
@@ -363,6 +381,10 @@ export const censusCommonJsModuleRecords = (
     const target = runtimeModuleTargetOf(argument.text, node.getSourceFile().fileName, 'require')
     const file = target === null ? null : sourceFileOf(target)
     if (!file || file.isDeclarationFile || !ts.isExternalModule(file) || !/\.[cm]?tsx?$/.test(file.fileName)) return null
+    // Under TypeScript's emit the require answers the exports object, whose
+    // `default` is this expression -- not the expression itself -- unless the
+    // module assigned its exports to it (ajv's `module.exports = exports = Ajv`).
+    if (!isBuiltinModuleSource(file) && !assignsWrapperExports(file)) return null
     for (const statement of file.statements) if (ts.isExportAssignment(statement) && !statement.isExportEquals) return statement.expression
     return null
   }
@@ -382,12 +404,34 @@ export const censusCommonJsModuleRecords = (
     if (!ts.isVariableDeclarationList(list) || (list.flags & ts.NodeFlags.Const) === 0) return null
     return requiredDefaultOfCall(unwrapExpression(declaration.initializer))
   }
+  const assigningWrapperExports = new Map<ts.SourceFile, boolean>()
+  const assignsWrapperExports = (file: ts.SourceFile): boolean => {
+    const known = assigningWrapperExports.get(file)
+    if (known !== undefined) return known
+    let found = false
+    const inspect = (node: ts.Node): void => {
+      if (found) return
+      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        const left = unwrapExpression(node.left)
+        if (isExportsAccess(left) || wrapperGlobalOf(left) === 'exports') {
+          found = true
+          return
+        }
+      }
+      ts.forEachChild(node, inspect)
+    }
+    inspect(file)
+    assigningWrapperExports.set(file, found)
+    return found
+  }
   return {
     exportExpressionOf,
     exportExpressionAt,
     requiredExportExpressionAt,
     moduleExportExpressionAt,
     importedExportExpressionOf,
-    requiredDefaultExportAt
+    requiredDefaultExportAt,
+    assignsWrapperExports,
+    followsTypeScriptEmit: (file) => !isBuiltinModuleSource(file) || assignsWrapperExports(file)
   }
 }

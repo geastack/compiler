@@ -305,7 +305,9 @@ export interface IrBodyBuilder {
     captures: readonly IrOperand[],
     representation: Representation,
     /** See `AllocateCallableOperation.functionKind`. */
-    functionKind?: AllocateCallableOperation['functionKind']
+    functionKind?: AllocateCallableOperation['functionKind'],
+    /** See `AllocateCallableOperation.ordinaryConstructor`. */
+    ordinaryConstructor?: true
   ) => IrValueId
   readonly bindCallable: (
     block: IrBlockId,
@@ -834,7 +836,15 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
-  const allocateCallable: IrBodyBuilder['allocateCallable'] = (block, lineage, functionId, captures, representation, functionKind) => {
+  const allocateCallable: IrBodyBuilder['allocateCallable'] = (
+    block,
+    lineage,
+    functionId,
+    captures,
+    representation,
+    functionKind,
+    ordinaryConstructor
+  ) => {
     const result = mintResult(representation)
     append(block, {
       kind: 'allocate-callable',
@@ -842,7 +852,8 @@ export const createIrBodyBuilder = (
       functionId,
       captures,
       result,
-      ...(functionKind === undefined ? {} : { functionKind })
+      ...(functionKind === undefined ? {} : { functionKind }),
+      ...(ordinaryConstructor === undefined ? {} : { ordinaryConstructor })
     })
     return result.id
   }

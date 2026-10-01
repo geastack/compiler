@@ -19,6 +19,7 @@ import { cppDateType } from './prototype/emit-prototype-date.js'
 import { recordFieldsOfShape, recordIndexesOfShape } from './records.js'
 import { cppRecordFieldName, cppRecordFieldPresenceName, cppRecordStructName, cppStringLiteral, cppTypeOf } from './types.js'
 import { armAt, armIs } from './emit-union-properties.js'
+import { toStringRefusal, toStringText } from './emit-tostring.js'
 
 /**
  * `JSON.stringify`/`JSON.parse(...) as T`, rendered by generating one
@@ -851,7 +852,7 @@ export const jsonCallText = (ctx: EmitContext, member: 'stringify' | 'parse', op
     const revived =
       reviverText === null
         ? null
-        : `[&]() { const std::string& gea_json_text = ${operandText(ctx, operation.arguments[0] as IrOperand)}; gea::json::Reader gea_json_reader(gea_json_text); ` +
+        : `[&]() { const std::string& gea_json_text = ${jsonParseTextOf(ctx, operation.arguments[0] as IrOperand)}; gea::json::Reader gea_json_reader(gea_json_text); ` +
           `gea::Value gea_json_result{}; gea_json_read(gea_json_reader, gea_json_result); return gea::json::reviveParsed(gea_json_result, ${reviverText}); }()`
     const converted =
       revived === null ? null : alignedValueText(ctx, 'emit-json.ts:revived', boxed, operation.result.representation, revived)
@@ -873,7 +874,7 @@ export const jsonCallText = (ctx: EmitContext, member: 'stringify' | 'parse', op
   const reason = jsonUnsupportedReason(ctx.deriver, resultRepresentation, emptyJsonCollected(), new Set(), 'read')
   if (reason !== null)
     throw createCppEmitBlockedError('host-member-call:JSON.parse', `JSON.parse cannot decode natively into this asserted type: ${reason}`)
-  const textArgument = operandText(ctx, operation.arguments[0] as IrOperand)
+  const textArgument = jsonParseTextOf(ctx, operation.arguments[0] as IrOperand)
   const resultType = cppTypeOf(resultRepresentation)
   return `[&]() { const std::string& gea_json_text = ${textArgument}; gea::json::Reader gea_json_reader(gea_json_text); ${resultType} gea_json_result{}; gea_json_read(gea_json_reader, gea_json_result); return gea_json_result; }()`
 }
@@ -959,4 +960,22 @@ export const jsonStringifyFillLines = (ctx: EmitContext, operation: CallOperatio
   // storage on both sides and renders nothing (`emit-bindings.ts`).
   defineValueAlias(ctx, operation.result, target)
   return lines
+}
+
+/**
+ * 25.5.1 step 1, `ToString(text)`: the text a parse reads, from whatever the
+ * argument carries -- secure-json-parse's `JSON.parse(text)` over a
+ * `string | Buffer` it only sometimes decoded first. A carrier with no
+ * ToString refuses by name.
+ */
+const jsonParseTextOf = (ctx: EmitContext, text: IrOperand): string => {
+  const operand = operandText(ctx, text)
+  if (text.representation.kind === 'string') return operand
+  const converted = toStringText(operand, text.representation, ctx.classes, ctx.deriver)
+  if (converted === null)
+    throw createCppEmitBlockedError(
+      'host-member-call:JSON.parse',
+      `JSON.parse's text is ToString-ed (ECMA-262 25.5.1 step 1), and ${toStringRefusal(text.representation, ctx.classes, ctx.deriver)}`
+    )
+  return `std::string(${converted})`
 }

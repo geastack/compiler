@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resolve } from 'node:path'
 import ts from 'typescript'
-import { censusParameterBindings } from './parameter-bindings.js'
+import { censusParameterBindings, indexParameterBindingProgram } from './parameter-bindings.js'
 import { wholeProgram } from './reachability.js'
 
 /**
@@ -10,12 +10,12 @@ import { wholeProgram } from './reachability.js'
  * `@param {boolean} premultipliedAlpha`, and `colorBuffer.setClear( 0, 0, 0,
  * 1 )` leaves it out.
  */
-const bindingOf = (calls: string, statement = 'boolean') => {
+const bindingOf = (calls: string, statement = 'boolean', tagged = 'premultipliedAlpha', dynamicFallback = false) => {
   const entry = resolve('test/fixtures/omitted-stated-parameter.js')
   const source = `export {};
     /**
      * @param {number} r
-     * @param {${statement}} premultipliedAlpha
+     * @param {${statement}} ${tagged}
      */
     function setClear( r, premultipliedAlpha ) {
       return premultipliedAlpha === true ? r * 2 : r;
@@ -29,7 +29,8 @@ const bindingOf = (calls: string, statement = 'boolean') => {
   const program = ts.createProgram([entry], options, host)
   const checker = program.getTypeChecker()
   const file = program.getSourceFile(entry)!
-  const census = censusParameterBindings(checker, [file], wholeProgram)
+  const index = indexParameterBindingProgram(checker, [file], wholeProgram, undefined, undefined, dynamicFallback)
+  const census = censusParameterBindings(checker, [file], wholeProgram, undefined, index)
   const declaration = file.statements.find(ts.isFunctionDeclaration)!
   const parameter = declaration.parameters[1]!
   let read_: ts.Identifier | undefined
@@ -81,4 +82,33 @@ test('an open caller set still holds the omission a visible caller makes', () =>
 
 test('a spread that may reach the position refuses', () => {
   assert.equal(bindingOf('setClear( ...[ 0 ] ); setClear( 1, true );').parameter, null)
+})
+
+test('an optional stated parameter a caller passes something else holds that too', () => {
+  // fastify's `reqIdGenFactory`: `@param {string} [requestIdHeader]`, handed
+  // `false` when no header is configured.
+  const { parameter } = bindingOf("setClear( 0, false ); setClear( 1, 'x' );", 'string', '[premultipliedAlpha]')
+  assert.deepEqual(parameter, ['false', 'string', 'true', 'undefined'])
+})
+
+test('an untyped argument with a typed branch outside the statement leaves the cell any', () => {
+  // fastify's `requestIdHeader`: `any` as a whole, and `false | "request-id"` on
+  // the branch that answers when no header is configured.
+  const calls =
+    "const header = /** @type {any} */ ( globalThis ).header; const h = typeof header === 'string' ? /** @type {any} */ ( header ).toLowerCase() : ( header === true && 'request-id' ); setClear( 0, h );"
+  assert.deepEqual(bindingOf(calls, 'string', '[premultipliedAlpha]').parameter, ['any'])
+  assert.equal(bindingOf('setClear( 0, /** @type {any} */ ( globalThis ).header );', 'string', '[premultipliedAlpha]').parameter, null)
+})
+
+test('under the fallback, a plain object statement every caller hands an untyped value holds that value', () => {
+  // fastify's `router.setup(options)`: `@param {FastifyServerOptions}`, handed
+  // the `any` copy `processOptions` has written a logger instance into.
+  const untyped = 'setClear( 0, /** @type {any} */ ( globalThis ).options );'
+  const statement = '{ logger?: boolean | { level?: string } }'
+  assert.deepEqual(bindingOf(untyped, statement, 'premultipliedAlpha', true).parameter, ['any'])
+  assert.equal(bindingOf(untyped, statement).parameter, null)
+  // A typed caller, a primitive statement, and a class statement keep theirs.
+  assert.equal(bindingOf(`${untyped} setClear( 1, { logger: true } );`, statement, 'premultipliedAlpha', true).parameter, null)
+  assert.equal(bindingOf(untyped, 'boolean', 'premultipliedAlpha', true).parameter, null)
+  assert.equal(bindingOf(`class Held {} ${untyped}`, 'Held', 'premultipliedAlpha', true).parameter, null)
 })

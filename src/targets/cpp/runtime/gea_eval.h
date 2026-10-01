@@ -236,6 +236,7 @@ struct Node {
     Throw
   } kind;
   std::string text;
+  std::string source;
   Value value;
   std::vector<std::shared_ptr<Node>> children;
   std::vector<std::string> names;
@@ -287,7 +288,11 @@ struct Parser {
   }
   [[noreturn]] void syntax(const std::string& text) { error("SyntaxError", text + " at byte " + std::to_string(token.offset)); }
   bool is(const char* text) const { return token.kind != Token::String && token.text == text; }
-  void advance() { token = lexer.next(); }
+  std::size_t consumedEnd = 0;
+  void advance() {
+    consumedEnd = lexer.offset;
+    token = lexer.next();
+  }
   bool eat(const char* text) {
     if (!is(text)) return false;
     advance();
@@ -561,7 +566,9 @@ struct Parser {
       expect("}");
       return out;
     }
-    if (eat("function")) {
+    if (is("function")) {
+      const std::size_t start = token.offset;
+      advance();
       auto out = node(Node::FunctionExpr);
       if (!is("(")) out->text = identifier();
       expect("(");
@@ -577,6 +584,7 @@ struct Parser {
       loops = 0;
       out->children.push_back(body(true));
       out->strict = strict;
+      out->source = lexer.source.substr(start, consumedEnd - start);
       functionBody = savedFunction;
       strict = savedStrict;
       loops = savedLoops;
@@ -652,6 +660,9 @@ struct Closure {
   Ref<Scope> scope;
   Ref<Context> context;
   bool strict = false;
+  std::string name;
+  std::string source;
+  Function::CallableFacts facts() const { return Function::CallableFacts{name, source, parameters.size()}; }
   friend void geaTraceRefs(const Closure& closure, detail::RefVisitor& visitor) {
     detail::traceRefs(closure.scope, visitor);
     detail::traceRefs(closure.context, visitor);
@@ -752,7 +763,7 @@ inline Value binary(const std::string& op, const Value& a, const Value& b) {
 Value read(const Value& object, const PropertyKey& key);
 Value invoke(void* environment, Value receiver, Args arguments);
 Value makeFunction(const Tree& body, const std::vector<std::string>& params, Ref<Scope> scope, Ref<Context> context, bool strict,
-                   const std::string& name = "");
+                   const std::string& name, std::string source);
 struct Reference {
   Ref<Scope> scope;
   std::string name;
@@ -914,7 +925,12 @@ struct Machine {
         for (std::size_t i = 1; i < tree->children.size(); ++i) args.push_back(eval(tree->children[i]));
         if (tree->kind == Node::Construct) {
           if (callee.tag() != Value::Tag::Function) error("TypeError", "Value is not a constructor");
-          if (callee.payloadType() != detail::payloadTypeTagFor<Function>() || callee.as<Function>().invoke != invoke)
+          // A compiled program function is constructed exactly as a `new` in
+          // compiled code constructs it. This runtime's own builtins share its
+          // carrier and have no ordinary [[Construct]] (`new Number(2)` is a
+          // wrapper object), so they still refuse.
+          if (callee.payloadType() != detail::payloadTypeTagFor<Function>()) return callee.construct(args);
+          if (callee.as<Function>().invoke != invoke)
             unsupported("Constructing an external callable requires a native construct adapter");
           self = Value::object();
           auto proto = read(callee, PropertyKey::string("prototype"));
@@ -951,7 +967,7 @@ struct Machine {
           closureScope = makeRef<Scope>();
           closureScope->parent = scope;
         }
-        auto fn = makeFunction(tree->children[0], tree->names, closureScope, context, tree->strict || strict, tree->text);
+        auto fn = makeFunction(tree->children[0], tree->names, closureScope, context, tree->strict || strict, tree->text, tree->source);
         if (!tree->text.empty()) closureScope->bindings[tree->text] = {fn, true, true, true};
         return fn;
       }
@@ -1121,8 +1137,9 @@ inline Value invoke(void* environment, Value receiver, Args arguments) {
   return result.kind == Completion::Returned ? result.value : Value();
 }
 inline Value makeFunction(const Tree& body, const std::vector<std::string>& params, Ref<Scope> scope, Ref<Context> context, bool strict,
-                          const std::string& name) {
-  auto closure = makeRef<Closure>(Closure{body, params, scope, context, strict});
+                          const std::string& name, std::string source) {
+  auto closure = makeRef<Closure>(Closure{body, params, scope, context, strict, name, std::move(source)});
+  Function::registerSourceAdapter<invoke, Closure>();
   auto fn = Value::boxMethod<1>(Function(invoke, PackedEnvironment{closure.get(), refCastToVoid(closure)}));
   auto prototype = Value::object();
   prototype.asDynamicObject()->setPrototype(context->objectPrototype.asDynamicObject());
@@ -1150,12 +1167,25 @@ inline std::vector<Value> list(const Args& args, std::size_t begin = 0) {
 struct Bound {
   Value target, receiver;
   std::vector<Value> arguments;
+  // ECMA-262 BoundFunctionCreate's name ("bound " + target name) and length
+  // (the target's, less the bound arguments, never below zero). avvio picks
+  // the arguments it passes by a callback's `length`.
+  std::string name;
+  std::size_t length = 0;
+  Function::CallableFacts facts() const { return Function::CallableFacts{name, "function () { [native code] }", length}; }
   friend void geaTraceRefs(const Bound& bound, detail::RefVisitor& visitor) {
     detail::traceRefs(bound.target, visitor);
     detail::traceRefs(bound.receiver, visitor);
     for (const auto& arg : bound.arguments) detail::traceRefs(arg, visitor);
   }
 };
+inline Value invokeBound(void* environment, Value, Args rest) {
+  const auto& state = *static_cast<Bound*>(environment);
+  auto args = state.arguments;
+  const auto more = list(rest);
+  args.insert(args.end(), more.begin(), more.end());
+  return state.target.callWithReceiver(state.receiver, args);
+}
 inline Value functionPrototype(const PropertyKey& key) {
   if (!key.isSymbol() && key.text() == "call")
     return method(+[](void*, Value fn, Args args) { return fn.callWithReceiver(argument(args, 0), list(args, 1)); });
@@ -1176,17 +1206,22 @@ inline Value functionPrototype(const PropertyKey& key) {
     return method(+[](void*, Value fn, Args args) {
       if (fn.tag() != Value::Tag::Function) error("TypeError", "bind receiver is not callable");
       auto bound = makeRef<Bound>(Bound{fn, argument(args, 0), list(args, 1)});
-      return Value::boxMethod<1>(Function(
-          +[](void* env, Value, Args rest) {
-            const auto& state = *static_cast<Bound*>(env);
-            auto args = state.arguments;
-            const auto more = list(rest);
-            args.insert(args.end(), more.begin(), more.end());
-            return state.target.callWithReceiver(state.receiver, args);
-          },
-          PackedEnvironment{bound.get(), refCastToVoid(bound)}));
+      const Value targetName = fn.getProperty(PropertyKey::string("name"));
+      bound->name = "bound " + (targetName.tag() == Value::Tag::String ? targetName.as<std::string>() : std::string());
+      const Value targetLength = fn.getProperty(PropertyKey::string("length"));
+      if (targetLength.tag() == Value::Tag::Number) {
+        const double remaining = std::trunc(targetLength.as<double>()) - static_cast<double>(bound->arguments.size());
+        bound->length = remaining > 0 ? static_cast<std::size_t>(remaining) : 0;
+      }
+      Function::registerSourceAdapter<&invokeBound, Bound>();
+      return Value::boxMethod<1>(Function(&invokeBound, PackedEnvironment{bound.get(), refCastToVoid(bound)}));
     });
-  if (!key.isSymbol() && (key.text() == "caller" || key.text() == "arguments" || key.text() == "constructor" || key.text() == "toString" ||
+  if (!key.isSymbol() && key.text() == "toString")
+    return method(+[](void*, Value fn, Args) {
+      if (fn.tag() != Value::Tag::Function) error("TypeError", "Function.prototype.toString requires that 'this' be a Function");
+      return string(fn.functionSourceText());
+    });
+  if (!key.isSymbol() && (key.text() == "caller" || key.text() == "arguments" || key.text() == "constructor" ||
                           key.text() == "name" || key.text() == "length" || key.text() == "prototype"))
     unsupported("Function reflection: " + key.text());
   return Value();
@@ -1257,6 +1292,11 @@ inline Value initializeRealmGlobal(Value global) {
     descriptor.writable = writable;
     descriptor.configurable = writable;
     if (global.isDynamicObject()) global.defineProperty(key, descriptor);
+    // Initialization supplies a name the global does not hold yet, which is
+    // not a change to anything the compiled program bound natively; the
+    // natively-bound guard refuses only later writes through the global.
+    else if (global.payloadType() == detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<gea::Value>>>())
+      global.as<gea::Ref<gea::Dictionary<gea::Value>>>()->setProperty(name, value);
     else global.setProperty(key, value);
   };
   define("undefined", Value(), false);
@@ -1336,7 +1376,7 @@ class Eval {
     Parser parser(body, true);
     auto tree = parser.body(false);
     validate(tree, names);
-    return makeFunction(tree, names, {}, context_, parser.strict, "anonymous");
+    return makeFunction(tree, names, {}, context_, parser.strict, "anonymous", "function anonymous(" + joined + "\n) {\n" + body + "\n}");
   }
   Value run(const std::string& source) const {
     using namespace eval_detail;

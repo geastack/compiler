@@ -182,6 +182,23 @@ export const impliedPatternTargetOf = (
  * construction. `null` for a named parameter, an annotated pattern, or a
  * pattern that is not a parameter's own name.
  */
+/**
+ * The members of every type the checker synthesizes for an unannotated object
+ * pattern parameter (`impliedPatternParameterOf`). fastify's
+ * `wrapRouting(router, { rewriteUrl, logger })` is handed `options` without a
+ * `rewriteUrl`, which the synthesized type calls required.
+ */
+export const impliedPatternMembersOf = (checker: ts.TypeChecker, files: readonly ts.SourceFile[]): ReadonlySet<ts.Symbol> => {
+  const members = new Set<ts.Symbol>()
+  const visit = (node: ts.Node): void => {
+    if (ts.isParameter(node) && ts.isObjectBindingPattern(node.name) && impliedPatternParameterOf(checker, node) !== null)
+      for (const member of checker.getTypeAtLocation(node).getProperties()) members.add(member)
+    ts.forEachChild(node, visit)
+  }
+  for (const file of files) if (!file.isDeclarationFile) visit(file)
+  return members
+}
+
 export const impliedPatternParameterOf = (checker: ts.TypeChecker, node: ts.Node): ts.ParameterDeclaration | null => {
   const parameter = ts.isParameter(node)
     ? node

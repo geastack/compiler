@@ -118,7 +118,9 @@ const cases = [
   'let o={toString:function(){return "x";}}; return String(o);',
   'let o={}; return o+"!";',
   'let f=function(){return 3;}; return f.length;',
-  'let f=function(){return 3;}; return f(1,2);'
+  'let f=function(){return 3;}; return f(1,2);',
+  'let f=function(a){return a;}; return f.toString();',
+  'let f=function  named ( a ){ return a; /* c */ }; return f.toString() + String(function(){});'
 ]
 for (const body of cases)
   test(`Eval matches Node: ${body}`, () => {
@@ -174,6 +176,69 @@ for (const form of ['new Function', 'Function'])
     assert.equal(execFileSync(executable, { encoding: 'utf8' }), '5 9 2 anonymous\n')
   })
 
+test('a function bound where the eval runtime is linked keeps its name and length', () => {
+  const file = resolve(root, 'test/runtime/eval-bound-length.js')
+  const source =
+    "function inner(err, cb) { return 1 } const f = new Function('return 0'); const box = JSON.parse('{}'); box.inner = inner; const b = box.inner.bind({}); const c = box.inner.bind(null, 1, 2, 3); console.log(f(), b.length, b.name, c.length)"
+  const result = compile({
+    rootFileNames: [file],
+    sourceOverlay: new Map([[file, source]]),
+    javaScriptSources: true,
+    dynamicFallback: true
+  })
+  assert.ok(
+    result.source,
+    JSON.stringify({ diagnostics: result.diagnostics, lowering: result.loweringBlockers, emission: result.emissionRefusals })
+  )
+  const executable = resolve(root, `measurements/eval-bound-length${executableSuffix}`)
+  execFileSync('clang++', ['-std=c++20', '-O0', '-I', resolve(root, 'src/targets/cpp/runtime'), '-x', 'c++', '-', '-o', executable], {
+    input: result.source + '\nint main(){__gea_top_level();}\n',
+    stdio: ['pipe', 'pipe', 'inherit']
+  })
+  assert.equal(execFileSync(executable, { encoding: 'utf8' }), '0 2 bound inner 0\n')
+})
+test('a constructed Function constructs a compiled function constructor', () => {
+  const file = resolve(root, 'test/runtime/eval-construct-compiled.js')
+  const source =
+    "function NullObject() {} NullObject.prototype = Object.create(null); const make = new Function('NullObject', 'return new NullObject()'); const o = make(NullObject); o.a = 1; console.log(typeof o, o.a)"
+  const result = compile({
+    rootFileNames: [file],
+    sourceOverlay: new Map([[file, source]]),
+    javaScriptSources: true,
+    dynamicFallback: true
+  })
+  assert.ok(
+    result.source,
+    JSON.stringify({ diagnostics: result.diagnostics, lowering: result.loweringBlockers, emission: result.emissionRefusals })
+  )
+  const executable = resolve(root, `measurements/eval-construct-compiled${executableSuffix}`)
+  execFileSync('clang++', ['-std=c++20', '-O0', '-I', resolve(root, 'src/targets/cpp/runtime'), '-x', 'c++', '-', '-o', executable], {
+    input: result.source + '\nint main(){__gea_top_level();}\n',
+    stdio: ['pipe', 'pipe', 'inherit']
+  })
+  assert.equal(execFileSync(executable, { encoding: 'utf8' }), 'object 1\n')
+})
+test('a constructed Function sees the non-writable intrinsics a compiled program binds natively', () => {
+  const file = resolve(root, 'test/runtime/eval-natively-bound-intrinsic.js')
+  const source = "const n = Number.isNaN(NaN); console.log(n, new Function('return NaN !== NaN && Infinity > 0 && undefined === void 0')())"
+  const result = compile({
+    rootFileNames: [file],
+    sourceOverlay: new Map([[file, source]]),
+    javaScriptSources: true,
+    dynamicFallback: true
+  })
+  assert.ok(
+    result.source,
+    JSON.stringify({ diagnostics: result.diagnostics, lowering: result.loweringBlockers, emission: result.emissionRefusals })
+  )
+  assert.match(result.source, /bindGlobalNamesNatively\(\{[^}]*"NaN"/)
+  const executable = resolve(root, `measurements/eval-natively-bound-intrinsic${executableSuffix}`)
+  execFileSync('clang++', ['-std=c++20', '-O0', '-I', resolve(root, 'src/targets/cpp/runtime'), '-x', 'c++', '-', '-o', executable], {
+    input: result.source + '\nint main(){__gea_top_level();}\n',
+    stdio: ['pipe', 'pipe', 'inherit']
+  })
+  assert.equal(execFileSync(executable, { encoding: 'utf8' }), 'true true\n')
+})
 test('a constructed Function cannot change a global the compiled program binds natively', () => {
   const file = resolve(root, 'test/runtime/eval-natively-bound.js')
   const source =

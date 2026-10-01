@@ -14,7 +14,12 @@ import type { ExplicitThisCallFrame, FlowInvocationOperands, ValueFlowIndex } fr
 import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
 import { readsAbsentKey } from './absent-key-read.js'
 import { foreignClassArgumentTypeOf, foreignClassDefaultTypeOf } from './foreign-class-default.js'
-import { omissionStatedTypeOf, widenedStatedParameter } from './omitted-stated-parameter.js'
+import {
+  destructuredPlainObjectStatementOf,
+  omissionStatedTypeOf,
+  statesPlainObject,
+  widenedStatedParameter
+} from './omitted-stated-parameter.js'
 import { indexValueFlow } from './flow/value-flow.js'
 import { closedArrayCalleeAuthorityOf, hasClosedMemberCallableUses } from './flow/callable-reach.js'
 import type { CallableArrayOriginAuthority } from './flow/callable-array-origins.js'
@@ -686,6 +691,10 @@ export interface ParameterBindingProgramIndex {
     readonly parameter: ts.ParameterDeclaration
     readonly index: number
     readonly stated: ts.Type
+    /** Under the dynamic fallback, a plain object statement every caller hands an untyped value holds that value. */
+    readonly holdsUntypedArguments: boolean
+    /** A destructured parameter, which takes part in that rule and in no other. */
+    readonly untypedArgumentsOnly: boolean
   }[]
   /** Stated parameters whose default is an instance of a class the statement does not name -- see `foreign-class-default.ts`. */
   readonly foreignDefaultSites: readonly { readonly parameter: ts.ParameterDeclaration; readonly type: ts.Type }[]
@@ -723,7 +732,8 @@ export const indexParameterBindingProgram = (
   files: readonly ts.SourceFile[],
   reachable: ProgramReachability,
   valueFlow: ValueFlowIndex = indexValueFlow(checker, files, reachable),
-  argumentsObjects: ArgumentsObjectCensus = censusArgumentsObjects(checker, files)
+  argumentsObjects: ArgumentsObjectCensus = censusArgumentsObjects(checker, files),
+  dynamicFallback = false
 ): ParameterBindingProgramIndex => {
   // `GEA_INDEX_TIMING=1` prints what one build of this index costs. It is the
   // only honest way to price the hoist on a shared machine: across two runs
@@ -733,7 +743,14 @@ export const indexParameterBindingProgram = (
   const startedAt = process.env['GEA_INDEX_TIMING'] ? performance.now() : 0
   const candidates: ParameterCandidate[] = []
   const restParameterCandidates: RestParameterCandidate[] = []
-  const omissionSites: { declaration: ts.SignatureDeclaration; parameter: ts.ParameterDeclaration; index: number; stated: ts.Type }[] = []
+  const omissionSites: {
+    declaration: ts.SignatureDeclaration
+    parameter: ts.ParameterDeclaration
+    index: number
+    stated: ts.Type
+    holdsUntypedArguments: boolean
+    untypedArgumentsOnly: boolean
+  }[] = []
   const foreignDefaultSites: { parameter: ts.ParameterDeclaration; type: ts.Type }[] = []
   const foreignArgumentSites: { declaration: ts.SignatureDeclaration; parameter: ts.ParameterDeclaration; index: number }[] = []
   const assigned = new Set<ts.Symbol>()
@@ -829,7 +846,25 @@ export const indexParameterBindingProgram = (
                 })
               // Not inferred -- but a caller may still leave it out.
               const omissionStated = omissionStatedTypeOf(checker, parameter)
-              if (omissionStated) omissionSites.push({ declaration: node, parameter, index, stated: omissionStated })
+              if (omissionStated)
+                omissionSites.push({
+                  declaration: node,
+                  parameter,
+                  index,
+                  stated: omissionStated,
+                  holdsUntypedArguments: dynamicFallback && statesPlainObject(checker, omissionStated),
+                  untypedArgumentsOnly: false
+                })
+              const destructured = dynamicFallback ? destructuredPlainObjectStatementOf(checker, parameter) : null
+              if (destructured)
+                omissionSites.push({
+                  declaration: node,
+                  parameter,
+                  index,
+                  stated: destructured,
+                  holdsUntypedArguments: true,
+                  untypedArgumentsOnly: true
+                })
               const foreignDefault = foreignClassDefaultTypeOf(checker, parameter)
               if (foreignDefault) foreignDefaultSites.push({ parameter, type: foreignDefault })
               else if (parameter.type !== undefined) foreignArgumentSites.push({ declaration: node, parameter, index })
@@ -3274,38 +3309,48 @@ export const censusParameterBindings = (
   // like any inference, and its obligations are kept with the binding.
   propagating.reset()
   // `GEA_STATED_OMISSION_OFF` keeps the arm without this rule runnable, the way `GEA_BAG_OFF` is.
-  for (const site of process.env['GEA_STATED_OMISSION_OFF'] ? [] : index.omissionSites) {
-    if (bindings.has(site.parameter) || unionArms.has(site.parameter)) continue
-    const answer = widenedStatedParameter(
-      checker,
-      site.stated,
-      site.index,
-      callsByDeclaration.get(site.declaration) ?? [],
-      (call) => invocationOperands.get(call)!.args,
-      (argument) => propagating.known(argument) ?? propagating.resolve(argument) ?? checker.getTypeAtLocation(argument)
-    )
-    if (answer === null) continue
-    if ('refused' in answer) {
-      lastRefusal.set(site.parameter, answer.refused)
-      continue
+  // To a fixed point: a site widened in this pass is an argument another
+  // site reads (avvio's `start(parent, ...)` forwards the `null` it is
+  // handed to `[kAddNode](parent, ...)`, declared earlier in the file).
+  for (let widened = true; widened;) {
+    widened = false
+    propagating.reset()
+    for (const site of process.env['GEA_STATED_OMISSION_OFF'] ? [] : index.omissionSites) {
+      if (bindings.has(site.parameter) || unionArms.has(site.parameter)) continue
+      const answer = widenedStatedParameter(
+        checker,
+        site.stated,
+        site.index,
+        callsByDeclaration.get(site.declaration) ?? [],
+        (call) => invocationOperands.get(call)!.args,
+        (argument) => propagating.known(argument) ?? propagating.resolve(argument) ?? checker.getTypeAtLocation(argument),
+        site.holdsUntypedArguments,
+        site.untypedArgumentsOnly
+      )
+      if (answer === null) continue
+      if ('refused' in answer) {
+        lastRefusal.set(site.parameter, answer.refused)
+        continue
+      }
+      // Deliberately NOT gated on `escapeReason`. A caller the census cannot see
+      // is held to the statement whether or not this binds -- that is what the
+      // parameter's carrier is when it stays unbound -- so it can only add
+      // statement values to the cell, never take away the `undefined` a caller
+      // the census DOES see provably passes. Refusing an open caller set left
+      // the bare statement standing, which is the one answer known to be wrong.
+      const closure = (): string | null => ((contractsFor(site.declaration)?.length ?? 0) > 0 ? 'stated-omission-callback-contract' : null)
+      const captured = protocolLedger?.capture(closure) ?? { value: closure(), requirements: [] }
+      if (captured.value !== null) {
+        lastRefusal.set(site.parameter, captured.value)
+        continue
+      }
+      bindings.set(site.parameter, answer.type)
+      statedBindings.set(site.parameter, answer.type)
+      widened = true
+      protocolRequirements.set(site.parameter, captured.requirements)
+      if (process.env['GEA_BINDING_DEBUG'])
+        console.error(`[STATED-OMISSION] ${describeParameter(site.parameter)} :: ${checker.typeToString(answer.type)}`)
     }
-    // Deliberately NOT gated on `escapeReason`. A caller the census cannot see
-    // is held to the statement whether or not this binds -- that is what the
-    // parameter's carrier is when it stays unbound -- so it can only add
-    // statement values to the cell, never take away the `undefined` a caller
-    // the census DOES see provably passes. Refusing an open caller set left
-    // the bare statement standing, which is the one answer known to be wrong.
-    const closure = (): string | null => ((contractsFor(site.declaration)?.length ?? 0) > 0 ? 'stated-omission-callback-contract' : null)
-    const captured = protocolLedger?.capture(closure) ?? { value: closure(), requirements: [] }
-    if (captured.value !== null) {
-      lastRefusal.set(site.parameter, captured.value)
-      continue
-    }
-    bindings.set(site.parameter, answer.type)
-    statedBindings.set(site.parameter, answer.type)
-    protocolRequirements.set(site.parameter, captured.requirements)
-    if (process.env['GEA_BINDING_DEBUG'])
-      console.error(`[STATED-OMISSION] ${describeParameter(site.parameter)} :: ${checker.typeToString(answer.type)}`)
   }
   // Every caller is held to the statement, which the widened type contains,
   // so no caller set -- closed or open -- can disagree with it.

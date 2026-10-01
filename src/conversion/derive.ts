@@ -1,4 +1,4 @@
-import type { Representation } from '../representation/model.js'
+import type { RecordField, Representation } from '../representation/model.js'
 import { representationKey } from '../representation/model.js'
 import type { ClassifierContract, ConversionArm, ConversionCapability, ConversionField, ConversionNodeId } from './algebra.js'
 import { classRefDomainsOverlap, classifierDomainsOverlap, never } from './algebra.js'
@@ -146,6 +146,15 @@ const deriveAt = (target: Representation, context: ConversionDerivationContext, 
       // primitive. The refusal below is the honest answer only for the
       // ownerships no round trip exists for -- a `borrowed` reference has no
       // lifetime to hand back, and the registry says so by answering `null`.
+      //
+      // A shape with no host type is a compiler-owned record carried by name,
+      // so it materializes through the product an inline `record` gets. A
+      // shape whose layout reaches itself keeps the identity round trip: its
+      // product would be a cycle with no base the graph can close.
+      if (target.native === null && target.recursive === undefined) {
+        const product = deriveNamedRecord(target, nested, path)
+        if (product !== null) return product
+      }
       return atomFrom(
         context.registry.recordRefMaterializer(target.shapeId, target.ownership),
         `an erased or borrowed native reference to shape "${target.shapeId}" (${target.ownership}) is not recoverable from a dynamic value`
@@ -275,6 +284,107 @@ const deriveRecord = (
   if (!materializer) return never(`no installed product materializer for record shape "${target.shapeId}" (${target.ownership})`)
 
   const fields: ConversionField[] = target.fields.map((field) => ({
+    key: field.key,
+    required: field.required,
+    capability: deriveAt(field.value, context, `${path}.${field.key}`)
+  }))
+  return { kind: 'product', fields, materializer }
+}
+
+/**
+ * The one arm of a union that a plain object can only mean: the sole
+ * compiler-owned record arm, beside arms that hold no object at all
+ * (primitives, `null`/`undefined`, callables). A box no arm's exact test
+ * admits then materializes that arm through its checked product rather than
+ * refusing: fastify's `boolean | FastifyLoggerOptions` handed the options
+ * object it was configured with. `null` when another arm could hold an object.
+ */
+export const solePlainObjectArm = (arms: readonly { readonly value: Representation }[]): number | null => {
+  const ownedRecord = (value: Representation): boolean =>
+    (value.kind === 'record' && value.accessors.length === 0 && value.ownership !== 'borrowed') ||
+    (value.kind === 'native-record-ref' && value.native === null && value.recursive === undefined && value.ownership !== 'borrowed')
+  const holdsNoObject = (value: Representation): boolean => {
+    switch (value.kind) {
+      case 'scalar':
+      case 'string':
+      case 'symbol':
+      case 'null':
+      case 'undefined':
+      case 'void':
+      case 'function':
+      case 'function-family':
+      case 'function-value-family':
+      case 'function-value-dispatch':
+      case 'function-and-constructor':
+        return true
+      case 'optional':
+        return holdsNoObject(value.payload)
+      default:
+        return false
+    }
+  }
+  const records = arms.flatMap((arm, index) => (ownedRecord(arm.value) ? [index] : []))
+  if (records.length !== 1) return null
+  return arms.every((arm, index) => index === records[0] || holdsNoObject(arm.value)) ? (records[0] ?? null) : null
+}
+
+type NamedRecordFields = (shapeId: string) => readonly RecordField[] | null
+
+const selfReferencing = new WeakMap<NamedRecordFields, Map<string, boolean>>()
+
+/**
+ * The layout a named record materializes through, or `null` when it has none
+ * or when its data reaches the shape again. The conversion algebra and the
+ * printer both ask this, so the product one certifies is the one the other
+ * renders.
+ */
+export const expandableNamedRecordFields = (fieldsOf: NamedRecordFields, shapeId: string): readonly RecordField[] | null => {
+  const fields = fieldsOf(shapeId)
+  if (fields === null) return null
+  let answers = selfReferencing.get(fieldsOf)
+  if (answers === undefined) selfReferencing.set(fieldsOf, (answers = new Map()))
+  let reaches = answers.get(shapeId)
+  if (reaches === undefined) {
+    const visited = new Set<string>()
+    const walk = (value: Representation): boolean => {
+      switch (value.kind) {
+        case 'native-record-ref': {
+          if (value.native !== null || value.recursive !== undefined) return false
+          if (value.shapeId === shapeId) return true
+          if (visited.has(value.shapeId)) return false
+          visited.add(value.shapeId)
+          return (fieldsOf(value.shapeId) ?? []).some((field) => walk(field.value))
+        }
+        case 'record':
+        case 'record-with-index':
+          return value.fields.some((field) => walk(field.value))
+        case 'array-object':
+          return walk(value.element)
+        case 'optional':
+          return walk(value.payload)
+        case 'tagged-union':
+          return value.arms.some((arm) => walk(arm.value))
+        case 'dictionary':
+          return walk(value.value)
+        default:
+          return false
+      }
+    }
+    reaches = fields.some((field) => walk(field.value))
+    answers.set(shapeId, reaches)
+  }
+  return reaches ? null : fields
+}
+
+const deriveNamedRecord = (
+  target: Extract<Representation, { kind: 'native-record-ref' }>,
+  context: ConversionDerivationContext,
+  path: ConversionNodeId
+): ConversionCapability | null => {
+  const layout = expandableNamedRecordFields(context.registry.namedRecordFields, target.shapeId)
+  const materializer = layout === null ? null : context.registry.recordMaterializer(target.shapeId, target.ownership)
+  if (layout === null || materializer === null) return null
+  const fields: ConversionField[] = layout.map((field) => ({
     key: field.key,
     required: field.required,
     capability: deriveAt(field.value, context, `${path}.${field.key}`)

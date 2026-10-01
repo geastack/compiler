@@ -1424,6 +1424,10 @@ export const createRepresentationDeriver = (
       : substantive
   }
 
+  const isErasedTypeExpressionMember = (member: StructuralTypeId): boolean => {
+    const memberShape = shapeOf(member)
+    return memberShape?.kind === 'unresolved' && memberShape.fallback === 'erased-type-expression'
+  }
   const bodyShapeOf = (member: StructuralTypeId): StructuralShape | null => {
     const memberShape = shapeOf(member)
     return (memberShape?.kind === 'declared' && memberShape.body !== null ? shapeOf(memberShape.body) : memberShape) ?? null
@@ -1850,6 +1854,13 @@ export const createRepresentationDeriver = (
     if (shape.resolved !== null && !substantive.some(outranksCheckerReduction)) {
       return derive(shape.resolved)
     }
+    // Under the opt-in, a member the table could intern only as an erased type
+    // expression is the box on its own (the `unresolved` case of `derive`), and
+    // a value that is also that member is the same box. fastify's
+    // `frameworkErrors` request: `RawRequest['headers'] & RequestType['headers']`
+    // where the second member is a conditional over the callback's own type
+    // parameters.
+    if (dynamicFallback && substantive.some(isErasedTypeExpressionMember)) return { kind: 'dynamic', reason: 'opt-in-fallback' }
     const merged = new Map<string, RecordField>()
     // Every substantive member's own index signature applies at once, exactly
     // like a named field does below: a value satisfying the intersection has

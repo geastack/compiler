@@ -243,8 +243,18 @@ const valuesText = (ctx: EmitContext, operation: CallOperation): string =>
   overCarrier(ctx, 'values', operation, (view) => valuesOfView(ctx, operation, view))
 
 const valuesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectView): string => {
-  if (view.kind === 'dynamic') return `gea::host::ObjectConstructor::values(${view.receiver})`
   const result = operation.result?.representation
+  if (view.kind === 'dynamic') {
+    // The runtime answers a fresh array of boxes; a call the plan publishes as
+    // a box holds that array boxed.
+    const values = `gea::host::ObjectConstructor::values(${view.receiver})`
+    if (result?.kind !== 'dynamic') return values
+    const native: Representation = { kind: 'array-object', element: result, ownership: 'shared-refcount', extension: null }
+    const boxed = alignedValueText(ctx, 'host/emit-host-object.ts:values', native, result, values)
+    if (boxed === null)
+      throw createCppEmitBlockedError('host-member-call:Object.values', '"Object.values" of a box does not box its array result')
+    return boxed
+  }
   if (view.kind === 'dictionary') {
     if (view.representation.key === 'symbol') {
       if (result === undefined || result.kind !== 'array-object') {
@@ -2124,10 +2134,12 @@ const assignSourceText = (ctx: EmitContext, targetView: ObjectView, sourceView: 
     // (fast-uri's `Object.assign(target, headers)`).
     if (sourceView.kind === 'dictionary' && sourceView.representation.key === 'string' && targetView.kind === 'dynamic') {
       const value = cppTypeOf(sourceView.value)
+      // `objectViewOf` hands a dictionary view as the table itself (behind the
+      // `Ref` already), so it is read with `.`.
       return (
-        `{ const auto& gea_assign_source = ${sourceView.receiver}; if (gea_assign_source) for (const std::string& gea_assign_key : ` +
-        `*gea_assign_source->enumerableKeySnapshot()) ${targetView.receiver}.setProperty(gea::PropertyKey::string(gea_assign_key), ` +
-        `gea::detail::DynamicCarrier<${value}>::out(gea_assign_source->read(gea_assign_key))); }`
+        `{ const auto& gea_assign_source = ${sourceView.receiver}; for (const std::string& gea_assign_key : ` +
+        `*gea_assign_source.enumerableKeySnapshot()) ${targetView.receiver}.setProperty(gea::PropertyKey::string(gea_assign_key), ` +
+        `gea::detail::DynamicCarrier<${value}>::out(gea_assign_source.read(gea_assign_key))); }`
       )
     }
     const table = targetView.kind === 'dictionary' ? targetView : sourceView

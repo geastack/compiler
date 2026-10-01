@@ -178,7 +178,11 @@ export const toStringTextOver = (
   // legitimate dynamic boundaries, not a value this emitter boxed on its own
   // initiative. `gea::host::detail::toString(const gea::Value&)`
   // tag-switches, mirroring `toBoolean(const gea::Value&)`.
-  if (carrier.kind === 'dynamic') return `gea::host::detail::toString(${text})`
+  if (carrier.kind === 'dynamic') {
+    if (!nullishJoinsEmpty) return `gea::host::detail::toString(${text})`
+    const tag = `(${text}).tag()`
+    return `((${tag} == gea::Value::Tag::Undefined || ${tag} == gea::Value::Tag::Null) ? std::string() : gea::host::detail::toString(${text}))`
+  }
   // An optional DOES know which absence it holds. `Representation`'s own
   // `optional` variant carries `absence: 'null' | 'undefined'` -- it has to,
   // because `x === null` and `x === undefined` are different questions over

@@ -56,11 +56,11 @@
  * `parseFloat('3px')`. They stay absent, which leaves them exactly where they
  * were: an unresolved external cell whose link fails by name.
  *
- * `escape`/`unescape` (ECMA-262 B.2.1) ARE implemented in the runtime
+ * `escape`/`unescape` (ECMA-262 B.2.1) are implemented in the runtime
  * (`gea::runtime::uri::escapeImpl`/`unescapeImpl`, ported with the rest of
- * v1's `uri.cpp`) but are deliberately not claimed here: `lib.es5.d.ts` does
- * not declare them at all, so no program this compiler sees can name one, and
- * a row for a name that cannot be reached would claim a surface nothing tests.
+ * v1's `uri.cpp`). `lib.es5.d.ts` does not declare them, so a TypeScript file
+ * cannot name one, but a JavaScript file can: fast-uri calls both, and
+ * unclaimed they linked as unresolved externals.
  */
 export const coreGlobalFunctions: ReadonlyMap<string, string> = new Map<string, string>([
   // HTML Standard 8.3. `btoa` is defined over Latin-1 code points and `atob`
@@ -77,7 +77,9 @@ export const coreGlobalFunctions: ReadonlyMap<string, string> = new Map<string, 
   ['encodeURI', 'gea::runtime::uri::encodeUri'],
   ['encodeURIComponent', 'gea::runtime::uri::encodeUriComponent'],
   ['decodeURI', 'gea::runtime::uri::decodeUri'],
-  ['decodeURIComponent', 'gea::runtime::uri::decodeUriComponent']
+  ['decodeURIComponent', 'gea::runtime::uri::decodeUriComponent'],
+  ['escape', 'gea::runtime::uri::escapeImpl'],
+  ['unescape', 'gea::runtime::uri::unescapeImpl']
 ])
 
 /**

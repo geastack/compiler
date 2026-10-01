@@ -3,7 +3,7 @@ import type { StructuralTypeId } from '../../identity/ids.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'
 import type { StructuralShape } from '../model/structural-types.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
-import { disjointUnionTypeOf, isGlobalObjectConstructor, literalMemberNameOf, widestOf } from './derived-expression-type.js'
+import { disjointUnionTypeOf, isGlobalObjectConstructor, joinOfWrites, literalMemberNameOf, widestOf } from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import type { ValueFlowIndex } from './flow/model.js'
 import { definitelyReturns } from './return-paths.js'
@@ -1228,7 +1228,10 @@ export const censusObjectBagBindings = (
     // (`collection-bindings.ts`), answered by the same rule, so a set that
     // census would refuse (a member subsuming another, too many arms) is
     // refused here too.
-    const widest = widestOf(checker, types) ?? disjointUnionTypeOf(checker, types)
+    // A present value beside an absence (`bag[k] = undefined` next to
+    // `bag[k] = '' + v`) is neither: one arm is no union, and neither type
+    // covers the other. It is the cell write-set join's nullable case.
+    const widest = widestOf(checker, types) ?? disjointUnionTypeOf(checker, types) ?? joinOfWrites(checker, types)
     return widest ?? 'disagree'
   }
 

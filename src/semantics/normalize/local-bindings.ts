@@ -248,6 +248,38 @@ const readDisprovesJoin = (
           return
         }
       }
+      // Compared with `undefined` while no joined type admits it -- fastify's
+      // `let contentType = cache.get(h); if (contentType !== undefined) ...`
+      // over a silent `get` and a speaking `new ContentType(h)` -- the program
+      // itself says the silent write can store `undefined`, which the join
+      // cannot hold. A loose comparison with `null` says the same: IsLooselyEqual
+      // (ECMA-262 7.2.14) holds for `undefined` there, and find-my-way's
+      // `if (currentNode == null) return null` is how it tests an absent tree.
+      const strictEquality =
+        ts.isBinaryExpression(parent) &&
+        (parent.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken ||
+          parent.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken)
+      const looseEquality =
+        ts.isBinaryExpression(parent) &&
+        (parent.operatorToken.kind === ts.SyntaxKind.EqualsEqualsToken ||
+          parent.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsToken)
+      const comparedFlags =
+        ts.isBinaryExpression(parent) && (strictEquality || looseEquality)
+          ? checker.getTypeAtLocation(parent.left === node ? parent.right : parent.left).flags
+          : 0
+      const comparedWithUndefined =
+        (comparedFlags & ts.TypeFlags.Undefined) !== 0 || (looseEquality && (comparedFlags & ts.TypeFlags.Null) !== 0)
+      if (
+        comparedWithUndefined &&
+        !joined.some(
+          (type) =>
+            (type.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0 ||
+            (type.isUnion() && type.types.some((member) => (member.flags & ts.TypeFlags.Undefined) !== 0))
+        )
+      ) {
+        disproved = true
+        return
+      }
       const assigned = ts.isBinaryExpression(parent) && parent.left === node && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
       const type = checker.getTypeAtLocation(node)
       if (!assigned && (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) === 0) {

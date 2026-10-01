@@ -140,6 +140,14 @@ export interface StructuralPartsInput {
    */
   readonly deletedMember?: (symbol: ts.Symbol) => boolean
   /**
+   * A member of the type the checker synthesizes from a destructuring
+   * pattern (`impliedPatternMembersOf`): read by the pattern, never required
+   * of the value, since a caller may leave any of them out and the binding
+   * reads `undefined`. TypeScript marks one optional only where its element
+   * has a default.
+   */
+  readonly patternMember?: (symbol: ts.Symbol) => boolean
+  /**
    * Whether an array literal is the unstated empty `[]` that `structural.ts`'s
    * `unstated-never-array` rule lays out as an array of boxes. A member holding
    * one is stored the same way, not as the checker's `never[]`.
@@ -830,7 +838,10 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // creates two carriers for one cell and turns that finite recurrence into
     // an unresolved expression/binding cycle downstream.
     const inferredBag = table && declaration ? bagShapeTypeAt(table, typeOf, bags, declaration) : null
-    const optional = (symbol.getFlags() & ts.SymbolFlags.Optional) !== 0 || (input.deletedMember?.(symbol) ?? false)
+    const optional =
+      (symbol.getFlags() & ts.SymbolFlags.Optional) !== 0 ||
+      (input.patternMember?.(symbol) ?? false) ||
+      (input.deletedMember?.(symbol) ?? false)
     const arraySlot = inferredArray && optional ? input.internUnion([inferredArray, typeOf(checker.getUndefinedType())]) : inferredArray
     // ⛔ An optional member's ABSENCE is a state of its own and has to be in
     // the member's TYPE, because that type is the only thing

@@ -42,6 +42,7 @@ export const emptyConversionRegistry: ConversionRuntimeRegistry = Object.freeze(
   nativeHandleMaterializer: () => null,
   recordMaterializer: () => null,
   recordRefMaterializer: () => null,
+  namedRecordFields: () => null,
   arrayObjectDomain: () => null,
   functionMaterializer: () => null,
   functionValueDispatchMaterializer: () => null,

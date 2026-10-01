@@ -15,6 +15,7 @@ import { structuralArrayReadAt } from './structural-array-read.js'
 import { enclosingArgumentsFunction, implicitArgumentsSlotOf, isArgumentsObjectIdentifier } from './implicit-arguments.js'
 import { createStructuralCallResultResolver, createStructuralConstructResultResolver } from './structural-callable.js'
 import type { DeclarationId, StructuralTypeId } from '../../identity/ids.js'
+import type { RegExpDeclarationKind } from '../../representation/policies.js'
 import { genericFunctionChoiceMembersOf, genericSourceFunctionDeclarationOf } from './generic-function-choice.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'
 import type { SignatureShape, StructuralMember, StructuralShape } from '../model/structural-types.js'
@@ -349,7 +350,9 @@ export const createStructuralMapper = (
   families: InterfaceFamilyCensus = emptyInterfaceFamilyCensus,
   moduleRecords: CommonJsModuleRecordCensus = emptyCommonJsModuleRecordCensus,
   declaredMembers: DeclaredMemberCensus = emptyDeclaredMemberCensus,
-  isIntrinsicDescriptorCall: (call: ts.CallExpression) => boolean = () => false
+  isIntrinsicDescriptorCall: (call: ts.CallExpression) => boolean = () => false,
+  regexpDeclarations: ReadonlyMap<DeclarationId, RegExpDeclarationKind> = new Map(),
+  patternMembers: ReadonlySet<ts.Symbol> = new Set()
 ): StructuralMapper => {
   const storageTypeOf = recordStorageFamilies(checker, flow, parameters)
   // One disagreement list for the WHOLE mapper, for the same reason the caches
@@ -406,7 +409,9 @@ export const createStructuralMapper = (
       viewIndependentKeyOf,
       sharedCompleted,
       classCopyKeys,
-      disagreements
+      disagreements,
+      regexpDeclarations,
+      patternMembers
     )
     views.set(key, built)
     return built
@@ -438,7 +443,9 @@ const buildMapper = (
   viewIndependentKeyOf: (type: ts.Type) => string | null,
   sharedCompleted: Map<ts.Type, StructuralTypeId>,
   classCopyKeys: Map<DeclarationId, Map<number, ClassCopyKey>>,
-  disagreements: StructuralDisagreement[]
+  disagreements: StructuralDisagreement[],
+  regexpDeclarations: ReadonlyMap<DeclarationId, RegExpDeclarationKind>,
+  patternMembers: ReadonlySet<ts.Symbol>
 ): StructuralMapper => {
   const {
     boundByPath,
@@ -713,6 +720,7 @@ const buildMapper = (
     // The bag census the collection value slot needs -- see
     // `StructuralPartsInput.bags`.
     bags,
+    patternMember: (symbol) => patternMembers.has(symbol),
     deletedMember: (symbol) =>
       deletedMemberDeclarations.size > 0 && (symbol.declarations ?? []).some((declaration) => deletedMemberDeclarations.has(declaration)),
     unstatedNeverArrayAt: (node) => unstatedNeverArray(checker, collections, layoutTypeAt, node)
@@ -3970,7 +3978,78 @@ const buildMapper = (
     return table.intern({ kind: 'union', members: kept.map((arm) => translate(arm)) })
   }
 
+  /**
+   * The declaration behind `node` when the checker aliased it through an
+   * accessed `require` whose chain carries a key naming no member (see the
+   * `accessed-require-with-a-computed-key` rule below), else `null`.
+   */
+  const misboundRequireDeclarationOf = (node: ts.Node): ts.VariableDeclaration | null => {
+    // A variable is an alias to the checker only through that one binder rule,
+    // so the flag is the proof the chain is an accessed `require`.
+    const symbol = ts.isVariableDeclaration(node) ? checker.getSymbolAtLocation(node.name) : checker.getSymbolAtLocation(node)
+    if (!symbol || (symbol.flags & ts.SymbolFlags.Alias) === 0) return null
+    const declaration = symbol.declarations?.find(ts.isVariableDeclaration)
+    if (!declaration?.initializer || !ts.isIdentifier(declaration.name)) return null
+    for (
+      let access: ts.Expression = declaration.initializer;
+      ts.isElementAccessExpression(access) || ts.isPropertyAccessExpression(access);
+      access = access.expression
+    ) {
+      if (
+        ts.isElementAccessExpression(access) &&
+        !ts.isStringLiteralLike(access.argumentExpression) &&
+        !ts.isNumericLiteral(access.argumentExpression)
+      )
+        return declaration
+    }
+    return null
+  }
+
+  // Whether the checker's type is, or has an arm that is, the standard
+  // `RegExpExecArray` (`regexpDeclarationsOf`).
+  const namesExecResult = (type: ts.Type): boolean => {
+    if (type.isUnion()) return type.types.some(namesExecResult)
+    const symbol = type.getSymbol()
+    const declaration = symbol === undefined ? null : identities.symbolDeclarationId(symbol)
+    return declaration !== null && regexpDeclarations.get(declaration) === 'exec-result'
+  }
+
   const structuralRules: readonly StructuralRule[] = [
+    {
+      // A capture slot of a match: `undefined` for a group that did not
+      // participate (22.2.7.2), where `RegExpExecArray extends Array<string>`
+      // says `string`. ret's `(_a = rs[1] && sets.words()) !== void 0 ? _a :
+      // ...` reads an empty string there as a present answer and ends its
+      // loop.
+      name: 'regexp-exec-capture-slot',
+      forms: [ts.SyntaxKind.ElementAccessExpression],
+      resolve: (node) => {
+        if (!ts.isElementAccessExpression(node)) return null
+        if ((checker.getTypeAtLocation(node.argumentExpression).flags & ts.TypeFlags.NumberLike) === 0) return null
+        // Index 0 is the matched substring, which a match always has.
+        if (ts.isNumericLiteral(node.argumentExpression) && Number(node.argumentExpression.text) === 0) return null
+        if (!namesExecResult(checker.getTypeAtLocation(node.expression))) return null
+        return table.intern({
+          kind: 'union',
+          members: [mapper.typeOf(checker.getTypeAtLocation(node)), table.intern({ kind: 'primitive', primitive: 'undefined' })]
+        })
+      }
+    },
+    {
+      // `const internals = require('./handle-request.js')[Symbol.for('internals')]`
+      // (fastify's `reply.js`): TypeScript's JavaScript binder aliases any
+      // access chain whose leftmost expression is a `require` call
+      // (`isVariableDeclarationInitializedWithRequireHelper`), and for a key
+      // that names no member it resolves the alias to the module itself -- so
+      // the binding reads as the module's export while its initializer is
+      // `any`. The binding holds what the initializer evaluates to.
+      name: 'accessed-require-with-a-computed-key',
+      forms: [ts.SyntaxKind.Identifier, ts.SyntaxKind.VariableDeclaration],
+      resolve: (node) => {
+        const declaration = misboundRequireDeclarationOf(node)
+        return declaration?.initializer ? mapper.typeOf(checker.getTypeAtLocation(declaration.initializer)) : null
+      }
+    },
     {
       // `for (const x of xs)` where the checker's element is `never` --
       // JavaScript's `never[]` for an empty literal the program later pushes
