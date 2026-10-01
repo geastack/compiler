@@ -23,6 +23,7 @@ import type { RepresentationDeriver } from '../../representation/derive.js'
 import type { RecordAccessor, RecordField, RecordIndexSidecar, Representation, CallableAbi } from '../../representation/model.js'
 import { representationKey, walkRepresentation } from '../../representation/model.js'
 import { dynamicFieldAbsencePolicy } from '../../representation/field-descriptor-policy.js'
+import { isNativeCallableCarrier } from '../../representation/callable-object.js'
 import type { SealedRepresentationPlan } from '../../representation/plan.js'
 import { integerStorageSlot } from '../../ir/integer-storage.js'
 import { recordIndexDomainContainsKey } from '../../ir/native-record-index.js'
@@ -42,7 +43,7 @@ import {
   cppTypeOf
 } from './types.js'
 import { storedEnvironmentText } from './emit-context.js'
-import { boxedText, dynamicCarrierBoxText, dynamicTagFor } from './emit-narrowing.js'
+import { boxedText, callableObjectAbi, dynamicCarrierBoxText, dynamicTagFor } from './emit-narrowing.js'
 
 /**
  * The value carrier of a struct's dynamic-property sidecar, plus its key
@@ -506,11 +507,12 @@ const isRepresentationNode = (value: unknown): value is Representation =>
 /**
  * The struct names a carrier requires the COMPLETE definition of.
  *
- * Two stopping rules, and they are the whole correctness argument. A carrier
- * whose `ownership` is not `owned` is a pointer or a reference
+ * Two stopping rules, and they are the whole correctness argument. A struct
+ * carrier whose `ownership` is not `owned` is a pointer or a reference
  * (`cppOwnershipWrap`, types.ts), which a forward declaration satisfies -- so
  * it is not a dependency, and descending past it would manufacture a cycle out
- * of two structs that legitimately point at each other. A callable -- spelled
+ * of two structs that legitimately point at each other. (A shared container is
+ * not a struct: what it holds by value is still walked, see below.) A callable -- spelled
  * by carrying an `abi` -- never requires its parameter or result types to be
  * complete either, for the same reason and with the same cycle risk.
  *
@@ -525,7 +527,12 @@ const valueHeldStructNames = (representation: Representation, into: Set<string>,
   seen.add(representation)
   const node = representation as unknown as Readonly<Record<string, unknown>>
   const ownership = node['ownership']
-  if (typeof ownership === 'string' && ownership !== 'owned') return
+  // A shared CONTAINER is still walked for what it holds by value: the struct's
+  // trace hook names `TraceEdges<decltype(field)>` in its own definition, and
+  // that trait looks through the handle into the element carriers, so a record
+  // a shared dictionary holds by value has to be complete there too. A
+  // referenced struct itself stays a pointer.
+  if (typeof ownership === 'string' && ownership !== 'owned' && cppStructNameOf(representation) !== null) return
   if (node['abi'] !== undefined) {
     // A bare record in a function-pointer signature may remain incomplete,
     // but a by-value carrier BUILT AROUND that record may not. In
@@ -850,6 +857,29 @@ const dynamicFieldAccessOf = (field: RecordField, storageType: string): DynamicF
   }
 }
 
+/**
+ * The box tag a dynamic write into a field of this carrier is admitted under,
+ * through `gea::detail::writeDynamicField`, or `null` when the field has no
+ * such write: a native callable (`Function`), and an object held by
+ * reference -- a record or a class instance (`Object`).
+ */
+const referenceWriteTag = (carrier: Representation, tag: string): 'Function' | 'Object' | null => {
+  if (tag === 'Function' && isNativeCallableCarrier(carrier.kind)) return 'Function'
+  if (tag !== 'Object') return null
+  if (carrier.kind === 'record' || carrier.kind === 'native-record-ref' || carrier.kind === 'class-ref')
+    return carrier.ownership === 'shared-refcount' ? 'Object' : null
+  return null
+}
+
+/**
+ * The runtime write a dynamic value takes into a field of this carrier: a
+ * callable whose ABI's first slot is `this` is adapted with that slot as the
+ * receiver (`writeDynamicReceiverField`), every other carrier through
+ * `writeDynamicField`.
+ */
+const dynamicFieldWriterOf = (carrier: Representation): string =>
+  callableObjectAbi(carrier.kind === 'optional' ? carrier.payload : carrier)?.receiver ? 'writeDynamicReceiverField' : 'writeDynamicField'
+
 const refuseFieldText = (structName: string, key: string): string =>
   `gea::detail::refuseUnaddressableField(${cppStringLiteral(structName)}, ${cppStringLiteral(key)});`
 
@@ -871,7 +901,7 @@ const refuseFieldText = (structName: string, key: string): string =>
  * letter's case -- `gea_runtime.h`'s `enum class WellKnownSymbol` is
  * generated to match `SymbolConstructor`'s own member names one for one.
  */
-const wellKnownSymbolEnumNameOf = (wellKnownSymbols: ReadonlyMap<DeclarationId, string>, key: string): string | null => {
+export const wellKnownSymbolEnumNameOf = (wellKnownSymbols: ReadonlyMap<DeclarationId, string>, key: string): string | null => {
   for (const [declaration, member] of wellKnownSymbols) {
     if (key === `sym(${declaration})`) return member.charAt(0).toUpperCase() + member.slice(1)
   }
@@ -1456,7 +1486,7 @@ const renderFieldDispatcher = (
         writes,
         writesByKey,
         `    if (gea_name == ${literal}) { if (${presence} ? !${attributes}.writable : !gea_extensible) return false; ` +
-          `gea::detail::writeDynamicField(${access.member}, gea_value, ${cppStringLiteral(structName)}, ${literal}); if (!${presence}) ${attributes} = gea::NativeIndexAttributes{}; ${presence} = true; return true; }`
+          `gea::detail::${dynamicFieldWriterOf(field.value)}(${access.member}, gea_value, ${cppStringLiteral(structName)}, ${literal}); if (!${presence}) ${attributes} = gea::NativeIndexAttributes{}; ${presence} = true; return true; }`
       )
       record(descriptors, descriptorsByKey, descriptorText(boxed))
       const absencePolicy = dynamicFieldAbsencePolicy(field.value)
@@ -1467,9 +1497,9 @@ const renderFieldDispatcher = (
           ? defineText(
               boxed,
               `gea::detail::dynamicFieldAccepts<${access.type}>(gea_value)`,
-              `gea::detail::writeDynamicField(${access.member}, gea_applied.value, ${cppStringLiteral(structName)}, ${literal})`
+              `gea::detail::${dynamicFieldWriterOf(field.value)}(${access.member}, gea_applied.value, ${cppStringLiteral(structName)}, ${literal})`
             )
-          : `    if (gea_name == ${literal}) return gea::detail::applyNativeDynamicFieldDescriptor(` +
+          : `    if (gea_name == ${literal}) return gea::detail::applyNativeDynamicFieldDescriptor${dynamicFieldWriterOf(field.value) === 'writeDynamicReceiverField' ? '<true>' : ''}(` +
               `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, ${absencePolicy.allowsUndefined}, ${absencePolicy.allowsNull}, ${cppStringLiteral(structName)}, ${literal});`
       )
       continue
@@ -1553,6 +1583,31 @@ const renderFieldDispatcher = (
               `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, gea::Value::Tag::${access.tag}); }`
           : `    if (gea_name == ${literal}) return gea::applyNativeFieldDescriptor(` +
               `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, gea::Value::Tag::${access.tag});`
+      )
+    } else if (lazyPlan === undefined && referenceWriteTag(field.value, access.tag) !== null) {
+      // A callable or a reference-carried object has no canonical box payload,
+      // but it crosses through the runtime's typed adapter the way a dynamic
+      // call argument does: fast-querystring's `module.exports.parse = parse`
+      // over its `{ parse, stringify }` exports, avvio's `opts.expose =
+      // opts.expose || {}` over fastify's options record. Any value of the
+      // field's tag is admitted, and the adapter adapts it or refuses it by
+      // name. A lazy field keeps refusing, since its materialization would
+      // overwrite the stored value.
+      const member = `gea::detail::writeDynamicField(${access.member}, gea_value, ${cppStringLiteral(structName)}, ${literal})`
+      record(
+        writes,
+        writesByKey,
+        `    if (gea_name == ${literal}) { if (${presence} ? !${attributes}.writable : !gea_extensible) return false; ` +
+          `${member}; if (!${presence}) ${attributes} = gea::NativeIndexAttributes{}; ${presence} = true; return true; }`
+      )
+      record(
+        defines,
+        definesByKey,
+        defineText(
+          boxed,
+          `gea_value.tag() == gea::Value::Tag::${referenceWriteTag(field.value, access.tag)}`,
+          member.replace('gea_value', 'gea_applied.value')
+        )
       )
     } else {
       record(writes, writesByKey, `    if (gea_name == ${literal}) ${refuseFieldText(structName, access.key)}`)
@@ -2030,7 +2085,21 @@ const renderFieldDispatcher = (
       '    gea_out.insert(gea_out.end(), gea_indices.begin(), gea_indices.end());',
       '    gea_out.insert(gea_out.end(), gea_strings.begin(), gea_strings.end());',
       '    gea_out.insert(gea_out.end(), gea_symbols.begin(), gea_symbols.end());'
-    ])
+    ]),
+    // The keys a plain object must hold to become this record at a dynamic
+    // call boundary (`gea::detail::rebuildDynamicRecord`). Stated only for a
+    // record whose required fields are all string-keyed: a required symbol
+    // field has no key a plain object's own-property walk names reliably.
+    ...(!dynamicProtocol || classDispatch || layout.fields.some((field) => field.required && cppRecordFieldKeyIsSymbol(field.key))
+      ? []
+      : [
+          '  /** The declared fields a dynamic object must carry to be rebuilt as this record. */',
+          `  static void gea_requiredFieldKeys(std::vector<gea::PropertyKey>& ${layout.fields.some((field) => field.required) ? 'gea_out' : ''}) {`,
+          ...layout.fields
+            .filter((field) => field.required)
+            .map((field) => `    gea_out.push_back(gea::PropertyKey::string(${cppStringLiteral(field.key)}));`),
+          '  }'
+        ])
   ]
 }
 
@@ -2421,6 +2490,17 @@ export const cppRecordDeclarations = (
   readonly staticMethodStateClasses: ReadonlySet<DeclarationId>
   /** Authenticated program-class ancestry; the translation unit owns namespace placement. */
   readonly runtimeClassBases: readonly { readonly derived: string; readonly base: string }[]
+  /**
+   * The tuple records a callable's REST parameter is carried as, with their
+   * slots in position order: a dynamic call adapter spreads such a rest into
+   * the boxed argument list (`gea::detail::DynamicRestArgument`), and only the
+   * layout says which members the positions are. The translation unit owns
+   * namespace placement.
+   */
+  readonly restTuples: readonly {
+    readonly structName: string
+    readonly slots: readonly { readonly field: string; readonly presence: string }[]
+  }[]
   readonly refused: readonly CppRecordRefusal[]
   /**
    * Which reactive fields got the COMPANION revision cell rather than a cell of
@@ -2481,6 +2561,7 @@ export const cppRecordDeclarations = (
       declarations: [],
       fieldDefinitionsByStruct: new Map(),
       runtimeClassBases: [],
+      restTuples: [],
       refused: missing.map((structName) => ({
         structName,
         reason: `no record layout: ${unlayoutable.get(structName) ?? 'named by no reachable shape'}`
@@ -2616,6 +2697,7 @@ export const cppRecordDeclarations = (
       declarations: [],
       fieldDefinitionsByStruct: new Map(),
       runtimeClassBases: [],
+      restTuples: [],
       refused,
       revisionFields: new Map(),
       celledFields: new Map(),
@@ -2666,11 +2748,45 @@ export const cppRecordDeclarations = (
     ],
     fieldDefinitionsByStruct,
     runtimeClassBases,
+    restTuples: restTuplesOf(representations, fieldsByStruct),
     refused: [],
     revisionFields,
     celledFields,
     staticMethodStateClasses
   }
+}
+
+/** See the `restTuples` result above: every rest parameter carried as a positional record, in the order its slots bind. */
+const restTuplesOf = (
+  representations: readonly Representation[],
+  fieldsByStruct: ReadonlyMap<string, RecordLayout>
+): readonly { readonly structName: string; readonly slots: readonly { readonly field: string; readonly presence: string }[] }[] => {
+  const names = new Set<string>()
+  const visited = new Set<Representation>()
+  for (const representation of representations) {
+    for (const nested of walkRepresentation(representation, visited)) {
+      const abi = (nested as { readonly abi?: CallableAbi }).abi
+      if (!abi || abi.restFrom === null) continue
+      const rest = abi.parameters[abi.restFrom]?.value
+      if (!rest || rest.kind === 'class-ref') continue
+      const name = cppStructNameOf(rest)
+      if (name !== null) names.add(name)
+    }
+  }
+  return [...names].sort().flatMap((structName) => {
+    const layout = fieldsByStruct.get(structName)
+    if (!layout || layout.fields.length === 0) return []
+    const positions = layout.fields.map((field) => ({ field, position: Number(field.key) }))
+    if (positions.some(({ field, position }) => !Number.isInteger(position) || String(position) !== field.key)) return []
+    positions.sort((left, right) => left.position - right.position)
+    if (positions.some(({ position }, index) => position !== index)) return []
+    return [
+      {
+        structName,
+        slots: positions.map(({ field }) => ({ field: cppRecordFieldName(field.key), presence: cppRecordFieldPresenceName(field.key) }))
+      }
+    ]
+  })
 }
 
 /**

@@ -3,6 +3,7 @@ import type { SemanticGraph } from '../semantics/model/graph.js'
 import type { SemanticOperand } from '../semantics/model/operands.js'
 import type { SignatureShape, StructuralShape } from '../semantics/model/structural-types.js'
 import { sharedPrimitiveDomainOf } from './primitive-domain.js'
+import { commonJsBoundaryOf } from './publish.js'
 
 /**
  * The object types this program may carry BY VALUE rather than behind a
@@ -99,6 +100,23 @@ const isFlatData = (graph: SemanticGraph, shape: Extract<StructuralShape, { kind
 
 export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<StructuralTypeId> => {
   const disqualified = new Set<StructuralTypeId>()
+  // The types a value reaches the dynamic side as -- bound to `any`, handed to
+  // a dynamic-language operation, or to or from a call whose target is open.
+  // A subset of `disqualified`, kept apart because what such a value holds
+  // reaches the dynamic side with it (below); a host member, a protocol step,
+  // a mutation or an identity test implies nothing about what it holds.
+  const escaped = new Set<StructuralTypeId>()
+  const escape = (id: StructuralTypeId): void => {
+    objectCoresOf(graph, id, disqualified)
+    objectCoresOf(graph, id, escaped)
+  }
+  /** The type of the result an operand reads, as its producer published it. */
+  const producedTypeOf = (operand: SemanticOperand): StructuralTypeId | undefined => {
+    const source = operand.source
+    if (source.kind !== 'result') return undefined
+    const producer = graph.results.get(source.result)
+    return producer === undefined ? undefined : graph.operations.get(producer)?.results.find((result) => result.id === source.result)?.type
+  }
   /** Whether this operand names the result of an allocation -- the object being built. */
   const namesFreshObject = (operand: SemanticOperand): boolean => {
     if (operand.source.kind !== 'result') return false
@@ -111,7 +129,9 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
     seen.add(id)
     const shape = graph.structuralTypes.get(id)?.shape
     if (!shape) return []
-    if (shape.kind === 'signature') return shape.call
+    // A construct signature's result is the instance `new` hands out, which
+    // reaches the caller exactly as a call's result does.
+    if (shape.kind === 'signature') return [...shape.call, ...shape.construct]
     if (shape.kind === 'declared' && shape.body !== null) return signatureShapesOf(shape.body, seen)
     if (shape.kind === 'union') return shape.members.flatMap((member) => signatureShapesOf(member, seen))
     return []
@@ -130,10 +150,11 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
    * VALUE, which `nativeCallOpsFor` then refuses to adapt at all -- aborting
    * the first dynamic call, not merely mis-copying one.
    */
-  const disqualifyCallable = (id: StructuralTypeId): void => {
+  const disqualifyCallable = (id: StructuralTypeId, escaping = false): void => {
+    const mark = escaping ? escape : (type: StructuralTypeId): void => objectCoresOf(graph, type, disqualified)
     for (const signature of signatureShapesOf(id)) {
-      objectCoresOf(graph, signature.result, disqualified)
-      for (const parameter of signature.parameters) objectCoresOf(graph, parameter.type, disqualified)
+      mark(signature.result)
+      for (const parameter of signature.parameters) mark(parameter.type)
     }
   }
   for (const operation of graph.operations.values()) {
@@ -164,8 +185,8 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
       if (!resultIsDynamic) continue
       for (const operand of operation.operands) {
         if (operand.type === result.type) continue
-        objectCoresOf(graph, operand.type, disqualified)
-        disqualifyCallable(operand.type)
+        escape(operand.type)
+        disqualifyCallable(operand.type, true)
       }
       continue
     }
@@ -181,6 +202,26 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
       // is the construction itself.
       if (operation.internalMethod === 'define-own-property' && namesFreshObject(receiver)) continue
       objectCoresOf(graph, receiver.type, disqualified)
+      // A value stored into a box -- a receiver typed `any`, or the module's
+      // exports, handed to every module that requires it -- crosses the
+      // dynamic boundary: ret's `exports.ints = () => ({ type, set: INTS(),
+      // not })` is called through that box, and the record it returns is
+      // boxed with everything it holds.
+      const producerId = receiver.source.kind === 'result' ? graph.results.get(receiver.source.result) : undefined
+      const producer = producerId === undefined ? undefined : graph.operations.get(producerId)
+      const receiverShape = graph.structuralTypes.get(receiver.type)?.shape
+      const dynamicReceiver =
+        receiverShape?.kind === 'primitive' && (receiverShape.primitive === 'any' || receiverShape.primitive === 'unknown')
+      if (dynamicReceiver || commonJsBoundaryOf(graph, producer) !== null) {
+        // The operand is typed by the target (`any` for a box); what crosses
+        // is the value its producer made.
+        const value = operation.operands.find((operand) => operand.role === 'value')
+        for (const type of [value?.type, value ? producedTypeOf(value) : undefined]) {
+          if (type === undefined) continue
+          escape(type)
+          disqualifyCallable(type, true)
+        }
+      }
       continue
     }
     // A call the compiler does not itself compile can RETAIN what it was
@@ -195,15 +236,25 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
       if (target.kind === 'exact' && target.target.kind === 'function') continue
       const receiver = operation.operands.find((operand) => operand.role === 'receiver')
       const carried = receiver ? typeArgumentsOf(graph, receiver.type) : new Set<StructuralTypeId>()
+      // An authenticated intrinsic that reads only its argument's own keys or
+      // its carrier hands nothing the argument holds to the other side.
+      const escapes = target.kind === 'open' && !operation.intrinsicOwnKeys && !operation.intrinsicCarrierPredicate
       for (const operand of operation.operands) {
         // A container's own method handed one of its ELEMENTS is not an
         // escape: the element type is what the container stores, so the copy
         // the call makes is the copy the container was always going to hold.
         // `ring.push({ x, y, z })` is the whole shape of a value record's use.
         if (operand.role === 'argument' && carried.has(operand.type)) continue
-        objectCoresOf(graph, operand.type, disqualified)
+        if (escapes) escape(operand.type)
+        else objectCoresOf(graph, operand.type, disqualified)
+        // A callable handed THROUGH a call this compiler cannot see (an
+        // argument, or `.call`'s receiver) can be called or constructed there,
+        // which is the escape `disqualifyCallable` names.
+        if (operand.role !== 'callee') disqualifyCallable(operand.type, escapes)
       }
-      for (const result of operation.results) objectCoresOf(graph, result.type, disqualified)
+      for (const result of operation.results)
+        if (escapes) escape(result.type)
+        else objectCoresOf(graph, result.type, disqualified)
       continue
     }
     // An identity test, and every boundary an object can leave this compiler's
@@ -213,8 +264,29 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
     if (!identityTest && operation.family !== 'dynamic-language' && operation.family !== 'boundary' && operation.family !== 'protocol')
       continue
     for (const operand of operation.operands) {
-      objectCoresOf(graph, operand.type, disqualified)
-      disqualifyCallable(operand.type)
+      if (operation.family === 'dynamic-language') escape(operand.type)
+      else objectCoresOf(graph, operand.type, disqualified)
+      disqualifyCallable(operand.type, operation.family === 'dynamic-language')
+    }
+  }
+
+  // What an escaped value HOLDS escapes with it: a box of ret's `{ type, set,
+  // not }` hands the dynamic side `set`, and each token in it, as objects with
+  // identity, and the runtime's boxed-array element table (`gea::Value`'s
+  // `nativeArrayOpsFor`) has no carrier for a record held by value.
+  let escapedChanged = true
+  while (escapedChanged) {
+    escapedChanged = false
+    for (const id of [...escaped]) {
+      const before = escaped.size
+      const shape = graph.structuralTypes.get(id)?.shape
+      if (shape?.kind === 'object')
+        for (const member of shape.members) {
+          escape(member.type)
+          disqualifyCallable(member.type, true)
+        }
+      for (const carried of typeArgumentsOf(graph, id)) escape(carried)
+      if (escaped.size > before) escapedChanged = true
     }
   }
 

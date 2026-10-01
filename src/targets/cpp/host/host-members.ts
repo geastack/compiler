@@ -746,7 +746,8 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
     {
       kind: 'property',
       emit: 'gea::host::ErrorConstructor::stackTraceLimit',
-      store: 'gea::host::ErrorConstructor::stackTraceLimit = {value}'
+      store: 'gea::host::ErrorConstructor::stackTraceLimit = {value}',
+      resultRepresentation: { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
     }
   ],
   [

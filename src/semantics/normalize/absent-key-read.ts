@@ -25,6 +25,16 @@ export const readsAbsentKey = (checker: ts.TypeChecker, holder: ts.Type, key: st
   if ((checker.getTypeAtLocation(element.name).flags & ts.TypeFlags.Any) === 0) return false
   const nonNull = checker.getNonNullableType(holder)
   if (isUnusableEvidence(nonNull) || (nonNull.flags & ts.TypeFlags.Object) === 0) return false
+  // A type stated only by declaration files describes an object the program
+  // did not build -- a host's, which may carry members its declaration omits
+  // (V8's `Error.stackTraceLimit`, which secure-json-parse destructures) -- so
+  // the declaration's silence is not the object's.
+  const declarations = nonNull.getSymbol()?.declarations ?? []
+  if (declarations.length > 0 && declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile)) return false
+  // Nor is a module's namespace type (`typeof import('./package.json')`, which
+  // thread-stream destructures its `version` out of): the object a JSON or
+  // `export =` module hands out is not the namespace the checker types.
+  if (declarations.some(ts.isSourceFile)) return false
   return (
     !checker.getPropertyOfType(nonNull, key) &&
     !checker.getIndexTypeOfType(nonNull, ts.IndexKind.String) &&

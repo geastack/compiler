@@ -1,6 +1,14 @@
+import { resolve as resolvePath } from 'node:path'
 import type { PackageSource } from './package-sources.js'
 import type { CommonJsWrapperDeclaration, HostNativeTypeDeclaration, HostOwnedDeclaration } from '../plugins/model.js'
-import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, anyKeyedLiteralTypes, proxyFallbackTypes } from './dynamic-fallback.js'
+import {
+  anyKeyedWriteTypes,
+  prototypeMutatedConstructorTypes,
+  anyKeyedLiteralTypes,
+  proxyFallbackTypes,
+  nativeInstanceInterfaceTypes,
+  moduleWrapperThisTypes
+} from './dynamic-fallback.js'
 import ts from 'typescript'
 import { isScriptGlobalObjectPropertyDeclaration } from './normalize/script-global-redefinition.js'
 import { structuralShapeKey } from './model/structural-types.js'
@@ -46,7 +54,11 @@ import { createReassignedBindingCensus } from './normalize/reassigned-bindings.j
 import { createCommonJsRequireCensus } from './normalize/commonjs-require.js'
 import { censusCommonJsModuleRecords } from './normalize/commonjs-module-record.js'
 import { censusNamespacePaths } from './normalize/namespace-paths.js'
-import { numericIndexAbsenceProven, closedLiteralMemberAbsenceProven } from './normalize/derived-expression-type.js'
+import {
+  numericIndexAbsenceProven,
+  closedLiteralMemberAbsenceProven,
+  impliedPatternMembersOf
+} from './normalize/derived-expression-type.js'
 import {
   censusParameterBindings,
   emptyParameterBindingCensus,
@@ -971,12 +983,16 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // wrapper names against the host's declaration file, and handed only the
   // implementation files it found no wrapper to authenticate against, so no
   // module ever proved its record (`nativeRecord` was never set).
+  // The plugin's configured builtin sources, compared as the configured
+  // wrapper declarations are (`commonjs-wrapper.ts`): by resolved file.
+  const builtinModuleSources = new Set([...(input.commonJsBuiltinModuleSources?.values() ?? [])].map((fileName) => resolvePath(fileName)))
   const commonJsModuleRecords = censusCommonJsModuleRecords(
     compiled.checker,
     compiled.program.getSourceFiles(),
     input.commonJsGlobals ?? new Map(),
     compiled.runtimeModuleTargetOf,
-    compiled.sourceFileOf
+    compiled.sourceFileOf,
+    (file) => builtinModuleSources.has(resolvePath(file.fileName))
   )
   // This index retains syntax and checker facts from the initial flow view.
   // Unlike receiver protocol recognition in `valueFlow`, those do not change
@@ -985,7 +1001,14 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // Discovery belongs to one census: inference and reference citation consume
   // the same lexical frames and never enumerate arguments uses independently.
   const argumentsObjects = censusArgumentsObjects(compiled.checker, compiled.sourceFiles)
-  const parameterIndex = indexParameterBindingProgram(compiled.checker, compiled.sourceFiles, reachable, baseValueFlow, argumentsObjects)
+  const parameterIndex = indexParameterBindingProgram(
+    compiled.checker,
+    compiled.sourceFiles,
+    reachable,
+    baseValueFlow,
+    argumentsObjects,
+    input.dynamicFallback ?? false
+  )
   /**
    * Everything a round of `compose` builds besides the parameter census it is
    * settled on -- returned rather than assigned to captured `let`s, so which
@@ -1274,6 +1297,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     isStandardLibraryDeclaration: (declaration: ts.Declaration) => compiled.program.isSourceFileDefaultLibrary(declaration.getSourceFile()),
     globalHostMutationTaint
   }
+  // Resolved the same way and for the same reason as `keyedCollections` above.
+  const regexpDeclarations = regexpDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   const types = createStructuralMapper(
     compiled.checker,
     identities,
@@ -1289,7 +1314,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     commonJsModuleRecords,
     censusDeclaredMembers(compiled.checker, compiled.sourceFiles, identities, (body) => bodyReadsThis(body), reachable),
     (call) =>
-      hostMutationFactsSealed && intrinsicPropertyCallOf(intrinsicPropertyContext, call, call.expression) === 'getOwnPropertyDescriptor'
+      hostMutationFactsSealed && intrinsicPropertyCallOf(intrinsicPropertyContext, call, call.expression) === 'getOwnPropertyDescriptor',
+    regexpDeclarations,
+    impliedPatternMembersOf(compiled.checker, compiled.sourceFiles)
   )
   // The frontend's evidence-policy tables: built from the same
   // `identities`/`valueFlow`/`reachable` the fixpoint above already settled,
@@ -1354,6 +1381,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     ? new Set<StructuralTypeId>([
         ...proxyFallbackTypes(compiled.sourceFiles, compiled.checker, types),
         ...anyKeyedLiteralTypes(compiled.sourceFiles, compiled.checker, types),
+        ...nativeInstanceInterfaceTypes(compiled.sourceFiles, compiled.checker, types),
+        ...moduleWrapperThisTypes(compiled.commonJsSourceFiles, compiled.checker, types),
         ...prototypeFallback.types
       ])
     : new Set<StructuralTypeId>()
@@ -1801,8 +1830,6 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   const generatorDeclaration = generatorDeclarationEarly
   const asyncGeneratorDeclaration = asyncGeneratorDeclarationEarly
   const mapIteratorDeclaration = mapIteratorDeclarationEarly
-  // Resolved the same way and for the same reason as `keyedCollections` above.
-  const regexpDeclarations = regexpDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   timing.mark('structural-and-host-censuses')
   const normalized = normalizeProgram({
     census,
@@ -1945,7 +1972,10 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // a call to a function nothing defines.
     // `fileEvaluates` is the reached-statement half of that: a file kept only
     // for a layout-only class has a region and, by design, no body.
-    moduleOrder: moduleEvaluationOrder({ checker: compiled.checker, files: compiled.sourceFiles, entries: compiled.entryFiles })
+    moduleOrder: moduleEvaluationOrder(
+      { checker: compiled.checker, files: compiled.sourceFiles, entries: compiled.entryFiles },
+      new Set(compiled.commonJsSourceFiles)
+    )
       .filter((file) => fileEvaluates(reachable, file))
       .map((file) => regionId(identities.nodeIdOf(file), 'module-body'))
       .filter((region) => normalized.graph.regions.has(region)),

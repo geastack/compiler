@@ -489,6 +489,7 @@ struct gea_native_protocol_Boolean_prototype_v1 {};
 struct gea_native_protocol_Object_prototype_v1 {};
 struct gea_native_protocol_Promise_prototype_v1 {};
 struct gea_native_protocol_StringConstructor_v1 {};
+struct gea_native_protocol_BooleanConstructor_v1 {};
 struct gea_native_protocol_ErrorConstructor_v1 {};
 struct gea_native_protocol_EvalErrorConstructor_v1 {};
 struct gea_native_protocol_RangeErrorConstructor_v1 {};
@@ -822,6 +823,8 @@ class FunctionObjectIdentity;
 
 /** Allocates the one identity owner an ECMAScript function object carries. */
 Ref<FunctionObjectIdentity> makeFunctionObjectIdentity();
+/** The one Function object of a constructor with no environment, keyed by its construct pointer as native `===` keys it. */
+const Ref<FunctionObjectIdentity>& environmentFreeConstructorIdentity(const void* construct);
 /** Installs a callable's fixed Function own-property descriptors once. */
 void installCallableOwnFacts(const Ref<FunctionObjectIdentity>&, std::string_view name, double length);
 /** Attaches/reads the checker-authenticated source declaration behind a Function object. */
@@ -4026,6 +4029,7 @@ template <typename Result, typename... Arguments>
 struct ConstructorObject<Result(Arguments...)> {
   friend void geaTraceRefs(const ConstructorObject& value, detail::RefVisitor& visitor) {
     detail::traceRefs(value.environmentOwner, visitor);
+    detail::traceRefs(value.functionObject, visitor);
   }
 
   using Construct = Result (*)(void*, Arguments...);
@@ -4033,10 +4037,32 @@ struct ConstructorObject<Result(Arguments...)> {
   Construct construct_;
   void* environment;
   Ref<void> environmentOwner;
+  mutable Ref<FunctionObjectIdentity> functionObject;
+  /** The class evaluation's own identity slot (`nativeClassMethodEnvironment`); valid while `environmentOwner` is held. */
+  EnvironmentIdentityHeader* identityHeader = nullptr;
 
   ConstructorObject() = default;
   ConstructorObject(Construct construct__, void* environment_) : construct_(construct__), environment(environment_) {}
-  ConstructorObject(Construct construct__, PackedEnvironment packed) : construct_(construct__), environment(packed.pointer), environmentOwner(std::move(packed.owner)) {}
+  ConstructorObject(Construct construct__, PackedEnvironment packed)
+      : construct_(construct__), environment(packed.pointer), environmentOwner(std::move(packed.owner)), identityHeader(packed.identityHeader) {}
+
+  /**
+   * The Function object a box of this constructor is. Native `===` identifies
+   * a class by its evaluation's environment, so every copy of one evaluation
+   * -- and every carrier rebuilt from its state -- anchors on that
+   * evaluation's header; an environment-free constructor is its construct
+   * pointer.
+   */
+  const Ref<FunctionObjectIdentity>& functionObjectIdentity() const {
+    if (functionObject || construct_ == nullptr) return functionObject;
+    if (identityHeader != nullptr) {
+      if (!identityHeader->identity) identityHeader->identity = makeFunctionObjectIdentity();
+      return identityHeader->identity;
+    }
+    if (environment == nullptr) return environmentFreeConstructorIdentity(reinterpret_cast<const void*>(construct_));
+    functionObject = makeFunctionObjectIdentity();
+    return functionObject;
+  }
 
   Result construct(Arguments... arguments) const {
     const auto keepAlive = environmentOwner;
@@ -4070,6 +4096,8 @@ Target upcastConstructor(const Source& source) {
   target.construct_ = &detail::ConstructorUpcast<Target, SourceConstruct>::construct;
   target.environment = source.environment;
   target.environmentOwner = source.environmentOwner;
+  target.functionObject = source.functionObject;
+  target.identityHeader = source.identityHeader;
   return target;
 }
 
@@ -4308,6 +4336,7 @@ struct TraceEdges<ConstructorObject<Result(Arguments...)>> {
   static constexpr bool supported = true;
   static void visit(const ConstructorObject<Result(Arguments...)>& value, RefVisitor& visitor) {
     traceRefs(value.environmentOwner, visitor);
+    traceRefs(value.functionObject, visitor);
   }
 };
 
@@ -4322,6 +4351,12 @@ struct TraceEdges<CallableConstructorObject<Result(Arguments...), Constructed(Co
 
 template <typename>
 struct IsNativeCallableConstructorObject : std::false_type {};
+
+template <typename>
+struct IsNativeConstructorObject : std::false_type {};
+
+template <typename Result, typename... Arguments>
+struct IsNativeConstructorObject<ConstructorObject<Result(Arguments...)>> : std::true_type {};
 
 template <typename Result, typename... Arguments, typename Constructed, typename... ConstructArguments>
 struct IsNativeCallableConstructorObject<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>> : std::true_type {};
@@ -5033,8 +5068,44 @@ inline const gea::Ref<ArrayObject<Element>>& emptyArraySentinel() {
 }
 
 class Value;
+
+namespace detail {
+/**
+ * The entry points of the dynamic-to-native callable adapters
+ * (`DynamicCarrier<CallableObject<…>>::inAs`), each of which packs the boxed
+ * source it adapts as its environment. Boxing such an adapter again answers
+ * that source box itself (`Value::box`): the adapter shares the source's
+ * function-object identity already, and a new box would re-adapt its
+ * arguments to the target ABI's declared types -- fastify's route `handler`,
+ * written through a declared tuple-rest field and called with the request
+ * objects it never declared.
+ */
+inline std::unordered_set<const void*>& dynamicAdapterEntries() {
+  static std::unordered_set<const void*> entries;
+  return entries;
+}
+inline bool isDynamicAdapterEntry(const void* entry) {
+  const auto& entries = dynamicAdapterEntries();
+  return !entries.empty() && entries.count(entry) != 0;
+}
+}  // namespace detail
 template <>
 struct HoldsItsOwnAbsence<Value> : std::true_type {};
+
+namespace runtime::regex {
+struct ExecResult;
+}
+
+namespace detail {
+/**
+ * A match as the dynamic side reads it: the Array 22.2.7.2 builds, captures
+ * (a non-participating one `undefined`) then `index`, `input` and `groups`.
+ * The typed `ExecResult` keeps participation beside an `Array<string>` view no
+ * box can read, so it crosses as this Array and is rebuilt on the way back
+ * (`rebuildBoxedExecResult`).
+ */
+Value boxExecResult(const gea::Ref<gea::runtime::regex::ExecResult>& result);
+}  // namespace detail
 
 template <typename Element, typename Source>
 inline gea::Ref<ArrayObject<Element>> emptyArraySentinel(const gea::Ref<ArrayObject<Source>>& source) {
@@ -6908,6 +6979,32 @@ class TaggedUnion {
 
 namespace detail {
 
+template <typename Union>
+struct UnionArmsOf;
+template <typename... Arms>
+struct UnionArmsOf<TaggedUnion<Arms...>> {
+  using type = std::tuple<Arms...>;
+  static constexpr std::size_t count = sizeof...(Arms);
+};
+
+/**
+ * A value placed in the one arm of `Union` whose carrier is exactly its type:
+ * a per-arm method result meeting the sum the call publishes. An arm type
+ * that appears twice, or not at all, is a clang error here -- a refusal, not
+ * a guess at which arm was meant.
+ */
+template <typename Union, typename T>
+inline Union intoUnion(T&& value) {
+  using Arm = std::decay_t<T>;
+  using Arms = typename UnionArmsOf<Union>::type;
+  return [&]<std::size_t... Indices>(std::index_sequence<Indices...>) -> Union {
+    static_assert(((std::is_same_v<Arm, std::tuple_element_t<Indices, Arms>> ? 1 : 0) + ...) == 1,
+                  "a per-arm result names no single arm of the sum it meets");
+    constexpr std::size_t index = ((std::is_same_v<Arm, std::tuple_element_t<Indices, Arms>> ? Indices : 0) + ...);
+    return Union::template ofArm<index>(std::forward<T>(value));
+  }(std::make_index_sequence<UnionArmsOf<Union>::count>{});
+}
+
 // Explicit synchronous host protocol: ordinary arrays get one converted,
 // owned snapshot; matching non-shared typed storage is retained and borrowed.
 // A host using this adapter must consume it before returning and must not
@@ -7694,10 +7791,28 @@ class SymbolDictionary {
  * spelling the program supplied, exactly as ECMA-262 23.1.3.9's
  * CanonicalizeKeyedCollectionKey requires.
  */
+/** How many arms a keyed collection's union key has; zero for any other key. */
+template <typename K>
+struct UnionKeyArity : std::integral_constant<std::size_t, 0> {};
+template <typename... Arms>
+struct UnionKeyArity<TaggedUnion<Arms...>> : std::integral_constant<std::size_t, sizeof...(Arms)> {};
+
 template <typename K>
 inline bool sameValueZero(const K& left, const K& right) {
   if constexpr (std::is_floating_point_v<K>) {
     return (left != left && right != right) || left == right;
+  } else if constexpr (UnionKeyArity<K>::value > 0) {
+    // A sum's arms are disjoint, so two sums hold the same value only in the
+    // same arm, and then exactly when that arm's payloads do (a keyed
+    // collection keyed by a union). One template with this arm rather than a
+    // second overload: the array algorithms state their own, and two
+    // equally specialized templates found through ADL would be ambiguous.
+    if (left.index() != right.index()) return false;
+    bool same = false;
+    [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
+      ((left.index() == Indices ? (same = sameValueZero(left.template get<Indices>(), right.template get<Indices>()), 0) : 0), ...);
+    }(std::make_index_sequence<UnionKeyArity<K>::value>{});
+    return same;
   } else {
     return left == right;
   }
@@ -8117,11 +8232,25 @@ struct IsSharedPtr : std::false_type {};
 template <typename T>
 struct IsSharedPtr<gea::Ref<T>> : std::true_type {};
 
+template <typename T>
+struct IsArrayObjectStruct : std::false_type {};
+template <typename E>
+struct IsArrayObjectStruct<ArrayObject<E>> : std::true_type {};
+
 template <typename Entry, typename K, typename V>
 inline Entry makeMapEntry(const K& key, const V& value) {
   if constexpr (IsSharedPtr<Entry>::value) {
     using Struct = typename Entry::element_type;
-    return gea::makeRef<Struct>(Struct{key, value});
+    // An entry the checker typed as an array (`any[]`) rather than a `[K, V]`
+    // tuple is that array, holding the key and then the value.
+    if constexpr (IsArrayObjectStruct<Struct>::value) {
+      auto entry = gea::makeRef<Struct>();
+      entry->push(key);
+      entry->push(value);
+      return entry;
+    } else {
+      return gea::makeRef<Struct>(Struct{key, value});
+    }
   } else {
     return Entry{key, value};
   }
@@ -9905,8 +10034,15 @@ struct ValueMetadata {
   int restFrom;
   bool array;
   bool map;
+  /** The payload is a host handle (`gea::NativeHandle<Protocol>`): its members are the host's, and the box's own are its expando's. */
+  bool hostHandle;
 };
-inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false};
+inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false, false};
+
+template <typename T>
+struct IsHostHandlePayload : std::false_type {};
+template <typename Protocol>
+struct IsHostHandlePayload<gea::NativeHandle<Protocol>> : std::true_type {};
 
 template <typename T, int RestFrom = -1>
 const ValueMetadata* valueMetadataFor() {
@@ -9915,7 +10051,8 @@ const ValueMetadata* valueMetadataFor() {
     if constexpr (RestFrom < 0) calls = nativeCallOpsFor<T>();
     else calls = nativeRestCallOpsFor<T, static_cast<std::size_t>(RestFrom)>();
     return ValueMetadata{nativeFieldOpsFor<T>(), nativePrototypeOpsFor<T>(), calls, nativeArrayOpsFor<T>(),
-                         payloadTypeTagFor<T>(), RestFrom, IsArrayPayload<T>::value, IsMapPayload<T>::value};
+                         payloadTypeTagFor<T>(), RestFrom, IsArrayPayload<T>::value, IsMapPayload<T>::value,
+                         IsHostHandlePayload<T>::value};
   }();
   return &metadata;
 }
@@ -10025,7 +10162,7 @@ class Value {
     detail::traceRefs(value.functionObject_, visitor);
   }
 
-  enum class Tag { Undefined, Null, Boolean, Number, String, Object, Function, Symbol, BigInt };
+  enum class Tag : std::uint8_t { Undefined, Null, Boolean, Number, String, Object, Function, Symbol, BigInt };
 
   /** A default-constructed box is `undefined`: a hoisted cell holds *some* value from the moment it exists. */
   Value() = default;
@@ -10047,11 +10184,19 @@ class Value {
         if (gea::Ref<DynamicObject> owner = detail::nativeBaseOwnerOf(value.get())) return fromDynamicObject(std::move(owner));
       }
     }
+    if constexpr (std::is_same_v<std::decay_t<T>, gea::Ref<gea::runtime::regex::ExecResult>>) {
+      if (value) return detail::boxExecResult(value);
+    }
+    if (tag == Tag::Function) {
+      Value source;
+      if (adaptedSource(value, source)) return source;
+    }
     Value result;
     result.tag_ = tag;
     if (tag == Tag::Function) {
       if constexpr (
-          detail::IsNativeCallableObject<std::decay_t<T>>::value || detail::IsNativeCallableConstructorObject<std::decay_t<T>>::value) {
+          detail::IsNativeCallableObject<std::decay_t<T>>::value || detail::IsNativeCallableConstructorObject<std::decay_t<T>>::value ||
+          detail::IsNativeConstructorObject<std::decay_t<T>>::value) {
         // A native callable can cross into an explicit `any` boundary, but
         // that boundary must observe the SAME function object.  Reusing the
         // callable's identity keeps properties written while it was native
@@ -10110,12 +10255,52 @@ class Value {
     return result;
   }
 
+  /**
+   * `callable`'s source box when it is a dynamic-to-native adapter, else what
+   * `box` makes of it. Emitted ABI-stating wrappers (`adaptSource` over a
+   * tuple rest or a receiver-taking parameter) are built before any box, so
+   * they ask this first rather than wrapping the adapter a second time.
+   */
+  template <typename T, typename Box>
+  static Value boxUnlessAdapted(const T& callable, Box&& box) {
+    Value source;
+    if (adaptedSource(callable, source)) return source;
+    return box(callable);
+  }
+
+  /** The source box a dynamic-to-native adapter packs (`detail::dynamicAdapterEntries`); `false` for any other value. */
+  template <typename T>
+  static bool adaptedSource(const T& value, Value& source) {
+    if constexpr (requires(const std::decay_t<T>& callable) { callable.invoke; callable.environment; }) {
+      if (value.environment != nullptr && detail::isDynamicAdapterEntry(reinterpret_cast<const void*>(value.invoke))) {
+        alignas(void*) unsigned char slot[sizeof(void*)];
+        source = *gea::unpackEnvironment<Value>(value.environment, slot);
+        return true;
+      }
+    }
+    return false;
+  }
+
   template <int RestFrom = -1, typename T>
   static Value boxMethod(T&& callable) {
+    Value source;
+    if (adaptedSource(callable, source)) return source;
     Value result;
     if constexpr (RestFrom < 0) result = box(Tag::Function, std::forward<T>(callable));
     else result = boxCallable<static_cast<std::size_t>(RestFrom)>(std::forward<T>(callable));
     result.receivesThis_ = true;
+    return result;
+  }
+
+  /**
+   * The same box, stating that the callable's absent result is `null`. A
+   * result carrier `gea::Optional<T>` records only presence, so its empty
+   * state leaves the thunk as `undefined`; the boxing site knows the ABI's
+   * result representation and says which absent value it means.
+   */
+  Value withNullAbsentResult() const {
+    Value result = *this;
+    result.resultAbsentIsNull_ = true;
     return result;
   }
 
@@ -10313,6 +10498,8 @@ class Value {
    */
   template <std::size_t RestFrom, typename T>
   static Value boxCallable(T&& value) {
+    Value source;
+    if (adaptedSource(value, source)) return source;
     Value result = box(Tag::Function, std::forward<T>(value));
     result.metadata_ = detail::valueMetadataFor<std::decay_t<T>, static_cast<int>(RestFrom)>();
     return result;
@@ -10419,6 +10606,7 @@ class Value {
   bool dynamic_ = false;
   bool proxy_ = false;
   bool receivesThis_ = false;
+  bool resultAbsentIsNull_ = false;
   bool inlineBoolean_ = false;
   const detail::ValueMetadata* metadata_ = &detail::emptyValueMetadata;
   gea::Ref<void> classObject_{};
@@ -11067,7 +11255,18 @@ class DynamicObject {
    */
   void setNativePrototype(Value boxedPrototype) { nativePrototype_ = std::move(boxedPrototype); }
   const Value& nativePrototype() const { return nativePrototype_; }
+  /**
+   * A compiled class INSTANCE standing in this chain (`Object.create(context)`):
+   * a lookup this object's own table misses reads the instance itself -- its
+   * fields as well as its class's methods -- live, through its own [[Get]].
+   */
+  void setNativeInstancePrototype(Value boxedInstance) { nativeInstance_ = std::move(boxedInstance); }
   bool readNativePrototype(const PropertyKey& key, Value& out) const {
+    if (nativeInstance_.tag() != Value::Tag::Undefined) {
+      if (!nativeInstance_.hasProperty(key)) return false;
+      out = nativeInstance_.getProperty(key);
+      return true;
+    }
     return nativePrototype_.tag() != Value::Tag::Undefined && nativePrototype_.readPrototypeMember(key, out);
   }
 
@@ -11220,6 +11419,7 @@ class DynamicObject {
   InternalBrand internalBrand_ = InternalBrand::None;
   gea::Ref<void> internalSlots_{};
   Value nativePrototype_{};
+  Value nativeInstance_{};
   gea::Ref<void> nativeBase_{};
   const void* nativeBaseClass_ = nullptr;
 };
@@ -11549,6 +11749,13 @@ class FunctionObjectIdentity {
 
 inline Ref<FunctionObjectIdentity> makeFunctionObjectIdentity() { return makeRef<FunctionObjectIdentity>(); }
 
+inline const Ref<FunctionObjectIdentity>& environmentFreeConstructorIdentity(const void* construct) {
+  static std::unordered_map<const void*, Ref<FunctionObjectIdentity>> identities;
+  Ref<FunctionObjectIdentity>& identity = identities[construct];
+  if (!identity) identity = makeFunctionObjectIdentity();
+  return identity;
+}
+
 /** One ClassDefinitionEvaluation owns one prototype's method objects. The
  * declaration token selects a native layout; it is never the allocation identity. */
 struct NativeClassMethodState {
@@ -11562,9 +11769,12 @@ struct NativeClassMethodState {
   Ref<void> prototypeObject;
   std::vector<std::pair<const void*, Ref<FunctionObjectIdentity>>> methods;
   std::vector<AdaptedMethod> adaptedMethods;
+  /** The class constructor's own Function object, minted when it is first boxed. */
+  EnvironmentIdentityHeader constructorIdentity;
 
   friend void geaTraceRefs(const NativeClassMethodState& value, detail::RefVisitor& visitor) {
     detail::traceRefs(value.parent, visitor);
+    detail::traceRefs(value.constructorIdentity.identity, visitor);
     detail::traceRefs(value.prototypeObject, visitor);
     for (const auto& entry : value.methods) detail::traceRefs(entry.second, visitor);
     for (const auto& entry : value.adaptedMethods) detail::traceRefs(entry.value, visitor);
@@ -11579,7 +11789,9 @@ inline Ref<NativeClassMethodState> nativeClassMethodStateFromEnvironment(void* e
 }
 
 inline PackedEnvironment nativeClassMethodEnvironment(Ref<NativeClassMethodState> state) {
-  return {state.get(), std::move(state)};
+  EnvironmentIdentityHeader* const header = state ? &state->constructorIdentity : nullptr;
+  void* const pointer = state.get();
+  return {pointer, std::move(state), header};
 }
 
 template <typename NativeClass>
@@ -11703,6 +11915,31 @@ inline const void* callableDeclarationIdentityOf(const Ref<FunctionObjectIdentit
   return functionObject ? functionObject->declarationIdentity : nullptr;
 }
 
+namespace detail {
+inline std::vector<const void*>& ordinaryConstructorDeclarations() {
+  static std::vector<const void*> declarations;
+  return declarations;
+}
+
+/** Records a source declaration MakeConstructor (ECMA-262 10.2.5) runs for; `identifyCallable` registers each once. */
+inline bool registerOrdinaryConstructor(const void* declaration) {
+  ordinaryConstructorDeclarations().push_back(declaration);
+  return true;
+}
+
+/** Whether a function object allocated from this declaration owns a `prototype` from creation. */
+inline bool isOrdinaryConstructorDeclaration(const void* declaration) {
+  if (declaration == nullptr) return false;
+  for (const void* entry : ordinaryConstructorDeclarations())
+    if (entry == declaration) return true;
+  return false;
+}
+
+inline bool isOrdinaryConstructorPrototypeRead(const Ref<FunctionObjectIdentity>& functionObject, const PropertyKey& key) {
+  return !key.isSymbol() && key.text() == "prototype" && isOrdinaryConstructorDeclaration(callableDeclarationIdentityOf(functionObject));
+}
+}  // namespace detail
+
 /**
  * Installs declaration identity without changing the callable's ABI, object
  * identity, or property table -- and, for a `CallableObject` with a heap
@@ -11725,9 +11962,13 @@ inline const void* callableDeclarationIdentityOf(const Ref<FunctionObjectIdentit
  * or an inline environment with no shared block) have no cheaper path: both
  * fall back to minting right here, exactly as before this existed.
  */
-template <auto Declaration, typename Callable>
+template <auto Declaration, bool OrdinaryConstructor = false, typename Callable>
 Callable identifyCallable(Callable callable) {
   const void* tag = detail::callableDeclarationTagFor<Declaration>();
+  if constexpr (OrdinaryConstructor) {
+    static const bool registered = detail::registerOrdinaryConstructor(tag);
+    (void)registered;
+  }
   if constexpr (requires(Callable& c) { c.identityHeader; }) {
     if (callable.functionObject) {
       installCallableDeclarationIdentity(callable.functionObject, tag);
@@ -11924,10 +12165,14 @@ inline bool callableDynamicSet(const CallableObject<Result(Arguments...)>& calla
   return identity->properties->set(key, value, Value::box(Value::Tag::Function, callable));
 }
 
+template <typename Callable>
+inline void installCallableConstructorPrototype(const Callable& callable);
+
 template <typename Result, typename... Arguments>
 inline Value callableDynamicGet(const CallableObject<Result(Arguments...)>& callable, const PropertyKey& key) {
   const auto& identity = callable.functionObjectIdentity();
   installCallableOwnFacts(identity, callable.name(), callable.length());
+  if (detail::isOrdinaryConstructorPrototypeRead(identity, key)) installCallableConstructorPrototype(callable);
   const Value receiver = Value::box(Value::Tag::Function, callable);
   if (identity->properties->hasProperty(key)) return identity->properties->get(key, receiver);
   if (!key.isSymbol() && key.text() == "constructor") return functionConstructorOf(identity);
@@ -12575,6 +12820,9 @@ inline const Value& finalizationRegistryConstructor() {
 
 namespace detail {
 
+/** The native match a boxed `exec` answer holds (`boxExecResult`), rebuilt; false for any other box. */
+bool rebuildBoxedExecResult(gea::Ref<gea::runtime::regex::ExecResult>& out, const Value& value);
+
 /**
  * The one thing this runtime cannot answer about a box, said out loud.
  *
@@ -13192,6 +13440,15 @@ T unboxValue(const Value& value, Value::Tag expected, const char* site) {
       if (adoptBoxedPromise(adopted, value)) return adopted;
     }
   }
+  // `regexp.exec(s)` through a box answers the Array the language builds; a
+  // slot the checker types `RegExpExecArray` holds that match as the native
+  // result the typed `exec` returns.
+  if constexpr (std::is_same_v<T, gea::Ref<gea::runtime::regex::ExecResult>>) {
+    if (value.tag() == Value::Tag::Object && value.payloadType() != payloadTypeTagFor<T>()) {
+      gea::Ref<gea::runtime::regex::ExecResult> rebuilt;
+      if (rebuildBoxedExecResult(rebuilt, value)) return rebuilt;
+    }
+  }
   return T(unboxAs<T>(value, expected, site));
 }
 
@@ -13208,6 +13465,68 @@ T unboxValue(const Value& value, Value::Tag expected, const char* site) {
  * the original allocation, never structural reconstruction and never a box
  * of an already typed object.
  */
+/**
+ * A fixed-tuple rest argument built for a boxed positional call. The filler
+ * is a generic lambda, so its member writes -- and this construction -- are
+ * instantiated only after every emitted struct is complete; the adapter can be
+ * spelled inside a record's own field hooks, where the tuple may not be yet.
+ */
+template <typename Struct, typename Fill>
+gea::Ref<Struct> makeSharedTupleRecord(Fill&& fill) {
+  auto tuple = makeRef<Struct>();
+  fill(*tuple);
+  return tuple;
+}
+template <typename Struct, typename Fill>
+Struct makeValueTupleRecord(Fill&& fill) {
+  Struct tuple{};
+  fill(tuple);
+  return tuple;
+}
+
+/**
+ * A compiler-owned record that states its required keys and its whole dynamic
+ * field protocol can be built from a plain object at a dynamic call boundary:
+ * the dynamic twin of the checked product `emit-narrowing.ts` renders for a
+ * static conversion. Class instances never qualify; their identity is their
+ * allocation.
+ */
+/** The value carrier of a `Dictionary<V>`; `value` is false for any other type. */
+template <typename T>
+struct DictionaryValueOf : std::false_type {};
+template <typename V>
+struct DictionaryValueOf<Dictionary<V>> : std::true_type {
+  using type = V;
+};
+template <typename V>
+gea::Ref<Dictionary<V>> unboxDynamicDictionary(const Value& value, const char* site);
+
+template <typename T>
+concept DynamicRecordRebuild = NativeFieldTable<T> && requires(std::vector<PropertyKey>& keys) { T::gea_requiredFieldKeys(keys); };
+
+/**
+ * Every own enumerable property of the object is written through the record's
+ * own `[[Set]]`: a declared field takes its checked typed write, and any other
+ * key lands in the record's expando table, so the rebuilt value keeps what
+ * the declared layout does not name. A missing required key, or a present
+ * value its field does not admit, refuses.
+ */
+template <typename T>
+gea::Ref<T> rebuildDynamicRecord(const Value& source) {
+  std::vector<PropertyKey> required;
+  T::gea_requiredFieldKeys(required);
+  PropertyDescriptor descriptor;
+  for (const PropertyKey& key : required)
+    if (!source.ownDescriptor(key, descriptor)) refusePayloadMismatch("a dynamic call argument lacks a required record field");
+  auto rebuilt = makeRef<T>();
+  for (const PropertyKey& key : source.ownPropertyKeys()) {
+    if (!source.ownDescriptor(key, descriptor) || !descriptor.enumerable) continue;
+    // Found by argument-dependent lookup: `nativeDynamicSet` is declared in `gea` after this template.
+    if (!nativeDynamicSet(rebuilt, key, source.getProperty(key))) refusePayloadMismatch("a dynamic call argument");
+  }
+  return rebuilt;
+}
+
 template <typename Target>
 gea::Ref<Target> unboxClassRef(const Value& value, const char* site) {
   const auto* target = &RefOperationsFor<Target>::table;
@@ -13583,6 +13902,23 @@ gea::Ref<T> nativeBaseOf(const Value& owner) {
   return gea::Ref<T>();
 }
 
+/**
+ * A compiled object handed to `Object.create` as a prototype, as a link of a
+ * dynamic prototype chain: one ordinary object per allocation, answering that
+ * object's own fields and inherited members. The facade holds the box, so the
+ * allocation it is keyed by cannot be reused while it is cached.
+ */
+inline Value nativeInstancePrototypeFacade(const Value& boxedInstance) {
+  static std::vector<std::pair<const void*, gea::Ref<DynamicObject>>> facades;
+  const void* identity = boxedInstance.classObject().get();
+  for (const auto& entry : facades)
+    if (entry.first == identity) return Value::fromDynamicObject(entry.second);
+  Value facade = Value::object();
+  facade.asDynamicObject()->setNativeInstancePrototype(boxedInstance);
+  facades.emplace_back(identity, facade.asDynamicObject());
+  return facade;
+}
+
 /** A compiled class's prototype object as a link of a dynamic prototype chain: one ordinary object per prototype, answering the class's methods. */
 inline Value nativePrototypeFacade(const Value& boxedPrototype) {
   static std::vector<std::pair<const void*, gea::Ref<DynamicObject>>> facades;
@@ -13600,13 +13936,35 @@ struct DynamicCarrier<gea::Ref<T>> {
   static constexpr bool supported = true;
   static Value out(const gea::Ref<T>& value) { return Value::box(Value::Tag::Object, value); }
   static bool accepts(const Value& value) {
+    if (value.tag() == Value::Tag::Object && value.payloadType() == payloadTypeTagFor<gea::Ref<T>>()) return true;
     return value.tag() == Value::Tag::Object && value.classObject() &&
            classIdentityExtends(value.classIdentity(), &RefOperationsFor<T>::table);
   }
   static gea::Ref<T> in(const Value& value, std::size_t position) {
     if (value.tag() == Value::Tag::Undefined) refuseMissingCallArgument(position);
+    // A record has no class identity to authenticate; the exact payload it
+    // was boxed with is the proof (avvio's `opts.expose = opts.expose || {}`
+    // writes fastify's own options record back into its field).
+    if (value.tag() == Value::Tag::Object && value.payloadType() == payloadTypeTagFor<gea::Ref<T>>())
+      return unboxAs<gea::Ref<T>>(value, Value::Tag::Object, "a dynamic call argument");
+    if constexpr (std::is_same_v<T, gea::runtime::regex::ExecResult>) {
+      gea::Ref<T> rebuilt;
+      if (rebuildBoxedExecResult(rebuilt, value)) return rebuilt;
+    }
     if (value.tag() == Value::Tag::Object && !value.classObject()) {
       if (gea::Ref<T> base = nativeBaseOf<T>(value)) return base;
+    }
+    // Every Ref payload keeps its erased allocation (`classObject_`), so a
+    // dictionary-backed object is no less plain than a DynamicObject here.
+    if constexpr (DynamicRecordRebuild<T>) {
+      if (value.tag() == Value::Tag::Object) return rebuildDynamicRecord<T>(value);
+    }
+    // A string-keyed dictionary is rebuilt from the object's own data
+    // properties, each checked into its value carrier, exactly as a static
+    // assertion into it is (`unboxDynamicDictionary`).
+    if constexpr (DictionaryValueOf<T>::value) {
+      if (value.tag() == Value::Tag::Object)
+        return unboxDynamicDictionary<typename DictionaryValueOf<T>::type>(value, "a dynamic call argument");
     }
     return unboxClassRef<T>(value, "a dynamic call argument");
   }
@@ -13665,6 +14023,16 @@ struct DynamicRestArgument {
   static constexpr bool supported = false;
 };
 
+/**
+ * One slot of a positional-record rest, boxed for a dynamic call's argument
+ * list (the translation unit's `DynamicRestArgument` specializations). A slot
+ * the integer pass narrowed is still a Number. The specialization compiles
+ * whether or not an adapter uses it, so a slot carrier with no box answer
+ * refuses by name when it is reached, not when it is spelled.
+ */
+template <typename T>
+inline Value restSlotBox(const T& slot);
+
 template <typename Element>
 struct DynamicRestArgument<gea::Ref<gea::ArrayObject<Element>>> {
   static constexpr bool supported = DynamicCallableCarrier<Element>::supported;
@@ -13682,6 +14050,18 @@ struct DynamicRestArgument<gea::Ref<gea::ArrayObject<Element>>> {
     }
   }
 };
+
+template <typename T>
+inline Value restSlotBox(const T& slot) {
+  if constexpr (std::is_integral_v<T> && !std::is_same_v<T, bool>) {
+    return DynamicCallableCarrier<double>::out(static_cast<double>(slot));
+  } else if constexpr (DynamicCallableCarrier<T>::supported) {
+    return DynamicCallableCarrier<T>::out(slot);
+  } else {
+    refusePayloadMismatch("a positional rest slot whose carrier has no box");
+    return Value();
+  }
+}
 
 /**
  * A function value crossing the boundary in the READ direction, and the one
@@ -13754,9 +14134,15 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
         value.restFrom() == targetRestFrom)
       return value.as<Self>();
     Self adapted(entry, gea::packEnvironment<Value>(value));
+    detail::dynamicAdapterEntries().insert(reinterpret_cast<const void*>(entry));
     // A dynamic-to-native ABI adapter changes only the invocation convention.
     // It is not a new Function allocation, so it must retain both object
-    // identity and the one own-property table of the boxed source.
+    // identity and the one own-property table of the boxed source. The
+    // source's own `name`/`length` are installed on that table first: the
+    // adapter's entry registers no facts, and the first reader through it
+    // would otherwise install an empty name and length 0 (avvio picks its
+    // callback's arguments by `length`).
+    (void)value.functionProperties();
     adapted.shareFunctionObject(value.functionObjectIdentity());
     return adapted;
   }
@@ -13907,6 +14293,16 @@ struct ReceiverDroppingCallableConstructor<CallableConstructorObject<Result(Rece
  * on the value -- so a box that is not a constructor throws the TypeError
  * `new` throws, where the language throws it.
  */
+/**
+ * A recursive container's wrapper (`recursive-containers.ts`) crosses a box as
+ * the runtime carrier it derives from: it adds no storage and no behavior,
+ * only the name that closes the recursive equation, and converts from that
+ * base.
+ */
+template <typename T>
+  requires(T::geaRecursiveContainerWrapper)
+struct DynamicCarrier<T> : DynamicCarrier<typename T::Base> {};
+
 template <typename Result, typename... Arguments, typename Constructed, typename... ConstructArguments>
 struct DynamicCarrier<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>> {
   using Self = CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>;
@@ -14126,10 +14522,13 @@ struct DynamicCarrier<ConstructorObject<Result(Arguments...)>> {
     // half too) constructs through its own [[Construct]].
     auto held = makeRef<Value>(value);
     Value* pointer = held.get();
-    return Self(+[](void* environment, Arguments... arguments) -> Result {
+    Self adapted(+[](void* environment, Arguments... arguments) -> Result {
       const Value constructed = static_cast<const Value*>(environment)->construct({DynamicCarrier<std::decay_t<Arguments>>::out(arguments)...});
       return DynamicCarrier<Result>::in(constructed, 0);
     }, PackedEnvironment{pointer, refCastToVoid(std::move(held))});
+    // Boxed again, the adapter is the function object it adapts.
+    adapted.functionObject = value.functionObjectIdentity();
+    return adapted;
   }
 };
 
@@ -14201,6 +14600,27 @@ void writeDynamicField(T& field, const Value& value, const char* owner, const ch
 }
 
 /**
+ * The same write into a callable field whose ABI's first slot is ECMAScript
+ * `this`. `in` would adapt a boxed function with that slot as an ordinary
+ * argument, so a later call through the field would hand the receiver to the
+ * first parameter: avvio's `server.ready = function (func) { ... }` then saw
+ * fastify itself as `func`.
+ */
+template <typename T>
+void writeDynamicReceiverField(T& field, const Value& value, const char* owner, const char* key) {
+  if constexpr (is_optional_v<T>) {
+    using Payload = std::remove_cvref_t<decltype(*field)>;
+    if (value.tag() == Value::Tag::Undefined || value.tag() == Value::Tag::Null) field = T();
+    else if constexpr (DynamicCarrier<Payload>::supported) field = T(DynamicCarrier<Payload>::inWithReceiver(value, 0));
+    else refuseUnaddressableField(owner, key);
+  } else if constexpr (DynamicCarrier<T>::supported) {
+    field = DynamicCarrier<T>::inWithReceiver(value, 0);
+  } else {
+    refuseUnaddressableField(owner, key);
+  }
+}
+
+/**
  * Test a dynamic write without instantiating an unavailable carrier API.
  *
  * Generated record hooks exist for every declared field, including native
@@ -14208,10 +14628,38 @@ void writeDynamicField(T& field, const Value& value, const char* owner, const ch
  * unused DefineOwnProperty branch must still be valid C++; an unsupported
  * carrier rejects the write instead of making the translation unit ill-formed.
  */
+/**
+ * What a write into a field of carrier `T` admits: what `DynamicCarrier<T>::in`
+ * can store. That is `accepts`, the exact test a union arm is chosen by,
+ * except for a callable, which the adapter wraps whatever function it is
+ * handed (avvio's `server[readyKey] = function (func) { ... }` over fastify's
+ * `ready` field, which holds fastify's own `ready`).
+ */
+template <typename T>
+struct DynamicFieldAdmission {
+  static bool admits(const Value& value) {
+    if constexpr (DynamicCarrier<T>::supported) return DynamicCarrier<T>::accepts(value);
+    else return false;
+  }
+};
+
+template <typename Result, typename... Arguments>
+struct DynamicFieldAdmission<CallableObject<Result(Arguments...)>> {
+  static bool admits(const Value& value) {
+    return DynamicCarrier<CallableObject<Result(Arguments...)>>::supported && value.tag() == Value::Tag::Function;
+  }
+};
+
+template <typename T>
+struct DynamicFieldAdmission<Optional<T>> {
+  static bool admits(const Value& value) {
+    return value.tag() == Value::Tag::Undefined || value.tag() == Value::Tag::Null || DynamicFieldAdmission<T>::admits(value);
+  }
+};
+
 template <typename T>
 bool dynamicFieldAccepts(const Value& value) {
-  if constexpr (DynamicCarrier<T>::supported) return DynamicCarrier<T>::accepts(value);
-  else return false;
+  return DynamicFieldAdmission<T>::admits(value);
 }
 
 /**
@@ -14225,7 +14673,19 @@ bool dynamicFieldAccepts(const Value& value) {
  * does not allocate a boxed copy of a native value merely to run the
  * descriptor algorithm.
  */
-template <typename T>
+/** A descriptor's value for a field of `T`; `Receiver` adapts a callable's first slot as `this` (`writeDynamicReceiverField`). */
+template <typename T, bool Receiver>
+T dynamicFieldDescriptorValue(const Value& value) {
+  if constexpr (Receiver) {
+    T out{};
+    writeDynamicReceiverField(out, value, "a native field descriptor", "value");
+    return out;
+  } else {
+    return DynamicFieldDescriptorAdapter<T>::in(value);
+  }
+}
+
+template <bool Receiver = false, typename T>
 bool applyNativeDynamicFieldDescriptor(
     T& value, NativeIndexAttributes& attributes, bool& present,
     const PropertyDescriptor& incoming, bool extensible, bool allowsUndefined, bool allowsNull,
@@ -14248,7 +14708,7 @@ bool applyNativeDynamicFieldDescriptor(
     if (incoming.hasValue || !present) {
       if ((candidate.tag() == Value::Tag::Undefined && !allowsUndefined) ||
           (candidate.tag() == Value::Tag::Null && !allowsNull)) return false;
-      if (!DynamicCarrier<T>::accepts(candidate)) return false;
+      if (!DynamicFieldAdmission<T>::admits(candidate)) return false;
     }
 
     if (present && !attributes.configurable) {
@@ -14257,7 +14717,7 @@ bool applyNativeDynamicFieldDescriptor(
       if (!attributes.writable) {
         if (incoming.hasWritable && incoming.writable) return false;
         if (incoming.hasValue) {
-          const T incomingNative = DynamicFieldDescriptorAdapter<T>::in(incoming.value);
+          const T incomingNative = dynamicFieldDescriptorValue<T, Receiver>(incoming.value);
           if (!detail::sameNativeFieldValue(value, incomingNative)) return false;
         }
       }
@@ -14266,7 +14726,7 @@ bool applyNativeDynamicFieldDescriptor(
     // Only a supplied value, or the undefined value required for a new
     // optional property, mutates the carrier. Generic/attribute-only updates
     // leave it untouched.
-    if (incoming.hasValue || !present) value = DynamicFieldDescriptorAdapter<T>::in(candidate);
+    if (incoming.hasValue || !present) value = dynamicFieldDescriptorValue<T, Receiver>(candidate);
     if (!present) attributes = NativeIndexAttributes{false, false, false};
     if (incoming.hasWritable) attributes.writable = incoming.writable;
     if (incoming.hasEnumerable) attributes.enumerable = incoming.enumerable;
@@ -14370,9 +14830,9 @@ const NativeArrayOps* nativeArrayOpsFor() {
  * preserves holes and length, and lets `DynamicCarrier<Element>::in` reject a
  * mismatched element by name rather than reinterpret its bytes.
  */
-template <typename Element>
-gea::Ref<ArrayObject<Element>> unboxDynamicArray(const Value& value, const char* site) {
-  using Target = gea::Ref<ArrayObject<Element>>;
+template <typename Element, typename Container = ArrayObject<Element>>
+gea::Ref<Container> unboxDynamicArray(const Value& value, const char* site) {
+  using Target = gea::Ref<Container>;
   if (value.tag() != Value::Tag::Object || !value.isArrayPayload()) {
     std::fprintf(stderr, "gea: %s expected an Array\n", site);
     gea::detail::abortAfterFlush();
@@ -14383,7 +14843,7 @@ gea::Ref<ArrayObject<Element>> unboxDynamicArray(const Value& value, const char*
     gea::detail::abortAfterFlush();
   } else {
     const std::size_t length = value.dynamicArrayLength(site);
-    auto result = gea::makeRef<ArrayObject<Element>>();
+    auto result = gea::makeRef<Container>();
     result->setLength(static_cast<double>(length));
     for (std::size_t index = 0; index < length; index += 1) {
       Value element;
@@ -14421,20 +14881,31 @@ template <typename V>
 gea::Ref<Dictionary<V>> unboxDynamicDictionary(const Value& value, const char* site) {
   using Target = gea::Ref<Dictionary<V>>;
   if (value.tag() == Value::Tag::Object && value.payloadType() == payloadTypeTagFor<Target>()) return value.as<Target>();
-  const gea::Ref<DynamicObject> table = value.tag() == Value::Tag::Object ? value.asDynamicObject() : gea::Ref<DynamicObject>();
-  if (!table) {
+  if (value.tag() != Value::Tag::Object) {
     std::fprintf(stderr, "gea: %s expected an object\n", site);
     gea::detail::abortAfterFlush();
   }
+  const gea::Ref<DynamicObject> table = value.asDynamicObject();
   if constexpr (!DynamicCarrier<V>::supported) {
     std::fprintf(stderr, "gea: %s cannot convert this object's dynamic properties to the requested native carrier\n", site);
     gea::detail::abortAfterFlush();
   } else {
     auto result = gea::makeRef<Dictionary<V>>();
     std::size_t index = 0;
-    for (const auto& property : table->properties()) {
-      if (property.key.isSymbol() || !property.descriptor.enumerable || property.descriptor.isAccessor()) continue;
-      (*result)[property.key.text()] = DynamicCarrier<V>::in(property.descriptor.value, index++);
+    if (table) {
+      for (const auto& property : table->properties()) {
+        if (property.key.isSymbol() || !property.descriptor.enumerable || property.descriptor.isAccessor()) continue;
+        (*result)[property.key.text()] = DynamicCarrier<V>::in(property.descriptor.value, index++);
+      }
+      return result;
+    }
+    // Any other object -- a dictionary- or record-backed box, fastify's reply
+    // headers -- answers the same own enumerable string-keyed data properties
+    // through its own reflection.
+    PropertyDescriptor descriptor;
+    for (const PropertyKey& key : value.ownPropertyKeys()) {
+      if (key.isSymbol() || !value.ownDescriptor(key, descriptor) || !descriptor.enumerable || descriptor.isAccessor()) continue;
+      (*result)[key.text()] = DynamicCarrier<V>::in(value.getProperty(key), index++);
     }
     return result;
   }
@@ -15380,7 +15851,15 @@ bool nativeDynamicRead(const gea::Ref<T>& object, const PropertyKey& key, Value&
     if (object->gea_matchesOwnIndex(key)) return false;
   }
   const gea::Ref<DynamicObject> expando = detail::expandoFor(gea::refCastToVoid(object), false);
-  return expando && expando->readWithReceiver(key, [&] { return Value::box(Value::Tag::Object, object); }, answer);
+  if (expando && expando->readWithReceiver(key, [&] { return Value::box(Value::Tag::Object, object); }, answer)) return true;
+  // [[Get]] continues to the prototype once no own property answers: a class
+  // instance's methods live on its generated prototype reader, which a box of
+  // the same instance already consults (avvio's `this[kAddNode](...)`, a
+  // symbol-keyed method read through a computed key).
+  if constexpr (requires(const T& reader) { reader.gea_readPrototypeProperty(key, answer); }) {
+    return object->gea_readPrototypeProperty(key, answer);
+  }
+  return false;
 }
 
 // A certified missing property still evaluates its receiver/key and throws on
@@ -15855,12 +16334,13 @@ inline Value Value::callWithReceiver(const Value& receiver, const std::vector<Va
   // `nativeCallOpsFor`), so both halves of the null check are needed to
   // refuse exactly the cases this always refused.
   if (metadata_->calls == nullptr || metadata_->calls->call == nullptr) detail::refuseNotCallable();
-  if (!receivesThis_) return metadata_->calls->call(held_.get(), arguments.data(), arguments.size());
+  const auto absent = [this](Value result) { return resultAbsentIsNull_ && result.tag() == Tag::Undefined ? Value::box(Tag::Null, nullptr) : result; };
+  if (!receivesThis_) return absent(metadata_->calls->call(held_.get(), arguments.data(), arguments.size()));
   std::vector<Value> frame;
   frame.reserve(arguments.size() + 1);
   frame.push_back(receiver);
   frame.insert(frame.end(), arguments.begin(), arguments.end());
-  return metadata_->calls->call(held_.get(), frame.data(), frame.size());
+  return absent(metadata_->calls->call(held_.get(), frame.data(), frame.size()));
 }
 
 namespace detail {
@@ -15996,11 +16476,28 @@ inline const Value& intrinsicConstructorBox() {
 }
 
 /**
+ * `Boolean` is the one intrinsic constructor a program routinely hands out to
+ * be CALLED (`values.filter(Boolean)`), so its one box is a function: 20.3.1.1
+ * `Boolean(value)` is ToBoolean(value), and a missing argument is `undefined`,
+ * which is `false`. It stays the one box every spelling of `Boolean` boxes to.
+ */
+template <>
+inline const Value& intrinsicConstructorBox<gea_native_protocol_BooleanConstructor_v1>() {
+  static const Value box = Value::box(
+      Value::Tag::Function,
+      CallableObject<Value(Value)>(
+          +[](void*, Value value) -> Value { return Value::box(Value::Tag::Boolean, gea::host::detail::toBoolean(value)); }, nullptr));
+  return box;
+}
+
+/**
  * A boxed Date's or RegExp's `constructor`: its intrinsic (21.4.4.1,
  * 22.2.6.1). Defined at the end of this header, where both structs are complete.
  */
 inline bool boxedNativeConstructor(const Value& value, Value& out);
 inline bool boxedNativeMethod(const Value& self, const PropertyKey& key, Value& out);
+/** A host handle's box answers its intrinsic's own members (`Object.prototype.toString` read off the boxed prototype). Defined in `gea_dynamic_proxy.h`, after `objectTag`. */
+inline bool hostHandleMember(const Value& self, const PropertyKey& key, Value& out);
 
 /** A boxed Array's or typed array's `constructor`: its kind's intrinsic (23.1.3.1, 23.2.3.5). */
 inline Value boxedViewConstructor(const Value& view) {
@@ -16084,6 +16581,10 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
     return dynamicArrayPrototypeGet(key);
   }
   if (tag_ == Tag::Function) {
+    PropertyDescriptor ownPrototype;
+    if (detail::isOrdinaryConstructorPrototypeRead(functionObject_, key) && functionProperties() &&
+        !functionProperties()->ownDescriptor(key, ownPrototype))
+      gea::host::installOrdinaryConstructorPrototype(*this);
     const Ref<DynamicObject>& properties = functionProperties();
     if (properties && properties->hasProperty(key)) return properties->get(key, receiver);
     Value classStatic;
@@ -16105,6 +16606,11 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
     if (detail::boxedNativeMethod(*this, key, method)) return method;
     Value own;
     if (detail::boxedTypedArrayOwn(*this, key, own)) return own;
+    if (metadata_->hostHandle) {
+      const auto expando = detail::expandoFor(expandoAnchor(), false);
+      if (expando && expando->hasProperty(key)) return expando->get(key, receiver);
+      if (detail::hostHandleMember(*this, key, own)) return own;
+    }
   }
   if (tag_ == Tag::Object || tag_ == Tag::Function) detail::refuseOpaquePropertyAccess("a property read", key);
   if (!key.isSymbol() && key.text() == "constructor") {
@@ -16291,8 +16797,18 @@ inline bool Value::hasProperty(const PropertyKey& key) const {
     return (expando && expando->hasProperty(key)) || dynamicArrayPrototypeGet(key).tag() != Tag::Undefined;
   }
   if (tag_ == Tag::Function) {
+    if (detail::isOrdinaryConstructorPrototypeRead(functionObject_, key)) return true;
     const Ref<DynamicObject>& properties = functionProperties();
     return (properties && properties->hasProperty(key)) || dynamicFunctionPrototypeGet(key).tag() != Tag::Undefined;
+  }
+  // A host handle's box (`Object.prototype` read off a box, fastify's and
+  // safe-stable-stringify's `const hasOwnProperty = Object.prototype.hasOwnProperty`)
+  // holds as its own only what the program added; the handle's members are the
+  // host's, which the emitter answers statically beside this test.
+  if (metadata_->hostHandle) {
+    const auto expando = detail::expandoFor(expandoAnchor(), false);
+    Value member;
+    return (expando && expando->hasProperty(key)) || detail::hostHandleMember(*this, key, member);
   }
   if (tag_ == Tag::Object || tag_ == Tag::Function) detail::refuseOpaquePropertyAccess("a property test", key);
   return false;
@@ -19206,6 +19722,10 @@ struct MatchSlice {
   std::vector<gea::Optional<std::string>> captures;
 };
 
+struct Pattern;
+/** `RegExp.prototype.exec` as the dynamic side reads it (`detail::boxExecResult`). */
+inline gea::Value boxedExec(const Pattern &pattern, const std::string &input);
+
 // v1: `gea::runtime::regex::Pattern`.
 struct Pattern {
   // ECMAScript-spec named slots for `RegExp.prototype.{source,flags,...}` so
@@ -19482,7 +20002,14 @@ struct Pattern {
             return gea::Value::box(gea::Value::Tag::Boolean, pattern->test(gea::dynamicToString(input)));
           },
           nullptr});
-    else if (name == "exec" || name == "compile")
+    else if (name == "exec")
+      out = gea::Value::boxMethod<-1>(gea::CallableObject<gea::Value(gea::Value, gea::Value)>{
+          +[](void*, gea::Value receiver, gea::Value input) -> gea::Value {
+            const auto& pattern = gea::detail::unboxAs<gea::Ref<Pattern>>(receiver, gea::Value::Tag::Object, "RegExp.prototype.exec receiver");
+            return boxedExec(*pattern, gea::dynamicToString(input));
+          },
+          nullptr});
+    else if (name == "compile")
       throwTypeError("Dynamic RegExp prototype-method reads are not implemented");
     else return false;
     return true;
@@ -20122,6 +20649,61 @@ inline gea::Optional<gea::Ref<ExecResult>> exec(const Pattern &pattern, const st
   for (const gea::Optional<std::string> &capture : slice.captures) out->pushCapture(capture);
   return gea::Optional<gea::Ref<ExecResult>>(out);
 }
+
+inline gea::Value boxedExec(const Pattern &pattern, const std::string &input) {
+  const gea::Optional<gea::Ref<ExecResult>> result = exec(pattern, input);
+  if (!result.has_value()) return gea::Value::box(gea::Value::Tag::Null, nullptr);
+  return gea::detail::boxExecResult(*result);
+}
+
+}  // namespace gea::runtime::regex
+
+namespace gea::detail {
+
+inline Value boxExecResult(const gea::Ref<gea::runtime::regex::ExecResult>& result) {
+  const gea::runtime::regex::ExecResult& matched = *result;
+  auto elements = gea::makeRef<gea::ArrayObject<Value>>();
+  for (std::size_t slot = 0; slot < matched.size(); ++slot) {
+    const gea::Optional<std::string> capture = matched.capturedOrAbsent(static_cast<double>(slot));
+    elements->push(capture.has_value() ? Value::box(Value::Tag::String, *capture) : Value());
+  }
+  Value boxed = Value::box(Value::Tag::Object, elements);
+  boxed.setProperty(PropertyKey::string("index"), Value::box(Value::Tag::Number, matched.index));
+  boxed.setProperty(PropertyKey::string("input"), Value::box(Value::Tag::String, matched.input));
+  Value groups;
+  if (matched.groups.has_value() && *matched.groups) {
+    auto table = gea::makeRef<gea::Dictionary<Value>>();
+    for (const std::string& name : (*matched.groups)->propertyKeys()) (*table)[name] = Value::box(Value::Tag::String, (*matched.groups)->read(name));
+    groups = Value::box(Value::Tag::Object, table);
+  }
+  boxed.setProperty(PropertyKey::string("groups"), groups);
+  return boxed;
+}
+
+inline bool rebuildBoxedExecResult(gea::Ref<gea::runtime::regex::ExecResult>& out, const Value& value) {
+  if (!value.isArrayPayload() || value.getProperty(PropertyKey::string("index")).tag() != Value::Tag::Number) return false;
+  auto rebuilt = gea::makeRef<gea::runtime::regex::ExecResult>();
+  const double length = dynamicToNumber(value.getProperty(PropertyKey::string("length")));
+  for (double slot = 0; slot < length; ++slot) {
+    const Value element = value.getProperty(PropertyKey::number(slot));
+    rebuilt->pushCapture(element.tag() == Value::Tag::Undefined ? gea::Optional<std::string>() : gea::Optional<std::string>(dynamicToString(element)));
+  }
+  rebuilt->index = dynamicToNumber(value.getProperty(PropertyKey::string("index")));
+  rebuilt->input = dynamicToString(value.getProperty(PropertyKey::string("input")));
+  const Value groups = value.getProperty(PropertyKey::string("groups"));
+  if (groups.tag() == Value::Tag::Object) {
+    auto table = gea::makeRef<gea::Dictionary<std::string>>();
+    for (const PropertyKey& key : groups.ownPropertyKeys())
+      if (!key.isSymbol()) (*table)[key.text()] = dynamicToString(groups.getProperty(key));
+    rebuilt->groups = gea::Optional<gea::Ref<gea::Dictionary<std::string>>>(table);
+  }
+  out = rebuilt;
+  return true;
+}
+
+}  // namespace gea::detail
+
+namespace gea::runtime::regex {
 
 }  // namespace gea::runtime::regex
 
@@ -20991,6 +21573,10 @@ auto map(const gea::Ref<ArrayObject<E>>& array, const Callable& fn) {
 template <typename Callable, typename E>
 auto fromCall(const Callable& fn, const E& element, double index) {
   if constexpr (std::is_invocable_v<const Callable&, const E&, double>) return fn(element, index);
+  // `Array.from({ length }, (_, i) => ...)` hands the callback `undefined`;
+  // a callback whose first parameter is boxed takes it as the box.
+  else if constexpr (std::is_same_v<E, Undefined> && std::is_invocable_v<const Callable&, const Value&, double>) return fn(Value(), index);
+  else if constexpr (std::is_same_v<E, Undefined> && std::is_invocable_v<const Callable&, const Value&>) return fn(Value());
   else if constexpr (std::is_invocable_v<const Callable&, const E&>) return fn(element);
   else if constexpr (std::is_invocable_v<const Callable&>) return fn();
   else if constexpr (std::is_invocable_v<const Callable&, Undefined, const E&, double>) return fn(Undefined{}, element, index);
@@ -23008,13 +23594,28 @@ const E& elementOrRefuse(const gea::Ref<ArrayObject<E>>& array, std::size_t inde
  * that takes one, so a fixed three-argument invocation would refuse the common
  * case.
  */
+/**
+ * ECMA-262 7.1.2 ToBoolean of a predicate's result (`filter`, `find`,
+ * `findIndex`, `some`, `every` each test it). A callback typed to answer a box,
+ * an optional, a number or a string answers what that is truthy as.
+ */
+template <typename T>
+inline bool predicateHolds(const T& result) {
+  if constexpr (std::is_same_v<T, bool>) return result;
+  else if constexpr (std::is_same_v<T, Value>) return gea::host::detail::toBoolean(result);
+  else if constexpr (gea::is_optional_v<T>) return result.has_value() && predicateHolds(*result);
+  else if constexpr (std::is_floating_point_v<T>) return result == result && result != 0;
+  else if constexpr (std::is_same_v<T, std::string>) return !result.empty();
+  else return static_cast<bool>(result);
+}
+
 template <typename E, typename Callable>
 gea::Ref<ArrayObject<E>> filter(const gea::Ref<ArrayObject<E>>& array, const Callable& fn) {
   auto kept = gea::makeRef<ArrayObject<E>>();
   if (!array) return kept;
   for (std::size_t index = 0; index < array->size(); ++index) {
     if (!array->present(index)) continue;
-    if (mapCall(fn, array->at(index), static_cast<double>(index), array)) kept->push(array->at(index));
+    if (predicateHolds(mapCall(fn, array->at(index), static_cast<double>(index), array))) kept->push(array->at(index));
   }
   return kept;
 }
@@ -23045,7 +23646,7 @@ gea::Ref<ArrayObject<R>> filterNarrowed(const gea::Ref<ArrayObject<E>>& array, c
   if (!array) return kept;
   for (std::size_t index = 0; index < array->size(); ++index) {
     if (!array->present(index)) continue;
-    if (mapCall(fn, array->at(index), static_cast<double>(index), array)) kept->push(project(array->at(index)));
+    if (predicateHolds(mapCall(fn, array->at(index), static_cast<double>(index), array))) kept->push(project(array->at(index)));
   }
   return kept;
 }
@@ -23072,7 +23673,7 @@ gea::Optional<E> find(const gea::Ref<ArrayObject<E>>& array, const Callable& fn)
   if (!array) return gea::Optional<E>();
   for (std::size_t index = 0; index < array->size(); ++index) {
     const E& element = elementOrRefuse(array, index, "find");
-    if (mapCall(fn, element, static_cast<double>(index), array)) return gea::Optional<E>(element);
+    if (predicateHolds(mapCall(fn, element, static_cast<double>(index), array))) return gea::Optional<E>(element);
   }
   return gea::Optional<E>();
 }
@@ -23082,7 +23683,7 @@ double findIndex(const gea::Ref<ArrayObject<E>>& array, const Callable& fn) {
   if (!array) return -1.0;
   for (std::size_t index = 0; index < array->size(); ++index) {
     const E& element = elementOrRefuse(array, index, "findIndex");
-    if (mapCall(fn, element, static_cast<double>(index), array)) return static_cast<double>(index);
+    if (predicateHolds(mapCall(fn, element, static_cast<double>(index), array))) return static_cast<double>(index);
   }
   return -1.0;
 }
@@ -23093,7 +23694,7 @@ bool some(const gea::Ref<ArrayObject<E>>& array, const Callable& fn) {
   if (!array) return false;
   for (std::size_t index = 0; index < array->size(); ++index) {
     if (!array->present(index)) continue;
-    if (mapCall(fn, array->at(index), static_cast<double>(index), array)) return true;
+    if (predicateHolds(mapCall(fn, array->at(index), static_cast<double>(index), array))) return true;
   }
   return false;
 }
@@ -23104,7 +23705,7 @@ bool every(const gea::Ref<ArrayObject<E>>& array, const Callable& fn) {
   if (!array) return true;
   for (std::size_t index = 0; index < array->size(); ++index) {
     if (!array->present(index)) continue;
-    if (!mapCall(fn, array->at(index), static_cast<double>(index), array)) return false;
+    if (!predicateHolds(mapCall(fn, array->at(index), static_cast<double>(index), array))) return false;
   }
   return true;
 }
@@ -23600,11 +24201,29 @@ gea::Ref<ArrayObject<E>> sortIndexedProperties(const gea::Ref<ArrayObject<E>>& a
  * `NaN` as "keep the existing relative order", which a stable sort with a
  * strictly-less predicate already delivers.
  */
+template <typename E>
+gea::Ref<ArrayObject<E>> sortDefault(const gea::Ref<ArrayObject<E>>& array);
+
 template <typename E, typename Callable>
 gea::Ref<ArrayObject<E>> sort(const gea::Ref<ArrayObject<E>>& array, const Callable& comparefn) {
+  // Step 1: an undefined comparator is the default order; anything else that
+  // is not callable is a TypeError before any element is compared.
+  if constexpr (std::is_same_v<Callable, gea::Value>) {
+    if (comparefn.tag() == gea::Value::Tag::Undefined) {
+      if constexpr (requires(const E& value) { gea::host::detail::toString(value); }) return sortDefault(array);
+    }
+    if (comparefn.tag() != gea::Value::Tag::Function)
+      gea::host::throwRuntimeError("TypeError", "The comparison function must be either a function or undefined");
+  }
   return sortIndexedProperties(array, [&comparefn](const E& left, const E& right) {
     if constexpr (std::is_invocable_v<const Callable&, const E&, const E&>) {
       return comparefn(left, right) < 0.0;
+    } else if constexpr (std::is_same_v<Callable, gea::Value> && gea::detail::DynamicCarrier<E>::supported) {
+      // A comparator that is itself a box: called through it, and read as
+      // step 1's `ToNumber(Call(comparefn, undefined, x, y))`.
+      const gea::Value order = comparefn.callWithReceiver(
+          gea::Value(), {gea::detail::DynamicCarrier<E>::out(left), gea::detail::DynamicCarrier<E>::out(right)});
+      return gea::dynamicToNumber(order) < 0.0;
     } else if constexpr (gea::detail::DynamicCarrier<E>::supported &&
                          std::is_invocable_v<const Callable&, gea::Value, gea::Value>) {
       // `Array<T>.sort((a: any, b: any) => ...)`: T remains native in the
@@ -24466,11 +25085,10 @@ inline constexpr double SQRT2 = 1.41421356237309504880;
  *
  * `isInteger` and `isFinite` declare their parameter `unknown` in
  * `lib.es2015.core.d.ts`, and their first specified step is "if the argument
- * is not a Number, return false" (ECMA-262 21.1.2.3 / 21.1.2.2). Only the
- * Number case is spelled here: answering the others would mean carrying a
- * boxed argument to ask what it is at runtime, and this backend has no box.
- * A call on any other carrier is a clang error naming this overload set,
- * which is a refusal -- not a silent `false` for a value that is an integer.
+ * is not a Number, return false" (ECMA-262 21.1.2.3 / 21.1.2.2). A `double`
+ * is a Number, and a box answers the step from its own tag. Any other static
+ * carrier is a clang error naming this overload set, which is a refusal -- not
+ * a silent `false` for a value that is an integer.
  *
  * Free functions, not `CallableObject` constants like `Math::floor`: a
  * callable's C++ signature would be `bool(double)`, and the checker's own
@@ -24501,6 +25119,29 @@ inline bool isSafeInteger(double value) {
          static_cast<double>(static_cast<std::int64_t>(value)) == value;
 }
 bool isSafeInteger(bool) = delete;
+
+inline bool isInteger(const Value& value) {
+  return value.tag() == Value::Tag::Number && isInteger(gea::detail::unboxValue<double>(value, Value::Tag::Number, "Number.isInteger"));
+}
+inline bool isFinite(const Value& value) {
+  return value.tag() == Value::Tag::Number && isFinite(gea::detail::unboxValue<double>(value, Value::Tag::Number, "Number.isFinite"));
+}
+inline bool isNaN(const Value& value) {
+  return value.tag() == Value::Tag::Number && isNaN(gea::detail::unboxValue<double>(value, Value::Tag::Number, "Number.isNaN"));
+}
+/** An absent optional is `undefined`, which is not a Number. */
+template <typename T>
+inline bool isInteger(const Optional<T>& value) { return value.has_value() && isInteger(*value); }
+template <typename T>
+inline bool isFinite(const Optional<T>& value) { return value.has_value() && isFinite(*value); }
+template <typename T>
+inline bool isNaN(const Optional<T>& value) { return value.has_value() && isNaN(*value); }
+template <typename T>
+inline bool isSafeInteger(const Optional<T>& value) { return value.has_value() && isSafeInteger(*value); }
+inline bool isSafeInteger(const Value& value) {
+  return value.tag() == Value::Tag::Number &&
+         isSafeInteger(gea::detail::unboxValue<double>(value, Value::Tag::Number, "Number.isSafeInteger"));
+}
 
 // The `NumberConstructor` data properties -- 21.1.2.1 `EPSILON`, .6
 // `MAX_SAFE_INTEGER`, .7 `MAX_VALUE`, .8 `MIN_SAFE_INTEGER`, .9 `MIN_VALUE`.
@@ -24621,6 +25262,9 @@ inline double parseInt(const std::string &value, double radix = 0.0) {
  * `gea::host::detail::toNumber(const std::string&)` above already carries,
  * reused here rather than restated.
  */
+/** 19.2.5 step 1 is `ToString(string)`: a boxed argument is read as its string. */
+inline double parseInt(const Value& value, double radix = 0.0) { return parseInt(gea::host::detail::toString(value), radix); }
+
 inline double parseFloat(const std::string &value) {
   const double nan = std::numeric_limits<double>::quiet_NaN();
   std::size_t index = detail::leadingWhiteSpace(value);
@@ -25173,11 +25817,12 @@ inline gea::Ref<Derived> downcastClassRef(const gea::Ref<Base>& ref) {
 namespace ErrorConstructor {
 
 /**
- * V8's `Error.stackTraceLimit`: an ordinary writable number, Node's default
- * 10. This target records no stack frames, so the limit bounds nothing; it
- * is still the value a program reads back after writing it.
+ * V8's `Error.stackTraceLimit`: an ordinary writable property, Node's default
+ * 10, that holds whatever a program stores. This target records no stack
+ * frames, so the limit bounds nothing; it is still the value a program reads
+ * back after writing it.
  */
-inline double stackTraceLimit = 10;
+inline gea::Value stackTraceLimit = gea::Value::box(gea::Value::Tag::Number, 10.0);
 
 /** V8's `Error.prepareStackTrace`: stored and read back, never called -- there are no frames to format. */
 inline gea::Value prepareStackTrace;
@@ -29506,11 +30151,17 @@ namespace gea::runtime::object {
 
 inline Value create(const Value& prototype, const Value& properties) {
   Value object = Value::object();
-  if (prototype.tag() == Value::Tag::Object || prototype.tag() == Value::Tag::Function) {
+  // %Object.prototype% itself (pino's `Object.create(Object.prototype, ...)`,
+  // through the handle's box): an ordinary object of this runtime already
+  // answers that prototype's members without a linked table, so there is
+  // nothing to link.
+  const bool ordinaryPrototype =
+      prototype.payloadType() == gea::detail::payloadTypeTagFor<gea::NativeHandle<gea_native_protocol_Object_prototype_v1>>();
+  if (!ordinaryPrototype && (prototype.tag() == Value::Tag::Object || prototype.tag() == Value::Tag::Function)) {
     const gea::Ref<DynamicObject> link = gea::host::ObjectConstructor::prototypeLinkOf(prototype);
     if (!link) gea::host::throwRuntimeError("TypeError", "Object prototype may only be an Object or null: a native object has no prototype this runtime can link to");
     object.asDynamicObject()->setPrototype(link);
-  } else if (prototype.tag() != Value::Tag::Null) {
+  } else if (!ordinaryPrototype && prototype.tag() != Value::Tag::Null) {
     gea::host::throwRuntimeError("TypeError", "Object prototype may only be an Object or null");
   }
   if (properties.tag() != Value::Tag::Undefined) defineProperties(object, properties);
@@ -29915,12 +30566,15 @@ inline gea::Ref<gea::DynamicObject> prototypeSlotOf(const gea::Value& value) {
  * The object a `[[Prototype]]` slot links to for a value handed in as a
  * prototype: an ordinary object itself, or -- for a compiled class's prototype
  * object (`Object.setPrototypeOf(proto, EventEmitter.prototype)`) -- its
- * facade. A native class INSTANCE has no link this runtime can make.
+ * facade, and for a compiled instance (`Object.create(context)`), the facade
+ * that reads that instance live.
  */
 inline gea::Ref<gea::DynamicObject> prototypeLinkOf(const gea::Value& value) {
   if (gea::Ref<gea::DynamicObject> slot = prototypeSlotOf(value)) return slot;
   if (value.tag() == gea::Value::Tag::Object && gea::detail::nativePrototypeObjects().count(value.classObject().get()))
     return gea::detail::nativePrototypeFacade(value).asDynamicObject();
+  if (value.tag() == gea::Value::Tag::Object && value.classObject())
+    return gea::detail::nativeInstancePrototypeFacade(value).asDynamicObject();
   return gea::Ref<gea::DynamicObject>();
 }
 
@@ -31976,6 +32630,16 @@ inline std::string encodeUri(bool value) { return encodeImpl(gea::host::detail::
 inline std::string encodeUriComponent(const std::string& value) { return encodeImpl(value, true); }
 inline std::string encodeUriComponent(double value) { return encodeImpl(gea::host::detail::toString(value), true); }
 inline std::string encodeUriComponent(bool value) { return encodeImpl(gea::host::detail::toString(value), true); }
+inline std::string encodeUriComponent(const Value& value) { return encodeImpl(gea::host::detail::toString(value), true); }
+/** Step 1's ToString of a sum: each arm is one of the carriers the overloads above take. */
+template <typename... Arms>
+inline std::string encodeUriComponent(const TaggedUnion<Arms...>& value) {
+  std::string out;
+  [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
+    ((value.index() == Indices ? (out = encodeUriComponent(value.template get<Indices>()), 0) : 0), ...);
+  }(std::index_sequence_for<Arms...>{});
+  return out;
+}
 inline std::string decodeUri(const std::string& value) { return decodeImpl(value, false); }
 inline std::string decodeUri(double value) { return decodeImpl(gea::host::detail::toString(value), false); }
 inline std::string decodeUri(bool value) { return decodeImpl(gea::host::detail::toString(value), false); }

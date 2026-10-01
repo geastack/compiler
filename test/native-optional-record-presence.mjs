@@ -28,7 +28,9 @@ test('optional record fields distinguish absence from present undefined and dele
   // The unused adapter exposes declared fields to genuinely dynamic callers.
   // Its definition is not a boxed operation in this typed fixture; check both
   // the authoritative selections above and executable generated code below.
-  const operations = result.source.replace(/  (?:virtual )?bool gea_readOwnField\([^]*?\n  }/g, '')
+  const operations = result.source
+    .replace(/^  (?:virtual )?bool gea_(?:readOwnField|ownFieldDescriptor)\([^\n]*\{\n[^]*?\n  }$/gm, '')
+    .replace(/^bool \w+::gea_(?:readOwnField|ownFieldDescriptor)\([^\n]*\{\n[^]*?\n}$/gm, '')
   assert.doesNotMatch(operations, /gea_cpp_value|Value::box\(gea::Value::Tag::Object|\.callAsFunction/)
   const binary = resolve(root, `measurements/native-optional-record-presence${executableSuffix}`)
   execFileSync(

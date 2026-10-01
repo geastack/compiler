@@ -361,7 +361,12 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
           : operation.generatorFunction === true
             ? 'generator'
             : undefined
-      registerResult(ctx, operation, ctx.builder.allocateCallable(block, lineage, callable, captures, representation, functionKind))
+      const ordinaryConstructor = operation.ownPrototypeProperty === true ? true : undefined
+      registerResult(
+        ctx,
+        operation,
+        ctx.builder.allocateCallable(block, lineage, callable, captures, representation, functionKind, ordinaryConstructor)
+      )
       return
     }
     case 'template-object': {

@@ -1128,7 +1128,11 @@ const constructThunkOf = (
   // a certified program abort at runtime.
   const actuals = [
     ...(hasEnvironment ? [cppEnvironmentParamName] : ['nullptr']),
-    ...(abi.receiver !== null ? [cppReceiverName] : []),
+    ...(abi.receiver === null
+      ? []
+      : abi.receiver.kind === 'dynamic'
+        ? [`gea::Value::box(gea::Value::Tag::Object, ${cppReceiverName})`]
+        : [cppReceiverName]),
     ...construct.parameters.map((_, ordinal) => cppFormalName(ordinal))
   ]
   const buildable = nativeOrdinaryConstructInstanceMatches(abi, instance)
@@ -1351,6 +1355,8 @@ const entryDefinitionOf = (
 interface CommonJsDefinitions {
   readonly definitions: readonly string[]
   readonly modules: ReadonlySet<RegionId>
+  /** The modules whose record is the generated native state rather than a runtime `ModuleRecord`. */
+  readonly nativeRecordModules: ReadonlySet<RegionId>
   readonly hasBuiltinModuleRegistry: boolean
   readonly refused: readonly CppEmissionRefusal[]
 }
@@ -1546,7 +1552,13 @@ const commonJsDefinitionsOf = (bodies: readonly IrBody[]): CommonJsDefinitions =
         `}`
     )
   }
-  return { definitions, modules: targets, hasBuiltinModuleRegistry: builtinTargets.size > 0, refused }
+  return {
+    definitions,
+    modules: targets,
+    nativeRecordModules: new Set(nativeRecords.keys()),
+    hasBuiltinModuleRegistry: builtinTargets.size > 0,
+    refused
+  }
 }
 
 /** The lexical module record a body uses, if it reaches any CommonJS wrapper binding. */
@@ -1898,7 +1910,8 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
     input.classes,
     (callable) => abiByBody.get(String(callable)) ?? null,
     capturesNothingOf,
-    (declaration) => classBoxable(input.classes, declaration)
+    (declaration) => classBoxable(input.classes, declaration),
+    input.wellKnownSymbols
   )
   const structMembers = new Map<string, readonly string[]>(virtuals.membersByStruct)
   for (const [struct, members] of prototypeHooks.membersByStruct)
@@ -2179,6 +2192,17 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
   // it would leave a `CallableObject` of the method's own convention in the
   // unit, boxing an `any` formal that no code ever passes.
   const globals = globalStorage(input.placements, new Set([...input.omitGlobals, ...hostMethodAliases.keys()]))
+  // What a body sees of the cells: one the shaker found no kept operation
+  // referencing is not declared by this unit, so it carries no carrier here
+  // either -- which is the question a reader naming a cell TEXTUALLY (a class's
+  // boxed-statics reader) has to ask before it spells the cell's name.
+  const bodyPlacements: ReadonlyMap<DeclarationId, BindingPlacement> = new Map(
+    [...input.placements].map(([declaration, placement]) =>
+      input.omitGlobals.has(declaration) && placement.storage.kind === 'region'
+        ? [declaration, { ...placement, representation: null }]
+        : [declaration, placement]
+    )
+  )
 
   // Environment structs ahead of every forward signature: a capturing body's
   // own formal names its struct as a pointer type, so the struct must already
@@ -2454,6 +2478,7 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
   // and C++ requires a namespace-scope name to be declared before it is used.
   // Rendering first is the whole of the reordering: each body's artifacts keep
   // their own facts and their own order.
+  const commonJs = commonJsDefinitionsOf(input.bodies)
   const renderedBodies: RenderedBody[] = []
   for (const body of input.bodies) {
     // A body's statements are not a translation unit on their own: they need a
@@ -2469,7 +2494,7 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
     try {
       const sections = emitBody(
         body,
-        input.placements,
+        bodyPlacements,
         input.classes,
         hosts,
         deriver,
@@ -2500,8 +2525,11 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
         constructorOverrideClasses
       )
       const stableEntry = stableBorrowEntries.get(cppBodyName(body.sourceOwner))
+      // A module whose record is native has no runtime `ModuleRecord` for a
+      // scope to install; its bodies reach other modules only through static
+      // requires, which need none.
       const commonJsScope =
-        commonJsOwner === null || commonJsOwner.nativeRecord
+        commonJsOwner === null || commonJsOwner.nativeRecord || commonJs.nativeRecordModules.has(commonJsOwner.owner)
           ? []
           : [`gea::commonjs::Scope commonjs_scope(${cppCommonJsRecordName(commonJsOwner.owner)}());`]
       // A body's formals are named `gea_this`/`gea_arg_N`/`gea_e` by this
@@ -2558,7 +2586,6 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
   }
 
   let entry: string | null = null
-  const commonJs = commonJsDefinitionsOf(input.bodies)
   refused.push(...commonJs.refused)
   if (input.entrySymbol !== null) {
     const rendered = entryDefinitionOf(
@@ -2597,28 +2624,59 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
 
   const appendStructDeclarations = (builder: ReturnType<typeof createCppDocumentBuilder>): void => {
     for (const declaration of recursiveContainers) builder.append(plain(declaration))
-    for (const declaration of structs.declarations) builder.append(plain(declaration))
     const qualifier = isolate && namespaceName !== null ? `${namespaceName}::` : ''
     // A recursive callable/container wrapper's `gea::detail::TraceEdges`
     // specialisation has the exact same problem `structs.runtimeClassBases`
     // solves below: re-opening `namespace gea::detail` from INSIDE the
     // isolating namespace declares a shadow `gea`, not the real one. So it is
-    // closed out to global scope here too, sharing the one close/reopen
-    // rather than doing it twice.
+    // closed out to global scope too. Explicit specializations belong to the
+    // runtime template's namespace, never a nested gea namespace inside the
+    // isolated program; named program types stay qualified so separately
+    // linked programs cannot collide.
+    //
+    // It lands right after the wrappers and before any struct: a record's
+    // trace hook names `TraceEdges<decltype(field)>` in its own definition, so
+    // a record holding a wrapper instantiates the primary template there, and
+    // an explicit specialization after that point is ill-formed.
     const recursiveContainerTraceEdges = cppRecursiveContainerTraceEdges(input.plan, qualifier, emissionRepresentations)
-    if (recursiveContainerTraceEdges.length === 0 && structs.runtimeClassBases.length === 0) return
-    // Explicit specializations belong to the runtime template's namespace,
-    // never a nested gea namespace inside the isolated program. Named program
-    // types stay qualified so separately linked programs cannot collide.
-    if (isolate) builder.append(plain(namespaceClose))
-    for (const declaration of recursiveContainerTraceEdges) builder.append(plain(declaration))
-    if (structs.runtimeClassBases.length > 0) {
-      builder.append(plain('namespace gea::detail {'))
-      for (const { derived, base } of structs.runtimeClassBases) {
-        builder.append(plain(`template <> struct ClassRefBase<${qualifier}${derived}> { using type = ${qualifier}${base}; };`))
-      }
-      builder.append(plain('}  // namespace gea::detail'))
+    if (recursiveContainerTraceEdges.declarations.length > 0) {
+      if (isolate) builder.append(plain(namespaceClose))
+      for (const declaration of recursiveContainerTraceEdges.declarations) builder.append(plain(declaration))
+      if (isolate) builder.append(plain(namespaceOpen))
     }
+    for (const declaration of structs.declarations) builder.append(plain(declaration))
+    if (structs.runtimeClassBases.length === 0 && structs.restTuples.length === 0 && recursiveContainerTraceEdges.definitions.length === 0)
+      return
+    if (isolate) builder.append(plain(namespaceClose))
+    builder.append(plain('namespace gea::detail {'))
+    for (const definition of recursiveContainerTraceEdges.definitions) builder.append(plain(definition))
+    for (const { derived, base } of structs.runtimeClassBases) {
+      builder.append(plain(`template <> struct ClassRefBase<${qualifier}${derived}> { using type = ${qualifier}${base}; };`))
+    }
+    // After every struct is complete and before any body names an adapter:
+    // a rest parameter carried as a positional record spreads its slots into
+    // the boxed argument list, an absent slot as `undefined`.
+    for (const { structName, slots } of structs.restTuples) {
+      const handle = `gea::Ref<${qualifier}${structName}>`
+      const appends = slots.map(
+        ({ field, presence }) =>
+          `    if (rest->${presence}) destination.push_back(restSlotBox(rest->${field})); else destination.emplace_back();`
+      )
+      builder.append(
+        plain(
+          [
+            `template <> struct DynamicRestArgument<${handle}> {`,
+            '  static constexpr bool supported = true;',
+            `  static void append(std::vector<Value>& destination, const ${handle}& rest) {`,
+            '    if (!rest) refusePayloadMismatch("a dynamic call adapter\'s rest argument");',
+            ...appends,
+            '  }',
+            '};'
+          ].join('\n')
+        )
+      )
+    }
+    builder.append(plain('}  // namespace gea::detail'))
     if (isolate) builder.append(plain(namespaceOpen))
   }
 

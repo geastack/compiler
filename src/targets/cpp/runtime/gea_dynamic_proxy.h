@@ -1579,4 +1579,76 @@ inline std::string objectTag(const FunctionValue& value, const char* builtinTag 
   return objectTag(static_cast<const Value&>(value), builtinTag, defaultTag);
 }
 
+/**
+ * %Object.prototype.toString% as a value (pino-std-serializers' `const
+ * toString = Object.prototype.toString`): one function object whose receiver
+ * is the object asked, answering 20.1.3.6 through `objectTag`.
+ */
+inline const Value& prototypeToStringFunction() {
+  static const Value function = Value::boxMethod<-1>(CallableObject<Value(Value)>{
+      +[](void*, Value receiver) -> Value { return Value::box(Value::Tag::String, objectTag(receiver)); }, nullptr});
+  return function;
+}
+
+namespace detail {
+/** 7.2.1 RequireObjectCoercible, for an intrinsic method called through a box on `this`. */
+inline const Value& coercibleReceiver(const Value& receiver, const char* method) {
+  if (receiver.tag() == Value::Tag::Undefined || receiver.tag() == Value::Tag::Null)
+    host::throwRuntimeError("TypeError", std::string(method) + " called on null or undefined");
+  return receiver;
+}
+
+/**
+ * The intrinsic prototypes a program reads a member of as a VALUE through the
+ * handle's box (`const test = RegExp.prototype.test`), each member the same
+ * operation its typed call runs.
+ */
+inline bool hostHandleMember(const Value& self, const PropertyKey& key, Value& out) {
+  if (key.isSymbol()) return false;
+  const std::string& name = key.text();
+  if (self.payloadType() == payloadTypeTagFor<NativeHandle<gea_native_protocol_Object_prototype_v1>>()) {
+    if (name == "hasOwnProperty") out = host::ObjectConstructor::prototypeHasOwnPropertyFunction();
+    else if (name == "toString") out = prototypeToStringFunction();
+    // 20.1.3.7: ToObject(this value), which an object already is.
+    else if (name == "valueOf")
+      out = Value::boxMethod<-1>(CallableObject<Value(Value)>{
+          +[](void*, Value receiver) -> Value { return coercibleReceiver(receiver, "Object.prototype.valueOf"); }, nullptr});
+    else return false;
+    return true;
+  }
+  if (self.payloadType() == payloadTypeTagFor<NativeHandle<gea_native_protocol_RegExp_prototype_v1>>()) {
+    // 22.2.6.16 and 22.2.6.17 over the RegExp the call hands as `this`, as a
+    // boxed RegExp's own reads answer them (`Pattern::gea_readPrototypeProperty`).
+    if (name == "test")
+      out = Value::boxMethod<-1>(CallableObject<Value(Value, Value)>{
+          +[](void*, Value receiver, Value input) -> Value {
+            const auto& pattern = unboxAs<Ref<runtime::regex::Pattern>>(receiver, Value::Tag::Object, "RegExp.prototype.test receiver");
+            return Value::box(Value::Tag::Boolean, pattern->test(dynamicToString(input)));
+          },
+          nullptr});
+    else if (name == "toString")
+      out = Value::boxMethod<-1>(CallableObject<Value(Value)>{
+          +[](void*, Value receiver) -> Value {
+            const auto& pattern = unboxAs<Ref<runtime::regex::Pattern>>(receiver, Value::Tag::Object, "RegExp.prototype.toString receiver");
+            return Value::box(Value::Tag::String, pattern->toString());
+          },
+          nullptr});
+    else return false;
+    return true;
+  }
+  if (self.payloadType() == payloadTypeTagFor<NativeHandle<gea_native_protocol_String_prototype_v1>>()) {
+    // 22.1.3.28: ToString(RequireObjectCoercible(this)), then the lowercase map.
+    if (name == "toLowerCase")
+      out = Value::boxMethod<-1>(CallableObject<Value(Value)>{
+          +[](void*, Value receiver) -> Value {
+            return Value::box(Value::Tag::String, runtime::string::toLowerCase(dynamicToString(coercibleReceiver(receiver, "String.prototype.toLowerCase"))));
+          },
+          nullptr});
+    else return false;
+    return true;
+  }
+  return false;
+}
+}  // namespace detail
+
 }  // namespace gea

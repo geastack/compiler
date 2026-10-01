@@ -602,10 +602,19 @@ export const censusFieldBindings = (
    * field `any[]` while the allocation it holds was typed, and every store
    * between them was an array copy nothing can install (find-my-way's
    * `this.parametricChildren = []`, filled with `ParametricNode`s).
+   *
+   * A field written with a READ of such an array (`const raw = []; ...
+   * this.rawHeaders = raw`, light-my-request's `Request`) holds the same
+   * allocation, so the same census answer (`arrayElementForRead`) types it.
    */
   const emptyArrayLiteralType = (write: ts.Expression): ts.Type | null => {
-    if (!ts.isArrayLiteralExpression(write) || write.elements.length > 0) return null
-    const element = collections.arrayElementAt(write)
+    if (ts.isArrayLiteralExpression(write)) {
+      if (write.elements.length > 0) return null
+      const element = collections.arrayElementAt(write)
+      return element ? arrayTypeOf(checker, element) : null
+    }
+    if (!isVacuousArrayType(checker, checker.getTypeAtLocation(write))) return null
+    const element = collections.arrayElementForRead(write)
     return element ? arrayTypeOf(checker, element) : null
   }
 
@@ -748,7 +757,10 @@ export const censusFieldBindings = (
     }
     if (types.length === 0 || (silent > 0 && !lenientPhase)) return null
     const joined = joinOfWrites(checker, types)
-    const dictionary = joined ? dictionaryTypeOf(checker, joined) : null
+    // A key no write ever stored reads `undefined` (find-my-way's
+    // `this.trees[method]` for a method with no route), so the slot carries
+    // that absence beside every value written, as a bag's index slot does.
+    const dictionary = joined ? dictionaryTypeOf(checker, checker.getNullableType(joined, ts.TypeFlags.Undefined)) : null
     return dictionary ? withNullish(checker, dictionary, wholeValueTypes) : null
   }
 

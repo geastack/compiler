@@ -32,6 +32,7 @@ const cppIdentifierCharacters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTU
  * a pattern against it.
  */
 const cppDigits = '0123456789'
+const cppUppercaseLetters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
 export const sanitizeForCppIdentifier = (raw: string): string => {
   let sanitized = ''
@@ -238,6 +239,26 @@ const cppReservedKeywords = new Set([
 ])
 
 /**
+ * Whether a key could be a preprocessor macro some header of the unit defines.
+ *
+ * A macro rewrites every token spelled like it, so a member named `EOF`
+ * (Node's DNS error-code table) becomes `gea::Value (-1);`. The macro set of a
+ * platform's headers cannot be enumerated from here, but macros are spelled in
+ * capitals by convention, and the few lowercase ones the C and C++ standard
+ * libraries define are named. A key matching either is escaped like a keyword.
+ */
+const lowercaseStandardMacros = new Set(['assert', 'errno', 'math_errhandling', 'offsetof', 'setjmp', 'stderr', 'stdin', 'stdout'])
+const mayBePreprocessorMacro = (key: string): boolean => {
+  if (lowercaseStandardMacros.has(key)) return true
+  let sawLetter = false
+  for (const character of key) {
+    if (cppUppercaseLetters.includes(character)) sawLetter = true
+    else if (!cppDigits.includes(character) && character !== '_') return false
+  }
+  return sawLetter
+}
+
+/**
  * The textual marker `derive.ts`'s `recordFieldKeyOf` publishes for a
  * symbol-keyed record field: `sym(<declaration>)`, the identical convention
  * `structuralShapeKey`'s `keyOfPropertyKey` (semantics/model/structural-types.ts)
@@ -434,7 +455,7 @@ export const cppRecordFieldName = (key: string): string => {
       let positional = true
       for (const character of key) positional = positional && cppDigits.includes(character)
       if (positional) return `gea_slot_${key}`
-    } else if (isCppIdentifierShaped(key) && !cppReservedKeywords.has(key)) return key
+    } else if (isCppIdentifierShaped(key) && !cppReservedKeywords.has(key) && !mayBePreprocessorMacro(key)) return key
   }
   return `${cppEscapedFieldNamePrefix}${escapeForCppMemberName(key)}`
 }

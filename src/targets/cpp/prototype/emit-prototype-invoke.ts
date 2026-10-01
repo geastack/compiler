@@ -115,7 +115,10 @@ const numberFormatText =
  * separate digit-layout the following steps describe.
  */
 const numberToStringText = (ctx: EmitContext, receiverText: string, args: readonly IrOperand[]): string => {
-  if (args.length === 0) return `gea::host::detail::toString(${receiverText})`
+  // The receiver is a Number, but its storage may be an integer the loop
+  // narrowed (`ir/integer-storage.ts`), which converts to both `bool` and
+  // `double` at one rank; naming `double` picks the Number overload.
+  if (args.length === 0) return `gea::host::detail::toString(static_cast<double>(${receiverText}))`
   const radix = args[0]
   if (args.length !== 1 || !radix) {
     throw createCppEmitBlockedError(
@@ -130,7 +133,7 @@ const numberToStringText = (ctx: EmitContext, receiverText: string, args: readon
     radix.representation.payload.domain === 'number'
   ) {
     const text = operandText(ctx, radix)
-    return `(${text}.has_value() ? gea::host::detail::toStringRadix(${receiverText}, *${text}) : gea::host::detail::toString(${receiverText}))`
+    return `(${text}.has_value() ? gea::host::detail::toStringRadix(${receiverText}, *${text}) : gea::host::detail::toString(static_cast<double>(${receiverText})))`
   }
   if (radix.representation.kind !== 'scalar' || radix.representation.domain !== 'number') {
     throw createCppEmitBlockedError(
@@ -1341,9 +1344,11 @@ const renderPrototypeMethodCall = (
       if (discardedWithAbsentArm) return `(void)(${text})`
       // Beside a boxed arm the call publishes a box, so a native arm's own
       // result is boxed by its C++ type to meet it.
-      return boxesResult
-        ? `[&](auto&& gea_native) { return gea::detail::DynamicCarrier<std::decay_t<decltype(gea_native)>>::out(gea_native); }(${text})`
-        : text
+      if (boxesResult)
+        return `[&](auto&& gea_native) { return gea::detail::DynamicCarrier<std::decay_t<decltype(gea_native)>>::out(gea_native); }(${text})`
+      // A call that publishes a sum (`string | Buffer`'s `slice`) meets each
+      // arm's own result in the result arm of its C++ type.
+      return operation.result?.representation.kind === 'tagged-union' ? `gea::detail::intoUnion<${resultType}>(${text})` : text
     })
     return branches.reduceRight<string>(
       (rest, branch, index) => (index === branches.length - 1 ? branch : `${receiverText}.is<${index}>() ? ${branch} : (${rest})`),
@@ -1420,5 +1425,26 @@ const renderPrototypeMethodCall = (
     !operation.argumentsAreSpread
   )
     return unpackedInsertText(ctx, read.member, receiverText, read.arrayCarrier.element, operation.arguments)
-  return render(ctx, receiverText, read.arrayCarrier.element, operation.arguments, operation.result)
+  const rendered = render(ctx, receiverText, read.arrayCarrier.element, operation.arguments, operation.result)
+  // These members answer an array of the receiver's own element carrier (the
+  // receiver itself, for the in-place ones). A call the plan publishes as a
+  // box gets that array boxed, not assigned into the `gea::Value` raw.
+  if (operation.result?.representation.kind === 'dynamic' && receiverElementArrayMembers.has(read.member)) {
+    const boxed = alignedValueText(
+      ctx,
+      'prototype/emit-prototype-invoke.ts:array-result',
+      read.arrayCarrier,
+      operation.result.representation,
+      rendered
+    )
+    if (boxed === null)
+      throw createCppEmitBlockedError(
+        `conversion:${representationKey(read.arrayCarrier)}->${representationKey(operation.result.representation)}`,
+        `"Array.prototype.${read.member}" answers "${representationKey(read.arrayCarrier)}", which does not box into this call's result`
+      )
+    return boxed
+  }
+  return rendered
 }
+
+const receiverElementArrayMembers: ReadonlySet<string> = new Set(['slice', 'reverse', 'sort', 'fill', 'filter', 'splice'])

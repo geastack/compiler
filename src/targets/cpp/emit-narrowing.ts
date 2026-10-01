@@ -8,6 +8,7 @@ import {
   containsUnresolved,
   isBooleanShapedMergeTarget,
   isCanonicalNumberPropertyKeyText,
+  recursiveCarrierOf,
   representationKey,
   walkRepresentation,
   carriesUndefined
@@ -23,6 +24,7 @@ import type { ClassLayout } from '../../projection/classes.js'
 import type { CaptureIndex } from './emit-context.js'
 import { structuralRecordViewText, viewPlanFor } from './emit-record-view.js'
 import { recordViewDispatchesArms } from '../../conversion/record-view.js'
+import { expandableNamedRecordFields, solePlainObjectArm } from '../../conversion/derive.js'
 import {
   createCppEmitBlockedError,
   cppConstructThunkName,
@@ -45,6 +47,7 @@ import {
   cppRecordFieldPresenceName,
   cppRecordStructName,
   cppResultTypeOf,
+  cppRecursiveContainerName,
   cppStringLiteral,
   cppTypeOf,
   cppUndefinedIn,
@@ -951,15 +954,77 @@ const restFromOf = (representation: Representation): number | null => {
  * a `gea::Value` and loads it with the parameter's own ABI; name, length and
  * identity stay the source's (`adaptSource`).
  */
+/**
+ * The one arm of a callable union that admits every function: a receiver and
+ * a single rest of plain values, node-compat's `EventHandler`
+ * (`(this: unknown, ...args: readonly any[]) => unknown`). A boxed function no
+ * other arm holds exactly can always be that arm without losing an argument.
+ * Nothing in the C++ type says so, since `(this, ...args)` spells like
+ * `(a, args)`, so only the representation can name it. `null` when there is
+ * no such arm, or more than one.
+ */
+const universalCallableArmOf = (union: Extract<Representation, { kind: 'tagged-union' }>): number | null => {
+  const universal = union.arms.flatMap((arm, index) => {
+    const own = callableObjectAbi(arm.value)
+    const rest = own?.parameters[0]?.value
+    return own !== null &&
+      own.receiver !== null &&
+      own.restFrom === 0 &&
+      own.parameters.length === 1 &&
+      rest?.kind === 'array-object' &&
+      rest.element.kind === 'dynamic'
+      ? [index]
+      : []
+  })
+  const callableArms = union.arms.every((arm) => callableObjectAbi(arm.value) !== null)
+  return callableArms && universal.length === 1 ? (universal[0] ?? null) : null
+}
+
+/** A boxed function into a callable union with a universal arm: an exact arm payload keeps its arm, any other function takes the universal one. */
+const universalCallableUnionLoadText = (
+  union: Extract<Representation, { kind: 'tagged-union' }>,
+  universal: number,
+  text: string
+): string | null => {
+  const type = cppTypeOf(union)
+  const universalLoad = unboxedLoadText(union.arms[universal]!.value, 'gea_union_value')
+  if (universalLoad === null) return null
+  const exact = union.arms.map((arm, index) => {
+    const armType = cppTypeOf(arm.value)
+    return `if (gea::detail::DynamicCallableCarrier<${armType}>::accepts(gea_union_value)) return ${type}::ofArm<${index}>(gea::detail::DynamicCallableCarrier<${armType}>::in(gea_union_value, 0));`
+  })
+  return (
+    `[](const gea::Value& gea_union_value) -> ${type} { ${exact.join(' ')} ` +
+    `if (gea_union_value.tag() == gea::Value::Tag::Function) return ${type}::ofArm<${universal}>(${universalLoad}); ` +
+    `gea::detail::refusePayloadMismatch("a dynamic callable union argument"); }(${text})`
+  )
+}
+
 export const parameterAbiStatingText = (abi: CallableAbi, type: string, text: string): string => {
+  const universalOf = (parameter: AbiParameter): number | null =>
+    parameter.value.kind === 'tagged-union' ? universalCallableArmOf(parameter.value) : null
   const statesAbi = (parameter: AbiParameter): boolean => {
+    if (universalOf(parameter) !== null) return true
+    // A union whose one object arm is a record: the thunk's exact-arm
+    // carrier would refuse a plain object, which the union's own load admits.
+    if (parameter.value.kind === 'tagged-union' && solePlainObjectArm(parameter.value.arms) !== null) return true
     const own = callableObjectAbi(parameter.value)
     return own !== null && (own.receiver !== null || own.restFrom !== null)
   }
-  if (!abi.parameters.some(statesAbi)) return text
-  const loads = abi.parameters.map((parameter, ordinal) =>
-    statesAbi(parameter) ? unboxedLoadText(parameter.value, adapterFormalName(ordinal)) : adapterFormalName(ordinal)
-  )
+  // The result too: a callable result with a receiver or rest slot boxed by
+  // the thunk's C++ type loses that slot, and the next dynamic call through it
+  // shifts every argument (avvio's `encapsulateThreeParam` returning
+  // `function (err, cb)` to a boxed caller). It is boxed with its own ABI.
+  const resultAbi = callableObjectAbi(abi.result)
+  const resultStatesAbi = resultAbi !== null && (resultAbi.receiver !== null || resultAbi.restFrom !== null)
+  if (!abi.parameters.some(statesAbi) && !resultStatesAbi) return text
+  const loads = abi.parameters.map((parameter, ordinal) => {
+    if (!statesAbi(parameter)) return adapterFormalName(ordinal)
+    const universal = universalOf(parameter)
+    return universal !== null && parameter.value.kind === 'tagged-union'
+      ? universalCallableUnionLoadText(parameter.value, universal, adapterFormalName(ordinal))
+      : unboxedLoadText(parameter.value, adapterFormalName(ordinal))
+  })
   if (loads.some((load) => load === null)) return text
   const receiver = abi.receiver === null ? [] : [`${cppTypeOf(abi.receiver)} ${adapterReceiverName}`]
   const formals = [
@@ -974,11 +1039,76 @@ export const parameterAbiStatingText = (abi: CallableAbi, type: string, text: st
     ...abi.parameters.map((parameter) => (statesAbi(parameter) ? 'gea::Value' : cppAbiParameterType(parameter)))
   ]
   const actuals = [...(abi.receiver === null ? [] : [adapterReceiverName]), ...loads]
+  const called = `static_cast<${type}*>(${adapterEnvironmentName})->call(${actuals.join(', ')})`
+  const resultType = resultStatesAbi ? 'gea::Value' : cppResultTypeOf(abi.result)
   return (
-    `gea::CallableObject<${cppResultTypeOf(abi.result)}(${boxedSignature.join(', ')})>::adaptSource(${type}{${text}}, ` +
-    `[](${formals.join(', ')}) -> ${cppResultTypeOf(abi.result)} { ` +
-    `return static_cast<${type}*>(${adapterEnvironmentName})->call(${actuals.join(', ')}); })`
+    `gea::CallableObject<${resultType}(${boxedSignature.join(', ')})>::adaptSource(${type}{${text}}, ` +
+    `[](${formals.join(', ')}) -> ${resultType} { ` +
+    `return ${resultStatesAbi ? boxedText(abi.result, 'Function', called) : called}; })`
   )
+}
+
+/**
+ * The fixed tuple a rest parameter spells (`(...args: [A, B]) => R`): a record
+ * whose fields are exactly the positions `0..n-1`, all required. Such a rest
+ * is positional -- `(...args: [A, B])` takes what `(a: A, b: B)` takes -- but
+ * a box's rest thunk packs trailing arguments into an Array, which this
+ * carrier is not, so the box would have no call entry at all.
+ */
+const tupleRestOf = (abi: CallableAbi): Extract<Representation, { kind: 'record' }> | null => {
+  if (abi.restFrom === null || abi.restFrom !== abi.parameters.length - 1) return null
+  const rest = abi.parameters[abi.restFrom]!.value
+  if (rest.kind !== 'record' || rest.accessors.length !== 0 || rest.fields.length === 0) return null
+  return rest.fields.every((field, index) => field.key === String(index) && field.required) ? rest : null
+}
+
+/**
+ * A callable whose rest is a fixed tuple, boxed as the positional convention
+ * it is: each tuple slot is a positional `gea::Value` loaded with its own
+ * field's load, the tuple is rebuilt, and the source is called with it. The
+ * name, length and identity stay the source's (`adaptSource`).
+ */
+export const tupleRestBoxText = (abi: CallableAbi, type: string, text: string): string | null => {
+  const tuple = tupleRestOf(abi)
+  if (tuple === null) return null
+  const leading = abi.parameters.slice(0, abi.restFrom!)
+  const slots = tuple.fields.map((field, index) => {
+    const formal = `gea_tuple_arg_${index}`
+    const load = field.value.kind === 'dynamic' ? formal : unboxedLoadText(field.value, formal)
+    return load === null ? null : { formal, member: cppRecordFieldName(field.key), load }
+  })
+  if (slots.some((slot) => slot === null)) return null
+  const struct = cppRecordStructName(tuple.shapeId)
+  const shared = tuple.ownership === 'shared-refcount'
+  const receiver = abi.receiver === null ? [] : [`${cppTypeOf(abi.receiver)} ${adapterReceiverName}`]
+  const formals = [
+    `void* ${adapterEnvironmentName}`,
+    ...receiver,
+    ...leading.map((parameter, ordinal) => `${cppAbiParameterType(parameter)} ${adapterFormalName(ordinal)}`),
+    ...slots.map((slot) => `gea::Value ${slot!.formal}`)
+  ]
+  const signature = [
+    ...(abi.receiver === null ? [] : [cppTypeOf(abi.receiver)]),
+    ...leading.map((parameter) => cppAbiParameterType(parameter)),
+    ...slots.map(() => 'gea::Value')
+  ]
+  const fill = slots.map((slot) => `gea_tuple_fill.${slot!.member} = ${slot!.load};`).join(' ')
+  const build = [
+    `auto gea_tuple = gea::detail::${shared ? 'makeSharedTupleRecord' : 'makeValueTupleRecord'}<${struct}>([&](auto& gea_tuple_fill) { ${fill} });`
+  ]
+  const actuals = [
+    ...(abi.receiver === null ? [] : [adapterReceiverName]),
+    ...leading.map((_, ordinal) => adapterFormalName(ordinal)),
+    'gea_tuple'
+  ]
+  const result = cppResultTypeOf(abi.result)
+  const adapter =
+    `gea::CallableObject<${result}(${signature.join(', ')})>::adaptSource(${type}{gea_boxed_source}, ` +
+    `[](${formals.join(', ')}) -> ${result} { ${build.join(' ')} ` +
+    `return static_cast<${type}*>(${adapterEnvironmentName})->call(${actuals.join(', ')}); })`
+  const boxed = abi.receiver !== null ? `gea::Value::boxMethod<-1>(${adapter})` : `gea::Value::box(gea::Value::Tag::Function, ${adapter})`
+  const stated = resultAbsentIsNull(abi) ? `${boxed}.withNullAbsentResult()` : boxed
+  return `gea::Value::boxUnlessAdapted(${type}{${text}}, [](const ${type}& gea_boxed_source) { return ${stated}; })`
 }
 
 export const boxedText = (representation: Representation, tag: string, text: string): string => {
@@ -999,14 +1129,38 @@ export const boxedText = (representation: Representation, tag: string, text: str
   const restFrom = restFromOf(representation)
   const abi = representation.kind === 'function-and-constructor' ? representation.call : 'abi' in representation ? representation.abi : null
   const callable = callableObjectAbi(representation)
+  if (callable !== null && tag === 'Function') {
+    const tupleRest = tupleRestBoxText(callable, cppTypeOf(representation), `static_cast<${cppTypeOf(representation)}>(${text})`)
+    if (tupleRest !== null) return tupleRest
+  }
   const value =
     callable === null
       ? `static_cast<${cppTypeOf(representation)}>(${text})`
       : parameterAbiStatingText(callable, cppTypeOf(representation), `static_cast<${cppTypeOf(representation)}>(${text})`)
-  if (abi?.receiver) return `gea::Value::boxMethod<${restFrom === null ? -1 : restFrom + 1}>(${value})`
-  if (restFrom === null) return `gea::Value::box(gea::Value::Tag::${tag}, ${value})`
-  return `gea::Value::boxCallable<${restFrom}>(${value})`
+  // An ABI-stating wrapper is built before any box, so a dynamic-to-native
+  // adapter is unwrapped to its source box first (`Value::boxUnlessAdapted`).
+  const plain = `static_cast<${cppTypeOf(representation)}>(${text})`
+  const wraps = callable !== null && value !== plain
+  const inner = wraps ? parameterAbiStatingText(callable!, cppTypeOf(representation), 'gea_boxed_source') : value
+  const boxed = abi?.receiver
+    ? `gea::Value::boxMethod<${restFrom === null ? -1 : restFrom + 1}>(${inner})`
+    : restFrom === null
+      ? `gea::Value::box(gea::Value::Tag::${tag}, ${inner})`
+      : `gea::Value::boxCallable<${restFrom}>(${inner})`
+  const stated = abi && resultAbsentIsNull(abi) ? `${boxed}.withNullAbsentResult()` : boxed
+  return wraps
+    ? `gea::Value::boxUnlessAdapted(${plain}, [](const ${cppTypeOf(representation)}& gea_boxed_source) { return ${stated}; })`
+    : stated
 }
+
+/**
+ * Whether a callable's result carrier is an optional whose absence is `null`.
+ * `gea::Optional<T>` leaves its empty state untagged, so a boxed callable
+ * states this (`Value::withNullAbsentResult`) for a dynamic call to answer
+ * `null` rather than `undefined`: find-my-way's `findRoute` returns `null`
+ * for a route it does not hold.
+ */
+export const resultAbsentIsNull = (abi: CallableAbi): boolean => abi.result.kind === 'optional' && abi.result.absence === 'null'
 
 /**
  * How a native carrier boxes into a dynamic cell, rendered over an arbitrary
@@ -1952,15 +2106,22 @@ const recastedRecordText = (
     return `static_cast<decltype(${cppRecordStructName(target.shapeId)}::${cppRecordFieldName(field.key)})>(${converted})`
   })
   if (reads.some((read) => read === null)) return null
+  // Presence is assigned by name, not positionally: every field has a bit
+  // (a required one's may be a `static inline` constant the struct does not
+  // store), so a positional list of the optional fields' bits alone landed in
+  // the required fields' -- ret's group recast left `stack` absent.
+  const built = `gea_built_${depth}`
+  const builtArrow = target.ownership === 'shared-refcount' ? '->' : '.'
   const presences = target.fields.flatMap((field) => {
     if (field.required) return []
     const match = source.fields.find((candidate) => candidate.key === field.key)
-    if (match === undefined) return ['false']
-    return [match.required ? 'true' : `${holder}${arrow}${cppRecordFieldPresenceName(field.key)}`]
+    const present = match === undefined ? 'false' : match.required ? 'true' : `${holder}${arrow}${cppRecordFieldPresenceName(field.key)}`
+    return [`${built}${builtArrow}${cppRecordFieldPresenceName(field.key)} = ${present};`]
   })
-  const structure = `${cppRecordStructName(target.shapeId)}{${[...reads, ...presences].join(', ')}}`
-  const built = target.ownership === 'shared-refcount' ? `gea::makeRef<${cppRecordStructName(target.shapeId)}>(${structure})` : structure
-  return `[](const ${cppTypeOf(source)}& ${holder}) { return ${built}; }(${text})`
+  const structure = `${cppRecordStructName(target.shapeId)}{${reads.join(', ')}}`
+  const value = target.ownership === 'shared-refcount' ? `gea::makeRef<${cppRecordStructName(target.shapeId)}>(${structure})` : structure
+  if (presences.length === 0) return `[](const ${cppTypeOf(source)}& ${holder}) { return ${value}; }(${text})`
+  return `[](const ${cppTypeOf(source)}& ${holder}) { auto ${built} = ${value}; ${presences.join(' ')} return ${built}; }(${text})`
 }
 
 /**
@@ -3171,7 +3332,7 @@ export const boxDiscriminantsOfArm = (arm: TaggedUnionArm): BoxDiscriminant[] | 
  */
 const assertionSite = (target: Representation): string => `an assertion out of a dynamic value to ${cppTypeOf(target)}`
 
-export const unboxedLoadText = (target: Representation, text: string): string | null => {
+export const unboxedLoadText = (target: Representation, text: string, layouts: RecordLayoutPolicy | null = null): string | null => {
   // A `Function` arm remains a Value because its ABI is unknown. Loading it
   // out of a broader dynamic boundary is an identity-preserving copy guarded
   // by the Function tag, not an adaptation to an invented signature.
@@ -3339,7 +3500,13 @@ export const unboxedLoadText = (target: Representation, text: string): string | 
     // would otherwise turn (for example) Boolean into whichever arm happens
     // to be last. A box matching no published member is invalid for this
     // union and refuses before any member coercion can run.
-    const refused = `([]() -> ${targetType} { gea::detail::refusePayloadMismatch("a dynamic value admitted by no union arm"); }())`
+    const refusal = `([]() -> ${targetType} { gea::detail::refusePayloadMismatch("a dynamic value admitted by no union arm"); }())`
+    const plainObjectArm = catchAll < 0 ? solePlainObjectArm(target.arms) : null
+    const plainObjectLoad = plainObjectArm === null ? null : unboxedLoadText(target.arms[plainObjectArm]!.value, text, layouts)
+    const refused =
+      plainObjectArm !== null && plainObjectLoad !== null
+        ? `(${text}.tag() == gea::Value::Tag::Object ? ${targetType}::ofArm<${plainObjectArm}>(${plainObjectLoad}) : ${refusal})`
+        : refusal
     const typed = target.arms.map((_, index) => index).filter((index) => index !== catchAll)
     let result = catchAll >= 0 ? armText(catchAll) : refused
     for (let position = typed.length - 1; position >= 0; position--) {
@@ -3365,7 +3532,7 @@ export const unboxedLoadText = (target: Representation, text: string): string | 
     // exact assertion into its payload; `null` must not become an absent
     // `undefined` optional (or vice versa), and a typed payload must never
     // acquire ToNumber/ToString semantics merely by crossing this boundary.
-    const payload = target.payload.kind === 'dynamic' ? text : unboxedLoadText(target.payload, text)
+    const payload = target.payload.kind === 'dynamic' ? text : unboxedLoadText(target.payload, text, layouts)
     if (payload === null) return null
     const targetType = cppTypeOf(target)
     const absentTag = target.absence === 'null' ? 'Null' : 'Undefined'
@@ -3380,7 +3547,11 @@ export const unboxedLoadText = (target: Representation, text: string): string | 
   // result is a native `ArrayObject<Element>` and a bad element refuses rather
   // than being reinterpreted or leaving the whole Array boxed.
   if (target.kind === 'array-object') {
-    return `gea::detail::unboxDynamicArray<${cppTypeOf(target.element)}>(${text}, ${cppStringLiteral(assertionSite(target))})`
+    // A recursive array is its wrapper struct (`recursive-containers.ts`),
+    // which the payload test and the rebuild both have to name.
+    const recursive = recursiveCarrierOf(target)
+    const container = recursive === null ? '' : `, ${cppRecursiveContainerName(recursive.type)}`
+    return `gea::detail::unboxDynamicArray<${cppTypeOf(target.element)}${container}>(${text}, ${cppStringLiteral(assertionSite(target))})`
   }
   if (target.kind === 'dictionary' && target.key === 'string' && target.ownership === 'shared-refcount') {
     return `gea::detail::unboxDynamicDictionary<${cppTypeOf(target.value)}>(${text}, ${cppStringLiteral(assertionSite(target))})`
@@ -3393,15 +3564,46 @@ export const unboxedLoadText = (target: Representation, text: string): string | 
   // when the box already carries this record; the fallback evaluates the
   // source once and leaves extra dictionary keys outside the statically
   // declared result, matching the assertion's structural view.
+  // A named record this compiler lays out itself is the same product as an
+  // inline one (`conversion/derive.ts`'s `deriveNamedRecord`): rebuilt from
+  // its layout, unless that layout reaches the shape again.
+  if (target.kind === 'native-record-ref' && target.native === null && target.recursive === undefined && layouts?.plainFieldsForShape) {
+    const fields = expandableNamedRecordFields(layouts.plainFieldsForShape, target.shapeId)
+    if (fields !== null && target.ownership !== 'borrowed')
+      return unboxedLoadText({ kind: 'record', shapeId: target.shapeId, fields, accessors: [], ownership: target.ownership }, text, layouts)
+  }
   if (target.kind === 'record' && target.accessors.length === 0) {
     if (target.ownership === 'borrowed') return null
     const targetType = cppTypeOf(target)
     const holder = 'gea_dynamic_record'
+    // A host's one object (a namespace root's facade, `native-record-ref`
+    // `owned` with its native type stated -- see `derive.ts`) is the same
+    // object whatever the box holds, so the field is that facade and the
+    // member is never read: node-compat's `require('buffer').Buffer` is such a
+    // root, and reading it through the box stops by name (thread-stream).
+    const isHostFacade = (value: Representation): boolean =>
+      value.kind === 'native-record-ref' && value.ownership === 'owned' && value.native !== null
+    // An optional field whose present value has no checked load (a union of
+    // callables no box can choose between) still materializes its absence:
+    // the value is read only when present, and a present one refuses by name.
+    const presentRefusal = (field: RecordField, value: string): string => {
+      const type = cppTypeOf(field.value)
+      const refusal = `([]() -> ${type} { gea::detail::refusePayloadMismatch(${cppStringLiteral(`a dynamic record field ${field.key} holds a value no checked load admits`)}); }())`
+      if (field.value.kind !== 'optional') return refusal
+      const absentTag = field.value.absence === 'null' ? 'Null' : 'Undefined'
+      return `(${value}.tag() == gea::Value::Tag::${absentTag} ? ${type}() : ${refusal})`
+    }
     const fields = target.fields.map((field, index) => {
       const present = `gea_dynamic_record_present_${index}`
       const value = `gea_dynamic_record_value_${index}`
-      const load = field.value.kind === 'dynamic' ? value : unboxedLoadText(field.value, value)
-      return { field, present, value, load }
+      const facade = isHostFacade(field.value)
+      const loaded = facade
+        ? `${cppTypeOf(field.value)}{}`
+        : field.value.kind === 'dynamic'
+          ? value
+          : unboxedLoadText(field.value, value, layouts)
+      const load = loaded === null && !field.required ? presentRefusal(field, value) : loaded
+      return { field, present, value, load, facade }
     })
     if (fields.some((field) => field.load === null)) return null
     const checks = fields
@@ -3409,10 +3611,12 @@ export const unboxedLoadText = (target: Representation, text: string): string | 
       .map(
         ({ field, present }) => `if (!${present}) gea::detail::refusePayloadMismatch("a dynamic record lacks required field ${field.key}");`
       )
-    const values = fields.map(
-      ({ field, present, value }) =>
-        `const gea::Value ${value} = ${present} ? gea::detail::dynamicRecordField(${holder}, ${cppStringLiteral(field.key)}) : gea::Value();`
-    )
+    const values = fields
+      .filter(({ facade }) => !facade)
+      .map(
+        ({ field, present, value }) =>
+          `const gea::Value ${value} = ${present} ? gea::detail::dynamicRecordField(${holder}, ${cppStringLiteral(field.key)}) : gea::Value();`
+      )
     const reads = fields.map(({ field, present, load }) => {
       const materialized = load!
       return field.required ? materialized : `(${present} ? ${materialized} : ${cppTypeOf(field.value)}{})`
@@ -3799,6 +4003,35 @@ export const conversionChain: readonly ConversionStep[] = [
   // answer for an optional source: a payload this cannot convert refuses rather
   // than falling through, because the fallthrough was that same unwrap one frame
   // deeper (hono's `c.json` answered `HTTP/1.1 0 unknown` through it).
+  // An optional whose payload is a union with a dynamic arm: that arm's box
+  // may itself hold the absent value (avvio's `callback(execErr)` with
+  // `execErr === null`), so it loads through the optional TARGET's own load,
+  // which reads `null`/`undefined` as empty, rather than into the payload.
+  {
+    id: 'optional-union-dynamic-arm',
+    apply: (source, target, text) => {
+      if (target.kind !== 'optional' || source.kind !== 'optional' || source.payload.kind !== 'tagged-union') return undefined
+      const union = source.payload
+      if (!union.arms.some((arm) => arm.value.kind === 'dynamic')) return undefined
+      const type = cppTypeOf(target)
+      const arms = union.arms.map((arm, index) => {
+        const armText = `gea_union_source.template get<${index}>()`
+        const loaded =
+          arm.value.kind === 'dynamic'
+            ? unboxedLoadText(target, armText)
+            : (() => {
+                const payload = convertedValueText(arm.value, target.payload, armText)
+                return payload === null ? null : `${type}{${cppTypeOf(target.payload)}{${payload}}}`
+              })()
+        return loaded === null ? null : `if (gea_union_source.template is<${index}>()) return ${loaded};`
+      })
+      if (arms.some((arm) => arm === null)) return undefined
+      return (
+        `(${text}.has_value() ? [&]() -> ${type} { const auto& gea_union_source = *${text}; ${arms.join(' ')} ` +
+        `gea::detail::refusePayloadMismatch("a union with no live arm"); }() : ${type}{})`
+      )
+    }
+  },
   {
     id: 'optional-payload-convert',
     apply: (source, target, text) => {
@@ -4291,6 +4524,11 @@ export const convertedEvaluationText = (
  * (`convertedValueText`) is deliberately ctx-free -- see `algebra.ts`'s doc
  * on the kind for why an `atom` cannot carry this recipe.
  */
+const namesOwnedRecord = (target: Representation): boolean => {
+  const carrier = target.kind === 'optional' ? target.payload : target
+  return carrier.kind === 'native-record-ref' && carrier.native === null && carrier.recursive === undefined
+}
+
 export const recipeText = (ctx: ConversionSite, node: ConversionNode, text: string): string | null => {
   if (node.capability.kind === 'identity') return text
   if (node.capability.kind === 'never') return null
@@ -4333,6 +4571,7 @@ export const recipeText = (ctx: ConversionSite, node: ConversionNode, text: stri
     return callableResultViewText(ctx, node.source, node.target, text)
   if (node.capability.kind === 'static' && node.capability.materializer.id === 'host-record-view')
     return hostRecordViewText(ctx.layouts, node.source, node.target, text)
+  if (node.source.kind === 'dynamic' && namesOwnedRecord(node.target)) return unboxedLoadText(node.target, text, ctx.layouts)
   return convertedValueText(node.source, node.target, text) ?? structuralRecordViewText(ctx, node.source, node.target, text)
 }
 

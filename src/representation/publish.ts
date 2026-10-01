@@ -439,6 +439,7 @@ const patternSourceArmOf = (
 
 /** Method values read dynamically retain their runtime call frame, including this and rest arguments. */
 const dynamicCallableReadOf = (
+  graph: SemanticGraph,
   operation: SemanticOperation | undefined,
   result: SemanticResult,
   deriver: RepresentationDeriver,
@@ -449,9 +450,77 @@ const dynamicCallableReadOf = (
   const receiver = operandOf(operation, 'receiver')
   const receiverOrigin = receiver?.source.kind === 'result' ? callableOrigins.get(receiver.source.result) : undefined
   const receiverIsExactDynamicCallable = receiverOrigin !== undefined && dynamicCallables.has(withoutFunctionSpecialization(receiverOrigin))
-  if (!receiver || (!receiverIsExactDynamicCallable && deriver.derive(receiver.type).kind !== 'dynamic')) return null
-  const carrier = deriver.derive(result.type)
-  if (
+  if (!receiver || (!receiverIsExactDynamicCallable && !receiverIsBox(graph, operation, deriver))) return null
+  return holdsDynamicallyReadCallable(deriver.derive(result.type)) ? { kind: 'dynamic', reason: 'opt-in-fallback' } : null
+}
+
+/**
+ * A mutable container read off a box keeps the box. Unboxing a plain object
+ * into a compiler-owned dictionary, array or record rebuilds a copy
+ * (`unboxDynamicDictionary`), so a write through the read --
+ * find-my-way's `this.trees[method] = new StaticNode('/')` on a Router whose
+ * instances are boxes -- would land in a temporary and the next read would
+ * not see it. A class instance is projected by identity and keeps its carrier.
+ */
+const dynamicStorageReadOf = (
+  graph: SemanticGraph,
+  operation: SemanticOperation | undefined,
+  result: SemanticResult,
+  deriver: RepresentationDeriver
+): Representation | null => {
+  if (!deriver.dynamicFallback || operation?.family !== 'property' || operation.internalMethod !== 'get') return null
+  if (!receiverIsBox(graph, operation, deriver)) return null
+  return storageReadOfBox(deriver, result)
+}
+
+/** What a read off a box publishes when the box, not the read's carrier, is the faithful answer. */
+const storageReadOfBox = (deriver: RepresentationDeriver, result: SemanticResult): Representation | null => {
+  const read = deriver.derive(result.type)
+  const carrier = read.kind === 'optional' ? read.payload : read
+  // An absence-only carrier is no promise a box can keep either: the shape
+  // of a function constructor's instance sees `this._treeGET = null` and not
+  // the prototype method that later writes a node there.
+  if (read.kind === 'null' || read.kind === 'undefined') return { kind: 'dynamic', reason: 'opt-in-fallback' }
+  const rebuilt =
+    carrier.kind === 'dictionary' ||
+    carrier.kind === 'array-object' ||
+    carrier.kind === 'record' ||
+    carrier.kind === 'record-with-index' ||
+    (carrier.kind === 'native-record-ref' && carrier.native === null && carrier.recursive === undefined)
+  return rebuilt ? { kind: 'dynamic', reason: 'opt-in-fallback' } : null
+}
+
+/**
+ * Whether a property operation's receiver is a box: derived `dynamic`, or
+ * itself a read off a box that `dynamicStorageReadOf` keeps boxed
+ * (avvio's `instance._current.unshift(plugin)`, where `_current` is an Array
+ * read off a boxed instance).
+ */
+const receiverIsBox = (graph: SemanticGraph, operation: SemanticOperation, deriver: RepresentationDeriver, depth = 0): boolean => {
+  const receiver = operandOf(operation, 'receiver')
+  if (!receiver) return false
+  if (deriver.derive(receiver.type).kind === 'dynamic') return true
+  if (depth >= 16 || receiver.source.kind !== 'result') return false
+  const resultId = receiver.source.result
+  const producerId = graph.results.get(resultId)
+  const producer = producerId === undefined ? undefined : graph.operations.get(producerId)
+  if (producer?.family !== 'property' || producer.internalMethod !== 'get') return false
+  const produced = producer.results.find((candidate) => candidate.id === resultId)
+  return produced !== undefined && receiverIsBox(graph, producer, deriver, depth + 1) && storageReadOfBox(deriver, produced) !== null
+}
+
+/**
+ * A carrier a method value read off a box would have to be unboxed into. An
+ * optional or a sum with such an arm is the same read: the box holds the one
+ * Function object whichever arm the checker names, and callable arms share
+ * the Function tag, so no classifier picks among them (pino's
+ * `this[levelValSym]`, typed by a JavaScript literal's invented symbol index as
+ * the union of its method members).
+ */
+const holdsDynamicallyReadCallable = (carrier: Representation): boolean => {
+  if (carrier.kind === 'optional') return holdsDynamicallyReadCallable(carrier.payload)
+  if (carrier.kind === 'tagged-union') return carrier.arms.some((arm) => holdsDynamicallyReadCallable(arm.value))
+  return (
     carrier.kind === 'function' ||
     carrier.kind === 'function-family' ||
     carrier.kind === 'function-value-family' ||
@@ -460,8 +529,6 @@ const dynamicCallableReadOf = (
     // whose carrier states identity only; the box read is still the box.
     carrier.kind === 'callable-identity'
   )
-    return { kind: 'dynamic', reason: 'opt-in-fallback' }
-  return null
 }
 
 /**
@@ -554,7 +621,7 @@ const dynamicCallableValueOf = (
  * The checker authenticated the wrapper declaration and normalization carried
  * that fact onto the operation; no arbitrary typed value reaches this route.
  */
-const commonJsBoundaryOf = (graph: SemanticGraph, operation: SemanticOperation | undefined): Representation | null => {
+export const commonJsBoundaryOf = (graph: SemanticGraph, operation: SemanticOperation | undefined): Representation | null => {
   if (operation?.family === 'invocation' && operation.commonJsRequire !== undefined && operation.commonJsRequire.nativeRecord !== true)
     return { kind: 'dynamic', reason: 'commonjs-module-boundary' }
   if (
@@ -587,6 +654,18 @@ const commonJsBoundaryOf = (graph: SemanticGraph, operation: SemanticOperation |
     const receiver = operandOf(operation, 'receiver')
     if (receiver?.source.kind === 'result') {
       const producerId = graph.results.get(receiver.source.result)
+      const producer = producerId === undefined ? undefined : graph.operations.get(producerId)
+      if (commonJsBoundaryOf(graph, producer) !== null) return { kind: 'dynamic', reason: 'commonjs-module-boundary' }
+    }
+  }
+  // An assignment expression's value is its right-hand side's value (13.15.2),
+  // so a box assigned is the box: `module.exports.S = require('./s')` stored
+  // the required module's exports converted to their checker type, which in a
+  // require cycle is the unfinished module's `{}`.
+  if (operation?.family === 'computation' && operation.form === 'assignment' && operation.operator === '=') {
+    const value = operandOf(operation, 'value')
+    if (value?.source.kind === 'result') {
+      const producerId = graph.results.get(value.source.result)
       const producer = producerId === undefined ? undefined : graph.operations.get(producerId)
       if (commonJsBoundaryOf(graph, producer) !== null) return { kind: 'dynamic', reason: 'commonjs-module-boundary' }
     }
@@ -774,7 +853,8 @@ export const publishRepresentations = (
       commonJsBoundaryOf(graph, operation) ??
       shadowedCallableBuiltinReadOf(operation, callableOrigins, facts) ??
       dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables) ??
-      dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables) ??
+      dynamicCallableReadOf(graph, operation, result, deriver, callableOrigins, dynamicFallbackCallables) ??
+      dynamicStorageReadOf(graph, operation, result, deriver) ??
       nativeCursorIteratorOf(graph.structuralTypes, operation, result, deriver) ??
       patternSourceSnapshotOf(graph.structuralTypes, regexp, operation, result, deriver) ??
       patternSourceArmOf(operation, result, deriver) ??
@@ -836,11 +916,13 @@ export const publishRepresentations = (
                 ? 'shadowed-callable-builtin'
                 : dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables)
                   ? 'dynamic-callable-identity'
-                  : dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables)
+                  : dynamicCallableReadOf(graph, operation, result, deriver, callableOrigins, dynamicFallbackCallables)
                     ? 'dynamic-call-frame'
-                    : override === collectionGet
-                      ? 'keyed-collection-get'
-                      : 'protocol-array-fast-path',
+                    : dynamicStorageReadOf(graph, operation, result, deriver)
+                      ? 'dynamic-storage-read'
+                      : override === collectionGet
+                        ? 'keyed-collection-get'
+                        : 'protocol-array-fast-path',
         joinsClosedFamily: false
       })
     }

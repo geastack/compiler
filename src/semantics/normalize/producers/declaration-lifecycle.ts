@@ -2,7 +2,13 @@ import ts from 'typescript'
 import type { DeclarationId, OperationId } from '../../../identity/ids.js'
 import { operationId, regionId, semanticResultId } from '../../../identity/ids.js'
 import type { SemanticEdge } from '../../model/edges.js'
-import type { AllocationOperation, BindingOperation, DeclarationLifecycleOperation, PropertyOperation } from '../../model/operations.js'
+import type {
+  AllocationOperation,
+  BindingOperation,
+  DeclarationLifecycleOperation,
+  InvocationOperation,
+  PropertyOperation
+} from '../../model/operations.js'
 import type { CompletionBehavior, EffectBehavior, SemanticCaller, SemanticOperand, SemanticResult } from '../../model/operands.js'
 import { normalCompletion, throwingCompletion } from '../../model/operands.js'
 import type { CensusCandidate } from '../census.js'
@@ -10,7 +16,7 @@ import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'
 import type { SpecializationCensus } from '../specialization.js'
 import { mintOperationId, mintResult, operand } from './mint.js'
-import { asBlocked, resultEdge, valueEdgesInto } from './shared.js'
+import { asBlocked, provesNativeModuleRecord, resultEdge, valueEdgesInto } from './shared.js'
 import { citeExpressionResult } from './references.js'
 
 /**
@@ -227,6 +233,76 @@ export const createDeclarationLifecycleProducer = (context: ProducerContext): Fa
     }
   }
 
+  /**
+   * `import * as equal from 'fast-deep-equal'` over a CommonJS module whose
+   * export is a VALUE (`module.exports = function equal ...`). The binding is
+   * its own cell (`identities.ts`'s `aliasTargetOf`), because no declaration in
+   * the exporting module holds that value, so there is no exporting cell for a
+   * module link to resolve to (`ir/lower.ts` lowers `module-link` to nothing).
+   * The value lives in the module record, and the cell is initialized from the
+   * same record lookup a `require` of that module performs.
+   */
+  const commonJsValueNamespaceOf = (
+    candidate: CensusCandidate,
+    node: ts.ImportDeclaration,
+    namespace: ts.NamespaceImport
+  ): { readonly operations: readonly (BindingOperation | InvocationOperation)[]; readonly edges: readonly SemanticEdge[] } | null => {
+    const symbol = context.checker.getSymbolAtLocation(namespace.name)
+    if (!symbol || context.identities.declarationOfSymbol(symbol) !== namespace) return null
+    if (!ts.isStringLiteralLike(node.moduleSpecifier)) return null
+    const ownerFile = node.getSourceFile()
+    const targetFileName = context.runtimeModuleTargetOf(node.moduleSpecifier.text, ownerFile.fileName, 'import')
+    const targetFile = targetFileName === null ? null : context.sourceFileOf(targetFileName)
+    if (!targetFile || targetFile.isDeclarationFile) return null
+    // The same proof a `require` of this module consumes: a native record keeps
+    // the exports' own type, anything else is the module-record box.
+    const nativeRecord = provesNativeModuleRecord(context, context.commonJsModuleRecords.importedExportExpressionOf(node))
+    const recordType = nativeRecord ? context.types.typeAt(namespace.name) : context.types.typeOf(context.checker.getAnyType())
+    const requireId = mintOperationId(context.ordinals, candidate.id, 'declaration-lifecycle')
+    const lookup: InvocationOperation = {
+      id: requireId,
+      family: 'invocation',
+      caller: candidate.caller,
+      internalMethod: 'call',
+      optionalChain: false,
+      selectedSignature: null,
+      resultDivergence: { kind: 'none' },
+      target: { kind: 'open', evidence: ['checker-authenticated CommonJS module record'] },
+      commonJsRequire: {
+        owner: regionId(context.identities.nodeIdOf(ownerFile), 'module-body'),
+        target: regionId(context.identities.nodeIdOf(targetFile), 'module-body'),
+        builtinModule: context.builtinModuleNameOf(node.moduleSpecifier.text),
+        ...(nativeRecord ? { nativeRecord: true as const } : {})
+      },
+      operands: [],
+      results: [mintResult(requireId, 'value', recordType)],
+      completion: throwingCompletion,
+      effects: { readsMutableState: true, writesMutableState: true, allocates: false, callsUserCode: true },
+      // At the import's own position: ES imports are initialized before any
+      // statement of the body runs, and a fresh ordinal lands after them --
+      // ajv's `runtime/uri.ts` read `uri` before its cell was initialized.
+      evaluationOrdinal: candidate.evaluationOrdinal
+    }
+    const record = semanticResultId(requireId, 'value')
+    const bindId = mintOperationId(context.ordinals, candidate.id, 'declaration-lifecycle')
+    const bind: BindingOperation = {
+      id: bindId,
+      family: 'binding',
+      action: 'initialize',
+      declaration: context.identities.declarationIdOf(namespace),
+      mutable: false,
+      temporalDeadZone: false,
+      caller: candidate.caller,
+      operands: [operand('initializer', 0, { kind: 'result', result: record }, recordType)],
+      results: [mintResult(bindId, 'value', recordType)],
+      completion: normalCompletion,
+      effects: { readsMutableState: false, writesMutableState: true, allocates: false, callsUserCode: false },
+      evaluationOrdinal: candidate.evaluationOrdinal
+    }
+    const edge = resultEdge({ kind: 'result', result: record }, bindId, 'initializer', 0)
+    return { operations: [lookup, bind], edges: edge ? [edge] : [] }
+  }
+
   const contributeImport = (candidate: CensusCandidate, node: ts.ImportDeclaration): CandidateContribution => {
     if (node.importClause?.isTypeOnly) return { kind: 'operations', operations: [], edges: [] }
     if (!ts.isStringLiteralLike(node.moduleSpecifier)) {
@@ -244,7 +320,9 @@ export const createDeclarationLifecycleProducer = (context: ProducerContext): Fa
     }
 
     const { id: moduleEvaluateId, operation: freshModuleEvaluate } = moduleEvaluateOperation(moduleDeclaration)
-    const operations: DeclarationLifecycleOperation[] = freshModuleEvaluate ? [freshModuleEvaluate] : []
+    const operations: (DeclarationLifecycleOperation | BindingOperation | InvocationOperation)[] = freshModuleEvaluate
+      ? [freshModuleEvaluate]
+      : []
     const edges: SemanticEdge[] = []
 
     const clause = node.importClause
@@ -260,7 +338,12 @@ export const createDeclarationLifecycleProducer = (context: ProducerContext): Fa
     }
 
     const namedBindings = clause.namedBindings
-    if (namedBindings && ts.isNamespaceImport(namedBindings)) {
+    const valueNamespace =
+      namedBindings && ts.isNamespaceImport(namedBindings) ? commonJsValueNamespaceOf(candidate, node, namedBindings) : null
+    if (valueNamespace) {
+      operations.push(...valueNamespace.operations)
+      edges.push(...valueNamespace.edges)
+    } else if (namedBindings && ts.isNamespaceImport(namedBindings)) {
       // The namespace import's own binding IS the module namespace object.
       const pair = bindingPair(candidate, namedBindings, namedBindings.name, moduleEvaluateId)
       operations.push(...pair.operations)
@@ -513,7 +596,13 @@ export const createDeclarationLifecycleProducer = (context: ProducerContext): Fa
     valueType: SemanticResult['type']
   ): { readonly operations: readonly (BindingOperation | PropertyOperation)[]; readonly edges: readonly SemanticEdge[] } => {
     const file = node.getSourceFile()
-    if (node.isExportEquals || !context.commonJsModules.has(file) || !ts.isExternalModule(file)) return { operations: [], edges: [] }
+    if (
+      node.isExportEquals ||
+      !context.commonJsModules.has(file) ||
+      !ts.isExternalModule(file) ||
+      context.commonJsModuleRecords.followsTypeScriptEmit(file)
+    )
+      return { operations: [], edges: [] }
     const moduleDeclaration = commonJsModuleWrapperOf(file)
     if (moduleDeclaration === undefined) return { operations: [], edges: [] }
     const owner = regionId(context.identities.nodeIdOf(file), 'module-body')
@@ -578,7 +667,12 @@ export const createDeclarationLifecycleProducer = (context: ProducerContext): Fa
     const moduleDeclaration = commonJsModuleWrapperOf(file)
     if (!moduleSymbol || moduleDeclaration === undefined) return none
     const exported = context.checker.getExportsOfModule(moduleSymbol)
-    if (exported.some((symbol) => symbol.escapedName === 'default')) return none
+    // A module that follows TypeScript's emit gets its `default` here too, as
+    // `exports.default = X`: ajv's `runtime/equal.ts` answers
+    // `require(...).default`, and its `module.exports = exports = Ajv` makes
+    // `require('ajv').default` the class itself.
+    if (exported.some((symbol) => symbol.escapedName === 'default') && !context.commonJsModuleRecords.followsTypeScriptEmit(file))
+      return none
     const owner = regionId(context.identities.nodeIdOf(file), 'module-body')
     const anyType = context.types.typeOf(context.checker.getAnyType())
     const stringType = context.types.typeOf(context.checker.getStringType())

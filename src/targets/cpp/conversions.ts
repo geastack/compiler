@@ -955,6 +955,7 @@ const cppConversionTables = (
       materializer: { id: 'gea::detail::unboxValue', domain, allocates: false }
     }
   },
+  namedRecordFields: (shapeId) => layouts.plainFieldsForShape?.(shapeId) ?? null,
   /**
    * Reading a materializable ordinary Array back out of a box -- the
    * MATERIALIZING direction (a genuinely dynamic value becoming a native

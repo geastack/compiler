@@ -71,9 +71,11 @@ import { verifyIrBody, type IrViolation } from './verify.js'
  *   member is read by CALLING a body the carrier names, and the call site
  *   spells it from the shape rather than from an operation.
  *
- * A plain function body is therefore reachable through exactly one thing: a
- * kept `allocate-callable` citing it. That is the only edge this pass relies on
- * being complete, and it is: nothing else in the backend spells a
+ * A plain function body is therefore reachable through exactly two things: a
+ * kept `allocate-callable` citing it, or a kept call through a generic function
+ * set whose `family` names it (the set's tag holds a member, and the call runs
+ * that member's copy by name). Those are the only edges this pass relies on
+ * being complete, and they are: nothing else in the backend spells a
  * non-class, non-accessor body's symbol.
  *
  * ## Fail-closed
@@ -405,6 +407,9 @@ const sliceBody = (
   for (const operation of kept) {
     if (operation.kind === 'binding-read') readCells.add(operation.declaration)
     if (operation.kind === 'allocate-callable') citedFunctions.add(operation.functionId)
+    // A call through a generic function set runs the copy its `family` names
+    // for whichever member the tag holds, by that copy's own symbol.
+    if (operation.kind === 'call') for (const entry of operation.family ?? []) citedFunctions.add(entry.functionId)
     if (operation.kind === 'allocate-constructor') evaluatedClasses.add(operation.declaration)
     if (operation.kind === 'construct') {
       const targets =

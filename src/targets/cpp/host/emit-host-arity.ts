@@ -1,5 +1,5 @@
 import type { Representation } from '../../../representation/model.js'
-import { cppRecordFieldName, cppScalarType, cppTypeOf } from '../types.js'
+import { cppRecordFieldName, cppScalarType, cppStringLiteral, cppTypeOf } from '../types.js'
 import { createCppEmitBlockedError, operandText, type EmitContext, type HostMemberRead } from '../emit-context.js'
 import { fillHostTemplate, hostCallName, hostMemberOf, type HostCallSpelling } from './host-members.js'
 import { unboxedReadText } from '../emit-dynamic-properties.js'
@@ -107,11 +107,48 @@ export const hostArgumentText = (representation: Representation, text: string, a
  */
 export const hostMemberReceiverText = (ctx: EmitContext, read: HostMemberRead): string | null => {
   if (read.receiver === null) return null
-  const text = operandText(ctx, read.receiver)
+  const operand = operandText(ctx, read.receiver)
+  const union = read.receiver.representation
+  const arm = union.kind === 'tagged-union' ? hostReceiverArmOf(union, read.protocol) : null
+  const text =
+    arm === null ? operand : checkedArmText(operand, arm.index, `${read.protocol}.prototype.${read.member} called on another kind of value`)
+  const representation = arm === null ? union : arm.value
   const host = hostMemberOf(ctx.hosts.members, read.protocol, read.member)
   if (host?.kind === 'method' && host.receiver === 'raw') return text
-  return hostArgumentText(read.receiver.representation, text)
+  return hostArgumentText(representation, text)
 }
+
+const primitiveWrapperProtocols: ReadonlyMap<string, (value: Representation) => boolean> = new Map([
+  ['String', (value) => value.kind === 'string'],
+  ['Number', (value) => value.kind === 'scalar' && value.domain === 'number'],
+  ['Boolean', (value) => value.kind === 'scalar' && value.domain === 'boolean'],
+  ['BigInt', (value) => value.kind === 'scalar' && value.domain === 'bigint'],
+  ['Symbol', (value) => value.kind === 'symbol']
+])
+const isPrimitiveCarrier = (value: Representation): boolean =>
+  value.kind === 'string' || value.kind === 'scalar' || value.kind === 'symbol' || value.kind === 'null' || value.kind === 'undefined'
+
+/**
+ * The one arm of a union receiver a host method of `protocol` runs on. The
+ * checker resolved the member on the receiver's narrowed type, which the
+ * union's own carrier does not state (sonic-boom's `writingBuf.subarray(n)`
+ * after `if (typeof writingBuf === 'string') writingBuf = Buffer.from(...)`).
+ * A primitive's wrapper protocol runs on its primitive arm; any other protocol
+ * on the one arm that holds an object. More than one candidate is no answer.
+ */
+const hostReceiverArmOf = (
+  union: Extract<Representation, { readonly kind: 'tagged-union' }>,
+  protocol: string
+): { readonly index: number; readonly value: Representation } | null => {
+  const matches = primitiveWrapperProtocols.get(protocol) ?? ((value: Representation) => !isPrimitiveCarrier(value))
+  const candidates = union.arms.flatMap((arm, index) => (matches(arm.value) ? [{ index, value: arm.value }] : []))
+  return candidates.length === 1 ? (candidates[0] ?? null) : null
+}
+
+/** One union arm, read after a test that throws the TypeError calling the member on any other arm would. */
+const checkedArmText = (union: string, index: number, message: string): string =>
+  `([&]() -> const auto& { if (!(${union}).template is<${index}>()) gea::host::throwRuntimeError("TypeError", ${cppStringLiteral(message)}); ` +
+  `return (${union}).template get<${index}>(); }())`
 
 /**
  * One result, as the program holds it.

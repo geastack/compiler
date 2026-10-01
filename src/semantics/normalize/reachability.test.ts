@@ -192,3 +192,22 @@ test('the JSDoc type-cast spelling of the clone idiom also keeps its family full
     'Dead is dispatched through .copy(this) and must not stay a shape-only layout'
   )
 })
+
+test('a CommonJS module an ES module imports evaluates at the import, not as a script', async () => {
+  const { moduleEvaluationOrder } = await import('./reachability.js')
+  const name = (file: string) => resolve(`test/fixtures/evaluation-order-${file}.${file === 'commonjs' ? 'js' : 'ts'}`)
+  const result = createProgram({
+    rootFileNames: [name('entry')],
+    projectFileName: null,
+    options: { ...defaultCompilerOptions, types: [], allowJs: true },
+    sourceOverlay: new Map([
+      [name('entry'), `import './evaluation-order-first'; import './evaluation-order-commonjs'; export {};`],
+      [name('first'), `console.log('first'); export const first = 1;`],
+      [name('commonjs'), `console.log('commonjs'); module.exports = {};`]
+    ])
+  })
+  const order = moduleEvaluationOrder({ checker: result.checker, files: result.sourceFiles, entries: result.entryFiles }, new Set()).map(
+    (file) => file.fileName
+  )
+  assert.deepEqual(order, [name('first'), name('commonjs'), name('entry')])
+})

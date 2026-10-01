@@ -115,7 +115,18 @@ export const cppRecursiveContainerDeclarations = (
     ...ordered.map(([type, representation]) => {
       const name = cppRecursiveContainerName(type)
       const base = baseTypeOf(representation)
-      return [`struct ${name} final : ${base} {`, `  using Base = ${base};`, '  using Base::Base;', '};'].join('\n')
+      // A callable wrapper is carried BY VALUE, so it converts from its base
+      // and marks itself for the runtime's `DynamicCarrier`; a container
+      // wrapper is only ever behind a `Ref` and needs neither.
+      const byValue =
+        representation.kind === 'function-value-dispatch'
+          ? [
+              `  ${name}() = default;`,
+              `  ${name}(Base base) : Base(std::move(base)) {}`,
+              '  static constexpr bool geaRecursiveContainerWrapper = true;'
+            ]
+          : []
+      return [`struct ${name} final : ${base} {`, `  using Base = ${base};`, '  using Base::Base;', ...byValue, '};'].join('\n')
     })
   ]
 }
@@ -148,19 +159,28 @@ export const cppRecursiveContainerTraceEdges = (
   plan: SealedRepresentationPlan,
   qualifier: string,
   representations: readonly Representation[] = [...plan.selected.values()]
-): readonly string[] => {
+): { readonly declarations: readonly string[]; readonly definitions: readonly string[] } => {
   const ordered = orderedRecursiveDefinitions(representations)
-  return ordered.map(([type]) => {
-    const name = `${qualifier}${cppRecursiveContainerName(type)}`
-    return [
-      'namespace gea::detail {',
-      `template <> struct TraceEdges<${name}> {`,
-      '  static constexpr bool supported = true;',
-      `  static void visit(const ${name}& value, RefVisitor& visitor) {`,
-      `    traceRefs(static_cast<const ${name}::Base&>(value), visitor);`,
-      '  }',
-      '};',
-      '}'
-    ].join('\n')
-  })
+  // Declared as early as the wrappers (a record's trace hook asks the trait in
+  // its own definition), defined only once every struct is complete: tracing
+  // the base walks its element carriers, and a record the wrapper holds by
+  // value has no size before its own definition.
+  const names = ordered.map(([type]) => `${qualifier}${cppRecursiveContainerName(type)}`)
+  return {
+    declarations: names.map((name) =>
+      [
+        'namespace gea::detail {',
+        `template <> struct TraceEdges<${name}> {`,
+        '  static constexpr bool supported = true;',
+        `  static void visit(const ${name}& value, RefVisitor& visitor);`,
+        '};',
+        '}'
+      ].join('\n')
+    ),
+    definitions: names.map(
+      (name) =>
+        `inline void TraceEdges<${name}>::visit(const ${name}& value, RefVisitor& visitor) {\n` +
+        `  traceRefs(static_cast<const ${name}::Base&>(value), visitor);\n}`
+    )
+  }
 }

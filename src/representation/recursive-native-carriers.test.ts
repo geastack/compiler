@@ -34,8 +34,14 @@ const planOf = (...representations: readonly Representation[]): SealedRepresenta
 // the isolating namespace for) are recombined here so a syntax check still
 // exercises both -- these tests compile at true global scope, so the
 // specialisation's empty qualifier is the right one everywhere below.
-const emittedFor = (plan: SealedRepresentationPlan): string =>
-  [...cppRecursiveContainerDeclarations(plan), ...cppRecursiveContainerTraceEdges(plan, '')].join('\n')
+const emittedFor = (plan: SealedRepresentationPlan): string => {
+  const traceEdges = cppRecursiveContainerTraceEdges(plan, '')
+  return [
+    ...cppRecursiveContainerDeclarations(plan),
+    ...traceEdges.declarations,
+    ...(traceEdges.definitions.length > 0 ? ['namespace gea::detail {', ...traceEdges.definitions, '}'] : [])
+  ].join('\n')
+}
 
 const syntaxCheckRecursiveContainers = (declarations: string, completenessChecks: string): void => {
   const compiler = process.env.CXX ?? 'clang++'

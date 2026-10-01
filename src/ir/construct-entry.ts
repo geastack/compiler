@@ -82,7 +82,13 @@ export const nativeOrdinaryConstructInstanceMatches = (
   return (
     (instance.kind === 'record' || instance.kind === 'record-with-index' || instance.kind === 'native-record-ref') &&
     (instance.ownership === 'owned' || instance.ownership === 'shared-refcount') &&
-    (abi.receiver === null || representationKey(abi.receiver) === representationKey(instance))
+    (abi.receiver === null ||
+      representationKey(abi.receiver) === representationKey(instance) ||
+      // A body entered with a box runs over a box of the SAME allocation, so
+      // its writes land in the instance through the record's field hooks:
+      // fastq's `Task`, whose receiver the fallback boxes, built natively by
+      // `reusify`'s `new Constructor()`.
+      (abi.receiver.kind === 'dynamic' && instance.ownership === 'shared-refcount'))
   )
 }
 

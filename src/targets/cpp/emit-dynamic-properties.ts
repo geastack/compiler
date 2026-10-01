@@ -215,10 +215,13 @@ export const dynamicGetText = (ctx: EmitContext, operation: GetOperation): strin
   if (converted !== null) return `[](const gea::Value& ${materialized}) -> ${cppTypeOf(produced)} { return ${converted}; }(${read})`
   const boxed: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
   const reason = firstNeverReasonOf(ctx.conversions.nodeFor(boxed, produced).capability)
+  const union = produced.kind === 'optional' ? produced.payload : produced
+  const arms = union.kind === 'tagged-union' ? ` (arms ${union.arms.map((arm) => representationKey(arm.value)).join(' | ')})` : ''
   throw createCppEmitBlockedError(
     `conversion:${representationKey(boxed)}->${representationKey(produced)}`,
     `a "get" on a dynamic receiver publishes "${representationKey(produced)}"; unboxing a dynamic property read into a concrete ` +
-      `carrier needs a tag-checked conversion, which is not installed${reason === null ? '' : ` (${reason})`}`
+      `carrier needs a tag-checked conversion, which is not installed${reason === null ? '' : ` (${reason})`}${arms} ` +
+      `(receiver ${representationKey(operation.receiver.representation)})`
   )
 }
 
@@ -819,6 +822,15 @@ export const unboxedReadText = (produced: Representation, text: string, site: st
       )
     }
     return `gea::detail::unboxOptional<${cppTypeOf(produced.payload)}>(${text}, gea::Value::Tag::${payloadTag}, ${cppStringLiteral(site)})`
+  }
+  // A callable read back out of a property is adapted, not asserted: the box
+  // holds the function at its own convention (avvio's `this[kAddNode](...)`
+  // reads a symbol-keyed class method, boxed with its monomorph's ABI), and
+  // `DynamicCarrier` recovers an exact payload or builds the checked adapter
+  // -- the load `unboxedLoadText` states for every other box of a callable.
+  if (isNativeCallableCarrier(produced.kind)) {
+    const load = unboxedLoadText(produced, text)
+    if (load !== null) return load
   }
   const tag = dynamicTagFor(produced)
   if (tag === null) {

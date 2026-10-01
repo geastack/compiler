@@ -6,6 +6,7 @@ import { objectAssignTargetType } from '../derived-expression-type.js'
 import { keptLeftPartTypeOf } from '../logical-result-type.js'
 import type { ProducerContext } from '../producer-context.js'
 import { bindingKindOf } from './binding-kind.js'
+import { valueSymbolAt } from '../unresolvable-names.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import {
   isAssignmentOperatorKind,
@@ -72,8 +73,11 @@ const bindingWriteFor = (
   // A namespace-qualified member (`Debug.level = 2`) is a name too -- see
   // `namespace-paths.ts`. The census gave it the `reference` family, so no
   // property family publishes a `[[Set]]` for it: this write is the store.
+  // The lexical binding, as a read of the same name resolves it: checked
+  // JavaScript answers `exports = module.exports = {}`'s target with the
+  // module's own symbol, not the wrapper's `exports`.
   const symbol = ts.isIdentifier(target)
-    ? context.checker.getSymbolAtLocation(target)
+    ? valueSymbolAt(context.checker, target)
     : ts.isPropertyAccessExpression(target)
       ? (context.namespacePaths.memberSymbolOf(target) ?? undefined)
       : undefined
@@ -213,8 +217,15 @@ const finishComputation = (
       // union would not reproduce, and no operand disagrees with it there.
       const right = operands.find((candidate) => candidate.role === 'right')
       if (right && right.type !== context.types.typeOf(context.checker.getTypeAtLocation(node.right))) {
-        const kept = context.types.typeOf(context.checker.getNonNullableType(context.checker.getTypeAtLocation(node.left)))
-        return kept === right.type ? kept : context.table.intern({ kind: 'union', members: [kept, right.type] })
+        const keptType = context.checker.getNonNullableType(context.checker.getTypeAtLocation(node.left))
+        // As for `&&` below: an `any`/`unknown` left keeps an arm that states
+        // nothing, so the checker's own answer stands. avvio's `opts.expose =
+        // opts.expose || {}` otherwise held the `{}` literal's record and
+        // rebuilt the box it read into it.
+        if ((keptType.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) {
+          const kept = context.types.typeOf(keptType)
+          return kept === right.type ? kept : context.table.intern({ kind: 'union', members: [kept, right.type] })
+        }
       }
     }
     if (form === 'logical' && ts.isBinaryExpression(node) && operatorText === '&&') {
@@ -240,6 +251,26 @@ const finishComputation = (
       // the right operand, and saying so is what keeps a class carrier from
       // being unioned into a numeric answer.
       const right = operands.find((candidate) => candidate.role === 'right')
+      // The left operand re-typed with an absence the checker does not state
+      // -- a `RegExpExecArray` capture slot (`properties.ts`), `string` to
+      // the checker -- keeps that `undefined` too: `rs[1] && sets.words()` is
+      // `undefined` for a group that did not participate.
+      const left = operands.find((candidate) => candidate.role === 'left')
+      const undefinedType = context.table.intern({ kind: 'primitive', primitive: 'undefined' })
+      const leftShape = left === undefined ? undefined : context.table.get(left.type).shape
+      const leftAddsAbsence =
+        left !== undefined &&
+        left.type !== context.types.typeOf(context.checker.getTypeAtLocation(node.left)) &&
+        leftShape?.kind === 'union' &&
+        leftShape.members.includes(undefinedType)
+      if (right && leftAddsAbsence) {
+        const keptType = keptLeftPartTypeOf(context.checker, '&&', context.checker.getTypeAtLocation(node.left))
+        const kept =
+          keptType === null
+            ? undefinedType
+            : context.table.intern({ kind: 'union', members: [context.types.typeOf(keptType), undefinedType] })
+        return context.table.intern({ kind: 'union', members: [kept, right.type] })
+      }
       if (right && right.type !== context.types.typeOf(context.checker.getTypeAtLocation(node.right))) {
         const keptType = keptLeftPartTypeOf(context.checker, '&&', context.checker.getTypeAtLocation(node.left))
         // An `any`/`unknown` guard keeps an arm that states nothing, and a

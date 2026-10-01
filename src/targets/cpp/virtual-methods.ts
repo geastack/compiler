@@ -28,6 +28,7 @@ import {
   cppAbiParameterType,
   cppBodyName,
   cppClassName,
+  cppRecordFieldKeyIsSymbol,
   cppRecordFieldName,
   cppResultTypeOf,
   cppStringLiteral,
@@ -35,6 +36,7 @@ import {
   cppUndefinedIn
 } from './types.js'
 import { alignedValueText, dynamicCarrierBoxText, type ConversionSite } from './emit-narrowing.js'
+import { wellKnownSymbolEnumNameOf } from './records.js'
 
 /**
  * Dispatch for a method the program overrides.
@@ -325,7 +327,8 @@ export const prototypeReadHooks = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   abiOf: (callable: FunctionId) => CallableAbi | null,
   capturesNothing: (callable: FunctionId) => boolean,
-  readDynamically: (declaration: DeclarationId) => boolean
+  readDynamically: (declaration: DeclarationId) => boolean,
+  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map()
 ): PrototypeReadHooks => {
   // A method read yields the prototype's one function object for that key
   // (`o.on === C.prototype.on`), boxed once over the body: the thunk captures
@@ -388,18 +391,43 @@ export const prototypeReadHooks = (
       `  ${lead}gea::detail::NativePrototypeOps::SetResult gea_setPrototypeProperty(const gea::PropertyKey& gea_key, const gea::Value& gea_value, const gea::Value& gea_receiver)${tail};`
     ])
     const inherited = ancestor === null ? null : cppClassName(ancestor)
-    const names = getters.map((getter) => cppStringLiteral(getter.key))
+    // A member keyed by a symbol carries its `sym(<declaration>)` marker, and
+    // is matched on the symbol path -- by the well-known enum, or by the id
+    // its declaring cell registered -- as records.ts's field dispatcher
+    // matches a symbol-keyed field. avvio's `TimeTree` declares every
+    // internal method as `[kAddNode](...)` and reads it as `this[kAddNode]`.
+    const named = getters.filter((getter) => !cppRecordFieldKeyIsSymbol(getter.key))
+    const symbolic = getters.filter((getter) => cppRecordFieldKeyIsSymbol(getter.key))
+    const symbolIdOf = (key: string): string => {
+      const wellKnown = wellKnownSymbolEnumNameOf(wellKnownSymbols, key)
+      return wellKnown === null
+        ? `gea::detail::declaredSymbolId(${cppStringLiteral(key)})`
+        : `static_cast<std::uint32_t>(gea::detail::WellKnownSymbol::${wellKnown})`
+    }
+    const names = named.map((getter) => cppStringLiteral(getter.key))
+    const nameTest = names.length === 0 ? 'false' : names.map((name) => `gea_key.text() == ${name}`).join(' || ')
+    const symbolTest =
+      symbolic.length === 0 ? 'false' : symbolic.map((getter) => `gea_key.symbolId() == ${symbolIdOf(getter.key)}`).join(' || ')
     definitions.push(
       [
         `bool ${struct}::gea_readPrototypeProperty(const gea::PropertyKey& gea_key, gea::Value& gea_out) const {`,
         '  if (!gea_key.isSymbol()) {',
         '    const std::string& gea_name = gea_key.text();',
-        ...getters.map((getter, index) => `    if (gea_name == ${names[index]}) { gea_out = ${getter.text}; return true; }`),
+        ...named.map((getter, index) => `    if (gea_name == ${names[index]}) { gea_out = ${getter.text}; return true; }`),
         '  }',
+        ...(symbolic.length === 0
+          ? []
+          : [
+              '  if (gea_key.isSymbol()) {',
+              ...symbolic.map(
+                (getter) => `    if (gea_key.symbolId() == ${symbolIdOf(getter.key)}) { gea_out = ${getter.text}; return true; }`
+              ),
+              '  }'
+            ]),
         `  return ${inherited === null ? 'false' : `${inherited}::gea_readPrototypeProperty(gea_key, gea_out)`};`,
         '}',
         `bool ${struct}::gea_hasPrototypeProperty(const gea::PropertyKey& gea_key) const {`,
-        `  if (!gea_key.isSymbol() && (${names.map((name) => `gea_key.text() == ${name}`).join(' || ')})) return true;`,
+        `  if (gea_key.isSymbol() ? (${symbolTest}) : (${nameTest})) return true;`,
         `  return ${inherited === null ? 'false' : `${inherited}::gea_hasPrototypeProperty(gea_key)`};`,
         '}',
         // Setters stay on the static paths; a dynamic write falls through to the payload's own fields.
