@@ -25174,10 +25174,19 @@ bool isDocumentLevelEvent(const Node& node, const std::string& name) {
  * is gated on the node's live token instead -- a rebuilt subtree leaves an
  * inert closure behind rather than a second generation of the handler.
  *
- * Bubbling events are delegated to the BODY and gated by `containsNode`; see
- * the no-argument `addNodeListener` for why, and `recordNodeSubscription` for
- * how it is released with the node. Scroll stays on its target because it does
- * not bubble.
+ * Everything else is registered on `node` itself. `Tree::dispatchEvent` walks
+ * from the hit node up through its ancestors and runs each node's listeners in
+ * turn, so a descendant's handler runs before its ancestors', `stopPropagation`
+ * stops the walk, and an event that does not bubble (scroll) stays on its
+ * target. The engine drops the listeners when the node is taken down.
+ *
+ * These listeners used to be delegated to the BODY and gated by `containsNode`.
+ * The body runs its listeners in registration order, not deepest first, so a
+ * list row rebuilt after its ancestors' handlers were bound (a re-rendered
+ * `items.map(...)`) ran AFTER them: with an ancestor `onPointerDown` and a row
+ * `onPointerDown`, the order flipped from row-then-ancestor to
+ * ancestor-then-row after the first re-render, and `stopPropagation` could not
+ * hold back the ancestor at all.
  */
 template <typename Node, typename Invoke>
 void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
@@ -25204,18 +25213,7 @@ void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
       });
     return;
   }
-  if (name == "scroll") {
-    target.addEventListener(name.c_str(), std::move(run));
-    return;
-  }
-  const auto listenerId = gea::embedded::ui::Document::instance().body().addEventListener(
-    name.c_str(), [target, run](gea::framework::events::PointerEvent& event) mutable {
-      if (!gea::embedded::ui::Tree::instance().containsNode(target.id(), event.targetId)) return;
-      run(event);
-    });
-  recordNodeSubscription(target.id(), [name, listenerId]() {
-    gea::embedded::ui::Document::instance().body().removeEventListener(name.c_str(), listenerId);
-  });
+  target.addEventListener(name.c_str(), std::move(run));
 }
 
 /**
@@ -25233,32 +25231,19 @@ void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
 
 template <typename Node, typename Result>
 void addNodeListener(Node& node, const std::string& type, const gea::CallableObject<Result()>& handler) {
-  // Registered on the BODY, not on `node`, and gated by `containsNode`.
-  //
-  // The engine dispatches a pointer event to the node the hit test named and
-  // to nothing else -- it does not walk ancestors. So `onClick` on a `<div>`
-  // whose only child is a `<span>` never ran: the hit landed on the span, the
-  // listener sat on the div, and the app rendered perfectly and did nothing.
-  //
-  // Bubbling is the caller's job, and v1 does it exactly this way -- see any
-  // `mount_*` in the gea plugin's mounted-renderer output (all 12 of
-  // todo-jsx's click listeners are on the body, none on a node): an early
-  // return unless `Tree::containsNode(root, event.targetId)`, then
-  // `currentTarget`/`currentTargetId`/`eventPhase` set for the duration of the
-  // handler and restored after, so a nested handler sees its own target and
+  // Registered on `node` itself. `Tree::dispatchEvent` starts at the node the
+  // hit test named and walks up through its ancestors, so `onClick` on a `<div>`
+  // whose only child is a `<span>` still runs when the hit lands on the span,
+  // and a nested handler runs before the outer one. `bindNodeListener` sets
+  // `currentTarget`/`currentTargetId`/`eventPhase` for the duration of the
+  // handler and restores them after, so a nested handler sees its own target and
   // the outer one is not left holding the inner one's.
   //
-  // OWNED BY `node`, and released when `node` is taken down -- see
-  // `recordNodeSubscription` below. The listener lives on the body, but the body
-  // is never removed, so nothing else would ever take it off: a conditional
-  // branch or a list row that is rebuilt leaves its handler on the body forever,
-  // and `Tree::createNode` hands the freed node ids straight back to the
-  // subtree that replaces it. Every generation's handler then matches the same
-  // `containsNode` gate and they ALL run on one click. An idempotent handler
-  // (`setActive(id)`, `managing = 1`) survives that; a TOGGLE does not -- weather's
-  // C/F pill ran `toggleUnit()` once per generation, so after one rebuild a click
-  // flipped the unit twice and the whole UI stayed in Celsius, with nothing
-  // logged and every node still rendering correctly.
+  // OWNED BY `node`: the engine drops a node's listeners when the node is taken
+  // down, and `Tree::createNode` hands the freed id to the subtree that replaces
+  // it with none of the old listeners. A conditional branch or a list row that is
+  // rebuilt therefore never leaves a stale generation of its handler behind (the
+  // weather C/F pill toggled once per generation when these lived on the body).
   const gea::CallableObject<Result()> held = handler;
   bindNodeListener(node, eventTypeOf(type), [held](gea::framework::events::PointerEvent&) mutable { held.call(); });
 }
@@ -25267,13 +25252,10 @@ void addNodeListener(Node& node, const std::string& type, const gea::CallableObj
  * A handler that DOES declare the event -- `onTouchMove={e => pan(e.clientX,
  * e.clientY)}`.
  *
- * Delegated to the BODY and gated by `containsNode`, for the same reason and by
- * the same rule as the no-argument overload above: the engine dispatches to the
- * node the hit test named and does not walk ancestors, so a listener sitting on
- * the node it was written on never fires when the hit lands on a child. This
- * overload previously registered on the node -- which is why a `<div>` wrapping
- * the whole app received nothing at all, and the refusal it was supposed to
- * print never even ran. A drag that does nothing, silently.
+ * Registered on the node it was written on, by the same rule as the no-argument
+ * overload above: the engine walks from the hit node up through its ancestors,
+ * so a `<div>` wrapping the whole app still receives a drag that lands on a
+ * child, and it runs after the handlers of the nodes nested inside it.
  *
  * The event is passed through as the engine's own `PointerEvent` whenever the
  * declared parameter has a carrier for it (the gea plugin package maps
