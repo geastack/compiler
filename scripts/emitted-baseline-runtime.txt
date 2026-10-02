@@ -340,9 +340,10 @@ json-reader-dispatch.ts.cpp 705c70d17135
 json-stringify-held-as-a-box.runtime.js.cpp 28ddaef52623
 json-stringify-replacer.ts.cpp 136ec1fa7978
 jsx-class-map.tsx.cpp 933edb2655e6
-jsx-reactive-list-row-style.tsx.cpp 8ca5be0c7385
-jsx-reactive-style-slot.tsx.cpp ec48e5fb0c4d
-jsx-stateless-component.tsx.cpp bf0fdf5dde35
+jsx-conditional-reactive-class.tsx.cpp 3cd9e311a9fc
+jsx-reactive-list-row-style.tsx.cpp 4210c426292c
+jsx-reactive-style-slot.tsx.cpp 29c1cb68e097
+jsx-stateless-component.tsx.cpp d082f3940587
 jump-threading.ts.cpp 35065f7450fa
 key-order-cases.ts.cpp 36f9f7e763c5
 keyed-collection-from-an-array-of-boxes.runtime.js.cpp ee811c490652
@@ -528,7 +529,7 @@ physical-class-ancestry-optional.ts.cpp 1c3a76306a64
 plain-call-of-a-this-typed-callable.ts.cpp e43bc2aecf4c
 plain-function-returns-generator.runtime.js.cpp 3dd02e758312
 populated-record-late-fields.js.cpp 50f20517ba63
-printer-drift.txt 7c23a81f591e
+printer-drift.txt 30402bbbcdce
 promise-cache-keyed-by-a-generic-key.ts.cpp 6f9ee0cb0da9
 promise-executor-arrow-body-discards-its-result.ts.cpp d85168f70bf0
 promise-method-read-as-value.ts.cpp 6a9fd4c7d90d
@@ -553,7 +554,7 @@ prototype-method-own-length.runtime.js.cpp 271ede6b5b47
 prototype-method-value-call.runtime.js.cpp 38fc49316732
 prototype-methods-over-boxed-positions.runtime.js.cpp 5864c641eb1f
 prototype-object-class-typed-instance.ts.cpp 28fe6f08a261
-reactive-inherited-cell-no-list-tick.ts.cpp 7699cb1bf2f5
+reactive-inherited-cell-no-list-tick.ts.cpp 937c40b5564e
 readable-from-an-async-generator.runtime.js.cpp 9b084c972207
 receiver-ignored-construct.ts.cpp a68d985fdfa2
 record-index-sidecar.ts.cpp d8c8d37e23ca
