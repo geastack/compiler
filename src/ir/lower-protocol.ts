@@ -149,7 +149,7 @@ export const lowerProtocol = (ctx: LoweringContext, block: IrBlockId, operation:
       const target =
         nativeBaseReceiverView(ctx, block, lineage, targetOperand, resolvedTarget) ??
         assertedDocumentIterationView(ctx, block, lineage, targetOperand, resolvedTarget) ??
-        resolvedTarget
+        iterableArmOf(ctx, block, lineage, operation, resolvedTarget)
       // The array fast path (`contributeForOfIn`, control.ts) mints no
       // `get-method` step at all -- there is no `[[Get]]` of `Symbol.iterator`
       // to perform when the source is a provably plain array, so `method` is

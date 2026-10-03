@@ -17,6 +17,8 @@ import {
   enterRequiredOperand
 } from './lower-operands.js'
 
+const isStorageFree = (representation: Representation): boolean => representation.kind === 'undefined' || representation.kind === 'void'
+
 const heritageEvaluationOf: OperationIndexSelection = (event) =>
   event.family === 'class-lifecycle' && event.event === 'evaluate-heritage' ? { key: event.classDeclaration } : null
 

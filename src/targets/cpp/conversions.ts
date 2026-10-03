@@ -28,7 +28,6 @@ import {
   resultAdapterTransportOf,
   adaptsConstructorIntoDispatch,
   boxDiscriminantsOfArm,
-  boxesIntoFunctionArm,
   type BoxDiscriminant,
   conversionRecipeOf,
   boxedAssertionText,
@@ -37,7 +36,6 @@ import {
   dropsUnboundParameters,
   dynamicTagFor,
   promisePayloadConvertible,
-  promiseArmAdoptionOf,
   rebasesRestOverLeadingParameters,
   dictionaryCastableToDictionary,
   CONSTRUCTOR_STATIC_VIEW,
@@ -947,7 +945,17 @@ const cppConversionTables = (
         classifier: { id: 'gea::Value::payloadType', domain: `array-payload:${ownership}` },
         excluded: [],
         preservesHoles: true,
-        preservesIdentity: true
+        preservesIdentity: true,
+        // `unboxDynamicArray` converts each element through
+        // `DynamicCarrier<Element>::in`, and for an element carried as
+        // `gea::Ref<ArrayObject<E>>` that is the class-reference rule: the exact
+        // allocation type or an abort. Two sites routinely spell one
+        // `(A | B)[]` with different element carriers (a literal's own union and
+        // a stated parameter's), so the inner Array JavaScript accepts is the
+        // one this aborts on. Rebuilding it instead would hand the callee a
+        // copy, which `array-copy-recast` (emit-narrowing.ts) refuses across the
+        // dynamic boundary for the aliasing miscompile it pins.
+        recoversNestedArrays: false
       }
     },
     // The sum classifier is the emitter's actual condition: one exact tag and

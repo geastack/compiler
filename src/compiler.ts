@@ -1102,9 +1102,10 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // consumers of the body list, so the shaker and the emitter agree on which
   // bodies -- and which placements, since a bridged cell mints its own -- the
   // program actually has.
-  const split = complete && lowered ? splitGeneratorBodies(lowered.bodies, placements) : null
-  const splitBodies = split?.bodies ?? lowered?.bodies ?? new Map()
-  const splitPlacements = split?.placements ?? placements
+  const relocated = lowered ? relocateReceiverGenericCopies(lowered.bodies, placements, receiverGenericCopies) : null
+  const split = complete && relocated ? splitGeneratorBodies(relocated.bodies, relocated.placements) : null
+  const splitBodies = split?.bodies ?? relocated?.bodies ?? new Map()
+  const splitPlacements = split?.placements ?? relocated?.placements ?? placements
   // Pruning is per body, and a body lowering blocked on is absent rather than
   // half built, so an incomplete program is pruned too. Gating it on
   // `complete` certified the proven-dead arms of every OTHER body whenever one

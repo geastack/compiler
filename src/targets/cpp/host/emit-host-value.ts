@@ -8,6 +8,7 @@ import { hostArgumentText } from './emit-host-arity.js'
 import type { HostCallSpelling, HostMember } from './host-members.js'
 import { fillHostTemplate } from './host-members.js'
 import { dateGetters, dateSetters, dateStringForms } from '../prototype/emit-prototype-date.js'
+import { isTypedArrayConstructorHandle, typedArrayConstructorIdentityOf } from '../../../representation/typed-array-constructors.js'
 
 /**
  * A host function READ as a value: the function object the language says it is.

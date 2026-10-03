@@ -49,7 +49,6 @@ import {
   cppUndefinedValue
 } from './types.js'
 import { toStringText } from './emit-tostring.js'
-import { propertyKeyText } from './emit-dynamic-properties.js'
 import {
   typedArrayBufferMemberText,
   typedArrayBufferMembers,

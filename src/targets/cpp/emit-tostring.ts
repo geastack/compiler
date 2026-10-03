@@ -7,7 +7,7 @@ import { constructedBaseOf, type ClassLayout } from '../../projection/classes.js
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import { recordFieldsOfShape, recordLayoutPolicyOf } from '../../projection/fields.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
-import { cppBodyName, cppConstantLiteral, cppRecordFieldName, cppTypeOf } from './types.js'
+import { cppBodyName, cppConstantLiteral, cppRecordFieldName, cppTypeOf, cppRecordFieldKeyIsSymbol, cppStringLiteral } from './types.js'
 import { memberAccessOperator } from './emit-carrier-members.js'
 import { cppDateType, isDateCarrier } from './prototype/emit-prototype-date.js'
 
@@ -453,40 +453,6 @@ const holdsTypedCallable = (carrier: Representation): boolean => {
 }
 
 /**
- * A tuple is an Array, carried as a positional record (there is no tuple
- * carrier), and ECMA-262 23.1.3.36 gives an Array the ToString of
- * `join(",")`: each position through 23.1.3.18's ToString, a nullish one as
- * the empty string. Answering the ordinary object's "[object Object]" tag
- * made `Object.entries(o).join(';')` print that tag for every entry.
- *
- * An optional position refuses: whether it is present decides the tuple's
- * length, and with it whether a trailing separator is written.
- */
-const tupleToStringText = (
-  text: string,
-  carrier: Extract<Representation, { kind: 'record' }>,
-  layouts: RecordLayoutPolicy
-): string | null => {
-  if (carrier.fields.some((field, position) => field.key !== String(position) || !field.required)) return null
-  if (carrier.fields.length === 0) return cppConstantLiteral('', 'string', { kind: 'string' })
-  const tuple = '__gea_tuple'
-  const pieces: string[] = []
-  for (const field of carrier.fields) {
-    const piece = toStringTextOver(
-      `${tuple}${memberAccessOperator(carrier.ownership)}${cppRecordFieldName(field.key)}`,
-      field.value,
-      layouts,
-      false,
-      true
-    )
-    if (piece === null) return null
-    if (pieces.length > 0) pieces.push(cppConstantLiteral(',', 'string', { kind: 'string' }))
-    pieces.push(piece)
-  }
-  return `([&](const ${cppTypeOf(carrier)}& ${tuple}) -> std::string { return gea::concatStrings({${pieces.join(', ')}}); }(${text}))`
-}
-
-/**
  * ToString over a list of operands, folded with `separator` inserted between
  * every pair -- the one machine behind two different joins: a template
  * literal's own adjacency (`separator: null`, `templateText` below) and
@@ -518,15 +484,9 @@ const joinedToStringText = (
   for (const operand of operands) {
     // A template or `+` throws on a symbol; `console.log` inspects it instead, so only the
     // separator-less fold may state that throw.
-    const converted = toStringText(
-      operandText(ctx, operand),
-      operand.representation,
-      ctx.classes,
-      ctx.deriver,
-      false,
-      false,
-      separator === null
-    )
+    const converted =
+      rendered(operand) ??
+      toStringText(operandText(ctx, operand), operand.representation, ctx.classes, ctx.deriver, false, false, separator === null)
     if (converted === null) return { refused: operand.representation }
     pieces.push(converted)
   }

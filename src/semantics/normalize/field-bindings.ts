@@ -336,6 +336,22 @@ const isBareFieldDeclaration = (checker: ts.TypeChecker, declaration: ts.Declara
  */
 const statedUpperBoundOfField = (checker: ts.TypeChecker, declaration: ts.Declaration): ts.Type | null => {
   if (ts.isPropertySignature(declaration)) return statedCallableResultBoundOfSignature(checker, declaration)
+  // A JavaScript field is declared by assigning it, and states its type in a
+  // JSDoc `@type` over that assignment: three's `/** @type
+  // {Array<NodeFunctionInput>} */ this.inputs = inputs`, a name the file cannot
+  // bind. The FIELD form of the JSDoc upper bound `parameter-bindings.ts` reads
+  // for the parameter that fills it -- held to the same rule, admitted only
+  // where the open positions are array elements -- or the parameter is
+  // narrowed to the typed array its callers pass while the field it is stored
+  // into keeps the boxed element, and the store is a conversion no backend
+  // renders (an Array is not copied).
+  if (ts.isBinaryExpression(declaration)) {
+    const tag = ts.getJSDocType(declaration)
+    if (!tag || declaration.getSourceFile().isDeclarationFile) return null
+    const tagged = checker.getTypeFromTypeNode(tag)
+    if (annotationStatesNothing(checker, declaration, tagged) || isUnusableEvidence(tagged)) return null
+    return jsDocTagOpensOnlyArrayElements(checker, declaration, tagged) ? tagged : null
+  }
   if (!ts.isPropertyDeclaration(declaration)) return null
   if (!declaration.type || declaration.initializer) return null
   if (declaration.getSourceFile().isDeclarationFile) return null

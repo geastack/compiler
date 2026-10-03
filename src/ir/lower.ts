@@ -63,6 +63,8 @@ import {
 } from './lower-operands.js'
 import { allOperationsOf, type IrBlock, type IrBlockId, type IrBody, type IrIteratorCloseRegion } from './model.js'
 import { firstOperationByKey, type OperationIndexSelection } from './operation-index.js'
+import { receiverDependentResultsOf, receiverGenericCopyOf } from './receiver-generic-copies.js'
+import { createSlotCensus } from '../projection/slots.js'
 
 const classConstructorObjectOf: OperationIndexSelection = (entry) =>
   entry.family === 'allocation' && entry.allocated === 'class-constructor-object' ? { key: entry.classDeclaration } : null

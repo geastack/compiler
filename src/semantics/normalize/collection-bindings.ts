@@ -1,6 +1,6 @@
 import ts from 'typescript'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
-import { disjointUnionTypeOf, isStandardInterfaceType, joinOfWrites, widestOf } from './derived-expression-type.js'
+import { disjointUnionTypeOf, isStandardInterfaceType, joinOfWrites, widestOf, isStandardGlobalValue } from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
@@ -960,7 +960,6 @@ export const censusCollectionBindings = (
     }
     const keyArgs: ts.Expression[] = []
     const valueArgs: ts.Expression[] = []
-    const aliases = aliasClosureOf(owner)
     for (const write of ts.isNewExpression(owner) ? (receiverChains.get(owner)?.writes ?? []) : []) {
       if (write.edge === 'collection-key' && write.value) keyArgs.push(write.value)
       else if (write.edge === 'collection-value' && write.value) valueArgs.push(write.value)
@@ -1866,6 +1865,22 @@ export const censusCollectionBindings = (
     if (reason) arrayNodeRefusal.set(node, reason)
   }
 
+  const isOpenArray = (type: ts.Type): boolean => {
+    if (!checker.isArrayType(type)) return false
+    const [element] = checker.getTypeArguments(type as ts.TypeReference)
+    return element !== undefined && (element.flags & (ts.TypeFlags.Never | ts.TypeFlags.Any)) !== 0
+  }
+  /** See `CollectionTypeArguments.valueArrayElement`. */
+  const valueArrayElementOf = (owner: ts.Node, value: ts.Type): ts.Type | null => {
+    const arms = value.isUnion()
+      ? value.types.filter((member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) === 0)
+      : [value]
+    const [arm] = arms
+    if (arms.length !== 1 || arm === undefined || !isOpenArray(arm)) return null
+    const stored = valueSlotArray.get(owner)
+    return stored ? (boundElement.get(stored) ?? null) : null
+  }
+
   // --- Parameters every map argument agrees for ------------------------
   //
   // A parameter a bound map is passed into is an alias of it, and its writes
@@ -1882,7 +1897,8 @@ export const censusCollectionBindings = (
   const argumentsOfOwner = (owner: ts.Node): CollectionTypeArguments | null => {
     const key = boundKey.get(owner)
     const value = boundValue.get(owner)
-    if (key !== undefined && value !== undefined) return { key, value, valueEvidence: [] }
+    if (key !== undefined && value !== undefined)
+      return { key, value, valueEvidence: [], valueArrayElement: valueArrayElementOf(owner, value) }
     return parameterArguments.get(owner) ?? null
   }
   const mapArgumentsIntoParameter = (parameter: ts.ParameterDeclaration): CollectionTypeArguments | null => {
@@ -1937,22 +1953,6 @@ export const censusCollectionBindings = (
     const valueEvidence = unresolvedValueArgs.get(owner) ?? []
     if (key === null && value === null && valueEvidence.length === 0) return null
     return { key, value, valueEvidence, valueArrayElement: value ? valueArrayElementOf(owner, value) : null }
-  }
-
-  const isOpenArray = (type: ts.Type): boolean => {
-    if (!checker.isArrayType(type)) return false
-    const [element] = checker.getTypeArguments(type as ts.TypeReference)
-    return element !== undefined && (element.flags & (ts.TypeFlags.Never | ts.TypeFlags.Any)) !== 0
-  }
-  /** See `CollectionTypeArguments.valueArrayElement`. */
-  const valueArrayElementOf = (owner: ts.Node, value: ts.Type): ts.Type | null => {
-    const arms = value.isUnion()
-      ? value.types.filter((member) => (member.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)) === 0)
-      : [value]
-    const [arm] = arms
-    if (arms.length !== 1 || arm === undefined || !isOpenArray(arm)) return null
-    const stored = valueSlotArray.get(owner)
-    return stored ? (boundElement.get(stored) ?? null) : null
   }
 
   /** See `CollectionBindingCensus.arrayFromElementAt`. */
@@ -2015,6 +2015,20 @@ export const censusCollectionBindings = (
       const owner = ownerDeclOfExpr(expression)
       if (!owner) return null
       return boundArgumentsFor(owner) ?? parameterArguments.get(owner) ?? null
+    },
+    mapResultTypeAt: (call) => mapResults.get(call) ?? null,
+    mapCallbackElementAt: (callback) => mapCallbacks.get(callback) ?? null,
+    arrayFromElementAt,
+    setKeyForRead,
+    literalArrayTypeAt: (node) => literalArrays.get(node) ?? null,
+    nullSlotElementFor: (expression) => {
+      const type = checker.getTypeAtLocation(expression)
+      if (!checker.isArrayType(type)) return null
+      const [checkerElement] = checker.getTypeArguments(type as ts.TypeReference)
+      if (checkerElement === undefined || checkerElement.flags !== ts.TypeFlags.Null) return null
+      const owner = ownerDeclOfExpr(expression)
+      const element = owner ? (boundElement.get(owner) ?? null) : null
+      return element && element !== checkerElement ? element : null
     }
   }
 }

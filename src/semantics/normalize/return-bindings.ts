@@ -768,7 +768,7 @@ export const censusReturnBindings = (
   /** The checker's own answer at this node, when it says something usable. */
   /** The checker's own answer, when usable -- `annotationStatesNothing` beside `isUnusableEvidence` for the reason `field-bindings.ts`'s `known` documents: a vacuous type dominates a `widestOf` join. */
   const known = (node: ts.Node): ts.Type | null => {
-    const type = objectAssignedValueType(node) ?? checker.getTypeAtLocation(node)
+    const type = objectAssignedValueType(node) ?? constructedClassChoiceCheckerTypeAt(checker, node) ?? checker.getTypeAtLocation(node)
     return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) ? null : type
   }
 

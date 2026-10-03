@@ -570,8 +570,15 @@ const withoutShadowedAmbientModules = (
   return ts.createSourceFile(file.fileName, text, version, true, scriptKindOf(file.fileName))
 }
 
-/** The text each file's source transforms last produced, with the inputs that produced it. */
-type TransformOutputs = Map<string, { readonly input: string; readonly declarationFileName: string | undefined; readonly output: string }>
+/**
+ * The text each file's source transforms last produced, with the inputs that
+ * produced it -- including the program's roots, from which the `programFiles`
+ * every transform is handed is derived.
+ */
+type TransformOutputs = Map<
+  string,
+  { readonly input: string; readonly declarationFileName: string | undefined; readonly roots: string; readonly output: string }
+>
 
 /**
  * A resolved module as TypeScript itself would name it: with `/`.
@@ -623,20 +630,6 @@ const programSourceClosure = (
   }
   return seen
 }
-
-/**
- * What the source transforms made of each file's text, kept across every
- * program one `createProgram` builds. A transform is a function of the file's
- * name, its text and its declaration file, so a file read again with the same
- * three gets the same answer -- and the rebuilds (a program re-created to add
- * a CommonJS target, or from prepared text) would otherwise run the whole
- * chain over every file again, which on three's source is most of a
- * program's cost.
- */
-type TransformedText = Map<
-  string,
-  { readonly input: string; readonly declarationFileName: string | undefined; readonly roots: string; readonly output: string }
->
 
 const transformingHost = (
   input: ProgramInput,
@@ -745,16 +738,25 @@ const transformingHost = (
     // and re-running 17 transforms over 1650 of them is 1.5 s a program. Only
     // the TEXT is reused -- each program parses its own SourceFile below.
     const remembered = transformed.get(fileName)
-    if (remembered && remembered.input === original && remembered.declarationFileName === declarationFileName) text = remembered.output
+    if (
+      remembered &&
+      remembered.input === original &&
+      remembered.declarationFileName === declarationFileName &&
+      remembered.roots === rootsKey
+    )
+      text = remembered.output
     else {
       for (const [index, transform] of transforms.entries()) {
         text = timing.measure(
           `transform:${index}:${transform.name}`,
-          () => transform({ fileName, text, ...(declarationFileName ? { declarationFileName } : {}) }) ?? text
+          () =>
+            transform({ fileName, text, programFiles: programFilesOf(), ...(declarationFileName ? { declarationFileName } : {}) }) ?? text
         )
       }
-      transformed.set(fileName, { input: original, declarationFileName, output: text })
+      transformed.set(fileName, { input: original, declarationFileName, roots: rootsKey, output: text })
     }
+    const contradicted = input.censusContradictions?.get(resolve(fileName))
+    if (contradicted) text = blankSpans(text, contradicted)
     const transformedFile =
       text === file.text ? file : ts.createSourceFile(fileName, text, languageVersionOrOptions, true, scriptKindOf(fileName))
     // Asked of the TRANSFORMED file, not the one on disk: a plugin (or the
@@ -954,7 +956,9 @@ const configuredProgram = (
       // per file, so the next program must be built rather than reused.
       const respelled = targets.filter((target) => target.endsWith('.json') && !requiredJsonFiles.has(target))
       for (const target of respelled) requiredJsonFiles.add(target)
-      const added = targets.filter((target) => !roots.has(target) && program.getSourceFile(target) === undefined)
+      const added = [...targets, ...realizer.missingTargets(program)].filter(
+        (target) => !roots.has(target) && program.getSourceFile(target) === undefined
+      )
       if (added.length === 0 && respelled.some((target) => program.getSourceFile(target) !== undefined)) {
         program = timing.measure('rebuild-program', () => ts.createProgram({ rootNames: [...roots], options, host }))
         continue
@@ -965,6 +969,8 @@ const configuredProgram = (
       }
       program = timing.measure('rebuild-program', () => ts.createProgram({ rootNames: [...roots], options, host }))
     }
+    // On the program this build keeps, before anything asks it a type question.
+    timing.measure('scoped-type-realizations', () => realizer.install(program))
     return {
       program,
       runtimeModuleTargetOf: targetOf,
@@ -974,14 +980,22 @@ const configuredProgram = (
   }
   if (!projectFileName) {
     const options = { ...input.options, ...(input.dynamicFallback ? { noImplicitAny: false, checkJs: false } : {}) }
-    const host = transformingHost(input, options, resolutionDiagnostics, preparedSourceText, timing, requiredJsonFiles, transformed)
     const rootNames = [
       ...new Set([
         ...input.rootFileNames,
         ...(input.commonJsGlobals ? [...input.commonJsGlobals.values()].map((entry) => entry.declarationFileName) : [])
       ])
     ]
-    const host = transformingHost(input, rootNames, options, resolutionDiagnostics, preparedSourceText, timing, transformed)
+    const host = transformingHost(
+      input,
+      rootNames,
+      options,
+      resolutionDiagnostics,
+      preparedSourceText,
+      timing,
+      requiredJsonFiles,
+      transformed
+    )
     // `host` is omitted rather than passed as `undefined`: under
     // `exactOptionalPropertyTypes` the two are different, and the option is
     // "the caller supplies a host" -- not "the caller supplies no host".
@@ -1019,7 +1033,16 @@ const configuredProgram = (
     ...fixedOptions,
     ...(input.dynamicFallback ? { noImplicitAny: false, checkJs: false } : {})
   }
-  const host = transformingHost(input, options, resolutionDiagnostics, preparedSourceText, timing, requiredJsonFiles, transformed)
+  const host = transformingHost(
+    input,
+    rootNames,
+    options,
+    resolutionDiagnostics,
+    preparedSourceText,
+    timing,
+    requiredJsonFiles,
+    transformed
+  )
   return buildProgram(rootNames, options, host ?? ts.createCompilerHost(options, true))
 }
 
@@ -1064,10 +1087,34 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
   const ambientRestatements = timing.measure('module-ambient-global-restatements', () =>
     withoutModuleAmbientGlobalRedeclarations(configured.program, new Map([...preparation.sourceText, ...redeclarations]))
   )
+  const restated = new Map([...preparation.sourceText, ...redeclarations, ...ambientRestatements])
+  // On the same first program, and composed onto what the passes above
+  // prepared: each of these blanks bytes in place, so none moves another's
+  // offsets (`contradicted-jsdoc-types.ts`).
+  const fieldContradictions = timing.measure('contradicted-jsdoc-types', () => contradictedJsDocTypeBlanks(configured.program, restated))
+  const contradictions = new Map([
+    ...fieldContradictions,
+    ...timing.measure('contradicted-jsdoc-parameters', () =>
+      contradictedJsDocParameterBlanks(configured.program, new Map([...restated, ...fieldContradictions]), input.absentGlobals)
+    )
+  ])
+  // Composed onto both, and in place like them (`absent-jsdoc-tags.ts`).
+  const blanked = new Map([...restated, ...contradictions])
+  const absences = timing.measure('absent-jsdoc-tags', () => absentJsDocTagWidenings(configured.program, blanked))
+  // And in place over all of them (`over-arity-jsdoc-arrays.ts`).
+  const widened = new Map([...blanked, ...absences])
+  const arrays = timing.measure('over-arity-jsdoc-arrays', () => overArityJsDocArrayRewrites(configured.program, widened))
   let prepared = new Map<string, string>()
-  if (preparation.audit.length > 0 || redeclarations.size > 0 || ambientRestatements.size > 0) {
+  if (
+    preparation.audit.length > 0 ||
+    redeclarations.size > 0 ||
+    ambientRestatements.size > 0 ||
+    contradictions.size > 0 ||
+    absences.size > 0 ||
+    arrays.size > 0
+  ) {
     resolutionDiagnostics.length = 0
-    prepared = new Map([...preparation.sourceText, ...redeclarations, ...ambientRestatements])
+    prepared = new Map([...widened, ...arrays])
     configured = configuredProgram(input, resolutionDiagnostics, prepared, timing, transformOutputs)
   }
   // Asked of the program the preparations above produced, so each rewritten

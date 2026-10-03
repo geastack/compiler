@@ -10,7 +10,7 @@ import {
   isFloatStorageValue,
   operandText,
   paddedArguments,
-  type EmitContext
+  type EmitContext, typedArrayConstructorGuardText
 } from '../emit-context.js'
 import { consoleArgumentsText, toStringRefusal, toStringText, toStringTextOver } from '../emit-tostring.js'
 import { classToNumberText, classToPrimitiveOf, toNumberRefusal, toNumberText } from '../emit-tonumber.js'

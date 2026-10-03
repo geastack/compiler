@@ -1,4 +1,3 @@
-import { noOwnKeyOrderTracking, type OwnKeyOrderTracking } from '../../ir/own-key-order.js'
 import { objectTagExpression, objectTagCapability } from './emit-object-tag.js'
 import { restrictsEveryCarrier, type IntegrityRestrictions } from '../../ir/integrity-restrictions.js'
 import { emitAllocateProxy, emitProxyArmTest, emitProxyPart, emitProxyTrapCheck } from './emit-proxy.js'

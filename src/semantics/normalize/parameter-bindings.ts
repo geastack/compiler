@@ -83,6 +83,8 @@ import { classInstanceArmsPassed, plainRecordStatementOf } from './class-instanc
 import { overrideFieldArmsOf, overrideRecordStatementOf } from './override-field-arms.js'
 import type { SpecializationCensus } from './specialization.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
+import { receiverPassingMemberGuards } from './member-guard-narrowing.js'
+import { readFollowsEveryWrite } from './stored-local-read.js'
 
 /**
  * The type a parameter the program never annotated is actually called with.
@@ -606,11 +608,12 @@ const statedUpperBound = (checker: ts.TypeChecker, parameter: ts.ParameterDeclar
   if (annotationStatesNothing(checker, statement, declared)) return null
   if (isUnusableEvidence(declared)) return null
   if (
-    !containsUnstatedPosition(checker, parameter.type, declared) &&
+    !containsUnstatedPosition(checker, statement, declared) &&
     !statesOnlyAConstructionConvention(declared) &&
     !statesAnArrayBufferView(declared)
   )
     return null
+  if (!parameter.type && !jsDocTagOpensOnlyArrayElements(checker, statement, declared)) return null
   // A DEFAULTED or OPTIONAL parameter's statement is `T | undefined` to its
   // callers, whatever its annotation spells: the absence is what the default
   // exists to answer. Testing the agreed argument type against the bare `T`
@@ -2234,7 +2237,7 @@ export const censusParameterBindings = (
         return null
       // Closed for the whole program, not only at the literal: a write through
       // an alias can add exactly this key -- see `local-bindings.ts`'s twin.
-      if (!closedLiteralMemberAbsent(checker, valueFlow, nonNull, key, element)) return null
+      if (!closedLiteralMemberAbsent(checker, valueFlow, nonNull, key, element, null)) return null
       const read = checker.getUndefinedType()
       patternReadTypes.set(element, read)
       if (!element.initializer) return read

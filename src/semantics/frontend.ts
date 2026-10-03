@@ -127,6 +127,7 @@ import {
   typedArrayInstanceInterfaceNames,
   wellKnownSymbolDeclarationsOf
 } from './host-protocols.js'
+import { type ScopedTypeRealization } from './scoped-type-realizations.js'
 
 /**
  * The frontend boundary.
@@ -883,6 +884,28 @@ const nativeConstructorCandidatesOf = (file: ts.SourceFile): readonly (ts.ClassD
   return found
 }
 
+/**
+ * How many times a settled binding census may send the frontend back to
+ * compile without the stated types it contradicts. Each attempt only adds
+ * blanks, and a stated type is blanked at most once, so this bounds the work
+ * and not the answer: past it, the last attempt's census stands.
+ */
+const censusContradictionAttempts = 4
+
+/**
+ * The frontend, run until its settled binding census contradicts no stated
+ * type. A `@param` or field `@type` that the program's own stores contradict
+ * is blanked before the census (`contradicted-jsdoc-types.ts`,
+ * `contradicted-jsdoc-parameters.ts`) wherever the checker can type the store.
+ * Where the checker types it `any`, only the settled census knows what it
+ * holds, and the same test, asked again with the census's answer, may find
+ * the statement false: three's `BufferAttributeNode` passes `InputNode`'s
+ * `@type {any}` value, a `BufferAttribute` or `Float32Array` by the census,
+ * to `@param {InterleavedBuffer}` parameters. Such a statement is blanked by
+ * compiling again without it, so the census that the rest of the frontend
+ * reads is the one authority over that slot, as it is over a slot never
+ * stated. Each attempt is dropped before the next begins.
+ */
 export const runFrontend = (input: FrontendInput): FrontendResult => {
   let contradictions = new Map<string, readonly BlankSpan[]>()
   for (let attempt = 1; ; attempt++) {
@@ -1589,6 +1612,7 @@ const attemptFrontend = (
     ? new Set<StructuralTypeId>([...proxyFallbackTypes(compiled.sourceFiles, compiled.checker, types), ...prototypeFallback.types])
     : new Set<StructuralTypeId>()
   const dynamicWrittenTypes = anyKeyedWriteTypes(compiled.sourceFiles, compiled.checker, types)
+  const proxySites = input.dynamicFallback ? new Set<NodeId>() : proxyConstructionSites(compiled.sourceFiles, compiled.checker, identities)
   const classHeritage = classHeritageOf(compiled.checker, identities, compiled.sourceFiles, prototypeReparentings.baseOf)
   const classCopyHeritage = classCopyHeritageOf(compiled.checker, identities, specializations, compiled.sourceFiles, classHeritage)
   const deadMethodCopies = deadMethodCopiesOf(
@@ -1737,6 +1761,7 @@ const attemptFrontend = (
   }
   const nativeCollectionOverrides = nativeCollectionOverridesOf(compiled.checker, identities, compiled.sourceFiles, classHeritage)
   const nativeErrorOverrides = nativeErrorOverridesOf(compiled.checker, identities, compiled.sourceFiles, classHeritage)
+  const typedArrayDeclarationSet = new Set<DeclarationId>()
   const context: ProducerContext = {
     nativeCollectionOverrides,
     deadMethodCopies,
@@ -1821,6 +1846,8 @@ const attemptFrontend = (
     asyncGeneratorDeclaration: asyncGeneratorDeclarationEarly,
     mapIteratorDeclaration: mapIteratorDeclarationEarly,
     arrayIteratorDeclaration: arrayIteratorDeclarationEarly,
+    // Filled below, before normalization reads it, the same way `hosts` is.
+    typedArrayDeclarations: typedArrayDeclarationSet,
     ...(returns ? { returns } : {})
   }
   const hostInput: HostProtocolInput = {
@@ -2045,7 +2072,6 @@ const attemptFrontend = (
   const generatorDeclaration = generatorDeclarationEarly
   const asyncGeneratorDeclaration = asyncGeneratorDeclarationEarly
   const mapIteratorDeclaration = mapIteratorDeclarationEarly
-  const setIteratorDeclaration = setIteratorDeclarationEarly
   // Resolved the same way and for the same reason as `keyedCollections` above.
   const regexpDeclarations = regexpDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   timing.mark('structural-and-host-censuses')

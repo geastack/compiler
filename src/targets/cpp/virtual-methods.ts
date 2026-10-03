@@ -38,6 +38,7 @@ import {
   cppUndefinedIn
 } from './types.js'
 import { alignedValueText, dynamicCarrierBoxText, type ConversionSite } from './emit-narrowing.js'
+import { receiverGenericCopyOf } from '../../ir/receiver-generic-copies.js'
 
 /**
  * Dispatch for a method the program overrides.

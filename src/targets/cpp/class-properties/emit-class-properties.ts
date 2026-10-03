@@ -1,4 +1,4 @@
-import { nativePrototypeObjectText } from './native-prototype.js'
+import { nativePrototypeObjectText, nativePrototypeValueHookText } from './native-prototype.js'
 import type { CallableAbi, RecordField, Representation } from '../../../representation/model.js'
 import { abiKey, representationKey } from '../../../representation/model.js'
 import { abiOfCallee } from '../../../projection/callee.js'
@@ -51,6 +51,7 @@ import {
   classPrototypeMethodValueArmsOf,
   virtualDispatchFor
 } from '../../../projection/dispatch.js'
+import { classPrototypeExtendedOf } from '../../../projection/class-prototype.js'
 
 /**
  * Reading a class's own members as VALUES: an instance's methods and

@@ -1197,6 +1197,26 @@ export const publishClassMethodOverrides = (
       (carrier.native ?? carrier.protocol) === 'ObjectConstructor'
     )
   }
+  // `Object.getPrototypeOf`/`getOwnPropertyDescriptors`/`getOwnPropertyDescriptor`
+  // reads, by the result the call's callee cites. Handing `C.prototype` to one
+  // of them only reads it.
+  const reflectionMembers = new Set(['getPrototypeOf', 'getOwnPropertyDescriptors', 'getOwnPropertyDescriptor'])
+  const reflectionReads = new Map<SemanticResultId, string>()
+  for (const operation of input.graph.operations.values()) {
+    if (operation.family !== 'property' || operation.internalMethod !== 'get') continue
+    const key = operandOf(operation, 'key')
+    const receiver = operandOf(operation, 'receiver')
+    const carrier = receiver?.source.kind === 'result' ? input.plan.selected.get(receiver.source.result) : undefined
+    const result = resultOf(operation, 'value')
+    if (!result || key?.source.kind !== 'constant' || carrier?.kind !== 'native-handle' || carrier.protocol !== 'ObjectConstructor')
+      continue
+    if (reflectionMembers.has(key.source.text)) reflectionReads.set(result.id, key.source.text)
+  }
+  const reflectionCallOf = (operation: SemanticOperation): string | null => {
+    if (operation.family !== 'invocation') return null
+    const callee = operation.operands.find((operand) => operand.role === 'callee')
+    return callee?.source.kind === 'result' ? (reflectionReads.get(callee.source.result) ?? null) : null
+  }
   const unsupportedPrototypes = new Map<DeclarationId, Set<string>>()
   const unsupported = (declaration: DeclarationId, reason: string): void => {
     const reasons = unsupportedPrototypes.get(declaration) ?? new Set<string>()

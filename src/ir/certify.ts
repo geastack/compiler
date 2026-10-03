@@ -464,8 +464,11 @@ const ownDemandsOf = (operation: IrOperation, ctx: CertifyContext): CapabilityDe
       return operation.captures.map((capture) => ({ key: `capture:${captureCapabilityOf(capture.representation)}` }))
     case 'binding-read':
       return ctx.externalBindings.has(operation.declaration) ? [{ key: 'native-boundary:external-binding' }] : []
-    case 'get':
+    case 'get': {
+      const prototypeRefusal = classPrototypeUseRefusalOf(operation, ctx)
+      if (prototypeRefusal !== null) return [prototypeRefusal]
       return [...dynamicGetResultDemandsOf(operation, ctx), ...getDemandsOf(operation, ctx)]
+    }
     case 'set':
     case 'define-own-property': {
       // The write twin of the sealed read recipe above, and validated the same

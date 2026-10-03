@@ -11,9 +11,8 @@ import type { ProducerContext } from '../producer-context.js'
 import { argumentsObjectValueAt, isArgumentsObjectIdentifier } from './bindings.js'
 import { assertsType } from './erasure.js'
 import { operand } from './mint.js'
-import { hasNativeIterationCursor, sourceForValue } from './shared.js'
-import { isDynamicIterationSource, mintIteratorSteps } from './protocol.js'
-import { gathersDeclaredIterator } from './allocations.js'
+import { hasNativeIterationCursor, sourceForValue, isPlainArrayType, isTypedArrayType } from './shared.js'
+import { gathersDeclaredIterator, isDynamicIterationSource, mintIteratorSteps } from './protocol.js'
 import {
   isClosedTupleSpread,
   maxArityTupleElementTypesOf,
@@ -24,8 +23,7 @@ import {
   tupleSpreadReads,
   widenedWithUndefined,
   declaredTupleRestArityOf,
-  declaredTupleRestSpreadReads,
-  widenedWithUndefined
+  declaredTupleRestSpreadReads
 } from './tuple-spread.js'
 
 /**

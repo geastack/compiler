@@ -267,60 +267,23 @@ const NARROWING_DEPTH = 3
  * reads `narrowingStepsOf` and nothing else, and representations are immutable
  * value objects. Keyed structurally rather than by identity precisely so two
  * equal-but-distinct mintings share one answer, which is the whole point.
- *
- * ⛔ Pure within ONE program only. A key is unique inside the program that
- * minted it, not across programs: `class-ref(decl|f168|20,...)` leaves out the
- * class's ancestors, because inside one program the declaration decides them,
- * and a declaration identity is an ordinal, so the next program's
- * `decl|f168|20` is another class. A process-wide table answered one program's
- * questions with another's: after `native-default-merge-field-flow.ts`, whose
- * `decl|f168|20` has no base, `native-reflection-virtual-class.ts` read
- * "`NativeBase | null | undefined` does not reach `NativeDerived`" and emitted
- * a different conversion than when compiled alone. The closure also hands back
- * the representations themselves, which carry fields the key leaves out. So
- * both tables belong to one compilation (`withNarrowingMemo`).
  */
-type NarrowingClosure = { readonly values: readonly Representation[]; readonly keys: ReadonlySet<string> }
-type NarrowingMemo = { readonly closures: Map<string, NarrowingClosure>; readonly reaches: Map<string, boolean> }
-
-const createNarrowingMemo = (): NarrowingMemo => ({ closures: new Map(), reaches: new Map() })
-
-let compilationNarrowingMemo: NarrowingMemo | null = null
-
-/**
- * Runs `run` with narrowing memo tables of its own, and restores the outer
- * tables after it, so a compilation started inside another cannot leave its
- * answers behind. `compile()` runs its whole body inside this.
- *
- * Outside any compilation each question gets fresh tables: slower, never
- * wrong. A default process-wide table would reopen the leak for every caller
- * that forgot to scope itself.
- */
-export const withNarrowingMemo = <T>(run: () => T): T => {
-  const outer = compilationNarrowingMemo
-  compilationNarrowingMemo = createNarrowingMemo()
-  try {
-    return run()
-  } finally {
-    compilationNarrowingMemo = outer
-  }
-}
-
-const narrowingMemo = (): NarrowingMemo => compilationNarrowingMemo ?? createNarrowingMemo()
+const narrowingClosures = new Map<string, { readonly values: readonly Representation[]; readonly keys: ReadonlySet<string> }>()
 
 /** The closure's members' keys, which is all either caller actually tests. */
-const narrowingClosureKeysOf = (source: Representation, memo: NarrowingMemo): ReadonlySet<string> =>
-  narrowingClosureEntryOf(source, memo).keys
+const narrowingClosureKeysOf = (source: Representation): ReadonlySet<string> => narrowingClosureEntryOf(source).keys
 
-const narrowingClosureOf = (source: Representation): readonly Representation[] => narrowingClosureEntryOf(source, narrowingMemo()).values
+const narrowingClosureOf = (source: Representation): readonly Representation[] => narrowingClosureEntryOf(source).values
 
-const narrowingClosureEntryOf = (source: Representation, memo: NarrowingMemo): NarrowingClosure => {
+const narrowingClosureEntryOf = (
+  source: Representation
+): { readonly values: readonly Representation[]; readonly keys: ReadonlySet<string> } => {
   const sourceCacheKey = representationKey(source)
-  const remembered = memo.closures.get(sourceCacheKey)
+  const remembered = narrowingClosures.get(sourceCacheKey)
   if (remembered !== undefined) return remembered
   const values = buildNarrowingClosure(source)
   const entry = { values, keys: new Set(values.map(representationKey)) }
-  memo.closures.set(sourceCacheKey, entry)
+  narrowingClosures.set(sourceCacheKey, entry)
   return entry
 }
 
@@ -382,12 +345,11 @@ export const resetNarrowingMemos = (): void => {
 }
 
 export const narrowingReachesTarget = (source: Representation, target: Representation): boolean => {
-  const memo = narrowingMemo()
   const targetKey = representationKey(target)
-  if (narrowingClosureKeysOf(source, memo).has(targetKey)) return true
-  // Per compilation for the same reason `narrowingClosureOf`'s cache above is:
+  if (narrowingClosureKeysOf(source).has(targetKey)) return true
+  // Module level for the same reason `narrowingClosureOf`'s cache above is:
   // `reaches(from, to)` is a pure structural question about two immutable
-  // representations of one program, so the answer is the same for every caller, and a memo
+  // representations, so the answer is the same for every caller, and a memo
   // minted per call throws away the whole table between questions that
   // overwhelmingly repeat. `active` stays per call -- it is the cycle guard for
   // THIS descent, not a fact about the graph, and sharing it would let one
@@ -397,9 +359,9 @@ export const narrowingReachesTarget = (source: Representation, target: Represent
     const fromKey = representationKey(from)
     const toKey = representationKey(to)
     if (fromKey === toKey) return true
-    if (narrowingClosureKeysOf(from, memo).has(toKey)) return true
+    if (narrowingClosureKeysOf(from).has(toKey)) return true
     const pair = `${fromKey}->${toKey}`
-    const known = memo.reaches.get(pair)
+    const known = reachesMemo.get(pair)
     if (known !== undefined) return known
     if (active.has(pair)) return false
     active.add(pair)
@@ -417,7 +379,7 @@ export const narrowingReachesTarget = (source: Representation, target: Represent
           : from.arms.some((arm) => reaches(arm.value, to))
     }
     active.delete(pair)
-    memo.reaches.set(pair, result)
+    reachesMemo.set(pair, result)
     return result
   }
   return reaches(source, target)

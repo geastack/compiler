@@ -135,7 +135,7 @@ const emitFieldInits = (
     const member = tailLookupFields === null ? cppRecordFieldName(field.key) : tailAwareFieldWriteText(tailLookupFields, field.key)
     lines.push(`${receiverName}${accessor}${member} = ${valueText};`)
     const declared = declaredRecordFieldOf(ctx.deriver, representation, field.key, ctx.classes)
-    if (declared && (!declared.required || tracksOwnKeyOrder(ctx.ownKeyOrder, representation))) {
+    if (declared && !declared.required) {
       lines.push(`${receiverName}${accessor}${cppRecordFieldPresenceName(field.key)} = true;`)
     }
   }
@@ -320,10 +320,6 @@ export const emitAllocateRecord = (ctx: EmitContext, lines: string[], operation:
           'frame owns; there is nothing for an allocation to borrow from'
       )
   }
-  // A tracked literal starts holding none of its keys; the initializers and
-  // the definitions after this allocation create them in written order.
-  if (tracksOwnKeyOrder(ctx.ownKeyOrder, representation) && (recordFieldsOfShape(ctx.deriver, representation.shapeId) ?? []).length > 0)
-    lines.push(`${name}${memberAccessOperator(representation.ownership)}gea_beginOwnKeys();`)
   emitFieldInits(ctx, lines, name, representation, representation.ownership, operation.fields)
   emitAccessorEnvironments(ctx, lines, name, representation, representation.ownership)
 }

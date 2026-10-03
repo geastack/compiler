@@ -35,7 +35,8 @@ import {
   sourceForValue,
   unwrapErased,
   valueEdgesInto,
-  withIterationProtocolArguments
+  withIterationProtocolArguments,
+  iterationProtocolArgumentsOf
 } from './shared.js'
 import type { CitedBranch } from './references.js'
 import { isShortCircuitingCall, optionalChainGuardOf, optionalCallGuardOf, presentReturnTypeOf } from './optional-chain.js'
@@ -1330,6 +1331,15 @@ const collectionMemberResultOverride = (context: ProducerContext, node: ts.CallE
   if (member === 'get' && bound.value === null && bound.valueEvidence.length === 0) return null
   return context.types.typeAt(node)
 }
+
+/**
+ * An `Array.prototype.map` call whose fresh result took the element of the
+ * statement it flows into -- `collection-bindings.ts`'s "A map result is a
+ * fresh array". The GATE only, like the two collection overrides above: the
+ * census answered `typeAt` for this node, and this returns that answer.
+ */
+const mapResultOverride = (context: ProducerContext, node: ts.CallExpression): StructuralTypeId | null =>
+  context.collections.mapResultTypeAt?.(node) ? context.types.typeAt(node) : null
 
 /**
  * `Array.from(source)` over a source the census typed where the checker saw

@@ -71,7 +71,18 @@ import ts from 'typescript'
  * `@param`, another field's `@type` -- and one of those being imprecise is
  * not evidence against this one: three's `LightShadow.clone()` states it
  * returns a `LightShadow`, and its subclasses store the clone into a field
- * they state more narrowly.
+ * they state more narrowly. One that EXCLUDES this one is: neither type holds
+ * the other, as a subtype or a subclass, and the one is a primitive where the
+ * other states only objects. Then one of the two statements is false, and the
+ * store is what the program does. three's `InterleavedBufferAttribute` states
+ * `@type {InterleavedBuffer}` over `this.normalized = normalized`, from a
+ * `@param {boolean} [normalized=false]`; `MemberNode` states `@type {Node}`
+ * over the `@param {string} property` it stores; `Node.getUpdateType`
+ * states `@return {NodeUpdateType}`, the constants object, and returns the
+ * `@type {string}` field holding one of its values; `MRTNode.has` states
+ * `@return {NodeBuilder}` and returns a comparison. A host's type on either
+ * side is left to the host boundary, as `contradicted-jsdoc-parameters.ts`
+ * leaves it.
  *
  * An object literal is evidence through what it lacks: a member the tag
  * requires that the literal does not write at all. Which members a literal
@@ -714,6 +725,21 @@ export const derivesFromStatedClass = (checker: ts.TypeChecker, constructed: ts.
       pending.push(...checker.getBaseTypes(declared as ts.InterfaceType))
   }
   return false
+}
+
+/** Whether an arm of `type`, or an array element of one, is an object type only declaration files declare. */
+export const namesDeclaredOnlyType = (checker: ts.TypeChecker, type: ts.Type): boolean =>
+  (type.isUnion() ? type.types : [type]).some((arm) => {
+    if (checker.isArrayType(arm))
+      return checker.getTypeArguments(arm as ts.TypeReference).some((element) => namesDeclaredOnlyType(checker, element))
+    const declarations = (arm.flags & ts.TypeFlags.Object) !== 0 ? (arm.getSymbol()?.declarations ?? []) : []
+    return declarations.length > 0 && declarations.every((declaration) => declaration.getSourceFile().isDeclarationFile)
+  })
+
+/** An instance of a class the program declares: its type's symbol is the class. */
+export const isClassInstance = (type: ts.Type): boolean => {
+  const symbol = ((type as ts.TypeReference).target ?? type).getSymbol()
+  return symbol !== undefined && (symbol.flags & ts.SymbolFlags.Class) !== 0 && (type.flags & ts.TypeFlags.Object) !== 0
 }
 
 /** A value whose type is its own construction: `new C( ... )`, a primitive literal, or a function or arrow expression. */

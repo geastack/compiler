@@ -3,7 +3,7 @@ import type { DeclarationId } from '../../identity/ids.js'
 import type { IrOperand } from '../../ir/model.js'
 import type { Representation } from '../../representation/model.js'
 import { isOpenDocument, representationKey } from '../../representation/model.js'
-import { createCppEmitBlockedError, operandText, type EmitContext } from './emit-context.js'
+import { createCppEmitBlockedError, operandText, type EmitContext, typedArrayConstructorGuardText } from './emit-context.js'
 import { boxedValueText } from './emit-dynamic-properties.js'
 import { typedArrayConstructorDomains } from '../../representation/typed-array-constructors.js'
 import { cppClassName, cppScalarType } from './types.js'
@@ -243,6 +243,7 @@ const compositeNativeInstanceProtocols: ReadonlySet<string> = new Set([
   ...errorConstructorNames.keys(),
   'RegExpConstructor',
   'ArrayBufferConstructor',
+  'DataViewConstructor',
   // A `Date` is one physical carrier too: a `native-record-ref` of `gea::runtime::Date`.
   // bson's `isDate(value)` asks `value instanceof Date` of whatever its caller holds.
   'DateConstructor',
@@ -250,6 +251,24 @@ const compositeNativeInstanceProtocols: ReadonlySet<string> = new Set([
   // `set`. mongodb's `defineAspects` asks `aspects instanceof Set` of a
   // `symbol | symbol[] | Set<symbol>`.
   'SetConstructor'
+])
+
+/**
+ * The protocols of that set whose identity is one physical carrier, and which
+ * one. An arm carrying it IS an instance; every other settled carrier is a
+ * different allocation, and so is a `native-record-ref` of any other layout.
+ * `Set` is the `set` family alone: a WeakSet is not a Set (24.2 and 24.4 are
+ * two constructors, and neither prototype inherits from the other).
+ */
+const physicalIdentityOf: ReadonlyMap<string, (carrier: Representation) => boolean> = new Map([
+  [
+    'RegExpConstructor',
+    (carrier: Representation) => carrier.kind === 'native-record-ref' && carrier.native === cppRegExpNativeTypes.pattern
+  ],
+  ['ArrayBufferConstructor', (carrier: Representation) => carrier.kind === 'array-buffer'],
+  ['DataViewConstructor', (carrier: Representation) => carrier.kind === 'data-view'],
+  ['DateConstructor', (carrier: Representation) => carrier.kind === 'native-record-ref' && carrier.native === cppDateType],
+  ['SetConstructor', (carrier: Representation) => carrier.kind === 'keyed-collection' && carrier.family === 'set']
 ])
 
 /** A settled answer that still evaluates the operand, the way every other constant verdict in this file does. */
@@ -345,20 +364,9 @@ const nativeInstanceLeafText = (ctx: EmitContext, protocol: string, carrier: Rep
     // native record is one C++ layout and not that one.
     const isOtherNativeRecord = carrier.kind === 'native-record-ref' && carrier.native !== cppErrorNativeType
     if (isOtherNativeRecord || settledNonNativeCarrier(ctx, carrier)) return settledInstanceText(value, false)
-  } else if (
-    protocol === 'RegExpConstructor' ||
-    protocol === 'ArrayBufferConstructor' ||
-    protocol === 'SetConstructor' ||
-    protocol === 'DateConstructor'
-  ) {
-    const matches =
-      protocol === 'RegExpConstructor'
-        ? carrier.kind === 'native-record-ref' && carrier.native === cppRegExpNativeTypes.pattern
-        : protocol === 'DateConstructor'
-          ? carrier.kind === 'native-record-ref' && carrier.native === cppDateType
-          : protocol === 'SetConstructor'
-            ? carrier.kind === 'keyed-collection' && carrier.family === 'set'
-            : carrier.kind === 'array-buffer'
+  } else {
+    const identity = physicalIdentityOf.get(protocol)
+    const matches = identity !== undefined && identity(carrier)
     // A `native-record-ref` of a different native layout IS that layout and no
     // other -- one C++ type per native record -- so it settles as flatly as a
     // scalar does.

@@ -26,7 +26,6 @@ import {
 import { emptyDeclaredMemberCensus, type DeclaredMemberCensus } from './structural-declarations.js'
 import { createLocalUnionResolver, type GuardedArms } from './structural-local-union.js'
 import { armPassesMemberGuards, memberGuardsOf } from './member-guard-narrowing.js'
-import { absenceKindsReachingRead, ALL_KINDS, checkerLeftReadOpen, NULL_KIND, PRESENT_KIND, UNDEFINED_KIND } from './stored-local-read.js'
 import { createMutableMethodResolver } from './structural-mutable-method.js'
 import { structuralArrayReadAt } from './structural-array-read.js'
 import { enclosingArgumentsFunction, implicitArgumentsSlotOf, isArgumentsObjectIdentifier } from './implicit-arguments.js'
@@ -61,12 +60,13 @@ import {
   isLibArrayBufferViewType,
   isUnusableEvidence,
   memberCensusNodeOf,
-  widestOf
+  widestOf,
+  isGlobalObjectInterfaceSpread
 } from './derived-expression-type.js'
 import { createLeafKeying, literalFor, primitiveFor, symbolKeyDeclarationOf } from './structural-leaves.js'
 import { unwrapErasedExpression } from './producers/erasure.js'
 import { intrinsicAccessorGetterChainOf } from './intrinsic-accessor-getter.js'
-import { createStructuralParts, selfReferentialCallableShapeOf } from './structural-parts.js'
+import { createStructuralParts, selfReferentialCallableShapeOf, constructSignaturesOf } from './structural-parts.js'
 import { bodyReadsThis, createReceiverResolver } from './structural-receiver.js'
 import type { IdentityTable } from './identities.js'
 import { createMemberRules, type MemberMode } from './structural-members.js'
@@ -826,11 +826,16 @@ const buildMapper = (
     identities,
     typeOf: (type) => typeOf(type),
     layoutTypeAt: (node) => layoutTypeAt(node),
-    parameterOverrideAt: (parameter) =>
-      refusedArrayParameterTypeAt(parameter) ??
-      prototypeObjectParameterTypeAt(parameter) ??
-      bivariantSlotParameterAt(parameter) ??
-      suppressedWriteParameterAt(parameter),
+    parameterOverrideAt: (parameter) => {
+      const nullDefaulted = nullDefaultedParameterReadAt(parameter)
+      return (
+        refusedArrayParameterTypeAt(parameter) ??
+        prototypeObjectParameterTypeAt(parameter) ??
+        bivariantSlotParameterAt(parameter) ??
+        suppressedWriteParameterAt(parameter) ??
+        (nullDefaulted ? typeOf(nullDefaulted) : null)
+      )
+    },
     implicitReceiverOf,
     declaredMemberResultOf,
     declaredMembers,
@@ -4736,6 +4741,16 @@ const buildMapper = (
         return standIn === undefined || recordIds === null
           ? null
           : table.intern({ kind: 'union', members: [typeOf(standIn), ...recordIds] })
+      }
+    },
+    {
+      // Before every rule that starts from the checker's own answer, which is
+      // the default's `null` alone.
+      name: 'null-defaulted-parameter',
+      forms: [ts.SyntaxKind.Parameter, ts.SyntaxKind.Identifier],
+      resolve: (node) => {
+        const widened = nullDefaultedParameterReadAt(node)
+        return widened ? typeOf(widened) : null
       }
     },
     {

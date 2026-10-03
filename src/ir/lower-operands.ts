@@ -23,7 +23,7 @@ import {
   type CallableAbi,
   type RecordField,
   type Representation,
-  type TaggedUnionArm
+  type TaggedUnionArm, abiKey
 } from '../representation/model.js'
 import type { SealedRepresentationPlan } from '../representation/plan.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
@@ -33,6 +33,7 @@ import type { IrBodyBuilder } from './build.js'
 import { anchorResultOf, IrLoweringBlockedError, requireRepresentation } from './lower-graph.js'
 import type { PendingShortCircuit } from './lower-short-circuit.js'
 import type { IrBlockId, IrOperand } from './model.js'
+import { optionalOf } from '../representation/optional.js'
 
 /**
  * Reading an operation's inputs and publishing its result.

@@ -1,5 +1,5 @@
 import type { ComponentId, DeclarationId, FunctionId, OperationId, SemanticResultId, StructuralTypeId } from '../identity/ids.js'
-import { componentId, withoutFunctionSpecialization } from '../identity/ids.js'
+import { componentId, withoutFunctionSpecialization, type NodeId } from '../identity/ids.js'
 import { callableOriginsOf, callableOwnPropertyWritesOf, unknownCallableOwnProperty } from '../semantics/callable-origins.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import { partitionAuthorityComponents } from '../semantics/model/graph.js'
@@ -45,15 +45,7 @@ import {
   defaultTypedArrayElementPolicy,
   defaultValueRecordPolicy
 } from './derive.js'
-import {
-  isArrayPatternCapable,
-  passingOf,
-  representationKey,
-  soleArrayPatternCapableArm,
-  soleIterableArmOf,
-  type CallableAbi,
-  type Representation
-} from './model.js'
+import { isArrayPatternCapable, representationKey, soleArrayPatternCapableArm, type Representation } from './model.js'
 import { literalDestinationsOf } from './literal-destination.js'
 import { proxyCarriersOf } from './proxy-carriers.js'
 import { staticFieldAbsenceOf, staticMembersOf, withStaticFieldAbsence } from './static-field-cells.js'
@@ -640,79 +632,6 @@ const dynamicCallableValueOf = (
     : null
 }
 
-const proxyOriginCarrier: Representation = { kind: 'dynamic', reason: 'proxy-origin' }
-
-/**
- * An array whose elements may hold a proxy: the array keeps its own native
- * carrier and its elements take `dynamic`. `null` for a carrier that is not
- * such an array, or whose elements already are.
- */
-const proxyElementArrayOf = (carrier: Representation): Representation | null =>
-  carrier.kind === 'array-object' && carrier.element.kind !== 'dynamic' ? { ...carrier, element: proxyOriginCarrier } : null
-
-/**
- * A convention whose result, or whose parameters at `positions`, may be a
- * proxy: those slots take `dynamic`. A rest slot whose gathered arguments may
- * be one (`restElements`) keeps its array and takes `dynamic` elements.
- */
-const proxyReachedAbi = (
-  abi: CallableAbi,
-  returns: boolean,
-  positions: ReadonlySet<number> | undefined,
-  restElements: boolean
-): CallableAbi => ({
-  ...abi,
-  result: returns ? proxyOriginCarrier : abi.result,
-  parameters: abi.parameters.map((parameter, ordinal) => {
-    if (positions?.has(ordinal) && parameter.value.kind !== 'dynamic')
-      return { value: proxyOriginCarrier, ownership: parameter.ownership, passing: passingOf(proxyOriginCarrier, parameter.ownership) }
-    const elements = restElements && ordinal === abi.restFrom ? proxyElementArrayOf(parameter.value) : null
-    return elements === null
-      ? parameter
-      : { value: elements, ownership: parameter.ownership, passing: passingOf(elements, parameter.ownership) }
-  })
-})
-
-/**
- * The carrier of a value that may hold a proxy (`semantics/proxy-origins.ts`),
- * or of a source function whose convention a proxy reaches -- every view of
- * that exact Function object states the same convention, so the body, its
- * callers and its own value agree.
- */
-const proxyOriginOf = (
-  result: SemanticResult,
-  origins: ProxyOrigins,
-  callableOrigins: ReadonlyMap<SemanticResultId, FunctionId>,
-  derived: () => Representation
-): Representation | null => {
-  // A value already carried as `dynamic` keeps the reason it has: the box
-  // holds a proxy as well as anything else, and a second reason for the same
-  // slot would only make its views disagree with the convention that binds it.
-  if (origins.results.has(result.id)) return derived().kind === 'dynamic' ? null : proxyOriginCarrier
-  if (origins.elementResults.has(result.id)) return proxyElementArrayOf(derived())
-  const origin = callableOrigins.get(result.id)
-  if (origin === undefined) return null
-  const callable = withoutFunctionSpecialization(origin)
-  const returns = origins.returning.has(callable)
-  const positions = origins.parameters.get(callable)
-  const restElements = origins.restElements.has(callable)
-  if (!returns && positions === undefined && !restElements) return null
-  const carrier = derived()
-  switch (carrier.kind) {
-    case 'function':
-    case 'function-value-dispatch':
-      return { ...carrier, abi: proxyReachedAbi(carrier.abi, returns, positions, restElements) }
-    case 'function-and-constructor':
-      return {
-        ...carrier,
-        call: proxyReachedAbi(carrier.call, returns, positions, restElements),
-        construct: proxyReachedAbi(carrier.construct, false, positions, restElements)
-      }
-    default:
-      return null
-  }
-}
-
 /**
  * CommonJS module records are the one explicitly dynamic host boundary here.
  * The checker authenticated the wrapper declaration and normalization carried
@@ -909,6 +828,21 @@ export const publishRepresentations = (
   // A fresh object literal whose one consumer is a declared cell is minted as
   // that cell's record (`literal-destination.ts`).
   const literalDestinations = literalDestinationsOf(graph, deriver)
+  // Which values may hold a proxy, by provenance from the authenticated
+  // `new Proxy` sites (`semantics/proxy-origins.ts`), for the receiver-generic
+  // method copies (`ir/receiver-generic-copies.ts`). Carriers stay
+  // `proxyCarriersOf`'s below.
+  const resultTypes = new Map<SemanticResultId, StructuralTypeId>()
+  if (proxySites.size > 0)
+    for (const operation of graph.operations.values()) for (const result of operation.results) resultTypes.set(result.id, result.type)
+  const carrierKindOf = (result: SemanticResultId): Representation['kind'] | null => {
+    const type = resultTypes.get(result)
+    return type === undefined ? null : deriver.deriveStored(type).kind
+  }
+  const proxyOrigins = proxyOriginsOf(graph, proxySites, {
+    dynamic: (result) => carrierKindOf(result) === 'dynamic',
+    functionOf: (result) => callableOrigins.get(result)
+  })
   // A value that may be a `new Proxy` result carries the handler with it, decided by provenance (`proxy-carriers.ts`).
   // An Error instance: a compiled subclass, whose struct derives from the
   // intrinsic error in place, or the intrinsic itself, named by the policy that
@@ -1060,5 +994,5 @@ export const publishRepresentations = (
   }
 
   const plan = builder.seal()
-  return { plan, committed, blocked, conflicts, violations: verifyRepresentationPlan(plan), deriver, staticFieldCarriers }
+  return { plan, committed, blocked, conflicts, violations: verifyRepresentationPlan(plan), deriver, staticFieldCarriers, proxyOrigins }
 }

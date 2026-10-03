@@ -10,7 +10,12 @@ import {
   impliedPatternTargetOf,
   objectAssignFreshTargetType,
   objectAssignTargetType,
-  nominalConstructorChoiceTypeAt
+  plainClassInstanceCopyAt,
+  nominalConstructorChoiceTypeAt,
+  memberCensusNodeOf,
+  defaultOnlyParameterOf,
+  emptyArrayDefaultParameterOf,
+  statesNoArrayElement
 } from './derived-expression-type.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import ts from 'typescript'
@@ -128,6 +133,43 @@ export const createLayoutTypeResolver = (
     const narrowed = own.isUnion() ? own.types : [own]
     if (!narrowed.every(exotic)) return null
     return held.some((arm) => checker.isTypeAssignableTo(arm, own)) ? null : checker.getNeverType()
+  }
+  const nullOnlyCellOf = (node: ts.Node): ts.VariableDeclaration | null => {
+    const declaration = ts.isVariableDeclaration(node)
+      ? node
+      : ts.isIdentifier(node)
+        ? checker.getSymbolAtLocation(node)?.valueDeclaration
+        : undefined
+    if (!declaration || !ts.isVariableDeclaration(declaration) || declaration.type || !ts.isIdentifier(declaration.name)) return null
+    const declared = checker.getTypeAtLocation(declaration.name)
+    return (declared.flags & ts.TypeFlags.Null) !== 0 && !declared.isUnion() ? declaration : null
+  }
+  // Whether some later `cell = value` stores a value the checker types `any`
+  // into the cell, walked once per declaration over its own file.
+  const untypedCellWrites = new Map<ts.VariableDeclaration, boolean>()
+  const cellTakesUntypedWrite = (declaration: ts.VariableDeclaration): boolean => {
+    const known = untypedCellWrites.get(declaration)
+    if (known !== undefined) return known
+    const symbol = checker.getSymbolAtLocation(declaration.name)
+    let found = false
+    const visit = (node: ts.Node): void => {
+      if (found) return
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        ts.isIdentifier(node.left) &&
+        symbol !== undefined &&
+        checker.getSymbolAtLocation(node.left) === symbol &&
+        (checker.getTypeAtLocation(node.right).flags & ts.TypeFlags.Any) !== 0
+      ) {
+        found = true
+        return
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(declaration.getSourceFile())
+    untypedCellWrites.set(declaration, found)
+    return found
   }
   // The other half of the same split: a cell the checker types from its
   // initializer as a bare primitive, which the program later sets to `null`
@@ -1259,6 +1301,11 @@ export const createLayoutTypeResolver = (
         const assignedTarget = objectAssignTargetType(checker, call)
         if (assignedTarget) return assignedTarget
       }
+      // A literal stored whole into a bag slot the join shares with another
+      // literal is allocated as that slot's record -- see
+      // `ObjectBagCensus.literalSlotLayoutOf`, the one authority for it.
+      const bagSlot = bags?.literalSlotLayoutOf(node)
+      if (bagSlot) return bagSlot
     }
     // AN EMPTY ARRAY LITERAL NESTED IN ANOTHER LITERAL takes its element from
     // the position it fills, not from its own inference. `[]` alone infers

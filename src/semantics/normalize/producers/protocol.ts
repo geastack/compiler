@@ -21,7 +21,8 @@ import {
   dynamicSpreadSourceTypeOf,
   spreadSourceTypeOf,
   staticSpreadMembersOf,
-  valueEdgesInto
+  valueEdgesInto,
+  isTypedArrayType
 } from './shared.js'
 import { iteratorMethodSymbolOf, iteratorRecordTypesOf, iteratorYieldStructuralType } from './iteration-yield.js'
 import type { IterationProtocol } from './iteration-yield.js'

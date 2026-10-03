@@ -938,8 +938,13 @@ const scanOf = (filePath: string, text: string): PackageFileScan => {
   return scan
 }
 
-const buildPackageIndex = (root: string, read: DeclarerReader, neverSkip: ReadonlySet<string>): PackageIndex => {
-  const key = indexKey(root, neverSkip)
+const buildPackageIndex = (
+  root: string,
+  read: DeclarerReader,
+  neverSkip: ReadonlySet<string>,
+  programFiles: ReadonlySet<string> | undefined
+): PackageIndex => {
+  const key = programFiles === undefined ? indexKey(root, neverSkip) : root
   const cached = cachesFor(read).index.get(key)
   if (cached) return cached
 
@@ -1348,7 +1353,7 @@ export const createSubclassMemberOverlayTransform =
       // `null` stored into a `std::string`. The same ancestor walk the
       // overlay itself uses keeps inherited declarations authoritative.
       const inherited = new Set<string>()
-      for (let ancestorName: string | null = info.baseName; ancestorName !== null; ) {
+      for (let ancestorName: string | null = info.baseName; ancestorName !== null;) {
         const ancestor = index.classesByName.get(ancestorName)
         if (!ancestor || inherited.has(`class:${ancestorName}`)) break
         inherited.add(`class:${ancestorName}`)

@@ -1,4 +1,3 @@
-import { tracksOwnKeyOrder } from '../../../ir/own-key-order.js'
 import type { CallableAbi, Ownership, RecordField, Representation } from '../../../representation/model.js'
 import { passingOf, representationKey } from '../../../representation/model.js'
 import { hostMemberTemplateOf } from '../../../representation/host-templates.js'
@@ -98,35 +97,6 @@ import { ownPropertySymbolsText } from './emit-host-reflect.js'
 
 /** A `dynamic` carrier, built where a member has to state the box it widens a known field into. */
 const dynamicCarrier: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
-
-/**
- * A known view's `Object.values`/`Object.entries` once a key no declared
- * field names may exist.
- *
- * The braced vector over the declared fields is exact for an object whose own
- * keys are those fields, and that is every object until an index-signature
- * entry or a computed write (`o[key] = v`) gives it one more. `Object.keys`
- * already asks the runtime for every own key (`ownEnumerableKeysText`), so
- * `Object.keys(o)` said `alpha,gamma` while `Object.values(o)` said `1`. A
- * generated shared object therefore takes the braced vector only while
- * `gea::nativeHasUndeclaredOwnKeys` says it has no such key, and otherwise
- * walks the same key list `Object.keys` does: declared fields keep their
- * native reads, and every other value arrives boxed from the dynamic protocol
- * and is entered into the result's element carrier.
- *
- * A carrier with no conversion from a box cannot hold such a value; that
- * program has no sound answer to give, and says so at the key that needs one.
- */
-const withUndeclaredKeys = (view: Extract<ObjectView, { kind: 'known' }>, fixed: string, keyed: (receiver: string) => string): string =>
-  ownershipOfGeneratedCarrier(view.representation) === 'shared-refcount'
-    ? `(gea::nativeHasUndeclaredOwnKeys(${view.receiver}) ? ${keyed(view.receiver)} : ${fixed})`
-    : fixed
-
-/** The body of the `undeclared` callback where a box has no conversion into the slot. */
-const unconvertibleUndeclaredText = (member: string, slot: Representation): string =>
-  `gea::host::throwRuntimeError("TypeError", ${cppStringLiteral(
-    `Object.${member}: an own property no declared field names holds a dynamic value, and "${representationKey(slot)}" has no conversion from one`
-  )});`
 
 const objectValueConversionText = (
   ctx: EmitContext,
@@ -2731,27 +2701,6 @@ const assignText = (ctx: EmitContext, operation: CallOperation): string => {
  * signature, and inventing one that dropped the receiver would make
  * `get: () => this.x` read the wrong object.
  */
-const accessorDescriptorFieldText = (field: RecordField, read: string, slot: string): string | null => {
-  if (field.key !== 'get' && field.key !== 'set') return null
-  if (field.value.kind !== 'function-value-dispatch') return null
-  const abi = field.value.abi
-  if (abi.receiver !== null && abi.receiver.kind !== 'dynamic') return null
-  const boxed =
-    abi.receiver === null
-      ? abi.restFrom === null
-        ? `gea::Value::box(gea::Value::Tag::Function, ${read})`
-        : `gea::Value::boxCallable<${abi.restFrom}>(${read})`
-      : `gea::Value::boxMethod<${abi.restFrom === null ? -1 : abi.restFrom + 1}>(${read})`
-  const held = `__gea_${field.key}ter`
-  return field.key === 'get'
-    ? `{ const gea::Value ${held} = ${boxed}; ${slot}.hasGet = true; ${slot}.getterValue = ${held}; ` +
-        `${slot}.getIdentity = ${held}.functionObjectIdentity().get(); ` +
-        `${slot}.get = [${held}](const gea::Value& gea_receiver) -> gea::Value { return ${held}.callWithReceiver(gea_receiver, {}); }; }`
-    : `{ const gea::Value ${held} = ${boxed}; ${slot}.hasSet = true; ${slot}.setterValue = ${held}; ` +
-        `${slot}.setIdentity = ${held}.functionObjectIdentity().get(); ` +
-        `${slot}.set = [${held}](const gea::Value& gea_receiver, const gea::Value& gea_written) { ${held}.callWithReceiver(gea_receiver, {gea_written}); }; }`
-}
-
 const defineDescriptorLines = (ctx: EmitContext, operation: CallOperation, descriptor: IrOperand, slot: string): string =>
   descriptorSlotLines(ctx, operation, descriptor.representation, operandText(ctx, descriptor), slot)
 
@@ -3067,20 +3016,16 @@ const fixedFieldDefinePropertyText = (
   // Same class of defect this whole refactor is about: a second authority
   // answering a question one already owned.
   const presenceText = `${target}${view.accessor}${cppRecordFieldPresenceName(field.key)}`
-  // A struct that tracks its key order holds a field only once something
-  // creates it, so its bit answers existence for a required field too.
-  const tracked = tracksOwnKeyOrder(ctx.ownKeyOrder, view.representation)
-  const existing =
-    !field.required || tracked
-      ? presenceText
-      : (() => {
-          if (ctx.recordFieldSources.get(targetOperand.value)?.has(field.key) === true) return 'true'
-          if (view.representation.kind !== 'class-ref') return 'true'
-          const site = classMemberOf(ctx.classes, view.representation.declaration, field.key)
-          if (site?.kind !== 'field') return 'true'
-          const projected = ctx.classes.get(site.owner)?.fields.find((candidate) => candidate.key === field.key)
-          return projected === undefined || projected.initializer !== null ? 'true' : 'false'
-        })()
+  const existing = !field.required
+    ? presenceText
+    : (() => {
+        if (ctx.recordFieldSources.get(targetOperand.value)?.has(field.key) === true) return 'true'
+        if (view.representation.kind !== 'class-ref') return 'true'
+        const site = classMemberOf(ctx.classes, view.representation.declaration, field.key)
+        if (site?.kind !== 'field') return 'true'
+        const projected = ctx.classes.get(site.owner)?.fields.find((candidate) => candidate.key === field.key)
+        return projected === undefined || projected.initializer !== null ? 'true' : 'false'
+      })()
   // `convertedValueText` is allowed to spell an authorized implicit widening
   // as the source text (bare T -> Optional<T>). Materialize the selected field
   // carrier before template deduction: the runtime helper deliberately takes
@@ -3090,7 +3035,7 @@ const fixedFieldDefinePropertyText = (
   // A define that CREATES an optional field has to publish the property, or
   // the value lands in the payload while every other reader -- `in`, `delete`,
   // `Object.keys`, the descriptor read -- still sees an absent property.
-  const publish = field.required && !tracked ? '' : ` ${presenceText} = true;`
+  const publish = field.required ? '' : ` ${presenceText} = true;`
   // `applyNativeFixedDataDescriptor` reads the CURRENT value through
   // `fieldText` when the field is present, non-configurable and
   // non-writable (a SameValue check against the incoming value) -- an

@@ -357,32 +357,34 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
         kind: 'signature',
         call: [
           {
-            parameters: written.parameters.map((parameter) => {
-              const flags = {
-                optional: parameter.questionToken !== undefined || isOverloadOmissibleParameter(parameter),
-                rest: parameter.dotDotDotToken !== undefined,
-                hasInitializer: parameter.initializer !== undefined
-              }
-              const type = context.types.typeAt(parameter)
-              // Widen the census-aware type itself. A defaulted parameter's
-              // physical slot always admits `undefined`, including when the
-              // census replaced the checker's initializer-derived `{}` with
-              // the record its call sites actually pass. Leaving that replaced
-              // type unwidened makes the constructor ABI require the record
-              // while `contributeDefaultedParameter` correctly reads an
-              // optional raw argument, so the body and its callable allocation
-              // publish different frames and ABI projection must refuse them.
-              return {
-                type,
-                slot: parameterSlotTypeOf(
-                  (members) => context.table.intern({ kind: 'union', members }),
-                  context.types.typeOf(context.checker.getUndefinedType()),
-                  flags,
-                  type
-                ),
-                ...flags
-              }
-            }),
+            parameters: written.parameters
+              .map((parameter) => {
+                const flags = {
+                  optional: parameter.questionToken !== undefined || isOverloadOmissibleParameter(parameter),
+                  rest: parameter.dotDotDotToken !== undefined,
+                  hasInitializer: parameter.initializer !== undefined
+                }
+                const type = context.types.typeAt(parameter)
+                // Widen the census-aware type itself. A defaulted parameter's
+                // physical slot always admits `undefined`, including when the
+                // census replaced the checker's initializer-derived `{}` with
+                // the record its call sites actually pass. Leaving that replaced
+                // type unwidened makes the constructor ABI require the record
+                // while `contributeDefaultedParameter` correctly reads an
+                // optional raw argument, so the body and its callable allocation
+                // publish different frames and ABI projection must refuse them.
+                return {
+                  type,
+                  slot: parameterSlotTypeOf(
+                    (members) => context.table.intern({ kind: 'union', members }),
+                    context.types.typeOf(context.checker.getUndefinedType()),
+                    flags,
+                    type
+                  ),
+                  ...flags
+                }
+              })
+              .concat(phantomParameter ? [phantomParameter] : []),
             minimumArity: written.parameters.filter((parameter) => !parameter.questionToken && !parameter.initializer).length,
             thisParameter: context.types.instanceTypeAt(node),
             implicitReceiver: true,

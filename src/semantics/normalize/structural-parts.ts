@@ -21,8 +21,18 @@ import {
   restParameterUnionOfTuplesElementTypeOf,
   impliedPatternArrayElementAt
 } from './parameter-slot.js'
-import { annotationStatesNothing, isUnusableEvidence } from './derived-expression-type.js'
-import { inferredArrayElementAt, inferredCollectionTypeArgumentsAt } from './structural-array-element.js'
+import {
+  annotationStatesNothing,
+  isUnusableEvidence,
+  constructedClassChoiceMemberTypeOf,
+  memberCensusNodeOf
+} from './derived-expression-type.js'
+import {
+  inferredArrayElementAt,
+  inferredCollectionTypeArgumentsAt,
+  nullableArrayArmsOf,
+  unstatedNeverArray
+} from './structural-array-element.js'
 import type { IdentityTable } from './identities.js'
 import { withAbsences, type SloppyAbsenceCensus } from './sloppy-absence.js'
 
@@ -806,7 +816,7 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // checker answer that IS usable is never second-guessed here, the same
     // discipline `parameter-bindings.ts`'s own `known()` keeps for a bound
     // parameter's narrowed use.
-    const censusNode = declaration ? (censusValueNodeOf(declaration) ?? declaration) : null
+    const censusNode = declaration ? memberCensusNodeOf(declaration) : null
     // `object` and `{}` are upper bounds too. For `{ fields: payload }`,
     // a closed parameter census can know payload's concrete record even
     // though the checker retains its vacuous annotation. Storage must use

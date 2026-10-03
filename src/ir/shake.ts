@@ -300,6 +300,8 @@ interface BodySlice {
   readonly computedMemberHazards: readonly ComputedMemberHazard[]
   /** The carriers a kept `JSON.stringify` serializes -- expanded into field hazards by `jsonSerializedClassScopes`, which needs the class layouts this slice does not hold. */
   readonly jsonSerialized: readonly Representation[]
+  /** Carriers a kept call hands to a host function. See `hostCalleeOf`. */
+  readonly hostBoundaries: readonly Representation[]
   /** What a kept operation can instantiate. See `ConstructionDemand`. */
   readonly construction: ConstructionDemand
 }
@@ -630,6 +632,7 @@ const sliceBody = (
     fieldHazardScopes,
     computedMemberHazards,
     jsonSerialized,
+    hostBoundaries,
     construction: { constructors, classes: constructedClasses, evaluated: evaluatedClasses, open: openConstruction }
   }
 }

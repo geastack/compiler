@@ -1,4 +1,3 @@
-import { noOwnKeyOrderTracking, type OwnKeyOrderTracking } from '../../ir/own-key-order.js'
 import type { NativeSelectionHelper } from './native-selection-helpers.js'
 import { restrictsEveryCarrier, type IntegrityRestrictions } from '../../ir/integrity-restrictions.js'
 import type { BorrowedArmProjection } from './borrowed-arm-projections.js'

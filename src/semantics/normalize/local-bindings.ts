@@ -763,7 +763,7 @@ export const censusLocalBindings = (
    * with an instance was laid out as bare `null`. It is left out of the arms
    * instead; a write whose every branch reads the cell adds nothing.
    */
-  const branchArmsOf = (node: ts.Node): readonly ts.Type[] | null => {
+  const branchArmsOf = (node: ts.Node, cell: ts.Symbol): readonly ts.Type[] | null => {
     // `&&`'s right operand IS a write, though: when it is a genuinely dynamic
     // read nobody types, the cell holds that box, exactly as below.
     // memory-pager's `var page = arr && arr[first]` reads a slot of a tree of
@@ -775,7 +775,7 @@ export const censusLocalBindings = (
       const own = checker.getTypeAtLocation(node)
       return (own.flags & DYNAMIC_FLAGS) !== 0 ? [own] : null
     }
-    const branches = ts.isConditionalExpression(node)
+    const written = ts.isConditionalExpression(node)
       ? ([node.whenTrue, node.whenFalse] as const)
       : ts.isBinaryExpression(node) &&
           (node.operatorToken.kind === ts.SyntaxKind.BarBarToken || node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)
@@ -1702,7 +1702,7 @@ export const censusLocalBindings = (
           !checker.getPropertyOfType(nonNull, keyText) &&
           !indexed &&
           !checker.getIndexTypeOfType(nonNull, ts.IndexKind.String) &&
-          closedLiteralMemberAbsent(checker, flow, nonNull, keyText, element)
+          closedLiteralMemberAbsent(checker, flow, nonNull, keyText, element, null)
             ? checker.getUndefinedType()
             : null
         ownType = arrayIndexRead ?? absentRead ?? (keyText !== null ? propertyTypeOf(sourceType, keyText, element) : null)
