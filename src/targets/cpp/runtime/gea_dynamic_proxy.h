@@ -721,13 +721,13 @@ inline bool Value::defineProperty(const PropertyKey& key, const PropertyDescript
 }
 
 inline const NativeClassMethodState* Value::classPrototypeState() const {
-  if (proxy_ || dynamic_ || metadata_ == nullptr || metadata_->prototypeState == nullptr || !held_) return nullptr;
-  return metadata_->prototypeState(held_.get());
+  if (proxy_ || dynamic_ || metadata_ == nullptr || metadata_->prototypeState == nullptr || payload() == nullptr) return nullptr;
+  return metadata_->prototypeState(payload());
 }
 
 inline bool Value::nativeClassChainStart(const NativeClassMethodState*& start) const {
-  if (proxy_ || dynamic_ || metadata_ == nullptr || metadata_->methodState == nullptr || !held_) return false;
-  start = metadata_->methodState(held_.get());
+  if (proxy_ || dynamic_ || metadata_ == nullptr || metadata_->methodState == nullptr || payload() == nullptr) return false;
+  start = metadata_->methodState(payload());
   return true;
 }
 
@@ -871,7 +871,7 @@ inline bool Value::reflectSet(const PropertyKey& key, const Value& value, const 
     }
   }
   if (!exists && metadata_->methodState != nullptr) {
-    const auto result = detail::nativePrototypeChainSet(metadata_->methodState(held_.get()), key, value, [&]() -> const Value& { return receiver; });
+    const auto result = detail::nativePrototypeChainSet(metadata_->methodState(payload()), key, value, [&]() -> const Value& { return receiver; });
     if (result != detail::NativePrototypeOps::SetResult::Absent) return result == detail::NativePrototypeOps::SetResult::Accepted;
   }
   if (exists) {

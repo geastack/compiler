@@ -308,6 +308,7 @@ inline std::terminate_handler previousTerminateHandler = nullptr;
 inline void reportUncaughtException() noexcept;
 
 inline void flushThenTerminate() {
+  reportUncaughtException();
   flushAllOutput();
   if (previousTerminateHandler != nullptr) previousTerminateHandler();
   std::abort();
@@ -1245,7 +1246,12 @@ inline void profileRefCreationSite() {
   }();
   if (census == nullptr) return;
   void* frames[10];
+#if defined(_WIN32)
+  // The leak probe's capture (`leakProbeEvent`): Windows has no `backtrace`.
+  const int count = ::RtlCaptureStackBackTrace(0, 10, frames, nullptr);
+#else
   const int count = ::backtrace(frames, 10);
+#endif
   AllocationSiteKey key;
   for (int index = 3; index < count && index < 9; ++index) key.frames[static_cast<std::size_t>(index - 3)] = frames[index];
   ++census->sites[key];
@@ -11436,6 +11442,20 @@ inline bool sameValueZero(const K& left, const K& right) {
 }
 
 /**
+ * A class object as a key (three keys a vertex-format table by
+ * `Float16BufferAttribute`): the class identity `===` compares
+ * (`emit-equality.ts`'s `constructorIdentityEqualityText`) -- the class
+ * evaluation's environment where there is one, otherwise the construct
+ * pointer. `ConstructorObject` has no `operator==` because two sides of `===`
+ * may spell different C++ types; a key type is one.
+ */
+template <typename Result, typename... Arguments>
+inline bool sameValueZero(const ConstructorObject<Result(Arguments...)>& left, const ConstructorObject<Result(Arguments...)>& right) {
+  if (left.environment != nullptr) return left.environment == right.environment;
+  return reinterpret_cast<const void*>(left.construct_) == reinterpret_cast<const void*>(right.construct_) && right.environment == nullptr;
+}
+
+/**
  * A union-keyed collection (`Map<Level | number, ...>`): keys of different
  * arms are different values, and keys of one arm compare as that arm does.
  */
@@ -11497,31 +11517,6 @@ inline bool sameValueZeroCandidate(const K& key, const Candidate& candidate) {
 template <typename K, typename... Candidates>
 inline bool sameValueZeroMember(const K& key, const Candidates&... candidates) {
   return (sameValueZeroCandidate(key, candidates) || ...);
-}
-
-/**
- * A tagged union as a key (three's RenderObject fills a `Set` with
- * `BufferAttribute | InterleavedBuffer`): the arms are pairwise disjoint at
- * runtime (`TaggedUnion`), so two keys are the same key only when they hold
- * the same arm, and then exactly when that arm's values are.
- */
-template <typename... Arms>
-inline bool sameValueZero(const TaggedUnion<Arms...>& left, const TaggedUnion<Arms...>& right) {
-  if (left.index() != right.index()) return false;
-  return [&]<std::size_t... Indices>(std::index_sequence<Indices...>) {
-    return ((left.template is<Indices>() && sameValueZero(left.template get<Indices>(), right.template get<Indices>())) || ...);
-  }(std::index_sequence_for<Arms...>{});
-}
-
-/**
- * `T | undefined` as a key (a `Set` filled with `item.data` over a union one
- * of whose arms has no `data`, and so reads `undefined`): `undefined` is one
- * key, and it is never the same key as any `T`.
- */
-template <typename T>
-inline bool sameValueZero(const Optional<T>& left, const Optional<T>& right) {
-  if (left.has_value() != right.has_value()) return false;
-  return !left.has_value() || sameValueZero(*left, *right);
 }
 
 /** ECMA-262 SameValue for Number values: NaN equals NaN, while +0 and -0 differ. */
@@ -15440,6 +15435,7 @@ class ProxyObject {
 // can break it.
 class PropertyKey;
 class DynamicObject;
+struct NativeClassMethodState;
 
 namespace host::detail {
 inline std::string toString(double value);
@@ -15462,6 +15458,13 @@ const NativeFieldOps* nativeFieldOpsFor();
 struct NativePrototypeOps;
 template <typename T>
 const NativePrototypeOps* nativePrototypeOpsFor();
+/** Where a boxed class instance's prototype-table walk starts (`nativePrototypeChainStart`); null for every other payload. */
+using NativeMethodStateRead = const NativeClassMethodState* (*)(const void* payload);
+template <typename T>
+NativeMethodStateRead nativeMethodStateOpsFor();
+/** The class evaluation whose prototype object a boxed payload is, or null (`Value::classPrototypeState`). */
+template <typename T>
+NativeMethodStateRead nativePrototypeStateOpsFor();
 
 /**
  * The `[[Call]]` of a boxed callable, installed the same way and for the same
@@ -15804,8 +15807,10 @@ struct ValueMetadata {
   bool map;
   bool nativeError;
   NativeConstructThunk construct;
+  NativeMethodStateRead methodState;
+  NativeMethodStateRead prototypeState;
 };
-inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false, false, nullptr};
+inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false, false, nullptr, nullptr, nullptr};
 
 template <typename T, int RestFrom = -1>
 const ValueMetadata* valueMetadataFor() {
@@ -15816,7 +15821,7 @@ const ValueMetadata* valueMetadataFor() {
     return ValueMetadata{nativeFieldOpsFor<T>(), nativePrototypeOpsFor<T>(), calls,
                          nativeArrayOpsFor<T>(), payloadTypeTagFor<T>(), RestFrom,
                          IsArrayPayload<T>::value, IsMapPayload<T>::value, IsNativeErrorRefPayload<T>::value,
-                         nativeConstructFor<T>()};
+                         nativeConstructFor<T>(), nativeMethodStateOpsFor<T>(), nativePrototypeStateOpsFor<T>()};
   }();
   return &metadata;
 }
@@ -16074,6 +16079,10 @@ class Value {
   Value getLiteralProperty(const PropertyKey& key, detail::LiteralReadCache& cache) const;
   bool reflectSet(const PropertyKey& key, const Value& value, const Value& receiver);
   bool ownDescriptor(const PropertyKey& key, PropertyDescriptor& out) const;
+  /** The class evaluation whose prototype object this box holds, or null for every other value. */
+  const NativeClassMethodState* classPrototypeState() const;
+  /** Whether this box holds a native class instance or prototype object; `start` is where its prototype walk begins. */
+  bool nativeClassChainStart(const NativeClassMethodState*& start) const;
   std::vector<PropertyKey> ownPropertyKeys() const;
   bool defineProperty(const PropertyKey& key, const PropertyDescriptor& descriptor) const;
   /** SetIntegrityLevel/IsFrozen over the exact native payload plus its identity sidecar. */
@@ -16872,8 +16881,6 @@ class DynamicObject {
   struct Property {
     PropertyKey key;
     PropertyDescriptor descriptor;
-    /** When this key was created (`detail::ownKeyClock`), so a native object's expando keys interleave with its tracked fields. */
-    std::uint64_t order = detail::nextOwnKeyStamp();
   };
 
   /** 10.1.2 -- the `[[Prototype]]` slot. Null for `Object.create(null)` and for the root of every chain this runtime builds. */
@@ -17554,26 +17561,6 @@ class NativeIndexAttributeTable {
 };
 
 /**
- * When each entry of a tracked struct's index sidecar was created, beside the
- * sidecar the way its attribute table is. The generated write hooks note a key
- * they add and the delete hook forgets it; an entry nothing noted (a path
- * that writes the dictionary directly) answers 1, the allocation order.
- */
-template <typename Key>
-class NativeIndexOrderTable {
- public:
-  void note(const Key& key) { entries_[key] = detail::nextOwnKeyStamp(); }
-  void erase(const Key& key) { entries_.erase(key); }
-  std::uint64_t order(const Key& key) const {
-    const auto found = entries_.find(key);
-    return found == entries_.end() ? 1 : found->second;
-  }
-
- private:
-  std::map<Key, std::uint64_t> entries_;
-};
-
-/**
  * The data-only half of ValidateAndApplyPropertyDescriptor for a native typed
  * index entry.  Accessor descriptors are deliberately outside this protocol:
  * their receiver-carrying call convention is not represented by an index
@@ -17743,6 +17730,23 @@ struct NativeClassMethodState {
   const void* declaration = nullptr;
   Ref<NativeClassMethodState> parent;
   Ref<void> prototypeObject;
+  // The property table on `prototypeObject` (its expando), once one exists:
+  // what a program added to this class's prototype at run time. Cached for
+  // the instance-read walk (`detail::nativePrototypeChainRead`); the table
+  // lives exactly as long as `prototypeObject`, which this state holds.
+  mutable DynamicObject* prototypeTable = nullptr;
+  // For a class whose prototype takes run-time-keyed installs: the name of
+  // the class that declares `key` as a method or accessor (this class or an
+  // ancestor), or null. Set when the prototype object is materialized.
+  const char* (*declaredMemberOwner)(const PropertyKey& key) = nullptr;
+  // The class's own declared methods and accessors as descriptors, for
+  // `Object.getOwnPropertyDescriptors(C.prototype)`; null until the
+  // prototype object is materialized.
+  void (*declaredDescriptors)(std::vector<std::pair<PropertyKey, PropertyDescriptor>>& out) = nullptr;
+  // Materializes this evaluation's prototype object and boxes it, for
+  // `Object.getPrototypeOf` over an instance; installed at class evaluation
+  // when the program reflects over prototypes (`reflectNativeClassPrototype`).
+  Value (*prototypeValue)(const Ref<NativeClassMethodState>& state) = nullptr;
   std::vector<std::pair<const void*, Ref<FunctionObjectIdentity>>> methods;
   std::vector<AdaptedMethod> adaptedMethods;
   /** The constructor object's own properties, one record per shape the program views the class as (`constructorStaticView`). */
@@ -19131,6 +19135,39 @@ struct NativeFieldPayload<gea::Ref<U>> {
 };
 
 template <typename T>
+NativeMethodStateRead nativeMethodStateOpsFor() {
+  using Target = typename NativeFieldPayload<T>::Target;
+  if constexpr (!std::is_void_v<Target> && requires(const Target& target) { target.gea_method_state.get(); }) {
+    return [](const void* payload) -> const NativeClassMethodState* {
+      const Target* target = NativeFieldPayload<T>::reader(payload);
+      if (target == nullptr) return nullptr;
+      const NativeClassMethodState* state = target->gea_method_state.get();
+      // A class's prototype object is a native object of the class's own
+      // layout; its [[Prototype]] is the parent evaluation's prototype.
+      if (state != nullptr && state->prototypeObject.get() == static_cast<const void*>(target)) return state->parent.get();
+      return state;
+    };
+  } else {
+    return nullptr;
+  }
+}
+
+template <typename T>
+NativeMethodStateRead nativePrototypeStateOpsFor() {
+  using Target = typename NativeFieldPayload<T>::Target;
+  if constexpr (!std::is_void_v<Target> && requires(const Target& target) { target.gea_method_state.get(); }) {
+    return [](const void* payload) -> const NativeClassMethodState* {
+      const Target* target = NativeFieldPayload<T>::reader(payload);
+      if (target == nullptr) return nullptr;
+      const NativeClassMethodState* state = target->gea_method_state.get();
+      return state != nullptr && state->prototypeObject.get() == static_cast<const void*>(target) ? state : nullptr;
+    };
+  } else {
+    return nullptr;
+  }
+}
+
+template <typename T>
 const NativePrototypeOps* nativePrototypeOpsFor() {
   using Target = typename NativeFieldPayload<T>::Target;
   if constexpr (!std::is_void_v<Target> && NativePrototypeTable<Target>) {
@@ -19519,6 +19556,13 @@ gea::Ref<Target> unboxClassRef(const Value& value, const char* site) {
   // boxed it was this one.
   if (value.tag() != Value::Tag::Object || !value.classObject() ||
       (!classIdentityExtends(value.classIdentity(), target) && value.classIdentity() != &PlainObjectOperationsFor<Target>::table)) {
+    // A proxy is carried as `dynamic` exactly where the compiler followed it
+    // (`semantics/proxy-origins.ts`), and a method runs with one as `this`
+    // only through its receiver-generic copy: anywhere else is this refusal.
+    if (value.isProxy()) {
+      std::fprintf(stderr, "gea: %s is a Proxy where a native class instance is required (a slot or a method `this` the proxy was not followed to)\n", site);
+      gea::detail::abortAfterFlush();
+    }
     refusePayloadMismatch(site);
   }
   return value.classObject().template staticCast<Target>();
@@ -20056,6 +20100,28 @@ struct DynamicRestArgument<gea::Ref<T>> {
 };
 
 /**
+ * A callable result declared `T | null`, read out of a box.
+ *
+ * `Null` is its absence. So is `Undefined`: a typed callable whose frame
+ * returns `Optional<T>` boxes its absent state as `Undefined` whichever
+ * absence its declaration meant (`DynamicCarrier<Optional<T>>::out`), so a
+ * `T | null` function crossing a dynamic boundary and back answers
+ * `Undefined` for its own `null`. This is the same pair of tags
+ * `DynamicCarrier<Optional<T>>::in` accepts for every non-callable read;
+ * anything else must be a `T`.
+ */
+template <typename T>
+struct NullAbsentCallableResult;
+
+template <typename T>
+struct NullAbsentCallableResult<Optional<T>> {
+  static Optional<T> in(const Value& value) {
+    if (value.tag() == Value::Tag::Null || value.tag() == Value::Tag::Undefined) return Optional<T>();
+    return Optional<T>(DynamicCallableCarrier<T>::in(value, 0));
+  }
+};
+
+/**
  * A function value crossing the boundary in the READ direction, and the one
  * carrier for which an exact payload match is not the general case.
  *
@@ -20088,7 +20154,13 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
   static bool accepts(const Value& value) {
     return value.tag() == Value::Tag::Function && value.payloadType() == payloadTypeTagFor<Self>();
   }
-  static Self in(const Value& value, std::size_t position) { return inAs(value, position, false, -1, &adapt); }
+  // `NullResult` states that the frame's `Optional<T>` RESULT means `T | null`.
+  // `Optional<T>` itself cannot say which absence it holds, and the callable
+  // carrier policy reads only `Undefined` as absent, so a Function installed
+  // in three's `@return {?boolean}` `Node.update` slot could not answer
+  // `null`. See `NullAbsentCallableResult` for what it reads.
+  template <bool NullResult = false>
+  static Self in(const Value& value, std::size_t position) { return inAs(value, position, false, -1, &adapt<NullResult>); }
 
   /**
    * `in` for a MEMBER read off an object: `stream.once(...)` calls the method
@@ -20106,28 +20178,29 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     return adapted;
   }
 
+  template <bool NullResult = false>
   static Self inWithReceiver(const Value& value, std::size_t position) {
     if constexpr (sizeof...(Arguments) == 0) {
       refusePayloadMismatch("a receiver-bearing callable ABI has no physical receiver slot");
     } else {
-      return inAs(value, position, true, -1, &adaptWithReceiver);
+      return inAs(value, position, true, -1, &adaptWithReceiver<NullResult>);
     }
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult = false>
   static Self inWithRest(const Value& value, std::size_t position) {
     static_assert(RestFrom < sizeof...(Arguments), "a rest slot must be a physical callable argument");
     using Rest = std::tuple_element_t<RestFrom, Args>;
     static_assert(DynamicRestArgument<Rest>::supported, "a checked dynamic rest adapter requires ArrayObject<Element>");
-    return inAs(value, position, false, static_cast<int>(RestFrom), &adaptWithRest<RestFrom>);
+    return inAs(value, position, false, static_cast<int>(RestFrom), &adaptWithRest<RestFrom, NullResult>);
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult = false>
   static Self inWithReceiverAndRest(const Value& value, std::size_t position) {
     static_assert(RestFrom > 0 && RestFrom < sizeof...(Arguments), "a receiver-bearing rest slot follows the physical receiver");
     using Rest = std::tuple_element_t<RestFrom, Args>;
     static_assert(DynamicRestArgument<Rest>::supported, "a checked dynamic rest adapter requires ArrayObject<Element>");
-    return inAs(value, position, true, static_cast<int>(RestFrom), &adaptWithReceiverAndRest<RestFrom>);
+    return inAs(value, position, true, static_cast<int>(RestFrom), &adaptWithReceiverAndRest<RestFrom, NullResult>);
   }
 
  private:
@@ -20176,6 +20249,16 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     return true;
   }
 
+  template <bool NullResult>
+  static Result readResult(const Value& value) {
+    if constexpr (NullResult) {
+      return NullAbsentCallableResult<Result>::in(value);
+    } else {
+      return DynamicCallableCarrier<Result>::in(value, 0);
+    }
+  }
+
+  template <bool NullResult>
   static Result adapt(void* environment, Arguments... arguments) {
     alignas(void*) unsigned char slot[sizeof(void*)];
     const Value* source = gea::unpackEnvironment<Value>(environment, slot);
@@ -20183,7 +20266,7 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source->callAsFunction(boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source->callAsFunction(boxed), 0);
+      return readResult<NullResult>(source->callAsFunction(boxed));
     }
   }
 
@@ -20203,6 +20286,7 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     }
   }
 
+  template <bool NullResult>
   static Result adaptWithReceiver(void* environment, Arguments... arguments) {
     static_assert(sizeof...(Arguments) > 0, "a receiver-bearing callable ABI has a physical receiver slot");
     alignas(void*) unsigned char slot[sizeof(void*)];
@@ -20220,11 +20304,11 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source->callWithReceiver(receiver, boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source->callWithReceiver(receiver, boxed), 0);
+      return readResult<NullResult>(source->callWithReceiver(receiver, boxed));
     }
   }
 
-  template <std::size_t RestFrom, std::size_t... Fixed>
+  template <std::size_t RestFrom, bool NullResult, std::size_t... Fixed>
   static Result adaptWithRestFrame(const Value& source, const Args& frame, std::index_sequence<Fixed...>) {
     std::vector<Value> boxed{DynamicCallableCarrier<std::tuple_element_t<Fixed, Args>>::out(std::get<Fixed>(frame))...};
     using Rest = std::tuple_element_t<RestFrom, Args>;
@@ -20232,19 +20316,19 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source.callAsFunction(boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source.callAsFunction(boxed), 0);
+      return readResult<NullResult>(source.callAsFunction(boxed));
     }
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult>
   static Result adaptWithRest(void* environment, Arguments... arguments) {
     alignas(void*) unsigned char slot[sizeof(void*)];
     const Value* source = gea::unpackEnvironment<Value>(environment, slot);
     const Args frame(arguments...);
-    return adaptWithRestFrame<RestFrom>(*source, frame, std::make_index_sequence<RestFrom>{});
+    return adaptWithRestFrame<RestFrom, NullResult>(*source, frame, std::make_index_sequence<RestFrom>{});
   }
 
-  template <std::size_t RestFrom, std::size_t... Fixed>
+  template <std::size_t RestFrom, bool NullResult, std::size_t... Fixed>
   static Result adaptWithReceiverAndRestFrame(const Value& source, const Args& frame, std::index_sequence<Fixed...>) {
     using Receiver = std::tuple_element_t<0, Args>;
     using Rest = std::tuple_element_t<RestFrom, Args>;
@@ -20255,16 +20339,16 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (std::is_void_v<Result>) {
       source.callWithReceiver(receiver, boxed);
     } else {
-      return DynamicCallableCarrier<Result>::in(source.callWithReceiver(receiver, boxed), 0);
+      return readResult<NullResult>(source.callWithReceiver(receiver, boxed));
     }
   }
 
-  template <std::size_t RestFrom>
+  template <std::size_t RestFrom, bool NullResult>
   static Result adaptWithReceiverAndRest(void* environment, Arguments... arguments) {
     alignas(void*) unsigned char slot[sizeof(void*)];
     const Value* source = gea::unpackEnvironment<Value>(environment, slot);
     const Args frame(arguments...);
-    return adaptWithReceiverAndRestFrame<RestFrom>(*source, frame, std::make_index_sequence<RestFrom - 1>{});
+    return adaptWithReceiverAndRestFrame<RestFrom, NullResult>(*source, frame, std::make_index_sequence<RestFrom - 1>{});
   }
 };
 
@@ -22907,127 +22991,6 @@ bool nativeCopiedKeysInOrder(const T& self, NativeOwnKeyOrder& order, std::vecto
   return true;
 }
 
-struct NativeMapOps {
-  double (*size)(const void* payload);
-  bool (*find)(const void* payload, const Value& key, Value* value);
-  void (*set)(void* payload, const Value& key, const Value& value);
-  bool (*remove)(void* payload, const Value& key);
-  void (*clear)(void* payload);
-  bool (*entry)(const void* payload, std::size_t index, Value& key, Value& value);
-};
-
-/** Whether a carrier can hold a function value, under any callable spelling. */
-template <typename T>
-struct CarrierHoldsFunctions : std::false_type {};
-template <>
-struct CarrierHoldsFunctions<Value> : std::true_type {};
-template <>
-struct CarrierHoldsFunctions<FunctionValue> : std::true_type {};
-template <typename Result, typename... Arguments>
-struct CarrierHoldsFunctions<CallableObject<Result(Arguments...)>> : std::true_type {};
-template <typename Result, typename... Arguments>
-struct CarrierHoldsFunctions<ConstructorObject<Result(Arguments...)>> : std::true_type {};
-template <typename T>
-struct CarrierHoldsFunctions<Optional<T>> : CarrierHoldsFunctions<T> {};
-template <typename... Arms>
-struct CarrierHoldsFunctions<TaggedUnion<Arms...>> : std::bool_constant<(CarrierHoldsFunctions<Arms>::value || ...)> {};
-
-/** A boxed Map written with a key or value its own native carrier cannot hold. */
-[[noreturn]] inline void refuseBoxedMapStore(const char* position) {
-  std::fprintf(stderr, "gea: Map.prototype.set through a dynamic value stored a %s this Map's native carrier cannot hold\n", position);
-  gea::detail::abortAfterFlush();
-}
-
-/**
- * The one lookup key a boxed Map cannot answer: a function its key carrier
- * does not claim. A callable keeps its identity across carriers
- * (`Value::box`'s function-object arm), so a stored key under another
- * callable spelling may be this very function, and "absent" could be wrong.
- */
-[[noreturn]] inline void refuseBoxedMapFunctionKey() {
-  std::fprintf(stderr, "gea: a dynamic Map lookup used a function key whose callable carrier this Map's key carrier does not name\n");
-  gea::detail::abortAfterFlush();
-}
-
-template <typename T>
-struct NativeMapOpsFor {
-  static const NativeMapOps* table() { return nullptr; }
-};
-
-/**
- * A lookup key that the key carrier does not claim is absent, which is exact
- * for every value but a function (`refuseBoxedMapFunctionKey`): a class
- * instance, an Array, a record and a primitive each have one runtime identity
- * or tag, and `DynamicCarrier<K>::accepts` answers for it.
- */
-template <typename K, typename V>
-struct NativeMapOpsFor<gea::Ref<Map<K, V>>> {
-  using Held = gea::Ref<Map<K, V>>;
-  template <typename Found>
-  static bool withKey(const Value& key, Found&& found) {
-    if (DynamicCarrier<K>::accepts(key)) return found(DynamicCarrier<K>::in(key, 0));
-    if constexpr (CarrierHoldsFunctions<K>::value) {
-      if (key.tag() == Value::Tag::Function) refuseBoxedMapFunctionKey();
-    }
-    return false;
-  }
-  static const NativeMapOps* table() {
-    if constexpr (!DynamicCarrier<K>::supported || !DynamicCarrier<V>::supported) {
-      return nullptr;
-    } else {
-      static const NativeMapOps ops{
-          [](const void* payload) -> double {
-            const Held& map = *static_cast<const Held*>(payload);
-            return map ? map->size() : 0;
-          },
-          [](const void* payload, const Value& key, Value* value) -> bool {
-            const Held& map = *static_cast<const Held*>(payload);
-            if (!map) return false;
-            return withKey(key, [&](const K& native) {
-              for (const std::pair<K, V>& entry : map->entries()) {
-                if (!sameValueZero(entry.first, native)) continue;
-                if (value != nullptr) *value = DynamicCarrier<V>::out(entry.second);
-                return true;
-              }
-              return false;
-            });
-          },
-          [](void* payload, const Value& key, const Value& value) {
-            const Held& map = *static_cast<const Held*>(payload);
-            if (!map) gea::host::throwRuntimeError("TypeError", "Map.prototype.set called on an absent Map");
-            if (!DynamicCarrier<K>::accepts(key)) refuseBoxedMapStore("key");
-            if (!DynamicCarrier<V>::accepts(value)) refuseBoxedMapStore("value");
-            map->set(DynamicCarrier<K>::in(key, 0), DynamicCarrier<V>::in(value, 1));
-          },
-          [](void* payload, const Value& key) -> bool {
-            const Held& map = *static_cast<const Held*>(payload);
-            return map && withKey(key, [&](const K& native) { return map->remove(native); });
-          },
-          [](void* payload) {
-            const Held& map = *static_cast<const Held*>(payload);
-            if (map) map->clear();
-          },
-          // By position into the live entry list, as the typed Map iterator
-          // reads it (`Iterator(gea::Ref<Map<K, V>>)`): an entry added while
-          // a walk is under way is still visited.
-          [](const void* payload, std::size_t index, Value& key, Value& value) -> bool {
-            const Held& map = *static_cast<const Held*>(payload);
-            if (!map || index >= map->entries().size()) return false;
-            const std::pair<K, V>& entry = map->entries()[index];
-            key = DynamicCarrier<K>::out(entry.first);
-            value = DynamicCarrier<V>::out(entry.second);
-            return true;
-          }};
-      return &ops;
-    }
-  }
-};
-
-template <typename T>
-const NativeMapOps* nativeMapOpsFor() {
-  return NativeMapOpsFor<T>::table();
-}
-
 /**
  * The own enumerable string keys of a record that has no creation-order log:
  * its present declared fields in layout order, which is its enumeration order.
@@ -23439,7 +23402,140 @@ inline void dropNativeExpando(const void* object, RefCounts* counts) {
   --counts->weak;
 }
 
+/**
+ * The run-time half of a class's prototype chain: the tables a program added
+ * to each class evaluation's native prototype object (`C.prototype.k = v`,
+ * `Object.defineProperties(C.prototype, ...)`), most-derived first.
+ *
+ * Declared methods are not here: the emitter answers them before it asks
+ * this, by the object's run-time class. That order is the language's only
+ * because an install never shadows a member declared on its class or an
+ * ancestor -- such an install aborts by name when it runs
+ * (`nativePrototypeInstallShadows`) -- so "every declared method, then every
+ * table" and "per level, declared then table" give one answer.
+ */
+inline DynamicObject* nativePrototypeTableOf(const NativeClassMethodState& state) {
+  if (state.prototypeTable != nullptr) return state.prototypeTable;
+  if (!state.prototypeObject) return nullptr;
+  // The expando bit is set exactly when a table exists for the address.
+  if ((refCountsOf(state.prototypeObject.get())->weak & expandoTagged) == 0) return nullptr;
+  state.prototypeTable = const_cast<DynamicObject*>(findNativeExpando(state.prototypeObject.get()));
+  return state.prototypeTable;
+}
+
+/**
+ * A run-time install on a class's prototype object whose key names a method
+ * or accessor the class or an ancestor declares. Declared members answer
+ * before the prototype tables (`nativePrototypeChainFind`), so the install
+ * would be silently ignored; it stops the program instead, when it runs.
+ */
+inline void refusePrototypeInstallShadow(const NativeClassMethodState* state, const void* object, const PropertyKey& key) {
+  if (state == nullptr || state->declaredMemberOwner == nullptr || state->prototypeObject.get() != object) return;
+  const char* owner = state->declaredMemberOwner(key);
+  if (owner == nullptr) return;
+  std::fprintf(stderr, "gea: a run-time install on a class prototype shadows the member '%s' that %s declares\n",
+               key.isSymbol() ? "<symbol>" : key.text().c_str(), owner);
+  gea::detail::abortAfterFlush();
+}
+
+/** Where `object`'s walk starts: its own class evaluation, or the parent's when `object` is that evaluation's prototype object. */
+inline const NativeClassMethodState* nativePrototypeChainStart(const NativeClassMethodState* state, const void* object) {
+  if (state != nullptr && state->prototypeObject.get() == object) return state->parent.get();
+  return state;
+}
+
+/** The first table in the chain that holds `key` as an own property, or null. */
+inline const PropertyDescriptor* nativePrototypeChainFind(const NativeClassMethodState* start, const PropertyKey& key) {
+  for (const NativeClassMethodState* level = start; level != nullptr; level = level->parent.get()) {
+    const DynamicObject* table = nativePrototypeTableOf(*level);
+    if (table == nullptr) continue;
+    if (const PropertyDescriptor* found = table->ownProperty(key)) return found;
+  }
+  return nullptr;
+}
+
+/** OrdinaryGet's inherited step over those tables; an accessor runs with the original receiver. */
+template <typename Receiver>
+bool nativePrototypeChainRead(const NativeClassMethodState* start, const PropertyKey& key, Receiver&& receiver, Value& answer) {
+  const PropertyDescriptor* found = nativePrototypeChainFind(start, key);
+  if (found == nullptr) return false;
+  answer = !found->isAccessor() ? found->value : found->hasGet && found->get ? found->get(receiver()) : Value();
+  return true;
+}
+
+/**
+ * OrdinarySet's inherited step (10.1.9.2 step 1) over those tables, for a key
+ * the receiver does not hold itself. `Absent` sends the write on to create an
+ * own property; an inherited setter runs with the receiver; an inherited
+ * non-writable data property or a setter-less accessor rejects the write.
+ */
+template <typename Receiver>
+NativePrototypeOps::SetResult nativePrototypeChainSet(const NativeClassMethodState* start, const PropertyKey& key, const Value& value, Receiver&& receiver) {
+  const PropertyDescriptor* found = nativePrototypeChainFind(start, key);
+  if (found == nullptr) return NativePrototypeOps::SetResult::Absent;
+  if (found->isAccessor()) {
+    if (!found->hasSet || !found->set) return NativePrototypeOps::SetResult::Rejected;
+    found->set(receiver(), value);
+    return NativePrototypeOps::SetResult::Accepted;
+  }
+  return found->writable ? NativePrototypeOps::SetResult::Absent : NativePrototypeOps::SetResult::Rejected;
+}
+
+/** `Object.getPrototypeOf` for an object whose walk starts at `start`: that evaluation's prototype object, or null past the root class (this runtime models no `Object.prototype` object; an ordinary `{}` answers null too). */
+inline Value nativeClassPrototypeValue(const NativeClassMethodState* start) {
+  if (start == nullptr) return Value::box(Value::Tag::Null, nullptr);
+  if (start->prototypeValue == nullptr) {
+    std::fputs("gea: Object.getPrototypeOf reached a class evaluation that cannot hand out its prototype object\n", stderr);
+    gea::detail::abortAfterFlush();
+  }
+  return start->prototypeValue(Ref<NativeClassMethodState>::adopt(const_cast<NativeClassMethodState*>(start), true));
+}
+
+/**
+ * A declared method or accessor, as `Object.getOwnPropertyDescriptors(C.prototype)`
+ * lists it. The attributes are a class member's (non-enumerable,
+ * configurable, a method writable); the function is a stand-in that stops
+ * the program if it is called, since the member's body takes a receiver the
+ * descriptor does not carry. three only tests these for presence.
+ */
+[[noreturn]] inline Value declaredMemberFunctionCalled() {
+  std::fputs("gea: a declared class member's function read out of Object.getOwnPropertyDescriptors was called; this backend lists it but does not hand it out\n", stderr);
+  gea::detail::abortAfterFlush();
+}
+inline Value declaredMemberFunctionStandIn() {
+  return Value::box(Value::Tag::Function, CallableObject<Value()>{+[](void*) -> Value { declaredMemberFunctionCalled(); }, nullptr});
+}
+inline void declaredMethodDescriptor(std::vector<std::pair<PropertyKey, PropertyDescriptor>>& out, const char* key) {
+  PropertyDescriptor descriptor;
+  descriptor.hasValue = descriptor.hasWritable = descriptor.hasEnumerable = descriptor.hasConfigurable = true;
+  descriptor.value = declaredMemberFunctionStandIn();
+  descriptor.writable = descriptor.configurable = true;
+  out.emplace_back(PropertyKey::string(key), std::move(descriptor));
+}
+inline void declaredAccessorDescriptor(std::vector<std::pair<PropertyKey, PropertyDescriptor>>& out, const char* key, bool getter, bool setter) {
+  PropertyDescriptor descriptor;
+  descriptor.hasGet = descriptor.hasSet = descriptor.hasEnumerable = descriptor.hasConfigurable = true;
+  descriptor.configurable = true;
+  if (getter) {
+    descriptor.getterValue = declaredMemberFunctionStandIn();
+    descriptor.get = [](const Value&) -> Value { declaredMemberFunctionCalled(); };
+  }
+  if (setter) {
+    descriptor.setterValue = declaredMemberFunctionStandIn();
+    descriptor.set = [](const Value&, const Value&) { declaredMemberFunctionCalled(); };
+  }
+  out.emplace_back(PropertyKey::string(key), std::move(descriptor));
+}
+
 }  // namespace detail
+
+/** `Object.getPrototypeOf(instance)` for a native class instance (or a class's prototype object, whose [[Prototype]] is the parent's). */
+template <typename T>
+Value nativeGetPrototypeOf(const gea::Ref<T>& object) {
+  if (!object) gea::host::throwRuntimeError("TypeError", "Cannot convert undefined or null to object");
+  return detail::nativeClassPrototypeValue(
+      detail::nativePrototypeChainStart(object->gea_method_state.get(), static_cast<const void*>(object.get())));
+}
 
 inline std::size_t Value::dynamicArrayLength(const char* site) const {
   if (tag_ != Tag::Object || !metadata_->array || metadata_->elements == nullptr) {
@@ -23880,8 +23976,20 @@ bool nativeDynamicRead(const gea::Ref<T>& object, const PropertyKey& key, Value&
     if (object->gea_readOwnIndex(key, answer)) return true;
     if (object->gea_matchesOwnIndex(key)) return false;
   }
+  const auto receiver = [&] { return Value::box(Value::Tag::Object, object); };
   const gea::Ref<DynamicObject> expando = detail::expandoFor(gea::refCastToVoid(object), false);
-  return expando && expando->readWithReceiver(key, [&] { return Value::box(Value::Tag::Object, object); }, answer);
+  if (expando && expando->readWithReceiver(key, receiver, answer)) return true;
+  // The declared members before the run-time installs, in the order the boxed
+  // read (`Value::getProperty`) takes them: a key read off a native instance
+  // (a proxy `get` trap's `t[k]`) names a method as often as a field.
+  if constexpr (detail::NativePrototypeTable<T>) {
+    if (object->gea_readPrototypeProperty(key, answer)) return true;
+  }
+  if constexpr (requires { object->gea_method_state.get(); }) {
+    const auto* start = detail::nativePrototypeChainStart(object->gea_method_state.get(), static_cast<const void*>(object.get()));
+    return detail::nativePrototypeChainRead(start, key, receiver, answer);
+  }
+  return false;
 }
 
 // A certified missing property still evaluates its receiver/key and throws on
@@ -23985,6 +24093,9 @@ bool nativeDynamicSet(const gea::Ref<T>& object, const PropertyKey& key, const V
       if (object->gea_matchesOwnIndex(key)) return object->gea_writeOwnIndex(key, value, nativeIsExtensible(object));
     }
   }
+  if constexpr (requires { object->gea_method_state.get(); }) {
+    detail::refusePrototypeInstallShadow(object->gea_method_state.get(), static_cast<const void*>(object.get()), key);
+  }
   const gea::Ref<DynamicObject> existing = detail::expandoFor(gea::refCastToVoid(object), false);
   const auto receiver = [&] { return Value::box(Value::Tag::Object, object); };
   if (existing && existing->ownProperty(key) != nullptr) return existing->setWithReceiver(key, value, receiver);
@@ -23993,6 +24104,11 @@ bool nativeDynamicSet(const gea::Ref<T>& object, const PropertyKey& key, const V
     if (result != detail::NativePrototypeOps::SetResult::Absent) {
       return result == detail::NativePrototypeOps::SetResult::Accepted;
     }
+  }
+  if constexpr (requires { object->gea_method_state.get(); }) {
+    const auto* start = detail::nativePrototypeChainStart(object->gea_method_state.get(), static_cast<const void*>(object.get()));
+    const auto result = detail::nativePrototypeChainSet(start, key, value, receiver);
+    if (result != detail::NativePrototypeOps::SetResult::Absent) return result == detail::NativePrototypeOps::SetResult::Accepted;
   }
   if (!nativeIsExtensible(object)) return false;
   if (!detail::expandoFor(gea::refCastToVoid(object), true)->setWithReceiver(key, value, receiver)) return false;
@@ -24049,6 +24165,9 @@ bool nativeDynamicDefineProperty(const gea::Ref<T>& object, const PropertyKey& k
       if (object->gea_matchesOwnIndex(key)) return object->gea_defineOwnIndex(key, descriptor, nativeIsExtensible(object));
     }
   }
+  if constexpr (requires { object->gea_method_state.get(); }) {
+    detail::refusePrototypeInstallShadow(object->gea_method_state.get(), static_cast<const void*>(object.get()), key);
+  }
   const gea::Ref<DynamicObject> existing = detail::expandoFor(gea::refCastToVoid(object), false);
   if (existing && existing->ownProperty(key) != nullptr) return existing->defineOwnProperty(key, descriptor);
   if (!nativeIsExtensible(object)) return false;
@@ -24089,14 +24208,6 @@ Optional<PropertyDescriptor> nativeOwnPropertyDescriptor(const gea::Ref<T>& obje
   const gea::Ref<DynamicObject> expando = detail::expandoFor(gea::refCastToVoid(object), false);
   const PropertyDescriptor* descriptor = expando ? expando->ownProperty(key) : nullptr;
   return descriptor ? Optional<PropertyDescriptor>(*descriptor) : Optional<PropertyDescriptor>();
-}
-
-inline const void* Value::identity() const {
-  if (tag_ == Tag::Object || tag_ == Tag::Function) {
-    const gea::Ref<void> anchor = expandoAnchor();
-    if (anchor) return anchor.get();
-  }
-  return held_ ? held_.get() : this;
 }
 
 /**
@@ -24811,7 +24922,20 @@ inline bool ordinaryObjectPrototypeHas(const PropertyKey& key) {
 
 template <typename T>
 bool nativeDynamicHasProperty(const gea::Ref<T>& object, const PropertyKey& key) {
-  return nativeDynamicHas(object, key) || ordinaryObjectPrototypeHas(key);
+  if (nativeDynamicHas(object, key)) return true;
+  // The declared members before the run-time installs, the order
+  // `nativeDynamicRead` and the boxed HasProperty take them in: `'m' in t` on
+  // a native instance names a method as often as a field.
+  if constexpr (detail::NativePrototypeTable<T>) {
+    if (object && object->gea_hasPrototypeProperty(key)) return true;
+  }
+  if constexpr (requires { object->gea_method_state.get(); }) {
+    if (object) {
+      const auto* start = detail::nativePrototypeChainStart(object->gea_method_state.get(), static_cast<const void*>(object.get()));
+      if (detail::nativePrototypeChainFind(start, key) != nullptr) return true;
+    }
+  }
+  return ordinaryObjectPrototypeHas(key);
 }
 
 /**
@@ -26289,6 +26413,9 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
     if (expando && expando->hasProperty(key)) return expando->get(key, receiver);
     if (tuple) return dynamicArrayPrototypeGet(key);
     if (metadata_->prototype != nullptr && metadata_->prototype->read(payload(), key, answer)) return answer;
+    if (metadata_->methodState != nullptr &&
+        detail::nativePrototypeChainRead(metadata_->methodState(payload()), key, [&]() -> const Value& { return receiver; }, answer))
+      return answer;
     return Value();
   }
   if (metadata_->elements != nullptr) {
@@ -26311,14 +26438,6 @@ inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) c
     const Ref<DynamicObject>& properties = functionProperties();
     if (properties && properties->hasProperty(key)) return properties->get(key, receiver);
     return dynamicFunctionPrototypeGet(key);
-  }
-  // A Map has no own properties a box could have given it -- a write through
-  // one still refuses below -- so every read is `Map.prototype`'s, and a key
-  // that falls through to an unmodelled `Object.prototype` member keeps the
-  // opaque refusal rather than answering `undefined` for a real method.
-  if (metadata_->keyed != nullptr) {
-    Value answer;
-    if (dynamicMapPrototypeGet(key, receiver, answer)) return answer;
   }
   if (tag_ == Tag::Object) {
     Value method;
@@ -26509,7 +26628,7 @@ inline void Value::setProperty(const PropertyKey& key, const Value& value) {
       if (result != detail::NativePrototypeOps::SetResult::Absent) return;
     }
     if (metadata_->methodState != nullptr) {
-      const auto result = detail::nativePrototypeChainSet(metadata_->methodState(held_.get()), key, value, [&]() -> const Value& { return *this; });
+      const auto result = detail::nativePrototypeChainSet(metadata_->methodState(payload()), key, value, [&]() -> const Value& { return *this; });
       if (result != detail::NativePrototypeOps::SetResult::Absent) return;
     }
     if (!isExtensible()) return;
@@ -26614,7 +26733,8 @@ inline bool Value::hasProperty(const PropertyKey& key) const {
     const gea::Ref<DynamicObject> expando = detail::expandoFor(expandoAnchor(), false);
     if (expando && expando->hasProperty(key)) return true;
     if (tuple) return dynamicArrayPrototypeGet(key).tag() != Tag::Undefined;
-    return metadata_->prototype != nullptr && metadata_->prototype->has(payload(), key);
+    if (metadata_->prototype != nullptr && metadata_->prototype->has(payload(), key)) return true;
+    return metadata_->methodState != nullptr && detail::nativePrototypeChainFind(metadata_->methodState(payload()), key) != nullptr;
   }
   if (metadata_->elements != nullptr) {
     if (!key.isSymbol() && key.text() == "length") return true;
@@ -42489,17 +42609,6 @@ gea::Value parseWithReviver(const std::string& text, const Reviver& reviver) {
 }
 
 }  // namespace gea::json
-
-/**
- * An `optional` outside a record field -- an array element, or an arm of a
- * written union (`emit-json.ts`'s `JsonWriteReach`): absent writes `null`,
- * ECMA-262 25.5.2.4's answer for an array element and the value of a `null`.
- */
-template <typename T>
-inline void gea_json_write(std::string& out, const gea::Optional<T>& value) {
-  if (value.has_value()) gea_json_write(out, *value);
-  else out += "null";
-}
 
 /** An Array position: a hole and a stored `undefined` both serialize as `null` -- ECMA-262's own rule for an array, and the one JSON position `undefined` has any spelling at all (an *object property* holding `undefined` is omitted instead -- `emit-json.ts`'s generated struct writer does that, not this template, because only it knows which member is which). */
 template <typename Element>
