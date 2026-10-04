@@ -297,7 +297,15 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
   const parameterOf = (parameter: ts.Symbol, forceRest = false): SignatureParameter => {
     const declaration = identities.declarationOfSymbol(parameter)
     const isParameter = declaration !== null && ts.isParameter(declaration)
-    const bound = isParameter ? parameters.typeAt(declaration) : null
+    // A stated widening an earlier census round made and a later round did not
+    // remake is forwarded only through `statedTypeAt` (`parameter-bindings.ts`'s
+    // `computeStatedTypeAt`), and the body binds the parameter from there
+    // (`structural-layout-type.ts` asks it first). Read here too, or the slot
+    // keeps the bare statement under a body that holds the widening: three's
+    // `InterleavedBuffer.setUsage( value )` is widened to `number | undefined`
+    // while `BufferAttributeNode` still calls it with an unset `this.usage`,
+    // and that call turns dynamic in the rounds after.
+    const bound = isParameter ? (parameters.typeAt(declaration) ?? parameters.statedTypeAt(declaration)) : null
     const boundArms = isParameter ? parameters.unionArmsAt(declaration) : null
     // The published ABI and the body it wraps read the SAME rest parameter --
     // see `parameter-slot.ts`'s `restParameterArrayTypeOf`, which the body's

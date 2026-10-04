@@ -2,8 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resolve } from 'node:path'
 import ts from 'typescript'
-import { censusParameterBindings } from './parameter-bindings.js'
+import { censusParameterBindings, emptyParameterBindingCensus } from './parameter-bindings.js'
 import { wholeProgram } from './reachability.js'
+import { createIdentityTable } from './identities.js'
+import { createStructuralMapper } from './structural.js'
+import { createStructuralTypeTable } from '../model/structural-type-table.js'
 
 /**
  * three's `ColorBuffer.setClear`, reduced: the declaration overlay states
@@ -75,4 +78,38 @@ test('an open caller set still holds the omission a visible caller makes', () =>
 
 test('a spread that may reach the position refuses', () => {
   assert.equal(bindingOf('setClear( ...[ 0 ] ); setClear( 1, true );').parameter, null)
+})
+
+// A widening an earlier census round made and a later round did not remake
+// reaches the mapper only through `statedTypeAt`: three's
+// `InterleavedBuffer.setUsage( value )`, whose absent-passing caller turns
+// dynamic in the rounds after. The body binds the parameter from it, so the
+// slot the signature declares must hold it too.
+test('a forwarded stated widening is the slot the signature declares', () => {
+  const entry = resolve('test/fixtures/omitted-stated-parameter.js')
+  const source = `export {};
+    /** @param {number} value */
+    function setUsage( value ) {
+      return value;
+    }`
+  const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022, allowJs: true, strict: true, types: [] }
+  const host = ts.createCompilerHost(options)
+  const read = host.getSourceFile.bind(host)
+  host.getSourceFile = (name, version, ...rest) =>
+    resolve(name) === resolve(entry) ? ts.createSourceFile(name, source, version, true, ts.ScriptKind.JS) : read(name, version, ...rest)
+  const program = ts.createProgram([entry], options, host)
+  const checker = program.getTypeChecker()
+  const file = program.getSourceFile(entry)!
+  const declaration = file.statements.find(ts.isFunctionDeclaration)!
+  const parameter = declaration.parameters[0]!
+  const widened = checker.getNullableType(checker.getTypeAtLocation(parameter), ts.TypeFlags.Undefined)
+  const census = { ...emptyParameterBindingCensus, statedTypeAt: (node: ts.Node) => (node === parameter ? widened : null) }
+  const table = createStructuralTypeTable()
+  const mapper = createStructuralMapper(checker, createIdentityTable(program, checker), table, undefined, undefined, census)
+  const signature = table.get(mapper.typeAt(declaration)).shape
+  assert.equal(signature.kind, 'signature')
+  if (signature.kind !== 'signature') return
+  const slot = signature.call[0]?.parameters[0]?.slot
+  assert.equal(slot, mapper.typeAt(parameter))
+  assert.equal(table.get(slot!).shape.kind, 'union')
 })
