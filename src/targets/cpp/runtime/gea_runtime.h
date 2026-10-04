@@ -5059,7 +5059,12 @@ struct CallableObject<Result(Arguments...)> {
 
   /** See `statedRestOf`. */
   static constexpr int restUnstated = -2;
+  /** See `registerUnreadTail`: the fact for an entry that reads no formal from `first` on. */
+  static constexpr int restUnreadFrom(std::size_t first) { return -4 - static_cast<int>(first); }
+  static constexpr bool restIsUnread(int fact) { return fact <= restUnreadFrom(0); }
+  static constexpr std::size_t restFirstUnread(int fact) { return static_cast<std::size_t>(-4 - fact); }
   static constexpr bool restTailed = EndsInRestArray<Arguments...>::value;
+  static constexpr std::size_t arity = sizeof...(Arguments);
 
   /**
    * The three per-declaration static facts ECMA-262 attaches to a function
@@ -5252,6 +5257,22 @@ struct CallableObject<Result(Arguments...)> {
     }
   }
 
+  // An adapter that forwards only its `Source`'s own leading formals
+  // (`dropArguments` and its siblings) never reads the formals past them --
+  // the trailing array among them -- so where a dynamic call puts its tail
+  // cannot change what the adapter does. That is a fact of the two types, not
+  // a guess at a convention, and it is asserted from them: a source as wide as
+  // the slot would read its tail, and is not an adapter this may register.
+  // The fact names the first formal not read (the source's arity), so a
+  // dynamic call converts only the ones the source receives.
+  template <Invoke Entry, typename Source>
+  static void registerUnreadTail() {
+    static_assert(Source::arity < sizeof...(Arguments), "an unread tail needs a source narrower than the slot it fills");
+    if constexpr (restTailed) {
+      static const RestRegistration registration{Entry, restUnreadFrom(Source::arity), nullptr};
+    }
+  }
+
   static int statedRestOf(Invoke invoke, void* environment) {
     for (auto* entry = restRegistrations().load(std::memory_order_acquire); entry; entry = entry->next) {
       if (entry->entry == invoke) return entry->resolve ? entry->resolve(environment) : entry->restFrom;
@@ -5262,7 +5283,10 @@ struct CallableObject<Result(Arguments...)> {
   int statedRest() const { return statedRestOf(invoke, environment); }
 
   /** A source's stated rest seen through a view that drops its leading receiver formal. */
-  static constexpr int restPastReceiver(int source) { return source >= 1 ? source - 1 : source == -1 ? -1 : restUnstated; }
+  static constexpr int restPastReceiver(int source) {
+    if (restIsUnread(source)) return restUnreadFrom(restFirstUnread(source) == 0 ? 0 : restFirstUnread(source) - 1);
+    return source >= 1 ? source - 1 : source == -1 ? -1 : restUnstated;
+  }
 
   std::string_view sourceText() const { return facts().text; }
   /** ECMA-262 [[Name]] -- the declared name, or the `NamedEvaluation` name from where an anonymous literal was defined; empty when neither applies. */
@@ -5434,6 +5458,7 @@ struct CallableObject<Result(Arguments...)> {
   CallableObject(const Source& source) : CallableObject(&dropArguments, packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&dropArguments, Source>();
+    registerUnreadTail<&dropArguments, Source>();
   }
 
   static Result dropArguments(void* environment_, Arguments...) {
@@ -5648,6 +5673,7 @@ struct CallableObject<Result(Arguments...)> {
       : CallableObject(&dropTrailingArguments<SourceResult, SourceArguments...>, packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&dropTrailingArguments<SourceResult, SourceArguments...>, CallableObject<SourceResult(SourceArguments...)>>();
+    registerUnreadTail<&dropTrailingArguments<SourceResult, SourceArguments...>, CallableObject<SourceResult(SourceArguments...)>>();
   }
 
   /**
@@ -5882,6 +5908,7 @@ struct CallableObject<Result(Arguments...)> {
       : CallableObject(&dropArgumentsIntoArm<SourceResult>, packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&dropArgumentsIntoArm<SourceResult>, CallableObject<SourceResult()>>();
+    registerUnreadTail<&dropArgumentsIntoArm<SourceResult>, CallableObject<SourceResult()>>();
   }
 
   /** The composed constructor's own thunk: call the zero-arg source, ignoring every argument the wider slot was called with (`dropArguments`'s rule), then narrow the result into the arm `ResultWidensIntoArm` already proved it is (`TaggedUnion::ofArm`). */
@@ -15661,6 +15688,10 @@ const NativeCallOps* nativeRestCallOpsFor();
 /** `restUnstated` or `restConflict` (`callableMetadataFor`): reflectable, and a boxed call refuses by name. */
 template <typename T, int Refusal>
 const NativeCallOps* nativeRefusedRestCallOpsFor();
+template <typename T, std::size_t FirstUnread>
+const NativeCallOps* nativeUnreadTailCallOpsFor();
+/** `CallableObject`'s unread-tail encoding, for the metadata selection below that is not specific to one signature. */
+using RestFacts = CallableObject<void()>;
 /** The boxed `[[Construct]]` thunk of a native constructor payload, or null (`DynamicConstructSignature`). */
 using NativeConstructThunk = Value (*)(const void* payload, const Value* arguments, std::size_t count);
 template <typename T>
@@ -15993,6 +16024,7 @@ const ValueMetadata* valueMetadataFor() {
   static const ValueMetadata metadata = [] {
     const NativeCallOps* calls;
     if constexpr (RestFrom == -1) calls = nativeCallOpsFor<T>();
+    else if constexpr (RestFacts::restIsUnread(RestFrom)) calls = nativeUnreadTailCallOpsFor<T, RestFacts::restFirstUnread(RestFrom)>();
     else if constexpr (RestFrom < -1) calls = nativeRefusedRestCallOpsFor<T, RestFrom>();
     else calls = nativeRestCallOpsFor<T, static_cast<std::size_t>(RestFrom)>();
     return ValueMetadata{nativeFieldOpsFor<T>(), nativePrototypeOpsFor<T>(), calls,
@@ -16014,11 +16046,24 @@ inline constexpr int restConflict = -3;
  * the box `restUnstated` and a contradiction leaves it `restConflict`, and both
  * refuse a dynamic call by name (`nativeRefusedRestCallOpsFor`) while the box
  * stays the same function object for identity, reflection and property access.
+ * An unread tail (`CallableObject::registerUnreadTail`) agrees with every site:
+ * no placement of the trailing arguments reaches the adapter's source.
  */
+template <typename T, std::size_t... First>
+const ValueMetadata* unreadTailMetadataFor(std::size_t first, std::index_sequence<First...>) {
+  const ValueMetadata* metadata = nullptr;
+  ((first == First ? (metadata = valueMetadataFor<T, RestFacts::restUnreadFrom(First)>(), true) : false) || ...);
+  return metadata;
+}
+
 template <typename T>
 const ValueMetadata* callableMetadataFor(int stated, int site) {
   constexpr int unstated = -2;
   constexpr int last = CallableRestView<T>::last;
+  // `registerUnreadTail` asserted the first unread formal is below the arity,
+  // so the lookup always finds it.
+  if (RestFacts::restIsUnread(stated))
+    return unreadTailMetadataFor<T>(RestFacts::restFirstUnread(stated), std::make_index_sequence<static_cast<std::size_t>(last) + 1>{});
   const int fact = stated == unstated ? site : site == unstated || site == stated ? stated : restConflict;
   if (fact == -1) return valueMetadataFor<T>();
   if (fact == last) return valueMetadataFor<T, last>();
@@ -20483,8 +20528,10 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     // The boxed ABI metadata is therefore part of exact identity: returning a
     // non-rest payload for a rest target would pass the packed Array as one JS
     // argument instead of expanding it.
+    // An unread tail is exact under either convention: the payload's source
+    // never sees the array either one would build.
     if (value.payloadType() == payloadTypeTagFor<Self>() && value.receivesThis() == targetReceivesThis &&
-        value.restFrom() == targetRestFrom)
+        (value.restFrom() == targetRestFrom || Self::restIsUnread(value.restFrom())))
       return value.as<Self>();
     if constexpr (std::is_void_v<Result>) {
       // A target that discards its result, fed a native callable boxed with the
@@ -21892,6 +21939,74 @@ const NativeCallOps* nativeRefusedRestCallOpsFor() {
       }
       gea::detail::abortAfterFlush();
     },
+    +[](const void* payload) { return std::string(static_cast<const T*>(payload)->sourceText()); },
+    +[](const void* payload) { return static_cast<const T*>(payload)->name(); },
+    +[](const void* payload) { return static_cast<const T*>(payload)->length(); }};
+  return &ops;
+}
+
+/**
+ * A boxed call of an adapter that reads no formal from `FirstUnread` on
+ * (`CallableObject::registerUnreadTail`): the formals its source receives bind
+ * positionally, as every convention agrees they do, and the rest -- the
+ * trailing array among them -- are bound empty rather than packed or
+ * converted. Nothing bound there reaches the source, and converting an
+ * argument into one could only refuse a call the source would have answered.
+ */
+template <typename Callable, std::size_t FirstUnread, typename Result, typename... Arguments>
+struct DynamicUnreadTailCall {
+  using Args = std::tuple<Arguments...>;
+  static constexpr bool supported = FirstUnread < sizeof...(Arguments) &&
+                                    (std::is_void_v<Result> || DynamicCallableCarrier<Result>::supported) &&
+                                    (DynamicCallableCarrier<Arguments>::supported && ...) && (std::is_default_constructible_v<Arguments> && ...);
+
+  static Value call(const void* payload, const Value* arguments, std::size_t count) {
+    return invoke(*static_cast<const Callable*>(payload), arguments, count, std::index_sequence_for<Arguments...>{});
+  }
+
+ private:
+  template <std::size_t Position>
+  static std::tuple_element_t<Position, Args> bound(const Value* arguments, std::size_t count) {
+    using Formal = std::tuple_element_t<Position, Args>;
+    if constexpr (Position < FirstUnread) return DynamicCallableCarrier<Formal>::in(dynamicCallArgument(arguments, count, Position), Position);
+    else return Formal{};
+  }
+
+  template <std::size_t... Positions>
+  static Value invoke(const Callable& callable, const Value* arguments, std::size_t count, std::index_sequence<Positions...>) {
+    if constexpr (std::is_void_v<Result>) {
+      callable.call(bound<Positions>(arguments, count)...);
+      return Value();
+    } else {
+      return DynamicCallableCarrier<Result>::out(callable.call(bound<Positions>(arguments, count)...));
+    }
+  }
+};
+
+template <typename T, std::size_t FirstUnread>
+struct DynamicUnreadTailCallSignature {
+  static constexpr bool supported = false;
+};
+
+template <std::size_t FirstUnread, typename Result, typename... Arguments>
+struct DynamicUnreadTailCallSignature<CallableObject<Result(Arguments...)>, FirstUnread>
+    : DynamicUnreadTailCall<CallableObject<Result(Arguments...)>, FirstUnread, Result, Arguments...> {};
+
+template <std::size_t FirstUnread, typename Result, typename... Arguments, typename Constructed, typename... ConstructArguments>
+struct DynamicUnreadTailCallSignature<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>, FirstUnread>
+    : DynamicUnreadTailCall<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>, FirstUnread, Result,
+                            Arguments...> {};
+
+template <typename T, std::size_t FirstUnread>
+const NativeCallOps* nativeUnreadTailCallOpsFor() {
+  // Same split as `nativeCallOpsFor`: reflection does not depend on whether
+  // the call can cross the dynamic boundary.
+  using Signature = DynamicUnreadTailCallSignature<T, FirstUnread>;
+  using Call = Value (*)(const void*, const Value*, std::size_t);
+  Call call = nullptr;
+  if constexpr (Signature::supported) call = &Signature::call;
+  static const NativeCallOps ops{
+    call,
     +[](const void* payload) { return std::string(static_cast<const T*>(payload)->sourceText()); },
     +[](const void* payload) { return static_cast<const T*>(payload)->name(); },
     +[](const void* payload) { return static_cast<const T*>(payload)->length(); }};
