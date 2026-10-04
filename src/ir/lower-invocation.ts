@@ -715,7 +715,7 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
   // already `dynamic`, a spread only of a dynamic list -- are packed into the
   // rest array this convention declares; `CallOperation.assignSourcesPacked`
   // says which layout this is. A typed source would be boxed by the pack, so
-  // it keeps the old path's refusal.
+  // a typed list is admitted only as the one spread, passed as it is.
   const hostTemplate = hostTemplateOf(ctx, operation, callee)
   const packedAssignSources: IrOperand | null =
     hostTemplate === 'object-assign' &&
@@ -732,7 +732,29 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
       return carrier.kind === 'dynamic' || (carrier.kind === 'array-object' && carrier.element.kind === 'dynamic')
     })
       ? { value: packArgumentArray(ctx, block, lineage, evaluated.slice(1), textRest), representation: textRest }
-      : null
+      : hostTemplate === 'object-assign' &&
+          calleeAbi?.restFrom === 1 &&
+          calleeReceiverIsNativeHandle(ctx, operation) &&
+          evaluated.length === 2 &&
+          evaluated[0]?.kind === 'value' &&
+          evaluated[1]?.kind === 'spread' &&
+          evaluated[1].value.representation.kind === 'array-object'
+        ? // `Object.assign( {}, ...children )` over a TYPED list: the list
+          // already is the sources, in order, so it is the packed list itself.
+          // Copying it into the dynamic rest array would box every element.
+          evaluated[1].value
+        : null
+  // Any other spread would fall to the whole-list pack below, which packs the
+  // TARGET with the sources: `assignText` then reads that list as the target
+  // and finds no source. Refuse here, naming what each argument carries.
+  if (hostTemplate === 'object-assign' && packedAssignSources === null && evaluated.some((slot) => slot.kind === 'spread')) {
+    throw new IrLoweringBlockedError(
+      'Object.assign with a spread source list packs only dynamic sources behind a positional target; this call passes ' +
+        evaluated.map((slot) => `${slot.kind} ${representationKey(slot.value.representation)}`).join(', ') +
+        ` (callee rest from ${calleeAbi?.restFrom ?? 'none'}, rest ${textRest === null ? 'none' : representationKey(textRest)}` +
+        `${textJoined ? '' : ', not text-joined'}${calleeReceiverIsNativeHandle(ctx, operation) ? '' : ', receiver not the native Object'})`
+    )
+  }
   const wholeSpreadArgument: IrOperand | null =
     packedAssignSources === null &&
     textJoined &&

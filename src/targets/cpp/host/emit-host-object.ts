@@ -2660,20 +2660,17 @@ const assignIntoCallableText = (ctx: EmitContext, operation: CallOperation, targ
  * `Object.assign( {}, ...children )`: the sources arrive as ONE packed list
  * (`CallOperation.assignSourcesPacked`), so 20.1.2.1 step 4's loop over
  * `sources` runs here at run time, each element copied exactly as the same
- * `dynamic` source written out positionally would be. An absent element is
- * `undefined`, which step 4.a skips.
+ * source written out positionally would be. The list is either the dynamic
+ * rest array the lowering packed, or a typed spread list passed as it is
+ * (`ir/lower-invocation.ts`). An absent element is `undefined`, which step
+ * 4.a skips.
  */
 const assignPackedSourcesText = (ctx: EmitContext, targetView: ObjectView, sources: readonly IrOperand[]): string => {
   const [packed] = sources
-  if (
-    sources.length !== 1 ||
-    packed === undefined ||
-    packed.representation.kind !== 'array-object' ||
-    packed.representation.element.kind !== 'dynamic'
-  ) {
+  if (sources.length !== 1 || packed === undefined || packed.representation.kind !== 'array-object') {
     throw createCppEmitBlockedError(
       'host-member-call:Object.assign',
-      '"Object.assign"\'s packed source list must be one array of dynamic sources, as ir/lower-invocation.ts packs it'
+      '"Object.assign"\'s packed source list must be one array of sources, as ir/lower-invocation.ts packs it'
     )
   }
   const list = '__gea_assign_sources'
@@ -2682,7 +2679,7 @@ const assignPackedSourcesText = (ctx: EmitContext, targetView: ObjectView, sourc
   return (
     `{ const auto& ${list} = ${operandText(ctx, packed)}; ` +
     `for (long long __gea_index = 0; __gea_index < static_cast<long long>(${list}->length()); ++__gea_index) { ` +
-    `if (!${list}->hasElementValueAtIndex(__gea_index)) continue; const gea::Value& ${each} = ${list}->elementAtIndex(__gea_index); ${copy} } }`
+    `if (!${list}->hasElementValueAtIndex(__gea_index)) continue; const auto& ${each} = ${list}->elementAtIndex(__gea_index); ${copy} } }`
   )
 }
 
