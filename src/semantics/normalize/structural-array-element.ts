@@ -282,6 +282,15 @@ export const unstatedNeverArray = (
     // (`gea::dictionary::aliasOf`), and every write it takes is an `any` -- so
     // the box is the element the program's own writes state, and an
     // `undefined` element would refuse the first of them.
+    // Nor when the array census SAW writes into this literal and could not
+    // type them (`array:element-unresolved`/`array:elements-disagree`):
+    // XRManager's `viewData = { viewports: [] }` takes a `push` of an `any`
+    // read, which a JavaScript program needs no cast for. Its reads are boxed
+    // by the identifier branch below, and a `never[]` field under them is
+    // `gea::emptyArraySentinel`'s source -- so every push landed in the one
+    // shared sentinel. The literal takes the box, and the field it fills is
+    // the same box (`structural-parts.ts`'s `boxedLiteral`).
+    const written = (collections.arrayRefusalOf(node) ?? 'array:no-writes') !== 'array:no-writes'
     let arm: ts.Node = node
     while (arm.parent && ts.isParenthesizedExpression(arm.parent)) arm = arm.parent
     if (
@@ -289,7 +298,8 @@ export const unstatedNeverArray = (
       ts.isPropertyAssignment(arm.parent) &&
       arm.parent.initializer === arm &&
       ts.isObjectLiteralExpression(arm.parent.parent) &&
-      !(contextual !== undefined && isOpenDocumentType(checker, contextual))
+      !(contextual !== undefined && isOpenDocumentType(checker, contextual)) &&
+      !written
     )
       return false
     return node.elements.length === 0 && collections.arrayElementAt(node) === null && neverElement(layoutTypeAt(node))

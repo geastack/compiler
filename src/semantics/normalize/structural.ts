@@ -3761,8 +3761,21 @@ const buildMapper = (
     // A receiver whose one array arm sits beside `null`/`undefined` reads the
     // same member off that arm: see `inferredNullableArrayAt`.
     const nullable = inferredNullableArrayAt(checker, collections, layoutTypeAt, node.expression)
-    const element = inferredArrayElementAt(checker, collections, layoutTypeAt, node.expression) ?? nullable?.element ?? null
-    if (!element || (element.flags & (ts.TypeFlags.Any | ts.TypeFlags.Never)) !== 0) return null
+    // A receiver the census REFUSED -- XRManager's `viewports: []`, filled
+    // from `gpuSubImage.viewport` off an `any` binding, a write it cannot
+    // type -- is stored as the `unstated-never-array` box below, `any[]`. That
+    // box is the element its member's positions take too: the checker's
+    // `(...items: never[])` for `push` off it is the frame of a function
+    // nobody can call (`derive.ts`'s identity-only signature), so the pushed
+    // value had no rest slot to land in. The same holds for an `any` element
+    // the census itself bound. Its `never` positions take the `any`, as
+    // `any[]` would have stated; an `any` position is unchanged. Only a
+    // `never` element is still unstated.
+    const element =
+      inferredArrayElementAt(checker, collections, layoutTypeAt, node.expression) ??
+      nullable?.element ??
+      (unstatedNeverArray(checker, collections, layoutTypeAt, node.expression) ? checker.getAnyType() : null)
+    if (!element || (element.flags & ts.TypeFlags.Never) !== 0) return null
     // The checker's own member type, interned directly: asking `typeAt` of
     // this same node would re-enter here. A receiver the checker carries as
     // `any` (a cell initialized from an untyped read) has no member type of
@@ -3777,10 +3790,14 @@ const buildMapper = (
     // `any` for the evolving array the checker gave up on, `never` for the one
     // it is still tracking (`push` off a fresh `[]` is `(...items: never[])`).
     const unstated = new Set<StructuralTypeId>()
+    const unstatedNever = new Set<StructuralTypeId>()
     for (const primitive of ['any', 'never'] as const) {
       const id = table.intern({ kind: 'primitive', primitive })
-      unstated.add(id)
-      unstated.add(table.intern({ kind: 'array', element: id, readonly: false, extension: [] }))
+      const ids = [id, table.intern({ kind: 'array', element: id, readonly: false, extension: [] })]
+      for (const each of ids) {
+        unstated.add(each)
+        if (primitive === 'never') unstatedNever.add(each)
+      }
     }
     const elementId = typeOf(element)
     const elementArray = table.intern({ kind: 'array', element: elementId, readonly: false, extension: [] })
@@ -3790,6 +3807,9 @@ const buildMapper = (
     }
     const call = shape.call[0]
     if (!call || !call.parameters.some((parameter) => unstated.has(parameter.type))) return null
+    // An `any` element rewrites nothing an `any` position already says, so the
+    // checker's own member stands unless a `never` position is there to fill.
+    if ((element.flags & ts.TypeFlags.Any) !== 0 && !call.parameters.some((parameter) => unstatedNever.has(parameter.type))) return null
     const parameters = call.parameters.map((parameter) => ({
       ...parameter,
       type: substitute(parameter.type),

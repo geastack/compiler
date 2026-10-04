@@ -105,7 +105,16 @@ export const structuralArrayReadAt = (
     if (shape.kind === 'primitive') return shape.primitive === 'never'
     return shape.kind === 'declared' && shape.body ? isNever(shape.body, next) : false
   }
-  const staleNever = (raw.flags & ts.TypeFlags.Never) !== 0 && !isNever(result, new Set())
+  // The same stale `never` one step removed: under `noUncheckedIndexedAccess`
+  // the checker answers `never | undefined`, i.e. `undefined`, for a read off
+  // the `never[]` it still holds -- XRManager's `viewData.viewports[0]` after
+  // the census boxed that literal. The receiver is the evidence: a checker
+  // `never[]` the mapper carries as something else is the evolving-array
+  // repair, and the read takes the element of the repaired array.
+  const receiver = checker.getTypeAtLocation(node.expression)
+  const neverElementReceiver =
+    checker.isArrayType(receiver) && ((checker.getTypeArguments(receiver as ts.TypeReference)[0]?.flags ?? 0) & ts.TypeFlags.Never) !== 0
+  const staleNever = ((raw.flags & ts.TypeFlags.Never) !== 0 || neverElementReceiver) && !isNever(result, new Set())
   if (!containsUnstatedPosition(checker, node, raw) && !staleNever) return null
   // `any | undefined` collapses to `any` in the checker, so recovering its
   // element must also recover the absence that erasure hid. No checker
