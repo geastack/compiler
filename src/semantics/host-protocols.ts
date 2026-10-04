@@ -395,6 +395,10 @@ const bindNativeType = (input: HostProtocolInput, census: HostCensus, reference:
  * so the handler was an arity-1 callable the listener runtime had no way to
  * call, and every drag, pan and swipe in a JSX app did nothing at all.
  */
+// TypeScript's own `getEffectiveTypeAnnotationNode` for a JavaScript parameter, which it does not export.
+const jsDocStatesType = (parameter: ts.ParameterDeclaration): boolean =>
+  (parameter.flags & ts.NodeFlags.JavaScriptFile) !== 0 && parameter.type === undefined && ts.getJSDocType(parameter) !== undefined
+
 const bindNativeContextualType = (input: HostProtocolInput, census: HostCensus, reference: ts.Identifier): ts.Type | null => {
   const parameter = reference.parent
   if (!ts.isParameter(parameter) || parameter.name !== reference) return null
@@ -423,7 +427,14 @@ const bindNativeContextualType = (input: HostProtocolInput, census: HostCensus, 
   // containing native objects. Walk its members without claiming the record
   // itself as opaque; otherwise their binding depends on an unrelated global
   // read elsewhere in the program, such as reading window before onmessage.
-  if (stated === null) return type
+  //
+  // Only for a parameter that states no type of its own. In JavaScript a JSDoc
+  // `@param {T}` is as written as a TypeScript annotation, though
+  // `parameter.type` is undefined for it, and a written type the host states
+  // no carrier for seeds nothing (`bindNativeType`). Seeding from it made every
+  // three function documented `@param {WebGL2RenderingContext} gl` pull the
+  // whole WebGL object model into a WebGPU build's host closure.
+  if (stated === null) return jsDocStatesType(parameter) ? null : type
   const declaration = input.identities.symbolDeclarationId(symbol, reference)
   if (!declaration) return null
   if (!census.protocols.has(declaration))
