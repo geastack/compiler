@@ -76,6 +76,30 @@ test('inside the scope it is the package class; outside, in TypeScript and where
   assert.deepEqual(compiled.diagnostics, [])
 })
 
+// The CommonJS require census types every assignment's value while it decides
+// which `require` calls are static, and it runs on each program the build
+// makes before keeping one. The checker caches a JSDoc type reference the
+// first time it resolves one, so a census that ran before the row was installed
+// pinned `Frame.js`'s `WeakMap<Node, number>` to lib.dom for good.
+test('the row holds when the CommonJS require census asks the checker first', () => {
+  const wrapper = at('commonjs-wrapper.d.ts')
+  const commonJsGlobals = new Map(
+    ['require', 'exports', 'module'].map((name) => [name, { global: name, declarationName: name, declarationFileName: wrapper }])
+  )
+  const compiled = createProgram({
+    rootFileNames: [at('entry.ts'), probe, valueUse, ownNode, dom],
+    projectFileName: at('tsconfig.json'),
+    options: {},
+    commonJsGlobals,
+    scopedTypeRealizations: [realizeNode]
+  })
+  assert.equal(parameterTypeFile(compiled, frame), nodeClass)
+  const source = compiled.program.getSourceFile(frame)
+  const visits = find(source, (node) => ts.isPropertyAccessExpression(node) && node.name.text === 'visits')
+  const [key] = compiled.checker.getTypeArguments(compiled.checker.getTypeAtLocation(visits))
+  assert.equal(resolve(key.getSymbol().declarations[0].getSourceFile().fileName), nodeClass)
+})
+
 test('a row that cannot be realized is an error, not lib.dom', () => {
   assert.throws(() => programWith([{ ...realizeNode, type: 'Missing' }]), /exports no 'Missing'/)
   assert.throws(() => programWith([{ ...realizeNode, importedFrom: 'node-lib/src/core/Absent.js' }]), /does not resolve/)

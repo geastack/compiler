@@ -933,6 +933,18 @@ const configuredProgram = (
     let program = timing.measure('create-program', () => ts.createProgram({ rootNames: [...roots], options, host }))
     const globals = input.commonJsGlobals ?? new Map()
     for (;;) {
+      // The censuses below type every assignment they walk, and the checker
+      // caches a JSDoc type reference the first time it resolves one, so a
+      // realized name asked about before `install` stays lib.dom's for the
+      // life of this checker. Each program is therefore installed before its
+      // checker answers anything, which needs the realization modules in it.
+      const realizationTargets = realizer.missingTargets(program).filter((target) => !roots.has(target))
+      if (realizationTargets.length > 0) {
+        for (const target of realizationTargets) roots.add(target)
+        program = timing.measure('rebuild-program', () => ts.createProgram({ rootNames: [...roots], options, host }))
+        continue
+      }
+      timing.measure('scoped-type-realizations', () => realizer.install(program))
       // A program this iteration is about to replace is never read again, so
       // the full census (0.7-1 s, and a checker warm-up only the kept program
       // needs) is spent only when no rebuild follows from the static requires.
@@ -956,9 +968,7 @@ const configuredProgram = (
       // per file, so the next program must be built rather than reused.
       const respelled = targets.filter((target) => target.endsWith('.json') && !requiredJsonFiles.has(target))
       for (const target of respelled) requiredJsonFiles.add(target)
-      const added = [...targets, ...realizer.missingTargets(program)].filter(
-        (target) => !roots.has(target) && program.getSourceFile(target) === undefined
-      )
+      const added = targets.filter((target) => !roots.has(target) && program.getSourceFile(target) === undefined)
       if (added.length === 0 && respelled.some((target) => program.getSourceFile(target) !== undefined)) {
         program = timing.measure('rebuild-program', () => ts.createProgram({ rootNames: [...roots], options, host }))
         continue
@@ -969,8 +979,6 @@ const configuredProgram = (
       }
       program = timing.measure('rebuild-program', () => ts.createProgram({ rootNames: [...roots], options, host }))
     }
-    // On the program this build keeps, before anything asks it a type question.
-    timing.measure('scoped-type-realizations', () => realizer.install(program))
     return {
       program,
       runtimeModuleTargetOf: targetOf,
