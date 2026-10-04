@@ -2,7 +2,8 @@ import type { DeclarationId, FunctionId } from '../identity/ids.js'
 import type { ClassField, ClassLayout, ClassMethod } from './classes.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
 import type { CallableAbi, Representation } from '../representation/model.js'
-import { abiKey, representationKey } from '../representation/model.js'
+import { abiKey, passingOf, representationKey } from '../representation/model.js'
+import { optionalOf } from '../representation/optional.js'
 import { classMemberOf } from './fields.js'
 
 /** Exact allocation identities and the method each prototype lookup selects.
@@ -720,6 +721,77 @@ const joinedClassResultOf = (
 }
 
 /**
+ * The carrier one position of a family's slot takes when the implementors
+ * that declare it disagree: one of their own carriers that every other
+ * converts to and back from -- the caller converts into the slot, the adapter
+ * out of it into each implementor. Only static carriers join: `dynamic` would
+ * box every statically typed argument. `null` keeps the root's convention,
+ * which the implementor that does not fit then refuses.
+ */
+const joinedParameterOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  conversions: ConversionCensus,
+  values: readonly Representation[]
+): Representation | null => {
+  if (values.some((value) => value.kind === 'dynamic' || value.kind === 'void' || value.kind === 'unresolved')) return null
+  const fits = (candidate: Representation): boolean =>
+    values.every(
+      (value) =>
+        virtualValueConvertible(classes, conversions, value, candidate) && virtualValueConvertible(classes, conversions, candidate, value)
+    )
+  return values.find(fits) ?? null
+}
+
+/**
+ * The parameters of a concrete root's slot, joined with its overrides'
+ * (ECMA-262 10.2.11): the root's own, then every position an override
+ * declares beyond them.
+ *
+ * A caller typed as the root still passes the arguments an override reads
+ * (`nodeObject.updateReference( this )` against `Node.updateReference()`); a
+ * slot that stopped at the root's formals dropped them and ran the override
+ * with `undefined`. A position past the root's formals is bound to
+ * `undefined` when the call omits it, so its carrier is the implementors'
+ * join made optional -- a static carrier, never the box.
+ *
+ * The result is not joined here. A call publishes the result of the member it
+ * reads, which is the root's own body, so a slot answering a wider join would
+ * be read back through a narrowing that the overrides it was widened for
+ * always fail; an implementation whose result does not convert to the root's
+ * keeps the family refused, by name.
+ */
+const joinedRootAbiOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  conversions: ConversionCensus,
+  root: CallableAbi,
+  implementors: readonly VirtualMethodImplementor[],
+  abiOf: (callable: FunctionId) => CallableAbi | null
+): CallableAbi => {
+  const abis = implementors.map((implementor) => abiOf(implementor.callable))
+  if (root.restFrom !== null || abis.some((abi) => abi === null || abi.restFrom !== null)) return root
+  const declared = abis.filter((abi): abi is CallableAbi => abi !== null)
+  const width = Math.max(root.parameters.length, ...declared.map((abi) => abi.parameters.length))
+  if (width === root.parameters.length) return root
+  const parameters = [...root.parameters]
+  for (let position = root.parameters.length; position < width; position++) {
+    const values = declared.flatMap((abi) => {
+      const parameter = abi.parameters[position]
+      return parameter === undefined ? [] : [parameter.value]
+    })
+    // A call through the root's type may omit the argument, and each
+    // implementation then receives `undefined`; one whose own formal cannot
+    // hold it keeps the root's convention and is refused for it below, rather
+    // than unwrapping an absent optional into that formal.
+    if (!values.every(admitsUndefined)) return root
+    const joined = joinedParameterOf(classes, conversions, values)
+    const value = joined === null ? null : optionalOf(joined, 'undefined')
+    if (value === null || value.kind === 'unresolved') return root
+    parameters.push({ value, ownership: 'owned', passing: passingOf(value, 'owned') })
+  }
+  return { ...root, parameters }
+}
+
+/**
  * The dispatchability verdict for every override family: whether it can be
  * dispatched through a C++ virtual member at all, and the exact convention
  * (`rootAbi`) every call site converts to when it can.
@@ -787,7 +859,13 @@ export const virtualDispatchVerdictOf = (
       borrowed === null || rootInstance === null
         ? null
         : { ...borrowed, receiver: rootInstance, ...(borrowedResult ? { result: borrowedResult } : {}) }
-    const rootAbi = (rootImplementor ? abiOf(rootImplementor.callable) : null) ?? (family.abstractRoot ? inheritedAbi : null)
+    const ownRootAbi = rootImplementor ? abiOf(rootImplementor.callable) : null
+    const rootAbi =
+      ownRootAbi !== null
+        ? joinedRootAbiOf(classes, conversions, ownRootAbi, family.implementors, abiOf)
+        : family.abstractRoot
+          ? inheritedAbi
+          : null
     if (family.copyAbsentFrom !== undefined) {
       refused.push({
         key: family.key,
