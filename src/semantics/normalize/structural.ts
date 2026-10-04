@@ -5626,6 +5626,7 @@ const buildMapper = (
       forms: [
         ts.SyntaxKind.ArrayLiteralExpression,
         ts.SyntaxKind.NewExpression,
+        ts.SyntaxKind.CallExpression,
         ts.SyntaxKind.VariableDeclaration,
         ts.SyntaxKind.PropertyDeclaration,
         ts.SyntaxKind.Identifier,

@@ -439,6 +439,9 @@ export const inferredArrayElementAt = (
   // `new Array( n )` is n holes, an allocation that states no element as `[]`
   // does; the census types it from its index writes (three's Material.copy).
   if (ts.isNewExpression(node)) return collections.arrayElementAt(node)
+  // `new Array( n ).fill( 0 )`: a receiver-returning call's value IS the
+  // allocation, so it reads the element the census bound for it.
+  if (ts.isCallExpression(node)) return ts.isPropertyAccessExpression(node.expression) ? collections.arrayElementForRead(node) : null
   // THE CELL'S OWN DECLARATION -- neither the literal that filled it nor a
   // read of it, and the node a cell's stored carrier is actually published
   // from. `const uvBuffer = []` types as `never[]` at the

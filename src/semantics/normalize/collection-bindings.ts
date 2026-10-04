@@ -458,7 +458,7 @@ export const censusCollectionBindings = (
   const ownerDeclOfExpr = (expr: ts.Expression): ts.Node | null => {
     if (ts.isIdentifier(expr)) return declNodeOf(checker.getSymbolAtLocation(expr))
     if (ts.isPropertyAccessExpression(expr)) return declNodeOf(checker.getSymbolAtLocation(expr.name))
-    if (ts.isCallExpression(expr) || ts.isNewExpression(expr)) return receiverOwnerOfChain(expr)
+    if (ts.isCallExpression(expr) || ts.isNewExpression(expr)) return receiverOwnerOfChain(expr) ?? arrayChainOwnerOf(expr)
     return null
   }
 
@@ -531,6 +531,21 @@ export const censusCollectionBindings = (
     return { writes, lands }
   }
   const receiverChains = new Map<ts.NewExpression, ReceiverChain>()
+  /**
+   * The same receiver-returning chain on a `new Array( n )` (three's TSLCore
+   * `params.concat( new Array( minParams - params.length ).fill( 0 ) )`):
+   * `fill` returns its receiver (ECMA-262 23.1.3.7), so the chain's value is
+   * the allocation and its writes are the allocation's evidence. Filled in
+   * the array pass; keyed by the allocation, whose owner `arrayNodeOwner`
+   * states.
+   */
+  const arrayChains = new Map<ts.NewExpression, ReceiverChain>()
+  const arrayChainOwnerOf = (expression: ts.Expression): ts.Node | null => {
+    let current: ts.Expression = expression
+    while (ts.isCallExpression(current) && ts.isPropertyAccessExpression(current.expression) && returnsItsReceiver(current))
+      current = current.expression.expression
+    return ts.isNewExpression(current) && arrayChains.has(current) ? (arrayNodeOwner.get(current) ?? null) : null
+  }
   /** The chained construction a receiver-returning call's result IS, or `null`. */
   const receiverOwnerOfChain = (expression: ts.Expression): ts.NewExpression | null => {
     let current: ts.Expression = expression
@@ -565,7 +580,7 @@ export const censusCollectionBindings = (
   const aliasClosureOf = (owner: ts.Node, stopAt: (node: ts.Node) => boolean = () => false): ReadonlySet<ts.Node> => {
     const seen = new Set<ts.Node>([owner])
     const queue: ts.Node[] = [owner]
-    const chain = ts.isNewExpression(owner) ? receiverChains.get(owner) : undefined
+    const chain = ts.isNewExpression(owner) ? (receiverChains.get(owner) ?? arrayChains.get(owner)) : undefined
     for (const land of chain?.lands ?? []) {
       if (seen.has(land)) continue
       seen.add(land)
@@ -1270,6 +1285,48 @@ export const censusCollectionBindings = (
    * complete write set is known, every alias must use that storage element,
    * including an earlier checker read narrowed before publication elsewhere.
    */
+  const arrayChainEndOf = (node: ts.Expression): ReceiverChain & { readonly end: ts.Expression } => {
+    const writes: ValueWrite[] = []
+    let end: ts.Expression = node
+    for (;;) {
+      const access = end.parent
+      if (!ts.isPropertyAccessExpression(access) || access.expression !== end) break
+      const call = access.parent
+      if (!ts.isCallExpression(call) || call.expression !== access || !returnsItsReceiver(call)) break
+      for (const write of flow.writesAtSite(call)) if (write.naming === end) writes.push(write)
+      end = call
+    }
+    const lands: ts.Node[] = []
+    for (const write of end === node ? [] : flow.writesAtSite(end))
+      if (write.value === end && write.slot === 'whole' && ALIAS_EDGES.has(write.edge) && write.target.declaration)
+        lands.push(write.target.declaration)
+    return { writes, lands, end }
+  }
+  /**
+   * The owner of a `new Array( n )` read through a receiver-returning chain:
+   * the cell the chain's value is bound to, or else the allocation itself when
+   * the value is a call argument or a discarded statement. An argument's
+   * landing parameters join its alias closure, as `receiverChainOf`'s do; an
+   * argument to code the index attributes no parameter for is admitted as the
+   * same allocation bound to a local and then passed there is. Any other
+   * position (a return, a literal element) stays untracked, as before.
+   */
+  const arrayChainOwnerAt = (node: ts.Expression): ts.Node | null => {
+    if (!ts.isNewExpression(node)) return null
+    const chain = arrayChainEndOf(node)
+    // Only `fill` stores through such a chain; a write this census does not
+    // read as evidence leaves the element open.
+    if (chain.end === node || chain.writes.some((write) => write.edge !== 'array-fill')) return null
+    const bound = arrayOwnerDeclOf(chain.end)
+    const consumer = chain.end.parent
+    const own =
+      bound === null &&
+      (((ts.isCallExpression(consumer) || ts.isNewExpression(consumer)) && consumer.expression !== chain.end) ||
+        ts.isExpressionStatement(consumer))
+    if (bound === null && !own) return null
+    arrayChains.set(node, chain)
+    return bound ?? node
+  }
   const arrayOwnerDeclOf = (node: ts.Expression): ts.Node | null => {
     const parent = node.parent
     if (ts.isVariableDeclaration(parent) && parent.initializer === node && ts.isIdentifier(parent.name)) {
@@ -1300,8 +1357,18 @@ export const censusCollectionBindings = (
     if (!checker.isArrayType(type)) return false
     const [element] = checker.getTypeArguments(type as ts.TypeReference)
     if (element === undefined || (element.flags & ts.TypeFlags.Any) === 0) return false
-    const contextual = checker.getContextualType(node)
-    return contextual === undefined || (statesNoElement(contextual) && assignedIntoUnstatedVariable(node))
+    // A chained allocation is stated, if at all, where the chain's value lands.
+    const position = arrayChainEndOf(node).end
+    const contextual = checker.getContextualType(position)
+    if (contextual === undefined) return true
+    // An argument whose parameter is plain `any` (TSLCore's untyped
+    // `params.concat( ... )`) states the slot, not the array's element: the
+    // same allocation bound to an unstated local first and passed there is
+    // admitted, and the argument converts into the slot either way.
+    const argument =
+      (ts.isCallExpression(position.parent) || ts.isNewExpression(position.parent)) && position.parent.expression !== position
+    if (position !== node && argument && (contextual.flags & ts.TypeFlags.Any) !== 0) return true
+    return statesNoElement(contextual) && assignedIntoUnstatedVariable(position)
   }
 
   // Pass 3: every candidate empty array literal, grouped by owning declaration node.
@@ -1324,7 +1391,7 @@ export const censusCollectionBindings = (
     // refusals from one missing exclusion, not four different defects.
     if (reachable.memberIsPruned(node)) return
     if (isUnstatedEmptyArrayLiteral(node) || isUnstatedArrayConstruct(node)) {
-      const owner = arrayOwnerDeclOf(node)
+      const owner = arrayOwnerDeclOf(node) ?? arrayChainOwnerAt(node)
       if (owner) {
         arrayNodeOwner.set(node, owner)
         const existing = arraysByOwner.get(owner)
@@ -1590,6 +1657,10 @@ export const censusCollectionBindings = (
       )
     )
     for (const literal of nullLiterals) evidence.push(...literal.elements)
+    for (const alias of aliases)
+      for (const allocation of arraysByOwner.get(alias) ?? [])
+        for (const write of ts.isNewExpression(allocation) ? (arrayChains.get(allocation)?.writes ?? []) : [])
+          if (write.edge === 'array-fill' && write.value) evidence.push(write.value)
     for (const decl of [...aliases, ...boundaries]) {
       for (const write of flow.writesToDeclaration(decl)) {
         if ((write.edge === 'array-append' || write.edge === 'array-fill') && write.value) evidence.push(write.value)

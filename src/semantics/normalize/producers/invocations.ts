@@ -1321,6 +1321,9 @@ const collectionMemberResultOverride = (context: ProducerContext, node: ts.CallE
   // `Array.from( s )` over a Set the census bound: the same gate, for the
   // array `collectionArrayFromResultTypeAt` publishes.
   if (context.collections.arrayFromElementAt?.(node)) return context.types.typeAt(node)
+  // `new Array( n ).fill( 0 )`: the receiver-returning call's value is the
+  // allocation the array census bound, which `inferredArrayElementAt` types.
+  if (context.collections.arrayElementForRead(node)) return context.types.typeAt(node)
   const member = callee.name.text
   // `s.values()`/`s.keys()` over a Set the census bound: the iterator of its key.
   if ((member === 'values' || member === 'keys') && node.arguments.length === 0)
