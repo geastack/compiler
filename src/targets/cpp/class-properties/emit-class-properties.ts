@@ -1492,6 +1492,41 @@ const constructorIdentityStaticMemberText = (
 }
 
 /**
+ * `x.constructor.prototype` -- three's `NodeMaterial.setValues`/`copy` walk
+ * `Object.getOwnPropertyDescriptors( material.constructor.prototype )`: the
+ * prototype object of the class that ALLOCATED `x`, which its evaluation hands
+ * out as `Object.getPrototypeOf` does (`reflectNativeClassPrototype`). Every
+ * class the instance can be must install that hook, or one of them would stop
+ * the program at run time; the read refuses here instead.
+ */
+const constructorIdentityPrototypeText = (
+  ctx: EmitContext,
+  operation: GetOperation,
+  receiver: Extract<Representation, { kind: 'constructor-identity' }>,
+  candidates: readonly ClassLayout[]
+): string => {
+  const result = operation.result.representation
+  // `Function.prototype` is `any` to the checker; a read published as anything
+  // narrower has no single prototype object to stand for.
+  if (result.kind !== 'dynamic') {
+    throw createCppEmitBlockedError(
+      `conversion:dynamic->${representationKey(result)}`,
+      `the prototype object of a class read off an instance is a "dynamic" value and this read publishes "${representationKey(result)}"`
+    )
+  }
+  const silent = candidates.find((layout) => classPrototypeValueHookText(ctx, layout.declaration) === null)
+  if (candidates.length === 0 || silent !== undefined) {
+    throw createCppEmitBlockedError(
+      'property-access:constructor-identity:get:false',
+      silent === undefined
+        ? `class ${receiver.declaration} has no runtime class whose prototype to read`
+        : `class ${silent.declaration}, which an instance of class ${receiver.declaration} can be, cannot hand out its prototype object`
+    )
+  }
+  return `gea::detail::nativeClassPrototypeValue(${operandText(ctx, operation.receiver)}.get())`
+}
+
+/**
  * `x.constructor.name`: the `[[Name]]` of the class that ALLOCATED `x`.
  *
  * `x.constructor` is carried as the instance's class evaluation
@@ -1513,6 +1548,7 @@ export const constructorIdentityMemberText = (ctx: EmitContext, operation: GetOp
   const candidates = runtimeClassLayoutsOf(ctx.classes)
     .filter((layout) => classDescendsFrom(ctx.classes, layout.declaration, receiver.declaration))
     .sort((left, right) => String(left.declaration).localeCompare(String(right.declaration)))
+  if (key === 'prototype') return constructorIdentityPrototypeText(ctx, operation, receiver, candidates)
   if (key !== 'name') return constructorIdentityStaticMemberText(ctx, operation, receiver, candidates, key)
   const shadowed = candidates.find(
     (layout) =>
