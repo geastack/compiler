@@ -23,7 +23,8 @@ import {
   type CallableAbi,
   type RecordField,
   type Representation,
-  type TaggedUnionArm, abiKey
+  type TaggedUnionArm,
+  abiKey
 } from '../representation/model.js'
 import type { SealedRepresentationPlan } from '../representation/plan.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
@@ -1191,9 +1192,13 @@ export const narrowedBindingRead = (
   // A read the checker's control flow narrowed to exactly one arm of the
   // cell's union (`flowNarrowsType`), where the census has no sound per-arm
   // answer: the runtime-checked arm projection, as `assertedArmEntry` takes
-  // for an `as T`.
+  // for an `as T`. A read the flow walk proved holds only the arms that
+  // reach it (`BindingOperation.reachingArms`) takes the same projection: a
+  // `TypeError` at runtime if the walk were wrong.
   const pair = ctx.program.conversions.nodeFor(held, representation)
-  const narrowed = pair.capability.kind === 'never' && operation.operands.some((operand) => operand.asserted === true)
+  const narrowed =
+    pair.capability.kind === 'never' &&
+    (operation.operands.some((operand) => operand.asserted === true) || (operation.family === 'binding' && operation.reachingArms === true))
   const node = (narrowed ? ctx.program.conversions.exactArmFor(held, representation) : null) ?? pair
   if (node.capability.kind === 'never') {
     recordDrift(ctx, block, operation.id, 'read', 0, held, representation)

@@ -426,6 +426,9 @@ export const inferredArrayElementAt = (
     return (
       collections.arrayElementAt(node) ?? iterableMergeArmElement(checker, layoutTypeAt, node) ?? definedPropertyArrayElement(checker, node)
     )
+  // `new Array( n )` is n holes, an allocation that states no element as `[]`
+  // does; the census types it from its index writes (three's Material.copy).
+  if (ts.isNewExpression(node)) return collections.arrayElementAt(node)
   // THE CELL'S OWN DECLARATION -- neither the literal that filled it nor a
   // read of it, and the node a cell's stored carrier is actually published
   // from. `const uvBuffer = []` types as `never[]` at the
@@ -868,7 +871,16 @@ export const inferredCollectionTypeArgumentsAt = (
         ? collections.typeArgumentsForRead(node)
         : isAssertionOverSameStorage(node)
           ? collections.typeArgumentsForRead(node.expression)
-          : null
+          : // A JavaScript class declares a field by assigning it, `this.flowsData
+            // = new WeakMap()`, so the member's declaration is that assignment
+            // rather than a `PropertyDeclaration`. Asked through its target, which
+            // names the same owner every read of the field names; left to the
+            // checker, the field kept `WeakMap`'s defaulted `object` key while
+            // the allocation and every read carried the census's (three's
+            // `NodeBuilder.flowsData`, `WebGLState.currentDrawbuffers`).
+            ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(node.left)
+            ? collections.typeArgumentsForRead(node.left)
+            : null
   if (!bound) return null
   const generic = table.get(typeOf(own)).shape
   // A cell's own type need not be the collection at all -- bson's `object:

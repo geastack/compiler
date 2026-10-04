@@ -866,7 +866,10 @@ const cppConversionTables = (
      */
     boxedIdentityMaterializer: (target) => {
       const eligible =
-        (target.kind === 'dictionary' || target.kind === 'record-with-index' || target.kind === 'typed-array') &&
+        (target.kind === 'dictionary' ||
+          target.kind === 'record-with-index' ||
+          target.kind === 'typed-array' ||
+          target.kind === 'keyed-collection') &&
         target.ownership === 'shared-refcount'
       if (!eligible && target.kind !== 'array-buffer' && target.kind !== 'shared-array-buffer' && target.kind !== 'data-view') return null
       if (dynamicTagFor(target) === null) return null

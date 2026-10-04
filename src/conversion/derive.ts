@@ -235,8 +235,19 @@ const deriveAt = (target: Representation, context: ConversionDerivationContext, 
       // boxed round trip this compiler declines to build. The one exception
       // is the all-dynamic Map, which needs no per-entry check at all -- see
       // `dynamicMapViewMaterializer`.
+      //
+      // A WeakMap/Set whose key AND value are both dynamic needs no per-entry
+      // conversion either, and has no view: only the brand check is left, and
+      // that is the `dictionary` identity round trip above -- the collection
+      // this program boxed comes back as itself, the same object, or the load
+      // refuses (three's `ChainMap` stores each inner `new WeakMap()` in its
+      // outer map's dynamic value slot and walks back down with
+      // `map = map.get( key )`).
       return (
         maybeAtom(context.registry.dynamicMapViewMaterializer(target)) ??
+        (target.key.kind === 'dynamic' && (target.value === null || target.value.kind === 'dynamic')
+          ? maybeAtom(context.registry.boxedIdentityMaterializer(target))
+          : null) ??
         never(
           'no checked Map/Set materializer is installed; recovering a keyed collection from a dynamic value needs a runtime ' +
             'brand check plus a per-entry checked conversion of both key and value'

@@ -92,6 +92,7 @@ import { widenedNativeSumText } from './emit-sum-widening.js'
 import { nativeSelectionText } from './emit-native-selection.js'
 import { narrowingReachesTarget } from '../../conversion/build.js'
 import { evaluatedOnceText } from './evaluated-once.js'
+import { isTypedArrayConstructorHandle } from '../../representation/typed-array-constructors.js'
 
 /**
  * `native-record-ref` (the String WRAPPER OBJECT, `new String(x)`) -> `string`,
@@ -4678,6 +4679,21 @@ export const conversionChain: readonly ConversionStep[] = [
       const template = target.viewsFrom?.get(source.native)
       return template?.replace('{value}', `(${text})`)
     }
+  },
+  // One typed-array constructor held where another is declared: tsc's subtype
+  // reduction folds `[ [Int8Array, 'int'], [Int16Array, 'int'] ]` onto ONE
+  // constructor interface, so the Map's key carrier names a constructor its
+  // other keys are not. Every such handle carries its constructor's own
+  // identity in the id (`typedArrayConstructorValueText`), so the retag keeps
+  // the value the program wrote, and `==`/Map keys still compare it. A use
+  // that reads the constructor off the static tag instead -- `new K()`,
+  // `x instanceof K`, `K.BYTES_PER_ELEMENT` -- first checks the id against that
+  // tag (`requireTypedArrayConstructor`) unless the operand is the host class
+  // itself.
+  {
+    id: 'typed-array-constructor-retag',
+    apply: (source, target, text) =>
+      isTypedArrayConstructorHandle(source) && isTypedArrayConstructorHandle(target) ? `${cppTypeOf(target)}(${text}.id())` : undefined
   },
   { id: 'callable-part', apply: (source, target, text) => claimed(callablePartText(source, target, text)) },
   // An EMPTY array literal flowing into a native array-like carrier. `[]` with
