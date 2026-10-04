@@ -2003,6 +2003,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     isStoreSinkConstructor: (body) => storeSinkConstructors.has(String(body.sourceOwner)),
     classInstanceOf: (declaration) => input.classes.get(declaration)?.instance ?? null,
     shapeLayoutOf: (shapeId) => input.deriver.layoutOf(shapeId as StructuralTypeId),
+    classPrototypesHandedOut: [...input.classes.values()].some((layout) => layout.prototypeReflected !== undefined),
     plainFieldRead: (receiver, key) => {
       if (receiver.kind === 'class-ref') {
         // A class over a host base reads its members through the host's

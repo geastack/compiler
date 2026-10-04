@@ -114,6 +114,14 @@ export interface ProgramFactsPolicy {
   readonly shapeLayoutOf: (shapeId: string, recursive: boolean) => import('../representation/model.js').Representation | null
   /** Whether `receiver.key` is a plain data-field load -- see `borrow-effects.ts`'s `PlainFieldRead`. */
   readonly plainFieldRead: PlainFieldRead
+  /**
+   * Whether a class evaluation hands its native prototype object out at run
+   * time (`ClassLayout.prototypeReflected`, `Object.getPrototypeOf` or an
+   * instance's `constructor.prototype`). That object is an instance of the
+   * class layout that owns none of its fields, so a presence bit shared by
+   * every instance would be cleared on all of them.
+   */
+  readonly classPrototypesHandedOut: boolean
 }
 
 /**
@@ -477,7 +485,7 @@ export const programFactsOf = (
     }
   })
   const nativeIntegrityRestricted = integrity
-  const fixedFieldStateConstant = !nativeIntegrityRestricted.any && !fixedFieldDeletionsOf(bodies)
+  const fixedFieldStateConstant = !nativeIntegrityRestricted.any && !fixedFieldDeletionsOf(bodies) && !policy.classPrototypesHandedOut
   const singleEvaluationClasses = singleEvaluationClassesOf(bodies)
   const definitionCells = definitionCellsOf(bodies)
 
