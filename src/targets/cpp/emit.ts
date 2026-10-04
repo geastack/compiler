@@ -922,8 +922,15 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
   // flag: it is the one case left that boxes an operand this backend could
   // otherwise have kept native (the `firstDynamic !== secondDynamic` branch
   // just above, when it applies).
+  //
+  // Two operands that are BOTH already `dynamic` box nothing: each is the
+  // carrier it arrived in, so `gea::dynamicAdd` (13.15.3 over the runtime's
+  // own ToPrimitive) is the whole answer and is not gated -- the same reason
+  // the one-dynamic-side recipe above is not. Only a typed or tagged-union
+  // side, which this call WOULD box, stays behind the flag.
+  const bothDynamic = first.representation.kind === 'dynamic' && second.representation.kind === 'dynamic'
   if (
-    ctx.deriver.dynamicFallback &&
+    (ctx.deriver.dynamicFallback || bothDynamic) &&
     operation.operator === '+' &&
     (first.representation.kind === 'dynamic' ||
       second.representation.kind === 'dynamic' ||
