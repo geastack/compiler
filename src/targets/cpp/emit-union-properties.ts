@@ -499,8 +499,14 @@ const armRuntimeFieldText = (
         // A generic method's copies share its key; each allocation's arm
         // materializes the copy this read publishes, as a lone class-ref
         // read does (`computedOverriddenMethodValueText`).
-        return overriddenMethodValueText(ctx, arm, armExprText, key, (method) =>
-          classMethodValueText(ctx, operation, key, publishedMethodCopyOf(ctx, method, key, published), published, armExprText, arm)
+        return overriddenMethodValueText(
+          ctx,
+          arm,
+          armExprText,
+          key,
+          (method) =>
+            classMethodValueText(ctx, operation, key, publishedMethodCopyOf(ctx, method, key, published), published, armExprText, arm),
+          published
         ).text
       }
       if (site.kind === 'accessor') {

@@ -22,6 +22,7 @@ export const computedOverriddenMethodValueText = (
     operandText(ctx, operation.receiver),
     key,
     materialize,
+    operation.result.representation,
     abiOfCallee(operation.result.representation)
   )
 }
@@ -35,6 +36,7 @@ export const overriddenMethodValueText = (
   receiverText: string,
   key: string,
   materialize: (method: ClassMethod) => { readonly text: string; readonly type: string },
+  published: Representation,
   held: CallableAbi | null = null
 ): { readonly text: string; readonly type: string } => {
   const arms = receiver.kind === 'class-ref' ? classMethodValueArmsOf(ctx.classes, receiver.declaration, key) : null
@@ -45,6 +47,7 @@ export const overriddenMethodValueText = (
     )
   const values = arms.map((arm) => {
     const method = held === null ? arm.method : heldMethodCopyOf(ctx, arm.method, key, held)
+    refuseNarrowedOverride(ctx, key, method, published)
     return { ...arm, ...materialize(method) }
   })
   const type = values[0]!.type
@@ -52,6 +55,32 @@ export const overriddenMethodValueText = (
     (arm) => `if (gea::host::hasNativeClassLayoutRef<${cppClassName(arm.allocation)}>(${receiverText})) return ${arm.text};`
   )
   return { type, text: `([&]() -> ${type} { ${branches.join(' ')} std::abort(); })()` }
+}
+
+/**
+ * Refuses an overridden method value whose arm declares more formals than the
+ * convention the read publishes.
+ *
+ * The read is typed by the checker from the declaration it names -- usually
+ * the family's root -- so an override with a formal the root leaves out
+ * (a root `updateReference()` against an override's `updateReference(frame)`) is
+ * converted into a carrier with no slot for it. A JS caller may still pass
+ * the argument (`method.call(node, frame)`, a bound copy), and the carrier
+ * would drop it while the override reads `undefined`. Which calls the value
+ * reaches is not known at the read, so every such narrowing refuses.
+ */
+const refuseNarrowedOverride = (ctx: EmitContext, key: string, method: ClassMethod, published: Representation): void => {
+  if (method.callable === null) return
+  const body = ctx.abiOfCallable(method.callable)
+  if (body === null) return
+  for (const carrier of published.kind === 'tagged-union' ? published.arms.map((arm) => arm.value) : [published]) {
+    const abi = abiOfCallee(carrier)
+    if (abi === null || abi.parameters.length >= body.parameters.length) continue
+    throw createCppEmitBlockedError(
+      'call-abi:overridden-method-value-narrows',
+      `method value "${key}" is published with ${abi.parameters.length} formal(s), and the override ${String(method.callable)} it may select declares ${body.parameters.length}; a call through the value would drop what it passes past the published ones`
+    )
+  }
 }
 
 /**
