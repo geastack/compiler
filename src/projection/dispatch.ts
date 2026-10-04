@@ -727,6 +727,12 @@ const joinedClassResultOf = (
  * out of it into each implementor. Only static carriers join: `dynamic` would
  * box every statically typed argument. `null` keeps the root's convention,
  * which the implementor that does not fit then refuses.
+ *
+ * That holds even where every declarer carries the same `dynamic` (three's
+ * `updateReference( state )`, `@param {any}` on each override): the caller's
+ * conversion into the slot is printed at the call site, outside every IR body,
+ * so the reflection census never sees the class instance it boxes and the
+ * box reaches the override with no field dispatcher to read it through.
  */
 const joinedParameterOf = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
@@ -740,6 +746,90 @@ const joinedParameterOf = (
         virtualValueConvertible(classes, conversions, value, candidate) && virtualValueConvertible(classes, conversions, candidate, value)
     )
   return values.find(fits) ?? null
+}
+
+/**
+ * The argument lists the program's own calls hand each virtual member, keyed
+ * by `virtualDispatchKey(receiverClass, key, 'call')` of the read the call
+ * goes through -- one entry per call, `null` when some call there spreads its
+ * arguments. A key with no entry has no call through its member.
+ *
+ * Published by `ir/virtual-member-calls.ts` from the same reads
+ * `targets/cpp/direct-call-receivers.ts`'s `virtualCalleesOf` routes through
+ * the member: a method value that escapes its read is selected at read time
+ * and never reaches the slot. Absent altogether, nothing is known about any
+ * call, and a slot position is carried exactly as the implementors' own
+ * conventions allow.
+ */
+export type VirtualMemberCalls = ReadonlyMap<string, readonly (readonly Representation[])[] | null>
+
+/**
+ * Every call through `family`'s member, from a receiver of the root's class
+ * or any class below it -- or `null` when that is not known.
+ */
+const familyCallsOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  family: VirtualMethodFamily,
+  calls: VirtualMemberCalls | undefined
+): readonly (readonly Representation[])[] | null => {
+  // A generic method's copies share the key, so a call does not say which
+  // copy's member it went through.
+  if (calls === undefined || family.role !== 'call' || family.copy !== undefined) return null
+  const found: (readonly Representation[])[] = []
+  for (const declaration of classes.keys()) {
+    if (declaration !== family.root && !extendsClass(classes, declaration, family.root)) continue
+    const entry = calls.get(virtualDispatchKey(declaration, family.key, 'call'))
+    if (entry === undefined) continue
+    if (entry === null) return null
+    found.push(...entry)
+  }
+  return found
+}
+
+/**
+ * The carrier a slot position takes from the arguments the program's calls
+ * actually pass there, when the implementors' own carriers do not join (three's
+ * `updateReference( state )`, `@param {any}` on every override, called as
+ * `node.updateReference( this )` with a `NodeFrame`).
+ *
+ * The call site converts into the slot outside every IR body, where the
+ * reflection census cannot see it, so it must never box, and never test either:
+ * the candidate is a static carrier every passed argument WIDENS to -- the
+ * same carrier, an ancestor class's, or an optional of one -- so the
+ * conversion cannot fail where the language's call could not. The adapter then converts
+ * it into each implementor's own formal -- a box there is a protocol boundary
+ * the census does read (`VirtualFamilyVerdict.protocolBoundaries`). A call
+ * that omits the position binds `undefined`, so the slot carries it optional
+ * and every implementor's formal must hold `undefined` too.
+ */
+const passedCarrierOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  conversions: ConversionCensus,
+  passed: readonly Representation[],
+  omitted: boolean,
+  declared: readonly Representation[]
+): Representation | null => {
+  const opaque = (value: Representation): boolean => value.kind === 'dynamic' || value.kind === 'void' || value.kind === 'unresolved'
+  if (passed.length === 0 || passed.some(opaque)) return null
+  if (omitted && !declared.every(admitsUndefined)) return null
+  const widens = (value: Representation, target: Representation): boolean => {
+    if (representationKey(value) === representationKey(target)) return true
+    if (value.kind === 'class-ref' && target.kind === 'class-ref')
+      return (
+        value.ownership === 'shared-refcount' &&
+        target.ownership === 'shared-refcount' &&
+        extendsClass(classes, value.declaration, target.declaration)
+      )
+    return target.kind === 'optional' && target.absence === 'undefined' && (value.kind === 'undefined' || widens(value, target.payload))
+  }
+  for (const candidate of [...passed, ...declared]) {
+    if (opaque(candidate)) continue
+    if (!passed.every((value) => widens(value, candidate))) continue
+    const carried = omitted ? optionalOf(candidate, 'undefined') : candidate
+    if (carried === null || carried.kind === 'unresolved') continue
+    if (declared.every((value) => virtualValueConvertible(classes, conversions, carried, value))) return carried
+  }
+  return null
 }
 
 /**
@@ -765,7 +855,8 @@ const joinedRootAbiOf = (
   conversions: ConversionCensus,
   root: CallableAbi,
   implementors: readonly VirtualMethodImplementor[],
-  abiOf: (callable: FunctionId) => CallableAbi | null
+  abiOf: (callable: FunctionId) => CallableAbi | null,
+  calls: readonly (readonly Representation[])[] | null
 ): CallableAbi => {
   const abis = implementors.map((implementor) => abiOf(implementor.callable))
   if (root.restFrom !== null || abis.some((abi) => abi === null || abi.restFrom !== null)) return root
@@ -782,11 +873,30 @@ const joinedRootAbiOf = (
     // implementation then receives `undefined`; one whose own formal cannot
     // hold it keeps the root's convention and is refused for it below, rather
     // than unwrapping an absent optional into that formal.
-    if (!values.every(admitsUndefined)) return root
-    const joined = joinedParameterOf(classes, conversions, values)
-    const value = joined === null ? null : optionalOf(joined, 'undefined')
+    const joined = values.every(admitsUndefined) ? joinedParameterOf(classes, conversions, values) : null
+    const optional = joined === null ? null : optionalOf(joined, 'undefined')
+    // Where the implementors' own carriers do not join, the calls the program
+    // makes decide: a position no call passes needs no carrier (the slot ends
+    // before it, and every later one, since a call omitting it omits them
+    // too), and one some call passes takes the arguments' own carrier.
+    const passed = calls?.flatMap((call) => (call.length > position ? [call[position]!] : [])) ?? null
+    if (optional === null && passed !== null && passed.length === 0) break
+    const value =
+      optional ??
+      (calls === null || passed === null
+        ? null
+        : passedCarrierOf(
+            classes,
+            conversions,
+            passed,
+            calls.some((call) => call.length <= position),
+            values
+          ))
     if (value === null || value.kind === 'unresolved') return root
-    parameters.push({ value, ownership: 'owned', passing: passingOf(value, 'owned') })
+    // A carrier that names its own ownership (a class handle) is passed as it
+    // is held; `owned` would spell the struct itself by value.
+    const ownership = optional === null && 'ownership' in value ? value.ownership : 'owned'
+    parameters.push({ value, ownership, passing: passingOf(value, ownership) })
   }
   return { ...root, parameters }
 }
@@ -814,7 +924,8 @@ export const virtualDispatchVerdictOf = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   abiOf: (callable: FunctionId) => CallableAbi | null,
   capturesNothing: (callable: FunctionId) => boolean,
-  conversions: ConversionCensus
+  conversions: ConversionCensus,
+  memberCalls?: VirtualMemberCalls
 ): VirtualDispatchVerdict => {
   const families: VirtualFamilyVerdict[] = []
   const refused: VirtualFamilyRefusal[] = []
@@ -860,9 +971,10 @@ export const virtualDispatchVerdictOf = (
         ? null
         : { ...borrowed, receiver: rootInstance, ...(borrowedResult ? { result: borrowedResult } : {}) }
     const ownRootAbi = rootImplementor ? abiOf(rootImplementor.callable) : null
+    const calls = familyCallsOf(classes, family, memberCalls)
     const rootAbi =
       ownRootAbi !== null
-        ? joinedRootAbiOf(classes, conversions, ownRootAbi, family.implementors, abiOf)
+        ? joinedRootAbiOf(classes, conversions, ownRootAbi, family.implementors, abiOf, calls)
         : family.abstractRoot
           ? inheritedAbi
           : null
@@ -936,11 +1048,19 @@ export const virtualDispatchVerdictOf = (
           continue
         }
         if (actualAbi.restFrom === position && parameter.value.kind === 'array-object') continue
-        if (!admitsUndefined(parameter.value)) {
-          parameterIncompatible =
-            `implementation ${implementor.declaration}'s extra parameter ${position} is carried as "${representationKey(parameter.value)}", ` +
+        // A position the slot does not carry is one every call through the
+        // family drops: the implementation runs with `undefined` there even
+        // when the caller passed a value (`node.updateReference( this )`
+        // against a root `updateReference()`). That is the language's own
+        // answer only when no call passes it -- then the adapter supplies the
+        // `undefined` the omitted argument binds, if the formal can hold it.
+        const omittedByEveryCall = calls !== null && calls.every((call) => call.length <= position)
+        if (omittedByEveryCall && admitsUndefined(parameter.value)) continue
+        parameterIncompatible = admitsUndefined(parameter.value)
+          ? `implementation ${implementor.declaration}'s extra parameter ${position} ("${representationKey(parameter.value)}") has no ` +
+            "carrier in the family's slot, so an argument a call passes there would be dropped"
+          : `implementation ${implementor.declaration}'s extra parameter ${position} is carried as "${representationKey(parameter.value)}", ` +
             'which cannot hold the undefined supplied by an omitted argument'
-        }
       }
       if (parameterIncompatible !== null) {
         incompatible = parameterIncompatible
@@ -968,6 +1088,11 @@ export const virtualDispatchVerdictOf = (
       if (incompatible !== null) break
     }
     if (incompatible !== null) {
+      // The refusal surfaces downstream only as "needs dynamic dispatch" at
+      // each read of the member; this names why the family has no member.
+      const filter = process.env['GEA_VIRTUAL_FAMILY_DEBUG']
+      if (filter !== undefined && (filter === '*' || filter === family.key))
+        console.error(`[VIRTUAL-FAMILY] ${family.root}.${family.key}: ${incompatible}`)
       refused.push({
         key: family.key,
         role: family.role,

@@ -95,7 +95,8 @@ import {
   withUnreadParametersUnnamed
 } from './records.js'
 import { prototypeReadHooks, virtualMethodEmission, virtualMethodFamiliesOf } from './virtual-methods.js'
-import { virtualDispatchVerdictOf } from '../../projection/dispatch.js'
+import { virtualDispatchVerdictOf, type VirtualMemberCalls } from '../../projection/dispatch.js'
+import { virtualMemberCallsAgree, virtualMemberCallsOf } from '../../ir/virtual-member-calls.js'
 import { stringConstantsOf } from '../../ir/dead-values.js'
 import { integerParameterSlot, integerResultSlot, integerStorageCensusOf, integerStorageSlot } from '../../ir/integer-storage.js'
 import { narrowableIntegersOf } from '../../ir/integers.js'
@@ -326,6 +327,13 @@ export interface CppTranslationUnitInput {
   readonly deriver: RepresentationDeriver
   /** The conversion census the lowering named its `convert` nodes from; see `EmitContext.conversions`. */
   readonly conversions: ConversionCensus
+  /**
+   * What the program's calls pass each overridden member, as `compiler.ts`
+   * read it for the call-dispatch verdict (`ir/virtual-member-calls.ts`).
+   * Handed in rather than re-read so this unit's verdict is that one; absent,
+   * no call is known and the slot carries only what the conventions join.
+   */
+  readonly virtualMemberCalls?: VirtualMemberCalls
   /**
    * This program's module bodies, in the order ECMA-262 evaluates them
    * (`FrontendResult.moduleOrder`).
@@ -2080,11 +2088,21 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // (a fact moved out of the target); `virtualMethodEmission` below
   // now only renders the C++ struct members and adapter bodies for whatever
   // it says is dispatchable.
+  // The calls fact is `compiler.ts`'s, so this verdict is the one the call
+  // targets were filled from -- but only while the bodies printed here still
+  // make those calls. Otherwise no call is known, and a family whose slot it
+  // shortened is refused rather than rendered dropping an argument.
+  const memberCallsAgree =
+    input.virtualMemberCalls !== undefined && virtualMemberCallsAgree(input.virtualMemberCalls, virtualMemberCallsOf(input.bodies))
+  if (input.virtualMemberCalls !== undefined && !memberCallsAgree && process.env['GEA_VIRTUAL_FAMILY_DEBUG'] !== undefined)
+    console.error('[VIRTUAL-FAMILY] the printed bodies call members differently from the dispatch verdict; no call is known')
+  const memberCalls = memberCallsAgree ? input.virtualMemberCalls : undefined
   const virtualVerdict = virtualDispatchVerdictOf(
     input.classes,
     (callable) => abiByBody.get(String(callable)) ?? null,
     capturesNothingOf,
-    input.conversions
+    input.conversions,
+    memberCalls
   )
   const virtuals = virtualMethodEmission(
     programSite,

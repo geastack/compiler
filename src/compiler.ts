@@ -65,6 +65,7 @@ import { rewriteLiteralSetMembership } from './ir/literal-set-membership.js'
 import { shareReadOnlyEmptyRecords } from './ir/shared-empty-records.js'
 import { elideReadOnlySpreadCopies, plainRecordFieldsOf } from './ir/spread-copy-elision.js'
 import { capturesNothing, publishCaptureFacts } from './ir/captures.js'
+import { virtualMemberCallsOf } from './ir/virtual-member-calls.js'
 import { recordAccessorBodiesOf, recordLayoutOfShapeId } from './projection/fields.js'
 import { fillCallDispatchTargets } from './ir/call-dispatch.js'
 import type { IrBody } from './ir/model.js'
@@ -1202,8 +1203,17 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     captureFacts ? [...captureFacts.values()].map((body) => [String(body.sourceOwner), body.facts] as const) : []
   )
   const capturesNothingOf = (callable: FunctionId): boolean => capturesNothing(bodyFactsBySourceOwner.get(String(callable)))
+  // What the program's calls pass each overridden member, read once here and
+  // handed to the render's verdict too, so the two verdicts see one fact.
+  const virtualMemberCalls = captureFacts ? virtualMemberCallsOf(captureFacts.values()) : undefined
   const dispatchVerdict = shaken
-    ? virtualDispatchVerdictOf(shaken.classes, (callable) => abis.abis.get(callable) ?? null, capturesNothingOf, conversionCensus)
+    ? virtualDispatchVerdictOf(
+        shaken.classes,
+        (callable) => abis.abis.get(callable) ?? null,
+        capturesNothingOf,
+        conversionCensus,
+        virtualMemberCalls
+      )
     : null
   const adapterBoundaries = dispatchVerdict?.families.flatMap((verdict) => verdict.protocolBoundaries ?? []) ?? []
   let dispatchedBodies =
@@ -1460,6 +1470,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
           conversions: conversionCensus,
           ...(emissionRepresentations ? { emissionRepresentations: emissionRepresentations.representations } : {}),
           ...(reflection ? { reflection } : {}),
+          ...(virtualMemberCalls ? { virtualMemberCalls } : {}),
           certificate
         })
       : null
