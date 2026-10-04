@@ -1191,12 +1191,27 @@ const readOnlyKeyedCollectionNames: ReadonlySet<string> = new Set(['ReadonlyMap'
  *
  * `SharedArrayBuffer` has its own carrier. It is not an `ArrayBuffer` alias:
  * its backing state is what makes Atomics' concurrent protocol truthful.
+ *
+ * `ArrayBufferView` is no object type of its own but WebIDL's typedef over the
+ * views, which lib spells as an interface. It is resolved here, with the
+ * buffers, because the same trap catches it: walked as an ambient body it
+ * became a record of `buffer`/`byteLength`/`byteOffset` that no typed array or
+ * DataView converts into, since the record has lost which view it was.
  */
 const standardBufferKinds: ReadonlyMap<string, StandardBufferKind> = new Map<string, StandardBufferKind>([
   ['ArrayBuffer', 'array-buffer'],
   ['SharedArrayBuffer', 'shared-array-buffer'],
-  ['DataView', 'data-view']
+  ['DataView', 'data-view'],
+  ['ArrayBufferView', 'array-buffer-view']
 ])
+
+/**
+ * The names whose interface must be the standard library's own to be bound.
+ * `ArrayBufferView` is a name a program can reasonably declare for itself; one
+ * with no default-lib declaration states its own structure and stays a record.
+ * An augmentation of lib's interface is still lib's interface.
+ */
+const libOnlyBufferNames: ReadonlySet<string> = new Set(['ArrayBufferView'])
 
 /**
  * The declaration identity of the standard `ArrayBuffer` and `DataView`
@@ -1229,6 +1244,11 @@ export const standardBufferDeclarationsOf = (
   for (const [name, kind] of standardBufferKinds) {
     const symbol = checker.resolveName(name, anchor, ts.SymbolFlags.Interface, false)
     if (!symbol) continue
+    if (
+      libOnlyBufferNames.has(name) &&
+      !(symbol.getDeclarations() ?? []).some((declaration) => declaration.getSourceFile().hasNoDefaultLib)
+    )
+      continue
     const declaration = identities.symbolDeclarationId(symbol, anchor)
     if (declaration) found.set(declaration, kind)
   }

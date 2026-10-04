@@ -561,8 +561,12 @@ const exactArmEntry = (
   if (slot.kind !== 'tagged-union' || operand.role !== 'argument') return null
   const target = conversionRoleTargetOf(operation, 'argument', operand.ordinal, 'exact-arm')
   if (target === undefined) return null
+  // A type names an arm only when it is the semanticType of exactly one: the
+  // view arms of lib's `ArrayBufferView` all cite the view type, and the first
+  // of them would read an int8 view out of a Float32Array.
+  const typed = slot.arms.filter((candidate) => candidate.semanticType === target.type)
   const arm =
-    slot.arms.find((candidate) => candidate.semanticType === target.type) ??
+    (typed.length === 1 ? typed[0] : undefined) ??
     ((): TaggedUnionArm | undefined => {
       const key = representationKey(ctx.constantDeriver.layoutOf(target.type))
       return slot.arms.find((candidate) => representationKey(candidate.value) === key)

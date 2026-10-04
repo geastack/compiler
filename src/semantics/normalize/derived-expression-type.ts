@@ -2737,8 +2737,10 @@ const isDefaultLibDeclared = (type: ts.Type): boolean =>
  * lib's `ArrayBufferView` interface: a window onto an `ArrayBuffer` that says
  * nothing about WHICH view -- `Uint8Array`, `DataView`, ... -- sits behind
  * it. Like the class behind a structural constructor type, that identity is
- * the one position the statement leaves open, and no view converts into the
- * interface's generated record without losing it.
+ * the one position the statement leaves open: the interface derives as the
+ * sum of the views it may be (`derive.ts`'s `openViewOf`). This is the
+ * checker-side test for a statement naming that open view; the narrowings
+ * that ask it are precision, a caller's exact view being cheaper than the sum.
  */
 export const isLibArrayBufferViewType = (type: ts.Type): boolean =>
   (type.flags & ts.TypeFlags.Object) !== 0 && type.getSymbol()?.getName() === 'ArrayBufferView' && isDefaultLibDeclared(type)

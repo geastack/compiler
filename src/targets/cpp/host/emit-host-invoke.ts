@@ -1604,6 +1604,7 @@ export const nativeHandleInvocationText = (
     // template names exactly that many `{argN}` slots and nothing else can fill
     // the difference.
     if (stated.arity === 'pass-through') {
+      for (const argument of args) refuseViewSumArgument(argument, `a pass-through "${protocol}" host construct`)
       const passed = args.map((argument) => hostArgumentText(argument.representation, operandText(ctx, argument))).join(', ')
       const filled = fillHostTemplate(stated.emit, null, [], passed)
       if (filled === null) {
@@ -1649,6 +1650,7 @@ export const nativeHandleInvocationText = (
   const invocation = role === 'call' ? ctx.hosts.invocations.get(`${callee.native ?? protocol}.call`) : undefined
   if (invocation !== undefined) {
     if (invocation.arity === 'pass-through') {
+      for (const argument of args) refuseViewSumArgument(argument, `a pass-through "${protocol}" host`)
       const passed = args.map((argument) => hostArgumentText(argument.representation, operandText(ctx, argument))).join(', ')
       const filled = fillHostTemplate(invocation.emit, null, [], passed)
       if (filled === null)
@@ -1689,6 +1691,25 @@ export const nativeHandleInvocationText = (
 }
 
 /**
+ * A pass-through row lets C++ pick the host's overload from each argument's
+ * type, and the overloads take one view each -- `TextDecoder.decode` has a
+ * `TypedArray<T>`, a `DataView` and an `ArrayBuffer` one -- never a sum of
+ * them. A sum with a view arm, lib's `ArrayBufferView` above all, would reach
+ * clang as an overload error, so it is refused here by name until a per-arm
+ * dispatch is installed.
+ */
+const refuseViewSumArgument = (argument: IrOperand, where: string): void => {
+  const carrier = argument.representation
+  if (carrier.kind !== 'tagged-union' || !carrier.arms.some((arm) => arm.value.kind === 'typed-array' || arm.value.kind === 'data-view'))
+    return
+  throw createCppEmitBlockedError(
+    'host-invocation:pass-through-view-sum',
+    `${where} call receives "${representationKey(carrier)}", a sum with a typed-array or DataView arm; the host's overloads take ` +
+      'one view each, and no per-arm dispatch of a pass-through row is installed'
+  )
+}
+
+/**
  * A host *method* call -- `document.getElementById(id)`, `el.setAttribute(k, v)`.
  *
  * The access itself rendered nothing (`nativeHandleMemberText`, emit-properties.ts)
@@ -1713,6 +1734,7 @@ export const nativeHandleInvocationText = (
  * overload could name.
  */
 const passThroughArgumentText = (ctx: EmitContext, operation: CallOperation, argument: IrOperand, ordinal: number): string => {
+  refuseViewSumArgument(argument, 'a pass-through host member')
   const text = operandText(ctx, argument)
   const parameter =
     argument.representation.kind === 'dynamic' ? abiOfCallee(operation.callee.representation)?.parameters[ordinal]?.value : undefined

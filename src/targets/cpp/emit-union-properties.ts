@@ -49,7 +49,7 @@ import { abiOfCallee } from '../../projection/callee.js'
 import { recordAccessorsOfShape } from './records.js'
 import { cppRecordIndexSidecarName } from './records.js'
 import { hasNativeNumericIndexArms, nativeNumericIndexOf } from '../../representation/numeric-index.js'
-import { binaryToStringTagText, typedArrayBufferMemberText, typedArrayPrototypeMethods } from './emit-buffers.js'
+import { binaryToStringTagText, dataViewWindowMemberText, typedArrayBufferMemberText, typedArrayPrototypeMethods } from './emit-buffers.js'
 import { typeofTextFor } from './emit-typeof.js'
 import { keyedCollectionPrototypeMethods, promisePrototypeMethods } from './prototype/emit-prototype-invoke.js'
 import { arrayInheritedMemberRefusals, arrayMemberRefusals, arrayPrototypeMethods } from './prototype/emit-prototype-array.js'
@@ -398,6 +398,17 @@ const armRuntimeFieldText = (
       const source: Representation =
         key === 'buffer' ? { kind: arm.buffer, ownership: 'shared-refcount' } : { kind: 'scalar', domain: 'number' }
       return alignedValueText(ctx, 'emit-union-properties.ts:145', source, published, bufferMember)
+    }
+  }
+  // The DataView arm of lib's `ArrayBufferView` sum answers the same window
+  // its typed-array siblings do. This runtime's DataView sits on an
+  // ArrayBuffer only, so its `buffer` is one.
+  if (arm.kind === 'data-view') {
+    const window = dataViewWindowMemberText(armExprText, key)
+    if (window !== null) {
+      const source: Representation =
+        key === 'buffer' ? { kind: 'array-buffer', ownership: 'shared-refcount' } : { kind: 'scalar', domain: 'number' }
+      return alignedValueText(ctx, 'emit-union-properties.ts:data-view-window', source, published, window)
     }
   }
   // A block's one data property. `view.buffer` is typed `ArrayBufferLike`, so

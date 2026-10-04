@@ -20,6 +20,8 @@ export interface UnionDeriverContext {
   readonly derive: (id: StructuralTypeId) => Representation
   /** Whether no value can have this type -- the deriver's own answer, so an arm rule and the carrier rule agree. */
   readonly isNeverType: (id: StructuralTypeId) => boolean
+  /** Whether this member is lib's `ArrayBufferView`, which the deriver answers as the sum of the views (`derive.ts`'s `openViewOf`). */
+  readonly isOpenViewMember: (id: StructuralTypeId) => boolean
 }
 
 /**
@@ -34,7 +36,7 @@ export interface UnionDeriverContext {
 export const createUnionDeriver = (
   context: UnionDeriverContext
 ): ((shape: Extract<StructuralShape, { kind: 'union' }>) => Representation) => {
-  const { shapeOf, derive, isNeverType } = context
+  const { shapeOf, derive, isNeverType, isOpenViewMember } = context
 
   /** The literal text discriminating each arm, when one member key does so. */
   const discriminantOf = (arms: readonly StructuralTypeId[]): { key: string; tags: readonly string[] } | null => {
@@ -301,6 +303,54 @@ export const createUnionDeriver = (
     return { kind: 'tagged-union', arms }
   }
 
+  /**
+   * A union naming lib's `ArrayBufferView` beside other buffers, with the
+   * view's arms spliced in where the view stands rather than nested as one arm.
+   *
+   * `AllowSharedBufferSource` is `ArrayBuffer | SharedArrayBuffer |
+   * ArrayBufferView` as the checker flattens it, and WebGL's `bufferData` takes
+   * it. Nested, a `Float32Array` matches no top-level arm, and arm widening and
+   * the recast compare top-level arms only. Splicing is right for this one
+   * member because the view sum is a typedef, not a value carrying a tag of its
+   * own; a nested union in general keeps its own discriminant.
+   *
+   * Members that derive to one carrier are one arm, the first stated keeping
+   * its `semanticType`: `Uint8Array | ArrayBufferView` has one uint8 arm, the
+   * `Uint8Array`'s. Only the buffer family is spliced, every member at one
+   * ownership, so the arms are pairwise disjoint by carrier; anything else is
+   * `null` and keeps the nested arm, which conversions refuse by name.
+   */
+  const openViewSpliceOf = (members: readonly StructuralTypeId[]): Representation | null => {
+    if (!members.some(isOpenViewMember)) return null
+    const arms: TaggedUnionArm[] = []
+    const seen = new Set<string>()
+    let ownership: string | null = null
+    for (const member of members) {
+      const value = deriveStored(member)
+      const parts =
+        isOpenViewMember(member) && value.kind === 'tagged-union'
+          ? value.arms.map((arm) => ({ value: arm.value, semanticType: arm.semanticType }))
+          : [{ value, semanticType: member }]
+      for (const part of parts) {
+        const carrier = part.value
+        if (
+          carrier.kind !== 'typed-array' &&
+          carrier.kind !== 'data-view' &&
+          carrier.kind !== 'array-buffer' &&
+          carrier.kind !== 'shared-array-buffer'
+        )
+          return null
+        if (ownership !== null && carrier.ownership !== ownership) return null
+        ownership = carrier.ownership
+        const key = representationKey(carrier)
+        if (seen.has(key)) continue
+        seen.add(key)
+        arms.push(armOf(String(arms.length), carrier, part.semanticType))
+      }
+    }
+    return { kind: 'tagged-union', arms }
+  }
+
   /** The carrier for the non-absent arms of a union. */
   const derivePresent = (present: readonly StructuralTypeId[]): Representation => {
     const only = present[0]
@@ -337,6 +387,8 @@ export const createUnionDeriver = (
     const canonical = canonicalMembersOf(present)
     const single = canonical.length === 1 ? canonical[0] : undefined
     if (single) return deriveStored(single)
+    const spliced = openViewSpliceOf(canonical)
+    if (spliced !== null) return spliced
 
     const discriminant = discriminantOf(canonical)
     if (!discriminant) return armIndexUnion(canonical)

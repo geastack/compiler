@@ -11,7 +11,7 @@ import {
   recordFieldKeyOf
 } from './object-shape.js'
 import type { AbiParameter, CallableAbi, RecordField, RecordIndexSidecar, Representation, TaggedUnionArm } from './model.js'
-import { abiKey, passingOf, representationKey } from './model.js'
+import { abiKey, passingOf, representationKey, typedArrayElementDomains } from './model.js'
 import {
   createIntersectionFlattener,
   intersectPropertyRepresentations,
@@ -363,6 +363,30 @@ export const createRepresentationDeriver = (
         return 'shared-array-buffer'
     }
     return 'array-buffer'
+  }
+  /**
+   * lib's `ArrayBufferView<TArrayBuffer>`: WebIDL's typedef over the nine
+   * typed-array views and DataView, which leaves open WHICH view a value is. So
+   * the carrier is the sum of the views, each arm its own static carrier over
+   * the buffer kind the type argument states -- the answer
+   * `Uint8Array<ArrayBufferLike>` already gets, so a typed array's own key is
+   * an arm key exactly. Every arm cites the view type as its `semanticType`.
+   */
+  const openViewOf = (shape: Extract<StructuralShape, { kind: 'declared' }>, id: StructuralTypeId): Representation => {
+    const buffer = typedArrayBufferKindOf(shape)
+    const owned = ownership.forShape(shape, id)
+    const views: Representation[] = [
+      ...typedArrayElementDomains.map((element): Representation => ({ kind: 'typed-array', element, buffer, ownership: owned })),
+      { kind: 'data-view', ownership: owned }
+    ]
+    return {
+      kind: 'tagged-union',
+      arms: views.map((value, position) => ({ tag: String(position), value, semanticType: id, runtimeDiscriminator: { kind: 'carrier' } }))
+    }
+  }
+  const isOpenViewMember = (id: StructuralTypeId): boolean => {
+    const shape = shapeOf(id)
+    return shape?.kind === 'declared' && buffers.forDeclaration(shape.declaration) === 'array-buffer-view'
   }
 
   /**
@@ -1777,6 +1801,21 @@ export const createRepresentationDeriver = (
     ) {
       return typedArray
     }
+    // lib's `ArrayBufferView` intersected with structure is still a view, and
+    // the structure states members ON it: bson's web `toLocalBufferType`
+    // takes `ArrayBufferView & { [Symbol.toStringTag]?: string }`. Same rule
+    // as the nominal class below, and as the typed-array branch above, which
+    // keeps `ArrayBufferView & Uint8Array & {...}` the one view it names: no
+    // member may be a typed array here, and every other member is structure.
+    const openViews = substantive.filter(isOpenViewMember)
+    const openView = openViews.length === 1 ? openViews[0] : undefined
+    if (
+      openView !== undefined &&
+      typedArrayCarriers.length === 0 &&
+      substantive.every((member) => member === openView || intersectionMemberShape(member) !== null)
+    ) {
+      return derive(openView)
+    }
     // A NOMINAL class intersected with structure carries the class.
     //
     // `x in obj` is where this shows up and it is ordinary TypeScript: narrowing
@@ -2568,7 +2607,7 @@ export const createRepresentationDeriver = (
 
   // `isNeverType` is declared below; the union deriver only calls it later,
   // per arm, so the closure is what is handed over rather than the value.
-  const deriveUnion = createUnionDeriver({ shapeOf, derive, isNeverType: (id) => isNeverType(id) })
+  const deriveUnion = createUnionDeriver({ shapeOf, derive, isNeverType: (id) => isNeverType(id), isOpenViewMember })
   const deriveUnionShape = (shape: Extract<StructuralShape, { kind: 'union' }>): Representation => {
     // A choice among generic source functions is ONE set, tagged by
     // member, not a sum of markers: `cond ? identity : setOriginalNode`.
@@ -2638,6 +2677,7 @@ export const createRepresentationDeriver = (
         // is what made every ArrayBuffer in three.js an opaque handle with no
         // bytes behind it. See `StandardBufferPolicy`.
         const buffer = buffers.forDeclaration(shape.declaration)
+        if (buffer === 'array-buffer-view') return openViewOf(shape, id)
         if (buffer) return { kind: buffer, ownership: ownership.forShape(shape, id) }
         // `Promise<T>` is checked immediately after, for the identical
         // reason and ahead of `binding`/the ambient-body walk below: run

@@ -456,6 +456,18 @@ export const deferredDataViewMethodClaim = (
   return { receiverKind: 'data-view', member: staticKey, receiver: { kind: 'operand', operand: receiver }, receiverElement: null }
 }
 
+/**
+ * A DataView's window onto its buffer -- `byteLength`, `byteOffset`, `buffer` --
+ * or `null` for any other key. Stated once for a lone DataView and for the
+ * DataView arm of a union (`emit-union-properties.ts`).
+ */
+export const dataViewWindowMemberText = (receiverText: string, key: string | undefined): string | null => {
+  if (key === 'byteLength') return `${receiverText}->byteLength()`
+  if (key === 'byteOffset') return `${receiverText}->byteOffset()`
+  if (key === 'buffer') return `${receiverText}->buffer()`
+  return null
+}
+
 /** The DataView reading of a property access, or `null` when the receiver is not one. */
 export const dataViewAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOperand, result: IrValueId | null): string | null => {
   if (receiver.representation.kind !== 'data-view') return null
@@ -464,9 +476,8 @@ export const dataViewAccessText = (ctx: EmitContext, receiver: IrOperand, key: I
   // map, so a render-time-folded text is never mistaken for a static member name.
   const staticKey = ctx.staticKeyTexts.get(key.value)
   if (wellKnownSymbolMemberOf(ctx, key) === 'toStringTag') return cppStringLiteral('DataView')
-  if (staticKey === 'byteLength') return `${receiverText}->byteLength()`
-  if (staticKey === 'byteOffset') return `${receiverText}->byteOffset()`
-  if (staticKey === 'buffer') return `${receiverText}->buffer()`
+  const window = dataViewWindowMemberText(receiverText, staticKey)
+  if (window !== null) return window
   if (staticKey !== undefined) {
     if (deferredDataViewMethodClaim(ctx.staticKeyTexts, receiver, key) !== null) {
       if (result === null) {

@@ -100,8 +100,23 @@ export type ScalarDomain = 'boolean' | 'number' | 'bigint' | 'int32' | 'uint32' 
  * naming `BigInt64Array` therefore gets no typed-array carrier and refuses by
  * name upstream, rather than being quietly given a 64-bit integer view whose
  * reads would have to lie about their type.
+ *
+ * Listed in the standard library's own order, which is the order `derive.ts`
+ * lays out the view arms of `ArrayBufferView` in.
  */
-export type TypedArrayElementDomain = 'int8' | 'uint8' | 'uint8-clamped' | 'int16' | 'uint16' | 'int32' | 'uint32' | 'float32' | 'float64'
+export const typedArrayElementDomains = [
+  'int8',
+  'uint8',
+  'uint8-clamped',
+  'int16',
+  'uint16',
+  'int32',
+  'uint32',
+  'float32',
+  'float64'
+] as const
+
+export type TypedArrayElementDomain = (typeof typedArrayElementDomains)[number]
 
 /** How long a reference is valid and who may keep it. */
 export type Ownership = 'owned' | 'shared-refcount' | 'borrowed'

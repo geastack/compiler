@@ -337,13 +337,19 @@ export const defaultKeyedCollectionPolicy: KeyedCollectionPolicy = {
   forDeclaration: () => null
 }
 
-/** The two standard ArrayBuffer-family object types -- see `Representation`'s `array-buffer` and `data-view` arms. */
-export type StandardBufferKind = 'array-buffer' | 'shared-array-buffer' | 'data-view'
+/**
+ * The standard ArrayBuffer-family object types -- see `Representation`'s
+ * `array-buffer` and `data-view` arms. `array-buffer-view` is lib's
+ * `ArrayBufferView`, the WebIDL typedef over the views: it has no carrier of
+ * its own, and `derive.ts` gives it the sum of the views it may be.
+ */
+export type StandardBufferKind = 'array-buffer' | 'shared-array-buffer' | 'data-view' | 'array-buffer-view'
 
 /**
- * Which declared types are the standard library's own `ArrayBuffer` and
- * `DataView` interfaces -- the same shape of policy, checked at the same point
- * in `derive.ts`'s `'declared'` case, and installed for the same reason as
+ * Which declared types are the standard library's own `ArrayBuffer`,
+ * `SharedArrayBuffer`, `DataView` and `ArrayBufferView` interfaces -- the
+ * same shape of policy, checked at the same point in `derive.ts`'s
+ * `'declared'` case, and installed for the same reason as
  * `TypedArrayElementPolicy` and `KeyedCollectionPolicy` above.
  *
  * The reason, concretely: the ambient-value census binds `ArrayBuffer` as a
