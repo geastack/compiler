@@ -109,7 +109,20 @@ const isDeclarationName = (node: ts.Identifier): boolean => {
  */
 const lexicalSymbolBehindExportSynthesis = (checker: ts.TypeChecker, node: ts.Identifier, symbol: ts.Symbol): ts.Symbol | null => {
   if ((symbol.flags & (ts.SymbolFlags.Assignment | ts.SymbolFlags.ModuleExports)) === 0) return null
-  if ((symbol.declarations ?? []).some((declaration) => ts.isVariableDeclaration(declaration) || ts.isParameter(declaration))) return null
+  // A class or function a file declares is lexical even when it carries the
+  // flag: the JavaScript binder adds `Assignment` to it for a top-level expando
+  // (`Node.captureStackTrace = false`), and asking the global scope instead
+  // handed three's `Node` class to lib.dom's ambient `Node` value.
+  if (
+    (symbol.declarations ?? []).some(
+      (declaration) =>
+        ts.isVariableDeclaration(declaration) ||
+        ts.isParameter(declaration) ||
+        ts.isClassDeclaration(declaration) ||
+        ts.isFunctionDeclaration(declaration)
+    )
+  )
+    return null
   const scoped = checker.resolveName(node.text, node, ts.SymbolFlags.Value, false)
   const lexical =
     scoped !== undefined && (scoped.flags & (ts.SymbolFlags.ModuleExports | ts.SymbolFlags.Assignment)) === 0
