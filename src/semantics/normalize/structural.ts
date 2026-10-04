@@ -2239,6 +2239,51 @@ const buildMapper = (
     return ids
   }
 
+  /**
+   * A deferred `OmitThisParameter<F>` whose only hole is the polymorphic
+   * `this` of F's own receiver: what `callback.bind(this)` produces inside a
+   * class for a `(this: this, frame: NodeFrame) => unknown` callback.
+   *
+   * The checker defers it on `unknown extends this`, and nothing else in it is
+   * open. That `this` is not a parameter a caller fills: `translate` answers
+   * it with the class instance (see its `TypeParameter` branch), and no class
+   * instance is `unknown`, so the test is false for every filling and the
+   * operator is its false branch, `F extends (...args: infer A) => infer R ?
+   * (...args: A) => R : F` -- F's one call signature without its receiver,
+   * the shape `withoutReceiver` gives a bound method, and what `bind`
+   * produces at run time.
+   * three's `Node.onUpdate`/`onReference` and `UniformNode.onUpdate` bind
+   * their callbacks this way.
+   *
+   * Only one non-generic call signature and no construct signature: `infer`
+   * over an overload set reads the LAST overload and over a generic signature
+   * an erased one, and neither is F's shape minus its receiver. Any other
+   * receiver type is left to the refusal, since the test is then open for real.
+   */
+  const omittedPolymorphicThis = (type: ts.Type): StructuralTypeId | null => {
+    if ((type.flags & ts.TypeFlags.Conditional) === 0) return null
+    const argument = operatorArgument(type, 'OmitThisParameter')
+    if (!argument) return null
+    const callable = closedForm(argument) ?? argument
+    const calls = callable.getCallSignatures()
+    const call = calls[0]
+    if (calls.length !== 1 || !call || callable.getConstructSignatures().length !== 0) return null
+    if ((call.getTypeParameters()?.length ?? 0) > 0 || !call.thisParameter) return null
+    const receiver = checker.getTypeOfSymbol(call.thisParameter)
+    const receiverSymbol = receiver.getSymbol()
+    const receiverDeclaration = receiverSymbol ? identities.declarationOfSymbol(receiverSymbol) : null
+    const polymorphicThis =
+      (receiver.flags & ts.TypeFlags.TypeParameter) !== 0 &&
+      receiverSymbol !== undefined &&
+      receiverDeclaration !== null &&
+      (ts.isClassLike(receiverDeclaration) || (receiverSymbol.flags & ts.SymbolFlags.Class) !== 0)
+    if (!polymorphicThis) return null
+    const id = typeOf(callable)
+    const shape = table.get(id).shape
+    if (shape.kind !== 'signature' || shape.call.length !== 1 || shape.construct.length !== 0) return null
+    return table.intern({ ...shape, call: shape.call.map((one) => ({ ...one, thisParameter: null })) })
+  }
+
   function translate(type: ts.Type): StructuralTypeId {
     // Asked BEFORE anything else, because it answers about the very type that
     // was handed in rather than about its parts: an open member type of a
@@ -2275,6 +2320,8 @@ const buildMapper = (
     if (awaited) return remember(type, typeOf(awaited))
     const parameterList = parametersOperatorShape(type)
     if (parameterList !== null) return remember(type, parameterList)
+    const unbound = omittedPolymorphicThis(type)
+    if (unbound !== null) return remember(type, unbound)
     // A conditional that still exists after this copy's instantiated-member
     // image was asked for, and that neither operator above could reduce, is
     // unresolved.

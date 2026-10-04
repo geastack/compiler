@@ -12,6 +12,7 @@ import {
   objectAssignTargetType,
   plainClassInstanceCopyAt,
   nominalConstructorChoiceTypeAt,
+  constructedClassChoiceTypeAt,
   memberCensusNodeOf,
   defaultOnlyParameterOf,
   emptyArrayDefaultParameterOf,
@@ -1049,6 +1050,10 @@ export const createLayoutTypeResolver = (
       const cellChoice = nominalConstructorChoiceTypeAt(checker, choiceCell.initializer, layoutTypeAt)
       if (cellChoice) return cellChoice
     }
+    // A `new` through such a choice builds one of its classes, not the one the
+    // checker reduced the merged construct signatures to (`getWireframeIndex`).
+    const constructedChoice = constructedClassChoiceTypeAt(checker, node, layoutTypeAt)
+    if (constructedChoice) return constructedChoice
     // A narrowly scoped construction proof can outrank a checker answer that
     // is usable but wider than every value the initializer can produce. The
     // local-binding census currently publishes only the authenticated
