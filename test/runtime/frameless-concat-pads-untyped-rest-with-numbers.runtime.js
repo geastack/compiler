@@ -3,6 +3,8 @@
 // list with `params.concat( new Array( n ).fill( 0 ) )`. The checker types the
 // receiver `any`, so the call has no frame. ECMA-262 23.1.3.2 spreads the Array
 // argument, and each number enters the receiver's dynamic element.
+// The operands take no `= null` default: under `strict` the checker types such a
+// JS parameter `null`, and the padded `0` arriving there is rightly refused.
 class Node {
 
 	static get type() {
@@ -27,7 +29,7 @@ class JoinNode extends Node {
 
 	}
 
-	constructor( a = null, b = null, c = null ) {
+	constructor( a, b, c ) {
 
 		super( 'vec3' );
 		this.nodes = [ a, b, c ];
@@ -44,7 +46,7 @@ class OperatorNode extends Node {
 
 	}
 
-	constructor( op, a = null, b = null ) {
+	constructor( op, a, b ) {
 
 		super( 'float' );
 		this.op = op;
