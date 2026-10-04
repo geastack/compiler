@@ -1649,7 +1649,14 @@ export const composeReturnBindings = (
       // collection-bound `return list` is the measured case: this census
       // answers the storage's `E[]`, the looser one the checker's `any[]`.
       typeAt: (node) => returns.typeAt(node) ?? parameters.typeAt(node),
-      statedTypeAt: (node) => parameters.statedTypeAt(node) ?? returns.statedTypeAt(node),
+      // The same order for the stated channel. At a call the parameter census
+      // has only the PRIOR round's answer (`computeStatedTypeAt` forwards
+      // `upstream`), and the call's layout reads this channel first while its
+      // signature reads `typeAt` above: three's `Node.getSerializeChildren`
+      // (`@return {Array<Object>}`, returning `_getChildren()`) settled as
+      // `Object[]` in the first round and as `_getChildren`'s records in the
+      // next, and the call published the stale one against the fresh signature.
+      statedTypeAt: (node) => returns.statedTypeAt(node) ?? parameters.statedTypeAt(node),
       unionArmsAt: (node) => parameters.unionArmsAt(node) ?? returns.unionArmsAt(node),
       boundCount: parameters.boundCount + returns.boundCount,
       refusals

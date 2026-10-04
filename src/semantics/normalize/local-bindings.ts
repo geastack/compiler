@@ -2231,7 +2231,12 @@ export const withLocalBindings = (
       locals.preferredTypeAt(node) ??
       locals.bindingTypeAt(node) ??
       (locals.unionArmsAt(node) ? null : (parameters.typeAt(node) ?? (parameters.unionArmsAt(node) ? null : locals.typeAt(node)))),
-    statedTypeAt: (node) => parameters.statedTypeAt(node) ?? locals.statedTypeAt(node),
+    // The same ownership for the stated channel: the parameter census forwards
+    // the PRIOR round's stated answer at a const, so a const held from a call
+    // whose narrowing settled one round later (`const nodeChildren =
+    // this.getSerializeChildren()`, three's `Node.serialize`) kept the stale
+    // spelling while the call itself published the fresh one.
+    statedTypeAt: (node) => locals.statedTypeAt(node) ?? parameters.statedTypeAt(node),
     preferredTypeAt: (node) => locals.preferredTypeAt(node) ?? parameters.preferredTypeAt?.(node) ?? null,
     unionArmsAt: (node) => locals.unionArmsAt(node) ?? parameters.unionArmsAt(node),
     boundCount: parameters.boundCount + locals.boundCount,
