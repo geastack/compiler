@@ -1452,12 +1452,17 @@ export const isNativeIterableMapType = (context: ProducerContext, type: Structur
   return shape.kind === 'declared' && context.keyedCollections.get(shape.declaration) === 'map'
 }
 
-/** A `Map.prototype.entries()` or `Array.prototype.entries()`/`keys()`/`values()` result is already a native cursor. */
+/**
+ * A `Map.prototype.entries()`, `Set.prototype.values()`/`keys()` or
+ * `Array.prototype.entries()`/`keys()`/`values()` result is already a native cursor.
+ */
 const isNativeMapIteratorType = (context: ProducerContext, type: StructuralTypeId): boolean => {
   const shape = context.table.get(type).shape
   return (
     shape.kind === 'declared' &&
-    (shape.declaration === context.mapIteratorDeclaration || shape.declaration === context.arrayIteratorDeclaration)
+    (shape.declaration === context.mapIteratorDeclaration ||
+      shape.declaration === context.setIteratorDeclaration ||
+      shape.declaration === context.arrayIteratorDeclaration)
   )
 }
 

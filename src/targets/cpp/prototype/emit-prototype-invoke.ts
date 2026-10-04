@@ -829,7 +829,7 @@ export const promisePrototypeMethods: ReadonlySet<string> = new Set(promiseMetho
  *   principle.
  */
 const strongMapMethods: ReadonlySet<string> = new Set(['get', 'set', 'has', 'delete', 'clear', 'entries', 'keys', 'values'])
-const strongSetMethods: ReadonlySet<string> = new Set(['add', 'has', 'delete', 'clear', 'forEach'])
+const strongSetMethods: ReadonlySet<string> = new Set(['add', 'has', 'delete', 'clear', 'forEach', 'keys', 'values'])
 const weakMapMethods: ReadonlySet<string> = new Set(['get', 'set', 'has', 'delete'])
 const weakSetMethods: ReadonlySet<string> = new Set(['add', 'has', 'delete'])
 

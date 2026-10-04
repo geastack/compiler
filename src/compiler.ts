@@ -715,6 +715,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         declaration === frontend.generatorDeclaration ||
         declaration === frontend.asyncGeneratorDeclaration ||
         declaration === frontend.mapIteratorDeclaration ||
+        declaration === frontend.setIteratorDeclaration ||
         declaration === frontend.arrayIteratorDeclaration,
       isAsync: (declaration: DeclarationId) => declaration === frontend.asyncGeneratorDeclaration
     },

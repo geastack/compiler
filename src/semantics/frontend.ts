@@ -116,6 +116,7 @@ import {
   generatorDeclarationOf,
   asyncGeneratorDeclarationOf,
   mapIteratorDeclarationOf,
+  setIteratorDeclarationOf,
   arrayIteratorDeclarationOf,
   hostProtocolBindings,
   keyedCollectionDeclarationsOf,
@@ -532,6 +533,8 @@ export interface FrontendResult {
   readonly asyncGeneratorDeclaration: DeclarationId | null
   /** The standard `MapIterator<T>` returned by `Map.prototype.entries()`. */
   readonly mapIteratorDeclaration: DeclarationId | null
+  /** The standard `SetIterator<T>` returned by `Set.prototype.values()`/`keys()`. */
+  readonly setIteratorDeclaration: DeclarationId | null
   /** The standard `ArrayIterator<T>` returned by `Array.prototype.entries()`/`keys()`/`values()`. */
   readonly arrayIteratorDeclaration: DeclarationId | null
   /**
@@ -1672,6 +1675,7 @@ const attemptFrontend = (
   const generatorDeclarationEarly = generatorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
   const asyncGeneratorDeclarationEarly = asyncGeneratorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
   const mapIteratorDeclarationEarly = mapIteratorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
+  const setIteratorDeclarationEarly = setIteratorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
   const arrayIteratorDeclarationEarly = arrayIteratorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
   const standardBuffers = standardBufferDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   const wellKnownSymbols = wellKnownSymbolDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
@@ -1848,6 +1852,7 @@ const attemptFrontend = (
     generatorDeclaration: generatorDeclarationEarly,
     asyncGeneratorDeclaration: asyncGeneratorDeclarationEarly,
     mapIteratorDeclaration: mapIteratorDeclarationEarly,
+    setIteratorDeclaration: setIteratorDeclarationEarly,
     arrayIteratorDeclaration: arrayIteratorDeclarationEarly,
     // Filled below, before normalization reads it, the same way `hosts` is.
     typedArrayDeclarations: typedArrayDeclarationSet,
@@ -2217,6 +2222,7 @@ const attemptFrontend = (
     generatorDeclaration,
     asyncGeneratorDeclaration,
     mapIteratorDeclaration,
+    setIteratorDeclaration: setIteratorDeclarationEarly,
     arrayIteratorDeclaration: arrayIteratorDeclarationEarly,
     keyedCollections,
     readOnlyKeyedCollections: readOnlyKeyedCollectionDeclarationsOf(compiled.checker, identities, compiled.sourceFiles),
