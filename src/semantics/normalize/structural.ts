@@ -1819,6 +1819,13 @@ const buildMapper = (
   const keyofOfShapeId = createKeyofResolver(table)
 
   function typeOf(type: ts.Type): StructuralTypeId {
+    // A type the host states absent is `never` wherever it is reached -- an
+    // array's element, a field, a signature's result -- not only as a union
+    // arm or a node's own type: `Array<Image>` holds no value an `Image` could
+    // be, and asking for its element carrier demanded a native boundary for a
+    // class that is not there.
+    const present = absent.substituteAbsentType(type)
+    if (present !== type) return typeOf(present)
     // Every view of one linked object lays out as its instance's canonical
     // member, whose body merges them all -- see `record-link-families.ts`.
     const linked = linkFamilies.storageOf(type)

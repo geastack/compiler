@@ -501,6 +501,22 @@ export const enter = (
   // converted on the way in; converting here would hand the view builder a
   // value it then re-viewed.
   if (answer.source === 'alias') return resolved
+  if (dropsValue(resolved.representation, answer.representation)) {
+    ctx.program.drift.push({
+      block,
+      operation: operation.id,
+      role: operand.role,
+      ordinal: operand.ordinal,
+      source: representationKey(resolved.representation),
+      slot: representationKey(answer.representation),
+      reason:
+        `a value of ${representationKey(resolved.representation)} enters a slot that holds none (${representationKey(answer.representation)}): ` +
+        'its type is uninhabited, as a type the host states absent is, and converting would drop the value',
+      sourceRepresentation: resolved.representation,
+      slotRepresentation: answer.representation
+    })
+    return resolved
+  }
   const caught = caughtHandoffEntry(ctx, block, lineage, operand, resolved, answer.representation)
   if (caught !== null) return caught
   const nullish = nullishOptionalArgumentEntry(ctx, block, lineage, operation, operand, resolved, answer.representation)
