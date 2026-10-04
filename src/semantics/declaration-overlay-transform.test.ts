@@ -653,6 +653,24 @@ export function trailing( count, tag ) { return count; }
   assert.equal(types.get('tag'), 'string')
 })
 
+// three's `PhysicalLightingModel.computeMultiscattering` takes one parameter
+// more than its declaration states, so its defaulted last one sits past the
+// declaration's end. Untagged, it reads as its default; an optional-marker tag
+// would make it `null | undefined` and refuse every Node a caller passes.
+test('a defaulted parameter past the declaration gets no optional marker', () => {
+  const source = `
+export function defaulted( scatter, f0, extra, fallback = null ) { return fallback; }
+`
+  const text = overlayRecord('positions', source)
+  const { types, diagnostics } = parameterTypes('positions', text)
+  assert.doesNotMatch(text, /@param[^\n]*\bfallback\b/)
+  // It reads exactly as it does in the untouched source.
+  assert.equal(types.get('fallback'), parameterTypes('positions', source).types.get('fallback'))
+  // The untagged parameter before it still keeps its optional reading.
+  assert.match(text, /@param \[extra\]/)
+  assert.deepEqual(diagnostics, [])
+})
+
 // three's `FnNode.call( ...params )` met `ShaderNode.call( inputs )` by name:
 // the record the declaration states for ONE argument was published for the
 // array of all of them, and the census and the checker read it differently.

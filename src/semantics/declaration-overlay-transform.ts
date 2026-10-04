@@ -1130,6 +1130,14 @@ const paramLinesFor = (
         if (!written[index]!.endsWith(']')) break
         continue
       }
+      // A parameter with a default is optional with or without a tag, so it
+      // needs no marker -- and one would change its reading, not keep it: the
+      // checker reads `[iridescenceF0]` over `iridescenceF0 = null` as `null |
+      // undefined`, and the body then holds only absence. three's
+      // `PhysicalLightingModel.computeMultiscattering` is declared with one
+      // parameter fewer than it takes, so its last one was marked, and every
+      // `Node` its callers pass was refused.
+      if (parameter.initializer) continue
       if (parameter.type || parameter.dotDotDotToken || !ts.isIdentifier(parameter.name) || ts.getJSDocParameterTags(parameter).length > 0)
         break
       written[index] = ` * @param [${parameter.name.text}]`

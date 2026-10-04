@@ -4,6 +4,7 @@ export declare function inserted(blending: number, blendDst: number, premultiply
 export declare function renamed(value: boolean, depth: number): void
 export declare function swapped(width: number, label: string): void
 export declare function trailing(count: number, tag: string, extra: boolean): void
+export declare function defaulted(scatter: number, fallback?: number | null): void
 export declare function gathered(inputs: { count: number }): void
 export declare function spread(...values: number[]): void
 export declare function listed(...items: string[]): void
