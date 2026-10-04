@@ -1402,6 +1402,12 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     'protocol:iterator:get-iterator:optional(keyed-collection)',
     'protocol:iterator:get-iterator:optional(string)',
     'protocol:iterator:get-iterator:optional(iterator)',
+    // A `never` source, carried storage-free (`producers/shared.ts`'s
+    // `isNeverIterationSource`): the loop cannot run, so the cursor is
+    // `unreachableValue` rather than a constructed walk (`emit-iterator.ts`).
+    // Only a `never` source reaches a cursor step with this carrier; an
+    // `undefined`-typed one has no native cursor and mints a `get-method`.
+    'protocol:iterator:get-iterator:undefined',
     // `for await` over `AsyncGenerator | null` (mongodb's `readMany` over
     // `this.dataEvents`, a field a call may reset): the same presence
     // assertion in front of the same generator cursor.
@@ -1566,6 +1572,9 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // mandatory: a dictionary receiver requires a different key-domain
     // contract, claimed separately below as `dynamic->dictionary(string)`.
     'protocol:spread:next:dynamic->dynamic',
+    // The same walk over a typed source boxed first -- `boxedValueText` refuses by
+    // name a carrier the box has no tag for.
+    'protocol:spread:next:boxed->dynamic',
     'protocol:spread:next:indexed-record<-copyable',
     // The same field-by-field copy into a literal with NO index signature
     // (`emit-allocation.ts`'s `emitSpreadIntoFieldRecord`): every key the

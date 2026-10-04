@@ -389,6 +389,8 @@ export const spreadSourceCarrierKeyOf = (
     if (isDynamicCopyableIntoFieldRecord(deriver, receiver)) return 'field-record<-dynamic'
     return receiver?.kind === 'dictionary' ? `dynamic->dictionary(${receiver.key})` : `dynamic->${receiver?.kind ?? 'absent'}`
   }
+  // A dynamic receiver walks a typed source through its box (`emit-allocation.ts`).
+  if (receiver?.kind === 'dynamic') return 'boxed->dynamic'
   if (spreadFieldRecordReceiverOf(deriver, receiver) !== null)
     return isCopyableIntoFieldRecord(deriver, representation) ? 'field-record<-copyable' : `field-record<-${kind}`
   if (representation.kind === 'dictionary') return dictionaryKind(representation)
