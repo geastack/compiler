@@ -2,16 +2,22 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resolve } from 'node:path'
 import ts from 'typescript'
+import type { StructuralTypeId } from '../../identity/ids.js'
 import { createIdentityTable } from './identities.js'
 import { indexValueFlow } from './flow/value-flow.js'
 import { censusGlobalHostMutations } from './global-host-mutations.js'
 import { censusUnresolvableNames } from './unresolvable-names.js'
 import { wholeProgram } from './reachability.js'
-import { primitivePropertyIsAbsent } from './primitive-property-absence.js'
+import { primitiveArmsLackingProperty, primitivePropertyIsAbsent } from './primitive-property-absence.js'
 import { createStructuralTypeTable } from '../model/structural-type-table.js'
 import { createStructuralMapper } from './structural.js'
 
-const absent = (setup: string, type = 'number | boolean | string', key = 'marker'): boolean => {
+const proofOf = <T>(
+  prove: (expression: ts.Expression, type: StructuralTypeId, key: string, context: Parameters<typeof primitivePropertyIsAbsent>[3]) => T,
+  setup: string,
+  type: string,
+  key: string
+): T => {
   const entry = resolve('test/runtime/primitive-property-absence-input.ts')
   const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022, strict: true }
   const host = ts.createCompilerHost(options)
@@ -46,7 +52,7 @@ const absent = (setup: string, type = 'number | boolean | string', key = 'marker
   )
   const table = createStructuralTypeTable()
   const types = createStructuralMapper(checker, identities, table)
-  return primitivePropertyIsAbsent(expression, types.typeAt(expression), key, {
+  return prove(expression, types.typeAt(expression), key, {
     checker,
     identities,
     table,
@@ -54,6 +60,12 @@ const absent = (setup: string, type = 'number | boolean | string', key = 'marker
     isStandardLibraryDeclaration: (declaration) => program.isSourceFileDefaultLibrary(declaration.getSourceFile())
   })
 }
+
+const absent = (setup: string, type = 'number | boolean | string', key = 'marker'): boolean =>
+  proofOf(primitivePropertyIsAbsent, setup, type, key)
+
+const lackingArms = (setup: string, type: string, key = 'marker'): readonly string[] =>
+  proofOf(primitiveArmsLackingProperty, setup, type, key)
 
 test('missing primitive properties require an intact intrinsic prototype chain', () => {
   assert.equal(absent(''), true)
@@ -88,4 +100,16 @@ test('declared members, indexed characters, augmentations and open receiver arms
   assert.equal(absent('', 'number | { marker: boolean }'), false)
   assert.equal(absent('', 'unknown'), false)
   assert.equal(absent('', 'any'), false)
+})
+
+test('a mixed receiver lists each primitive arm its own intact chain proves absent', () => {
+  assert.deepEqual(lackingArms('', 'string | { marker: boolean }'), ['string'])
+  assert.deepEqual(lackingArms('', 'number | boolean | { marker: boolean }'), ['number', 'boolean'])
+  // Each domain stands on its own chain: patching Number's leaves String's proof.
+  assert.deepEqual(lackingArms('(Number.prototype as any).marker = true;', 'number | string | { marker: boolean }'), ['string'])
+  assert.deepEqual(lackingArms('(Object.prototype as any).marker = true;', 'number | string | { marker: boolean }'), [])
+  assert.deepEqual(lackingArms('', 'string | { length: number }', 'length'), [])
+  assert.deepEqual(lackingArms('', 'string | { valueOf(): number }', 'valueOf'), [])
+  assert.deepEqual(lackingArms('', 'string | { [key: string]: number }', '0'), [])
+  assert.deepEqual(lackingArms('', '{ marker: boolean }'), [])
 })

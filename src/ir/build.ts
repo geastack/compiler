@@ -2,7 +2,7 @@ import type { DeclarationId, FunctionId, IrValueId, PhysicalBodyId, RegionId, Se
 import { irValueId } from '../identity/ids.js'
 import type { CallableAbi, Representation } from '../representation/model.js'
 import type { ConstantLiteral } from '../semantics/model/operands.js'
-import type { SemanticTargetProof } from '../semantics/model/operations.js'
+import type { PrimitiveArmDomain, SemanticTargetProof } from '../semantics/model/operations.js'
 import type { HostMethodBinding } from '../semantics/host-methods.js'
 import type { UnboxedMethodAssumption } from '../projection/method-value-escapes.js'
 import type { TypedComputedReadRecipe, TypedComputedWriteRecipe } from './typed-property-access.js'
@@ -86,7 +86,9 @@ export interface IrBodyBuilder {
     /** See `SetOperation.typedComputedWrite`. */
     typedComputedWrite?: TypedComputedWriteRecipe,
     /** See `SetOperation.provenKeyTexts`. */
-    provenKeyTexts?: readonly string[]
+    provenKeyTexts?: readonly string[],
+    /** See `SetOperation.primitiveArmsLackKey`. */
+    primitiveArmsLackKey?: readonly PrimitiveArmDomain[]
   ) => IrValueId | null
   readonly delete: (
     block: IrBlockId,
@@ -579,7 +581,18 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
-  const set: IrBodyBuilder['set'] = (block, lineage, receiver, key, value, strict, representation, typedComputedWrite, provenKeyTexts) => {
+  const set: IrBodyBuilder['set'] = (
+    block,
+    lineage,
+    receiver,
+    key,
+    value,
+    strict,
+    representation,
+    typedComputedWrite,
+    provenKeyTexts,
+    primitiveArmsLackKey
+  ) => {
     const result = mintOptionalResult(representation)
     append(block, {
       kind: 'set',
@@ -590,7 +603,8 @@ export const createIrBodyBuilder = (
       strict,
       result,
       ...(typedComputedWrite === undefined ? {} : { typedComputedWrite }),
-      ...(provenKeyTexts === undefined ? {} : { provenKeyTexts })
+      ...(provenKeyTexts === undefined ? {} : { provenKeyTexts }),
+      ...(primitiveArmsLackKey === undefined ? {} : { primitiveArmsLackKey })
     })
     return result?.id ?? null
   }

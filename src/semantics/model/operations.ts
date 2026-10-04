@@ -175,6 +175,14 @@ export interface PropertyOperation extends SemanticOperationBase {
   /** Normal completion is known to return absence; receiver evaluation may still throw. */
   readonly normalResult?: 'undefined'
   /**
+   * The primitive domains of a receiver that also holds objects whose intact
+   * prototype chain declares no property under this static key
+   * (`primitiveArmsLackingProperty`): on such an arm `[[Set]]` finds no
+   * setter and answers false. Published for a `[[Set]]`; absent where nothing
+   * is proven.
+   */
+  readonly primitiveArmsLackKey?: readonly PrimitiveArmDomain[]
+  /**
    * A read of a declared host method whose value only a truthiness test
    * consumes (`buf.equals && buf.equals(x)`): the method is always present, so
    * the read is `true` and no function value is materialized.
@@ -189,6 +197,9 @@ export interface PropertyOperation extends SemanticOperationBase {
    */
   readonly descriptor: PropertyDescriptorShape | null
 }
+
+/** A primitive value's domain, as the wrapper whose prototype chain answers its property reads. */
+export type PrimitiveArmDomain = 'string' | 'number' | 'boolean' | 'bigint' | 'symbol'
 
 /** Binding cells: the lexical environment as an explicit value, not an emitter detail. */
 export interface BindingOperation extends SemanticOperationBase {

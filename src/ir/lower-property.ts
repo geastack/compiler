@@ -281,7 +281,8 @@ const lowerPropertyOn = (
         operation.strict,
         optionalResultRepresentation(ctx, operation, 'value'),
         typedComputedWriteRecipeOf(ctx.graph, operation, receiver.representation, ctx.constantDeriver, ctx.program.classes) ?? undefined,
-        operation.provenKeyTexts
+        operation.provenKeyTexts,
+        operation.primitiveArmsLackKey
       )
     }
     case 'define-own-property': {

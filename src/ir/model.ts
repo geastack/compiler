@@ -2,7 +2,7 @@ import type { DeclarationId, FunctionId, IrValueId, OperationId, PhysicalBodyId,
 import type { CallableAbi, Representation } from '../representation/model.js'
 import type { ConstantLiteral } from '../semantics/model/operands.js'
 import type { HostMethodBinding } from '../semantics/host-methods.js'
-import type { SemanticTargetProof } from '../semantics/model/operations.js'
+import type { PrimitiveArmDomain, SemanticTargetProof } from '../semantics/model/operations.js'
 import type { VirtualMemberRole } from '../projection/dispatch.js'
 import type { UnboxedMethodAssumption } from '../projection/method-value-escapes.js'
 import type { NativeEqualityRecipe } from './native-equality.js'
@@ -220,6 +220,15 @@ export interface SetOperation extends IrOperationBase {
   readonly typedComputedWrite?: TypedComputedWriteRecipe
   /** See `GetOperation.provenKeyTexts` -- the same fact, copied for a `[[Set]]`'s own computed key. */
   readonly provenKeyTexts?: readonly string[]
+  /**
+   * The primitive domains of this union receiver whose intact prototype chain
+   * declares no property under the static key -- the semantic proof
+   * (`primitiveArmsLackingProperty`), copied while the graph is open. On such
+   * an arm no setter can run, so `[[Set]]` answers false: a TypeError in
+   * strict code, nothing at all otherwise. An arm whose domain is not listed
+   * has no proof, and the printer keeps refusing it.
+   */
+  readonly primitiveArmsLackKey?: readonly PrimitiveArmDomain[]
 }
 
 export interface DeleteOperation extends IrOperationBase {

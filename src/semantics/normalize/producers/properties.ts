@@ -13,7 +13,7 @@ import {
   type OperandEvaluation,
   type OperandSource
 } from '../../model/operands.js'
-import type { NamespaceKeyedBinding, PropertyOperation } from '../../model/operations.js'
+import type { NamespaceKeyedBinding, PrimitiveArmDomain, PropertyOperation } from '../../model/operations.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { CensusCandidate } from '../census.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
@@ -27,7 +27,7 @@ import { moduleNamespaceOf, namespaceMembersUnderClosedKeyOf } from '../flow/tar
 import { isGlobalFunctionConstructor, isHostMethodPresenceTest, literalMemberNameOf } from '../derived-expression-type.js'
 import { assertsType, enclosingCallIfCallee, outermostErasureOf, unwrapErasedExpression } from './erasure.js'
 import { isScriptGlobalObjectPropertyDeclaration } from '../script-global-redefinition.js'
-import { primitivePropertyIsAbsent } from '../primitive-property-absence.js'
+import { primitiveArmsLackingProperty, primitivePropertyIsAbsent } from '../primitive-property-absence.js'
 import { assertedReceiverArmMayLackMember } from '../asserted-arm-absence.js'
 import { keySetTouches } from '../host-mutation-keys.js'
 import { privateNameKeyText } from '../../model/structural-types.js'
@@ -691,6 +691,13 @@ const buildOperations = (
   // never weaken.
   const provenKeyTexts: readonly string[] | undefined =
     key.computed && ts.isElementAccessExpression(node) ? (context.computedKeyTextsOf?.(node.argumentExpression) ?? undefined) : undefined
+  // Which primitive arms of a mixed receiver provably lack this static key,
+  // asked only for a store -- the proof reads that one key off each domain's
+  // intact chain, so a key known only at run time publishes nothing.
+  const primitiveArmsLackKey = (): readonly PrimitiveArmDomain[] =>
+    !key.computed && key.source.kind === 'constant' && key.source.literal === 'string'
+      ? primitiveArmsLackingProperty(node.expression, context.types.typeAt(node.expression), key.source.text, context)
+      : []
   const guardExpression = optionalChainGuardOf(node)
   const guardSource = guardExpression === null ? null : sourceForValue(context, guardExpression)
   const presentValueType = shortCircuits ? presentValueTypeOf(node, key, valueType, context) : valueType
@@ -828,6 +835,7 @@ const buildOperations = (
   ): PropertyOperation => {
     const id = mintOperationId(context.ordinals, candidate.id, 'property')
     const stored = internalMethod === 'set' ? storedValue() : null
+    const lacking = internalMethod === 'set' ? primitiveArmsLackKey() : []
     const hostMethod = internalMethod === 'get' ? context.hostMethodOf?.(node) : null
     const hostReadType = internalMethod === 'get' ? hostReadTypeOf(context, node) : null
     const intrinsicValue =
@@ -851,6 +859,7 @@ const buildOperations = (
         ? { methodPresenceTest: true as const }
         : {}),
       ...(provenKeyTexts ? { provenKeyTexts } : {}),
+      ...(lacking.length > 0 ? { primitiveArmsLackKey: lacking } : {}),
       id,
       family: 'property',
       internalMethod,

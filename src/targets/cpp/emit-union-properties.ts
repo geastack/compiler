@@ -3,6 +3,7 @@ import { dictionaryKeyDomainOf, representationKey } from '../../representation/m
 import { typedArrayUnionOnly } from '../../representation/host-templates.js'
 import type { IrValueId } from '../../identity/ids.js'
 import type { DefineOwnPropertyOperation, GetOperation, IrBody, IrOperand, SetOperation } from '../../ir/model.js'
+import type { PrimitiveArmDomain } from '../../semantics/model/operations.js'
 import { allOperationsOf } from '../../ir/model.js'
 import { operandsOfIrOperation } from '../../ir/queries.js'
 import {
@@ -304,6 +305,13 @@ const absentArmText = (published: Representation, key: string, arm: string): str
  * mongodb's `decrypted[kDecoratedKeys]` off the nested document
  * `decorateDecryptionResult` recursed into.
  */
+/** The primitive domain an arm's value belongs to, as `PrimitiveArmDomain` names it -- `null` for an object arm. */
+export const primitiveArmDomainOf = (arm: Representation): PrimitiveArmDomain | null => {
+  if (arm.kind === 'string' || arm.kind === 'symbol') return arm.kind
+  if (arm.kind !== 'scalar') return null
+  return arm.domain === 'boolean' || arm.domain === 'bigint' ? arm.domain : 'number'
+}
+
 const unionArmPropertyKeyText = (key: string): string =>
   cppRecordFieldKeyIsSymbol(key)
     ? `gea::PropertyKey::symbol(gea::Symbol(gea::detail::declaredSymbolId<${cppStringLiteral(key)}>()))`
@@ -1487,6 +1495,17 @@ const unionLeafSetText = (
     return operation.strict
       ? `if (${refused}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read only property");`
       : `(void)(${refused});`
+  }
+  // A primitive arm whose chain the semantic proof found without this key
+  // (`SetOperation.primitiveArmsLackKey`): no setter can run, so the store
+  // answers false -- three's `result.outputNode = null` over a `string | Node`
+  // build result. Only a listed domain answers this way; any other primitive
+  // arm still refuses below, since a missing recipe proves nothing.
+  const domain = primitiveArmDomainOf(leaf.representation)
+  if (operation.kind === 'set' && domain !== null && (operation.primitiveArmsLackKey?.includes(domain) ?? false)) {
+    return operation.strict
+      ? `gea::host::throwRuntimeError("TypeError", ${cppStringLiteral(`Cannot create property '${key}' on ${domain}`)});`
+      : `(void)0;`
   }
   const propertyKey = unionArmPropertyKeyText(key)
   const boxedValue = sidecarStoredValueText(operation, rawValueText)
