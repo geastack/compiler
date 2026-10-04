@@ -708,6 +708,7 @@ export const censusFieldBindings = (
     for (const declaration of symbol.declarations ?? [])
       for (const write of flow.writesToDeclaration(declaration)) if (isFieldEvidence(write) && write.value) writes.add(write.value)
     for (const write of receiverTypedWritesOf(symbol)) writes.add(write)
+    for (const root of joinedRoots.get(symbol) ?? []) for (const write of writesOf(root)) writes.add(write)
     return [...writes]
   }
 
@@ -1004,12 +1005,75 @@ export const censusFieldBindings = (
   }
   /** `getSymbolAtLocation` for a member read, falling back to the census-resolved receiver's own member when the checker names none. */
   const memberSymbolAt = (node: ts.PropertyAccessExpression): ts.Symbol | null => {
-    const named = checker.getSymbolAtLocation(node)
-    if (named) return named
-    const receiver = knownOrResolve(node.expression)
-    return receiver ? memberSymbolOf(receiver, node.name.text) : null
+    let named = checker.getSymbolAtLocation(node) ?? null
+    if (!named) {
+      const receiver = knownOrResolve(node.expression)
+      named = receiver ? memberSymbolOf(receiver, node.name.text) : null
+    }
+    return named ? (canonicalFieldSymbol(named) ?? named) : null
   }
 
+  /**
+   * The one symbol a field's census cell is keyed by, or why a member symbol
+   * has none. A member read through a class-typed receiver outside the class
+   * is the checker's transient copy of the member (instantiated for that
+   * receiver's `this`), not the symbol `this.x` names inside the class, and
+   * each files its own writes. Keyed by the copy, the cell joined only the
+   * writes filed under it: three's `node.value` through a `Node` receiver
+   * missed `InputNode`'s `this.value = value` -- filed under the real symbol,
+   * and by declaration under InputNode's own assignment -- and typed the
+   * field without its number/boolean/null arms, which the emitter then
+   * unboxed unchecked. The copy is keyed by its one root symbol (the
+   * checker's own map back from an instantiation) when the root declares
+   * everything the copy does. A copy whose root does not is refused rather
+   * than kept as a partial cell, and so is an instantiation of a generic class:
+   * the root holds the unsubstituted type parameters, so it cannot stand in
+   * for what this receiver reads. The checker answers a read it types through
+   * the instantiation before this census is asked; one it leaves `any` must
+   * not be answered from a subset of the writes. A member with several roots
+   * (a union's synthesized member) keeps its own cell but joins every root's
+   * writes into it (`joinedRoots`): an `A | B` receiver may hold either, and
+   * the writes through `this` in each class are filed under that class's
+   * root, not under the synthesized symbol. A root that cannot be keyed, or
+   * that a generic class declares, refuses the whole member.
+   */
+  const canonicalSymbols = new Map<ts.Symbol, ts.Symbol | string>()
+  const joinedRoots = new Map<ts.Symbol, readonly ts.Symbol[]>()
+  const declaredByGenericClass = (root: ts.Symbol): boolean => {
+    const parent = (root as ts.Symbol & { readonly parent?: ts.Symbol }).parent
+    return (
+      parent !== undefined &&
+      (parent.flags & ts.SymbolFlags.Class) !== 0 &&
+      ((checker.getDeclaredTypeOfSymbol(parent) as ts.InterfaceType).typeParameters?.length ?? 0) > 0
+    )
+  }
+  const canonicalOf = (symbol: ts.Symbol): ts.Symbol | string => {
+    if ((symbol.flags & ts.SymbolFlags.Transient) === 0) return symbol
+    const cached = canonicalSymbols.get(symbol)
+    if (cached !== undefined) return cached
+    // A root that leads back here is no key at all.
+    canonicalSymbols.set(symbol, 'transient-member-symbol')
+    const roots = checker.getRootSymbols(symbol).filter((root) => root !== symbol)
+    let answer: ts.Symbol | string = symbol
+    const [root] = roots
+    if (root !== undefined && roots.length === 1) {
+      const declarations = new Set(root.declarations ?? [])
+      if (!(symbol.declarations ?? []).every((declaration) => declarations.has(declaration))) answer = 'transient-member-symbol'
+      else if (declaredByGenericClass(root)) answer = 'transient-member-symbol-generic'
+      else answer = root
+    } else if (roots.length > 1) {
+      const keyed = roots.map((each) => (declaredByGenericClass(each) ? 'transient-member-symbol' : canonicalOf(each)))
+      const cells = keyed.filter((each): each is ts.Symbol => typeof each !== 'string')
+      if (cells.length !== keyed.length) answer = 'transient-member-symbol'
+      else joinedRoots.set(symbol, [...new Set(cells)])
+    }
+    canonicalSymbols.set(symbol, answer)
+    return answer
+  }
+  const canonicalFieldSymbol = (symbol: ts.Symbol): ts.Symbol | null => {
+    const canonical = canonicalOf(symbol)
+    return typeof canonical === 'string' ? null : canonical
+  }
   const attribute = (symbol: ts.Symbol, reason: string): null => {
     if (!refusalOf.has(symbol)) refusalOf.set(symbol, reason)
     return null
@@ -1021,7 +1085,9 @@ export const censusFieldBindings = (
    * by `resolvingSymbols` so a field whose write reads itself (or another
    * field/cell whose write reads this one) refuses instead of looping.
    */
-  const resolveSymbol = (symbol: ts.Symbol): ts.Type | null => {
+  const resolveSymbol = (asked: ts.Symbol): ts.Type | null => {
+    const symbol = canonicalOf(asked)
+    if (typeof symbol === 'string') return isCandidateSymbol(checker, asked) ? attribute(asked, symbol) : null
     const already = bound.get(symbol)
     if (already) return already
     if (unionArms.has(symbol)) return null
@@ -1348,7 +1414,7 @@ export const censusFieldBindings = (
   const visit = (node: ts.Node): void => {
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(node.left)) {
       const symbol = checker.getSymbolAtLocation(node.left)
-      if (symbol && isCandidateSymbol(checker, symbol)) candidateSymbols.add(symbol)
+      if (symbol && isCandidateSymbol(checker, symbol)) candidateSymbols.add(canonicalFieldSymbol(symbol) ?? symbol)
     }
     // A bare `field;` is a candidate whether or not anything writes it -- one
     // nothing writes must be REFUSED rather than absent, or `refusals` stops
@@ -1433,7 +1499,7 @@ export const censusFieldBindings = (
           : ts.isElementAccessExpression(node)
             ? checker.getSymbolAtLocation(node)
             : undefined
-    return symbol ? (statedBindings.get(symbol) ?? null) : null
+    return symbol ? (statedBindings.get(canonicalFieldSymbol(symbol) ?? symbol) ?? null) : null
   }
 
   return {
@@ -1442,7 +1508,7 @@ export const censusFieldBindings = (
     statedTypeAt,
     boundCount: bound.size + unionArms.size,
     refusals,
-    refusalOf: (symbol) => refusalOf.get(symbol) ?? null
+    refusalOf: (symbol) => refusalOf.get(canonicalFieldSymbol(symbol) ?? symbol) ?? null
   }
 }
 
