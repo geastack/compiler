@@ -246,7 +246,8 @@ const lowerPropertyOn = (
         callableOwnPrototype,
         operation.normalResult,
         typedComputedRead ?? undefined,
-        operation.provenKeyTexts
+        operation.provenKeyTexts,
+        operation.primitiveArmsLackKey
       )
       const value =
         held === null

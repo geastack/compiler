@@ -13,7 +13,7 @@ import {
   deferredTypedArrayMethodClaim
 } from '../emit-carrier-members.js'
 import { deferredArrayBufferMethodClaim, deferredDataViewMethodClaim } from '../emit-buffers.js'
-import { deferredTypedArrayUnionMethodClaim, deferredUnionToStringClaim } from '../emit-union-properties.js'
+import { deferredTypedArrayUnionMethodClaim, deferredUnionToStringClaim, primitiveArmDomainOf } from '../emit-union-properties.js'
 import { isDeclaredStringPrototypeKey } from '../emit-carrier-members.js'
 import { objectPrototypeMemberNames } from '../../../representation/record-fields.js'
 import type { Representation } from '../../../representation/model.js'
@@ -138,7 +138,12 @@ const mixedUnionClaimOf = (ctx: EmitContext, receiver: IrOperand, operation: Get
       answered += 1
       continue
     }
-    if (inheritedByEveryObject || !armHasNoCallableMember(arm.value, member)) return null
+    // A primitive arm the semantic proof found without this key
+    // (`GetOperation.primitiveArmsLackKey`, three's `vars.includes` over
+    // `number | Array<NodeVar>`) reads `undefined` (10.1.8.1) just the same.
+    const domain = primitiveArmDomainOf(arm.value)
+    const proven = domain !== null && (operation.primitiveArmsLackKey?.includes(domain) ?? false)
+    if (inheritedByEveryObject || !(proven || armHasNoCallableMember(arm.value, member))) return null
     arms.push(null)
   }
   if (answered === 0) return null

@@ -168,6 +168,13 @@ export interface GetOperation extends IrOperationBase {
    * as the result's `undefined` instead of an expando lookup.
    */
   readonly absentClassArms?: readonly DeclarationId[]
+  /**
+   * `SetOperation.primitiveArmsLackKey`'s fact for a `[[Get]]`: the primitive
+   * domains of this union receiver whose intact chain declares no property
+   * under the static key, so the read answers `undefined` there (10.1.8.1).
+   * Copied while the semantic graph is open; an unlisted arm has no proof.
+   */
+  readonly primitiveArmsLackKey?: readonly PrimitiveArmDomain[]
   /** A field read whose synthetic ancestor slot was relocated to its real owners. */
   readonly nativeFieldOwnerRead?: import('./native-field-owner.js').NativeFieldOwnerRead
   /** Callable identity proved from an unmodified compiler-owned record allocation. */

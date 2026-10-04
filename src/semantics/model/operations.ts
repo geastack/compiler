@@ -178,8 +178,8 @@ export interface PropertyOperation extends SemanticOperationBase {
    * The primitive domains of a receiver that also holds objects whose intact
    * prototype chain declares no property under this static key
    * (`primitiveArmsLackingProperty`): on such an arm `[[Set]]` finds no
-   * setter and answers false. Published for a `[[Set]]`; absent where nothing
-   * is proven.
+   * setter and answers false, and `[[Get]]` answers `undefined`. Published for
+   * a `[[Set]]` and a `[[Get]]`; absent where nothing is proven.
    */
   readonly primitiveArmsLackKey?: readonly PrimitiveArmDomain[]
   /**

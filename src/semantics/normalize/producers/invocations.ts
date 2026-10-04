@@ -5,7 +5,7 @@ import { intrinsicPropertyCallOf } from '../intrinsic-property-call.js'
 import { contributeObjectTag } from './object-tag.js'
 import { isIntrinsicAccessorGetterPart } from '../intrinsic-accessor-getter.js'
 import { bagShapeTypeAt } from '../object-bag-bindings.js'
-import { isFabricatedSignatureShape, structuralCallSignatures } from '../structural-callable.js'
+import { isFabricatedSignatureShape, presentCallSignatures, structuralCallSignatures } from '../structural-callable.js'
 import {
   contextualArrayConstructTypeAt,
   contextualCollectionTypeAt,
@@ -1867,7 +1867,7 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     const fabricatedNativeCall =
       signature !== undefined &&
       isFabricatedSignatureShape(context.checker, signature) &&
-      structuralCallSignatures(context.table, calleeType) !== null
+      presentCallSignatures(context.table, calleeType) !== null
     if (calleeIsDynamic || fabricatedNativeCall) {
       signature = undefined
       selectedSignature = null
@@ -2134,7 +2134,7 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // `new` names construct signatures these are not.
     const carriedReturnType =
       selectedSignature === null && ts.isCallExpression(node)
-        ? (structuralCallSignatures(context.table, calleeType)?.[0]?.result ?? null)
+        ? (presentCallSignatures(context.table, calleeType)?.[0]?.result ?? null)
         : null
     const censusedCandidate = selectedSignature !== null ? selectedSignature.returnType : carriedReturnType
     const censusedReturnType =

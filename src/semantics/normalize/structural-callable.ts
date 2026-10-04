@@ -25,6 +25,26 @@ export const structuralCallSignatures = (
   return arms.length && arms.every((arm) => arm !== null) ? arms.flatMap((arm) => arm ?? []) : null
 }
 
+/**
+ * The call signatures a call through `id` can COMPLETE with. An absent arm
+ * (`undefined`/`null`) is not callable, so the call throws a TypeError there
+ * before any result exists (7.3.14 Call, step 2): three's `vars.includes( v )`
+ * over `number | Array<NodeVar>`, whose callee reads `includes | undefined`,
+ * returns only what the present arm's `includes` returns.
+ */
+export const presentCallSignatures = (table: StructuralTypeTable, id: StructuralTypeId): readonly SignatureShape[] | null => {
+  const shape = table.get(id).shape
+  if (shape.kind !== 'union') return structuralCallSignatures(table, id)
+  const absent = (member: StructuralTypeId): boolean => {
+    const arm = table.get(member).shape
+    return arm.kind === 'primitive' && (arm.primitive === 'undefined' || arm.primitive === 'null')
+  }
+  const present = shape.members.filter((member) => !absent(member))
+  if (present.length === 0 || present.length === shape.members.length) return structuralCallSignatures(table, id)
+  const arms = present.map((member) => structuralCallSignatures(table, member))
+  return arms.every((arm) => arm !== null) ? arms.flatMap((arm) => arm ?? []) : null
+}
+
 /** A native constructor choice returns every arm's instance, even when the checker merges their identical shapes. */
 export const createStructuralConstructResultResolver = (
   table: StructuralTypeTable,

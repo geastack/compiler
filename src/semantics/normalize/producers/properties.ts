@@ -692,8 +692,8 @@ const buildOperations = (
   const provenKeyTexts: readonly string[] | undefined =
     key.computed && ts.isElementAccessExpression(node) ? (context.computedKeyTextsOf?.(node.argumentExpression) ?? undefined) : undefined
   // Which primitive arms of a mixed receiver provably lack this static key,
-  // asked only for a store -- the proof reads that one key off each domain's
-  // intact chain, so a key known only at run time publishes nothing.
+  // asked for a store and a read -- the proof reads that one key off each
+  // domain's intact chain, so a key known only at run time publishes nothing.
   const primitiveArmsLackKey = (): readonly PrimitiveArmDomain[] =>
     !key.computed && key.source.kind === 'constant' && key.source.literal === 'string'
       ? primitiveArmsLackingProperty(node.expression, context.types.typeAt(node.expression), key.source.text, context)
@@ -835,7 +835,7 @@ const buildOperations = (
   ): PropertyOperation => {
     const id = mintOperationId(context.ordinals, candidate.id, 'property')
     const stored = internalMethod === 'set' ? storedValue() : null
-    const lacking = internalMethod === 'set' ? primitiveArmsLackKey() : []
+    const lacking = internalMethod === 'set' || internalMethod === 'get' ? primitiveArmsLackKey() : []
     const hostMethod = internalMethod === 'get' ? context.hostMethodOf?.(node) : null
     const hostReadType = internalMethod === 'get' ? hostReadTypeOf(context, node) : null
     const intrinsicValue =
