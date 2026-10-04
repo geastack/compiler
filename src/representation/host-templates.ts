@@ -113,16 +113,35 @@ export const isArrayConstantOf = (kind: Representation['kind']): boolean | null 
 /**
  * A single `%TypedArray%.prototype.set` source: a typed array, read through its
  * own element type, or an Array of numbers, whose holes read as `undefined`
- * (ECMA-262 23.2.3.26 steps 5 and 6). `null` for anything else.
+ * (ECMA-262 23.2.3.26 steps 5 and 6). A `dynamic` source is the boxed value
+ * itself: 23.2.3.26 chooses between those two algorithms by what the value
+ * is, so the runtime makes the same choice from the box
+ * (`gea::typedArraySetFromValue`) rather than the compiler guessing one.
+ * `null` for anything else.
  */
-export const typedArraySetSourceOf = (carrier: Representation): 'typed-array' | 'number-array' | null =>
+export const typedArraySetSourceOf = (carrier: Representation): 'typed-array' | 'number-array' | 'dynamic' | null =>
   carrier.kind === 'typed-array'
     ? 'typed-array'
     : carrier.kind === 'array-object' && carrier.element.kind === 'scalar' && carrier.element.domain === 'number'
       ? 'number-array'
-      : null
+      : carrier.kind === 'dynamic'
+        ? 'dynamic'
+        : null
 
 /** Whether `set` copies from this source: a single source, or a union whose every arm is one. */
 export const typedArraySetSourceAccepted = (carrier: Representation): boolean =>
   typedArraySetSourceOf(carrier) !== null ||
   (carrier.kind === 'tagged-union' && carrier.arms.every((arm) => typedArraySetSourceOf(arm.value) !== null))
+
+/**
+ * Whether `set` copies from this source without walking a box: accepted, and
+ * no single source or arm is `dynamic`. A boxed source is read through the
+ * dynamic protocol ("length", then each index), so whatever it holds needs
+ * the field protocol that an open call boundary demands; only a source read
+ * through its own native storage closes the call's frame.
+ */
+export const typedArraySetSourceStaysNative = (carrier: Representation): boolean =>
+  typedArraySetSourceAccepted(carrier) &&
+  (carrier.kind === 'tagged-union'
+    ? carrier.arms.every((arm) => typedArraySetSourceOf(arm.value) !== 'dynamic')
+    : typedArraySetSourceOf(carrier) !== 'dynamic')

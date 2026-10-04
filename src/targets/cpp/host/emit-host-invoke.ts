@@ -10,7 +10,8 @@ import {
   isFloatStorageValue,
   operandText,
   paddedArguments,
-  type EmitContext, typedArrayConstructorGuardText
+  type EmitContext,
+  typedArrayConstructorGuardText
 } from '../emit-context.js'
 import { consoleArgumentsText, toStringRefusal, toStringText, toStringTextOver } from '../emit-tostring.js'
 import { classToNumberText, classToPrimitiveOf, toNumberRefusal, toNumberText } from '../emit-tonumber.js'
@@ -1383,6 +1384,14 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
       `if (${operandText(ctx, source)}) gea::appendSetRange(*gea_from, *${operandText(ctx, source)}); return gea_from; }())`
     )
   }
+  // A boxed source states at run time whether it is iterable, which is the
+  // only thing 23.1.2.1 asks of it (GetMethod(@@iterator), else array-like),
+  // so `gea::arrayFromValue` makes that choice from the box and yields boxed
+  // elements. Only an Array of boxed values can hold them unconverted, and a
+  // mapper would need its own parameter convention per element, so both
+  // still refuse. three's `Array.from( image.data )` reads an `any` field.
+  if (carrier.kind === 'dynamic' && !callback && result.element.kind === 'dynamic')
+    return `gea::arrayFromValue(${operandText(ctx, source)})`
   throw createCppEmitBlockedError(
     'host-member-call:ArrayConstructor.from',
     `"Array.from" of a "${representationKey(carrier)}" source needs an iterable protocol this backend does not lower`

@@ -5,7 +5,7 @@ import { transfersNativeStorage, type ConversionCapability } from '../conversion
 import type { RecordField, Representation } from '../representation/model.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { isNativeCallableCarrier } from '../representation/callable-object.js'
-import { isArrayConstantOf, typedArraySetSourceAccepted } from '../representation/host-templates.js'
+import { isArrayConstantOf, typedArraySetSourceStaysNative } from '../representation/host-templates.js'
 import { abiOfCallee, constructAbiOfCallee } from '../projection/callee.js'
 import type { ClassLayout } from '../projection/classes.js'
 import { declaredFieldRepresentationOf, recordFieldsOfShape, recordLayoutPolicyOf } from '../projection/fields.js'
@@ -331,7 +331,10 @@ export const nativeCallFrameOf = (
  *   offset)` for an array of numbers, an `is<i>()`/`get<i>()` chain over a
  *   union of only those, and the offset operand's own text as the runtime's
  *   `double`. The expression's value is `gea::Undefined{}`. A third argument is
- *   never read; it is refused here rather than argued about.
+ *   never read; it is refused here rather than argued about. A `dynamic`
+ *   source also renders (`gea::typedArraySetFromValue`), but it is walked
+ *   through the dynamic protocol, so it never closes this frame
+ *   (`typedArraySetSourceStaysNative`).
  * - `object-assign` -- `assignText` (emit-host-object.ts), which returns the
  *   target itself. Into a Function object (`assignIntoCallableText`) each
  *   source field is stored through `callableDynamicSet` after the conversion
@@ -405,7 +408,7 @@ export const hostTemplateFrameOf = (
     return (
       source !== undefined &&
       operation.arguments.length <= 2 &&
-      typedArraySetSourceAccepted(source.representation) &&
+      typedArraySetSourceStaysNative(source.representation) &&
       (offset === undefined || (offset.representation.kind === 'scalar' && offset.representation.domain === 'number')) &&
       (result === undefined || result.kind === 'undefined' || result.kind === 'void')
     )

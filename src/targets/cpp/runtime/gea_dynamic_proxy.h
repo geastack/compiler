@@ -242,6 +242,112 @@ inline Value dynamicAdd(const Value& left, const Value& right) {
   return Value::box(Value::Tag::Number, dynamicToNumber(a) + dynamicToNumber(b));
 }
 
+namespace detail {
+/** ECMA-262 7.1.20 ToLength over an already-converted Number: NaN and negatives are 0, the rest clamp to 2^53 - 1. */
+inline std::size_t arrayLikeLength(double length) {
+  if (!(length > 0)) return 0;
+  return static_cast<std::size_t>(std::min(std::floor(length), 9007199254740991.0));
+}
+
+template <typename Target, typename Element>
+inline bool typedArraySetFromBoxedAs(TypedArray<Target>& target, const Value& source, double offset) {
+  using Handle = gea::Ref<TypedArray<Element>>;
+  if (source.payloadType() != payloadTypeTagFor<Handle>()) return false;
+  const Handle& view = source.as<Handle>();
+  if (!view) return false;
+  target.setFrom(*view, offset);
+  return true;
+}
+}  // namespace detail
+
+/**
+ * `%TypedArray%.prototype.set(source, offset)` (ECMA-262 23.2.3.26) from a
+ * source whose carrier is `dynamic`. The specification chooses the algorithm
+ * from the value itself, so this does too: a boxed typed array of any element
+ * type is copied through its own element type by the same `setFrom` a
+ * statically typed source takes (SetTypedArrayFromTypedArray, overlap and
+ * all), and every other value is SetTypedArrayFromArrayLike (23.2.3.26.2):
+ * ToObject, LengthOfArrayLike, the range check, then one [[Get]] and one
+ * ToNumber per index, in index order, each written as it is read. three's
+ * `previousBoneMatrices.set( skeleton.boneMatrices )` reaches here with the
+ * skeleton read off an untyped callback argument.
+ *
+ * The offset follows `setFrom`'s rule (a named abort for a value that is not
+ * an index, and for a source that would run past the end) so the two paths
+ * cannot disagree on a RangeError.
+ */
+template <typename T>
+inline void typedArraySetFromValue(TypedArray<T>& target, const Value& source, double offset) {
+  if (detail::typedArraySetFromBoxedAs<T, std::uint8_t>(target, source, offset) || detail::typedArraySetFromBoxedAs<T, std::int8_t>(target, source, offset) ||
+      detail::typedArraySetFromBoxedAs<T, ClampedUint8>(target, source, offset) || detail::typedArraySetFromBoxedAs<T, std::int16_t>(target, source, offset) ||
+      detail::typedArraySetFromBoxedAs<T, std::uint16_t>(target, source, offset) ||
+      detail::typedArraySetFromBoxedAs<T, std::int32_t>(target, source, offset) ||
+      detail::typedArraySetFromBoxedAs<T, std::uint32_t>(target, source, offset) || detail::typedArraySetFromBoxedAs<T, float>(target, source, offset) ||
+      detail::typedArraySetFromBoxedAs<T, double>(target, source, offset))
+    return;
+  const std::size_t start = detail::typedArrayLengthIndex(offset);
+  // Step 4's ToObject: the only values it rejects are null and undefined.
+  if (source.tag() == Value::Tag::Null || source.tag() == Value::Tag::Undefined)
+    host::throwRuntimeError("TypeError", "Cannot convert undefined or null to object");
+  const std::size_t count = detail::arrayLikeLength(dynamicToNumber(source.getProperty(PropertyKey::string("length"))));
+  if (start > target.size() || count > target.size() - start) {
+    std::fprintf(stderr, "gea: TypedArray.prototype.set source of length %zu at offset %zu does not fit a view of length %zu (RangeError)\n", count, start,
+                 target.size());
+    gea::detail::abortAfterFlush();
+  }
+  // TypedArraySetElement (10.4.5.16) converts before it checks the index, and
+  // drops the write when a conversion's side effect left the index invalid --
+  // exactly `setElementAtIndex`.
+  for (std::size_t index = 0; index < count; ++index) {
+    const double number = dynamicToNumber(source.getProperty(PropertyKey::number(static_cast<double>(index))));
+    target.setElementAtIndex(static_cast<long long>(start + index), number);
+  }
+}
+
+/**
+ * `Array.from(items)` (ECMA-262 23.1.2.1, no mapper) from a source whose
+ * carrier is `dynamic`, into an Array of boxed values. GetMethod(@@iterator)
+ * decides between the two algorithms: an iterable is drained through its own
+ * iterator, anything else is read as an array-like (ToObject, then
+ * LengthOfArrayLike and one [[Get]] per index -- a hole reads `undefined`).
+ *
+ * A boxed Array or string answers no `@@iterator` from its box, so it takes
+ * the intrinsic iterator `runtime::iterator::getIterator` already supplies for
+ * it (a string iterates by code point, which the array-like path would not).
+ * A boxed typed array refuses a symbol read off its chain by design; its
+ * intrinsic `@@iterator` (unless the box holds its own) is
+ * `%TypedArray%.prototype.values`, which visits exactly the indices below its
+ * length, so it reads as the array-like it also is. three's
+ * `Array.from( image.data )` over a DataTexture's pixel array reaches here.
+ */
+inline gea::Ref<ArrayObject<Value>> arrayFromValue(const Value& items) {
+  if (items.tag() == Value::Tag::Null || items.tag() == Value::Tag::Undefined)
+    host::throwRuntimeError("TypeError", "Array.from requires an iterable or array-like object, not null or undefined");
+  auto out = gea::makeRef<ArrayObject<Value>>();
+  const PropertyKey iteratorKey = PropertyKey::symbol(wellKnownSymbol(detail::WellKnownSymbol::Iterator));
+  detail::BoxedByteBlockBrand brand;
+  PropertyDescriptor own;
+  const bool typedArray = detail::boxedByteBlockBrand(items, brand) && brand.kind == detail::BoxedByteBlockBrand::Kind::TypedArray &&
+                          !items.ownDescriptor(iteratorKey, own);
+  if (!typedArray) {
+    const Value method = items.getProperty(iteratorKey);
+    if (method.tag() != Value::Tag::Undefined && method.tag() != Value::Tag::Null) {
+      if (method.tag() != Value::Tag::Function) host::throwRuntimeError("TypeError", "Array.from source's Symbol.iterator is not a function");
+      const Value iterator = method.callWithReceiver(items, {});
+      if (!isObjectValue(iterator)) host::throwRuntimeError("TypeError", "Result of the Symbol.iterator method is not an object");
+      runtime::iterator::appendGather(*out, iterator);
+      return out;
+    }
+    if (items.isArrayPayload() || items.tag() == Value::Tag::String) {
+      runtime::iterator::appendGather(*out, items.tag() == Value::Tag::String ? runtime::iterator::stringIterator(items) : runtime::iterator::arrayIterator(items));
+      return out;
+    }
+  }
+  const std::size_t length = detail::arrayLikeLength(dynamicToNumber(items.getProperty(PropertyKey::string("length"))));
+  for (std::size_t index = 0; index < length; ++index) out->push(items.getProperty(PropertyKey::number(static_cast<double>(index))));
+  return out;
+}
+
 inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
   if (key.isSymbol()) return Value();
   using Args = gea::Ref<ArrayObject<Value>>;

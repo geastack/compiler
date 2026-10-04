@@ -659,21 +659,19 @@ export const typedArrayCallText = (
   const carrier = source.representation
   // Two sources, two ECMA-262 algorithms (23.2.3.26 steps 5 and 6), and the
   // difference is real: a typed-array source is read through its own element
-  // type, while an Array source may hold HOLES that read as `undefined`.
+  // type, while an Array source may hold HOLES that read as `undefined`. A
+  // boxed source carries which of the two it is, so the runtime picks.
+  const sourceSetText = (kind: ReturnType<typeof typedArraySetSourceOf>, value: string): string =>
+    kind === 'typed-array'
+      ? `(${receiver}->setFrom(*${value}, ${offset}), gea::Undefined{})`
+      : kind === 'number-array'
+        ? `(${receiver}->setFromArray(${value}, ${offset}), gea::Undefined{})`
+        : `(gea::typedArraySetFromValue(*${receiver}, ${value}, ${offset}), gea::Undefined{})`
   const single = typedArraySetSourceOf(carrier)
-  if (single === 'typed-array') {
-    return `(${receiver}->setFrom(*${operandText(ctx, source)}, ${offset}), gea::Undefined{})`
-  }
-  if (single === 'number-array') {
-    return `(${receiver}->setFromArray(${operandText(ctx, source)}, ${offset}), gea::Undefined{})`
-  }
+  if (single !== null) return sourceSetText(single, operandText(ctx, source))
   if (carrier.kind === 'tagged-union' && typedArraySetSourceAccepted(carrier)) {
     const sourceText = operandText(ctx, source)
-    const branches = carrier.arms.map((arm, index) => {
-      const value = `${sourceText}.get<${index}>()`
-      if (typedArraySetSourceOf(arm.value) === 'typed-array') return `(${receiver}->setFrom(*${value}, ${offset}), gea::Undefined{})`
-      return `(${receiver}->setFromArray(${value}, ${offset}), gea::Undefined{})`
-    })
+    const branches = carrier.arms.map((arm, index) => sourceSetText(typedArraySetSourceOf(arm.value), `${sourceText}.get<${index}>()`))
     return branches.reduceRight<string>(
       (rest, branch, index) => (index === branches.length - 1 ? branch : `${sourceText}.is<${index}>() ? ${branch} : (${rest})`),
       ''
@@ -682,7 +680,7 @@ export const typedArrayCallText = (
   throw createCppEmitBlockedError(
     'host-member-call:TypedArray.set',
     `TypedArray.prototype.set of element "${element}" received a "${carrier.kind}" source; ECMA-262 23.2.3.26 takes a typed ` +
-      'array or an array-like of numbers, and any other array-like needs the generic length-and-index protocol this backend does not lower'
+      'array, an array of numbers or a boxed value, and any other carrier needs a length-and-index protocol this backend does not lower'
   )
 }
 
