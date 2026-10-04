@@ -980,6 +980,22 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     return input.checker.isTypeAssignableTo(own, receiver)
   }
 
+  /**
+   * `x.constructor` is typed `Function`, which has no construct signature, yet
+   * it IS the constructor of the class that allocated `x` -- `x`'s own class or
+   * any class below it. Three's `get type() { return this.constructor.type }`
+   * reads each node class's `static get type()` that way, and when no other
+   * read names a class's static the walk pruned it from under that read.
+   */
+  const instanceConstructorTypesOf = (receiver: ts.Expression): readonly ts.Type[] => {
+    if (!ts.isPropertyAccessExpression(receiver) || receiver.name.text !== 'constructor') return []
+    const instance = input.checker.getNonNullableType(input.checker.getTypeAtLocation(receiver.expression))
+    return (instance.isUnion() ? instance.types : [instance]).flatMap((arm) => {
+      const symbol = (input.checker.getBaseConstraintOfType(arm) ?? arm).getSymbol()
+      return symbol !== undefined && (symbol.flags & ts.SymbolFlags.Class) !== 0 ? [input.checker.getTypeOfSymbol(symbol)] : []
+    })
+  }
+
   const readConstructorKey = (text: string, receiver: ts.Expression): void => {
     // The class's own binding (`Readable.from`, an imported alias of it) is
     // exactly that class -- TypeScript refuses an assignment to it -- and its
@@ -988,7 +1004,10 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     if (named && named.flags & ts.SymbolFlags.Alias) named = input.checker.getAliasedSymbol(named)
     if (named && named.flags & ts.SymbolFlags.Class) return
     const type = input.checker.getNonNullableType(input.checker.getTypeAtLocation(receiver))
-    const arms = (type.isUnion() ? type.types : [type]).filter((arm) => arm.getConstructSignatures().length > 0)
+    const arms = [
+      ...(type.isUnion() ? type.types : [type]).filter((arm) => arm.getConstructSignatures().length > 0),
+      ...instanceConstructorTypesOf(receiver)
+    ]
     if (arms.length === 0) return
     const known = constructorReads.get(text) ?? []
     const fresh = arms.filter((arm) => !known.includes(arm))
