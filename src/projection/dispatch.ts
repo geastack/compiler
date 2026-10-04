@@ -733,6 +733,8 @@ const joinedClassResultOf = (
  * conversion into the slot is printed at the call site, outside every IR body,
  * so the reflection census never sees the class instance it boxes and the
  * box reaches the override with no field dispatcher to read it through.
+ * `joinedRootAbiOf` carries such a box only where the program's calls are
+ * known, so the verdict can hand the census each one.
  */
 const joinedParameterOf = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
@@ -820,6 +822,10 @@ const passedCarrierOf = (
         target.ownership === 'shared-refcount' &&
         extendsClass(classes, value.declaration, target.declaration)
       )
+    // Injection into a declared union's arm (three's `@param
+    // {(NodeFrame|NodeBuilder)} state`, passed a `NodeFrame`) -- but only into
+    // exactly one: a value two arms could take would leave the arm to a guess.
+    if (target.kind === 'tagged-union') return target.arms.filter((arm) => widens(value, arm.value)).length === 1
     return target.kind === 'optional' && target.absence === 'undefined' && (value.kind === 'undefined' || widens(value, target.payload))
   }
   for (const candidate of [...passed, ...declared]) {
@@ -881,6 +887,28 @@ const joinedRootAbiOf = (
     // too), and one some call passes takes the arguments' own carrier.
     const passed = calls?.flatMap((call) => (call.length > position ? [call[position]!] : [])) ?? null
     if (optional === null && passed !== null && passed.length === 0) break
+    // Every implementor that declares the position holds the same box (three's
+    // `VarNode.getArrayCount( builder )`, untagged, against a root with no
+    // formal): the slot carries that box, so each call converts into it as a
+    // direct call to the override would. That conversion is printed at the call
+    // site, outside every IR body, so the verdict hands each passed carrier to
+    // the census as a protocol boundary -- which is why the calls must be known.
+    const box = values[0]
+    if (
+      optional === null &&
+      box !== undefined &&
+      box.kind === 'dynamic' &&
+      admitsUndefined(box) &&
+      values.every((value) => representationKey(value) === representationKey(box)) &&
+      passed !== null &&
+      passed.every(
+        (value) => value.kind !== 'void' && value.kind !== 'unresolved' && virtualValueConvertible(classes, conversions, value, box)
+      )
+    ) {
+      const declarer = declared.find((abi) => abi.parameters[position] !== undefined)!.parameters[position]!
+      parameters.push(declarer)
+      continue
+    }
     const value =
       optional ??
       (calls === null || passed === null
@@ -1009,6 +1037,15 @@ export const virtualDispatchVerdictOf = (
       nativeFieldProtocolUnused = false
       protocolBoundaries.push({ source, target })
     }
+    // A position past the root's own formals is not in the checker's signature
+    // of the member, so the lowering passes the argument as it is and the
+    // printer converts it into the slot at the call -- a conversion no IR body
+    // holds. The census reads it here, as it reads the adapter's.
+    const ownWidth = ownRootAbi?.parameters.length ?? rootAbi.parameters.length
+    for (const call of calls ?? []) {
+      for (let position = ownWidth; position < Math.min(call.length, rootAbi.parameters.length); position++)
+        observeProtocol(call[position]!, rootAbi.parameters[position]!.value)
+    }
     for (const implementor of family.implementors) {
       const actualAbi = abiOf(implementor.callable)
       if (actualAbi === null) {
@@ -1091,8 +1128,15 @@ export const virtualDispatchVerdictOf = (
       // The refusal surfaces downstream only as "needs dynamic dispatch" at
       // each read of the member; this names why the family has no member.
       const filter = process.env['GEA_VIRTUAL_FAMILY_DEBUG']
-      if (filter !== undefined && (filter === '*' || filter === family.key))
-        console.error(`[VIRTUAL-FAMILY] ${family.root}.${family.key}: ${incompatible}`)
+      if (filter !== undefined && (filter === '*' || filter === family.key)) {
+        // What the slot's calls pass is what decided its length, so a refusal
+        // over a formal the root leaves out is traced only with them.
+        const passed =
+          calls === null
+            ? 'unknown'
+            : calls.map((call) => `(${call.map((value) => representationKey(value)).join(', ')})`).join(' ') || 'none'
+        console.error(`[VIRTUAL-FAMILY] ${family.root}.${family.key}: ${incompatible}; calls through the slot pass ${passed}`)
+      }
       refused.push({
         key: family.key,
         role: family.role,
