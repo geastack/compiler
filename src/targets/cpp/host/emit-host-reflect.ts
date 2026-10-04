@@ -154,7 +154,7 @@ export const nativeReflectCallText = (ctx: EmitContext, operation: CallOperation
     }
     return (
       `([&]() -> bool { ${prepare} return __gea_callable.functionObjectIdentity()->properties->set(__gea_key, ` +
-      `${boxedValueText(ctx, operation.arguments[2]!, site)}, gea::Value::box(gea::Value::Tag::Function, __gea_callable)); })()`
+      `${boxedValueText(ctx, operation.arguments[2]!, site)}, gea::Value::boxFunction(__gea_callable)); })()`
     )
   }
   // Pattern is native, not a generated record, but its `lastIndex` hook is

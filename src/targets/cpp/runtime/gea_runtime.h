@@ -5022,6 +5022,28 @@ struct RestRebaseAdmits<std::tuple<Ref<ArrayObject<Element>>>, std::tuple<Source
   using element = Element;
 };
 
+/**
+ * Whether a physical argument list ends in the carrier a rest parameter lowers
+ * to. `(a, xs: T[])` and `(a, ...xs: T[])` are this one C++ type, so for these
+ * lists alone a boxed dynamic call depends on a fact the type cannot carry:
+ * which convention the function object was CREATED with
+ * (`CallableObject::statedRestOf`).
+ */
+template <typename T>
+struct IsRestArrayCarrier : std::false_type {};
+
+template <typename Element>
+struct IsRestArrayCarrier<Ref<ArrayObject<Element>>> : std::true_type {};
+
+template <typename... Arguments>
+struct EndsInRestArray : std::false_type {};
+
+template <typename Last>
+struct EndsInRestArray<Last> : IsRestArrayCarrier<std::remove_cvref_t<Last>> {};
+
+template <typename First, typename Second, typename... Rest>
+struct EndsInRestArray<First, Second, Rest...> : EndsInRestArray<Second, Rest...> {};
+
 namespace host {
 [[noreturn]] inline void throwRuntimeError(const char* kind, const std::string& message);
 }
@@ -5034,6 +5056,10 @@ struct CallableObject<Result(Arguments...)> {
   }
 
   using Invoke = Result (*)(void*, Arguments...);
+
+  /** See `statedRestOf`. */
+  static constexpr int restUnstated = -2;
+  static constexpr bool restTailed = EndsInRestArray<Arguments...>::value;
 
   /**
    * The three per-declaration static facts ECMA-262 attaches to a function
@@ -5113,12 +5139,18 @@ struct CallableObject<Result(Arguments...)> {
     }};
   }
 
-    template <typename Source, typename Adapter>
+  // `RestFrom` is the adapted view's own convention, which the emitter states
+  // from the slot's ABI where the view ends in an array: the adapter is one
+  // lambda per emitting site, so its registration is one per site too.
+  template <int RestFrom = restUnstated, typename Source, typename Adapter>
   static CallableObject adaptSource(Source source, Adapter adapter) {
     static const SourceRegistration registration{+adapter, {}, 0, {}, +[](void* environment_) -> CallableFacts {
       const auto source = static_cast<const Source*>(environment_)->facts();
       return CallableFacts{source.name, source.text, source.length};
     }};
+    if constexpr (RestFrom != restUnstated) {
+      static const RestRegistration rest{+adapter, RestFrom, nullptr};
+    }
     CallableObject adapted{+adapter, packEnvironment(std::move(source))};
     adapted.shareFunctionObject(*static_cast<const Source*>(adapted.environment));
     return adapted;
@@ -5136,12 +5168,15 @@ struct CallableObject<Result(Arguments...)> {
    * is why this is rendered only for a source whose representation names its one
    * function.
    */
-  template <auto Known, typename Source, typename Adapter>
+  template <auto Known, int RestFrom = restUnstated, typename Source, typename Adapter>
   static CallableObject adaptSourceInPlace(const Source& source, Adapter adapter) {
     static const SourceRegistration registration{+adapter, {}, 0, {}, +[](void* environment_) -> CallableFacts {
       const auto own = Source::factsFor(Known, environment_);
       return CallableFacts{own.name, own.text, own.length};
     }};
+    if constexpr (RestFrom != restUnstated) {
+      static const RestRegistration rest{+adapter, RestFrom, nullptr};
+    }
     CallableObject adapted{+adapter, PackedEnvironment{source.environment, source.environmentOwner, nullptr}};
     adapted.shareFunctionObject(source);
     return adapted;
@@ -5158,6 +5193,76 @@ struct CallableObject<Result(Arguments...)> {
   }
 
   CallableFacts facts() const { return factsFor(invoke, environment); }
+
+  /**
+   * The physical formal a boxed call packs its trailing arguments into, as the
+   * function object's CREATION stated it, for a signature whose last formal is
+   * the array a rest parameter lowers to (`EndsInRestArray`). The C++ type
+   * cannot say it -- `(a, xs: T[])` and `(a, ...xs: T[])` are one
+   * `CallableObject` -- and a box made where no ABI is in view
+   * (`DynamicCarrier::out` handing back a callable a dynamic call returned, a
+   * function's own property read) has nothing else to read it from: three's
+   * TSL `nodeProxy(...).setParameterLength(2)` returns its rest-taking proxy
+   * through exactly such a box, and the next call through it handed the first
+   * argument to the packed-array slot.
+   *
+   * So the fact travels the way `name`/`length` do: registered once per entry
+   * where a function object is minted (`entryWithRest`, spelled by the emitter
+   * from the body's own ABI; the runtime's own adapters below derive theirs
+   * from the source they wrap), and read back by `Value::box`. An entry nothing
+   * registered answers `restUnstated`, and a box of it refuses the dynamic call
+   * by name rather than picking a convention. (`restUnstated` and
+   * `restTailed` are declared beside `Invoke`, ahead of the adapters whose
+   * template defaults name them.)
+   */
+  struct RestRegistration {
+    Invoke entry;
+    int restFrom;
+    int (*resolve)(void*);
+    const RestRegistration* next;
+    RestRegistration(Invoke entry_, int restFrom_, int (*resolve_)(void*)) : entry(entry_), restFrom(restFrom_), resolve(resolve_) {
+      auto& head = restRegistrations();
+      next = head.load(std::memory_order_relaxed);
+      while (!head.compare_exchange_weak(next, this, std::memory_order_release, std::memory_order_relaxed)) {}
+    }
+  };
+
+  static std::atomic<const RestRegistration*>& restRegistrations() {
+    static std::atomic<const RestRegistration*> head{nullptr};
+    return head;
+  }
+
+  // Composes with `entryWithFacts` (`entryWithRest<&thunk, R>(entryWithFacts<&thunk>(...))`):
+  // both hand the entry back, and each registers once per `Entry` at the mint.
+  template <Invoke Entry, int RestFrom>
+  static Invoke entryWithRest(Invoke entry) {
+    static const RestRegistration registration{Entry, RestFrom, nullptr};
+    return entry;
+  }
+
+  // An adapter whose convention is its SOURCE's, reached through the
+  // environment exactly as `registerSourceAdapter`'s facts are.
+  // Only a rest-tailed signature can ask, so no other adapter grows the list.
+  template <Invoke Entry>
+  static void registerRestResolver(int (*resolve)(void*)) {
+    if constexpr (restTailed) {
+      static const RestRegistration registration{Entry, restUnstated, resolve};
+    } else {
+      (void)resolve;
+    }
+  }
+
+  static int statedRestOf(Invoke invoke, void* environment) {
+    for (auto* entry = restRegistrations().load(std::memory_order_acquire); entry; entry = entry->next) {
+      if (entry->entry == invoke) return entry->resolve ? entry->resolve(environment) : entry->restFrom;
+    }
+    return restUnstated;
+  }
+
+  int statedRest() const { return statedRestOf(invoke, environment); }
+
+  /** A source's stated rest seen through a view that drops its leading receiver formal. */
+  static constexpr int restPastReceiver(int source) { return source >= 1 ? source - 1 : source == -1 ? -1 : restUnstated; }
 
   std::string_view sourceText() const { return facts().text; }
   /** ECMA-262 [[Name]] -- the declared name, or the `NamedEvaluation` name from where an anonymous literal was defined; empty when neither applies. */
@@ -5383,6 +5488,8 @@ struct CallableObject<Result(Arguments...)> {
     CallableObject bound{&callBoundReceiver<Receiver>, packEnvironment(Bound{source, std::move(receiver)})};
     bound.shareFunctionObject(source);
     registerSourceAdapter<&callBoundReceiver<Receiver>, Bound>();
+    registerRestResolver<&callBoundReceiver<Receiver>>(
+        +[](void* environment_) -> int { return restPastReceiver(static_cast<const Bound*>(environment_)->source.statedRest()); });
     return bound;
   }
 
@@ -5432,6 +5539,8 @@ struct CallableObject<Result(Arguments...)> {
     CallableObject bound{&callHolder<Held>, packEnvironment(Bound{source, WeakRef<Held>(holder)})};
     bound.shareFunctionObject(source);
     registerSourceAdapter<&callHolder<Held>, Bound>();
+    registerRestResolver<&callHolder<Held>>(
+        +[](void* environment_) -> int { return restPastReceiver(static_cast<const Bound*>(environment_)->source.statedRest()); });
     return bound;
   }
 
@@ -5475,6 +5584,7 @@ struct CallableObject<Result(Arguments...)> {
     }};
     CallableObject bound{&callOwnedHolder<Known, Held>, packTransientEnvironment(HolderEnvironment<Held>{holder})};
     bound.shareFunctionObject(source);
+    registerRestResolver<&callOwnedHolder<Known, Held>>(+[](void*) -> int { return restPastReceiver(Source::statedRestOf(Known, nullptr)); });
     return bound;
   }
 
@@ -5593,6 +5703,9 @@ struct CallableObject<Result(Arguments...)> {
       : CallableObject(&spreadRestOverLeading<SourceResult, SourceArguments...>, packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&spreadRestOverLeading<SourceResult, SourceArguments...>, CallableObject<SourceResult(SourceArguments...)>>();
+    // Its one array IS the argument list it spreads over the source, so this
+    // view takes every argument packed whatever slot it was made for.
+    (void)entryWithRest<&spreadRestOverLeading<SourceResult, SourceArguments...>, 0>(invoke);
   }
 
   /**
@@ -5735,6 +5848,8 @@ struct CallableObject<Result(Arguments...)> {
       : CallableObject(&discardResult<SourceResult>, packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&discardResult<SourceResult>, CallableObject<SourceResult(Arguments...)>>();
+    registerRestResolver<&discardResult<SourceResult>>(
+        +[](void* environment_) -> int { return static_cast<const CallableObject<SourceResult(Arguments...)>*>(environment_)->statedRest(); });
   }
 
   /** The discarding constructor's own thunk: call the source with the SAME arguments the wider call received, and throw away whatever it returns -- there is nothing left to do with it, `Result` being `void`. */
@@ -5822,6 +5937,8 @@ struct CallableObject<Result(Arguments...)> {
       : CallableObject(&widenResultIntoArm<SourceResult>, packEnvironment(source)) {
     shareFunctionObject(source);
     registerSourceAdapter<&widenResultIntoArm<SourceResult>, CallableObject<SourceResult(Arguments...)>>();
+    registerRestResolver<&widenResultIntoArm<SourceResult>>(
+        +[](void* environment_) -> int { return static_cast<const CallableObject<SourceResult(Arguments...)>*>(environment_)->statedRest(); });
   }
 
   /** The same-arity widening constructor's own thunk: call the source with the arguments it already declares, then narrow the result into the arm `ResultWidensIntoArm` proved it is. */
@@ -5971,16 +6088,26 @@ struct CallableObject<Result(Arguments...)> {
  * builds the one shared `CallableObject` on first use -- one per thunk, so a
  * builtin still has exactly one identity however many reads copy it.
  */
-template <typename Signature, auto Entry>
+// `RestFrom` is the builtin's own convention for a signature ending in an
+// array (`Math.max(...values)` packs every argument), stated where its one
+// function object is created like any other (`CallableObject::statedRestOf`).
+// The default states nothing (`CallableObject::restUnstated`): a builtin whose
+// array formal nobody classified refuses a boxed call rather than guessing.
+template <typename Signature, auto Entry, int RestFrom = -2>
 struct HostFunction;
 
-template <typename Result, typename... Arguments, Result (*Entry)(void*, Arguments...)>
-struct HostFunction<Result(Arguments...), Entry> {
+template <typename Result, typename... Arguments, Result (*Entry)(void*, Arguments...), int RestFrom>
+struct HostFunction<Result(Arguments...), Entry, RestFrom> {
   using Carrier = CallableObject<Result(Arguments...)>;
 
   static const Carrier& carrier() {
-    static const Carrier value{Entry, nullptr};
+    static const Carrier value{statedEntry(), nullptr};
     return value;
+  }
+
+  static typename Carrier::Invoke statedEntry() {
+    if constexpr (Carrier::restTailed && RestFrom != Carrier::restUnstated) return Carrier::template entryWithRest<Entry, RestFrom>(Entry);
+    else return Entry;
   }
 
   operator const Carrier&() const { return carrier(); }
@@ -6320,6 +6447,37 @@ struct IsNativeCallableConstructorObject : std::false_type {};
 
 template <typename Result, typename... Arguments, typename Constructed, typename... ConstructArguments>
 struct IsNativeCallableConstructorObject<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>> : std::true_type {};
+
+/**
+ * The `[[Call]]` registry a callable payload's stated rest lives in
+ * (`CallableObject::statedRestOf`), for the payloads whose boxed dispatch
+ * depends on it: a constructor-callable shares its call signature's registry,
+ * because the emitter mints its invoke pointer through that same signature.
+ * An empty carrier holds no function object to have a convention, and keeps
+ * the plain box so it still reads back as the same empty carrier.
+ */
+template <typename T>
+struct CallableRestView {
+  static constexpr bool tailed = false;
+};
+
+template <typename Result, typename... Arguments>
+struct CallableRestView<CallableObject<Result(Arguments...)>> {
+  using View = CallableObject<Result(Arguments...)>;
+  static constexpr bool tailed = View::restTailed;
+  static constexpr int last = static_cast<int>(sizeof...(Arguments)) - 1;
+  static int stated(const View& value) { return value.invoke == nullptr ? -1 : value.statedRest(); }
+};
+
+template <typename Result, typename... Arguments, typename Constructed, typename... ConstructArguments>
+struct CallableRestView<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>> {
+  using View = CallableObject<Result(Arguments...)>;
+  static constexpr bool tailed = View::restTailed;
+  static constexpr int last = static_cast<int>(sizeof...(Arguments)) - 1;
+  static int stated(const CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>& value) {
+    return value.invoke == nullptr ? -1 : View::statedRestOf(value.invoke, value.environment);
+  }
+};
 
 template <typename>
 struct IsNativeConstructorObject : std::false_type {};
@@ -15500,6 +15658,9 @@ template <typename T>
 const NativeCallOps* nativeCallOpsFor();
 template <typename T, std::size_t RestFrom>
 const NativeCallOps* nativeRestCallOpsFor();
+/** `restUnstated` or `restConflict` (`callableMetadataFor`): reflectable, and a boxed call refuses by name. */
+template <typename T, int Refusal>
+const NativeCallOps* nativeRefusedRestCallOpsFor();
 /** The boxed `[[Construct]]` thunk of a native constructor payload, or null (`DynamicConstructSignature`). */
 using NativeConstructThunk = Value (*)(const void* payload, const Value* arguments, std::size_t count);
 template <typename T>
@@ -15831,7 +15992,8 @@ template <typename T, int RestFrom = -1>
 const ValueMetadata* valueMetadataFor() {
   static const ValueMetadata metadata = [] {
     const NativeCallOps* calls;
-    if constexpr (RestFrom < 0) calls = nativeCallOpsFor<T>();
+    if constexpr (RestFrom == -1) calls = nativeCallOpsFor<T>();
+    else if constexpr (RestFrom < -1) calls = nativeRefusedRestCallOpsFor<T, RestFrom>();
     else calls = nativeRestCallOpsFor<T, static_cast<std::size_t>(RestFrom)>();
     return ValueMetadata{nativeFieldOpsFor<T>(), nativePrototypeOpsFor<T>(), calls,
                          nativeArrayOpsFor<T>(), payloadTypeTagFor<T>(), RestFrom,
@@ -15839,6 +16001,29 @@ const ValueMetadata* valueMetadataFor() {
                          nativeConstructFor<T>(), nativeMethodStateOpsFor<T>(), nativePrototypeStateOpsFor<T>()};
   }();
   return &metadata;
+}
+
+/** A box site's rest position contradicts the one the function object's creation stated. */
+inline constexpr int restConflict = -3;
+
+/**
+ * The metadata of one rest-tailed callable box (`CallableRestView`): `stated`
+ * is what the function object's creation registered, `site` what the box site
+ * states (`Value::boxStatingRest`). Creation is the authority; a site may only
+ * fill in for a creation that stated nothing. Neither stating anything leaves
+ * the box `restUnstated` and a contradiction leaves it `restConflict`, and both
+ * refuse a dynamic call by name (`nativeRefusedRestCallOpsFor`) while the box
+ * stays the same function object for identity, reflection and property access.
+ */
+template <typename T>
+const ValueMetadata* callableMetadataFor(int stated, int site) {
+  constexpr int unstated = -2;
+  constexpr int last = CallableRestView<T>::last;
+  const int fact = stated == unstated ? site : site == unstated || site == stated ? stated : restConflict;
+  if (fact == -1) return valueMetadataFor<T>();
+  if (fact == last) return valueMetadataFor<T, last>();
+  if (fact == unstated) return valueMetadataFor<T, unstated>();
+  return valueMetadataFor<T, restConflict>();
 }
 }  // namespace detail
 
@@ -15881,6 +16066,32 @@ class Value {
   /** Boxes a value of any shape. The tag is stated by the caller because C++ type identity is not JavaScript type identity -- a `std::string` is a JS string, but a `gea::Optional<double>` is a JS number or `undefined` depending on the presence flag, and only the emitter knows which. */
   template <typename T>
   static Value box(Tag tag, T&& value) {
+    return boxStatingRest(tag, std::forward<T>(value), -1);
+  }
+
+  /**
+   * A function box made where no call ABI is in view, which therefore states
+   * no rest position of its own and carries the one the function object's
+   * creation stated (`CallableObject::statedRestOf`): a callable a dynamic
+   * call returns (`DynamicCarrier::out`), or a function boxed as the receiver
+   * of its own property access. `box` is the emitter's fixed-arity statement.
+   */
+  template <typename T>
+  static Value boxFunction(T&& callable) {
+    return boxStatingRest(Tag::Function, std::forward<T>(callable), -2);
+  }
+
+  /**
+   * `box`, with the rest position the box SITE states for a rest-tailed
+   * callable (`detail::CallableRestView`): -1 for a fixed-arity site, the
+   * physical rest slot for `boxCallable`, or -2 (`restUnstated`) for a site
+   * that states none. The function object's own creation-time statement wins
+   * where there is one, and a site that contradicts it boxes a callable whose
+   * dynamic call refuses by name (`detail::callableMetadataFor`). Every other
+   * payload ignores it.
+   */
+  template <typename T>
+  static Value boxStatingRest(Tag tag, T&& value, int restSite) {
     // A Document that views another object (`gea::dictionary::aliasOf`) boxes
     // as that object: `any` sees the instance itself -- its identity, its
     // class, its prototype -- and not a table standing in for it.
@@ -15938,7 +16149,12 @@ class Value {
     }
     // Type facts are immutable and shared by every value of this payload
     // type. The exact payload identity and all dispatch tables travel together.
-    result.metadata_ = detail::valueMetadataFor<std::decay_t<T>>();
+    if constexpr (detail::CallableRestView<std::decay_t<T>>::tailed) {
+      result.metadata_ = detail::callableMetadataFor<std::decay_t<T>>(detail::CallableRestView<std::decay_t<T>>::stated(value), restSite);
+    } else {
+      (void)restSite;
+      result.metadata_ = detail::valueMetadataFor<std::decay_t<T>>();
+    }
     detail::registerPromisePayloadType<std::decay_t<T>>();
     detail::registerMapPayloadType<std::decay_t<T>>();
     // When the payload is a `gea::Ref<T>`, retain the allocated object itself.
@@ -15982,7 +16198,7 @@ class Value {
   template <int RestFrom = -1, typename T>
   static Value boxMethod(T&& callable) {
     Value result;
-    if constexpr (RestFrom < 0) result = box(Tag::Function, std::forward<T>(callable));
+    if constexpr (RestFrom < 0) result = boxStatingRest(Tag::Function, std::forward<T>(callable), -1);
     else result = boxCallable<static_cast<std::size_t>(RestFrom)>(std::forward<T>(callable));
     result.receivesThis_ = true;
     return result;
@@ -16218,9 +16434,15 @@ class Value {
    */
   template <std::size_t RestFrom, typename T>
   static Value boxCallable(T&& value) {
-    Value result = box(Tag::Function, std::forward<T>(value));
-    result.metadata_ = detail::valueMetadataFor<std::decay_t<T>, static_cast<int>(RestFrom)>();
-    return result;
+    if constexpr (detail::CallableRestView<std::decay_t<T>>::tailed) {
+      return boxStatingRest(Tag::Function, std::forward<T>(value), static_cast<int>(RestFrom));
+    } else {
+      // A rest slot carried by some other physical carrier (a forwarded
+      // `arguments` record) has no creation-time statement to agree with.
+      Value result = box(Tag::Function, std::forward<T>(value));
+      result.metadata_ = detail::valueMetadataFor<std::decay_t<T>, static_cast<int>(RestFrom)>();
+      return result;
+    }
   }
 
   /** The table behind a dynamic object, or `nullptr` for every other box -- including a `Tag::Object` box holding a record, a class instance or a host handle. */
@@ -18244,14 +18466,14 @@ template <typename Result, typename... Arguments>
 inline bool callableDynamicSet(const CallableObject<Result(Arguments...)>& callable, const PropertyKey& key, const Value& value) {
   const auto& identity = callable.functionObjectIdentity();
   installCallableOwnFacts(identity, callable.name(), callable.length());
-  return identity->properties->set(key, value, Value::box(Value::Tag::Function, callable));
+  return identity->properties->set(key, value, Value::boxFunction(callable));
 }
 
 template <typename Result, typename... Arguments>
 inline Value callableDynamicGet(const CallableObject<Result(Arguments...)>& callable, const PropertyKey& key) {
   const auto& identity = callable.functionObjectIdentity();
   installCallableOwnFacts(identity, callable.name(), callable.length());
-  const Value receiver = Value::box(Value::Tag::Function, callable);
+  const Value receiver = Value::boxFunction(callable);
   if (identity->properties->hasProperty(key)) return identity->properties->get(key, receiver);
   return dynamicFunctionPrototypeGet(key);
 }
@@ -18275,7 +18497,7 @@ inline void installCallableConstructorPrototype(const Callable& callable) {
   installCallableOwnFacts(identity, callable.name(), callable.length());
   const Ref<DynamicObject>& properties = identity->properties;
   if (properties->ownProperty(PropertyKey::string("prototype"))) return;
-  const Value constructor = Value::box(Value::Tag::Function, callable);
+  const Value constructor = Value::boxFunction(callable);
   const Value prototype = Value::object();
   PropertyDescriptor backPointer;
   backPointer.hasValue = backPointer.hasWritable = backPointer.hasEnumerable = backPointer.hasConfigurable = true;
@@ -18318,7 +18540,7 @@ inline Value callableOwnPrototypeGet(const CallableObject<Result(Arguments...)>&
   if (makesConstructor) installCallableConstructorPrototype(callable);
   const PropertyKey key = PropertyKey::string("prototype");
   if (!identity->properties->hasProperty(key)) return Value();
-  return identity->properties->get(key, Value::box(Value::Tag::Function, callable));
+  return identity->properties->get(key, Value::boxFunction(callable));
 }
 
 template <typename Result, typename... Arguments, typename Constructed, typename... ConstructArguments>
@@ -18326,7 +18548,7 @@ inline Value callableDynamicGet(const CallableConstructorObject<Result(Arguments
   const auto& identity = callable.functionObjectIdentity();
   installCallableOwnFacts(identity, callable.name(), callable.length());
   if (!key.isSymbol() && key.text() == "prototype") installCallableConstructorPrototype(callable);
-  const Value receiver = Value::box(Value::Tag::Function, callable);
+  const Value receiver = Value::boxFunction(callable);
   if (identity->properties->hasProperty(key)) return identity->properties->get(key, receiver);
   return dynamicFunctionPrototypeGet(key);
 }
@@ -20190,7 +20412,7 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
   static constexpr bool supported =
     (std::is_void_v<Result> || DynamicCallableCarrier<Result>::supported) &&
     (DynamicCallableCarrier<Arguments>::supported && ...);
-  static Value out(const Self& value) { return Value::box(Value::Tag::Function, value); }
+  static Value out(const Self& value) { return Value::boxFunction(value); }
   static bool accepts(const Value& value) {
     return value.tag() == Value::Tag::Function && value.payloadType() == payloadTypeTagFor<Self>();
   }
@@ -20200,7 +20422,7 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
   // in three's `@return {?boolean}` `Node.update` slot could not answer
   // `null`. See `NullAbsentCallableResult` for what it reads.
   template <bool NullResult = false>
-  static Self in(const Value& value, std::size_t position) { return inAs(value, position, false, -1, &adapt<NullResult>); }
+  static Self in(const Value& value, std::size_t position) { return inAs(value, position, false, -1, stated<&adapt<NullResult>, -1>()); }
 
   /**
    * `in` for a MEMBER read off an object: `stream.once(...)` calls the method
@@ -20213,7 +20435,7 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
    */
   static Self inBound(const Value& value, std::size_t position, const Value& receiver) {
     if (value.tag() != Value::Tag::Function || !value.receivesThis()) return in(value, position);
-    Self adapted(&adaptBound, gea::packEnvironment<BoundMethod>(BoundMethod{value, receiver}));
+    Self adapted(stated<&adaptBound, -1>(), gea::packEnvironment<BoundMethod>(BoundMethod{value, receiver}));
     adapted.shareFunctionObject(value.functionObjectIdentity());
     return adapted;
   }
@@ -20223,7 +20445,7 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     if constexpr (sizeof...(Arguments) == 0) {
       refusePayloadMismatch("a receiver-bearing callable ABI has no physical receiver slot");
     } else {
-      return inAs(value, position, true, -1, &adaptWithReceiver<NullResult>);
+      return inAs(value, position, true, -1, stated<&adaptWithReceiver<NullResult>, -1>());
     }
   }
 
@@ -20232,7 +20454,7 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     static_assert(RestFrom < sizeof...(Arguments), "a rest slot must be a physical callable argument");
     using Rest = std::tuple_element_t<RestFrom, Args>;
     static_assert(DynamicRestArgument<Rest>::supported, "a checked dynamic rest adapter requires ArrayObject<Element>");
-    return inAs(value, position, false, static_cast<int>(RestFrom), &adaptWithRest<RestFrom, NullResult>);
+    return inAs(value, position, false, static_cast<int>(RestFrom), stated<&adaptWithRest<RestFrom, NullResult>, static_cast<int>(RestFrom)>());
   }
 
   template <std::size_t RestFrom, bool NullResult = false>
@@ -20240,10 +20462,19 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     static_assert(RestFrom > 0 && RestFrom < sizeof...(Arguments), "a receiver-bearing rest slot follows the physical receiver");
     using Rest = std::tuple_element_t<RestFrom, Args>;
     static_assert(DynamicRestArgument<Rest>::supported, "a checked dynamic rest adapter requires ArrayObject<Element>");
-    return inAs(value, position, true, static_cast<int>(RestFrom), &adaptWithReceiverAndRest<RestFrom, NullResult>);
+    return inAs(value, position, true, static_cast<int>(RestFrom), stated<&adaptWithReceiverAndRest<RestFrom, NullResult>, static_cast<int>(RestFrom)>());
   }
 
  private:
+  // Each adapter's own convention -- how its body forwards the frame it is
+  // called with -- stated where it is minted, so a box of it carries the
+  // convention it actually has (CallableObject::statedRestOf).
+  template <typename Self::Invoke Entry, int RestFrom>
+  static typename Self::Invoke stated() {
+    if constexpr (Self::restTailed) return Self::template entryWithRest<Entry, RestFrom>(Entry);
+    else return Entry;
+  }
+
   static Self inAs(const Value& value, std::size_t position, bool targetReceivesThis, int targetRestFrom, typename Self::Invoke entry) {
     static_assert(supported, "a checked dynamic callable adapter requires an exact carrier for every frame position");
     if (value.tag() == Value::Tag::Undefined) refuseMissingCallArgument(position);
@@ -21642,6 +21873,29 @@ const NativeCallOps* nativeRestCallOpsFor() {
   } else {
     return nullptr;
   }
+}
+
+/**
+ * A boxed call that cannot know where the callee packs its trailing arguments
+ * (`callableMetadataFor`). Refused like `refuseNotCallable` rather than thrown
+ * as a TypeError: the gap is this runtime's, not the program's, and a
+ * `try`/`catch` in the program must not be able to swallow it.
+ */
+template <typename T, int Refusal>
+const NativeCallOps* nativeRefusedRestCallOpsFor() {
+  static const NativeCallOps ops{
+    +[](const void*, const Value*, std::size_t) -> Value {
+      if constexpr (Refusal == restConflict) {
+        std::fprintf(stderr, "gea: a dynamic call reached a function boxed with a rest position its creation did not state\n");
+      } else {
+        std::fprintf(stderr, "gea: a dynamic call reached a function whose creation stated no rest position for its trailing array\n");
+      }
+      gea::detail::abortAfterFlush();
+    },
+    +[](const void* payload) { return std::string(static_cast<const T*>(payload)->sourceText()); },
+    +[](const void* payload) { return static_cast<const T*>(payload)->name(); },
+    +[](const void* payload) { return static_cast<const T*>(payload)->length(); }};
+  return &ops;
 }
 
 /**
@@ -35947,8 +36201,8 @@ inline constexpr gea::HostFunction<double(double), &detail::atan_invoke> atan{};
 inline constexpr gea::HostFunction<double(double), &detail::sinh_invoke> sinh{};
 inline constexpr gea::HostFunction<double(double), &detail::log_invoke> log{};
 inline constexpr gea::HostFunction<double(), &detail::random_invoke> random{};
-inline constexpr gea::HostFunction<double(gea::Ref<gea::ArrayObject<double>>), &detail::max_invoke> max{};
-inline constexpr gea::HostFunction<double(gea::Ref<gea::ArrayObject<double>>), &detail::min_invoke> min{};
+inline constexpr gea::HostFunction<double(gea::Ref<gea::ArrayObject<double>>), &detail::max_invoke, 0> max{};
+inline constexpr gea::HostFunction<double(gea::Ref<gea::ArrayObject<double>>), &detail::min_invoke, 0> min{};
 // A direct call's already-evaluated numeric operands need no JS array identity.
 // The initializer list borrows native stack storage for this synchronous call.
 inline double maxDirect(std::initializer_list<double> values) {
@@ -35961,7 +36215,7 @@ inline double minDirect(std::initializer_list<double> values) {
   for (double value : values) result = detail::extremumStep<false>(result, value);
   return result;
 }
-inline constexpr gea::HostFunction<double(gea::Ref<gea::ArrayObject<double>>), &detail::hypot_invoke> hypot{};
+inline constexpr gea::HostFunction<double(gea::Ref<gea::ArrayObject<double>>), &detail::hypot_invoke, 0> hypot{};
 // The sixteen members `lib.es2015.core.d.ts` adds to `Math` beyond the ES5 set
 // plus `cbrt`, each over the same exact scalar ABI as the row above. `imul` is
 // the one binary member here; every other is `(x: number) => number`.
@@ -36368,8 +36622,8 @@ inline std::string fromCodePoint_invoke(void*, gea::Ref<gea::ArrayObject<double>
 
 }  // namespace detail
 
-inline constexpr gea::HostFunction<std::string(gea::Ref<gea::ArrayObject<double>>), &detail::fromCharCode_invoke> fromCharCode{};
-inline constexpr gea::HostFunction<std::string(gea::Ref<gea::ArrayObject<double>>), &detail::fromCodePoint_invoke> fromCodePoint{};
+inline constexpr gea::HostFunction<std::string(gea::Ref<gea::ArrayObject<double>>), &detail::fromCharCode_invoke, 0> fromCharCode{};
+inline constexpr gea::HostFunction<std::string(gea::Ref<gea::ArrayObject<double>>), &detail::fromCodePoint_invoke, 0> fromCodePoint{};
 // A direct call's already-evaluated numeric operands need no JS array
 // identity (the same borrowed stack sequence `Math::maxDirect` takes). The
 // bson deserializer's `String.fromCharCode(bytes[i])` per short string was

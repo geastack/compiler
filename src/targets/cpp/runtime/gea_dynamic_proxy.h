@@ -1160,7 +1160,7 @@ std::string callableObjectTag(const Callable& callable, const char* builtinTag, 
     // The native callable only crosses a dynamic boundary if a program-supplied
     // accessor actually needs its `this`. Absent and data properties never box it.
     Value tag;
-    if (identity->properties->readWithReceiver(key, [&] { return Value::box(Value::Tag::Function, callable); }, tag))
+    if (identity->properties->readWithReceiver(key, [&] { return Value::boxFunction(callable); }, tag))
       return objectTagWithOverride(tag, builtinTag);
   }
   return objectTagText(defaultTag ? defaultTag : builtinTag);

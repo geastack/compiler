@@ -1,5 +1,5 @@
 import type { ConversionCensus } from '../conversion/nodes.js'
-import type { DeclarationId, IrValueId, SemanticResultId } from '../identity/ids.js'
+import type { DeclarationId, FunctionId, IrValueId, SemanticResultId } from '../identity/ids.js'
 import { operationOfResult } from '../identity/ids.js'
 import type { TargetRuntimeManifest } from '../preflight/obligations.js'
 import type { ClassLayout } from '../projection/classes.js'
@@ -7,6 +7,8 @@ import type { RepresentationDeriver } from '../representation/derive.js'
 import { forEachEmbeddedRepresentation } from '../representation/embedded-carriers.js'
 import { captureCapabilityOf, representationKey, type CallableAbi, type Representation } from '../representation/model.js'
 import type { BindingPlacement } from '../projection/bindings.js'
+import { abiOfCallee } from '../projection/callee.js'
+import { statedRestOf } from '../representation/stated-rest.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import type { SemanticOperation } from '../semantics/model/operations.js'
 import type { DeadTypeofGuardCensus } from '../semantics/normalize/dead-typeof-guards.js'
@@ -132,6 +134,8 @@ export interface CertifyContext extends CertifyInput {
   readonly semanticOperationOf: (lineage: SemanticResultId) => SemanticOperation | null
   /** Whether the semantic operation this IR operation lowers sits in a proven-dead `typeof` guard consequent. */
   readonly isDead: (lineage: SemanticResultId) => boolean
+  /** The convention a function's own body was lowered under, the one the function object it allocates is created with. */
+  readonly abiOfFunction: (functionId: FunctionId) => CallableAbi | null
 }
 
 export interface IrCertification {
@@ -353,6 +357,33 @@ const classPrototypeUseRefusalOf = (operation: Extract<IrOperation, { kind: 'get
 }
 
 /**
+ * A function object is created stating its own rest position (`statedRestOf`
+ * over its body's convention), and every box of it reads that statement back;
+ * an emitter box site states the position of the carrier it holds. A carrier
+ * whose convention places the trailing array differently from the body that
+ * creates the object would make the two statements disagree -- the runtime
+ * refuses that box's dynamic call by name, and this refuses the program before
+ * it gets there. Only a disagreement is a demand: an agreeing allocation asks
+ * the target for nothing new.
+ */
+const restFactDemandsOf = (functionId: FunctionId, carrier: Representation, ctx: CertifyContext): CapabilityDemand[] => {
+  if (carrier.kind === 'constructor-family' || carrier.kind === 'constructor-value-dispatch') return []
+  const carried = abiOfCallee(carrier)
+  const created = ctx.abiOfFunction(functionId)
+  if (carried === null || created === null) return []
+  const site = statedRestOf(carried)
+  const own = statedRestOf(created)
+  if (site === null || site === own) return []
+  return [
+    {
+      key: 'call-abi:rest-fact',
+      verdict: 'missing',
+      detail: `the function object is created stating rest position ${String(own)}, and its carrier states ${String(site)}`
+    }
+  ]
+}
+
+/**
  * The demands this module derives itself: the ones whose fact is a single
  * field of the operation. The property families and the runtime-helper
  * families each live in their own module because their key spellings are
@@ -458,10 +489,15 @@ const ownDemandsOf = (operation: IrOperation, ctx: CertifyContext): CapabilityDe
       return demands
     }
     case 'allocate-callable':
-    case 'allocate-constructor':
+    case 'allocate-constructor': {
       // Each captured slot crosses a body boundary in its own ownership; the
       // capture path transports the ownerships the manifest lists and no other.
-      return operation.captures.map((capture) => ({ key: `capture:${captureCapabilityOf(capture.representation)}` }))
+      const captures = operation.captures.map((capture): CapabilityDemand => ({
+        key: `capture:${captureCapabilityOf(capture.representation)}`
+      }))
+      if (operation.kind === 'allocate-constructor') return captures
+      return [...captures, ...restFactDemandsOf(operation.functionId, operation.result.representation, ctx)]
+    }
     case 'binding-read':
       return ctx.externalBindings.has(operation.declaration) ? [{ key: 'native-boundary:external-binding' }] : []
     case 'get': {
@@ -570,7 +606,7 @@ const verdictOf = (demand: CapabilityDemand, ctx: CertifyContext): Decision => {
   }
 }
 
-const contextFor = (input: CertifyInput, body: IrBody): CertifyContext => {
+const contextFor = (input: CertifyInput, body: IrBody, abiOfFunction: CertifyContext['abiOfFunction']): CertifyContext => {
   const definitions = new Map<IrValueId, IrOperation>()
   for (const blockId of body.blockOrder) {
     const block = body.blocks.get(blockId)
@@ -585,7 +621,8 @@ const contextFor = (input: CertifyInput, body: IrBody): CertifyContext => {
     body,
     definitionOf: (value) => definitions.get(value) ?? null,
     semanticOperationOf: (lineage) => input.graph.operations.get(operationOfResult(lineage)) ?? null,
-    isDead: (lineage) => input.deadTypeofGuards.isDeadOperation(operationOfResult(lineage))
+    isDead: (lineage) => input.deadTypeofGuards.isDeadOperation(operationOfResult(lineage)),
+    abiOfFunction
   }
 }
 
@@ -669,8 +706,13 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
   const boxed = new Set<DeclarationId>()
   for (const body of input.bodies.values()) for (const declaration of body.facts?.boxed ?? []) boxed.add(declaration)
 
+  // Keyed the way the printer's own `abiOfCallable` is (`translation-unit.ts`),
+  // so the convention checked here is the one the creation will state.
+  const abiByFunction = new Map([...input.bodies.values()].map((body) => [String(body.sourceOwner), body.abi]))
+  const abiOfFunction = (functionId: FunctionId): CallableAbi | null => abiByFunction.get(String(functionId)) ?? null
+
   for (const body of input.bodies.values()) {
-    const ctx = contextFor(input, body)
+    const ctx = contextFor(input, body, abiOfFunction)
     const owner = String(body.sourceOwner)
     for (const demand of captureDemandsOf(body, input.placements, boxed)) decide(owner, demand, ctx)
     for (const demand of abiDemands(input.manifest, body.abi)) decide(owner, demand, ctx)

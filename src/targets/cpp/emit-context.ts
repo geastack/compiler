@@ -32,8 +32,10 @@ import type { HostCallSpelling, HostSpellings } from './host/host-members.js'
 import { hostCallName, hostMemberOf, statedHostIntrinsicLength } from './host/host-members.js'
 import type { CallableAbi, RecordField, Representation } from '../../representation/model.js'
 import { representationKey } from '../../representation/model.js'
+import { statedRestOf } from '../../representation/stated-rest.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import {
+  cppAbiType,
   cppBodyName,
   cppConstructName,
   cppNarrowedFloatType,
@@ -2635,9 +2637,31 @@ export interface CallableFactsSpelling {
  * object can be asked for its facts, so registering there preserves every
  * observable answer and pins nothing else.
  */
-export const cppThunkEntryText = (ctx: Pick<EmitContext, 'functionFacts'>, functionId: FunctionId): string => {
+export const cppThunkEntryText = (ctx: Pick<EmitContext, 'functionFacts' | 'abiOfCallable'>, functionId: FunctionId): string =>
+  cppMintedThunkEntryText(ctx.functionFacts.get(functionId), ctx.abiOfCallable(functionId), functionId)
+
+/** `cppThunkEntryText` for a site that holds the facts and the body's ABI itself rather than a whole context. */
+export const cppMintedThunkEntryText = (
+  facts: CallableFactsSpelling | undefined,
+  abi: CallableAbi | null,
+  functionId: FunctionId
+): string => cppMintedEntryText(abi, functionId, cppFactsEntryText(facts, functionId))
+
+/**
+ * `entry` (the invoke pointer a mint stores) registering the function's rest
+ * fact as it is created (`CallableObject::entryWithRest`), which is what a box
+ * made where no ABI is in view reads. A body with no published ABI states
+ * nothing, and a dynamic call through a box of it refuses by name at runtime
+ * rather than guess (`CallableObject::statedRestOf`).
+ */
+const cppMintedEntryText = (abi: CallableAbi | null, functionId: FunctionId, entry: string): string => {
+  const stated = abi === null ? null : statedRestOf(abi)
+  if (abi === null || stated === null) return entry
+  return `gea::CallableObject<${cppAbiType(abi)}>::entryWithRest<&${cppThunkName(functionId)}, ${stated}>(${entry})`
+}
+
+const cppFactsEntryText = (facts: CallableFactsSpelling | undefined, functionId: FunctionId): string => {
   const thunk = `&${cppThunkName(functionId)}`
-  const facts = ctx.functionFacts.get(functionId)
   if (facts === undefined) return thunk
   // The source text is the function's whole declaration, and a function is
   // minted at every site that makes a value of it -- mongodb's methods at up

@@ -3,6 +3,7 @@ import type { RecordLayoutPolicy } from '../../../representation/policies.js'
 import type { IntrinsicAccessorGetter } from '../../../semantics/model/intrinsic-accessor-getters.js'
 import { cppAbiParameterType, cppResultTypeOf, cppStringLiteral, cppTypeOf } from '../types.js'
 import { toStringTextOver } from '../emit-tostring.js'
+import { statedRestOf } from '../../../representation/stated-rest.js'
 import { booleanTestText } from '../emit-presence.js'
 import { hostArgumentText } from './emit-host-arity.js'
 import type { HostCallSpelling, HostMember } from './host-members.js'
@@ -69,7 +70,17 @@ const capturelessHostThunkText = (
   if (call === null) return null
   const body = abi.result.kind === 'void' ? `${call};` : `return ${call};`
   const signature = `${result}(${abi.parameters.map(cppAbiParameterType).join(', ')})`
-  return `gea::CallableObject<${signature}>(+[](void*${formals.map((formal) => `, ${formal}`).join('')}) -> ${result} { ${body} }, nullptr)`
+  const invoke = `+[](void*${formals.map((formal) => `, ${formal}`).join('')}) -> ${result} { ${body} }`
+  const stated = statedRestOf(abi)
+  if (stated === null) return `gea::CallableObject<${signature}>(${invoke}, nullptr)`
+  // A trailing array states its rest position as the object is created
+  // (`CallableObject::entryWithRest`), keyed by the invoke pointer, so the
+  // lambda is named once to be both the key and the entry.
+  const parameters = abi.parameters.map((parameter) => `, ${cppAbiParameterType(parameter)}`).join('')
+  return (
+    `([&]() { static constexpr ${result} (*__gea_invoke)(void*${parameters}) = ${invoke}; ` +
+    `return gea::CallableObject<${signature}>(gea::CallableObject<${signature}>::entryWithRest<__gea_invoke, ${stated}>(__gea_invoke), nullptr); })()`
+  )
 }
 
 /**

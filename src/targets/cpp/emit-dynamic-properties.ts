@@ -1371,7 +1371,7 @@ export const emitNativeSidecarSet = (ctx: EmitContext, lines: string[], operatio
         ? `([&]() -> bool { const auto& __gea_callable = ${callable}; gea::installCallableOwnFacts(__gea_callable.functionObjectIdentity(), __gea_callable.name(), __gea_callable.length()); ` +
           `const gea::PropertyKey __gea_key = ${key}; ` +
           `if (!__gea_key.isSymbol() && __gea_key.text() == "prototype") gea::installCallableConstructorPrototype(__gea_callable); ` +
-          `return __gea_callable.functionObjectIdentity()->properties->set(__gea_key, ${value}, gea::Value::box(gea::Value::Tag::Function, __gea_callable)); })()`
+          `return __gea_callable.functionObjectIdentity()->properties->set(__gea_key, ${value}, gea::Value::boxFunction(__gea_callable)); })()`
         : `gea::callableDynamicSet(${callable}, ${key}, ${value})`
     if (operation.strict) {
       lines.push(`if (!${write}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read-only Function own property");`)

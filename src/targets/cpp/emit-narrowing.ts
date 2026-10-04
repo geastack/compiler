@@ -42,6 +42,7 @@ import {
   type ConversionCensus
 } from '../../conversion/nodes.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
+import { statedRestOf } from '../../representation/stated-rest.js'
 import type { ClassLayout } from '../../projection/classes.js'
 import type { CaptureIndex } from './emit-context.js'
 import { familyMemberViewText, structuralRecordViewText, unionRecastPlanOf, viewPlanFor } from './emit-record-view.js'
@@ -3279,7 +3280,13 @@ export const resultAdaptedCallableText = (
       : adapter.to.result.kind === 'void'
         ? `${call};`
         : `${cppTypeOf(adapter.from.result)} ${adapterResultName} = ${call}; return ${adapter.convertedResult};`
-  const adapt = known === null ? 'adaptSource' : `adaptSourceInPlace<&${known}>`
+  // The adapted view is a function object created here, over the slot's own
+  // convention, so it states that convention's rest position as it is created.
+  const stated = statedRestOf(adapter.to)
+  const adapt =
+    known === null
+      ? `adaptSource${stated === null ? '' : `<${stated}>`}`
+      : `adaptSourceInPlace<&${known}${stated === null ? '' : `, ${stated}`}>`
   return `${cppTypeOf(target)}::${adapt}(${sourceType}{${text}}, [](${formals.join(', ')}) -> ${cppResultTypeOf(adapter.to.result)} { ${body} })`
 }
 

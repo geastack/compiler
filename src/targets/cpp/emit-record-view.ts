@@ -14,7 +14,7 @@ import { classFamilyOverridesOf, virtualDispatchKey } from '../../projection/dis
 import { cppVirtualMemberName } from './virtual-methods.js'
 import { classMemberOf } from './class-layout.js'
 import { classMethodOverrideOf, classPrototypeMethodMutableOf } from '../../projection/fields.js'
-import { cppThunkEntryText, cppThunkName } from './emit-context.js'
+import { cppMintedThunkEntryText } from './emit-context.js'
 import {
   alignedValueText,
   boxedAssertionText,
@@ -368,8 +368,7 @@ const classMethodValueViewText = (
   const own = site.method.representation
   if (own === undefined || own.kind !== 'function-value-dispatch') return null
   const callable = site.method.callable
-  const entry =
-    ctx.functionFacts === undefined ? `&${cppThunkName(callable)}` : cppThunkEntryText({ functionFacts: ctx.functionFacts }, callable)
+  const entry = cppMintedThunkEntryText(ctx.functionFacts?.get(callable), own.abi, callable)
   const value =
     `gea::nativeClassMethodValue<${cppClassName(site.owner)}, &${cppCallableDeclarationTagName(callable)}>` +
     `(${text}->gea_method_state, ${cppTypeOf(own)}{${entry}, nullptr})`
