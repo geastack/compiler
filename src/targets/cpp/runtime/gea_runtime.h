@@ -19549,11 +19549,17 @@ T unboxValue(const Value& value, Value::Tag expected, const char* site) {
   else return T(unboxAs<T>(value, expected, site));
 }
 
+}  // namespace detail
+
+// Spelled `gea::reflectNativeClassPrototype` at every class evaluation, so it
+// stays outside `detail` like the other class-evaluation entry points.
 /** Class evaluation for a program that reflects over prototypes: the evaluation can hand out its prototype object. */
 inline PackedEnvironment reflectNativeClassPrototype(PackedEnvironment environment, Value (*prototypeValue)(const Ref<NativeClassMethodState>&)) {
   static_cast<NativeClassMethodState*>(environment.pointer)->prototypeValue = prototypeValue;
   return environment;
 }
+
+namespace detail {
 
 /**
  * Projects an authenticated boxed program-class allocation to a stated class.
