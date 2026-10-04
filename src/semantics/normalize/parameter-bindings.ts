@@ -1989,7 +1989,8 @@ export const censusParameterBindings = (
     const declarationOf = (node: ts.Identifier): ts.Declaration | null => {
       // `{ x }` reads the binding `x` exactly as `{ x: x }` does; the name's
       // own symbol is the literal's property, which holds no cell.
-      const symbol = valueSymbolAt(checker, node, hostProvided)
+      const named = valueSymbolAt(checker, node, hostProvided)
+      const symbol = named && (named.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(named) : named
       const declarations = symbol?.declarations
       return declarations && declarations.length === 1 ? (declarations[0] ?? null) : null
     }
