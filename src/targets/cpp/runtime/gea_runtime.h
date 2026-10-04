@@ -15927,6 +15927,11 @@ class Value {
         // and every native read of it -- sees one property table.
         result.functionObject_ =
             value.environment != nullptr ? constructorEnvironmentIdentity(value.environment) : makeFunctionObjectIdentity();
+      } else if constexpr (std::is_same_v<std::decay_t<T>, Ref<NativeClassMethodState>>) {
+        // `x.constructor` carried as its class evaluation alone: that state is
+        // the environment every `ConstructorObject` of the class closes over,
+        // so the box is the same function object a boxed class value is.
+        result.functionObject_ = value ? constructorEnvironmentIdentity(value.get()) : makeFunctionObjectIdentity();
       } else {
         result.functionObject_ = makeFunctionObjectIdentity();
       }

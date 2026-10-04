@@ -923,6 +923,14 @@ export const dynamicTagFor = (representation: Representation): string | null => 
     case 'constructor-family':
     case 'constructor-value-dispatch':
     case 'function-and-constructor':
+    // `x.constructor` is the class evaluation `x` was allocated by -- the same
+    // `NativeClassMethodState` a `constructor-family` value closes over as its
+    // environment -- so it boxes as that class's one function object
+    // (`Value::box` reads `constructorEnvironmentIdentity` off either), and a
+    // Map keyed by the class or an `===` against it finds the same object.
+    // three's LightsNode hands `light.constructor` to NodeLibrary's
+    // `getLightNodeClass`, whose `{Light.constructor}` tag names no type.
+    case 'constructor-identity':
       return 'Function'
     default:
       return null
