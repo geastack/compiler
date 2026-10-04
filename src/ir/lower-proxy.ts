@@ -196,7 +196,14 @@ export const lowerProxyConstruct = (
   if (!handlerOperand) throw new IrLoweringBlockedError('a Proxy construction has no handler argument')
   const target = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'argument'))
   const handler = resolveRequiredOperand(ctx, block, lineage, handlerOperand)
-  if (representationKey(target.representation) !== representationKey(carrier.target))
+  // A proxy over a proxy: the inner one enters the `dynamic` target slot as its
+  // box, which is not a copy -- `gea::boxProxyObject` hands every boxing of one
+  // proxy the same box, so the outer proxy forwards to the inner one itself.
+  const boxedTarget =
+    target.representation.kind === 'proxy-object' && carrier.target.kind === 'dynamic'
+      ? convertTo(ctx, block, lineage, target, carrier.target)
+      : null
+  if (boxedTarget === null && representationKey(target.representation) !== representationKey(carrier.target))
     throw new IrLoweringBlockedError(
       `a Proxy target held as "${representationKey(target.representation)}" would be copied into "${representationKey(carrier.target)}", ` +
         'and a proxy forwards to the object itself, never a copy'
@@ -206,7 +213,7 @@ export const lowerProxyConstruct = (
     throw new IrLoweringBlockedError(
       `a Proxy handler held as "${representationKey(handler.representation)}" does not convert into "${representationKey(carrier.handler)}"`
     )
-  return ctx.builder.allocateProxy(block, lineage, target, stored, carrier)
+  return ctx.builder.allocateProxy(block, lineage, boxedTarget ?? target, stored, carrier)
 }
 
 /** Whether a carrier is a union one of whose arms is a proxy. */

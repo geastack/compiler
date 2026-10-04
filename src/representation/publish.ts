@@ -45,7 +45,14 @@ import {
   defaultTypedArrayElementPolicy,
   defaultValueRecordPolicy
 } from './derive.js'
-import { isArrayPatternCapable, representationKey, soleArrayPatternCapableArm, type Representation } from './model.js'
+import {
+  isArrayPatternCapable,
+  passingOf,
+  representationKey,
+  soleArrayPatternCapableArm,
+  type CallableAbi,
+  type Representation
+} from './model.js'
 import { literalDestinationsOf } from './literal-destination.js'
 import { proxyCarriersOf } from './proxy-carriers.js'
 import { staticFieldAbsenceOf, staticMembersOf, withStaticFieldAbsence } from './static-field-cells.js'
@@ -632,6 +639,102 @@ const dynamicCallableValueOf = (
     : null
 }
 
+const proxyOriginCarrier: Representation = { kind: 'dynamic', reason: 'proxy-origin' }
+const suspendingResultKinds: ReadonlySet<Representation['kind']> = new Set(['promise', 'iterator', 'async-generator'])
+const holdsNativeProxy = (carrier: Representation): boolean =>
+  carrier.kind === 'proxy-object' ||
+  (carrier.kind === 'optional' && holdsNativeProxy(carrier.payload)) ||
+  (carrier.kind === 'tagged-union' && carrier.arms.some((arm) => holdsNativeProxy(arm.value)))
+
+/**
+ * An array whose elements may hold a proxy: the array keeps its own native
+ * carrier and its elements take `dynamic`. `null` for a carrier that is not
+ * such an array, or whose elements already are.
+ */
+const proxyElementArrayOf = (carrier: Representation): Representation | null =>
+  carrier.kind === 'array-object' && carrier.element.kind !== 'dynamic' ? { ...carrier, element: proxyOriginCarrier } : null
+
+/**
+ * A convention whose result, or whose parameters at `positions`, may be a
+ * proxy: those slots take `dynamic`. A rest slot whose gathered arguments may
+ * be one (`restElements`) keeps its array and takes `dynamic` elements.
+ */
+const proxyReachedAbi = (
+  abi: CallableAbi,
+  returns: boolean,
+  positions: ReadonlySet<number> | undefined,
+  restElements: boolean
+): CallableAbi => ({
+  ...abi,
+  // An async function or generator's `return` settles its promise or ends its
+  // iteration; the call itself answers that promise or iterator, which no
+  // proxy reaches. The body's return converts into the settled carrier. A
+  // result `proxyCarriersOf` already carries the proxy in natively keeps it.
+  result: returns && !suspendingResultKinds.has(abi.result.kind) && !holdsNativeProxy(abi.result) ? proxyOriginCarrier : abi.result,
+  parameters: abi.parameters.map((parameter, ordinal) => {
+    if (positions?.has(ordinal) && parameter.value.kind !== 'dynamic')
+      return { value: proxyOriginCarrier, ownership: parameter.ownership, passing: passingOf(proxyOriginCarrier, parameter.ownership) }
+    const elements = restElements && ordinal === abi.restFrom ? proxyElementArrayOf(parameter.value) : null
+    return elements === null
+      ? parameter
+      : { value: elements, ownership: parameter.ownership, passing: passingOf(elements, parameter.ownership) }
+  })
+})
+
+/**
+ * The carrier of a value a proxy reaches (`semantics/proxy-origins.ts`) where
+ * `proxy-carriers.ts` gives it none, or of a source function whose convention
+ * a proxy reaches -- every view of that exact Function object states the same
+ * convention, so the body, its callers and its own value agree.
+ *
+ * The two walks answer different questions. `proxyCarriersOf` follows the
+ * proxy itself along the flow it models (cells, returns, assignments,
+ * `??`/`||`, static fields) and keeps it native there, handler and all. What
+ * it does not follow -- a conditional's arms, a parameter a proxy is passed
+ * to, a rest array gathering one -- and the values a trap PRODUCES (a member
+ * read off a proxy, the result of calling one) have no native carrier that
+ * tells the truth: the checker typed them off the target, and the handler
+ * decides them. Those stay `dynamic`, and a native proxy entering one is
+ * boxed (`emit-narrowing.ts`'s `widenedStoreText`). `provenance` is
+ * `proxyCarriersOf`'s carrier for the same result and wins wherever it
+ * exists: a convention it re-typed still takes the slots this walk reaches,
+ * but never this walk's `dynamic` result in place of a proxy it carries.
+ */
+const proxyOriginOf = (
+  result: SemanticResult,
+  origins: ProxyOrigins,
+  callableOrigins: ReadonlyMap<SemanticResultId, FunctionId>,
+  derived: () => Representation,
+  provenance: Representation | undefined
+): Representation | null => {
+  // A value already carried as `dynamic` keeps the reason it has: the box
+  // holds a proxy as well as anything else, and a second reason for the same
+  // slot would only make its views disagree with the convention that binds it.
+  if (provenance === undefined && origins.results.has(result.id)) return derived().kind === 'dynamic' ? null : proxyOriginCarrier
+  if (provenance === undefined && origins.elementResults.has(result.id)) return proxyElementArrayOf(derived())
+  const origin = callableOrigins.get(result.id)
+  if (origin === undefined) return null
+  const callable = withoutFunctionSpecialization(origin)
+  const returns = origins.returning.has(callable)
+  const positions = origins.parameters.get(callable)
+  const restElements = origins.restElements.has(callable)
+  if (!returns && positions === undefined && !restElements) return null
+  const carrier = provenance ?? derived()
+  switch (carrier.kind) {
+    case 'function':
+    case 'function-value-dispatch':
+      return { ...carrier, abi: proxyReachedAbi(carrier.abi, returns, positions, restElements) }
+    case 'function-and-constructor':
+      return {
+        ...carrier,
+        call: proxyReachedAbi(carrier.call, returns, positions, restElements),
+        construct: proxyReachedAbi(carrier.construct, false, positions, restElements)
+      }
+    default:
+      return null
+  }
+}
+
 /**
  * CommonJS module records are the one explicitly dynamic host boundary here.
  * The checker authenticated the wrapper declaration and normalization carried
@@ -828,10 +931,10 @@ export const publishRepresentations = (
   // A fresh object literal whose one consumer is a declared cell is minted as
   // that cell's record (`literal-destination.ts`).
   const literalDestinations = literalDestinationsOf(graph, deriver)
-  // Which values may hold a proxy, by provenance from the authenticated
-  // `new Proxy` sites (`semantics/proxy-origins.ts`), for the receiver-generic
-  // method copies (`ir/receiver-generic-copies.ts`). Carriers stay
-  // `proxyCarriersOf`'s below.
+  // Which values a proxy reaches, by provenance from the authenticated
+  // `new Proxy` sites (`semantics/proxy-origins.ts`): the positions
+  // `proxyCarriersOf` below does not follow (`proxyOriginOf`), and the
+  // receiver-generic method copies (`ir/receiver-generic-copies.ts`).
   const resultTypes = new Map<SemanticResultId, StructuralTypeId>()
   if (proxySites.size > 0)
     for (const operation of graph.operations.values()) for (const result of operation.results) resultTypes.set(result.id, result.type)
@@ -884,8 +987,13 @@ export const publishRepresentations = (
     // Every other result is completely unaffected -- `override` is `null` for
     // all of them, and this degrades to exactly the unconditional `exact`
     // publish this loop always did.
+    const structural = (): Representation =>
+      operation?.family === 'binding' || operation?.family === 'property' ? deriver.deriveStored(result.type) : deriver.derive(result.type)
+    const proxyCarrier = proxyCarriers.get(resultId)
+    const proxyOrigin = proxySites.size > 0 ? proxyOriginOf(result, proxyOrigins, callableOrigins, structural, proxyCarrier) : null
     const provenance =
-      proxyCarriers.get(resultId) ??
+      proxyOrigin ??
+      proxyCarrier ??
       commonJsBoundaryOf(graph, operation) ??
       shadowedCallableBuiltinReadOf(graph, operation, callableOrigins) ??
       instanceConstructorReadOf(operation, result, deriver, isErrorInstance) ??
@@ -954,23 +1062,25 @@ export const publishRepresentations = (
             ? 'unassigned-binding-absence'
             : unwrittenMember
               ? 'unwritten-record-member'
-              : override === proxyCarriers.get(resultId)
-                ? 'proxy-provenance'
-                : override === literalDestinations.get(resultId)
-                  ? 'literal-destination'
-                  : commonJsBoundaryOf(graph, operation)
-                    ? 'commonjs-module-boundary'
-                    : shadowedCallableBuiltinReadOf(graph, operation, callableOrigins)
-                      ? 'shadowed-callable-builtin'
-                      : instanceConstructorReadOf(operation, result, deriver, isErrorInstance)
-                        ? 'instance-constructor-read'
-                        : exactClassInstanceReadOf(operation, result, deriver)
-                          ? 'exact-class-instance'
-                          : dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables)
-                            ? 'dynamic-callable-identity'
-                            : dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables)
-                              ? 'dynamic-call-frame'
-                              : 'protocol-array-fast-path',
+              : override === proxyOrigin
+                ? 'proxy-origin'
+                : override === proxyCarrier
+                  ? 'proxy-provenance'
+                  : override === literalDestinations.get(resultId)
+                    ? 'literal-destination'
+                    : commonJsBoundaryOf(graph, operation)
+                      ? 'commonjs-module-boundary'
+                      : shadowedCallableBuiltinReadOf(graph, operation, callableOrigins)
+                        ? 'shadowed-callable-builtin'
+                        : instanceConstructorReadOf(operation, result, deriver, isErrorInstance)
+                          ? 'instance-constructor-read'
+                          : exactClassInstanceReadOf(operation, result, deriver)
+                            ? 'exact-class-instance'
+                            : dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables)
+                              ? 'dynamic-callable-identity'
+                              : dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables)
+                                ? 'dynamic-call-frame'
+                                : 'protocol-array-fast-path',
         joinsClosedFamily: false
       })
     }

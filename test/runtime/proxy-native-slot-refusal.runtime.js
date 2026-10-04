@@ -1,12 +1,12 @@
 // @ts-nocheck
-//! expect-abort
-//! expect: before builder
+//! expect-refusal: no runtime conversion is installed from proxy-object(
 
-// A proxy reaches only the slots its provenance makes `dynamic`
-// (src/semantics/proxy-origins.ts). A typed field of a class is not one of
-// them: storing the proxy there is the checked unbox every dynamic value takes
-// into a native slot, and it refuses the proxy by name at run time instead of
-// storing the object behind it.
+// A proxy is never stored as the object behind it. Here it is passed to a
+// constructor whose parameter is typed `NodeBuilder` and then stored in a
+// field of that type. The proxy is carried natively
+// (src/representation/proxy-carriers.ts), and no conversion turns it into the
+// class's own handle, so the program is refused at compile time by name. It
+// is not stored and left to abort at run time.
 class NodeBuilder {
   constructor() {
     this.name = 'builder'

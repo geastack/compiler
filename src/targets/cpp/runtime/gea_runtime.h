@@ -15409,22 +15409,37 @@ class AsyncGenerator {
   gea::Ref<ProtocolSteps> protocol_;
 };
 
+namespace detail {
+// Defined in `gea_dynamic_proxy.h`, once `Value` is complete.
+struct ProxyBoxCell;
+inline std::shared_ptr<ProxyBoxCell> makeProxyBoxCell();
+}  // namespace detail
+
 /** A Proxy carries target, handler, and revoked state, per `substrate.ts`'s `ProxyObjectSubstrate`. Trap dispatch (handler when it defines one, else the target) has no emitter yet; this stores the two references dispatch would need. */
 template <typename Target, typename Handler>
 class ProxyObject {
  public:
   ProxyObject() = default;
-  ProxyObject(Target target, Handler handler) : target_(std::move(target)), handler_(std::move(handler)) {}
+  ProxyObject(Target target, Handler handler)
+      : target_(std::move(target)), handler_(std::move(handler)), box_(detail::makeProxyBoxCell()) {}
 
   const Target& target() const { return target_; }
   const Handler& handler() const { return handler_; }
   bool revoked() const { return revoked_; }
   void revoke() { revoked_ = true; }
+  /**
+   * The one `gea::Value` this proxy boxes to (`boxProxyObject`), shared by
+   * every copy of it. The carrier is a value type, so without one shared cell
+   * two boxings of the same proxy would be two `DynamicProxy` objects, and
+   * `===` between them would answer `false`.
+   */
+  const std::shared_ptr<detail::ProxyBoxCell>& boxCell() const { return box_; }
 
  private:
   Target target_{};
   Handler handler_{};
   bool revoked_ = false;
+  std::shared_ptr<detail::ProxyBoxCell> box_;
 };
 
 // `Value`'s property operations take a `PropertyKey` and `DynamicObject`

@@ -1,11 +1,10 @@
-//! expect-abort
-//! expect: a method read off a Proxy is called with the Proxy as `this`, which no native frame can hold
+//! expect: compressed 3
 
 // A Proxy whose `get` trap really answers a function: the language calls it
-// with the proxy itself as `this`. A native Proxy has no box of its own, so no
-// native receiver slot can hold it, and the call aborts by name -- never a
-// load of the union's other arm, and never a catchable TypeError the program
-// does not have.
+// with the proxy itself as `this`. What a trap answers is `dynamic`
+// (`semantics/proxy-origins.ts`), so the call goes through the box, and the
+// proxy enters the receiver slot as its own box (`gea::boxProxyObject`). It
+// is never a load of the union's other arm.
 
 type ZStandardLib = {
   compress(buf: Uint8Array, level?: number): Promise<Uint8Array>

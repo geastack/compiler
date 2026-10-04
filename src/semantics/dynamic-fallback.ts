@@ -185,6 +185,23 @@ const isStandardProxyConstruction = (node: ts.Node, checker: ts.TypeChecker): no
 }
 
 /**
+ * A function written as a trap of the handler literal a standard `new
+ * Proxy(target, { ... })` is given. What it returns is the proxy's answer for
+ * an arbitrary key, so no census narrows it to the writes it can type.
+ */
+export const isProxyHandlerTrap = (node: ts.Node, checker: ts.TypeChecker): boolean => {
+  const member = ts.isMethodDeclaration(node)
+    ? node
+    : ts.isPropertyAssignment(node.parent) && node.parent.initializer === node
+      ? node.parent
+      : undefined
+  const literal = member?.parent
+  if (literal === undefined || !ts.isObjectLiteralExpression(literal)) return false
+  const construction = literal.parent
+  return isStandardProxyConstruction(construction, checker) && construction.arguments?.[1] === literal
+}
+
+/**
  * Every `new Proxy(...)` site, for the provenance fact that decides which
  * values may hold a proxy without `--dynamic-fallback`
  * (`semantics/proxy-origins.ts`). The flag keeps `proxyFallbackTypes` instead.

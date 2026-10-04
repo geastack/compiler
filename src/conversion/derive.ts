@@ -388,9 +388,10 @@ const deriveTaggedUnion = (
   const classified: { readonly tag: string; readonly classifier: ClassifierContract; readonly value: Representation }[] = []
   for (const arm of target.arms) {
     // A `proxy-object` arm is minted only by a native `new Proxy` site
-    // (`representation/proxy-carriers.ts`), and a native proxy never enters a
-    // box -- that conversion has no recipe. So no dynamic value can be one,
-    // and the arm is simply not a destination: mongodb's `kerberos =
+    // (`representation/proxy-carriers.ts`). A native proxy may enter a box
+    // (`gea::boxProxyObject`), but what comes out is the dynamic proxy, never
+    // the native one again -- that direction has no recipe. So no dynamic
+    // value can be one, and the arm is simply not a destination: mongodb's `kerberos =
     // require('kerberos')` fills the ordinary arms of a slot that another
     // path fills with `makeErrorModule(...)`'s proxy.
     if (arm.value.kind === 'proxy-object') continue

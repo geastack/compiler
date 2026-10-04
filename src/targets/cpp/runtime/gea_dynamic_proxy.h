@@ -29,6 +29,35 @@ inline Value Value::proxy(Value target, Value handler) {
   return value;
 }
 
+namespace detail {
+struct ProxyBoxCell {
+  Value boxed;
+  bool present = false;
+};
+inline std::shared_ptr<ProxyBoxCell> makeProxyBoxCell() { return std::make_shared<ProxyBoxCell>(); }
+}  // namespace detail
+
+/**
+ * A native `ProxyObject` entering a `dynamic` slot: the same target and
+ * handler, boxed, behind the dynamic proxy's own internal methods, so a trap
+ * the native carrier does not dispatch (`apply`, an `any` receiver) still
+ * runs. The box is minted once per proxy and every later boxing hands back
+ * the same object, which is what keeps the proxy's identity across the
+ * boundary. The two box texts are lambdas so a proxy already boxed boxes
+ * nothing again.
+ */
+template <typename Target, typename Handler, typename BoxTarget, typename BoxHandler>
+inline Value boxProxyObject(const ProxyObject<Target, Handler>& proxy, BoxTarget&& boxTarget, BoxHandler&& boxHandler) {
+  const std::shared_ptr<detail::ProxyBoxCell>& cell = proxy.boxCell();
+  if (cell && cell->present) return cell->boxed;
+  Value boxed = Value::proxy(boxTarget(), boxHandler());
+  if (cell) {
+    cell->boxed = boxed;
+    cell->present = true;
+  }
+  return boxed;
+}
+
 inline const DynamicProxy& Value::proxyState() const {
   if (!proxy_) host::throwRuntimeError("TypeError", "Expected a Proxy");
   const auto& state = *gea::refStaticCast<DynamicProxy>(held_);

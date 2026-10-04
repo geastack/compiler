@@ -159,6 +159,9 @@ export const typeofExpression = (
   // never reached by a value that has a static type, because every other
   // carrier above answers as a literal without consulting the value at all.
   if (representation.kind === 'dynamic') return dynamic(operand())
+  // A proxy answers for its target (`typeofTextFor`), and a target held in a
+  // box -- a proxy over another proxy -- answers at run time like any box.
+  if (representation.kind === 'proxy-object') return typeofExpression(representation.target, () => `${operand()}.target()`, quote, dynamic)
   if (representation.kind !== 'tagged-union') {
     const answer = typeofTextFor(representation)
     return answer === null ? null : quote(answer)

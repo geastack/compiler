@@ -561,7 +561,15 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
     lowerDeferredFunctionBind(ctx, block, lineage, operation, deferred)
     return
   }
-  const callee = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'callee'))
+  const resolvedCallee = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'callee'))
+  // Calling a native proxy is its `apply` trap, and the native dispatch
+  // (`lower-proxy.ts`) answers only get/set/has/deleteProperty. The dynamic
+  // proxy runs every trap, so the call goes through the box, which is the same
+  // proxy (`gea::boxProxyObject` keeps one box per proxy).
+  const callee =
+    operation.internalMethod === 'call' && resolvedCallee.representation.kind === 'proxy-object'
+      ? (convertTo(ctx, block, lineage, resolvedCallee, { kind: 'dynamic', reason: 'proxy-origin' }) ?? resolvedCallee)
+      : resolvedCallee
   const constructed = operation.internalMethod === 'construct' ? optionalResultRepresentation(ctx, operation, 'value') : null
   if (constructed?.kind === 'proxy-object') {
     registerResult(ctx, operation, lowerProxyConstruct(ctx, block, lineage, operation, constructed))

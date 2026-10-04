@@ -218,6 +218,8 @@ const boxable = (representation: Representation): boolean => {
   if (representation.kind === 'dynamic') return true
   if (representation.kind === 'optional') return boxable(representation.payload)
   if (representation.kind === 'tagged-union') return representation.arms.every((arm) => boxable(arm.value))
+  // A proxy boxes as the dynamic proxy over its two halves (`widenedStoreText`).
+  if (representation.kind === 'proxy-object') return boxable(representation.target) && boxable(representation.handler)
   return dynamicTagFor(representation) !== null
 }
 
@@ -1270,6 +1272,20 @@ const cppConversionTables = (
       ) {
         return dynamicCallablePair(target)
       }
+      // A native proxy into a callable slot: its box, read through the same
+      // checked adapter, so a call runs the `apply` trap (`widenedStoreText`).
+      if (
+        source.kind === 'proxy-object' &&
+        target.kind === 'function-value-dispatch' &&
+        boxable(source) &&
+        dynamicCallableAbiSupported(target.abi)
+      ) {
+        const domain = `proxy-callable:${representationKey(source)}->${representationKey(target)}`
+        return {
+          classifier: { id: 'gea::boxProxyObject', domain },
+          materializer: { id: 'gea::detail::DynamicCarrier::in', domain, allocates: true }
+        }
+      }
       // A callable declaring a type-matching PREFIX of the target's own
       // parameters widening into it -- `gea::CallableObject`'s own converting
       // constructor (`gea_runtime.h`) performs this, so the pairing this
@@ -1462,6 +1478,16 @@ const cppConversionTables = (
           return {
             classifier: { id: 'gea::Value::box', domain: `box:sum:${representationKey(source)}` },
             materializer: { id: 'gea::Value::box', domain: `box:sum:${representationKey(source)}`, allocates: true }
+          }
+        }
+        // A native proxy reaching a slot typed `any`: `widenedStoreText`
+        // boxes it as the dynamic proxy over its boxed target and handler,
+        // once per proxy, so its traps still run and its identity holds.
+        if (source.kind === 'proxy-object') {
+          if (!boxable(source)) return null
+          return {
+            classifier: { id: 'gea::boxProxyObject', domain: `box:proxy:${representationKey(source)}` },
+            materializer: { id: 'gea::boxProxyObject', domain: `box:proxy:${representationKey(source)}`, allocates: true }
           }
         }
         const tag = dynamicTagFor(source)

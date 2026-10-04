@@ -40,6 +40,7 @@ import {
 } from './derived-expression-type.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
+import { isProxyHandlerTrap } from '../dynamic-fallback.js'
 
 /**
  * The type an unannotated JavaScript function actually RETURNS.
@@ -625,7 +626,16 @@ export const censusReturnBindings = (
       const contextual = contextualReturnTypeOf(checker, node)
       if (contextual) contextualReturns.set(node, contextual)
     }
-    if (isReturnCandidateKind(node) && !hasStatedReturnType(checker, node) && node.body !== undefined && !slotIsWritten(node)) {
+    // A Proxy handler trap answers every key, not the ones its writes type:
+    // TSL's `let value` is a generator for `@@iterator` and `Reflect.get` for
+    // the rest (`semantics/proxy-origins.ts` keeps the cell as written).
+    if (
+      isReturnCandidateKind(node) &&
+      !hasStatedReturnType(checker, node) &&
+      node.body !== undefined &&
+      !slotIsWritten(node) &&
+      !isProxyHandlerTrap(node, checker)
+    ) {
       const signature = checker.getSignatureFromDeclaration(node)
       const returned = signature ? checker.getReturnTypeOfSignature(signature) : null
       // `isAnyType` alone is a trap here, and exactly the one `parameter-

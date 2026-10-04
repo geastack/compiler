@@ -3,6 +3,7 @@ import { nodeOfOperation, withoutFunctionSpecialization, withoutSpecialization }
 import type { SemanticGraph } from './model/graph.js'
 import { operandOf, resultOf, type SemanticOperand } from './model/operands.js'
 import type { InvocationOperation, SemanticOperation } from './model/operations.js'
+import { isArrayIndexKey } from './normalize/host-mutation-keys.js'
 
 /**
  * Which semantic values may hold a Proxy, followed from each `new Proxy` site.
@@ -132,7 +133,8 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
     const rest = signature?.parameters.findIndex((parameter) => parameter.rest) ?? -1
     if (rest >= 0) restFrom.set(withoutFunctionSpecialization(operation.callable), rest)
   }
-  // Rest cells whose ELEMENTS a proxy reaches, and the results that read them.
+  // Cells whose ELEMENTS a proxy reaches -- a rest array, or a cell an array
+  // listing one was stored in -- and the results that read them.
   const restCells = new Map<DeclarationId, Reach>()
   const elementReached = new Map<SemanticResultId, Reach>()
   const elementReachOf = (operand: SemanticOperand | undefined): Reach | 0 =>
@@ -319,6 +321,8 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
           if (operation.action === 'initialize' || operation.action === 'write') {
             const how = reachOf(valueOperandOf(operation))
             if (how !== 0) raise(cells, operation.declaration, how)
+            const elements = elementReachOf(valueOperandOf(operation))
+            if (elements !== 0) raise(restCells, operation.declaration, elements)
           }
           const elements = restCells.get(operation.declaration)
           if (elements !== undefined) {
@@ -343,16 +347,34 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
           break
         }
         case 'property': {
-          // An element read off a rest array a proxy was gathered into may be
-          // that proxy.
+          // An element read off an array a proxy was gathered into may be that
+          // proxy. A named member is the Array's own (`join`, `length`), never
+          // an element, so it keeps its carrier.
           const elements = elementReachOf(operandOf(operation, 'receiver'))
-          if (elements !== 0 && operation.internalMethod === 'get') reach(value?.id, elements)
+          const key = operandOf(operation, 'key')?.source
+          const named = key?.kind === 'constant' && key.literal === 'string' && !isArrayIndexKey(key.text)
+          if (elements !== 0 && operation.internalMethod === 'get' && !named) reach(value?.id, elements)
           const how = reachOf(operandOf(operation, 'receiver'))
           if (how === 0) break
           // A `[[Set]]` publishes the receiver it wrote into.
           if (operation.internalMethod === 'set') reach(value?.id, how)
           // A read through one is whatever its `get` trap returns.
           if (operation.internalMethod === 'get') reach(value?.id, DYNAMIC)
+          break
+        }
+        case 'allocation': {
+          // An array literal listing a proxy holds it as an element, the way a
+          // rest array gathers one: three's `_shadowFilterLib = [
+          // BasicShadowFilter, ... ]` lists TSL `Fn()` proxies, and a call
+          // through an element read runs the `apply` trap, whose answer the
+          // checker's `() => void` element type does not state.
+          if (operation.allocated !== 'array-literal') break
+          let how: Reach | 0 = 0
+          for (const operand of operation.operands) {
+            const held = operand.role === 'spread' ? elementReachOf(operand) : operand.role === 'element' ? reachOf(operand) : 0
+            if (held > how) how = held
+          }
+          if (how !== 0 && value) raise(elementReached, value.id, how)
           break
         }
         case 'protocol':

@@ -1120,6 +1120,8 @@ const dynamicMapArmViewStoreText = (held: Representation, written: Representatio
   return null
 }
 
+const proxyBoxCarrier: Representation = { kind: 'dynamic', reason: 'proxy-origin' }
+
 /** `renderedWidenedStoreText` with its source evaluated once -- see `evaluated-once.ts`. */
 export const widenedStoreText = (held: Representation, written: Representation, text: string): string | null =>
   evaluatedOnceText(text, (operand) => renderedWidenedStoreText(held, written, operand))
@@ -1128,6 +1130,13 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
   if (representationKey(held) === representationKey(written)) return null
   const remappedSet = genericFunctionSetWideningText(written, held, text)
   if (remappedSet !== null) return remappedSet
+  // A native proxy stored into a callable slot is called through its `apply`
+  // trap, which only the dynamic proxy runs: the slot holds the checked
+  // callable adapter over its box, as it would for any boxed Function.
+  if (written.kind === 'proxy-object' && held.kind === 'function-value-dispatch') {
+    const boxed = widenedStoreText(proxyBoxCarrier, written, text)
+    return boxed === null ? null : unboxedLoadText(held, boxed)
+  }
   // An optional over a union widens twice: the arm becomes the union, and the
   // union assigns into the optional through its converting assignment. Asking
   // recursively is what keeps the two steps from being two separate rules.
@@ -1267,6 +1276,20 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
         arms.push(`${text}.is<${index}>() ? ${boxed} : `)
       }
       return `(${arms.join('')}gea::Value())`
+    }
+    // A native proxy has no tag of its own -- `typeof` answers its target's --
+    // and boxing it as its target would drop the handler. It boxes as the
+    // dynamic proxy over its boxed target and handler, minted once per proxy
+    // (`gea::boxProxyObject`), so a slot the checker typed `any` -- a trap's
+    // own receiver, TSL's `jsFunc( inputs, builder )` -- still holds the
+    // proxy every trap runs on.
+    if (written.kind === 'proxy-object') {
+      const part = (carrier: Representation, partText: string): string | null =>
+        carrier.kind === 'dynamic' ? partText : widenedStoreText(held, carrier, partText)
+      const target = part(written.target, `${text}.target()`)
+      const handler = part(written.handler, `${text}.handler()`)
+      if (target === null || handler === null) return null
+      return `gea::boxProxyObject(${text}, [&]() -> gea::Value { return ${target}; }, [&]() -> gea::Value { return ${handler}; })`
     }
     const tag = dynamicTagFor(written)
     return tag === null ? null : boxedText(written, tag, text)
