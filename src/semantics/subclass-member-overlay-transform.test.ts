@@ -64,6 +64,51 @@ for (const inlineDefault of [false, true]) {
   })
 }
 
+for (const [install, overlaid] of [
+  ["Node.prototype[ 'flip' + upper ] = function () { return this }", false],
+  ["Node.prototype[ 'flop' + upper ] = function () { return this }", true],
+  ['Object.defineProperty( Node.prototype, `flip${ upper }`, { value: 1 } )', false],
+  ["Object.prototype[ 'flip' + upper ] = function () { return this }", false],
+  ['Node.prototype[ 1 + upper ] = function () { return this }', true]
+] as const) {
+  test(`a prototype install whose key can be flipY decides its overlay: ${install}`, () => {
+    // Virtual files under the compiler's own package root: the index reads
+    // them through `read`, the program through `sourceOverlay`.
+    const directory = resolve('test/fixtures/virtual-prototype-install')
+    const texts = new Map([
+      [resolve(directory, 'dispatcher.js'), 'export class EventDispatcher {}\n'],
+      [
+        resolve(directory, 'texture.js'),
+        "import { EventDispatcher } from './dispatcher.js'\nexport class Texture extends EventDispatcher {\n  constructor() {\n    super()\n    /** @type {boolean} */\n    this.flipY = true\n    /** @type {boolean} */\n    this.isTexture = true\n  }\n}\n"
+      ],
+      [resolve(directory, 'node.js'), "import { EventDispatcher } from './dispatcher.js'\nexport class Node extends EventDispatcher {}\n"],
+      [
+        resolve(directory, 'install.js'),
+        `import { Node } from './node.js'\n/** @param {string} upper */\nexport function install(upper) {\n  ${install}\n}\n/** @param {any} t */\nexport const flags = (t) => [t.flipY, t.isTexture]\n`
+      ]
+    ])
+    const read = (file: string): string => {
+      const text = texts.get(file)
+      if (text === undefined) throw new Error(`no virtual file ${file}`)
+      return text
+    }
+    const result = createProgram({
+      rootFileNames: [...texts.keys()],
+      projectFileName: null,
+      options: { ...defaultCompilerOptions, types: [] },
+      sourceOverlay: texts,
+      sourceTransforms: [createSubclassMemberOverlayTransform(read)]
+    })
+    const file = result.program.getSourceFile(resolve(directory, 'dispatcher.js'))
+    assert.ok(file)
+    const declaration = file.statements.find(ts.isClassDeclaration)
+    assert.ok(declaration)
+    const type = result.checker.getTypeAtLocation(declaration)
+    assert.ok(type.getProperty('isTexture'), 'a key no install can name keeps its overlay')
+    assert.equal(type.getProperty('flipY') !== undefined, overlaid)
+  })
+}
+
 test('a subclass in a file the program does not include declares nothing on its base', () => {
   // `child.js` shares the package with `base.js` and writes five members onto
   // `Base`, but a program rooted at `base.js` alone never loads it: its

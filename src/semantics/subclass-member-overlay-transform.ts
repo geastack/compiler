@@ -127,6 +127,12 @@ import { dirname, join, relative, resolve, sep } from 'path'
  *   unrelated hierarchy elsewhere in the same package (three.js's own
  *   `KeyframeTrack.js` uses this idiom; it has nothing to do with `Material`
  *   or `Light`).
+ * - A member name a prototype install in the hierarchy can name, by a key
+ *   whose text proves an exact key or a prefix/suffix
+ *   (`Node.prototype[ 'flip' + propUpper ]` names `flipY`, which three's
+ *   `Texture` also assigns as a flag): the member is a method on one class
+ *   and a field on another, and the checker's `any` is the true answer. A
+ *   key whose text bounds nothing is not refused.
  * - A candidate name already bound in `Base`'s own file (an existing import,
  *   local class, or variable of that name): reusing it risks a second
  *   identity for the class the overlay means, so that declarer is dropped
@@ -699,13 +705,15 @@ interface PackageIndex {
   readonly classesByName: ReadonlyMap<string, ClassInfo>
   readonly directSubclassesOf: ReadonlyMap<string, readonly ClassInfo[]>
   /**
-   * Class names whose OWN members this scan cannot trust: the target of an
-   * `Object.assign( X.prototype, ... )` or `X.prototype.name = ...` mutation
-   * found anywhere in the package. Scoped to the mutated class itself, NOT
-   * the whole package -- three.js's own `KeyframeTrack.js` uses this idiom,
-   * and that says nothing about `Material`/`Light` elsewhere in the package.
+   * Class names whose OWN members this scan cannot trust: the owner of any
+   * prototype install (`prototypeInstallsOf`) found anywhere in the package.
+   * Scoped to the mutated class itself, NOT the whole package -- three.js's
+   * own `KeyframeTrack.js` uses this idiom, and that says nothing about
+   * `Material`/`Light` elsewhere in the package.
    */
   readonly untrustedClassNames: ReadonlySet<string>
+  /** Every prototype install in the package, with the keys it can name. */
+  readonly prototypeInstalls: readonly PrototypeInstall[]
   /**
    * Raw source text of every heritage clause this scan could not resolve to
    * a bare identifier -- a mixin factory, `extends someFn(Base)`. A base
@@ -773,43 +781,131 @@ const cachesFor = (read: DeclarerReader): ReaderCaches => {
   return fresh
 }
 
-/** The identifier name of the class whose prototype `node` dynamically mutates, or `null`. */
-const prototypeMutationTarget = (node: ts.Node): string | null => {
+/**
+ * The keys a write can name, as far as its text proves them: one `exact` key,
+ * or every key that starts with `prefix` and ends with `suffix`. Both affixes
+ * empty and no exact key is the unbounded domain, which proves nothing.
+ */
+interface KeyDomain {
+  readonly exact: string | null
+  readonly prefix: string
+  readonly suffix: string
+}
+
+const UNBOUNDED_KEYS: KeyDomain = { exact: null, prefix: '', suffix: '' }
+
+/**
+ * A key expression's string affixes, or `null` when it is not proven to be a
+ * string. Only string evidence counts: in `1 + x` neither side is a string,
+ * and the sum may be a number whose text no affix bounds.
+ */
+const stringAffixOf = (expression: ts.Expression): KeyDomain | null => {
+  if (ts.isParenthesizedExpression(expression)) return stringAffixOf(expression.expression)
+  if (ts.isStringLiteralLike(expression)) return { exact: expression.text, prefix: expression.text, suffix: expression.text }
+  if (ts.isTemplateExpression(expression)) {
+    const last = expression.templateSpans[expression.templateSpans.length - 1]
+    return { exact: null, prefix: expression.head.text, suffix: last?.literal.text ?? '' }
+  }
+  if (!ts.isBinaryExpression(expression) || expression.operatorToken.kind !== ts.SyntaxKind.PlusToken) return null
+  const left = stringAffixOf(expression.left)
+  const right = stringAffixOf(expression.right)
+  if (left === null && right === null) return null
+  if (left !== null && right !== null && left.exact !== null && right.exact !== null) {
+    const exact = left.exact + right.exact
+    return { exact, prefix: exact, suffix: exact }
+  }
+  // A side not proven a string still stringifies to SOME text, so it ends the
+  // affix the other side started; a proven side extends an exact neighbour.
+  const prefix = left === null ? '' : left.exact !== null ? left.exact + (right?.prefix ?? '') : left.prefix
+  const suffix = right === null ? '' : right.exact !== null ? (left?.suffix ?? '') + right.exact : right.suffix
+  return { exact: null, prefix, suffix }
+}
+
+/**
+ * The domain of a computed key. A numeric literal is exact only in the direct
+ * key position, where `ToPropertyKey` turns it into its canonical text.
+ */
+const keyDomainOf = (expression: ts.Expression): KeyDomain => {
+  const key = ts.isParenthesizedExpression(expression) ? expression.expression : expression
+  if (ts.isNumericLiteral(key)) {
+    const exact = String(Number(key.text))
+    return { exact, prefix: exact, suffix: exact }
+  }
+  return stringAffixOf(key) ?? UNBOUNDED_KEYS
+}
+
+const admitsKey = (domain: KeyDomain, name: string): boolean => {
+  if (domain.exact !== null) return domain.exact === name
+  if (domain.prefix === '' && domain.suffix === '') return false
+  return name.length >= domain.prefix.length + domain.suffix.length && name.startsWith(domain.prefix) && name.endsWith(domain.suffix)
+}
+
+/**
+ * One write that installs members on a class's prototype at runtime: the
+ * class it names (`null` when `.prototype` is not read off a bare identifier,
+ * so the scan cannot say whose prototype it is) and the keys it can install.
+ */
+interface PrototypeInstall {
+  readonly owner: string | null
+  readonly keys: KeyDomain
+}
+
+const prototypeOwnerOf = (expression: ts.Expression): { readonly owner: string | null } | null =>
+  ts.isPropertyAccessExpression(expression) && expression.name.text === 'prototype'
+    ? { owner: ts.isIdentifier(expression.expression) ? expression.expression.text : null }
+    : null
+
+/** The keys an object literal handed to `defineProperties`/`assign` installs. */
+const objectLiteralKeysOf = (source: ts.Expression): readonly KeyDomain[] => {
+  if (!ts.isObjectLiteralExpression(source)) return [UNBOUNDED_KEYS]
+  return source.properties.map((property) => {
+    if (ts.isSpreadAssignment(property) || property.name === undefined) return UNBOUNDED_KEYS
+    if (ts.isComputedPropertyName(property.name)) return keyDomainOf(property.name.expression)
+    if (ts.isNumericLiteral(property.name)) return keyDomainOf(property.name)
+    const text = ts.isIdentifier(property.name) || ts.isStringLiteralLike(property.name) ? property.name.text : null
+    return text === null ? UNBOUNDED_KEYS : { exact: text, prefix: text, suffix: text }
+  })
+}
+
+/**
+ * Every prototype install `node` performs: `X.prototype.k = ...`,
+ * `X.prototype[ k ] = ...` (any assignment operator), `X.prototype = ...`,
+ * `Object.defineProperty( X.prototype, k, ... )`, and
+ * `Object.defineProperties`/`Object.assign( X.prototype, ... )`.
+ */
+const prototypeInstallsOf = (node: ts.Node): readonly PrototypeInstall[] => {
   if (ts.isCallExpression(node)) {
     const callee = node.expression
-    if (
-      ts.isPropertyAccessExpression(callee) &&
-      ts.isIdentifier(callee.expression) &&
-      callee.expression.text === 'Object' &&
-      callee.name.text === 'assign'
-    ) {
-      const first = node.arguments[0]
-      if (
-        first &&
-        ts.isPropertyAccessExpression(first) &&
-        ts.isIdentifier(first.expression) &&
-        ts.isIdentifier(first.name) &&
-        first.name.text === 'prototype'
-      ) {
-        return first.expression.text
-      }
+    if (!ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.expression) || callee.expression.text !== 'Object') return []
+    const first = node.arguments[0]
+    const target = first ? prototypeOwnerOf(first) : null
+    if (target === null) return []
+    const method = callee.name.text
+    if (method === 'defineProperty') {
+      const key = node.arguments[1]
+      return [{ owner: target.owner, keys: key ? keyDomainOf(key) : UNBOUNDED_KEYS }]
     }
-    return null
+    if (method !== 'defineProperties' && method !== 'assign') return []
+    const sources = method === 'defineProperties' ? node.arguments.slice(1, 2) : node.arguments.slice(1)
+    return sources.flatMap((source) =>
+      (ts.isSpreadElement(source) ? [UNBOUNDED_KEYS] : objectLiteralKeysOf(source)).map((keys) => ({ owner: target.owner, keys }))
+    )
   }
-  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(node.left)) {
-    if (ts.isIdentifier(node.left.expression) && ts.isIdentifier(node.left.name) && node.left.name.text === 'prototype')
-      return node.left.expression.text
-    const inner = node.left.expression
-    if (
-      ts.isPropertyAccessExpression(inner) &&
-      ts.isIdentifier(inner.expression) &&
-      ts.isIdentifier(inner.name) &&
-      inner.name.text === 'prototype'
-    ) {
-      return inner.expression.text
-    }
-  }
-  return null
+  if (
+    !ts.isBinaryExpression(node) ||
+    node.operatorToken.kind < ts.SyntaxKind.FirstAssignment ||
+    node.operatorToken.kind > ts.SyntaxKind.LastAssignment
+  )
+    return []
+  const replaced = prototypeOwnerOf(node.left)
+  if (replaced !== null) return [{ owner: replaced.owner, keys: UNBOUNDED_KEYS }]
+  if (!ts.isPropertyAccessExpression(node.left) && !ts.isElementAccessExpression(node.left)) return []
+  const target = prototypeOwnerOf(node.left.expression)
+  if (target === null) return []
+  const keys = ts.isPropertyAccessExpression(node.left)
+    ? { exact: node.left.name.text, prefix: node.left.name.text, suffix: node.left.name.text }
+    : keyDomainOf(node.left.argumentExpression)
+  return [{ owner: target.owner, keys }]
 }
 
 const wholeWordPresent = (haystack: string, word: string): boolean =>
@@ -853,7 +949,7 @@ const classImportLine = (info: ClassInfo, hereDir: string): string => {
 
 /** What ONE file contributes to a package index: a pure function of its path and text. */
 interface PackageFileScan {
-  readonly untrustedClassNames: readonly string[]
+  readonly prototypeInstalls: readonly PrototypeInstall[]
   readonly externallyReadNames: readonly string[]
   readonly unresolvedHeritageTexts: readonly string[]
   readonly constants: readonly { readonly name: string; readonly domain: string }[]
@@ -862,15 +958,14 @@ interface PackageFileScan {
 
 const scanPackageFile = (filePath: string, text: string): PackageFileScan => {
   const file = ts.createSourceFile(filePath, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
-  const untrustedClassNames: string[] = []
+  const prototypeInstalls: PrototypeInstall[] = []
   const externallyReadNames: string[] = []
   const unresolvedHeritageTexts: string[] = []
   const constants: { name: string; domain: string }[] = []
   const classes: ClassInfo[] = []
 
   const scanForMutation = (node: ts.Node): void => {
-    const target = prototypeMutationTarget(node)
-    if (target) untrustedClassNames.push(target)
+    prototypeInstalls.push(...prototypeInstallsOf(node))
     if (ts.isPropertyAccessExpression(node) && node.expression.kind !== ts.SyntaxKind.ThisKeyword && ts.isIdentifier(node.name)) {
       externallyReadNames.push(node.name.text)
     }
@@ -912,7 +1007,7 @@ const scanPackageFile = (filePath: string, text: string): PackageFileScan => {
       ownObjectShapes: evidence.objectShape
     })
   }
-  return { untrustedClassNames, externallyReadNames, unresolvedHeritageTexts, constants, classes }
+  return { prototypeInstalls, externallyReadNames, unresolvedHeritageTexts, constants, classes }
 }
 
 /**
@@ -951,6 +1046,7 @@ const buildPackageIndex = (
   const classesByName = new Map<string, ClassInfo>()
   const duplicateNames = new Set<string>()
   const untrustedClassNames = new Set<string>()
+  const prototypeInstalls: PrototypeInstall[] = []
   const unresolvedHeritageTexts: string[] = []
   const externallyReadNames = new Set<string>()
   const constantDomainsByName = new Map<string, string>()
@@ -964,7 +1060,8 @@ const buildPackageIndex = (
       continue
     }
     const scan = scanOf(filePath, text)
-    for (const name of scan.untrustedClassNames) untrustedClassNames.add(name)
+    for (const install of scan.prototypeInstalls) if (install.owner !== null) untrustedClassNames.add(install.owner)
+    prototypeInstalls.push(...scan.prototypeInstalls)
     for (const name of scan.externallyReadNames) externallyReadNames.add(name)
     unresolvedHeritageTexts.push(...scan.unresolvedHeritageTexts)
     for (const { name, domain } of scan.constants) {
@@ -991,6 +1088,7 @@ const buildPackageIndex = (
     classesByName,
     directSubclassesOf,
     untrustedClassNames,
+    prototypeInstalls,
     unresolvedHeritageTexts,
     externallyReadNames,
     constantDomainsByName
@@ -1053,7 +1151,7 @@ const ancestorChainOf = (index: PackageIndex, className: string): ReadonlySet<st
  * of never relaxing a guard -- has no record shape to reduce that against
  * every member is nominal, not structural (`unresolved-reaches-materialization`
  * fires). This is a purely structural check over the package's own class
- * index, exactly like `wholeWordPresent`/`prototypeMutationTarget` above --
+ * index, exactly like `wholeWordPresent`/`prototypeInstallsOf` above --
  * no library name, no member name, no checker call.
  */
 const shareCommonAncestor = (index: PackageIndex, names: readonly string[]): boolean => {
@@ -1453,6 +1551,24 @@ export const createSubclassMemberOverlayTransform =
         }
       }
       for (const name of alreadyDeclared) candidateNames.delete(name)
+      // A key a prototype install can name is not one declarers' field: three's
+      // `Texture` sets `this.flipY = true` while TSLCore installs `flipY()` as
+      // `Node.prototype[ 'flip' + propUpper ]`, and both extend
+      // `EventDispatcher`. Overlaying `flipY: boolean | undefined` there made
+      // `node.flipY()` a call on a scalar; without it the read stays the
+      // checker's `any`, which is what the member genuinely is across this
+      // hierarchy. An install counts when its class is in this hierarchy or
+      // its ancestry, or when the scan cannot say whose prototype it is. An
+      // unbounded key (`Node.prototype[ name ]`) proves nothing and is not
+      // refused here.
+      const reach = new Set([...ancestorChainOf(index, statement.name.text), ...hierarchyNames])
+      for (const name of candidateNames) {
+        const installed = index.prototypeInstalls.some(
+          (install) =>
+            admitsKey(install.keys, name) && (install.owner === null || !index.classesByName.has(install.owner) || reach.has(install.owner))
+        )
+        if (installed) candidateNames.delete(name)
+      }
       if (candidateNames.size === 0) {
         if (restated.length > 0) edits.push({ at: statement.members.pos, text: '\n' + restated.join('') })
         continue
