@@ -34988,6 +34988,69 @@ gea::Ref<ArrayObject<E>> slice(const gea::Ref<ArrayObject<E>>& array) {
 }
 
 /**
+ * 23.1.3.28 steps 8-11 once both indices are known. `len` was read before
+ * either index was coerced, and coercing an `any` index may run its
+ * `valueOf`/`toString`, which can shrink the receiver: an index it no longer
+ * holds fails step 8.b's HasProperty and is a hole in the result, whose
+ * length is the span regardless (step 11).
+ */
+template <typename E>
+gea::Ref<ArrayObject<E>> sliceSpanAfterCoercion(const gea::Ref<ArrayObject<E>>& array, std::size_t from, std::size_t to) {
+  auto out = gea::makeRef<ArrayObject<E>>();
+  if (from >= to) return out;
+  const std::size_t held = std::min(to, array->size());
+  if (from < held) out->assignRange(*array, from, held);
+  for (std::size_t index = std::max(from, held); index < to; ++index) out->pushHole();
+  return out;
+}
+
+/** Step 3's (and step 5's) ToIntegerOrInfinity of an `any` index: ToNumber runs here, after `len` was read. */
+inline std::size_t sliceIndexOfValue(const gea::Value& index, std::size_t length) { return relativeIndex(gea::dynamicToNumber(index), length); }
+
+/** Step 5: an `undefined` end is `len` itself, never ToNumber's NaN. */
+inline std::size_t sliceEndOfValue(const gea::Value& end, std::size_t length) {
+  return end.tag() == gea::Value::Tag::Undefined ? length : sliceIndexOfValue(end, length);
+}
+
+/**
+ * `slice(start, end)` with an `any` index -- three's TSLCore
+ * `params.slice( 0, maxParams )`. The specification reads `len` (step 2)
+ * before it coerces `start` (step 3) and then `end` (step 5), and ToNumber of
+ * an object runs program code, so the index arrives as the value it is and is
+ * coerced here, in that order, rather than before the call.
+ */
+template <typename E>
+gea::Ref<ArrayObject<E>> slice(const gea::Ref<ArrayObject<E>>& array, double start, const gea::Value& end) {
+  if (!array) return gea::makeRef<ArrayObject<E>>();
+  const std::size_t length = array->size();
+  const std::size_t from = relativeIndex(start, length);
+  return sliceSpanAfterCoercion(array, from, sliceEndOfValue(end, length));
+}
+
+template <typename E>
+gea::Ref<ArrayObject<E>> slice(const gea::Ref<ArrayObject<E>>& array, const gea::Value& start, double end) {
+  if (!array) return gea::makeRef<ArrayObject<E>>();
+  const std::size_t length = array->size();
+  const std::size_t from = sliceIndexOfValue(start, length);
+  return sliceSpanAfterCoercion(array, from, relativeIndex(end, length));
+}
+
+template <typename E>
+gea::Ref<ArrayObject<E>> slice(const gea::Ref<ArrayObject<E>>& array, const gea::Value& start, const gea::Value& end) {
+  if (!array) return gea::makeRef<ArrayObject<E>>();
+  const std::size_t length = array->size();
+  const std::size_t from = sliceIndexOfValue(start, length);
+  return sliceSpanAfterCoercion(array, from, sliceEndOfValue(end, length));
+}
+
+template <typename E>
+gea::Ref<ArrayObject<E>> slice(const gea::Ref<ArrayObject<E>>& array, const gea::Value& start) {
+  if (!array) return gea::makeRef<ArrayObject<E>>();
+  const std::size_t length = array->size();
+  return sliceSpanAfterCoercion(array, sliceIndexOfValue(start, length), length);
+}
+
+/**
  * ECMA-262 23.1.3.1 `at(index)`.
  *
  * `undefined` out of range, hence `Optional<E>`. A negative index counts back
@@ -37812,23 +37875,23 @@ inline void appendMapRangeAsArrays(gea::ArrayObject<gea::Ref<gea::ArrayObject<ge
 }
 
 /**
- * `new Map(array)` for a `Map<any, any>` (ECMA-262 24.1.1.2
- * AddEntriesFromIterable): each element is an object whose "0" and "1"
- * properties are read with an ordinary [[Get]] -- a `[k, v]` Array, or any
- * other object, whose missing slots read `undefined`. A hole reads
- * `undefined`, which is not an Object, so it throws the TypeError of step
- * 4.d. The emitter reaches this only for an array whose element is an object
- * carrier. three's TSLCore seeds its `cacheMaps` maps this way.
+ * `new Map(entries)` for a `Map<any, any>` seeded from an Array of `[k, v]`
+ * Arrays of `any` (ECMA-262 24.1.1.2 AddEntriesFromIterable): each entry's
+ * "0" and "1" are read with an ordinary [[Get]], so a missing or `undefined`
+ * slot reads `undefined`. A hole or an `undefined` entry is not an Object:
+ * the TypeError of step 4.d. Both halves already are the map's own values,
+ * so nothing here converts. three's TSLCore seeds its constant-node cache
+ * this way, `new Map( [ ...boolsCacheMap, ...floatsCacheMap ] )`, over the
+ * entry Arrays `appendMapRangeAsArrays` mints.
  */
-template <typename E>
-inline gea::Ref<gea::Map<gea::Value, gea::Value>> mapFromEntryArray(const gea::Ref<gea::ArrayObject<E>>& source) {
+inline gea::Ref<gea::Map<gea::Value, gea::Value>> mapFromEntryArray(const gea::Ref<gea::ArrayObject<gea::Ref<gea::ArrayObject<gea::Value>>>>& source) {
   auto result = gea::makeRef<gea::Map<gea::Value, gea::Value>>();
-  const gea::PropertyKey first = gea::PropertyKey::number(0);
-  const gea::PropertyKey second = gea::PropertyKey::number(1);
-  for (const auto& slot : source->slots()) {
-    if (!slot.present) gea::host::throwRuntimeError("TypeError", "Iterator value undefined is not an entry object");
-    const gea::Value item = gea::Value::box(gea::Value::Tag::Object, slot.value);
-    result->set(item.getProperty(first), item.getProperty(second));
+  if (!source) return result;
+  for (std::size_t index = 0; index < source->size(); ++index) {
+    if (!source->present(index) || source->elementIsUndefined(index) || !source->at(index))
+      gea::host::throwRuntimeError("TypeError", "Iterator value undefined is not an entry object");
+    const auto& entry = source->at(index);
+    result->set(entry->hasElementValueAtIndex(0) ? entry->at(0) : gea::Value(), entry->hasElementValueAtIndex(1) ? entry->at(1) : gea::Value());
   }
   return result;
 }

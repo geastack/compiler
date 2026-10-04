@@ -725,6 +725,24 @@ const rangedMethodText =
   }
 
 /**
+ * ECMA-262 23.1.3.28 `slice(start, end)`. A `number` index takes the plain
+ * overload. An `any` index (three's TSLCore `params.slice( 0, maxParams )`)
+ * takes the runtime's own `gea::Value` overload as the value it already is:
+ * the specification reads the receiver's length BEFORE ToIntegerOrInfinity
+ * runs on either index, and ToNumber of an object runs program code, so no
+ * coercion before the call could keep that order. This is a second spelling
+ * of `slice`, not a looser gate: an index of any other carrier still refuses,
+ * and every other ranged member still requires a number.
+ */
+const sliceText: ArrayCallRenderer = (ctx, receiverText, _element, args) => {
+  requireArity('slice', '23.1.3.28', [0, 1, 2], args)
+  for (let ordinal = 0; ordinal < args.length; ordinal += 1) {
+    if (args[ordinal]?.representation.kind !== 'dynamic') requireNumber('slice', ordinal, args)
+  }
+  return call(ctx, 'slice', receiverText, args)
+}
+
+/**
  * ECMA-262 23.1.3.16 `includes(searchElement[, fromIndex])` -- SameValueZero
  * against every element, which is a comparison between two VALUES and never a
  * store: the search value is not written into the array, so it need not carry
@@ -1067,7 +1085,7 @@ export const arrayMethods: ReadonlyMap<string, ArrayCallRenderer> = new Map<stri
   ['entries', arrayIteratorText('entries', '23.1.3.5')],
   ['keys', arrayIteratorText('keys', '23.1.3.19')],
   ['values', arrayIteratorText('values', '23.1.3.38')],
-  ['slice', rangedMethodText('slice', '23.1.3.28', [0, 1, 2], null)],
+  ['slice', sliceText],
   ['indexOf', rangedMethodText('indexOf', '23.1.3.17', [1, 2], 0)],
   ['lastIndexOf', rangedMethodText('lastIndexOf', '23.1.3.20', [1, 2], 0)],
   ['includes', includesText],

@@ -2714,6 +2714,20 @@ const mapSeedText = (
   }
   if (source.kind !== 'array-object' || source.ownership !== 'shared-refcount') return null
   const pair = source.element
+  // `[k, v]` Arrays of `any` into a `Map<any, any>`: three's TSLCore
+  // `new Map( [ ...boolsCacheMap, ...floatsCacheMap ] )` over the entry Arrays
+  // `appendMapRangeAsArrays` mints. Each entry's "0"/"1" is already the map's
+  // own `dynamic` carrier, so the runtime walk reads them and converts nothing.
+  if (
+    pair.kind === 'array-object' &&
+    pair.ownership === 'shared-refcount' &&
+    pair.extension === null &&
+    pair.element.kind === 'dynamic' &&
+    result.key.kind === 'dynamic' &&
+    value.kind === 'dynamic'
+  ) {
+    return `return gea::runtime::iterator::mapFromEntryArray(${text});`
+  }
   if (pair.kind !== 'record' || pair.fields.length !== 2) return null
   const [first, second] = pair.fields
   if (first?.key !== '0' || second?.key !== '1' || !first.required || !second.required) return null
