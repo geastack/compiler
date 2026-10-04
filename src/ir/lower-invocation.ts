@@ -707,7 +707,34 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
   // a member declares (`log(message?: any, ...optionalParams: any[])`) is
   // joined exactly like the tail, so the one array holds every argument.
   const textRest = restElement
+  // `Object.assign( {}, ...children )` (three's ContextNode): 20.1.2.1 takes
+  // `(target, ...sources)`, so only the SOURCES are the runtime-counted list.
+  // Packing the target into the whole list below would box it, and the call's
+  // result is the target's own carrier (`assignText` requires it), which no
+  // boxed copy can be. So the target stays positional and the sources -- each
+  // already `dynamic`, a spread only of a dynamic list -- are packed into the
+  // rest array this convention declares; `CallOperation.assignSourcesPacked`
+  // says which layout this is. A typed source would be boxed by the pack, so
+  // it keeps the old path's refusal.
+  const hostTemplate = hostTemplateOf(ctx, operation, callee)
+  const packedAssignSources: IrOperand | null =
+    hostTemplate === 'object-assign' &&
+    textJoined &&
+    textRest !== null &&
+    textRest.kind === 'array-object' &&
+    calleeAbi?.restFrom === 1 &&
+    calleeReceiverIsNativeHandle(ctx, operation) &&
+    evaluated[0]?.kind === 'value' &&
+    evaluated.slice(1).some((slot) => slot.kind === 'spread') &&
+    evaluated.slice(1).every((slot) => {
+      const carrier = slot.value.representation
+      if (slot.kind === 'value') return carrier.kind === 'dynamic'
+      return carrier.kind === 'dynamic' || (carrier.kind === 'array-object' && carrier.element.kind === 'dynamic')
+    })
+      ? { value: packArgumentArray(ctx, block, lineage, evaluated.slice(1), textRest), representation: textRest }
+      : null
   const wholeSpreadArgument: IrOperand | null =
+    packedAssignSources === null &&
     textJoined &&
     evaluated.length === 1 &&
     evaluated[0]?.kind === 'spread' &&
@@ -753,33 +780,35 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
       ? [dynamicSpreadList]
       : numericRestHostCall !== null
         ? (numericRestArguments ?? evaluated.map((slot) => slot.value))
-        : calleeReceiverIsNativeHandle(ctx, operation) && textJoined
-          ? wholeSpreadArgument !== null
-            ? [wholeSpreadArgument]
-            : evaluated.map((slot) => {
-                if (slot.kind === 'spread') {
-                  // The text-joined native-handle path renders its call from the
-                  // operands themselves, one rendered text per operand, so there is
-                  // nothing for a range copy to expand INTO -- `console.log(...args)`
-                  // would print the array where the language prints its elements.
-                  throw new IrLoweringBlockedError(
-                    'a spread argument reaches a host member whose call is rendered from its operands as text; a range copy has no expansion there'
-                  )
-                }
-                return slot.value
-              })
-          : calleeReceiverIsIteratorCarrier(ctx, operation)
-            ? evaluated.map((slot) => {
-                if (slot.kind === 'spread') {
-                  throw new IrLoweringBlockedError(
-                    "a spread argument reaches a generator cursor's next()/return()/throw(), which reads its own resume/abrupt operand " +
-                      'directly and has no rest frame for a range copy to expand into'
-                  )
-                }
-                return slot.value
-              })
-            : (spreadFill?.args ??
-              packRestArguments(ctx, block, lineage, operation.id, calleeAbi, evaluated, callee.representation, operation.internalMethod))
+        : packedAssignSources !== null && evaluated[0] !== undefined
+          ? [evaluated[0].value, packedAssignSources]
+          : calleeReceiverIsNativeHandle(ctx, operation) && textJoined
+            ? wholeSpreadArgument !== null
+              ? [wholeSpreadArgument]
+              : evaluated.map((slot) => {
+                  if (slot.kind === 'spread') {
+                    // The text-joined native-handle path renders its call from the
+                    // operands themselves, one rendered text per operand, so there is
+                    // nothing for a range copy to expand INTO -- `console.log(...args)`
+                    // would print the array where the language prints its elements.
+                    throw new IrLoweringBlockedError(
+                      'a spread argument reaches a host member whose call is rendered from its operands as text; a range copy has no expansion there'
+                    )
+                  }
+                  return slot.value
+                })
+            : calleeReceiverIsIteratorCarrier(ctx, operation)
+              ? evaluated.map((slot) => {
+                  if (slot.kind === 'spread') {
+                    throw new IrLoweringBlockedError(
+                      "a spread argument reaches a generator cursor's next()/return()/throw(), which reads its own resume/abrupt operand " +
+                        'directly and has no rest frame for a range copy to expand into'
+                    )
+                  }
+                  return slot.value
+                })
+              : (spreadFill?.args ??
+                packRestArguments(ctx, block, lineage, operation.id, calleeAbi, evaluated, callee.representation, operation.internalMethod))
   // `operation.target` (the `SemanticTargetProof`) is never read here: `open`
   // is a complete answer that selects this same generic path, and a narrower
   // proof does not license skipping straight to a direct call this IR has no
@@ -861,11 +890,10 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
             operation.intrinsicDataDefinition === true
           )
         : null
-    // The host template that prints this call, when this IR states that
-    // template's frame; the struct copies it prints are published before the
-    // reflection census reads them.
-    const hostTemplate = hostTemplateOf(ctx, operation, callee)
-    if (hostTemplate === 'object-assign' && wholeSpreadArgument === null)
+    // The host template that prints this call (`hostTemplate`, above), when
+    // this IR states that template's frame; the struct copies it prints are
+    // published before the reflection census reads them.
+    if (hostTemplate === 'object-assign' && wholeSpreadArgument === null && packedAssignSources === null)
       publishObjectAssignFieldConversions(args, ctx.constantDeriver, ctx.program.classes, ctx.program.conversions)
     const called = ctx.builder.call(
       block,
@@ -880,7 +908,10 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
       operation.intrinsicOwnKeys && calleeRenderingOf(ctx.program.slots.input, operation) === 'template' ? true : undefined,
       fixedDataDefinition ?? undefined,
       numericRestHostCall ?? undefined,
-      !fixedDataDefinition && wholeSpreadArgument === null && calleeRenderingOf(ctx.program.slots.input, operation) === 'template'
+      !fixedDataDefinition &&
+        wholeSpreadArgument === null &&
+        packedAssignSources === null &&
+        calleeRenderingOf(ctx.program.slots.input, operation) === 'template'
         ? objectValueConversionsOf(operation.intrinsicMutation, args, ctx.constantDeriver, ctx.program.conversions)
         : undefined,
       // Carried whatever the callee's rendering: unlike `intrinsicOwnKeys`,
@@ -889,7 +920,9 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
       // it is eventually spelled.
       operation.intrinsicCarrierPredicate,
       calleeRenderingOf(ctx.program.slots.input, operation) === 'template' ? operation.intrinsicReflection : undefined,
-      hostTemplate
+      hostTemplate,
+      undefined,
+      packedAssignSources !== null ? true : undefined
     )
     const returned =
       narrows && called !== null && physical !== null && representation !== null

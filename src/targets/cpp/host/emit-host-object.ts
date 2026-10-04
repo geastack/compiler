@@ -107,8 +107,14 @@ const objectValueConversionText = (
   source: Representation,
   text: string
 ): string => {
+  // Matched on the source carrier too: a `defineProperties` table of two
+  // descriptor shapes cites each arm's `get` separately.
   const citation = operation.objectValueConversions?.find(
-    (value) => value.role === role && value.argument === argument && value.field === field
+    (value) =>
+      value.role === role &&
+      value.argument === argument &&
+      value.field === field &&
+      representationKey(value.source) === representationKey(source)
   )
   const node = citation && ctx.conversions.nodeById(citation.conversion)
   if (!citation || !node || representationKey(citation.source) !== representationKey(source))
@@ -2650,13 +2656,52 @@ const assignIntoCallableText = (ctx: EmitContext, operation: CallOperation, targ
   return `([&]() { ${body} return ${targetText}; })()`
 }
 
+/**
+ * `Object.assign( {}, ...children )`: the sources arrive as ONE packed list
+ * (`CallOperation.assignSourcesPacked`), so 20.1.2.1 step 4's loop over
+ * `sources` runs here at run time, each element copied exactly as the same
+ * `dynamic` source written out positionally would be. An absent element is
+ * `undefined`, which step 4.a skips.
+ */
+const assignPackedSourcesText = (ctx: EmitContext, targetView: ObjectView, sources: readonly IrOperand[]): string => {
+  const [packed] = sources
+  if (
+    sources.length !== 1 ||
+    packed === undefined ||
+    packed.representation.kind !== 'array-object' ||
+    packed.representation.element.kind !== 'dynamic'
+  ) {
+    throw createCppEmitBlockedError(
+      'host-member-call:Object.assign',
+      '"Object.assign"\'s packed source list must be one array of dynamic sources, as ir/lower-invocation.ts packs it'
+    )
+  }
+  const list = '__gea_assign_sources'
+  const each = '__gea_assign_each'
+  const copy = assignSourceText(ctx, targetView, objectViewFrom(ctx, 'assign', packed.representation.element, each, 'source'))
+  return (
+    `{ const auto& ${list} = ${operandText(ctx, packed)}; ` +
+    `for (long long __gea_index = 0; __gea_index < static_cast<long long>(${list}->length()); ++__gea_index) { ` +
+    `if (!${list}->hasElementValueAtIndex(__gea_index)) continue; const gea::Value& ${each} = ${list}->elementAtIndex(__gea_index); ${copy} } }`
+  )
+}
+
 const assignText = (ctx: EmitContext, operation: CallOperation): string => {
   const target = targetOf(ctx, 'assign', operation)
   const targetText = operandText(ctx, target)
   const sources = operation.arguments.slice(1)
   if (sources.length === 0)
     throw createCppEmitBlockedError('host-member-call:Object.assign', '"Object.assign" takes a source object, and this call passes none')
-  if (isNativeCallableCarrier(target.representation.kind)) return assignIntoCallableText(ctx, operation, target)
+  if (isNativeCallableCarrier(target.representation.kind)) {
+    // Each store into a Function object is cited per written source field
+    // (`objectValueConversions`); a packed list states no fields to cite.
+    if (operation.assignSourcesPacked)
+      throw createCppEmitBlockedError(
+        'host-member-call:Object.assign',
+        '"Object.assign" into a Function object stores each source field through a cited conversion, and a spread source list names no fields'
+      )
+    return assignIntoCallableText(ctx, operation, target)
+  }
   const targetView = objectViewOf(ctx, 'assign', target, 'target')
   if (targetView.kind === 'known') {
     const result = operation.result?.representation
@@ -2669,7 +2714,9 @@ const assignText = (ctx: EmitContext, operation: CallOperation): string => {
       )
     }
   }
-  const copies = sources.map((source) => assignOperandText(ctx, targetView, source)).join(' ')
+  const copies = operation.assignSourcesPacked
+    ? assignPackedSourcesText(ctx, targetView, sources)
+    : sources.map((source) => assignOperandText(ctx, targetView, source)).join(' ')
   if (operation.result === null) return `([&]() { ${copies} })()`
   return `([&]() { ${copies} return ${targetText}; })()`
 }
@@ -2702,7 +2749,7 @@ const assignText = (ctx: EmitContext, operation: CallOperation): string => {
  * `get: () => this.x` read the wrong object.
  */
 const defineDescriptorLines = (ctx: EmitContext, operation: CallOperation, descriptor: IrOperand, slot: string): string =>
-  descriptorSlotLines(ctx, operation, descriptor.representation, operandText(ctx, descriptor), slot)
+  descriptorSlotLines(ctx, operation, descriptor.representation, operandText(ctx, descriptor), slot, 2)
 
 /**
  * The descriptor operand of `Object.defineProperty`, in every carrier a
@@ -2721,7 +2768,10 @@ const descriptorSlotLines = (
   operation: CallOperation,
   representation: Representation,
   text: string,
-  slot: string
+  slot: string,
+  // The argument the descriptor's conversions are cited at: `defineProperty`'s
+  // descriptor is its third, `defineProperties`'s table its second.
+  argument: 1 | 2
 ): string => {
   if (representation.kind === 'native-handle' && representation.protocol === 'PropertyDescriptor') {
     return `const gea::PropertyDescriptor& ${slot} = ${text};`
@@ -2729,7 +2779,7 @@ const descriptorSlotLines = (
   if (representation.kind === 'optional') {
     return (
       `if (!(${text}).has_value()) gea::host::throwRuntimeError("TypeError", "Property description must be an object: ${representation.absence}"); ` +
-      descriptorSlotLines(ctx, operation, representation.payload, `(*${text})`, slot)
+      descriptorSlotLines(ctx, operation, representation.payload, `(*${text})`, slot, argument)
     )
   }
   // A table of descriptor literals of different shapes (`{ get, set }` beside
@@ -2738,7 +2788,7 @@ const descriptorSlotLines = (
   if (representation.kind === 'tagged-union') {
     const arms = representation.arms.map(
       (arm, index) =>
-        `if ((${text}).is<${index}>()) { ${descriptorSlotLines(ctx, operation, arm.value, `(${text}).get<${index}>()`, `${slot}_arm`)} ${slot} = ${slot}_arm; }`
+        `if ((${text}).is<${index}>()) { ${descriptorSlotLines(ctx, operation, arm.value, `(${text}).get<${index}>()`, `${slot}_arm`, argument)} ${slot} = ${slot}_arm; }`
     )
     return `gea::PropertyDescriptor ${slot}; ${arms.map((arm, index) => (index === 0 ? arm : ` else { ${arm}`)).join('')}${' }'.repeat(arms.length - 1)}`
   }
@@ -2801,7 +2851,9 @@ const descriptorSlotLines = (
     // a descriptor is not both kinds runs after every field is read, below.
     if (field.key === 'get' || field.key === 'set') {
       const boxed =
-        carried.kind === 'dynamic' ? held : objectValueConversionText(ctx, operation, 'descriptor-value', 2, field.key, carried, held)
+        carried.kind === 'dynamic'
+          ? held
+          : objectValueConversionText(ctx, operation, 'descriptor-value', argument, field.key, carried, held)
       push(field, `gea::${field.key === 'get' ? 'installDescriptorGetter' : 'installDescriptorSetter'}(${slot}, ${boxed});`)
       continue
     }
@@ -2822,7 +2874,7 @@ const descriptorSlotLines = (
       }
       // The cited conversion retains callable receiver conventions as well as
       // payload type; the printer never chooses a dynamic box tag here.
-      const boxed = objectValueConversionText(ctx, operation, 'descriptor-value', 2, field.key, carried, held)
+      const boxed = objectValueConversionText(ctx, operation, 'descriptor-value', argument, field.key, carried, held)
       push(field, stated(`${slot}.hasValue = true; ${slot}.value = ${boxed};`))
       continue
     }
@@ -3334,7 +3386,7 @@ const definePropertiesText = (ctx: EmitContext, operation: CallOperation): strin
       `${site} reads its descriptors from a string-keyed table; this map carries "${representationKey(table)}"`
     )
   const slot = '__gea_descriptor'
-  const read = descriptorSlotLines(ctx, operation, table.value, '__gea_entry', slot)
+  const read = descriptorSlotLines(ctx, operation, table.value, '__gea_entry', slot, 1)
   const mapText = `(${operandText(ctx, map)})${memberAccessOperator(table.ownership)}`
   return (
     `([&]() { std::vector<std::pair<gea::PropertyKey, gea::PropertyDescriptor>> __gea_descriptors; ` +

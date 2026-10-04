@@ -58,6 +58,42 @@ export const objectValueConversionInputsOf = (
         .map((field) => ({ role: 'descriptor-value' as const, argument: 2, field: field.key, source: field.value, target: dynamic }))
     ]
   }
+  // `Object.defineProperties(target, map)` (three's TSLCore over its swizzle
+  // accessor table): every descriptor in the string-keyed table is read by the
+  // same reader `defineProperty`'s is (`descriptorSlotLines`), so each arm's
+  // fields need the same citations, at the table's argument. A field already
+  // `dynamic` needs none; the halves rule is `defineProperty`'s above.
+  if (intrinsic === 'object-define-properties') {
+    const table = args[1]?.representation
+    if (table?.kind !== 'dictionary' || table.key !== 'string') return []
+    const arms = (carrier: Representation): readonly Representation[] =>
+      carrier.kind === 'optional'
+        ? arms(carrier.payload)
+        : carrier.kind === 'tagged-union'
+          ? carrier.arms.flatMap((arm) => arms(arm.value))
+          : [carrier]
+    const inputs = new Map<string, ObjectValueConversionInput>()
+    for (const field of arms(table.value).flatMap(fieldsOf)) {
+      const half = field.key === 'get' || field.key === 'set'
+      const source =
+        field.key === 'value'
+          ? field.value.kind === 'optional' && field.value.absence === 'undefined'
+            ? field.value.payload
+            : field.value
+          : half && field.required && field.value.kind !== 'optional'
+            ? field.value
+            : null
+      if (source === null || source.kind === 'dynamic') continue
+      inputs.set(`${field.key}|${representationKey(source)}`, {
+        role: 'descriptor-value',
+        argument: 1,
+        field: field.key,
+        source,
+        target: dynamic
+      })
+    }
+    return [...inputs.values()]
+  }
   const target = args[0]?.representation
   if (intrinsic !== 'object-assign' || !target || !isNativeCallableCarrier(target.kind)) return []
   return args.slice(1).flatMap((argument, index) =>

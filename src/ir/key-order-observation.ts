@@ -157,6 +157,14 @@ export const keyOrderObservationOf = (
         if (operation.hostTemplate === 'object-assign' && !operation.argumentsAreSpread) {
           const [target, ...sources] = operation.arguments
           if (target === undefined) return
+          // A packed source list feeds the target from each ELEMENT, the way
+          // the same sources written out would; the array itself is no source.
+          if (operation.assignSourcesPacked) {
+            const packed = sources[0]?.representation
+            if (packed?.kind !== 'array-object' || sources.length !== 1) return observeAll(operation)
+            feed(target.representation, packed.element)
+            return
+          }
           for (const source of sources) feed(target.representation, source.representation)
           return
         }

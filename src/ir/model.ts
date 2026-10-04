@@ -338,6 +338,16 @@ export interface CallOperation extends IrOperationBase {
    */
   readonly argumentsAreSpread?: boolean
   /**
+   * `true` exactly when this is `Object.assign(target, ...sources)` (host
+   * template `object-assign`) whose sources include a spread: `arguments` is
+   * `[target, sources]`, the second ONE fresh `array-object` of every source in
+   * written order (`ir/lower-invocation.ts`'s `packedAssignSources`). Without
+   * it the packed array is indistinguishable from a single array SOURCE
+   * (`Object.assign({}, xs)` copies `xs`'s indices), so every consumer that
+   * reads `arguments.slice(1)` as sources must read this first.
+   */
+  readonly assignSourcesPacked?: true
+  /**
    * Authenticated host property with a borrowed numeric rest sequence, instead
    * of an escaping rest array. `wholeArray`: the one argument is a spread of a
    * numeric array the host reads whole (`String.fromCharCode(...codes)`), so
