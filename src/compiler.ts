@@ -45,6 +45,7 @@ import { symbolKeyedExpandoSourceTransform } from './semantics/symbol-keyed-expa
 import { newCalleeClassTagSourceTransform } from './semantics/new-callee-class-tag-source-transform.js'
 import { borrowedBuiltinCallBindSourceTransform } from './semantics/borrowed-builtin-call-bind-source-transform.js'
 import { borrowedMethodReceiverCopySourceTransform } from './semantics/borrowed-method-receiver-copy-source-transform.js'
+import { boundReceiverThisTagSourceTransform } from './semantics/bound-receiver-this-tag-source-transform.js'
 import { runFrontend, type CensusAccounting } from './semantics/frontend.js'
 import type { CellFactsPublication } from './semantics/normalize/cells/index.js'
 import type { DiagnosticSourcePreparationAudit } from './semantics/diagnostic-source-preparation.js'
@@ -406,6 +407,11 @@ export const sourceTransformsFor = (
   // method placed in that class, which the checker then types against the
   // receiver -- see the transform's own module comment.
   borrowedMethodReceiverCopySourceTransform,
+  // A module function every reference binds or calls on one class's `this`
+  // (`onSessionEnd.bind( this )`) is tagged `@this` with that class, so its
+  // body reads the class's members rather than a constructor layout the
+  // checker inferred from its own `this.x =` writes.
+  boundReceiverThisTagSourceTransform,
   // `jsdocNamepathTransform` runs before the overlay: it respells a name the
   // source already stated into one the checker can bind, so the overlay --
   // which reads the source's own tags to decide what it must bring into
