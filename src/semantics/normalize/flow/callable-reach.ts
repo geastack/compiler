@@ -70,6 +70,7 @@ import { enclosingArgumentsFunction, isArgumentsObjectIdentifier } from '../impl
 import { constructorCallsOf } from './parameter-values.js'
 import { outermostErasureOf } from '../producers/erasure.js'
 import { intrinsicOwnKeyQueryOf } from '../intrinsic-property-call.js'
+import { createPropertyKeyDomains } from '../property-key-domain.js'
 import { localBindingValuesOf, localBindingWritesAreComplete } from './value-provenance.js'
 import { computedKeySetOf, type ComputedKeySetAuthority } from './computed-key-set.js'
 import { callableCompletionValuesOf, constructionYieldsCompletionOf } from './callable-completions.js'
@@ -2006,7 +2007,7 @@ const closedMemberCallableUses = (
     // same `computedKeyMayBeMember`; refusing them here as an unexplained use
     // of the alias made this proof stricter than the writes it is proving.
     if (ts.isElementAccessExpression(parent) && parent.expression === reference && member !== null)
-      return !computedKeyMayBeMember(checker, parent.argumentExpression, member.getName())
+      return !computedKeyMayBeMember(checker, flow, parent.argumentExpression, member.getName())
     // `Object.assign(receiver, { x: 2 })` writes exactly the keys its sources
     // spell: every source an object literal, none naming this member, and the
     // receiver is untouched at this key. A source whose keys cannot be read
@@ -3846,7 +3847,7 @@ const closedMemberCallableUses = (
     // A computed key whose static type is numeric, or a literal set not
     // holding the key, cannot address this slot (`computedKeyMayBeMember`,
     // shared with the receiver-alias walk).
-    const computedKeyMayBe = (argument: ts.Expression): boolean => computedKeyMayBeMember(checker, argument, key)
+    const computedKeyMayBe = (argument: ts.Expression): boolean => computedKeyMayBeMember(checker, flow, argument, key)
     const inventory = slotWriteInventoryOf(checker, flow)
     for (const access of inventory.namedWrites.get(key) ?? []) if (mayBeFamilyInstance(access.expression)) return false
     for (const access of inventory.namedWrites.get('__proto__') ?? []) if (mayBeFamilyInstance(access.expression)) return false
@@ -4131,15 +4132,7 @@ const closedMemberCallableUses = (
       for (const allocated of origins.classes) if (inFamily(allocated)) return true
       return false
     }
-    const computedKeyMayBe = (argument: ts.Expression): boolean => {
-      const type = checker.getTypeAtLocation(argument)
-      const arms = type.isUnion() ? type.types : [type]
-      return arms.some((arm) => {
-        if (arm.flags & ts.TypeFlags.NumberLike) return false
-        if (arm.isStringLiteral()) return arm.value === key
-        return true
-      })
-    }
+    const computedKeyMayBe = (argument: ts.Expression): boolean => computedKeyMayBeMember(checker, flow, argument, key)
     const inventory = slotWriteInventoryOf(checker, flow)
     // None of these installs a value this walk can enumerate, so any one
     // reaching the family refuses the slot whole -- exactly the bar
@@ -7538,14 +7531,28 @@ const spelledLiteralKeysOf = (expression: ts.Expression): ReadonlySet<string> | 
 const numericKeyType = (type: ts.Type): boolean =>
   (type.isUnion() ? type.types : [type]).every((arm) => (arm.flags & ts.TypeFlags.NumberLike) !== 0)
 
-const computedKeyMayBeMember = (checker: ts.TypeChecker, argument: ts.Expression, key: string): boolean => {
+/**
+ * The key's checker type decides first; past it, the key's own spelling does
+ * (`createPropertyKeyDomains`, the domain the family member-read proof and the
+ * intrinsic census already ask). A `string`-typed key written `'on' + type` or
+ * `` `${ name }Name` `` cannot name `copy`, and the type alone made every such
+ * store a write that may replace any member of any family it might reach.
+ * The flow index holds only reachable writes, so the domain needs no
+ * reachability filter of its own.
+ */
+const memberKeyDomainsByFlow = new WeakMap<ValueFlowIndex, ReturnType<typeof createPropertyKeyDomains>>()
+const computedKeyMayBeMember = (checker: ts.TypeChecker, flow: ValueFlowIndex, argument: ts.Expression, key: string): boolean => {
   const type = checker.getTypeAtLocation(argument)
   const arms = type.isUnion() ? type.types : [type]
-  return arms.some((arm) => {
+  const typed = arms.some((arm) => {
     if (arm.flags & ts.TypeFlags.NumberLike) return false
     if (arm.isStringLiteral()) return arm.value === key
     return true
   })
+  if (!typed) return false
+  let domains = memberKeyDomainsByFlow.get(flow)
+  if (!domains) memberKeyDomainsByFlow.set(flow, (domains = createPropertyKeyDomains(checker, flow, () => true)))
+  return domains.mayName(domains.of(argument), key)
 }
 
 /**
