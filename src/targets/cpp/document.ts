@@ -110,6 +110,8 @@ const representationIsRenderable = (representation: Representation): boolean => 
     case 'constructor-identity':
     case 'error-constructor':
       return true
+    case 'typed-array-constructor':
+      return representationIsRenderable(representation.instance)
     case 'record':
       return representation.fields.every((field) => representationIsRenderable(field.value))
     case 'record-with-index':

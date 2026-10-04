@@ -185,6 +185,12 @@ export const defaultHostBindingPolicy: HostBindingPolicy = {
 export interface TypedArrayElementPolicy {
   /** The element width a declared type is a typed-array view over, or `null` for an ordinary declared type. */
   readonly forDeclaration: (declaration: DeclarationId) => TypedArrayElementDomain | null
+  /**
+   * Whether a declaration is one of the nine standard instance interfaces
+   * itself, not an interface extending one (`Buffer`): only those name their
+   * own constructor. Absent answers no.
+   */
+  readonly isStandardInstance?: (declaration: DeclarationId) => boolean
 }
 
 /** No typed-array declarations installed: every declared type falls through to its ordinary answer, unchanged. */

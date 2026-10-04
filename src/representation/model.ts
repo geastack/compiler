@@ -928,6 +928,22 @@ export type Representation =
    * other use, `===` included, has no recipe and refuses by name.
    */
   | { readonly kind: 'error-constructor' }
+  /**
+   * The constructor of a standard typed array, carried by the array itself.
+   *
+   * `array.constructor.name` over three's `TypedArray` union (`BufferAttribute`'s
+   * `toJSON`) names the class that allocated the array, and every carrier here
+   * already states that class: `typed-array`'s element domain is one of the
+   * eight standard views, each of which is its own constructor's only
+   * instance shape. So, as with `error-constructor`, the instance stands for
+   * its constructor -- `instance` is the receiver's carrier, a `typed-array`
+   * or a union of them -- and the only read answered is `name`. A Buffer-style
+   * intersection derives to the same `typed-array(uint8)` while its
+   * constructor is another class, so it is never published as one
+   * (`publish.ts`'s `instanceConstructorReadOf`). Every other use, `new` and
+   * `===` included, has no recipe and refuses by name.
+   */
+  | { readonly kind: 'typed-array-constructor'; readonly instance: Representation }
   | { readonly kind: 'generic-function-set'; readonly members: readonly DeclarationId[] }
   /**
    * An optional payload with an exact absence tag.
@@ -1222,6 +1238,8 @@ const buildRepresentationKey = (representation: Representation): string => {
       return `constructor-identity(${representation.declaration})`
     case 'error-constructor':
       return 'error-constructor'
+    case 'typed-array-constructor':
+      return `typed-array-constructor(${nestedKey(representation.instance)})`
     case 'generic-function-set':
       return `generic-function-set(${representation.members.join('+')})`
     case 'optional':
@@ -1303,6 +1321,7 @@ const alwaysTruthyKinds: ReadonlySet<Representation['kind']> = new Set([
   'callable-identity',
   'constructor-identity',
   'error-constructor',
+  'typed-array-constructor',
   'generic-function-set',
   'constructor-family',
   'constructor-value-dispatch',
@@ -1866,6 +1885,9 @@ export function* walkRepresentation(representation: Representation, visited: Set
       return
     case 'optional':
       yield* walk(representation.payload)
+      return
+    case 'typed-array-constructor':
+      yield* walk(representation.instance)
       return
     case 'tagged-union':
       for (const arm of representation.arms) yield* walk(arm.value)

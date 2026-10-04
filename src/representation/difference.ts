@@ -89,6 +89,8 @@ const shallowSignature = (representation: Representation): string => {
       return `constructor-identity(${representation.declaration})`
     case 'error-constructor':
       return representation.kind
+    case 'typed-array-constructor':
+      return representation.kind
     case 'class-ref':
       return `class-ref(${representation.declaration},${representation.shapeId},${representation.ownership})`
     case 'native-handle':
@@ -223,6 +225,8 @@ const children = (representation: Representation): ReadonlyArray<readonly [strin
       ]
     case 'promise':
       return [['value', representation.value] as const]
+    case 'typed-array-constructor':
+      return [['instance', representation.instance] as const]
     case 'keyed-collection':
       return [['key', representation.key] as const, ...(representation.value ? [['value', representation.value] as const] : [])]
     case 'dictionary':

@@ -25,6 +25,13 @@ const typedArrayTagNames: Readonly<Record<Extract<Representation, { kind: 'typed
   float64: 'Float64Array'
 }
 
+/**
+ * A standard typed array's [[TypedArrayName]]: both its `@@toStringTag` and
+ * the `name` of the constructor that allocated it (ECMA-262 23.2's TypedArray Constructors table).
+ */
+export const typedArrayNameOf = (representation: Extract<Representation, { kind: 'typed-array' }>): string =>
+  typedArrayTagNames[representation.element]
+
 /** Builtin `@@toStringTag` values carried directly by the binary-view family. */
 export const binaryToStringTagText = (representation: Representation): string | null => {
   if (representation.kind === 'typed-array') return cppStringLiteral(typedArrayTagNames[representation.element])

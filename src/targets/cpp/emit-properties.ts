@@ -1,5 +1,6 @@
 import type { Ownership, RecordAccessor, RecordField, Representation } from '../../representation/model.js'
 import { errorConstructorGetText, errorConstructorMemberText } from './emit-error-constructor.js'
+import { typedArrayConstructorGetText, typedArrayConstructorMemberText } from './emit-typed-array-constructor.js'
 import { dictionaryKeyDomainOf, isOpenDocument, ownershipOf, representationKey } from '../../representation/model.js'
 import { carrierDifference, shortCarrierText } from '../../representation/difference.js'
 import { nativeFieldOwnerReadText } from './emit-field-owner.js'
@@ -647,6 +648,11 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
   const errorConstructor = errorConstructorGetText(ctx, operation) ?? errorConstructorMemberText(ctx, operation)
   if (errorConstructor !== null) {
     lines.push(`${defineValue(ctx, operation.result)} = ${errorConstructor};`)
+    return
+  }
+  const typedArrayConstructor = typedArrayConstructorGetText(ctx, operation) ?? typedArrayConstructorMemberText(ctx, operation)
+  if (typedArrayConstructor !== null) {
+    lines.push(`${defineValue(ctx, operation.result)} = ${typedArrayConstructor};`)
     return
   }
   const classMember = classMemberText(ctx, operation)

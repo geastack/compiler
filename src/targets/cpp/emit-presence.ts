@@ -363,6 +363,7 @@ export const booleanTestText = (text: string, representation: Representation, in
     case 'callable-identity':
     case 'constructor-identity':
     case 'error-constructor':
+    case 'typed-array-constructor':
     case 'generic-function-set':
     case 'constructor-family':
     case 'constructor-value-dispatch':

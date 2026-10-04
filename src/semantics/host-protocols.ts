@@ -654,6 +654,20 @@ export const typedArrayDeclarationsOf = (
   program: ts.Program,
   hostDeclarations: readonly HostOwnedDeclaration[] = []
 ): Map<DeclarationId, TypedArrayElementDomain> => {
+  const found = standardTypedArrayDeclarationsOf(checker, identities, files)
+  extendedTypedArrayDeclarations(checker, identities, files, program, hostDeclarations, found)
+  return found
+}
+
+/**
+ * The nine instance interfaces alone, without the interfaces that extend
+ * them: a `Buffer` has the elements of a `Uint8Array` but not its constructor.
+ */
+export const standardTypedArrayDeclarationsOf = (
+  checker: ts.TypeChecker,
+  identities: IdentityTable,
+  files: readonly ts.SourceFile[]
+): Map<DeclarationId, TypedArrayElementDomain> => {
   const found = new Map<DeclarationId, TypedArrayElementDomain>()
   const anchor = files[0]
   if (!anchor) return found
@@ -663,7 +677,6 @@ export const typedArrayDeclarationsOf = (
     const declaration = identities.symbolDeclarationId(symbol, anchor)
     if (declaration) found.set(declaration, domain)
   }
-  extendedTypedArrayDeclarations(checker, identities, files, program, hostDeclarations, found)
   return found
 }
 

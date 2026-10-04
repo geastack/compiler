@@ -1342,6 +1342,8 @@ export const cppTypeOf = (representation: Representation, ownership: Ownership |
     // The instance whose constructor it stands for (`model.ts`).
     case 'error-constructor':
       return 'gea::Ref<gea::runtime::Error>'
+    case 'typed-array-constructor':
+      return cppTypeOf(representation.instance)
     case 'function-value-dispatch':
       // A signature that mentions itself has no finite expansion: the wrapper
       // name is the whole spelling, by value, exactly as the recursive

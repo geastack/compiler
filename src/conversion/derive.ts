@@ -274,6 +274,8 @@ const deriveAt = (target: Representation, context: ConversionDerivationContext, 
       return never('constructor identity is nominal authority; no runtime materializer can rediscover it from a dynamic value')
     case 'error-constructor':
       return never('an Error constructor is carried by the instance it was read off; a dynamic value is no such instance')
+    case 'typed-array-constructor':
+      return never('a typed array constructor is carried by the array it was read off; a dynamic value is no such array')
     case 'callable-identity':
       // A boxed value that IS a function does carry one of these, but reading
       // it back needs an authenticated callable classifier, and this registry

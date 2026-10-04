@@ -175,6 +175,7 @@ const callableKinds: ReadonlySet<Representation['kind']> = new Set([
   'callable-identity',
   'constructor-identity',
   'error-constructor',
+  'typed-array-constructor',
   'generic-function-set'
 ])
 

@@ -500,7 +500,8 @@ const instanceConstructorReadOf = (
   operation: SemanticOperation | undefined,
   result: SemanticResult,
   deriver: RepresentationDeriver,
-  isErrorInstance: (carrier: Representation, type: StructuralTypeId) => boolean
+  isErrorInstance: (carrier: Representation, type: StructuralTypeId) => boolean,
+  isStandardTypedArray: (carrier: Representation, type: StructuralTypeId) => boolean
 ): Representation | null => {
   if (operation?.family !== 'property' || operation.internalMethod !== 'get' || operation.keyIsComputed) return null
   const key = operandOf(operation, 'key')
@@ -518,7 +519,10 @@ const instanceConstructorReadOf = (
     carrier.kind === 'tagged-union'
       ? carrier.arms.map((arm) => [arm.value, arm.semanticType] as const)
       : [[carrier, receiver.type] as const]
-  return arms.every(([arm, type]) => isErrorInstance(arm, type)) ? { kind: 'error-constructor' } : null
+  if (arms.every(([arm, type]) => isErrorInstance(arm, type))) return { kind: 'error-constructor' }
+  // A standard typed array likewise stands for its constructor, which its
+  // element domain names (`model.ts`'s `typed-array-constructor`).
+  return arms.every(([arm, type]) => isStandardTypedArray(arm, type)) ? { kind: 'typed-array-constructor', instance: carrier } : null
 }
 
 /**
@@ -963,6 +967,14 @@ export const publishRepresentations = (
     const shape = graph.structuralTypes.get(type)?.shape
     return shape?.kind === 'declared' && errors.forDeclaration(shape.declaration) !== null
   }
+  // One of the nine typed arrays the standard lib declares. Node's `Buffer`
+  // shares the `typed-array(uint8)` carrier but not the constructor, whether
+  // declared as an interface extending `Uint8Array` or met as an intersection.
+  const isStandardTypedArray = (carrier: Representation, type: StructuralTypeId): boolean => {
+    if (carrier.kind !== 'typed-array') return false
+    const shape = graph.structuralTypes.get(type)?.shape
+    return shape?.kind === 'declared' && elements.isStandardInstance?.(shape.declaration) === true
+  }
   // A static field with no initializer holds `undefined` until written, which its declared type does not say (`static-field-cells.ts`).
   const statics = staticMembersOf(graph, deriver)
   const proxies = proxyCarriersOf(graph, deriver, statics)
@@ -1003,7 +1015,7 @@ export const publishRepresentations = (
       proxyCarrier ??
       commonJsBoundaryOf(graph, operation) ??
       shadowedCallableBuiltinReadOf(graph, operation, callableOrigins) ??
-      instanceConstructorReadOf(operation, result, deriver, isErrorInstance) ??
+      instanceConstructorReadOf(operation, result, deriver, isErrorInstance, isStandardTypedArray) ??
       exactClassInstanceReadOf(operation, result, deriver) ??
       dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables) ??
       dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables) ??
@@ -1079,7 +1091,7 @@ export const publishRepresentations = (
                       ? 'commonjs-module-boundary'
                       : shadowedCallableBuiltinReadOf(graph, operation, callableOrigins)
                         ? 'shadowed-callable-builtin'
-                        : instanceConstructorReadOf(operation, result, deriver, isErrorInstance)
+                        : instanceConstructorReadOf(operation, result, deriver, isErrorInstance, isStandardTypedArray)
                           ? 'instance-constructor-read'
                           : exactClassInstanceReadOf(operation, result, deriver)
                             ? 'exact-class-instance'

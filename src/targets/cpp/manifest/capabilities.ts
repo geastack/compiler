@@ -264,6 +264,10 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // stands for its constructor, and only `name` is answered
     // (`emit-error-constructor.ts`).
     'error-constructor:get:false',
+    // `array.constructor.name` off a standard typed array: the array stands
+    // for its constructor, and only `name` is answered
+    // (`emit-typed-array-constructor.ts`).
+    'typed-array-constructor:get:false',
     // An Array's `length` get/set, its element get/set by a numeric key
     // (computed or a constant that spells a canonical index -- `a[0]` and
     // `a[i]` are the same rule, just with the index known at different

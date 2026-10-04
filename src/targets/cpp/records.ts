@@ -3596,6 +3596,8 @@ const renderStructDefinition = (
       case 'constructor-identity':
       case 'error-constructor':
         return true
+      case 'typed-array-constructor':
+        return selfInitializing(value.instance)
       case 'class-ref':
       case 'record':
       case 'record-with-index':

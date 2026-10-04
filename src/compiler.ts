@@ -655,7 +655,8 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       viewsInto: (native) => (native === null ? new Map() : (hostViews.get(native) ?? new Map()))
     },
     {
-      forDeclaration: (declaration) => frontend.typedArrayElements.get(declaration) ?? null
+      forDeclaration: (declaration) => frontend.typedArrayElements.get(declaration) ?? null,
+      isStandardInstance: (declaration) => frontend.standardTypedArrayDeclarations.has(declaration)
     },
     // `Promise<T>`'s own declaration identity, resolved once by the frontend
     // independent of whether the program's own text ever names `Promise`

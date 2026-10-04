@@ -124,6 +124,7 @@ import {
   regexpDeclarationsOf,
   standardBufferDeclarationsOf,
   typedArrayDeclarationsOf,
+  standardTypedArrayDeclarationsOf,
   typedArrayInstanceInterfaceNames,
   wellKnownSymbolDeclarationsOf
 } from './host-protocols.js'
@@ -445,6 +446,8 @@ export interface FrontendResult {
    * `typedArrayElementBindings` for how this is found.
    */
   readonly typedArrayElements: ReadonlyMap<DeclarationId, TypedArrayElementDomain>
+  /** Of those, the nine standard instance interfaces themselves (`standardTypedArrayDeclarationsOf`). */
+  readonly standardTypedArrayDeclarations: ReadonlySet<DeclarationId>
   /**
    * The declaration identity of the standard library's own `Promise<T>`
    * interface, or `null` if this compilation's `lib` does not install one.
@@ -1896,6 +1899,9 @@ const attemptFrontend = (
     typedArrayElements.set(declaration, domain)
   }
   for (const declaration of typedArrayElements.keys()) typedArrayDeclarationSet.add(declaration)
+  const standardTypedArrayDeclarations = new Set(
+    standardTypedArrayDeclarationsOf(compiled.checker, identities, compiled.sourceFiles).keys()
+  )
   // After the ambient census, deliberately: a standard-library class the
   // census already bound weakly (as a structural body, or as a protocol with
   // no carrier) must end up on the backend's own carrier, not beside it. See
@@ -2194,6 +2200,7 @@ const attemptFrontend = (
       .filter((region) => normalized.graph.regions.has(region)),
     sourceFileNames: identities.sourceFileNames,
     typedArrayElements,
+    standardTypedArrayDeclarations,
     promiseDeclaration,
     promiseLikeDeclaration,
     dateDeclaration,
