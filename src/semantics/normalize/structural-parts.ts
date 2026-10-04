@@ -178,6 +178,13 @@ export interface StructuralParts {
  */
 const isBuiltinBindParameter = (declaration: ts.ParameterDeclaration): boolean => {
   if (!declaration.getSourceFile().hasNoDefaultLib) return false
+  // `bind`'s first `CallableFunction` overload returns `OmitThisParameter<T>`,
+  // whose `(...args: A) => R` is declared in lib's alias rather than in `bind`
+  // itself: it is the same bind protocol's result, its `A` the bound
+  // function's own parameter list.
+  let alias: ts.Node | undefined = declaration.parent
+  while (alias && !ts.isTypeAliasDeclaration(alias)) alias = alias.parent
+  if (alias && ts.isTypeAliasDeclaration(alias) && alias.name.text === 'OmitThisParameter') return true
   let owner: ts.Node | undefined = declaration.parent
   while (owner && !ts.isMethodSignature(owner)) owner = owner.parent
   return (

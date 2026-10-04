@@ -27,13 +27,10 @@ import ts from 'typescript'
  * A JavaScript file only. A function is tagged when ALL of these hold:
  * - it is a top-level, non-exported `FunctionDeclaration` with a body that
  *   reads `this` (an arrow inside it shares that `this`), and it carries no
- *   `@this`, `@class` or `@constructor` tag;
- * - it declares no parameter. A function with a `this` type binds through
- *   lib's `OmitThisParameter`, which respells the result as a rest of a tuple
- *   (`(...args: [layer?: any]) => R`), and the native bind lowering does not
- *   carry a rest-taking convention yet (`lowerDeferredFunctionBind`):
- *   tagging XRManager's `createXRLayer( layer )` traded its receiver for that
- *   refusal. With no parameter the result is the plain `() => R`;
+ *   `@this`, `@class` or `@constructor` tag. Parameters are admitted: a
+ *   function with a `this` type binds through lib's `OmitThisParameter`,
+ *   whose `(...args: [layer?: any]) => R` is the bind protocol's own closed
+ *   tuple and is flattened to positional slots (`isBuiltinBindParameter`);
  * - it has at least one reference, and every identifier spelled like it in
  *   the file (outside its own name and a property name) is the receiver of a
  *   `.bind`/`.call`/`.apply` call whose first argument is `this` -- so a
@@ -140,7 +137,7 @@ const candidatesIn = (file: ts.SourceFile): readonly Candidate[] => {
   for (const statement of file.statements) {
     if (!ts.isFunctionDeclaration(statement) || !statement.name || !statement.body) continue
     if (statement.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword)) continue
-    if (statement.parameters.length > 0 || receiverTagged(statement) || !readsOwnThis(statement.body)) continue
+    if (receiverTagged(statement) || !readsOwnThis(statement.body)) continue
     functions.set(statement.name.text, statement)
   }
   if (functions.size === 0) return []

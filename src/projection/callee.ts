@@ -233,9 +233,23 @@ const bindAbiOfCallableReceiver = (representation: Representation): CallableAbi 
     case 'function-value-family':
     case 'function-value-dispatch':
       return representation.abi
+    case 'function-and-constructor':
+      return representation.call
     default:
       return null
   }
+}
+
+/**
+ * A JS function the checker inferred as a constructor binds through its call
+ * half only when the bind's published result is a plain function value: then
+ * the native bound wrapper is exactly the value the plan selected. A result
+ * still shaped as a constructor keeps the ordinary property read, whose
+ * refusal names it -- the bound wrapper has no construct half to give it.
+ */
+const bindResultTakesCallHalf = (input: DeferredCalleeInput, operation: InvocationOperation): boolean => {
+  const result = resultOf(operation, 'value')
+  return result !== undefined && input.plan.selected.get(result.id)?.kind === 'function-value-dispatch'
 }
 
 const memberNames = ['call', 'apply', 'bind'] as const
@@ -289,6 +303,7 @@ export const deferredCalleeOf = (input: DeferredCalleeInput, operation: Invocati
   // renders -- see `DeferredCallee.frame`.
   const frame = representation.kind === 'dynamic' ? 'boxed' : 'native'
   if (member === 'bind') {
+    if (representation.kind === 'function-and-constructor' && !bindResultTakesCallHalf(input, operation)) return null
     // `functionId` names the checker-authenticated DECLARATION a `dynamic`
     // receiver's own-property facts are read off -- needed only to recover a
     // boxed Function's native ABI (`emit-callable.ts`'s `bindCallable`, the

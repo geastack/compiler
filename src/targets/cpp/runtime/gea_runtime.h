@@ -18414,6 +18414,20 @@ inline bool callableBindIsIntrinsic(const CallableObject<Signature>& source) {
   return callableBuiltinIsIntrinsic(source, bind);
 }
 
+// A Function object with both halves has no identity header: its identity is
+// only ever the one `functionObject` minted, so a miss there is a table never made.
+template <typename CallSignature, typename ConstructSignature>
+inline bool callableBuiltinIsIntrinsic(const CallableConstructorObject<CallSignature, ConstructSignature>& source, const PropertyKey& member) {
+  const FunctionObjectIdentity* identity = source.functionObject.get();
+  return identity == nullptr || !identity->properties || !identity->properties->hasProperty(member);
+}
+
+template <typename CallSignature, typename ConstructSignature>
+inline bool callableBindIsIntrinsic(const CallableConstructorObject<CallSignature, ConstructSignature>& source) {
+  static const PropertyKey bind = PropertyKey::string("bind");
+  return callableBuiltinIsIntrinsic(source, bind);
+}
+
 inline Value Value::object() {
   Value result;
   result.tag_ = Tag::Object;
