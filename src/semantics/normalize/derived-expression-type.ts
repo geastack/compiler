@@ -4431,10 +4431,20 @@ export const synthesizedUnionArmsAt = <D extends ts.Declaration>(
   // null` reads back `null` everywhere the checker narrowed nothing -- while
   // its callers fill it with more. Such a read is the whole cell, not its
   // default's arm: filtering by it handed three's `Fn( jsFunc, layout )` on
-  // to `new FnNode( jsFunc, layout )` as a constant `null`.
+  // to `new FnNode( jsFunc, layout )` as a constant `null`. Only a declared
+  // type that is not `any` can say "nothing narrowed": `any` is assignable
+  // both ways with every type, so an untyped `cyrb53( value )` read under
+  // `Array.isArray( value )` (`any[]`) would pass as un-narrowed and lose its
+  // array arm.
   const name = ts.getNameOfDeclaration(declaration)
   const declared = name && ts.isIdentifier(name) ? checker.getTypeAtLocation(name) : null
-  if (declared !== null && checker.isTypeAssignableTo(read, declared) && checker.isTypeAssignableTo(declared, read)) return all
+  if (
+    declared !== null &&
+    (declared.flags & ts.TypeFlags.Any) === 0 &&
+    checker.isTypeAssignableTo(read, declared) &&
+    checker.isTypeAssignableTo(declared, read)
+  )
+    return all
   const admitted = all.filter((arm) => checker.isTypeAssignableTo(arm, read))
   return admitted.length === 0 ? all : admitted
 }
