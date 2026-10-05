@@ -2587,28 +2587,32 @@ const nativeErrorSourceText = (targetView: ObjectView, source: Representation, r
 }
 
 /** Copy one source, including the spec's null/undefined skip and a union's live arm. */
-const assignOperandText = (ctx: EmitContext, targetView: ObjectView, source: IrOperand): string => {
-  const representation = source.representation
+const assignOperandText = (ctx: EmitContext, targetView: ObjectView, source: IrOperand): string =>
+  assignCarrierText(ctx, targetView, source.representation, operandText(ctx, source))
+
+/**
+ * One source carrier's copy, peeled the way 7.3.25 reads it: an absent value
+ * is skipped, and a union copies whichever arm is live. The peeling recurses
+ * because the two wrappers nest -- a `settings = null` parameter whose callers
+ * pass record literals of different shapes is `optional(tagged-union(record,
+ * record))` (three's `ShaderNodeProxy`, `{ generateMipmaps: true }` beside
+ * `nodeProxyIntent`'s `{ intent: true }`), and handing that union to the
+ * receiver question as one carrier refused a copy every arm of which renders.
+ */
+const assignCarrierText = (ctx: EmitContext, targetView: ObjectView, representation: Representation, receiver: string): string => {
   if (representation.kind === 'null' || representation.kind === 'undefined') return ''
-  const nativeError = nativeErrorSourceText(targetView, representation, operandText(ctx, source))
+  const nativeError = nativeErrorSourceText(targetView, representation, receiver)
   if (nativeError !== null) return nativeError
   if (representation.kind === 'optional') {
-    const receiver = operandText(ctx, source)
-    const payload = objectViewFrom(ctx, 'assign', representation.payload, `(*(${receiver}))`, 'source')
-    return `if ((${receiver}).has_value()) { ${assignSourceText(ctx, targetView, payload)} }`
+    return `if ((${receiver}).has_value()) { ${assignCarrierText(ctx, targetView, representation.payload, `(*(${receiver}))`)} }`
   }
   if (representation.kind !== 'tagged-union') {
-    return assignSourceText(ctx, targetView, objectViewOf(ctx, 'assign', source, 'source'))
+    return assignSourceText(ctx, targetView, objectViewFrom(ctx, 'assign', representation, receiver, 'source'))
   }
-  const receiver = operandText(ctx, source)
-  const branches = representation.arms.map((arm, index) => {
-    const body =
-      arm.value.kind === 'null' || arm.value.kind === 'undefined'
-        ? ''
-        : (nativeErrorSourceText(targetView, arm.value, armAt(receiver, index)) ??
-          assignSourceText(ctx, targetView, objectViewFrom(ctx, 'assign', arm.value, armAt(receiver, index), 'source')))
-    return `${index === 0 ? 'if' : 'else if'} (${armIs(receiver, index)}) { ${body} }`
-  })
+  const branches = representation.arms.map(
+    (arm, index) =>
+      `${index === 0 ? 'if' : 'else if'} (${armIs(receiver, index)}) { ${assignCarrierText(ctx, targetView, arm.value, armAt(receiver, index))} }`
+  )
   return branches.join(' ')
 }
 
