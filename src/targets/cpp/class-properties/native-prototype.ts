@@ -2,7 +2,12 @@ import type { DeclarationId } from '../../../identity/ids.js'
 import type { Representation } from '../../../representation/model.js'
 import type { ClassLayout } from '../../../projection/classes.js'
 import { classPrototypeReadOf } from '../../../projection/class-prototype.js'
-import { classMethodOverrideOf, classPrototypeMethodMutableOf, classPrototypeMethodFamilyMutableOf } from '../../../projection/fields.js'
+import {
+  classMethodOverrideOf,
+  classPrototypeMethodMutableOf,
+  classPrototypeMethodFamilyMutableOf,
+  nativeBaseFieldOf
+} from '../../../projection/fields.js'
 import { createCppEmitBlockedError, type EmitContext } from '../emit-context.js'
 import { alignedValueText } from '../emit-narrowing.js'
 import {
@@ -88,7 +93,12 @@ const nativePrototypeInitializerText = (ctx: EmitContext, layout: ClassLayout, o
       // A descendant field the subclass-member overlay put on this shape and
       // the class's native storage then left out has no slot to clear.
       const omitted = new Set(entry.nativeStorage?.omittedOverlays ?? [])
-      for (const field of ctx.layouts.forShape(entry.instance.shapeId) ?? []) if (!omitted.has(field.key)) clear.add(field.key)
+      // Nor does a member the native base stores (`name`, `message`, `stack`
+      // on `gea::runtime::Error`): it has no bit. `cause` is the one it carries.
+      const instance = entry.instance
+      const nativeOwned = (key: string): boolean => key !== 'cause' && nativeBaseFieldOf(ctx.deriver, instance, key, ctx.classes)
+      for (const field of ctx.layouts.forShape(instance.shapeId) ?? [])
+        if (!omitted.has(field.key) && !nativeOwned(field.key)) clear.add(field.key)
     }
     // Semantic class accessors dispatch through bodies and need not allocate
     // record-property slots. Only the shared physical layout owns these bits.
