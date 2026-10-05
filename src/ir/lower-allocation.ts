@@ -12,6 +12,7 @@ import {
   requireLineage,
   requireResultRepresentation,
   resolveRequiredOperand,
+  dynamicSpreadIteratorOf,
   type LoweringContext,
   convertTo,
   enterRequiredOperand
@@ -230,11 +231,12 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
           if (tuple.kind === 'array-object' && isStorageFree(source.representation) && ctx.constantDeriver.isNeverType(slot.operand.type)) {
             source = convertTo(ctx, block, lineage, source, tuple, 'never-spread-source') ?? source
           }
-          // Dynamic spread operands cite the already-acquired iterator
-          // record.  A `Value` does not become an ArrayObject projection just
+          // A dynamic spread operand is drained through its iterator record
+          // (`dynamicSpreadIteratorOf`).  A `Value` does not become an ArrayObject projection just
           // because it is being spread: only the gather primitive may drain
           // it, and only into an explicitly dynamic-element destination.
           if (source.representation.kind === 'dynamic') {
+            source = dynamicSpreadIteratorOf(ctx, block, lineage, slot.operand, source)
             // A `dynamic` destination cell IS an explicitly dynamic-element
             // one: `emitAllocateArrayObject`'s `representation.kind ===
             // 'dynamic'` branch allocates `ArrayObject<gea::Value>`, drains

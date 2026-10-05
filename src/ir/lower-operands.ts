@@ -1,5 +1,6 @@
 import {
   operationOfResult,
+  roleOfResult,
   type DeclarationId,
   type FunctionId,
   type IrValueId,
@@ -1625,4 +1626,40 @@ export const packArgumentArray = (
       : { kind: 'spread' as const, value: entry.value, from: entry.from ?? 0 }
   })
   return ctx.builder.allocateArrayObject(block, lineage, elements, restArray)
+}
+
+/**
+ * The iterator a `dynamic` spread operand is drained through.
+ *
+ * Every spread begins with GetIterator (ArgumentListEvaluation,
+ * ArrayAccumulation), and the gather lanes downstream (`packArgumentArray`,
+ * an array literal's `gather` element) step whatever `dynamic` operand they
+ * hold as an iterator record. The producer (`spread-arguments.ts`,
+ * `allocations.ts`) cites an acquired record only when the source's TYPE is
+ * dynamic; a source the census types as an array cites the value itself, and
+ * its carrier can still be `dynamic` -- three's `new NodeClass(
+ * ...nodeArray( params ) )`, where `nodeArray`'s formal is widened by one
+ * caller handing it a boxed value. Gathering that value directly reads `next`
+ * off the Array and calls undefined, so the record is acquired here, through
+ * the same generic protocol `lower-destructuring.ts` uses for a dynamic
+ * pattern source: a custom @@iterator is still observed.
+ */
+export const dynamicSpreadIteratorOf = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operand: SemanticOperand,
+  resolved: IrOperand
+): IrOperand => {
+  if (resolved.representation.kind !== 'dynamic') return resolved
+  if (operand.source.kind === 'result' && roleOfResult(operand.source.result) === 'iterator-record') return resolved
+  // A gather drains the whole iterator; skipping a prefix someone already read
+  // positionally has no lane for an iterator that was never acquired.
+  if ((operand.from ?? 0) > 0) {
+    throw new IrLoweringBlockedError('a spread of a dynamically carried array starts past its first element; no gather skips a prefix')
+  }
+  return {
+    value: ctx.builder.getIterator(block, lineage, 'iterator', resolved, null, resolved.representation),
+    representation: resolved.representation
+  }
 }

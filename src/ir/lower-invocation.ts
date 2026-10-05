@@ -30,6 +30,7 @@ import {
   requireResultRepresentation,
   resolveOptionalOperand,
   resolveRequiredOperand,
+  dynamicSpreadIteratorOf,
   enter,
   type LoweringContext,
   convertTo,
@@ -573,7 +574,10 @@ const argumentSlotsOf = (
   ].sort((left, right) => left.ordinal - right.ordinal)
   return merged.map((entry) => {
     const resolved = resolveRequiredOperand(ctx, block, lineage, entry.operand)
-    const value = entry.kind === 'value' ? enter(ctx, block, lineage, operation, entry.operand, resolved) : resolved
+    const value =
+      entry.kind === 'value'
+        ? enter(ctx, block, lineage, operation, entry.operand, resolved)
+        : dynamicSpreadIteratorOf(ctx, block, lineage, entry.operand, resolved)
     return entry.operand.from === undefined ? { kind: entry.kind, value } : { kind: entry.kind, value, from: entry.operand.from }
   })
 }
