@@ -184,8 +184,47 @@ export const classFamilyOverridesOf = (
  * `this.referenceNode.value` reads it through that base, and InputNode's own
  * `this.value = value` is then that slot's write.
  */
-const accessorReplaceableField = (layout: ClassLayout | undefined, key: string): ClassField | undefined =>
+const assignedFieldEvidence = (layout: ClassLayout | undefined, key: string): ClassField | undefined =>
   layout?.fields.find((field) => field.key === key && (field.assignedMember === true || field.syntheticSubclassMemberOverlay === true))
+
+/**
+ * The replaceable field whose slot `declaration`'s native storage holds,
+ * carried as the slot is stored: a class this answers for can root a family
+ * over the field.
+ *
+ * The evidence alone does not say where the slot is. An overlay is type
+ * evidence, kept as storage only where an access goes through that base
+ * (`projectNativeClassStorage`); when none does, the slot is the first
+ * descendant's own, and three's `InputNode` holds `value` while `Node`, whose
+ * overlay types it, holds nothing. Rooting at the overlay anyway made the
+ * root's member store into a struct member that was never declared, and
+ * pulled every same-named accessor under the overlay's class into the family,
+ * reachable from the receivers or not: `PMREMNode`'s `value`, whose Texture
+ * the slot did not convert to, and `Node`'s getter-only `type` under
+ * `EventDispatcher`'s overlay, which left the `type` family with no setter
+ * for Node -- either refused the family, and with it every write through an
+ * `InputNode`, a `UniformNode` or a `Material`.
+ *
+ * The slot's carrier is the storage's, which can be wider than the evidence:
+ * the evidence lists the values the flow saw stored, and a field that stores
+ * a function is boxed, so a setter taking a value the flow never saw stored
+ * (TextureNode's Texture) finds no conversion from the evidence while every
+ * write already converts into the storage. A class with no native storage is
+ * answered by its evidence.
+ */
+const accessorReplaceableField = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  declaration: DeclarationId,
+  key: string
+): ClassField | undefined => {
+  const layout = classes.get(declaration)
+  if (layout?.nativeStorage === undefined) return assignedFieldEvidence(layout, key)
+  const slot = layout.nativeStorage.fields.find((field) => field.key === key)
+  if (slot === undefined) return undefined
+  const site = classMemberOf(classes, declaration, key)
+  const evidence = site?.kind === 'field' ? assignedFieldEvidence(classes.get(site.owner), key) : undefined
+  return evidence === undefined ? undefined : { ...evidence, representation: slot.value }
+}
 
 /**
  * Every class below `declaration` whose accessor replaces the data field a
@@ -202,7 +241,7 @@ export const fieldReplacingAccessorsOf = (
   key: string
 ): readonly DeclarationId[] => {
   const site = classMemberOf(classes, declaration, key)
-  if (site?.kind !== 'field' || accessorReplaceableField(classes.get(site.owner), key) === undefined) return []
+  if (site?.kind !== 'field' || assignedFieldEvidence(classes.get(site.owner), key) === undefined) return []
   return classFamilyOverridesOf(classes, declaration, key).filter((candidate) =>
     classes.get(candidate)!.accessors.some((entry) => entry.key === key)
   )
@@ -308,7 +347,7 @@ const rootDeclaring = (
     if (
       layout.methods.some((method: ClassMethod) => method.key === key) ||
       layout.accessors.some((entry) => entry.key === key) ||
-      (role !== 'call' && accessorReplaceableField(layout, key) !== undefined)
+      (role !== 'call' && accessorReplaceableField(classes, current, key) !== undefined)
     )
       root = current
     current = layout.base
@@ -371,7 +410,7 @@ export const virtualMethodFamiliesOf = (classes: ReadonlyMap<DeclarationId, Clas
       fieldImplementors: fieldImplementorsOf(entry),
       // Only a root that declares no accessor of its own is answered by its
       // field; one that does is an ordinary accessor family.
-      rootField: entry.role === 'call' || entry.rootDeclares ? undefined : accessorReplaceableField(classes.get(entry.root), entry.key)
+      rootField: entry.role === 'call' || entry.rootDeclares ? undefined : accessorReplaceableField(classes, entry.root, entry.key)
     }))
     .filter(
       ({ entry, fieldImplementors, rootField }) =>
@@ -1011,10 +1050,11 @@ const joinedRootAbiOf = (
 
 /**
  * The slot of a family whose root answers with its own data field: the
- * accessors' convention, with the field's carrier where the value passes. A
- * read through the root already publishes that carrier, and a write already
- * converts into it, so every accessor converts to the field rather than the
- * field to one accessor -- the getter's result must be one the field can hold.
+ * accessors' convention, with the field's stored carrier where the value
+ * passes. A read converts from it to what the read publishes, as a load of the
+ * field does, and a write converts into it as a store does, so every accessor
+ * converts to the field rather than the field to one accessor -- the getter's
+ * result must be one the field can hold.
  */
 const fieldSlotAbiOf = (field: ClassField, role: VirtualMemberRole, accessors: CallableAbi | null): CallableAbi | null => {
   const stored = field.representation
