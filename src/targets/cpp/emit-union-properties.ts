@@ -43,7 +43,7 @@ import { canonicalIndexLiteral, stringIndexText, isDeclaredStringPrototypeKey } 
 import { objectPrototypeMemberNames } from '../../representation/record-fields.js'
 import { classFamilyOverridesOf, classMemberOf } from './class-layout.js'
 import { classMethodOverrideOf, classStaticMemberOf } from '../../projection/fields.js'
-import { classMethodValueArmsOf, virtualDispatchKey } from '../../projection/dispatch.js'
+import { classMethodValueArmsOf, fieldReplacingAccessorsOf, virtualDispatchKey } from '../../projection/dispatch.js'
 import { cppVirtualMemberName } from './virtual-methods.js'
 import { abiOfCallee } from '../../projection/callee.js'
 import { recordAccessorsOfShape } from './records.js'
@@ -248,7 +248,8 @@ const armFieldSite = (
   if (!addressableArmKind(arm.kind)) return null
   if (arm.kind === 'class-ref') {
     const member = classMemberOf(ctx.classes, arm.declaration, key)
-    if (member === null || member.kind !== 'field') return null
+    // A field a descendant's accessor replaces is no slot on those instances.
+    if (member === null || member.kind !== 'field' || fieldReplacingAccessorsOf(ctx.classes, arm.declaration, key).length > 0) return null
   }
   const declared = declaredFieldRepresentationOf(ctx.deriver, arm, key, ctx.classes)
   if (declared === null) return null
@@ -490,7 +491,19 @@ const armRuntimeFieldText = (
   if (arm.kind === 'class-ref') {
     const site = classMemberOf(ctx.classes, arm.declaration, key)
     if (site !== null) {
-      if (site.kind === 'unknown-class' || site.kind === 'field') return null
+      if (site.kind === 'unknown-class') return null
+      if (site.kind === 'field') {
+        if (fieldReplacingAccessorsOf(ctx.classes, arm.declaration, key).length === 0) return null
+        const dispatch = ctx.virtualDispatch.get(virtualDispatchKey(arm.declaration, key, 'get'))
+        if (dispatch === undefined) return null
+        return alignedValueText(
+          ctx,
+          'emit-union-properties.ts:replaced-field-read',
+          dispatch.result,
+          published,
+          `${armExprText}->${cppVirtualMemberName(key, 'get')}()`
+        )
+      }
       // Select the method at the read, using the same allocation identity as
       // a computed class-method read. Calling later with another receiver must
       // retain this exact method, rather than redispatching through that object.
@@ -1461,6 +1474,20 @@ const unionLeafSetText = (
   }
   if (leaf.representation.kind === 'class-ref') {
     const member = classMemberOf(ctx.classes, leaf.representation.declaration, key)
+    if (member?.kind === 'field' && fieldReplacingAccessorsOf(ctx.classes, leaf.representation.declaration, key).length > 0) {
+      const parameter = ctx.virtualDispatch.get(virtualDispatchKey(leaf.representation.declaration, key, 'set'))?.parameters[0]?.value
+      const converted =
+        parameter === undefined
+          ? null
+          : alignedValueText(ctx, 'emit-union-properties.ts:replaced-field-set', operation.value.representation, parameter, rawValueText)
+      if (converted === null) {
+        throw createCppEmitBlockedError(
+          `property-access:tagged-union:${operation.kind}:false`,
+          `a "${operation.kind}" of data field "${key}" through class ${leaf.representation.declaration}, which a descendant's accessor replaces, needs a dispatch member this unit has no conversion into`
+        )
+      }
+      return `${leaf.text}->${cppVirtualMemberName(key, 'set')}(${converted});`
+    }
     if (member?.kind === 'accessor' && member.accessor.setter !== null) {
       if (classFamilyOverridesOf(ctx.classes, leaf.representation.declaration, key).length > 0) {
         throw createCppEmitBlockedError(

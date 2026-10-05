@@ -95,7 +95,7 @@ import {
   withUnreadParametersUnnamed
 } from './records.js'
 import { prototypeReadHooks, virtualMethodEmission, virtualMethodFamiliesOf } from './virtual-methods.js'
-import { virtualDispatchVerdictOf, type VirtualMemberCalls } from '../../projection/dispatch.js'
+import { fieldReplacingAccessorsOf, virtualDispatchVerdictOf, type VirtualMemberCalls } from '../../projection/dispatch.js'
 import { virtualMemberCallsAgree, virtualMemberCallsOf } from '../../ir/virtual-member-calls.js'
 import { stringConstantsOf } from '../../ir/dead-values.js'
 import { integerParameterSlot, integerResultSlot, integerStorageCensusOf, integerStorageSlot } from '../../ir/integer-storage.js'
@@ -2017,7 +2017,11 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         // A class over a host base reads its members through the host's
         // protocol; only a wholly projected class has plain member loads.
         if (input.classes.get(receiver.declaration)?.nativeBase !== null) return false
-        return classMemberOf(input.classes, receiver.declaration, key)?.kind === 'field'
+        // A field a descendant's accessor replaces runs that getter on its instances.
+        return (
+          classMemberOf(input.classes, receiver.declaration, key)?.kind === 'field' &&
+          fieldReplacingAccessorsOf(input.classes, receiver.declaration, key).length === 0
+        )
       }
       if (receiver.kind === 'record')
         return receiver.fields.some((field) => field.key === key) && !receiver.accessors.some((accessor) => accessor.key === key)
@@ -2109,7 +2113,11 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     input.classes,
     (callable) => abiByBody.get(String(callable)) ?? null,
     virtualVerdict,
-    instanceReparentTargetsOf(input.bodies, input.classes)
+    instanceReparentTargetsOf(input.bodies, input.classes),
+    (declaration, key) => {
+      const instance = input.classes.get(declaration)?.instance
+      return instance ? (declaredRecordFieldOf(deriver, instance, key, input.classes)?.value ?? null) : null
+    }
   )
   // Which classes a box can hold, by the reflection census's own verdict. A
   // prototype property is read through a `gea::Value` only where an instance

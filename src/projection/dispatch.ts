@@ -173,6 +173,42 @@ export const classFamilyOverridesOf = (
 }
 
 /**
+ * A data field a descendant's accessor can replace: one a JavaScript
+ * `this.x = v` store creates. That store is a [[Set]], so on an instance of a
+ * class below that declares `get x()`/`set x()` it runs the setter rather than
+ * creating an own property, and the field never exists on that instance. A
+ * field DEFINED at construction is an own property that shadows the accessor
+ * instead. A subclass-member overlay defines nothing: it is the typed slot a
+ * base keeps for its descendants' same-named members, so the descendants'
+ * `this.x = v` stores land in it. A base that names no `value` keeps one when
+ * `this.referenceNode.value` reads it through that base, and InputNode's own
+ * `this.value = value` is then that slot's write.
+ */
+const accessorReplaceableField = (layout: ClassLayout | undefined, key: string): ClassField | undefined =>
+  layout?.fields.find((field) => field.key === key && (field.assignedMember === true || field.syntheticSubclassMemberOverlay === true))
+
+/**
+ * Every class below `declaration` whose accessor replaces the data field a
+ * read or write of `key` on it resolves to, or nothing when the member is no
+ * such field. three's `InputNode` stores `this.value = value`, and
+ * `TextureNode`, below it, declares `get value()`/`set value()`: a receiver
+ * typed `UniformNode` holding a TextureNode reaches the accessor, so a
+ * non-empty answer means the field is not the member for every instance and
+ * the access has to dispatch.
+ */
+export const fieldReplacingAccessorsOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  declaration: DeclarationId,
+  key: string
+): readonly DeclarationId[] => {
+  const site = classMemberOf(classes, declaration, key)
+  if (site?.kind !== 'field' || accessorReplaceableField(classes.get(site.owner), key) === undefined) return []
+  return classFamilyOverridesOf(classes, declaration, key).filter((candidate) =>
+    classes.get(candidate)!.accessors.some((entry) => entry.key === key)
+  )
+}
+
+/**
  * Which of a member's three dispatchable halves a family is.
  *
  * A key is a method OR an accessor, never both, so `call` never coexists with
@@ -223,6 +259,21 @@ export interface VirtualMethodFamily {
    * slot fell through to the abstract root's stub and aborted.
    */
   readonly fieldImplementors?: readonly VirtualFieldImplementor[]
+  /**
+   * The root's own DATA FIELD, which the implementors' accessors replace
+   * (`fieldReplacingAccessorsOf`): the root's member reads or writes it, and
+   * the slot carries its carrier. Without the family a read through the root
+   * loaded the field a TextureNode never writes, and the root's own
+   * constructor store wrote it instead of running the setter.
+   */
+  readonly rootField?: ClassField
+  /**
+   * The classes whose accessor replaces `rootField` but has no body for this
+   * half. The language throws on such a write (a getter-only accessor in
+   * class code), and no read of a setter-only one finds the field, so the
+   * family is refused rather than let the root's field answer for them.
+   */
+  readonly halfAbsentFrom?: readonly DeclarationId[]
 }
 
 export interface VirtualMethodImplementor {
@@ -236,7 +287,12 @@ export interface VirtualFieldImplementor {
 }
 
 /** The topmost class along `declaration`'s chain that declares `key` as a method. */
-const rootDeclaring = (classes: ReadonlyMap<DeclarationId, ClassLayout>, declaration: DeclarationId, key: string): DeclarationId => {
+const rootDeclaring = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  declaration: DeclarationId,
+  key: string,
+  role: VirtualMemberRole
+): DeclarationId => {
   const walked = new Set<DeclarationId>()
   let root = declaration
   let current: DeclarationId | null = declaration
@@ -246,8 +302,14 @@ const rootDeclaring = (classes: ReadonlyMap<DeclarationId, ClassLayout>, declara
     if (!layout) return root
     // Accessors alongside methods: `get label()` overridden by `get label()`
     // is the identical family question, and asking only about methods rooted
-    // every override at its own class, which is no family at all.
-    if (layout.methods.some((method: ClassMethod) => method.key === key) || layout.accessors.some((entry) => entry.key === key))
+    // every override at its own class, which is no family at all. A data
+    // field an accessor below replaces roots the accessor's family the same
+    // way: a receiver typed as the field's class reaches the accessor.
+    if (
+      layout.methods.some((method: ClassMethod) => method.key === key) ||
+      layout.accessors.some((entry) => entry.key === key) ||
+      (role !== 'call' && accessorReplaceableField(layout, key) !== undefined)
+    )
       root = current
     current = layout.base
   }
@@ -266,14 +328,22 @@ const rootDeclaring = (classes: ReadonlyMap<DeclarationId, ClassLayout>, declara
 export const virtualMethodFamiliesOf = (classes: ReadonlyMap<DeclarationId, ClassLayout>): readonly VirtualMethodFamily[] => {
   const byRoot = new Map<
     string,
-    { key: string; role: VirtualMemberRole; root: DeclarationId; rootDeclares: boolean; implementors: VirtualMethodImplementor[] }
+    {
+      key: string
+      role: VirtualMemberRole
+      root: DeclarationId
+      rootDeclares: boolean
+      implementors: VirtualMethodImplementor[]
+      absent: DeclarationId[]
+    }
   >()
   const record = (declaration: DeclarationId, key: string, role: VirtualMemberRole, callable: FunctionId | null): void => {
-    const root = rootDeclaring(classes, declaration, key)
+    const root = rootDeclaring(classes, declaration, key, role)
     const id = `${root} ${key} ${role}`
-    const entry = byRoot.get(id) ?? { key, role, root, rootDeclares: false, implementors: [] }
+    const entry = byRoot.get(id) ?? { key, role, root, rootDeclares: false, implementors: [], absent: [] }
     if (declaration === root) entry.rootDeclares = true
     if (callable !== null) entry.implementors.push({ declaration, callable })
+    else entry.absent.push(declaration)
     byRoot.set(id, entry)
   }
   for (const [declaration, layout] of classes) {
@@ -296,19 +366,29 @@ export const virtualMethodFamiliesOf = (classes: ReadonlyMap<DeclarationId, Clas
     return found.sort((left, right) => (left.declaration < right.declaration ? -1 : 1))
   }
   return [...byRoot.values()]
-    .map((entry) => ({ entry, fieldImplementors: fieldImplementorsOf(entry) }))
+    .map((entry) => ({
+      entry,
+      fieldImplementors: fieldImplementorsOf(entry),
+      // Only a root that declares no accessor of its own is answered by its
+      // field; one that does is an ordinary accessor family.
+      rootField: entry.role === 'call' || entry.rootDeclares ? undefined : accessorReplaceableField(classes.get(entry.root), entry.key)
+    }))
     .filter(
-      ({ entry, fieldImplementors }) =>
-        fieldImplementors.length > 0 || entry.implementors.some((implementor) => implementor.declaration !== entry.root)
+      ({ entry, fieldImplementors, rootField }) =>
+        rootField !== undefined ||
+        fieldImplementors.length > 0 ||
+        entry.implementors.some((implementor) => implementor.declaration !== entry.root)
     )
-    .filter(({ entry }) => entry.rootDeclares)
-    .map(({ entry, fieldImplementors }) => ({
+    .filter(({ entry, rootField }) => entry.rootDeclares || rootField !== undefined)
+    .map(({ entry, fieldImplementors, rootField }) => ({
       key: entry.key,
       role: entry.role,
       root: entry.root,
-      abstractRoot: !entry.implementors.some((implementor) => implementor.declaration === entry.root),
+      abstractRoot: rootField === undefined && !entry.implementors.some((implementor) => implementor.declaration === entry.root),
       implementors: [...entry.implementors].sort((left, right) => (left.declaration < right.declaration ? -1 : 1)),
-      ...(fieldImplementors.length > 0 ? { fieldImplementors } : {})
+      ...(fieldImplementors.length > 0 ? { fieldImplementors } : {}),
+      ...(rootField !== undefined ? { rootField } : {}),
+      ...(rootField !== undefined && entry.absent.length > 0 ? { halfAbsentFrom: [...entry.absent].sort() } : {})
     }))
     .sort((left, right) => (`${left.root} ${left.key} ${left.role}` < `${right.root} ${right.key} ${right.role}` ? -1 : 1))
 }
@@ -930,6 +1010,21 @@ const joinedRootAbiOf = (
 }
 
 /**
+ * The slot of a family whose root answers with its own data field: the
+ * accessors' convention, with the field's carrier where the value passes. A
+ * read through the root already publishes that carrier, and a write already
+ * converts into it, so every accessor converts to the field rather than the
+ * field to one accessor -- the getter's result must be one the field can hold.
+ */
+const fieldSlotAbiOf = (field: ClassField, role: VirtualMemberRole, accessors: CallableAbi | null): CallableAbi | null => {
+  const stored = field.representation
+  if (stored === null || stored.kind === 'unresolved' || accessors === null) return null
+  if (role === 'get') return { ...accessors, result: stored }
+  const ownership = 'ownership' in stored ? stored.ownership : 'owned'
+  return { ...accessors, parameters: [{ value: stored, ownership, passing: passingOf(stored, ownership) }] }
+}
+
+/**
  * The dispatchability verdict for every override family: whether it can be
  * dispatched through a C++ virtual member at all, and the exact convention
  * (`rootAbi`) every call site converts to when it can.
@@ -1001,11 +1096,31 @@ export const virtualDispatchVerdictOf = (
     const ownRootAbi = rootImplementor ? abiOf(rootImplementor.callable) : null
     const calls = familyCallsOf(classes, family, memberCalls)
     const rootAbi =
-      ownRootAbi !== null
-        ? joinedRootAbiOf(classes, conversions, ownRootAbi, family.implementors, abiOf, calls)
-        : family.abstractRoot
-          ? inheritedAbi
-          : null
+      family.rootField !== undefined
+        ? fieldSlotAbiOf(family.rootField, family.role, inheritedAbi)
+        : ownRootAbi !== null
+          ? joinedRootAbiOf(classes, conversions, ownRootAbi, family.implementors, abiOf, calls)
+          : family.abstractRoot
+            ? inheritedAbi
+            : null
+    if (family.halfAbsentFrom !== undefined) {
+      refused.push({
+        key: family.key,
+        role: family.role,
+        owner: family.root,
+        reason: `the accessor replacing data field ${family.root}.${family.key} in ${family.halfAbsentFrom.join(', ')} has no ${family.role === 'get' ? 'getter' : 'setter'}`
+      })
+      continue
+    }
+    if (family.rootField !== undefined && rootAbi === null) {
+      refused.push({
+        key: family.key,
+        role: family.role,
+        owner: family.root,
+        reason: `data field ${family.root}.${family.key}, which descendants replace with an accessor, publishes no carrier for the dispatch member`
+      })
+      continue
+    }
     if (family.copyAbsentFrom !== undefined) {
       refused.push({
         key: family.key,

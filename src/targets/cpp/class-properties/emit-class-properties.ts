@@ -50,7 +50,9 @@ import {
   classMethodValueArmsOf,
   classPrototypeMethodKeysOf,
   classPrototypeMethodValueArmsOf,
-  virtualDispatchFor
+  fieldReplacingAccessorsOf,
+  virtualDispatchFor,
+  virtualDispatchKey
 } from '../../../projection/dispatch.js'
 import { classPrototypeExtendedOf } from '../../../projection/class-prototype.js'
 
@@ -702,6 +704,32 @@ export const classMemberText = (ctx: EmitContext, operation: GetOperation): Clas
     )
   }
   if (site.kind === 'field') {
+    // A descendant's accessor replacing the field is the member on that
+    // descendant's instances, so a read through this receiver dispatches; the
+    // root's member reads the field for every other class. Without the member
+    // the read is refused: loading the field would answer what a TextureNode
+    // never stores.
+    const replacing = dispatchesStatically(ctx, operation.receiver) ? [] : fieldReplacingAccessorsOf(ctx.classes, receiver.declaration, key)
+    if (replacing.length > 0) {
+      const dispatch = ctx.virtualDispatch.get(virtualDispatchKey(receiver.declaration, key, 'get'))
+      if (dispatch === undefined) {
+        throw createCppEmitBlockedError(
+          `property-access:${representationKey(receiver)}:get:false`,
+          `data field "${key}" of class ${site.owner} is replaced by an accessor in ${replacing.join(', ')}, so a receiver typed as ${receiver.declaration} needs dynamic dispatch, which this unit emitted no member for; loading the field would miss the getter for every instance of those classes`
+        )
+      }
+      const text = `${operandText(ctx, operation.receiver)}->${cppVirtualMemberName(key, 'get')}()`
+      const target = operation.result.representation
+      if (cppTypeOf(dispatch.result) === cppTypeOf(target)) return { text, spelling: null }
+      const converted = alignedValueText(ctx, 'emit-class-properties.ts:replaced-field-read', dispatch.result, target, text)
+      if (converted === null) {
+        throw createCppEmitBlockedError(
+          `conversion:${representationKey(dispatch.result)}->${representationKey(target)}`,
+          `data field "${key}" of class ${site.owner} answers "${representationKey(dispatch.result)}" through its dispatch member, and this read publishes "${representationKey(target)}"`
+        )
+      }
+      return { text: converted, spelling: null }
+    }
     // A celled field renders its read exactly as any other field does -- the
     // cell converts to `const T&` -- so this declines and lets the ordinary
     // member access below produce the line. The note a JSX consumer needs to

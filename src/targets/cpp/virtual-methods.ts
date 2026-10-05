@@ -32,6 +32,7 @@ import {
   cppClassName,
   cppRecordFieldKeyIsSymbol,
   cppRecordFieldName,
+  cppRecordFieldPresenceName,
   cppResultTypeOf,
   cppStringLiteral,
   cppTypeOf,
@@ -259,7 +260,8 @@ export const virtualMethodEmission = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   abiOf: (callable: FunctionId) => CallableAbi | null,
   verdict: VirtualDispatchVerdict,
-  reparentTargets: ReadonlyMap<DeclarationId, ReadonlySet<DeclarationId>> = new Map()
+  reparentTargets: ReadonlyMap<DeclarationId, ReadonlySet<DeclarationId>> = new Map(),
+  declaredFieldOf: (declaration: DeclarationId, key: string) => Representation | null = () => null
 ): VirtualMethodEmission => {
   const membersByStruct = new Map<string, string[]>()
   const definitions: string[] = []
@@ -310,20 +312,36 @@ export const virtualMethodEmission = (
     }
     // A derived class whose own data field implements the accessor: the
     // override reads (or writes) that field, which is what the property is
-    // on such an instance (`VirtualMethodFamily.fieldImplementors`).
-    for (const { declaration, field } of family.fieldImplementors ?? []) {
+    // on such an instance (`VirtualMethodFamily.fieldImplementors`). The
+    // root's own field, which the implementors' accessors replace
+    // (`VirtualMethodFamily.rootField`), is the root's member the same way.
+    const fieldMembers = [
+      ...(family.rootField !== undefined ? [{ declaration: family.root, field: family.rootField, root: true }] : []),
+      ...(family.fieldImplementors ?? []).map((implementation) => ({ ...implementation, root: false }))
+    ]
+    for (const { declaration, field, root } of fieldMembers) {
       const structName = cppClassName(declaration)
-      const stored = field.representation
+      // The struct member is spelled by the class's declared record field,
+      // which can be wider than the layout's evidence: a base's overlay slot
+      // for a descendant member is stored boxed while its evidence is a sum.
+      const stored = declaredFieldOf(declaration, family.key) ?? field.representation
       if (stored === null) throw new Error(`virtual field implementation ${declaration}.${family.key} has no carrier`)
       const member = cppVirtualMemberName(family.key, family.role, family.copy)
       const slot = `this->${cppRecordFieldName(family.key)}`
       const written = rootAbi.parameters[0]?.value
+      // The store the member replaces is the one that makes the property
+      // present; a required field's bit is a constant `true` already.
+      const presence = root ? ` this->${cppRecordFieldPresenceName(family.key)} = true;` : ''
       const body =
         family.role === 'get'
           ? `return ${virtualValueConversionText(site, classes, stored, rootAbi.result, slot) ?? throwVirtualFieldDrift(declaration, family.key)};`
           : `${slot} = ${(written && virtualValueConversionText(site, classes, written, stored, cppFormalName(0))) ?? throwVirtualFieldDrift(declaration, family.key)};` +
+            presence +
             (result === 'void' ? '' : ` return ${cppUndefinedIn(rootAbi.result) ?? throwVirtualFieldDrift(declaration, family.key)};`)
-      membersByStruct.set(structName, [...(membersByStruct.get(structName) ?? []), `  ${result} ${member}(${formals}) override;`])
+      membersByStruct.set(structName, [
+        ...(membersByStruct.get(structName) ?? []),
+        root ? `  virtual ${result} ${member}(${formals});` : `  ${result} ${member}(${formals}) override;`
+      ])
       definitions.push(`${result} ${structName}::${member}(${formals}) { ${body} }`)
     }
   }

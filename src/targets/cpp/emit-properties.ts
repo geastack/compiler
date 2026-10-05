@@ -48,6 +48,7 @@ import {
 import { isNativeError } from './error-types.js'
 import { toStringOnlyObjectKinds } from '../../projection/coercions.js'
 import { cppVirtualMemberName, virtualDispatchKey } from './virtual-methods.js'
+import { fieldReplacingAccessorsOf } from '../../projection/dispatch.js'
 import {
   recordAccessorsOfShape,
   declaredFieldRepresentationOf,
@@ -396,7 +397,9 @@ export const isPlainMemberRead = (ctx: EmitContext, operation: GetOperation, key
     // it calls a getter. Dropping an unused extracted value must not drop that
     // getter's observable effects.
     const member = classMemberOf(ctx.classes, representation.declaration, key)
-    return member !== null && member.kind !== 'accessor'
+    return (
+      member !== null && member.kind !== 'accessor' && fieldReplacingAccessorsOf(ctx.classes, representation.declaration, key).length === 0
+    )
   }
   const accessors = recordAccessorsFor(ctx, representation)
   return accessors === null || !accessors.some((entry) => entry.key === key)
@@ -2012,7 +2015,38 @@ const emitFieldStoreLines = (
   if (setter !== null && !setterParameter) {
     throw createCppEmitBlockedError(`call-abi:accessor-setter:${fieldName}`, `setter "${fieldName}" has no emitted parameter convention`)
   }
-  const held = setterParameter ?? declaredFieldRepresentation(ctx, operation.receiver, fieldName)
+  // A data field a descendant's accessor replaces is written through the
+  // family's member: on such an instance the store runs the setter -- the
+  // base constructor's own `this.value = value` included -- and the root's
+  // member stores the field for every other class (`fieldReplacingAccessorsOf`).
+  const replacing =
+    setter === null && operation.receiver.representation.kind === 'class-ref' && !dispatchesStatically(ctx, operation.receiver)
+      ? fieldReplacingAccessorsOf(ctx.classes, operation.receiver.representation.declaration, fieldName)
+      : []
+  const replacedSlot =
+    replacing.length === 0 || operation.receiver.representation.kind !== 'class-ref'
+      ? null
+      : (ctx.virtualDispatch.get(virtualDispatchKey(operation.receiver.representation.declaration, fieldName, 'set'))?.parameters[0]
+          ?.value ?? null)
+  if (replacing.length > 0 && replacedSlot === null) {
+    throw createCppEmitBlockedError(
+      `property-access:${representationKey(operation.receiver.representation)}:set:false`,
+      `data field "${fieldName}" is replaced by an accessor in ${replacing.join(', ')}, so a write through a receiver typed as ` +
+        `${representationKey(operation.receiver.representation)} needs dynamic dispatch, which this unit emitted no member for; storing the field would skip the setter for every instance of those classes`
+    )
+  }
+  // An overridden setter dispatches through the object for the same reason an
+  // overridden getter does: `rule.weight = v` on a receiver typed as the base
+  // must reach the subclass's own setter, and binding the base's body would
+  // write the wrong one with nothing to show for it at compile time.
+  const setterDispatch =
+    setter === null || operation.receiver.representation.kind !== 'class-ref' || dispatchesStatically(ctx, operation.receiver)
+      ? undefined
+      : ctx.virtualDispatch.get(virtualDispatchKey(operation.receiver.representation.declaration, fieldName, 'set'))
+  // The member takes the family's slot, which is the replaced field's carrier
+  // when the family is rooted at one, not this setter's own parameter.
+  const dispatchedSlot = setterDispatch?.parameters[0]?.value ?? null
+  const held = dispatchedSlot ?? setterParameter ?? replacedSlot ?? declaredFieldRepresentation(ctx, operation.receiver, fieldName)
   // `convertedValueText` returns the text UNCHANGED when the carriers already
   // agree, where the `widenedStoreText` this replaced returned `null`. That
   // difference is load-bearing exactly here, because the `??` below reads
@@ -2067,15 +2101,7 @@ const emitFieldStoreLines = (
   // An accessor-backed member is written by *calling* its setter. The receiver
   // is still threaded onward below, because what a store publishes is the
   // object written into and not whatever the setter body happens to return.
-  // An overridden setter dispatches through the object for the same reason an
-  // overridden getter does: `rule.weight = v` on a receiver typed as the base
-  // must reach the subclass's own setter, and binding the base's body would
-  // write the wrong one with nothing to show for it at compile time.
-  const setterDispatch =
-    setter === null || operation.receiver.representation.kind !== 'class-ref'
-      ? undefined
-      : ctx.virtualDispatch.get(virtualDispatchKey(operation.receiver.representation.declaration, fieldName, 'set'))
-  if (setter !== null && setterDispatch !== undefined && !dispatchesStatically(ctx, operation.receiver)) {
+  if (setterDispatch !== undefined || replacedSlot !== null) {
     lines.push(`${receiverText}->${cppVirtualMemberName(fieldName, 'set')}(${valueText});`)
   } else if (setter !== null) {
     const environment = accessorEnvironmentArguments(ctx, operation.receiver.representation, fieldName, setter, 'setter', receiverText)
