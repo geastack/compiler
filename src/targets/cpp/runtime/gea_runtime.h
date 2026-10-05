@@ -41625,19 +41625,34 @@ inline gea::Ref<gea::ArrayObject<std::string>> getOwnPropertyNames(const gea::Va
  * field-by-field struct copy could not do for a source that has accessors.
  * The target is returned so a multi-source `Object.assign(t, a, b)` chains as
  * nested calls at the site.
+ *
+ * Both sides go through the box's own property protocol rather than an
+ * ordinary object's table. A dynamic carrier is not only an ordinary object:
+ * it also holds a record or class instance the program passed where `any` was
+ * expected, and that object's own keys and fields are the struct's, reached
+ * through its field dispatcher. three's `ShaderNodeProxy` copies a
+ * `{ ...settings, intent: true }` record onto a freshly constructed node
+ * instance this way; demanding a table of either aborted. A declared field is
+ * written in place, so a typed read of the same instance sees the copy, and a
+ * key the class does not declare becomes an expando -- exactly what a dynamic
+ * `node[key] = value` on that instance does.
  */
 inline gea::Value assign(const gea::Value& target, const gea::Value& source) {
+  // 20.1.2.1 step 1, ToObject(target). A primitive target would need a
+  // wrapper object this runtime does not model, so it keeps the named refusal.
+  if (target.tag() == gea::Value::Tag::Undefined || target.tag() == gea::Value::Tag::Null)
+    gea::host::throwRuntimeError("TypeError", "Cannot convert undefined or null to object");
+  if (target.tag() != gea::Value::Tag::Object && target.tag() != gea::Value::Tag::Function) gea::runtime::object::require(target, "Object.assign target");
   // 20.1.2.1 step 4.a: a null or undefined source contributes nothing rather
-  // than throwing, which is the one case a bare `require` would get wrong.
-  if (!gea::runtime::object::isOrdinary(source)) {
-    if (source.tag() == gea::Value::Tag::Undefined || source.tag() == gea::Value::Tag::Null) return target;
-  }
-  gea::DynamicObject& from = gea::runtime::object::require(source, "Object.assign source");
-  gea::runtime::object::require(target, "Object.assign target");
-  for (const gea::PropertyKey& key : from.ownKeys()) {
-    const gea::PropertyDescriptor* descriptor = from.ownProperty(key);
-    if (descriptor == nullptr || !descriptor->enumerable) continue;
-    gea::runtime::object::set(target, key, gea::runtime::object::get(source, key));
+  // than throwing. A number, boolean, symbol or bigint source has no own
+  // enumerable property either; a string's are its indices, which its box
+  // reports itself.
+  if (source.tag() != gea::Value::Tag::Object && source.tag() != gea::Value::Tag::Function && source.tag() != gea::Value::Tag::String) return target;
+  for (const gea::PropertyKey& key : source.ownPropertyKeys()) {
+    gea::PropertyDescriptor descriptor;
+    if (!source.ownDescriptor(key, descriptor) || !descriptor.enumerable) continue;
+    gea::Value receiver = target;
+    receiver.setProperty(key, source.getProperty(key));
   }
   return target;
 }
