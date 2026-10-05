@@ -361,6 +361,40 @@ const isSiblingClassCopy = (argument: Representation, slot: Representation): boo
   )
 }
 
+const dynamicBoundary: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+
+/**
+ * An argument handed to one arm of a callee carried as a value, in a slot
+ * that has no conversion from the argument's own carrier.
+ *
+ * The argument is typed by every arm the cell can hold, and the slot by one
+ * of them: ShaderNodeProxy's `new NodeClass( scope, ... )` passes its string
+ * `scope` to whichever class the proxy was built for, and the dispatch types
+ * that call for every class any proxy holds -- `ArrayElementNode( node )`
+ * among them, whose `@param {Node}` no string converts into. Which arm a
+ * value meets is only known at run time, so it converts there: boxed, and
+ * read back through the slot's own checked load -- the conversion a spread
+ * element already takes into the same slot (`censusParameterBindings`'
+ * value-carried rule) -- and a value the slot cannot hold throws where it
+ * arrives. Only a pair with a real conversion on each side of the box takes
+ * this; anything else still refuses by name.
+ */
+const acrossDynamicBoundaryText = (
+  ctx: EmitContext,
+  source: Representation,
+  slot: Representation,
+  text: string,
+  what: string
+): string | null => {
+  if (source.kind === 'dynamic' || slot.kind === 'dynamic') return null
+  if (ctx.conversions.nodeFor(source, dynamicBoundary).capability.kind === 'never') return null
+  if (ctx.conversions.nodeFor(dynamicBoundary, slot).capability.kind === 'never') return null
+  const boxed = alignedValueText(ctx, `emit-callable.ts:${what}:box`, source, dynamicBoundary, text)
+  const read = alignedValueText(ctx, `emit-callable.ts:${what}:checked-load`, dynamicBoundary, slot, 'gea_crossed')
+  if (boxed === null || read === null) return null
+  return `[&]() -> ${cppTypeOf(slot)} { gea::Value gea_crossed = ${boxed}; return ${read}; }()`
+}
+
 /**
  * One argument in the carrier the frame it is being written into declares.
  *
@@ -386,7 +420,13 @@ const isSiblingClassCopy = (argument: Representation, slot: Representation): boo
  * which `ir/lower-operands.ts`'s `packRestArguments` has already built in
  * exactly the carrier the convention states.
  */
-export const alignedText = (ctx: EmitContext, slot: Representation | undefined, argument: IrOperand, what = 'call'): string => {
+export const alignedText = (
+  ctx: EmitContext,
+  slot: Representation | undefined,
+  argument: IrOperand,
+  what = 'call',
+  armOfCarriedCallee = false
+): string => {
   const text = operandText(ctx, argument)
   if (!slot) return text
   if (derivesFrom(ctx, argument.representation, slot)) return text
@@ -425,6 +465,10 @@ export const alignedText = (ctx: EmitContext, slot: Representation | undefined, 
   // refusal of the live arms beside it.
   if (isSiblingClassCopy(argument.representation, slot)) {
     return `[&]() -> ${cppTypeOf(slot)} { gea::host::throwRuntimeError("TypeError", "a value of another instantiation of this generic class was passed"); }()`
+  }
+  if (armOfCarriedCallee) {
+    const crossed = acrossDynamicBoundaryText(ctx, argument.representation, slot, text, what)
+    if (crossed !== null) return crossed
   }
   throw createCppEmitBlockedError(
     `conversion:${representationKey(argument.representation)}->${representationKey(slot)}`,
@@ -505,9 +549,16 @@ export const receiverBoundCallableText = (ctx: EmitContext, operand: IrOperand, 
   return `${cppTypeOf(target)}::bindReceiver(${text}, ${receiver})`
 }
 
-const argumentText = (ctx: EmitContext, abi: CallableAbi, position: number, argument: IrOperand, what = 'call'): string => {
+const argumentText = (
+  ctx: EmitContext,
+  abi: CallableAbi,
+  position: number,
+  argument: IrOperand,
+  what = 'call',
+  armOfCarriedCallee = false
+): string => {
   const slot = abi.restFrom !== null && position >= abi.restFrom ? undefined : abi.parameters[position]?.value
-  const text = alignedText(ctx, slot, argument, what)
+  const text = alignedText(ctx, slot, argument, what, armOfCarriedCallee)
   // A dying refcounted argument MOVES (`buildDyingArgumentIndex`, captures.ts):
   // the cell it reads is never looked at again, so the increment on the way in
   // and the release on the way out are both pure cost. Only a carrier that
@@ -2968,7 +3019,7 @@ const emitTaggedUnionConstruct = (ctx: EmitContext, lines: string[], operation: 
     }
     const restFrom = abi.restFrom
     const named = restFrom === null ? receivableArguments(abi, operation.arguments) : operation.arguments.slice(0, restFrom)
-    const args = named.map((argument, position) => argumentText(ctx, abi, position, argument, 'union construct'))
+    const args = named.map((argument, position) => argumentText(ctx, abi, position, argument, 'union construct', true))
     const padded =
       restFrom === null
         ? paddedArguments(abi, args, 'union construct')
