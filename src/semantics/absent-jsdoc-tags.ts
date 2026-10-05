@@ -37,7 +37,9 @@ import { isUncheckedJavaScript } from './contradicted-jsdoc-types.js'
  *
  * - a `@param`: the parameter's own default, or an argument at a call the
  *   checker resolves to the function;
- * - a field `@type`: a store into the field, including its own declaring one;
+ * - a field `@type`: a store into the field, including its own declaring one
+ *   and an ancestor's tag of the same name, of the literal or of a parameter
+ *   defaulted to it that its function never reassigns;
  * - a `@return`: a `return null` in the function's own body.
  *
  * Nothing else is: a value that is some other statement's claim is
@@ -76,6 +78,24 @@ export const absentJsDocTagWidenings = (program: ts.Program, prepared: ReadonlyM
   }
   const paramTagOf = (parameter: ts.ParameterDeclaration): ts.JSDocParameterTag | undefined =>
     ts.getJSDocParameterTags(parameter).find((tag) => tag.typeExpression !== undefined)
+  // A read of a parameter whose default is the literal `null` and which its
+  // function never reassigns carries that `null` straight through: three's
+  // `UniformGroupNode( name, shared = false, order = 1, updateType = null )`
+  // stores `this.updateType = updateType`, and `sharedUniformGroup(
+  // 'cameraIndex' )` leaves the default in place.
+  const nullDefaults = new Map<ts.ParameterDeclaration, boolean>()
+  const readsNullDefault = (node: ts.Expression): boolean => {
+    const current = withoutParentheses(node)
+    if (!ts.isIdentifier(current)) return false
+    const symbol = checker.getSymbolAtLocation(current)
+    const parameter = symbol?.valueDeclaration
+    if (!symbol || !parameter || !ts.isParameter(parameter) || !isNull(parameter.initializer)) return false
+    const known = nullDefaults.get(parameter)
+    if (known !== undefined) return known
+    const carried = !reassigns(checker, parameter.parent, symbol)
+    nullDefaults.set(parameter, carried)
+    return carried
+  }
 
   // Field tags by name, so a store is asked about only when its name is one.
   const fieldTags = new Map<string, { readonly declaration: ts.Node; readonly tag: ts.JSDocTypeTag }[]>()
@@ -100,7 +120,12 @@ export const absentJsDocTagWidenings = (program: ts.Program, prepared: ReadonlyM
         named.push({ declaration: field.declaration, tag: field.tag })
         fieldTags.set(field.name, named)
       }
-      if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && isNull(node.right)) fieldStores.push(node)
+      if (
+        ts.isBinaryExpression(node) &&
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+        (isNull(node.right) || readsNullDefault(node.right))
+      )
+        fieldStores.push(node)
       ts.forEachChild(node, visit)
     }
     visit(file)
@@ -127,13 +152,13 @@ export const absentJsDocTagWidenings = (program: ts.Program, prepared: ReadonlyM
     // its constructor and another through an instance, and both list the
     // assignment that declares it.
     const declarations = new Set<ts.Node>(checker.getSymbolAtLocation(target)?.declarations ?? [])
-    for (const candidate of candidates) {
-      if (!declarations.has(candidate.declaration) && candidate.declaration !== store) continue
-      widen(candidate.tag)
-      // The overlay copies of this declarer's tag onto its ancestors (see
-      // `ancestorOverlaysOf`) state the same value, so they admit the null too.
-      for (const overlay of ancestorOverlaysOf(checker, candidate.declaration, candidates)) widen(overlay.tag)
-    }
+    // A `this.name = v` store declares the member of its own class whether or
+    // not the checker lists it among the symbol's declarations.
+    if (target.expression.kind === ts.SyntaxKind.ThisKeyword) declarations.add(store)
+    for (const candidate of candidates) if (declarations.has(candidate.declaration)) widen(candidate.tag)
+    // The same name's tags on the declaring classes' ancestors state the same
+    // storage (see `ancestorTagsOf`), so they admit the null too.
+    for (const declaration of declarations) for (const inherited of ancestorTagsOf(checker, declaration, candidates)) widen(inherited.tag)
   }
   for (const [, candidates] of fieldTags)
     for (const candidate of candidates)
@@ -168,22 +193,26 @@ export const absentJsDocTagWidenings = (program: ts.Program, prepared: ReadonlyM
 }
 
 /**
- * The `@geaSubclassMemberOverlay` fields of the same name on the ancestors of
- * the class a field tag is declared in.
+ * The tags of the same name on the ancestors of the class a field is declared
+ * in.
  *
- * `subclass-member-overlay-transform.ts` writes a member some subclasses
- * declare onto their common ancestors, as the union of the declarers' tags
- * and `undefined`, and each declarer restates its own tag. It copies the tag
- * TEXT before this pass runs, so when a declarer's tag is widened for a
- * `null` store, the copies on the ancestors still leave the `null` out.
- * three's `ComputeNode` states `@type {number|Array<number>}` over
- * `this.dispatchSize = null`: its own tag became `{?number|Array<number>}`,
- * while `Node`'s and `EventDispatcher`'s overlays kept
- * `{number|Array<number> | undefined}`, and the store took that carrier,
- * which has no state for `null` (ComputeNode:85). The overlay is the union of
- * what the declarers hold, and a declarer holds the `null`.
+ * An instance has one own property per name, so a subclass declaring a field
+ * its ancestor also tags declares no second slot: the ancestor's tag states
+ * the same storage, and every read typed by the ancestor reads what the
+ * subclass stored. three's `UniformGroupNode` restates `Node`'s `@type
+ * {string}` `updateType` as `@type {string|null}` and stores its `null`
+ * default into it; `Node`'s tag kept the `null` out, the slot was laid out as
+ * a bare string, and the store raised on the absent value at run time.
+ *
+ * `subclass-member-overlay-transform.ts`'s `@geaSubclassMemberOverlay`
+ * fields are such ancestor tags too: it writes a member some subclasses
+ * declare onto their common ancestors, copying the declarers' tag TEXT before
+ * this pass runs, so a declarer's widened tag left the copies without the
+ * `null` -- three's `ComputeNode` states `@type {number|Array<number>}` over
+ * `this.dispatchSize = null`, and `Node`'s and `EventDispatcher`'s overlays
+ * kept `{number|Array<number> | undefined}` (ComputeNode:85).
  */
-const ancestorOverlaysOf = (
+const ancestorTagsOf = (
   checker: ts.TypeChecker,
   declaration: ts.Node,
   candidates: readonly { readonly declaration: ts.Node; readonly tag: ts.JSDocTypeTag }[]
@@ -199,12 +228,37 @@ const ancestorOverlaysOf = (
     if (current) ancestors.add(current)
   }
   if (ancestors.size === 0) return []
-  return candidates.filter(
-    (candidate) =>
-      ts.isPropertyDeclaration(candidate.declaration) &&
-      ancestors.has(candidate.declaration.parent) &&
-      ts.getJSDocTags(candidate.declaration).some((tag) => tag.tagName.text === 'geaSubclassMemberOverlay')
-  )
+  return candidates.filter((candidate) => {
+    const owner = classOf(candidate.declaration)
+    return owner !== undefined && ancestors.has(owner)
+  })
+}
+
+/** Whether `scope` assigns `symbol` anywhere, a function nested in it included. */
+const reassigns = (checker: ts.TypeChecker, scope: ts.Node, symbol: ts.Symbol): boolean => {
+  let found = false
+  const names = (node: ts.Node): boolean => {
+    const target = ts.isExpression(node) ? withoutParentheses(node) : node
+    return ts.isIdentifier(target) && checker.getSymbolAtLocation(target) === symbol
+  }
+  const visit = (node: ts.Node): void => {
+    if (found) return
+    if (
+      (ts.isBinaryExpression(node) &&
+        node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+        node.operatorToken.kind <= ts.SyntaxKind.LastAssignment &&
+        names(node.left)) ||
+      ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+        (node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken) &&
+        names(node.operand))
+    ) {
+      found = true
+      return
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(scope)
+  return found
 }
 
 const classOf = (node: ts.Node): ts.ClassLikeDeclaration | undefined => {
