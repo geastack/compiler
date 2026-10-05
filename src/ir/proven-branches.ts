@@ -1,4 +1,7 @@
 import { irValueId, type IrValueId, type PhysicalBodyId, type SemanticResultId, type StructuralTypeId } from '../identity/ids.js'
+import type { DeclarationId } from '../identity/ids.js'
+import type { ClassLayout } from '../projection/classes.js'
+import { extendsClass } from '../projection/dispatch.js'
 import type { Representation } from '../representation/model.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import type { OperandSource } from '../semantics/model/operands.js'
@@ -87,6 +90,49 @@ const disjointCarriers = (left: Representation, right: Representation): boolean 
   if (leftTags === null || rightTags === null) return false
   for (const tag of leftTags) if (rightTags.has(tag)) return false
   return true
+}
+
+/**
+ * No value `carrier` can hold is an instance of a class in `members`' family,
+ * so `v instanceof C` is false wherever it completes normally. A primitive is
+ * never an instance (ECMA-262 7.3.22 OrdinaryHasInstance step 4). A
+ * `class-ref(D)` holds D, a descendant of D, D's prototype object or a plain
+ * object built with D's layout; under single inheritance one of those is in
+ * C's family only when D and a member lie on one chain. Every other carrier --
+ * a view, a box -- may hold an instance and decides nothing. three's
+ * `GLSLNodeBuilder.setupPBO` narrows InputNode's `any` value with `instanceof
+ * BufferAttribute` where no BufferAttribute ever reaches it: the narrowed uses
+ * never run and must not demand a conversion into that class.
+ */
+const neverInstanceOf = (
+  carrier: Representation,
+  members: readonly DeclarationId[],
+  classes: ReadonlyMap<DeclarationId, ClassLayout>
+): boolean => {
+  switch (carrier.kind) {
+    case 'scalar':
+    case 'string':
+    case 'symbol':
+    case 'null':
+    case 'undefined':
+      return true
+    case 'class-ref':
+      return (
+        classes.has(carrier.declaration) &&
+        members.every(
+          (member) =>
+            member !== carrier.declaration &&
+            !extendsClass(classes, carrier.declaration, member) &&
+            !extendsClass(classes, member, carrier.declaration)
+        )
+      )
+    case 'optional':
+      return neverInstanceOf(carrier.payload, members, classes)
+    case 'tagged-union':
+      return carrier.arms.length > 0 && carrier.arms.every((arm) => neverInstanceOf(arm.value, members, classes))
+    default:
+      return false
+  }
 }
 
 /** Normal-completion truth facts derived from the semantic operations' sealed results. */
@@ -233,7 +279,8 @@ export const provenResultTruthiness = (
 export const pruneProvenBranches = (
   bodies: ReadonlyMap<PhysicalBodyId, IrBody>,
   graph: Pick<SemanticGraph, 'operations'> & Partial<Pick<SemanticGraph, 'structuralTypes'>>,
-  slotDrift: readonly SlotDrift[] = []
+  slotDrift: readonly SlotDrift[] = [],
+  classes?: ReadonlyMap<DeclarationId, ClassLayout>
 ): { readonly bodies: ReadonlyMap<PhysicalBodyId, IrBody>; readonly slotDrift: readonly SlotDrift[] } => {
   const semantic = provenResultTruthiness(graph)
   const absentReads = new Set<SemanticResultId>()
@@ -277,9 +324,34 @@ export const pruneProvenBranches = (
         facts.set(operation.result.id, operation.operator === '!==')
     }
     for (const operation of operations) {
-      if (operation.kind !== 'test' || operation.predicate !== 'to-boolean') continue
-      const truth = facts.get(operation.value.value)
-      if (truth !== undefined) facts.set(operation.result.id, truth)
+      if (operation.kind !== 'compute' || operation.form !== 'instanceof' || classes === undefined) continue
+      const [left, right] = operation.operands
+      if (
+        left !== undefined &&
+        right?.representation.kind === 'constructor-family' &&
+        right.representation.members.length > 0 &&
+        right.representation.members.every((member) => classes.has(member)) &&
+        neverInstanceOf(left.representation, right.representation.members, classes)
+      )
+        facts.set(operation.result.id, false)
+    }
+    // `if (!(v instanceof C)) throw` is the guard shape: a truth fact reaches
+    // the branch through the negation as well as through ToBoolean.
+    for (let grew = true; grew;) {
+      grew = false
+      for (const operation of operations) {
+        const step =
+          operation.kind === 'test' && operation.predicate === 'to-boolean'
+            ? { source: operation.value.value, result: operation.result.id, negated: false }
+            : operation.kind === 'compute' && operation.form === 'unary' && operation.operator === '!' && operation.operands[0]
+              ? { source: operation.operands[0].value, result: operation.result.id, negated: true }
+              : undefined
+        if (step === undefined || facts.has(step.result)) continue
+        const truth = facts.get(step.source)
+        if (truth === undefined) continue
+        facts.set(step.result, truth !== step.negated)
+        grew = true
+      }
     }
     const blocks = new Map(body.blocks)
     const expandedValues = new Map(body.values)

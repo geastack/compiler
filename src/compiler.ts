@@ -1124,7 +1124,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // lowering was blocked, and vanished whenever it was not.
   stage('generator-split')
   const provenPruned = lowered
-    ? pruneProvenBranches(splitBodies, frontend.graph, lowered.slotDrift)
+    ? pruneProvenBranches(splitBodies, frontend.graph, lowered.slotDrift, classes)
     : { bodies: splitBodies, slotDrift: [] }
   // Run after the set rewrite so a body it left alone is still judged on its own;
   // the copy elision needs the placements to prove its cell is frame-local.
