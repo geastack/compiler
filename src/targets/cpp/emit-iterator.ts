@@ -26,7 +26,7 @@ import {
 import { alignedValueText } from './emit-narrowing.js'
 import { dispatchedLeafExpression, unionPropertyLeaves } from './emit-union-properties.js'
 import { recordAccessorsOfShape, recordFieldsOfShape } from './records.js'
-import { renderTryRegion, type RegionRendering } from './emit-exceptions.js'
+import { coroutineCatchFence, renderTryRegion, type RegionRendering } from './emit-exceptions.js'
 import { awaitTickText, awaitedText, coroutineAwaitStatements } from './prototype/emit-prototype-promise.js'
 import { accessorEnvironmentArguments } from './emit-properties.js'
 import { classPrototypeExtendedOf } from '../../projection/class-prototype.js'
@@ -1632,7 +1632,8 @@ const renderSuspendingIteratorCloseRegion = (
   lines.push(`std::exception_ptr ${thrown};`)
   lines.push(`bool ${guard}_returning = false;`)
   if (closingFlag !== null) lines.push(`bool ${closingFlag} = false;`)
-  lines.push('try {')
+  const fence = coroutineCatchFence(ctx)
+  lines.push(...fence.open, 'try {')
   const leaves = (target: IrBlockId): boolean => !selected.has(target) && !region.dismissTargets.includes(target)
   const scopedRendering: IteratorCloseRegionRendering = {
     ...rendering,
@@ -1700,10 +1701,12 @@ const renderSuspendingIteratorCloseRegion = (
   const returning = `${guard}_returning`
   lines.push(
     `} catch (const gea::Value&) { ${thrown} = std::current_exception(); } ` +
-      `catch (...) { ${thrown} = std::current_exception(); ${returning} = true; }`
+      `catch (...) { ${thrown} = std::current_exception(); ${returning} = true; }`,
+    ...fence.close
   )
   // Reached only through a handler: every block above ends in a terminator.
-  const closing = `if (${armed}) { ${armed} = false; if (${returning}) { ${close} } else { try { ${close} } catch (const gea::Value&) {} } }`
+  const guardedClose = [...fence.open, `try { ${close} } catch (const gea::Value&) {}`, ...fence.close].join(' ')
+  const closing = `if (${armed}) { ${armed} = false; if (${returning}) { ${close} } else { ${guardedClose} } }`
   lines.push(closingFlag === null ? closing : `if (${closingFlag}) { ${closing} }`)
   lines.push(`std::rethrow_exception(${thrown});`)
   lines.push('}')
@@ -1767,7 +1770,8 @@ export const renderIteratorCloseRegion = (
       : null
   const closingFlag = splitEntry === null ? null : `${guard}_in_body`
   if (closingFlag !== null) lines.push(`bool ${closingFlag} = false;`)
-  lines.push('try {')
+  const fence = coroutineCatchFence(ctx)
+  lines.push(...fence.open, 'try {')
   const scopedRendering: IteratorCloseRegionRendering = {
     ...rendering,
     emitTerminator: (inner, targetLines, labels, isSingleBlock, terminator) => {
@@ -1814,7 +1818,7 @@ export const renderIteratorCloseRegion = (
   if (closingFlag === null) lines.push(`try { ${guard}.close(); } catch (const gea::Value&) {}`)
   else lines.push(`if (${closingFlag}) { try { ${guard}.close(); } catch (const gea::Value&) {} } else { ${guard}.dismiss(); }`)
   lines.push('throw;')
-  lines.push('}')
+  lines.push('}', ...fence.close)
   lines.push('}')
   return order
 }

@@ -612,6 +612,24 @@ const finallyRendering = (rendering: RegionRendering): RegionRendering => ({
   }
 })
 
+/** Whether this body's frame is a C++20 coroutine, which is where a handler may not suspend and a try needs `coroutineCatchFence`. */
+const inCoroutineFrame = (ctx: EmitContext): boolean => ctx.asyncCoroutineBody || ctx.generatorBody
+
+/**
+ * The block a `try` statement written into a coroutine body is the sole
+ * statement of: `open` before the `try`, `close` after its last handler.
+ *
+ * `gea::detail::CoroutineCatchFence` says why: under funclet EH, LLVM's
+ * coroutine split breaks SSA in a cleanup that a handler dispatch unwinds into
+ * whenever that cleanup carries PHIs, and the fence gives every dispatch a
+ * cleanup of its own that carries none. Outside a coroutine there is no split,
+ * so the statement keeps its bare shape.
+ */
+export const coroutineCatchFence = (ctx: EmitContext): { readonly open: readonly string[]; readonly close: readonly string[] } =>
+  inCoroutineFrame(ctx)
+    ? { open: ['{', '[[maybe_unused]] gea::detail::CoroutineCatchFence gea_catch_fence;'], close: ['}'] }
+    : { open: [], close: [] }
+
 /** Renders one region's `try { } catch (...) { }` text and returns every block it consumed, so the caller can skip them in the ordinary per-block loop. */
 export const renderTryRegion = (
   ctx: EmitContext,
@@ -672,7 +690,7 @@ export const renderTryRegion = (
   // the scope guard's lambda -- so a coroutine whose handler or finally clause
   // awaits renders that part outside the construct C++ would forbid it in.
   // Every other try statement keeps its native shape.
-  const coroutineFrame = ctx.asyncCoroutineBody || ctx.generatorBody
+  const coroutineFrame = inCoroutineFrame(ctx)
   const catchSuspends = coroutineFrame && catchPart !== null && blocksSuspend(body, catchPart.owned)
   const finallySuspends = coroutineFrame && finallyPart !== null && blocksSuspend(body, finallyPart.owned)
 
@@ -700,6 +718,7 @@ export const renderTryRegion = (
   // The pending slot is declared OUTSIDE the guard's scope, so the rethrow that
   // reads it can be written AFTER the guard has been destroyed -- which is the
   // whole reason the slot exists (`finallyGuardType`'s comment says why).
+  const fence = coroutineCatchFence(ctx)
   if (finallyPart) {
     lines.push('{')
     lines.push(`std::exception_ptr ${finallyPendingName(region)};`)
@@ -707,11 +726,11 @@ export const renderTryRegion = (
     lines.push(`${finallyGuardType} ${finallyGuardName(region)}{[&]() {`)
     lines.push(...renderPart(ctx, body, finallyRendering(rendering), finallyPart.order, finallyPart.owned, false, true))
     lines.push('}};')
-    lines.push('try {')
+    lines.push(...fence.open, 'try {')
   }
   lines.push(...renderTryAndCatch(ctx, body, region, rendering, tryPart, catchPart, binding, catchSuspends))
   if (finallyPart) {
-    lines.push(`} catch (...) { ${finallyPendingName(region)} = std::current_exception(); }`)
+    lines.push(`} catch (...) { ${finallyPendingName(region)} = std::current_exception(); }`, ...fence.close)
     lines.push('}')
     lines.push(`if (${finallyPendingName(region)}) std::rethrow_exception(${finallyPendingName(region)});`)
     lines.push('}')
@@ -744,14 +763,15 @@ const renderTryAndCatch = (
 ): readonly string[] => {
   const lines: string[] = []
   if (catchPart === null) return renderPart(ctx, body, rendering, tryPart.order, tryPart.owned, false, true)
+  const fence = coroutineCatchFence(ctx)
   if (!catchSuspends) {
     const parameter = binding
       ? `const ${cppTypeOf(binding.result.representation)}& ${defineValueBoundElsewhere(ctx, binding.result)}`
       : '...'
     const tryText = renderPart(ctx, body, rendering, tryPart.order, tryPart.owned, false, true)
-    lines.push('try {', ...tryText, '}', `catch (${parameter}) {`)
+    lines.push(...fence.open, 'try {', ...tryText, '}', `catch (${parameter}) {`)
     lines.push(...renderPart(ctx, body, rendering, catchPart.order, catchPart.owned, binding !== null, false))
-    lines.push('}')
+    lines.push('}', ...fence.close)
     return lines
   }
   const tryText = renderPart(ctx, body, rendering, tryPart.order, tryPart.owned, false, true)
@@ -760,7 +780,7 @@ const renderTryAndCatch = (
   const record = binding
     ? `catch (const ${thrownType}& gea_thrown) { ${defineValue(ctx, binding.result, thrownType)} = gea_thrown; ${caught} = true; }`
     : `catch (...) { ${caught} = true; }`
-  lines.push('{', `bool ${caught} = false;`, 'try {', ...tryText, '}', record, `if (${caught}) {`)
+  lines.push('{', `bool ${caught} = false;`, ...fence.open, 'try {', ...tryText, '}', record, ...fence.close, `if (${caught}) {`)
   lines.push(...renderPart(ctx, body, rendering, catchPart.order, catchPart.owned, binding !== null, false))
   lines.push('}', '}')
   return lines
@@ -866,8 +886,9 @@ const renderSuspendingFinally = (
     }
   }
   const statement = renderStatement(partRendering)
-  lines.push('{', `std::exception_ptr ${pending};`, `int ${completion} = 0;`, 'try {', ...statement, '}')
-  lines.push(`catch (...) { ${pending} = std::current_exception(); }`, `goto ${run};`)
+  const fence = coroutineCatchFence(ctx)
+  lines.push('{', `std::exception_ptr ${pending};`, `int ${completion} = 0;`, ...fence.open, 'try {', ...statement, '}')
+  lines.push(`catch (...) { ${pending} = std::current_exception(); }`, ...fence.close, `goto ${run};`)
   exits.forEach((_, index) => lines.push(`${exitLabel(index)}: ${completion} = ${index + 1}; goto ${run};`))
   lines.push(`${run}:`)
   const clauseRendering: RegionRendering = {

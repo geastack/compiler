@@ -14600,8 +14600,41 @@ Promise<R> mapSettledPromise(const Promise<V>& source, F&& mapper) {
  *    alive forever (JavaScript would collect both); a queued job that is
  *    dropped without running leaks the frame rather than run its `finally`
  *    guards at an arbitrary point (e.g. static destruction).
+ *  - Every `try` statement the emitter writes into a coroutine body is the
+ *    sole statement of a block opened by a `CoroutineCatchFence` (below).
  */
 namespace detail {
+
+/**
+ * The cleanup a coroutine's handler dispatch unwinds into, and nothing else.
+ *
+ * Under funclet EH (the MSVC ABI, and WebAssembly exceptions) a `try`'s
+ * `catchswitch` unwinds into the cleanup of whatever is in scope around the
+ * statement. Once SROA has promoted those locals -- a `gea::Ref` reassigned
+ * across the statement is enough -- that cleanup starts with PHIs, and LLVM's
+ * coroutine split (`rewritePHIsForCleanupPad`) rewires a cleanup with a
+ * `catchswitch` predecessor through a dispatch block while leaving each PHI's
+ * incoming value as it was. A value defined after the last suspension then no
+ * longer dominates its use: the split emits IR the verifier rejects, and the
+ * passes after it crash on it or miscompile it (clang 22.1.3 -O1/-O2 crashed
+ * in jump-threading on three's `NodeManager`, and in correlated-propagation on
+ * `test/runtime/coroutine-catch-dispatch-unwinds-into-its-own-cleanup`).
+ *
+ * Declared immediately before the `try`, this object's cleanup is the one the
+ * dispatch unwinds into. It reads no promoted value, so it has no PHI to break,
+ * and the outer cleanup is reached by `cleanupret`, which the split rewrites
+ * correctly. The destructor is a compiler-only barrier: no instruction, but a
+ * side effect the optimizer may not delete, so the cleanup cannot fold away.
+ * Landing-pad ABIs have no such rewrite, so there it is empty and emits nothing.
+ */
+struct CoroutineCatchFence {
+  CoroutineCatchFence() = default;
+  CoroutineCatchFence(const CoroutineCatchFence&) = delete;
+  CoroutineCatchFence& operator=(const CoroutineCatchFence&) = delete;
+#if defined(_MSC_VER) || defined(__wasm_exception_handling__)
+  ~CoroutineCatchFence() { std::atomic_signal_fence(std::memory_order_seq_cst); }
+#endif
+};
 
 /**
  * Coroutine frames through the same size-class pools `makeRef` uses. A frame
