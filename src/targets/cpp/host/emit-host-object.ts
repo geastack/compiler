@@ -1,3 +1,4 @@
+import type { DeclarationId } from '../../../identity/ids.js'
 import type { CallableAbi, Ownership, RecordField, Representation } from '../../../representation/model.js'
 import { passingOf, representationKey } from '../../../representation/model.js'
 import { hostMemberTemplateOf } from '../../../representation/host-templates.js'
@@ -638,6 +639,9 @@ const entriesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectV
   )
 }
 
+const mayHoldDescendantInstance = (ctx: EmitContext, declaration: DeclarationId): boolean =>
+  (ctx.layouts.classSubtreeOf?.(declaration) ?? []).some((member) => member.declaration !== declaration)
+
 /**
  * The own enumerable properties of a shared record, walked by the runtime in
  * creation order, as a call answering whether it walked them.
@@ -671,6 +675,17 @@ const creationOrderedOwnCopyText = (
     throw error
   }
   if (body === null) return null
+  // A class source an instance of a descendant may stand behind is always
+  // walked: the static copy and the runtime's layout-order arms both read the
+  // STATIC struct's fields, and a subclass instance owns fields that struct
+  // does not have (three's `Binding.clone()`, `Object.assign( new
+  // this.constructor(), this )` on a `Buffer`). The walk's keys and reads go
+  // through the instance's own field table, as `Object.keys` already does.
+  if (view.representation.kind === 'class-ref' && mayHoldDescendantInstance(ctx, view.representation.declaration))
+    return (
+      `gea::copyOwnPropertiesInCreationOrder(${view.receiver}, ` +
+      `[&](const std::string& __gea_ordered_key, const gea::Value& __gea_ordered_value) { ${body} }, true)`
+    )
   // A copy into a known target with its static copy in hand: the runtime runs
   // that copy itself when the source's keys only left layout order
   // (`gea::assignOwnPropertiesInCreationOrderWith`).

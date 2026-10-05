@@ -5,9 +5,10 @@ import { indexedRecordViewOf, spreadFieldRecordReceiverOf } from './certify/carr
 import type { DeclarationId, FunctionId, IrValueId, PhysicalBodyId, StructuralTypeId } from '../identity/ids.js'
 import { classLayoutOfCopy, classLayoutsConstructedBy, type ClassLayout, type PhysicalClassLayout } from '../projection/classes.js'
 import type { BindingPlacement } from '../projection/bindings.js'
-import { classMemberOf, declaredRecordFieldOf } from '../projection/fields.js'
+import { classMemberOf, declaredRecordFieldOf, recordLayoutPolicyOf } from '../projection/fields.js'
 import { classPrototypeReadOf } from '../projection/class-prototype.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
+import type { RecordLayoutPolicy } from '../representation/policies.js'
 import type { CallableAbi, RecordField, Representation } from '../representation/model.js'
 import { isOpenDocument, representationKey } from '../representation/model.js'
 import type { ConstantOperation, IrBody, IrOperand, IrOperation } from './model.js'
@@ -432,6 +433,14 @@ const keyOperandOf = (operation: IrOperation): IrOperand | null => {
     default:
       return null
   }
+}
+
+/** Whether a copy source of this carrier can hold an instance of a class extending its own; see `creationOrderedOwnCopyText`. */
+const classSourceMayHoldDescendant = (carrier: Representation, layouts: RecordLayoutPolicy): boolean => {
+  if (carrier.kind === 'optional') return classSourceMayHoldDescendant(carrier.payload, layouts)
+  if (carrier.kind === 'tagged-union') return carrier.arms.some((arm) => classSourceMayHoldDescendant(arm.value, layouts))
+  if (carrier.kind !== 'class-ref') return false
+  return (layouts.classSubtreeOf?.(carrier.declaration) ?? []).some((member) => member.declaration !== carrier.declaration)
 }
 
 const extendsClass = (classes: ReadonlyMap<DeclarationId, ClassLayout>, candidate: DeclarationId, ancestor: DeclarationId): boolean => {
@@ -1759,6 +1768,16 @@ export const reflectionExposureOf = (
       // CallOperation has no authenticated host-path fact. Unknown calls may
       // inspect or mutate every native receiver/argument they receive.
       // A matching call elsewhere cannot certify this operation's ABI.
+      // A class-typed `Object.assign` source may be a subclass instance whose
+      // own fields its static struct does not list (three's `Binding.clone()`
+      // copies a `UniformBuffer` through `this: Binding`), so the printer walks
+      // the instance's own field table, which only the field protocol carries.
+      if (operation.hostTemplate === 'object-assign' && !operation.argumentsAreSpread && deriver !== null) {
+        const layouts = recordLayoutPolicyOf(deriver, classes)
+        for (const source of operation.arguments.slice(1))
+          if (classSourceMayHoldDescendant(source.representation, layouts))
+            promoteFull(source.representation, 'object-assign-descendant-class-source')
+      }
       if (closedCallOperations.has(operation)) continue
       // A native fixed frame cannot inspect trailing arguments it does not
       // receive. Their evaluation is already represented by preceding IR;

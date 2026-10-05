@@ -153,10 +153,22 @@ export type ObjectView =
  * definition for it and cannot know whether the C++ members it was told about
  * are the JavaScript object's own keys -- so it refuses rather than reporting
  * a member list as a key list.
+ *
+ * A class's struct is laid out from its native storage, not from its shape: a
+ * subclass-member overlay in the shape is type evidence, kept as a member only
+ * where an access goes through that base (`projectNativeClassStorage`), so the
+ * shape can name a key whose slot only a descendant's struct holds, and the
+ * storage lists it among `omittedOverlays`. Reading it
+ * as a member of this one named a member that is not there (three's
+ * `Binding.clone`, copying `bytesPerElement` that only `Buffer` stores).
  */
 const knownShapeFieldsOf = (ctx: EmitContext, representation: Representation): readonly RecordField[] | null => {
   if (representation.kind === 'record' || representation.kind === 'record-with-index') return representation.fields
-  if (representation.kind === 'class-ref') return recordFieldsOfShape(ctx.deriver, representation.shapeId)
+  if (representation.kind === 'class-ref') {
+    const fields = recordFieldsOfShape(ctx.deriver, representation.shapeId)
+    const omitted = new Set(ctx.classes.get(representation.declaration)?.nativeStorage?.omittedOverlays ?? [])
+    return omitted.size === 0 || fields === null ? fields : fields.filter((field) => !omitted.has(field.key))
+  }
   if (representation.kind !== 'native-record-ref' || representation.native !== null) return null
   return recordFieldsOfShape(ctx.deriver, representation.shapeId)
 }
