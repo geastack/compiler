@@ -94,6 +94,7 @@ import {
 } from './prototype/emit-prototype-regexp.js'
 import { emitTaggedUnionSet, taggedUnionGetText } from './emit-union-properties.js'
 import { stringAppendStatement } from './emit-tostring.js'
+import { toNumberArgumentText } from './emit-tonumber.js'
 
 /**
  * The property spine: every `[[Get]]`, `[[Set]]`, and `[[DefineOwnProperty]]`
@@ -1706,7 +1707,7 @@ const emitFieldStoreLines = (
       // `arr.length = n` is the Array exotic object's own truncate/extend
       // rule, not a field write: `setLength` in the runtime header is where
       // that rule lives, so nothing here decides truncation-vs-extension.
-      lines.push(`${arrayReceiver}->setLength(${operandText(ctx, operation.value)});`)
+      lines.push(`${arrayReceiver}->setLength(${toNumberArgumentText(ctx, operation.value)});`)
       finishArrayStore()
       return
     }

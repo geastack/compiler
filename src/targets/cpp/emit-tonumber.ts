@@ -242,6 +242,18 @@ const dynamicToNumericText = (text: string): string => {
 const dynamicToNumberText = (text: string): string => `gea::dynamicToNumber(${text})`
 
 /**
+ * A Number argument of a native member (an index, a length) the language takes
+ * through ToNumber: a `dynamic` one -- a `+` over an untyped operand, which may
+ * concatenate -- converts, and any other carrier is already the native's
+ * parameter. three's `array.subarray( i * itemSize, i * itemSize + itemSize )`
+ * and `planes.length = offset + l` pass such sums.
+ */
+export const toNumberArgumentText = (ctx: EmitContext, operand: IrOperand): string => {
+  const text = operandText(ctx, operand)
+  return operand.representation.kind === 'dynamic' ? dynamicToNumberText(text) : text
+}
+
+/**
  * `emit.ts`'s `emitCompute` entry point for the `unary`/`'ToNumeric'` shape
  * `ir/lower.ts` mints -- kept here, not inline in that file's own `unary`
  * dispatch, purely to leave `emit.ts` its documentation budget under the

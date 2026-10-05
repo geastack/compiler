@@ -10,6 +10,7 @@ import {
   type EmitContext,
   type PrototypeMethodRead
 } from './emit-context.js'
+import { toNumberArgumentText } from './emit-tonumber.js'
 import { cppRecordFieldName, cppRecordFieldPresenceName, cppScalarType, cppStringLiteral, cppTypeOf } from './types.js'
 import { recordFieldsOfShape } from '../../projection/fields.js'
 
@@ -615,9 +616,9 @@ export const typedArrayCallText = (
     }
     return `gea::runtime::base64::toUint8Base64(${receiver})`
   }
-  const rangeStart = (index: number): string => (args[index] === undefined ? '0.0' : operandText(ctx, args[index] as IrOperand))
+  const rangeStart = (index: number): string => (args[index] === undefined ? '0.0' : toNumberArgumentText(ctx, args[index] as IrOperand))
   const rangeEnd = (index: number): string =>
-    args[index] === undefined ? `${receiver}->length()` : operandText(ctx, args[index] as IrOperand)
+    args[index] === undefined ? `${receiver}->length()` : toNumberArgumentText(ctx, args[index] as IrOperand)
   // ECMA-262 23.2.3.32: `%TypedArray%.prototype.toString` IS
   // `Array.prototype.toString`, which is `join()` with the default separator
   // -- a comma between elements and nothing else. The runtime's own
