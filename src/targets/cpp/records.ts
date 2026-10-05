@@ -571,13 +571,27 @@ const isRepresentationNode = (value: unknown): value is Representation =>
  * this walk automatically instead of silently falling out of it, which is the
  * failure mode a `switch` over kinds would have. The walk stops at each struct
  * it names -- that struct's own dependencies are placed when IT is ordered.
+ *
+ * `probed` widens the first stopping rule for the one question that looks
+ * through a `Ref`: a struct's `geaTraceRefs` signature asks
+ * `TraceEdges<decltype(field)>::supported`, and `gea_runtime.h`'s
+ * `RefTargetIsLeaf` answers that for a `Ref<ArrayObject<E>>` or
+ * `Ref<Dictionary<V>>` by asking the ELEMENT. An `Optional<Record>` element is
+ * then instantiated and needs `Record` complete (a hard error), and a bare
+ * record element is asked for a `geaTraceRefs` friend an incomplete record
+ * does not have yet (a silently wrong "leaf"). A recursive container is a
+ * named wrapper the probe stops at, so it is never looked into.
  */
-const valueHeldStructNames = (representation: Representation, into: Set<string>, seen: Set<object>): void => {
+const valueHeldStructNames = (representation: Representation, into: Set<string>, seen: Set<object>, probed = false): void => {
   if (seen.has(representation)) return
   seen.add(representation)
   const node = representation as unknown as Readonly<Record<string, unknown>>
   const ownership = node['ownership']
-  if (typeof ownership === 'string' && ownership !== 'owned') return
+  if (typeof ownership === 'string' && ownership !== 'owned') {
+    const element = probed && ownership === 'shared-refcount' ? traceProbedElementOf(representation) : null
+    if (element !== null) valueHeldStructNames(element, into, seen, probed)
+    return
+  }
   if (node['abi'] !== undefined) {
     // A bare record in a function-pointer signature may remain incomplete,
     // but a by-value carrier BUILT AROUND that record may not. In
@@ -588,7 +602,7 @@ const valueHeldStructNames = (representation: Representation, into: Set<string>,
     const abi = node['abi'] as CallableAbi
     const nested = [...abi.parameters.map((parameter) => parameter.value), abi.result, ...(abi.receiver ? [abi.receiver] : [])]
     for (const value of nested) {
-      if (cppStructNameOf(value) === null) valueHeldStructNames(value, into, seen)
+      if (cppStructNameOf(value) === null) valueHeldStructNames(value, into, seen, probed)
     }
     return
   }
@@ -599,7 +613,7 @@ const valueHeldStructNames = (representation: Representation, into: Set<string>,
   }
   const descend = (value: unknown): void => {
     if (isRepresentationNode(value)) {
-      valueHeldStructNames(value, into, seen)
+      valueHeldStructNames(value, into, seen, probed)
       return
     }
     if (Array.isArray(value)) {
@@ -617,12 +631,20 @@ const valueHeldStructNames = (representation: Representation, into: Set<string>,
   for (const value of Object.values(node)) descend(value)
 }
 
-/** Every struct one struct's own storage embeds by value. */
-const structValueDependencies = (layout: RecordLayout): ReadonlySet<string> => {
+/** The element `RefTargetIsLeaf` judges a `Ref` to this container by, or `null` when it judges the container without one. */
+const traceProbedElementOf = (representation: Representation): Representation | null => {
+  if (representation.kind === 'array-object') return representation.recursive === undefined ? representation.element : null
+  if (representation.kind === 'dictionary')
+    return representation.recursive === undefined && representation.key !== 'symbol' ? representation.value : null
+  return null
+}
+
+/** Every struct one struct's own storage embeds by value -- or, `probed`, every struct its trace signature needs complete. */
+const structValueDependencies = (layout: RecordLayout, probed = false): ReadonlySet<string> => {
   const into = new Set<string>()
   const seen = new Set<object>()
-  for (const field of layout.fields) valueHeldStructNames(field.value, into, seen)
-  for (const index of layout.indexes) valueHeldStructNames(index.value, into, seen)
+  for (const field of layout.fields) valueHeldStructNames(field.value, into, seen, probed)
+  for (const index of layout.indexes) valueHeldStructNames(index.value, into, seen, probed)
   return into
 }
 
@@ -852,15 +874,36 @@ const immortalMethodStateRoots = (
  * name the incomplete type rather than this walk running forever. That is
  * exactly what the previous name sort did for every struct, so a cycle is no
  * worse than before and everything else is now right.
+ *
+ * `traceDependencies` are the structs only a definition's trace signature
+ * needs complete (`valueHeldStructNames`' `probed` walk). They are placed
+ * after the hard ones, and only where placing one cannot break a hard one: a
+ * trace dependency whose own base/by-value closure reaches back into the chain
+ * is skipped, because emitting it first would emit a struct before something
+ * it embeds -- trading a certain error for a possible one.
  */
 const definitionOrder = (
   structNames: readonly string[],
   bases: ReadonlyMap<string, ClassBaseLink>,
-  valueDependencies: ReadonlyMap<string, ReadonlySet<string>>
+  valueDependencies: ReadonlyMap<string, ReadonlySet<string>>,
+  traceDependencies: ReadonlyMap<string, ReadonlySet<string>>
 ): readonly string[] => {
   const ordered: string[] = []
   const emitted = new Set<string>()
   const placeable = new Set(structNames)
+  const hardClosureMeetsChain = (from: string, chain: ReadonlySet<string>): boolean => {
+    const walked = new Set<string>()
+    const pending = [from]
+    for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+      if (chain.has(next)) return true
+      if (walked.has(next) || emitted.has(next) || !placeable.has(next)) continue
+      walked.add(next)
+      const base = bases.get(next)
+      if (base) pending.push(base.structName)
+      pending.push(...(valueDependencies.get(next) ?? []))
+    }
+    return false
+  }
   const visit = (structName: string, chain: ReadonlySet<string>): void => {
     if (emitted.has(structName) || chain.has(structName)) return
     const deeper = new Set([...chain, structName])
@@ -870,6 +913,9 @@ const definitionOrder = (
       // A name this run emits no definition for -- a host struct, or a carrier
       // naming a shape outside `requiredStructs` -- is not this order's to place.
       if (placeable.has(dependency)) visit(dependency, deeper)
+    }
+    for (const dependency of traceDependencies.get(structName) ?? []) {
+      if (placeable.has(dependency) && !hardClosureMeetsChain(dependency, deeper)) visit(dependency, deeper)
     }
     if (emitted.has(structName)) return
     emitted.add(structName)
@@ -3821,7 +3867,12 @@ export const cppRecordDeclarations = (
   // deterministic where nothing constrains it.
   const forwardDeclarations = structNames.map((structName) => `struct ${structName};`)
   const valueDependencies = new Map<string, ReadonlySet<string>>()
-  for (const [structName, layout] of fieldsByStruct) valueDependencies.set(structName, structValueDependencies(layout))
+  const traceDependencies = new Map<string, ReadonlySet<string>>()
+  for (const [structName, layout] of fieldsByStruct) {
+    const held = structValueDependencies(layout)
+    valueDependencies.set(structName, held)
+    traceDependencies.set(structName, new Set([...structValueDependencies(layout, true)].filter((name) => !held.has(name))))
+  }
   const fieldDefinitionsByStruct = new Map<string, readonly string[]>()
   const dynamicProtocolByStruct = new Map<string, boolean>()
   const fieldOperationsByStruct = new Map<string, ReflectionFieldOperations>()
@@ -3860,7 +3911,7 @@ export const cppRecordDeclarations = (
   }
   const virtualDeclarations = new Map<string, ReadonlySet<string>>()
   const layouts = recordLayoutPolicyOf(deriver, classes, wellKnownSymbols)
-  const ordered = definitionOrder(structNames, links, valueDependencies)
+  const ordered = definitionOrder(structNames, links, valueDependencies, traceDependencies)
   const evaluatedOnce = (structName: string): boolean => {
     const declaration = declarationByStruct.get(structName)
     return declaration !== undefined && singleEvaluationClasses.has(declaration)
@@ -3967,7 +4018,7 @@ export const cppRecordDeclarations = (
   // proven, emitted-program links to the runtime table; native bases are
   // intentionally absent because this compiler has no authenticated native
   // ancestry contract for them.
-  const runtimeClassBases = definitionOrder(structNames, links, valueDependencies).flatMap((structName) => {
+  const runtimeClassBases = ordered.flatMap((structName) => {
     const link = links.get(structName)
     if (!classStructNames.has(structName) || !link || link.native || !classStructNames.has(link.structName)) return []
     return [{ derived: structName, base: link.structName }]
