@@ -650,8 +650,10 @@ const memberTypeTextsOf = (klass: ts.ClassLikeDeclaration, file: ts.SourceFile):
       recordObjectLiteral(name, rhsExpr)
       return
     }
+    if (rhsExpr?.kind === ts.SyntaxKind.NullKeyword) nullPlaceholders.add(name)
     recordText(name, rhsExpr ? literalShapeText(rhsExpr) : null)
   }
+  const nullPlaceholders = new Set<string>()
 
   for (const member of klass.members) {
     if (member.name && ts.isIdentifier(member.name)) declaredNames.add(member.name.text)
@@ -690,6 +692,27 @@ const memberTypeTextsOf = (klass: ts.ClassLikeDeclaration, file: ts.SourceFile):
   // `copy()` method that reassigns it this way. So only the constructor body
   // is walked.
   if (ctor?.body) walkBody(ctor.body)
+
+  // ...except where the constructor's own write is an untyped `null`. That is
+  // a placeholder, not a type a later write could preserve: whatever another
+  // method stores there is the member's real value, and reading the member as
+  // the placeholder alone restated three's `ShaderNodeInternal.layout` as
+  // `@type {null}` -- a `std::nullptr_t` field that `setLayout( layout )`
+  // then aborted writing a record into.
+  const fillsPlaceholder = (node: ts.Node): void => {
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isPropertyAccessExpression(node.left) &&
+      node.left.expression.kind === ts.SyntaxKind.ThisKeyword &&
+      ts.isIdentifier(node.left.name) &&
+      nullPlaceholders.has(node.left.name.text) &&
+      node.right.kind !== ts.SyntaxKind.NullKeyword
+    )
+      state.set(node.left.name.text, { kind: 'poisoned' })
+    ts.forEachChild(node, fillsPlaceholder)
+  }
+  for (const member of klass.members) if (member !== ctor && !ts.isPropertyDeclaration(member)) fillsPlaceholder(member)
 
   const text = new Map<string, readonly string[]>()
   const objectShape = new Map<string, ReadonlyMap<string, string>>()

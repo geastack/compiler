@@ -74,7 +74,8 @@ import {
   impliedPatternParameterOf,
   statesNoArrayElement,
   constructedClassChoiceCheckerTypeAt,
-  emptyArrayDefaultParameterOf
+  emptyArrayDefaultParameterOf,
+  defaultOnlyParameterOf
 } from './derived-expression-type.js'
 import { isUnreducedTypeForm } from './unreduced-type-form.js'
 import { noHostProvidedNames, valueSymbolAt } from './unresolvable-names.js'
@@ -1950,7 +1951,8 @@ export const censusParameterBindings = (
       // program.
       if (ts.isIdentifier(node)) {
         const declaration = declarationOf(node)
-        if (declaration && ts.isParameter(declaration) && bindings.has(declaration)) {
+        // A synthesized union is a binding too: `parameterTypeOf` answers it.
+        if (declaration && ts.isParameter(declaration) && (bindings.has(declaration) || unionArms.has(declaration))) {
           if (checker.getTypeAtLocation(declaration) === type) return null
         }
         // Not yet bound, a parameter typed only by an empty `[]` default
@@ -1959,7 +1961,15 @@ export const censusParameterBindings = (
         // as an answer, it bound the next parameter down before this one's
         // callers were read -- three's `CubeTexture( images = [] )` hands
         // `images` to `Texture( image )`, which was bound `any[]` for good.
-        if (declaration && ts.isParameter(declaration) && emptyArrayDefaultParameterOf(checker, node, type) !== null) {
+        // A `null` default is the same silence: three's `Fn( jsFunc, layout =
+        // null )` handed `new FnNode( jsFunc, layout )` a constant `null`, and
+        // every static layout and node type its callers passed was dropped.
+        if (
+          declaration &&
+          ts.isParameter(declaration) &&
+          (emptyArrayDefaultParameterOf(checker, node, type) !== null ||
+            (isNullishType(type) && defaultOnlyParameterOf(checker, node) !== null))
+        ) {
           if (checker.getTypeAtLocation(declaration) === type) return null
         }
         // A name bound by a parameter's implied pattern is typed by the

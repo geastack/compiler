@@ -4399,8 +4399,9 @@ export const censusedTypeAt = (
  * 2040 times), with `ops` unchanged and 92 FEWER unmet obligations.
  *
  * A synthesized union arises only where the declaration's own checker type is
- * `any`, but a guard still narrows `any`: `Array.isArray( value )` to `any[]`,
- * `typeof value === 'string'` to `string`, `instanceof C` to `C`. Answering the
+ * `any` or the bare type of its default, but a guard still narrows it:
+ * `Array.isArray( value )` to `any[]`, `typeof value === 'string'` to
+ * `string`, `instanceof C` to `C`. Answering the
  * whole union there would discard that narrowing, which is the one thing that
  * could make this unsound. So a narrowed read answers the arms the narrowed
  * type admits: three's `cyrb53( value )` is `string | number[]` from its
@@ -4426,6 +4427,14 @@ export const synthesizedUnionArmsAt = <D extends ts.Declaration>(
   if (all === null) return null
   const read = checker.getTypeAtLocation(node)
   if ((read.flags & ts.TypeFlags.Any) !== 0) return all
+  // A cell typed only by its default is declared as that default -- `layout =
+  // null` reads back `null` everywhere the checker narrowed nothing -- while
+  // its callers fill it with more. Such a read is the whole cell, not its
+  // default's arm: filtering by it handed three's `Fn( jsFunc, layout )` on
+  // to `new FnNode( jsFunc, layout )` as a constant `null`.
+  const name = ts.getNameOfDeclaration(declaration)
+  const declared = name && ts.isIdentifier(name) ? checker.getTypeAtLocation(name) : null
+  if (declared !== null && checker.isTypeAssignableTo(read, declared) && checker.isTypeAssignableTo(declared, read)) return all
   const admitted = all.filter((arm) => checker.isTypeAssignableTo(arm, read))
   return admitted.length === 0 ? all : admitted
 }
