@@ -2966,7 +2966,11 @@ const unionRestArgumentText = (
     tail === undefined ? operation.arguments.slice(restFrom) : operation.arguments.slice(restFrom, Math.max(restFrom, tail.from))
   const name = 'gea_union_rest'
   const lines = [`auto ${name} = gea::makeRef<gea::ArrayObject<${cppTypeOf(element)}>>();`]
-  for (const argument of written) lines.push(`${name}->push(${alignedText(ctx, element, argument, 'union construct rest')});`)
+  // Every arm here is an arm of a callee carried as a value, so a written
+  // argument meets the rest element exactly as it meets a named formal of
+  // the same arm (`emitTaggedUnionConstruct`): typed by every arm, converted
+  // into this one's, across the dynamic boundary where nothing static does.
+  for (const argument of written) lines.push(`${name}->push(${alignedText(ctx, element, argument, 'union construct rest', true)});`)
   if (tail !== undefined) {
     if (tail.list.representation.kind !== 'array-object') {
       throw createCppEmitBlockedError('call-abi:tagged-union-construct', 'a spread construction names a list that is not an array-object')
@@ -2976,7 +2980,9 @@ const unionRestArgumentText = (
     if (representationKey(source) === representationKey(element))
       lines.push(`${name}->appendRange(*${operandText(ctx, tail.list)}, ${from});`)
     else {
-      const converted = alignedValueText(ctx, 'emit-callable.ts:union-construct-rest', source, element, 'gea_element')
+      const converted =
+        alignedValueText(ctx, 'emit-callable.ts:union-construct-rest', source, element, 'gea_element') ??
+        acrossDynamicBoundaryText(ctx, source, element, 'gea_element', 'union construct rest range')
       if (converted === null) {
         throw createCppEmitBlockedError(
           `conversion:${representationKey(source)}->${representationKey(element)}`,
