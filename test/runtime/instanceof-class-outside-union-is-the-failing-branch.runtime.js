@@ -2,11 +2,12 @@
 //! expect: absent threw not a BufferAttr: 1
 //! expect: absent threw not a BufferAttr: 2
 //! expect: absent threw not a BufferAttr: 3
+//! expect: absent threw not a BufferAttr: 4
 //! expect: present 3 threw not a BufferAttr
 // three's `GLSLNodeBuilder.setupPBO` reads `node.value` off a StorageBufferNode
 // and writes `attribute.array`, where `value` is InputNode's `@type {any}`
 // field. No StorageBufferNode is ever constructed, so that field's carrier
-// holds numbers, booleans and vectors and never a BufferAttribute. Narrowing
+// holds numbers, booleans, vectors and typed arrays and never a BufferAttribute. Narrowing
 // it with `instanceof BufferAttribute` and throwing otherwise is then the
 // throw, statically: the guarded uses are unreachable and convert nothing.
 // `Present` holds a `BufferAttr` among its arms, so its narrowing stays a test.
@@ -52,7 +53,7 @@ const setupPresent = (node) => {
   attribute.array = [7, 8, 9]
   return attribute.array.length
 }
-const inputs = [new Input(1), new Input(new Vec()), new Input(true)]
+const inputs = [new Input(1), new Input(new Vec()), new Input(true), new Input(new Float32Array(2))]
 let count = 0
 for (const input of inputs) {
   try {

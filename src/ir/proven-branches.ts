@@ -98,7 +98,10 @@ const disjointCarriers = (left: Representation, right: Representation): boolean 
  * never an instance (ECMA-262 7.3.22 OrdinaryHasInstance step 4). A
  * `class-ref(D)` holds D, a descendant of D, D's prototype object or a plain
  * object built with D's layout; under single inheritance one of those is in
- * C's family only when D and a member lie on one chain. Every other carrier --
+ * C's family only when D and a member lie on one chain. A `typed-array`
+ * holds a built-in typed array, whose prototype chain is %TypedArray%'s and
+ * holds no class's prototype, even a class extending that array type, whose
+ * instances a class-ref carries. Every other carrier --
  * a view, a box -- may hold an instance and decides nothing. three's
  * `GLSLNodeBuilder.setupPBO` narrows InputNode's `any` value with `instanceof
  * BufferAttribute` where no BufferAttribute ever reaches it: the narrowed uses
@@ -115,6 +118,7 @@ const neverInstanceOf = (
     case 'symbol':
     case 'null':
     case 'undefined':
+    case 'typed-array':
       return true
     case 'class-ref':
       return (
