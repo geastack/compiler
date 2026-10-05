@@ -478,7 +478,12 @@ const contributeUpdate = (
   const postfix = ts.isPostfixUnaryExpression(node)
   const targetSource = sourceForValue(context, node.operand)
   const oldType = context.types.typeAt(node.operand)
-  const storedType = postfix ? oldType : context.types.typeAt(node)
+  // The stored value is ToNumeric(old) +/- 1, of the type the expression's
+  // own coercion has whichever form it is -- never the target's: a read that
+  // may be absent (a dictionary member, `number | undefined`) still stores a
+  // number. three's `this.info.memory.geometries ++` stored the read's
+  // optional carrier.
+  const storedType = context.types.typeAt(node)
 
   const updateId = mintOperationId(context.ordinals, candidate.id, 'computation')
   const coercionId = postfix ? mintOperationId(context.ordinals, candidate.id, 'computation') : null
