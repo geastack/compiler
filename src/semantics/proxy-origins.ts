@@ -384,8 +384,11 @@ export const proxyOriginsOf = (graph: SemanticGraph, sites: ReadonlySet<NodeId>,
           // checker's element and member types are the target's, which the
           // trap need not honor (TSL's builder proxy answers `@@iterator`
           // with a generator yielding `undefined`).
+          // A step's `done` is not among them: IteratorComplete is ToBoolean of
+          // whatever the trap answered (ECMA-262 7.4.9), so it stays a boolean.
           if (operation.operands.some((operand) => reachOf(operand) !== 0 || elementReachOf(operand) !== 0))
-            for (const result of operation.results) reach(result.id, DYNAMIC)
+            for (const result of operation.results)
+              if (!(operation.family === 'protocol' && operation.step === 'next' && result.role === 'completion')) reach(result.id, DYNAMIC)
           break
         default:
           if (passesOperandThrough(operation)) {
