@@ -6,10 +6,12 @@
 //   GEA_CORE_DIR=<an installed @geastack/core> \
 //     node scripts/three-webgpu-coverage.mjs [--three <dir>] [--native-webgpu <dir>]
 //     [--gea-core <dir>] [--gea-plugin <host-shims>] [--out <dir>] [--memory-limit-gb <n>]
-//     [--summarize <coverage.json>] [--refusals-only]
+//     [--summarize <coverage.json>] [--refusals-only] [--entry <file.ts>]
 //
 // The program is `test/fixtures/three-webgpu/entry.ts`: a scene, a camera, a
-// box with a node material, and `renderer.render(scene, camera)`. No real app
+// box with a node material, and `renderer.render(scene, camera)`. `--entry`
+// stages another program as the app's `entry.ts` instead; it imports only
+// `three` and `@geastack/native-webgpu`, the two packages the app links. No real app
 // hands geatsc its entry and lets the checker follow every import: gea's build
 // (`build-gea-vite-geatsc.mjs`) bundles the app with Vite first, and its
 // module-graph plugin (`entryReachableOnly`) records the modules the bundle
@@ -121,6 +123,8 @@ const geaPluginOverride = () => {
 }
 
 const outDir = resolve(option('--out') ?? join(root, 'measurements/three-webgpu'))
+const entrySource = resolve(option('--entry') ?? join(fixture, 'entry.ts'))
+if (!existsSync(entrySource)) fail(`--entry ${entrySource}: no such file`)
 const summarizeOnly = option('--summarize')
 const refusalsOnly = process.argv.includes('--refusals-only')
 if (summarizeOnly && refusalsOnly)
@@ -275,7 +279,7 @@ const isGeatsc = (peak, command) => resolve(peak.argv[0] ?? '') === join(root, '
  */
 const stageApp = (appDir, three, webgpu) => {
   mkdirSync(join(appDir, 'node_modules/@geastack'), { recursive: true })
-  writeFileSync(join(appDir, 'entry.ts'), readFileSync(join(fixture, 'entry.ts')))
+  writeFileSync(join(appDir, 'entry.ts'), readFileSync(entrySource))
   writeFileSync(
     join(appDir, 'package.json'),
     `${JSON.stringify(
@@ -465,6 +469,7 @@ const compileOnce = async () => {
 
   const run = {
     date: new Date().toISOString(),
+    entry: entrySource,
     compiler: gitHead(),
     machine: `${hostname()}, ${process.platform} ${process.arch}, ${cpus()[0]?.model.trim() ?? '?'} x${cpus().length}, ${(totalmem() / 1024 ** 3).toFixed(0)} GB, node ${process.version}`,
     three: `${three.version} (${three.dir})`,
