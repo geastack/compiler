@@ -1815,6 +1815,14 @@ export const censusLocalBindings = (
       return element ? resolveBindingElement(element) : null
     }
     if (ts.isPropertyAccessExpression(node)) {
+      // A field an earlier round STATED holds an unknown value
+      // (`field-bindings.ts`: stored from a formal a spread of unknown
+      // elements reaches) is not what any arm's checker type says it is.
+      // Projecting the arms here typed three's `nodeImmutable( PropertyNode,
+      // ... ).varying` as the field's JSDoc `boolean`, and the local holding it
+      // unboxed the ConstNode the field holds.
+      const stated = parameters.statedTypeAt(node)
+      if (stated && (stated.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return stated
       const upstream = parameters.typeAt(node)
       if (upstream) return upstream
       const allArms = unionArmsForResolution(node.expression)

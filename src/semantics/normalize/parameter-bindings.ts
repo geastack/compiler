@@ -3933,6 +3933,83 @@ export const censusParameterBindings = (
           console.error(`[COPY-BINDING] ${describeParameter(parameter)} #${ordinal} :: ${checker.typeToString(type)}`)
     }
   }
+  // A SPREAD OF UNKNOWN ELEMENTS.
+  //
+  // A call that spreads a value whose elements the program never typed hands
+  // every formal at or past the spread whatever those elements are, and no
+  // per-position argument exists for any rule above to read: the spread-
+  // covered positions look omitted to `collectPassedArguments`, and a callee
+  // reached only through a class-valued binding (three's TSLCore
+  // `ShaderNodeImmutable( NodeClass, ...params )` running `new NodeClass(
+  // ...nodeArray( params ) )`) is no attributed call of the constructor at all.
+  // So PropertyNode's `varying` -- `@param {boolean} [varying=false]`, handed
+  // only `true`/`false` by its direct callers -- kept a `bool` slot while
+  // `nodeArray` had already turned the `false` into a ConstNode, and the gather
+  // aborted unboxing it. Each such formal is published as `any`: what the
+  // gathered element can hold. A TypeScript annotation is a statement the
+  // checker holds every caller to and is left alone; a JSDoc tag in unchecked
+  // JavaScript, a default and an unannotated formal state nothing a caller
+  // must agree with.
+  propagating.reset()
+  const statesNoElement = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
+  const spreadHoldsUnknownElements = (source: ts.Expression): boolean => {
+    const type = propagating.known(source) ?? propagating.resolve(source) ?? checker.getTypeAtLocation(source)
+    return (type.isUnion() ? type.types : [type]).some((arm) => {
+      if (statesNoElement(arm)) return true
+      const element = checker.getIndexTypeOfType(arm, ts.IndexKind.Number)
+      return element !== undefined && statesNoElement(element)
+    })
+  }
+  // The attributed bodies, and every body the callee's own binding can hold:
+  // a class-valued formal bound to `typeof A | typeof B` constructs either.
+  const dynamicSpreadTargetsOf = (call: ts.CallExpression | ts.NewExpression): ReadonlySet<ts.SignatureDeclaration> => {
+    const targets = new Set<ts.SignatureDeclaration>(callTargets.get(call) ?? [])
+    const calleeExpression = invocationOperands.get(call)!.callee
+    const callee =
+      propagating.known(calleeExpression) ?? propagating.resolve(calleeExpression) ?? checker.getTypeAtLocation(calleeExpression)
+    for (const arm of callee.isUnion() ? callee.types : [callee]) {
+      // A JavaScript function entered with `new` declares no construct
+      // signature; its call signature names the body, as `attributeCalls` reads it.
+      const constructed = ts.isNewExpression(call) ? arm.getConstructSignatures() : []
+      for (const signature of constructed.length > 0 ? constructed : arm.getCallSignatures()) {
+        const declaration = signature.declaration
+        if (!declaration || !isRealCallableDeclaration(declaration) || declaration.getSourceFile().isDeclarationFile) continue
+        if ('body' in declaration && declaration.body) targets.add(declaration)
+      }
+    }
+    return targets
+  }
+  const dynamicSpreadReached = new Set<ts.ParameterDeclaration>()
+  const dynamicSpreadRests = new Set<ts.ParameterDeclaration>()
+  for (const call of allCalls) {
+    const args = invocationOperands.get(call)!.args
+    const spreadAt = args.findIndex(ts.isSpreadElement)
+    if (spreadAt === -1 || !args.some((argument) => ts.isSpreadElement(argument) && spreadHoldsUnknownElements(argument.expression)))
+      continue
+    for (const target of dynamicSpreadTargetsOf(call)) {
+      runtimeParametersOf(target).forEach((parameter, index) => {
+        if (index < spreadAt || parameter.type !== undefined || !ts.isIdentifier(parameter.name)) return
+        if (parameter.dotDotDotToken) dynamicSpreadRests.add(parameter)
+        else dynamicSpreadReached.add(parameter)
+      })
+    }
+  }
+  for (const parameter of dynamicSpreadReached) {
+    const unknown = checker.getAnyType()
+    bindings.set(parameter, unknown)
+    statedBindings.set(parameter, unknown)
+    unionArms.delete(parameter)
+    unionTypes.delete(parameter)
+    statedUnionParameters.delete(parameter)
+    flowCarrierArms.delete(parameter)
+    flowCarrierBounds.delete(parameter)
+    recordHomeArms.delete(parameter)
+    copyBindings.delete(parameter)
+    argumentsByParameter.delete(parameter)
+    protocolRequirements.delete(parameter)
+    lastRefusal.delete(parameter)
+    if (process.env['GEA_BINDING_DEBUG']) console.error(`[DYNAMIC-SPREAD] ${describeParameter(parameter)} :: any`)
+  }
   for (const [parameter, reason] of lastRefusal) refuse(reason, describeParameter(parameter))
   /**
    * A READ of a stated parameter answers the BODY's binding, not the slot's.
@@ -4050,7 +4127,7 @@ export const censusParameterBindings = (
       if (!ts.isParameter(declaration)) continue
       const narrowed = statedBindings.get(declaration)
       if (!narrowed) continue
-      if (guardNarrowsDynamicBinding(node, narrowed)) return null
+      if (guardNarrowsDynamicBinding(node, narrowed, declaration)) return null
       return withReadAbsenceOf(node, declaration, bodyBindingOf(declaration, narrowed))
     }
     return null
@@ -4068,11 +4145,18 @@ export const censusParameterBindings = (
    * parameter DECLARED `any`, which this census never binds; the narrowed
    * read then converts out of the dynamic cell once, at the read. A dead
    * branch (`never`) and an unnarrowed read keep the binding.
+   *
+   * A formal a spread of unknown elements reaches states a type the checker
+   * reads at every mention -- `varying = false` is `boolean` throughout -- so
+   * only a read whose flow moved off that declared type is a guard's.
    */
-  const guardNarrowsDynamicBinding = (read: ts.Identifier, bound: ts.Type): boolean => {
+  const guardNarrowsDynamicBinding = (read: ts.Identifier, bound: ts.Type, parameter: ts.ParameterDeclaration): boolean => {
     if ((bound.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) return false
     const flow = checker.getTypeAtLocation(read)
-    return (flow.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) === 0
+    if ((flow.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.Never)) !== 0) return false
+    if (!dynamicSpreadReached.has(parameter)) return true
+    const declared = checker.getTypeAtLocation(parameter.name)
+    return flow !== declared && flow !== checker.getNonNullableType(declared)
   }
 
   /** The copy-bound parameter a node is, or reads -- memoized, since every node of every copy asks. */
@@ -4332,6 +4416,9 @@ export const censusParameterBindings = (
       }
     }
   }
+
+  // A rest formal past a spread of unknown elements gathers those elements.
+  for (const parameter of dynamicSpreadRests) restElementTypes.delete(parameter)
 
   // Later composed censuses can retain earlier inferred facts. Their protocol
   // dependencies remain required while any dependent parameter facts survive.

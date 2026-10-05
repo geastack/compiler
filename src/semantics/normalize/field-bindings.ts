@@ -1338,6 +1338,8 @@ export const censusFieldBindings = (
       // emitted C++, and `const _state = renderer.state` was laid out
       // `gea::Value` from the checker's `any` -- every `_state.setBlending()`
       // then went through dynamic lookup and threw on the first frame.
+      const statedUnknown = statedUnknownMemberOf(receiver, node.name.text)
+      if (statedUnknown) return statedUnknown
       const member = symbol ? null : memberSymbolOf(receiver, node.name.text)
       if (member && isCandidateSymbol(checker, member)) return resolveSymbol(member)
       const typed = propertyTypeOf(receiver, node.name.text, node)
@@ -1407,14 +1409,48 @@ export const censusFieldBindings = (
     return answer
   }
 
+  // A FIELD STORED FROM A CELL THE PARAMETER CENSUS STATED HOLDS AN UNKNOWN
+  // VALUE holds that value. The parameter census states that only for a formal
+  // a spread of unknown elements reaches (`parameter-bindings.ts`), where the
+  // formal's own JSDoc and defaults were evidence about the direct callers and
+  // not about what the spread delivers. three's `PropertyNode( nodeType, name,
+  // varying = false )`, filled through `new NodeClass( ...nodeArray( params )
+  // )`, stores `this.varying = varying`: the checker types the field from the
+  // formal's `false` default, so the widened formal was unboxed into a `bool`
+  // field and the ConstNode the spread delivered aborted the store. A field
+  // whose type the program states in TypeScript is held to that statement and
+  // converts at the store as before; a JSDoc tag is a hint, exactly as it is
+  // on the formal.
+  const writeHoldsStatedUnknown = (write: ts.Expression): boolean => {
+    const value = unwrapParens(write)
+    if (!ts.isIdentifier(value)) return false
+    const stated = parameters.statedTypeAt(value)
+    return stated !== null && (stated.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
+  }
+  const declaresNoTypeAnnotation = (symbol: ts.Symbol): boolean => {
+    const declarations = symbol.declarations ?? []
+    return (
+      declarations.length > 0 &&
+      declarations.every(
+        (declaration) =>
+          !declaration.getSourceFile().isDeclarationFile &&
+          !isAmbientDeclaration(declaration) &&
+          (isAssignmentDeclaration(declaration) || (ts.isPropertyDeclaration(declaration) && declaration.type === undefined))
+      )
+    )
+  }
+
   // Enumerate every candidate SYMBOL up front, from every `x.field = expr`
   // write's left-hand side, so `boundCount`/`refusals` reflect the whole
   // program rather than only the nodes some other pass happened to query.
   const candidateSymbols = new Set<ts.Symbol>()
+  const dynamicFields = new Set<ts.Symbol>()
   const visit = (node: ts.Node): void => {
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(node.left)) {
       const symbol = checker.getSymbolAtLocation(node.left)
       if (symbol && isCandidateSymbol(checker, symbol)) candidateSymbols.add(canonicalFieldSymbol(symbol) ?? symbol)
+      if (symbol && writeHoldsStatedUnknown(node.right) && declaresNoTypeAnnotation(symbol))
+        dynamicFields.add(canonicalFieldSymbol(symbol) ?? symbol)
     }
     // A bare `field;` is a candidate whether or not anything writes it -- one
     // nothing writes must be REFUSED rather than absent, or `refusals` stops
@@ -1425,7 +1461,30 @@ export const censusFieldBindings = (
     }
     ts.forEachChild(node, visit)
   }
+  // A read through a receiver only a census types (the instances a
+  // constructor choice built, `any` to the checker and a synthesized union to
+  // the local census) names such a field through one arm of that receiver.
+  // Whichever arm it is, the read can deliver what the field holds.
+  const statedUnknownMemberOf = (receiver: ts.Type | readonly ts.Type[], name: string): ts.Type | null => {
+    if (dynamicFields.size === 0) return null
+    const arms = Array.isArray(receiver)
+      ? receiver
+      : (receiver as ts.Type).isUnion()
+        ? (receiver as ts.UnionType).types
+        : [receiver as ts.Type]
+    for (const arm of arms) {
+      const member = checker.getPropertyOfType(arm, name)
+      const field = member ? (canonicalFieldSymbol(member) ?? member) : null
+      if (field && dynamicFields.has(field)) return statedBindings.get(field) ?? null
+    }
+    return null
+  }
   for (const file of files) forEachReachableStatement(reachable, file, visit)
+  for (const symbol of dynamicFields) {
+    const unknown = checker.getAnyType()
+    bound.set(symbol, unknown)
+    statedBindings.set(symbol, unknown)
+  }
   for (const symbol of candidateSymbols) resolveSymbol(symbol)
   // The relaxed phase, run only once the strict pass has settled -- so every
   // field the strict rule can bind is bound from ALL its writes before any
@@ -1499,7 +1558,10 @@ export const censusFieldBindings = (
           : ts.isElementAccessExpression(node)
             ? checker.getSymbolAtLocation(node)
             : undefined
-    return symbol ? (statedBindings.get(canonicalFieldSymbol(symbol) ?? symbol) ?? null) : null
+    const stated = symbol ? (statedBindings.get(canonicalFieldSymbol(symbol) ?? symbol) ?? null) : null
+    if (stated || dynamicFields.size === 0 || !ts.isPropertyAccessExpression(node)) return stated
+    const receiver = receiverTypeOf(node.expression) ?? parameters.unionArmsAt(node.expression)
+    return receiver ? statedUnknownMemberOf(receiver, node.name.text) : null
   }
 
   return {
