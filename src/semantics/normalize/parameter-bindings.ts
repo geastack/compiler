@@ -3950,6 +3950,26 @@ export const censusParameterBindings = (
   // checker holds every caller to and is left alone; a JSDoc tag in unchecked
   // JavaScript, a default and an unannotated formal state nothing a caller
   // must agree with.
+  //
+  // Only a callee carried as a value is owed this, and only a defaulted
+  // formal of it. A call that names its callable is attributed to that body
+  // with certainty, and `collectPassedArguments` judges its spread-covered
+  // positions as it judges the explicit `params[ 0 ]` spelling of the same
+  // call: the formal keeps its binding and the element converts, checked, at
+  // the boundary. Widening those too made three's `Vector3( x = 0, ... )`
+  // dynamic from `getValueFromType`'s `new Vector3( ...params )`, so every
+  // `this.x -= v.x` became a dynamic subtraction with no spelling. A callee
+  // carried as a value (`new NodeClass( ... )`) is attributed at most to the
+  // one arm the checker's union signature names, so every other arm sees no
+  // argument at all. There a formal takes the element the way
+  // `collectPassedArguments`'s `supplied` arm takes a dynamic argument:
+  // beside a default, which states only what omission binds. A formal with no
+  // default treats it as any other unresolved argument -- it keeps the
+  // binding its callers give and converts at the arm's dispatch. Widening
+  // every arm's every formal reached `OperatorNode( op, ... )` through
+  // ShaderNodeProxy's `scope === null` branch, which no OperatorNode takes,
+  // and `_vectorOperators[ this.op ]` became a dynamic key into a by-value
+  // record.
   propagating.reset()
   const statesNoElement = (type: ts.Type): boolean => (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
   const spreadHoldsUnknownElements = (source: ts.Expression): boolean => {
@@ -3979,6 +3999,30 @@ export const censusParameterBindings = (
     }
     return targets
   }
+  // Whether the callee spelling resolves to the callable's own declaration --
+  // a class, a function, a method, or a binding initialized with one -- rather
+  // than to a cell holding whichever callable was stored in it.
+  const namesItsCallable = (callee: ts.Expression): boolean => {
+    const name = ts.isIdentifier(callee) ? callee : ts.isPropertyAccessExpression(callee) ? callee.name : null
+    if (!name) return false
+    const named = checker.getSymbolAtLocation(name)
+    const symbol = named && (named.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(named) : named
+    const declarations = symbol?.declarations ?? []
+    return (
+      declarations.length > 0 &&
+      declarations.every(
+        (declaration) =>
+          ts.isClassLike(declaration) ||
+          ts.isFunctionDeclaration(declaration) ||
+          ts.isMethodDeclaration(declaration) ||
+          (ts.isVariableDeclaration(declaration) &&
+            declaration.initializer !== undefined &&
+            (ts.isFunctionExpression(declaration.initializer) ||
+              ts.isArrowFunction(declaration.initializer) ||
+              ts.isClassExpression(declaration.initializer)))
+      )
+    )
+  }
   const dynamicSpreadReached = new Set<ts.ParameterDeclaration>()
   const dynamicSpreadRests = new Set<ts.ParameterDeclaration>()
   for (const call of allCalls) {
@@ -3986,11 +4030,12 @@ export const censusParameterBindings = (
     const spreadAt = args.findIndex(ts.isSpreadElement)
     if (spreadAt === -1 || !args.some((argument) => ts.isSpreadElement(argument) && spreadHoldsUnknownElements(argument.expression)))
       continue
-    for (const target of dynamicSpreadTargetsOf(call)) {
+    const carried = !namesItsCallable(invocationOperands.get(call)!.callee)
+    for (const target of carried ? dynamicSpreadTargetsOf(call) : (callTargets.get(call) ?? [])) {
       runtimeParametersOf(target).forEach((parameter, index) => {
         if (index < spreadAt || parameter.type !== undefined || !ts.isIdentifier(parameter.name)) return
         if (parameter.dotDotDotToken) dynamicSpreadRests.add(parameter)
-        else dynamicSpreadReached.add(parameter)
+        else if (carried && parameter.initializer !== undefined) dynamicSpreadReached.add(parameter)
       })
     }
   }
