@@ -35650,22 +35650,42 @@ gea::Ref<ArrayObject<E>> sortIndexedProperties(const gea::Ref<ArrayObject<E>>& a
  * `NaN` as "keep the existing relative order", which a stable sort with a
  * strictly-less predicate already delivers.
  */
+template <typename E>
+gea::Ref<ArrayObject<E>> sortDefault(const gea::Ref<ArrayObject<E>>& array);
+
 template <typename E, typename Callable>
 gea::Ref<ArrayObject<E>> sort(const gea::Ref<ArrayObject<E>>& array, const Callable& comparefn) {
-  return sortIndexedProperties(array, [&comparefn](const E& left, const E& right) {
-    if constexpr (std::is_invocable_v<const Callable&, const E&, const E&>) {
-      return comparefn(left, right) < 0.0;
-    } else if constexpr (gea::detail::DynamicCarrier<E>::supported &&
-                         std::is_invocable_v<const Callable&, gea::Value, gea::Value>) {
-      // `Array<T>.sort((a: any, b: any) => ...)`: T remains native in the
-      // array and is boxed only for the two parameters declared dynamic.
-      return comparefn(gea::detail::DynamicCarrier<E>::out(left),
-                       gea::detail::DynamicCarrier<E>::out(right)) < 0.0;
-    } else {
-      static_assert(std::is_invocable_v<const Callable&, const E&, const E&>,
-                    "Array.prototype.sort comparator cannot accept the array element carrier");
+  // A boxed comparator -- `list.sort( custom || fallback )` over an untyped
+  // `custom`, three's `RenderList.sort` -- is whichever function the program
+  // picked. Step 1: `undefined` is the default order, and anything else is
+  // called (a non-callable refuses in the call, as the TypeError it is), its
+  // answer taken through ToNumber.
+  if constexpr (std::is_same_v<Callable, gea::Value>) {
+    if (comparefn.tag() == gea::Value::Tag::Undefined) {
+      if constexpr (requires(const E& element) { gea::host::detail::toString(element); }) return sortDefault(array);
+      else gea::host::throwRuntimeError("TypeError", "Array.prototype.sort's default order needs a ToString of this element carrier");
     }
-  });
+    static_assert(gea::detail::DynamicCarrier<E>::supported, "Array.prototype.sort cannot box this element for a dynamic comparator");
+    return sortIndexedProperties(array, [&comparefn](const E& left, const E& right) {
+      return gea::dynamicToNumber(comparefn.callAsFunction(
+                 {gea::detail::DynamicCarrier<E>::out(left), gea::detail::DynamicCarrier<E>::out(right)})) < 0.0;
+    });
+  } else {
+    return sortIndexedProperties(array, [&comparefn](const E& left, const E& right) {
+      if constexpr (std::is_invocable_v<const Callable&, const E&, const E&>) {
+        return comparefn(left, right) < 0.0;
+      } else if constexpr (gea::detail::DynamicCarrier<E>::supported &&
+                           std::is_invocable_v<const Callable&, gea::Value, gea::Value>) {
+        // `Array<T>.sort((a: any, b: any) => ...)`: T remains native in the
+        // array and is boxed only for the two parameters declared dynamic.
+        return comparefn(gea::detail::DynamicCarrier<E>::out(left),
+                         gea::detail::DynamicCarrier<E>::out(right)) < 0.0;
+      } else {
+        static_assert(std::is_invocable_v<const Callable&, const E&, const E&>,
+                      "Array.prototype.sort comparator cannot accept the array element carrier");
+      }
+    });
+  }
 }
 
 /**
