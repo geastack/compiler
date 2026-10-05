@@ -75,7 +75,7 @@ const usage =
   '       --no-webgl-plugin leaves the built-in native-webgl-angle host out of the build; GEA_WEBGL_PLUGIN=0 does the same\n' +
   '       compile options include [--plugin <module>]... [--plugin-option <key>=<value>]...\n' +
   '       geatsc analyze <entry> --plugin <module>\n' +
-  '       geatsc coverage <entry> [--project <tsconfig.json>] [--no-project] [--plugin <module>]... [--json] [--no-derived] [--no-boxed] [--no-webgl-plugin]'
+  '       geatsc coverage <entry> [--project <tsconfig.json>] [--no-project] [--plugin <module>]... [--plugin-option <key>=<value>]... [--json] [--no-derived] [--no-boxed] [--no-webgl-plugin]'
 
 export const main = async (argv: readonly string[]): Promise<number> => {
   // `compile` is the build pipeline's own spelling (`build-gea-vite-geatsc.mjs`

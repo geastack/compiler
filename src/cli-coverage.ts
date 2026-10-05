@@ -55,6 +55,8 @@ interface CoverageArguments {
   readonly entry: string | null
   readonly projectFileName: string | null | 'discover'
   readonly plugins: readonly string[]
+  /** A malformed flag, worded as `compile` words it; a run without the plugin would measure another build. */
+  readonly error: string | null
   readonly pluginOptions: ReadonlyMap<string, string>
   readonly json: boolean
   readonly derived: boolean
@@ -103,6 +105,7 @@ const parseArguments = (argv: readonly string[]): CoverageArguments => {
   let entry: string | null = null
   let projectFileName: string | null | 'discover' = 'discover'
   const plugins: string[] = []
+  let error: string | null = null
   const pluginOptions = new Map<string, string>()
   let json = false
   let derived = true
@@ -117,7 +120,9 @@ const parseArguments = (argv: readonly string[]): CoverageArguments => {
       projectFileName = null
     } else if (argument === '--plugin') {
       const specifier = argv[index + 1]
-      if (specifier !== undefined) plugins.push(specifier)
+      if (specifier === undefined || specifier.length === 0 || specifier.startsWith('--'))
+        error ??= '--plugin requires a module path or specifier'
+      else plugins.push(specifier)
       index += 1
     } else if (argument === '--plugin-option') {
       const pair = argv[index + 1] ?? ''
@@ -136,7 +141,7 @@ const parseArguments = (argv: readonly string[]): CoverageArguments => {
       entry = argument
     }
   }
-  return { entry, projectFileName, plugins, pluginOptions, json, derived, boxed, webglPlugin }
+  return { entry, projectFileName, plugins, error, pluginOptions, json, derived, boxed, webglPlugin }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +403,11 @@ export const runCoverage = async (argv: readonly string[]): Promise<number> => {
     process.stderr.write(
       'usage: geatsc coverage <entry> [--project <tsconfig.json>] [--no-project] [--plugin <module>]... [--plugin-option k=v]... [--json] [--no-derived] [--no-boxed] [--no-webgl-plugin]\n'
     )
+    return 1
+  }
+  if (parsed.error !== null) {
+    process.stderr.write(`coverage: ${parsed.error}
+`)
     return 1
   }
   const entry = resolve(parsed.entry)
