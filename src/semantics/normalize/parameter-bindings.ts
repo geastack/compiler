@@ -17,7 +17,7 @@ import { sourceValueSessionOf } from './flow/source-value-session.js'
 import { interfaceFlowImplementorsOf } from '../interface-implementors.js'
 import { omissionStatedTypeOf, statedParameterWithOmission } from './omitted-stated-parameter.js'
 import { implementationOfOverload, indexValueFlow } from './flow/value-flow.js'
-import { closedArrayCalleeAuthorityOf, hasClosedMemberCallableUses } from './flow/callable-reach.js'
+import { closedArrayCalleeAuthorityOf, hasClosedMemberCallableUses, memberOpenUsesOf, type MemberOpenUse } from './flow/callable-reach.js'
 import type { CallableArrayOriginAuthority } from './flow/callable-array-origins.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
 import {
@@ -1642,6 +1642,14 @@ export const censusParameterBindings = (
 
   const callbackContracts = new Map<ts.SignatureDeclaration, readonly CallbackParameterContract[] | null>()
   const memberOpenUses = new Map<ts.SignatureDeclaration, { readonly reference: ts.Expression; readonly kind: string }[]>()
+  // `GEA_BINDING_DEBUG` only. The member proof stops at its FIRST open
+  // obligation, so `memberOpenUses` names one cause per refusal. The audit that
+  // names every one of them is replayed at report time from the exact question
+  // the refusing proof was asked, and `escapeSites` keeps every reference a
+  // non-member refusal stopped at.
+  const bindingDebug = Boolean(process.env['GEA_BINDING_DEBUG'])
+  const memberOpenAudits = new Map<ts.SignatureDeclaration, () => readonly MemberOpenUse[] | null>()
+  const escapeSites = new Map<ts.SignatureDeclaration, readonly ts.Node[]>()
   const contractsFor = (declaration: ts.SignatureDeclaration): readonly CallbackParameterContract[] | null => {
     const cached = callbackContracts.get(declaration)
     if (cached !== undefined) return cached
@@ -1649,8 +1657,20 @@ export const censusParameterBindings = (
     callbackContracts.set(declaration, result)
     return result
   }
+  /** Whether an uncounted mention is a use ordinary inference cannot account for. */
+  const escapesOrdinarily = (reference: ts.Node): boolean => {
+    if ((ts.isIdentifier(reference) || ts.isPrivateIdentifier(reference)) && isBindingOnlyReference(reference)) return false
+    if (isTypePositionReference(reference)) return false
+    if (isStaticSideUse(checker, reference)) return false
+    const parent = reference.parent
+    return !(parent && (ts.isCallExpression(parent) || ts.isNewExpression(parent)) && isCalleeOf(reference, parent))
+  }
   const escapeReason = (declaration: ts.SignatureDeclaration, requireCountedReferences = false): string | null => {
     memberOpenUses.delete(declaration)
+    if (bindingDebug) {
+      memberOpenAudits.delete(declaration)
+      escapeSites.delete(declaration)
+    }
     if (ts.isMethodSignature(declaration)) {
       // An interface has no executable body to escape. Its physical call
       // frame can follow the caller census only when the joint value graph
@@ -1666,7 +1686,10 @@ export const censusParameterBindings = (
         : 'function-escapes:uncounted-member-reference'
     }
     const name = nameOfCallable(declaration)
-    if (!name) return `function-escapes:unnamed:${declaration.parent ? ts.SyntaxKind[declaration.parent.kind] : 'root'}`
+    if (!name) {
+      if (bindingDebug) escapeSites.set(declaration, [declaration])
+      return `function-escapes:unnamed:${declaration.parent ? ts.SyntaxKind[declaration.parent.kind] : 'root'}`
+    }
     const symbol = checker.getSymbolAtLocation(name)
     if (!symbol) return 'function-escapes:no-symbol'
     const calls = callsByDeclaration.get(declaration) ?? []
@@ -1674,13 +1697,15 @@ export const censusParameterBindings = (
     // when every use of this function is accounted for by the shared flow.
     // This is parameter evidence, not the stricter single-publication proof
     // used by factory/receiver analyses elsewhere in this census.
-    const memberClosed = (member: ts.Symbol): boolean =>
-      hasClosedMemberCallableUses(
+    const memberClosed = (member: ts.Symbol): boolean => {
+      const counted = new Set(calls)
+      const receiverTypeAt = memberClosureReceiverTypeAt
+      const closed = hasClosedMemberCallableUses(
         checker,
         valueFlow,
         member,
-        new Set(calls),
-        memberClosureReceiverTypeAt,
+        counted,
+        receiverTypeAt,
         implicitArgumentsUsesAt,
         (reference, kind) => {
           const path = memberOpenUses.get(declaration) ?? []
@@ -1688,6 +1713,17 @@ export const censusParameterBindings = (
           memberOpenUses.set(declaration, path)
         }
       )
+      // Asked at report time, once the census has settled, rather than here:
+      // `escapeReason` runs every round, and auditing every open obligation
+      // of every refusal every round multiplies the debug run for answers
+      // only the last one prints. `receiverTypeAt` is this round's authority,
+      // kept so the audit asks the proof the question this refusal asked.
+      if (!closed && bindingDebug)
+        memberOpenAudits.set(declaration, () =>
+          memberOpenUsesOf(checker, valueFlow, member, counted, receiverTypeAt, implicitArgumentsUsesAt)
+        )
+      return closed
+    }
     // A method is carried by every instance of its class family, and one that
     // never names `.m` still hands unknown code a way to call it: after
     // `globalThis.unknownConsumer( new A() )` that code can run `m` with any
@@ -1791,13 +1827,17 @@ export const censusParameterBindings = (
               `memberClosed=${publishedMember ? String(memberClosed(publishedMember)) : '-'}`
           )
         }
+        if (bindingDebug) escapeSites.set(declaration, [reference])
         return 'function-escapes:uncounted-reference'
       }
-      if ((ts.isIdentifier(reference) || ts.isPrivateIdentifier(reference)) && isBindingOnlyReference(reference)) continue
-      if (isTypePositionReference(reference)) continue
-      if (isStaticSideUse(checker, reference)) continue
+      if (!escapesOrdinarily(reference)) continue
+      // Every reference that escapes, not only this first one, for the report.
+      if (bindingDebug)
+        escapeSites.set(
+          declaration,
+          references.filter((other) => !counted.has(other) && escapesOrdinarily(other))
+        )
       const parent = reference.parent
-      if (parent && (ts.isCallExpression(parent) || ts.isNewExpression(parent)) && isCalleeOf(reference, parent)) continue
       return `function-escapes:${parent ? ts.SyntaxKind[parent.kind] : 'root'}`
     }
     return null
@@ -4581,12 +4621,71 @@ export const censusParameterBindings = (
         const file = at.getSourceFile()
         return `  ${reason}  <-  ${subject} @${file.fileName.split('/').pop()}:${file.getLineAndCharacterOfPosition(at.getStart()).line + 1}${context}${continuation ? `\n${continuation}` : ''}`
       }
-      const parameters = [...lastRefusal].map(([parameter, reason]) =>
-        row(reason, parameter.getText().slice(0, 80), parameter, parameter.parent)
+      // The row above names the one cause the refusing proof reported. Under
+      // it, one `[OPEN-USE]` line per open use the refusal has: every open
+      // obligation of the member proof, each with its own chain, or every
+      // reference a non-member refusal stopped at. One JSON object per line
+      // with the whitespace of every quoted source collapsed, so a log that
+      // wraps long lines can still be split back into records.
+      const flat = (text: string, width: number): string => text.replace(/\s+/g, ' ').trim().slice(0, width)
+      const site = (node: ts.Node) => {
+        const file = node.getSourceFile()
+        const start = node.getStart()
+        const line = file.getLineAndCharacterOfPosition(start).line
+        const starts = file.getLineStarts()
+        return {
+          file: file.fileName,
+          line: line + 1,
+          text: flat(node.getText(), 120),
+          parent: node.parent ? ts.SyntaxKind[node.parent.kind] : 'root',
+          // The rewritten text the compiler read: a three.js line number does
+          // not address the file on disk once a source transform has run.
+          source: flat(file.text.slice(starts[line] ?? start, starts[line + 1] ?? file.text.length), 200)
+        }
+      }
+      const audits = new Map<ts.SignatureDeclaration, readonly MemberOpenUse[] | null>()
+      const auditOf = (owner: ts.SignatureDeclaration): readonly MemberOpenUse[] | null | undefined => {
+        const audit = memberOpenAudits.get(owner)
+        if (!audit) return undefined
+        if (!audits.has(owner)) audits.set(owner, audit())
+        return audits.get(owner) ?? null
+      }
+      const openUses = (reason: string, subject: string, at: ts.Node, owner: ts.SignatureDeclaration): string => {
+        if (!bindingDebug || !reason.startsWith('function-escapes')) return ''
+        const refusal = { reason, subject: flat(subject, 80), at: site(at) }
+        const record = (entry: object): string => `\n    [OPEN-USE] ${JSON.stringify({ refusal, ...entry })}`
+        const audit = auditOf(owner)
+        if (audit) {
+          return audit
+            .map((use, index) =>
+              record({
+                use: index + 1,
+                of: audit.length,
+                obligation: use.reason,
+                reproduced: use.reproduced,
+                at: use.at ? site(use.at) : null,
+                chain: use.chain.map(([reference, kind]) => ({ kind, ...site(reference) }))
+              })
+            )
+            .join('')
+        }
+        const escapes = escapeSites.get(owner) ?? []
+        if (escapes.length > 0)
+          return escapes
+            .map((node, index) => record({ use: index + 1, of: escapes.length, obligation: 'escape-site', at: site(node), chain: [] }))
+            .join('')
+        // No obligation reproduced open (`null`) or no open use recorded at all.
+        return record({ use: 0, of: 0, obligation: audit === null ? 'audit-found-none-open' : 'no-open-use-recorded', at: null, chain: [] })
+      }
+      const parameters = [...lastRefusal].map(
+        ([parameter, reason]) =>
+          row(reason, parameter.getText().slice(0, 80), parameter, parameter.parent) +
+          openUses(reason, parameter.getText(), parameter, parameter.parent)
       )
-      const frames = [...implicitRefusals].map(([owner, reason]) =>
-        row(reason, `${nameOfCallable(owner)?.getText() ?? '<anonymous>'}(arguments)`, owner, owner)
-      )
+      const frames = [...implicitRefusals].map(([owner, reason]) => {
+        const subject = `${nameOfCallable(owner)?.getText() ?? '<anonymous>'}(arguments)`
+        return row(reason, subject, owner, owner) + openUses(reason, subject, owner, owner)
+      })
       return [...parameters, ...frames].join('\n') + '\n'
     }
   }

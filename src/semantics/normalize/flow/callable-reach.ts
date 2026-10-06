@@ -813,7 +813,7 @@ export const hasClosedValueUses = (
   }
 }
 
-type OpenUseKind = 'receiver' | 'containing-object' | 'member-reference-inventory' | 'member-receiver-inventory'
+export type OpenUseKind = 'receiver' | 'containing-object' | 'member-reference-inventory' | 'member-receiver-inventory'
 
 /**
  * Answers to member-closure proofs, shared across the round.
@@ -1112,7 +1112,7 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
   const checker = parameters[0]
   const flow = parameters[1]
   const ledger = deferredIntrinsicProtocolLedgerOf(flow)
-  const [, , member, counted, givenReceiverTypeAt, argumentsUsesAt, onOpenUse, activeMembers, activeFamilies, valueMode] = parameters
+  const [, , member, counted, givenReceiverTypeAt, argumentsUsesAt, onOpenUse, activeMembers, activeFamilies, valueMode, audit] = parameters
   const inheritedMembers: ReadonlySet<ts.Symbol> = activeMembers ?? EMPTY_KEYS
   const inheritedFamilies: ReadonlySet<SourceClass> = activeFamilies ?? EMPTY_KEYS
   // Key on the one wrapper per given authority, so a nested proof (handed the
@@ -1212,7 +1212,10 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
     (scanValueTerminals?.has(key as ClosedValueMode['terminalUse']) ?? false) ||
     (scanFieldReads?.has(key as ts.Expression) ?? false) ||
     hypothesisGuardIsOpen(key)
-  for (const answer of answers) {
+  // An audit asks a different question than the stored answers do -- which
+  // obligations are open, not whether any is -- so it neither reads nor
+  // stores them.
+  for (const answer of audit === undefined ? answers : []) {
     proofStats.scanned++
     if (!sameCountedCalls(answer.counted, counted)) continue
     let applies = true
@@ -1325,6 +1328,13 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
         noteAssumption(key)
       }
     }
+    if (audit !== undefined) {
+      // A focused audit asked only some obligations, so even a `true` from it
+      // is no proof that the member is closed: confirming the claims that
+      // leaned on this member from it would turn them into facts unproven.
+      dischargeProvisionalAnswers(false, assumed, escaped)
+      return
+    }
     proofStats.stores++
     if (leansOnReentryGuard) proofStats.droppedByGuard++
     if (assumed.size === 0) proofStats.unconditionalStores++
@@ -1386,9 +1396,86 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
     return closed
   }
   const captured = ledger.capture(work)
-  if (captured.value) ledger.include(captured.requirements)
+  if (captured.value && audit === undefined) ledger.include(captured.requirements)
   share(captured.value, captured.requirements)
   return captured.value
+}
+
+/**
+ * `GEA_BINDING_DEBUG`'s question to the member proof: which obligations are open.
+ *
+ * `only: null` asks every obligation and lists each open one in `failed`;
+ * `only: n` asks the n-th alone. An audit never reads, stores or confirms a
+ * proof answer and never publishes its intrinsic obligations.
+ */
+interface OpenUseAudit {
+  readonly only: number | null
+  readonly failed: { readonly index: number; readonly reason: string; readonly at: ts.Node | null }[]
+}
+
+/** One open obligation of a member's closure proof, with the open uses its proof reported. */
+export interface MemberOpenUse {
+  /** The `openMember` reason: `mention-not-closed`, `receiver-open`, ... */
+  readonly reason: string
+  /** The member mention, receiver or slot write the obligation is about. */
+  readonly at: ts.Node | null
+  /** The open uses, as the proof reported them: innermost first, `at`'s own last. */
+  readonly chain: readonly (readonly [ts.Expression, OpenUseKind])[]
+  /** Whether the obligation asked alone is still open, as it was among all of them. */
+  readonly reproduced: boolean
+}
+
+/**
+ * Every open obligation of `member`'s closure proof, each with the chain of
+ * open uses behind it -- `GEA_BINDING_DEBUG` only.
+ *
+ * The proof itself stops at the first open obligation, so the open-use path it
+ * reports names one cause of a refusal. Each obligation here is asked again in
+ * a fresh proof of its own: within one proof, a walk an earlier obligation
+ * already failed answers from the proof's own memo and reports nothing the
+ * second time, which would cut every later chain short. Null when the audit
+ * finds no obligation open.
+ */
+export const memberOpenUsesOf = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  member: ts.Symbol,
+  counted: ReadonlySet<ts.CallExpression | ts.NewExpression>,
+  receiverTypeAt: (expression: ts.Expression) => ts.Type | null,
+  argumentsUsesAt: (declaration: ts.SignatureDeclaration) => readonly ts.Identifier[] | undefined
+): readonly MemberOpenUse[] | null => {
+  const all: OpenUseAudit = { only: null, failed: [] }
+  hasClosedMemberCallableUses(
+    checker,
+    flow,
+    member,
+    counted,
+    receiverTypeAt,
+    argumentsUsesAt,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    all
+  )
+  if (all.failed.length === 0) return null
+  return all.failed.map(({ index, reason, at }) => {
+    const chain: (readonly [ts.Expression, OpenUseKind])[] = []
+    const closed = hasClosedMemberCallableUses(
+      checker,
+      flow,
+      member,
+      counted,
+      receiverTypeAt,
+      argumentsUsesAt,
+      (reference, kind) => chain.push([reference, kind]),
+      undefined,
+      undefined,
+      undefined,
+      { only: index, failed: [] }
+    )
+    return { reason, at, chain, reproduced: !closed }
+  })
 }
 
 /**
@@ -1693,7 +1780,8 @@ const closedMemberCallableUses = (
   ) => void,
   activeMembers: ReadonlySet<ts.Symbol> = new Set(),
   activeFamilies: ReadonlySet<SourceClass> = new Set(),
-  valueMode?: ClosedValueMode
+  valueMode?: ClosedValueMode,
+  audit?: OpenUseAudit
 ): boolean => {
   if (member && activeMembers.has(member)) {
     noteAssumption(member)
@@ -7462,86 +7550,138 @@ const closedMemberCallableUses = (
   valueMode?.exposeOrigins?.({ classAllocationsOf: allocationOriginsOf, parameterValuesOf, fieldValuesOf, bindingValuesOf })
   if (valueMode) return valueMode.roots.length > 0 && valueMode.roots.every(receiverUse)
   if (!member) return false
-  for (const reference of references) {
-    if (visit(reference)) continue
-    onOpenUse?.(reference, 'receiver')
-    return openMember('mention-not-closed', reference)
-  }
-  const receivers = new Set<ts.Expression>()
-  for (const reference of references) {
-    const access = ts.isPropertyAccessExpression(reference.parent) && reference.parent.name === reference ? reference.parent : reference
-    if (ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access)) receivers.add(access.expression)
-  }
-  // A receiver the member is WRITTEN through holds the function, and so does
-  // every object it can denote: those are found where they were allocated and
-  // walked from there, which reaches every alias. Walking only the mentions
-  // of the binding the write named missed `const leaf = leaves[ 0 ];
-  // leaf.onDraw = fn` read back through `leaves[ 0 ]`, and in a method it
-  // walked the call's RESULT where `this` is the call's receiver. A receiver
-  // that only reads the slot is a mention of an object those walks reach.
-  const written = new Set<ts.Expression>()
-  for (const declaration of member.declarations ?? []) {
-    const left = ts.isBinaryExpression(declaration) ? declaration.left : undefined
-    if (left && (ts.isPropertyAccessExpression(left) || ts.isElementAccessExpression(left))) written.add(left.expression)
-    for (const write of flow.writesToDeclaration(declaration)) {
-      const naming = write.naming
-      if (naming && (ts.isPropertyAccessExpression(naming) || ts.isElementAccessExpression(naming))) written.add(naming.expression)
+  // Every obligation this proof owes, lazily and in the order it discharges
+  // them: the ordinary proof stops at the first open one, so each obligation
+  // is computed exactly when -- and only if -- the proof reaches it. Spelled as
+  // one sequence so the `GEA_BINDING_DEBUG` audit below walks the same
+  // obligations the proof does instead of a copy of them.
+  function* topLevelUses(member: ts.Symbol): Generator<TopLevelUse> {
+    for (const reference of references)
+      yield { closed: () => visit(reference), reason: 'mention-not-closed', at: reference, open: [reference, 'receiver'] }
+    const receivers = new Set<ts.Expression>()
+    for (const reference of references) {
+      const access = ts.isPropertyAccessExpression(reference.parent) && reference.parent.name === reference ? reference.parent : reference
+      if (ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access)) receivers.add(access.expression)
+    }
+    // A receiver the member is WRITTEN through holds the function, and so does
+    // every object it can denote: those are found where they were allocated and
+    // walked from there, which reaches every alias. Walking only the mentions
+    // of the binding the write named missed `const leaf = leaves[ 0 ];
+    // leaf.onDraw = fn` read back through `leaves[ 0 ]`, and in a method it
+    // walked the call's RESULT where `this` is the call's receiver. A receiver
+    // that only reads the slot is a mention of an object those walks reach.
+    const written = new Set<ts.Expression>()
+    for (const declaration of member.declarations ?? []) {
+      const left = ts.isBinaryExpression(declaration) ? declaration.left : undefined
+      if (left && (ts.isPropertyAccessExpression(left) || ts.isElementAccessExpression(left))) written.add(left.expression)
+      for (const write of flow.writesToDeclaration(declaration)) {
+        const naming = write.naming
+        if (naming && (ts.isPropertyAccessExpression(naming) || ts.isElementAccessExpression(naming))) written.add(naming.expression)
+      }
+    }
+    for (const receiver of written) receivers.add(receiver)
+    const ownDeclaration = member.valueDeclaration
+    // A method shorthand is an entry of its literal exactly as `key: function` is.
+    if (
+      ownDeclaration &&
+      (ts.isPropertyAssignment(ownDeclaration) || ts.isMethodDeclaration(ownDeclaration)) &&
+      ts.isObjectLiteralExpression(ownDeclaration.parent)
+    )
+      receivers.add(ownDeclaration.parent)
+    if (receivers.size === 0 && !unnamed)
+      yield {
+        closed: () => false,
+        reason: 'no-receiver-inventory',
+        at: memberSite ?? undefined,
+        open: memberSite ? [memberSite, 'member-receiver-inventory'] : null
+      }
+    for (const receiver of receivers)
+      yield {
+        closed: () =>
+          ts.isObjectLiteralExpression(receiver)
+            ? receiverUse(receiver)
+            : written.has(receiver)
+              ? publishInto(receiver, null)
+              : receiverCell(receiver),
+        reason: 'receiver-open',
+        at: receiver,
+        open: [receiver, 'receiver']
+      }
+    // A method or field initializer is carried by EVERY instance of its family,
+    // and the receivers above are only the ones that name it. A sibling that
+    // never mentions `.m` still reaches unknown code with its prototype -- which
+    // can replace `m` for all of them, or call `m` with its own arguments -- so
+    // every construction and initializer receiver of the family is walked.
+    if ((member.declarations ?? []).some((declaration) => ts.isClassElement(declaration)))
+      yield {
+        closed: () => ownerOriginsClosed(),
+        reason: 'family-origins-open',
+        at: memberSite ?? undefined,
+        open: memberSite ? [memberSite, 'member-receiver-inventory'] : null
+      }
+
+    // Replacing the slot with an external callable removes the closed family
+    // proof even if all currently visible calls have compatible arguments.
+    for (const declaration of member.declarations ?? [])
+      for (const reference of flow.receiverReferencesToDeclaration(declaration))
+        yield { closed: () => receiverUse(reference), reason: 'slot-receiver-reference-open', at: reference, open: null }
+    const writes = (member.declarations ?? [])
+      .flatMap((declaration) => flow.writesToDeclaration(declaration))
+      .filter((write) => write.edge !== 'return' && write.edge !== 'yield')
+    for (const write of writes) {
+      const value = write.value
+      if (value === null) {
+        yield { closed: () => write.edge === 'delete', reason: 'slot-deleted', at: write.site, open: null }
+        continue
+      }
+      yield {
+        closed: () => {
+          if (provenSelfBindOf(value) !== null) return true
+          // Replacement validation must use the same complete origins as member
+          // implementation lookup. A constructor parameter or alias can carry a
+          // known callback just as a literal can; its receiver effects still owe
+          // exactly the same closure proof once those bodies are enumerated.
+          const targets = closedCallableTargetsOf(checker, flow, value, elementCalleeAuthority)
+          return targets !== null && targets.every((target) => flow.receiverReferencesToDeclaration(target).every(receiverUse))
+        },
+        reason: 'slot-written-with-open-callable',
+        at: write.site,
+        open: null
+      }
     }
   }
-  for (const receiver of written) receivers.add(receiver)
-  const ownDeclaration = member.valueDeclaration
-  // A method shorthand is an entry of its literal exactly as `key: function` is.
-  if (
-    ownDeclaration &&
-    (ts.isPropertyAssignment(ownDeclaration) || ts.isMethodDeclaration(ownDeclaration)) &&
-    ts.isObjectLiteralExpression(ownDeclaration.parent)
-  )
-    receivers.add(ownDeclaration.parent)
-  if (receivers.size === 0 && !unnamed) {
-    if (memberSite) onOpenUse?.(memberSite, 'member-receiver-inventory')
-    return openMember('no-receiver-inventory', memberSite ?? undefined)
+  if (audit === undefined) {
+    for (const use of topLevelUses(member)) {
+      if (use.closed()) continue
+      if (use.open) onOpenUse(use.open[0], use.open[1])
+      return openMember(use.reason, use.at)
+    }
+    return true
   }
-  for (const receiver of receivers) {
-    const closed = ts.isObjectLiteralExpression(receiver)
-      ? receiverUse(receiver)
-      : written.has(receiver)
-        ? publishInto(receiver, null)
-        : receiverCell(receiver)
-    if (closed) continue
-    onOpenUse?.(receiver, 'receiver')
-    return openMember('receiver-open', receiver)
+  // `GEA_BINDING_DEBUG` only (`memberOpenUsesOf`): every obligation is asked,
+  // or only the one `audit.only` names, and each open one is reported.
+  let ordinal = 0
+  let open = false
+  for (const use of topLevelUses(member)) {
+    const index = ordinal++
+    if (audit.only !== null && index !== audit.only) continue
+    if (use.closed()) continue
+    if (use.open) onOpenUse(use.open[0], use.open[1])
+    openMember(use.reason, use.at)
+    audit.failed.push({ index, reason: use.reason, at: use.at ?? null })
+    open = true
   }
-  // A method or field initializer is carried by EVERY instance of its family,
-  // and the receivers above are only the ones that name it. A sibling that
-  // never mentions `.m` still reaches unknown code with its prototype -- which
-  // can replace `m` for all of them, or call `m` with its own arguments -- so
-  // every construction and initializer receiver of the family is walked.
-  if ((member.declarations ?? []).some((declaration) => ts.isClassElement(declaration)) && !ownerOriginsClosed()) {
-    if (memberSite) onOpenUse?.(memberSite, 'member-receiver-inventory')
-    return openMember('family-origins-open', memberSite ?? undefined)
-  }
+  return !open
+}
 
-  // Replacing the slot with an external callable removes the closed family
-  // proof even if all currently visible calls have compatible arguments.
-  for (const declaration of member.declarations ?? [])
-    for (const reference of flow.receiverReferencesToDeclaration(declaration))
-      if (!receiverUse(reference)) return openMember('slot-receiver-reference-open', reference)
-  return (member.declarations ?? [])
-    .flatMap((declaration) => flow.writesToDeclaration(declaration))
-    .filter((write) => write.edge !== 'return' && write.edge !== 'yield')
-    .every((write) => {
-      if (write.value === null) return write.edge === 'delete' || openMember('slot-deleted', write.site)
-      if (provenSelfBindOf(write.value) !== null) return true
-      // Replacement validation must use the same complete origins as member
-      // implementation lookup. A constructor parameter or alias can carry a
-      // known callback just as a literal can; its receiver effects still owe
-      // exactly the same closure proof once those bodies are enumerated.
-      const targets = closedCallableTargetsOf(checker, flow, write.value, elementCalleeAuthority)
-      return (
-        (targets !== null && targets.every((target) => flow.receiverReferencesToDeclaration(target).every(receiverUse))) ||
-        openMember('slot-written-with-open-callable', write.site)
-      )
-    })
+/** One obligation of a member's closure proof. */
+interface TopLevelUse {
+  readonly closed: () => boolean
+  /** The `openMember` reason the proof answers with when this obligation fails. */
+  readonly reason: string
+  readonly at: ts.Node | undefined
+  /** The open use the proof reports for this obligation, when it reports one. */
+  readonly open: readonly [ts.Expression, OpenUseKind] | null
 }
 
 /** The binary operators whose RESULT is a boolean, so an operand's value stops there. */
