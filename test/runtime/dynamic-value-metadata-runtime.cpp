@@ -281,4 +281,34 @@ int main(int argc, char** argv) {
   TargetMethodRest adaptedMethodRest =
     gea::detail::DynamicCarrier<TargetMethodRest>::template inWithReceiverAndRest<2>(boxedSourceMethodRest, 0);
   assert(adaptedMethodRest(gea::makeRef<Receiver>(Receiver{"ctx"}), 4, gea::arrayOf<double>({5})) == "ctx/9");
+
+  // An `arguments` frame behind one formal: the formal binds by position and
+  // the array holds every argument past the receiver, so its size is the
+  // count the dynamic caller passed -- fewer, as many, and more than the
+  // formals, and an explicit `undefined` counts.
+  using Frame = gea::Ref<gea::ArrayObject<Value>>;
+  using FrameMethod = gea::CallableObject<std::string(Value, Value, Frame)>;
+  static constexpr std::string (*frameEntry)(void*, Value, Value, Frame) = +[](void*, Value, Value first, Frame frame) {
+    return std::to_string(frame->size()) + (first.tag() == Value::Tag::Undefined ? "u" : "v");
+  };
+  const Value frameReceiver = Value::box(Value::Tag::String, std::string("r"));
+  const Value present = Value::box(Value::Tag::String, std::string("a"));
+  const auto frameCounts = [&](const Value& boxed) {
+    assert(boxed.callWithReceiver(frameReceiver, {}).as<std::string>() == "0u");
+    assert(boxed.callWithReceiver(frameReceiver, {present}).as<std::string>() == "1v");
+    assert(boxed.callWithReceiver(frameReceiver, {present, present, present}).as<std::string>() == "3v");
+    assert(boxed.callWithReceiver(frameReceiver, {Value()}).as<std::string>() == "1u");
+  };
+  frameCounts(Value::boxMethod<2, 1>(FrameMethod(frameEntry, nullptr)));
+  // A box made where no ABI is in view reads the creation's statement.
+  Value frameFromCreation = Value::boxFunction(FrameMethod(FrameMethod::entryWithRest<frameEntry, 2, 1>(frameEntry), nullptr));
+  frameFromCreation = Value::boxMethod<2, 1>(frameFromCreation.as<FrameMethod>());
+  frameCounts(frameFromCreation);
+  // The frame splits the list differently from a rest at the same slot, so
+  // the two facts differ and a box site stating the plain rest conflicts.
+  const int frameFact = Value::boxMethod<2, 1>(FrameMethod(frameEntry, nullptr)).restFrom();
+  assert(frameFact != Value::boxMethod<2>(FrameMethod(frameEntry, nullptr)).restFrom());
+  static_assert(FrameMethod::restPastReceiver(FrameMethod::restStated(2, 1)) == FrameMethod::restStated(1, 0));
+  static_assert(FrameMethod::restPastReceiver(FrameMethod::restStated(1, 0)) == FrameMethod::restUnstated);
+  static_assert(FrameMethod::restStated(2, 2) == 2 && !FrameMethod::restIsFrame(2));
 }

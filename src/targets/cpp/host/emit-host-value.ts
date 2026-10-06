@@ -4,6 +4,7 @@ import type { IntrinsicAccessorGetter } from '../../../semantics/model/intrinsic
 import { cppAbiParameterType, cppResultTypeOf, cppStringLiteral, cppTypeOf } from '../types.js'
 import { toStringTextOver } from '../emit-tostring.js'
 import { statedRestOf } from '../../../representation/stated-rest.js'
+import { cppStatedRestArguments } from '../emit-context.js'
 import { booleanTestText } from '../emit-presence.js'
 import { hostArgumentText } from './emit-host-arity.js'
 import type { HostCallSpelling, HostMember } from './host-members.js'
@@ -79,7 +80,7 @@ const capturelessHostThunkText = (
   const parameters = abi.parameters.map((parameter) => `, ${cppAbiParameterType(parameter)}`).join('')
   return (
     `([&]() { static constexpr ${result} (*__gea_invoke)(void*${parameters}) = ${invoke}; ` +
-    `return gea::CallableObject<${signature}>(gea::CallableObject<${signature}>::entryWithRest<__gea_invoke, ${stated}>(__gea_invoke), nullptr); })()`
+    `return gea::CallableObject<${signature}>(gea::CallableObject<${signature}>::entryWithRest<__gea_invoke, ${cppStatedRestArguments(stated)}>(__gea_invoke), nullptr); })()`
   )
 }
 

@@ -22,7 +22,15 @@ import { classFamilyOverridesOf, virtualDispatchKey } from '../../projection/dis
 import { cppVirtualMemberName } from './virtual-methods.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import { abiKey, representationKey, restPackedFrom, sameRestPartition } from '../../representation/model.js'
-import { alignedValueText, bindsReceiver, callableObjectAbi, movedValueText, recipeText, unboxedLoadText } from './emit-narrowing.js'
+import {
+  alignedValueText,
+  bindsReceiver,
+  boxedRestArguments,
+  callableObjectAbi,
+  movedValueText,
+  recipeText,
+  unboxedLoadText
+} from './emit-narrowing.js'
 import { memberAccessOperator, reactiveRevisionText } from './emit-carrier-members.js'
 import { structuralRecordViewText } from './emit-record-view.js'
 import { frameHandleText, sharedGroupMemberText } from './emit-binding-reference.js'
@@ -2295,19 +2303,12 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
       )
     }
     const callableType = `gea::CallableObject<${cppAbiType(abi)}>`
-    if (abi.argumentsFrame === true) {
-      // A dynamic call splits its list at the boxed rest position, which
-      // cannot also hand the formals' arguments to the `arguments` frame.
-      throw createCppEmitBlockedError(
-        'call-abi:dynamic',
-        'a callable that reads `arguments` past named parameters cannot be boxed as "dynamic": a dynamic call packs only the arguments past its rest position'
-      )
-    }
     const boxText = (payloadText: string): string => {
       const callable = identified(payloadText)
-      if (abi.receiver !== null) return `gea::Value::boxMethod<${abi.restFrom === null ? -1 : abi.restFrom + 1}>(${callable})`
+      if (abi.receiver !== null)
+        return `gea::Value::boxMethod<${abi.restFrom === null ? -1 : boxedRestArguments(abi, abi.restFrom, 1)}>(${callable})`
       if (abi.restFrom === null) return `gea::Value::box(gea::Value::Tag::Function, ${callable})`
-      return `gea::Value::boxCallable<${abi.restFrom}>(${callable})`
+      return `gea::Value::boxCallable<${boxedRestArguments(abi, abi.restFrom, 0)}>(${callable})`
     }
     if (admission.kind === 'none') {
       lines.push(

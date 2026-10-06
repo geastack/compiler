@@ -24,6 +24,7 @@ any-record-union-arm-into-interface-parameter.runtime.ts.cpp 6ab99af2c27f
 any-sourced-null-into-optional-class-field.runtime.ts.cpp fb89c8cca3a9
 app-root-through-factory-and-host-callback.runtime.ts.cpp 3239664e2b85
 arguments-forwarding-function-in-reflective-record.runtime.js.cpp bf8f1d847891
+arguments-frame-boxed-dynamic-call.runtime.js.cpp 1a304543e4a1
 arithmetic-over-two-dynamic-operands.runtime.js.cpp 194c53ebaf43
 array-assignment-rest-target.ts.cpp 46c90ffddbcc
 array-buffer-inline-storage-aliasing.runtime.ts.cpp 79deede54e10
@@ -558,7 +559,7 @@ guarded-member-call-integer-result.runtime.ts.cpp 1c85b4d3f669
 guarded-method-call-on-wide-uniform-union.runtime.js.cpp b04f51331e86
 guarded-property-class-union.ts.cpp 802784bfb453
 hand-written-async-generator-object-literal.runtime.ts.cpp 4f6968aceb9c
-harness-is-writable-shape.runtime.js.cpp 52c24f6b6336
+harness-is-writable-shape.runtime.js.cpp d6e87708341b
 hoisted-function-declaration-dependencies.ts.cpp 0b3c26e8f8be
 hoisted-function-declaration.ts.cpp 9e49c197a221
 hoisted-value-not-moved-in-loop.ts.cpp fa49537b4005
@@ -579,7 +580,7 @@ hot-path-layout-guards.ts.cpp ceaa862f8be5
 hot-path-static-layout.ts.cpp fd308302d46d
 hot-path-string-append.ts.cpp da861b548341
 identified-callable-moves.runtime.ts.cpp 5ba08fdb352c
-implicit-arguments-number.js.cpp cf19ce43e406
+implicit-arguments-number.js.cpp b0d016d1d85f
 implicit-arguments-returned-member.js.cpp 00e9f2a714be
 in-boxed-key-over-string-dictionary.ts.cpp 02127e7e0b92
 in-boxed-key.ts.cpp 19b06d2d1704
@@ -825,8 +826,8 @@ native-field-operation-demand.ts.cpp ab48e226a25c
 native-field-owner.runtime.js.cpp d23874dcfbfc
 native-function-source.js.cpp 8d4e3a56b66e
 native-handle-computed-access.runtime.js.cpp a76793ebcea4
-native-implicit-arguments-elements.runtime.js.cpp cc00fd8fc14e
-native-implicit-arguments-union.runtime.js.cpp 0722bc40c6d4
+native-implicit-arguments-elements.runtime.js.cpp 4a21b129ba85
+native-implicit-arguments-union.runtime.js.cpp 5edddb598d1e
 native-indexed-union.ts.cpp 9b7f986a5cbb
 native-inherited-number-storage.runtime.ts.cpp eafefb38173e
 native-method-own-override.runtime.ts.cpp 4c42832d2de1
@@ -1048,7 +1049,7 @@ plain-regex-test-and-ascii-string-search.runtime.ts.cpp 3c67df0a9006
 populated-record-late-fields.js.cpp ccc9715a198e
 primitive-delete-arms.runtime.js.cpp 952d8957498f
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 52d4c29d6073
-printer-drift.txt 97306b78748f
+printer-drift.txt c1c51538bdda
 private-names-are-not-own-properties.ts.cpp 5a904aac80af
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp ed60c96c28c7
 promise-all-over-a-generator.ts.cpp cd9ebb8b8ee8
@@ -1074,11 +1075,11 @@ promise-subclass-then-through-an-optional-chain-union.runtime.ts.cpp 550e162e8be
 promise-subclass-timeout-races-real-work.runtime.ts.cpp f6725bdf2305
 promise-then-with-absent-handler.ts.cpp 06f97c2cf4de
 promise-void-implementation-through-unknown-interface.runtime.ts.cpp 6c2450eaf969
-property-helper-date-prototype-length.runtime.js.cpp 07a7575917f1
-property-helper-date-prototype-name.runtime.js.cpp 4f74f8fb2174
-property-helper-date-prototype-own.runtime.js.cpp 4db3d4ca70b2
-property-helper-math-abs.runtime.js.cpp 28a8fe8ec15b
-property-helper-math-sqrt2.runtime.js.cpp 4ced46fcb3cc
+property-helper-date-prototype-length.runtime.js.cpp 525e64a28859
+property-helper-date-prototype-name.runtime.js.cpp c1c7eaaa6476
+property-helper-date-prototype-own.runtime.js.cpp 00f6a358b3fc
+property-helper-math-abs.runtime.js.cpp c87b28cb598f
+property-helper-math-sqrt2.runtime.js.cpp 59c5735f0ade
 property-rejection-boundaries.ts.cpp d88a54bd70ae
 property-test-over-a-boxed-map.runtime.ts.cpp df990a8f900d
 prototype-constructor-and-number-reflection.runtime.js.cpp 9a8578dbd426

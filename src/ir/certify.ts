@@ -8,7 +8,7 @@ import { forEachEmbeddedRepresentation } from '../representation/embedded-carrie
 import { captureCapabilityOf, representationKey, type CallableAbi, type Representation } from '../representation/model.js'
 import type { BindingPlacement } from '../projection/bindings.js'
 import { abiOfCallee } from '../projection/callee.js'
-import { statedRestOf } from '../representation/stated-rest.js'
+import { sameStatedRest, statedRestOf, type StatedRest } from '../representation/stated-rest.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import type { SemanticOperation } from '../semantics/model/operations.js'
 import type { DeadTypeofGuardCensus } from '../semantics/normalize/dead-typeof-guards.js'
@@ -356,6 +356,9 @@ const classPrototypeUseRefusalOf = (operation: Extract<IrOperation, { kind: 'get
   return { key: 'property-access:class-prototype:method-only', verdict: 'unsupported', detail: reasons.join('; ') }
 }
 
+const statedRestText = (stated: StatedRest | null): string =>
+  stated === null ? 'null' : stated.packedFrom === stated.slot ? String(stated.slot) : `${stated.slot} (packed from ${stated.packedFrom})`
+
 /**
  * A function object is created stating its own rest position (`statedRestOf`
  * over its body's convention), and every box of it reads that statement back;
@@ -373,12 +376,12 @@ const restFactDemandsOf = (functionId: FunctionId, carrier: Representation, ctx:
   if (carried === null || created === null) return []
   const site = statedRestOf(carried)
   const own = statedRestOf(created)
-  if (site === null || site === own) return []
+  if (site === null || sameStatedRest(site, own)) return []
   return [
     {
       key: 'call-abi:rest-fact',
       verdict: 'missing',
-      detail: `the function object is created stating rest position ${String(own)}, and its carrier states ${String(site)}`
+      detail: `the function object is created stating rest position ${statedRestText(own)}, and its carrier states ${statedRestText(site)}`
     }
   ]
 }

@@ -19,6 +19,7 @@ import {
   isCanonicalNumberPropertyKeyText,
   isOpenDocument,
   representationKey,
+  restPackedFrom,
   sameRestPartition,
   standInRefuses,
   walkRepresentation,
@@ -60,6 +61,7 @@ import { recordViewDispatchesArms } from '../../conversion/record-view.js'
 import {
   createCppEmitBlockedError,
   cppConstructThunkName,
+  cppStatedRestArguments,
   cppThunkName,
   defineValue,
   isCppEmitBlockedError,
@@ -1012,18 +1014,20 @@ export const boxedText = (representation: Representation, tag: string, text: str
   const restFrom = restFromOf(representation)
   const value = `static_cast<${cppTypeOf(representation)}>(${text})`
   const abi = representation.kind === 'function-and-constructor' ? representation.call : 'abi' in representation ? representation.abi : null
-  if (abi?.argumentsFrame === true) {
-    // The runtime's thunk splits a dynamic call at the boxed rest position and
-    // cannot also hand the formals' arguments to the `arguments` frame.
-    throw createCppEmitBlockedError(
-      'call-abi:dynamic',
-      'a callable that reads arguments past named parameters cannot be boxed: a dynamic call packs only the arguments past its rest position'
-    )
-  }
-  if (abi?.receiver) return `gea::Value::boxMethod<${restFrom === null ? -1 : restFrom + 1}>(${value})`
-  if (restFrom === null) return `gea::Value::box(gea::Value::Tag::${tag}, ${value})`
-  return `gea::Value::boxCallable<${restFrom}>(${value})`
+  if (abi?.receiver) return `gea::Value::boxMethod<${restFrom === null ? -1 : boxedRestArguments(abi, restFrom, 1)}>(${value})`
+  if (restFrom === null || abi === null) return `gea::Value::box(gea::Value::Tag::${tag}, ${value})`
+  return `gea::Value::boxCallable<${boxedRestArguments(abi, restFrom, 0)}>(${value})`
 }
+
+/**
+ * The rest statement a box site makes for a callable with a rest slot, over
+ * its physical formals: `receiverSlots` is 1 where a dynamic call prepends
+ * `this`. An `arguments` frame packs from the first argument past the receiver
+ * rather than from its slot, so its array holds every argument the dynamic
+ * caller passed while the formals before the slot still bind by position.
+ */
+export const boxedRestArguments = (abi: CallableAbi, restFrom: number, receiverSlots: number): string =>
+  cppStatedRestArguments({ slot: restFrom + receiverSlots, packedFrom: (restPackedFrom(abi) ?? restFrom) + receiverSlots })
 
 /**
  * How a native carrier boxes into a dynamic cell, rendered over an arbitrary
@@ -3297,8 +3301,8 @@ export const resultAdaptedCallableText = (
   const stated = statedRestOf(adapter.to)
   const adapt =
     known === null
-      ? `adaptSource${stated === null ? '' : `<${stated}>`}`
-      : `adaptSourceInPlace<&${known}${stated === null ? '' : `, ${stated}`}>`
+      ? `adaptSource${stated === null ? '' : `<${cppStatedRestArguments(stated)}>`}`
+      : `adaptSourceInPlace<&${known}${stated === null ? '' : `, ${cppStatedRestArguments(stated)}`}>`
   return `${cppTypeOf(target)}::${adapt}(${sourceType}{${text}}, [](${formals.join(', ')}) -> ${cppResultTypeOf(adapter.to.result)} { ${body} })`
 }
 

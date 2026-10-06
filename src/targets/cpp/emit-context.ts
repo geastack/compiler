@@ -32,7 +32,7 @@ import type { HostCallSpelling, HostSpellings } from './host/host-members.js'
 import { hostCallName, hostMemberOf, statedHostIntrinsicLength } from './host/host-members.js'
 import type { CallableAbi, RecordField, Representation } from '../../representation/model.js'
 import { representationKey } from '../../representation/model.js'
-import { statedRestOf } from '../../representation/stated-rest.js'
+import { statedRestOf, type StatedRest } from '../../representation/stated-rest.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import {
   cppAbiType,
@@ -2657,8 +2657,17 @@ export const cppMintedThunkEntryText = (
 const cppMintedEntryText = (abi: CallableAbi | null, functionId: FunctionId, entry: string): string => {
   const stated = abi === null ? null : statedRestOf(abi)
   if (abi === null || stated === null) return entry
-  return `gea::CallableObject<${cppAbiType(abi)}>::entryWithRest<&${cppThunkName(functionId)}, ${stated}>(${entry})`
+  return `gea::CallableObject<${cppAbiType(abi)}>::entryWithRest<&${cppThunkName(functionId)}, ${cppStatedRestArguments(stated)}>(${entry})`
 }
+
+/**
+ * A rest statement as the runtime's template arguments (`CallableObject::restStated`):
+ * the bare slot for a rest that packs from its own slot, which is every
+ * statement but an `arguments` frame's, and the slot then the packing start
+ * for a frame.
+ */
+export const cppStatedRestArguments = (stated: StatedRest): string =>
+  stated.packedFrom === stated.slot ? `${stated.slot}` : `${stated.slot}, ${stated.packedFrom}`
 
 const cppFactsEntryText = (facts: CallableFactsSpelling | undefined, functionId: FunctionId): string => {
   const thunk = `&${cppThunkName(functionId)}`
