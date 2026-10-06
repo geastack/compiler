@@ -16,6 +16,7 @@ import {
   unwrapPresentValue,
   type EmitContext,
   type ReactiveRevisionOrigin,
+  isIntegerKeyValue,
   isIntegerStorageValue,
   storedEnvironmentText
 } from './emit-context.js'
@@ -45,7 +46,6 @@ import {
   cppUndefinedIn
 } from './types.js'
 import { isNativeError } from './error-types.js'
-import { toStringOnlyObjectKinds } from '../../projection/coercions.js'
 import { cppVirtualMemberName, virtualDispatchKey } from './virtual-methods.js'
 import {
   recordAccessorsOfShape,
@@ -60,8 +60,7 @@ import {
 import { tracksKeyOrder } from './key-order-tracking.js'
 import { recordLayoutOfShapeId } from '../../projection/fields.js'
 import { nativeErrorMemberText } from './prototype/emit-prototype-error.js'
-import { structuralRecordViewText, viewPlanFor } from './emit-record-view.js'
-import { recordViewDispatchesArms } from '../../conversion/record-view.js'
+import { structuralRecordViewText } from './emit-record-view.js'
 import {
   classMemberText,
   classConstructorStaticFieldStorage,
@@ -70,7 +69,8 @@ import {
   classConstructorStaticMemberText,
   constructorIdentityMemberText
 } from './class-properties/emit-class-properties.js'
-import { alignedValueText, classFamilyLoadText, movedValueText, narrowedLoadText } from './emit-narrowing.js'
+import { alignedValueText, movedValueText } from './emit-narrowing.js'
+import { operationConversionText } from './emit-certified-conversion.js'
 import { namespaceMemberStore } from './emit-namespaces.js'
 import {
   callableSidecarGetText,
@@ -768,10 +768,16 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
           // (zero, which is what its declaration already holds) stored it, address-escaped, once per character.
           lines.push(`${metadata}_units = ${sharedMetadata}_units;`)
           lines.push(`${metadata}_basic_latin = ${sharedMetadata}_basic_latin;`)
+        } else if (sharedMetadata !== null) {
+          // Only the cursor is read out of the struct, and a fresh one is always
+          // a valid start. A whole-struct copy here reloaded the layout's bool and
+          // cursor across stores of other widths and stalled on every call of a
+          // short hash loop.
+          lines.push(`${metadata}_units = ${sharedMetadata}.units;`)
+          lines.push(`${metadata}_basic_latin = ${sharedMetadata}.basicLatin;`)
+          lines.push(`${metadata}.cursor = {};`)
         } else {
-          lines.push(
-            `${metadata} = ${sharedMetadata ?? `gea::runtime::string::utf16Metadata(${prototypeMethodReceiverText(ctx, read.receiver)})`};`
-          )
+          lines.push(`${metadata} = gea::runtime::string::utf16Metadata(${prototypeMethodReceiverText(ctx, read.receiver)});`)
           lines.push(`${metadata}_units = ${metadata}.units;`)
           lines.push(`${metadata}_basic_latin = ${metadata}.basicLatin;`)
         }
@@ -780,7 +786,10 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
       return
     }
     const name = defineValue(ctx, operation.result)
-    lines.push(`${name} = ${sharedMetadata === null ? stringMember : `static_cast<double>(${sharedMetadata}.units)`};`)
+    // An integer-stored length takes the count as an integer: through `double` it hid from native range analysis
+    // that a `i < length` loop bound is the very count the metadata reads check against.
+    const units = `static_cast<${isIntegerStorageValue(ctx, operation.result.id) ? 'long long' : 'double'}>(${sharedMetadata}.units)`
+    lines.push(`${name} = ${sharedMetadata === null ? stringMember : units};`)
     return
   }
   const symbolMember = symbolMemberText(ctx, operation.receiver, operation.key, operation.result)
@@ -1248,46 +1257,7 @@ const fixedFieldPresenceText = (ctx: EmitContext, receiver: IrOperand, fieldName
   return `${constructorViewReceiverText(ctx, receiver, fieldName, operandText(ctx, receiver))}${memberAccessOperator(representation.ownership)}${cppRecordFieldPresenceName(fieldName)}`
 }
 
-/**
- * A field read whose published carrier is NARROWER than the field's storage.
- *
- * `interface Cell { v: number | null }` stores `Optional<double>`, and after
- * `if (c.v !== null)` -- or after `c.v ??= 4` -- the checker types the very
- * same access `number`. Both answers are true and they are about different
- * things: one is what the struct member holds, the other is what this read
- * yields on this branch. A reinterpretation between them does not exist, so
- * emitting the bare member load produced `double = gea::Optional<double>` --
- * a certified program clang rejects. It is the two-carrier narrowed read,
- * on a record FIELD rather than on a cell.
- *
- * The conversion itself is not spelled here: `narrowedLoadText`
- * (emit-narrowing.ts) is the one authority on what a read of a wider carrier
- * at a narrower one looks like -- a dereference for an optional the branch
- * proved present, an arm load for a tagged union, and the combination for
- * both. It is the same function a narrowed CELL read goes through, which is
- * the point: a field and a cell disagreeing about what narrowing means is how
- * the original defect got in. A disagreement it declines to convert is a
- * defect upstream, not a spelling this may invent, so that refuses by name.
- */
-const primitiveStorageReadAsObject = (declared: Representation, published: Representation): boolean =>
-  (declared.kind === 'string' || declared.kind === 'scalar') && toStringOnlyObjectKinds.has(published.kind)
-
-/**
- * A data-record field read as a BYTE carrier. mongodb's `AutoEncrypter`
- * guards `this._kmsProviders` (`KMSProviders`) with `Buffer.isBuffer`, and the
- * checker types the guarded read `KMSProviders & Buffer`. A compiler-built
- * record struct is never a typed array, an `ArrayBuffer` or a `DataView` --
- * those are exotic objects with internal slots no record has -- so the guard
- * answers false for every value this storage holds and the branch is dead.
- * A class is left out: one may extend `Uint8Array`.
- */
-const byteCarrierKinds: ReadonlySet<Representation['kind']> = new Set(['typed-array', 'array-buffer', 'data-view'])
-const recordStorageReadAsBytes = (declared: Representation, published: Representation): boolean =>
-  (declared.kind === 'record' ||
-    declared.kind === 'record-with-index' ||
-    (declared.kind === 'native-record-ref' && declared.native === null)) &&
-  byteCarrierKinds.has(published.kind)
-
+/** A native slot is read through the exact conversion lowering certified. */
 const narrowedFieldReadText = (
   ctx: EmitContext,
   operation: GetOperation,
@@ -1308,20 +1278,7 @@ const narrowedFieldReadText = (
   const declared = declaredStorage ?? declaredFieldRepresentation(ctx, operation.receiver, fieldName)
   if (declared === null) return storage
   const published = operation.result.representation
-  const present = (() => {
-    if (representationKey(declared) === representationKey(published)) return storage
-    const classFamily = classFamilyLoadText(ctx, declared, published, storage)
-    if (classFamily !== null) return classFamily
-    // A slot whose arms are other records a redeclaration stores
-    // (`override-field-arms.ts`) is read at each declaration's own record,
-    // and no narrowing proved which arm is live: the census's dispatch view
-    // tests the arm, where the chain would select one and trust it.
-    const view = viewPlanFor(ctx.layouts, declared, published)
-    if (view !== null && recordViewDispatchesArms(view)) return structuralRecordViewText(ctx, declared, published, storage)
-    const narrowed = narrowedLoadText(declared, published, storage)
-    if (narrowed !== null) return narrowed
-    return alignedValueText(ctx, 'emit-properties.ts:864', declared, published, storage)
-  })()
+  const present = operationConversionText(ctx, operation, 'field-read', declared, published, storage)
   if (present !== null) {
     // A tail field's `storage` (built by `plainFieldReadText`/`fixedFieldReadText`
     // through `fieldMemberText`) is already `gea::RecordTail::ensure().<field>`,
@@ -1333,29 +1290,6 @@ const narrowedFieldReadText = (
     const absent = presence === null ? null : cppUndefinedIn(published)
     return absent === null ? present : `(${presence} ? ${present} : ${absent})`
   }
-  // A primitive field read as an OBJECT: a user type guard (`value is Long`,
-  // bson's `Long.isLong(doc.$timestamp.i)` over a field declared `number`)
-  // narrowed the checker's type to `number & Long`, which no value this
-  // storage holds can be -- a primitive is never an object. The branch is
-  // dead (the guard answers false for every primitive) or the guard lied, and
-  // then the language fails at the member use that follows; either way no
-  // value exists to convert, so the read is the unreachable throw rather than
-  // a refusal of the live code around it.
-  if (primitiveStorageReadAsObject(declared, published) || recordStorageReadAsBytes(declared, published))
-    return `gea::host::unreachableValue<${cppTypeOf(published)}>()`
-  // Asked second, and only once narrowing has declined: a read whose published
-  // carrier is not NARROWER than the storage but merely a different spelling of
-  // it is a CONVERSION, and `convertedValueText` is this backend's one authority
-  // on those. A binding write already asks both -- `emit-bindings.ts` calls
-  // exactly this function for the store direction -- and a field read asking
-  // only one of the two is how a field holding `(c: Context) => Response` came
-  // to refuse against a read publishing `(c: Context) => Response |
-  // Promise<Response>`: an implicit converting constructor `gea::CallableObject`
-  // declares, licensed for a cell and refused for a struct member, over the
-  // identical pair of carriers.
-  //
-  // Still fail-closed: `convertedValueText` answers `null` for a pair it has no
-  // recipe for, and that is the refusal below rather than a bare member load.
   throw createCppEmitBlockedError(
     `conversion:${representationKey(declared)}->${representationKey(published)}`,
     `field "${fieldName}" is stored as "${representationKey(declared)}" and this read publishes ` +
@@ -1505,7 +1439,13 @@ export const emitFieldStore = (
   // write one element's own cell had already notified -- rebuilding every row
   // of the list to deliver a change that touched one field of one element.
   const struct = key === undefined ? null : fieldDeclaringStructOf(ctx.classes, operation.receiver.representation, key)
-  if (struct !== null && key !== undefined && ctx.hosts.reactive.celled.get(struct)?.has(key) === true) return
+  if (
+    struct !== null &&
+    key !== undefined &&
+    ctx.hosts.reactive.celled.get(struct)?.has(key) === true &&
+    ctx.hosts.reactive.revisionBoundRecordFields.get(struct)?.has(key) !== true
+  )
+    return
   // ...nor when NOTHING RENDERS the member. A revision tick exists to tell the
   // list its rows are stale; a member no row reads cannot have made one stale.
   // `syncCells()` writing `cell.piece = -1` -- a field the board never displays
@@ -1749,7 +1689,7 @@ const emitFieldStoreLines = (
             `"${representationKey(operation.receiver.representation.element)}"`
         )
       }
-      lines.push(`${arrayReceiver}->setElement(${index}, ${storedValue});`)
+      lines.push(`${arrayReceiver}->setElementAtIndex(${index}, ${storedValue});`)
       finishArrayStore()
       return
     }
@@ -1784,7 +1724,7 @@ const emitFieldStoreLines = (
         `an Array element store keyed by a "${operation.key.representation.kind}" carrier needs a ToPropertyKey conversion, which is not installed`
       )
     }
-    const writer = isIntegerStorageValue(ctx, operation.key.value) ? 'setElementAtIndex' : 'setElement'
+    const writer = isIntegerKeyValue(ctx, operation.key) ? 'setElementAtIndex' : 'setElement'
     // Each operand is rendered ONCE and named twice: a deferred operand's text
     // is an expression this emitter built, and asking for it again is a second
     // rendering of the same operation, not a second read of a name.
@@ -1837,7 +1777,7 @@ const emitFieldStoreLines = (
           `writing the typed array property "${key}" is an ordinary property, and typed arrays have no ordinary-property table`
         )
       }
-      lines.push(`${typedArrayReceiver}->setElement(${index}, ${operandText(ctx, operation.value)});`)
+      lines.push(`${typedArrayReceiver}->setElementAtIndex(${index}, ${operandText(ctx, operation.value)});`)
       finishTypedArrayStore()
       return
     }
@@ -1849,7 +1789,7 @@ const emitFieldStoreLines = (
     }
     const dense = denseCellText(ctx, operation)
     const value = operandText(ctx, operation.value)
-    const integerKey = isIntegerStorageValue(ctx, operation.key.value)
+    const integerKey = isIntegerKeyValue(ctx, operation.key)
     // An integer value stores its low bits (or itself, rounded once, into a
     // float view) without the `double` modulo `setElementAtIndex` performs.
     const integerValue = isIntegerStorageValue(ctx, operation.value.value)

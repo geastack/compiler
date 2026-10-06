@@ -10,6 +10,7 @@ import {
   geaElementTextLeafTags,
   geaHostConstants,
   geaHostFunctions,
+  geaNativeFunctionDeclarations,
   geaHostNamespaceMethods,
   geaHostNamespaceProperties,
   geaHostNamespacePropertySetters,
@@ -87,6 +88,7 @@ export const geaPlugin: CompilerPlugin = {
       lowerElementProp: lowerGeaElementRef,
       slotOf: createGeaSlotHook(facts),
       capabilities: {
+        nativeFunctionDeclarations: geaNativeFunctionDeclarations(options),
         commonJsGlobals: geaCommonJsGlobals(),
         // `element:value` is this plugin's recipe, and it is claimed here
         // because this plugin is what implements it: the lowering above turns

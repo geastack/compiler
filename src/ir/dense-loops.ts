@@ -1,8 +1,11 @@
 import type { DeclarationId, IrValueId } from '../identity/ids.js'
+import type { ConversionNode } from '../conversion/algebra.js'
+import type { ConversionCensus } from '../conversion/nodes.js'
+import type { BindingPlacement } from '../projection/bindings.js'
 import { controlFlowGraphOf, dominatorTreeOf, naturalLoopsOf, type ControlFlowGraph, type NaturalLoop } from './dominance.js'
 import { loopInvariantHoistsOf, type HoistPlan } from './hoist.js'
 import { borrowSafeOperationsOf } from './borrow-effects.js'
-import type { Representation, TypedArrayElementDomain } from '../representation/model.js'
+import { representationKey, type Representation, type TypedArrayElementDomain } from '../representation/model.js'
 import type { IrBlockId, IrBody, IrNonTerminatorOperation, IrOperand } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 
@@ -127,8 +130,13 @@ export interface DenseArray {
 export type DenseOffset = { readonly terms: readonly { readonly operand: IrOperand; readonly negated: boolean }[] } | null
 
 export type DenseReference =
-  | { readonly kind: 'cell'; readonly declaration: DeclarationId; readonly representation: Representation }
-  | { readonly kind: 'value'; readonly operand: IrOperand; readonly storage: Representation }
+  | {
+      readonly kind: 'cell'
+      readonly declaration: DeclarationId
+      readonly representation: Representation
+      readonly conversion?: ConversionNode
+    }
+  | { readonly kind: 'value'; readonly operand: IrOperand; readonly storage: Representation; readonly conversion?: ConversionNode }
   /**
    * A ROW of another array: `grid[i]` read inside the `j` loop.
    *
@@ -196,6 +204,69 @@ export interface DenseLoopPlan {
 }
 
 export const emptyDenseLoopPlan: DenseLoopPlan = { arrays: [], groups: [], accesses: new Map(), lengths: new Map() }
+
+/** Dense preheaders perform real reads; their transport belongs to the lowered body's certificate too. */
+export const publishDenseLoopPlan = (
+  body: IrBody,
+  placements: ReadonlyMap<DeclarationId, BindingPlacement>,
+  conversions: ConversionCensus
+): IrBody => {
+  const raw = denseLoopsOf(body)
+  const seal = (reference: DenseReference): DenseReference | null => {
+    if (reference.kind === 'element') {
+      const holder = seal(reference.holder)
+      return holder === null ? null : { ...reference, holder }
+    }
+    const source = reference.kind === 'cell' ? placements.get(reference.declaration)?.representation : reference.storage
+    const target = reference.kind === 'cell' ? reference.representation : reference.operand.representation
+    if (source === undefined || source === null) return null
+    const conversion = conversions.nodeFor(source, target)
+    return conversion.capability.kind === 'never' ? null : { ...reference, conversion }
+  }
+  const arrays = raw.arrays.flatMap((array) => {
+    const reference = seal(array.reference)
+    return reference === null ? [] : [{ ...array, reference }]
+  })
+  const ordinals = new Set(arrays.map((array) => array.ordinal))
+  const accesses = new Map([...raw.accesses].filter(([, access]) => ordinals.has(access.array)))
+  const lengths = new Map([...raw.lengths].filter(([, ordinal]) => ordinals.has(ordinal)))
+  return { ...body, denseLoopPlan: { arrays, accesses, lengths, groups: raw.groups } }
+}
+
+export const denseLoopConversionsOf = (plan: DenseLoopPlan): readonly ConversionNode[] => {
+  const nodes = new Map<string, ConversionNode>()
+  const visit = (reference: DenseReference): void => {
+    if (reference.kind === 'element') visit(reference.holder)
+    else if (reference.conversion !== undefined) nodes.set(reference.conversion.id, reference.conversion)
+  }
+  for (const array of plan.arrays) visit(array.reference)
+  return [...nodes.values()]
+}
+
+export const denseLoopPlanMatches = (
+  body: IrBody,
+  plan: DenseLoopPlan,
+  placements: ReadonlyMap<DeclarationId, BindingPlacement>,
+  conversions: ConversionCensus
+): boolean => {
+  const matches = (reference: DenseReference): boolean => {
+    if (reference.kind === 'element') return matches(reference.holder)
+    const node = reference.conversion
+    const source = reference.kind === 'cell' ? placements.get(reference.declaration)?.representation : reference.storage
+    const target = reference.kind === 'cell' ? reference.representation : reference.operand.representation
+    if (node === undefined || source === undefined || source === null || node.capability.kind === 'never') return false
+    if (reference.kind === 'value') {
+      const storage = body.values.get(reference.operand.value)
+      if (storage === undefined || representationKey(storage) !== representationKey(reference.storage)) return false
+    }
+    return (
+      conversions.nodeById(node.id) === node &&
+      representationKey(node.source) === representationKey(source) &&
+      representationKey(node.target) === representationKey(target)
+    )
+  }
+  return plan.arrays.every((array) => matches(array.reference))
+}
 
 /**
  * The plan a body can actually RENDER, once the target has answered the one
@@ -918,12 +989,7 @@ const constantModulusOf = (
 }
 
 /** Whether an index whose reach `constantModulusOf` read is a MASK, which is never negative. */
-const isMaskKey = (
-  key: IrOperand,
-  context: WindowContext,
-  operations: readonly IrNonTerminatorOperation[],
-  at: number
-): boolean => {
+const isMaskKey = (key: IrOperand, context: WindowContext, operations: readonly IrNonTerminatorOperation[], at: number): boolean => {
   const compute = remainderBehind(key, context, operations, at)
   return compute?.kind === 'compute' && compute.form === 'binary' && compute.operator === '&'
 }

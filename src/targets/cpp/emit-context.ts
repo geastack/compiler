@@ -1,10 +1,14 @@
+import type { NativeDebugSource } from './native-debug-source.js'
 import type { NativeSelectionHelper } from './native-selection-helpers.js'
 import { restrictsEveryCarrier, type IntegrityRestrictions } from '../../ir/integrity-restrictions.js'
 import type { BorrowedArmProjection } from './borrowed-arm-projections.js'
 import type { StableBorrowEntry } from './borrowed-call-entry.js'
 import type { SharedStringLayout } from '../../ir/string-layout-reuse.js'
+import type { LazySplit } from '../../ir/lazy-splits.js'
 import type { CapabilityKey } from '../../ir/certify.js'
 import type { DeclarationId, FunctionId, IrValueId, RegionId, SemanticResultId } from '../../identity/ids.js'
+import type { CallableFlowCandidate } from '../../ir/callable-flow-candidates.js'
+import type { DeclaredIntegerWidth } from '../../ir/integers.js'
 import { nodeOfOperation, operationOfResult, withoutSpecialization } from '../../identity/ids.js'
 import type { BindingPlacement } from '../../projection/bindings.js'
 import type { ClassLayout } from '../../projection/classes.js'
@@ -859,12 +863,21 @@ export interface EmitBodyFacts {
    * whole program after the shake, so this is a straight projection of it
    * plus `abiOfCallable`, neither of which any printer is asked about.
    */
+  /** Whole-program proof: these call results own a Task frame, consumed by their sole await. */
+  readonly taskResults: ReadonlySet<IrValueId>
   readonly directCallees: ReadonlyMap<IrValueId, string>
   /** See `EmitContext.directCalleeAbis`, settled by the same walk. */
   readonly directCalleeAbis: ReadonlyMap<IrValueId, CallableAbi>
+  /** See `EmitContext.directCallableValues`, settled by `directCallableValuesOf`. */
+  readonly directCallableValues: ReadonlyMap<IrValueId, FunctionId>
+  /** See `EmitContext.integerWidenings`, settled by `integerWideningsOf`. */
+  readonly integerWidenings: ReadonlyMap<IrValueId, IrOperand>
+  /** See `EmitContext.lazySplits`, settled by `lazySplitsOf`. */
+  readonly lazySplits: ReadonlyMap<IrValueId, LazySplit>
 }
 
 export interface EmitContext {
+  readonly debugSource?: NativeDebugSource
   /**
    * The calling convention this body implements, or `null` for an uncalled
    * region.
@@ -957,17 +970,6 @@ export interface EmitContext {
    * one keeps no creation-order bookkeeping at all.
    */
   readonly keyOrderUnobserved: ReadonlySet<string>
-  /**
-   * The async bodies that are ALSO emitted as a `_task` twin returning a
-   * `gea::Task<V>` (`taskTwinOf`, `coroutine-bodies.ts`), by C++ body name.
-   * A call to one of them whose result the very next operation awaits, and
-   * nothing else reads, calls the twin (`emit-callable.ts`).
-   */
-  readonly taskBodies: ReadonlySet<string>
-  /** Call results that are awaited by the operation right after the call and read nowhere else (`fusedAwaitCallsOf`). */
-  readonly fusableAwaitCalls: ReadonlySet<IrValueId>
-  /** The call results actually rendered as a `gea::Task`: the await that consumes one moves it. */
-  readonly taskValues: Set<IrValueId>
   readonly valueNames: Map<IrValueId, string>
   readonly ownedValues: Set<IrValueId>
   /**
@@ -1140,7 +1142,30 @@ export interface EmitContext {
    * after it -- the walk only ever asked `CallOperation.target` and
    * `abiOfCallable`, neither of which needs a built context.
    */
+  /** Whole-program proof: these call results own a Task frame, consumed by their sole await. */
+  readonly taskResults: ReadonlySet<IrValueId>
   readonly directCallees: ReadonlyMap<IrValueId, string>
+  /**
+   * Values that are one capture-free function for certain: its allocation, or
+   * a read of a cell `ir/call-dispatch.ts` proved always holds it. A host
+   * algorithm handed one (`Array.prototype.sort`'s comparator) can call the
+   * function's thunk by name instead of through the carrier's pointer, which
+   * is what lets the C++ compiler inline it into the algorithm's loop.
+   */
+  readonly directCallableValues: ReadonlyMap<IrValueId, FunctionId>
+  /**
+   * A `number` that is an `int`/`i32` value widened (`convert` from the
+   * integer-width scalar), keyed by the widened value, to the integer it
+   * widened. A comparison against an integer constant asks the integer instead
+   * (`emit-integers.ts`'s `integerConstantComparison`).
+   */
+  readonly integerWidenings: ReadonlyMap<IrValueId, IrOperand>
+  /**
+   * The arrays a `split` call would build for one local `for`-`of` and
+   * nothing else (`ir/lazy-splits.ts`), keyed by the array value: the call
+   * renders nothing and the loop walks the string itself.
+   */
+  readonly lazySplits: ReadonlyMap<IrValueId, LazySplit>
   /**
    * The body convention behind the corresponding direct spelling. Its result
    * can be physically broader than the covariant method value published at
@@ -1305,6 +1330,8 @@ export interface EmitContext {
   /** Converts rendered as a reference to one arm of a borrowed union formal (`borrowed-arm-projections.ts`). Each is also a stable actual. */
   readonly borrowedArmProjections: ReadonlyMap<IrValueId, BorrowedArmProjection>
   readonly callableMemberCandidates: ReadonlyMap<string, FunctionId>
+  /** This body's guard candidates for calls through callable parameters, captures and fields (`callableFlowCandidatesOf`). */
+  readonly callableFlowCandidates: ReadonlyMap<IrValueId, CallableFlowCandidate>
   readonly directCallableBindings: ReadonlyMap<DeclarationId, FunctionId>
   /** Constructor cells this unit constructs through repeatedly, and the class each names -- see `buildRepeatedConstructorIndex`. */
   readonly repeatedConstructors: ReadonlyMap<DeclarationId, DeclarationId>
@@ -1714,6 +1741,14 @@ export interface EmitContext {
   readonly remainderForms: ReadonlyMap<IrValueId, 'restated' | 'dynamic'>
   /** Settled the same way as `hoistedResults`; see `IntegerNarrowing.roundingArithmetic`. */
   readonly roundingArithmetic: ReadonlySet<IrValueId>
+  /** See `IntegerNarrowing.integerDivisions`. */
+  readonly integerDivisions: ReadonlySet<IrValueId>
+  /** See `IntegerNarrowing.declaredWidths`. */
+  readonly declaredWidths: ReadonlyMap<IrValueId, DeclaredIntegerWidth>
+  /** See `IntegerNarrowing.exactNumericConversions`; settled before rendering. */
+  readonly exactNumericConversions: ReadonlySet<IrValueId>
+  /** See `IntegerNarrowing.declaredBindings`. */
+  readonly declaredIntegerCells: ReadonlyMap<DeclarationId, DeclaredIntegerWidth>
   /**
    * Call results the integer census narrowed from a guarded candidate's returns
    * (`IntegerStorageFacts.guarded`), with the bound each is checked against.
@@ -1939,6 +1974,10 @@ export interface EmitBodyPrepassFacts {
   readonly typeQueryComparisons: Map<ComputeOperation, TypeQueryComparison>
   readonly remainderForms: Map<IrValueId, 'restated' | 'dynamic'>
   readonly roundingArithmetic: Set<IrValueId>
+  readonly integerDivisions: Set<IrValueId>
+  readonly declaredWidths: Map<IrValueId, DeclaredIntegerWidth>
+  readonly exactNumericConversions: Set<IrValueId>
+  readonly declaredIntegerCells: Map<DeclarationId, DeclaredIntegerWidth>
   readonly integerCallChecks: Map<IrValueId, number>
   readonly deadValues: Set<IrValueId>
   readonly unreadValues: Set<IrValueId>
@@ -1986,6 +2025,38 @@ export const directCalleesOf = (
   return { directCallees, directCalleeAbis }
 }
 
+/** See `EmitContext.directCallableValues`. */
+export const directCallableValuesOf = (
+  body: IrBody,
+  captureFree: (callable: FunctionId) => boolean
+): ReadonlyMap<IrValueId, FunctionId> => {
+  const values = new Map<IrValueId, FunctionId>()
+  for (const block of body.blocks.values())
+    for (const operation of block.operations) {
+      if (operation.kind === 'allocate-callable') {
+        if (captureFree(operation.functionId)) values.set(operation.result.id, operation.functionId)
+      } else if (operation.kind === 'binding-read' && operation.closedCallable?.kind === 'exact') {
+        if (captureFree(operation.closedCallable.functionId)) values.set(operation.result.id, operation.closedCallable.functionId)
+      }
+    }
+  return values
+}
+
+/** See `EmitContext.integerWidenings`. */
+export const integerWideningsOf = (body: IrBody): ReadonlyMap<IrValueId, IrOperand> => {
+  const widenings = new Map<IrValueId, IrOperand>()
+  for (const block of body.blocks.values())
+    for (const operation of block.operations) {
+      if (operation.kind !== 'convert') continue
+      const source = operation.source.representation
+      const target = operation.result.representation
+      if (source.kind !== 'scalar' || source.domain !== 'number' || source.integerWidth === undefined) continue
+      if (target.kind !== 'scalar' || target.domain !== 'number' || target.integerWidth !== undefined) continue
+      widenings.set(operation.result.id, operation.source)
+    }
+  return widenings
+}
+
 export const createEmitContext = (
   abi: CallableAbi | null,
   owner: FunctionId | RegionId,
@@ -2008,6 +2079,7 @@ export const createEmitContext = (
   functionFacts: ReadonlyMap<FunctionId, CallableFactsSpelling> = new Map(),
   hostMethodAliases: ReadonlyMap<DeclarationId, HostMethodAlias> = new Map(),
   callableMemberCandidates: ReadonlyMap<string, FunctionId> = new Map(),
+  callableFlowCandidates: ReadonlyMap<IrValueId, CallableFlowCandidate> = new Map(),
   borrowableMemberBodies: ReadonlySet<FunctionId> = new Set(),
   stableBorrowEntries: ReadonlyMap<string, StableBorrowEntry> = new Map(),
   printerDrift: PrinterDrift[] = [],
@@ -2020,9 +2092,7 @@ export const createEmitContext = (
   nativeIntegrityRestricted: IntegrityRestrictions = restrictsEveryCarrier,
   fixedFieldStateConstant = false,
   definitionCells: ReadonlySet<DeclarationId> = new Set(),
-  keyOrderUnobserved: ReadonlySet<string> = new Set(),
-  taskBodies: ReadonlySet<string> = new Set(),
-  fusableAwaitCalls: ReadonlySet<IrValueId> = new Set()
+  keyOrderUnobserved: ReadonlySet<string> = new Set()
 ): { readonly ctx: EmitContext; readonly prepass: EmitBodyPrepassFacts } => {
   const admission = captures.of(owner)
   const layouts = recordLayoutPolicyOf(deriver, classes, wellKnownSymbols)
@@ -2044,6 +2114,10 @@ export const createEmitContext = (
   const typeQueryComparisons = new Map<ComputeOperation, TypeQueryComparison>()
   const remainderForms = new Map<IrValueId, 'restated' | 'dynamic'>()
   const roundingArithmetic = new Set<IrValueId>()
+  const integerDivisions = new Set<IrValueId>()
+  const declaredWidths = new Map<IrValueId, DeclaredIntegerWidth>()
+  const exactNumericConversions = new Set<IrValueId>()
+  const declaredIntegerCells = new Map<DeclarationId, DeclaredIntegerWidth>()
   const integerCallChecks = new Map<IrValueId, number>()
   const deadValues = new Set<IrValueId>()
   const unreadValues = new Set<IrValueId>()
@@ -2083,9 +2157,6 @@ export const createEmitContext = (
     deriver,
     layouts,
     keyOrderUnobserved,
-    taskBodies,
-    fusableAwaitCalls,
-    taskValues: new Set(),
     ...(nativeSelections === undefined ? {} : { nativeSelectionHelpers: nativeSelections }),
     conversions: conversions ?? createConversionNodes({ registry: createCppConversionRegistry(layouts), nodes: new Map() }),
     valueNames: new Map(),
@@ -2103,8 +2174,12 @@ export const createEmitContext = (
     wellKnownSymbols,
     reactiveFieldReads,
     thunkValues: bodyFacts.thunkValues,
+    taskResults: bodyFacts.taskResults,
     directCallees: bodyFacts.directCallees,
     directCalleeAbis: bodyFacts.directCalleeAbis,
+    directCallableValues: bodyFacts.directCallableValues,
+    integerWidenings: bodyFacts.integerWidenings,
+    lazySplits: bodyFacts.lazySplits,
     directCallReceivers,
     virtualCallees,
     virtualCalleesUsed: new Set(),
@@ -2123,6 +2198,7 @@ export const createEmitContext = (
     virtualDispatch,
     directCallableBindings,
     callableMemberCandidates,
+    callableFlowCandidates,
     borrowableMemberBodies,
     stableBorrowEntries,
     stableBorrowActuals: bodyFacts.stableBorrowActuals,
@@ -2188,6 +2264,10 @@ export const createEmitContext = (
     loopInvariantValues,
     remainderForms,
     roundingArithmetic,
+    integerDivisions,
+    declaredWidths,
+    exactNumericConversions,
+    declaredIntegerCells,
     integerCallChecks,
     checkedIntegerCalls: new Set(),
     denseArrays,
@@ -2229,6 +2309,10 @@ export const createEmitContext = (
       typeQueryComparisons,
       remainderForms,
       roundingArithmetic,
+      integerDivisions,
+      declaredWidths,
+      exactNumericConversions,
+      declaredIntegerCells,
       integerCallChecks,
       deadValues,
       unreadValues,
@@ -2279,10 +2363,19 @@ export const storageTypeOf = (ctx: EmitContext, value: IrValueId, representation
   ctx.typeQueryValues.has(value)
     ? 'gea::Value::Tag'
     : ctx.integerValues.has(value)
-      ? cppNarrowedIntegerType
+      ? declaredIntegerTypeOf(ctx.declaredWidths.get(value))
       : ctx.float32.values.has(value)
         ? cppNarrowedFloatType
         : cppTypeOf(representation)
+
+/**
+ * The C++ integer an `int`/`i32` annotation holds its values in: `int32_t` for
+ * `i32` -- the native integer of a 32-bit core, where a `long long` sum is two
+ * instructions and its quotient a library call -- and the narrowed `long long`
+ * for `int` and for every integer the census narrowed on its own.
+ */
+export const declaredIntegerTypeOf = (width: DeclaredIntegerWidth | undefined): string =>
+  width === 'int32' ? 'std::int32_t' : cppNarrowedIntegerType
 
 /** Whether a value's rendered text is a `float` -- the float32 census's twin of `isIntegerStorageValue`. */
 export const isFloatStorageValue = (ctx: EmitContext, value: IrValueId): boolean => {
@@ -2306,6 +2399,20 @@ export const isIntegerStorageValue = (ctx: EmitContext, value: IrValueId): boole
   if (ctx.integerValues.has(value) || ctx.narrowedFormalValues.has(value)) return true
   const declaration = ctx.bindingReadDeclarations.get(value)
   return declaration !== undefined && ctx.integerBindings.has(declaration) && !ctx.captures.isBoxed(declaration)
+}
+
+/**
+ * Whether an element key renders as a C++ integer: a value the integer census
+ * narrowed, or one the program declared `int`/`i32`, whose storage holds an
+ * integer by construction. Asked by the element readers and writers that take
+ * an integer key instead of a double one, and by nothing that decides storage.
+ */
+export const isIntegerKeyValue = (ctx: EmitContext, key: IrOperand): boolean => {
+  const value = key.value
+  if (key.representation.kind === 'scalar' && key.representation.integerWidth !== undefined) return true
+  if (isIntegerStorageValue(ctx, value) || ctx.declaredWidths.has(value)) return true
+  const declaration = ctx.bindingReadDeclarations.get(value)
+  return declaration !== undefined && ctx.declaredIntegerCells.has(declaration) && !ctx.captures.isBoxed(declaration)
 }
 
 /**
@@ -2610,6 +2717,30 @@ export interface CallableFactsSpelling {
  * object can be asked for its facts, so registering there preserves every
  * observable answer and pins nothing else.
  */
+/**
+ * A capture-free function's value converted into a wider callable slot, its
+ * thunk named in the adapter's type (`gea::staticPrefixCallable`) rather than
+ * reached through the narrower callable's pointer. The function's facts, when
+ * the program reads them, are registered on the adapter's entry exactly as
+ * `cppThunkEntryText` registers them on the thunk's own.
+ */
+export const cppStaticPrefixCallableText = (
+  ctx: Pick<EmitContext, 'functionFacts'>,
+  functionId: FunctionId,
+  slotType: string,
+  sourceType: string
+): string => {
+  const templateArguments = `${slotType}, ${sourceType}, &${cppThunkName(functionId)}`
+  const facts = ctx.functionFacts.get(functionId)
+  if (facts === undefined) return `gea::staticPrefixCallable<${templateArguments}>()`
+  const literal = cppStringViewLiteral(facts.source)
+  const source = unitFunctionName(`${cppThunkName(functionId)}_source`, (name) => `std::string_view ${name}()`, `return ${literal};`)
+  return (
+    `gea::staticPrefixCallable<${templateArguments}>(` +
+    `${cppStringViewLiteral(facts.name)}, ${facts.length}, ${source === null ? literal : `${source}()`})`
+  )
+}
+
 export const cppThunkEntryText = (ctx: Pick<EmitContext, 'functionFacts'>, functionId: FunctionId): string => {
   const thunk = `&${cppThunkName(functionId)}`
   const facts = ctx.functionFacts.get(functionId)
@@ -2930,7 +3061,7 @@ export const templateObjectDefinitions = (templateObjects: ReadonlyMap<string, T
 // question every caller was already asking of this module -- "what C++ name
 // does this declaration have here" -- and moving the import sites would have
 // been a rename dressed up as a refactor.
-export { bindingReference, frameHandleText } from './emit-binding-reference.js'
+export { bindingReference, copiedCaptureName, frameHandleText } from './emit-binding-reference.js'
 
 /**
  * Invariant 5 (invariant 5: no write during render): the printer's context is
@@ -2982,11 +3113,6 @@ const renderMutableEmitContextFields: ReadonlySet<string> = new Set([
   // rendered call has already wrapped in its check, read once at the end of
   // the body to refuse any `integerCallChecks` entry that no call rendered.
   'checkedIntegerCalls',
-  // Render bookkeeping by the same test: which call results a rendered call
-  // actually spelled as a `gea::Task` twin call. WHICH calls may be fused is
-  // the settled fact (`fusableAwaitCalls`, `taskBodies`); this is only what the
-  // printer then did, read back by the await that consumes the result.
-  'taskValues',
   // Naming again, by the same test as `valueNames`: what these two hold is the
   // C++ NAME of a scratch local this render minted for a dynamic iterator --
   // `v<ordinal>` from `nextValueOrdinal`, declared into `declarations` on the

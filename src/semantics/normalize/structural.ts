@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import { declaredIntegerWidthOf } from '../declared-integers.js'
 import { isAmbientDeclaration } from '../ambient.js'
 import { transparentClassAliasDeclarationTarget, transparentConstClassAliasTarget } from '../class-alias.js'
 import {
@@ -2641,6 +2642,8 @@ const buildMapper = (
     const viewMember = families.viewMemberOf?.(type) ?? null
     if (viewMember !== null) return remember(type, typeOf(viewMember))
     if (type.isIntersection()) {
+      const integerWidth = declaredIntegerWidthOf(type)
+      if (integerWidth !== null) return remember(type, table.intern({ kind: 'primitive', primitive: integerWidth }))
       // The alias's own anchor, recorded beside the members rather than instead
       // of them: a branded alias (`type Rgb565 = number & { readonly
       // __geaRgb565: unique symbol }`) erases to its substantive member, and

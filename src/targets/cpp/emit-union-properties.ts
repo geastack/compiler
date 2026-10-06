@@ -36,7 +36,8 @@ import {
   memberAccessOperator,
   positionalRecordArityText
 } from './emit-carrier-members.js'
-import { alignedValueText, classFamilyLoadText, receiverBoundFieldText, widenedStoreText } from './emit-narrowing.js'
+import { alignedValueText, classFamilyLoadText, receiverBoundFieldText } from './emit-narrowing.js'
+import { operationConversionText } from './emit-certified-conversion.js'
 import { canonicalIndexLiteral, stringIndexText, isDeclaredStringPrototypeKey } from './emit-carrier-members.js'
 import { objectPrototypeMemberNames } from '../../representation/record-fields.js'
 import { classFamilyOverridesOf, classMemberOf } from './class-layout.js'
@@ -350,7 +351,7 @@ const armRuntimeFieldText = (
         published,
         `${armExprText}->length()`
       )
-    if (index !== null) return arrayArmReadText(armExprText, 'elementAt', index, arm.element, published)
+    if (index !== null) return arrayArmReadText(ctx, operation, armExprText, 'elementAt', index, arm.element, published)
     // An ORDINARY own property of the Array object -- a name no Array
     // inherits and its extended interface does not declare -- lives in the
     // identity-keyed expando table every native object shares, exactly as the
@@ -619,8 +620,8 @@ const nativeNumericUnionAccess = (
         : `${at}${memberAccessOperator(storage.ownership)}`
     if (operation.kind === 'get') {
       return storage.kind === 'elements'
-        ? arrayArmReadText(at, 'elementAt', key, storage.value, operation.result.representation)
-        : dictionaryArmReadText(member, key, storage.value, operation.result.representation)
+        ? arrayArmReadText(ctx, operation, at, 'elementAt', key, storage.value, operation.result.representation)
+        : dictionaryArmReadText(ctx, operation, member, key, storage.value, operation.result.representation)
     }
     const written = alignedValueText(
       ctx,
@@ -782,6 +783,8 @@ export const taggedUnionHasOnlyDictionaryArms = (representation: Representation)
  * instead of a FIELD one.
  */
 const dictionaryArmReadText = (
+  ctx: EmitContext,
+  operation: GetOperation,
   member: string,
   keyText: string,
   dictionaryValue: Representation,
@@ -791,7 +794,7 @@ const dictionaryArmReadText = (
   const rawRead = `${member}read(${keyText})`
   if (published.kind !== 'optional') {
     if (representationKey(dictionaryValue) === representationKey(published)) return rawRead
-    const widened = widenedStoreText(published, dictionaryValue, rawRead)
+    const widened = operationConversionText(ctx, operation, 'index-read', dictionaryValue, published, rawRead)
     if (widened !== null) return widened
     throw createCppEmitBlockedError(
       `property-access:tagged-union(${armFamily}):get:true`,
@@ -802,7 +805,7 @@ const dictionaryArmReadText = (
   const presentText =
     representationKey(dictionaryValue) === representationKey(published.payload)
       ? rawRead
-      : widenedStoreText(published.payload, dictionaryValue, rawRead)
+      : operationConversionText(ctx, operation, 'index-read', dictionaryValue, published.payload, rawRead)
   if (presentText === null) {
     throw createCppEmitBlockedError(
       `property-access:tagged-union(${armFamily}):get:true`,
@@ -850,7 +853,7 @@ const taggedUnionDictionaryGetText = (ctx: EmitContext, operation: GetOperation)
     const armText = armAt(receiverText, index)
     const member = `${armText}${memberAccessOperator(dictionary.ownership)}`
     const keyText = keyedTableKeyText(ctx, operation.key, dictionaryKeyDomainOf(dictionary.key, operation.key.representation))
-    return dictionaryArmReadText(member, keyText, dictionary.value, published)
+    return dictionaryArmReadText(ctx, operation, member, keyText, dictionary.value, published)
   })
   const dispatched = armTexts.reduceRight<string | null>(
     (rest, text, index) => (rest === null ? text : `${armIs(receiverText, index)} ? ${text} : (${rest})`),
@@ -952,7 +955,7 @@ const taggedUnionDictionaryOrSidecarGetText = (ctx: EmitContext, operation: GetO
     if (value.kind === 'dictionary') {
       const member = `${leaf.text}${memberAccessOperator(value.ownership)}`
       const keyText = keyedTableKeyText(ctx, operation.key, dictionaryKeyDomainOf(value.key, operation.key.representation))
-      return dictionaryArmReadText(member, keyText, value.value, published, 'dictionary-or-sidecar-arms')
+      return dictionaryArmReadText(ctx, operation, member, keyText, value.value, published, 'dictionary-or-sidecar-arms')
     }
     if (value.kind === 'null' || value.kind === 'undefined') {
       return `gea::host::throwGetPropertyOfNullish<${cppTypeOf(published)}>("${value.kind}")`
@@ -980,6 +983,8 @@ const taggedUnionDictionaryOrSidecarGetText = (ctx: EmitContext, operation: GetO
  * arm of the published carrier matches.
  */
 const arrayArmReadText = (
+  ctx: EmitContext,
+  operation: GetOperation,
   armText: string,
   reader: 'elementAt' | 'elementAtIndex',
   keyText: string,
@@ -998,7 +1003,7 @@ const arrayArmReadText = (
   }
   if (published.kind !== 'optional') {
     if (representationKey(element) === representationKey(published)) return rawRead
-    const widened = widenedStoreText(published, element, rawRead)
+    const widened = operationConversionText(ctx, operation, 'index-read', element, published, rawRead)
     if (widened !== null) return widened
     throw createCppEmitBlockedError(
       'property-access:tagged-union(array-arms):get:true',
@@ -1007,7 +1012,7 @@ const arrayArmReadText = (
     )
   }
   const presentText =
-    representationKey(element) === representationKey(published.payload) ? rawRead : widenedStoreText(published.payload, element, rawRead)
+    representationKey(element) === representationKey(published.payload) ? rawRead : operationConversionText(ctx, operation, 'index-read', element, published.payload, rawRead)
   const has = reader === 'elementAtIndex' ? 'hasElementAtIndex' : 'hasElement'
   const carrier = cppTypeOf(published)
   // An arm whose element no arm of the published read holds is a tuple the
@@ -1051,7 +1056,7 @@ const taggedUnionArrayGetText = (ctx: EmitContext, operation: GetOperation): str
       throw createCppEmitBlockedError('property-access:tagged-union(array-arms):get:true', 'an array-arms union reached a non-array arm')
     }
     const armText = armAt(receiverText, index)
-    return arrayArmReadText(armText, reader, keyText, array.element, published)
+    return arrayArmReadText(ctx, operation, armText, reader, keyText, array.element, published)
   })
   const dispatched = armTexts.reduceRight<string | null>(
     (rest, text, index) => (rest === null ? text : `${armIs(receiverText, index)} ? ${text} : (${rest})`),
@@ -1488,7 +1493,7 @@ const unionLeafSetText = (
       : `(void)(${refused});`
   }
   const propertyKey = unionArmPropertyKeyText(key)
-  const boxedValue = sidecarStoredValueText(operation, rawValueText)
+  const boxedValue = sidecarStoredValueText(ctx, operation, rawValueText)
   if (leaf.representation.kind === 'dynamic' && boxedValue !== null) {
     return `${leaf.text}.setProperty(${propertyKey}, ${boxedValue});`
   }
@@ -1503,14 +1508,14 @@ const unionLeafSetText = (
 }
 
 /** The written value in the boxed carrier an arm's expando sidecar holds, or `null` when it has no boxed store. */
-const sidecarStoredValueText = (operation: SetOperation | DefineOwnPropertyOperation, valueText: string): string | null => {
+const sidecarStoredValueText = (ctx: EmitContext, operation: SetOperation | DefineOwnPropertyOperation, valueText: string): string | null => {
   const boxed: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
   // `widenedStoreText` answers `null` for a value ALREADY in the held carrier
   // -- no widening to do -- which is not the same null as "cannot be stored":
   // a declared-`any` value written through a union's dynamic arm is the box
   // itself.
   if (representationKey(operation.value.representation) === representationKey(boxed)) return valueText
-  return widenedStoreText(boxed, operation.value.representation, valueText)
+  return operationConversionText(ctx, operation, 'dynamic-write', operation.value.representation, boxed, valueText)
 }
 
 /**
@@ -1561,7 +1566,7 @@ const emitTaggedUnionNativeSidecarSet = (ctx: EmitContext, lines: string[], oper
     return operation.strict ? `gea::host::throwRuntimeError("TypeError", "Cannot create property on a primitive value");` : `(void)0;`
   }
   const sidecarValue = (): string => {
-    const value = sidecarStoredValueText(operation, valueText)
+    const value = sidecarStoredValueText(ctx, operation, valueText)
     if (value === null) {
       throw createCppEmitBlockedError(
         'property-access:tagged-union(native-sidecar-arms):set:true',

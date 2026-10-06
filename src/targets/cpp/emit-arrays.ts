@@ -1,4 +1,3 @@
-import type { HoistPlan } from '../../ir/hoist.js'
 import { pcmMapOfLoop } from '../../ir/pcm-loops.js'
 import { realmBindingName } from './realm-storage.js'
 import { regexpRoleOf } from './prototype/emit-prototype-regexp.js'
@@ -15,10 +14,12 @@ import {
   type NaturalLoop
 } from '../../ir/dominance.js'
 import { operandsOfIrOperation, resultOfIrOperation } from '../../ir/queries.js'
-import { containsUnresolved, representationKey, type RecordField, type Representation } from '../../representation/model.js'
-import { admittedDenseLoopPlanOf, denseLoopsOf, type DenseArray, type DenseReference } from '../../ir/dense-loops.js'
+import { representationKey, type Representation } from '../../representation/model.js'
+import type { RecordToArrayPlan } from '../../conversion/structural-plan.js'
+import { admittedDenseLoopPlanOf, type DenseArray, type DenseReference } from '../../ir/dense-loops.js'
 import {
   bindingReference,
+  copiedCaptureName,
   declareCell,
   defineValueAlias,
   cppDenseDivisorName,
@@ -41,7 +42,7 @@ import { readsCell } from './deferral-safety.js'
 import { cellValueText } from './emit-bindings.js'
 import { alignedText } from './emit-callable.js'
 import { cppConstantLiteral, cppNarrowedIntegerType, cppRecordFieldName, cppTypeOf, cppScalarType } from './types.js'
-import { alignedValueText, narrowedLoadText, widenedStoreText } from './emit-narrowing.js'
+import { alignedValueText, namedConversionText, type ConversionSite } from './emit-narrowing.js'
 import { arrayBulkAppendMethodName } from './prototype/emit-prototype-array.js'
 
 /**
@@ -942,9 +943,13 @@ const denseCellName = (ctx: EmitContext, declaration: DeclarationId): string | n
   // A buffer cell is a string, not an array a dense window or a fill loop could address.
   if (ctx.charCodeBuffers.cells.has(declaration)) return null
   if (placement.storage.kind === 'region') return realmBindingName(ctx.placements, declaration)
-  if (placement.storage.kind !== 'local' || placement.storage.owner !== ctx.owner) return null
+  if (placement.storage.kind !== 'local') return null
   if (ctx.captures.isBoxed(declaration)) return null
-  return bindingReference(ctx, declaration, 'a dense Array window').name
+  if (placement.storage.owner === ctx.owner) return bindingReference(ctx, declaration, 'a dense Array window').name
+  // A parallel region's row callback reads every array it indexes as a
+  // capture, and without this each element read paid the bounds and view
+  // checks the window hoists.
+  return copiedCaptureName(ctx, declaration)
 }
 
 /** One dense-window operand as a `long long`; the census already narrowed most of them, and the rest are ordinary `number` cells. */
@@ -974,8 +979,9 @@ const denseIntegerText = (ctx: EmitContext, operand: IrOperand): string =>
  * until a `%` compute actually renders (`emit.ts`'s `emitBinaryOperation`),
  * which is why that one field, alone of this group, is on the whitelist.
  */
-export const admitDenseWindows = (ctx: EmitContext, prepass: EmitBodyPrepassFacts, body: IrBody, hoists: HoistPlan): void => {
-  const plan = denseLoopsOf(body, hoists)
+export const admitDenseWindows = (ctx: EmitContext, prepass: EmitBodyPrepassFacts, body: IrBody): void => {
+  const plan = body.denseLoopPlan
+  if (plan === undefined) throw new Error(`body ${body.owner} has no certified dense-loop plan`)
   if (plan.arrays.length === 0) return
   const admitted = admittedDenseLoopPlanOf(plan, ctx.integerValues, (declaration) => denseCellName(ctx, declaration) !== null)
   for (const [operation, access] of admitted.accesses) prepass.denseAccesses.set(operation, access)
@@ -1012,12 +1018,15 @@ const denseHolderOf = (ctx: EmitContext, lines: string[], reference: DenseRefere
   if (reference.kind === 'cell') {
     const name = denseCellName(ctx, reference.declaration)
     if (name === null) return null
-    const held = ctx.placements.get(reference.declaration)?.representation
-    return { text: (held && narrowedLoadText(held, reference.representation, name)) ?? name, guard: [] }
+    if (reference.conversion === undefined) throw new Error(`dense cell ${reference.declaration} has no certified conversion`)
+    const converted = namedConversionText(ctx, 'emit-arrays.ts:dense-cell', reference.conversion, name)
+    return converted === null ? null : { text: converted, guard: [] }
   }
   if (reference.kind === 'value') {
     const stored = operandText(ctx, reference.operand)
-    return { text: narrowedLoadText(reference.storage, reference.operand.representation, stored) ?? stored, guard: [] }
+    if (reference.conversion === undefined) throw new Error(`dense value ${reference.operand.value} has no certified conversion`)
+    const converted = namedConversionText(ctx, 'emit-arrays.ts:dense-value', reference.conversion, stored)
+    return converted === null ? null : { text: converted, guard: [] }
   }
   const holder = denseHolderOf(ctx, lines, reference.holder, array)
   if (holder === null) return null
@@ -1126,84 +1135,19 @@ export const emitDenseSetup = (ctx: EmitContext, lines: string[], blockId: IrBlo
   }
 }
 
-/**
- * A record whose fields are a closed, contiguous run of numeric keys --
- * `0`, `1`, ... with no gap -- poured into the array it physically is.
- *
- * `semantics/normalize/structural.ts`'s `restParameterArrayElementAt` is what
- * makes this pairing reachable at all: an unannotated `...rest` parameter's
- * checker type is a tuple with optional trailing elements (an overloaded call
- * shape or a signature's own optional tail), and that function collapses
- * `rest` ITSELF to the array it is at runtime. But every other place the SAME
- * open-arity tuple still surfaces -- the enclosing function's OWN callable
- * ABI, still stated from the checker's tuple type -- keeps publishing the
- * `record(0?:..., 1?:...)` view, and a call site that reads `rest[0]`/
- * `rest[1]` needs a real conversion between the two, not a second producer
- * disagreeing with the first about which one is true.
- *
- * Every field must convert into the array's ONE element carrier
- * (`widenedStoreText`, asked rather than restated -- the identical function
- * `registry.widening`'s dynamic-target branch calls, so a field that boxes
- * into a `dynamic` element today boxes it the same way tomorrow). A record
- * with accessors, zero fields, or a non-contiguous key set is refused: the
- * first has no storage to read positionally, the second has no element type
- * to publish, and the third is not this shape at all -- `tuple-destructuring.
- * ts`'s `representationIsPositionalTupleRecord` asks the identical question
- * for a destructuring read, kept as a separate, smaller local check here
- * rather than imported, since `targets/cpp` does not depend on `preflight`.
- *
- * `field.required` (model.ts) is not consulted, for the same reason
- * `records.ts`'s own field-layout renderer does not: an optional field's
- * struct member is unconditionally present today (no physical presence bit),
- * so there is no runtime state to ask -- every field converts and every
- * element pushes, an array of exactly `source.fields.length` elements. A
- * caller that omitted a trailing argument the checker allowed and a caller
- * that passed one explicitly are indistinguishable at this carrier, which is
- * the same fidelity gap `records.ts` already documents rather than a new one
- * introduced here.
- */
-export const recordCastableToArray = (
-  source: Extract<Representation, { kind: 'record' }>,
-  target: Extract<Representation, { kind: 'array-object' }>
-): boolean => {
-  if (source.accessors.length > 0) return false
-  if (source.fields.length === 0) return false
-  if (target.ownership !== 'shared-refcount') return false
-  if (!source.fields.every((field, index) => field.key === String(index))) return false
-  // `widenedStoreText` returns null both when no widening exists AND when the
-  // two representations already match (its own top-line sentinel: "nothing to
-  // convert"). Treating both as failure rejected every field already carrying
-  // the target's element representation -- the exact shape of the rest-array
-  // case, where the first field is already `dynamic` and only the trailing
-  // optional field needs boxing. A field counts as castable if it either has
-  // a real widening text or is already representation-identical to the target.
-  // A PROBE: "false" is legitimate, so lattice bottom is caught here, not
-  // left to crash `widenedStoreText` deeper in (mongodb's `Filter`).
-  if (containsUnresolved(target.element)) return false
-  const targetKey = representationKey(target.element)
-  const castable = (field: RecordField): boolean =>
-    representationKey(field.value) === targetKey || widenedStoreText(target.element, field.value, '') !== null
-  return source.fields.every((field) => !containsUnresolved(field.value) && castable(field))
-}
-
-export const recastedRecordToArrayText = (
-  source: Extract<Representation, { kind: 'record' }>,
-  target: Extract<Representation, { kind: 'array-object' }>,
-  text: string
-): string | null => {
-  if (!recordCastableToArray(source, target)) return null
+/** The tuple conversion authority already chose every leaf; this only reads native fields and spells their recipes. */
+export const recastedRecordToArrayText = (ctx: ConversionSite, plan: RecordToArrayPlan, text: string): string | null => {
+  const { source, target } = plan
   const fieldArrow = source.ownership === 'shared-refcount' ? '->' : '.'
   const elementType = cppTypeOf(target.element)
-  const pushes = source.fields
-    .map((field) => {
-      const raw = `gea_from${fieldArrow}${cppRecordFieldName(field.key)}`
-      // `widenedStoreText` returns `null` for "already the array's own element
-      // carrier, nothing to convert" -- `raw` unchanged is that value, the
-      // identical fallback its every other caller in this file uses.
-      return `gea_arr->push(${widenedStoreText(target.element, field.value, raw) ?? raw});`
-    })
-    .join(' ')
-  return `[](const ${cppTypeOf(source)}& gea_from) { auto gea_arr = gea::makeRef<gea::ArrayObject<${elementType}>>(); ${pushes} return gea_arr; }(${text})`
+  const pushes: string[] = []
+  for (const { field, conversion } of plan.fields) {
+    const raw = `gea_from${fieldArrow}${cppRecordFieldName(field.key)}`
+    const converted = namedConversionText(ctx, 'emit-arrays.ts:tuple-field', conversion, raw)
+    if (converted === null) return null
+    pushes.push(`gea_arr->push(${converted});`)
+  }
+  return `[](const ${cppTypeOf(source)}& gea_from) { auto gea_arr = gea::makeRef<gea::ArrayObject<${elementType}>>(); ${pushes.join(' ')} return gea_arr; }(${text})`
 }
 
 /** Guard the entire window before bypassing any observable indexed operation. */

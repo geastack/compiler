@@ -1,13 +1,10 @@
-// A formal fed from a value the census cannot see into -- here a field of a
-// record parsed from JSON, as bson's `options.index` is filled from dynamic
-// options -- keeps every offset derived from it a double. The body gets an
-// integer version entered after testing the argument, and the original keeps
-// every other Number: a fraction, -0, or a value past 2^53.
+// An unproved Number from JSON keeps one general body. Integer, fractional,
+// and negative-zero calls must retain their behavior without speculative copies.
 //! expect: 9 2 1
 //! expect: 0 0 1
 //! expect: 3 -0 1
-//! emitted-has: gea::carriesExactInteger(
-//! emitted-has: _integral(
+//! emitted-lacks: gea::carriesExactInteger(
+//! emitted-lacks: _integral(
 
 function scan(bytes: Uint8Array, start: number): string {
   let offset = start

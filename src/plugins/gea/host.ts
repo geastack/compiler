@@ -1,5 +1,6 @@
 import { createHostPackageLoader } from '../host-package.js'
-import type { CommonJsWrapperDeclaration } from '../model.js'
+import { dirname, resolve } from 'node:path'
+import type { CommonJsWrapperDeclaration, NativeHostFunctionDeclaration, PluginOptions } from '../model.js'
 import type {
   HostCallSpelling,
   HostConstructor,
@@ -115,6 +116,7 @@ interface GeaHostShimSlice {
   readonly hostNamespacePropertyAccessors?: Readonly<Record<string, readonly string[]>>
   readonly hostNamespacePropertySetters?: Readonly<Record<string, Readonly<Record<string, string>>>>
   readonly embeddedHostFunctions?: Readonly<Record<string, string>>
+  readonly nativeFunctionSignatureSources?: Readonly<Record<string, { readonly packageName: string; readonly header: string }>>
   readonly embeddedHostConstants?: Readonly<Record<string, { readonly emit?: string }>>
   readonly hostExternDeclarations?: Readonly<Record<string, readonly string[]>>
   /**
@@ -497,6 +499,35 @@ export const geaHostNamespacePropertySetters = (): ReadonlyMap<string, string> =
 
 /** The host's free functions, by the name the program writes. */
 export const geaHostFunctions = (): ReadonlyMap<string, string> => flatTable(geaShims()?.embeddedHostFunctions)
+
+export const geaNativeFunctionDeclarations = (options: PluginOptions): readonly NativeHostFunctionDeclaration[] => {
+  const sources = geaShims()?.nativeFunctionSignatureSources ?? {}
+  if (Object.keys(sources).length === 0) return []
+  const coreRoot =
+    options.get('gea.native-signature-core-root') ??
+    process.env.GEA_CORE_DIR ??
+    dirname(packageLoader.resolve('@geastack/core/package.json'))
+  const functions = geaHostFunctions()
+  return Object.entries(sources).map(([name, source]) => {
+    const cppFunction = functions.get(name)
+    if (cppFunction === undefined) throw new Error(`Native signature source has no host function mapping: ${name}`)
+    const packageRoot =
+      source.packageName === '@geastack/host'
+        ? (options.get('gea.native-signature-host-root') ??
+          process.env.GEA_HOST_DIR ??
+          dirname(packageLoader.resolve(`${source.packageName}/package.json`)))
+        : dirname(packageLoader.resolve(`${source.packageName}/package.json`))
+    return {
+      declarationFileName: resolve(coreRoot, 'index.d.ts'),
+      declarationName: name,
+      inspection: {
+        cppFunction,
+        headers: [resolve(packageRoot, source.header)],
+        ...(options.get('gea.native-signature-compiler') ? { compiler: options.get('gea.native-signature-compiler')! } : {})
+      }
+    }
+  })
+}
 
 /**
  * `new <AmbientConstructor>(...)` spellings, transposed from the package's own

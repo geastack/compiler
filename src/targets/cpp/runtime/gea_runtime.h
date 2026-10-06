@@ -59,6 +59,9 @@
 #include "gea_pcm.h"
 #if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
 #include <thread>
+#if defined(__linux__)
+#include <malloc.h>
+#endif
 #endif
 
 /**
@@ -303,7 +306,16 @@ inline void flushAllOutput() {
  */
 inline std::terminate_handler previousTerminateHandler = nullptr;
 
+/**
+ * Names the value an uncaught throw carried, set once `gea::Value` is complete.
+ * Without it a program that dies on an uncaught throw says only "abort": on a
+ * microcontroller the console is not even up during module evaluation, so the
+ * one record left is the panic dump, which must therefore carry the message.
+ */
+inline void (*describeUncaught)() = nullptr;
+
 inline void flushThenTerminate() {
+  if (describeUncaught != nullptr) describeUncaught();
   flushAllOutput();
   if (previousTerminateHandler != nullptr) previousTerminateHandler();
   std::abort();
@@ -313,6 +325,105 @@ inline const bool terminateFlushInstalled = [] {
   previousTerminateHandler = std::set_terminate(&flushThenTerminate);
   return true;
 }();
+
+/**
+ * Integer views of a double read from its bits. On a core with no
+ * double-precision FPU (ESP32 Xtensa, the single-precision RISC-V parts) every
+ * `double` compare and conversion is a soft-float libcall, so the canonical
+ * index test `key >= 0 && key < 2^32-1 && key == double(uint32_t(key))` costs
+ * four calls per array access. The exponent and mantissa answer the same
+ * question with a handful of integer instructions. Cores with a double FPU keep
+ * the arithmetic spelling, which is already a few instructions there.
+ */
+#ifndef GEA_SOFT_DOUBLE
+#if (defined(__riscv) && (!defined(__riscv_flen) || __riscv_flen < 64)) || defined(__XTENSA__)
+#define GEA_SOFT_DOUBLE 1
+#else
+#define GEA_SOFT_DOUBLE 0
+#endif
+#endif
+
+/** `value` as an integer of magnitude at most 2^53, or false. -0 answers 0. */
+[[gnu::always_inline]] inline bool doubleBitsInteger(double value, std::int64_t& out) {
+  std::uint64_t bits;
+  std::memcpy(&bits, &value, sizeof bits);
+  const bool negative = (bits >> 63) != 0;
+  const int exponent = static_cast<int>((bits >> 52) & 0x7ff) - 1023;
+  if (exponent < 0) {
+    if ((bits << 1) != 0) return false;
+    out = 0;
+    return true;
+  }
+  if (exponent > 53) return false;
+  const std::uint64_t mantissa = (bits & ((std::uint64_t{1} << 52) - 1)) | (std::uint64_t{1} << 52);
+  std::uint64_t magnitude;
+  if (exponent >= 52) {
+    magnitude = mantissa << (exponent - 52);
+    if (magnitude > (std::uint64_t{1} << 53)) return false;
+  } else {
+    const int shift = 52 - exponent;
+    if ((mantissa & ((std::uint64_t{1} << shift) - 1)) != 0) return false;
+    magnitude = mantissa >> shift;
+  }
+  out = negative ? -static_cast<std::int64_t>(magnitude) : static_cast<std::int64_t>(magnitude);
+  return true;
+}
+
+/**
+ * `trunc(value)` as an integer, or false for NaN, an infinity or |value| >= 2^63.
+ * `fractional` says whether anything was cut off. Integer instructions only: the
+ * `double`->`long long` cast and the compare that checks its range are each a
+ * soft-float libcall on a core without a double FPU. -0 and |value| < 1 answer 0.
+ */
+[[gnu::always_inline]] inline bool doubleBitsTruncate(double value, std::int64_t& out, bool& fractional) {
+  std::uint64_t bits;
+  std::memcpy(&bits, &value, sizeof bits);
+  const int exponent = static_cast<int>((bits >> 52) & 0x7ff) - 1023;
+  if (exponent < 0) {
+    fractional = (bits << 1) != 0;
+    out = 0;
+    return true;
+  }
+  if (exponent > 62) return false;
+  const std::uint64_t mantissa = (bits & ((std::uint64_t{1} << 52) - 1)) | (std::uint64_t{1} << 52);
+  std::uint64_t magnitude;
+  if (exponent >= 52) {
+    magnitude = mantissa << (exponent - 52);
+    fractional = false;
+  } else {
+    const int shift = 52 - exponent;
+    fractional = (mantissa & ((std::uint64_t{1} << shift) - 1)) != 0;
+    magnitude = mantissa >> shift;
+  }
+  out = (bits >> 63) != 0 ? -static_cast<std::int64_t>(magnitude) : static_cast<std::int64_t>(magnitude);
+  return true;
+}
+
+/** `value` as a canonical array index (ECMA-262 6.1.7: below 2^32-1), or false. */
+[[gnu::always_inline]] inline bool doubleArrayIndex(double value, std::uint32_t& out) {
+#if GEA_SOFT_DOUBLE
+  std::uint64_t bits;
+  std::memcpy(&bits, &value, sizeof bits);
+  if ((bits << 1) == 0) {
+    out = 0;
+    return true;
+  }
+  if ((bits >> 63) != 0) return false;
+  const int exponent = static_cast<int>(bits >> 52) - 1023;
+  if (exponent < 0 || exponent > 31) return false;
+  const std::uint64_t mantissa = (bits & ((std::uint64_t{1} << 52) - 1)) | (std::uint64_t{1} << 52);
+  const int shift = 52 - exponent;
+  if ((mantissa & ((std::uint64_t{1} << shift) - 1)) != 0) return false;
+  const std::uint64_t index = mantissa >> shift;
+  if (index >= 4294967295u) return false;
+  out = static_cast<std::uint32_t>(index);
+  return true;
+#else
+  if (!(value >= 0.0 && value < 4294967295.0)) return false;
+  out = static_cast<std::uint32_t>(value);
+  return value == static_cast<double>(out);
+#endif
+}
 
 }  // namespace detail
 
@@ -324,6 +435,18 @@ inline const bool terminateFlushInstalled = [] {
 inline bool denseIndexWindow(std::size_t size, double seed, double base, double bound,
                              double step, bool inclusive, bool widened) {
   constexpr double limit = 9007199254740991.0;
+#if GEA_SOFT_DOUBLE
+  constexpr std::int64_t safe = 9007199254740991;
+  std::int64_t seedInt, baseInt, boundInt, stepInt;
+  const auto integral = [](double value, std::int64_t& out) __attribute__((always_inline)) {
+    return detail::doubleBitsInteger(value, out) && out >= -safe && out <= safe;
+  };
+  if (!integral(seed, seedInt) || !integral(base, baseInt) || !integral(bound, boundInt) ||
+      !integral(step, stepInt) || stepInt < 0)
+    return false;
+  const auto low = baseInt + seedInt;
+  const auto high = baseInt + boundInt + (widened ? stepInt : 0) + (inclusive ? 1 : 0);
+#else
   const auto integral = [](double value) {
     return value >= -9007199254740991.0 && value <= 9007199254740991.0 &&
            static_cast<double>(static_cast<std::int64_t>(value)) == value;
@@ -332,6 +455,7 @@ inline bool denseIndexWindow(std::size_t size, double seed, double base, double 
   const auto low = static_cast<std::int64_t>(base) + static_cast<std::int64_t>(seed);
   const auto high = static_cast<std::int64_t>(base) + static_cast<std::int64_t>(bound) +
                     (widened ? static_cast<std::int64_t>(step) : 0) + (inclusive ? 1 : 0);
+#endif
   return low >= 0 && high >= low && high <= static_cast<std::int64_t>(limit) &&
          static_cast<std::uint64_t>(high) <= size;
 }
@@ -947,26 +1071,224 @@ inline std::string concatStrings(std::initializer_list<std::string_view> pieces)
   return result;
 }
 
+// Concatenation pieces are mostly a few bytes (a literal, a formatted
+// number), where a `memcpy` call costs more than the copy. Two overlapping
+// loads and stores of one width cover any length in [width, 2 * width] and
+// touch no byte outside the piece or the destination.
+[[gnu::always_inline]] inline void copyPieceBytes(char* to, const char* from, std::size_t length) {
+  if (length > 16) {
+    std::memcpy(to, from, length);
+  } else if (length >= 8) {
+    std::uint64_t first, last;
+    std::memcpy(&first, from, 8);
+    std::memcpy(&last, from + length - 8, 8);
+    std::memcpy(to, &first, 8);
+    std::memcpy(to + length - 8, &last, 8);
+  } else if (length >= 4) {
+    std::uint32_t first, last;
+    std::memcpy(&first, from, 4);
+    std::memcpy(&last, from + length - 4, 4);
+    std::memcpy(to, &first, 4);
+    std::memcpy(to + length - 4, &last, 4);
+  } else if (length != 0) {
+    to[0] = from[0];
+    to[length / 2] = from[length / 2];
+    to[length - 1] = from[length - 1];
+  }
+}
+
+// `out = concatStrings(pieces)`, built in `out` itself: no temporary to move in
+// afterwards (the emitter's `stringStoreText` says why that move was worth
+// removing), and `out`'s own capacity is reused when it already suffices. A
+// piece that views `out` is read before `out` changes, so that case takes the
+// temporary.
+namespace detail {
+// The rare halves kept out of line, so the inlined common path is the copy alone.
+[[gnu::noinline]] inline void concatStringsAliased(std::string& out, std::initializer_list<std::string_view> pieces) {
+  out = concatStrings(pieces);
+}
+[[gnu::noinline]] inline void appendStringsAliased(std::string& target, std::initializer_list<std::string_view> pieces) {
+  target += concatStrings(pieces);
+}
+[[gnu::noinline, noreturn]] inline void stringLengthExceeded() { throw std::length_error("string concatenation exceeds max_size"); }
+// Pieces copied end to end from `buffer`, the terminator after them, and the
+// length stored: one pass rather than an `_M_append` per piece rechecking the
+// capacity. The length is the word after the data pointer, as
+// `GEA_FAST_SMALL_STRING_COPY` below relies on too (defined after this point).
+[[gnu::always_inline]] inline void fillPieces(std::string& out, char* buffer, std::initializer_list<std::string_view> pieces, std::size_t length) {
+  for (auto piece : pieces) {
+    copyPieceBytes(buffer, piece.data(), piece.size());
+    buffer += piece.size();
+  }
+  *buffer = '\0';
+  std::memcpy(reinterpret_cast<char*>(&out) + sizeof(void*), &length, sizeof(length));
+}
+}  // namespace detail
+
+// Inlined: the emitter passes a fixed list, so piece count and every literal's
+// size are constants at the call site and each copy is a few fixed moves.
+[[gnu::always_inline]] inline void concatStringsInto(std::string& out, std::initializer_list<std::string_view> pieces) {
+  const auto begin = reinterpret_cast<std::uintptr_t>(out.data());
+  const auto end = begin + out.capacity() + 1;
+  std::size_t total = 0;
+  bool aliases = false;
+  for (auto piece : pieces) {
+    const auto at = reinterpret_cast<std::uintptr_t>(piece.data());
+    aliases = aliases || (piece.size() != 0 && at >= begin && at < end);
+    total += piece.size();
+  }
+  if (aliases) [[unlikely]] {
+    detail::concatStringsAliased(out, pieces);
+    return;
+  }
+  if (total > out.max_size()) [[unlikely]] detail::stringLengthExceeded();
+  // A string past the inline buffer keeps sixteen spare bytes, so a short
+  // tail appended to it later (`appendedStrings`) stays in place instead of
+  // reallocating. A buffer that already holds `total` is kept as it is.
+  if (out.capacity() < total) [[unlikely]] {
+    out.clear();
+    out.reserve(total + 16);
+  }
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI
+  detail::fillPieces(out, out.data(), pieces, total);
+#else
+  out.clear();
+  for (auto piece : pieces) out.append(piece.data(), piece.size());
+#endif
+}
+
+namespace detail {
+template <typename Piece>
+concept DigitWordPiece = requires(const Piece& piece) {
+  { piece.digitWord() } -> std::same_as<std::uint64_t>;
+  { piece.digitCount() } -> std::same_as<std::size_t>;
+};
+template <typename Piece>
+[[gnu::always_inline]] inline std::string_view pieceView(const Piece& piece) {
+  if constexpr (std::is_array_v<Piece>) return std::string_view(piece, __builtin_strlen(piece));
+  else return std::string_view(piece);
+}
+template <typename Piece>
+[[gnu::always_inline]] inline std::size_t pieceSize(const Piece& piece) {
+  if constexpr (DigitWordPiece<Piece>) {
+    if (piece.digitWord() != 0) return piece.digitCount();
+  }
+  return pieceView(piece).size();
+}
+// Literals and formatted numbers own their bytes; anything else may view the destination.
+template <typename Piece>
+[[gnu::always_inline]] inline bool pieceViews(const Piece& piece, std::uintptr_t begin, std::uintptr_t end) {
+  if constexpr (std::is_array_v<Piece> || DigitWordPiece<Piece>) {
+    return false;
+  } else {
+    const auto view = pieceView(piece);
+    const auto at = reinterpret_cast<std::uintptr_t>(view.data());
+    return view.size() != 0 && at >= begin && at < end;
+  }
+}
+// A formatted number's digits go from the register they were computed in to
+// the destination as one store when eight bytes fit before `limit`. Copying
+// them out of the formatter's buffer instead loads across offsets of the one
+// store that wrote them, and that load cannot forward.
+template <typename Piece>
+[[gnu::always_inline]] inline char* writePiece(char* to, const char* limit, const Piece& piece) {
+  if constexpr (DigitWordPiece<Piece>) {
+    const std::uint64_t word = piece.digitWord();
+    if (word != 0 && to + 8 <= limit) {
+      std::memcpy(to, &word, 8);
+      return to + piece.digitCount();
+    }
+  }
+  const auto view = pieceView(piece);
+  copyPieceBytes(to, view.data(), view.size());
+  return to + view.size();
+}
+template <typename... Pieces>
+[[gnu::always_inline]] inline void fillTypedPieces(std::string& out, char* buffer, std::size_t length, const Pieces&... pieces) {
+  const char* const limit = out.data() + out.capacity() + 1;
+  ((buffer = writePiece(buffer, limit, pieces)), ...);
+  *buffer = '\0';
+  std::memcpy(reinterpret_cast<char*>(&out) + sizeof(void*), &length, sizeof(length));
+}
+}  // namespace detail
+
+// The emitter's spelling of `concatStringsInto` and `appendStrings`: the pieces
+// as written, each keeping its own type, so a literal's size is a constant and
+// a formatted number is stored straight from its register.
+template <typename... Pieces> requires(sizeof...(Pieces) > 0)
+[[gnu::always_inline]] inline void concatStringsInto(std::string& out, const Pieces&... pieces) {
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI
+  const auto begin = reinterpret_cast<std::uintptr_t>(out.data());
+  const auto end = begin + out.capacity() + 1;
+  if ((detail::pieceViews(pieces, begin, end) || ...)) [[unlikely]] {
+    detail::concatStringsAliased(out, {detail::pieceView(pieces)...});
+    return;
+  }
+  const std::size_t total = (detail::pieceSize(pieces) + ...);
+  if (total > out.max_size()) [[unlikely]] detail::stringLengthExceeded();
+  if (out.capacity() < total) [[unlikely]] {
+    out.clear();
+    out.reserve(total + 16);
+  }
+  detail::fillTypedPieces(out, out.data(), total, pieces...);
+#else
+  concatStringsInto(out, {std::string_view(pieces)...});
+#endif
+}
+
 // Append several already-evaluated pieces with one destination capacity check.
 // A piece may view the destination (`s += s + s`), so detect that before a
 // reserve can invalidate its view and snapshot only that aliasing case.
-inline void appendStrings(std::string& target, std::initializer_list<std::string_view> pieces) {
+[[gnu::always_inline]] inline void appendStrings(std::string& target, std::initializer_list<std::string_view> pieces) {
   const auto begin = reinterpret_cast<std::uintptr_t>(target.data());
   const auto end = begin + target.size();
+  const std::size_t size = target.size();
   std::size_t added = 0;
   bool aliases = false;
   for (auto piece : pieces) {
-    if (piece.size() > target.max_size() - target.size() - added) throw std::length_error("string append exceeds max_size");
     added += piece.size();
     const auto data = reinterpret_cast<std::uintptr_t>(piece.data());
     aliases = aliases || (data >= begin && data <= end);
   }
-  if (aliases) {
-    target += concatStrings(pieces);
+  if (aliases) [[unlikely]] {
+    detail::appendStringsAliased(target, pieces);
     return;
   }
-  target.reserve(target.size() + added);
+  if (added > target.max_size() - size) [[unlikely]] detail::stringLengthExceeded();
+  if (target.capacity() - size < added) [[unlikely]] target.reserve(size + added);
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI
+  detail::fillPieces(target, target.data() + size, pieces, size + added);
+#else
   for (auto piece : pieces) target.append(piece.data(), piece.size());
+#endif
+}
+
+template <typename... Pieces> requires(sizeof...(Pieces) > 0)
+[[gnu::always_inline]] inline void appendStrings(std::string& target, const Pieces&... pieces) {
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI
+  const auto begin = reinterpret_cast<std::uintptr_t>(target.data());
+  const std::size_t size = target.size();
+  // `<=` past the end, as the list form: a view starting at the terminator still names this storage.
+  if ((detail::pieceViews(pieces, begin, begin + size + 1) || ...)) [[unlikely]] {
+    detail::appendStringsAliased(target, {detail::pieceView(pieces)...});
+    return;
+  }
+  const std::size_t added = (detail::pieceSize(pieces) + ...);
+  if (added > target.max_size() - size) [[unlikely]] detail::stringLengthExceeded();
+  if (target.capacity() - size < added) [[unlikely]] target.reserve(size + added);
+  detail::fillTypedPieces(target, target.data() + size, size + added, pieces...);
+#else
+  appendStrings(target, {std::string_view(pieces)...});
+#endif
+}
+
+// `head + pieces` where nothing reads `head` afterwards: the pieces go into the
+// buffer `head` already owns (`concatStringsInto` leaves room for a short tail)
+// rather than all of it being copied into a new allocation.
+inline std::string appendedStrings(std::string&& head, std::initializer_list<std::string_view> pieces) {
+  std::string out = std::move(head);
+  appendStrings(out, pieces);
+  return out;
 }
 
 namespace detail {
@@ -1413,8 +1735,10 @@ struct DeferredCount {
 
 /** A size class's free cells left in a region's chunks at its end, handed to the joining thread's own pool. */
 struct Donation {
-  void (*donate)(void* head);
+  void (*donate)(void* head, void* tail);
   void* head;
+  /** The list's last cell, kept as it was built: the join splices, it does not walk. */
+  void* tail;
 };
 
 struct ThreadRegion {
@@ -1680,6 +2004,12 @@ struct AllocationPool {
   struct RegionCells {
     std::uint64_t tag = 0;
     Cell* available = nullptr;
+    // Cells are pushed and popped at the head, so the cell pushed onto an
+    // empty list stays last until the list empties. Walking to it at the join
+    // instead was serial work over every cell a region freed: binary-trees'
+    // 52 million nodes held the joining thread for 50 ms after every worker
+    // had finished.
+    Cell* tail = nullptr;
   };
   static RegionCells& regionCells() {
     static thread_local RegionCells cells;
@@ -1690,6 +2020,7 @@ struct AllocationPool {
     if (cells.tag != region.tag) [[unlikely]] {
       cells.tag = region.tag;
       cells.available = nullptr;
+      cells.tail = nullptr;
       region.donors.push_back(&donateRegionCells);
     }
     return cells;
@@ -1698,14 +2029,14 @@ struct AllocationPool {
   static void donateRegionCells() {
     auto& cells = regionCells();
     if (cells.available != nullptr && parallel::activeRegion != nullptr)
-      parallel::activeRegion->donations.push_back({&adoptDonatedCells, cells.available});
+      parallel::activeRegion->donations.push_back({&adoptDonatedCells, cells.available, cells.tail});
     cells.available = nullptr;
+    cells.tail = nullptr;
     cells.tag = 0;
   }
   /** Runs on the joining thread: the region's leftover cells join its ordinary free list. */
-  static void adoptDonatedCells(void* head) {
-    Cell* tail = static_cast<Cell*>(head);
-    while (tail->next != nullptr) tail = tail->next;
+  static void adoptDonatedCells(void* head, void* last) {
+    Cell* tail = static_cast<Cell*>(last);
     auto& available = state().available;
     tail->next = available;
     available = static_cast<Cell*>(head);
@@ -1721,6 +2052,7 @@ struct AllocationPool {
   [[gnu::noinline]] static void giveInRegion(parallel::ThreadRegion& region, void* block) {
     auto& cells = regionCellsFor(region);
     Cell* cell = static_cast<Cell*>(block);
+    if (cells.available == nullptr) cells.tail = cell;
     cell->next = cells.available;
     cells.available = cell;
   }
@@ -2602,6 +2934,86 @@ inline void ageDipCache(CycleState& state) {
 }
 
 /**
+ * Scratch storage for the cycle collector's graph (`collectReferenceCycles`).
+ *
+ * The graph is kept between collections and only ever grows, and a full trace
+ * spans the whole reachable heap. As one `std::vector` it doubles into a
+ * single contiguous block: Skytail on the ESP32-S31 traces ~8k nodes, so
+ * crossing that asks for 448 KB in one piece, long after PSRAM has fragmented
+ * below that -- and a board's `operator new` aborts rather than throws. On a
+ * board the graph therefore lives in fixed chunks taken with nothrow `new`: no
+ * request is ever larger than one chunk, and a refused chunk is `bad_alloc`,
+ * which the collector turns into "try again at the next collection".
+ * A host keeps `std::vector`, whose indexing the trace loop is tuned around.
+ */
+// Thrown only by the board's graph storage, so a collection gives up quietly
+// on its own scratch space and nothing else: a tracer's or destructor's
+// `bad_alloc` still propagates exactly as before.
+struct CycleGraphExhausted : std::bad_alloc {};
+#if defined(GEA_EMBEDDED_CPP_BOARD)
+template <typename T, unsigned Shift>
+class CycleGraphStorage {
+  static_assert(std::is_trivially_destructible_v<T>, "chunks are freed without running destructors");
+  static constexpr std::size_t chunkLength = std::size_t{1} << Shift;
+  static constexpr std::size_t chunkMask = chunkLength - 1;
+
+ public:
+  CycleGraphStorage() = default;
+  CycleGraphStorage(const CycleGraphStorage&) = delete;
+  CycleGraphStorage& operator=(const CycleGraphStorage&) = delete;
+  ~CycleGraphStorage() {
+    for (T* chunk : chunks_) ::operator delete(chunk);
+  }
+  std::size_t size() const { return size_; }
+  bool empty() const { return size_ == 0; }
+  T& operator[](std::size_t index) { return chunks_[index >> Shift][index & chunkMask]; }
+  const T& operator[](std::size_t index) const { return chunks_[index >> Shift][index & chunkMask]; }
+  void push_back(const T& value) {
+    if ((size_ >> Shift) == chunks_.size()) grow();
+    ::new (static_cast<void*>(&(*this)[size_])) T(value);
+    ++size_;
+  }
+  // Keeps the chunks: the next collection traces about as many nodes again.
+  void clear() { size_ = 0; }
+
+  template <typename Owner, typename Value>
+  class Iterator {
+   public:
+    Iterator(Owner* owner, std::size_t index) : owner_(owner), index_(index) {}
+    Value& operator*() const { return (*owner_)[index_]; }
+    Iterator& operator++() { ++index_; return *this; }
+    bool operator!=(const Iterator& other) const { return index_ != other.index_; }
+   private:
+    Owner* owner_;
+    std::size_t index_;
+  };
+  Iterator<CycleGraphStorage, T> begin() { return {this, 0}; }
+  Iterator<CycleGraphStorage, T> end() { return {this, size_}; }
+  Iterator<const CycleGraphStorage, const T> begin() const { return {this, 0}; }
+  Iterator<const CycleGraphStorage, const T> end() const { return {this, size_}; }
+
+ private:
+  void grow() {
+    void* memory = ::operator new(sizeof(T) * chunkLength, std::nothrow);
+    if (memory == nullptr) throw CycleGraphExhausted();
+    // The chunk table holds one pointer per chunk (a few dozen), so its own
+    // growth is never the large request this class exists to avoid.
+    try {
+      chunks_.push_back(static_cast<T*>(memory));
+    } catch (...) {
+      ::operator delete(memory);
+      throw;
+    }
+  }
+  std::vector<T*> chunks_;
+  std::size_t size_ = 0;
+};
+#else
+template <typename T, unsigned Shift>
+using CycleGraphStorage = std::vector<T>;
+#endif
+
+/**
  * The probe `bufferCycleCandidate` defers, over `list[from, end)`; entries
  * before `from` were probed by an earlier filter and are only checked for
  * death, and only when `prefix` (the collector needs every root alive; a
@@ -2919,9 +3331,10 @@ inline void collectReferenceCycles(bool full = false) {
     bool hadClippedEdge = false;
   };
   struct Graph {
-    std::vector<Node> nodes;
-    std::vector<std::uint32_t> edges;
-    std::vector<std::uint32_t> live;
+    // ~28 B nodes in 14 KB chunks, indices in 8 KB chunks (see CycleGraphStorage).
+    CycleGraphStorage<Node, 9> nodes;
+    CycleGraphStorage<std::uint32_t, 11> edges;
+    CycleGraphStorage<std::uint32_t, 11> live;
     bool indexed = false;
     // false = young: a `cycleMature` target not already in this graph is a
     // leaf (see the correctness comment above). true = full: trace through
@@ -3168,6 +3581,21 @@ inline void collectReferenceCycles(bool full = false) {
         if (--node.reference.counts->weak == 0) node.reference.operations->release(node.reference.counts);
       }
     }
+  } catch (const CycleGraphExhausted&) {
+    restorePins();
+    if (state.candidates.empty()) state.candidates.swap(roots);
+    else state.candidates.insert(state.candidates.end(), roots.begin(), roots.end());
+    graph.clear();
+    state.collecting = false;
+#if defined(GEA_EMBEDDED_CPP_BOARD)
+    // No room for the graph this time. Nothing was destroyed and every count
+    // and pin is restored, so the candidates simply wait for the next
+    // collection; the callers (frame end, quiescence) have no handler, and a
+    // board must not abort over scratch space.
+    return;
+#else
+    throw;
+#endif
   } catch (...) {
     restorePins();
     if (state.candidates.empty()) state.candidates.swap(roots);
@@ -3715,6 +4143,10 @@ class CycleCollectionDeferral {
 template <typename T>
 struct WeakRef;
 
+namespace host {
+[[noreturn]] inline void throwRuntimeError(const char* kind, const std::string& message);
+}
+
 namespace detail {
 /**
  * The one word every `Ref<T>` is: the object, erased.
@@ -3760,6 +4192,15 @@ struct Ref : detail::RefStorage {
   Ref() = default;
   Ref(std::nullptr_t) {}
 
+  // Null and undefined are different native absence states. Word 1 belongs
+  // to Optional<Ref>'s absent wrapper; word 2 is the strict unbound receiver.
+  static Ref undefined() {
+    Ref value;
+    value.erased_ = reinterpret_cast<void*>(static_cast<std::uintptr_t>(2));
+    return value;
+  }
+  bool isUndefined() const noexcept { return erased_ == reinterpret_cast<void*>(static_cast<std::uintptr_t>(2)); }
+
   // The handle's own copy, move, assignment and destruction are forced inline
   // so that a type holding two or three of them (`CallableObject`, a record
   // with `Ref` fields) has defaulted operators clang still inlines into the
@@ -3776,7 +4217,9 @@ struct Ref : detail::RefStorage {
   [[gnu::always_inline]] Ref(Ref&& other) noexcept : detail::RefStorage{other.erased_} { other.erased_ = nullptr; }
 
   template <typename Other, typename = std::enable_if_t<std::is_convertible_v<Other*, T*>>>
-  Ref(const Ref<Other>& other) : detail::RefStorage{static_cast<void*>(static_cast<T*>(other.get()))} {
+  Ref(const Ref<Other>& other)
+      : detail::RefStorage{other.isUndefined() ? reinterpret_cast<void*>(static_cast<std::uintptr_t>(2))
+                                             : static_cast<void*>(static_cast<T*>(other.get()))} {
     // A STANDALONE block may never be named by a handle of another type --
     // that is the whole of `refStandalone`'s contract, and both halves of a
     // block's addressing depend on it: `refCountsOf` subtracts
@@ -3833,7 +4276,7 @@ struct Ref : detail::RefStorage {
    * its own dip. A sole owner (`strong == 1`) takes the ordinary release.
    */
   [[gnu::always_inline]] void releaseSharedQuiet() {
-    if (erased_ == nullptr) return;
+    if (!ownsObject()) return;
 #if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
     if (detail::parallel::ThreadRegion* region = detail::parallel::foreignRegionFor(erased_)) [[unlikely]] {
       region->deferStrong(erased_, &deferredCountOperations, -1);
@@ -3851,10 +4294,16 @@ struct Ref : detail::RefStorage {
   }
 
   T* get() const { return pointer(); }
-  T* operator->() const { return pointer(); }
+  T* operator->() const {
+    if (!ownsObject()) host::throwRuntimeError("TypeError", isUndefined() ? "Cannot read properties of undefined" : "Cannot read properties of null");
+    return pointer();
+  }
   /** `add_lvalue_reference_t` rather than `T&`, for the same reason `std::shared_ptr` spells it that way: `Ref<void>` is the box's own storage, and `void&` is not a type. */
-  typename std::add_lvalue_reference<T>::type operator*() const { return *pointer(); }
-  explicit operator bool() const { return erased_ != nullptr; }
+  typename std::add_lvalue_reference<T>::type operator*() const {
+    if (!ownsObject()) host::throwRuntimeError("TypeError", isUndefined() ? "Cannot read properties of undefined" : "Cannot read properties of null");
+    return *pointer();
+  }
+  explicit operator bool() const { return ownsObject(); }
 
   /** The box (`gea::Value`) stores a `Ref<void>` and recovers the object with this, exactly where it used to call `std::static_pointer_cast`. */
   template <typename Other>
@@ -3864,14 +4313,14 @@ struct Ref : detail::RefStorage {
     // exact type.
     static_assert(std::is_same_v<Other, T> || !detail::refStandalone<T>,
                   "a standalone gea::Ref may not be cast to a handle of another type (see refStandalone)");
-    return Ref<Other>::adopt(static_cast<Other*>(pointer()), true);
+    return isUndefined() ? Ref<Other>::undefined() : Ref<Other>::adopt(static_cast<Other*>(pointer()), true);
   }
 
   template <typename Other>
   Ref<Other> staticCast() && {
     static_assert(std::is_same_v<Other, T> || !detail::refStandalone<T>,
                   "a standalone gea::Ref may not be cast to a handle of another type (see refStandalone)");
-    auto result = Ref<Other>::adopt(static_cast<Other*>(pointer()));
+    auto result = isUndefined() ? Ref<Other>::undefined() : Ref<Other>::adopt(static_cast<Other*>(pointer()));
     erased_ = nullptr;
     return result;
   }
@@ -3909,16 +4358,16 @@ struct Ref : detail::RefStorage {
 
   [[gnu::always_inline]] void retain() {
 #if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
-    if (erased_ != nullptr) {
+    if (ownsObject()) {
       if (detail::parallel::ThreadRegion* region = detail::parallel::foreignRegionFor(erased_)) [[unlikely]] {
         region->deferStrong(erased_, &deferredCountOperations, 1);
         return;
       }
     }
 #endif
-    if (erased_ != nullptr) ++detail::refCountsOf(pointer())->strong;
+    if (ownsObject()) ++detail::refCountsOf(pointer())->strong;
 #if defined(GEA_PROFILE_ALLOCATIONS)
-    if (erased_ != nullptr && static_cast<const void*>(erased_) == detail::leakProbeTarget()) detail::leakProbeEvent("retain", pointer(), detail::refCountsOf(pointer())->strong);
+    if (ownsObject() && static_cast<const void*>(erased_) == detail::leakProbeTarget()) detail::leakProbeEvent("retain", pointer(), detail::refCountsOf(pointer())->strong);
 #endif
   }
 
@@ -3944,12 +4393,12 @@ struct Ref : detail::RefStorage {
   // 128 KB) keeps one copy of the body per handle type instead of one per
   // handle that dies -- every temporary in a JSX template was one.
   void release() {
-    if (erased_ != nullptr) releaseOutOfLine(pointer());
+    if (ownsObject()) releaseOutOfLine(pointer());
   }
   [[gnu::noinline]] static void releaseOutOfLine(T* pointer) { Ref::releasePointer(pointer); }
 #else
   [[gnu::always_inline]] void release() {
-    if (erased_ != nullptr) releasePointer(pointer());
+    if (ownsObject()) releasePointer(pointer());
   }
 #endif
 
@@ -4058,7 +4507,8 @@ struct Ref : detail::RefStorage {
   }
 
   /** The object, typed: the base stores it erased so every handle type reads the one member under one access path (see `detail::RefStorage`). */
-  [[gnu::always_inline]] T* pointer() const { return static_cast<T*>(erased_); }
+  [[gnu::always_inline]] bool ownsObject() const { return reinterpret_cast<std::uintptr_t>(erased_) > 2; }
+  [[gnu::always_inline]] T* pointer() const { return ownsObject() ? static_cast<T*>(erased_) : nullptr; }
 
 #if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
   // A region thread's count operations on an object it does not own, applied
@@ -4154,6 +4604,7 @@ struct TraceEdges<Ref<T>> {
 
 template <typename T, typename Other>
 inline bool operator==(const Ref<T>& left, const Ref<Other>& right) {
+  if (left.isUndefined() || right.isUndefined()) return left.isUndefined() && right.isUndefined();
   return static_cast<const void*>(left.get()) == static_cast<const void*>(right.get());
 }
 
@@ -4164,22 +4615,22 @@ inline bool operator!=(const Ref<T>& left, const Ref<Other>& right) {
 
 template <typename T>
 inline bool operator==(const Ref<T>& left, std::nullptr_t) {
-  return left.get() == nullptr;
+  return !left.isUndefined() && left.get() == nullptr;
 }
 
 template <typename T>
 inline bool operator==(std::nullptr_t, const Ref<T>& right) {
-  return right.get() == nullptr;
+  return !right.isUndefined() && right.get() == nullptr;
 }
 
 template <typename T>
 inline bool operator!=(const Ref<T>& left, std::nullptr_t) {
-  return left.get() != nullptr;
+  return !(left == nullptr);
 }
 
 template <typename T>
 inline bool operator!=(std::nullptr_t, const Ref<T>& right) {
-  return right.get() != nullptr;
+  return !(nullptr == right);
 }
 
 template <typename T, typename Other>
@@ -4321,6 +4772,20 @@ inline Ref<T> makeRef(Arguments&&... arguments) {
 #if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
 namespace detail::parallel {
 
+#if defined(__GLIBC__)
+/**
+ * Each worker allocates from its own glibc arena, which grows its heap a page
+ * range at a time with `mprotect` -- and every `mprotect` takes the address
+ * space's write lock, stalling every other thread's page faults behind it. A
+ * parallel `sorted` of two million numbers made 583 of those calls and spent
+ * more time in the kernel than in user code. Growing (and trimming) in 64 MiB
+ * steps makes it a few dozen: 27.4 ms to 23.5 ms at 20 threads. Set at static
+ * initialization, so the serial code that builds a region's input grows the
+ * same way. Untouched padding is address space, not memory.
+ */
+inline const bool allocatorPadded = ::mallopt(M_TOP_PAD, 64 << 20) != 0;
+#endif
+
 /**
  * The threads that run region tasks, and the one region in flight.
  *
@@ -4358,17 +4823,21 @@ class RegionPool {
     decidedIndex_ = count;
     failure_ = nullptr;
     const std::size_t helpers = std::min(workers_.size(), count - 1);
+    finished_.store(0, std::memory_order_relaxed);
+    bool sleeping;
     {
       std::lock_guard lock(mutex_);
-      generation_ = epoch;
-      helpers_ = helpers;
-      finished_ = 0;
+      published_.store((epoch << 8) | helpers, std::memory_order_release);
+      sleeping = sleepers_ != 0;
     }
-    wake_.notify_all();
+    if (sleeping) wake_.notify_all();
     work(regions_[0], epoch, 1);
-    {
+    const auto joined = [&] { return finished_.load(std::memory_order_acquire) == helpers; };
+    if (!spinUntil(joined)) {
       std::unique_lock lock(mutex_);
-      done_.wait(lock, [&] { return finished_ == helpers_; });
+      joining_ = true;
+      done_.wait(lock, joined);
+      joining_ = false;
     }
     join(helpers + 1);
     if (failure_ != nullptr && failedIndex_ < decidedIndex_) {
@@ -4392,22 +4861,49 @@ class RegionPool {
     for (auto& worker : workers_) worker.detach();
   }
 
+  /**
+   * Spins for a moment before a thread parks: a program that runs regions
+   * back to back (spectral-norm's forty maps) otherwise pays a futex wake for
+   * every helper and a futex join per region, and under WSL each of those is a
+   * hypervisor round trip. Rayon's workers spin the same way before sleeping.
+   */
+  template <typename Ready>
+  static bool spinUntil(const Ready& ready) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::microseconds(100);
+    for (std::uint32_t spin = 0;; ++spin) {
+      if (ready()) return true;
+#if defined(__x86_64__) || defined(__i386__)
+      __builtin_ia32_pause();
+#endif
+      if ((spin & 63) == 63 && std::chrono::steady_clock::now() >= deadline) return ready();
+    }
+  }
+
+  // The epoch and its helper count travel in ONE word: read separately, a
+  // worker could pair one region's epoch with the next region's count.
   void serve(std::size_t slot) {
     std::uint64_t seen = 0;
     for (;;) {
-      std::uint64_t epoch;
-      {
+      std::uint64_t epoch = 0;
+      const auto claim = [&] {
+        const std::uint64_t word = published_.load(std::memory_order_acquire);
+        if ((word >> 8) == seen || slot > (word & 0xff)) return false;
+        epoch = word >> 8;
+        return true;
+      };
+      if (!spinUntil(claim)) {
         std::unique_lock lock(mutex_);
-        wake_.wait(lock, [&] { return generation_ != seen && slot <= helpers_; });
-        epoch = generation_;
-        seen = epoch;
+        ++sleepers_;
+        wake_.wait(lock, claim);
+        --sleepers_;
       }
+      seen = epoch;
       work(regions_[slot], epoch, slot + 1);
-      {
+      const std::size_t helpers = published_.load(std::memory_order_relaxed) & 0xff;
+      if (finished_.fetch_add(1, std::memory_order_acq_rel) + 1 == helpers) {
         std::lock_guard lock(mutex_);
-        ++finished_;
+        if (joining_) done_.notify_one();
       }
-      done_.notify_one();
     }
   }
 
@@ -4460,7 +4956,7 @@ class RegionPool {
       }
     }
     for (std::size_t slot = 0; slot < participants; ++slot) {
-      for (const Donation& donation : regions_[slot].donations) donation.donate(donation.head);
+      for (const Donation& donation : regions_[slot].donations) donation.donate(donation.head, donation.tail);
       regions_[slot].donations.clear();
     }
     auto& mine = cycleState();
@@ -4489,9 +4985,10 @@ class RegionPool {
   std::condition_variable wake_;
   std::condition_variable done_;
   std::uint64_t epoch_ = 0;
-  std::uint64_t generation_ = 0;
-  std::size_t helpers_ = 0;
-  std::size_t finished_ = 0;
+  std::atomic<std::uint64_t> published_{0};
+  std::atomic<std::size_t> finished_{0};
+  std::size_t sleepers_ = 0;
+  bool joining_ = false;
   bool (*task_)(void*, std::size_t) = nullptr;
   void* context_ = nullptr;
   std::size_t count_ = 0;
@@ -4539,7 +5036,9 @@ inline void tasks(Count count, const Body& body) {
   const auto total = static_cast<std::size_t>(requested);
   // The caller's frame holds the body for the whole region, so no task needs
   // a count of its own on the environment: `callStable`, not `call`.
-  auto run = [&body](std::size_t index) -> bool { return body.callStable(static_cast<double>(index)); };
+  // The index converts to whatever the body declares: a `long long` for the
+  // library's `int` index, a double for a body typed `number`.
+  auto run = [&body](std::size_t index) -> bool { return body.callStable(static_cast<long long>(index)); };
   detail::parallel::runRegion(total, run);
 }
 
@@ -4683,8 +5182,13 @@ namespace detail {
  * which the 64-bit carrier cannot spell. Any other Number runs the original.
  */
 [[gnu::always_inline]] inline bool carriesExactInteger(double value) {
+#if GEA_SOFT_DOUBLE
+  std::int64_t integer;
+  return detail::doubleBitsInteger(value, integer) && !(integer == 0 && std::signbit(value));
+#else
   return value >= -9007199254740992.0 && value <= 9007199254740992.0 && value == static_cast<double>(static_cast<long long>(value)) &&
          !(value == 0.0 && std::signbit(value));
+#endif
 }
 
 [[gnu::always_inline]] inline long long faithfulIntegerSum(long long left, long long right) {
@@ -4731,10 +5235,72 @@ namespace detail {
  * with this one, against 36.8ms for the hand-written baseline that spells the
  * same select inline.
  */
+/**
+ * `/` and `%` over values an `int`/`i32` annotation holds in the integers
+ * (`ir/integers.ts`, `integerDivisions`). Both truncate toward zero, as
+ * ECMA-262's `%` and the annotated binding's store do. A zero divisor answers
+ * 0 -- what the store makes of the Number's NaN or Infinity, as `ToInt32`
+ * does -- instead of trapping, and `MIN / -1` wraps instead of overflowing.
+ * An operand the census left a double keeps the double arithmetic: the store
+ * truncates that quotient to the same integer.
+ */
+template <typename Left, typename Right>
+[[gnu::always_inline]] inline auto integerQuotient(Left dividend, Right divisor) {
+  using Common = std::common_type_t<Left, Right>;
+  if constexpr (std::is_integral_v<Common>) {
+    using Unsigned = std::make_unsigned_t<Common>;
+    if (divisor == 0) [[unlikely]] return Common{0};
+    // Only the minimum dividend overflows `/ -1`; it wraps to itself.
+    if constexpr (std::is_signed_v<Common>)
+      if (static_cast<Common>(dividend) == std::numeric_limits<Common>::min() && divisor == -1) [[unlikely]]
+        return static_cast<Common>(Unsigned{0} - static_cast<Unsigned>(dividend));
+    return static_cast<Common>(static_cast<Common>(dividend) / static_cast<Common>(divisor));
+  } else {
+    const Common quotient = static_cast<Common>(dividend) / static_cast<Common>(divisor);
+    return std::isfinite(quotient) ? quotient : Common{0};
+  }
+}
+template <typename Left, typename Right>
+[[gnu::always_inline]] inline auto integerModulo(Left dividend, Right divisor) {
+  using Common = std::common_type_t<Left, Right>;
+  if constexpr (std::is_integral_v<Common>) {
+    if (divisor == 0) [[unlikely]] return Common{0};
+    // `x % -1` is 0, and only the minimum `x` traps in C++. Asked of the
+    // dividend, the test is invariant in a trial-division loop (primes) and
+    // hoists out of it, leaving the zero test alone where `divisor` changes.
+    if constexpr (std::is_signed_v<Common>)
+      if (static_cast<Common>(dividend) == std::numeric_limits<Common>::min() && divisor == -1) [[unlikely]] return Common{0};
+    return static_cast<Common>(static_cast<Common>(dividend) % static_cast<Common>(divisor));
+  } else {
+    return divisor == 0 ? Common{0} : static_cast<Common>(std::fmod(static_cast<Common>(dividend), static_cast<Common>(divisor)));
+  }
+}
+/**
+ * `+ - *` over an `int`/`i32` binding's values, at the annotation's width.
+ * They wrap, as an `int32_t` lane of a typed array does: computed in the
+ * unsigned type of the same width, where overflow is defined, and converted
+ * back (modular since C++20). On a 32-bit core an `i32` sum is one `add`.
+ */
+template <typename Held, typename Left, typename Right>
+[[gnu::always_inline]] inline Held wrappingAdd(Left left, Right right) {
+  using Unsigned = std::make_unsigned_t<Held>;
+  return static_cast<Held>(static_cast<Unsigned>(static_cast<Held>(left)) + static_cast<Unsigned>(static_cast<Held>(right)));
+}
+template <typename Held, typename Left, typename Right>
+[[gnu::always_inline]] inline Held wrappingSubtract(Left left, Right right) {
+  using Unsigned = std::make_unsigned_t<Held>;
+  return static_cast<Held>(static_cast<Unsigned>(static_cast<Held>(left)) - static_cast<Unsigned>(static_cast<Held>(right)));
+}
+template <typename Held, typename Left, typename Right>
+[[gnu::always_inline]] inline Held wrappingMultiply(Left left, Right right) {
+  using Unsigned = std::make_unsigned_t<Held>;
+  return static_cast<Held>(static_cast<Unsigned>(static_cast<Held>(left)) * static_cast<Unsigned>(static_cast<Held>(right)));
+}
+
 inline long long integerRemainder(long long dividend, long long divisor) {
   // A power-of-two divisor is a MASK, and the three cases below are worth
   // nothing against one: the emitter narrows a `%` only when the divisor is a
-  // constant, so this test folds away and leaves either an `and` or the ladder,
+  // constant, so this test folds away and leaves either the mask or the ladder,
   // never the test itself.
   //
   // Which one is right depends on the DIVIDEND, not on the divisor being
@@ -4743,16 +5309,17 @@ inline long long integerRemainder(long long dividend, long long divisor) {
   // iteration after the sixteenth -- two compares and two branches to arrive at
   // an `and`. `modulo.ts` accumulates `(h * 3 + i) % 1000000007`, where the
   // dividend really is below twice the divisor almost always and the single
-  // subtraction is the whole point. Measured: closure 40.7 -> 31.6 ms, modulo
-  // 38.6 -> 38.4 (unchanged, its divisor is not a power of two), both answers
-  // identical.
+  // subtraction is the whole point.
   //
-  // The sign test stays because the mask is only the remainder for a
-  // non-negative dividend, and `%` in C++ takes the dividend's sign exactly as
-  // ECMA-262 does. It is a `cmov`, not a branch.
-  if (divisor > 0 && (divisor & (divisor - 1)) == 0) {
-    return dividend >= 0 ? (dividend & (divisor - 1)) : dividend % divisor;
-  }
+  // The mask is spelled as the plain `%`, not as `d >= 0 ? d & (s - 1) : d % s`.
+  // Clang lowers a signed `%` by a power of two to the mask itself wherever it
+  // can see the dividend is non-negative (a loop counter: closure.ts measured
+  // the same either way), and it knows what the hand-written select hides:
+  // whether `d % 2 == 0` needs no remainder at all, only the low bit. Spelled
+  // as the select, collatz's `v % 2 === 0` paid a mask, a negate, a sign test
+  // and a `cmov` on its critical path every step -- 524 ms against 251 ms for
+  // the plain `%`, 3M starts on a Ryzen 9 9900X3D.
+  if (divisor > 0 && (divisor & (divisor - 1)) == 0) return dividend % divisor;
   return (dividend >= 0 && dividend < divisor)
            ? dividend
            : ((dividend >= 0 && divisor > 0 && dividend < 2 * divisor) ? dividend - divisor : dividend % divisor);
@@ -4818,11 +5385,30 @@ inline long long integerBoundOf(double rounded, double whenNaN) {
 // instructions. Conditional expressions keep the existing select-based shape.
 template <bool RoundUp>
 inline long long integerRoundedBound(double value, double whenNaN) {
+#if GEA_SOFT_DOUBLE
+  // Same answer from the bits: every double compare and the int64->double
+  // conversion of the arithmetic spelling below is a soft-float libcall. NaN,
+  // the infinities and |value| >= 2^62 clamp to the sentinel of their sign
+  // (NaN to `whenNaN`'s), which is what the clamp-then-adjust spelling yields.
+  std::uint64_t bits;
+  std::memcpy(&bits, &value, sizeof bits);
+  const bool negative = (bits >> 63) != 0;
+  std::int64_t truncated;
+  bool fractional;
+  if (detail::doubleBitsTruncate(value, truncated, fractional) && truncated > -4611686018427387904ll &&
+      truncated < 4611686018427387904ll) [[likely]] {
+    if constexpr (RoundUp) return truncated + static_cast<long long>(fractional && !negative);
+    else return truncated - static_cast<long long>(fractional && negative);
+  }
+  const bool nan = ((bits >> 52) & 0x7ff) == 0x7ff && (bits << 12) != 0;
+  return (nan ? whenNaN < 0 : negative) ? -4611686018427387904ll : 4611686018427387904ll;
+#else
   const auto truncated = integerBoundOf(value, whenNaN);
   if constexpr (RoundUp)
     return truncated + static_cast<long long>(value > static_cast<double>(truncated) && value < kIntegerBoundLimit);
   else
     return truncated - static_cast<long long>(value < static_cast<double>(truncated) && value > -kIntegerBoundLimit);
+#endif
 }
 
 /** `i < d` becomes `i < integerBoundLess(d)`. */
@@ -5646,6 +6232,40 @@ namespace host {
 [[noreturn]] inline void throwRuntimeError(const char* kind, const std::string& message);
 }
 
+/**
+ * A capture-free function handed to a host algorithm by name rather than as a
+ * `CallableObject`. It calls the same thunk the carrier would point at, with
+ * the same null environment, so the call means exactly what calling the
+ * carrier means. The difference is that the thunk is a template argument, so
+ * the compiler sees which function runs and can inline it into the algorithm.
+ */
+template <auto Thunk>
+struct DirectCallable {
+  // A function declaring fewer parameters than it is called with ignores the
+  // rest, as a JS call does: `sort(() => 0)` hands the thunk no arguments.
+  template <typename... Arguments>
+  decltype(auto) operator()(Arguments&&... arguments) const {
+    return callPrefix<sizeof...(Arguments)>(std::forward_as_tuple(std::forward<Arguments>(arguments)...));
+  }
+
+ private:
+  template <std::size_t Count, typename Tuple, std::size_t... Index>
+  static constexpr bool takes(std::index_sequence<Index...>) {
+    return std::is_invocable_v<decltype(Thunk), std::nullptr_t, std::tuple_element_t<Index, Tuple>...>;
+  }
+
+  template <std::size_t Count, typename Tuple>
+  static decltype(auto) callPrefix(Tuple&& arguments) {
+    if constexpr (Count == 0 || takes<Count, std::remove_reference_t<Tuple>>(std::make_index_sequence<Count>{})) {
+      return [&]<std::size_t... Index>(std::index_sequence<Index...>) -> decltype(auto) {
+        return Thunk(nullptr, std::get<Index>(std::forward<Tuple>(arguments))...);
+      }(std::make_index_sequence<Count>{});
+    } else {
+      return callPrefix<Count - 1>(std::forward<Tuple>(arguments));
+    }
+  }
+};
+
 template <typename Result, typename... Arguments>
 struct CallableObject<Result(Arguments...)> {
   friend void geaTraceRefs(const CallableObject& value, detail::RefVisitor& visitor) {
@@ -5951,8 +6571,13 @@ struct CallableObject<Result(Arguments...)> {
     registerSourceAdapter<&dropArguments, Source>();
   }
 
+  // Every adapter thunk reaches its source with `callStable`: the source is a
+  // packed copy nothing writes after the adapter is made, and the adapter's
+  // own environment -- which owns that copy -- is kept alive by whoever is
+  // calling the adapter. `call`'s retain bought nothing and cost a refcount
+  // round trip per element on `mapReduce`'s per-element callback.
   static Result dropArguments(void* environment_, Arguments...) {
-    return static_cast<CallableObject<Result()>*>(environment_)->call();
+    return static_cast<CallableObject<Result()>*>(environment_)->callStable();
   }
 
   /**
@@ -6243,13 +6868,13 @@ struct CallableObject<Result(Arguments...)> {
   template <typename Source, typename Element, std::size_t... Indices, typename Array>
   static Result callWithSpreadRest(Source* source, std::index_sequence<Indices...>, const Array& all, std::size_t length,
                                    Ref<ArrayObject<Element>> tail) {
-    return source->call((Indices < length ? Optional<Element>(all->at(Indices)) : Optional<Element>())..., tail);
+    return source->callStable((Indices < length ? Optional<Element>(all->at(Indices)) : Optional<Element>())..., tail);
   }
 
   template <typename Source, std::size_t... Indices, typename... All>
   static Result callWithPrefix(Source* source, std::index_sequence<Indices...>, All&&... all) {
     auto forwarded = std::forward_as_tuple(std::forward<All>(all)...);
-    return source->call(std::get<Indices>(forwarded)...);
+    return source->callStable(std::get<Indices>(forwarded)...);
   }
 
   /**
@@ -6360,7 +6985,7 @@ struct CallableObject<Result(Arguments...)> {
   /** The discarding constructor's own thunk: call the source with the SAME arguments the wider call received, and throw away whatever it returns -- there is nothing left to do with it, `Result` being `void`. */
   template <typename SourceResult>
   static Result discardResult(void* environment_, Arguments... arguments) {
-    static_cast<CallableObject<SourceResult(Arguments...)>*>(environment_)->call(arguments...);
+    static_cast<CallableObject<SourceResult(Arguments...)>*>(environment_)->callStable(arguments...);
   }
 
   /**
@@ -6393,7 +7018,7 @@ struct CallableObject<Result(Arguments...)> {
   template <typename SourceResult>
   static Result dropArgumentsIntoArm(void* environment_, Arguments...) {
     return Result::template ofArm<ResultWidensIntoArm<SourceResult, Result>::index>(
-        static_cast<CallableObject<SourceResult()>*>(environment_)->call());
+        static_cast<CallableObject<SourceResult()>*>(environment_)->callStable());
   }
 
   /**
@@ -6448,7 +7073,7 @@ struct CallableObject<Result(Arguments...)> {
   template <typename SourceResult>
   static Result widenResultIntoArm(void* environment_, Arguments... arguments) {
     return Result::template ofArm<ResultWidensIntoArm<SourceResult, Result>::index>(
-        static_cast<CallableObject<SourceResult(Arguments...)>*>(environment_)->call(arguments...));
+        static_cast<CallableObject<SourceResult(Arguments...)>*>(environment_)->callStable(arguments...));
   }
 
   [[gnu::always_inline]] Result call(Arguments... arguments) const {
@@ -6479,6 +7104,16 @@ struct CallableObject<Result(Arguments...)> {
   template <auto Known>
   [[gnu::always_inline]] Result callKnown(Arguments... arguments) const {
     const auto keepAlive = environmentOwner;
+    if constexpr (std::is_same_v<decltype(Known), Invoke>) {
+      if (invoke == Known) return Known(environment, std::forward<Arguments>(arguments)...);
+    }
+    return invoke(environment, std::forward<Arguments>(arguments)...);
+  }
+
+  // `callKnown` for a callee `callStable` may take: the caller's own slot
+  // keeps the environment alive, so neither branch retains it.
+  template <auto Known>
+  [[gnu::always_inline]] Result callStableKnown(Arguments... arguments) const {
     if constexpr (std::is_same_v<decltype(Known), Invoke>) {
       if (invoke == Known) return Known(environment, std::forward<Arguments>(arguments)...);
     }
@@ -6616,7 +7251,58 @@ struct IsNativeCallableObject : std::false_type {};
 template <typename Result, typename... Arguments>
 struct IsNativeCallableObject<CallableObject<Result(Arguments...)>> : std::true_type {};
 
+
+/**
+ * `CallableObject`'s trailing-argument drop with the source thunk named in the
+ * type. A capture-free function `(value) => ...` handed to a slot that passes
+ * `(value, index)` converted through `dropTrailingArguments`, whose thunk reads
+ * the source callable back out of its environment and calls through its
+ * pointer: two indirect calls per element of a parallel `mapReduce`, where
+ * Rayon inlines the closure. Here the adapter calls `Thunk` by name, so the
+ * function inlines into it and one indirect call remains. Anything that is
+ * not that drop converts exactly as before.
+ */
+template <typename Slot, typename Source, auto Thunk>
+struct StaticPrefixAdapter {
+  static constexpr bool applies = false;
+  static constexpr std::nullptr_t known = nullptr;
+};
+template <typename Result, typename... Arguments, typename SourceResult, typename... SourceArguments, auto Thunk>
+struct StaticPrefixAdapter<CallableObject<Result(Arguments...)>, CallableObject<SourceResult(SourceArguments...)>, Thunk> {
+  static constexpr bool applies = std::is_same_v<SourceResult, Result> && sizeof...(SourceArguments) != 0 &&
+                                  sizeof...(SourceArguments) < sizeof...(Arguments) &&
+                                  IsTypePrefix<std::tuple<SourceArguments...>, std::tuple<Arguments...>>::value;
+  static Result call(void* environment_, Arguments... arguments) {
+    return prefix(environment_, std::index_sequence_for<SourceArguments...>{}, std::forward<Arguments>(arguments)...);
+  }
+  // `call` is this adapter's entry only where `staticPrefixCallable` mints it;
+  // anywhere else a guard on it must never match, so it names no entry.
+  static constexpr auto known = [] {
+    if constexpr (applies) return &call;
+    else return nullptr;
+  }();
+  template <std::size_t... Indices>
+  [[gnu::always_inline]] static Result prefix(void* environment_, std::index_sequence<Indices...>, Arguments... arguments) {
+    auto all = std::forward_as_tuple(std::forward<Arguments>(arguments)...);
+    return Thunk(environment_, std::get<Indices>(std::move(all))...);
+  }
+};
 }  // namespace detail
+
+/** A capture-free function's value in `Slot`; see `detail::StaticPrefixAdapter`. */
+template <typename Slot, typename Source, auto Thunk>
+inline Slot staticPrefixCallable() {
+  using Adapter = detail::StaticPrefixAdapter<Slot, Source, Thunk>;
+  if constexpr (Adapter::applies) return Slot{&Adapter::call, nullptr};
+  else return Slot(Source{Thunk, nullptr});
+}
+/** The same, for a function whose `name`/`length`/source are registered on its entry (`entryWithFacts`). */
+template <typename Slot, typename Source, auto Thunk>
+inline Slot staticPrefixCallable(std::string_view name, std::size_t length, std::string_view text) {
+  using Adapter = detail::StaticPrefixAdapter<Slot, Source, Thunk>;
+  if constexpr (Adapter::applies) return Slot{Slot::template entryWithFacts<&Adapter::call>(name, length, text), nullptr};
+  else return Slot(Source{Source::template entryWithFacts<Thunk>(name, length, text), nullptr});
+}
 
 /** What `new` invokes. Physically identical to `CallableObject`, deliberately separate: `[[Call]]`/`[[Construct]]` differ (a class ctor throws without `new`; an arrow has no `[[Construct]]`), so one type for both would let an unconstructible value reach a construction site and compile. */
 template <typename Signature>
@@ -6752,6 +7438,16 @@ struct CallableConstructorObject<Result(Arguments...), Constructed(ConstructArgu
   template <auto Known>
   [[gnu::always_inline]] Result callKnown(Arguments... arguments) const {
     const auto keepAlive = environmentOwner;
+    if constexpr (std::is_same_v<decltype(Known), Invoke>) {
+      if (invoke == Known) return Known(environment, std::forward<Arguments>(arguments)...);
+    }
+    return invoke(environment, std::forward<Arguments>(arguments)...);
+  }
+
+  // `callKnown` for a callee `callStable` may take: the caller's own slot
+  // keeps the environment alive, so neither branch retains it.
+  template <auto Known>
+  [[gnu::always_inline]] Result callStableKnown(Arguments... arguments) const {
     if constexpr (std::is_same_v<decltype(Known), Invoke>) {
       if (invoke == Known) return Known(environment, std::forward<Arguments>(arguments)...);
     }
@@ -7051,6 +7747,126 @@ inline const void* arrayExtensionTagOf() {
 class Value;
 
 namespace detail {
+
+// libstdc++'s new-ABI `std::string` keeps up to 15 bytes in the object itself
+// ({pointer, length, 16-byte buffer}; the pointer addresses the buffer). Its
+// copy constructor and assignment hand those bytes to `memcpy` with the
+// string's LENGTH as the size, which is a libc call whose small-size branches
+// follow the length -- keys and names of 1 to 15 bytes in random order are the
+// worst case for that, and on the mongodb driver's per-operation path that was
+// 400 `memcpy` calls and a tenth of all branch mispredicts. A string held in
+// its own object is copied here as 24 constant-size bytes, with no call and no
+// branch on the length. Anything else (heap storage, another standard
+// library) takes the ordinary copy.
+#if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI && (defined(__x86_64__) || defined(__aarch64__))
+#define GEA_FAST_SMALL_STRING_COPY 1
+static_assert(sizeof(std::string) == 4 * sizeof(void*), "the small-string copy assumes {pointer, length, 16-byte buffer}");
+inline bool stringIsHeldInline(const std::string& value) {
+  return value.data() == reinterpret_cast<const char*>(&value) + 2 * sizeof(void*);
+}
+/** Length and buffer of an inline string, byte for byte; the pointer of `to` already addresses its own buffer. */
+[[gnu::always_inline]] inline void copyInlineStringBytes(std::string& to, const std::string& from) {
+  std::memcpy(reinterpret_cast<char*>(&to) + sizeof(void*), reinterpret_cast<const char*>(&from) + sizeof(void*),
+              sizeof(std::string) - sizeof(void*));
+}
+#endif
+
+/**
+ * `target = std::move(source)`. libstdc++'s move reloads the length and
+ * capacity as one 16-byte word; a string just built by `concatStringsInto`
+ * stored them as two 8-byte words, which cannot forward, and the load waited
+ * for both stores to retire. A heap buffer handed to an inline target is
+ * moved word by word instead, each load matching the store that wrote it.
+ */
+[[gnu::always_inline]] inline void adoptString(std::string& target, std::string&& source) {
+#ifdef GEA_FAST_SMALL_STRING_COPY
+  if (&target != &source && stringIsHeldInline(target) && !stringIsHeldInline(source)) {
+    char* const to = reinterpret_cast<char*>(&target);
+    char* const from = reinterpret_cast<char*>(&source);
+    std::uint64_t pointer, length, capacity;
+    std::memcpy(&pointer, from, 8);
+    std::memcpy(&length, from + 8, 8);
+    std::memcpy(&capacity, from + 16, 8);
+    // Kept as three scalars: merged back into one vector load, the stall returns.
+    __asm__("" : "+r"(length), "+r"(capacity));
+    std::memcpy(to, &pointer, 8);
+    std::memcpy(to + 8, &length, 8);
+    std::memcpy(to + 16, &capacity, 8);
+    char* const local = from + 16;
+    const std::uint64_t empty = 0;
+    std::memcpy(from, &local, 8);
+    std::memcpy(from + 8, &empty, 8);
+    from[16] = '\0';
+    return;
+  }
+#endif
+  target = std::move(source);
+}
+
+/** A copy of `source`; see above for why this is not `std::string(source)`. */
+[[gnu::always_inline]] inline std::string duplicateString(const std::string& source) {
+  std::string copy;
+#ifdef GEA_FAST_SMALL_STRING_COPY
+  if (stringIsHeldInline(source)) copyInlineStringBytes(copy, source);
+  else copy.assign(source);
+#else
+  copy.assign(source);
+#endif
+  return copy;
+}
+
+/**
+ * `to = std::string_view(from, length)` for a `to` held in its own object and a
+ * `length` it holds there, as ONE 16-byte store of the bytes with everything
+ * past `length` zeroed (the terminator included). `memmove` writes a short
+ * string as two overlapping stores, and the next read of its first word spans
+ * both -- the store cannot forward, and the read waits for both to retire.
+ * `from` must have 16 readable bytes.
+ */
+[[gnu::always_inline]] inline bool storeShortString(std::string& to, const char* from, std::size_t length) {
+#ifdef GEA_FAST_SMALL_STRING_COPY
+  if (length > 15 || !stringIsHeldInline(to)) return false;
+  using Bytes = unsigned char __attribute__((vector_size(16)));
+  constexpr Bytes lanes = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+  Bytes bytes;
+  std::memcpy(&bytes, from, 16);
+  bytes &= (Bytes)(lanes < static_cast<unsigned char>(length));
+  std::memcpy(reinterpret_cast<char*>(&to) + 2 * sizeof(void*), &bytes, 16);
+  std::memcpy(reinterpret_cast<char*>(&to) + sizeof(void*), &length, sizeof(length));
+  return true;
+#else
+  (void)to, (void)from, (void)length;
+  return false;
+#endif
+}
+
+/** `source`'s value moved out: an inline string as constant-size bytes, a heap one by stealing its buffer. */
+[[gnu::always_inline]] inline std::string takeString(std::string& source) {
+#ifdef GEA_FAST_SMALL_STRING_COPY
+  std::string taken;
+  if (stringIsHeldInline(source)) copyInlineStringBytes(taken, source);
+  else taken = std::move(source);
+  return taken;
+#else
+  return std::move(source);
+#endif
+}
+
+/**
+ * What an array's string cell is constructed FROM, so the cell is built once,
+ * in place: the conversion's result initializes the element directly. A
+ * `Cell{value}` built first and then moved into the buffer copied an inline
+ * string twice, each a `memcpy` call on its length.
+ */
+struct StringCellCopy {
+  const std::string& source;
+  operator std::string() const { return duplicateString(source); }
+};
+struct StringCellMove {
+  std::string& source;
+  operator std::string() const { return takeString(source); }
+};
+
 
 /**
  * How many BYTES of element cells an `ArrayObject<Element>` carries inside its
@@ -7589,12 +8405,15 @@ struct ArrayObject {
 
   /** A canonical array index, per ECMA-262 6.1.7: a non-negative integer below 2^32-1. */
   static bool isIndex(double key) {
-    return key >= 0.0 && key < 4294967295.0 && key == static_cast<double>(static_cast<uint32_t>(key));
+    std::uint32_t index;
+    return detail::doubleArrayIndex(key, index);
   }
 
   static size_t requireIndex(double key) {
-    if (GEA_ARRAY_CHECKS && !isIndex(key)) [[unlikely]] detail::failNonCanonicalIndex(key);
-    return static_cast<size_t>(key);
+    std::uint32_t index;
+    const bool canonical = detail::doubleArrayIndex(key, index);
+    if (GEA_ARRAY_CHECKS && !canonical) [[unlikely]] detail::failNonCanonicalIndex(key);
+    return canonical ? static_cast<size_t>(index) : static_cast<size_t>(key);
   }
 
   const Element& elementAt(double key) const {
@@ -7628,8 +8447,8 @@ struct ArrayObject {
   }
 
   /** `hasElement`'s integer-keyed twin, for the key `elementAtIndex` takes. */
-  bool hasElementAtIndex(long long index) const {
-    return index >= 0 && static_cast<size_t>(index) < size() && present(static_cast<size_t>(index));
+  [[gnu::always_inline]] bool hasElementAtIndex(long long index) const {
+    return static_cast<unsigned long long>(index) < size() && present(static_cast<size_t>(index));
   }
 
   /**
@@ -7657,8 +8476,8 @@ struct ArrayObject {
   }
 
   /** `hasElementValue`'s integer-keyed twin, for the key `elementAtIndex` takes. */
-  bool hasElementValueAtIndex(long long index) const {
-    return index >= 0 && static_cast<size_t>(index) < size() && present(static_cast<size_t>(index)) &&
+  [[gnu::always_inline]] bool hasElementValueAtIndex(long long index) const {
+    return static_cast<unsigned long long>(index) < size() && present(static_cast<size_t>(index)) &&
            !elementIsUndefined(static_cast<size_t>(index));
   }
 
@@ -7674,8 +8493,21 @@ struct ArrayObject {
    * becomes ten million convert/convert-back pairs on a value that never left
    * the integers.
    */
-  const Element& elementAtIndex(long long index) const {
-    if (GEA_ARRAY_CHECKS && (index < 0 || static_cast<size_t>(index) >= size() || !present(static_cast<size_t>(index)))) [[unlikely]] {
+  [[gnu::always_inline]] const Element& elementAtIndex(long long index) const {
+    // The dense case first: in range with no hole or undefined bookkeeping at
+    // all (the flag vectors are empty for an array that never held either)
+    // answers the element after one unsigned compare. A negative index wraps
+    // past `size()`, so that compare is the `index < 0` test as well. It is
+    // made at 64 bits: a 32-bit `size_t` would let 2^32 + 1 wrap to 1. The
+    // rest is out of line and cold, so the accessor stays a few instructions
+    // at every call site even under -Os.
+    if (static_cast<unsigned long long>(index) < cells.size() && holes.empty() && undefineds.empty()) [[likely]]
+      return at(static_cast<std::size_t>(index));
+    return elementAtIndexSlow(index);
+  }
+
+  [[gnu::noinline]] const Element& elementAtIndexSlow(long long index) const {
+    if (GEA_ARRAY_CHECKS && (index < 0 || static_cast<unsigned long long>(index) >= size() || !present(static_cast<size_t>(index)))) [[unlikely]] {
       detail::failAbsentElement(static_cast<double>(index), size());
     }
     if (elementIsUndefined(static_cast<std::size_t>(index))) [[unlikely]] detail::failUndefinedElement();
@@ -7684,16 +8516,24 @@ struct ArrayObject {
 
   /** `setElement`'s integer-keyed twin, with Array's own extension rule unchanged. */
   template <typename CompleteElement = Element>
-  void setElementAtIndex(long long index, ElementParam<CompleteElement> value) requires (std::is_same_v<CompleteElement, Element>) {
+  [[gnu::always_inline]] void setElementAtIndex(long long index, ElementParam<CompleteElement> value) requires (std::is_same_v<CompleteElement, Element>) {
     requireMutable();
-    if (GEA_ARRAY_CHECKS && index < 0) [[unlikely]] detail::failNonCanonicalIndex(static_cast<double>(index));
-    const size_t at_ = static_cast<size_t>(index);
-    if (at_ < cells.size()) [[likely]] {
+    // In range first, compared at 64 bits (see `elementAtIndex`); extension,
+    // growth and the fault for a non-canonical index are out of line.
+    if (static_cast<unsigned long long>(index) < cells.size()) [[likely]] {
+      const size_t at_ = static_cast<size_t>(index);
       at(at_) = value;
       if (at_ < holes.size()) holes[at_] = 0;
       if (at_ < undefineds.size()) undefineds[at_] = 0;
       return;
     }
+    setElementAtIndexSlow<CompleteElement>(index, value);
+  }
+
+  template <typename CompleteElement = Element>
+  [[gnu::noinline]] void setElementAtIndexSlow(long long index, ElementParam<CompleteElement> value) requires (std::is_same_v<CompleteElement, Element>) {
+    if ((GEA_ARRAY_CHECKS && index < 0) || index >= 4294967295ll) [[unlikely]] detail::failNonCanonicalIndex(static_cast<double>(index));
+    const size_t at_ = static_cast<size_t>(index);
     if (at_ == cells.size() && cells.size() < cells.capacity() && undefineds.empty()) {
       cells.push_back(Cell{value});
       return;
@@ -7767,13 +8607,15 @@ struct ArrayObject {
   template <typename CompleteElement = Element>
   void push(ElementParam<CompleteElement> value) requires (std::is_same_v<CompleteElement, Element>) {
     requireMutable();
-    cells.push_back(Cell{value});
+    if constexpr (std::is_same_v<CompleteElement, std::string>) cells.emplace_back(detail::StringCellCopy{value});
+    else cells.push_back(Cell{value});
     if (!undefineds.empty()) undefineds.push_back(std::uint8_t{0});
   }
   template <typename CompleteElement = Element>
   void push(Element&& value) requires (std::is_same_v<CompleteElement, Element> && !std::is_same_v<ElementParam<CompleteElement>, Element>) {
     requireMutable();
-    cells.push_back(Cell{std::move(value)});
+    if constexpr (std::is_same_v<CompleteElement, std::string>) cells.emplace_back(detail::StringCellMove{value});
+    else cells.push_back(Cell{std::move(value)});
     if (!undefineds.empty()) undefineds.push_back(std::uint8_t{0});
   }
 
@@ -8241,9 +9083,12 @@ class ArrayBuffer {
   ArrayBuffer(ArrayBuffer&&) = delete;
   ArrayBuffer& operator=(ArrayBuffer&&) = delete;
 
-  bool detached() const { return detached_; }
-  void requireAttached() const {
-    if (detached_) gea::host::throwRuntimeError("TypeError", "ArrayBuffer is detached");
+  [[gnu::always_inline]] bool detached() const { return detached_; }
+  [[gnu::always_inline]] void requireAttached() const {
+    if (detached_) [[unlikely]] throwDetached();
+  }
+  [[noreturn, gnu::cold, gnu::noinline]] static void throwDetached() {
+    gea::host::throwRuntimeError("TypeError", "ArrayBuffer is detached");
   }
   // Transfer only the storage: the sender's object and every alias stay in
   // their original realm, observing an empty, permanently detached buffer.
@@ -8459,19 +9304,31 @@ inline std::size_t relativeIndex(double value, std::size_t length) {
  * `!isfinite` (NaN, +-Inf) converts to zero per spec (`ToIntegerOrInfinity`
  * on NaN is 0; the modulo of an infinity is itself defined to be 0).
  */
-[[gnu::always_inline]] inline double typedArrayIntegerModulo(double value, double modulus) {
-  // All callers use an unsigned element domain (2^8, 2^16 or 2^32).
-  // Inside the signed 64-bit range, truncation followed by unsigned masking
-  // is exactly JS modulo, including negative fractions. Prove the cast's
-  // range first: large doubles, infinities and NaN keep the floating path.
-  if (value >= -9223372036854775808.0 && value < 9223372036854775808.0) {
-    return static_cast<double>(static_cast<std::uint64_t>(static_cast<std::int64_t>(value)) &
-                               (static_cast<std::uint64_t>(modulus) - 1));
+[[gnu::always_inline]] inline std::uint64_t typedArrayIntegerBits(double value, std::uint64_t mask) {
+  // The wrapped result is an integer below 2^32, so it stays integer: the
+  // double the old spelling produced was converted straight back, and on a
+  // core without a double FPU each of those is a libcall.
+#if GEA_SOFT_DOUBLE
+  // The range test and the cast are libcalls too; the bits answer both.
+  {
+    std::int64_t bitsTruncated;
+    bool fractional;
+    if (doubleBitsTruncate(value, bitsTruncated, fractional)) [[likely]] return static_cast<std::uint64_t>(bitsTruncated) & mask;
   }
-  if (!std::isfinite(value)) return 0.0;
+#else
+  if (value >= -9223372036854775808.0 && value < 9223372036854775808.0) {
+    return static_cast<std::uint64_t>(static_cast<std::int64_t>(value)) & mask;
+  }
+#endif
+  if (!std::isfinite(value)) return 0;
+  const double modulus = static_cast<double>(mask) + 1.0;
   const double truncated = std::trunc(value);
   const double wrapped = std::fmod(truncated, modulus);
-  return wrapped < 0.0 ? wrapped + modulus : wrapped;
+  return static_cast<std::uint64_t>(wrapped < 0.0 ? wrapped + modulus : wrapped);
+}
+
+[[gnu::always_inline]] inline double typedArrayIntegerModulo(double value, double modulus) {
+  return static_cast<double>(typedArrayIntegerBits(value, static_cast<std::uint64_t>(modulus) - 1));
 }
 
 /**
@@ -8514,27 +9371,27 @@ T typedArrayElement(double value);
 
 template <>
 inline uint8_t typedArrayElement<uint8_t>(double value) {
-  return static_cast<uint8_t>(typedArrayIntegerModulo(value, 256.0));
+  return static_cast<uint8_t>(typedArrayIntegerBits(value, 255));
 }
 template <>
 inline int8_t typedArrayElement<int8_t>(double value) {
-  return static_cast<int8_t>(static_cast<uint8_t>(typedArrayIntegerModulo(value, 256.0)));
+  return static_cast<int8_t>(static_cast<uint8_t>(typedArrayIntegerBits(value, 255)));
 }
 template <>
 inline uint16_t typedArrayElement<uint16_t>(double value) {
-  return static_cast<uint16_t>(typedArrayIntegerModulo(value, 65536.0));
+  return static_cast<uint16_t>(typedArrayIntegerBits(value, 65535));
 }
 template <>
 inline int16_t typedArrayElement<int16_t>(double value) {
-  return static_cast<int16_t>(static_cast<uint16_t>(typedArrayIntegerModulo(value, 65536.0)));
+  return static_cast<int16_t>(static_cast<uint16_t>(typedArrayIntegerBits(value, 65535)));
 }
 template <>
 inline uint32_t typedArrayElement<uint32_t>(double value) {
-  return static_cast<uint32_t>(typedArrayIntegerModulo(value, 4294967296.0));
+  return static_cast<uint32_t>(typedArrayIntegerBits(value, 4294967295u));
 }
 template <>
 inline int32_t typedArrayElement<int32_t>(double value) {
-  return static_cast<int32_t>(static_cast<uint32_t>(typedArrayIntegerModulo(value, 4294967296.0)));
+  return static_cast<int32_t>(static_cast<uint32_t>(typedArrayIntegerBits(value, 4294967295u)));
 }
 template <>
 inline float typedArrayElement<float>(double value) {
@@ -8605,6 +9462,27 @@ template <typename T>
  * pattern for the identical `double`.
  */
 inline int32_t toInt32(double value) { return detail::typedArrayElement<int32_t>(value); }
+/**
+ * A Number stored into an `int` binding: `ToInt32`'s rule at 64 bits --
+ * truncated toward zero, wrapped modulo 2^64, NaN and the infinities 0. The
+ * same conversion as a `BigInt64Array` lane, so a core without a double FPU
+ * reads it from the bits (`GEA_SOFT_DOUBLE`) instead of a soft-float compare
+ * and a soft-float truncation per store.
+ */
+inline long long toInt64Wrapping(double value) {
+  return static_cast<long long>(detail::typedArrayIntegerBits(value, ~std::uint64_t{0}));
+}
+/** Any value stored into an `int`/`i32` binding, converted to the binding's width. */
+template <typename Held, typename Value>
+[[gnu::always_inline]] inline Held toDeclaredInteger(Value value) {
+  if constexpr (std::is_integral_v<Value>) {
+    return static_cast<Held>(value);
+  } else if constexpr (sizeof(Held) <= 4) {
+    return static_cast<Held>(toInt32(static_cast<double>(value)));
+  } else {
+    return static_cast<Held>(toInt64Wrapping(static_cast<double>(value)));
+  }
+}
 inline uint32_t toUint32(double value) { return detail::typedArrayElement<uint32_t>(value); }
 
 /**
@@ -8863,7 +9741,7 @@ class TypedArray {
    * offers it.
    */
   using value_type = T;
-  std::size_t size() const { return bytes_->detached() ? 0 : length_; }
+  [[gnu::always_inline]] std::size_t size() const { return bytes_->detached() ? 0 : length_; }
   const T* data() const { bytes_->requireAttached(); return reinterpret_cast<const T*>(base_); }
   T* data() { bytes_->requireAttached(); return reinterpret_cast<T*>(base_); }
 
@@ -9186,26 +10064,40 @@ class TypedArray {
   // unsigned 64-bit integer-to-double, so `double(size())` was a five
   // instruction sequence on every byte bson reads through a double offset.
   [[gnu::always_inline]] bool indexOf(double key, std::size_t& index) const {
+#if GEA_SOFT_DOUBLE
+    std::uint32_t small;
+    // Not a canonical index is not an element of a view whose length is a
+    // 32-bit `size_t`: the answer is no, with no double compare to say so.
+    if (!detail::doubleArrayIndex(key, small)) return false;
+    index = small;
+    return index < size();
+#else
     if (!(key >= 0.0 && key < 4611686018427387904.0)) return false;
     const auto candidate = static_cast<std::int64_t>(key);
     if (static_cast<double>(candidate) != key) return false;
     index = static_cast<std::size_t>(candidate);
     return index < size();
+#endif
   }
 
-  std::size_t requireIndex(double key) const {
+  [[noreturn, gnu::cold, gnu::noinline]] void failIndex(double key) const {
+    std::fprintf(stderr, "gea: typed array index %f is out of range for a buffer of length %zu\n", key, length_);
+    gea::detail::abortAfterFlush();
+  }
+  [[noreturn, gnu::cold, gnu::noinline]] void failIndexAt(long long key) const {
+    std::fprintf(stderr, "gea: typed array index %lld is out of range for a buffer of length %zu\n", key, length_);
+    gea::detail::abortAfterFlush();
+  }
+
+  [[gnu::always_inline]] std::size_t requireIndex(double key) const {
     std::size_t index;
-    if (!indexOf(key, index)) {
-      std::fprintf(stderr, "gea: typed array index %f is out of range for a buffer of length %zu\n", key, length_);
-      gea::detail::abortAfterFlush();
-    }
+    if (!indexOf(key, index)) [[unlikely]] failIndex(key);
     return index;
   }
 
-  std::size_t requireIndexAt(long long key) const {
+  [[gnu::always_inline]] std::size_t requireIndexAt(long long key) const {
     if (static_cast<unsigned long long>(key) >= size()) [[unlikely]] {
-      std::fprintf(stderr, "gea: typed array index %lld is out of range for a buffer of length %zu\n", key, length_);
-      gea::detail::abortAfterFlush();
+      failIndexAt(key);
     }
     return static_cast<std::size_t>(key);
   }
@@ -9897,40 +10789,6 @@ inline Symbol symbolFor(const std::string& key) {
 
 namespace detail {
 
-// libstdc++'s new-ABI `std::string` keeps up to 15 bytes in the object itself
-// ({pointer, length, 16-byte buffer}; the pointer addresses the buffer). Its
-// copy constructor and assignment hand those bytes to `memcpy` with the
-// string's LENGTH as the size, which is a libc call whose small-size branches
-// follow the length -- keys and names of 1 to 15 bytes in random order are the
-// worst case for that, and on the mongodb driver's per-operation path that was
-// 400 `memcpy` calls and a tenth of all branch mispredicts. A string held in
-// its own object is copied here as 24 constant-size bytes, with no call and no
-// branch on the length. Anything else (heap storage, another standard
-// library) takes the ordinary copy.
-#if defined(__GLIBCXX__) && defined(_GLIBCXX_USE_CXX11_ABI) && _GLIBCXX_USE_CXX11_ABI && (defined(__x86_64__) || defined(__aarch64__))
-#define GEA_FAST_SMALL_STRING_COPY 1
-static_assert(sizeof(std::string) == 4 * sizeof(void*), "the small-string copy assumes {pointer, length, 16-byte buffer}");
-inline bool stringIsHeldInline(const std::string& value) {
-  return value.data() == reinterpret_cast<const char*>(&value) + 2 * sizeof(void*);
-}
-/** Length and buffer of an inline string, byte for byte; the pointer of `to` already addresses its own buffer. */
-[[gnu::always_inline]] inline void copyInlineStringBytes(std::string& to, const std::string& from) {
-  std::memcpy(reinterpret_cast<char*>(&to) + sizeof(void*), reinterpret_cast<const char*>(&from) + sizeof(void*),
-              sizeof(std::string) - sizeof(void*));
-}
-#endif
-
-/** A copy of `source`; see above for why this is not `std::string(source)`. */
-[[gnu::always_inline]] inline std::string duplicateString(const std::string& source) {
-  std::string copy;
-#ifdef GEA_FAST_SMALL_STRING_COPY
-  if (stringIsHeldInline(source)) copyInlineStringBytes(copy, source);
-  else copy.assign(source);
-#else
-  copy.assign(source);
-#endif
-  return copy;
-}
 
 /**
  * `target = source`, with the inline-to-inline case spelled as constant-size
@@ -9957,8 +10815,34 @@ inline bool stringIsHeldInline(const std::string& value) {
 #endif
   target = std::move(source);
 }
+// A literal that fits the inline buffer is a constant-size copy into it, not `_M_replace`.
+template <std::size_t Size>
+[[gnu::always_inline]] inline void assignString(std::string& target, const char (&literal)[Size]) {
+#ifdef GEA_FAST_SMALL_STRING_COPY
+  if constexpr (Size <= 16) {
+    if (stringIsHeldInline(target)) {
+      const std::size_t length = __builtin_strlen(literal);
+      // The bytes as one or two 8-byte immediates: a later copy of them loads
+      // four or eight at a time, and a load spanning the several narrower
+      // stores of a `Size`-byte copy cannot forward.
+      char* const buffer = reinterpret_cast<char*>(&target) + 2 * sizeof(void*);
+      std::uint64_t low = 0;
+      std::memcpy(&low, literal, Size < 8 ? Size : 8);
+      std::memcpy(buffer, &low, 8);
+      if constexpr (Size > 8) {
+        std::uint64_t high = 0;
+        std::memcpy(&high, literal + 8, Size - 8);
+        std::memcpy(buffer + 8, &high, 8);
+      }
+      std::memcpy(reinterpret_cast<char*>(&target) + sizeof(void*), &length, sizeof(length));
+      return;
+    }
+  }
+#endif
+  target = literal;
+}
 template <typename Source>
-  requires(!std::is_same_v<std::remove_cvref_t<Source>, std::string>)
+  requires(!std::is_same_v<std::remove_cvref_t<Source>, std::string> && !std::is_array_v<std::remove_cvref_t<Source>>)
 [[gnu::always_inline]] inline void assignString(std::string& target, Source&& source) {
   target = std::forward<Source>(source);
 }
@@ -10289,8 +11173,8 @@ class Optional<Ref<Pointee>> {
   // The handle's own word, reached through its base exactly as `Ref` reaches it.
   void*& word() noexcept { return static_cast<detail::RefStorage&>(value_).erased_; }
   void* word() const noexcept { return static_cast<const detail::RefStorage&>(value_).erased_; }
-  /** An owning handle: neither absent (1) nor null (0). */
-  bool owns() const noexcept { return reinterpret_cast<std::uintptr_t>(word()) > 1; }
+  /** Only allocation words own: null 0, wrapper absence 1 and native undefined 2 carry no reference count. */
+  bool owns() const noexcept { return reinterpret_cast<std::uintptr_t>(word()) > 2; }
 
   /** Moves the owned handle out (or answers null for an absent / null word), leaving the word null. */
   Handle take() noexcept {
@@ -13601,6 +14485,18 @@ class LocalArrayCursor {
     done_ = false;
     return array_->present(index) ? array_->at(index) : E{};
   }
+  /** `target = arrayNext()`, stored through `assignString`: a string element is copied once, not copied out and then moved in. */
+  void arrayNextInto(E& target) {
+    if (!array_ || position_ >= array_->size()) {
+      done_ = true;
+      detail::assignString(target, E{});
+      return;
+    }
+    const std::size_t index = position_++;
+    done_ = false;
+    if (array_->present(index)) detail::assignString(target, array_->at(index));
+    else detail::assignString(target, E{});
+  }
   bool done() const { return done_; }
   friend void geaTraceRefs(const LocalArrayCursor& value, detail::RefVisitor& visitor) { detail::traceRefs(value.array_, visitor); }
  private:
@@ -13608,6 +14504,15 @@ class LocalArrayCursor {
   std::size_t position_ = 0;
   bool done_ = false;
 };
+
+namespace detail {
+/** `target = cursor.arrayNext()` for a string element, stored without the extra move; any cursor. */
+template <typename Cursor, typename Target>
+[[gnu::always_inline]] inline void nextInto(Cursor& cursor, Target& target) {
+  if constexpr (requires { cursor.arrayNextInto(target); }) cursor.arrayNextInto(target);
+  else assignString(target, cursor.arrayNext());
+}
+}  // namespace detail
 
 template <typename V>
 class LocalDictionaryCursor {
@@ -15392,15 +16297,16 @@ detail::PromiseAwaiter<V> operator co_await(Promise<V>&& promise) {
  * finished before it was awaited, at the moment it is awaited), never a direct
  * resumption -- so every interleaving with other jobs is unchanged.
  *
- * The emitter calls a body's `_task` twin only where the result is awaited by
- * the very next operation and read nowhere else (`emit-callable.ts`), so a
+ * Whole-program IR analysis selects one Task implementation only when every
+ * callable use is closed and every call result is immediately awaited once.
+ * An escaping callable or retained result keeps one Promise implementation. A
  * `Task` is never copied, stored or passed. Its frame is destroyed by the
  * awaiter once the value has been taken; a `Task` dropped while its body is
  * still running lets the body finish and free itself.
  *
  * A `co_return` of something that would need a promise's adoption (a promise, a
  * box that may hold one) has no meaning here and does not compile: the emitter
- * never makes a twin for a body that can return one.
+ * never selects Task for a body that can return one.
  */
 template <typename V>
 class Task;
@@ -16473,7 +17379,7 @@ class Value {
     if constexpr (detail::IsRefPayload<std::decay_t<T>>::value) {
       if (tag == Tag::Object && !value) {
         Value absent;
-        absent.tag_ = Tag::Null;
+        absent.tag_ = value.isUndefined() ? Tag::Undefined : Tag::Null;
         return absent;
       }
     }
@@ -17926,6 +18832,42 @@ struct NativeIndexAttributes {
 static_assert(sizeof(NativeIndexAttributes) == 1);
 
 namespace detail {
+
+// Pointer-to-member references preserve inherited/non-standard-layout objects;
+// shared state remains shared when the emitter proves its bits constant.
+template <typename Object, typename State>
+struct NativeFieldStateReference {
+  const State Object::* member = nullptr;
+  const State* shared = nullptr;
+  constexpr NativeFieldStateReference(const State Object::* value) : member(value) {}
+  constexpr NativeFieldStateReference(const State* value) : shared(value) {}
+  const State& read(const Object& object) const { return shared != nullptr ? *shared : object.*member; }
+};
+
+template <typename Object>
+struct NativeStringFieldMetadata {
+  const char* key;
+  NativeFieldStateReference<Object, bool> presence;
+  NativeFieldStateReference<Object, NativeIndexAttributes> attributes;
+};
+
+// Keeping the vector insertion in one loop avoids one string construction and
+// exception-cleanup region per declared field in large object protocols.
+template <typename Object, std::size_t Count>
+[[gnu::noinline]] inline void appendNativeStringFieldKeys(
+    const Object& object, const NativeStringFieldMetadata<Object> (&fields)[Count], std::vector<PropertyKey>& out) {
+  for (const auto& field : fields) {
+    if (field.presence.read(object)) out.push_back(PropertyKey::string(field.key));
+  }
+}
+
+template <typename Object, std::size_t Count>
+[[gnu::noinline]] inline void appendNativeEnumerableStringFieldKeys(
+    const Object& object, const NativeStringFieldMetadata<Object> (&fields)[Count], std::vector<std::string>& out) {
+  for (const auto& field : fields) {
+    if (field.presence.read(object) && field.attributes.read(object).enumerable) out.emplace_back(field.key);
+  }
+}
 
 /**
  * Compare a fixed field with an already authenticated incoming payload, without
@@ -19494,6 +20436,9 @@ struct NativeFieldOps {
   // answer names the predicate does not), no index sidecar, no own accessors.
   // Null for every other payload. `Value::getLiteralProperty` caches a miss on it.
   bool (*declaresName)(const void* payload, const PropertyKey& key);
+  // Native declared fields have descriptor/presence state too. Older adapters
+  // leave this absent and retain their non-configurable fixed-field behavior.
+  bool (*deleteField)(void* payload, const PropertyKey& key) = nullptr;
 };
 
 /**
@@ -19787,6 +20732,12 @@ concept TypedStringDictionaryTable = !std::is_void_v<typename StringDictionaryEn
                                      (isNumericDictionaryTable<T> || !std::is_same_v<typename StringDictionaryEntry<T>::type, Value>) &&
                                      DynamicCarrier<typename StringDictionaryEntry<T>::type>::supported;
 
+inline void forgetNativeOwnKey(const void* address, const PropertyKey& key);
+
+template <typename T>
+bool nativeDefineOwnField(T& object, const PropertyKey& key, const PropertyDescriptor& descriptor,
+                          bool extensible, const gea::Ref<void>& owner);
+
 template <typename T>
 const NativeFieldOps* nativeFieldOpsFor() {
   using Target = typename NativeFieldPayload<T>::Target;
@@ -19898,7 +20849,8 @@ const NativeFieldOps* nativeFieldOpsFor() {
       },
       [](void* payload, const PropertyKey& key, const PropertyDescriptor& descriptor, bool extensible) {
         Target* target = NativeFieldPayload<T>::writer(payload);
-        if constexpr (NativeOwnFieldProtocol<Target>) return target != nullptr && target->gea_defineOwnField(key, descriptor, extensible);
+        if constexpr (NativeOwnFieldProtocol<Target>)
+          return target != nullptr && nativeDefineOwnField(*target, key, descriptor, extensible, NativeFieldPayload<T>::owner(payload));
         return false;
       },
       [](const void* payload, const PropertyKey& key, Value& out) {
@@ -19959,6 +20911,16 @@ const NativeFieldOps* nativeFieldOpsFor() {
               const Target* target = NativeFieldPayload<T>::reader(payload);
               if constexpr (NativeOwnFieldProtocol<Target>) return target == nullptr || target->gea_matchesOwnField(key);
               else return true;
+            })
+          : nullptr,
+      NativeOwnFieldProtocol<Target>
+          ? static_cast<bool (*)(void*, const PropertyKey&)>([](void* payload, const PropertyKey& key) {
+              Target* target = NativeFieldPayload<T>::writer(payload);
+              if constexpr (NativeOwnFieldProtocol<Target>) {
+                if (target == nullptr || !target->gea_deleteOwnField(key)) return false;
+                forgetNativeOwnKey(target, key);
+                return true;
+              } else return false;
             })
           : nullptr};
     return &ops;
@@ -20721,7 +21683,7 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
     using Source = CallableObject<SourceResult(Arguments...)>;
     if (value.payloadType() != payloadTypeTagFor<Source>()) return false;
     out = Self::adaptSource(value.as<Source>(), +[](void* environment, Arguments... arguments) -> void {
-      static_cast<Source*>(environment)->call(std::move(arguments)...);
+      static_cast<Source*>(environment)->callStable(std::move(arguments)...);
     });
     return true;
   }
@@ -23189,6 +24151,18 @@ void noteNativeOwnKeyCreated(const gea::Ref<void>& payload, const PropertyKey& k
   noteNativeOwnKeyCreatedErased(payload, key, KeyLister::of(fieldKeys), KeyLister::of(declaredKeys));
 }
 
+// Definition can recreate a deleted declared field. Its native presence bit
+// decides creation order without reading or boxing the field's typed value.
+template <typename T>
+bool nativeDefineOwnField(T& object, const PropertyKey& key, const PropertyDescriptor& descriptor,
+                          bool extensible, const gea::Ref<void>& owner) {
+  bool present = true;
+  if constexpr (NativeOwnFieldPresenceTable<T>) object.gea_ownFieldPresent(key, present);
+  if (!object.gea_defineOwnField(key, descriptor, extensible)) return false;
+  if (!present) noteNativeOwnKeyCreated(owner, key, [&](std::vector<PropertyKey>& keys) { object.gea_ownFieldKeys(keys); });
+  return true;
+}
+
 /** A declared field deleted through the property protocol: created again later, it enumerates last. */
 inline void forgetNativeOwnKey(const void* address, const PropertyKey& key) {
   if (NativeOwnKeyOrder* order = findNativeOwnKeyOrder(address)) order->forget(key);
@@ -24483,7 +25457,8 @@ bool nativeDynamicDefineProperty(const gea::Ref<T>& object, const PropertyKey& k
   if (!object) return false;
   if constexpr (detail::NativeFieldTable<T>) {
     if constexpr (detail::wholeNativeOwnFieldProtocol<T>()) {
-      if (object->gea_matchesOwnField(key)) return object->gea_defineOwnField(key, descriptor, nativeIsExtensible(object));
+      if (object->gea_matchesOwnField(key))
+        return detail::nativeDefineOwnField(*object, key, descriptor, nativeIsExtensible(object), gea::refCastToVoid(object));
     } else {
       Value fixed;
       if (object->gea_readOwnField(key, fixed)) return false;
@@ -26533,7 +27508,8 @@ inline Value Value::getProperty(const PropertyKey& key) const {
 inline Value Value::getProperty(const PropertyKey& key, const Value& receiver) const {
   if (proxy_) return dynamicProxyGet(*this, key, receiver);
   if (tag_ == Tag::Null || tag_ == Tag::Undefined)
-    gea::host::throwRuntimeError("TypeError", tag_ == Tag::Null ? "Cannot read properties of null" : "Cannot read properties of undefined");
+    gea::host::throwRuntimeError("TypeError", std::string(tag_ == Tag::Null ? "Cannot read properties of null" : "Cannot read properties of undefined") +
+        " (reading '" + (key.isSymbol() ? std::string("Symbol()") : std::string(key.text())) + "')");
   if (dynamic_) return gea::refStaticCast<DynamicObject>(held_)->get(key, receiver);
   if (metadata_->payloadType == detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<gea::Value>>>()) {
     if (const gea::Value* gea_viewed = gea::dictionary::viewedObjectOf(*this)) return gea_viewed->getProperty(key);
@@ -26833,12 +27809,12 @@ inline bool Value::deleteProperty(const PropertyKey& key) {
     if (detail::stringOwnDescriptor(as<std::string>(), key, descriptor)) return descriptor.configurable;
   }
   if (metadata_->fields != nullptr) {
-    // ECMA-262 10.1.10.1 step 4: `[[Delete]]` of a non-configurable own
-    // property answers `false`. A C++ struct member is exactly that -- it
-    // exists for the lifetime of the struct and there is no representation of
-    // its absence -- so a declared field reports the truth rather than
-    // pretending to remove something. An expando key is configurable and
-    // really does go.
+    // The generated native protocol owns descriptor and presence state, so
+    // deletion must reach it exactly as nativeDynamicDelete does. Reading the
+    // value and returning false here made boxed native fields undeletable.
+    if (metadata_->fields->deleteField != nullptr && metadata_->fields->matchesField(payload(), key))
+      return metadata_->fields->deleteField(payload(), key);
+    // Host adapters without deletion state still expose fixed fields.
     Value probe;
     if (metadata_->fields->read(payload(), key, probe)) return false;
     if (metadata_->fields->matchesIndex(payload(), key)) return metadata_->fields->deleteIndex(payload(), key);
@@ -27320,6 +28296,17 @@ struct Utf16Metadata {
 inline bool isShortBasicLatin(const std::string &s) {
   const auto size = s.size();
   if (size > 16) return false;
+#if defined(GEA_FAST_SMALL_STRING_COPY) && defined(__SSE2__)
+  // An inline string's buffer is sixteen bytes in the object, and the split
+  // and literal stores fill it as one 16-byte store: read it back the same
+  // way. The overlapping words below load at offsets into that store, which
+  // waited for it to retire on every short part of a split.
+  if (::gea::detail::stringIsHeldInline(s)) {
+    __m128i bytes;
+    std::memcpy(&bytes, s.data(), 16);
+    return (static_cast<unsigned>(_mm_movemask_epi8(bytes)) & ((1u << size) - 1u)) == 0;
+  }
+#endif
   if (size > 8) {
     // Property and field names (`firstBatch`, `completed`) sit just past eight
     // bytes: two overlapping words cover nine to sixteen.
@@ -28912,7 +29899,150 @@ inline gea::Ref<gea::ArrayObject<std::string>> split(const std::string &s, const
   return result;
 }
 
+/**
+ * `for (const part of s.split(separator))` when the array is read by nothing
+ * but that loop (`ir/lazy-splits.ts`): the same elements as `split` above, in
+ * the same order, each written straight into the loop's binding. Building the
+ * array copied every part three times -- into a fresh string, into a cell, out
+ * to the binding -- and each copy reread bytes the previous one had only just
+ * stored, at a different width. `LocalArrayCursor`'s protocol, so the loop
+ * steps it the same way.
+ *
+ * It reads `s` as the loop runs, which is the array's answer only while `s`
+ * holds still: the emitter borrows a binding nothing writes again and hands
+ * anything else over as its own copy.
+ */
+class SplitCursor {
+ public:
+  SplitCursor() = default;
+  SplitCursor(const SplitCursor&) = delete;
+  SplitCursor& operator=(const SplitCursor&) = delete;
+  /** Starts over on `source`, read in place. Reset rather than reassigned, so opening the loop copies no cursor. */
+  void borrow(const std::string& source, std::string_view separator) {
+    borrowed_ = &source;
+    start(separator);
+  }
+  /** Starts over on a copy of `source`. */
+  void own(const std::string& source, std::string_view separator) {
+    owned_ = source;
+    borrowed_ = nullptr;
+    start(separator);
+  }
+  std::string arrayNext() {
+    std::string part;
+    arrayNextInto(part);
+    return part;
+  }
+  [[gnu::always_inline]] void arrayNextInto(std::string& target) {
+    const std::string& s = text();
+    if (separator_.empty()) [[unlikely]] {
+      nextUnitInto(target);
+      return;
+    }
+    done_ = finished_;
+    if (done_) {
+      target.clear();
+      return;
+    }
+    std::size_t end = separator_.size() == 1 ? findByte(s, separator_[0], position_) : s.find(separator_, position_);
+    finished_ = end == std::string::npos;
+    if (finished_) end = s.size();
+    // Sixteen bytes from the part's start lie inside the allocation, which
+    // always has room for the capacity and a terminator.
+    if (position_ + 16 > s.capacity() + 1 || !detail::storeShortString(target, s.data() + position_, end - position_))
+      target.assign(s, position_, end - position_);
+    position_ = end + separator_.size();
+  }
+  bool done() const { return done_; }
+
+ private:
+  const std::string& text() const { return borrowed_ != nullptr ? *borrowed_ : owned_; }
+  [[gnu::noinline]] void nextUnitInto(std::string& target) {
+    done_ = position_ >= units_;
+    if (done_) {
+      target.clear();
+    } else {
+      target = substringUtf16(text(), position_, position_ + 1);
+      ++position_;
+    }
+  }
+  // `std::string::find` of one byte is a `memchr` call, whose setup is most of
+  // the cost on a part a few bytes long. Past the first bytes, eight at a time
+  // while the word stays inside the allocation (capacity plus terminator); the
+  // lowest matching byte of a word is exact, and one past the size means no match.
+  [[gnu::always_inline]] static std::size_t findByte(const std::string& s, char byte, std::size_t from) {
+    const char* data = s.data();
+    const std::size_t size = s.size();
+    const std::size_t limit = s.capacity() + 1;
+    constexpr std::uint64_t ones = 0x0101010101010101ull;
+    const std::uint64_t pattern = ones * static_cast<unsigned char>(byte);
+    std::size_t at = from;
+    // The first bytes one at a time: a string just built (`a + ',' + b`) was
+    // written by stores of several widths, a word load spanning them waits for
+    // all to retire, and a byte load is always inside one. Most parts end here.
+    for (const std::size_t near = size < from + 16 ? size : from + 16; at < near; ++at)
+      if (data[at] == byte) return at;
+    for (; at < size && at + 8 <= limit; at += 8) {
+      std::uint64_t word;
+      std::memcpy(&word, data + at, 8);
+      word ^= pattern;
+      const std::uint64_t found = (word - ones) & ~word & 0x8080808080808080ull;
+      if (found != 0) {
+        const std::size_t index = at + (static_cast<std::size_t>(__builtin_ctzll(found)) >> 3);
+        return index < size ? index : std::string::npos;
+      }
+    }
+    for (; at < size; ++at)
+      if (data[at] == byte) return at;
+    return std::string::npos;
+  }
+  void start(std::string_view separator) {
+    separator_.assign(separator.data(), separator.size());
+    position_ = 0;
+    units_ = separator_.empty() ? utf16Length(text()) : 0;
+    finished_ = false;
+    done_ = false;
+  }
+
+  const std::string* borrowed_ = nullptr;
+  std::string owned_;
+  std::string separator_;
+  std::size_t position_ = 0;
+  std::size_t units_ = 0;
+  bool finished_ = false;
+  bool done_ = false;
+};
+
 }  // namespace gea::runtime::string
+
+namespace gea {
+
+/**
+ * `& | ^` with a `charCodeAt` operand. `ToInt32` of a code unit is the unit
+ * itself and of the out-of-range NaN is 0, so these are exact in the
+ * integers. Without them `hash ^= s.charCodeAt(i)` resolved to the `double`
+ * overloads: the integer hash widened to a double and both sides went through
+ * `ToInt32`'s range checks, on every character of an FNV loop.
+ */
+namespace detail {
+inline std::uint32_t int32Bits(runtime::string::CodeUnit value) { return value.unit <= 65535 ? value.unit : 0u; }
+template <typename Integer> requires std::is_integral_v<Integer>
+inline std::uint32_t int32Bits(Integer value) { return static_cast<std::uint32_t>(value); }
+template <typename Left, typename Right>
+inline constexpr bool codeUnitBitwise =
+    (std::is_same_v<Left, runtime::string::CodeUnit> || std::is_same_v<Right, runtime::string::CodeUnit>) &&
+    (std::is_integral_v<Left> || std::is_same_v<Left, runtime::string::CodeUnit>) &&
+    (std::is_integral_v<Right> || std::is_same_v<Right, runtime::string::CodeUnit>);
+}  // namespace detail
+
+template <typename Left, typename Right> requires detail::codeUnitBitwise<Left, Right>
+inline long long bitwiseAnd(Left left, Right right) { return static_cast<std::int32_t>(detail::int32Bits(left) & detail::int32Bits(right)); }
+template <typename Left, typename Right> requires detail::codeUnitBitwise<Left, Right>
+inline long long bitwiseOr(Left left, Right right) { return static_cast<std::int32_t>(detail::int32Bits(left) | detail::int32Bits(right)); }
+template <typename Left, typename Right> requires detail::codeUnitBitwise<Left, Right>
+inline long long bitwiseXor(Left left, Right right) { return static_cast<std::int32_t>(detail::int32Bits(left) ^ detail::int32Bits(right)); }
+
+}  // namespace gea
 
 namespace gea::runtime::regex {
 
@@ -33150,6 +34280,71 @@ inline std::string toString(double value) {
   return internal::toCharsToEcma(internal::generalFormat(value));
 }
 
+/**
+ * ToString(number) as one piece of a concatenation: `'item-' + i` formats `i`
+ * into this object's own buffer and the concatenation reads it as a view, so
+ * the digits are written once, into the result. `toString` would build a
+ * `std::string` only for it to be copied again and destroyed. The text is
+ * `toString`'s exactly -- its integer fast path, and `toString` itself for
+ * every other number.
+ */
+class NumberText {
+ public:
+  /**
+   * A value the integer census holds as an integer formats from it, without the
+   * round trip through a double and the floor and range tests that recover it.
+   * Past 2^53 the Number it stands for is the rounded double, so that prints.
+   */
+  [[gnu::always_inline]] explicit NumberText(long long value) {
+    if (value >= 0 && value < 100000000) {
+      // Up to eight digits computed in one register and stored as one word.
+      // `to_chars` stores them a pair at a time, and the concatenation copying
+      // them out loads four or eight bytes at once: a load spanning several
+      // narrower stores cannot forward and waits for all of them to retire.
+      const auto n = static_cast<std::uint64_t>(value);
+      std::uint64_t word = n / 10000 | (n % 10000) << 32;
+      std::uint64_t high = (word * 10486 >> 20) & 0x0000007F0000007Full;
+      word = high | (word - 100 * high) << 16;
+      high = (word * 103 >> 10) & 0x000F000F000F000Full;
+      word = (high | (word - 10 * high) << 8) | 0x3030303030303030ull;
+      const std::size_t count = 1 + (n >= 10) + (n >= 100) + (n >= 1000) + (n >= 10000) + (n >= 100000) + (n >= 1000000) + (n >= 10000000);
+      word >>= 8 * (8 - count);
+      std::memcpy(digits_, &word, 8);
+      word_ = word;
+      length_ = count;
+      return;
+    }
+    if (value >= -(1LL << 53) && value <= (1LL << 53)) {
+      length_ = static_cast<std::size_t>(std::to_chars(digits_, digits_ + sizeof(digits_), value).ptr - digits_);
+      return;
+    }
+    general_ = toString(static_cast<double>(value));
+    length_ = npos;
+  }
+  explicit NumberText(double value) {
+    if (value == std::floor(value) && value >= -9007199254740992.0 && value <= 9007199254740992.0) {
+      // -0 lands here as 0, which is what ECMAScript prints for it.
+      length_ = static_cast<std::size_t>(std::to_chars(digits_, digits_ + sizeof(digits_), static_cast<long long>(value)).ptr - digits_);
+      return;
+    }
+    general_ = toString(value);
+    length_ = npos;
+  }
+  NumberText(const NumberText&) = delete;
+  NumberText& operator=(const NumberText&) = delete;
+  operator std::string_view() const { return length_ == npos ? std::string_view(general_) : std::string_view(digits_, length_); }
+  /** Up to eight digits held in one register (`concatStringsInto` stores them as one word), or zero. */
+  std::uint64_t digitWord() const { return word_; }
+  std::size_t digitCount() const { return length_; }
+
+ private:
+  static constexpr std::size_t npos = static_cast<std::size_t>(-1);
+  std::uint64_t word_ = 0;
+  char digits_[24];
+  std::size_t length_ = 0;
+  std::string general_;
+};
+
 // The backend's narrowed-integer Number carrier (`cppNarrowedIntegerType`, a
 // loop counter proven integral): a Number like any other, so it prints as the
 // double it stands for. Without this overload a `long long` converts to both
@@ -35205,6 +36400,148 @@ gea::Ref<ArrayObject<E>> fill(const gea::Ref<ArrayObject<E>>& array, const std::
   return fill(array, value, 0.0, array ? static_cast<double>(array->size()) : 0.0);
 }
 
+namespace sorting {
+
+/** Inserts each element of `[sorted, last)` into the sorted prefix `[first, sorted)`; equal elements keep their order. */
+template <typename E, typename Less>
+void insertionSortTail(E* first, E* sorted, E* last, const Less& less) {
+  for (E* at = sorted; at < last; ++at) {
+    if (!less(*at, *(at - 1))) continue;
+    E value = std::move(*at);
+    E* hole = at;
+    do {
+      *hole = std::move(*(hole - 1));
+      --hole;
+    } while (hole > first && less(value, *(hole - 1)));
+    *hole = std::move(value);
+  }
+}
+
+/** Merges two sorted runs into `out` from the front, the left run winning ties. */
+template <typename E, typename Less>
+void mergeRunsForward(E* left, E* leftEnd, E* right, E* rightEnd, E* out, const Less& less) {
+  while (left < leftEnd && right < rightEnd) {
+    const bool takeRight = less(*right, *left);
+    if constexpr (std::is_trivially_copyable_v<E>) {
+      *out++ = takeRight ? *right : *left;
+      right += takeRight;
+      left += !takeRight;
+    } else if (takeRight) {
+      *out++ = std::move(*right++);
+    } else {
+      *out++ = std::move(*left++);
+    }
+  }
+  out = std::move(left, leftEnd, out);
+  std::move(right, rightEnd, out);
+}
+
+/**
+ * Merges two sorted runs into `out`, the left run winning ties.
+ *
+ * Each step is a select, not a branch: on unordered input which run supplies
+ * the next element is a coin toss, and a branch on it is mispredicted half the
+ * time. A select instead makes every step wait on the one before it, so a
+ * trivially copyable element is merged from both ends at once -- the front
+ * takes the smallest element left and the back the largest, and the two
+ * chains run side by side.
+ */
+template <typename E, typename Less>
+void mergeRuns(E* left, E* leftEnd, E* right, E* rightEnd, E* out, const Less& less) {
+  if constexpr (!std::is_trivially_copyable_v<E>) {
+    mergeRunsForward(left, leftEnd, right, rightEnd, out, less);
+  } else {
+    E* const leftStart = left;
+    E* const rightStart = right;
+    E* const destination = out;
+    E* back = out + ((leftEnd - left) + (rightEnd - right)) - 1;
+    E* leftBack = leftEnd - 1;
+    E* rightBack = rightEnd - 1;
+    while (back > out && left < leftEnd && right < rightEnd && leftBack >= leftStart && rightBack >= rightStart) {
+      const bool takeRight = less(*right, *left);
+      *out++ = takeRight ? *right : *left;
+      right += takeRight;
+      left += !takeRight;
+      // On a tie the back takes the right run's element: it sorts after an
+      // equal element of the left run.
+      const bool takeLeft = less(*rightBack, *leftBack);
+      *back-- = takeLeft ? *leftBack : *rightBack;
+      leftBack -= takeLeft;
+      rightBack -= !takeLeft;
+    }
+    // A consistent comparator leaves the two ends meeting exactly. One that
+    // is not can make both ends claim the same element; the runs are still
+    // intact in the source buffer, so merge again from the front alone.
+    if (left > leftBack + 1 || right > rightBack + 1) {
+      mergeRunsForward(leftStart, leftEnd, rightStart, rightEnd, destination, less);
+      return;
+    }
+    mergeRunsForward(left, leftBack + 1, right, rightBack + 1, out, less);
+  }
+}
+
+/**
+ * A stable natural merge sort: the runs the input already has are found and
+ * kept, short ones are extended by insertion to `minRun`, and neighbouring
+ * runs are merged pairwise until one is left. Two runs already in order are
+ * moved, not merged. Replaces `std::stable_sort`, whose merge branches on every
+ * comparison; this is the sort behind every `Array.prototype.sort`, and the
+ * input `@geastack/parallel`'s `sorted` hands it is a concatenation of sorted
+ * runs, which this merges without re-sorting.
+ */
+template <typename E, typename Less>
+void stableSort(E* base, std::size_t count, const Less& less) {
+  if (count < 2) return;
+  constexpr std::size_t minRun = 24;
+  std::vector<std::size_t> bounds{0};
+  for (std::size_t start = 0; start < count;) {
+    std::size_t end = start + 1;
+    if (end < count && less(base[end], base[start])) {
+      // Only a STRICTLY descending run may be reversed: reversing two equal
+      // elements would swap them.
+      while (end < count && less(base[end], base[end - 1])) ++end;
+      std::reverse(base + start, base + end);
+    } else {
+      while (end < count && !less(base[end], base[end - 1])) ++end;
+    }
+    if (end - start < minRun && end < count) {
+      const std::size_t target = std::min(count, start + minRun);
+      insertionSortTail(base + start, base + end, base + target, less);
+      end = target;
+    }
+    bounds.push_back(end);
+    start = end;
+  }
+  if (bounds.size() <= 2) return;
+  // Default-initialized, so a trivially copyable element's scratch is not
+  // zeroed first: every slot is written by a merge before it is read.
+  std::unique_ptr<E[]> scratch(new E[count]);
+  E* from = base;
+  E* to = scratch.get();
+  std::vector<std::size_t> next;
+  while (bounds.size() > 2) {
+    next.assign(1, 0);
+    for (std::size_t run = 0; run + 1 < bounds.size(); run += 2) {
+      const std::size_t first = bounds[run];
+      const std::size_t middle = bounds[run + 1];
+      if (run + 2 >= bounds.size()) {
+        std::move(from + first, from + middle, to + first);
+        next.push_back(middle);
+        continue;
+      }
+      const std::size_t last = bounds[run + 2];
+      if (!less(from[middle], from[middle - 1])) std::move(from + first, from + last, to + first);
+      else mergeRuns(from + first, from + middle, from + middle, from + last, to + first, less);
+      next.push_back(last);
+    }
+    bounds.swap(next);
+    std::swap(from, to);
+  }
+  if (from != base) std::move(from, from + count, base);
+}
+
+}  // namespace sorting
+
 /**
  * ECMA-262 23.1.3.30's SortIndexedProperties, shared by both sort spellings:
  * collect the PRESENT elements in index order, hand them to a stable sort, and
@@ -35213,18 +36550,26 @@ gea::Ref<ArrayObject<E>> fill(const gea::Ref<ArrayObject<E>>& array, const std::
  * itemCount..len-1). Holes therefore sort to the END, which is what every
  * engine does and what a naive whole-vector sort would get wrong.
  *
- * `std::stable_sort` because 23.1.3.30 requires the sort be stable.
+ * A stable sort (`sorting::stableSort`) because 23.1.3.30 requires one.
  */
 template <typename E, typename Less>
 gea::Ref<ArrayObject<E>> sortIndexedProperties(const gea::Ref<ArrayObject<E>>& array, const Less& less) {
   if (!array) return array;
   array->requireMutable();
+  if (array->holes.empty() && array->undefineds.empty()) {
+    // Every element is present, so the collected list IS the array's own
+    // storage, in order: sort it where it lies rather than copy it out and back.
+    using Cell = typename ArrayObject<E>::Cell;
+    sorting::stableSort(array->cells.begin(), array->cells.size(),
+                        [&less](const Cell& left, const Cell& right) { return less(left.value, right.value); });
+    return array;
+  }
   std::vector<E> present;
   present.reserve(array->size());
   for (const auto& slot : array->slots()) {
     if (slot.present) present.push_back(slot.value);
   }
-  std::stable_sort(present.begin(), present.end(), less);
+  sorting::stableSort(present.data(), present.size(), less);
   for (std::size_t index = 0; index < present.size(); ++index) {
     array->at(index) = present[index];
     if (index < array->holes.size()) array->holes[index] = 0;
@@ -35350,9 +36695,21 @@ template <typename Inner>
 gea::Ref<ArrayObject<Inner>> flat(const gea::Ref<ArrayObject<gea::Ref<ArrayObject<Inner>>>>& array) {
   auto out = gea::makeRef<ArrayObject<Inner>>();
   if (!array) return out;
+  // Sized once, and an inner array with no holes or present `undefined`s --
+  // every element present, carried as itself -- is copied as one block.
+  std::size_t total = 0;
+  for (const auto& slot : array->slots()) {
+    if (slot.present && slot.value) total += slot.value->size();
+  }
+  out->reserve(total);
   for (const auto& slot : array->slots()) {
     if (!slot.present || !slot.value) continue;
-    for (const auto& inner : slot.value->slots()) {
+    const ArrayObject<Inner>& part = *slot.value;
+    if (part.holes.empty() && part.undefineds.empty()) {
+      out->appendRange(part, 0);
+      continue;
+    }
+    for (const auto& inner : part.slots()) {
       if (inner.present) out->push(inner.value);
     }
   }
@@ -35642,7 +36999,48 @@ namespace detail {
 // v1: gea::runtime::math::floor (stdlib.cpp). Math.floor already matches
 // std::floor bit-for-bit -- same reasoning as ceil below, mirrored toward
 // -Infinity.
-inline double floor_invoke(void*, double x) { return std::floor(x); }
+inline double floor_invoke(void*, double x) {
+#if GEA_SOFT_DOUBLE
+  // Exact on every input, in the two 32-bit halves a soft-double core holds a
+  // double in (fdlibm's floor, inlined): no libcall, no register-pair shuffle
+  // across the ABI, and the common integral/|x| >= 2^52 case is two compares.
+  std::uint64_t bits;
+  std::memcpy(&bits, &x, sizeof bits);
+  std::uint32_t high = static_cast<std::uint32_t>(bits >> 32);
+  std::uint32_t low = static_cast<std::uint32_t>(bits);
+  const int exponent = static_cast<int>((high >> 20) & 0x7ff) - 1023;
+  if (exponent >= 52) return x;  // already integral, or infinity / NaN
+  if (exponent < 0) {
+    if (((high << 1) | low) == 0) return x;  // +-0 keeps its sign
+    return (high >> 31) != 0 ? -1.0 : 0.0;   // 0 < |x| < 1 (subnormals too)
+  }
+  if (exponent < 20) {
+    const std::uint32_t mask = 0x000fffffu >> exponent;
+    if (((high & mask) | low) == 0) return x;
+    if ((high >> 31) != 0) high += 0x00100000u >> exponent;
+    high &= ~mask;
+    low = 0;
+  } else {
+    const std::uint32_t mask = 0xffffffffu >> (exponent - 20);
+    if ((low & mask) == 0) return x;
+    if ((high >> 31) != 0) {
+      if (exponent == 20) {
+        high += 1;
+      } else {
+        const std::uint32_t sum = low + (std::uint32_t{1} << (52 - exponent));
+        if (sum < low) ++high;
+        low = sum;
+      }
+    }
+    low &= ~mask;
+  }
+  bits = (static_cast<std::uint64_t>(high) << 32) | low;
+  std::memcpy(&x, &bits, sizeof x);
+  return x;
+#else
+  return std::floor(x);
+#endif
+}
 
 // v1: gea::runtime::math::round (stdlib.cpp), ported with its comments.
 //
@@ -36745,6 +38143,24 @@ inline gea::Ref<Derived> downcastClassRef(const gea::Ref<Base>& ref) {
   return ref.template staticCast<Derived>();
 }
 
+/**
+ * The CHECKED class downcast of a program's own `as Derived` over a base-class
+ * handle (`conversion/nodes.ts`'s `assertedClassDowncastFor`). `downcastClassRef`
+ * above trusts a guard the emitter rendered; an assertion renders none, so the
+ * allocation's authenticated class chain is tested here and anything that is
+ * not a `Derived` is a `TypeError` rather than a field store through the wrong
+ * object's bytes.
+ */
+template <typename Derived, typename Base>
+inline gea::Ref<Derived> assertedDowncastClassRef(const gea::Ref<Base>& ref) {
+  static_assert(std::is_base_of<Base, Derived>::value,
+                "a class-ref assertion must name a class that descends from the handle's own (see assertedDowncastClassRef)");
+  if (!gea::detail::classIdentityExtends(gea::detail::refPayloadIdentity(ref), &gea::detail::RefOperationsFor<Derived>::table)) {
+    gea::host::throwRuntimeError("TypeError", "Value is not an instance of the class this assertion names");
+  }
+  return ref.template staticCast<Derived>();
+}
+
 namespace ErrorConstructor {
 
 template <typename ErrorRecord>
@@ -37233,6 +38649,23 @@ inline gea::Promise<V> race(const gea::Ref<gea::ArrayObject<Element>>& elements,
  */
 namespace console {
 
+/**
+ * One console argument's text. Node formats console arguments with
+ * `util.inspect`, not ToString, and for a Number the two differ in exactly one
+ * value: inspect prints negative zero as `-0`, where ECMA-262 Number::toString
+ * answers `0` (`console.log(-0)` vs `console.log(String(-0))`). Every other
+ * tag keeps the ToString it had, so this widens nothing else.
+ */
+inline std::string inspect(double value) {
+  if (value == 0 && std::signbit(value)) return "-0";
+  return detail::toString(value);
+}
+
+inline std::string inspect(const gea::Value& value) {
+  if (value.tag() == gea::Value::Tag::Number) return inspect(value.as<double>());
+  return detail::toString(value);
+}
+
 inline void log(const std::string& text) {
   std::fputs(text.c_str(), stdout);
   std::fputc('\n', stdout);
@@ -37263,10 +38696,10 @@ inline void error(const std::string& text) {
  * corpus call site uses).
  */
 inline std::string joined(const gea::Value& first, const std::vector<gea::Value>& rest) {
-  std::string text = detail::toString(first);
+  std::string text = inspect(first);
   for (const gea::Value& value : rest) {
     text += ' ';
-    text += detail::toString(value);
+    text += inspect(value);
   }
   return text;
 }
@@ -37299,7 +38732,7 @@ inline std::string joined(const std::vector<gea::Value>& values) {
   std::string text;
   for (const gea::Value& value : values) {
     if (!text.empty()) text += ' ';
-    text += detail::toString(value);
+    text += inspect(value);
   }
   return text;
 }
@@ -37328,7 +38761,7 @@ inline std::string joined(const gea::Ref<gea::ArrayObject<gea::Value>>& values) 
   if (values) {
     for (std::size_t index = 0; index < values->size(); index += 1) {
       if (!text.empty()) text += ' ';
-      text += detail::toString(values->present(index) ? values->at(index) : gea::Value{});
+      text += inspect(values->present(index) ? values->at(index) : gea::Value{});
     }
   }
   return text;
@@ -39046,7 +40479,7 @@ gea::Ref<bool> nodeLiveToken(const Node& node);
  * document-level listener chain (`dispatchDocumentRotary`), and
  * `Tree::setEventListener` drops "rotary" as a type it never walks the tree
  * for -- so an `onRotary` delegated to the body was registered nowhere and the
- * dial did nothing, silently. `keydown` is off-tree on anything but an
+ * dial did nothing, silently. `keydown` and `keyup` are off-tree on anything but an
  * `<input>`: the runtime hands a key to the focused input's own listener (which
  * bubbles to the body) and then to the document-level chain. The same rule the
  * gea plugin's `cpp-mounted-lowering.ts` applies to its direct-root listeners.
@@ -39054,7 +40487,7 @@ gea::Ref<bool> nodeLiveToken(const Node& node);
 template <typename Node>
 bool isDocumentLevelEvent(const Node& node, const std::string& name) {
   if (name == "rotary") return true;
-  if (name != "keydown") return false;
+  if (name != "keydown" && name != "keyup") return false;
   const char* tag = node.tagName();
   if (!tag) return true;
   std::string lowered(tag);
@@ -44016,6 +45449,41 @@ inline std::string runtimeErrorString(const gea::Value& value) {
   throw gea::Value::box(gea::Value::Tag::Object, createRuntimeError(kind, gea::Optional<std::string>(message)));
 #endif
 }
+}
+
+#if defined(ESP_PLATFORM)
+#include <esp_debug_helpers.h>
+#include <esp_rom_sys.h>
+#endif
+namespace gea::detail {
+inline const bool uncaughtDescriberInstalled = [] {
+  describeUncaught = [] {
+    const std::exception_ptr current = std::current_exception();
+    if (!current) return;
+    std::string text;
+    try {
+      std::rethrow_exception(current);
+    } catch (const gea::Value& value) {
+      try {
+        text = gea::host::isRuntimeError(value) ? gea::host::runtimeErrorString(value) : gea::dynamicToString(value);
+      } catch (...) {
+        text = "<a value whose ToString threw>";
+      }
+    } catch (const std::exception& error) {
+      text = error.what();
+    } catch (...) {
+      text = "<a non-JS exception>";
+    }
+    std::fprintf(stderr, "Uncaught %s\n", text.c_str());
+#if defined(ESP_PLATFORM)
+    esp_rom_printf("Uncaught %s\n", text.c_str());
+    // An exception no handler catches terminates before unwinding, so this
+    // stack is still the throw's.
+    esp_backtrace_print(32);
+#endif
+  };
+  return true;
+}();
 }
 
 namespace gea::dictionary {

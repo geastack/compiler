@@ -1,3 +1,4 @@
+import type { NativeDebugInfo } from './targets/cpp/native-debug-source.js'
 import { nodeOfOperation, operationOfResult } from './identity/ids.js'
 import { readFileSync } from 'fs'
 import type { PackageSource } from './semantics/package-sources.js'
@@ -69,6 +70,7 @@ import { virtualDispatchVerdictOf } from './projection/dispatch.js'
 import { splitGeneratorBodies } from './ir/generator-split.js'
 import { shakeProgram } from './ir/shake.js'
 import { pruneProvenBranches } from './ir/proven-branches.js'
+import { threadShortCircuitJoins } from './ir/short-circuit-threading.js'
 import { publishEmissionRepresentationsOf, type EmissionRepresentationPublication } from './ir/emission-representations.js'
 import { finalizeTypedComputedReads, reflectionExposureOf, type ReflectionExposure } from './ir/reflection-demand.js'
 import { confirmUnboxedMethodBinds } from './ir/boxed-bind-assumptions.js'
@@ -171,6 +173,8 @@ export interface CompilationRequest {
   readonly realmStorage?: boolean
   /** Retain final IR in the result for diagnostics. Off by default so normal builds can release it. */
   readonly includeIr?: boolean
+  /** Publish native DWARF-to-original-source display mappings. */
+  readonly debugSource?: boolean
   /**
    * How many C++ files the program becomes -- see `CppTranslationUnitLayout`.
    * `single` (the default) is one unit; `per-file` is one unit per source file
@@ -253,6 +257,7 @@ export interface CompilationResult {
   readonly source: RenderedCppSource | null
   /** Every C++ file the layout produced, named and in write order; empty whenever `source` would be null for a `single` layout. */
   readonly units: readonly CppRenderedUnit[]
+  readonly debugInfo?: NativeDebugInfo
   /** Bodies the IR refused, each naming what has no primitive yet. */
   readonly loweringBlockers: readonly IrLoweringBlocker[]
   /** Every refusal past the plan -- ABI, lowering and printer -- as one list (`ir/refusal.ts`). */
@@ -459,6 +464,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   const nativeTypesByDeclaration = new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.nativeTypesByDeclaration ?? new Map())]))
   const hostNamespaceRootDeclarations = plugins.flatMap((plugin) => plugin.capabilities.hostNamespaceRootDeclarations ?? [])
   const frontend = runFrontend({
+    nativeFunctionDeclarations: plugins.flatMap((plugin) => plugin.capabilities.nativeFunctionDeclarations ?? []),
     ...(request.packageSources ? { packageSources: request.packageSources } : {}),
     declarationModules: new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.declarationModules ?? [])])),
     rootFileNames: request.rootFileNames,
@@ -905,7 +911,8 @@ export const compile = (request: CompilationRequest): CompilationResult => {
       projections: new Map(),
       revisions: new Map(),
       celled: new Map(),
-      boundRecordFields: new Map()
+      boundRecordFields: new Map(),
+      revisionBoundRecordFields: new Map()
     }
   }
   stage('representations')
@@ -1062,7 +1069,11 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // the copy elision needs the placements to prove its cell is frame-local.
   const pruned = {
     ...provenPruned,
-    bodies: elideReadOnlySpreadCopies(rewriteLiteralSetMembership(provenPruned.bodies), splitPlacements, representations.deriver)
+    bodies: elideReadOnlySpreadCopies(
+      rewriteLiteralSetMembership(threadShortCircuitJoins(provenPruned.bodies)),
+      splitPlacements,
+      representations.deriver
+    )
   }
   stage('prune')
   // What the entry can reach, computed once over the whole lowered program.
@@ -1386,7 +1397,10 @@ export const compile = (request: CompilationRequest): CompilationResult => {
           classes: executableClasses,
           ...(physicalClasses ? { physicalClasses: physicalClasses.layouts } : {}),
           hosts,
-          runtimeDefinitions: plugins.flatMap((plugin) => [...plugin.capabilities.runtimeDefinitions]),
+          runtimeDefinitions: [
+            ...plugins.flatMap((plugin) => [...plugin.capabilities.runtimeDefinitions]),
+            ...frontend.nativeFunctionSignatures.assertions.map((text) => ({ text, requires: null }))
+          ],
           moduleOrder: frontend.moduleOrder,
           entrySymbol: request.entrySymbol === undefined ? defaultEntrySymbol : request.entrySymbol,
           // `'preferred'` rather than `false`: a unit that is the whole program
@@ -1396,9 +1410,21 @@ export const compile = (request: CompilationRequest): CompilationResult => {
           isolateSymbols: request.isolateSymbols === true ? 'required' : 'preferred',
           realmStorage: request.realmStorage === true,
           ...(parallelRegionEntries.size > 0 ? { parallelRegions: true } : {}),
+          ...(frontend.declaredIntegers.size > 0 ? { declaredIntegers: frontend.declaredIntegers } : {}),
+          nativeCallbackParameters: frontend.nativeFunctionSignatures.callbackParameters,
           layout: request.translationUnits ?? 'single',
           unitBaseName: request.unitBaseName ?? 'unit',
           sourceFileNames: frontend.sourceFileNames,
+          ...(request.debugSource === true
+            ? {
+                debugLocations: new Map(
+                  [...frontend.graph.results.keys()].flatMap((lineage) => {
+                    const location = frontend.locationOfNode(nodeOfOperation(operationOfResult(lineage)))
+                    return location === null ? [] : [[lineage, location] as const]
+                  })
+                )
+              }
+            : {}),
           wellKnownSymbols: frontend.wellKnownSymbols,
           // The one deriver this compilation built, so emission asks the same
           // authority the plan did. See `RepresentationPublication.deriver`.
@@ -1436,6 +1462,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     conversionCensus,
     source: rendered?.source ?? null,
     units: rendered?.units ?? [],
+    ...(rendered?.debugInfo === undefined ? {} : { debugInfo: rendered.debugInfo }),
     loweringBlockers: lowered?.blocked ?? [],
     certification,
     refusals: refusalsOf(

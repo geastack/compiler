@@ -647,7 +647,7 @@ module-local-ambient-text-codec-reads-the-global.runtime.ts.cpp dc4153f3a4e4
 mongodb-format-sort-through-type-guards.runtime.ts.cpp 8bcb36d6aff0
 named-import-of-export-assigned-function-expando.runtime.ts.cpp 542fbffab20e
 named-interface-into-any-dictionary.runtime.ts.cpp 7e6075cb5286
-namespace-import-of-overloaded-constructor-class.runtime.ts.cpp dd7bf2596009
+namespace-import-of-overloaded-constructor-class.runtime.ts.cpp be241322f1ea
 namespace-member-through-reexported-namespace.runtime.ts.cpp 9c5707277a79
 namespace-read-under-closed-key-selects-export.runtime.ts.cpp 601d7c957c3f
 narrow-nested-union.ts.cpp 057239cd907c
@@ -876,7 +876,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp 32a6383f4917
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 3c67df0a9006
 populated-record-late-fields.js.cpp ccc9715a198e
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 52d4c29d6073
-printer-drift.txt bc28be1a7c8e
+printer-drift.txt 19b6b6e22dcc
 private-names-are-not-own-properties.ts.cpp 5a904aac80af
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp ed60c96c28c7
 promise-all-over-a-generator.ts.cpp 6b335055e4de

@@ -1,6 +1,10 @@
+import { asyncResultConventionsOf } from '../../ir/async-result-conventions.js'
+import { createNativeDebugSource, type NativeDebugInfo } from './native-debug-source.js'
+import type { DiagnosticLocation } from '../../diagnostics/model.js'
+import type { SemanticResultId } from '../../identity/ids.js'
 import { publishRealmStorage } from './realm-storage.js'
 import { nativeSelectionHelpers } from './native-selection-helpers.js'
-import { asyncPromiseViewOf, isAsyncCoroutineBody, taskTwinEligible } from './coroutine-bodies.js'
+import { asyncPromiseViewOf, isAsyncCoroutineBody } from './coroutine-bodies.js'
 import { createCppEmitBlockedError } from './emit-context.js'
 import { instanceReparentTargetsOf } from '../../ir/instance-reparenting.js'
 import { cppErrorNativeType } from './error-types.js'
@@ -37,7 +41,7 @@ import { representationKey, walkRepresentation } from '../../representation/mode
 import type { RuntimeDefinition } from '../../plugins/model.js'
 import type { HostSpellings } from './host/host-members.js'
 import { hostCallName } from './host/host-members.js'
-import { reactiveBoundRecordFields, reactiveDependenciesOfBodies } from './reactive-dependencies.js'
+import { reactiveRecordBindingsOfBodies, reactiveDependenciesOfBodies } from './reactive-dependencies.js'
 import { buildDirectCallableIndex, buildCaptureIndex } from './captures.js'
 import { createCppDocumentBuilder, emptyCppFacts, render, spliceRendered, type CppArtifact, type RenderedCppSource } from './document.js'
 import { beginUnionAliasing, endUnionAliasing, cppNativeHandleTag } from './types.js'
@@ -98,7 +102,7 @@ import { prototypeReadHooks, virtualMethodEmission, virtualMethodFamiliesOf } fr
 import { virtualDispatchVerdictOf } from '../../projection/dispatch.js'
 import { stringConstantsOf } from '../../ir/dead-values.js'
 import { integerParameterSlot, integerResultSlot, integerStorageCensusOf, integerStorageSlot } from '../../ir/integer-storage.js'
-import { narrowableIntegersOf } from '../../ir/integers.js'
+import type { DeclaredIntegerWidth } from '../../ir/integers.js'
 import type { ReflectionDemand, ReflectionExposure } from '../../ir/reflection-demand.js'
 import { classesConstructedUnobservably, functionsIgnoringTheirReceiver, type InstantiationFacts } from '../../ir/instantiation.js'
 import { renderJsonStructDeclarations } from './emit-json.js'
@@ -286,6 +290,7 @@ const hostPreamblesOf = (
 export type CppSymbolIsolation = 'required' | 'preferred' | 'off'
 
 export interface CppTranslationUnitInput {
+  readonly debugLocations?: ReadonlyMap<SemanticResultId, DiagnosticLocation>
   readonly plan: SealedRepresentationPlan
   /** Reachable carrier closure published before certification; absent facts retain the full plan. */
   readonly emissionRepresentations?: readonly Representation[]
@@ -387,6 +392,9 @@ export interface CppTranslationUnitInput {
    * with the runtime's thread-safe install instead.
    */
   readonly parallelRegions?: boolean
+  /** Bindings annotated `int`/`i32` (`semantics/declared-integers.ts`), held in that integer. */
+  readonly declaredIntegers?: ReadonlyMap<DeclarationId, DeclaredIntegerWidth>
+  readonly nativeCallbackParameters?: import('../../ir/integer-storage.js').IntegerStorageQuestion['nativeCallbackParameters']
   /**
    * How the program is laid out on disk -- see `CppTranslationUnitLayout`.
    *
@@ -1169,7 +1177,8 @@ const signatureOf = (
   narrowed: ReadonlySet<number> = new Set(),
   narrowedResult = false,
   borrowed: ReadonlySet<number> = new Set(),
-  name = cppBodyName(body.sourceOwner)
+  name = cppBodyName(body.sourceOwner),
+  taskResult = false
 ): string => {
   // A body with no convention is entered by the region walker, or by nothing at
   // all when its region is never reached -- so an unreferenced definition here
@@ -1178,7 +1187,12 @@ const signatureOf = (
   if (!body.abi) return `[[maybe_unused]] void ${name}()`
   const admission = captures.of(body.sourceOwner)
   const effectiveAbi = effectiveAbiOf(body.abi, admission) ?? body.abi
-  const result = narrowedResult ? cppNarrowedIntegerType : cppResultTypeOf(effectiveAbi.result)
+  const result =
+    taskResult && effectiveAbi.result.kind === 'promise'
+      ? `gea::Task<${cppResultTypeOf(effectiveAbi.result.value)}>`
+      : narrowedResult
+        ? cppNarrowedIntegerType
+        : cppResultTypeOf(effectiveAbi.result)
   const formals = bodyFormalsOf(
     cppEnvironmentStructOf(captures, body.sourceOwner),
     effectiveAbi,
@@ -1222,7 +1236,8 @@ const thunkOf = (
   captures: CaptureIndex,
   narrowed: ReadonlySet<number>,
   narrowedResult: boolean,
-  linkage: CppLinkage
+  linkage: CppLinkage,
+  taskResult = false
 ): RenderedThunk | null => {
   if (!body.abi) return null
   const abi = body.abi
@@ -1269,7 +1284,12 @@ const thunkOf = (
   // The thunk's own result stays the ABI's, so the carrier's function-pointer
   // type is unchanged; a narrowed body result converts back here.
   const returned = narrowedResult ? `static_cast<${cppResultTypeOf(abi.result)}>(${call})` : call
-  const statement = `${unpack}${abi.result.kind === 'void' ? `${call};` : `return ${returned};`}`
+  // A closed Task body has no indirect callers. Its existing callable carrier
+  // still names this ABI adapter; it forwards once rather than copying logic.
+  const statement =
+    taskResult && abi.result.kind === 'promise'
+      ? `${unpack}${abi.result.value.kind === 'void' ? `co_await ${call}; co_return;` : `co_return co_await ${call};`}`
+      : `${unpack}${abi.result.kind === 'void' ? `${call};` : `return ${returned};`}`
   const signature = `${linkagePrefix(linkage)}${cppResultTypeOf(abi.result)} ${cppThunkName(body.sourceOwner)}(${formals.join(', ')})`
   const construct = constructThunkOf(body, abi, hasEnvironment, linkage)
   return {
@@ -1427,6 +1447,7 @@ export interface CppRenderedUnit {
 }
 
 export interface CppTranslationUnitResult {
+  readonly debugInfo?: NativeDebugInfo
   /**
    * The program as one unit -- `single` only. `null` under `per-file`, where
    * there is no one text that is the program, and whenever any body was
@@ -1852,6 +1873,8 @@ export const renderTranslationUnit = (input: CppTranslationUnitInput): CppTransl
 }
 
 const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTranslationUnitResult => {
+  const debugSource = input.debugLocations === undefined ? undefined : createNativeDebugSource(input.debugLocations)
+
   publishRealmStorage(input.placements, input.realmStorage === true)
   const emissionRepresentations = input.emissionRepresentations ?? [...input.plan.selected.values()]
   // A retained event record can mention an opaque host identity without ever
@@ -1998,6 +2021,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     if (layout.constructor !== null && !unsafeForStoreSink.has(declaration)) storeSinkConstructors.add(String(layout.constructor))
   const {
     callableMemberCandidates,
+    callableFlowCandidates,
     repeatedConstructors,
     dyingArguments,
     formalsBorrowedIn,
@@ -2056,7 +2080,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // Which record members a JSX slot binds, decided before the structs are
   // rendered because it is what narrows their reactive storage. It reads the
   // bodies only -- never the cell plan it feeds -- so the two stay acyclic.
-  const boundRecordFields = reactiveBoundRecordFields(input.bodies)
+  const recordBindings = reactiveRecordBindingsOfBodies(input.bodies)
+  const boundRecordFields = recordBindings.bound
   // Dispatch for the methods this program overrides, decided before the structs
   // render because it puts a member INSIDE them. The conventions come from the
   // bodies themselves -- one authority, the same one `signatureOf` spells --
@@ -2292,13 +2317,16 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     const abi = body.abi
     if (abi === null) continue
     abi.parameters.forEach((parameter, ordinal) => {
-      if (parameter.value.kind === 'scalar' && parameter.value.domain === 'number') return
+      if (parameter.value.kind === 'scalar' && parameter.value.domain === 'number' && parameter.value.integerWidth !== 'int32') return
       excludedSignatureSlots.add(integerParameterSlot(body.sourceOwner, ordinal))
     })
-    if (abi.result.kind !== 'scalar' || abi.result.domain !== 'number') excludedSignatureSlots.add(integerResultSlot(body.sourceOwner))
+    if (abi.result.kind !== 'scalar' || abi.result.domain !== 'number' || abi.result.integerWidth !== undefined)
+      excludedSignatureSlots.add(integerResultSlot(body.sourceOwner))
   }
   const narrowedStorage = integerStorageCensusOf({
     bodies: input.bodies,
+    ...(input.declaredIntegers === undefined ? {} : { declaredCells: input.declaredIntegers }),
+    ...(input.nativeCallbackParameters === undefined ? {} : { nativeCallbackParameters: input.nativeCallbackParameters }),
     integerCellEligible: (cell) => {
       const placement = input.placements.get(cell)
       const representation = placement?.representation
@@ -2345,7 +2373,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     deriver,
     input.classes,
     input.hosts.reactive,
-    boundRecordFields,
+    recordBindings.element,
     structMembers,
     narrowedStorage.slots,
     input.wellKnownSymbols,
@@ -2358,7 +2386,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     // A module may evaluate once in EACH worker realm. Keep the ordinary
     // per-instance reference to its constructor's realm-owned method state.
     input.realmStorage ? new Set() : singleEvaluationClasses,
-    (shapeId, hasSymbolField) => nativeIntegrityRestricted.restrictsRecordShape(shapeId, hasSymbolField)
+    (shapeId, hasSymbolField) => nativeIntegrityRestricted.restrictsRecordShape(shapeId, hasSymbolField),
+    (declaration, key) => constructionOnlyFields.holdsOlder(declaration, key)
   )
   const recursiveContainers = cppRecursiveContainerDeclarations(input.plan, emissionRepresentations)
 
@@ -2394,7 +2423,13 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // and the callee are separate bodies, emitted independently and in no
   // guaranteed order. It is computed after `revisions` because which member a
   // dependency names depends on it.
-  const reactive = { ...input.hosts.reactive, revisions: structs.revisionFields, celled: structs.celledFields, boundRecordFields }
+  const reactive = {
+    ...input.hosts.reactive,
+    revisions: structs.revisionFields,
+    celled: structs.celledFields,
+    boundRecordFields,
+    revisionBoundRecordFields: recordBindings.revision
+  }
   // Built here rather than beside the other includes above because one of its
   // lines is decided by the struct rendering that just ran: the cell's own
   // header is carried only where a field is ACTUALLY celled. `input.hosts
@@ -2630,83 +2665,18 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
       console.error(`[stable-borrow] ${cppBodyName(body.sourceOwner)} ${flags.join(' ')}`)
     }
   }
-  // The integer version: a second rendering of a body under the premise that
-  // its unproved number formals hold integers, entered from the original after
-  // testing exactly that (`gea::carriesExactInteger`). A formal fed from a
-  // double the census cannot see into -- bson's `deserializeObject(buffer,
-  // options.index ?? 0, ...)`, where the options record is filled from dynamic
-  // values -- keeps every offset derived from it a double, although every call
-  // the program makes passes an integer. The version buys what the census
-  // cannot prove at the one place it can be tested, and computes the same
-  // Numbers (`ir/integers.ts`'s rounding spelling covers what leaves +-2^53).
-  //
-  // Only where it pays for a second copy of the code: the premise must narrow
-  // at least `integerVersionGain` more values than the body narrows today.
-  const integerVersionGain = 8
-  const integerVersions = new Map<string, ReadonlySet<number>>()
-  for (const body of input.bodies) {
-    const abi = body.abi
-    if (abi === null || abi.restFrom !== null || isRegionId(body.sourceOwner)) continue
-    if (captures.of(body.sourceOwner).kind !== 'none' || isCoroutineBody(body) || asyncPromiseViewOf(body) !== null) continue
-    if (commonJsOwnerOf(body) !== null || physicalCounts.get(String(body.sourceOwner)) !== 1) continue
-    const narrowed = formalsNarrowedIn(body.sourceOwner)
-    const ordinals = new Set<number>()
-    abi.parameters.forEach((parameter, ordinal) => {
-      if (parameter.value.kind === 'scalar' && parameter.value.domain === 'number' && !narrowed.has(ordinal)) ordinals.add(ordinal)
-    })
-    if (ordinals.size === 0) continue
-    const today = narrowableIntegersOf(body, narrowedStorage.factsOf(body.sourceOwner)).values.size
-    const premised = narrowableIntegersOf(body, narrowedStorage.entryCheckedFactsOf(body.sourceOwner, ordinals)).values.size
-    if (process.env['GEA_INTEGER_VERSION_DEBUG'])
-      console.error(`[integer-version] ${cppBodyName(body.sourceOwner)} ${today} -> ${premised}`)
-    if (premised - today >= integerVersionGain) integerVersions.set(String(body.sourceOwner), ordinals)
-  }
-  const integerVersionNameOf = (body: IrBody): string =>
-    `${stableBorrowEntries.get(cppBodyName(body.sourceOwner))?.name ?? cppBodyName(body.sourceOwner)}_integral`
-  const integerVersionSignatureOf = (body: IrBody, ordinals: ReadonlySet<number>): string =>
-    signatureOf(
-      body,
-      captures,
-      new Set([...formalsNarrowedIn(body.sourceOwner), ...ordinals]),
-      resultNarrowedIn(body.sourceOwner),
-      stableBorrowEntries.get(cppBodyName(body.sourceOwner))?.formals ?? formalsBorrowedIn(body.sourceOwner),
-      integerVersionNameOf(body)
-    )
-  // The async bodies that also get a `_task` twin (`taskTwinEligible`): the
-  // same frame answering a `gea::Task<V>` to a caller that awaits the call at
-  // once. Only a body reached by its own name (no stable borrow entry, no
-  // CommonJS scope of its own) and that nothing renames.
-  const taskBodies = new Set<string>()
-  for (const body of input.bodies) {
-    if (isRegionId(body.sourceOwner) || !taskTwinEligible(body) || commonJsOwnerOf(body) !== null || resultNarrowedIn(body.sourceOwner))
-      continue
-    if (stableBorrowEntries.has(cppBodyName(body.sourceOwner))) continue
-    taskBodies.add(cppBodyName(body.sourceOwner))
-  }
-  const taskNameOf = (body: IrBody): string => `${cppBodyName(body.sourceOwner)}_task`
-  const taskSignatureOf = (body: IrBody): string => {
-    const named = signatureOf(
-      body,
-      captures,
-      formalsNarrowedIn(body.sourceOwner),
-      resultNarrowedIn(body.sourceOwner),
-      formalsBorrowedIn(body.sourceOwner),
-      taskNameOf(body)
-    )
-    const promise = 'gea::Promise<'
-    if (!named.startsWith(promise))
-      throw new Error(`a task twin of ${cppBodyName(body.sourceOwner)} expected a gea::Promise result, found ${named.slice(0, 60)}`)
-    return `gea::Task<${named.slice(promise.length)}`
-  }
+  const asyncResults = asyncResultConventionsOf(
+    input.bodies,
+    input.placements,
+    directCallables,
+    isAsyncCoroutineBody,
+    (owner) => captures.of(owner).kind === 'none'
+  )
+  const taskResultOf = (body: IrBody): boolean => !isRegionId(body.sourceOwner) && asyncResults.taskBodies.has(body.sourceOwner)
   const signatures = input.bodies.flatMap((body) => {
-    const original = `${signatureOf(body, captures, formalsNarrowedIn(body.sourceOwner), resultNarrowedIn(body.sourceOwner), formalsBorrowedIn(body.sourceOwner))};`
-    if (taskBodies.has(cppBodyName(body.sourceOwner))) return [original, `${taskSignatureOf(body)};`]
+    const original = `${signatureOf(body, captures, formalsNarrowedIn(body.sourceOwner), resultNarrowedIn(body.sourceOwner), formalsBorrowedIn(body.sourceOwner), cppBodyName(body.sourceOwner), taskResultOf(body))};`
     const entry = stableBorrowEntries.get(cppBodyName(body.sourceOwner))
-    const versioned = integerVersions.get(String(body.sourceOwner))
-    const version = versioned === undefined ? [] : [`${integerVersionSignatureOf(body, versioned)};`]
-    return entry === undefined
-      ? [original, ...version]
-      : [original, `${signatureOf(body, captures, new Set(), false, entry.formals, entry.name)};`, ...version]
+    return entry === undefined ? [original] : [original, `${signatureOf(body, captures, new Set(), false, entry.formals, entry.name)};`]
   })
   // Source/name/length reflection keeps its facts program-wide, including
   // functions arriving through fields and ABI adapters -- one registration
@@ -2730,14 +2700,13 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     'entries',
     'values'
   ])
-  // One read anywhere turns the source text on for EVERY function in the
-  // program, so when it is on the only question worth asking is which body
-  // turned it on. Env-gated because the answer is a single line and the
-  // question is only asked while sizing a binary.
+  // Names and arity do not observe the source text. Keep source demand
+  // separate so an ordinary fn.name read cannot retain every function body.
   const traceFunctionFacts = (body: IrBody, why: string): void => {
     if (process.env['GEA_FUNCTION_FACTS_DEBUG']) console.log(`[FACTS] ${String(body.sourceOwner)}: ${why}`)
   }
-  const preserveFunctionFacts = input.bodies.some((body) => {
+  let preserveFunctionFacts = false
+  const preserveFunctionSources = input.bodies.some((body) => {
     const keys = stringConstantsOf(body)
     const callable = (representation: Representation): boolean =>
       representation.kind === 'function-value-dispatch' || representation.kind === 'function-and-constructor'
@@ -2768,14 +2737,22 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         }
         // A coercion of a callable operand -- `fn + ''`, a template, the arm
         // of a union holding one -- spells its source text (`emit-tostring.ts`).
-        if (operation.kind === 'compute' && operation.operands.some((operand) => holdsCallable(operand.representation))) {
+        if (
+          operation.kind === 'compute' &&
+          operation.form !== 'typeof' &&
+          operation.operator !== '===' &&
+          operation.operator !== '!==' &&
+          operation.operands.some((operand) => holdsCallable(operand.representation))
+        ) {
           traceFunctionFacts(body, 'a computation over a callable operand')
           return true
         }
         if (operation.kind === 'get') {
           if (callable(operation.receiver.representation)) {
             const key = keys.get(operation.key.value)
-            if (key === undefined || key === 'toString' || key === 'name' || key === 'length') {
+            if (key === 'name' || key === 'length') {
+              preserveFunctionFacts = true
+            } else if (key === undefined || key === 'toString') {
               traceFunctionFacts(body, `a read of "${key ?? '<runtime key>'}" off a callable`)
               return true
             }
@@ -2804,19 +2781,26 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // spelled once per body here rather than looked up through the thunk. Empty
   // when the census above found no reader, so `&thunk` alone is stored.
   const functionFacts = new Map<FunctionId, CallableFactsSpelling>()
-  if (preserveFunctionFacts)
+  if (preserveFunctionFacts || preserveFunctionSources)
     for (const body of input.bodies) {
       if (isRegionId(body.sourceOwner) || body.abi === null || body.functionSource === undefined) continue
       functionFacts.set(body.sourceOwner, {
         abiType: cppAbiType(body.abi),
         name: body.functionName ?? '',
         length: body.functionLength ?? 0,
-        source: body.functionSource
+        source: preserveFunctionSources ? body.functionSource : ''
       })
     }
   const thunks = new Map<IrBody, RenderedThunk>()
   for (const body of input.bodies) {
-    const thunk = thunkOf(body, captures, formalsNarrowedIn(body.sourceOwner), resultNarrowedIn(body.sourceOwner), linkage)
+    const thunk = thunkOf(
+      body,
+      captures,
+      formalsNarrowedIn(body.sourceOwner),
+      resultNarrowedIn(body.sourceOwner),
+      linkage,
+      taskResultOf(body)
+    )
     if (thunk) thunks.set(body, thunk)
   }
 
@@ -2932,6 +2916,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         functionFacts,
         hostMethodAliases,
         callableMemberCandidates,
+        callableFlowCandidates.get(body.owner) ?? new Map(),
         borrowableMemberBodies,
         stableBorrowEntries,
         printerDrift,
@@ -2943,71 +2928,10 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         definitionCells,
         constructionOnlyFields,
         keyOrderUnobserved,
-        taskBodies,
-        borrowed
+        debugSource,
+        borrowed,
+        asyncResults.taskResults
       )
-      const versioned = integerVersions.get(String(body.sourceOwner))
-      const integerVersion =
-        versioned === undefined
-          ? []
-          : ((): readonly CppArtifact[] => {
-              const versionSections = emitBody(
-                body,
-                input.placements,
-                input.classes,
-                hosts,
-                deriver,
-                input.wellKnownSymbols,
-                captures,
-                symbolKeys,
-                templateObjects,
-                directCallables,
-                virtuals.dispatched,
-                narrowedStorage.entryCheckedFactsOf(body.sourceOwner, versioned),
-                new Set([...formalsNarrowedIn(body.sourceOwner), ...versioned]),
-                repeatedConstructors,
-                dyingArguments,
-                instantiation,
-                (callable) => abiByBody.get(String(callable)) ?? null,
-                functionFacts,
-                hostMethodAliases,
-                callableMemberCandidates,
-                borrowableMemberBodies,
-                stableBorrowEntries,
-                printerDrift,
-                input.conversions,
-                selectionHelpers,
-                callableIdentityDemand,
-                nativeIntegrityRestricted,
-                fixedFieldStateConstant,
-                definitionCells,
-                constructionOnlyFields,
-                keyOrderUnobserved,
-                taskBodies,
-                borrowed
-              )
-              const versionOpening = withUnreadParametersUnnamed(
-                integerVersionSignatureOf(body, versioned),
-                versionSections.map((section) => section.text)
-              )
-              return [plain(`${versionOpening} {`), ...versionSections, plain('}')]
-            })()
-      const integerDispatch =
-        versioned === undefined || body.abi === null
-          ? []
-          : [
-              `if (${[...versioned].map((ordinal) => `gea::carriesExactInteger(${cppFormalName(ordinal)})`).join(' && ')}) ` +
-                `return ${integerVersionNameOf(body)}(${[
-                  ...(body.abi.receiver !== null ? [cppReceiverName] : []),
-                  ...body.abi.parameters.map((_, ordinal) =>
-                    versioned.has(ordinal)
-                      ? `static_cast<long long>(${cppFormalName(ordinal)})`
-                      : borrowed.has(ordinal)
-                        ? cppFormalName(ordinal)
-                        : `std::move(${cppFormalName(ordinal)})`
-                  )
-                ].join(', ')});`
-            ]
       const commonJsScope = [
         ...coroutineEnvironmentPrologueOf(promiseView ?? body, captures),
         ...(commonJsOwner === null || commonJsOwner.nativeRecord
@@ -3026,19 +2950,18 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
           formalsNarrowedIn(body.sourceOwner),
           promiseView === null && resultNarrowedIn(body.sourceOwner),
           stableEntry?.formals ?? formalsBorrowedIn(body.sourceOwner),
-          stableEntry?.name ?? (promiseView === null ? cppBodyName(body.sourceOwner) : asyncPromiseViewName(body.sourceOwner))
+          stableEntry?.name ?? (promiseView === null ? cppBodyName(body.sourceOwner) : asyncPromiseViewName(body.sourceOwner)),
+          taskResultOf(body)
         ),
-        [...integerDispatch, ...commonJsScope, ...sections.map((section) => section.text)]
+        [...commonJsScope, ...sections.map((section) => section.text)]
       )
       renderedBodies.push({
         body,
         artifacts: [
           plain(`${opening} {`),
-          ...integerDispatch.map(plain),
           ...commonJsScope.map(plain),
           ...sections,
           plain('}'),
-          ...integerVersion,
           ...(promiseViewEntry === null ? [] : promiseViewEntry.map(plain)),
           ...(stableEntry === undefined
             ? []
@@ -3060,24 +2983,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
                   ].join(', ')});`
                 ),
                 plain('}')
-              ]),
-          // The twin: the same frame, answering a `gea::Task<V>` to a caller
-          // that awaits the call at once (`taskTwinEligible`). Same text, a
-          // different return type, so the promise type that makes it a
-          // coroutine differs and nothing else.
-          ...(taskBodies.has(cppBodyName(body.sourceOwner)) &&
-          promiseView === null &&
-          stableEntry === undefined &&
-          integerDispatch.length === 0
-            ? [
-                plain(
-                  `${withUnreadParametersUnnamed(taskSignatureOf(body), [...commonJsScope, ...sections.map((section) => section.text)])} {`
-                ),
-                ...commonJsScope.map(plain),
-                ...sections,
-                plain('}')
-              ]
-            : [])
+              ])
         ],
         templateObjects: [...templateObjects.values()].slice(templateObjectsBefore)
       })
@@ -3235,6 +3141,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     return {
       source,
       units: [{ role: 'unit', fileName: `${input.unitBaseName}.cpp`, sourceFile: null, source }],
+      ...(debugSource === undefined ? {} : { debugInfo: debugSource.info }),
       refused: Object.freeze([]),
       printerDrift
     }
@@ -3396,6 +3303,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   return {
     source: null,
     units: input.layout === 'balanced' ? balanceCppUnits(units, input.unitBaseName) : units,
+    ...(debugSource === undefined ? {} : { debugInfo: debugSource.info }),
     refused: Object.freeze([]),
     printerDrift
   }

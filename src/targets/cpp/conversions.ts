@@ -6,10 +6,10 @@ import {
   constructorUpcastMember,
   nativeRecordBaseTransportKind
 } from './class-ref-transport.js'
-import type { ClassifierContract, CollectionDomain, MaterializerContract } from '../../conversion/algebra.js'
+import type { ClassifierContract, CollectionDomain, ConversionNode, MaterializerContract } from '../../conversion/algebra.js'
+import { certifiedRecordViewPlan, recordToArrayPlan } from '../../conversion/structural-plan.js'
 import { chainFieldProtocolUnused, nativeSumNarrowingTransports } from './native-narrowing-transport.js'
 import { classRefDomainsOverlap, classifierDomainsOverlap } from '../../conversion/algebra.js'
-import { recordCastableToArray } from './emit-arrays.js'
 import { emptyConversionRegistry, narrowingReachesTarget, narrowsToDescendantClassUnion } from '../../conversion/build.js'
 import type { CallableAbi, Representation, TaggedUnionArm } from '../../representation/model.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
@@ -60,21 +60,20 @@ import {
   checkedArmNarrowingText
 } from './emit-narrowing.js'
 import { cppTypeOf } from './types.js'
-import { nativeSumWidenable } from '../../conversion/native-sum.js'
+import { nativeSumPlan, nativeSumPreservesPayload } from '../../conversion/native-sum.js'
 import { nativeSelectionRecipeOf, nativeTotalSelectionRecipeOf, type NativeSelectionRecipe } from '../../conversion/native-selection.js'
 import { nativeClassReferenceIdentityOf } from '../../conversion/native-class-reference.js'
 import {
   isRecordViewTarget,
   ownedRecordMaterializationPlan,
   recordViewDispatchesArms,
-  recordViewIndirectReads,
   recordViewResidualReflection,
   recordViewUsesOnlyDirectFields,
   type FamilyMemberKeys,
   type RecordViewPlan
 } from '../../conversion/record-view.js'
 import { cppStringObjectNativeType } from './regexp-types.js'
-import { familyMemberViewPlanFor, viewPlanFor } from './emit-record-view.js'
+import { viewPlanFor } from './emit-record-view.js'
 import { FAMILY_MEMBER_VIEW_MATERIALIZER } from '../../conversion/nodes.js'
 import { PROTOCOL_ITERATOR, protocolIteratorPlanFor } from './emit-protocol-iterator.js'
 import { ITERABLE_OBJECT_VIEW, iterableObjectViewPlanFor } from './emit-iterable-object-view.js'
@@ -99,7 +98,8 @@ const nativeCallableTransport = (source: Representation, target: Representation)
 }
 
 const nativeSumConversion = (source: Representation, target: Representation): ClassifierMaterializerPair | null => {
-  if (!nativeSumWidenable(source, target)) return null
+  const plan = nativeSumPlan(source, target)
+  if (plan === null) return null
   const domain = `sum-widen:${representationKey(source)}->${representationKey(target)}`
   return {
     classifier: { id: 'gea::native-sum::live-alternative', domain },
@@ -108,7 +108,7 @@ const nativeSumConversion = (source: Representation, target: Representation): Cl
       domain,
       allocates: false,
       nativeFieldProtocol: 'unused',
-      nativePayloadTransport: 'preserved',
+      ...(nativeSumPreservesPayload(plan) ? { nativePayloadTransport: 'preserved' as const } : {}),
       ...nativeClassReferenceIdentityOf(source, target)
     }
   }
@@ -849,14 +849,19 @@ const cppConversionTables = (
      * type, and `owned` spells a bare `Foo` whose copy-constructibility is
      * unchecked.
      *
-     * `record`/`native-record-ref`/`class-ref`/`array-object` are deliberately
-     * NOT routed here even though they would qualify -- each already has its own
-     * entry with its own reasoning, and a second answer to the same question is
-     * how two authorities drift apart.
+     * An accessor-bearing record cannot be reconstructed as a product: doing
+     * so would discard its accessor environments or run user code during a
+     * classifier. Its one admissible read is this authenticated payload
+     * recovery, retaining the exact object and its getters. Plain records
+     * keep their product entry; native records, classes and arrays keep their
+     * existing dedicated entries.
      */
     boxedIdentityMaterializer: (target) => {
       const eligible =
-        (target.kind === 'dictionary' || target.kind === 'record-with-index' || target.kind === 'typed-array') &&
+        (target.kind === 'dictionary' ||
+          target.kind === 'record-with-index' ||
+          target.kind === 'typed-array' ||
+          (target.kind === 'record' && target.accessors.length > 0)) &&
         target.ownership === 'shared-refcount'
       if (!eligible && target.kind !== 'array-buffer' && target.kind !== 'shared-array-buffer' && target.kind !== 'data-view') return null
       if (dynamicTagFor(target) === null) return null
@@ -1002,6 +1007,17 @@ const cppConversionTables = (
             nativeFieldProtocol: 'unused',
             ...nativeClassReferenceIdentityOf(source, target)
           }
+        }
+      }
+      // The same absent read of a cell whose own carrier encodes absence: a
+      // shared class reference IS `C | null` (a null `shared_ptr`), so `let x:
+      // C | null = null` read where the guard proved it holds nothing -- the
+      // flow type is `null` -- answers the constant, exactly as the optional
+      // pair above does.
+      if (source.kind === 'class-ref' && source.ownership === 'shared-refcount' && target.kind === 'null') {
+        return {
+          classifier: { id: 'gea::Optional::has_value', domain: 'absent-class-ref:null' },
+          materializer: { id: 'gea::constant', domain: 'absent-class-ref:null', allocates: false, nativeFieldProtocol: 'unused' }
         }
       }
       // A structural value read as an instance of a class nothing can
@@ -2200,18 +2216,6 @@ const cppConversionTables = (
           materializer: { id: 'gea::dictionary::recastValues', domain: `recast:${pairKey()}`, allocates: true }
         }
       }
-      // A third recast at the same distance: a closed, contiguous-numeric-keyed
-      // record -- an unannotated rest parameter's open-arity tuple view, from
-      // `semantics/normalize/structural.ts`'s `restParameterArrayElementAt` --
-      // poured into the array it physically is. `emit-narrowing.ts`'s
-      // `recordCastableToArray` is the one authority for which pairs rebuild.
-      if (source.kind === 'record' && target.kind === 'array-object') {
-        if (!recordCastableToArray(source, target)) return null
-        return {
-          classifier: { id: 'gea::record::recastToArray', domain: `recast:${pairKey()}` },
-          materializer: { id: 'gea::record::recastToArray', domain: `recast:${pairKey()}`, allocates: true }
-        }
-      }
       // Two optionals over the IDENTICAL payload that disagree only on which
       // falsy JS value spends the absence -- `string | null` widened into a
       // `string | undefined` slot (`request.ts`'s `this.raw.headers.get(name) ??
@@ -2371,24 +2375,44 @@ const cppConversionTables = (
             domain: `coercion:${operation}:${representationKey(source)}`,
             allocates: operation === 'ToString'
           },
+    structuralRecipe: (
+      source: Representation,
+      target: Representation,
+      lookup: (source: Representation, target: Representation) => ConversionNode,
+      members?: FamilyMemberKeys
+    ): MaterializerContract | null => {
+      if (!isSpellable(source) || !isSpellable(target)) return null
+      if (classArmWithoutHome(layouts, source, target) || proxyArmWithoutHome(source, target)) return null
+      const accepted = (from: Representation, into: Representation): ConversionNode | null => {
+        const node = lookup(from, into)
+        return node.capability.kind === 'never' ? null : node
+      }
+      if (source.kind === 'record' && target.kind === 'array-object') {
+        const plan = recordToArrayPlan(source, target, accepted)
+        return plan === null
+          ? null
+          : {
+              id: 'gea::record::recastToArray',
+              domain: `recast:${representationKey(source)}->${representationKey(target)}`,
+              allocates: true,
+              recordToArray: plan
+            }
+      }
+      const plan = certifiedRecordViewPlan(layouts, source, target, accepted, members)
+      return plan === null
+        ? null
+        : {
+            id: members === undefined ? 'view:structural-record' : FAMILY_MEMBER_VIEW_MATERIALIZER,
+            domain: members === undefined ? 'static:structural-record-view' : 'static:family-member-record-view',
+            allocates: true,
+            recordView: plan,
+            ...viewProtocolOf(plan.view)
+          }
+    },
     staticRecipe: (source: Representation, target: Representation) => {
       if (!isSpellable(source) || !isSpellable(target)) return null
       if (classArmWithoutHome(layouts, source, target)) return null
       if (proxyArmWithoutHome(source, target)) return null
-      // A sum some arm of which reaches the record-shaped target only through
-      // the structural view is that view's `dispatch` plan, asked BEFORE the
-      // chain: the chain answers the pair too, by selecting the exact arm, and
-      // that selection is the narrowing this table's `narrowing` entry has
-      // already declined for the pair (`recordViewDispatchesArms`). The
-      // printer renders in the same order (`emit-narrowing.ts`'s `recipeText`).
-      const dispatching = viewPlanFor(layouts, source, target)
-      if (dispatching !== null && recordViewDispatchesArms(dispatching))
-        return {
-          id: 'view:structural-record',
-          domain: 'static:structural-record-view',
-          allocates: true,
-          ...viewProtocolOf(dispatching)
-        }
       const recipe = conversionRecipeOf(source, target)
       if (recipe !== null && recipe.renders) {
         // `unreachable-value` spells either `unreachableValue<T>()` (a throw that
@@ -2415,29 +2439,6 @@ const cppConversionTables = (
                   : {}
         return { id: `chain:${recipe.id}`, domain: `static:${recipe.id}`, allocates: allocatingRecipes.has(recipe.id), ...native }
       }
-      // After the chain, as the printer asks (`emit.ts`'s `emitConvert`): a
-      // record rebuilt as another shape it satisfies, decided by the plan the
-      // printer renders from (`conversion/record-view.ts`). `viewPlanFor`
-      // caches this build so the printer's later render of the same node
-      // (`emit-record-view.ts`'s `structuralRecordViewText`) reads the plan
-      // this existence check already built rather than rebuilding it.
-      const view = viewPlanFor(layouts, source, target)
-      if (view !== null) {
-        const heldUnused = heldPairUnusedOf(nativeWrappedPayload)
-        if (process.env.GEA_REFLECTION_DEBUG !== undefined) {
-          const indirect = recordViewIndirectReads(view, heldUnused)
-          if (indirect.length > 0)
-            console.error(
-              `[VIEW-INDIRECT] ${representationKey(source).slice(0, 100)} -> ${representationKey(target).slice(0, 100)} reads=${indirect.join(',').slice(0, 300)}`
-            )
-        }
-        return {
-          id: 'view:structural-record',
-          domain: 'static:structural-record-view',
-          allocates: true,
-          ...viewProtocolOf(view)
-        }
-      }
       // A callable whose parameter reaches the source's only through a record
       // view (`emit-narrowing.ts`'s `VIEW_ADAPTED_CALLABLE`): the chain's own
       // adapter asked the same parameters and found no layout-free conversion.
@@ -2460,22 +2461,6 @@ const cppConversionTables = (
       if (boxedAssertionText(source, target, 'gea_conversion_probe') !== null)
         return { id: 'view:boxed-assertion', domain: 'static:boxed-assertion', allocates: true }
       return null
-    },
-    // The same view, knowing which family members the site named; rendered by
-    // `emit-record-view.ts`'s `familyMemberViewText` from the node's own
-    // `familyMembers`. No boxed fallback: a pair this plan refuses stays refused.
-    familyMemberView: (source: Representation, target: Representation, members: FamilyMemberKeys) => {
-      if (!isSpellable(source) || !isSpellable(target)) return null
-      if (classArmWithoutHome(layouts, source, target)) return null
-      if (proxyArmWithoutHome(source, target)) return null
-      const view = familyMemberViewPlanFor(layouts, source, target, members)
-      if (view === null) return null
-      return {
-        id: FAMILY_MEMBER_VIEW_MATERIALIZER,
-        domain: 'static:family-member-record-view',
-        allocates: true,
-        ...viewProtocolOf(view)
-      }
     }
   }
 }

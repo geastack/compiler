@@ -1,6 +1,6 @@
 import type { DeclarationId, FunctionId } from '../identity/ids.js'
 import type { CallableAbi, Ownership, Representation, ScalarDomain, TaggedUnionArm } from '../representation/model.js'
-import type { ClassifierContract, CoercionOperation, CollectionDomain, MaterializerContract } from './algebra.js'
+import type { ClassifierContract, CoercionOperation, CollectionDomain, MaterializerContract, ConversionNode } from './algebra.js'
 import type { FamilyMemberKeys } from './record-view.js'
 
 export type { CoercionOperation } from './algebra.js'
@@ -27,6 +27,13 @@ export interface ClassifierMaterializerPair {
 }
 
 export interface ConversionRuntimeRegistry {
+  /** Structural recipes cite each exact leaf admitted by the same census. */
+  readonly structuralRecipe?: (
+    source: Representation,
+    target: Representation,
+    lookup: (source: Representation, target: Representation) => ConversionNode,
+    members?: FamilyMemberKeys
+  ) => MaterializerContract | null
   /**
    * The exact JS tag/range materializer for one scalar domain, or `null` if
    * none is installed. `boolean` and `number` must be backed only by an exact

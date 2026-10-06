@@ -1,3 +1,4 @@
+import type { NativeDebugSource } from './native-debug-source.js'
 import { objectTagExpression, objectTagCapability } from './emit-object-tag.js'
 import { restrictsEveryCarrier, type IntegrityRestrictions } from '../../ir/integrity-restrictions.js'
 import { emitAllocateProxy, emitProxyArmTest, emitProxyPart, emitProxyTrapCheck } from './emit-proxy.js'
@@ -6,6 +7,7 @@ import { intrinsicAccessorGetterCapability } from '../../ir/certify/runtime-help
 import { intrinsicAccessorGetterOfOperator } from '../../semantics/model/intrinsic-accessor-getters.js'
 import type { NativeSelectionHelper } from './native-selection-helpers.js'
 import { stableBorrowActualsOf } from '../../ir/borrowed-call-arguments.js'
+import { lazySplitsOf } from '../../ir/lazy-splits.js'
 import { borrowedArmProjectionsOf } from './borrowed-arm-projections.js'
 import { owningConversionInputText } from './owning-conversion-input.js'
 import type { StableBorrowEntry } from './borrowed-call-entry.js'
@@ -28,6 +30,7 @@ import {
   type SunkStore
 } from '../../ir/transfer.js'
 import type { FunctionId, DeclarationId, IrValueId } from '../../identity/ids.js'
+import type { CallableFlowCandidate } from '../../ir/callable-flow-candidates.js'
 import type { BindingPlacement } from '../../projection/bindings.js'
 import { classLayoutsConstructedBy, constructedBaseOf, type ClassLayout } from '../../projection/classes.js'
 import { recordFieldsOfShape } from '../../projection/fields.js'
@@ -61,6 +64,7 @@ import type { RepresentationDeriver } from '../../representation/derive.js'
 import type { CppArtifact, CppFacts, CppSectionOwner } from './document.js'
 import type { HostSpellings } from './host/host-members.js'
 import {
+  copiedCaptureName,
   cppFormalName,
   cppReceiverName,
   createCppEmitBlockedError,
@@ -68,6 +72,8 @@ import {
   defineValue,
   defineValueAlias,
   directCalleesOf,
+  directCallableValuesOf,
+  integerWideningsOf,
   emptyCaptureIndex,
   isFloatStorageValue,
   isIntegerStorageValue,
@@ -81,7 +87,8 @@ import {
   type TemplateObjectDefinition,
   cppThunkEntryText,
   sealFactFieldsForRender,
-  suspendsInPlace
+  suspendsInPlace,
+  declaredIntegerTypeOf
 } from './emit-context.js'
 import { hostMemberReadsOf } from './host/emit-host-properties.js'
 import { hostNamespaceReadsOf } from './host-namespace-reads.js'
@@ -92,6 +99,7 @@ import { unionMemberTypeofReadsOf, unionMethodReadsOf } from './emit-union-prope
 import { reactiveOriginsOf } from './reactive-origins.js'
 import { renderTryRegion, type RegionRendering } from './emit-exceptions.js'
 import { declarationScopesOf, gotoTargetsOf, identifiersOf, scopePlanOf, type ScopePlan } from './emit-scopes.js'
+import { segmentScopedBodyOf } from './segment-scopes.js'
 import { emitReturn } from './emit-return.js'
 import {
   collectDirectBindingSinks,
@@ -110,6 +118,7 @@ import {
   EXACT_ARM_MATERIALIZER,
   FAMILY_MEMBER_VIEW_MATERIALIZER,
   CAUGHT_HANDOFF_MATERIALIZER,
+  ASSERTED_CLASS_DOWNCAST_MATERIALIZER,
   NULLISH_OPTIONAL_MATERIALIZER,
   NATIVE_BASE_VIEW_MATERIALIZER,
   type ConversionCensus
@@ -122,9 +131,9 @@ import {
   dynamicCarrierBoxText,
   emitMergeLiveArmRebuild,
   namedConversionText,
-  movedValueText,
-  widenedStoreText
+  movedValueText
 } from './emit-narrowing.js'
+import { operationConversionText } from './emit-certified-conversion.js'
 import { collectCharCodeBuffers } from './char-code-buffers.js'
 import {
   admitDenseWindows,
@@ -148,6 +157,8 @@ import {
   denseRemainderCompanion,
   integerBitwiseOperators,
   integerBoundedComparison,
+  integerConstantComparison,
+  declaredIntegerComparison,
   remainderText,
   roundingIntegerHelpers
 } from './emit-integers.js'
@@ -162,7 +173,7 @@ import {
 } from './emit-typeof.js'
 import { emitHasProperty } from './emit-in.js'
 import { mergeWritesOf } from './emit-namespaces.js'
-import { templateText, toStringRefusal } from './emit-tostring.js'
+import { stringStoreText, templateText, toStringRefusal } from './emit-tostring.js'
 import { mixedDynamicPlusText } from './emit-mixed-binary.js'
 import { emitFieldStore, emitGet, isPlainMemberRead } from './emit-properties.js'
 import { directClassMethodBody } from './class-properties/emit-class-properties.js'
@@ -182,7 +193,8 @@ import {
   emitBindCallable,
   emitCall,
   emitConstruct,
-  emitSuperInitialize
+  emitSuperInitialize,
+  staticPrefixCallableText
 } from './emit-callable.js'
 import { nativeSumWidenable } from './emit-sum-widening.js'
 import {
@@ -196,7 +208,7 @@ import {
   cppUndefinedValue
 } from './types.js'
 import { awaitTickText, awaitedText, coroutineAwaitStatements } from './prototype/emit-prototype-promise.js'
-import { fusedAwaitCallsOf, isAsyncCoroutineBody } from './coroutine-bodies.js'
+import { isAsyncCoroutineBody } from './coroutine-bodies.js'
 import { classTableRootsOf, emitElement, emitElementChild, emitElementProp } from './emit-jsx.js'
 import { emitDeleteOperation, emitUnaryDelete } from './emit-dynamic-properties.js'
 import type { HostMethodAlias } from './host/host-method-aliases.js'
@@ -503,6 +515,12 @@ const binaryOperatorFor = (operator: string, carrier: Representation): CppOperat
   return null
 }
 
+const declaredWrappingHelpers: ReadonlyMap<string, string> = new Map([
+  ['+', 'gea::wrappingAdd'],
+  ['-', 'gea::wrappingSubtract'],
+  ['*', 'gea::wrappingMultiply']
+])
+
 const updateStepOperators: ReadonlyMap<string, string> = new Map([
   ['++', '+'],
   ['--', '-']
@@ -693,6 +711,13 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
     }
     const name = defineValue(ctx, operation.result)
     const operandRendered = operandText(ctx, first)
+    const declaredWidth = ctx.declaredWidths.get(operation.result.id)
+    if (declaredWidth !== undefined && (operation.operator === '-' || operation.operator === '+')) {
+      // An `int`/`i32` value has no -0 to keep, and its negation wraps at its width.
+      const held = declaredIntegerTypeOf(declaredWidth)
+      lines.push(`${name} = ${operation.operator === '-' ? `gea::wrappingSubtract<${held}>(0, ${operandRendered})` : operandRendered};`)
+      return
+    }
     const narrowedNot = operation.operator === '~' && ctx.integerValues.has(first.value)
     const call = narrowedNot ? `gea::integerBitwiseNot(${operandRendered})` : `${spelling.text}(${operandRendered})`
     // C++ integer zero has no negative representation: `-(0)` is still the
@@ -783,7 +808,10 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
     const rendered = templateText(ctx, operation)
     if ('refused' in rendered)
       throw createCppEmitBlockedError('runtime-helper:computation:template', toStringRefusal(rendered.refused, ctx.classes, ctx.deriver))
-    lines.push(`${defineValue(ctx, operation.result)} = ${rendered.text};`)
+    const name = defineValue(ctx, operation.result)
+    // A deferrable value is reclaimed from its `name = text;` statement, so only storage that stays is built in place.
+    const assigned = `${name} = ${rendered.text};`
+    lines.push(ctx.deferrable.has(operation.result.id) ? assigned : stringStoreText(name, rendered.text, assigned))
     return
   }
 
@@ -799,9 +827,20 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
       )
     }
     const name = defineValue(ctx, operation.result)
+    const declaredWidth = ctx.declaredWidths.get(operation.result.id)
+    if (declaredWidth !== undefined) {
+      lines.push(`${name} = ${declaredWrappingHelpers.get(step)}<${declaredIntegerTypeOf(declaredWidth)}>(${operandText(ctx, first)}, 1);`)
+      return
+    }
     const rounding = ctx.roundingArithmetic.has(operation.result.id) ? roundingIntegerHelpers.get(step) : undefined
     const raw = rounding === undefined ? `${operandText(ctx, first)} ${step} 1` : `${rounding}(${operandText(ctx, first)}, 1LL)`
-    lines.push(`${name} = ${widenedStoreText(operation.result.representation, first.representation, raw) ?? raw};`)
+    const adapted = operationConversionText(ctx, operation, 'update', first.representation, operation.result.representation, raw)
+    if (adapted === null)
+      throw createCppEmitBlockedError(
+        `conversion:${representationKey(first.representation)}->${representationKey(operation.result.representation)}`,
+        'the numeric update has no certified result conversion'
+      )
+    lines.push(`${name} = ${adapted};`)
     return
   }
 
@@ -853,7 +892,12 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
   // which the generic path below cannot reach: two different carriers hit its
   // mixed-carrier refusal, and two identical sums hit `binaryOperatorFor`,
   // which has no `==` for a byte buffer. Answered here, before both.
-  const equality = sides[0] && sides[1] ? strictEqualityText(operation.operator, sides[0], sides[1]) : null
+  const equality =
+    sides[0] && sides[1]
+      ? strictEqualityText(operation.operator, sides[0], sides[1], (source, target, text) =>
+          operationConversionText(ctx, operation, 'equality', source, target, text)
+        )
+      : null
   if (equality !== null) {
     lines.push(`${defineValue(ctx, operation.result)} = ${equality};`)
     return
@@ -884,7 +928,10 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
     const rendered = templateText(ctx, operation)
     if ('refused' in rendered)
       throw createCppEmitBlockedError('runtime-helper:computation:template', toStringRefusal(rendered.refused, ctx.classes, ctx.deriver))
-    lines.push(`${defineValue(ctx, operation.result)} = ${rendered.text};`)
+    const name = defineValue(ctx, operation.result)
+    // A deferrable value is reclaimed from its `name = text;` statement, so only storage that stays is built in place.
+    const assigned = `${name} = ${rendered.text};`
+    lines.push(ctx.deferrable.has(operation.result.id) ? assigned : stringStoreText(name, rendered.text, assigned))
     return
   }
   // Exactly one side already `dynamic` and the other an ordinary typed
@@ -1079,10 +1126,63 @@ const emitCompute = (ctx: EmitContext, lines: string[], operation: ComputeOperat
   // truncates toward zero just as ECMA-262 6.1.6.1.6 does, so an integer
   // remainder is the same answer without the fmod round trip, under its own
   // name rather than an overload (a mixed call would make a pair ambiguous).
+  // ...unless the quotient lands only in an `int`/`i32` binding, which truncates
+  // it anyway (`IntegerNarrowing.integerDivisions`): there the integer division
+  // IS the answer, without a round trip through a double.
+  if (ctx.integerDivisions.has(operation.result.id) && (operation.operator === '/' || operation.operator === '%')) {
+    const helper = operation.operator === '/' ? 'gea::integerQuotient' : 'gea::integerModulo'
+    lines.push(`${name} = ${helper}(${operandText(ctx, first)}, ${operandText(ctx, second)});`)
+    return
+  }
+  // The rest of an `int`/`i32` binding's arithmetic, at its width: `+ - *`
+  // wrap, and an `i32` remainder stays in 32 bits rather than taking the
+  // narrowed `long long` spelling -- a 64-bit remainder is a library call on a
+  // 32-bit core.
+  const declaredWidth = ctx.declaredWidths.get(operation.result.id)
+  const wrapping = declaredWidth === undefined ? undefined : declaredWrappingHelpers.get(operation.operator)
+  if (declaredWidth !== undefined && (wrapping !== undefined || (declaredWidth === 'int32' && operation.operator === '%'))) {
+    const held = declaredIntegerTypeOf(declaredWidth)
+    const call = wrapping === undefined ? 'gea::integerModulo' : `${wrapping}<${held}>`
+    lines.push(`${name} = ${call}(${operandText(ctx, first)}, ${operandText(ctx, second)});`)
+    return
+  }
   const widenForDivision = integral && operation.operator === '/'
   const left = widenForDivision ? `static_cast<double>(${operandText(ctx, first)})` : promotedText(first)
   const right = widenForDivision ? `static_cast<double>(${operandText(ctx, second)})` : promotedText(second)
-  const bounded = integerBoundedComparison(ctx.integerValues, ctx.loopInvariantValues, operation, first, second, left, right)
+  const constantCompared = integerConstantComparison(
+    operation,
+    first,
+    second,
+    (operand) => {
+      const widened = ctx.integerWidenings.get(operand.value)
+      if (widened !== undefined) return operandText(ctx, widened)
+      return ctx.integerValues.has(operand.value) ? operandText(ctx, operand) : null
+    },
+    (operand) => ctx.constantTexts.get(operand.value)
+  )
+  if (constantCompared !== null) {
+    lines.push(`${name} = ${constantCompared};`)
+    return
+  }
+  const declaredCompared = declaredIntegerComparison(operation, first, second, (operand) => {
+    if (ctx.declaredWidths.has(operand.value)) return operandText(ctx, operand)
+    const widened = ctx.integerWidenings.get(operand.value)
+    return widened !== undefined && ctx.declaredWidths.has(widened.value) ? operandText(ctx, widened) : null
+  })
+  if (declaredCompared !== null) {
+    lines.push(`${name} = ${declaredCompared};`)
+    return
+  }
+  const bounded = integerBoundedComparison(
+    ctx.integerValues,
+    ctx.loopInvariantValues,
+    ctx.declaredWidths,
+    operation,
+    first,
+    second,
+    left,
+    right
+  )
   if (bounded !== null) {
     lines.push(`${name} = ${bounded};`)
     return
@@ -1313,6 +1413,10 @@ const emitConvert = (ctx: EmitContext, lines: string[], operation: ConvertOperat
   // A load no program fact proves present (`ir/presence-proof.ts`) tests the
   // cell first: `presentOrThrow` hands back the same cell or raises.
   const sourceText = operation.presence === 'checked' ? `gea::host::presentOrThrow(${input})` : input
+  if (ctx.exactNumericConversions.has(operation.result.id)) {
+    lines.push(`${defineValue(ctx, operation.result)} = ${sourceText};`)
+    return
+  }
   if (operation.rebuild === 'unshared-array') {
     const rebuilt = unsharedArrayRebuildText(ctx, operation.source.representation, operation.result.representation, sourceText)
     if (rebuilt === null) {
@@ -1342,6 +1446,7 @@ const emitConvert = (ctx: EmitContext, lines: string[], operation: ConvertOperat
         named.capability.materializer.id === ASSERTED_UNION_COPY_MATERIALIZER ||
         named.capability.materializer.id === FAMILY_MEMBER_VIEW_MATERIALIZER ||
         named.capability.materializer.id === CAUGHT_HANDOFF_MATERIALIZER ||
+        named.capability.materializer.id === ASSERTED_CLASS_DOWNCAST_MATERIALIZER ||
         named.capability.materializer.id === NULLISH_OPTIONAL_MATERIALIZER))
   const text =
     (namedOverPair
@@ -1370,6 +1475,14 @@ const emitConvert = (ctx: EmitContext, lines: string[], operation: ConvertOperat
       `converts ${representationKey(operation.source.representation)} to ${representationKey(operation.result.representation)}, ` +
         `which no installed load performs (conversion use ${operation.conversionUse})`
     )
+  }
+  // A pair C++ converts implicitly, from a capture-free function into a wider callable: the adapter names the thunk.
+  const plain = operandText(ctx, operation.source)
+  const prefixed =
+    text === plain || text === `(${plain})` ? staticPrefixCallableText(ctx, operation.source, operation.result.representation) : null
+  if (prefixed !== null) {
+    lines.push(`${defineValue(ctx, operation.result)} = ${prefixed};`)
+    return
   }
   const consumed = transfersFormalConversion(ctx.consumingFormalConversions, operation.result.id) === 'move' ? `std::move(${text})` : text
   // The payload of a borrowed optional formal, rendered as its bare dereference: name the formal's own
@@ -1418,7 +1531,7 @@ const emitAwait = (ctx: EmitContext, lines: string[], operation: AwaitOperation)
     // count dip on a settled state whose creator frame had already let go, so
     // every `await asyncCall()` buffered its promise as a cycle candidate and
     // forgot it again when the cell died.
-    const awaitedOperand = ctx.taskValues.has(operation.operand.value)
+    const awaitedOperand = ctx.taskResults.has(operation.operand.value)
       ? `std::move(${text})`
       : operation.operand.representation.kind === 'promise'
         ? movedValueText(ctx, operation.operand, null, text)
@@ -2041,6 +2154,7 @@ const noSunkStores: ReadonlyMap<IrValueId, SunkStore> = new Map()
 const emittingSunkStore = new WeakSet<object>()
 
 const emitOperation = (ctx: EmitContext, lines: string[], operation: IrNonTerminatorOperation, emitReturn?: EmitReturnAtYield): void => {
+  const debugStart = lines.length
   // A store whose formal was proven dying only because the store moved behind its
   // reads would empty the formal under them if rendered where it is written.
   if (operation.kind === 'set' && sunkStoresOf(ctx).has(operation.value.value) && !emittingSunkStore.has(operation))
@@ -2085,6 +2199,8 @@ const emitOperation = (ctx: EmitContext, lines: string[], operation: IrNonTermin
       error.message += ` while emitting ${operation.kind}${result === null ? '' : ` -> ${result.id}`}${operation.lineage === null ? '' : ` from ${operation.lineage}`}`
     }
     throw error
+  } finally {
+    ctx.debugSource?.decorate(operation.lineage, lines, debugStart)
   }
 }
 
@@ -2559,6 +2675,7 @@ export const emitBody = (
   functionFacts: ReadonlyMap<FunctionId, CallableFactsSpelling> = new Map(),
   hostMethodAliases: ReadonlyMap<DeclarationId, HostMethodAlias> = new Map(),
   callableMemberCandidates: ReadonlyMap<string, FunctionId> = new Map(),
+  callableFlowCandidates: ReadonlyMap<IrValueId, CallableFlowCandidate> = new Map(),
   borrowableMemberBodies: ReadonlySet<FunctionId> = new Set(),
   stableBorrowEntries: ReadonlyMap<string, StableBorrowEntry> = new Map(),
   printerDrift: PrinterDrift[] = [],
@@ -2570,8 +2687,9 @@ export const emitBody = (
   definitionCells: ReadonlySet<DeclarationId> = new Set(),
   constructionOnlyFields: ConstructionOnlyFields = noConstructionOnlyFields,
   keyOrderUnobserved: ReadonlySet<string> = new Set(),
-  taskBodies: ReadonlySet<string> = new Set(),
-  borrowedFormals: ReadonlySet<number> = new Set()
+  debugSource?: NativeDebugSource,
+  borrowedFormals: ReadonlySet<number> = new Set(),
+  taskResults: ReadonlySet<IrValueId> = new Set()
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -2579,11 +2697,21 @@ export const emitBody = (
   // context afterward. See `EmitBodyFacts`'s own doc
   // (the no-write-during-render
   // rule") for why this stopped being twelve `ctx.field.add(...)` calls.
+  // A by-value capture is as private as an own local: the environment field is
+  // written once, when the closure is made (a binding anyone writes later is
+  // boxed instead), and the environment outlives every call this body makes.
+  // A parallel region's per-element `fn(read(index))` reads its callees from
+  // there, and `call`'s retain/release on each of them was a shared counter
+  // every task bumped once per element.
+  const admission = captures.of(body.sourceOwner)
+  const capturedByValue = (declaration: DeclarationId): boolean =>
+    admission.kind === 'ok' &&
+    admission.layout.slots.some((slot) => slot.declaration === declaration && !slot.boxed && slot.frame === undefined) &&
+    captures.groupOf(body.sourceOwner)?.members.some((member) => member.declaration === declaration) !== true
   const stableBorrowActuals = stableBorrowActualsOf(body, (declaration) => {
     const placement = placements.get(declaration)
-    return placement?.storage.kind === 'local' && placement.storage.owner === body.sourceOwner && !captures.isBoxed(declaration)
-      ? placement.representation
-      : null
+    if (placement?.storage.kind !== 'local' || captures.isBoxed(declaration)) return null
+    return placement.storage.owner === body.sourceOwner || capturedByValue(declaration) ? placement.representation : null
   })
   const borrowedArmProjections = borrowedArmProjectionsOf(body, stableBorrowEntries.get(cppBodyName(body.sourceOwner)), conversions)
   // Each such view is a reference into a borrowed formal, so it is as stable an actual as the formal.
@@ -2682,10 +2810,14 @@ export const emitBody = (
     hostFunctionReads: hostNamespaces.functionReads,
     functionSourceReads: functionSources.reads,
     functionSourceSnapshotNames: functionSources.names,
+    taskResults,
     directCallees: directCalleeFacts.directCallees,
-    directCalleeAbis: directCalleeFacts.directCalleeAbis
+    directCalleeAbis: directCalleeFacts.directCalleeAbis,
+    directCallableValues: directCallableValuesOf(body, (callable) => captures.of(callable).kind === 'none'),
+    integerWidenings: integerWideningsOf(body),
+    lazySplits: lazySplitsOf(body)
   }
-  const { ctx, prepass } = createEmitContext(
+  const { ctx: baseCtx, prepass } = createEmitContext(
     body.abi,
     body.sourceOwner,
     placements,
@@ -2707,6 +2839,7 @@ export const emitBody = (
     functionFacts,
     hostMethodAliases,
     callableMemberCandidates,
+    callableFlowCandidates,
     borrowableMemberBodies,
     stableBorrowEntries,
     printerDrift,
@@ -2716,10 +2849,9 @@ export const emitBody = (
     nativeIntegrityRestricted,
     fixedFieldStateConstant,
     definitionCells,
-    keyOrderUnobserved,
-    taskBodies,
-    fusedAwaitCallsOf(body)
+    keyOrderUnobserved
   )
+  const ctx: EmitContext = debugSource === undefined ? baseCtx : { ...baseCtx, debugSource }
   // `ownedValues` stays a genuine render-time OUTPUT buffer (`EmitContext`'s
   // own doc: `defineValue` grows it as each operation's result is named) --
   // unlike `ownedDyingValues` above, a formal argument's membership in it is
@@ -2781,6 +2913,7 @@ export const emitBody = (
   // run inside it.
   const census = irBodyCensusOf(body, {
     integerStorage: narrowedStorage,
+    copiedCapture: (declaration) => copiedCaptureName(ctx, declaration) !== null,
     // A read of a plain field defers like an Array's `length` does -- see
     // `deferrableValuesOf`. Not a read of a reactive CELL: `gea_this->count`
     // spells the `Signal<double>` itself, and only the temporary it used to be
@@ -3027,6 +3160,10 @@ export const emitBody = (
       for (const value of settled.float32.arithmetic) prepass.float32.arithmetic.add(value)
       for (const [value, form] of settled.remainderForms) prepass.remainderForms.set(value, form)
       for (const value of settled.roundingArithmetic) prepass.roundingArithmetic.add(value)
+      for (const value of settled.integerDivisions) prepass.integerDivisions.add(value)
+      for (const [value, width] of settled.declaredWidths) prepass.declaredWidths.set(value, width)
+      for (const value of settled.exactNumericConversions) prepass.exactNumericConversions.add(value)
+      for (const [cell, width] of settled.declaredIntegerCells) prepass.declaredIntegerCells.set(cell, width)
       for (const [value, limit] of narrowedStorage.guarded ?? []) prepass.integerCallChecks.set(value, limit)
       for (const [call, intrinsic] of settled.numericCalls) prepass.numericCalls.set(call, intrinsic)
       for (const value of settled.numericCallOnly) prepass.numericCallOnly.add(value)
@@ -3053,7 +3190,7 @@ export const emitBody = (
   collectDirectBindingSinks(prepass, body, hoists.relocated)
   // After the hoists, because a window's own bound is often the loop-invariant
   // read they relocate, and a relocated value is one this may name.
-  admitDenseWindows(ctx, prepass, body, hoists)
+  admitDenseWindows(ctx, prepass, body)
   const isSingleBlock = body.blockOrder.length === 1
   const orderLabels = isSingleBlock ? new Map<IrBlockId, string>() : blockLabelsOf(body.blockOrder)
   const owner = sectionOwnerOf(body)
@@ -3208,7 +3345,9 @@ export const emitBody = (
         // would move an emptied value.
         const moved =
           converted === raw && !hoists.relocated.has(write.value.value) ? movedValueText(ctx, write.value, write.target, raw) : converted
-        lines.push(`${write.name} = ${moved};`)
+        // A string merge stores like a string binding does (`assignString`): `v = "other"` on each arm of a
+        // ternary went through `_M_replace` for a few bytes.
+        lines.push(write.target.kind === 'string' ? `gea::detail::assignString(${write.name}, ${moved});` : `${write.name} = ${moved};`)
       }
       // Last of all, so every value a window's condition names -- a hoisted read,
       // a merge -- is already assigned in this block.
@@ -3287,6 +3426,13 @@ export const emitBody = (
     if (nested !== null) {
       topDeclarations = nested.top
       blocks.splice(0, blocks.length, ...nested.artifacts)
+    }
+  } else if (isSingleBlock && blocks.length === 1) {
+    const only = blocks[0]!
+    const segmented = segmentScopedBodyOf(only.text, ctx.declarations, entryPrologue.join('\n'))
+    if (segmented !== null) {
+      topDeclarations = segmented.top
+      blocks.splice(0, 1, { text: segmented.text, facts: only.facts })
     }
   }
   // A guarded call result the census narrowed is an integer only because the

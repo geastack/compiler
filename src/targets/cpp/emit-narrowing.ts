@@ -1,4 +1,6 @@
 import { isNativeCallableCarrier } from '../../representation/callable-object.js'
+import { numberStorageTarget } from '../../conversion/number-storage.js'
+import { numberStorageText } from './emit-number-storage.js'
 import { isNativeError } from './error-types.js'
 import { proxyArmWithoutHome } from '../../representation/proxy-carriers.js'
 import type { NativeSelectionHelper } from './native-selection-helpers.js'
@@ -35,6 +37,7 @@ import {
   EXACT_ARM_MATERIALIZER,
   FAMILY_MEMBER_VIEW_MATERIALIZER,
   CAUGHT_HANDOFF_MATERIALIZER,
+  ASSERTED_CLASS_DOWNCAST_MATERIALIZER,
   NULLISH_OPTIONAL_MATERIALIZER,
   NATIVE_BASE_VIEW_MATERIALIZER,
   exactArmIndexOf,
@@ -507,6 +510,8 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
   // narrow") for this pair and would let the caller emit the whole
   // `gea::Optional<T>` where a `std::nullptr_t` is declared.
   if (held.kind === 'optional' && read.kind === held.absence) return read.kind === 'null' ? 'nullptr' : cppUndefinedValue
+  // A shared class reference carries its own absence (a null handle): the same proof, the same constant.
+  if (held.kind === 'class-ref' && held.ownership === 'shared-refcount' && read.kind === 'null') return 'nullptr'
   // Reading a cell as `dynamic` is not a narrowing at all -- it is the box, and
   // the box accepts every carrier. Answered by the widening this file already
   // owns rather than by searching the arms for a `dynamic` one, which no union
@@ -4232,6 +4237,10 @@ const unboxedLoadTextAt = (target: Representation, text: string): string | null 
   // the narrowing claimed refuses by name instead of reinterpreting bytes.
   // That is what makes reading an object out of a box safe here at all: the
   // tag alone says only "some object".
+  if (target.kind === 'scalar' && target.integerWidth !== undefined) {
+    const numeric = `gea::detail::unboxValue<double>(${text}, gea::Value::Tag::Number, ${cppStringLiteral(assertionSite(target))})`
+    return `gea::toDeclaredInteger<${cppTypeOf(target)}>(${numeric})`
+  }
   return `gea::detail::unboxValue<${cppTypeOf(target)}>(${text}, gea::Value::Tag::${tag}, ${cppStringLiteral(assertionSite(target))})`
 }
 
@@ -4440,6 +4449,13 @@ export const conversionChain: readonly ConversionStep[] = [
   // `gea::ConstructorObject<...>`, and a value of one already IS a value of the
   // other. Checking the spelling rather than enumerating the pairs is what keeps
   // this from becoming a second table that could disagree with `cppTypeOf`.
+  {
+    id: 'declared-integer-scalar',
+    apply: (source, target, text) => {
+      const numberTarget = numberStorageTarget(source, target)
+      return numberTarget === null ? undefined : numberStorageText(numberTarget, text, cppTypeOf)
+    }
+  },
   { id: 'same-cpp-type', apply: (source, target, text) => (cppTypeOf(source) === cppTypeOf(target) ? text : undefined) },
   { id: 'empty-array-sentinel', apply: (source, target, text) => claimed(emptyArraySentinelText(source, target, text)) },
   { id: 'callable-identity', apply: (source, target, text) => claimed(callableIdentityText(source, target, text)) },
@@ -5321,6 +5337,14 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
       `gea_nullish.tag() == gea::Value::Tag::Undefined ? ${optionalType}() : ${optionalType}(${payload}); }(${text})`
     )
   }
+  // The census's checked class downcast for an `as Derived` receiver
+  // (`nodes.ts`'s `assertedClassDowncastFor`).
+  if (
+    node.capability.kind === 'static' &&
+    node.capability.materializer.id === ASSERTED_CLASS_DOWNCAST_MATERIALIZER &&
+    node.target.kind === 'class-ref'
+  )
+    return `gea::host::assertedDowncastClassRef<${cppClassName(node.target.declaration)}>(${text})`
   // The census's caught-value handoff (`nodes.ts`'s `caughtHandoffFor`).
   if (
     node.capability.kind === 'static' &&

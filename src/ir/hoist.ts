@@ -69,6 +69,17 @@ const pureOperators: ReadonlySet<string> = new Set([
   '%'
 ])
 
+/** Receivers whose numeric-keyed element access reads or writes storage and runs no other code. */
+const elementStorageKinds: ReadonlySet<string> = new Set(['array-object', 'typed-array'])
+
+/** A conversion between two Number carriers, which differ only in width. */
+const isNumberWidthConversion = (operation: IrNonTerminatorOperation): boolean =>
+  operation.kind === 'convert' &&
+  operation.source.representation.kind === 'scalar' &&
+  operation.source.representation.domain === 'number' &&
+  operation.result.representation.kind === 'scalar' &&
+  operation.result.representation.domain === 'number'
+
 /**
  * The operation kinds that cannot change what an array answers.
  *
@@ -96,7 +107,11 @@ const storageNeutralKinds: ReadonlySet<string> = new Set([
  *   in software doubles on a core with no double FPU, and `dense-loops.ts`
  *   refused the window because its bound was defined inside the loop.
  */
-export const loopInvariantHoistsOf = (body: IrBody, programConstants: ReadonlyMap<DeclarationId, number> = new Map()): HoistPlan => {
+export const loopInvariantHoistsOf = (
+  body: IrBody,
+  programConstants: ReadonlyMap<DeclarationId, number> = new Map(),
+  copiedCapture: (declaration: DeclarationId) => boolean = () => false
+): HoistPlan => {
   // A try region renders as one `try { } catch { }` chunk assembled from
   // several blocks at once, so a relocation into or out of one has no single
   // place to land. Bodies with a region are left alone entirely.
@@ -256,10 +271,37 @@ export const loopInvariantHoistsOf = (body: IrBody, programConstants: ReadonlyMa
       const block = body.blocks.get(blockId)
       if (!block) continue
       for (const operation of block.operations) {
-        if (!storageNeutralKinds.has(operation.kind)) return true
+        if (!storageNeutralKinds.has(operation.kind) && !isNumberWidthConversion(operation)) return true
       }
     }
     return false
+  }
+
+  /**
+   * Whether every operation in these blocks is one that cannot hand control to
+   * other code: no call or construction, no property access that could reach
+   * an accessor, no conversion that could reach `valueOf`. Element access to an
+   * array or a typed array, arithmetic and local cells only.
+   */
+  const runsNoOtherCode = (blocks: ReadonlySet<IrBlockId>): boolean => {
+    for (const blockId of blocks) {
+      const block = body.blocks.get(blockId)
+      if (!block) return false
+      for (const operation of block.operations) {
+        if (operation.kind === 'constant' || operation.kind === 'phi') continue
+        if (operation.kind === 'binding-read' || operation.kind === 'binding-write' || operation.kind === 'parameter') continue
+        if (operation.kind === 'compute' && pureOperators.has(operation.operator)) {
+          if (operation.operands.every((operand) => operand.representation.kind === 'scalar')) continue
+          return false
+        }
+        if (isNumberWidthConversion(operation)) continue
+        if ((operation.kind === 'get' || operation.kind === 'set') && elementStorageKinds.has(operation.receiver.representation.kind)) {
+          if (operation.key.representation.kind === 'scalar' && operation.key.representation.domain === 'number') continue
+        }
+        return false
+      }
+    }
+    return true
   }
 
   /** Answered once per loop: the walk is over every operation the loop owns. */
@@ -283,6 +325,13 @@ export const loopInvariantHoistsOf = (body: IrBody, programConstants: ReadonlyMa
       // Invariant only while the loop writes the cell nowhere.
       return (cellWrites.get(operation.declaration) ?? []).every((write) => !blocks.has(write.block))
     }
+    // A Number carried at another width -- an `int` read as a plain Number --
+    // is arithmetic, not a conversion that can reach user code. Left in the
+    // loop, it kept every loop bounded by an `int` (`for (j = 0; j < n; j++)`
+    // with `n: int`) from naming its bound in the preheader, so
+    // `dense-loops.ts` refused the window and each element read paid its
+    // bounds and view checks on every turn.
+    if (operation.kind === 'convert') return isNumberWidthConversion(operation)
     if (operation.kind === 'get') {
       // Array elements and immutable string builtins: a record or class receiver can
       // reach an accessor, which is a call, and a call is not something this
@@ -294,6 +343,7 @@ export const loopInvariantHoistsOf = (body: IrBody, programConstants: ReadonlyMa
 
   const operandsOf = (operation: IrNonTerminatorOperation): readonly IrOperand[] => {
     if (operation.kind === 'compute') return operation.operands
+    if (operation.kind === 'convert') return [operation.source]
     if (operation.kind === 'get') return [operation.receiver, operation.key]
     return []
   }
@@ -331,9 +381,20 @@ export const loopInvariantHoistsOf = (body: IrBody, programConstants: ReadonlyMa
           // A cell read moved ahead of the loop has to name a cell something
           // already assigned; a write that only happens AFTER the loop leaves
           // the variable uninitialized at the new position.
+          // A cell this body never writes -- a closure's capture, a module
+          // binding -- was assigned before the body began; what could change
+          // it is other code running while the loop does. A loop that runs
+          // none reads the same value on every turn as at its preheader's end,
+          // and a capture this body holds its own copy of reads the same value
+          // whatever the loop calls: spectral-norm's row loop calls `entry`
+          // and re-read its captured `n` bound on every turn.
           if (operation.kind === 'binding-read' && !isProgramConstant(operation.declaration)) {
             const written = cellWrites.get(operation.declaration) ?? []
-            if (!written.some((write) => dominance.dominates(write.block, preheader))) continue
+            const assigned =
+              written.length === 0
+                ? copiedCapture(operation.declaration) || runsNoOtherCode(loop.blocks)
+                : written.some((write) => dominance.dominates(write.block, preheader))
+            if (!assigned) continue
           }
           const invariant = operandsOf(operation).every((operand) => {
             const where = location.get(operand.value)
@@ -402,7 +463,8 @@ export const loopInvariantValuesOf = (body: IrBody): ReadonlySet<IrValueId> => {
         operation.kind === 'constant' ||
         operation.kind === 'parameter' ||
         (operation.kind === 'binding-read' && !writtenInLoop.has(operation.declaration)) ||
-        (operation.kind === 'compute' && operandsOfIrOperation(operation).every((operand) => invariant.has(operand.value)))
+        (operation.kind === 'compute' && operandsOfIrOperation(operation).every((operand) => invariant.has(operand.value))) ||
+        (isNumberWidthConversion(operation) && operation.kind === 'convert' && invariant.has(operation.source.value))
       if (!stable) continue
       invariant.add(result.id)
       growing = true

@@ -149,6 +149,24 @@ const arrayReads = new Set([
 const arrayWrites = new Set(['copyWithin', 'fill', 'pop', 'push', 'reverse', 'set', 'shift', 'sort', 'splice', 'unshift'])
 /** A typed-array view of the same buffer: its result aliases the receiver rather than copying it. */
 const aliasingReads = new Set(['subarray'])
+/**
+ * Reads whose result is a NEW array holding elements, never an element
+ * itself. Modelled as "may be any element" like `at` or `find`, `items.slice()`
+ * looked like an object from before the region, and sorting the leaf's own
+ * copy was refused as a write to shared state.
+ */
+const arrayResultAllocatingReads = new Set([
+  'concat',
+  'filter',
+  'flat',
+  'flatMap',
+  'map',
+  'slice',
+  'toReversed',
+  'toSorted',
+  'toSpliced',
+  'with'
+])
 const collectionReads = new Set(['entries', 'forEach', 'get', 'has', 'keys', 'values'])
 const collectionWrites = new Set(['add', 'clear', 'delete', 'set'])
 
@@ -1119,7 +1137,7 @@ const runRegion = (
       if (aliasingReads.has(builtin.member) && out) solver.copy(self, out)
       else if (out && result !== undefined) {
         solver.add(out, `L|${result}`)
-        solver.copy(elements, out)
+        if (builtin.carrier === 'string' || !arrayResultAllocatingReads.has(builtin.member)) solver.copy(elements, out)
         solver.copy(elements, fieldNode(`L|${result}`, unknownField))
         solver.copy(elements, fieldNode(`L|${result}`, allFields))
       }

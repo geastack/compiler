@@ -1,4 +1,4 @@
-import type { DeclarationId, FunctionId, IrValueId, PhysicalBodyId, StructuralTypeId } from '../identity/ids.js'
+import type { DeclarationId, FunctionId, IrValueId, PhysicalBodyId, RegionId, StructuralTypeId } from '../identity/ids.js'
 import type { BindingPlacement } from '../projection/bindings.js'
 import type { ClassLayout } from '../projection/classes.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
@@ -677,7 +677,111 @@ const callableBindingsOf = (
     const writtenValue = writtenCallableValue.get(declaration)
     if (writtenValue !== undefined && captureFreeAllocated.has(writtenValue)) direct.set(declaration, functionId)
   }
+  for (const [declaration, functionId] of parameterCallablesOf(bodies, placements, capturesNothing, direct, closed)) {
+    direct.set(declaration, functionId)
+    closed.set(declaration, functionId)
+  }
   return { direct, closed }
+}
+
+/**
+ * The parameter cells that hold one capture-free function on every call.
+ *
+ * A callback parameter is otherwise an indirect call through whatever the
+ * caller passed: `sorted(items, (a, b) => a - b)` called its comparator
+ * through a function pointer on every comparison, inside the leaf sort and the
+ * merge alike, and nothing could inline it. When the function owning the
+ * parameter never escapes as a value -- every use of it is the callee of a
+ * call this program makes -- those calls are all of its calls, and when each
+ * passes the same capture-free function in that position, the cell holds that
+ * function whenever anything reads it. One body still serves every caller;
+ * only the call through the cell becomes direct.
+ */
+const parameterCallablesOf = (
+  bodies: readonly IrBody[],
+  placements: ReadonlyMap<DeclarationId, BindingPlacement>,
+  capturesNothing: (callable: FunctionId) => boolean,
+  direct: ReadonlyMap<DeclarationId, FunctionId>,
+  closed: ReadonlyMap<DeclarationId, FunctionId>
+): ReadonlyMap<DeclarationId, FunctionId> => {
+  const parameterCells = new Map<FunctionId | RegionId, Map<number, DeclarationId>>()
+  const writeCounts = new Map<DeclarationId, number>()
+  // Every value that denotes some function: its allocation, or a read of a
+  // cell whose one write is that allocation.
+  const denotes = new Map<IrValueId, FunctionId>()
+  const directDenotes = new Map<IrValueId, FunctionId>()
+  for (const body of bodies) {
+    const parameters = new Map<IrValueId, number>()
+    for (const blockId of body.blockOrder)
+      for (const operation of body.blocks.get(blockId)?.operations ?? []) {
+        if (operation.kind === 'parameter') parameters.set(operation.result.id, operation.ordinal)
+        else if (operation.kind === 'allocate-callable') {
+          denotes.set(operation.result.id, operation.functionId)
+          if (capturesNothing(operation.functionId)) directDenotes.set(operation.result.id, operation.functionId)
+        } else if (operation.kind === 'binding-read') {
+          const functionId = closed.get(operation.declaration)
+          if (functionId !== undefined) denotes.set(operation.result.id, functionId)
+          const held = direct.get(operation.declaration)
+          if (held !== undefined) directDenotes.set(operation.result.id, held)
+        } else if (operation.kind === 'binding-write') {
+          writeCounts.set(operation.declaration, (writeCounts.get(operation.declaration) ?? 0) + 1)
+          const ordinal = parameters.get(operation.value.value)
+          if (ordinal === undefined) continue
+          const cells = parameterCells.get(body.sourceOwner) ?? new Map<number, DeclarationId>()
+          cells.set(ordinal, operation.declaration)
+          parameterCells.set(body.sourceOwner, cells)
+        }
+      }
+  }
+  if (parameterCells.size === 0) return new Map()
+
+  const escaped = new Set<FunctionId | RegionId>()
+  const passed = new Map<FunctionId | RegionId, Map<number, FunctionId | null>>()
+  for (const body of bodies)
+    for (const blockId of body.blockOrder) {
+      const block = body.blocks.get(blockId)
+      if (!block) continue
+      for (const operation of [...block.operations, block.terminator]) {
+        const callee = operation.kind === 'call' ? denotes.get(operation.callee.value) : undefined
+        for (const operand of operandsOfIrOperation(operation)) {
+          const functionId = denotes.get(operand.value)
+          if (functionId === undefined) continue
+          const asCallee = operation.kind === 'call' && operand === operation.callee
+          // The write that gives a function declaration its own cell: reads
+          // of that cell are themselves denoting values, checked here too.
+          const asOwnCell = operation.kind === 'binding-write' && closed.get(operation.declaration) === functionId
+          if (!asCallee && !asOwnCell) escaped.add(functionId)
+        }
+        if (operation.kind !== 'call' || callee === undefined || !parameterCells.has(callee)) continue
+        const cells = parameterCells.get(callee)!
+        const seen = passed.get(callee) ?? new Map<number, FunctionId | null>()
+        passed.set(callee, seen)
+        for (const ordinal of cells.keys()) {
+          const argument = operation.argumentsAreSpread === true ? undefined : operation.arguments[ordinal]
+          // The cell and the function can disagree about the convention even
+          // when both are the same function -- `callableBindingsOf`'s guard.
+          const cell = placements.get(cells.get(ordinal)!)?.representation
+          const agrees = argument !== undefined && cell !== undefined && cell !== null && representationKey(cell) === representationKey(argument.representation)
+          const held = agrees ? (directDenotes.get(argument.value) ?? null) : null
+          const previous = seen.get(ordinal)
+          seen.set(ordinal, previous === undefined || previous === held ? held : null)
+        }
+      }
+    }
+
+  const found = new Map<DeclarationId, FunctionId>()
+  for (const [owner, cells] of parameterCells) {
+    if (escaped.has(owner)) continue
+    const seen = passed.get(owner)
+    if (seen === undefined) continue
+    for (const [ordinal, declaration] of cells) {
+      const functionId = seen.get(ordinal)
+      if (functionId === undefined || functionId === null || writeCounts.get(declaration) !== 1) continue
+      if (placements.get(declaration)?.storage.kind !== 'local') continue
+      found.set(declaration, functionId)
+    }
+  }
+  return found
 }
 
 /** Whether `value` is an object literal's own allocation, seen through converts (which keep its identity). */

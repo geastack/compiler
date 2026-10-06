@@ -120,7 +120,11 @@ const deriveAt = (target: Representation, context: ConversionDerivationContext, 
       // keep an exact boxed payload as a fast path, but that optimization does
       // not change the conversion capability into an identity-only claim -- an
       // arbitrary dynamic object still has to materialize the declared shape.
-      if (target.accessors.length !== 0) return never('a record with accessors has no pure dynamic product materializer')
+      if (target.accessors.length !== 0)
+        return (
+          maybeAtom(context.registry.boxedIdentityMaterializer(target)) ??
+          never('a record with accessors has no pure dynamic product materializer or authenticated native payload recovery')
+        )
       return deriveRecord(target, nested, path)
     case 'record-with-index':
       // The algebra has no shape for this carrier's open half for the same

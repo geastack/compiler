@@ -1898,7 +1898,15 @@ test('sum and dispatch conversion admission never invents element, native, null,
   assert.equal(pair(arraySource, arrayTarget), undefined, 'array element shape changes require a separate identity-preserving recipe')
   assert.equal(pair(envSource, envTarget), undefined, 'a ProcessEnv arm cannot be reclassified as string or boolean')
   assert.equal(pair(boolean, { kind: 'null' }), undefined)
-  assert.equal(pair(classRef, { kind: 'null' }), undefined)
+  const absentClass = pair(classRef, { kind: 'null' })
+  assert.equal(absentClass?.capability.kind, 'atom')
+  assert.deepEqual(absentClass.capability.classifier, { id: 'gea::Optional::has_value', domain: 'absent-class-ref:null' })
+  assert.deepEqual(absentClass.capability.materializer, {
+    id: 'gea::constant',
+    domain: 'absent-class-ref:null',
+    allocates: false,
+    nativeFieldProtocol: 'unused'
+  })
   assert.equal(pair(sourceDispatch, targetDispatch), undefined, 'different callable frames require an adapter, not an exact edge')
 })
 

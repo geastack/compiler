@@ -7,6 +7,7 @@ import type { ElementOperation, SemanticOperation } from '../../semantics/model/
 import { IrLoweringBlockedError } from '../../ir/lower-graph.js'
 import {
   abiOfCallee,
+  convertOrDrift,
   orderedOperandsOf,
   recordLayoutOf,
   registerResult,
@@ -251,7 +252,11 @@ const buildPropsRecord = (
   props: Representation
 ): BuiltFrame => {
   const lineage = requireLineage(operation)
-  const layout = recordLayoutOf(ctx, props)
+  // An element always supplies an object, even when the render parameter can
+  // also receive undefined. Build the declared present payload, then enter it
+  // into the optional ABI through the ordinary conversion census.
+  const present = props.kind === 'optional' ? props.payload : props
+  const layout = recordLayoutOf(ctx, present)
   if (!layout) {
     throw new IrLoweringBlockedError(
       `a component element builds its props object into the carrier its tag declares, which is "${representationKey(props)}"; ` +
@@ -309,5 +314,7 @@ const buildPropsRecord = (
     }
   }
 
-  return { value: ctx.builder.allocateRecord(block, lineage, fields, props), representation: props, consumed, tookChildren }
+  const allocated = { value: ctx.builder.allocateRecord(block, lineage, fields, present), representation: present }
+  const frame = convertOrDrift(ctx, block, lineage, operation.id, 'component-props', 0, allocated, props)
+  return { ...frame, consumed, tookChildren }
 }

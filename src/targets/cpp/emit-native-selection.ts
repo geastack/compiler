@@ -32,7 +32,11 @@ export const nativeSelectionBody = (recipe: NativeSelectionRecipe, source: Repre
           .join(' ')
     }
   }
-  return `using ${alias} = ${cppTypeOf(target)}; ${render(recipe.step, 'gea_selection')} gea::detail::refusePayloadMismatch("native sum selection has no matching alternative");`
+  const body = `${render(recipe.step, 'gea_selection')} gea::detail::refusePayloadMismatch("native sum selection has no matching alternative");`
+  // Only a body that spells the target needs the alias: a `downcastClassRef`
+  // or `identity` arm does not, and an unused local typedef is an error under
+  // the ESP-IDF build's `-Werror=unused-local-typedefs`.
+  return body.includes(alias) ? `using ${alias} = ${cppTypeOf(target)}; ${body}` : body
 }
 
 export const nativeSelectionText = (

@@ -20,6 +20,11 @@ import type {
 import { noHostNamespaces } from '../targets/cpp/host/host-members.js'
 import type { AmbientTypeRealization } from '../semantics/ambient-type-realization-transform.js'
 import type { HostMethodBindingTable } from '../semantics/host-methods.js'
+import type { NativeFunctionInspection } from '../native-signatures.js'
+
+export interface NativeHostFunctionDeclaration extends HostOwnedDeclaration {
+  readonly inspection: NativeFunctionInspection
+}
 
 /**
  * The extension seam.
@@ -124,6 +129,8 @@ export interface RuntimeDefinition {
 }
 
 export interface PluginCapabilities {
+  /** Native headers supply types; the complete checker declaration set authenticates their owner. */
+  readonly nativeFunctionDeclarations?: readonly NativeHostFunctionDeclaration[]
   readonly runtimeHelpers: ReadonlySet<string>
   readonly propertyRecipes: ReadonlySet<string>
   readonly nativeProtocols: ReadonlySet<string>

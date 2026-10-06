@@ -539,9 +539,30 @@ export const reactiveDependenciesOfBodies = (
  * is derived from this one, so asking it here would be a cycle. This answers
  * the prior question -- what does the program bind -- and celling follows.
  */
-export const reactiveBoundRecordFields = (bodies: readonly IrBody[]): ReadonlyMap<string, ReadonlySet<string>> => {
+export interface ReactiveRecordBindings {
+  readonly bound: ReadonlyMap<string, ReadonlySet<string>>
+  readonly element: ReadonlyMap<string, ReadonlySet<string>>
+  readonly revision: ReadonlyMap<string, ReadonlySet<string>>
+}
+
+export const reactiveRecordBindingsOfBodies = (bodies: readonly IrBody[]): ReactiveRecordBindings => {
   const bound = new Map<string, Set<string>>()
+  const element = new Map<string, Set<string>>()
+  const revision = new Map<string, Set<string>>()
   const thunks = new Set<FunctionId | RegionId>()
+
+  const indexedReceiver = (value: IrValueId, byResult: ReadonlyMap<IrValueId, IrOperation>, seen = new Set<IrValueId>()): boolean => {
+    if (seen.has(value)) return false
+    seen.add(value)
+    const source = byResult.get(value)
+    if (source?.kind === 'convert') return indexedReceiver(source.source.value, byResult, seen)
+    if (source?.kind === 'get') {
+      let receiver = source.receiver.representation
+      while (receiver.kind === 'optional') receiver = receiver.payload
+      return receiver.kind === 'array-object' || indexedReceiver(source.receiver.value, byResult, seen)
+    }
+    return false
+  }
 
   const noteRead = (operation: IrOperation, byResult: ReadonlyMap<IrValueId, IrOperation>): void => {
     if (operation.kind !== 'get') return
@@ -549,7 +570,10 @@ export const reactiveBoundRecordFields = (bodies: readonly IrBody[]): ReadonlyMa
     // `ReactiveCellPlan.fields`, which states the component's reactive members
     // directly; this map exists solely to narrow the ELEMENT records derived
     // from those fields.
-    const representation = operation.receiver.representation
+    // An indexed access carries an optional element even when a checked read
+    // proves presence. Its member still names the underlying record field.
+    let representation = operation.receiver.representation
+    while (representation.kind === 'optional') representation = representation.payload
     if (representation.kind !== 'record' && representation.kind !== 'native-record-ref') return
     const struct = structNameOfReceiver(representation)
     const keyOperation = byResult.get(operation.key.value)
@@ -557,12 +581,23 @@ export const reactiveBoundRecordFields = (bodies: readonly IrBody[]): ReadonlyMa
     const keys = bound.get(struct) ?? new Set<string>()
     keys.add(keyOperation.text)
     bound.set(struct, keys)
+    // Indexed receivers are re-read by a slot subscribed to the owning array
+    // revision, with or without an optional carrier. A row's record has its own
+    // member subscription. A field can require both channels.
+    const channel = indexedReceiver(operation.receiver.value, byResult) ? revision : element
+    const subscribed = channel.get(struct) ?? new Set<string>()
+    subscribed.add(keyOperation.text)
+    channel.set(struct, subscribed)
   }
 
   const noteThunk = (operation: IrOperation, byResult: ReadonlyMap<IrValueId, IrOperation>): void => {
     if (operation.kind !== 'call') return
     const callee = byResult.get(operation.callee.value)
     if (callee && callee.kind === 'allocate-callable') thunks.add(callee.functionId)
+    // Slots also read through typed helpers. Their subscription census already
+    // follows closed calls; the record-field census must follow the same edge
+    // or it mistakes a subscribed field for an unrendered one at write time.
+    if (operation.closedCallee?.kind === 'exact') thunks.add(operation.closedCallee.functionId)
   }
 
   // Which values a `style={{...}}` record is built out of. The members of an
@@ -648,5 +683,5 @@ export const reactiveBoundRecordFields = (bodies: readonly IrBody[]): ReadonlyMa
     }
     if (!grew) break
   }
-  return bound
+  return { bound, element, revision }
 }

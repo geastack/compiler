@@ -1,6 +1,7 @@
 import { representationKey, type CallableAbi, type Ownership, type RecordField, type Representation } from '../../representation/model.js'
 import { isNativeError } from './error-types.js'
-import { operandText, type EmitContext } from './emit-context.js'
+import { movedValueText } from './emit-narrowing.js'
+import { isIntegerStorageValue, operandText, type EmitContext } from './emit-context.js'
 import type { ComputeOperation, IrOperand } from '../../ir/model.js'
 import type { DeclarationId } from '../../identity/ids.js'
 import type { ClassLayout } from '../../projection/classes.js'
@@ -46,8 +47,11 @@ export const toStringText = (
    */
   nullishJoinsEmpty = false,
   /** See `toStringTextOver`'s `symbolThrows`. */
-  symbolThrows = false
-): string | null => toStringTextOver(text, carrier, recordLayoutPolicyOf(deriver, classes), explicit, nullishJoinsEmpty, symbolThrows)
+  symbolThrows = false,
+  /** See `toStringTextOver`'s `inspectsNumbers`. */
+  inspectsNumbers = false
+): string | null =>
+  toStringTextOver(text, carrier, recordLayoutPolicyOf(deriver, classes), explicit, nullishJoinsEmpty, symbolThrows, inspectsNumbers)
 
 /**
  * The `[[Call]]` convention a stored member holds, for the four carriers whose
@@ -158,7 +162,15 @@ export const toStringTextOver = (
    * binary's string side) must keep treating a symbol as unconvertible,
    * because ToPropertyKey of a symbol is the symbol and never its text.
    */
-  symbolThrows = false
+  symbolThrows = false,
+  /**
+   * Whether a Number is being formatted for `console.log` rather than
+   * converted. Node's console does not ToString its arguments, it inspects
+   * them, and `util.inspect(-0)` is `-0` where ECMA-262 6.1.6.1.20
+   * Number::toString answers `0`. Every other Number prints identically, so
+   * this changes only which runtime function renders a number-domain scalar.
+   */
+  inspectsNumbers = false
 ): string | null => {
   if (carrier.kind === 'string') return text
   if (carrier.kind === 'symbol')
@@ -209,6 +221,9 @@ export const toStringTextOver = (
     // intended overload rather than leaving it to be resolved by accident.
     if (carrier.domain === 'boolean') return `gea::host::detail::toString(static_cast<bool>(${text}))`
     if (carrier.domain === 'bigint') return `(${text}).toString()`
+    // An int32/uint32 can never hold -0, so only the domains that can take the inspect spelling.
+    if (inspectsNumbers && (carrier.domain === 'number' || carrier.domain === 'float64'))
+      return `gea::host::console::inspect(static_cast<double>(${text}))`
     return `gea::host::detail::toString(static_cast<double>(${text}))`
   }
   // A caught exception is the one place a `dynamic` carrier's own runtime tag
@@ -218,7 +233,7 @@ export const toStringTextOver = (
   // legitimate dynamic boundaries, not a value this emitter boxed on its own
   // initiative. `gea::host::detail::toString(const gea::Value&)`
   // tag-switches, mirroring `toBoolean(const gea::Value&)`.
-  if (carrier.kind === 'dynamic') return `gea::host::detail::toString(${text})`
+  if (carrier.kind === 'dynamic') return inspectsNumbers ? `gea::host::console::inspect(${text})` : `gea::host::detail::toString(${text})`
   // An optional DOES know which absence it holds. `Representation`'s own
   // `optional` variant carries `absence: 'null' | 'undefined'` -- it has to,
   // because `x === null` and `x === undefined` are different questions over
@@ -232,7 +247,7 @@ export const toStringTextOver = (
   // `vN`), never an expression with an effect, so naming it twice in one
   // conditional reads one local twice rather than running anything twice.
   if (carrier.kind === 'optional') {
-    const present = toStringTextOver(`(*${text})`, carrier.payload, layouts, explicit, nullishJoinsEmpty, symbolThrows)
+    const present = toStringTextOver(`(*${text})`, carrier.payload, layouts, explicit, nullishJoinsEmpty, symbolThrows, inspectsNumbers)
     if (present === null) return null
     const absent = nullishJoinsEmpty
       ? cppConstantLiteral('', 'string', { kind: 'string' })
@@ -254,7 +269,15 @@ export const toStringTextOver = (
   if (carrier.kind === 'tagged-union') {
     const arms: string[] = []
     for (const [index, arm] of carrier.arms.entries()) {
-      const converted = toStringTextOver(`${text}.get<${index}>()`, arm.value, layouts, explicit, nullishJoinsEmpty, symbolThrows)
+      const converted = toStringTextOver(
+        `${text}.get<${index}>()`,
+        arm.value,
+        layouts,
+        explicit,
+        nullishJoinsEmpty,
+        symbolThrows,
+        inspectsNumbers
+      )
       if (converted === null) return null
       arms.push(`std::string(${converted})`)
     }
@@ -464,9 +487,18 @@ const joinedToStringText = (
   separator: string | null
 ): { text: string } | { refused: Representation } => {
   const pieces: string[] = []
+  // A number among several pieces is formatted straight into the result
+  // (`NumberText`) rather than through a `std::string` of its own.
+  const formatsInPlace = separator === null && operands.length > 1
   for (const operand of operands) {
+    const carrier = operand.representation
+    if (formatsInPlace && carrier.kind === 'scalar' && carrier.domain !== 'boolean' && carrier.domain !== 'bigint') {
+      const integral = isIntegerStorageValue(ctx, operand.value)
+      pieces.push(`gea::host::detail::NumberText(static_cast<${integral ? 'long long' : 'double'}>(${operandText(ctx, operand)}))`)
+      continue
+    }
     // A template or `+` throws on a symbol; `console.log` inspects it instead, so only the
-    // separator-less fold may state that throw.
+    // separator-less fold may state that throw. The console fold also inspects its numbers.
     const converted = toStringText(
       operandText(ctx, operand),
       operand.representation,
@@ -474,7 +506,8 @@ const joinedToStringText = (
       ctx.deriver,
       false,
       false,
-      separator === null
+      separator === null,
+      separator !== null
     )
     if (converted === null) return { refused: operand.representation }
     pieces.push(converted)
@@ -486,8 +519,77 @@ const joinedToStringText = (
   // The first piece is forced to `std::string` so the fold is string
   // concatenation rather than pointer arithmetic between two `const char *`.
   if (pieces.length === 1) return { text: `std::string(${first})` }
+  // A string head nothing reads afterwards lends its buffer: the rest is appended where it already sits instead
+  // of copied with it into a fresh allocation (`prefix + (c ? 'a' : 'b')`, built across the branch).
+  const head = operands[0]!
+  if (separator === null && head.representation.kind === 'string' && first === operandText(ctx, head)) {
+    const moved = movedValueText(ctx, head, null, first)
+    if (moved !== first) return { text: `gea::appendedStrings(${moved}, {${pieces.slice(1).join(', ')}})` }
+  }
   const separated = separator === null ? pieces : pieces.flatMap((piece, index) => (index === 0 ? [piece] : [separator, piece]))
   return { text: `gea::concatStrings({${separated.join(', ')}})` }
+}
+
+/**
+ * `target = <text>;` for a string `target`. A concatenation is built in the
+ * target itself (`gea::concatStringsInto`) rather than in a temporary moved in
+ * after: the move reloads the temporary's length and capacity as one 16-byte
+ * word the concatenation stored as two, which cannot forward and stalled every
+ * template assigned to a local. Anything else keeps `fallback`'s spelling.
+ */
+export const stringStoreText = (target: string, text: string, fallback: string): string => {
+  const appended = appendedPiecesOf(text)
+  if (appended !== null) {
+    const adopt = appended.head === `std::move(${target})` ? '' : `gea::detail::adoptString(${target}, ${appended.head}); `
+    return `${adopt}gea::appendStrings(${target}, ${appended.pieces});`
+  }
+  // The pieces as arguments rather than a list of views, so each keeps its type: a literal's size is a constant
+  // and a formatted number is stored from its register (`gea::concatStringsInto`'s variadic form).
+  const pieces = concatenationPiecesOf(text)
+  return pieces === null ? fallback : `gea::concatStringsInto(${target}, ${pieces});`
+}
+
+/** The moved head and appended pieces of a rendered `gea::appendedStrings(std::move(head), {...})`, or `null`. */
+const appendedPiecesOf = (text: string): { readonly head: string; readonly pieces: string } | null => {
+  let inner = text.trim()
+  while (inner.startsWith('(') && inner.endsWith(')') && closes(inner, 0) === inner.length - 1) inner = inner.slice(1, -1).trim()
+  const opening = 'gea::appendedStrings('
+  if (!inner.startsWith(opening) || !inner.endsWith('})') || closes(inner, opening.length - 1) !== inner.length - 1) return null
+  const move = 'std::move('
+  if (!inner.startsWith(move, opening.length)) return null
+  const headEnd = closes(inner, opening.length + move.length - 1)
+  if (headEnd < 0 || !inner.startsWith(', {', headEnd + 1)) return null
+  const list = headEnd + 3
+  if (closes(inner, list) !== inner.length - 2) return null
+  return { head: inner.slice(opening.length, headEnd + 1), pieces: inner.slice(list + 1, -2) }
+}
+
+/** The piece list of a rendered `gea::concatStrings({...})`, optionally parenthesized, or `null` for any other text. */
+const concatenationPiecesOf = (text: string): string | null => {
+  let inner = text.trim()
+  while (inner.startsWith('(') && inner.endsWith(')') && closes(inner, 0) === inner.length - 1) inner = inner.slice(1, -1).trim()
+  const opening = 'gea::concatStrings({'
+  if (!inner.startsWith(opening) || !inner.endsWith('})')) return null
+  const call = opening.length - 2
+  return closes(inner, call) === inner.length - 1 ? inner.slice(opening.length, -2) : null
+}
+
+/** Where the bracket at `start` closes, quoted text skipped; -1 when it never does. */
+const closes = (text: string, start: number): number => {
+  let depth = 0
+  for (let index = start; index < text.length; index += 1) {
+    const character = text[index]
+    if (character === '"' || character === "'") {
+      for (index += 1; index < text.length && text[index] !== character; index += 1) if (text[index] === '\\') index += 1
+      continue
+    }
+    if (character === '(' || character === '{' || character === '[') depth += 1
+    else if (character === ')' || character === '}' || character === ']') {
+      depth -= 1
+      if (depth === 0) return index
+    }
+  }
+  return -1
 }
 
 /**
@@ -552,11 +654,13 @@ export const templateText = (ctx: EmitContext, operation: ComputeOperation): { t
       operand.representation.kind === 'string' &&
       ctx.deferredTexts.has(operand.value) &&
       origin?.form === 'binary' &&
-      origin.operator === '+' &&
-      origin.operands.every((part) => part.representation.kind === 'string')
+      origin.operator === '+'
     ) {
       // Only a single-use, effect-free deferred subtree can lose its temporary.
-      // Numeric additions and already-materialized string snapshots stay leaves.
+      // A `+` whose result is a string is itself a concatenation of its
+      // operands' ToStrings, in order, so `'item-' + i + ','` is three pieces of
+      // one allocation, not a temporary per `+`. Numeric additions (a number
+      // result) and already-materialized string snapshots stay leaves.
       for (const part of origin.operands) collect(part)
     } else leaves.push(operand)
   }

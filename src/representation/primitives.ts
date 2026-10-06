@@ -66,6 +66,9 @@ export const primitiveCarrier = (primitive: string): Representation | null => {
       return { kind: 'scalar', domain: 'boolean' }
     case 'number':
       return { kind: 'scalar', domain: 'number' }
+    case 'int32':
+    case 'int64':
+      return { kind: 'scalar', domain: 'number', integerWidth: primitive }
     case 'bigint':
       return { kind: 'scalar', domain: 'bigint' }
     case 'string':

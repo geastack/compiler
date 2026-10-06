@@ -2,6 +2,7 @@ import type { Representation } from '../../representation/model.js'
 import { nativeSumPlan, type NativeSumPlan } from '../../conversion/native-sum.js'
 export { nativeSumWidenable } from '../../conversion/native-sum.js'
 import { cppTypeOf, cppUndefinedValue, unitFunctionName } from './types.js'
+import { numberStorageText } from './emit-number-storage.js'
 
 /**
  * The alias the widening lambda binds its TARGET spelling to. A nine-arm
@@ -24,6 +25,8 @@ export const renderNativeSumPlan = (
   switch (step.kind) {
     case 'identity':
       return `std::move(${text})`
+    case 'number-storage':
+      return numberStorageText(step.target, text, spell)
     case 'class-upcast':
       return `${spell(step.target)}(${text})`
     case 'null-reference':

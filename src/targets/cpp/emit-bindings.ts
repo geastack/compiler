@@ -18,11 +18,12 @@ import {
   isCppEmitBlockedError,
   operandText,
   type EmitBodyPrepassFacts,
-  type EmitContext
+  type EmitContext,
+  declaredIntegerTypeOf
 } from './emit-context.js'
 import { alignedValueText, classFamilyLoadText, emptyArraySentinelText, movedValueText } from './emit-narrowing.js'
-import { stringAppendStatement } from './emit-tostring.js'
-import { cppAbiParameterType, cppBoxedType, cppNarrowedFloatType, cppNarrowedIntegerType, cppStringLiteral, cppTypeOf } from './types.js'
+import { stringAppendStatement, stringStoreText } from './emit-tostring.js'
+import { cppAbiParameterType, cppBoxedType, cppNarrowedFloatType, cppStringLiteral, cppTypeOf } from './types.js'
 import { receiverBoundCallableText } from './emit-callable.js'
 import { structuralRecordViewText } from './emit-record-view.js'
 import { owningConversionInputText } from './owning-conversion-input.js'
@@ -434,7 +435,7 @@ const storeText = (
   // declared as `gea::Value::Tag` (`heldType` below), so only a cell that really is
   // a `std::string` takes the helper.
   held?.kind === 'string' && operation.value.representation.kind === 'string' && !ctx.typeQueryBindings.has(operation.declaration)
-    ? `gea::detail::assignString(${target}, ${valueText});`
+    ? stringStoreText(target, valueText, `gea::detail::assignString(${target}, ${valueText});`)
     : `${target} = ${valueText};`
 
 export const emitBindingWrite = (ctx: EmitContext, lines: string[], operation: BindingWriteOperation): void => {
@@ -553,7 +554,17 @@ export const emitBindingWrite = (ctx: EmitContext, lines: string[], operation: B
   // A DYING owning value moves into the cell rather than being copied into it.
   // `movedValueText` declines whenever the cell holds something other than what
   // the value holds, so a converted store below is never wrapped.
-  const valueText = movedValueText(ctx, operation.value, held ?? null, converted ?? boundReceiver ?? rawText)
+  const movedText = movedValueText(ctx, operation.value, held ?? null, converted ?? boundReceiver ?? rawText)
+  // A value stored into an `int`/`i32` cell becomes the cell's integer by the
+  // annotation's rule (`gea::toDeclaredInteger`: truncate, wrap, NaN to 0),
+  // never by a bare C++ conversion, which is undefined for a Number out of
+  // range. A value already computed at the cell's width needs nothing.
+  const declaredWidth =
+    cell.boxed || !ctx.integerBindings.has(operation.declaration) ? undefined : ctx.declaredIntegerCells.get(operation.declaration)
+  const valueText =
+    declaredWidth === undefined || ctx.declaredWidths.get(operation.value.value) === declaredWidth
+      ? movedText
+      : `gea::toDeclaredInteger<${declaredIntegerTypeOf(declaredWidth)}>(${movedText})`
   // A file-scope cell is declared once by the translation unit, so every write
   // to it here is an assignment. Re-declaring it in the body that happens to
   // write it first would shadow the file-scope one and leave every other body
@@ -594,7 +605,7 @@ export const emitBindingWrite = (ctx: EmitContext, lines: string[], operation: B
   const heldType = ctx.typeQueryBindings.has(operation.declaration)
     ? 'gea::Value::Tag'
     : ctx.integerBindings.has(operation.declaration) && !cell.boxed
-      ? cppNarrowedIntegerType
+      ? declaredIntegerTypeOf(ctx.declaredIntegerCells.get(operation.declaration))
       : ctx.float32.bindings.has(operation.declaration) && !cell.boxed
         ? cppNarrowedFloatType
         : cppTypeOf(held ?? operation.value.representation)

@@ -773,6 +773,52 @@ const caughtHandoffEntry = (
   return { value: ctx.builder.convert(block, lineage, node.id, resolved, slot), representation: slot }
 }
 
+/**
+ * A property receiver the program asserts to a descendant class of the class
+ * it holds (`properties.ts`'s `receiverIsAssertedClassArm`): the census's
+ * checked class downcast, the one authority for both receivers. A union
+ * receiver first selects its class arm through the checked exact-arm
+ * projection (a TypeError on any other arm), then that arm's handle takes the
+ * same downcast -- selecting the arm only distinguishes arms, so a plain base
+ * object in the class arm would otherwise be stored through as the descendant.
+ * `null` for any other receiver.
+ */
+export const assertedClassReceiver = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operand: SemanticOperand,
+  resolved: IrOperand,
+  view: Representation
+): IrOperand | null => {
+  if (operand.asserted !== true) return null
+  let held = resolved
+  let target = view
+  if (resolved.representation.kind === 'tagged-union') {
+    target = ctx.constantDeriver.derive(operand.type)
+    if (target.kind !== 'class-ref') return null
+    const wanted = target
+    const arm = resolved.representation.arms.find(
+      (candidate) =>
+        candidate.value.kind === 'class-ref' &&
+        candidate.value.ownership === wanted.ownership &&
+        candidate.value.declaration !== wanted.declaration &&
+        wanted.ancestors.includes(candidate.value.declaration)
+    )
+    if (arm === undefined) return null
+    const selected = ctx.program.conversions.exactArmFor(resolved.representation, arm.value)
+    if (selected === null) return null
+    held = {
+      value: ctx.builder.convert(block, lineage, selected.id, resolved, arm.value),
+      representation: arm.value
+    }
+  }
+  if (held.representation.kind !== 'class-ref') return null
+  const node = ctx.program.conversions.assertedClassDowncastFor(held.representation, target)
+  if (node === null) return null
+  return { value: ctx.builder.convert(block, lineage, node.id, held, target), representation: target }
+}
+
 /** Whether a carrier has a `null` state of its own (a class reference's empty `Ref` is read separately). */
 const holdsNull = (representation: Representation): boolean => {
   if (representation.kind === 'null' || representation.kind === 'dynamic') return true

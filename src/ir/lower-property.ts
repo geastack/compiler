@@ -23,6 +23,7 @@ import {
   type LoweringContext,
   convertOrDrift,
   assertedCensusUnionReceiver,
+  assertedClassReceiver,
   nativeBaseReceiverView,
   enterRequiredOperand,
   enter,
@@ -79,6 +80,7 @@ export const lowerProperty = (ctx: LoweringContext, flow: FlowController, block:
   const viewed =
     nativeBaseReceiverView(ctx, block, lineage, receiverOperand, incoming) ??
     assertedCensusUnionReceiver(ctx, block, lineage, receiverOperand, incoming, ctx.constantDeriver.derive(receiverOperand.type)) ??
+    assertedClassReceiver(ctx, block, lineage, receiverOperand, incoming, view) ??
     convertOrDrift(ctx, block, lineage, operation.id, 'receiver', receiverOperand.ordinal, incoming, view, 'receiver-view')
   const method = operation.internalMethod
   if (holdsProxyArm(viewed.representation) && (method === 'get' || method === 'set' || method === 'has-property' || method === 'delete')) {

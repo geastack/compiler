@@ -3,6 +3,7 @@ import { controlFlowGraphOf, dominatorTreeOf, naturalLoopsOf } from './dominance
 import type { Representation, TypedArrayElementDomain } from '../representation/model.js'
 import type { ComputeOperation, IrBlockId, IrBody, IrOperand } from './model.js'
 import { numericIntrinsicsOf } from './numeric-intrinsics.js'
+import { operandsOfIrOperation } from './queries.js'
 
 /**
  * Which `number` values a body may hold in a 64-bit integer instead of a
@@ -100,6 +101,24 @@ export interface IntegerNarrowing {
    * rather than as bare C++ arithmetic.
    */
   readonly roundingArithmetic: ReadonlySet<IrValueId>
+  /**
+   * `/` and `%` results computed by a guarded integer division over values
+   * derived from `int`/`i32` bindings (`IntegerStorageFacts.declaredCells`): a
+   * `/` whose quotient only ever lands in such a binding, whose store truncates
+   * it anyway, and a `%` whose divisor is not a known non-zero constant.
+   */
+  readonly integerDivisions: ReadonlySet<IrValueId>
+  /**
+   * The narrowed values an `int`/`i32` annotation put there, each with its
+   * machine width. Their `+ - *`, negation and updates WRAP at that width --
+   * the annotation's contract -- rather than overflowing; an `int32` one is
+   * held in an `int32_t`, the native integer of a 32-bit core.
+   */
+  readonly declaredWidths: ReadonlyMap<IrValueId, DeclaredIntegerWidth>
+  /** Numeric views proved exact, or consumed exclusively by declared machine arithmetic. */
+  readonly exactNumericConversions: ReadonlySet<IrValueId>
+  /** The `int`/`i32` cells among `bindings`, with the width each is held at. */
+  readonly declaredBindings: ReadonlyMap<DeclarationId, DeclaredIntegerWidth>
 }
 
 export const emptyIntegerNarrowing: IntegerNarrowing = {
@@ -109,7 +128,11 @@ export const emptyIntegerNarrowing: IntegerNarrowing = {
   integral: new Set(),
   integralRemainders: new Set(),
   dynamicRemainders: new Set(),
-  roundingArithmetic: new Set()
+  roundingArithmetic: new Set(),
+  integerDivisions: new Set(),
+  declaredWidths: new Map(),
+  exactNumericConversions: new Set(),
+  declaredBindings: new Map()
 }
 
 /**
@@ -155,7 +178,18 @@ export interface IntegerStorageFacts {
    * every index built from a computed module constant was a double.
    */
   readonly cellIntegers?: ReadonlyMap<DeclarationId, IntegerMagnitude>
+  /**
+   * Bindings the program annotated `int` (64-bit) or `i32` (32-bit) --
+   * `semantics/declared-integers.ts`. The annotation accepts integer semantics,
+   * so such a cell is integer storage whatever its magnitude: a store
+   * truncates, and arithmetic over it stays in the integers rather than
+   * waiting for a bound this census could never prove.
+   */
+  readonly declaredCells?: ReadonlyMap<DeclarationId, DeclaredIntegerWidth>
 }
+
+/** The machine integer an `int`/`i32` annotation opts a binding into. */
+export type DeclaredIntegerWidth = 'int64' | 'int32'
 
 /**
  * Which cells hold one integer literal at every read, program-wide: exactly
@@ -468,11 +502,14 @@ export const narrowableIntegersOf = (body: IrBody, storage: IntegerStorageFacts 
   const cellScalar = new Map<DeclarationId, boolean>()
   const phis = new Map<IrValueId, readonly IrOperand[]>()
   const valueRepresentations = new Map<IrValueId, Representation>()
+  const numericConversions = new Map<IrValueId, IrOperand>()
 
   for (const blockId of body.blockOrder) {
     const block = body.blocks.get(blockId)
     if (!block) continue
     for (const operation of block.operations) {
+      if (operation.kind === 'convert' && isNumberScalar(operation.source) && isNumberScalar(operation.result))
+        numericConversions.set(operation.result.id, operation.source)
       if (operation.kind === 'constant') {
         definitions.set(operation.result.id, { kind: 'constant', operation })
         constantTexts.set(operation.result.id, operation.text)
@@ -578,8 +615,15 @@ export const narrowableIntegersOf = (body: IrBody, storage: IntegerStorageFacts 
   const integralCells = new Set<DeclarationId>()
   for (const value of valueRepresentations.keys()) if (isNumberScalarValue(value)) integral.add(value)
   for (const [cell, scalar] of cellScalar) if (scalar) integralCells.add(cell)
+  const declaredCells = storage.declaredCells ?? new Map<DeclarationId, DeclaredIntegerWidth>()
+  // A store into a declared cell truncates, so the cell is an integer whatever is written.
+  for (const cell of cellScalar.keys()) if (declaredCells.has(cell)) integralCells.add(cell)
 
   const producesInteger = (value: IrValueId): boolean => {
+    const carrier = valueRepresentations.get(value)
+    if (carrier?.kind === 'scalar' && carrier.integerWidth !== undefined) return true
+    const converted = numericConversions.get(value)
+    if (converted !== undefined) return integral.has(converted.value)
     if (imulResults.has(value) || clz32Results.has(value)) return true
     const absolute = absResults.get(value)
     if (absolute !== undefined) return integral.has(absolute.value)
@@ -652,6 +696,7 @@ export const narrowableIntegersOf = (body: IrBody, storage: IntegerStorageFacts 
       settling = true
     }
     for (const cell of [...integralCells]) {
+      if (declaredCells.has(cell)) continue
       if ((cellWrites.get(cell) ?? []).every((write) => integral.has(write.value.value))) continue
       integralCells.delete(cell)
       settling = true
@@ -774,6 +819,9 @@ export const narrowableIntegersOf = (body: IrBody, storage: IntegerStorageFacts 
   }
 
   const computeMagnitude = (operand: IrOperand): Magnitude | null => {
+    if (operand.representation.kind === 'scalar' && operand.representation.integerWidth === 'int32') return boundedBy(2 ** 31)
+    const converted = numericConversions.get(operand.value)
+    if (converted !== undefined) return magnitudeOfValue(converted)
     if (imulResults.has(operand.value)) return boundedBy(2 ** 31)
     if (clz32Results.has(operand.value)) return boundedBy(32)
     const absolute = absResults.get(operand.value)
@@ -867,8 +915,27 @@ export const narrowableIntegersOf = (body: IrBody, storage: IntegerStorageFacts 
     }
   }
 
-  const values = new Set<IrValueId>()
+  const declared = declaredIntegerValuesOf(
+    body,
+    declaredCells,
+    readsCell,
+    computes,
+    phis,
+    numericConversions,
+    valueRepresentations,
+    integral,
+    constants,
+    isNumberScalarValue
+  )
+
+  const values = new Set<IrValueId>(declared.values)
   const bindings = new Set<DeclarationId>()
+  const declaredBindings = new Map<DeclarationId, DeclaredIntegerWidth>()
+  for (const [cell, width] of declaredCells) {
+    if (!cellScalar.has(cell)) continue
+    bindings.add(cell)
+    declaredBindings.set(cell, width)
+  }
   for (const blockId of body.blockOrder) {
     const block = body.blocks.get(blockId)
     if (!block) continue
@@ -911,14 +978,219 @@ export const narrowableIntegersOf = (body: IrBody, storage: IntegerStorageFacts 
   }
   const roundingArithmetic = new Set<IrValueId>()
   for (const [result, compute] of computes) {
-    if (!values.has(result) || !isWide(valueMagnitudes.get(result))) continue
+    if (!values.has(result) || declared.values.has(result) || !isWide(valueMagnitudes.get(result))) continue
     if (
       compute.form === 'update' ||
       (compute.form === 'binary' && (compute.operator === '+' || compute.operator === '-' || compute.operator === '*'))
     )
       roundingArithmetic.add(result)
   }
-  return { values, bindings, magnitudes, integral, integralRemainders, dynamicRemainders, roundingArithmetic }
+  const exactNumericConversions = new Set<IrValueId>()
+  for (const [value, source] of numericConversions) {
+    const target = valueRepresentations.get(value)
+    if (target?.kind !== 'scalar' || target.integerWidth !== undefined) continue
+    const bound = valueMagnitudes.get(source.value)
+    if ((bound?.kind === 'bounded' && bound.limit <= exactIntegerLimit) || declared.values.has(value)) exactNumericConversions.add(value)
+  }
+  return {
+    values,
+    bindings,
+    magnitudes,
+    integral,
+    integralRemainders,
+    dynamicRemainders,
+    roundingArithmetic,
+    integerDivisions: declared.divisions,
+    declaredWidths: declared.widths,
+    exactNumericConversions,
+    declaredBindings
+  }
+}
+
+/**
+ * The values a body computes from `int`/`i32` bindings, held in the integer
+ * the annotation chose.
+ *
+ * The magnitude census above narrows only what it can bound, which is the right
+ * default and the wrong answer for a program that has already said it wants
+ * integers: `v = v % 2 === 0 ? v / 2 : 3 * v + 1` has no bound at all. Here a
+ * value narrows when it is DERIVED from a declared cell -- a read of one, or
+ * `+ - * %`, negation, an update or a phi over such a value -- and every other
+ * operand is an integer too. `/` joins only where its quotient lands nowhere
+ * but declared cells: those truncate it at the store, so dividing in the
+ * integers gives the same answer, and anywhere else `7 / 2` is still 3.5.
+ */
+const declaredIntegerValuesOf = (
+  body: IrBody,
+  declaredCells: ReadonlyMap<DeclarationId, DeclaredIntegerWidth>,
+  readsCell: ReadonlyMap<IrValueId, DeclarationId>,
+  computes: ReadonlyMap<IrValueId, ComputeOperation>,
+  phis: ReadonlyMap<IrValueId, readonly IrOperand[]>,
+  numericConversions: ReadonlyMap<IrValueId, IrOperand>,
+  valueRepresentations: ReadonlyMap<IrValueId, Representation>,
+  integral: ReadonlySet<IrValueId>,
+  constants: ReadonlyMap<IrValueId, number>,
+  isNumberScalarValue: (value: IrValueId) => boolean
+): {
+  readonly values: ReadonlySet<IrValueId>
+  readonly divisions: ReadonlySet<IrValueId>
+  readonly widths: ReadonlyMap<IrValueId, DeclaredIntegerWidth>
+} => {
+  const arithmetic: ReadonlySet<string> = new Set(['+', '-', '*', '%', '/'])
+  const operandsOf = (value: IrValueId): readonly IrOperand[] | null => {
+    const converted = numericConversions.get(value)
+    if (converted !== undefined) return [converted]
+    const incoming = phis.get(value)
+    if (incoming !== undefined) return incoming
+    const compute = computes.get(value)
+    if (!compute) return null
+    if (compute.form === 'binary' && arithmetic.has(compute.operator)) return compute.operands
+    if (compute.form === 'update') return compute.operands
+    if (compute.form === 'unary' && (compute.operator === '-' || compute.operator === '+')) return compute.operands
+    return null
+  }
+  const declaredRead = (value: IrValueId): boolean => {
+    const cell = readsCell.get(value)
+    return cell !== undefined && declaredCells.has(cell)
+  }
+
+  // Who consumes each value: a `/` qualifies only when every consumer is a
+  // declared store or a phi that itself only reaches declared stores.
+  const consumers = new Map<
+    IrValueId,
+    { readonly phi: IrValueId | null; readonly store: DeclarationId | null; readonly arithmetic?: IrValueId }[]
+  >()
+  const consumed = (
+    value: IrValueId,
+    use: { readonly phi: IrValueId | null; readonly store: DeclarationId | null; readonly arithmetic?: IrValueId }
+  ): void => {
+    const list = consumers.get(value) ?? []
+    list.push(use)
+    consumers.set(value, list)
+  }
+  for (const blockId of body.blockOrder) {
+    const block = body.blocks.get(blockId)
+    if (!block) continue
+    for (const operation of [...block.operations, block.terminator]) {
+      if (operation.kind === 'convert' && numericConversions.has(operation.result.id)) {
+        consumed(operation.source.value, { phi: operation.result.id, store: null })
+        continue
+      }
+      if (operation.kind === 'phi') {
+        for (const incoming of operation.incoming) consumed(incoming.value.value, { phi: operation.result.id, store: null })
+        continue
+      }
+      if (operation.kind === 'binding-write') {
+        consumed(operation.value.value, { phi: null, store: operation.declaration })
+        continue
+      }
+      if (operation.kind === 'compute' && operandsOf(operation.result.id) !== null) {
+        for (const operand of operandsOfIrOperation(operation))
+          consumed(operand.value, { phi: null, store: null, arithmetic: operation.result.id })
+        continue
+      }
+      for (const operand of operandsOfIrOperation(operation)) consumed(operand.value, { phi: null, store: null })
+    }
+  }
+  const landsOnlyInDeclared = (value: IrValueId, seen: Set<IrValueId> = new Set()): boolean => {
+    if (seen.has(value)) return true
+    seen.add(value)
+    const uses = consumers.get(value) ?? []
+    return (
+      uses.length > 0 &&
+      uses.every((use) =>
+        use.store !== null ? declaredCells.has(use.store) : use.phi !== null ? landsOnlyInDeclared(use.phi, seen) : false
+      )
+    )
+  }
+
+  // Derived: reachable forward from a declared read.
+  const derived = new Set<IrValueId>()
+  for (const [value, carrier] of valueRepresentations)
+    if (carrier.kind === 'scalar' && carrier.integerWidth !== undefined) derived.add(value)
+  for (const value of readsCell.keys()) if (declaredRead(value) && isNumberScalarValue(value)) derived.add(value)
+  for (let growing = true; growing;) {
+    growing = false
+    for (const value of [...computes.keys(), ...phis.keys(), ...numericConversions.keys()]) {
+      if (derived.has(value) || !isNumberScalarValue(value)) continue
+      const operands = operandsOf(value)
+      if (operands?.some((operand) => derived.has(operand.value))) {
+        derived.add(value)
+        growing = true
+      }
+    }
+  }
+  // Then strike, to the greatest fixed point, any whose other operands are not integers.
+  const held = new Set(derived)
+  const integer = (value: IrValueId): boolean => held.has(value) || integral.has(value)
+  for (let settling = true; settling;) {
+    settling = false
+    for (const value of [...held]) {
+      if (declaredRead(value)) continue
+      const operands = operandsOf(value)
+      const compute = computes.get(value)
+      const keeps =
+        operands !== null &&
+        operands.every((operand) => integer(operand.value)) &&
+        (compute?.operator !== '/' || landsOnlyInDeclared(value))
+      const carrier = valueRepresentations.get(value)
+      const machineView =
+        !numericConversions.has(value) ||
+        (carrier?.kind === 'scalar' && carrier.integerWidth !== undefined) ||
+        ((consumers.get(value)?.length ?? 0) > 0 &&
+          consumers
+            .get(value)!
+            .every((use) =>
+              use.store !== null
+                ? declaredCells.has(use.store)
+                : held.has(use.arithmetic ?? use.phi ?? value) && (use.arithmetic !== undefined || use.phi !== null)
+            ))
+      if (keeps && machineView) continue
+      held.delete(value)
+      settling = true
+    }
+  }
+  // Every `/`, and every `%` whose divisor is not a known non-zero constant (the
+  // narrowed `%` assumes one), takes the guarded integer helper.
+  const divisions = new Set<IrValueId>()
+  for (const value of held) {
+    const compute = computes.get(value)
+    if (compute?.operator === '/') divisions.add(value)
+    if (compute?.operator === '%' && compute.form === 'binary') {
+      const divisor = compute.operands[1] === undefined ? undefined : constants.get(compute.operands[1].value)
+      if (divisor === undefined || divisor === 0) divisions.add(value)
+    }
+  }
+  // A value is 32 bits wide when everything it is computed from is: an `i32`
+  // read, another 32-bit value, or a constant inside int32. Anything touching a
+  // 64-bit operand is 64 bits -- the wider integer holds every answer the
+  // narrower one does. Optimistic, so a phi cycle over `i32` reads stays 32.
+  const int32Range = (value: IrValueId): boolean => {
+    const constant = constants.get(value)
+    return constant !== undefined && constant >= -2147483648 && constant <= 2147483647
+  }
+  const narrow = new Set<IrValueId>()
+  for (const value of held) if (!declaredRead(value) || declaredCells.get(readsCell.get(value)!) === 'int32') narrow.add(value)
+  for (let settling = true; settling;) {
+    settling = false
+    for (const value of [...narrow]) {
+      if (declaredRead(value)) continue
+      const carrier = valueRepresentations.get(value)
+      if (carrier?.kind === 'scalar' && carrier.integerWidth === 'int32') continue
+      if (carrier?.kind === 'scalar' && carrier.integerWidth === 'int64') {
+        narrow.delete(value)
+        settling = true
+        continue
+      }
+      const operands = operandsOf(value) ?? []
+      if (operands.every((operand) => narrow.has(operand.value) || int32Range(operand.value))) continue
+      narrow.delete(value)
+      settling = true
+    }
+  }
+  const widths = new Map<IrValueId, DeclaredIntegerWidth>()
+  for (const value of held) widths.set(value, narrow.has(value) ? 'int32' : 'int64')
+  return { values: held, divisions, widths }
 }
 
 /**

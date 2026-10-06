@@ -438,6 +438,8 @@ export interface ReactiveCellPlan {
    * accumulate).
    */
   readonly boundRecordFields: ReadonlyMap<string, ReadonlySet<string>>
+  /** Rendered record fields whose indexed slots subscribe to the array revision. */
+  readonly revisionBoundRecordFields: ReadonlyMap<string, ReadonlySet<string>>
 }
 
 export interface HostSpellings {

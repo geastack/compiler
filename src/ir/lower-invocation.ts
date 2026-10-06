@@ -199,7 +199,8 @@ const lowerDeferredFunctionCall = (
     undefined,
     undefined,
     undefined,
-    deferred.shadowGuard
+    deferred.shadowGuard,
+    thisArgSlot.value
   )
   registerResult(ctx, operation, returned)
   registerCallShortCircuit(ctx, block, operation, returned, representation)
@@ -315,7 +316,8 @@ const lowerDeferredFunctionApply = (
     undefined,
     undefined,
     undefined,
-    deferred.shadowGuard
+    deferred.shadowGuard,
+    thisArgSlot.value
   )
   registerResult(ctx, operation, returned)
   registerCallShortCircuit(ctx, block, operation, returned, representation)
@@ -839,7 +841,9 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
       // it is eventually spelled.
       operation.intrinsicCarrierPredicate,
       calleeRenderingOf(ctx.program.slots.input, operation) === 'template' ? operation.intrinsicReflection : undefined,
-      hostTemplate
+      hostTemplate,
+      undefined,
+      supplied ?? undefined
     )
     const returned =
       narrows && called !== null && physical !== null && representation !== null

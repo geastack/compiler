@@ -671,8 +671,25 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
           }
           case 'binary':
             return binarySlot(operation, operand)
+          case 'equality': {
+            const left = operandOf(operation, 'left')
+            const right = operandOf(operation, 'right')
+            const a = left ? carrierOf(operation, left) : null
+            const b = right ? carrierOf(operation, right) : null
+            // Integer storage and ordinary Number are the same language type.
+            // Compare their shared numeric values when their physical widths
+            // differ; do not coerce unrelated types for strict equality.
+            if (
+              a?.kind === 'scalar' &&
+              a.domain === 'number' &&
+              b?.kind === 'scalar' &&
+              b.domain === 'number' &&
+              a.integerWidth !== b.integerWidth
+            )
+              return coerce('ToNumber')
+            return raw('compute-operand')
+          }
           case 'update':
-          case 'equality':
           case 'typeof':
           case 'instanceof':
           case 'coercion':

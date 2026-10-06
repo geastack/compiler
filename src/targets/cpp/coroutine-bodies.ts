@@ -1,7 +1,4 @@
-import type { IrBlockId, IrBody, IrNonTerminatorOperation, IrOperand } from '../../ir/model.js'
-import type { IrValueId } from '../../identity/ids.js'
-import { operandsOfIrOperation } from '../../ir/queries.js'
-import { representationKey, type Representation } from '../../representation/model.js'
+import type { IrBlockId, IrBody, IrNonTerminatorOperation } from '../../ir/model.js'
 
 /**
  * Whether rendering this operation writes a C++20 suspension -- `co_await` or
@@ -99,80 +96,3 @@ export const asyncPromiseViewOf = (body: IrBody): IrBody | null => {
 /** Whether this body is async, suspends, and has a non-promise ABI that no promise view can serve. */
 export const isUnviewableAsyncBody = (body: IrBody): boolean =>
   body.abi != null && body.abi.result.kind !== 'promise' && isAsyncSuspendingBody(body) && asyncPromiseViewOf(body) === null
-
-/** Whether resolving a value of this carrier can adopt a promise (`holdsThenable`, `prototype/emit-prototype-promise.ts`). */
-const mayAdopt = (carrier: Representation): boolean => {
-  if (carrier.kind === 'promise' || carrier.kind === 'dynamic') return true
-  if (carrier.kind === 'class-ref') return carrier.nativeBase?.kind === 'promise'
-  if (carrier.kind === 'optional') return mayAdopt(carrier.payload)
-  if (carrier.kind === 'tagged-union') return carrier.arms.some((arm) => mayAdopt(arm.value))
-  return false
-}
-
-/**
- * Whether this async coroutine body can ALSO be emitted as a `_task` twin: the
- * same frame returning a `gea::Task<V>` (`runtime/gea_runtime.h`), for a caller
- * that awaits its result at once and keeps no other handle to it.
- *
- * A twin settles a plain value into its frame; it cannot adopt a promise, so
- * the body must never return anything a promise's resolution would adopt: every
- * returned value is exactly the payload the body settles (so no conversion
- * stands between them), and neither the payload nor the value may hold a
- * thenable or a box. A value that arrives through a conversion out of a box
- * is refused too -- `coroutineReturnOf` (`emit-return.ts`) adopts through that
- * one.
- */
-export const taskTwinEligible = (body: IrBody): boolean => {
-  const result = body.abi?.result
-  if (result === undefined || result.kind !== 'promise' || !isAsyncCoroutineBody(body)) return false
-  const payload = result.value
-  if (mayAdopt(payload)) return false
-  const producers = new Map<IrValueId, IrNonTerminatorOperation>()
-  for (const block of body.blocks.values())
-    for (const operation of block.operations) {
-      const produced = 'result' in operation ? operation.result : null
-      if (produced !== null && produced !== undefined && 'id' in produced) producers.set(produced.id, operation)
-    }
-  for (const block of body.blocks.values()) {
-    const terminator = block.terminator
-    if (terminator.kind !== 'return' || terminator.value === null) continue
-    const value = terminator.value
-    if (mayAdopt(value.representation)) return false
-    if (payload.kind !== 'void' && representationKey(value.representation) !== representationKey(payload)) return false
-    const producer = producers.get(value.value)
-    if (producer?.kind === 'convert' && producer.source.representation.kind === 'dynamic') return false
-  }
-  return true
-}
-
-/**
- * The call results that are awaited by the very next operation and read
- * nowhere else: `const x = await f()` where `f()` is the only use of its own
- * promise. The caller may then take the callee's `_task` twin
- * (`taskTwinEligible`) instead of a `Promise`, since nothing can observe the
- * difference but the allocation.
- */
-export const fusedAwaitCallsOf = (body: IrBody): ReadonlySet<IrValueId> => {
-  const reads = new Map<IrValueId, number>()
-  const read = (operand: IrOperand): void => {
-    reads.set(operand.value, (reads.get(operand.value) ?? 0) + 1)
-  }
-  for (const block of body.blocks.values()) {
-    for (const operation of block.operations) for (const operand of operandsOfIrOperation(operation)) read(operand)
-    for (const operand of operandsOfIrOperation(block.terminator)) read(operand)
-  }
-  for (const region of body.iteratorCloseRegions ?? []) read(region.iterator)
-  const fused = new Set<IrValueId>()
-  for (const block of body.blocks.values()) {
-    const operations = block.operations
-    for (let index = 0; index + 1 < operations.length; index += 1) {
-      const call = operations[index]
-      const awaited = operations[index + 1]
-      if (call?.kind !== 'call' || call.result === null || awaited?.kind !== 'await') continue
-      if (call.result.representation.kind !== 'promise' || awaited.operand.representation.kind !== 'promise') continue
-      if (awaited.operand.value !== call.result.id || reads.get(call.result.id) !== 1) continue
-      fused.add(call.result.id)
-    }
-  }
-  return fused
-}

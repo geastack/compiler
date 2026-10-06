@@ -2,6 +2,8 @@ import type { CallableAbi, Representation } from '../representation/model.js'
 import type { FunctionId } from '../identity/ids.js'
 import type { NativeSelectionRecipe } from './native-selection.js'
 import type { FamilyMemberKeys } from './record-view.js'
+import type { CertifiedRecordViewPlan, RecordToArrayPlan } from './structural-plan.js'
+import type { NativeUnboundMethodContract } from './native-method.js'
 
 /**
  * The closed dynamic-conversion algebra.
@@ -68,6 +70,11 @@ export const classRefDomainsOverlap = (
 
 /** A checked conversion. It reports match, mismatch, or a pre-existing abrupt completion. */
 export interface MaterializerContract {
+  /** Exact nested recipes whose capabilities must also be certified. */
+  readonly dependencies?: readonly ConversionNode[]
+  readonly recordView?: CertifiedRecordViewPlan
+  readonly recordToArray?: RecordToArrayPlan
+  readonly nativeMethod?: NativeUnboundMethodContract
   readonly id: string
   /** The domain the materializer actually accepts; must equal the classifier's. */
   readonly domain: string

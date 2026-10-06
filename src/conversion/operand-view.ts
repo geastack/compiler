@@ -22,6 +22,15 @@ export const narrowedOperandView = (source: Representation, operand: SemanticOpe
     const asserted = deriver.derive(operand.type)
     return asserted.kind === 'unresolved' ? source : asserted
   }
+  // A base class handle asserted to a descendant (`(base as Derived).b`, `b`
+  // declared only on `Derived`; `properties.ts`'s
+  // `assertsDescendantClassOfUnionArm`): the member lives on the descendant, so
+  // the receiver is read as it -- the census's checked class-descendant
+  // downcast, a named abort when the object is not one.
+  if (source.kind === 'class-ref' && operand.asserted === true) {
+    const asserted = deriver.derive(operand.type)
+    return asserted.kind === 'class-ref' && representationKey(asserted) !== representationKey(source) ? asserted : source
+  }
   if (source.kind !== 'optional' && source.kind !== 'tagged-union') return source
   const target = deriver.derive(operand.type)
   if (representationKey(source) === representationKey(target)) return source

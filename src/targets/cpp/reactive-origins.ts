@@ -1,6 +1,7 @@
 import type { IrBody } from '../../ir/model.js'
 import { allOperationsOf } from '../../ir/model.js'
 import type { DeclarationId, IrValueId } from '../../identity/ids.js'
+import { representationKey } from '../../representation/model.js'
 import type { EmitContext, ReactiveRevisionOrigin } from './emit-context.js'
 import { reactiveClassFieldClaim } from './class-properties/emit-class-properties.js'
 import { reactiveRecordFieldClaim } from './emit-properties.js'
@@ -68,6 +69,15 @@ export const reactiveOriginsOf = (ctx: EmitContext, body: IrBody): ReactiveOrigi
         }
         const recordField = reactiveRecordFieldClaim(ctx, operation)
         if (recordField !== null) fieldReads.set(operation.result.id, recordField)
+        continue
+      }
+      // Presence narrowing unwraps the same object, rather than allocating a
+      // new record. Array element aliases must retain their owning revision
+      // across this optional-to-payload conversion before entering a binding.
+      if (operation.kind === 'convert' && operation.source.representation.kind === 'optional' &&
+          representationKey(operation.source.representation.payload) === representationKey(operation.result.representation)) {
+        const origin = origins.get(operation.source.value)
+        if (origin !== undefined) origins.set(operation.result.id, origin)
         continue
       }
       if (operation.kind === 'binding-read') {

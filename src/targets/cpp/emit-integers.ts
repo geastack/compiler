@@ -1,4 +1,5 @@
 import type { IrValueId } from '../../identity/ids.js'
+import type { DeclaredIntegerWidth } from '../../ir/integers.js'
 import type { ComputeOperation, IrOperand } from '../../ir/model.js'
 import { cppDenseDivisorName, cppDenseLengthName } from './emit-context.js'
 
@@ -52,6 +53,7 @@ const mirroredComparisons: ReadonlyMap<string, string> = new Map([
 export const integerBoundedComparison = (
   integerValues: ReadonlySet<IrValueId>,
   invariant: ReadonlySet<IrValueId>,
+  declaredWidths: ReadonlyMap<IrValueId, DeclaredIntegerWidth>,
   operation: ComputeOperation,
   first: IrOperand,
   second: IrOperand,
@@ -62,6 +64,8 @@ export const integerBoundedComparison = (
   const leftNarrowed = integerValues.has(first.value)
   const rightNarrowed = integerValues.has(second.value)
   if (leftNarrowed === rightNarrowed) return null
+  // Explicit int64 values can exceed the helpers' bounded sentinels.
+  if (declaredWidths.get(leftNarrowed ? first.value : second.value) === 'int64') return null
   // The side that stays a double is the one being restated, so it is the one
   // that has to be free to restate.
   if (!invariant.has(leftNarrowed ? second.value : first.value)) return null
@@ -69,6 +73,72 @@ export const integerBoundedComparison = (
   const helper = asked === undefined ? undefined : integerBoundHelpers.get(asked)
   if (helper === undefined) return null
   return leftNarrowed ? `${left} ${operation.operator} ${helper}(${right})` : `${helper}(${left}) ${operation.operator} ${right}`
+}
+
+const constantComparisons: ReadonlySet<string> = new Set(['==', '===', '!=', '!==', '<', '<=', '>', '>='])
+
+/**
+ * An integer compared against an integer-valued constant, asked of the integer.
+ *
+ * `while (value !== 1)` over an `int` read the integer, widened it to a double
+ * and compared doubles, once per turn of collatz's inner loop. Against a
+ * constant `c` that is an integer below 2^53 in magnitude the integer compare
+ * is the same answer for EVERY integer, not only the safe ones: widening is
+ * monotone and `c` is exact, and an integer that widens to `c` must lie within
+ * half a unit of it -- below 2^53 a unit is at most one, so only `c` itself
+ * does. Equality is therefore as safe here as the relations, unlike against a
+ * double that is only known at run time (`integerBoundedComparison`).
+ *
+ * `integerText` answers an operand's integer spelling, or `null` when it is
+ * not one; `constantText` its constant literal, if it is a constant.
+ */
+export const integerConstantComparison = (
+  operation: ComputeOperation,
+  first: IrOperand,
+  second: IrOperand,
+  integerText: (operand: IrOperand) => string | null,
+  constantText: (operand: IrOperand) => string | undefined
+): string | null => {
+  if (!constantComparisons.has(operation.operator)) return null
+  const integral = (operand: IrOperand): string | null => {
+    const text = constantText(operand)
+    if (text === undefined || operand.representation.kind !== 'scalar' || operand.representation.domain !== 'number') return null
+    const value = Number(text)
+    return Number.isInteger(value) && Math.abs(value) < 2 ** 53 ? `${value}LL` : null
+  }
+  const operator = operation.operator === '===' ? '==' : operation.operator === '!==' ? '!=' : operation.operator
+  const rightConstant = integral(second)
+  const leftInteger = rightConstant === null ? null : integerText(first)
+  if (rightConstant !== null && leftInteger !== null) return `(${leftInteger}) ${operator} ${rightConstant}`
+  const leftConstant = integral(first)
+  const rightInteger = leftConstant === null ? null : integerText(second)
+  if (leftConstant !== null && rightInteger !== null) return `${leftConstant} ${operator} (${rightInteger})`
+  return null
+}
+
+/**
+ * Two `int`/`i32` values compared, asked of the integers.
+ *
+ * `divisor * divisor <= value` over `int`s widened `value` to a double to meet
+ * the product's Number type and compared doubles, a conversion and a float
+ * compare on every turn of primes' trial-division loop. A declared integer is
+ * the annotation's contract -- its arithmetic already wraps at the machine
+ * width rather than rounding -- so its comparisons are the integer ones too.
+ * `declaredText` answers an operand's integer spelling when it is a declared
+ * value or a widening of one, else `null`.
+ */
+export const declaredIntegerComparison = (
+  operation: ComputeOperation,
+  first: IrOperand,
+  second: IrOperand,
+  declaredText: (operand: IrOperand) => string | null
+): string | null => {
+  if (!constantComparisons.has(operation.operator)) return null
+  const left = declaredText(first)
+  const right = left === null ? null : declaredText(second)
+  if (left === null || right === null) return null
+  const operator = operation.operator === '===' ? '==' : operation.operator === '!==' ? '!=' : operation.operator
+  return `(${left}) ${operator} (${right})`
 }
 
 /**

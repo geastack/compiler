@@ -6,6 +6,8 @@ import { createConversionDerivationContext, deriveConversionCapability } from '.
 import { narrowingCapabilityFor } from './build.js'
 import type { CoercionOperation, ConversionRuntimeRegistry } from './registry.js'
 import type { FamilyMemberKeys } from './record-view.js'
+import { impossibleFieldReadOf, IMPOSSIBLE_FIELD_READ } from './impossible-field-read.js'
+import { nativeUnboundMethodContractOf, NATIVE_UNBOUND_METHOD_MATERIALIZER } from './native-method.js'
 
 /**
  * The conversion census: ONE node per (source, target) pair, minted on
@@ -35,6 +37,9 @@ import type { FamilyMemberKeys } from './record-view.js'
  * already read; nothing here decides a pair on its own.
  */
 export interface ConversionCensus {
+  readonly fieldReadFor: (source: Representation, target: Representation) => ConversionNode
+  readonly absentIndexReadFor: (source: Representation, target: Representation) => ConversionNode
+  readonly nativeMethodFor: (source: Representation, target: Representation) => ConversionNode | null
   readonly nodeFor: (source: Representation, target: Representation) => ConversionNode
   /**
    * The node for an abstract operation over a source: `ToNumber` lands on
@@ -124,6 +129,19 @@ export interface ConversionCensus {
    */
   readonly caughtHandoffFor: (source: Representation, target: Representation) => ConversionNode | null
   /**
+   * A base class handle the program's own `as Derived` asserts to a
+   * DESCENDANT, read for a member only the descendant declares
+   * (`properties.ts`'s `assertsDescendantClassOfUnionArm`): the class
+   * downcast, CHECKED against the allocation's authenticated class chain, and
+   * a `TypeError` when the object is not that class. The ordinary pair's
+   * downcast (`downcastClassRef`) trusts an `instanceof` guard the emitter
+   * itself rendered; an assertion renders no guard, so trusting it would store
+   * a descendant's field through a base object's bytes. `null` unless the
+   * target is a class-ref descending from the source's class under the same
+   * ownership.
+   */
+  readonly assertedClassDowncastFor: (source: Representation, target: Representation) => ConversionNode | null
+  /**
    * An `any` argument entering an OPTIONAL parameter (`x?: T`, no default)
    * whose payload has no `null` state: a `null` the value holds reads as the
    * parameter's absence. mongodb's `executeCommands` keeps `let thrownError =
@@ -194,6 +212,7 @@ const containsUnresolved = (representation: Representation): boolean => represen
 
 export const createConversionNodes = (input: ConversionCensusInput): ConversionCensus => {
   const minted = new Map<ConversionNodeId, ConversionNode>()
+  const deriving = new Set<ConversionNodeId>()
   const context = createConversionDerivationContext(input.registry)
 
   const capabilityOf = (source: Representation, target: Representation, sourceKey: string, targetKey: string): ConversionCapability => {
@@ -225,6 +244,8 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
       const installed = table(source, target)
       if (installed) return { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
     }
+    const structural = input.registry.structuralRecipe?.(source, target, nodeFor)
+    if (structural) return { kind: 'static', materializer: structural }
     const recipe = input.registry.staticRecipe(source, target)
     if (recipe) return { kind: 'static', materializer: recipe }
     const foreign = foreignReceiverOf(source, target)
@@ -236,11 +257,32 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     const sourceKey = representationKey(source)
     const targetKey = representationKey(target)
     const id = `${sourceKey}->${targetKey}`
-    const eager = input.nodes.get(id)
-    if (eager !== undefined) return eager
     const remembered = minted.get(id)
     if (remembered !== undefined) return remembered
-    const capability = capabilityOf(source, target, sourceKey, targetKey)
+    if (deriving.has(id))
+      return { id, source, target, capability: { kind: 'never', reason: `recursive structural conversion ${id} has no finite leaf proof` } }
+    deriving.add(id)
+    let capability: ConversionCapability
+    try {
+      const eager = input.nodes.get(id)
+      capability = eager?.capability ?? capabilityOf(source, target, sourceKey, targetKey)
+      if (capability.kind === 'static' || capability.kind === 'atom') {
+        const materializer = capability.materializer
+        if (materializer.id === 'view:structural-record' || materializer.id === 'gea::record::classStructuralView') {
+          const sealed = input.registry.structuralRecipe?.(source, target, nodeFor)
+          capability = sealed?.recordView
+            ? { ...capability, materializer: { ...materializer, ...sealed, id: materializer.id } }
+            : { kind: 'never', reason: `structural conversion ${id} has no admitted leaf plan` }
+        } else if (materializer.id === 'gea::Promise::adopt-converted' && source.kind === 'promise' && target.kind === 'promise') {
+          const child = nodeFor(source.value, target.value)
+          capability = child.capability.kind === 'never'
+            ? child.capability
+            : { ...capability, materializer: { ...materializer, dependencies: [child] } }
+        }
+      }
+    } finally {
+      deriving.delete(id)
+    }
     // A membership view, not a Set copied from both tables: the copy was made
     // once per minted pair, quadratic in the census, and was the mongodb
     // driver's single largest lowering cost (20 of 35 seconds).
@@ -248,6 +290,38 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     const node: ConversionNode = { id, source, target, capability }
     minted.set(id, node)
     return node
+  }
+
+  const contextual = new Map<ConversionNodeId, ConversionNode>()
+  const contextualNode = (source: Representation, target: Representation, context: string, materializer: import('./algebra.js').MaterializerContract): ConversionNode => {
+    const id = `${conversionNodeIdOf(source, target)}#${context}`
+    const remembered = contextual.get(id)
+    if (remembered) return remembered
+    const node: ConversionNode = { id, source, target, capability: { kind: 'static', materializer } }
+    contextual.set(id, node)
+    return node
+  }
+  const fieldReadFor = (source: Representation, target: Representation): ConversionNode => {
+    const ordinary = nodeFor(source, target)
+    if (ordinary.capability.kind !== 'never' || !impossibleFieldReadOf(source, target)) return ordinary
+    return contextualNode(source, target, 'field-read', {
+      id: IMPOSSIBLE_FIELD_READ, domain: 'static:impossible-field-read', allocates: false, nativeFieldProtocol: 'unused'
+    })
+  }
+  const absentIndexReadFor = (source: Representation, target: Representation): ConversionNode => {
+    const ordinary = nodeFor(source, target)
+    if (ordinary.capability.kind !== 'never') return ordinary
+    return contextualNode(source, target, 'index-read', {
+      id: IMPOSSIBLE_INDEX_READ, domain: 'static:impossible-index-read', allocates: false, nativeFieldProtocol: 'unused'
+    })
+  }
+  const nativeMethodFor = (source: Representation, target: Representation): ConversionNode | null => {
+    const nativeMethod = nativeUnboundMethodContractOf(source, target)
+    if (!nativeMethod) return null
+    return contextualNode(source, target, 'native-method', {
+      id: NATIVE_UNBOUND_METHOD_MATERIALIZER, domain: 'static:native-unbound-method', allocates: true,
+      callableIdentityTransport: 'preserved', nativeFieldProtocol: 'unused', nativeMethod
+    })
   }
 
   const coercions = new Map<ConversionNodeId, ConversionNode>()
@@ -378,7 +452,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     const id = `${representationKey(source)}->${representationKey(target)}#family-members(${named})`
     const remembered = familyMemberViews.get(id)
     if (remembered !== undefined) return remembered
-    const materializer = input.registry.familyMemberView?.(source, target, members) ?? null
+    const materializer = input.registry.structuralRecipe?.(source, target, nodeFor, members) ?? null
     if (materializer === null) return null
     const node: ConversionNode = { id, source, target, capability: { kind: 'static', materializer }, familyMembers: members }
     familyMemberViews.set(id, node)
@@ -398,6 +472,35 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
       capability: { kind: 'static', materializer: { id: CAUGHT_HANDOFF_MATERIALIZER, domain: 'static:caught-handoff', allocates: false } }
     }
     caughtHandoffs.set(id, node)
+    return node
+  }
+
+  const assertedClassDowncasts = new Map<ConversionNodeId, ConversionNode>()
+  const assertedClassDowncastFor = (source: Representation, target: Representation): ConversionNode | null => {
+    if (source.kind !== 'class-ref' || target.kind !== 'class-ref') return null
+    if (source.ownership !== target.ownership || source.declaration === target.declaration) return null
+    if (!target.ancestors.includes(source.declaration)) return null
+    const id = `${representationKey(source)}->${representationKey(target)}#asserted-class-downcast`
+    const remembered = assertedClassDowncasts.get(id)
+    if (remembered !== undefined) return remembered
+    const node: ConversionNode = {
+      id,
+      source,
+      target,
+      capability: {
+        kind: 'static',
+        materializer: {
+          id: ASSERTED_CLASS_DOWNCAST_MATERIALIZER,
+          domain: `static:asserted-class-downcast:${representationKey(target)}`,
+          allocates: false,
+          nativeFieldProtocol: 'unused',
+          nativePayloadTransport: 'preserved',
+          nativeClassReferenceIdentity: 'preserved',
+          callableIdentityTransport: 'preserved'
+        }
+      }
+    }
+    assertedClassDowncasts.set(id, node)
     return node
   }
 
@@ -421,8 +524,9 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
   }
 
   const nodeById = (id: ConversionNodeId): ConversionNode | null =>
-    input.nodes.get(id) ??
     minted.get(id) ??
+    contextual.get(id) ??
+    input.nodes.get(id) ??
     coercions.get(id) ??
     exactArms.get(id) ??
     nativeBaseViews.get(id) ??
@@ -430,10 +534,14 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     assertedUnions.get(id) ??
     familyMemberViews.get(id) ??
     caughtHandoffs.get(id) ??
+    assertedClassDowncasts.get(id) ??
     nullishOptionals.get(id) ??
     null
 
   return {
+    fieldReadFor,
+    absentIndexReadFor,
+    nativeMethodFor,
     nodeFor,
     coercionFor,
     exactArmFor,
@@ -442,6 +550,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     assertedUnionFor,
     familyMemberViewFor,
     caughtHandoffFor,
+    assertedClassDowncastFor,
     nullishOptionalFor,
     nodeById,
     minted
@@ -450,9 +559,13 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
 
 /** The materializer id every family-member view node carries; the printer dispatches its recipe on it. */
 export const FAMILY_MEMBER_VIEW_MATERIALIZER = 'view:family-member-record'
+export const IMPOSSIBLE_INDEX_READ = 'native:impossible-index-read'
 
 /** The materializer id every nullish-optional node carries; the printer dispatches its recipe on it. */
 export const NULLISH_OPTIONAL_MATERIALIZER = 'view:nullish-optional'
+
+/** The materializer id every asserted-class-downcast node carries; the printer dispatches its recipe on it. */
+export const ASSERTED_CLASS_DOWNCAST_MATERIALIZER = 'gea::host::assertedDowncastClassRef'
 
 /** The materializer id every caught-handoff node carries; the printer dispatches its recipe on it. */
 export const CAUGHT_HANDOFF_MATERIALIZER = 'view:caught-handoff'

@@ -3,7 +3,7 @@ import type { Representation } from '../representation/model.js'
 import { stringConstantsOf } from './dead-values.js'
 import type { ClassConstruction } from './instantiation.js'
 import type { IrBlockId, IrBody, IrOperation } from './model.js'
-import { operandsOfIrOperation } from './queries.js'
+import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import type { ReflectionDemand, ReflectionFieldOperation } from './reflection-demand.js'
 
 /**
@@ -45,6 +45,15 @@ export interface ConstructionOnlyFields {
   readonly holds: (receiver: Representation, key: string) => boolean
   /** The bodies that construct: a read in one of them may precede the write. */
   readonly constructing: ReadonlySet<FunctionId>
+  /**
+   * Whether `key` on an instance of `declaration` is construction-only AND every
+   * construction write stores a value the constructor was handed -- one of its
+   * own arguments, or `null`/`undefined`. An argument is evaluated before the
+   * object exists, so such a field can only ever point at an OLDER object: no
+   * edge through it can close a cycle back to its holder (`records.ts`'s
+   * acyclic classes).
+   */
+  readonly holdsOlder: (declaration: DeclarationId, key: string) => boolean
 }
 
 const everyKey = Symbol('every key')
@@ -92,6 +101,25 @@ export const constructionOnlyFieldsOf = (
     return true
   }
 
+  // Cells every write of which -- in any body -- stores a constructor's own
+  // argument: reading one in a constructor reads an argument.
+  const argumentCells = new Map<DeclarationId, boolean>()
+  for (const body of bodies) {
+    const constructs = constructing.has(body.sourceOwner as FunctionId)
+    const parameters = new Set<IrValueId>()
+    for (const block of body.blocks.values())
+      for (const operation of block.operations) if (operation.kind === 'parameter') parameters.add(operation.result.id)
+    for (const block of body.blocks.values())
+      for (const operation of block.operations)
+        if (operation.kind === 'binding-write')
+          argumentCells.set(
+            operation.declaration,
+            (argumentCells.get(operation.declaration) ?? true) && constructs && parameters.has(operation.value.value)
+          )
+  }
+  /** The hierarchy keys some construction write stores anything but an argument or a nullish constant into. */
+  const derived = new Map<DeclarationId, Set<string>>()
+
   const poisoned = new Map<DeclarationId, Set<string | typeof everyKey>>()
   const poisonedEverywhere = new Set<string>()
   let everything = false
@@ -113,15 +141,40 @@ export const constructionOnlyFieldsOf = (
   for (const body of bodies) {
     const keys = stringConstantsOf(body)
     const own = new Set<IrValueId>()
+    const definitions = new Map<IrValueId, IrOperation>()
     if (constructing.has(body.sourceOwner as FunctionId)) {
       for (const block of body.blocks.values())
-        for (const operation of block.operations) if (operation.kind === 'receiver') own.add(operation.result.id)
+        for (const operation of block.operations) {
+          if (operation.kind === 'receiver') own.add(operation.result.id)
+          const result = resultOfIrOperation(operation)
+          if (result !== null) definitions.set(result.id, operation)
+        }
+    }
+    const handed = (value: IrValueId): boolean => {
+      const definition = definitions.get(value)
+      if (definition === undefined) return false
+      if (definition.kind === 'parameter') return true
+      if (definition.kind === 'constant') return definition.literal === 'null' || definition.literal === 'undefined'
+      if (definition.kind === 'convert') return handed(definition.source.value)
+      if (definition.kind === 'binding-read') return argumentCells.get(definition.declaration) === true
+      return false
     }
     for (const block of body.blocks.values()) {
       for (const operation of block.operations) {
         if (operation.kind === 'set' || operation.kind === 'define-own-property' || operation.kind === 'delete') {
           const key = keys.get(operation.key.value) ?? null
-          if (key !== null && own.has(operation.receiver.value)) continue
+          if (key !== null && own.has(operation.receiver.value)) {
+            if (operation.kind !== 'set' || !handed(operation.value.value)) {
+              const hierarchies = new Set<DeclarationId>()
+              hierarchiesOf(operation.receiver.representation, hierarchies)
+              for (const hierarchy of hierarchies) {
+                const keysOf = derived.get(hierarchy) ?? new Set<string>()
+                keysOf.add(key)
+                derived.set(hierarchy, keysOf)
+              }
+            }
+            continue
+          }
           write(operation.receiver.representation, key)
         } else if (operation.kind === 'spread-copy') {
           if (own.has(operation.receiver.value)) continue
@@ -129,7 +182,7 @@ export const constructionOnlyFieldsOf = (
         }
       }
     }
-    if (everything) return { holds: () => false, constructing }
+    if (everything) return { holds: () => false, constructing, holdsOlder: () => false }
   }
 
   for (const [declaration, writes] of reflectiveWrites) {
@@ -137,17 +190,22 @@ export const constructionOnlyFieldsOf = (
     else for (const key of writes) poison(rootOf(declaration), key)
   }
 
+  const unpoisoned = (hierarchy: DeclarationId, key: string): boolean => {
+    const keys = poisoned.get(hierarchy)
+    return !poisonedEverywhere.has(key) && !keys?.has(everyKey) && !keys?.has(key)
+  }
   return {
     constructing,
     holds: (receiver, key) => {
       if (receiver.kind !== 'class-ref' || poisonedEverywhere.has(key)) return false
       const hierarchies = new Set<DeclarationId>()
       if (!hierarchiesOf(receiver, hierarchies)) return false
-      for (const hierarchy of hierarchies) {
-        const keys = poisoned.get(hierarchy)
-        if (keys?.has(everyKey) || keys?.has(key)) return false
-      }
+      for (const hierarchy of hierarchies) if (!unpoisoned(hierarchy, key)) return false
       return true
+    },
+    holdsOlder: (declaration, key) => {
+      const hierarchy = rootOf(declaration)
+      return unpoisoned(hierarchy, key) && !derived.get(hierarchy)?.has(key)
     }
   }
 }
@@ -209,7 +267,7 @@ export const reflectiveFieldWritesOf = (demand: ReflectionDemand): ReadonlySet<s
 }
 
 /** No field is construction-only: the answer for a context built without the census. */
-export const noConstructionOnlyFields: ConstructionOnlyFields = { holds: () => false, constructing: new Set() }
+export const noConstructionOnlyFields: ConstructionOnlyFields = { holds: () => false, constructing: new Set(), holdsOlder: () => false }
 
 /**
  * The values a stable field read may read through: the body's own receiver,

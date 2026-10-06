@@ -5,7 +5,7 @@ import { nativeSelectionRecipeOf, nativeTotalSelectionRecipeOf, nativeTotalSelec
 import { createConversionNodes } from './nodes.js'
 import { createCppConversionRegistry } from '../targets/cpp/conversions.js'
 import { nativeSelectionText } from '../targets/cpp/emit-native-selection.js'
-import { nativeSumPlan } from './native-sum.js'
+import { nativeSumPlan, nativeSumPreservesPayload } from './native-sum.js'
 import { widenedNativeSumText } from '../targets/cpp/emit-sum-widening.js'
 
 const number: Representation = { kind: 'scalar', domain: 'number' }
@@ -26,6 +26,64 @@ const sum = (...values: Representation[]): Representation => ({
     semanticType: `type-${index}` as never,
     runtimeDiscriminator: { kind: 'carrier' }
   }))
+})
+
+test('integer storage enters the numeric arm of optional CSS unions without boxing', () => {
+  for (const integerWidth of ['int32', 'int64'] as const) {
+    const source: Representation = { kind: 'scalar', domain: 'number', integerWidth }
+    const target: Representation = { kind: 'optional', payload: sum(number, text), absence: 'undefined' }
+    const plan = nativeSumPlan(source, target)
+    assert.ok(plan?.kind === 'wrap' && plan.payload.kind === 'wrap')
+    assert.equal(plan.payload.index, 0)
+    assert.equal(plan.payload.payload.kind, 'number-storage')
+    assert.equal(nativeSumPreservesPayload(plan), false)
+    const census = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+    const node = census.nodeFor(source, target)
+    assert.ok(node.capability.kind === 'atom')
+    assert.equal(node.capability.materializer.nativeFieldProtocol, 'unused')
+    assert.equal(node.capability.materializer.allocates, false)
+    assert.equal(node.capability.materializer.nativePayloadTransport, undefined)
+    const emitted = widenedNativeSumText(source, target, 'readOnce()')
+    assert.ok(emitted)
+    assert.match(emitted, /static_cast<double>/)
+    assert.equal(emitted.split('readOnce()').length - 1, 1)
+    assert.doesNotMatch(emitted, /Value|unbox|nativeDynamic|OwnField/)
+  }
+})
+
+test('numeric sum conversion retains optional absence and every live union alternative', () => {
+  const integer: Representation = { kind: 'scalar', domain: 'number', integerWidth: 'int32' }
+  const source: Representation = { kind: 'optional', payload: sum(integer, text), absence: 'undefined' }
+  const target: Representation = { kind: 'optional', payload: sum(text, sum(number, { kind: 'null' })), absence: 'undefined' }
+  const plan = nativeSumPlan(source, target)
+  assert.ok(plan?.kind === 'optional' && plan.present.kind === 'dispatch')
+  assert.equal(plan.absent.kind, 'empty')
+  assert.equal(plan.present.arms.length, 2)
+  assert.equal(nativeSumPreservesPayload(plan), false)
+  assert.equal(nativeSumPlan(source, { kind: 'optional', payload: number, absence: 'undefined' }), null, 'a live string cannot disappear')
+  const emitted = widenedNativeSumText(source, target, 'readOnce()')
+  assert.ok(emitted)
+  assert.match(emitted, /has_value\(\)/)
+  assert.match(emitted, /static_cast<double>/)
+  assert.equal(emitted.split('readOnce()').length - 1, 1)
+})
+
+test('numeric unions prefer exact storage and refuse multiple non-exact numeric homes', () => {
+  const narrow: Representation = { kind: 'scalar', domain: 'number', integerWidth: 'int32' }
+  const wide: Representation = { kind: 'scalar', domain: 'number', integerWidth: 'int64' }
+  const exact = nativeSumPlan(narrow, sum(number, wide, narrow))
+  assert.ok(exact?.kind === 'wrap')
+  assert.equal(exact.index, 2)
+  assert.equal(exact.payload.kind, 'identity')
+  assert.equal(nativeSumPreservesPayload(exact), true)
+  assert.equal(nativeSumPlan(number, sum(narrow, wide)), null)
+  assert.equal(nativeSumPlan(wide, sum(narrow, number)), null)
+  assert.equal(nativeSumPlan(narrow, sum(text)), null)
+  assert.equal(nativeSumPlan({ kind: 'scalar', domain: 'boolean' }, sum(number, text)), null)
+  const conversion = widenedNativeSumText(number, sum(text, narrow), 'readOnce()')
+  assert.ok(conversion)
+  assert.match(conversion, /toDeclaredInteger<int32_t>/)
+  assert.equal(conversion.split('readOnce()').length - 1, 1)
 })
 
 test('mixed nested native sums publish a sealed field-free selection recipe', () => {

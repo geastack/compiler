@@ -10,7 +10,7 @@ import {
   type ReactiveRevisionOrigin,
   type EmitContext,
   type PrototypeMethodRead,
-  isIntegerStorageValue,
+  isIntegerKeyValue,
   wellKnownSymbolMemberOf
 } from './emit-context.js'
 import type { Ownership, Representation, TypedArrayElementDomain } from '../../representation/model.js'
@@ -20,7 +20,8 @@ import {
   recordIndexForKeyCarrier,
   representationKey
 } from '../../representation/model.js'
-import { alignedValueText, widenedStoreText, type ConversionSite } from './emit-narrowing.js'
+import { alignedValueText, type ConversionSite } from './emit-narrowing.js'
+import { operationConversionText } from './emit-certified-conversion.js'
 import {
   dictionaryPrototypeMethods,
   keyedCollectionPrototypeMethods,
@@ -275,10 +276,14 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
   if (wellKnownSymbolMemberOf(ctx, key) === 'toStringTag') return binaryToStringTagText(receiver.representation)
   if (staticKey !== undefined) {
     const index = canonicalIndexLiteral(staticKey)
+    // A canonical index literal is an integer by construction, so it takes the
+    // integer-keyed reader: `elementAt(0)` converted the literal to a double
+    // and proved it canonical again on every read, which on a core without a
+    // double FPU is a chain of soft-float calls per `m.elements[k]`.
     if (index !== null) {
       return (
-        absentCapableElementText(ctx, receiverText, 'elementAt', index, receiver.representation.element, result) ??
-        reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->elementAt(${index})`)
+        absentCapableElementText(ctx, receiverText, 'elementAtIndex', index, receiver.representation.element, result) ??
+        reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->elementAtIndex(${index})`)
       )
     }
     if (deferredArrayMethodClaim(ctx.staticKeyTexts, receiver, key) !== null) {
@@ -362,7 +367,7 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
   // An index the integer census narrowed goes straight in as an integer --
   // see `ArrayObject::elementAtIndex` for why the double round trip is not
   // merely redundant.
-  const reader = isIntegerStorageValue(ctx, key.value) ? 'elementAtIndex' : 'elementAt'
+  const reader = isIntegerKeyValue(ctx, key) ? 'elementAtIndex' : 'elementAt'
   const keyText = operandText(ctx, key)
   return (
     absentCapableElementText(ctx, receiverText, reader, keyText, receiver.representation.element, result) ??
@@ -425,7 +430,11 @@ export const typedArrayAccessText = (ctx: EmitContext, receiver: IrOperand, key:
   if (staticKey === 'length') return `${receiverText}->length()`
   if (staticKey !== undefined) {
     const index = canonicalIndexLiteral(staticKey)
-    if (index !== null) return absentCapableNumericElementText(receiverText, index, result) ?? `${receiverText}->elementAt(${index})`
+    if (index !== null)
+      return (
+        absentCapableNumericElementText(receiverText, index, result, 'hasElementAtIndex', 'elementAtIndex') ??
+        `${receiverText}->elementAtIndex(${index})`
+      )
     // The block-shaped half of the same carrier -- `buffer`/`byteLength`/
     // `byteOffset` and the four range methods -- lives in `emit-buffers.ts`
     // with `ArrayBuffer` and `DataView`, because what each of them is about is
@@ -482,7 +491,7 @@ export const typedArrayAccessText = (ctx: EmitContext, receiver: IrOperand, key:
   }
   // A key the integer census narrowed indexes as the integer it is, the same
   // choice the Array reader makes above.
-  const integerKey = isIntegerStorageValue(ctx, key.value)
+  const integerKey = isIntegerKeyValue(ctx, key)
   const reader = integerKey ? 'elementAtIndex' : 'elementAt'
   const keyText = operandText(ctx, key)
   const absentCapable = absentCapableNumericElementText(
@@ -1416,9 +1425,14 @@ export const emitRecordIndexSidecarStore = (
         `${table.member}operator[](__gea_key) = std::move(__gea_next); ${table.attributes}.set(__gea_attribute_key, __gea_attributes); return true; })()`
       )
     }
-    const boxed =
-      widenedStoreText({ kind: 'dynamic', reason: 'declared-any-never-narrowed' }, table.value, stored) ??
-      (table.value.kind === 'dynamic' ? stored : null)
+    const boxed = operationConversionText(
+      ctx,
+      operation,
+      'descriptor',
+      table.value,
+      { kind: 'dynamic', reason: 'declared-any-never-narrowed' },
+      stored
+    )
     if (boxed === null) {
       throw createCppEmitBlockedError(
         `conversion:${representationKey(table.value)}->dynamic`,

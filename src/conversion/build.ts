@@ -196,6 +196,9 @@ const narrowingStepsOf = (source: Representation): NarrowingSteps => {
       .flatMap((arm) => absences.map((absence) => ({ kind: 'optional', payload: arm.value, absence }) as const))
     return { nested: distinctByKey([...source.arms.map((arm) => arm.value), ...optionalArms]), subsets: dropOneArmUnionsOf(source) }
   }
+  // A shared class reference is `C | null` in one carrier, so a guard that
+  // proves it holds nothing reads it as `null` (see `carriesMergeAbsence`).
+  if (source.kind === 'class-ref' && source.ownership === 'shared-refcount') return { nested: [{ kind: 'null' }], subsets: [] }
   if (source.kind !== 'optional') return noNarrowingSteps
   // The ABSENT side is a narrowing target too, and it had no pairing at all.
   //

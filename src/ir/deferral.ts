@@ -120,6 +120,8 @@ export const noForwarding: ForwardingPolicy = { forwardsCallInto: () => false, f
 export interface ForwardedBinding {
   readonly value: IrOperand
   readonly read: IrValueId
+  /** The value is a `for`-`of` step's own temporary, already stored when the cell is written, rather than an expression that defers. */
+  readonly stepped?: true
 }
 
 /**
@@ -395,7 +397,15 @@ export const deferrableValuesOf = (
               ? block.terminator
               : undefined
         if (consumer === undefined) continue
-        if (!forwardedReadPositionAllowed(consumer, read.operation.result.id, read.operation.result.representation, pureGet)) continue
+        // A step's temporary is a name, not an expression: it can stand as a
+        // call's argument without moving anything into the argument list.
+        const stepped = producers.get(operation.value.value)?.kind === 'iterator-next'
+        const argument = consumer.kind === 'call' && consumer.arguments.some((each) => each.value === read.operation.result.id)
+        if (
+          !(stepped && argument) &&
+          !forwardedReadPositionAllowed(consumer, read.operation.result.id, read.operation.result.representation, pureGet)
+        )
+          continue
         // Effect-free is the condition here, not withheld: a pure read that
         // kept its temporary because ITS use lies past some later call still
         // writes nothing, and the written expression only has to reach the
@@ -438,8 +448,14 @@ export const deferrableValuesOf = (
     }
   }
   for (const candidate of bindingCandidates) {
-    if (!deferrable.has(candidate.value.value)) continue
     const producer = producers.get(candidate.value.value)
+    // A `for`-`of` step's value is a temporary of its own, assigned once per
+    // step and read by nothing but the loop binding's write: the binding's one
+    // read may name it as it stands. Copying it into the cell first reread a
+    // string the step had only just stored, at a different width, which on
+    // `strings.ts` stalled the copy and then the hash that read it.
+    const steppedOnce = producer?.kind === 'iterator-next' && uses.get(candidate.value.value)?.length === 1
+    if (!deferrable.has(candidate.value.value) && !steppedOnce) continue
     // A formal reaches its reads by name already (`emit-bindings.ts`'s
     // `collectFormalCells`), and that decision stays where it is.
     if (producer === undefined || producer.kind === 'parameter' || producer.kind === 'receiver') continue
@@ -451,7 +467,12 @@ export const deferrableValuesOf = (
       !(candidate.readAt === candidate.write + 1 && candidate.use === candidate.readAt + 1)
     )
       continue
-    forwardedBindings.set(candidate.declaration, { value: candidate.value, read: candidate.read })
+    forwardedBindings.set(
+      candidate.declaration,
+      steppedOnce && !deferrable.has(candidate.value.value)
+        ? { value: candidate.value, read: candidate.read, stepped: true }
+        : { value: candidate.value, read: candidate.read }
+    )
   }
   return { values: deferrable, consumedByCall, forwardedBindings }
 }

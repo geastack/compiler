@@ -23,6 +23,7 @@ const units = [
   'native-record-property-runtime',
   'native-symbol-index-runtime',
   'numeric-conversion-runtime',
+  'numeric-conversion-soft-double-runtime',
   'regexp-p1-runtime',
   'typed-array-copy-runtime'
 ]

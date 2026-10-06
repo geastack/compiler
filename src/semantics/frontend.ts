@@ -1,7 +1,13 @@
 import type { PackageSource } from './package-sources.js'
 import { withSharedArrayStorage } from './normalize/shared-array-storage.js'
 import { deadEventCallsOf } from './normalize/dead-event-emissions.js'
-import type { CommonJsWrapperDeclaration, HostNativeTypeDeclaration, HostOwnedDeclaration } from '../plugins/model.js'
+import type {
+  CommonJsWrapperDeclaration,
+  HostNativeTypeDeclaration,
+  HostOwnedDeclaration,
+  NativeHostFunctionDeclaration
+} from '../plugins/model.js'
+import { censusNativeFunctionSignatures, type NativeFunctionSignatureCensus } from './native-function-signatures.js'
 import { anyKeyedWriteTypes, prototypeMutatedConstructorTypes, proxyFallbackTypes } from './dynamic-fallback.js'
 import ts from 'typescript'
 import { structuralShapeKey } from './model/structural-types.js'
@@ -16,6 +22,7 @@ import { createStructuralTypeTable } from './model/structural-type-table.js'
 import { censusProgram } from './normalize/census.js'
 import type { FamilyProducer } from './normalize/contribution.js'
 import { createIdentityTable, rootSpecialization, type IdentityTable } from './normalize/identities.js'
+import { censusDeclaredIntegers, type DeclaredIntegerWidth } from './declared-integers.js'
 import { gatingEdges } from './normalize/gating.js'
 import { normalizeProgram } from './normalize/normalize.js'
 import type { ProducerContext } from './normalize/producer-context.js'
@@ -139,6 +146,7 @@ import {
  */
 
 export interface FrontendInput {
+  readonly nativeFunctionDeclarations?: readonly NativeHostFunctionDeclaration[]
   /** Package checkouts prepared by the project loader; the compiler discovers their implementation entries. */
   readonly packageSources?: readonly PackageSource[]
   readonly declarationModules?: ReadonlySet<string>
@@ -353,6 +361,9 @@ export interface FrontendResult {
    * why this cannot be answered from any operand's type.
    */
   readonly deadTypeofGuards: DeadTypeofGuardCensus
+  /** Bindings annotated `int`/`i32`: see `declared-integers.ts`. */
+  readonly declaredIntegers: ReadonlyMap<DeclarationId, DeclaredIntegerWidth>
+  readonly nativeFunctionSignatures: NativeFunctionSignatureCensus
   /**
    * Where a node identity is in the source, or `null` for one this program
    * has no node for.
@@ -1328,6 +1339,13 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // TypeScript inference's own `never`, so the proof has to come from the
   // guard's own shape and the host's own statement instead.
   const deadTypeofGuards = censusDeadTypeofGuards(compiled.sourceFiles, absent, identities)
+  const declaredIntegers = censusDeclaredIntegers(compiled.checker, compiled.sourceFiles, identities)
+  const nativeFunctionSignatures = censusNativeFunctionSignatures(
+    compiled.checker,
+    compiled.sourceFiles,
+    identities,
+    input.nativeFunctionDeclarations ?? []
+  )
   // The array/collection census now runs INSIDE the fixpoint above (see
   // `compose`'s own comment) rather than once more here over the settled
   // parameter census. `settled.facts.collections` already IS the instance computed
@@ -2077,6 +2095,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     hostNamespaceBindings: hosts.hostNamespaceBindings,
     absentBindings: absentBindingIds(absent, identities),
     deadTypeofGuards,
+    declaredIntegers,
+    nativeFunctionSignatures,
     locationOfNode,
     locationOfDeclaration,
     textOfNode,

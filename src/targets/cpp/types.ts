@@ -758,6 +758,17 @@ export const cppConstantLiteral = (text: string, literal: ConstantLiteral, repre
     return `gea::Value::box(gea::Value::Tag::${tag}, static_cast<${cppType}>(${rendered}))`
   }
   if (literal === 'bigint') return `gea::BigInt::parse(${cppStringLiteral(text)})`
+  // Outside Number's exact integer range, its shortest decimal spelling must
+  // round-trip through double. C++ parsing those digits as an integer can
+  // change the value before conversion into an explicitly declared integer.
+  const digits = text.startsWith('-') ? text.slice(1) : text
+  if (
+    literal === 'number' &&
+    digits.length > 0 &&
+    [...digits].every((digit) => digit >= '0' && digit <= '9') &&
+    !Number.isSafeInteger(Number(text))
+  )
+    return `${text}.0`
   if (literal !== 'string') return text
   return cppStringLiteral(text)
 }
@@ -1192,7 +1203,11 @@ export const cppTypeOf = (representation: Representation, ownership: Ownership |
     case 'void':
       throw new Error('void is not a value carrier and has no physical C++ type')
     case 'scalar':
-      return cppScalarType(representation.domain)
+      return representation.integerWidth === 'int64'
+        ? 'long long'
+        : representation.integerWidth === 'int32'
+          ? 'int32_t'
+          : cppScalarType(representation.domain)
     case 'string':
       return 'std::string'
     case 'symbol':

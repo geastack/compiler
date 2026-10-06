@@ -339,6 +339,46 @@ const assertsNativeCollection = (checker: ts.TypeChecker, expression: ts.Express
 }
 
 /**
+ * `(base as Derived).b = x` where `base: Base` is the same claim with a single
+ * class arm; the receiver need not be a union.
+ *
+ * `(mesh.material as MeshPhongMaterial).emissiveIntensity = x` where
+ * `material: Material | Material[]`: the assertion names a class that DESCENDS
+ * from one of the union's class arms, and no class arm declares the member --
+ * the member exists only on the asserted descendant. A per-arm dispatch has
+ * nowhere to put it (the base arm declares no such field, the array arm is not
+ * the class), so it fell back to a boxed `nativeDynamicSet` on every arm. The
+ * author stated the class; the value is taken as that class through the checked
+ * downcast, a TypeError when it is not. A member some class arm declares keeps
+ * the arm-wise dispatch (`downcast-method-read-absent-on-other-arm.ts`).
+ */
+const assertsDescendantClassOfUnionArm = (checker: ts.TypeChecker, node: AccessNode, unwrapped: ts.Expression): boolean => {
+  if (!ts.isPropertyAccessExpression(node)) return false
+  const asserted = checker.getTypeAtLocation(node.expression)
+  if (asserted.isUnion() || ((asserted.getSymbol()?.flags ?? 0) & ts.SymbolFlags.Class) === 0) return false
+  const held = checker.getTypeAtLocation(unwrapped)
+  // A receiver statically typed as the base class itself (`(base as Derived).b`)
+  // is the one-arm case of the same claim.
+  const classArms = (held.isUnion() ? held.types : [held]).filter((arm) => ((arm.getSymbol()?.flags ?? 0) & ts.SymbolFlags.Class) !== 0)
+  if (classArms.length === 0) return false
+  const ancestors = new Set<ts.Symbol>()
+  const collect = (type: ts.Type): void => {
+    for (const base of checker.getBaseTypes(type as ts.InterfaceType)) {
+      const symbol = base.getSymbol()
+      if (symbol === undefined || ancestors.has(symbol)) continue
+      ancestors.add(symbol)
+      collect(base)
+    }
+  }
+  if (asserted.isClass()) collect(asserted)
+  const name = node.name.text
+  return (
+    classArms.some((arm) => ancestors.has(arm.getSymbol() as ts.Symbol)) &&
+    classArms.every((arm) => checker.getPropertyOfType(arm, name) === undefined)
+  )
+}
+
+/**
  * Whether `expression`'s assertion names a carrier a boxed value's own runtime
  * tag answers for -- a primitive, an array or tuple, or a lib/host object --
  * so checking the box into it is exactly the claim the program makes. A
@@ -765,6 +805,7 @@ const buildOperations = (
   // member read off the box itself looked `join` up as a detached function
   // -- `(value as string[]).join(',')` then called it with no receiver.
   let receiverIsAssertedDynamic = false
+  let receiverIsAssertedClassArm = false
   if (receiverWasAsserted) {
     const physicalReceiverShape = context.table.get(context.types.typeAt(receiverExpression)).shape
     if (
@@ -780,6 +821,9 @@ const buildOperations = (
     ) {
       receiverExpression = node.expression
       receiverIsAssertedCensusUnion = true
+    } else if (assertsDescendantClassOfUnionArm(context.checker, node, receiverExpression)) {
+      receiverExpression = node.expression
+      receiverIsAssertedClassArm = true
     }
   }
   const guardsReceiver = node.questionDotToken !== undefined
@@ -863,7 +907,7 @@ const buildOperations = (
       operands: [
         internalMethod === 'get' && nativeView !== null
           ? { ...operand('receiver', 0, receiverSource, nativeView, receiverEvaluation), nativeBaseView: true as const }
-          : receiverIsAssertedCensusUnion || receiverIsAssertedDynamic
+          : receiverIsAssertedCensusUnion || receiverIsAssertedDynamic || receiverIsAssertedClassArm
             ? { ...operand('receiver', 0, receiverSource, receiverType, receiverEvaluation), asserted: true as const }
             : operand('receiver', 0, receiverSource, receiverType, receiverEvaluation),
         operand('key', 0, key.source, key.type, keyEvaluation),

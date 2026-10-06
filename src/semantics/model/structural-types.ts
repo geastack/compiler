@@ -21,6 +21,8 @@ export const primitiveShapes = [
   'null',
   'boolean',
   'number',
+  'int32',
+  'int64',
   'bigint',
   'string',
   'symbol',

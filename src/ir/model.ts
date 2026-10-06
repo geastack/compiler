@@ -8,6 +8,9 @@ import type { UnboxedMethodAssumption } from '../projection/method-value-escapes
 import type { NativeEqualityRecipe } from './native-equality.js'
 import type { FixedDataDefinitionRecipe } from './fixed-data-definition.js'
 import type { TypedComputedReadRecipe, TypedComputedWriteRecipe } from './typed-property-access.js'
+import type { OperationConversion } from './operation-conversions.js'
+import type { NativeMethodValueRecipe } from '../conversion/native-method.js'
+import type { DenseLoopPlan } from './dense-loops.js'
 
 /**
  * The typed IR: verified SSA values and a closed operation union.
@@ -84,6 +87,8 @@ export interface IrResult {
 
 /** Fields every operation carries, regardless of kind. */
 export interface IrOperationBase {
+  /** Internal storage/result adaptations selected before certification. */
+  readonly conversionRecipes?: readonly OperationConversion[]
   /**
    * The published semantic result this operation lowers.
    *
@@ -104,6 +109,7 @@ export interface IrOperationBase {
 // ---------------------------------------------------------------------------
 
 export interface GetOperation extends IrOperationBase {
+  readonly methodValueRecipes?: readonly NativeMethodValueRecipe[]
   readonly hostMethod?: HostMethodBinding
   readonly kind: 'get'
   /** Semantic proof that normal completion is the undefined value. */
@@ -302,6 +308,8 @@ export interface SpreadCopyOperation extends IrOperationBase {
  * mint an SSA id for.
  */
 export interface CallOperation extends IrOperationBase {
+  /** The language receiver, independent of the native frame's receiver slot. */
+  readonly thisArgument?: IrOperand
   readonly kind: 'call'
   /** Closed body entry, including evaluated arguments that do not enter its fixed frame. */
   readonly closedFrame?: {
@@ -1504,6 +1512,8 @@ export interface IrBlock {
 export const allOperationsOf = (block: IrBlock): readonly IrOperation[] => [...block.operations, block.terminator]
 
 export interface IrBody {
+  /** Certified adaptations used by the published dense storage windows. */
+  readonly denseLoopPlan?: DenseLoopPlan
   readonly owner: PhysicalBodyId
   /**
    * The execution region this body belongs to, carried alongside the folded

@@ -146,7 +146,8 @@ export interface IrBodyBuilder {
     intrinsicCarrierPredicate?: true,
     intrinsicReflection?: CallOperation['intrinsicReflection'],
     hostTemplate?: CallOperation['hostTemplate'],
-    builtinShadowGuard?: CallOperation['builtinShadowGuard']
+    builtinShadowGuard?: CallOperation['builtinShadowGuard'],
+    thisArgument?: IrOperand
   ) => IrValueId | null
   readonly commonJsRequire: (
     block: IrBlockId,
@@ -660,7 +661,8 @@ export const createIrBodyBuilder = (
     intrinsicCarrierPredicate,
     intrinsicReflection,
     hostTemplate,
-    builtinShadowGuard
+    builtinShadowGuard,
+    thisArgument
   ) => {
     const result = mintOptionalResult(representation)
     append(block, {
@@ -668,6 +670,7 @@ export const createIrBodyBuilder = (
       lineage,
       callee,
       receiver,
+      ...(thisArgument ? { thisArgument } : {}),
       arguments: args,
       result,
       ...(family ? { family } : {}),

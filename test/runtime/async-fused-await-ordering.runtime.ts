@@ -1,3 +1,6 @@
+//! emitted-lacks: gea::Task<
+//! emitted-lacks: _task(
+// Immediate awaits use the regular Promise body; no alternate body is emitted.
 // AN AWAIT COSTS EXACTLY ONE MICROTASK, WHATEVER THE CALLEE DID.
 //
 // Any fusion of `await asyncCall()` (skipping the callee's promise state) must

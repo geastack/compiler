@@ -52,6 +52,7 @@ const emptyConversions = (nodes = new Map<string, ConversionNode>()): Conversion
   assertedUnionFor: () => null,
   familyMemberViewFor: () => null,
   caughtHandoffFor: () => null,
+  assertedClassDowncastFor: () => null,
   nullishOptionalFor: () => null,
   nodeById: (id) => nodes.get(id) ?? null,
   minted: nodes

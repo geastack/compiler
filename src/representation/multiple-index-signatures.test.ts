@@ -34,7 +34,8 @@ const emptyReactivePlan = {
   projections: new Map(),
   revisions: new Map(),
   celled: new Map(),
-  boundRecordFields: new Map()
+  boundRecordFields: new Map(),
+      revisionBoundRecordFields: new Map()
 }
 
 const multiIndexShape = (value: StructuralTypeId, symbolValue: StructuralTypeId = value) => ({

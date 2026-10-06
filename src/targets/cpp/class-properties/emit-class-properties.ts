@@ -42,7 +42,8 @@ import {
   cppTypeOf,
   cppUndefinedIn
 } from '../types.js'
-import { alignedValueText, receiverBoundFieldText } from '../emit-narrowing.js'
+import { alignedValueText } from '../emit-narrowing.js'
+import { nativeMethodValueRecipeText } from '../emit-native-method.js'
 import { computedOverriddenMethodValueText, heldMethodCopyOf } from './computed-method-value.js'
 import { nativePrototypeMethodFallbackText } from './native-prototype.js'
 import {
@@ -132,97 +133,12 @@ const methodEnvironmentText = (ctx: EmitContext, callable: FunctionId, what: str
   return `gea::packEnvironment(${cppEnvironmentStructName(callable)}{${fields.join(', ')}})`
 }
 
-/**
- * The representation a materialized instance-method VALUE actually needs --
- * as opposed to `operation.result.representation`, which is what
- * `representation/derive.ts`'s `deriveSignature` publishes for it.
- *
- * `deriveSignature` derives a method's value representation purely from its
- * TS call signature, correctly: a method's declared TYPE never states an
- * implicit receiver parameter, so the `CallableAbi` it builds always has
- * `receiver: null`. But the C++ thunk this value actually points at
- * (`cppThunkName(site.method.callable)`, built by `translation-unit.ts`'s
- * `thunkOf`/`formalsOf`) gives every receiver-bearing body an EXPLICIT
- * leading receiver formal whenever `abi.receiver !== null` -- `cppAbiType`
- * (`types.ts`) documents the identical rule for spelling the type: "the
- * receiver (if any) as the first formal". A materialized value that keeps
- * the TS-derived, receiver-less type disagrees with the thunk it is built
- * from: the declared arity is missing the one argument the thunk requires,
- * and the one argument every caller that reaches it through `.call(receiver)`
- * -- `emit-iterator.ts`'s `emitDynamicGetIterator` is the caller that surfaced
- * this, calling exactly `${method}.call(${receiverText})` on the documented
- * assumption that `classMemberText` built the callable to expect it -- already
- * supplies.
- *
- * This has no effect on the common `obj.method()` case: that never
- * materializes this operation's value as a standalone `CallableObject` at
- * all (`emit-callable.ts`'s direct-call path calls the body by name once it
- * sees `ctx.directCallees`, without ever reading this text). It matters only
- * when a method is read as a first-class value and called separately from
- * where it was read -- rare in application code, but exactly the shape the
- * general iterator protocol mints (`get-method` and `get-iterator` are two
- * separate operations; `producers/protocol.ts`'s `mintIteratorSteps`) and,
- * per the `constructor-family`/`function-value-dispatch` split `cppTypeOf`
- * already documents, exactly as sound for a plain callback reference.
- *
- * A static member (`classConstructorStaticMemberText`, this file's twin) has
- * no receiver and needs no correction -- this helper is only ever called from
- * the instance-member path below.
- */
-const boundMethodValueRepresentation = (operation: GetOperation): Representation => {
-  const representation = operation.result.representation
-  if (representation.kind !== 'function-value-dispatch') {
-    throw createCppEmitBlockedError(
-      `physical-cpp-type:${representationKey(representation)}`,
-      `reads a method as a value carried as "${representationKey(representation)}", not "function-value-dispatch"; ` +
-        'this backend only knows how to bind a receiver onto that one carrier'
-    )
-  }
-  // Some method-value representations already carry a receiver -- measured on
-  // the real app corpus, which regressed (3 programs, `c++` 0/clang `-`)
-  // under an earlier version of this fix that threw here instead. Whatever
-  // published that receiver already agrees with the real thunk (those
-  // programs were clang-clean before this function existed), so this only
-  // fills the gap `deriveSignature`'s receiver-less TS-signature derivation
-  // leaves; a value that already names one is left exactly as published.
-  if (representation.abi.receiver !== null) return representation
-  return { ...representation, abi: { ...representation.abi, receiver: operation.receiver.representation } }
-}
-
-/**
- * `classMemberText`'s result: the initializer expression, plus the DECLARED
- * type `emitGet` must give the value when it differs from
- * `operation.result.representation` -- non-null exactly when
- * `boundMethodValueRepresentation` corrected the receiver-less method-value
- * representation, so the declaration and the initializer agree on one type
- * instead of the declaration silently keeping the wrong one.
- */
+/** A class member's published carrier is unchanged by materialization. */
 export interface ClassMemberValue {
   readonly text: string
   readonly spelling: string | null
 }
 
-/**
- * `computedClassPrototypeMethodText`'s result: `ClassMemberValue` plus the
- * CARRIER its arms were materialised at.
- *
- * That text is never the whole read. `nativeSidecarGetText`
- * (`emit-dynamic-properties.ts`) puts it behind an OWN-property test -- 10.1.8.1
- * runs `OrdinaryGetOwnProperty` before the prototype walk -- so the read the
- * body finally prints is a ternary whose other arm is the expando/field
- * lookup, and a `?:` has one type. The prototype arm's carrier is not always
- * `operation.result.representation`: `boundMethodValueRepresentation` corrects
- * a method VALUE whose TS-derived signature declares no receiver onto the
- * convention its thunk really has, receiver first. Handing back only the
- * rendered text left the sidecar arm and the slot to be spelled from the
- * UNCORRECTED representation, and the three disagreed at once -- the arms
- * would not reconcile, and the call that consumed the value passed the
- * receiver `classMethodValueReceiverClaim` had already committed it to
- * (`v10.call(b1)` against a `CallableObject<Promise<std::string>()>`).
- *
- * So the carrier travels with the text, and the one authority that corrected
- * it is the one every consumer of the read reads it from.
- */
 export interface ComputedPrototypeMethodValue extends ClassMemberValue {
   readonly carrier: Representation
 }
@@ -245,7 +161,7 @@ export const classMethodValueText = (
   // read, or the read's own `dynamic` carrier for a computed key the census
   // could not type (`d[String(k)]()`), which boxes the method with
   // `receivesThis` so the call's `callWithReceiver` hands the instance back.
-  valueRepresentation: Representation = boundMethodValueRepresentation(operation),
+  valueRepresentation: Representation = operation.result.representation,
   receiverText: string = operandText(ctx, operation.receiver),
   receiverRepresentation: Representation = operation.receiver.representation
 ): { readonly text: string; readonly type: string; readonly environment: string } => {
@@ -272,28 +188,9 @@ export const classMethodValueText = (
   const heldReceiver = override === null ? receiverText : 'gea_method_receiver'
   const state = `${heldReceiver}->gea_method_state`
   const bodyValue = `gea::nativeClassMethodValue<${cppClassName(owner.declaration)}, &${cppCallableDeclarationTagName(method.callable)}>(${state}, ${payload})`
-  const aligned = alignedValueText(ctx, 'class-properties/emit-class-properties.ts:212', bodyRepresentation, valueRepresentation, bodyValue)
   const materialized =
-    aligned ??
-    // The published value declares no receiver while the body's convention
-    // leads with one, so the receiver has to travel WITH the value
-    // (`gea_runtime.h`'s `CallableObject::bindReceiver`). This is the arm half
-    // of hono's `Router<T>.match`: the interface declares `match` a method and
-    // `RegExpRouter` stores a `this`-typed FUNCTION under that name, so the
-    // union's read publishes a receiver-less callable that every arm -- the
-    // field one and the two genuine methods -- has to be able to produce. A
-    // method arm cannot produce it any other way.
-    //
-    // Reached only where emission refused outright a line below, so nothing
-    // that compiles today moves. It is not the detached-method case
-    // `receiverBoundCallableText` guards with `readsReceiver`: that one is a
-    // value handed on to a slot, where the language would supply no receiver
-    // at all. What is NOT proven here is that this value is only ever called
-    // as a method -- a program that detaches it (`const f = r.match; f(a, b)`,
-    // which TypeScript admits through a method-declared member) would see the
-    // read's receiver where the language gives `undefined`. hono writes the
-    // two shapes that are exact: the call, and `router.match.bind(router)`.
-    receiverBoundFieldText(ctx, bodyRepresentation, valueRepresentation, bodyValue, receiverRepresentation, heldReceiver)
+    nativeMethodValueRecipeText(ctx, operation, key, bodyRepresentation, valueRepresentation, bodyValue, 'prototype', method.callable) ??
+    alignedValueText(ctx, 'class-properties/emit-class-properties.ts:212', bodyRepresentation, valueRepresentation, bodyValue)
   if (materialized === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(bodyRepresentation)}->${representationKey(valueRepresentation)}`,
@@ -306,7 +203,7 @@ export const classMethodValueText = (
   // receiver: cached, the second instance would call the first one's body
   // (two hono `SmartRouter`s, the second matching against the first's routes).
   const originalValue =
-    aligned !== null && publicAbi !== null && abiKey(publicAbi) !== abiKey(bodyAbi)
+    publicAbi !== null && abiKey(publicAbi) !== abiKey(bodyAbi)
       ? `gea::nativeClassAdaptedMethodValue<${cppClassName(owner.declaration)}, &${cppCallableDeclarationTagName(method.callable)}, ${valueType}>(${state}, [&]() { return ${materialized}; })`
       : materialized
   const fallback = nativePrototypeMethodFallbackText(
@@ -322,12 +219,8 @@ export const classMethodValueText = (
   if (override === null) return { text: fallback, type: valueType, environment }
   const ownedStorage = `${heldReceiver}->${cppRecordFieldName(key)}`
   const owned =
-    alignedValueText(ctx, 'class-properties/emit-class-properties.ts:own-method', override.value, valueRepresentation, ownedStorage) ??
-    // The own slot carries the METHOD's storage convention -- receiver first,
-    // because that is the convention every writer into it was adapted to --
-    // while this read publishes a receiver-less callable. Same conversion the
-    // prototype half above needs, and for the same reason.
-    receiverBoundFieldText(ctx, override.value, valueRepresentation, ownedStorage, receiverRepresentation, heldReceiver)
+    nativeMethodValueRecipeText(ctx, operation, key, override.value, valueRepresentation, ownedStorage, 'own', null) ??
+    alignedValueText(ctx, 'class-properties/emit-class-properties.ts:own-method', override.value, valueRepresentation, ownedStorage)
   if (owned === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(override.value)}->${representationKey(valueRepresentation)}`,
@@ -832,7 +725,7 @@ export const classMemberText = (ctx: EmitContext, operation: GetOperation): Clas
   // `super.m()` is excluded: that spelling binds statically (13.3.7) and an
   // abstract base really has nothing for it, which stays a refusal.
   if (site.method.callable === null && !isSuperAccess) {
-    const carrier = cppTypeOf(boundMethodValueRepresentation(operation))
+    const carrier = cppTypeOf(operation.result.representation)
     const failure =
       `std::fprintf(stderr, "gea: \\"${key}\\" of class ${String(site.owner)} is abstract and no class in this program implements it\\n"); ` +
       'std::abort();'
@@ -995,7 +888,7 @@ export const computedClassPrototypeMethodText = (ctx: EmitContext, operation: Ge
   // need the canonical-string comparison `gea::PropertyKey` does, and no
   // caller has asked for one yet.
   if (operation.key.representation.kind !== 'string') return null
-  const target = boundMethodValueRepresentation(operation)
+  const target = operation.result.representation
 
   // Which of the class's methods this read can actually YIELD: the ones whose
   // body convention fills the carrier the read publishes. That carrier is the
@@ -1008,14 +901,16 @@ export const computedClassPrototypeMethodText = (ctx: EmitContext, operation: Ge
     const bodyAbi = ctx.abiOfCallable(callable)
     if (bodyAbi === null) return false
     const bodyRepresentation: Representation = { kind: 'function-value-dispatch', abi: bodyAbi }
+    const recipe = operation.methodValueRecipes?.find(
+      (candidate) =>
+        candidate.callable === callable &&
+        candidate.origin === 'prototype' &&
+        representationKey(candidate.source) === representationKey(bodyRepresentation) &&
+        representationKey(candidate.target) === representationKey(target)
+    )
     return (
-      alignedValueText(
-        ctx,
-        'class-properties/emit-class-properties.ts:611',
-        bodyRepresentation,
-        target,
-        `${cppTypeOf(bodyRepresentation)}{}`
-      ) !== null
+      (recipe === undefined ? ctx.conversions.nodeFor(bodyRepresentation, target) : ctx.conversions.nodeById(recipe.conversion))?.capability
+        .kind !== 'never'
     )
   }
   const methods: { readonly key: string; readonly method: ClassLayout['methods'][number] }[] = []

@@ -63,6 +63,7 @@ interface EmitRequest {
   /** `--isolate-symbols`: this unit is one of several a resident build links -- see `TranslationUnitInput.isolateSymbols`. */
   readonly isolateSymbols: boolean
   readonly realmStorage: boolean
+  readonly debugSource: boolean
   /** `--translation-units single|per-file`: how many C++ files the program becomes -- see `CppTranslationUnitLayout`. */
   readonly translationUnits: CppTranslationUnitLayout
   readonly unhonored: readonly string[]
@@ -92,6 +93,7 @@ const parseEmitArguments = (argv: readonly string[]): EmitRequest | string => {
   let closedScriptScope = false
   let isolateSymbols = false
   let realmStorage = false
+  let debugSource = false
   let translationUnits: CppTranslationUnitLayout = 'single'
   // Carried, never interpreted: an option here belongs to whichever library
   // its prefix names, and this command's job is to deliver it rather than to
@@ -103,7 +105,9 @@ const parseEmitArguments = (argv: readonly string[]): EmitRequest | string => {
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (argument === undefined) continue
-    if (argument === '--out-dir') {
+    if (argument === '--debug-source') {
+      debugSource = true
+    } else if (argument === '--out-dir') {
       outDir = argv[index + 1] ?? null
       index += 1
     } else if (argument === '--entry-symbol') {
@@ -174,6 +178,7 @@ const parseEmitArguments = (argv: readonly string[]): EmitRequest | string => {
     projectFileName,
     isolateSymbols,
     realmStorage,
+    debugSource,
     translationUnits,
     unhonored
   }
@@ -245,6 +250,7 @@ export const runEmit = async (argv: readonly string[], moduleGraph = false): Pro
     pluginOptions: parsed.pluginOptions,
     isolateSymbols: parsed.isolateSymbols,
     realmStorage: parsed.realmStorage,
+    debugSource: parsed.debugSource,
     translationUnits: parsed.translationUnits,
     unitBaseName: unitStemOf(parsed.input),
     ...(parsed.entrySymbol === null ? {} : { entrySymbol: parsed.entrySymbol })
@@ -280,6 +286,7 @@ const runModuleGraph = (parsed: EmitRequest, plugins: readonly CompilerPlugin[])
     ...(parsed.closedScriptScope ? { closedScriptScope: true } : {}),
     isolateSymbols: parsed.isolateSymbols,
     realmStorage: parsed.realmStorage,
+    debugSource: parsed.debugSource,
     translationUnits: parsed.translationUnits,
     unitBaseName: unitStemOf(graph.entry),
     ...(parsed.entrySymbol === null ? {} : { entrySymbol: parsed.entrySymbol })
@@ -428,6 +435,7 @@ const report = (result: CompileResult, outDirName: string): number => {
   )
   const written = result.units.map((unit) => ({ unit, path: join(outDir, unit.fileName) }))
   for (const { unit, path } of written) writeIfChanged(path, `${unit.source}\n`)
+  if (result.debugInfo !== undefined) writeIfChanged(join(outDir, 'gea-debug-source.json'), JSON.stringify(result.debugInfo))
   writeGeneratedSupport(outDir, result.generatedSupportIncludes)
   // Whatever the installed hosts require beside the unit -- Apple's
   // `gea/apple/native_bridge.{h,mm}` is the case. After the units, and only on

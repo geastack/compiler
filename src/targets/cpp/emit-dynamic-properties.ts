@@ -32,7 +32,8 @@ import { runtimeClassLayoutsOf } from '../../projection/classes.js'
 import { classPrototypeReadOf } from '../../projection/class-prototype.js'
 import { intrinsicMemberValueOf } from './host/emit-host-object.js'
 import { toStringText } from './emit-tostring.js'
-import { alignedValueText, dynamicCarrierBoxText, dynamicTagFor, recipeText, unboxedLoadText, widenedStoreText } from './emit-narrowing.js'
+import { alignedValueText, dynamicCarrierBoxText, dynamicTagFor, recipeText, unboxedLoadText } from './emit-narrowing.js'
+import { certifiedConversionText } from './emit-certified-conversion.js'
 import { dictionaryTableOf } from './emit-properties.js'
 import { keyedTableKeyText, memberAccessOperator, recordIndexSidecarTableOf, recordIndexAttributeKeyText } from './emit-carrier-members.js'
 import { declaredRecordFieldOf, recordFieldsOfShape, recordIndexesOfShape, tailAwareFieldReadText } from './records.js'
@@ -246,7 +247,7 @@ export const boxedValueText = (ctx: EmitContext, value: IrOperand, contextDescri
   const text = operandText(ctx, value)
   if (value.representation.kind === 'dynamic') return text
   const boxed: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
-  const widened = widenedStoreText(boxed, value.representation, text)
+  const widened = certifiedConversionText(ctx, value.representation, boxed, text)
   if (widened !== null) return widened
   throw createCppEmitBlockedError(
     `conversion:${representationKey(value.representation)}->${representationKey(boxed)}`,

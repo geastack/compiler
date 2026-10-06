@@ -29,6 +29,7 @@ for (const name of [
   'cycle-self-loop-reclaim',
   'cycle-dead-candidate-forgotten',
   'cycle-dip-cache',
+  'cycle-graph-chunk-refusal',
   'cycle-trace-leaf-record',
   'cycle-trace-leaf-class',
   'borrowed-executor-environment',

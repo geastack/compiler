@@ -47,7 +47,8 @@ import {
 import { storedEnvironmentText } from './emit-context.js'
 import { boxedText, dynamicCarrierBoxText, dynamicTagFor, dynamicValueLoadText } from './emit-narrowing.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
-import { recordLayoutPolicyOf } from '../../projection/fields.js'
+import { recordLayoutPolicyOf, recordLayoutOfShapeId } from '../../projection/fields.js'
+import { classIndexProtocolsOf } from '../../projection/index-protocols.js'
 
 /**
  * The value carrier of a struct's dynamic-property sidecar, plus its key
@@ -654,8 +655,9 @@ const traceLeafStructsOf = (
   layouts: ReadonlyMap<string, RecordLayout>,
   excluded: ReadonlySet<string>,
   celled: ReadonlyMap<string, ReadonlySet<string>>,
-  classAncestors: ReadonlyMap<string, readonly string[]>
-): ReadonlySet<string> => {
+  classAncestors: ReadonlyMap<string, readonly string[]>,
+  holdsOlder: (structName: string, key: string) => boolean = () => false
+): { readonly leaves: ReadonlySet<string>; readonly olderOnly: ReadonlySet<string> } => {
   const verdicts = new Map<string, boolean>()
   const walking = new Set<string>()
   const structIsLeaf = (structName: string): boolean => {
@@ -738,7 +740,58 @@ const traceLeafStructsOf = (
   }
   const leaves = new Set<string>()
   for (const structName of layouts.keys()) if (structIsLeaf(structName)) leaves.add(structName)
-  return leaves
+
+  // A recursive class is no leaf by the walk above -- its field names itself
+  // -- but it can still never sit on a cycle. `class TreeNode { constructor(
+  // readonly left: TreeNode | null, ...) }`: a field written only by
+  // construction, only with the constructor's own argument, can only point at
+  // an object that existed before this one, so every edge through such
+  // fields runs from younger to older and none can close a loop. That holds
+  // as long as each such field holds the object ITSELF -- a class reference
+  // of a type with the same property, or null -- and not a container, which
+  // stays mutable whoever holds it. The set is a greatest fixed point: assume
+  // every eligible class, drop any with a field that is neither a leaf nor
+  // such a reference, until nothing changes.
+  const olderOnly = new Set<string>()
+  for (const [structName, ancestors] of classAncestors) {
+    if (leaves.has(structName) || ancestors.length > 0 || excluded.has(structName)) continue
+    const layout = layouts.get(structName)
+    if (layout === undefined || layout.accessors.length > 0 || layout.indexes.length > 0 || (celled.get(structName)?.size ?? 0) > 0)
+      continue
+    olderOnly.add(structName)
+  }
+  const olderReference = (value: Representation): boolean => {
+    switch (value.kind) {
+      case 'null':
+      case 'undefined':
+        return true
+      case 'optional':
+        return olderReference(value.payload)
+      case 'tagged-union':
+        return value.arms.every((arm) => olderReference(arm.value))
+      case 'class-ref': {
+        if (value.ownership === 'borrowed' || value.nativeBase !== undefined) return false
+        const target = cppClassName(value.declaration)
+        return leaves.has(target) || olderOnly.has(target)
+      }
+      default:
+        return false
+    }
+  }
+  for (let changed = true; changed;) {
+    changed = false
+    for (const structName of olderOnly) {
+      const layout = layouts.get(structName)
+      const holds =
+        layout !== undefined &&
+        layout.fields.every((field) => carrierIsLeaf(field.value) || (holdsOlder(structName, field.key) && olderReference(field.value)))
+      if (holds) continue
+      olderOnly.delete(structName)
+      changed = true
+    }
+  }
+  for (const structName of olderOnly) leaves.add(structName)
+  return { leaves, olderOnly }
 }
 
 /**
@@ -1584,7 +1637,8 @@ const renderFieldDispatcher = (
   /** The program's record layouts, which name the checked conversion a boxed write into an object-carrying field takes (`objectFieldWriteLoadText`). */
   layouts: RecordLayoutPolicy | undefined = undefined,
   /** Filled with every field operation a sealed demand names whose arm can only refuse -- see `record` below. */
-  unaddressableDemands: string[] | undefined = undefined
+  unaddressableDemands: string[] | undefined = undefined,
+  indexProtocol = true
 ): readonly string[] => {
   // A write through the property protocol that creates a declared field of a
   // record creates its key now, after every key already present, the same
@@ -2277,27 +2331,47 @@ const renderFieldDispatcher = (
   // here) follows every field.
   const ownKeys = interleavedOwnKeys(layout.fields, accessors)
   const stringKeys = ownKeys.filter((key) => !cppRecordFieldKeyIsSymbol(key))
+  // Small layouts retain straight-line traversal; larger layouts share one
+  // native metadata table across the two enumeration protocols. Values never
+  // enter the table: only name, presence and descriptor state do.
+  const compactStringKeys = stringKeys.length >= 8
+  const stringFieldMetadata = compactStringKeys
+    ? [
+        `  inline static constexpr gea::detail::NativeStringFieldMetadata<${structName}> gea_stringFieldMetadata[] = {`,
+        ...stringKeys.map(
+          (key) =>
+            `    {${cppStringLiteral(key)}, &${structName}::${cppRecordFieldPresenceName(key)}, &${structName}::${cppRecordFieldAttributesName(key)}},`
+        ),
+        '  };'
+      ]
+    : []
   const enumerableStringKeysBody: readonly string[] =
     (base && base.native) || stringKeys.some(isArrayIndexKey)
       ? ['    return false;']
       : [
           ...(base ? [`    if (!this->${base.structName}::gea_ownEnumerableStringKeys(gea_out)) return false;`] : []),
-          ...stringKeys.map(
-            (key) =>
-              `    if (${cppRecordFieldPresenceName(key)} && ${cppRecordFieldAttributesName(key)}.enumerable) gea_out.push_back(${cppStringLiteral(key)});`
-          ),
+          ...(compactStringKeys
+            ? ['    gea::detail::appendNativeEnumerableStringFieldKeys(*this, gea_stringFieldMetadata, gea_out);']
+            : stringKeys.map(
+                (key) =>
+                  `    if (${cppRecordFieldPresenceName(key)} && ${cppRecordFieldAttributesName(key)}.enumerable) gea_out.push_back(${cppStringLiteral(key)});`
+              )),
           ...sidecarEnumerableStringKeys,
           '    return true;'
         ]
-  const keys = ownKeys.flatMap((key) => {
-    if (!cppRecordFieldKeyIsSymbol(key))
-      return [`    if (${cppRecordFieldPresenceName(key)}) gea_declared.push_back(gea::PropertyKey::string(${cppStringLiteral(key)}));`]
-    const wellKnown = wellKnownSymbolEnumNameOf(wellKnownSymbols, key)
-    if (wellKnown === null) return []
-    return [
-      `    if (${cppRecordFieldPresenceName(key)}) gea_declared.push_back(gea::PropertyKey::symbol(gea::wellKnownSymbol(gea::detail::WellKnownSymbol::${wellKnown})));`
-    ]
-  })
+  const keys = [
+    ...(compactStringKeys ? ['    gea::detail::appendNativeStringFieldKeys(*this, gea_stringFieldMetadata, gea_declared);'] : []),
+    ...ownKeys.flatMap((key) => {
+      if (compactStringKeys && !cppRecordFieldKeyIsSymbol(key)) return []
+      if (!cppRecordFieldKeyIsSymbol(key))
+        return [`    if (${cppRecordFieldPresenceName(key)}) gea_declared.push_back(gea::PropertyKey::string(${cppStringLiteral(key)}));`]
+      const wellKnown = wellKnownSymbolEnumNameOf(wellKnownSymbols, key)
+      if (wellKnown === null) return []
+      return [
+        `    if (${cppRecordFieldPresenceName(key)}) gea_declared.push_back(gea::PropertyKey::symbol(gea::wellKnownSymbol(gea::detail::WellKnownSymbol::${wellKnown})));`
+      ]
+    })
+  ]
   const matches = ownKeys.map((key) => `    if (gea_name == ${cppStringLiteral(key)}) return true;`)
   const matchesByKey = new Map(layout.fields.map((field) => [field.key, matches[ownKeys.indexOf(field.key)] as string]))
   const presentFields = ownKeys.map(
@@ -2475,6 +2549,8 @@ const renderFieldDispatcher = (
   // recipes the dynamic protocol would emit, unreachable until reflection
   // demand turns the protocol on. Stating only the predicate tripped the
   // fail-closed static_assert in native-symbol-property-identity.
+  const indexMember = indexProtocol ? classMember : () => []
+  const dynamicIndexMember = indexProtocol ? dynamicMember : () => []
   const nativeIndexMember = sidecarNativeWrites.size > 0 ? classMember : dynamicMember
   const nativeWriteMethods = [...sidecarNativeWrites].flatMap(([valueType, writes]) => [
     ...classMember(
@@ -2484,6 +2560,7 @@ const renderFieldDispatcher = (
   ])
 
   return [
+    ...stringFieldMetadata,
     ...ownFieldTable,
     // This struct's declared fields, as a boxed `gea::Value` reads them. `false` means the struct does not declare the key, which sends it to the box's expando table.
     ...classMember('bool gea_ownFieldPresent(const gea::PropertyKey& gea_key, bool& gea_out) const', [
@@ -2500,12 +2577,12 @@ const renderFieldDispatcher = (
       ...(base && !base.native ? [`    if (this->${base.structName}::gea_ownFieldEnumerable(gea_key, gea_out)) return true;`] : []),
       '    return false;'
     ]),
-    ...classMember('bool gea_ownIndexPresent(const gea::PropertyKey& gea_key, bool& gea_out) const', [
+    ...indexMember('bool gea_ownIndexPresent(const gea::PropertyKey& gea_key, bool& gea_out) const', [
       ...(base && !base.native ? [`    if (this->${base.structName}::gea_ownIndexPresent(gea_key, gea_out)) return true;`] : []),
       ...sidecarPresent,
       '    return false;'
     ]),
-    ...classMember('bool gea_ownIndexEnumerable(const gea::PropertyKey& gea_key, bool& gea_out) const', [
+    ...indexMember('bool gea_ownIndexEnumerable(const gea::PropertyKey& gea_key, bool& gea_out) const', [
       ...(base && !base.native ? [`    if (this->${base.structName}::gea_ownIndexEnumerable(gea_key, gea_out)) return true;`] : []),
       ...sidecarEnumerable,
       '    return false;'
@@ -2644,57 +2721,56 @@ const renderFieldDispatcher = (
       '    return true;'
     ]),
     // A present entry of this record's index-signature sidecar. It is deliberately separate from fixed C++ fields: the former is configurable, the latter is not.
-    ...dynamicMember('bool gea_readOwnIndex(const gea::PropertyKey& gea_key, gea::Value& gea_out) const', [
+    ...dynamicIndexMember('bool gea_readOwnIndex(const gea::PropertyKey& gea_key, gea::Value& gea_out) const', [
       ...baseIndexRead,
       ...sidecarRead,
       '    return false;'
     ]),
     // Whether a key belongs to this typed index domain, even when no entry is present.
-    ...dynamicMember('bool gea_matchesOwnIndex(const gea::PropertyKey& gea_key) const', [
+    ...dynamicIndexMember('bool gea_matchesOwnIndex(const gea::PropertyKey& gea_key) const', [
       ...baseIndexMatches,
       ...sidecarMatches,
       '    return false;'
     ]),
     // Store one index-signature entry without making it masquerade as a fixed field.
-    ...dynamicMember('bool gea_writeOwnIndex(const gea::PropertyKey& gea_key, const gea::Value& gea_value, bool gea_extensible = true)', [
-      ...baseIndexWrite,
-      ...sidecarWrite,
-      '    return false;'
-    ]),
+    ...dynamicIndexMember(
+      'bool gea_writeOwnIndex(const gea::PropertyKey& gea_key, const gea::Value& gea_value, bool gea_extensible = true)',
+      [...baseIndexWrite, ...sidecarWrite, '    return false;']
+    ),
     // Complete descriptor reflection for one present typed index entry.
-    ...dynamicMember('bool gea_ownIndexDescriptor(const gea::PropertyKey& gea_key, gea::PropertyDescriptor& gea_out) const', [
+    ...dynamicIndexMember('bool gea_ownIndexDescriptor(const gea::PropertyKey& gea_key, gea::PropertyDescriptor& gea_out) const', [
       ...baseIndexDescriptor,
       ...sidecarDescriptor,
       '    return false;'
     ]),
     // Data-descriptor-only ValidateAndApplyPropertyDescriptor for the typed index store.
-    ...dynamicMember(
+    ...dynamicIndexMember(
       'bool gea_defineOwnIndex(const gea::PropertyKey& gea_key, const gea::PropertyDescriptor& gea_descriptor, bool gea_extensible)',
       [...baseIndexDefine, ...sidecarDefine, '    return false;']
     ),
     // Typed indexed assignment keeps its value native while honoring the same descriptor bits.
     ...nativeWriteMethods,
     // Delete an index-signature entry. Fixed fields intentionally never reach this hook.
-    ...dynamicMember('bool gea_deleteOwnIndex(const gea::PropertyKey& gea_key)', [
+    ...dynamicIndexMember('bool gea_deleteOwnIndex(const gea::PropertyKey& gea_key)', [
       ...baseIndexDelete,
       ...sidecarDelete,
       '    return false;'
     ]),
     // Freeze the sidecar entries without changing their native value carrier.
-    ...classMember('void gea_freezeOwnIndex()', [...baseIndexFreeze, ...sidecarFreeze]),
+    ...indexMember('void gea_freezeOwnIndex()', [...baseIndexFreeze, ...sidecarFreeze]),
     // Seal keeps typed index values writable while making their present entries non-configurable.
-    ...classMember('void gea_sealOwnIndex()', [
+    ...indexMember('void gea_sealOwnIndex()', [
       ...(base && !base.native ? [`    this->${base.structName}::gea_sealOwnIndex();`] : []),
       ...sidecarSeal
     ]),
     // TestIntegrityLevel(frozen) over present typed index entries.
-    ...classMember('bool gea_ownIndexFrozen() const', [
+    ...indexMember('bool gea_ownIndexFrozen() const', [
       ...(base && !base.native ? [`    if (!this->${base.structName}::gea_ownIndexFrozen()) return false;`] : []),
       ...sidecarFrozen,
       '    return true;'
     ]),
     // TestIntegrityLevel(sealed) over present typed index entries.
-    ...classMember('bool gea_ownIndexSealed() const', [
+    ...indexMember('bool gea_ownIndexSealed() const', [
       ...(base && !base.native ? [`    if (!this->${base.structName}::gea_ownIndexSealed()) return false;`] : []),
       ...sidecarSealed,
       '    return true;'
@@ -3317,6 +3393,13 @@ const renderStructDefinition = (
   /** `traceLeafStructsOf` proved this struct a leaf of the cycle collector: written down for `gea::detail::RefTargetIsLeaf`. */
   traceLeaf = false,
   /**
+   * A leaf only because every edge it holds points at an older object
+   * (`traceLeafStructsOf`'s `olderOnly`): it reports no traced edge at all, so
+   * the collector never buffers it -- and so the runtime never asks
+   * `TraceEdges` of its own self-referencing fields, which would be circular.
+   */
+  untraced = false,
+  /**
    * Whether no `freeze`/`seal`/`defineProperty` in the program can reach an
    * instance of this struct (`integrity-restrictions.ts`'s
    * `restrictsRecordShape`, asked of every shape the struct answers for). Its
@@ -3331,7 +3414,8 @@ const renderStructDefinition = (
    * exactly once (`immortalMethodStateRoots`): its per-instance method-state
    * handle is then not an edge the collector follows -- see there.
    */
-  methodStateUntraced = false
+  methodStateUntraced = false,
+  indexProtocol = true
 ): string | CppRecordRefusal => {
   const isNarrowed = (field: FieldLike): boolean => narrowedSlots.has(integerStorageSlot(structName, field.key))
   // A class keeps every field inline. Its fields are stored by the
@@ -3535,20 +3619,26 @@ const renderStructDefinition = (
   // reason: whether a minted entity has a caller is a program-wide fact this
   // renderer cannot see from one struct, so it never tries to predict it.
   if (traceLeaf) lines.push('  static constexpr bool gea_traceLeaf = true;')
-  lines.push(`  [[maybe_unused]] friend auto geaTraceRefs(const ${structName}& value, gea::detail::RefVisitor& visitor)`)
-  lines.push(`    -> std::bool_constant<${traceableFields.length ? traceableFields.join(' || ') : 'false'}> {`)
-  if (base) lines.push(`    gea::detail::traceRefs(static_cast<const ${base.structName}&>(value), visitor);`)
-  if (ownsMethodState && !staticMethodState && !methodStateUntraced)
-    lines.push('    gea::detail::traceRefs(value.gea_method_state, visitor);')
-  for (const field of layout.fields) {
-    if (tailFields.has(field.key)) continue
-    lines.push(`    gea::detail::traceRefs(value.${cppRecordFieldName(field.key)}, visitor);`)
+  if (untraced) {
+    lines.push(
+      `  [[maybe_unused]] friend auto geaTraceRefs(const ${structName}&, gea::detail::RefVisitor&) -> std::false_type { return {}; }`
+    )
+  } else {
+    lines.push(`  [[maybe_unused]] friend auto geaTraceRefs(const ${structName}& value, gea::detail::RefVisitor& visitor)`)
+    lines.push(`    -> std::bool_constant<${traceableFields.length ? traceableFields.join(' || ') : 'false'}> {`)
+    if (base) lines.push(`    gea::detail::traceRefs(static_cast<const ${base.structName}&>(value), visitor);`)
+    if (ownsMethodState && !staticMethodState && !methodStateUntraced)
+      lines.push('    gea::detail::traceRefs(value.gea_method_state, visitor);')
+    for (const field of layout.fields) {
+      if (tailFields.has(field.key)) continue
+      lines.push(`    gea::detail::traceRefs(value.${cppRecordFieldName(field.key)}, visitor);`)
+    }
+    if (tailFields.size > 0) lines.push(`    gea::detail::traceRefs(value.${cppRecordTailMemberName}, visitor);`)
+    for (const index of layout.indexes)
+      lines.push(`    gea::detail::traceRefs(value.${cppRecordIndexSidecarNameFor(index, layout.indexes)}, visitor);`)
+    lines.push('    return {};')
+    lines.push('  }')
   }
-  if (tailFields.size > 0) lines.push(`    gea::detail::traceRefs(value.${cppRecordTailMemberName}, visitor);`)
-  for (const index of layout.indexes)
-    lines.push(`    gea::detail::traceRefs(value.${cppRecordIndexSidecarNameFor(index, layout.indexes)}, visitor);`)
-  lines.push('    return {};')
-  lines.push('  }')
   const unaddressableDemands: string[] = []
   for (const line of renderFieldDispatcher(
     structName,
@@ -3566,7 +3656,8 @@ const renderStructDefinition = (
     lazyArrowFields,
     virtualDeclarations,
     layouts,
-    unaddressableDemands
+    unaddressableDemands,
+    indexProtocol
   ))
     lines.push(line)
   if (unaddressableDemands.length > 0)
@@ -3703,7 +3794,9 @@ export const cppRecordDeclarations = (
   /** `program-facts.ts`'s `singleEvaluationClasses` -- which classes may hold their method state statically. */
   singleEvaluationClasses: ReadonlySet<DeclarationId> = new Set(),
   /** `integrity-restrictions.ts`'s `restrictsRecordShape` -- see `renderStructDefinition`'s `attributesConstant`. */
-  recordShapeRestricted: (shapeId: string, hasSymbolField: boolean) => boolean = () => true
+  recordShapeRestricted: (shapeId: string, hasSymbolField: boolean) => boolean = () => true,
+  /** `construction-only-fields.ts`'s `holdsOlder`: the class fields that can only ever point at an older object. */
+  holdsOlder: (declaration: DeclarationId, key: string) => boolean = () => false
 ): {
   readonly declarations: readonly string[]
   readonly fieldDefinitionsByStruct: ReadonlyMap<string, readonly string[]>
@@ -3875,13 +3968,18 @@ export const cppRecordDeclarations = (
       return declaration === undefined || (lazyArrowFieldPlansForClass(classes, declaration)?.size ?? 0) > 0
     }
   )
-  const traceLeafStructs = traceLeafStructsOf(
+  const { leaves: traceLeafStructs, olderOnly: untracedStructs } = traceLeafStructsOf(
     fieldsByStruct,
     new Set([...classStructNames, ...baseStructNames, ...links.keys()].filter((structName) => !leafClasses.has(structName))),
     celledByStruct,
-    leafClasses
+    leafClasses,
+    (structName, key) => {
+      const declaration = declarationByStruct.get(structName)
+      return declaration !== undefined && holdsOlder(declaration, key)
+    }
   )
   const orderOf = new Map(ordered.map((structName, index) => [structName, index]))
+  const classIndexProtocols = classIndexProtocolsOf(physicalClasses, (shapeId) => recordLayoutOfShapeId(deriver, shapeId))
   const rendered = ordered.map((structName) => {
     const layout = fieldsByStruct.get(structName)
     // Unreachable given the check above, and stated rather than assumed: an
@@ -3932,6 +4030,7 @@ export const cppRecordDeclarations = (
       virtualDeclarations,
       layouts,
       traceLeafStructs.has(structName),
+      untracedStructs.has(structName),
       !classStructNames.has(structName) &&
         !links.has(structName) &&
         !baseStructNames.has(structName) &&
@@ -3943,7 +4042,8 @@ export const cppRecordDeclarations = (
             )
         ) &&
         (shapesByStruct.get(structName)?.size ?? 0) > 0,
-      immortalStateRoots.has(structName)
+      immortalStateRoots.has(structName),
+      declaration === undefined ? layout.indexes.length > 0 : classIndexProtocols.get(declaration) !== false
     )
   })
   const refused = rendered.filter((entry): entry is CppRecordRefusal => typeof entry !== 'string')

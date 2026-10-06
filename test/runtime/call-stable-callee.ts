@@ -1,6 +1,7 @@
 //! expect: param=3
 //! expect: field=100
 //! expect: typed=7
+//! expect: param2=7
 //! emitted-has: callStable(
 //! emitted-has: .call(
 // A callee that is the caller's own parameter sits in a slot nothing the callee runs can write, so
@@ -26,5 +27,7 @@ const table = new Float64Array(4)
 table[2] = 7
 const readTable = (): number => table[2] ?? 0
 console.log(`param=${viaParam((n) => n + 1, 1)}`)
+// A second function through the same parameter, so no census names the callee.
+console.log(`param2=${viaParam((n) => n * 2, 3)}`)
 console.log(`field=${holder.run(1)}`)
 console.log(`typed=${readTable()}`)

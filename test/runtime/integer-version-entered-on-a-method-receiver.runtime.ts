@@ -1,11 +1,9 @@
-// A method (a body with a receiver) gets the same integer version as a free
-// function: bson's ObjectId.serializeInto(buffer, index) writes twelve bytes at
-// `index + k`, and `index` arrives from a value the census cannot see into.
-// The receiver is forwarded unchanged into the `_integral` body.
+// An unproved Number method parameter keeps one general body, including its
+// receiver. Integer and fractional offsets must work without a cloned method.
 //! expect: 1,2,3,4,5,6,7,8,9,10,11,12 12
 //! expect: 0.5 11.5 12.5 true
-//! emitted-has: gea::carriesExactInteger(
-//! emitted-has: _integral(
+//! emitted-lacks: gea::carriesExactInteger(
+//! emitted-lacks: _integral(
 
 class Writer {
   bytes = new Uint8Array(16)

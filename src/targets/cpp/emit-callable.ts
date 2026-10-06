@@ -1,4 +1,5 @@
 import { proxyArmWithoutHome } from '../../representation/proxy-carriers.js'
+import { nativeCallReceiverText } from './emit-native-method.js'
 import { hostConstructFrameOf, receivableArguments } from '../../ir/call-entry.js'
 import { stableBorrowEntryAccepts } from './borrowed-call-entry.js'
 import { callableMemberAlternateSlot, callableMemberSlot } from '../../ir/callable-member-candidates.js'
@@ -39,6 +40,7 @@ import {
   cppFrameStructName,
   cppReceiverName,
   cppSharedIdentityFieldName,
+  cppStaticPrefixCallableText,
   cppThunkEntryText,
   cppThunkName,
   createCppEmitBlockedError,
@@ -93,6 +95,7 @@ import {
   cppRefcountedReceiver,
   cppStringLiteral,
   cppTypeOf,
+  cppResultTypeOf,
   cppUndefinedValue
 } from './types.js'
 
@@ -179,7 +182,13 @@ export const emitBindCallable = (ctx: EmitContext, lines: string[], operation: B
     throw createCppEmitBlockedError('call-abi:bind-callable', 'a dynamic Function source has no authenticated native ABI adapter')
   }
   const prefix = [...receiver, ...bound]
-  const native = `gea::bindCallable<${cppAbiType(operation.result.representation.abi)}, ${operation.bound.length}>(${[source, ...prefix].join(', ')})`
+  const logicalReceiver = operation.thisArgument
+    ? nativeCallReceiverText(operation.thisArgument.representation, operandText(ctx, operation.thisArgument))
+    : 'gea::NativeCallReceiver::undefined()'
+  const native =
+    operation.sourceAbi.receiver === null
+      ? `gea::bindCallableWithReceiver<${cppAbiType(operation.result.representation.abi)}, ${operation.bound.length}>(${[source, logicalReceiver, ...bound].join(', ')})`
+      : `gea::bindCallable<${cppAbiType(operation.result.representation.abi)}, ${operation.bound.length}>(${[source, ...prefix].join(', ')})`
   if (!guarded) {
     lines.push(`${defineValue(ctx, operation.result)} = ${native};`)
     return
@@ -359,6 +368,53 @@ const isSiblingClassCopy = (argument: Representation, slot: Representation): boo
   )
 }
 
+/** The carriers `cppTypeOf` spells `gea::CallableObject<abi>`: a value with an `invoke` a guard can compare. */
+const isCallableObject = (representation: Representation): boolean =>
+  representation.kind === 'function' ||
+  representation.kind === 'function-family' ||
+  representation.kind === 'function-value-family' ||
+  (representation.kind === 'function-value-dispatch' && !representation.recursive)
+
+/**
+ * A capture-free function entering a callable slot of another signature, as an
+ * adapter that names its thunk (`gea::staticPrefixCallable`), so the C++
+ * compiler inlines the function into it rather than calling through the
+ * narrower callable's pointer from a shared adapter. `null` for anything else.
+ * Only where neither convention's identity is observed: the runtime adapter
+ * shares its source's function object, and this one is a callable of its own.
+ * The caller has established that C++ converts the pair implicitly, which is
+ * what the helper falls back to for a pair that is not a trailing drop.
+ */
+export const staticPrefixCallableText = (ctx: EmitContext, source: IrOperand, slot: Representation): string | null => {
+  const direct = ctx.directCallableValues.get(source.value)
+  if (direct === undefined || ctx.callableIdentityDemand.observes(source.representation) || ctx.callableIdentityDemand.observes(slot))
+    return null
+  const slotType = cppTypeOf(slot)
+  const sourceType = cppTypeOf(source.representation)
+  if (slotType === sourceType || !isCallableObject(slot) || !isCallableObject(source.representation)) return null
+  return cppStaticPrefixCallableText(ctx, direct, slotType, sourceType)
+}
+
+/**
+ * The entry a callable parameter, capture or field was seen to hold
+ * (`callableFlowCandidatesOf`), for `callKnown`'s identity guard: the
+ * function's own thunk, or the static-prefix adapter's when the function was
+ * allocated with fewer parameters than the slot declares
+ * (`staticPrefixCallable`). A guard that never matches -- any other adapter, a
+ * thunk of another signature -- compiles to the plain call.
+ */
+const flowKnownText = (ctx: EmitContext, callee: IrOperand): string | null => {
+  const candidate = ctx.callableFlowCandidates.get(callee.value)
+  if (candidate === undefined) return null
+  if (!isCallableObject(callee.representation)) return null
+  const calleeType = cppTypeOf(callee.representation)
+  const allocatedType = cppTypeOf(candidate.allocated)
+  const thunk = `&${cppThunkName(candidate.functionId)}`
+  if (calleeType === allocatedType) return thunk
+  if (!isCallableObject(candidate.allocated)) return null
+  return `gea::detail::StaticPrefixAdapter<${calleeType}, ${allocatedType}, ${thunk}>::known`
+}
+
 /**
  * One argument in the carrier the frame it is being written into declares.
  *
@@ -387,7 +443,11 @@ const isSiblingClassCopy = (argument: Representation, slot: Representation): boo
 export const alignedText = (ctx: EmitContext, slot: Representation | undefined, argument: IrOperand, what = 'call'): string => {
   const text = operandText(ctx, argument)
   if (!slot) return text
-  if (derivesFrom(ctx, argument.representation, slot)) return text
+  if (derivesFrom(ctx, argument.representation, slot)) {
+    const prefixed = staticPrefixCallableText(ctx, argument, slot)
+    if (prefixed !== null) return prefixed
+    return text
+  }
   // Native sum widening owns its source. Preserve a proven dying input's
   // value category through that conversion, rather than copying before the
   // outer argument move gets a chance to see the different carrier.
@@ -1062,6 +1122,9 @@ const emitCharCodeBufferPush = (ctx: EmitContext, lines: string[], operation: Ca
 }
 
 export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOperation): void => {
+  // The array only one local loop reads: the loop walks the string instead
+  // (`ir/lazy-splits.ts`, `emitGetIterator`).
+  if (operation.result !== null && ctx.lazySplits.has(operation.result.id)) return
   const minMax = ctx.numericCalls.get(operation)
   if (minMax === 'min' || minMax === 'max') {
     // An integer result (`ir/integers.ts`) is the smaller or larger integer;
@@ -1649,11 +1712,17 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     calleeOperand.value === operation.callee.value &&
     (ctx.stableBorrowActuals.has(operation.callee.value) ||
       (ctx.ownedValues.has(operation.callee.value) && !ctx.deferredTexts.has(operation.callee.value)))
+  const flowKnown =
+    candidate === undefined && direct === undefined && dispatched === undefined && calleeOperand.value === operation.callee.value
+      ? flowKnownText(ctx, operation.callee)
+      : null
   const callMember =
     candidate === undefined
-      ? stableCallee
-        ? 'callStable'
-        : 'call'
+      ? flowKnown !== null
+        ? `${stableCallee ? 'callStableKnown' : 'callKnown'}<${flowKnown}>`
+        : stableCallee
+          ? 'callStable'
+          : 'call'
       : firstEntry !== undefined && alternate !== undefined && alternateEntry !== undefined
         ? `callKnownBorrowedEither<&${cppThunkName(candidate)}, &${firstEntry}, &${cppThunkName(alternate)}, &${alternateEntry}>`
         : alternateOnly
@@ -1677,12 +1746,15 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
         `gea::host::throwRuntimeError("TypeError", ${cppStringLiteral(`an own "${operation.builtinShadowGuard}" written onto a natively carried callable is not rendered by this backend`)});`
     )
   }
+  const logicalThis = operation.thisArgument
   const invocation =
     dispatched !== undefined
       ? `${virtualPadded[0]}->${dispatched.member}(${virtualPadded.slice(1).join(', ')})`
       : direct !== undefined
         ? `${stableEntry?.name ?? direct}(${padded.join(', ')})`
-        : `${operandText(ctx, calleeOperand)}.${callMember}(${padded.join(', ')})`
+        : abi.receiver === null && logicalThis !== undefined
+          ? `${operandText(ctx, calleeOperand)}.callWithReceiver(${[nativeCallReceiverText(logicalThis.representation, operandText(ctx, logicalThis)), ...padded].join(', ')})`
+          : `${operandText(ctx, calleeOperand)}.${callMember}(${padded.join(', ')})`
   // A result the integer census narrowed from the candidate body's returns is
   // checked where it lands, on every path the call can take: the guard above
   // may miss and run whatever callable the member holds.
@@ -1702,7 +1774,18 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     defineValueAlias(ctx, operation.result, '(void)0')
     return
   }
-  const name = defineValue(ctx, operation.result)
+  const taskResult = ctx.taskResults.has(operation.result.id)
+  const name = defineValue(
+    ctx,
+    operation.result,
+    taskResult && operation.result.representation.kind === 'promise'
+      ? `gea::Task<${cppResultTypeOf(operation.result.representation.value)}>`
+      : undefined
+  )
+  if (taskResult) {
+    lines.push(`${name} = ${invocation};`)
+    return
+  }
   // A convention whose result is `void` returns nothing at all in C++, so its
   // call is a statement and never the right-hand side of an assignment. The
   // language still gives the *expression* a value -- `undefined` -- and an
@@ -1761,29 +1844,6 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   // a jump bypass its initialization.
   if (checkedLimit !== undefined) ctx.checkedIntegerCalls.add(operation.result.id)
   if (produced === callResultName) {
-    // `await f()` where the promise is read nowhere else: call `f`'s `_task`
-    // twin (`taskTwinEligible`), which answers the frame itself instead of a
-    // pooled promise state. The very next operation awaits it
-    // (`fusedAwaitCallsOf`), so nothing else can name it.
-    const resultType = cppTypeOf(operation.result.representation)
-    if (
-      direct !== undefined &&
-      dispatched === undefined &&
-      stableEntry === undefined &&
-      checkedLimit === undefined &&
-      ctx.asyncCoroutineBody &&
-      ctx.taskBodies.has(direct) &&
-      ctx.fusableAwaitCalls.has(operation.result.id) &&
-      operation.result.representation.kind === 'promise'
-    ) {
-      const index = ctx.declarations.findIndex((entry) => entry.name === name)
-      if (index >= 0) {
-        ctx.declarations[index] = { name, type: `gea::Task<${resultType.slice('gea::Promise<'.length)}` }
-        ctx.taskValues.add(operation.result.id)
-        lines.push(`${name} = ${direct}_task(${padded.join(', ')});`)
-        return
-      }
-    }
     lines.push(`${name} = ${checked(invocation)};`)
     return
   }

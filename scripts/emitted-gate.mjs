@@ -6,6 +6,7 @@
 //   npm run gate -- --only=corpus   the corpus half, for iterating (never a landing gate)
 //   npm run gate -- --jobs=N        emit each set as N parallel shard processes (env GEA_GATE_JOBS;
 //                                   default min(8, cores/2, free memory/2GB); --jobs=1 is the serial path)
+//   npm run gate -- --rows          print normalized hashes for comparison with an earlier run
 //
 // WHY THIS EXISTS AS A SCRIPT AND NOT A RECIPE
 //
@@ -260,6 +261,7 @@ const rowsFor = async (set) => {
 let failed = false
 for (const set of sets) {
   const rows = await rowsFor(set)
+  if (process.argv.includes('--rows')) process.stdout.write(`[gate rows] ${JSON.stringify({ set: set.name, rows })}\n`)
   if (write) {
     writeFileSync(set.baseline, `${rows.join('\n')}\n`)
     process.stdout.write(`${set.name}: wrote ${rows.length} rows to ${set.baseline}\n`)

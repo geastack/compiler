@@ -147,7 +147,7 @@ export const hostMemberValueText = (representation: Representation, host: HostMe
       for (const [index, name] of names.entries()) {
         const parameter = abi.parameters[index]
         if (parameter === undefined) return null
-        const text = toStringTextOver(name, parameter.value, layouts)
+        const text = toStringTextOver(name, parameter.value, layouts, false, false, false, true)
         if (text === null) return null
         parts.push(text)
       }

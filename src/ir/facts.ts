@@ -5,7 +5,13 @@ import { deferrableValuesOf } from './deferral.js'
 import type { ForwardedBinding, ForwardingPolicy } from './deferral.js'
 import { churningRemaindersOf, loopInvariantHoistsOf, loopInvariantValuesOf, type HoistPlan } from './hoist.js'
 import { narrowableFloatsOf, type Float32Narrowing } from './floats.js'
-import { narrowableIntegersOf, remainderFormGroups, type IntegerNarrowing, type IntegerStorageFacts } from './integers.js'
+import {
+  narrowableIntegersOf,
+  remainderFormGroups,
+  type DeclaredIntegerWidth,
+  type IntegerNarrowing,
+  type IntegerStorageFacts
+} from './integers.js'
 import { localIteratorValuesOf } from './local-iterators.js'
 import {
   allOperationsOf,
@@ -88,6 +94,13 @@ export interface IrBodyCensus {
   readonly remainderForms: ReadonlyMap<IrValueId, 'restated' | 'dynamic'>
   /** See `IntegerNarrowing.roundingArithmetic`. */
   readonly roundingArithmetic: ReadonlySet<IrValueId>
+  /** See `IntegerNarrowing.integerDivisions`. */
+  readonly integerDivisions: ReadonlySet<IrValueId>
+  /** See `IntegerNarrowing.declaredWidths`. */
+  readonly declaredWidths: ReadonlyMap<IrValueId, DeclaredIntegerWidth>
+  readonly exactNumericConversions: ReadonlySet<IrValueId>
+  /** See `IntegerNarrowing.declaredBindings`. */
+  readonly declaredIntegerCells: ReadonlyMap<DeclarationId, DeclaredIntegerWidth>
   readonly numericCalls: ReadonlyMap<CallOperation, NumericIntrinsic>
   readonly numericCallOnly: ReadonlySet<IrValueId>
   readonly loopInvariantValues: ReadonlySet<IrValueId>
@@ -142,6 +155,8 @@ export interface IrBodyCensusPolicy {
    * would name it a second time.
    */
   readonly formalStorage: (settled: IrBodyCensusBeforeHoists) => ReadonlySet<DeclarationId>
+  /** Whether this body reads the declaration through its own by-value copy, which no call it makes can change. */
+  readonly copiedCapture: (declaration: DeclarationId) => boolean
 }
 
 /** What is known when `formalStorage` runs: everything except the hoists and the two censuses that read them. */
@@ -162,6 +177,10 @@ export type IrBodyCensusBeforeHoists = Pick<
   | 'float32'
   | 'remainderForms'
   | 'roundingArithmetic'
+  | 'integerDivisions'
+  | 'declaredWidths'
+  | 'exactNumericConversions'
+  | 'declaredIntegerCells'
   | 'numericCalls'
   | 'numericCallOnly'
 >
@@ -219,13 +238,17 @@ export const irBodyCensusOf = (body: IrBody, policy: IrBodyCensusPolicy): IrBody
     float32: narrowableFloatsOf(body, policy.float32Cell, narrowed.values, float32ExactIntegersOf(narrowed)),
     remainderForms,
     roundingArithmetic: narrowed.roundingArithmetic,
+    integerDivisions: narrowed.integerDivisions,
+    declaredWidths: narrowed.declaredWidths,
+    exactNumericConversions: narrowed.exactNumericConversions,
+    declaredIntegerCells: narrowed.declaredBindings,
     numericCalls: numericIntrinsics.calls,
     numericCallOnly: numericIntrinsics.callOnly
   }
   const stableFormals = policy.formalStorage(settled)
 
   const loopInvariantValues = loopInvariantValuesOf(body)
-  const hoists = loopInvariantHoistsOf(body, policy.integerStorage.cellConstants)
+  const hoists = loopInvariantHoistsOf(body, policy.integerStorage.cellConstants, policy.copiedCapture)
   const hoistedStringLayouts = sharedStringLayoutsOf(body, hoists, dead)
   const straightLineStringLayouts = straightLineStringLayoutsOf(
     body,
@@ -259,7 +282,8 @@ export const irBodyCensusOf = (body: IrBody, policy: IrBodyCensusPolicy): IrBody
   // longer both defer would spell a value that now has storage of its own at
   // a place that storage is not written yet.
   for (const [declaration, forwarded] of forwardedBindings) {
-    if (!deferrable.has(forwarded.value.value) || !deferrable.has(forwarded.read)) forwardedBindings.delete(declaration)
+    if ((!deferrable.has(forwarded.value.value) && forwarded.stepped !== true) || !deferrable.has(forwarded.read))
+      forwardedBindings.delete(declaration)
   }
   return { ...settled, loopInvariantValues, hoists, hoistedResults, sharedStringLayouts, reusedStringLengths }
 }

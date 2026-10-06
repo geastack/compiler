@@ -11,6 +11,7 @@ import type {
 } from '../../ir/model.js'
 import { representationKey, type CallableAbi, type RecordField, type Representation } from '../../representation/model.js'
 import { nativeEnumerationPlanOf, type NativeEnumerationPlan } from '../../ir/native-enumeration.js'
+import type { LazySplit } from '../../ir/lazy-splits.js'
 import { createCppEmitBlockedError, defineValue, operandText, paddedArguments, suspendsInPlace, type EmitContext } from './emit-context.js'
 import { receiverArgumentText } from './emit-callable.js'
 import { memberAccessOperator } from './emit-carrier-members.js'
@@ -477,6 +478,22 @@ const emitSequenceSumIterator = (
   )
 }
 
+/**
+ * The cursor over a `split` whose array nothing else reads (`ir/lazy-splits.ts`).
+ * It reads the string as the loop runs, so it borrows only a private binding
+ * written once -- nothing in the loop can change it -- and takes its own copy
+ * of anything else.
+ */
+const emitSplitCursor = (ctx: EmitContext, lines: string[], operation: GetIteratorOperation, split: LazySplit): void => {
+  const declaration = split.receiverDeclaration
+  const borrowed =
+    declaration !== null && ctx.stableBorrowActuals.has(split.receiver.value) && (ctx.bindingWriteCounts.get(declaration) ?? 0) === 1
+  const type = 'gea::runtime::string::SplitCursor'
+  const name = defineValue(ctx, operation.result, type)
+  const receiver = operandText(ctx, split.receiver)
+  lines.push(`${name}.${borrowed ? 'borrow' : 'own'}(${receiver}, ${operandText(ctx, split.separator)});`)
+}
+
 export const emitGetIterator = (ctx: EmitContext, lines: string[], operation: GetIteratorOperation): void => {
   // The general protocol: `receiver[Symbol.iterator]()`, called through the
   // method value `get-method` already resolved -- see `emitDynamicGetIterator`
@@ -485,6 +502,11 @@ export const emitGetIterator = (ctx: EmitContext, lines: string[], operation: Ge
   // point assumes.
   if (operation.method) {
     emitDynamicGetIterator(ctx, lines, operation)
+    return
+  }
+  const split = ctx.lazySplits.get(operation.receiver.value)
+  if (split !== undefined) {
+    emitSplitCursor(ctx, lines, operation, split)
     return
   }
   const representation = operation.result.representation
@@ -1175,7 +1197,11 @@ export const emitIteratorNext = (ctx: EmitContext, lines: string[], operation: I
   const element = iteratorRepresentation.element
   const result = operation.result.representation
   if (representationKey(result) === representationKey(element)) {
-    lines.push(`${name} = ${operandText(ctx, operation.iterator)}.arrayNext();`)
+    // A string element is stored in place: `name = arrayNext()` copied it out
+    // and then moved it in, and libstdc++ moves an inline string with a
+    // `memcpy` call on its length.
+    if (element.kind === 'string') lines.push(`gea::detail::nextInto(${operandText(ctx, operation.iterator)}, ${name});`)
+    else lines.push(`${name} = ${operandText(ctx, operation.iterator)}.arrayNext();`)
     return
   }
   // An absence-capable read: the position may lie past the cursor's end, and

@@ -1,4 +1,4 @@
-import type { DeclarationId, FunctionId, IrValueId, RegionId } from '../identity/ids.js'
+import type { DeclarationId, FunctionId, IrValueId, PhysicalBodyId, RegionId } from '../identity/ids.js'
 import type { BindingPlacement } from '../projection/bindings.js'
 import { representationKey } from '../representation/model.js'
 import { borrowEffectsOf, type PlainFieldRead } from './borrow-effects.js'
@@ -6,6 +6,7 @@ import { callableIdentityDemandOf, type CallableIdentityDemand } from './callabl
 import { fixedFieldDeletionsOf, integrityRestrictionsOf, type IntegrityRestrictions } from './integrity-restrictions.js'
 import { singleEvaluationClassesOf } from './class-evaluation.js'
 import { callableMemberCandidatesOf } from './callable-member-candidates.js'
+import { callableFlowCandidatesOf, type CallableFlowCandidate } from './callable-flow-candidates.js'
 import { cyclicBlocksOf } from './dominance.js'
 import { allOperationsOf, type IrBody, type IrNonTerminatorOperation } from './model.js'
 import { operandsOfIrOperation } from './queries.js'
@@ -35,6 +36,8 @@ const prototypeMutators: ReadonlySet<string> = new Set(['__defineSetter__', '__d
 export interface ProgramFacts {
   /** Module-level function cells a call may spell by name, keyed by the receiver-shape/key slot `callableMemberSlot` names. */
   readonly callableMemberCandidates: ReadonlyMap<string, FunctionId>
+  /** Guard candidates for calls through callable parameters, captures and fields, per body (`callableFlowCandidatesOf`). */
+  readonly callableFlowCandidates: ReadonlyMap<PhysicalBodyId, ReadonlyMap<IrValueId, CallableFlowCandidate>>
   /** Constructor cells this unit constructs through repeatedly, and the class each names. */
   readonly repeatedConstructors: ReadonlyMap<DeclarationId, DeclarationId>
   /** Argument reads whose value has no use after the call it feeds, so the printer may spell them `std::move(...)`. */
@@ -376,6 +379,7 @@ export const programFactsOf = (
   policy: ProgramFactsPolicy
 ): ProgramFacts => {
   const callableMemberCandidates = callableMemberCandidatesOf(bodies, directCallables, placements)
+  const callableFlowCandidates = callableFlowCandidatesOf(bodies, directCallables)
   const repeatedConstructors = buildRepeatedConstructorIndex(bodies, directCallables)
   // A store held back behind later reads is invisible only while nothing can observe the
   // field in between. `this` never escapes such a constructor, so the one way an accessor can
@@ -483,6 +487,7 @@ export const programFactsOf = (
 
   return {
     callableMemberCandidates,
+    callableFlowCandidates,
     repeatedConstructors,
     dyingArguments,
     formalsBorrowedIn,

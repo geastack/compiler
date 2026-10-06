@@ -97,8 +97,8 @@ const boundNamesIn = (file: ts.SourceFile): ReadonlySet<string> => {
  * WebGLRenderingContext` -- and not only what the program's own source
  * already wrote.
  *
- * Whole-comment, word-boundary text replacement, the same shape
- * `jsdocNamepathTransform` uses for the identical reason: this compiler does
+ * Word-boundary text replacement inside each JSDoc type expression (`{...}`),
+ * close to the shape `jsdocNamepathTransform` uses for the identical reason: this compiler does
  * not parse a JSDoc type expression into a tree before rewriting it, so
  * scoping the replacement to "inside a `/**\/` range" is what keeps it out of
  * ordinary code and prose comments, and a plain `\b` match is exact for a
@@ -157,14 +157,24 @@ export const createAmbientTypeRealizationTransform = (
     const edits: { pos: number; end: number; text: string }[] = []
     for (const range of ranges) {
       const comment = input.text.slice(range.pos, range.end)
-      let respelled = comment
-      for (const entry of usable) {
-        const { pattern } = entry
-        pattern.lastIndex = 0
-        if (!pattern.test(respelled)) continue
-        pattern.lastIndex = 0
-        respelled = respelled.replace(pattern, use(entry))
-      }
+      // Only a JSDoc TYPE EXPRESSION names a type -- the `{...}` of `@param
+      // {WebGLRenderingContext} gl`. Prose does not: three's
+      // PointsMaterial documents `sizeAttenuation` with a link to
+      // `.../Web/API/WebGLRenderingContext/getParameter`, and respelling that
+      // URL imported the native WebGL package into a program that never
+      // touches WebGL (gea-threejs on the Mosaico), which then failed to
+      // resolve it.
+      const respelled = comment.replace(/\{[^{}]*\}/g, (expression) => {
+        let typed = expression
+        for (const entry of usable) {
+          const { pattern } = entry
+          pattern.lastIndex = 0
+          if (!pattern.test(typed)) continue
+          pattern.lastIndex = 0
+          typed = typed.replace(pattern, use(entry))
+        }
+        return typed
+      })
       if (respelled === comment) continue
       edits.push({ pos: range.pos, end: range.end, text: respelled })
     }

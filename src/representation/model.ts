@@ -362,7 +362,7 @@ export type Representation =
    * is byte-identical.
    */
   | { readonly kind: 'void'; readonly bottom?: true }
-  | { readonly kind: 'scalar'; readonly domain: ScalarDomain }
+  | { readonly kind: 'scalar'; readonly domain: ScalarDomain; readonly integerWidth?: 'int32' | 'int64' }
   | { readonly kind: 'string' }
   /**
    * A symbol: a value the language mints, compares only by identity, and uses
@@ -1136,7 +1136,7 @@ const buildRepresentationKey = (representation: Representation): string => {
     case 'undefined':
       return representation.kind
     case 'scalar':
-      return `scalar(${representation.domain})`
+      return `scalar(${representation.domain}${representation.integerWidth === undefined ? '' : `,${representation.integerWidth}`})`
     case 'class-ref':
       return `class-ref(${representation.declaration},${representation.ownership})`
     case 'native-handle':

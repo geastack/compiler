@@ -1,6 +1,8 @@
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
 import type { CallableAbi, Representation } from '../../representation/model.js'
 import { representationKey } from '../../representation/model.js'
+import type { ConversionNode } from '../../conversion/algebra.js'
+import { structuralConversionKey, type CertifiedRecordViewPlan } from '../../conversion/structural-plan.js'
 import {
   optionalMethodPayloadOf,
   restForwards,
@@ -17,9 +19,8 @@ import { classMethodOverrideOf, classPrototypeMethodMutableOf } from '../../proj
 import { cppThunkEntryText, cppThunkName } from './emit-context.js'
 import {
   alignedValueText,
-  boxedAssertionText,
   chainConverts,
-  convertedValueText,
+  namedConversionText,
   dynamicCarrierBoxText,
   recastedUnionFromHomes,
   recastUnionArmText,
@@ -154,8 +155,9 @@ export const familyMemberViewText = (
   members: FamilyMemberKeys,
   text: string
 ): string | null => {
-  const plan = familyMemberViewPlanFor(ctx.layouts, source, target, members)
-  return plan === null ? null : recordViewText(ctx, plan, text)
+  const node = ctx.conversions.familyMemberViewFor(source, target, members)
+  const materializer = node?.capability.kind === 'static' ? node.capability.materializer : null
+  return materializer?.recordView === undefined ? null : certifiedRecordViewText(ctx, materializer.recordView, text)
 }
 
 const viewEnvironmentName = 'gea_view_env'
@@ -443,22 +445,46 @@ export const structuralRecordViewText = (
   target: Representation,
   text: string
 ): string | null => {
-  const plan = viewPlanFor(ctx.layouts, source, target)
-  // A view reads its source once per field; `evaluated-once.ts` keeps that
-  // one evaluation of the source when the source is an expression.
-  return evaluatedOnceText(text, (operand) =>
-    plan === null ? boxedAssertionText(source, target, operand) : recordViewText(ctx, plan, operand)
-  )
+  const node = ctx.conversions.nodeFor(source, target)
+  const materializer = node.capability.kind === 'static' || node.capability.kind === 'atom' ? node.capability.materializer : null
+  return materializer?.recordView === undefined ? null : certifiedRecordViewText(ctx, materializer.recordView, text)
 }
 
-const recordViewText = (ctx: ConversionSite, plan: RecordViewPlan, text: string): string | null => {
+interface RecordViewSite extends ConversionSite {
+  readonly structuralConversions: ReadonlyMap<string, ConversionNode>
+}
+
+const structuralLeafText = (ctx: RecordViewSite, source: Representation, target: Representation, text: string): string | null => {
+  const node = ctx.structuralConversions.get(structuralConversionKey(source, target))
+  if (node === undefined) throw new Error(`record view has no certified leaf for ${structuralConversionKey(source, target)}`)
+  return namedConversionText(ctx, 'emit-record-view.ts:certified-leaf', node, text)
+}
+
+export const certifiedRecordViewText = (ctx: ConversionSite, plan: CertifiedRecordViewPlan, text: string): string | null => {
+  const viewCtx: RecordViewSite = {
+    ...ctx,
+    structuralConversions: plan.leaves,
+    conversions: {
+      ...ctx.conversions,
+      nodeFor: (source, target) => {
+        const node = plan.leaves.get(structuralConversionKey(source, target))
+        if (node === undefined) throw new Error(`record view has no certified leaf for ${structuralConversionKey(source, target)}`)
+        return node
+      }
+    }
+  }
+  return evaluatedOnceText(text, (operand) => recordViewText(viewCtx, plan.view, operand))
+}
+
+const recordViewText = (ctx: RecordViewSite, plan: RecordViewPlan, text: string): string | null => {
   switch (plan.kind) {
     case 'owned':
       return ownedRecordMaterializationText(plan.plan, text)
     case 'arm': {
       const arm = plan.target.arms[plan.index]
       if (arm === undefined) return null
-      const converted = plan.payload === null ? convertedValueText(plan.source, arm.value, text) : recordViewText(ctx, plan.payload, text)
+      const converted =
+        plan.payload === null ? structuralLeafText(ctx, plan.source, arm.value, text) : recordViewText(ctx, plan.payload, text)
       return converted === null ? null : `${cppTypeOf(plan.target)}::ofArm<${plan.index}>(${converted})`
     }
     case 'optional': {
@@ -493,7 +519,7 @@ const recordViewText = (ctx: ConversionSite, plan: RecordViewPlan, text: string)
           home.via === 'exact'
             ? armText
             : home.via === 'convert'
-              ? convertedValueText(from.value, into.value, armText)
+              ? structuralLeafText(ctx, from.value, into.value, armText)
               : recordViewText(ctx, home.via, armText)
         if (rendered === null) return null
         homes.push({ index: home.index, text: rendered })
@@ -518,7 +544,7 @@ const recordViewText = (ctx: ConversionSite, plan: RecordViewPlan, text: string)
             : arm.via === 'absent'
               ? null
               : arm.via === 'convert'
-                ? convertedValueText(from.value, payload, armText)
+                ? structuralLeafText(ctx, from.value, payload, armText)
                 : recordViewText(ctx, arm.via, armText)
         if (arm.via !== 'absent' && rendered === null) return null
         homes.push(rendered === null ? `${targetType}()` : `${targetType}(${rendered})`)
@@ -568,7 +594,7 @@ const sidecarExpandoCell = 'gea_sidecar_expando'
  * the same source carrier at dozens of call arguments; pasted, each copy was
  * the whole field list.
  */
-const recordFieldsViewText = (ctx: ConversionSite, plan: Extract<RecordViewPlan, { kind: 'fields' }>, text: string): string | null => {
+const recordFieldsViewText = (ctx: RecordViewSite, plan: Extract<RecordViewPlan, { kind: 'fields' }>, text: string): string | null => {
   const formal = 'gea_view_source'
   const body = recordFieldsViewTextAt(ctx, plan, formal)
   if (body === null) return null
@@ -580,7 +606,7 @@ const recordFieldsViewText = (ctx: ConversionSite, plan: Extract<RecordViewPlan,
   return named === null ? recordFieldsViewTextAt(ctx, plan, text) : `${named}(${text})`
 }
 
-const recordFieldsViewTextAt = (ctx: ConversionSite, plan: Extract<RecordViewPlan, { kind: 'fields' }>, text: string): string | null => {
+const recordFieldsViewTextAt = (ctx: RecordViewSite, plan: Extract<RecordViewPlan, { kind: 'fields' }>, text: string): string | null => {
   const sidecarCells: string[] = []
   const built = recordFieldsBuiltText(ctx, plan, text, sidecarCells)
   if (built === null || sidecarCells.length === 0) return built
@@ -628,7 +654,7 @@ const recordFieldsViewTextAt = (ctx: ConversionSite, plan: Extract<RecordViewPla
 }
 
 const recordFieldsBuiltText = (
-  ctx: ConversionSite,
+  ctx: RecordViewSite,
   plan: Extract<RecordViewPlan, { kind: 'fields' }>,
   text: string,
   sidecarCells: string[],
@@ -744,7 +770,7 @@ const recordFieldsBuiltText = (
     const held = read.held
     const heldText = heldTextOf(field.key)
     const converted =
-      read.kind === 'view' ? recordViewText(ctx, read.plan, heldText) : convertedValueText(held.value, field.value, heldText)
+      read.kind === 'view' ? recordViewText(ctx, read.plan, heldText) : structuralLeafText(ctx, held.value, field.value, heldText)
     if (converted === null) return null
     // A nested view is order-sensitive exactly when its own reads are: a
     // getter body, a virtual accessor or a sidecar `[[Get]]` inside it.

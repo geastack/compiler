@@ -261,3 +261,20 @@ export const bindingReference = (
   ctx.bindingNames.set(declaration, name)
   return { name, owned: true, boxed: ctx.captures.isBoxed(declaration) }
 }
+
+/**
+ * The name this body reads another frame's local through when its environment
+ * holds a by-value copy of it, or `null` for anything else.
+ *
+ * Unboxed means nothing rebinds the declaration once a closure has captured
+ * it, so the copy holds the same value for as long as this body runs, whatever
+ * code it calls. A frame member or a boxed slot is shared storage and can
+ * change under a call.
+ */
+export const copiedCaptureName = (ctx: EmitContext, declaration: DeclarationId): string | null => {
+  const placement = ctx.placements.get(declaration)
+  if (placement?.storage.kind !== 'local' || placement.storage.owner === ctx.owner) return null
+  if (ctx.captures.isBoxed(declaration)) return null
+  const captured = bindingReference(ctx, declaration, 'a captured cell')
+  return captured.capture === true && captured.frame !== true && !captured.boxed ? captured.name : null
+}

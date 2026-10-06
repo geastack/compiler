@@ -1,9 +1,11 @@
 import type { Representation } from '../representation/model.js'
 import { representationKey } from '../representation/model.js'
+import { numberStorageTarget, type NumberScalar } from './number-storage.js'
 
 type Sum = Extract<Representation, { kind: 'optional' | 'tagged-union' }>
 export type NativeSumPlan =
   | { readonly kind: 'identity' }
+  | { readonly kind: 'number-storage'; readonly target: NumberScalar }
   | { readonly kind: 'class-upcast'; readonly target: Extract<Representation, { kind: 'class-ref' }> }
   | { readonly kind: 'null-reference'; readonly target: Extract<Representation, { kind: 'class-ref' }> }
   | { readonly kind: 'empty'; readonly target: Sum }
@@ -22,10 +24,10 @@ const isSum = (value: Representation): value is Sum => value.kind === 'optional'
 
 /**
  * A native sum widens only when EVERY source alternative has a home. Leaves
- * travel by exact carrier identity or the nominal class upcast their own
- * ancestry proves; this planner never boxes, narrows, coerces a primitive,
- * rebrands an absence, or reconstructs an object. It is shared by capability
- * admission and rendering so neither can claim a partial mapping.
+ * travel by carrier identity, native Number storage conversion, or the nominal
+ * class upcast their own ancestry proves. It never boxes, narrows a sum,
+ * changes a primitive's JS type, rebrands an absence, or reconstructs an
+ * object. Capability admission and rendering share this complete mapping.
  */
 // Both carriers are immutable, and presence is the only extra input. Keep
 // negative answers too: the graph asks many pairs sharing impossible leaves.
@@ -73,6 +75,8 @@ const computePlan = (source: Representation, target: Representation, sourcePrese
     }
     return arms.length > 0 ? { kind: 'dispatch', target, arms } : null
   }
+  const numberTarget = numberStorageTarget(source, target)
+  if (numberTarget !== null) return { kind: 'number-storage', target: numberTarget }
   // A sum's leaf can still need the ordinary nominal widening a bare class
   // value already supports. Three's `light.shadow && light.shadow.map` reads
   // two WebGLRenderTarget descendants on the evaluated arm and merges them
@@ -102,7 +106,9 @@ const computePlan = (source: Representation, target: Representation, sourcePrese
     const index = armIndexOf(target)
     const exact = index.firstByKey.get(representationKey(source)) ?? -1
     if (exact >= 0) return { kind: 'wrap', target, payload: { kind: 'identity' }, index: exact }
-    const homes = index.recursiveArms.flatMap((armIndex) => {
+    const candidates =
+      source.kind === 'scalar' && source.domain === 'number' ? [...index.recursiveArms, ...index.numberArms] : index.recursiveArms
+    const homes = candidates.flatMap((armIndex) => {
       const arm = target.arms[armIndex]
       if (arm === undefined) return []
       const payload = plan(source, arm.value, sourcePresent)
@@ -133,14 +139,16 @@ const computePlan = (source: Representation, target: Representation, sourcePrese
  * `recursiveArms` is exact, not a heuristic: with the source known not to be a
  * sum (the `optional`/`tagged-union` source branches run first) and its key
  * matching no arm, `plan(source, arm.value)` can only succeed when `arm.value`
- * is an `optional` (wrap), a `tagged-union` (a nested home), or a class-ref the
- * source class names as an ancestor. So the arms it skips are exactly the arms
- * that would have answered `null`.
+ * is an `optional` (wrap), a `tagged-union` (a nested home), a class-ref the
+ * source class names as an ancestor, or another native storage width of a
+ * Number. Number arms are asked only for numeric sources; an integer must not
+ * be coerced into a string alternative just because it has no exact home.
  */
 interface ArmIndex {
   readonly firstByKey: ReadonlyMap<string, number>
   /** Arms a non-exact leaf can recursively reach: nested sums or nominal class bases. */
   readonly recursiveArms: readonly number[]
+  readonly numberArms: readonly number[]
 }
 
 const armIndexes = new WeakMap<Representation, ArmIndex>()
@@ -150,12 +158,14 @@ const armIndexOf = (union: Extract<Representation, { kind: 'tagged-union' }>): A
   if (remembered !== undefined) return remembered
   const firstByKey = new Map<string, number>()
   const recursiveArms: number[] = []
+  const numberArms: number[] = []
   union.arms.forEach((arm, index) => {
     const key = representationKey(arm.value)
     if (!firstByKey.has(key)) firstByKey.set(key, index)
     if (isSum(arm.value) || arm.value.kind === 'class-ref') recursiveArms.push(index)
+    if (arm.value.kind === 'scalar' && arm.value.domain === 'number') numberArms.push(index)
   })
-  const built = { firstByKey, recursiveArms }
+  const built = { firstByKey, recursiveArms, numberArms }
   armIndexes.set(union, built)
   return built
 }
@@ -164,3 +174,20 @@ export const nativeSumPlan = (source: Representation, target: Representation): N
   isSum(target) ? plan(source, target) : null
 
 export const nativeSumWidenable = (source: Representation, target: Representation): boolean => nativeSumPlan(source, target) !== null
+
+/** Numeric casts stay field-free, but must not claim to merely wrap the original payload. */
+export const nativeSumPreservesPayload = (step: NativeSumPlan): boolean => {
+  switch (step.kind) {
+    case 'number-storage':
+      return false
+    case 'wrap':
+      return nativeSumPreservesPayload(step.payload)
+    case 'optional':
+    case 'nullable-reference':
+      return nativeSumPreservesPayload(step.present) && nativeSumPreservesPayload(step.absent)
+    case 'dispatch':
+      return step.arms.every(nativeSumPreservesPayload)
+    default:
+      return true
+  }
+}

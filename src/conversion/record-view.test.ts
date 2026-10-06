@@ -3,7 +3,8 @@ import test from 'node:test'
 import { representationKey, type Representation } from '../representation/model.js'
 import type { RecordLayoutPolicy } from '../representation/policies.js'
 import type { ConversionSite } from '../targets/cpp/emit-narrowing.js'
-import { structuralRecordViewText } from '../targets/cpp/emit-record-view.js'
+import { certifiedRecordViewText } from '../targets/cpp/emit-record-view.js'
+import { certifiedRecordViewPlan, structuralConversionKey } from './structural-plan.js'
 import { cppTypeOf } from '../targets/cpp/types.js'
 import { structuralRecordViewPlan, type PairConvertible } from './record-view.js'
 
@@ -72,9 +73,17 @@ test('the asserting unwrap renders a checked throw on absence, never a bare dere
   const ctx = {
     layouts: structurallyCompatibleLayouts,
     classes: new Map(),
-    captures: { of: () => ({ kind: 'none' }) }
+    captures: { of: () => ({ kind: 'none' }) },
+    printerDrift: [],
+    owner: 'test'
   } as unknown as ConversionSite
-  const text = structuralRecordViewText(ctx, source, target, 'gea_v0')
+  const plan = certifiedRecordViewPlan(structurallyCompatibleLayouts, source, target, (from, into) =>
+    identityConvertible(from, into)
+      ? { id: structuralConversionKey(from, into), source: from, target: into, capability: { kind: 'identity' } }
+      : null
+  )
+  assert.ok(plan)
+  const text = certifiedRecordViewText(ctx, plan, 'gea_v0')
   assert.ok(text !== null)
   const rendered = text ?? ''
   // The presence test and the throwing fallback both name the SAME target

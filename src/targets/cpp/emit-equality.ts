@@ -1,9 +1,11 @@
 import type { Representation } from '../../representation/model.js'
 import { representationKey } from '../../representation/model.js'
 import { absenceComparisonText } from './emit-presence.js'
-import { emptyArraySentinelText, widenedStoreText } from './emit-narrowing.js'
+import { emptyArraySentinelText } from './emit-narrowing.js'
 import { typeofTextFor } from './emit-typeof.js'
 import { nativeRecordBaseTransportKind } from './class-ref-transport.js'
+
+export type EqualityConversionRenderer = (source: Representation, target: Representation, text: string) => string | null
 
 /**
  * `===` and `!==` where one side is a sum -- ECMA-262 7.2.16 IsStrictlyEqual.
@@ -106,7 +108,12 @@ const foldedCarrierMismatchText = (left: Representation, right: Representation):
   return leftType === rightType ? null : 'false'
 }
 
-const armEqualityText = (arm: Representation, leftText: string, rightText: string): string | null => {
+const armEqualityText = (
+  arm: Representation,
+  leftText: string,
+  rightText: string,
+  convert?: EqualityConversionRenderer
+): string | null => {
   if (isAbsentArm(arm)) return 'true'
   const callable = callableIdentityEqualityText('===', { text: leftText, representation: arm }, { text: rightText, representation: arm })
   if (callable !== null) return callable
@@ -114,7 +121,7 @@ const armEqualityText = (arm: Representation, leftText: string, rightText: strin
   // the shape a three-way absence gives a union payload) is the same
   // question one level down.
   if (arm.kind === 'tagged-union' || arm.kind === 'optional') {
-    return strictEqualityText('===', { text: leftText, representation: arm }, { text: rightText, representation: arm })
+    return strictEqualityText('===', { text: leftText, representation: arm }, { text: rightText, representation: arm }, convert)
   }
   return armComparesByValue(arm) ? `${leftText} == ${rightText}` : null
 }
@@ -320,15 +327,16 @@ const sameNumericType = (left: Representation, right: Representation): boolean =
  */
 const armPairEqualityText = (
   left: { readonly text: string; readonly representation: Representation },
-  right: { readonly text: string; readonly representation: Representation }
+  right: { readonly text: string; readonly representation: Representation },
+  convert?: EqualityConversionRenderer
 ): string | null => {
   if (representationKey(left.representation) === representationKey(right.representation))
-    return armEqualityText(left.representation, left.text, right.text)
+    return armEqualityText(left.representation, left.text, right.text, convert)
   // `null` is only ever equal to `null`, and `undefined` to `undefined`; the
   // same kind always shares one key, so any other pairing is Type(x) != Type(y).
   if (isAbsentArm(left.representation) || isAbsentArm(right.representation)) return 'false'
   if (sameNumericType(left.representation, right.representation)) return `${left.text} == ${right.text}`
-  const nested = strictEqualityText('===', left, right)
+  const nested = strictEqualityText('===', left, right, convert)
   if (nested !== null) return nested
   return foldedCarrierMismatchText(left.representation, right.representation)
 }
@@ -343,14 +351,16 @@ const armPairEqualityText = (
 const mixedSumEqualityText = (
   operator: string,
   left: { readonly text: string; readonly union: Extract<Representation, { kind: 'tagged-union' }> },
-  right: { readonly text: string; readonly union: Extract<Representation, { kind: 'tagged-union' }> }
+  right: { readonly text: string; readonly union: Extract<Representation, { kind: 'tagged-union' }> },
+  convert?: EqualityConversionRenderer
 ): string | null => {
   const arms: string[] = []
   for (const [leftIndex, leftArm] of left.union.arms.entries()) {
     for (const [rightIndex, rightArm] of right.union.arms.entries()) {
       const compared = armPairEqualityText(
         { text: `${left.text}.get<${leftIndex}>()`, representation: leftArm.value },
-        { text: `${right.text}.get<${rightIndex}>()`, representation: rightArm.value }
+        { text: `${right.text}.get<${rightIndex}>()`, representation: rightArm.value },
+        convert
       )
       if (compared === null) return null
       if (compared === 'false') continue
@@ -363,7 +373,8 @@ const mixedSumEqualityText = (
 export const strictEqualityText = (
   operator: string,
   left: { readonly text: string; readonly representation: Representation },
-  right: { readonly text: string; readonly representation: Representation }
+  right: { readonly text: string; readonly representation: Representation },
+  convert?: EqualityConversionRenderer
 ): string | null => {
   if (operator !== '===' && operator !== '!==') return null
 
@@ -377,7 +388,7 @@ export const strictEqualityText = (
   // records the JavaScript type the carrier already had (`dynamicTagFor`), so
   // `signal.aborted === true` compares a Boolean tag against a Boolean tag and
   // answers false for a `signal.aborted` holding the string "true", exactly as
-  // the language says. A carrier `widenedStoreText` cannot box has no
+  // the language says. A carrier whose certified conversion cannot box has no
   // JavaScript type this backend can name, and refusing is then the only
   // answer that is not a guess.
   const dynamicSide = left.representation.kind === 'dynamic' || right.representation.kind === 'dynamic'
@@ -403,7 +414,7 @@ export const strictEqualityText = (
     const helper = callableHelper(concrete.representation)
     if (helper !== null) return negate(operator, `${helper}(${boxed.text}, ${concrete.text})`)
     const box = (side: typeof left, against: Representation): string | null =>
-      side.representation.kind === 'dynamic' ? side.text : widenedStoreText(against, side.representation, side.text)
+      side.representation.kind === 'dynamic' ? side.text : (convert?.(side.representation, against, side.text) ?? null)
     const leftText = box(left, right.representation)
     const rightText = box(right, left.representation)
     if (leftText === null || rightText === null) return null
@@ -446,9 +457,9 @@ export const strictEqualityText = (
     return text === null ? null : { text, representation: target }
   }
   const leftAsSentinel = sentinelSide(left, right.representation)
-  if (leftAsSentinel !== null) return strictEqualityText(operator, leftAsSentinel, right)
+  if (leftAsSentinel !== null) return strictEqualityText(operator, leftAsSentinel, right, convert)
   const rightAsSentinel = sentinelSide(right, left.representation)
-  if (rightAsSentinel !== null) return strictEqualityText(operator, left, rightAsSentinel)
+  if (rightAsSentinel !== null) return strictEqualityText(operator, left, rightAsSentinel, convert)
 
   const leftOptional = left.representation.kind === 'optional' ? left.representation : null
   const rightOptional = right.representation.kind === 'optional' ? right.representation : null
@@ -456,9 +467,9 @@ export const strictEqualityText = (
     const leftPayload = { text: `(*${left.text})`, representation: leftOptional.payload }
     const rightPayload = { text: `(*${right.text})`, representation: rightOptional.payload }
     const compared =
-      strictEqualityText('===', leftPayload, rightPayload) ??
+      strictEqualityText('===', leftPayload, rightPayload, convert) ??
       (representationKey(leftOptional.payload) === representationKey(rightOptional.payload)
-        ? armEqualityText(leftOptional.payload, leftPayload.text, rightPayload.text)
+        ? armEqualityText(leftOptional.payload, leftPayload.text, rightPayload.text, convert)
         : null)
     if (compared === null) return null
     const absent = leftOptional.absence === rightOptional.absence ? `!(${right.text}).has_value()` : 'false'
@@ -476,9 +487,9 @@ export const strictEqualityText = (
     // presence test outside so no absent payload is read.
     const payload = { text: `(*${optionalText})`, representation: optional.payload }
     const compared =
-      strictEqualityText('===', payload, other) ??
+      strictEqualityText('===', payload, other, convert) ??
       (representationKey(optional.payload) === representationKey(other.representation)
-        ? armEqualityText(optional.payload, payload.text, other.text)
+        ? armEqualityText(optional.payload, payload.text, other.text, convert)
         : optional.payload.kind === 'tagged-union' || other.representation.kind === 'tagged-union'
           ? null
           : foldedCarrierMismatchText(optional.payload, other.representation))
@@ -521,7 +532,7 @@ export const strictEqualityText = (
       value.ownership === 'shared-refcount' &&
       representationKey(value) === representationKey(right.representation)
     ) {
-      const compared = armEqualityText(value, left.text, right.text)
+      const compared = armEqualityText(value, left.text, right.text, convert)
       return compared === null ? null : negate(operator, compared)
     }
     return null
@@ -533,11 +544,11 @@ export const strictEqualityText = (
   // single `index()` test, which would call two different strings equal.
   if (leftUnion && rightUnion) {
     if (representationKey(left.representation) !== representationKey(right.representation)) {
-      return mixedSumEqualityText(operator, { text: left.text, union: leftUnion }, { text: right.text, union: rightUnion })
+      return mixedSumEqualityText(operator, { text: left.text, union: leftUnion }, { text: right.text, union: rightUnion }, convert)
     }
     const arms: string[] = []
     for (const [index, arm] of leftUnion.arms.entries()) {
-      const compared = armEqualityText(arm.value, `${left.text}.get<${index}>()`, `${right.text}.get<${index}>()`)
+      const compared = armEqualityText(arm.value, `${left.text}.get<${index}>()`, `${right.text}.get<${index}>()`, convert)
       if (compared === null) return null
       arms.push(`${left.text}.is<${index}>() && ${right.text}.is<${index}>() ? (${compared}) : `)
       if (arm.value.kind !== 'class-ref' && !callableIdentityCarrier(arm.value)) continue
@@ -553,7 +564,8 @@ export const strictEqualityText = (
         const crossClass = strictEqualityText(
           '===',
           { text: `${left.text}.get<${index}>()`, representation: arm.value },
-          { text: `${right.text}.get<${otherIndex}>()`, representation: otherArm.value }
+          { text: `${right.text}.get<${otherIndex}>()`, representation: otherArm.value },
+          convert
         )
         if (crossClass === null) return null
         arms.push(`${left.text}.is<${index}>() && ${right.text}.is<${otherIndex}>() ? (${crossClass}) : `)
@@ -586,7 +598,7 @@ export const strictEqualityText = (
         !(callableIdentityCarrier(arm.value) && callableIdentityCarrier(other.representation))
       )
         continue
-      const compared = strictEqualityText('===', { text: `${unionText}.get<${nestedIndex}>()`, representation: arm.value }, other)
+      const compared = strictEqualityText('===', { text: `${unionText}.get<${nestedIndex}>()`, representation: arm.value }, other, convert)
       if (compared === null) return null
       if (compared !== 'false') nested.push(`(${unionText}.is<${nestedIndex}>() && (${compared}))`)
     }
@@ -603,11 +615,11 @@ export const strictEqualityText = (
     widths.push(`(${unionText}.is<${otherIndex}>() && (${unionText}.get<${otherIndex}>() == ${other.text}))`)
   }
   if (widths.length > 0) {
-    const own = armEqualityText(arm.value, `${unionText}.get<${index}>()`, other.text)
+    const own = armEqualityText(arm.value, `${unionText}.get<${index}>()`, other.text, convert)
     if (own === null) return null
     return negate(operator, `((${unionText}.is<${index}>() && (${own})) || ${widths.join(' || ')})`)
   }
-  const compared = armEqualityText(arm.value, `${unionText}.get<${index}>()`, other.text)
+  const compared = armEqualityText(arm.value, `${unionText}.get<${index}>()`, other.text, convert)
   if (compared === null) return null
   if (compared === 'true') return negate(operator, `${unionText}.is<${index}>()`)
   return negate(operator, `(${unionText}.is<${index}>() && (${compared}))`)

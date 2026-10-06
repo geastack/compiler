@@ -4,7 +4,7 @@ import { dictionaryKeyDomainOf } from '../../representation/model.js'
 import {
   createCppEmitBlockedError,
   defineValue,
-  isIntegerStorageValue,
+  isIntegerKeyValue,
   operandText,
   wellKnownSymbolMemberOf,
   type EmitContext
@@ -270,7 +270,7 @@ const layoutAnswerFor = (ctx: EmitContext, carrier: Representation, receiverText
   ) {
     const receiver = receiverText()
     const keyText = operandText(ctx, key)
-    const reader = isIntegerStorageValue(ctx, key.value) ? 'hasElementAtIndex' : 'hasElement'
+    const reader = isIntegerKeyValue(ctx, key) ? 'hasElementAtIndex' : 'hasElement'
     return `${receiver}->${reader}(${keyText})`
   }
   if (carrier.kind !== 'dictionary') return null

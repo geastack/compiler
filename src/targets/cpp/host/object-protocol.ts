@@ -7,7 +7,8 @@ import type { GetOperation, IrOperand } from '../../../ir/model.js'
 import { createCppEmitBlockedError, operandText, type EmitContext, type PrototypeMethodRead } from '../emit-context.js'
 import type { IrValueId } from '../../../identity/ids.js'
 import { classMemberOf, lazyArrowFieldPlanOf, lazyMaterializedFieldText } from '../class-layout.js'
-import { alignedValueText, widenedStoreText } from '../emit-narrowing.js'
+import { alignedValueText } from '../emit-narrowing.js'
+import { certifiedConversionText } from '../emit-certified-conversion.js'
 import { memberAccessOperator } from '../emit-carrier-members.js'
 import {
   declaredFieldRepresentationOf,
@@ -522,9 +523,7 @@ export const setOwnText = (
       // `CommandOperationOptions` carrying `comment`), and ECMAScript's
       // `Object.assign` copies every one of them.
       const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
-      const boxed =
-        widenedStoreText(dynamic, value.representation, value.text) ??
-        alignedValueText(ctx, 'host/object-protocol.ts:sidecar-store', value.representation, dynamic, value.text)
+      const boxed = certifiedConversionText(ctx, value.representation, dynamic, value.text)
       if (boxed !== null) {
         return `gea::nativeDynamicSet(${view.receiver}, gea::PropertyKey::string(${cppStringLiteral(key)}), ${boxed});`
       }

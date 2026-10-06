@@ -146,7 +146,12 @@ export const operandsOfIrOperation = (operation: IrOperation): readonly IrOperan
     case 'compute':
       return operation.operands
     case 'call':
-      return [operation.callee, ...(operation.receiver ? [operation.receiver] : []), ...operation.arguments]
+      return [
+        operation.callee,
+        ...(operation.receiver ? [operation.receiver] : []),
+        ...(operation.thisArgument && operation.thisArgument.value !== operation.receiver?.value ? [operation.thisArgument] : []),
+        ...operation.arguments
+      ]
     case 'commonjs-require':
     case 'commonjs-binding':
       return []

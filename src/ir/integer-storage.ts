@@ -6,6 +6,7 @@ import {
   programCellConstantsOf,
   programCellIntegersOf,
   widenIntegerMagnitude,
+  type DeclaredIntegerWidth,
   type IntegerMagnitude,
   type IntegerNarrowing,
   type IntegerStorageFacts
@@ -119,6 +120,13 @@ export interface IntegerStorageQuestion {
    * the `long long` carrier the answer implies.
    */
   readonly integerCellEligible?: (cell: DeclarationId) => boolean
+  /** Bindings annotated `int`/`i32` (`semantics/declared-integers.ts`), handed to every body's facts. */
+  readonly declaredCells?: ReadonlyMap<DeclarationId, DeclaredIntegerWidth>
+  /** Authenticated native callback writes, keyed by host declaration and argument ordinal.
+   * A null parameter bound represents an unproved/nonintegral host write.
+   * Only these argument transfers are accounted; every other callable escape remains opaque.
+   */
+  readonly nativeCallbackParameters?: ReadonlyMap<DeclarationId, ReadonlyMap<number, readonly (IntegerMagnitude | null)[]>>
   /** The struct a carrier IS, or `null` when this census may not name one (a host struct, a non-record). */
   readonly structNameOf: (representation: Representation) => string | null
   /** Every native struct whose storage a value exposes, including class bases. */
@@ -224,10 +232,7 @@ export interface IntegerStorageQuestion {
 }
 
 /** A write into one slot: the body that performs it, and the value it stores. */
-interface StorageWrite {
-  readonly owner: string
-  readonly value: IrValueId
-}
+type StorageWrite = { readonly owner: string; readonly value: IrValueId } | { readonly nativeMagnitude: IntegerMagnitude }
 
 /**
  * The operations that may mention a struct-typed value without becoming a
@@ -474,6 +479,8 @@ interface BodyScan {
    * body this census reads.
    */
   readonly escapedCallables: ReadonlySet<string>
+  readonly nativeWrites: ReadonlyMap<string, readonly IntegerMagnitude[]>
+  readonly nativeCallbackOwners: ReadonlySet<string>
 }
 
 const isNumberScalar = (representation: Representation): boolean => representation.kind === 'scalar' && representation.domain === 'number'
@@ -538,9 +545,6 @@ export const emptyIntegerStorageCensus: IntegerStorageCensus = {
   entryCheckedFactsOf: () => emptyFacts
 }
 
-/** How many times each pass may re-derive before it gives up and refuses every slot. */
-const settlingRounds = 8
-
 const scanBody = (body: IrBody, question: IntegerStorageQuestion, disqualified: Set<string>): BodyScan => {
   const owner = String(body.sourceOwner)
   const constantTexts = new Map<IrValueId, string>()
@@ -564,6 +568,8 @@ const scanBody = (body: IrBody, question: IntegerStorageQuestion, disqualified: 
   const boxedValues = new Set<IrValueId>()
   let boxOpaque = false
   const escapedCallables = new Set<string>()
+  const nativeWrites = new Map<string, IntegerMagnitude[]>()
+  const nativeCallbackOwners = new Set<string>()
 
   // Two walks: a key is a `constant` operation and nothing orders it before the
   // access that names it, so the texts have to be complete before any access is
@@ -643,17 +649,34 @@ const scanBody = (body: IrBody, question: IntegerStorageQuestion, disqualified: 
     }
   }
 
+  const unwrapCallable = (value: IrValueId): IrValueId => {
+    const seen = new Set<IrValueId>()
+    while (!seen.has(value)) {
+      seen.add(value)
+      const source = convertSources.get(value)
+      if (
+        source === undefined ||
+        !callableCarriers.has(definedRepresentations.get(value)?.kind ?? '') ||
+        !callableCarriers.has(definedRepresentations.get(source)?.kind ?? '')
+      )
+        break
+      value = source
+    }
+    return value
+  }
+
   const calleeOwners = (callee: IrOperand): readonly string[] | null => {
+    const value = unwrapCallable(callee.value)
     const named = calleeOwnersOf(callee.representation)
     if (named !== null) return named
     // A method reaches its body through the callable the site allocates, whose
     // carrier is the dispatching one every callable cell has. The operation
     // that built it names the body outright.
-    const method = methodReads.get(callee.value)
+    const method = methodReads.get(value)
     if (method !== undefined) return [method]
-    const allocated = allocatedCallables.get(callee.value)
+    const allocated = allocatedCallables.get(value)
     if (allocated !== undefined) return [allocated]
-    const cell = cellReads.get(callee.value)
+    const cell = cellReads.get(value)
     if (cell === undefined) return null
     const resolved = question.directCallees.get(cell)
     return resolved === undefined ? null : [String(resolved)]
@@ -775,8 +798,59 @@ const scanBody = (body: IrBody, question: IntegerStorageQuestion, disqualified: 
     // from which the census can still see -- or follow -- every invocation.
     // Anywhere else (an argument to a host function, a record member, an array
     // element) it can be invoked by something this census never reads.
-    for (const operand of operandsOfIrOperation(operation)) {
+    const contractedArguments = new Set<number>()
+    if (operation.kind === 'call') {
+      const declaration = cellReads.get(unwrapCallable(operation.callee.value))
+      const contracts = declaration === undefined ? undefined : question.nativeCallbackParameters?.get(declaration)
+      for (const [ordinal, parameters] of contracts ?? []) {
+        const argument = operation.arguments[ordinal]
+        if (argument === undefined) continue
+        const owners = calleeOwners(argument)
+        if (owners === null) continue
+        contractedArguments.add(ordinal)
+        for (const owner of owners) {
+          nativeCallbackOwners.add(owner)
+          // A callback may bind more parameters than the native signature supplies.
+          // Those incoming writes are not authenticated by this contract.
+          const target = question.bodies.find((candidate) => String(candidate.sourceOwner) === owner)
+          if (target !== undefined)
+            for (const block of target.blocks.values())
+              for (const parameter of block.operations) {
+                if (parameter.kind === 'parameter' && parameter.ordinal >= parameters.length)
+                  disqualified.add(integerParameterSlot(target.sourceOwner, parameter.ordinal))
+              }
+          parameters.forEach((magnitude, parameter) => {
+            const slot = integerParameterSlot(owner as FunctionId, parameter)
+            if (
+              magnitude === null ||
+              magnitude.kind !== 'bounded' ||
+              !Number.isFinite(magnitude.limit) ||
+              magnitude.limit < 0 ||
+              magnitude.limit > 2 ** 53
+            ) {
+              disqualified.add(slot)
+              return
+            }
+            const writes = nativeWrites.get(slot) ?? []
+            writes.push(magnitude)
+            nativeWrites.set(slot, writes)
+          })
+        }
+      }
+    }
+    const escapingOperands =
+      operation.kind === 'call'
+        ? [
+            operation.callee,
+            ...(operation.receiver ? [operation.receiver] : []),
+            ...operation.arguments.filter((_, ordinal) => !contractedArguments.has(ordinal))
+          ]
+        : operandsOfIrOperation(operation)
+    for (const operand of escapingOperands) {
       if (!callableCarriers.has(operand.representation.kind)) continue
+      // A carrier-preserving conversion forwards identity; its later consumer
+      // still accounts the transfer or records the unknown escape.
+      if (operation.kind === 'convert' && callableCarriers.has(operation.result.representation.kind)) continue
       if ((operation.kind === 'call' || operation.kind === 'construct') && operation.callee.value === operand.value) continue
       escapes(operand, operation.kind === 'binding-write' ? operation.declaration : null)
     }
@@ -933,7 +1007,9 @@ const scanBody = (body: IrBody, question: IntegerStorageQuestion, disqualified: 
     boxOpaque,
     steps,
     constants,
-    escapedCallables
+    escapedCallables,
+    nativeWrites,
+    nativeCallbackOwners
   }
 }
 
@@ -941,14 +1017,17 @@ export const integerStorageCensusOf = (question: IntegerStorageQuestion): Intege
   const disqualified = new Set<string>()
   const scans = new Map<string, BodyScan>()
   for (const body of question.bodies) scans.set(String(body.sourceOwner), scanBody(body, question, disqualified))
+
   // Program-wide single-literal cells ride on every facts object handed out,
   // so a body that only READS a module constant still sees its value.
   const cellConstants = programCellConstantsOf(question.bodies)
   const cellIntegers = programCellIntegersOf(question.bodies, question.integerCellEligible ?? (() => false), cellConstants)
+  const declaredCells = question.declaredCells
   const withCells = (facts: IntegerStorageFacts): IntegerStorageFacts => ({
     ...facts,
     ...(cellConstants.size > 0 ? { cellConstants } : {}),
-    ...(cellIntegers.size > 0 ? { cellIntegers } : {})
+    ...(cellIntegers.size > 0 ? { cellIntegers } : {}),
+    ...(declaredCells !== undefined && declaredCells.size > 0 ? { declaredCells } : {})
   })
 
   // A box whose payload this census cannot name may hold ANY struct -- a
@@ -985,6 +1064,7 @@ export const integerStorageCensusOf = (question: IntegerStorageQuestion): Intege
   }
   for (const scan of scans.values()) {
     for (const [slot, values] of scan.writes) for (const value of values) record(slot, { owner: scan.owner, value })
+    for (const [slot, magnitudes] of scan.nativeWrites) for (const nativeMagnitude of magnitudes) record(slot, { nativeMagnitude })
   }
   // A class field's default initializer is a body whose return value seeds the
   // member -- see `fieldSeeds`. A seed this census cannot read is a write it
@@ -1007,6 +1087,9 @@ export const integerStorageCensusOf = (question: IntegerStorageQuestion): Intege
     if (boundary <= 0) return false
     const owner = slot.slice(0, boundary)
     if (escaped.has(owner)) return false
+    // The callback contract proves incoming parameters only, not how the host
+    // consumes its result. Keep that signature slot at its declared ABI.
+    if (slot.endsWith('#result') && [...scans.values()].some((scan) => scan.nativeCallbackOwners.has(owner))) return false
     if (question.excludedFormalOwners.has(owner) || question.excludedSignatureSlots.has(slot)) return false
     // A body that returns anything but a `number` on some path has a result
     // this census cannot narrow, whatever its numeric returns say.
@@ -1079,12 +1162,13 @@ export const integerStorageCensusOf = (question: IntegerStorageQuestion): Intege
     }
 
     // Pass 1 -- integrality, shrinking from "every candidate holds an integer".
-    for (let round = 0; round < settlingRounds; round += 1) {
+    for (;;) {
       const answers = censusRound()
       const survivors = new Set<string>()
       for (const slot of integral) {
         const writes = bySlot.get(slot) ?? []
-        if (writes.every((entry) => answers.get(entry.owner)?.integral.has(entry.value) === true)) survivors.add(slot)
+        if (writes.every((entry) => 'nativeMagnitude' in entry || answers.get(entry.owner)?.integral.has(entry.value) === true))
+          survivors.add(slot)
       }
       if (survivors.size === integral.size) break
       integral = survivors
@@ -1096,35 +1180,67 @@ export const integerStorageCensusOf = (question: IntegerStorageQuestion): Intege
     // census that never reaches one refuses, because an unsettled bound is
     // exactly the case where a `long long` and a double stop agreeing.
     let settled = false
-    for (let round = 0; round < settlingRounds; round += 1) {
-      const answers = censusRound()
-      const next = new Map<string, IntegerMagnitude>()
-      for (const slot of integral) {
-        let magnitude: IntegerMagnitude | null = { kind: 'bounded', limit: 0 }
-        let recursive = false
-        for (const entry of bySlot.get(slot) ?? []) {
-          const scan = scans.get(entry.owner)
-          // A self-recursive sum is bounded by the OTHER writes, so it is skipped
-          // here and applied to their join below -- reading it as arithmetic is
-          // what makes the slot climb forever.
-          if (scan !== undefined && selfSumOf(scan, slot, entry.value)) {
-            recursive = true
-            continue
+    while (!settled && integral.size > 0) {
+      magnitudes = new Map()
+      let changed = new Set<string>()
+      // Acyclic propagation can require one round per slot. A fixed budget
+      // rejected an entire application once unrelated data flow exceeded it.
+      const propagationRounds = integral.size + 1
+      for (let round = 0; round < propagationRounds; round += 1) {
+        const answers = censusRound()
+        const next = new Map<string, IntegerMagnitude>()
+        for (const slot of integral) {
+          let magnitude: IntegerMagnitude | null = { kind: 'bounded', limit: 0 }
+          let recursive = false
+          for (const entry of bySlot.get(slot) ?? []) {
+            if ('nativeMagnitude' in entry) {
+              magnitude = widenIntegerMagnitude(magnitude, entry.nativeMagnitude)
+              continue
+            }
+            const scan = scans.get(entry.owner)
+            // A self-recursive sum is bounded by the OTHER writes, so it is skipped
+            // here and applied to their join below -- reading it as arithmetic is
+            // what makes the slot climb forever.
+            if (scan !== undefined && selfSumOf(scan, slot, entry.value)) {
+              recursive = true
+              continue
+            }
+            const step = scan === undefined ? null : selfStepOf(scan, slot, entry.value)
+            const written = step !== null ? integerLinearMagnitude(step) : (answers.get(entry.owner)?.magnitudes.get(entry.value) ?? null)
+            magnitude = widenIntegerMagnitude(magnitude, written)
           }
-          const step = scan === undefined ? null : selfStepOf(scan, slot, entry.value)
-          const written = step !== null ? integerLinearMagnitude(step) : (answers.get(entry.owner)?.magnitudes.get(entry.value) ?? null)
-          magnitude = widenIntegerMagnitude(magnitude, written)
+          if (recursive && magnitude !== null)
+            magnitude = integerLinearMagnitude(magnitude.kind === 'bounded' ? magnitude.limit : magnitude.coefficient)
+          if (magnitude !== null) next.set(slot, magnitude)
         }
-        if (recursive && magnitude !== null)
-          magnitude = integerLinearMagnitude(magnitude.kind === 'bounded' ? magnitude.limit : magnitude.coefficient)
-        if (magnitude !== null) next.set(slot, magnitude)
+        changed = new Set([
+          ...[...next].filter(([slot, magnitude]) => !sameMagnitude(magnitudes.get(slot), magnitude)).map(([slot]) => slot),
+          ...[...magnitudes.keys()].filter((slot) => !next.has(slot))
+        ])
+        magnitudes = next
+        if (changed.size === 0) {
+          settled = true
+          break
+        }
       }
-      const unchanged =
-        next.size === magnitudes.size && [...next].every(([slot, magnitude]) => sameMagnitude(magnitudes.get(slot), magnitude))
-      magnitudes = next
-      if (unchanged) {
-        settled = true
-        break
+      if (!settled) {
+        // Refuse the unstable cycle, then derive the survivors from no bounds.
+        // A downstream slot that looked stable while its input grew must not
+        // retain that provisional bound. Re-running integrality also removes
+        // writes that relied on a refused input.
+        for (const slot of changed) integral.delete(slot)
+        for (;;) {
+          const answers = censusRound()
+          const survivors = new Set(
+            [...integral].filter((slot) =>
+              (bySlot.get(slot) ?? []).every(
+                (entry) => 'nativeMagnitude' in entry || answers.get(entry.owner)?.integral.has(entry.value) === true
+              )
+            )
+          )
+          if (survivors.size === integral.size) break
+          integral = survivors
+        }
       }
     }
     if (!settled) return unsettled

@@ -161,7 +161,25 @@ export const createStructuralTypeTable = (): StructuralTypeTable => {
       expanding.delete(id)
     }
     for (const member of shape.members) visit(member)
-    return { kind: 'union', members: [...members] }
+    const joined = joinedNumberWidths([...members])
+    // A union the width join left with one member is that member.
+    if (joined.length === 1 && members.size > 1) return byId.get(joined[0]!) ?? { kind: 'union', members: joined }
+    return { kind: 'union', members: joined }
+  }
+
+  // `int` and `i32` are numbers the program promises are integers of a width
+  // (`semantics/declared-integers.ts`), so a union of widths is the widest of
+  // them: `cond ? a - b : room` with `a - b` a `number` and `room` an `int` is
+  // a `number`. Kept as separate arms, it became a tagged union of two number
+  // carriers that no arithmetic accepts.
+  const numberWidths: readonly string[] = ['int32', 'int64', 'number']
+  const joinedNumberWidths = (members: readonly StructuralTypeId[]): readonly StructuralTypeId[] => {
+    const widthOf = (id: StructuralTypeId): number => {
+      const member = byId.get(id)
+      return member?.kind === 'primitive' ? numberWidths.indexOf(member.primitive) : -1
+    }
+    const widest = Math.max(...members.map(widthOf))
+    return widest < 0 ? members : members.filter((id) => widthOf(id) < 0 || widthOf(id) === widest)
   }
 
   const intern = (input: StructuralShape): StructuralTypeId => {

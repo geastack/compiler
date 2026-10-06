@@ -1,7 +1,7 @@
 import type { IrOperand, IrResult } from '../../../ir/model.js'
 import type { Representation } from '../../../representation/model.js'
 import { representationKey } from '../../../representation/model.js'
-import { createCppEmitBlockedError, operandText, type EmitContext } from '../emit-context.js'
+import { createCppEmitBlockedError, cppThunkName, operandText, type EmitContext } from '../emit-context.js'
 import { alignedValueText, type ConversionSite } from '../emit-narrowing.js'
 import { toStringRefusal, toStringText } from '../emit-tostring.js'
 import { cppConstantLiteral, cppRecordFieldName, cppRecordStructName, cppTypeOf } from '../types.js'
@@ -404,6 +404,16 @@ const spliceText: ArrayCallRenderer = (ctx, receiverText, element, args, result)
  */
 const sortText: ArrayCallRenderer = (ctx, receiverText, element, args) => {
   requireArity('sort', '23.1.3.30', [0, 1], args)
+  // A comparator known to be one capture-free function is handed over by
+  // name, so the sort can inline it.
+  const comparator = args[0]
+  const direct = comparator === undefined ? undefined : ctx.directCallableValues.get(comparator.value)
+  if (
+    direct !== undefined &&
+    comparator?.representation.kind === 'function-value-dispatch' &&
+    comparator.representation.abi.receiver === null
+  )
+    return `gea::runtime::array::sort(${receiverText}, gea::DirectCallable<&${cppThunkName(direct)}>{})`
   if (args.length === 1) return call(ctx, 'sort', receiverText, args)
   if (element.kind !== 'string' && element.kind !== 'scalar') {
     throw createCppEmitBlockedError(
