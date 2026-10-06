@@ -1943,8 +1943,17 @@ const closedMemberCallableUses = (
     const erased = outermostErasureOf(reference)
     if (erased !== reference && ts.isExpression(erased)) return visit(erased)
     if (ts.isPropertyAccessExpression(parent) && parent.expression === reference && EXPLICIT_THIS_METHODS.has(parent.name.text)) {
+      // A bound slot ignores the receiver `.call`/`.apply` passes, so the
+      // counted site would name the wrong `this`.
+      if (member !== null && selfBoundKeysOf(checker, flow).has(member.getName())) return false
       const call = parent.parent
       return ts.isCallExpression(call) && call.expression === parent && countedCalls.has(call)
+    }
+    // Binding calls nothing, and the bound function goes back into this slot,
+    // whose every other mention is classified here.
+    if (ts.isPropertyAccessExpression(parent) && parent.expression === reference && ts.isCallExpression(parent.parent)) {
+      const selfBind = provenSelfBindOf(parent.parent)
+      if (selfBind !== null && selfBind.bind === parent) return true
     }
     return classifyMention(checker, reference, declarationName).kind === 'inert'
   }
@@ -3512,6 +3521,8 @@ const closedMemberCallableUses = (
     const compute = (): readonly ts.SignatureDeclaration[] | null => {
       const found = new Set(collected.bodies)
       for (const value of collected.values) {
+        // It re-installs one of the bodies collected here behind a fixed receiver.
+        if (provenSelfBindOf(value) !== null) continue
         const targets = closedCallableTargetsOf(checker, flow, value, elementCalleeAuthority)
         if (targets === null) {
           if (process.env['GEA_IMPLEMENTATIONS_DEBUG'] !== undefined)
@@ -4575,11 +4586,64 @@ const closedMemberCallableUses = (
       implementations.every((body) => flow.receiverReferencesToDeclaration(body).every(use))
     )
   }
+  /**
+   * The self-bind fact every arm of this proof consumes: `x.m = x.m.bind(x)`
+   * with the intrinsic `bind` intact and a store that runs no setter (the
+   * descriptor authority's `writeBodies`). The slot then holds either one of
+   * its own implementations or one bound to the slot's own object, so the
+   * store adds no body, binding calls nothing, and the receiver reaches only
+   * the `this` of the slot's bodies. The ledger obligation is owed by each
+   * consuming proof, which is why only the syntactic half is cached.
+   */
+  const provenSelfBindOf = (expression: ts.Expression): ProvenSelfBind | null => {
+    let value = expression
+    while (ts.isParenthesizedExpression(value)) value = value.expression
+    if (!ts.isCallExpression(value)) return null
+    const shape = selfBindShapeAt(checker, flow, value)
+    if (shape === null) return null
+    const method = checker.getSymbolAtLocation(shape.bind.name)
+    if (!method || flow.writesToSymbol(method).length > 0) return null
+    if (deferredIntrinsicProtocolLedgerOf(flow)?.requirePrototypeKeys('Function', { names: [shape.bind.name.text] }, value) !== true)
+      return null
+    const symbol = checker.getSymbolAtLocation(shape.source.name)
+    const slot = symbol?.valueDeclaration ?? symbol?.declarations?.[0]
+    if (slot === undefined) return null
+    const object = shape.destination.expression
+    const receiver = receiverTypeAt(object) ?? checker.getTypeAtLocation(object)
+    const plan = sourceClassKeyReadPlanOf(
+      checker,
+      flow,
+      { kind: 'value', receiver, expression: object, originsOf: allocationOriginsOf },
+      shape.key
+    )
+    return plan !== null && plan.writeBodies !== null && plan.writeBodies.length === 0 ? { ...shape, slot } : null
+  }
+  /**
+   * The proven self-bind a receiver mention belongs to -- as the
+   * destination's object, the bound source's object or the bound receiver --
+   * or `null`. Each owes exactly what a call through the slot owes: the
+   * `this` of every body the slot can run.
+   */
+  const selfBindAtReceiver = (reference: ts.Expression): ProvenSelfBind | null => {
+    const parent = reference.parent
+    const value = ts.isCallExpression(parent)
+      ? parent
+      : ts.isPropertyAccessExpression(parent) && ts.isBinaryExpression(parent.parent) && parent.parent.left === parent
+        ? parent.parent.right
+        : ts.isPropertyAccessExpression(parent) && ts.isPropertyAccessExpression(parent.parent) && ts.isCallExpression(parent.parent.parent)
+          ? parent.parent.parent
+          : null
+    const selfBind = value === null ? null : provenSelfBindOf(value)
+    return selfBind !== null && selfBind.receivers.includes(reference) ? selfBind : null
+  }
   const siblingReadClosed = (
     declaration: ts.Declaration,
     constructedData: () => boolean,
     use: (expression: ts.Expression) => boolean
   ): boolean => {
+    // What a self-bind stores is bound to the very object read here, so the
+    // read owes what reading the method owes.
+    if (ts.isBinaryExpression(declaration) && provenSelfBindOf(declaration.right) !== null) return methodReceiverUses(declaration, use)
     if (!dataDeclaration(declaration)) return ts.isMethodDeclaration(declaration) && methodReceiverUses(declaration, use)
     if (ts.isBinaryExpression(declaration) && !constructedData()) return false
     // Any alias placing the carried value in a sibling has its own source
@@ -6512,6 +6576,10 @@ const closedMemberCallableUses = (
     if (primitive(checker.getTypeAtLocation(reference))) return true
     const parent = reference.parent
     if (!parent) return false
+    // Only while the store cannot replace a slot the path reads through.
+    const selfBind = selfBindAtReceiver(reference)
+    if (selfBind !== null && siblingKeyed(path, selfBind.key) && !headsOf(path).includes(`.${selfBind.key}`))
+      return traceReceiver(reference, 'container-self-bind', methodReceiverUses(selfBind.slot, use), () => `key=${selfBind.key}`)
     if (ts.isBinaryExpression(parent) && parent.left === reference && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
       // A plain assignment's left side names the SLOT being written. It is not
       // evaluated as a value, so it hands nothing to anyone -- `this.geometry
@@ -6946,6 +7014,10 @@ const closedMemberCallableUses = (
     if (primitive(checker.getTypeAtLocation(reference))) return true
     const parent = reference.parent
     if (!parent) return false
+    // Not when the store overwrites the data slot this proof follows.
+    const selfBind = selfBindAtReceiver(reference)
+    if (selfBind !== null && valueMode?.field?.key !== selfBind.key)
+      return traceReceiver(reference, 'self-bind', methodReceiverUses(selfBind.slot, receiverUse))
     if (ts.isBinaryExpression(parent) && parent.left === reference && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
       // A plain assignment's left side names the SLOT being written. It is not
       // evaluated as a value, so it hands nothing to anyone -- `this.geometry
@@ -7255,6 +7327,19 @@ const closedMemberCallableUses = (
       // thousands of reads the selected-data arm already accepted -- the three.js app
       // went from ~3 min to over 8 min at 23 GB before this ordering.
       const key = accessKeyOf(parent)
+      // three hands `this._onCanvasTargetResize` to `addEventListener` after
+      // self-binding it. The slot then holds its own bodies, unbound or bound
+      // to this very object, so the read hands the receiver only to their
+      // `this`. An unproven bind leaves `memberImplementationsOf` without an
+      // answer, which refuses here.
+      if (
+        target !== null &&
+        ts.isMethodDeclaration(target) &&
+        key !== null &&
+        valueMode?.field?.key !== key &&
+        selfBoundKeysOf(checker, flow).has(key)
+      )
+        return traceReceiver(reference, 'self-bound-read', methodReceiverUses(target, receiverUse), () => `key=${key}`)
       let readerClosedHeld: boolean | null = null
       const readerClosed = (): boolean => {
         if (readerClosedHeld !== null) return readerClosedHeld
@@ -7446,6 +7531,7 @@ const closedMemberCallableUses = (
     .filter((write) => write.edge !== 'return' && write.edge !== 'yield')
     .every((write) => {
       if (write.value === null) return write.edge === 'delete' || openMember('slot-deleted', write.site)
+      if (provenSelfBindOf(write.value) !== null) return true
       // Replacement validation must use the same complete origins as member
       // implementation lookup. A constructor parameter or alias can carry a
       // known callback just as a literal can; its receiver effects still owe
@@ -7485,6 +7571,100 @@ const COMPARISON_TOKENS: ReadonlySet<ts.SyntaxKind> = new Set([
  * identical shape -- before this name is trusted at all.
  */
 const EXPLICIT_THIS_METHODS: ReadonlySet<string> = new Set(['call', 'apply'])
+
+/** The syntactic and checker half of a self-bind; `provenSelfBindOf` adds the proof-state half. */
+interface SelfBindShape {
+  readonly store: ts.BinaryExpression
+  readonly destination: ts.PropertyAccessExpression
+  readonly source: ts.PropertyAccessExpression
+  readonly bind: ts.PropertyAccessExpression
+  readonly key: string
+  /** The destination's object, the bound source's object and the bound receiver, in that order. */
+  readonly receivers: readonly ts.Expression[]
+}
+
+/**
+ * Two mentions denote one object only when they are the same lexical `this`
+ * or the same `const` binding. Anything a write could retarget between the
+ * destination's evaluation and the bind call is a different receiver.
+ */
+const sameReceiver = (flow: ValueFlowIndex, left: ts.Expression, right: ts.Expression): boolean => {
+  if (left.kind === ts.SyntaxKind.ThisKeyword && right.kind === ts.SyntaxKind.ThisKeyword) {
+    const owner = flow.receiverOwnerOf(left)
+    return owner !== null && owner === flow.receiverOwnerOf(right)
+  }
+  if (!ts.isIdentifier(left) || !ts.isIdentifier(right)) return false
+  const declaration = flow.targetOf(left)?.declaration
+  return (
+    declaration !== undefined &&
+    declaration !== null &&
+    ts.isVariableDeclaration(declaration) &&
+    (ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const) !== 0 &&
+    flow.targetOf(right)?.declaration === declaration
+  )
+}
+
+/**
+ * `x.m = x.m.bind(x)`: the slot keeps a function bound to the very object
+ * that owns the slot. Three's `Renderer` does this so the listener it adds and
+ * later removes is one identity. A bound argument prefix changes the callee's
+ * arguments, and another receiver changes its `this`, so both stay open.
+ */
+const selfBindShapeOf = (checker: ts.TypeChecker, flow: ValueFlowIndex, call: ts.CallExpression): SelfBindShape | null => {
+  const argument = call.arguments[0]
+  if (call.questionDotToken || call.arguments.length !== 1 || !argument || ts.isSpreadElement(argument)) return null
+  const bind = call.expression
+  if (!ts.isPropertyAccessExpression(bind) || bind.questionDotToken || !ts.isIdentifier(bind.name) || bind.name.text !== 'bind') return null
+  const source = bind.expression
+  if (!ts.isPropertyAccessExpression(source) || source.questionDotToken || !ts.isIdentifier(source.name)) return null
+  let held: ts.Node = call
+  while (ts.isParenthesizedExpression(held.parent)) held = held.parent
+  const store = held.parent
+  if (!ts.isBinaryExpression(store) || store.right !== held || store.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return null
+  const destination = store.left
+  if (!ts.isPropertyAccessExpression(destination) || !ts.isIdentifier(destination.name)) return null
+  // The same standard-library test `unwrapExplicitThisCall` makes of
+  // `.call`/`.apply`: a program's own `bind` member is not this intrinsic.
+  const method = checker.getSymbolAtLocation(bind.name)
+  if (!method?.declarations?.length || !method.declarations.every((declaration) => declaration.getSourceFile().hasNoDefaultLib)) return null
+  if (checker.getSignaturesOfType(checker.getTypeAtLocation(source), ts.SignatureKind.Call).length === 0) return null
+  // One object and one key are one slot. The symbols cannot say so: the
+  // JavaScript binder gives `this.m = ...` its own symbol beside the method's.
+  if (destination.name.text !== source.name.text) return null
+  const receivers = [destination.expression, source.expression, argument]
+  if (!sameReceiver(flow, receivers[0]!, receivers[1]!) || !sameReceiver(flow, receivers[0]!, receivers[2]!)) return null
+  return { store, destination, source, bind, key: destination.name.text, receivers }
+}
+interface ProvenSelfBind extends SelfBindShape {
+  /** The slot's canonical declaration, which `memberImplementationsOf` enumerates the family from. */
+  readonly slot: ts.Declaration
+}
+const selfBindShapes = new WeakMap<ValueFlowIndex, Map<ts.CallExpression, SelfBindShape | null>>()
+const selfBindShapeAt = (checker: ts.TypeChecker, flow: ValueFlowIndex, call: ts.CallExpression): SelfBindShape | null => {
+  let shapes = selfBindShapes.get(flow)
+  if (!shapes) selfBindShapes.set(flow, (shapes = new Map()))
+  let shape = shapes.get(call)
+  if (shape === undefined) shapes.set(call, (shape = selfBindShapeOf(checker, flow, call)))
+  return shape
+}
+/**
+ * Every key some write self-binds, by key alone: the JavaScript binder files
+ * `this.m = ...` under its own declaration, so no member symbol lists them all.
+ */
+const selfBoundKeys = new WeakMap<ValueFlowIndex, ReadonlySet<string>>()
+const selfBoundKeysOf = (checker: ts.TypeChecker, flow: ValueFlowIndex): ReadonlySet<string> => {
+  let keys = selfBoundKeys.get(flow)
+  if (keys) return keys
+  const found = new Set<string>()
+  for (const write of flow.allWrites) {
+    let value = write.value
+    while (value && ts.isParenthesizedExpression(value)) value = value.expression
+    const shape = value && ts.isCallExpression(value) ? selfBindShapeAt(checker, flow, value) : null
+    if (shape !== null) found.add(shape.key)
+  }
+  selfBoundKeys.set(flow, (keys = found))
+  return keys
+}
 
 /** Parentheses, `!` and type assertions evaluate to the object the expression inside them does. */
 const unwrapValueExpression = (expression: ts.Expression): ts.Expression => {

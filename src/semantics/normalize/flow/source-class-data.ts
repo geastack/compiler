@@ -690,13 +690,18 @@ const sourceClassKeyReadPlanUncached = (
         if (
           member.declarations?.length &&
           member.declarations.every(
-            (declaration) => !declaration.getSourceFile().isDeclarationFile && ts.isMethodDeclaration(declaration)
+            (declaration) =>
+              (!declaration.getSourceFile().isDeclarationFile && ts.isMethodDeclaration(declaration)) ||
+              isSourceDataDeclaration(declaration)
           ) &&
           member.declarations.some((declaration) => ts.isMethodDeclaration(declaration) && declaration.body !== undefined)
         ) {
           // Source methods install ordinary writable data descriptors. A
           // store shadows that method on the instance without invoking the
           // old or new callable. Reading/calling it remains a separate proof.
+          // A JavaScript `this.m = ...` beside the method is the checker's
+          // record of that own data property, not an accessor, so it leaves
+          // the store as code-free as the method alone.
           readsKnown = false
         } else if (
           member.declarations?.length &&
