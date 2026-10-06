@@ -410,3 +410,49 @@ export const loopInvariantValuesOf = (body: IrBody): ReadonlySet<IrValueId> => {
   }
   return invariant
 }
+
+/**
+ * The `%` results whose divisor changes on every turn of the innermost loop
+ * around them: a cell that loop writes, or a merge at its header.
+ *
+ * `gea::preparedDivisor` pays a 64-bit division to build a reciprocal that
+ * later remainders reuse for a multiply -- a win for `i % ring.length`, whose
+ * divisor holds still while the dividend runs, and a loss for trial division,
+ * `n % d` with `d` the loop's own counter: a rebuild on every turn is a
+ * division AND the multiply, where the plain remainder is the division alone.
+ * Measured on `benchmarks/node/parallel/fixtures/primes.ts`: 890 ms with the
+ * memo, against 490 ms for the same loop in Rust.
+ */
+export const churningRemaindersOf = (body: IrBody, remainders: ReadonlySet<IrValueId>): ReadonlySet<IrValueId> => {
+  const churning = new Set<IrValueId>()
+  if (remainders.size === 0) return churning
+  const graph = controlFlowGraphOf(body)
+  const loops = naturalLoopsOf(graph, dominatorTreeOf(body))
+  if (loops.length === 0) return churning
+  const definitions = new Map<IrValueId, { readonly operation: IrNonTerminatorOperation; readonly block: IrBlockId }>()
+  const writes = new Map<DeclarationId, IrBlockId[]>()
+  for (const [block, contents] of body.blocks) {
+    for (const operation of contents.operations) {
+      const result = resultOfIrOperation(operation)
+      if (result !== null) definitions.set(result.id, { operation, block })
+      if (operation.kind === 'binding-write') writes.set(operation.declaration, [...(writes.get(operation.declaration) ?? []), block])
+    }
+  }
+  for (const [block, contents] of body.blocks) {
+    // Innermost first (`naturalLoopsOf`), so the first loop holding the block is the tightest.
+    const loop = loops.find((candidate) => candidate.blocks.has(block))
+    if (loop === undefined) continue
+    for (const operation of contents.operations) {
+      if (operation.kind !== 'compute' || operation.operator !== '%' || !remainders.has(operation.result.id)) continue
+      const divisor = operation.operands[1]
+      const definition = divisor === undefined ? undefined : definitions.get(divisor.value)
+      if (definition === undefined || !loop.blocks.has(definition.block)) continue
+      const moves =
+        definition.operation.kind === 'phi' ||
+        (definition.operation.kind === 'binding-read' &&
+          (writes.get(definition.operation.declaration) ?? []).some((written) => loop.blocks.has(written)))
+      if (moves) churning.add(operation.result.id)
+    }
+  }
+  return churning
+}

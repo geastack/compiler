@@ -1,3 +1,4 @@
+import { nodeOfOperation, operationOfResult } from './identity/ids.js'
 import { readFileSync } from 'fs'
 import type { PackageSource } from './semantics/package-sources.js'
 import { projectAbis, type AbiProjectionBlocker } from './projection/abi.js'
@@ -1325,6 +1326,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   // lowering did build: its refusals are the point of running at all, and
   // dropping them would hide why it did not lower.
   const certifiedBodies = emittedBodies ?? (lowered ? pruned.bodies : null)
+  const parallelRegionEntries = new Set(plugins.flatMap((plugin) => [...(plugin.capabilities.parallelRegionEntries ?? [])]))
   const certification: IrCertification | null =
     lowered && certifiedBodies
       ? certifyIr({
@@ -1338,6 +1340,18 @@ export const compile = (request: CompilationRequest): CompilationResult => {
           classes: executableClasses,
           ...(reflection ? { reflection } : {}),
           externalBindings: new Set(frontend.externalBindings.keys()),
+          ...(parallelRegionEntries.size > 0
+            ? {
+                parallelRegionEntries,
+                parallelRegionSource: {
+                  nameOfDeclaration: frontend.nameOfDeclaration,
+                  locationOfLineage: (lineage: SemanticResultId) => {
+                    const location = frontend.locationOfNode(nodeOfOperation(operationOfResult(lineage)))
+                    return location === null ? null : `${location.file}:${location.line}:${location.column}`
+                  }
+                }
+              }
+            : {}),
           deadTypeofGuards: frontend.deadTypeofGuards,
           graph: frontend.graph
         })
@@ -1381,6 +1395,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
           // elsewhere. See `CppSymbolIsolation`.
           isolateSymbols: request.isolateSymbols === true ? 'required' : 'preferred',
           realmStorage: request.realmStorage === true,
+          ...(parallelRegionEntries.size > 0 ? { parallelRegions: true } : {}),
           layout: request.translationUnits ?? 'single',
           unitBaseName: request.unitBaseName ?? 'unit',
           sourceFileNames: frontend.sourceFileNames,

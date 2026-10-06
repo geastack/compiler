@@ -3,7 +3,7 @@ import type { Representation } from '../representation/model.js'
 import { booleanConstantsOf, deadValuesOf, unreadValuesOf, type DeadValueRules } from './dead-values.js'
 import { deferrableValuesOf } from './deferral.js'
 import type { ForwardedBinding, ForwardingPolicy } from './deferral.js'
-import { loopInvariantHoistsOf, loopInvariantValuesOf, type HoistPlan } from './hoist.js'
+import { churningRemaindersOf, loopInvariantHoistsOf, loopInvariantValuesOf, type HoistPlan } from './hoist.js'
 import { narrowableFloatsOf, type Float32Narrowing } from './floats.js'
 import { narrowableIntegersOf, remainderFormGroups, type IntegerNarrowing, type IntegerStorageFacts } from './integers.js'
 import { localIteratorValuesOf } from './local-iterators.js'
@@ -190,6 +190,10 @@ export const irBodyCensusOf = (body: IrBody, policy: IrBodyCensusPolicy): IrBody
   const numericIntrinsics = numericIntrinsicsOf(body)
   const remainderForms = new Map<IrValueId, 'restated' | 'dynamic'>()
   for (const [form, values] of remainderFormGroups(narrowed)) for (const value of values) remainderForms.set(value, form)
+  // A divisor that changes every turn would rebuild its reciprocal every turn
+  // (`churningRemaindersOf`): those keep the plain remainder.
+  const dynamicRemainders = new Set([...remainderForms].filter(([, form]) => form === 'dynamic').map(([value]) => value))
+  for (const value of churningRemaindersOf(body, dynamicRemainders)) remainderForms.delete(value)
 
   // The two cell facts the forwarding census leaves to this sequence: a
   // narrowed cell is `long long` storage and a type-query cell a saved tag,

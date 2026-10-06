@@ -379,6 +379,8 @@ export interface FrontendResult {
   readonly locationOfDeclaration: (declaration: DeclarationId) => DiagnosticLocation | null
   /** The source text of a node identity, through the same walk as `locationOfNode`, for display only. */
   readonly textOfNode: (node: NodeId) => string | null
+  /** The name a declaration is spelled with in the source, through the same walk, for display only. */
+  readonly nameOfDeclaration: (declaration: DeclarationId) => string | null
   /**
    * The file each of those declarations lives in.
    *
@@ -2055,6 +2057,11 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   /** `locationOfNode`'s twin for a DeclarationId -- see `FrontendResult.locationOfDeclaration`. */
   const locationOfDeclaration = (declaration: DeclarationId): DiagnosticLocation | null =>
     locationOfFound(sourceNodeOfDeclaration(declaration))
+  const nameOfDeclaration = (declaration: DeclarationId): string | null => {
+    const found = sourceNodeOfDeclaration(declaration)
+    const name = found ? ts.getNameOfDeclaration(found as ts.Declaration) : undefined
+    return name && ts.isIdentifier(name) ? name.text : null
+  }
 
   return {
     dynamicFallbackTypes,
@@ -2073,6 +2080,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     locationOfNode,
     locationOfDeclaration,
     textOfNode,
+    nameOfDeclaration,
     externalBindingFiles: hosts.externalFiles,
     standardLibraryBindings: hosts.standardLibrary,
     // The module bodies the graph actually has, in evaluation order. A file the

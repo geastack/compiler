@@ -196,6 +196,14 @@ export interface PluginCapabilities {
   /** Packages/modules this host implements instead of compiling their JavaScript; package/* includes subpaths. */
   readonly declarationModules?: ReadonlySet<string>
   /**
+   * Host functions (by the C++ name `hostFunctionsByDeclaration` maps them to)
+   * that run their second, callable argument as a parallel region: called once
+   * per index in `[0, count)`, on any thread. The compiler certifies the
+   * region (`ir/certify/parallel-region.ts`) and refuses a program whose
+   * region could observe the order its tasks ran in.
+   */
+  readonly parallelRegionEntries?: ReadonlySet<string>
+  /**
    * An ambient declared type this plugin's own package REPLACES with a
    * concrete type it ships as ordinary source, keyed by the ambient name.
    *

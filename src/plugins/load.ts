@@ -124,7 +124,7 @@ const validateInstance = (value: unknown): PluginInstance => {
   for (const key of ['hostMethodBindings']) {
     if (capabilities[key] !== undefined) checkShape(capabilities[key], new Map(), `capabilities.${key}`)
   }
-  for (const key of ['declarationModules', 'hostArraySnapshotFunctions', 'hostNativeArrayFunctions']) {
+  for (const key of ['declarationModules', 'hostArraySnapshotFunctions', 'hostNativeArrayFunctions', 'parallelRegionEntries']) {
     if (capabilities[key] !== undefined) checkShape(capabilities[key], new Set(), `capabilities.${key}`)
   }
   for (const key of ['hostFunctions', 'nativeTypes', 'nativeConstants', 'hostNamespaceRootTypes']) {

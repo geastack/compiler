@@ -381,6 +381,13 @@ export interface CppTranslationUnitInput {
   readonly isolateSymbols: CppSymbolIsolation
   readonly realmStorage?: boolean
   /**
+   * The program runs parallel regions (`PluginCapabilities.parallelRegionEntries`),
+   * so state the emitted code installs lazily on first use -- a class's static
+   * method state -- may be installed by two threads at once and is spelled
+   * with the runtime's thread-safe install instead.
+   */
+  readonly parallelRegions?: boolean
+  /**
    * How the program is laid out on disk -- see `CppTranslationUnitLayout`.
    *
    * `single` is what every unit was until this existed. `per-file` groups
@@ -1022,7 +1029,8 @@ const constructionsOf = (
   linkage: CppLinkage,
   bodyAbis: ReadonlyMap<string, CallableAbi | null>,
   /** The classes whose struct holds `gea_method_state` statically -- `cppRecordDeclarations`' own report, never re-derived here. */
-  staticMethodStateClasses: ReadonlySet<DeclarationId> = new Set()
+  staticMethodStateClasses: ReadonlySet<DeclarationId> = new Set(),
+  parallelRegions = false
 ): readonly ClassConstruction[] => {
   // Layout-only classes publish no requested construction. Every runtime
   // construction still passes the complete ABI/initialization checks below.
@@ -1108,7 +1116,11 @@ const constructionsOf = (
       [
         `${constructSignature} {`,
         ...(staticState
-          ? [`if (${className}::gea_method_state.get() != gea_method_state) ${className}::gea_method_state = ${adoptedState};`]
+          ? [
+              parallelRegions
+                ? `gea::Ref<gea::NativeClassMethodState>::installShared(${className}::gea_method_state, gea_method_state);`
+                : `if (${className}::gea_method_state.get() != gea_method_state) ${className}::gea_method_state = ${adoptedState};`
+            ]
           : []),
         allocation,
         ...(staticState ? [] : [`${cppReceiverName}->gea_method_state = ${adoptedState};`]),
@@ -2853,7 +2865,16 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // resolves it concretely through the plugin's render bridge, so raising it
   // here failed 40-odd programs that had nothing wrong with them.
 
-  const constructions = constructionsOf(programSite, deriver, input.classes, refused, linkage, abiByBody, structs.staticMethodStateClasses)
+  const constructions = constructionsOf(
+    programSite,
+    deriver,
+    input.classes,
+    refused,
+    linkage,
+    abiByBody,
+    structs.staticMethodStateClasses,
+    input.parallelRegions === true
+  )
 
   // One intern table for the whole program, shared by every body: two bodies
   // that name the same `Symbol.for` key must reach the same static, and a
@@ -2886,6 +2907,10 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
       const promiseView = asyncPromiseViewOf(body)
       const promiseViewEntry =
         promiseView === null ? null : asyncPromiseViewEntryOf(body, promiseView, captures, programSite, formalsNarrowedIn(body.sourceOwner))
+      const stableEntry = stableBorrowEntries.get(cppBodyName(body.sourceOwner))
+      // The formals this body's signature takes by reference: their objects
+      // outlive the call, which `emit.ts`'s stable field reads rely on.
+      const borrowed = stableEntry?.formals ?? formalsBorrowedIn(body.sourceOwner)
       const sections = emitBody(
         promiseView ?? body,
         input.placements,
@@ -2918,11 +2943,10 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         definitionCells,
         constructionOnlyFields,
         keyOrderUnobserved,
-        taskBodies
+        taskBodies,
+        borrowed
       )
-      const stableEntry = stableBorrowEntries.get(cppBodyName(body.sourceOwner))
       const versioned = integerVersions.get(String(body.sourceOwner))
-      const borrowed = stableEntry?.formals ?? formalsBorrowedIn(body.sourceOwner)
       const integerVersion =
         versioned === undefined
           ? []
@@ -2959,7 +2983,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
                 definitionCells,
                 constructionOnlyFields,
                 keyOrderUnobserved,
-                taskBodies
+                taskBodies,
+                borrowed
               )
               const versionOpening = withUnreadParametersUnnamed(
                 integerVersionSignatureOf(body, versioned),

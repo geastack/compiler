@@ -57,6 +57,9 @@
 #include <cstring>
 #include <tuple>
 #include "gea_pcm.h"
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+#include <thread>
+#endif
 
 /**
  * How emitted code throws a program value: every `throw` statement the C++
@@ -95,6 +98,12 @@
 #define GEA_THREAD_LOCAL
 #else
 #define GEA_THREAD_LOCAL thread_local
+#endif
+
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+#define GEA_PARALLEL_SIDE_TABLE ::gea::detail::parallel::SideTableGuard gea_side_table_guard;
+#else
+#define GEA_PARALLEL_SIDE_TABLE
 #endif
 
 namespace gea {
@@ -1313,6 +1322,229 @@ inline void profileRefDestroyed(std::size_t bytes, bool collecting, const void* 
 #endif
 #endif
 
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+#if defined(GEA_RUNTIME_SINGLE_THREADED) && GEA_RUNTIME_SINGLE_THREADED
+#error "GEA_RUNTIME_PARALLEL runs compiled code on several threads; GEA_RUNTIME_SINGLE_THREADED removes the per-thread state that needs"
+#endif
+#if defined(GEA_RUNTIME_REALMS) && GEA_RUNTIME_REALMS
+#error "parallel regions keep their state per thread; a realm build keeps it per realm, which several region threads would share"
+#endif
+#if defined(GEA_RUNTIME_COMPACT_ALLOCATION)
+#error "parallel regions allocate from tagged region chunks, which the compact allocator does not have"
+#endif
+/**
+ * Parallel regions: `@geastack/parallel`'s one native primitive runs a task
+ * body on several threads at once, and this is what makes that sound for a
+ * runtime whose reference counts are deliberately NOT atomic.
+ *
+ * The compiler certifies every region body (`ir/certify/parallel-region.ts`):
+ * it writes nothing that existed before the region began, except through the
+ * sanctioned disjoint-slot store. So during a region the object graph that
+ * predates it is read-only -- but a READ still copies handles, and a handle
+ * copy is a count write. Two threads incrementing one count without atomics
+ * lose updates; making every count atomic would charge every program for the
+ * few that run regions, and still bounce the cache line of a hot shared object
+ * between every core.
+ *
+ * Instead every thread running region code -- the main thread included -- owns
+ * a REGION: the chunks it allocated from during this region, recognised by an
+ * ownership map from address granule to region tag. A count operation on an
+ * object the thread owns is the ordinary non-atomic one: nobody else can see
+ * that object until the join. A count operation on any other object is
+ * DEFERRED into the thread's own table and applied, single-threaded, at the
+ * join. The invariant that makes both halves correct: during a region no
+ * thread writes the header of an object it does not own. An object that
+ * predates the region cannot die inside it either, since the thread that
+ * started the region still holds the roots that reach it.
+ *
+ * Misclassifying an owned object as foreign is always safe (it is deferred,
+ * and dies at the join rather than in place); the reverse never happens,
+ * because a granule is tagged only while its owner bump-allocates into it.
+ */
+namespace parallel {
+
+inline constexpr unsigned granuleShift = 16;
+inline constexpr std::size_t granuleBytes = std::size_t{1} << granuleShift;
+inline constexpr std::size_t regionChunkBytes = std::size_t{1} << 20;
+
+/** Region-tag of each 64 KiB granule of the address space, two levels over 48-bit user addresses. */
+struct OwnershipMap {
+  std::atomic<std::atomic<std::uint64_t>*> leaves[std::size_t{1} << 16];
+};
+inline OwnershipMap& ownershipMap() {
+  static OwnershipMap map{};
+  return map;
+}
+inline std::uint64_t ownerOf(const void* address) {
+  const auto bits = reinterpret_cast<std::uintptr_t>(address);
+  std::atomic<std::uint64_t>* leaf = ownershipMap().leaves[(bits >> 32) & 0xFFFF].load(std::memory_order_acquire);
+  return leaf == nullptr ? 0 : leaf[(bits >> granuleShift) & 0xFFFF].load(std::memory_order_relaxed);
+}
+inline void tagGranules(const void* start, std::size_t bytes, std::uint64_t tag) {
+  auto bits = reinterpret_cast<std::uintptr_t>(start);
+  const auto end = bits + bytes;
+  for (; bits < end; bits += granuleBytes) {
+    auto& slot = ownershipMap().leaves[(bits >> 32) & 0xFFFF];
+    std::atomic<std::uint64_t>* leaf = slot.load(std::memory_order_acquire);
+    if (leaf == nullptr) {
+      auto* fresh = static_cast<std::atomic<std::uint64_t>*>(std::calloc(std::size_t{1} << 16, sizeof(std::atomic<std::uint64_t>)));
+      if (fresh == nullptr) throw std::bad_alloc();
+      if (slot.compare_exchange_strong(leaf, fresh, std::memory_order_acq_rel)) leaf = fresh;
+      else std::free(fresh);
+    }
+    leaf[(bits >> granuleShift) & 0xFFFF].store(tag, std::memory_order_relaxed);
+  }
+}
+
+/** What a deferred count needs to be applied later without knowing its type. */
+struct DeferredCountOperations {
+  void (*addStrong)(void* object, std::uint32_t count);
+  void (*releaseStrong)(void* object);
+  void (*addWeak)(void* object, std::uint32_t count);
+  void (*releaseWeak)(void* object);
+};
+
+struct DeferredCount {
+  void* object;
+  const DeferredCountOperations* operations;
+  std::int64_t strong;
+  std::int64_t weak;
+};
+
+/** A size class's free cells left in a region's chunks at its end, handed to the joining thread's own pool. */
+struct Donation {
+  void (*donate)(void* head);
+  void* head;
+};
+
+struct ThreadRegion {
+  std::uint64_t tag = 0;
+  unsigned char* chunk = nullptr;
+  unsigned char* bump = nullptr;
+  unsigned char* limit = nullptr;
+  std::vector<DeferredCount> table;
+  std::vector<std::uint32_t> used;
+  std::size_t mask = 0;
+  DeferredCount* last = nullptr;
+  std::vector<Donation> donations;
+  std::vector<void (*)()> donors;
+  void* cycles = nullptr;
+  /** Where this thread's cycle candidates stood when the region began: what is below it is not this region's to filter. */
+  std::size_t candidateFloor = 0;
+
+  [[gnu::always_inline]] bool owns(const void* address) const {
+    const auto* bytes = static_cast<const unsigned char*>(address);
+    if (bytes >= chunk && bytes < limit) return true;
+    return ownerOf(address) == tag;
+  }
+
+  [[gnu::noinline]] void* takeChunk(std::size_t size, std::size_t align) {
+    const std::size_t bytes = size + align > regionChunkBytes ? (size + align + granuleBytes - 1) & ~(granuleBytes - 1) : regionChunkBytes;
+    void* memory = nullptr;
+    if (::posix_memalign(&memory, granuleBytes, bytes) != 0) throw std::bad_alloc();
+    tagGranules(memory, bytes, tag);
+    chunk = static_cast<unsigned char*>(memory);
+    bump = chunk;
+    limit = chunk + bytes;
+    return take(size, align);
+  }
+
+  [[gnu::always_inline]] void* take(std::size_t size, std::size_t align) {
+    auto bits = reinterpret_cast<std::uintptr_t>(bump);
+    bits = (bits + align - 1) & ~(static_cast<std::uintptr_t>(align) - 1);
+    auto* cell = reinterpret_cast<unsigned char*>(bits);
+    if (bump == nullptr || cell + size > limit) [[unlikely]] return takeChunk(size, align);
+    bump = cell + size;
+    return cell;
+  }
+
+  [[gnu::noinline]] void grow() {
+    std::vector<DeferredCount> old = std::move(table);
+    const std::size_t capacity = old.empty() ? 1024 : old.size() * 2;
+    table.assign(capacity, DeferredCount{nullptr, nullptr, 0, 0});
+    mask = capacity - 1;
+    used.clear();
+    last = nullptr;
+    for (const auto& entry : old) {
+      if (entry.object == nullptr) continue;
+      DeferredCount& slot = slotFor(entry.object);
+      slot = entry;
+    }
+  }
+
+  DeferredCount& slotFor(void* object) {
+    std::size_t index = static_cast<std::size_t>((reinterpret_cast<std::uintptr_t>(object) >> 4) * 0x9E3779B97F4A7C15ull >> 20) & mask;
+    for (;;) {
+      DeferredCount& slot = table[index];
+      if (slot.object == object) return slot;
+      if (slot.object == nullptr) {
+        slot.object = object;
+        used.push_back(static_cast<std::uint32_t>(index));
+        return slot;
+      }
+      index = (index + 1) & mask;
+    }
+  }
+
+  [[gnu::always_inline]] DeferredCount& deferred(void* object, const DeferredCountOperations* operations) {
+    if (last != nullptr && last->object == object) [[likely]] return *last;
+    if ((used.size() + 1) * 2 > table.size()) grow();
+    DeferredCount& slot = slotFor(object);
+    slot.operations = operations;
+    last = &slot;
+    return slot;
+  }
+
+  void deferStrong(void* object, const DeferredCountOperations* operations, std::int64_t delta) { deferred(object, operations).strong += delta; }
+  void deferWeak(void* object, const DeferredCountOperations* operations, std::int64_t delta) { deferred(object, operations).weak += delta; }
+};
+
+/** The region the CURRENT thread is running region code under; null everywhere else, which is every thread almost always. */
+inline thread_local ThreadRegion* activeRegion = nullptr;
+
+/**
+ * The address-keyed side tables -- expandos, pending and logged key orders,
+ * the key-table position cache -- are process-wide, because an object built
+ * on one thread is enumerated on another once its region joins. Inside a
+ * region every access to them takes this lock; outside one only the main
+ * thread runs, and nothing is taken. Recursive, because the table entry points
+ * call one another.
+ */
+inline std::recursive_mutex& sideTableMutex() {
+  static std::recursive_mutex mutex;
+  return mutex;
+}
+
+class SideTableGuard {
+ public:
+  SideTableGuard() : locked_(activeRegion != nullptr) {
+    if (locked_) sideTableMutex().lock();
+  }
+  ~SideTableGuard() {
+    if (locked_) sideTableMutex().unlock();
+  }
+  SideTableGuard(const SideTableGuard&) = delete;
+  SideTableGuard& operator=(const SideTableGuard&) = delete;
+
+ private:
+  bool locked_;
+};
+
+/** A thread that runs region code may own the object; any other object is foreign to it until the join. */
+[[noreturn]] [[gnu::noinline]] inline void failSharedGrowth() {
+  std::fputs("gea: a parallel task grew an array that existed before its region\n", stderr);
+  std::abort();
+}
+
+[[gnu::always_inline]] inline ThreadRegion* foreignRegionFor(const void* object) {
+  ThreadRegion* region = activeRegion;
+  if (region == nullptr) [[likely]] return nullptr;
+  return region->owns(object) ? nullptr : region;
+}
+
+}  // namespace parallel
+#endif
+
 template <std::size_t Size, std::size_t Align>
 struct AllocationPool {
   union Cell {
@@ -1378,6 +1610,9 @@ struct AllocationPool {
    * size class, so which one a cell came from is not a fact anything needs.
    */
   [[gnu::always_inline]] static void* take() {
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+    if (parallel::ThreadRegion* region = parallel::activeRegion) [[unlikely]] return takeInRegion(*region);
+#endif
     auto& pool = state();
     // A freed cell is the common case in a steady state, and it is three
     // instructions: inlined into `makeRef`, which saves the call and the
@@ -1424,11 +1659,72 @@ struct AllocationPool {
   }
 
   static void give(void* block) {
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+    if (parallel::ThreadRegion* region = parallel::activeRegion) [[unlikely]] return giveInRegion(*region, block);
+#endif
     auto& available = state().available;
     Cell* cell = static_cast<Cell*>(block);
     cell->next = available;
     available = cell;
   }
+
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+  /**
+   * This size class's cells inside the current region. A region allocates
+   * only from its own tagged chunks -- a cell off the thread's ordinary free
+   * list could be anywhere, and the region would not recognise what it built
+   * there as its own -- so a cell freed inside the region is kept here for
+   * reuse in the same region, and what is left at its end is donated to the
+   * joining thread's ordinary pool (`ThreadRegion::donations`).
+   */
+  struct RegionCells {
+    std::uint64_t tag = 0;
+    Cell* available = nullptr;
+  };
+  static RegionCells& regionCells() {
+    static thread_local RegionCells cells;
+    return cells;
+  }
+  static RegionCells& regionCellsFor(parallel::ThreadRegion& region) {
+    auto& cells = regionCells();
+    if (cells.tag != region.tag) [[unlikely]] {
+      cells.tag = region.tag;
+      cells.available = nullptr;
+      region.donors.push_back(&donateRegionCells);
+    }
+    return cells;
+  }
+  /** Runs on the region thread at its end: hand what is left to the record the joining thread drains. */
+  static void donateRegionCells() {
+    auto& cells = regionCells();
+    if (cells.available != nullptr && parallel::activeRegion != nullptr)
+      parallel::activeRegion->donations.push_back({&adoptDonatedCells, cells.available});
+    cells.available = nullptr;
+    cells.tag = 0;
+  }
+  /** Runs on the joining thread: the region's leftover cells join its ordinary free list. */
+  static void adoptDonatedCells(void* head) {
+    Cell* tail = static_cast<Cell*>(head);
+    while (tail->next != nullptr) tail = tail->next;
+    auto& available = state().available;
+    tail->next = available;
+    available = static_cast<Cell*>(head);
+  }
+  [[gnu::noinline]] static void* takeInRegion(parallel::ThreadRegion& region) {
+    auto& cells = regionCellsFor(region);
+    if (Cell* cell = cells.available) {
+      cells.available = cell->next;
+      return cell;
+    }
+    return region.take(sizeof(Cell), alignof(Cell));
+  }
+  [[gnu::noinline]] static void giveInRegion(parallel::ThreadRegion& region, void* block) {
+    auto& cells = regionCellsFor(region);
+    Cell* cell = static_cast<Cell*>(block);
+    cell->next = cells.available;
+    cells.available = cell;
+  }
+#endif
 
   /**
    * One chunk, on HUGE pages where the kernel will give them.
@@ -3256,11 +3552,59 @@ inline void configureAutomaticCycleCollection(std::chrono::milliseconds interval
       interval.count() != 0 || state.candidates.size() >= state.filterAt || detail::dipCache().count >= detail::dipCache().limit;
 }
 
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+namespace detail::parallel {
+/**
+ * The safepoint filter, for a thread inside a parallel region.
+ *
+ * No collection runs in a region -- a trial deletion rewrites counts across a
+ * whole subgraph, and other threads are reading it -- so before this, every
+ * dip a task made waited for the join, and so did the block of every buffered
+ * object that died meanwhile: a task building and walking a tree buffered
+ * each node it walked, and a region of such tasks held every tree it had ever
+ * built (4 GB for binary-trees on 20 threads, where one thread used 14 MB).
+ *
+ * The filter is safe here where the collector is not, because it touches only
+ * the entries it examines: it frees the dead ones, drops the edgeless ones and
+ * reclaims self-loops, and a destructor it runs releases fields through the
+ * same handles task code uses, which defer any count on an object the region
+ * does not own. So it examines only entries this region owns and buffered
+ * after it began: the joining thread's own earlier dips, which can spill into
+ * its buffer mid-region, are moved aside untouched and left for the join.
+ */
+inline void filterRegionCandidates(ThreadRegion& region, CycleState& state) {
+  auto& list = state.candidates;
+  const std::size_t floor = std::min(region.candidateFloor, list.size());
+  const auto owned = std::partition(list.begin() + static_cast<std::ptrdiff_t>(floor), list.end(),
+                                    [&](const CycleReference& reference) { return !region.owns(reference.counts); });
+  const auto from = static_cast<std::size_t>(owned - list.begin());
+  state.collecting = true;
+  try {
+    filterCycleCandidates(list, from, /* pin = */ true, /* prefix = */ false);
+  } catch (...) {
+    state.collecting = false;
+    throw;
+  }
+  state.collecting = false;
+  state.filterAt = list.size() + (state.filterInterval != 0 ? state.filterInterval : state.candidateThreshold);
+}
+}  // namespace detail::parallel
+#endif
+
 /** Allocation-pressure safepoint. Ref::release only queues candidates; it
  * never traces an object while its container may be changing. */
 inline void collectCyclesIfNeeded() {
   if (!detail::cycleSafepointArmed()) return;
   auto& state = detail::cycleState();
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+  if (detail::parallel::ThreadRegion* region = detail::parallel::activeRegion) [[unlikely]] {
+    if (!state.collecting && state.candidates.size() >= state.filterAt) detail::parallel::filterRegionCandidates(*region, state);
+    // Disarmed until the buffer reaches the new bound: the join re-arms the
+    // joining thread for whatever is still due.
+    detail::cycleSafepointArmed() = false;
+    return;
+  }
+#endif
   // A postponed answer (deferral, collection in progress) leaves the
   // safepoint armed: the buffer is still at the threshold, and the first
   // safepoint after the deferral ends must answer it even when nothing is
@@ -3490,6 +3834,13 @@ struct Ref : detail::RefStorage {
    */
   [[gnu::always_inline]] void releaseSharedQuiet() {
     if (erased_ == nullptr) return;
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+    if (detail::parallel::ThreadRegion* region = detail::parallel::foreignRegionFor(erased_)) [[unlikely]] {
+      region->deferStrong(erased_, &deferredCountOperations, -1);
+      erased_ = nullptr;
+      return;
+    }
+#endif
     detail::RefCounts* counts = detail::refCountsOf(pointer());
     if (counts->strong > 1) {
       --counts->strong;
@@ -3533,10 +3884,38 @@ struct Ref : detail::RefStorage {
     return handle;
   }
 
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+  /**
+   * Points a handle every thread may read at `object`, retaining it, when it
+   * does not already: a class's static method state, which the first
+   * construction installs and every later one only confirms. A parallel region
+   * can make two tasks the first at once, so the confirmation is an acquire
+   * load and the install happens once, under a lock.
+   */
+  static void installShared(Ref& slot, T* object) {
+    std::atomic_ref<void*> cell(slot.erased_);
+    if (cell.load(std::memory_order_acquire) == object) return;
+    static std::mutex mutex;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (cell.load(std::memory_order_relaxed) == object) return;
+    Ref next = adopt(object, true);
+    // `next` leaves owning what the slot held, and releases it on return.
+    next.erased_ = cell.exchange(next.erased_, std::memory_order_acq_rel);
+  }
+#endif
+
  private:
   friend struct WeakRef<T>;
 
   [[gnu::always_inline]] void retain() {
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+    if (erased_ != nullptr) {
+      if (detail::parallel::ThreadRegion* region = detail::parallel::foreignRegionFor(erased_)) [[unlikely]] {
+        region->deferStrong(erased_, &deferredCountOperations, 1);
+        return;
+      }
+    }
+#endif
     if (erased_ != nullptr) ++detail::refCountsOf(pointer())->strong;
 #if defined(GEA_PROFILE_ALLOCATIONS)
     if (erased_ != nullptr && static_cast<const void*>(erased_) == detail::leakProbeTarget()) detail::leakProbeEvent("retain", pointer(), detail::refCountsOf(pointer())->strong);
@@ -3575,6 +3954,12 @@ struct Ref : detail::RefStorage {
 #endif
 
   [[gnu::always_inline]] static void releasePointer(T* pointer) {
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+    if (detail::parallel::ThreadRegion* region = detail::parallel::foreignRegionFor(pointer)) [[unlikely]] {
+      region->deferStrong(const_cast<void*>(static_cast<const void*>(pointer)), &deferredCountOperations, -1);
+      return;
+    }
+#endif
     detail::RefCounts* counts = detail::refCountsOf(pointer);
 #if defined(GEA_MEASURE_NEVER_FREE)
     // A measurement build only: every object lives forever, so what remains is
@@ -3674,6 +4059,17 @@ struct Ref : detail::RefStorage {
 
   /** The object, typed: the base stores it erased so every handle type reads the one member under one access path (see `detail::RefStorage`). */
   [[gnu::always_inline]] T* pointer() const { return static_cast<T*>(erased_); }
+
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+  // A region thread's count operations on an object it does not own, applied
+  // by the joining thread once no region code runs (see `detail::parallel`).
+  static void addStrongDeferred(void* object, std::uint32_t count) { detail::refCountsOf(static_cast<T*>(object))->strong += count; }
+  static void releaseStrongDeferred(void* object) { releasePointer(static_cast<T*>(object)); }
+  static void addWeakDeferred(void* object, std::uint32_t count) { detail::refCountsOf(static_cast<T*>(object))->weak += count; }
+  static void releaseWeakDeferred(void* object);
+  static constexpr detail::parallel::DeferredCountOperations deferredCountOperations{&addStrongDeferred, &releaseStrongDeferred, &addWeakDeferred,
+                                                                                     &releaseWeakDeferred};
+#endif
 };
 
 template <typename Element>
@@ -3808,13 +4204,9 @@ template <typename T>
 struct WeakRef {
   WeakRef() = default;
 
-  WeakRef(const Ref<T>& strong) : pointer_(strong.get()) {
-    if (pointer_ != nullptr) ++detail::refCountsOf(pointer_)->weak;
-  }
+  WeakRef(const Ref<T>& strong) : pointer_(strong.get()) { retainWeak(); }
 
-  WeakRef(const WeakRef& other) : pointer_(other.pointer_) {
-    if (pointer_ != nullptr) ++detail::refCountsOf(pointer_)->weak;
-  }
+  WeakRef(const WeakRef& other) : pointer_(other.pointer_) { retainWeak(); }
 
   WeakRef& operator=(const WeakRef& other) {
     WeakRef copy(other);
@@ -3824,9 +4216,18 @@ struct WeakRef {
     return *this;
   }
 
-  ~WeakRef() {
-    if (pointer_ == nullptr) return;
-    detail::RefCounts* counts = detail::refCountsOf(pointer_);
+  ~WeakRef() { releaseWeakPointer(pointer_); }
+
+  /** The last-handle-of-either-kind path of `~WeakRef`, for one weak count on `pointer`. */
+  static void releaseWeakPointer(T* pointer) {
+    if (pointer == nullptr) return;
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+    if (detail::parallel::ThreadRegion* region = detail::parallel::foreignRegionFor(pointer)) [[unlikely]] {
+      region->deferWeak(const_cast<void*>(static_cast<const void*>(pointer)), &Ref<T>::deferredCountOperations, -1);
+      return;
+    }
+#endif
+    detail::RefCounts* counts = detail::refCountsOf(pointer);
     if (--counts->weak != 0 || counts->strong != 0) return;
     // The block outlives the object, so the LAST handle of either kind frees
     // it -- and a standalone type's block has no table to ask, exactly as its
@@ -3834,7 +4235,7 @@ struct WeakRef {
     if constexpr (detail::refStandalone<T>) {
       detail::AllocationPool<detail::refBlockSize<T>, detail::refBlockAlign<T>>::give(counts);
     } else {
-      detail::refHeaderOf(pointer_)->operations->release(counts);
+      detail::refHeaderOf(pointer)->operations->release(counts);
     }
   }
 
@@ -3844,8 +4245,26 @@ struct WeakRef {
   Ref<T> lock() const { return expired() ? Ref<T>{} : Ref<T>::adopt(pointer_, true); }
 
  private:
+  void retainWeak() {
+    if (pointer_ == nullptr) return;
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+    if (detail::parallel::ThreadRegion* region = detail::parallel::foreignRegionFor(pointer_)) [[unlikely]] {
+      region->deferWeak(static_cast<void*>(pointer_), &Ref<T>::deferredCountOperations, 1);
+      return;
+    }
+#endif
+    ++detail::refCountsOf(pointer_)->weak;
+  }
+
   T* pointer_ = nullptr;
 };
+
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+template <typename T>
+void Ref<T>::releaseWeakDeferred(void* object) {
+  WeakRef<T>::releaseWeakPointer(static_cast<T*>(object));
+}
+#endif
 
 /**
  * `std::make_shared`'s replacement: one pooled block holding the header and
@@ -3898,6 +4317,234 @@ inline Ref<T> makeRef(Arguments&&... arguments) {
 #endif
   return Ref<T>::adopt(object);
 }
+
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+namespace detail::parallel {
+
+/**
+ * The threads that run region tasks, and the one region in flight.
+ *
+ * Persistent workers sleep on a condition variable between regions; the
+ * thread that starts a region runs tasks too, under a region of its own, so a
+ * machine of N hardware threads runs a region on N of them. Tasks are claimed
+ * from one counter in index order, which is what makes the exception contract
+ * exact: a task that throws or DECIDES (returns true: `every` found a false,
+ * `find` a match) cancels only the tasks ABOVE it; every task below it has
+ * already been claimed and runs to completion. The join rethrows the
+ * lowest-index failure below the lowest decision -- the one a sequential loop
+ * would have stopped at -- and discards any failure above it, which a
+ * sequential loop would never have reached.
+ * A region that starts inside a region runs its tasks inline, under the
+ * region already active on that thread.
+ */
+class RegionPool {
+ public:
+  static RegionPool& instance() {
+    static RegionPool* pool = new RegionPool;
+    return *pool;
+  }
+
+  std::size_t threads() const { return workers_.size() + 1; }
+
+  void run(std::size_t count, bool (*task)(void* context, std::size_t index), void* context) {
+    std::unique_lock serial(regionMutex_);
+    const std::uint64_t epoch = ++epoch_;
+    task_ = task;
+    context_ = context;
+    count_ = count;
+    next_.store(0, std::memory_order_relaxed);
+    cancelAbove_.store(count, std::memory_order_relaxed);
+    failedIndex_ = count;
+    decidedIndex_ = count;
+    failure_ = nullptr;
+    const std::size_t helpers = std::min(workers_.size(), count - 1);
+    {
+      std::lock_guard lock(mutex_);
+      generation_ = epoch;
+      helpers_ = helpers;
+      finished_ = 0;
+    }
+    wake_.notify_all();
+    work(regions_[0], epoch, 1);
+    {
+      std::unique_lock lock(mutex_);
+      done_.wait(lock, [&] { return finished_ == helpers_; });
+    }
+    join(helpers + 1);
+    if (failure_ != nullptr && failedIndex_ < decidedIndex_) {
+      std::exception_ptr failure = failure_;
+      failure_ = nullptr;
+      std::rethrow_exception(failure);
+    }
+  }
+
+ private:
+  RegionPool() {
+    std::size_t count = std::thread::hardware_concurrency();
+    if (const char* text = std::getenv("GEA_PARALLEL_THREADS")) {
+      const long requested = std::atol(text);
+      if (requested > 0) count = static_cast<std::size_t>(requested);
+    }
+    if (count == 0) count = 1;
+    if (count > 255) count = 255;
+    regions_ = std::vector<ThreadRegion>(count);
+    for (std::size_t slot = 1; slot < count; ++slot) workers_.emplace_back([this, slot] { serve(slot); });
+    for (auto& worker : workers_) worker.detach();
+  }
+
+  void serve(std::size_t slot) {
+    std::uint64_t seen = 0;
+    for (;;) {
+      std::uint64_t epoch;
+      {
+        std::unique_lock lock(mutex_);
+        wake_.wait(lock, [&] { return generation_ != seen && slot <= helpers_; });
+        epoch = generation_;
+        seen = epoch;
+      }
+      work(regions_[slot], epoch, slot + 1);
+      {
+        std::lock_guard lock(mutex_);
+        ++finished_;
+      }
+      done_.notify_one();
+    }
+  }
+
+  void work(ThreadRegion& region, std::uint64_t epoch, std::size_t slot) {
+    region.tag = (epoch << 8) | slot;
+    region.chunk = region.bump = region.limit = nullptr;
+    for (const std::uint32_t index : region.used) region.table[index] = DeferredCount{nullptr, nullptr, 0, 0};
+    region.used.clear();
+    region.last = nullptr;
+    region.donations.clear();
+    region.donors.clear();
+    auto& cycles = cycleState();
+    region.cycles = &cycles;
+    region.candidateFloor = cycles.candidates.size();
+    ++cycles.deferDepth;
+    activeRegion = &region;
+    for (;;) {
+      const std::size_t index = next_.fetch_add(1, std::memory_order_relaxed);
+      if (index >= count_ || index > cancelAbove_.load(std::memory_order_relaxed)) break;
+      try {
+        if (task_(context_, index)) {
+          std::lock_guard lock(failureMutex_);
+          if (index < decidedIndex_) {
+            decidedIndex_ = index;
+            if (index < cancelAbove_.load(std::memory_order_relaxed)) cancelAbove_.store(index, std::memory_order_relaxed);
+          }
+        }
+      } catch (...) {
+        std::lock_guard lock(failureMutex_);
+        if (index < failedIndex_) {
+          failedIndex_ = index;
+          failure_ = std::current_exception();
+          if (index < cancelAbove_.load(std::memory_order_relaxed)) cancelAbove_.store(index, std::memory_order_relaxed);
+        }
+      }
+    }
+    for (auto donor : region.donors) donor();
+    flushDipCache(cycles);
+    activeRegion = nullptr;
+    --cycles.deferDepth;
+  }
+
+  /** Single-threaded again: every region thread is parked, so the deferred counts apply as plain writes. */
+  void join(std::size_t participants) {
+    for (std::size_t slot = 0; slot < participants; ++slot) {
+      for (const std::uint32_t index : regions_[slot].used) {
+        const DeferredCount& entry = regions_[slot].table[index];
+        if (entry.strong > 0) entry.operations->addStrong(entry.object, static_cast<std::uint32_t>(entry.strong));
+        if (entry.weak > 0) entry.operations->addWeak(entry.object, static_cast<std::uint32_t>(entry.weak));
+      }
+    }
+    for (std::size_t slot = 0; slot < participants; ++slot) {
+      for (const Donation& donation : regions_[slot].donations) donation.donate(donation.head);
+      regions_[slot].donations.clear();
+    }
+    auto& mine = cycleState();
+    for (std::size_t slot = 1; slot < participants; ++slot) {
+      auto& theirs = *static_cast<CycleState*>(regions_[slot].cycles);
+      if (theirs.candidates.empty()) continue;
+      mine.candidates.insert(mine.candidates.end(), theirs.candidates.begin(), theirs.candidates.end());
+      theirs.candidates.clear();
+      theirs.filtered = 0;
+      theirs.recentSlots.fill(0);
+    }
+    for (std::size_t slot = 0; slot < participants; ++slot) {
+      for (const std::uint32_t index : regions_[slot].used) {
+        const DeferredCount& entry = regions_[slot].table[index];
+        for (std::int64_t step = entry.strong; step < 0; ++step) entry.operations->releaseStrong(entry.object);
+        for (std::int64_t step = entry.weak; step < 0; ++step) entry.operations->releaseWeak(entry.object);
+      }
+    }
+    if (mine.candidates.size() >= mine.filterAt) cycleSafepointArmed() = true;
+  }
+
+  std::vector<ThreadRegion> regions_;
+  std::vector<std::thread> workers_;
+  std::mutex regionMutex_;
+  std::mutex mutex_;
+  std::condition_variable wake_;
+  std::condition_variable done_;
+  std::uint64_t epoch_ = 0;
+  std::uint64_t generation_ = 0;
+  std::size_t helpers_ = 0;
+  std::size_t finished_ = 0;
+  bool (*task_)(void*, std::size_t) = nullptr;
+  void* context_ = nullptr;
+  std::size_t count_ = 0;
+  std::atomic<std::size_t> next_{0};
+  std::atomic<std::size_t> cancelAbove_{0};
+  std::mutex failureMutex_;
+  std::size_t failedIndex_ = 0;
+  std::size_t decidedIndex_ = 0;
+  std::exception_ptr failure_;
+};
+
+/**
+ * Runs `body(index)` for every index in [0, count) until one returns true, on
+ * every region thread when there is more than one task to share. Inline, and
+ * so exactly the sequential loop, when it cannot share: one task, one thread,
+ * or already inside a region.
+ */
+template <typename Body>
+inline void runRegion(std::size_t count, Body& body) {
+  if (count == 0) return;
+  auto task = +[](void* context, std::size_t index) -> bool { return (*static_cast<Body*>(context))(index); };
+  if (activeRegion != nullptr || count == 1 || RegionPool::instance().threads() == 1) {
+    for (std::size_t index = 0; index < count; ++index) {
+      if (task(&body, index)) return;
+    }
+    return;
+  }
+  RegionPool::instance().run(count, task, &body);
+}
+
+}  // namespace detail::parallel
+
+namespace parallel {
+
+/**
+ * `tasks(count, body)` of `@geastack/parallel/native`: `body(index)` for every
+ * index in [0, count) until one decides, on every region thread, joined before
+ * it returns. The compiler certified `body` before it emitted this call
+ * (`ir/certify/parallel-region.ts`).
+ */
+template <typename Count, typename Body>
+inline void tasks(Count count, const Body& body) {
+  const double requested = static_cast<double>(count);
+  if (!(requested > 0)) return;
+  const auto total = static_cast<std::size_t>(requested);
+  // The caller's frame holds the body for the whole region, so no task needs
+  // a count of its own on the environment: `callStable`, not `call`.
+  auto run = [&body](std::size_t index) -> bool { return body.callStable(static_cast<double>(index)); };
+  detail::parallel::runRegion(total, run);
+}
+
+}  // namespace parallel
+#endif
 
 /**
  * The one immutable empty `T` every proven read-only empty literal of that
@@ -7078,6 +7725,11 @@ struct ArrayObject {
       if (index < undefineds.size()) undefineds[index] = 0;
       return;
     }
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+    // A task may store only into an array's existing slots unless it built the
+    // array: growing one moves every other task's slot out from under it.
+    if (detail::parallel::foreignRegionFor(this) != nullptr) [[unlikely]] detail::parallel::failSharedGrowth();
+#endif
     if (index == cells.size() && cells.size() < cells.capacity() && undefineds.empty()) {
       cells.push_back(Cell{value});
       return;
@@ -11940,7 +12592,13 @@ inline gea::Ref<Set<K>> setFromArray(gea::Ref<ArrayObject<K>>&& source) {
   if (!source) return gea::makeRef<Set<K>>();
   const detail::RefCounts* counts = detail::refCountsOf(source.get());
   constexpr std::uint32_t weakFlags = detail::cycleBuffered | detail::expandoTagged | detail::keyOrderPending | detail::expandoEntry | detail::cycleMature | detail::cyclePermanent;
-  if (counts->strong != 1 || (counts->weak & ~weakFlags) != 0) return setFromArray(static_cast<const gea::Ref<ArrayObject<K>>&>(source));
+  bool sole = counts->strong == 1 && (counts->weak & ~weakFlags) == 0;
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+  // A count the region thread does not own may be missing its deferred
+  // holders: one of them would see its array emptied under it.
+  sole = sole && detail::parallel::foreignRegionFor(source.get()) == nullptr;
+#endif
+  if (!sole) return setFromArray(static_cast<const gea::Ref<ArrayObject<K>>&>(source));
   gea::Ref<Set<K>> result = gea::makeRef<Set<K>>();
   ArrayObject<K>& elements = *source;
   for (std::size_t index = 0; index < elements.size(); ++index) {
@@ -22164,12 +22822,14 @@ inline auto &nativeExpandos() {
 // A caller holding the object can inspect integrity without retaining it or
 // the table. Creation still records weak ownership to reject reused addresses.
 inline const DynamicObject *findNativeExpando(const void *address) {
+  GEA_PARALLEL_SIDE_TABLE
   const auto &entries = nativeExpandos();
   const auto found = entries.find(address);
   return found != entries.end() && !found->second.owner.expired() ? found->second.table.get() : nullptr;
 }
 
 inline gea::Ref<DynamicObject> expandoFor(const gea::Ref<void>& payload, bool create) {
+  GEA_PARALLEL_SIDE_TABLE
   const void* address = payload.get();
   // A lookup that will not create answers from the tag bit alone: an object
   // never given an expando is untagged, and a record view asks this once per
@@ -22302,6 +22962,7 @@ inline NativeOwnKeyOrder& nativeOwnKeyOrderFor(const gea::Ref<void>& payload);
  * one.
  */
 inline const std::vector<std::size_t>& nativeKeyTablePositions(const NativeLayoutInfo& layout, const std::string_view* keys, std::uint32_t count) {
+  GEA_PARALLEL_SIDE_TABLE
   struct TableKey {
     const NativeLayoutInfo* layout;
     const std::string_view* keys;
@@ -22335,6 +22996,7 @@ inline const std::vector<std::size_t>& nativeKeyTablePositions(const NativeLayou
 
 /** Build the log a pend deferred; true when `address` had one. */
 inline bool materializePendingNativeKeyOrder(const void* address) {
+  GEA_PARALLEL_SIDE_TABLE
   RefCounts* counts = refCountsOf(const_cast<void*>(address));
   if ((counts->weak & keyOrderPending) == 0) return false;
   counts->weak &= ~keyOrderPending;
@@ -22394,6 +23056,7 @@ inline bool materializePendingNativeKeyOrder(const void* address) {
 
 /** The key table a live object's pend holds (`keyOrderPending` set), wherever the pend is kept. */
 inline bool pendingNativeKeyTable(const void* address, const std::string_view*& keys, std::uint32_t& count) {
+  GEA_PARALLEL_SIDE_TABLE
   if ((refCountsOf(const_cast<void*>(address))->weak & keyOrderPending) == 0) return false;
   if (const InlineKeyOrder* slot = inlineKeyOrderOf(address)) {
     if (slot->positional) return false;
@@ -22410,6 +23073,7 @@ inline bool pendingNativeKeyTable(const void* address, const std::string_view*& 
 
 /** The creation-order log of a live object, or null while its keys are in layout order. */
 inline NativeOwnKeyOrder* findNativeOwnKeyOrder(const void* address) {
+  GEA_PARALLEL_SIDE_TABLE
   if (address == nullptr || (refCountsOf(const_cast<void*>(address))->weak & expandoTagged) == 0) return nullptr;
   materializePendingNativeKeyOrder(address);
   if (const InlineKeyOrder* slot = inlineKeyOrderOf(address)) return slot->order;
@@ -22420,6 +23084,7 @@ inline NativeOwnKeyOrder* findNativeOwnKeyOrder(const void* address) {
 }
 
 inline NativeOwnKeyOrder& nativeOwnKeyOrderFor(const gea::Ref<void>& payload) {
+  GEA_PARALLEL_SIDE_TABLE
   materializePendingNativeKeyOrder(payload.get());
   if (InlineKeyOrder* inlineSlot = inlineKeyOrderOf(payload.get())) {
     if (inlineSlot->order == nullptr) {
@@ -22562,6 +23227,7 @@ inline void seedNativeOwnKeyOrder(const gea::Ref<void>& payload, const std::vect
  */
 template <typename T>
 void pendNativeKeyOrder(const T* self, const std::string_view* keys, std::uint32_t count) {
+  GEA_PARALLEL_SIDE_TABLE
 #if defined(GEA_MEASURE_NO_DECLARED_KEY_ORDER)
   return;
 #endif
@@ -22757,6 +23423,7 @@ struct NativeCopiedKey {
  */
 template <typename T>
 bool nativeCopiedKeysInOrder(const T& self, NativeOwnKeyOrder& order, std::vector<NativeCopiedKey>& out) {
+  GEA_PARALLEL_SIDE_TABLE
   if constexpr (requires { self.gea_dynamic.size(); })
     if (self.gea_dynamic.size() != 0) return false;
   order.useDeclaredLayout(&nativeLayoutInfoOf(self));
@@ -22807,6 +23474,7 @@ bool nativeCopiedKeysInOrder(const T& self, NativeOwnKeyOrder& order, std::vecto
  */
 template <typename T>
 bool nativeLayoutKeysInOrder(const T& self, std::vector<NativeCopiedKey>& out) {
+  GEA_PARALLEL_SIDE_TABLE
   if constexpr (requires { self.gea_dynamic.size(); })
     if (self.gea_dynamic.size() != 0) return false;
   if (!nativeExpandos().empty()) {
@@ -22876,6 +23544,7 @@ enum class SourceOrderVerdict { follows, differs, refused };
 template <typename Source, typename Receiver>
 SourceOrderVerdict sourceOrderAgainstReceiverLayout(const Source& source, NativeOwnKeyOrder& order, const Receiver& receiver,
                                                     std::initializer_list<const char*> later, bool* sawHidden = nullptr) {
+  GEA_PARALLEL_SIDE_TABLE
   if constexpr (requires { source.gea_dynamic.size(); })
     if (source.gea_dynamic.size() != 0) return SourceOrderVerdict::refused;
   // Any expando key -- a symbol included, which a spread copies too -- is
@@ -22973,6 +23642,7 @@ void learnCopiedKeysInOrder(NativeOwnKeyOrder& into, const std::vector<NativeCop
  */
 template <typename T>
 bool nativeDeclaredKeyViewsInOrder(const T& self, NativeOwnKeyOrder& order, std::vector<std::string_view>& out) {
+  GEA_PARALLEL_SIDE_TABLE
   if constexpr (requires { self.gea_dynamic.size(); })
     if (self.gea_dynamic.size() != 0) return false;
   if (!nativeExpandos().empty()) {
@@ -23124,6 +23794,7 @@ inline NativeDeclaredKeyPositionHint (&nativeDeclaredKeyPositionHints())[256] {
 
 template <typename T>
 void noteNativeDeclaredKeyCreated(const T* self, std::string_view key) {
+  GEA_PARALLEL_SIDE_TABLE
 #if defined(GEA_MEASURE_NO_DECLARED_KEY_ORDER)
   return;
 #endif
@@ -23185,6 +23856,7 @@ void noteNativeDeclaredKeyCreated(const gea::Ref<T>& self, std::string_view key)
 }
 
 inline void dropNativeExpando(const void* object, RefCounts* counts) {
+  GEA_PARALLEL_SIDE_TABLE
   const std::uint32_t held = counts->weak;
   counts->weak &= ~(expandoTagged | keyOrderPending | expandoEntry);
   // A record's pend lives in the record and dies with it (`~InlineKeyOrder`).
@@ -25082,6 +25754,7 @@ bool spreadSourceIntoPendedPrefix(const gea::Ref<T>& source, const gea::Ref<Rece
  */
 template <typename T, typename Receiver, typename Each>
 void copyExpandoKeysKeepingOrder(const gea::Ref<T>& source, const gea::Ref<Receiver>& receiver, Each& each) {
+  GEA_PARALLEL_SIDE_TABLE
   if (nativeExpandos().empty()) return;
   const DynamicObject* expando = findNativeExpando(source.get());
   if (expando == nullptr) return;
@@ -25127,6 +25800,7 @@ bool nativeRecordIsUndecorated(const gea::Ref<Receiver>& receiver) {
 template <typename T, typename Receiver, typename Each, typename StaticCopy>
 bool copyOwnPropertiesInCreationOrderWith(const gea::Ref<T>& source, const gea::Ref<Receiver>& receiver, Each&& each, StaticCopy&& staticCopy,
                                           std::initializer_list<const char*> later = {}) {
+  GEA_PARALLEL_SIDE_TABLE
   // Only the layout table is needed here: the static copy moves every declared
   // field natively and the order is learned from presence bits. The Value
   // protocol serves just the source's expando keys, below, so a record the
@@ -41658,6 +42332,7 @@ namespace gea::json {
  * `first` is whether nothing has been written inside the braces yet.
  */
 inline void writeNativeExpandoMembers(std::string& out, const void* address, bool first) {
+  GEA_PARALLEL_SIDE_TABLE
   if (gea::detail::nativeExpandos().empty()) return;
   const gea::DynamicObject* expando = gea::detail::findNativeExpando(address);
   if (expando == nullptr) return;

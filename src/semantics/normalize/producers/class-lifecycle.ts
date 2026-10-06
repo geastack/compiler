@@ -1,6 +1,6 @@
 import ts from 'typescript'
 import type { DeclarationId, OperationId } from '../../../identity/ids.js'
-import { operationId, operationOfResult } from '../../../identity/ids.js'
+import { operationId, operationOfResult, semanticResultId } from '../../../identity/ids.js'
 import type { PrimitiveFamily } from '../../model/coverage.js'
 import type { SemanticEdge } from '../../model/edges.js'
 import type {
@@ -664,7 +664,50 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
 
     const receiverType = context.types.instanceTypeAt(classNode)
     const valueType = context.types.typeAt(node)
-    const bound = parameterBindingResultOf(node, context.identities)
+
+    // The stored value is a READ of the parameter's binding, the same
+    // reference/binding-read pair a written `this.name = name` mints -- not
+    // the binding's own result, which lowers to the formal itself. Cited
+    // directly, the formal had two consuming uses (initializing its cell, and
+    // this store), so it was never the last use of anything and the store
+    // copied it: one count up and one dip down per field per construction,
+    // and on a traced class every dip is a cycle candidate (a parameter-
+    // property tree node spent three quarters of its construction in the
+    // collector). A read is a value of its own, and dies at this store.
+    const parameterDeclaration = context.identities.declarationIdOf(node)
+    const referenceId = mintOperationId(context.ordinals, candidate.id, 'reference')
+    const parameterReference: ReferenceOperation = {
+      id: referenceId,
+      family: 'reference',
+      form: 'identifier',
+      strict: true,
+      unresolvableThrows: false,
+      hasNoCell: false,
+      caller: candidate.caller,
+      operands: [],
+      results: [mintResult(referenceId, 'reference', valueType)],
+      completion: normalCompletion,
+      effects: { ...pureEffects, readsMutableState: true },
+      evaluationOrdinal: candidate.evaluationOrdinal
+    }
+    const readId = mintOperationId(context.ordinals, candidate.id, 'binding')
+    const parameterRead: BindingOperation = {
+      id: readId,
+      family: 'binding',
+      action: 'read',
+      declaration: parameterDeclaration,
+      mutable: true,
+      temporalDeadZone: false,
+      caller: candidate.caller,
+      operands: [
+        operand('reference', 0, { kind: 'result', result: semanticResultId(referenceId, 'reference') }, valueType, { kind: 'provenance' })
+      ],
+      results: [mintResult(readId, 'value', valueType)],
+      completion: normalCompletion,
+      effects: { ...pureEffects, readsMutableState: true },
+      evaluationOrdinal: candidate.evaluationOrdinal
+    }
+    const bound = semanticResultId(readId, 'value')
 
     const receiverId = mintOperationId(context.ordinals, context.identities.nodeIdOf(constructorNode), 'reference')
     const receiverResult = mintResult(receiverId, 'value', receiverType)
@@ -709,6 +752,9 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
       evaluationOrdinal: candidate.evaluationOrdinal
     }
     const edges: SemanticEdge[] = [
+      { kind: 'value', result: semanticResultId(referenceId, 'reference'), to: readId, role: 'reference', ordinal: 0 },
+      // The cell holds the argument (or its default) once the parameter is bound.
+      { kind: 'evaluation', from: operationOfResult(parameterBindingResultOf(node, context.identities)), to: readId },
       { kind: 'value', result: receiverResult.id, to: storeId, role: 'receiver', ordinal: 0 },
       { kind: 'value', result: bound, to: storeId, role: 'value', ordinal: 0 }
     ]
@@ -727,7 +773,7 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
     if (superCall) {
       edges.push({ kind: 'evaluation', from: operationId(context.identities.nodeIdOf(superCall), 'invocation', 0), to: storeId })
     }
-    return { kind: 'operations', operations: [receiver, store], edges }
+    return { kind: 'operations', operations: [parameterReference, parameterRead, receiver, store], edges }
   }
 
   /** Shared prelude for a class-element candidate: locate it among its siblings. */

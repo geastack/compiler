@@ -12,6 +12,7 @@ import type { SemanticOperation } from '../semantics/model/operations.js'
 import type { DeadTypeofGuardCensus } from '../semantics/normalize/dead-typeof-guards.js'
 import { propertyAccessKeysOf } from './certify/property-access.js'
 import { runtimeHelperKeysOf } from './certify/runtime-helper.js'
+import { parallelRegionRefusalsOf } from './certify/parallel-region.js'
 import type { IrLoweringBlocker } from './lower.js'
 import type { SlotDrift } from './lower-operands.js'
 import { allOperationsOf, type IrBody, type IrOperation } from './model.js'
@@ -57,7 +58,8 @@ export const capabilityFamilies = [
   'conversion',
   'native-boundary',
   'runtime-helper',
-  'abrupt-edge'
+  'abrupt-edge',
+  'parallel-region'
 ] as const
 
 export type CapabilityFamily = (typeof capabilityFamilies)[number]
@@ -112,6 +114,20 @@ export interface CertifyInput {
   readonly classes: ReadonlyMap<DeclarationId, ClassLayout>
   /** Ambient value declarations rendered as `extern` references (`frontend.externalBindings`). */
   readonly externalBindings: ReadonlySet<DeclarationId>
+  /**
+   * The host functions the plugins run as parallel regions
+   * (`PluginCapabilities.parallelRegionEntries`). Absent for a program no
+   * plugin gives a region.
+   */
+  readonly parallelRegionEntries?: ReadonlySet<string>
+  /**
+   * Display only: how a parallel-region refusal names a variable and places
+   * its site, so a user reads `total` at `main.ts:12:5` rather than identities.
+   */
+  readonly parallelRegionSource?: {
+    readonly nameOfDeclaration: (declaration: DeclarationId) => string | null
+    readonly locationOfLineage: (lineage: SemanticResultId) => string | null
+  }
   readonly deadTypeofGuards: DeadTypeofGuardCensus
   /**
    * The semantic graph, reached only through `operationOfResult(lineage)`.
@@ -543,6 +559,8 @@ const verdictOf = (demand: CapabilityDemand, ctx: CertifyContext): Decision => {
       return registered(false, family, discriminator)
     case 'abrupt-edge':
       return registered(manifest.abruptEdgeHandlers.has(discriminator), family, discriminator)
+    case 'parallel-region':
+      return { verdict: 'unsupported', reason: `${demand.key} was demanded without a verdict` }
   }
 }
 
@@ -666,6 +684,32 @@ export const certifyIr = (input: CertifyInput): IrCertification => {
       for (const operation of allOperationsOf(block)) {
         for (const demand of capabilityKeysOf(operation, ctx)) decide(owner, demand, ctx, operation)
       }
+    }
+  }
+
+  // A parallel region is certified as a whole: whether a write races depends on
+  // what every body the region reaches can hold, so this family is one
+  // whole-program question rather than a per-operation lookup.
+  if (input.parallelRegionEntries && input.parallelRegionEntries.size > 0) {
+    for (const refusal of parallelRegionRefusalsOf({
+      bodies: input.bodies,
+      placements: input.placements,
+      entries: input.parallelRegionEntries,
+      graph: input.graph,
+      classes: input.classes,
+      ...(input.parallelRegionSource ? { nameOfDeclaration: input.parallelRegionSource.nameOfDeclaration } : {})
+    })) {
+      const key: CapabilityKey = 'parallel-region:pure'
+      demanded.add(key)
+      const dedupe = `${refusal.owner}|${key}|${refusal.detail}`
+      if (refused.has(dedupe)) continue
+      refused.add(dedupe)
+      refusals.push({
+        stage: 'certify',
+        key,
+        owner: refusal.owner,
+        reason: `parallel region ${refusal.detail} (first at ${(refusal.site.lineage && input.parallelRegionSource?.locationOfLineage(refusal.site.lineage)) || String(refusal.site.lineage)})`
+      })
     }
   }
 

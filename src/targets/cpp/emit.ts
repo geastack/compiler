@@ -11,7 +11,12 @@ import { owningConversionInputText } from './owning-conversion-input.js'
 import type { StableBorrowEntry } from './borrowed-call-entry.js'
 import { boxedValueText } from './emit-dynamic-properties.js'
 import { stableCellReadsOf } from '../../ir/stable-cell-reads.js'
-import { noConstructionOnlyFields, stableFieldReadsOf, type ConstructionOnlyFields } from '../../ir/construction-only-fields.js'
+import {
+  noConstructionOnlyFields,
+  stableFieldReadsOf,
+  stableReceiversOf,
+  type ConstructionOnlyFields
+} from '../../ir/construction-only-fields.js'
 import {
   DyingArgumentSet,
   dyingTransferUsesOf,
@@ -2565,7 +2570,8 @@ export const emitBody = (
   definitionCells: ReadonlySet<DeclarationId> = new Set(),
   constructionOnlyFields: ConstructionOnlyFields = noConstructionOnlyFields,
   keyOrderUnobserved: ReadonlySet<string> = new Set(),
-  taskBodies: ReadonlySet<string> = new Set()
+  taskBodies: ReadonlySet<string> = new Set(),
+  borrowedFormals: ReadonlySet<number> = new Set()
 ): readonly CppArtifact[] => {
   // Every fact this body settles before a single line renders, computed here
   // -- from `body` and the plain, already-available inputs above -- and
@@ -2633,7 +2639,13 @@ export const emitBody = (
     receiverValues,
     bindingWriteCounts,
     stableCellReads: stableCellReadsOf(body, (declaration) => placements.get(declaration)?.storage.kind === 'local'),
-    stableFieldReads: stableFieldReadsOf(body, receiverValues, constructionOnlyFields, nativeIntegrityRestricted, dyingArguments),
+    stableFieldReads: stableFieldReadsOf(
+      body,
+      stableReceiversOf(body, receiverValues, borrowedFormals, bindingWriteCounts, (declaration) => captures.isBoxed(declaration)),
+      constructionOnlyFields,
+      nativeIntegrityRestricted,
+      dyingArguments
+    ),
     constructorOf,
     ownedDyingValues,
     transferDyingValues,

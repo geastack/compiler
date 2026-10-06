@@ -212,6 +212,45 @@ export const reflectiveFieldWritesOf = (demand: ReflectionDemand): ReadonlySet<s
 export const noConstructionOnlyFields: ConstructionOnlyFields = { holds: () => false, constructing: new Set() }
 
 /**
+ * The values a stable field read may read through: the body's own receiver,
+ * and each formal its signature borrows -- taken by reference, so the caller
+ * keeps the object alive for the whole call and the body can neither move nor
+ * rebind it -- read as the formal itself or through its cell, provided
+ * nothing else writes the cell and no closure shares it. `count(node)`'s
+ * `const left = node.left` is then the same alias `const socket = this.socket`
+ * already was, instead of a retain and a release per node walked.
+ */
+export const stableReceiversOf = (
+  body: IrBody,
+  receivers: ReadonlySet<IrValueId>,
+  borrowed: ReadonlySet<number>,
+  bindingWrites: ReadonlyMap<DeclarationId, number>,
+  isBoxed: (declaration: DeclarationId) => boolean
+): ReadonlySet<IrValueId> => {
+  if (borrowed.size === 0) return receivers
+  const formals = new Set<IrValueId>()
+  for (const block of body.blocks.values())
+    for (const operation of block.operations)
+      if (operation.kind === 'parameter' && borrowed.has(operation.ordinal)) formals.add(operation.result.id)
+  if (formals.size === 0) return receivers
+  const cells = new Set<DeclarationId>()
+  for (const block of body.blocks.values())
+    for (const operation of block.operations)
+      if (
+        operation.kind === 'binding-write' &&
+        formals.has(operation.value.value) &&
+        bindingWrites.get(operation.declaration) === 1 &&
+        !isBoxed(operation.declaration)
+      )
+        cells.add(operation.declaration)
+  const stable = new Set([...receivers, ...formals])
+  for (const block of body.blocks.values())
+    for (const operation of block.operations)
+      if (operation.kind === 'binding-read' && cells.has(operation.declaration)) stable.add(operation.result.id)
+  return stable
+}
+
+/**
  * The reads of this body that may name a field instead of copying it: a
  * string-keyed read of a construction-only field (`constructionOnlyFieldsOf`)
  * off the body's own receiver, in a body that is not itself a construction
