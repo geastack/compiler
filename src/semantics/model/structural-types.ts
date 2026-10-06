@@ -113,6 +113,16 @@ export interface SignatureParameter {
    * `null` in this parameter from its absence (`null-blind-parameter.ts`).
    */
   readonly nullBlind?: true
+  /**
+   * The checker's phantom rest slot of a body that reads `arguments`, behind at
+   * least one declared formal. It holds EVERY argument the caller passed, from
+   * position 0, not only the tail past the formals: the formals still bind by
+   * position, but an omitted one binds `undefined` exactly as an explicit
+   * `undefined` does, so only the caller's own list can say how long
+   * `arguments` is. A phantom slot at ordinal 0 needs no mark, since its tail
+   * already is the whole list.
+   */
+  readonly argumentsFrame?: true
 }
 
 /** A callable or constructable signature. */
@@ -501,7 +511,8 @@ const keyOfSignature = (signature: SignatureShape): string =>
     signature.parameters
       .map(
         (parameter) =>
-          `${parameter.type}${parameter.optional ? '?' : ''}${parameter.rest ? '...' : ''}${parameter.hasInitializer ? '=' : ''}`
+          `${parameter.type}${parameter.optional ? '?' : ''}${parameter.rest ? '...' : ''}${parameter.hasInitializer ? '=' : ''}` +
+          (parameter.argumentsFrame ? '*' : '')
       )
       .join(','),
     signature.minimumArity,

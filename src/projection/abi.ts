@@ -197,9 +197,10 @@ const abiOfCarrier = (
  * disagreement that is the language's own.
  */
 const argumentFrameKey = (abi: CallableAbi): string =>
-  [abi.parameters.map((parameter) => `${representationKey(parameter.value)}/${parameter.ownership}`).join(','), abi.restFrom ?? '-'].join(
-    ';'
-  )
+  [
+    abi.parameters.map((parameter) => `${representationKey(parameter.value)}/${parameter.ownership}`).join(','),
+    abi.restFrom === null ? '-' : `${abi.restFrom}${abi.argumentsFrame === true ? '*' : ''}`
+  ].join(';')
 
 /**
  * The calling convention a Representation states, when it states one -- the

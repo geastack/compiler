@@ -801,6 +801,7 @@ export const createRepresentationDeriver = (
   const abiOf = (signature: SignatureShape): CallableAbi | null => {
     const parameters: AbiParameter[] = []
     let restFrom: number | null = null
+    let argumentsFrame = false
     for (const [position, parameter] of signature.parameters.entries()) {
       // A rest parameter's declared type is already the Array the language
       // binds it to, so the slot derives like any other. Only a rest parameter
@@ -809,6 +810,7 @@ export const createRepresentationDeriver = (
       if (parameter.rest) {
         if (position !== signature.parameters.length - 1) return null
         restFrom = position
+        argumentsFrame = parameter.argumentsFrame === true && position > 0
       }
       // An omitted argument is `undefined`, never `null`, and a defaulted
       // parameter widens the same way an optional one does: the physical slot
@@ -846,6 +848,7 @@ export const createRepresentationDeriver = (
     return {
       parameters,
       restFrom,
+      ...(argumentsFrame ? { argumentsFrame: true as const } : {}),
       result: derive(signature.result),
       // `this: void` is TypeScript's declaration that a function does not use
       // or require a receiver. It is not an `undefined` value passed in a

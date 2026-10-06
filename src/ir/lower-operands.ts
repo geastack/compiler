@@ -25,7 +25,8 @@ import {
   type RecordField,
   type Representation,
   type TaggedUnionArm,
-  abiKey
+  abiKey,
+  restPackedFrom
 } from '../representation/model.js'
 import type { SealedRepresentationPlan } from '../representation/plan.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
@@ -1526,6 +1527,17 @@ export const packRestArguments = (
     omitted.push({ kind: 'value', value: converted })
   }
   if (omitted.length > 0) args = [...args, ...omitted]
+  if (restPackedFrom(abi) !== abi.restFrom) {
+    // An `arguments` frame: the array is the list the caller passed, not the
+    // padded one, so its length is the count the callee reads back.
+    if (slot.value.kind !== 'array-object') {
+      throw new IrLoweringBlockedError(
+        `an arguments-frame convention declares a rest slot that is not an array-object (the slot is "${representationKey(slot.value)}")`
+      )
+    }
+    const packed = packArgumentArray(ctx, block, lineage, passedArgumentRun(passed), slot.value)
+    return [...args.slice(0, abi.restFrom).map((entry) => entry.value), { value: packed, representation: slot.value }]
+  }
   // A tuple carried as a positional record has a bounded field set.
   // Optional trailing positions may be omitted: leave those fields absent,
   // preserving the difference from a present argument whose value is undefined.
@@ -1562,6 +1574,35 @@ export const packRestArguments = (
   }
   const packed = packArgumentArray(ctx, block, lineage, args.slice(abi.restFrom), slot.value)
   return [...args.slice(0, abi.restFrom).map((entry) => entry.value), { value: packed, representation: slot.value }]
+}
+
+/**
+ * The argument list a caller passed, as one run for an `arguments` frame.
+ *
+ * A spread that also fills named formals arrives as positional reads of its
+ * leading elements followed by the spread itself starting past them
+ * (`ArgumentSlot.from`, `spread-arguments.ts`'s fixed-formal fill and the
+ * tuple `apply`). Each read past the source's end is `undefined`, which is
+ * right for a formal but would lengthen the list, so the reads fold back into
+ * one range copy of the whole source.
+ */
+const passedArgumentRun = (slots: readonly ArgumentSlot[]): readonly ArgumentSlot[] => {
+  const run: ArgumentSlot[] = []
+  for (const slot of slots) {
+    const from = slot.kind === 'spread' ? (slot.from ?? 0) : 0
+    if (from === 0) {
+      run.push(slot)
+      continue
+    }
+    const reads = run.splice(run.length - from)
+    if (reads.length !== from || reads.some((read) => read.kind !== 'value')) {
+      throw new IrLoweringBlockedError(
+        `a spread starts at its element ${from}, but the ${from} argument(s) before it are not its own positional reads`
+      )
+    }
+    run.push({ kind: 'spread', value: slot.value })
+  }
+  return run
 }
 
 /**

@@ -63,6 +63,7 @@ export const joinedCallableOf = (
         (parameter, index) =>
           parameter.optional === first.parameters[index]?.optional &&
           parameter.rest === first.parameters[index]?.rest &&
+          parameter.argumentsFrame === first.parameters[index]?.argumentsFrame &&
           parameter.hasInitializer === first.parameters[index]?.hasInitializer
       )
   )

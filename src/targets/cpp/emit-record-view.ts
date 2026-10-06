@@ -1,6 +1,6 @@
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
 import type { CallableAbi, Representation } from '../../representation/model.js'
-import { representationKey } from '../../representation/model.js'
+import { representationKey, sameRestPartition } from '../../representation/model.js'
 import {
   optionalMethodPayloadOf,
   restForwards,
@@ -275,7 +275,7 @@ const boundClassMethodText = (
     actuals.splice(restFrom, actuals.length - restFrom, `gea::arrayOf<${elementType}>({${elements.join(', ')}})`)
     const refused = widenFixedPrefix(restFrom)
     if (refused !== null) return trace(refused)
-  } else if (ownFrame !== null && ownFrame.restFrom !== null && abi.restFrom === ownFrame.restFrom) {
+  } else if (ownFrame !== null && ownFrame.restFrom !== null && sameRestPartition(abi, ownFrame)) {
     // `restForwards` proved the two rest slots agree on their ELEMENT carrier;
     // it says nothing about the fixed positions ahead of it, which the member
     // and the method may still name with different (but convertible) types.

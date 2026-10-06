@@ -3,7 +3,7 @@ import type { BindingPlacement } from '../projection/bindings.js'
 import { classLayoutsConstructedBy, constructedBaseOf, type ClassLayout } from '../projection/classes.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
-import { representationKey, type Representation } from '../representation/model.js'
+import { representationKey, sameRestPartition, type Representation } from '../representation/model.js'
 import type { CallCalleeIdentity, IrBody, IrOperand, IrOperation } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { nativeCallFrameOf } from './call-entry.js'
@@ -205,7 +205,7 @@ export const closedRecordCallablesOf = (
           target.target.constructable &&
           construct !== null &&
           constructMatchesAbi(operation, construct, conversions) &&
-          construct.restFrom === abi.restFrom &&
+          sameRestPartition(construct, abi) &&
           construct.parameters.length === abi.parameters.length &&
           construct.parameters.every(
             (parameter, index) => representationKey(parameter.value) === representationKey(abi.parameters[index]!.value)

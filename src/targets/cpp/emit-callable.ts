@@ -21,7 +21,7 @@ import { classLayoutsConstructedBy } from '../../projection/classes.js'
 import { classFamilyOverridesOf, virtualDispatchKey } from '../../projection/dispatch.js'
 import { cppVirtualMemberName } from './virtual-methods.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
-import { abiKey, representationKey } from '../../representation/model.js'
+import { abiKey, representationKey, restPackedFrom, sameRestPartition } from '../../representation/model.js'
 import { alignedValueText, bindsReceiver, callableObjectAbi, movedValueText, recipeText, unboxedLoadText } from './emit-narrowing.js'
 import { memberAccessOperator, reactiveRevisionText } from './emit-carrier-members.js'
 import { structuralRecordViewText } from './emit-record-view.js'
@@ -718,6 +718,21 @@ const restPackedArguments = (
   ]
 }
 
+/**
+ * Lowering packed the call's arguments against `held`. A body whose rest slot
+ * is its `arguments` frame needs every argument the caller passed, in a list
+ * whose length is that count, which only a convention of the same partition
+ * packed; padding or repacking past that point has lost the count.
+ */
+const refuseRepartitionedArgumentsFrame = (held: CallableAbi | null, body: CallableAbi, what: string): void => {
+  if (body.argumentsFrame !== true || (held !== null && sameRestPartition(held, body))) return
+  throw createCppEmitBlockedError(
+    `call-abi:${what}:arguments-frame`,
+    'a body that reads arguments binds every passed argument in its rest slot, and this call was packed against ' +
+      `${held === null ? 'no convention' : abiKey(held)}, which does not carry how many were passed`
+  )
+}
+
 const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallOperation): boolean => {
   const read = ctx.unionMethodReads.get(operation.callee.value)
   if (read === undefined) return false
@@ -774,6 +789,7 @@ const emitUnionMethodCall = (ctx: EmitContext, lines: string[], operation: CallO
       )
     }
     const heldAbi = abiOfCallee(operation.callee.representation)
+    refuseRepartitionedArgumentsFrame(heldAbi, abi, 'union method call')
     const supplied =
       (heldAbi === null ? null : restPackedArguments(ctx, heldAbi, abi, operation)) ??
       receivableArguments(abi, operation.arguments).map((argument, position) => argumentText(ctx, abi, position, argument))
@@ -941,6 +957,7 @@ const emitLazyArrowFieldCall = (ctx: EmitContext, lines: string[], operation: Ca
     // file's own `physicalFrame`, further below, and `EmitContext.
     // directCallReceivers`'s doc).
     const physicalFrame: CallableAbi = { ...bodyAbi, receiver: bodyReceiver }
+    refuseRepartitionedArgumentsFrame(storedAbi, bodyAbi, 'lazy field direct call')
 
     const result = operation.result
     const voidResult = result === null || result.representation.kind === 'void'
@@ -1619,6 +1636,7 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     if (operation.result && voidResult) defineValueAlias(ctx, operation.result, '(void)0')
     return
   }
+  if (direct !== undefined && directAbi !== abi) refuseRepartitionedArgumentsFrame(abi, directAbi, 'direct call')
   const args = [
     ...(declaredReceiverOperand ? [receiverArgumentText(ctx, physicalFrame, declaredReceiverOperand)] : []),
     ...((direct === undefined || directAbi === abi ? null : restPackedArguments(ctx, abi, directAbi, operation)) ??
@@ -1659,6 +1677,7 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   if (dispatched !== undefined && !virtualReceiver) {
     throw createCppEmitBlockedError('call-abi:receiver-mismatch', 'a virtual member call has no receiver to dispatch on')
   }
+  if (dispatched !== undefined) refuseRepartitionedArgumentsFrame(abi, dispatched.abi, 'virtual call')
   const virtualArgs =
     dispatched === undefined || !virtualReceiver
       ? []
@@ -2276,6 +2295,14 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
       )
     }
     const callableType = `gea::CallableObject<${cppAbiType(abi)}>`
+    if (abi.argumentsFrame === true) {
+      // A dynamic call splits its list at the boxed rest position, which
+      // cannot also hand the formals' arguments to the `arguments` frame.
+      throw createCppEmitBlockedError(
+        'call-abi:dynamic',
+        'a callable that reads `arguments` past named parameters cannot be boxed as "dynamic": a dynamic call packs only the arguments past its rest position'
+      )
+    }
     const boxText = (payloadText: string): string => {
       const callable = identified(payloadText)
       if (abi.receiver !== null) return `gea::Value::boxMethod<${abi.restFrom === null ? -1 : abi.restFrom + 1}>(${callable})`
@@ -2962,8 +2989,10 @@ const unionRestArgumentText = (
   }
   const element = rest.element
   const tail = operation.spreadTail
+  // An `arguments` frame packs from the first argument; the formals still take theirs.
+  const packedFrom = restPackedFrom(abi) ?? restFrom
   const written =
-    tail === undefined ? operation.arguments.slice(restFrom) : operation.arguments.slice(restFrom, Math.max(restFrom, tail.from))
+    tail === undefined ? operation.arguments.slice(packedFrom) : operation.arguments.slice(packedFrom, Math.max(packedFrom, tail.from))
   const name = 'gea_union_rest'
   const lines = [`auto ${name} = gea::makeRef<gea::ArrayObject<${cppTypeOf(element)}>>();`]
   // Every arm here is an arm of a callee carried as a value, so a written
@@ -2975,7 +3004,7 @@ const unionRestArgumentText = (
     if (tail.list.representation.kind !== 'array-object') {
       throw createCppEmitBlockedError('call-abi:tagged-union-construct', 'a spread construction names a list that is not an array-object')
     }
-    const from = Math.max(0, restFrom - tail.from)
+    const from = Math.max(0, packedFrom - tail.from)
     const source = tail.list.representation.element
     if (representationKey(source) === representationKey(element))
       lines.push(`${name}->appendRange(*${operandText(ctx, tail.list)}, ${from});`)

@@ -523,6 +523,9 @@ const dynamicCallableAbiSupported = (abi: CallableAbi, seen = new Set<Representa
   const result = statesResultAbsence && abi.result.kind === 'optional' && abi.result.absence === 'null' ? abi.result.payload : abi.result
   if (result.kind !== 'void' && !dynamicCarrierSupported(result, seen)) return false
   if (!abi.parameters.every((parameter) => dynamicCarrierSupported(parameter.value, seen))) return false
+  // The runtime adapter packs only the arguments past the rest position, and an
+  // `arguments` frame also holds the formals' arguments.
+  if (abi.argumentsFrame === true) return false
   if (abi.restFrom === null) return true
   const rest = abi.parameters[abi.restFrom]?.value
   return (

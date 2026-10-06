@@ -2,7 +2,7 @@ import type { DeclarationId, FunctionId } from '../identity/ids.js'
 import type { ClassField, ClassLayout, ClassMethod } from './classes.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
 import type { CallableAbi, Representation } from '../representation/model.js'
-import { abiKey, passingOf, representationKey } from '../representation/model.js'
+import { abiKey, passingOf, representationKey, sameRestPartition } from '../representation/model.js'
 import { optionalOf } from '../representation/optional.js'
 import { classMemberOf } from './fields.js'
 
@@ -501,7 +501,7 @@ export const methodCopyHeldBy = <M extends { readonly callable: FunctionId | nul
 }
 
 const conventionFits = (body: CallableAbi, held: CallableAbi): boolean =>
-  body.restFrom === held.restFrom &&
+  sameRestPartition(body, held) &&
   body.parameters.length === held.parameters.length &&
   body.parameters.every((parameter, index) => representationKey(parameter.value) === representationKey(held.parameters[index]!.value)) &&
   resultArmsFit(body.result, held.result)
@@ -663,7 +663,7 @@ const classCopyFamiliesOf = (
   // language does (the adapter passes only the formals it declares).
   // `narrow` is a parameter prefix of `wide`, with the same rest and result.
   const extendsConvention = (narrow: CallableAbi, wide: CallableAbi): boolean =>
-    wide.restFrom === narrow.restFrom &&
+    sameRestPartition(wide, narrow) &&
     wide.parameters.length > narrow.parameters.length &&
     narrow.parameters.every(
       (parameter, index) => representationKey(parameter.value) === representationKey(wide.parameters[index]!.value)
@@ -1211,10 +1211,11 @@ export const virtualDispatchVerdictOf = (
         incompatible = `implementation ${implementor.declaration} declares no receiver`
         break
       }
-      if (rootAbi.restFrom !== actualAbi.restFrom) {
+      if (!sameRestPartition(rootAbi, actualAbi)) {
         incompatible =
-          `implementation ${implementor.declaration} uses rest slot ${String(actualAbi.restFrom)}, while the family root uses ` +
-          `${String(rootAbi.restFrom)}; repartitioning an already-packed rest array is not installed`
+          `implementation ${implementor.declaration} uses rest slot ${String(actualAbi.restFrom)}${actualAbi.argumentsFrame ? ' (every argument)' : ''}, ` +
+          `while the family root uses ${String(rootAbi.restFrom)}${rootAbi.argumentsFrame ? ' (every argument)' : ''}; ` +
+          'repartitioning an already-packed rest array is not installed'
         break
       }
       const instance = classes.get(implementor.declaration)?.instance

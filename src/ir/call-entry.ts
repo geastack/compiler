@@ -9,7 +9,7 @@ import { isArrayConstantOf, typedArraySetSourceStaysNative } from '../representa
 import { abiOfCallee, constructAbiOfCallee } from '../projection/callee.js'
 import type { ClassLayout } from '../projection/classes.js'
 import { declaredFieldRepresentationOf, recordFieldsOfShape, recordLayoutPolicyOf } from '../projection/fields.js'
-import { abiKey, representationKey, type CallableAbi } from '../representation/model.js'
+import { abiKey, representationKey, restPackedFrom, type CallableAbi } from '../representation/model.js'
 import type { CallCalleeIdentity, CallOperation, ConstructOperation, GetIteratorOperation, IrOperand } from './model.js'
 
 /**
@@ -68,12 +68,13 @@ export const publishOmittedArgumentConversions = (operation: CallOperation | Con
       for (let index = 0; index < named; index++)
         conversions.nodeFor(operation.arguments[index]?.representation ?? { kind: 'undefined' }, abi.parameters[index]!.value)
       const rest = abi.restFrom === null ? undefined : abi.parameters[abi.restFrom]?.value
-      if (abi.restFrom !== null && rest?.kind === 'array-object') {
+      const packedFrom = restPackedFrom(abi)
+      if (packedFrom !== null && rest?.kind === 'array-object') {
         const tail = operation.spreadTail
         const written =
           tail === undefined
-            ? operation.arguments.slice(abi.restFrom)
-            : operation.arguments.slice(abi.restFrom, Math.max(abi.restFrom, tail.from))
+            ? operation.arguments.slice(packedFrom)
+            : operation.arguments.slice(packedFrom, Math.max(packedFrom, tail.from))
         for (const argument of written) conversions.nodeFor(argument.representation, rest.element)
         if (tail?.list.representation.kind === 'array-object') conversions.nodeFor(tail.list.representation.element, rest.element)
       }
@@ -171,7 +172,10 @@ export const nativeArgumentsMatch = (
     // as an element is what a lone trailing array would otherwise be mistaken
     // for.
     const carried = rest.length === 1 && representationKey(rest[0]!.representation) === representationKey(slot)
-    if (!carried && !rest.every((argument) => representationKey(argument.representation) === element)) return false
+    // An `arguments` frame packs the formals' arguments too, so each of them
+    // has to be the element carrier as well.
+    const packed = received.slice(restPackedFrom(abi) ?? restFrom)
+    if (!carried && !packed.every((argument) => representationKey(argument.representation) === element)) return false
   } else if (received.length > abi.parameters.length) return false
   return abi.parameters.every((parameter, index) => {
     if (restFrom !== null && index >= restFrom) return true

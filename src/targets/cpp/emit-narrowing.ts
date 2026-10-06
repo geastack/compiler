@@ -19,6 +19,7 @@ import {
   isCanonicalNumberPropertyKeyText,
   isOpenDocument,
   representationKey,
+  sameRestPartition,
   standInRefuses,
   walkRepresentation,
   carriesUndefined
@@ -1011,6 +1012,14 @@ export const boxedText = (representation: Representation, tag: string, text: str
   const restFrom = restFromOf(representation)
   const value = `static_cast<${cppTypeOf(representation)}>(${text})`
   const abi = representation.kind === 'function-and-constructor' ? representation.call : 'abi' in representation ? representation.abi : null
+  if (abi?.argumentsFrame === true) {
+    // The runtime's thunk splits a dynamic call at the boxed rest position and
+    // cannot also hand the formals' arguments to the `arguments` frame.
+    throw createCppEmitBlockedError(
+      'call-abi:dynamic',
+      'a callable that reads arguments past named parameters cannot be boxed: a dynamic call packs only the arguments past its rest position'
+    )
+  }
   if (abi?.receiver) return `gea::Value::boxMethod<${restFrom === null ? -1 : restFrom + 1}>(${value})`
   if (restFrom === null) return `gea::Value::box(gea::Value::Tag::${tag}, ${value})`
   return `gea::Value::boxCallable<${restFrom}>(${value})`
@@ -2893,6 +2902,9 @@ const resultAdapterOf = (
   const to = callableObjectAbi(target)
   if (!from || !to) return null
   if (from.receiver !== null && to.receiver === null) return null
+  // An `arguments` frame holds every argument, so an adapter that splits the
+  // list at a rest position would lose the count the body reads back.
+  if ((from.argumentsFrame === true || to.argumentsFrame === true) && !sameRestPartition(from, to)) return null
   const ignoresReceiver = from.receiver === null && to.receiver !== null
   // A fixed-arity source filling a slot whose trailing frame is ONE rest array:
   // `(...args: any[]) => void`, JavaScript's "some function, arguments not my
@@ -3584,7 +3596,7 @@ export const widensResultIntoArm = (source: Representation, target: Representati
   if (!from || !to) return false
   if (from.receiver !== null || to.receiver !== null) return false
   if (from.parameters.length === 0 || from.parameters.length !== to.parameters.length) return false
-  if (from.restFrom !== to.restFrom || to.result.kind !== 'tagged-union') return false
+  if (!sameRestPartition(from, to) || to.result.kind !== 'tagged-union') return false
   if (!from.parameters.every((parameter, index) => representationKey(parameter.value) === representationKey(to.parameters[index]!.value)))
     return false
   const resultKey = representationKey(from.result)
@@ -3622,7 +3634,7 @@ export const rebasesRestOverLeadingParameters = (source: Representation, target:
   if (representationKey(from.result) !== representationKey(to.result)) return false
   if (to.restFrom !== 0 || to.parameters.length !== 1) return false
   const leading = from.parameters.length - 1
-  if (leading < 1 || from.restFrom !== leading) return false
+  if (leading < 1 || from.restFrom !== leading || from.argumentsFrame === true) return false
   const slot = to.parameters[0]?.value
   const tail = from.parameters[leading]?.value
   if (!slot || !tail || slot.kind !== 'array-object') return false
@@ -3941,6 +3953,8 @@ const unboxedLoadTextAt = (target: Representation, text: string): string | null 
   // the generic `unboxValue<T>` below: that exact-payload load cannot adapt a
   // callable whose source and reader ABIs differ.
   const callableAbi = callableObjectAbi(target)
+  // The runtime's adapter packs only the arguments past the rest position.
+  if (callableAbi !== null && callableAbi.argumentsFrame === true) return null
   if (callableAbi !== null) {
     const type = cppTypeOf(target)
     const value = 'gea_callable_value'
@@ -4577,7 +4591,7 @@ export const conversionChain: readonly ConversionStep[] = [
       const [member] = source.members
       if (member === undefined || source.members.length !== 1 || !target.members.includes(member)) return undefined
       if (source.abi.receiver !== null || target.abi.receiver !== null) return undefined
-      if (source.abi.restFrom !== target.abi.restFrom || source.abi.parameters.length !== target.abi.parameters.length) return undefined
+      if (!sameRestPartition(source.abi, target.abi) || source.abi.parameters.length !== target.abi.parameters.length) return undefined
       if (classRefTransportKind(source.abi.result, target.abi.result) !== 'upcast') return undefined
       const formals: string[] = []
       const actuals: string[] = []

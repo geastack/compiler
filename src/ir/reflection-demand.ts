@@ -10,7 +10,7 @@ import { classPrototypeReadOf } from '../projection/class-prototype.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import type { RecordLayoutPolicy } from '../representation/policies.js'
 import type { CallableAbi, RecordField, Representation } from '../representation/model.js'
-import { isOpenDocument, representationKey } from '../representation/model.js'
+import { isOpenDocument, representationKey, sameRestPartition } from '../representation/model.js'
 import type { ConstantOperation, IrBody, IrOperand, IrOperation } from './model.js'
 import { observesNativeCarrierOnly, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { conversionNodeIdOf, type ConversionCensus } from '../conversion/nodes.js'
@@ -384,7 +384,7 @@ const isDeferredCarrier = (representation: Representation): boolean => {
 }
 
 const abiMatches = (left: CallableAbi, right: CallableAbi): boolean =>
-  left.restFrom === right.restFrom &&
+  sameRestPartition(left, right) &&
   representationKey(left.result) === representationKey(right.result) &&
   (left.receiver === null
     ? right.receiver === null
@@ -1683,7 +1683,7 @@ export const reflectionExposureOf = (
         )
           promoteFull(targetAbi.receiver, 'callable-adapter-input')
         targetAbi.parameters.forEach((parameter, index) => {
-          const source = sourceAbi !== null && sourceAbi.restFrom === targetAbi.restFrom ? sourceAbi.parameters[index]?.value : undefined
+          const source = sourceAbi !== null && sameRestPartition(sourceAbi, targetAbi) ? sourceAbi.parameters[index]?.value : undefined
           if (!forwarded(parameter.value, source)) promoteFull(parameter.value, 'callable-adapter-input')
         })
       }

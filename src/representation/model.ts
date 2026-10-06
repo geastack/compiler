@@ -313,6 +313,14 @@ export interface CallableAbi {
    */
   readonly restFrom: number | null
   /**
+   * The rest slot is the callee's whole `arguments` list
+   * (`SignatureParameter.argumentsFrame`): the caller packs EVERY argument it
+   * passes into it, from position 0, and still passes the named formals before
+   * it by position. Only ever beside a `restFrom` past 0. Part of the key: a
+   * convention that packs the tail alone splits the same list differently.
+   */
+  readonly argumentsFrame?: true
+  /**
    * Present on a program overload set joined across a callback overload
    * (`host-abi.ts`'s `callbackOverloadJoinedAbi`): `step(c): Promise<string>`
    * beside `step(c, cb): void` is one frame answering `Promise<string> |
@@ -1276,6 +1284,18 @@ const buildRepresentationKey = (representation: Representation): string => {
   }
 }
 
+/**
+ * The argument position the rest array's first element holds: `restFrom`, or
+ * 0 for an `arguments` frame, whose array also holds the named formals'
+ * arguments. `null` for a fixed-arity convention.
+ */
+export const restPackedFrom = (abi: CallableAbi): number | null =>
+  abi.restFrom === null ? null : abi.argumentsFrame === true ? 0 : abi.restFrom
+
+/** Whether two conventions split one argument list into the same formals and the same rest array. */
+export const sameRestPartition = (left: CallableAbi, right: CallableAbi): boolean =>
+  left.restFrom === right.restFrom && restPackedFrom(left) === restPackedFrom(right)
+
 /** A stable key for a calling convention. */
 export const abiKey = (abi: CallableAbi): string => {
   const remembered = abiKeys.get(abi)
@@ -1287,7 +1307,7 @@ export const abiKey = (abi: CallableAbi): string => {
 
 const buildAbiKey = (abi: CallableAbi): string =>
   `(${abi.parameters.map((parameter) => `${nestedKey(parameter.value)}/${parameter.ownership}`).join(',')}` +
-  `${abi.restFrom === null ? '' : `|rest@${abi.restFrom}`})` +
+  `${abi.restFrom === null ? '' : `|rest@${abi.restFrom}${abi.argumentsFrame === true ? '*' : ''}`})` +
   `->${nestedKey(abi.result)}` +
   `@${abi.receiver ? nestedKey(abi.receiver) : '-'}` +
   (abi.overloadJoined === true ? '|overloads' : '')

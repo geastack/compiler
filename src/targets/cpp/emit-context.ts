@@ -2827,6 +2827,14 @@ export const paddedArguments = (abi: CallableAbi, args: readonly string[], what:
   const padding = abi.parameters.slice(supplied).map((parameter, offset) => {
     const position = supplied + offset
     if (abi.restFrom !== null && position >= abi.restFrom) {
+      // An `arguments` frame holds what the caller passed, so it is empty only
+      // when nothing was; past a supplied argument the count is already lost.
+      if (abi.argumentsFrame === true && supplied > 0) {
+        throw createCppEmitBlockedError(
+          `call-abi:${what}:arguments-frame`,
+          `omits the arguments frame at position ${position} after ${supplied} supplied argument(s), which the caller must pack`
+        )
+      }
       // An omitted rest argument list IS the empty array -- ECMA-262 10.2.11
       // binds the rest parameter to a fresh Array of the arguments beyond the
       // fixed ones, and there are none. That is not lowering's judgement to

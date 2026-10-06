@@ -168,7 +168,7 @@ const shallowSignature = (representation: Representation): string => {
 /** An ABI's own identity: arity, ownerships, and where the rest slot starts. */
 const abiSignature = (abi: CallableAbi): string =>
   `${abi.parameters.map((parameter) => parameter.ownership).join(',')}` +
-  `${abi.restFrom === null ? '' : `|rest@${abi.restFrom}`}${abi.receiver ? '+receiver' : ''}`
+  `${abi.restFrom === null ? '' : `|rest@${abi.restFrom}${abi.argumentsFrame === true ? '*' : ''}`}${abi.receiver ? '+receiver' : ''}`
 
 /**
  * The nested carriers of one carrier, each with the name of the position it

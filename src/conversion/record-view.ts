@@ -1,5 +1,5 @@
 import type { CallableAbi, RecordField, RecordIndexSidecar, Representation } from '../representation/model.js'
-import { representationKey, standInRefuses } from '../representation/model.js'
+import { representationKey, sameRestPartition, standInRefuses } from '../representation/model.js'
 import type { RecordLayoutPolicy } from '../representation/policies.js'
 
 /**
@@ -306,7 +306,7 @@ export type FamilyMemberKeys = ReadonlyMap<string, ReadonlySet<string>>
  */
 const boundMethodFrameIsNative = (member: CallableAbi, own: CallableAbi | null): boolean =>
   own !== null &&
-  member.restFrom === own.restFrom &&
+  sameRestPartition(member, own) &&
   member.parameters.length === own.parameters.length &&
   member.parameters.every((parameter, index) => {
     const held = own.parameters[index]
@@ -489,7 +489,7 @@ export const recordViewIndirectReads = (plan: RecordViewPlan, heldPairUnused?: P
  */
 export const restForwards = (member: CallableAbi, own: CallableAbi | null, convertible?: PairConvertible): boolean => {
   if (member.restFrom === null) return own === null || own.restFrom === null || restPacks(member, own, convertible)
-  if (own === null || own.restFrom !== member.restFrom || own.parameters.length !== member.parameters.length) return false
+  if (own === null || !sameRestPartition(own, member) || own.parameters.length !== member.parameters.length) return false
   const rest = member.parameters[member.restFrom]
   const ownRest = own.parameters[member.restFrom]
   return rest !== undefined && ownRest !== undefined && representationKey(rest.value) === representationKey(ownRest.value)
@@ -505,7 +505,10 @@ export const restForwards = (member: CallableAbi, own: CallableAbi | null, conve
  * formals. Each packed argument must enter the Array's element carrier.
  */
 export const restPacks = (member: CallableAbi, own: CallableAbi, convertible?: PairConvertible): boolean => {
-  if (member.restFrom !== null || own.restFrom === null || own.parameters.length !== own.restFrom + 1) return false
+  // An `arguments` frame needs the count the member's caller passed, and the
+  // member's formals arrive with every omitted one already `undefined`.
+  if (member.restFrom !== null || own.restFrom === null || own.argumentsFrame === true || own.parameters.length !== own.restFrom + 1)
+    return false
   if (member.parameters.length < own.restFrom) return false
   const rest = own.parameters[own.restFrom]?.value
   if (rest === undefined || rest.kind !== 'array-object' || rest.ownership !== 'shared-refcount' || rest.recursive !== undefined)

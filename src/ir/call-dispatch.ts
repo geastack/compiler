@@ -10,7 +10,14 @@ import { closedCallFrameOf, publishOmittedArgumentConversions } from './call-ent
 import type { ConversionCensus } from '../conversion/nodes.js'
 import { classFamilyOverridesOf, extendsClass, virtualDispatchFor, type VirtualDispatchVerdict } from '../projection/dispatch.js'
 import { classMemberOf, classMethodOverrideOf, classPrototypeMethodMutableOf, declaredRecordFieldOf } from '../projection/fields.js'
-import { abiKey, representationKey, walkRepresentation, type CallableAbi, type Representation } from '../representation/model.js'
+import {
+  abiKey,
+  representationKey,
+  sameRestPartition,
+  walkRepresentation,
+  type CallableAbi,
+  type Representation
+} from '../representation/model.js'
 import { abiOfCallee } from '../projection/callee.js'
 import { classInstanceTestOf, classViewCarrierKinds } from '../projection/instance-test.js'
 import { classPrototypeReadOf } from '../projection/class-prototype.js'
@@ -770,7 +777,7 @@ const methodCopyPreferenceOf = (
   }
   const fits = (caller: CallableAbi, body: CallableAbi, depth: number): boolean =>
     caller.parameters.length === body.parameters.length &&
-    caller.restFrom === body.restFrom &&
+    sameRestPartition(caller, body) &&
     caller.parameters.every((parameter, index) => {
       const slot = body.parameters[index]
       return slot !== undefined && admits(parameter.value, slot.value, depth)

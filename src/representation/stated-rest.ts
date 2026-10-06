@@ -14,6 +14,9 @@ import type { CallableAbi } from './model.js'
  * that a creation and its carrier agree; both ask here.
  */
 export const statedRestOf = (abi: CallableAbi): number | null => {
+  // An `arguments` frame also holds the formals' arguments, which no split at
+  // one position states; stating nothing makes a dynamic call refuse by name.
+  if (abi.argumentsFrame === true) return null
   const last = abi.parameters.at(-1)?.value ?? abi.receiver
   if (last?.kind !== 'array-object') return null
   return abi.restFrom === null ? -1 : abi.restFrom + (abi.receiver === null ? 0 : 1)

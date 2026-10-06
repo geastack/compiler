@@ -1,6 +1,6 @@
 import { nativePrototypeObjectText, nativePrototypeValueHookText } from './native-prototype.js'
 import type { CallableAbi, RecordField, Representation } from '../../../representation/model.js'
-import { abiKey, representationKey } from '../../../representation/model.js'
+import { abiKey, representationKey, restPackedFrom, sameRestPartition } from '../../../representation/model.js'
 import { abiOfCallee } from '../../../projection/callee.js'
 import type { GetOperation, IrOperand } from '../../../ir/model.js'
 import type { DeclarationId, FunctionId } from '../../../identity/ids.js'
@@ -436,7 +436,8 @@ const dynamicConstructorActualText = (ctx: EmitContext, target: CallableAbi, act
       )
     }
     const packedName = `gea_constructor_arg_${targetRest}`
-    const packedIndex = position - targetRest
+    // An `arguments` frame packs from the first argument, not from its slot.
+    const packedIndex = position - (restPackedFrom(target) ?? targetRest)
     const absent = cppUndefinedIn(packed.value.element)
     if (absent === null) {
       throw createCppEmitBlockedError(
@@ -491,10 +492,11 @@ const dynamicConstructorCandidateText = (ctx: EmitContext, target: CallableAbi, 
       `runtime class ${declaration}'s construct convention unexpectedly declares a receiver`
     )
   }
-  if (actual.restFrom !== null && actual.restFrom !== target.restFrom) {
+  if (actual.restFrom !== null && !sameRestPartition(actual, target)) {
     throw createCppEmitBlockedError(
       'call-abi:dynamic-constructor',
-      `runtime class ${declaration}'s rest slot ${actual.restFrom} cannot be adapted from dynamic constructor rest slot ${String(target.restFrom)}`
+      `runtime class ${declaration}'s rest slot ${actual.restFrom}${actual.argumentsFrame ? ' (every argument)' : ''} cannot be adapted ` +
+        `from dynamic constructor rest slot ${String(target.restFrom)}${target.argumentsFrame ? ' (every argument)' : ''}`
     )
   }
   const actuals = actual.parameters.map((parameter, position) => {

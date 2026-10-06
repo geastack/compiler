@@ -422,6 +422,10 @@ export const buildArgumentOperands = (
   }
 
   const restFrom = restFormalIndexOf(selected)
+  // The phantom `arguments` slot is a rest the selected signature does not
+  // mark, and its body can count what reaches it, so a per-formal read of a
+  // runtime-length Array would hand it a list of the formals' length.
+  const frameRestFrom = spreads.length === 0 ? restFrom : fixedFillTailOf(context, candidate, restFrom)
   // Which positions each written argument will occupy, walked once up front so
   // a spread's own admissibility can be decided against the position it lands
   // in rather than against where it was written.
@@ -446,7 +450,7 @@ export const buildArgumentOperands = (
       !admitsOpenTupleSpread(context, argument, scan, restFrom, selected) &&
       !admitsMaxArityTupleSpread(context, args, scanIndex, restFrom, selected) &&
       !admitsFixedArgumentsSpread(context, args, scanIndex, restFrom, selected) &&
-      fixedArraySpreadElementOf(context, args, scanIndex, restFrom, selected) === null
+      fixedArraySpreadElementOf(context, args, scanIndex, frameRestFrom, selected) === null
     ) {
       // The magic `arguments` object -- `IArguments` has no native iteration
       // cursor of its own (it is not a `Set`/`Map`/`Array`/`string`/
@@ -481,7 +485,7 @@ export const buildArgumentOperands = (
       // against, the same shape `invocationArgumentTarget`
       // (`preflight/invocation-arguments.ts`) already treats as satisfied
       // outright for a dynamic callee's ordinary arguments.
-      if (fillsNamedFormals(context, selected, scan, restFrom)) {
+      if (fillsNamedFormals(context, selected, scan, restFrom) && !admitsFixedFormalArraySpread(context, args, scanIndex, selected)) {
         if (arrayElementTypeOf(context, context.types.typeAt(argument.expression)) !== null) {
           return {
             kind: 'refused',
@@ -554,7 +558,7 @@ export const buildArgumentOperands = (
         }
         continue
       }
-      const fixedElement = fixedArraySpreadElementOf(context, args, buildIndex, restFrom, selected)
+      const fixedElement = fixedArraySpreadElementOf(context, args, buildIndex, frameRestFrom, selected)
       if (fixedElement !== null && selected !== null) {
         const receiver = spreadReceiverOf(context, argument.expression)
         if (!receiver) return { kind: 'refused', reason: 'no normalized operation identifies the array a fixed-signature spread reads' }
@@ -654,10 +658,8 @@ export const buildArgumentOperands = (
       // `references.ts` resolves an identifier's value through its
       // DECLARATION, and the magic `arguments` binding has none -- so it is
       // sourced directly through `argumentsObjectValueAt` instead of
-      // `sourceForValue`, and the auxiliary operations that value needs
-      // (the phantom rest slot's own read, and -- only when a real declared
-      // parameter precedes it -- the array literal that concatenates the
-      // two) are minted here, against this call's own candidate, exactly as
+      // `sourceForValue`, and the phantom rest slot's own read that value
+      // needs is minted here, against this call's own candidate, exactly as
       // `tupleSpreadReads` above mints its `[[Get]]`s.
       if (isArgumentsObjectIdentifier(argument.expression, context.checker)) {
         const value = argumentsObjectValueAt(argument.expression, candidate.id, candidate.caller, candidate.evaluationOrdinal, context)

@@ -1,5 +1,5 @@
 import type { CallableAbi, Representation } from '../representation/model.js'
-import { abiKey, representationKey } from '../representation/model.js'
+import { abiKey, representationKey, sameRestPartition } from '../representation/model.js'
 import type { ClassLayout } from '../projection/classes.js'
 import type { ConstructOperation, IrBody } from './model.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
@@ -28,7 +28,7 @@ export const classConstructorBodyMatches = (layout: ClassLayout, body: IrBody): 
     representationKey(abi.receiver) === representationKey(layout.instance) &&
     construct !== null &&
     construct.receiver === null &&
-    abi.restFrom === construct.restFrom &&
+    sameRestPartition(abi, construct) &&
     abi.parameters.length === construct.parameters.length &&
     abi.parameters.every((parameter, index) => representationKey(parameter.value) === representationKey(construct.parameters[index]!.value))
   )

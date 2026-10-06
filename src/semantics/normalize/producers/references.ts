@@ -184,18 +184,13 @@ export interface CitationFacts {
  * publication that drift apart produce no error at all, only an operation
  * quietly withheld and, with it, every operation of the enclosing function.
  *
- * The shape depends on the phantom rest parameter's ordinal because
- * `argumentsObjectValueAt` publishes two shapes: at ordinal 0 the phantom's
- * own rest array IS the whole `arguments` object, and a single
- * `reference`/`parameter-value` operation carries it; at ordinal P > 0 the
- * object is P declared parameters concatenated with that tail, which takes an
- * array allocation the reference feeds, and the allocation is what a consumer
- * means by `arguments`.
+ * The phantom rest parameter's array IS the whole `arguments` object at every
+ * ordinal -- past declared parameters it is an `arguments` frame holding every
+ * argument the caller passed (`SignatureParameter.argumentsFrame`) -- so a
+ * single `reference`/`parameter-value` operation carries it.
  */
-const argumentsObjectResultAt = (nodeId: ReturnType<IdentityTable['nodeIdOf']>, phantomOrdinal: number): SemanticResultId =>
-  phantomOrdinal === 0
-    ? semanticResultId(operationId(nodeId, 'reference', 0), 'value')
-    : semanticResultId(operationId(nodeId, 'allocation', 0), 'value')
+const argumentsObjectResultAt = (nodeId: ReturnType<IdentityTable['nodeIdOf']>): SemanticResultId =>
+  semanticResultId(operationId(nodeId, 'reference', 0), 'value')
 
 /**
  * Where a name with no binding anywhere publishes its value.
@@ -251,9 +246,8 @@ export const citeExpressionResult = (
   // the enclosing function. That is what made `Object3D.add`'s
   // `arguments.length` guard, and the eleven other `arguments` bodies in
   // three.js, compile to nothing at all.
-  const argumentsOrdinal = facts.argumentsObjects.phantomOrdinalOf(real)
-  if (argumentsOrdinal !== null) {
-    return { kind: 'source', source: { kind: 'result', result: argumentsObjectResultAt(identities.nodeIdOf(real), argumentsOrdinal) } }
+  if (facts.argumentsObjects.phantomOrdinalOf(real) !== null) {
+    return { kind: 'source', source: { kind: 'result', result: argumentsObjectResultAt(identities.nodeIdOf(real)) } }
   }
 
   if (ts.isIdentifier(real) && facts.unresolvableNames.isIntrinsicGlobalThis(real)) {
@@ -1064,7 +1058,6 @@ const isWrittenThroughArguments = (node: ts.Identifier): boolean => {
 const buildArgumentsObjectReference = (
   candidate: CensusCandidate,
   node: ts.Identifier,
-  phantomOrdinal: number,
   context: ProducerContext
 ): CandidateContribution => {
   if (isWrittenThroughArguments(node)) {
@@ -1079,7 +1072,7 @@ const buildArgumentsObjectReference = (
     }
   }
   const built = argumentsObjectValueAt(node, candidate.id, candidate.caller, candidate.evaluationOrdinal, context)
-  // The census said this site has a phantom at `phantomOrdinal`; the builder
+  // The census said this site has a phantom; the builder
   // re-derives the same fact and would answer `null` if it disagreed. Neither
   // outcome is guessed at.
   if (!built) {
@@ -1097,7 +1090,7 @@ const buildArgumentsObjectReference = (
   // and a disagreement between them is invisible -- a withheld operation, no
   // error. So the publisher checks the citer's own rule against what it
   // actually minted, and refuses out loud instead.
-  const predicted = argumentsObjectResultAt(candidate.id, phantomOrdinal)
+  const predicted = argumentsObjectResultAt(candidate.id)
   if (built.value !== predicted) {
     return {
       kind: 'blocked',
@@ -1155,8 +1148,7 @@ export const createReferenceProducer = (context: ProducerContext): FamilyProduce
     if (ts.isIdentifier(node)) {
       // Ahead of `classifyIdentifier`, which reads only syntax and would call
       // this an ordinary name resolution -- the one thing `arguments` is not.
-      const phantomOrdinal = context.argumentsObjects.phantomOrdinalOf(node)
-      if (phantomOrdinal !== null) return buildArgumentsObjectReference(candidate, node, phantomOrdinal, context)
+      if (context.argumentsObjects.phantomOrdinalOf(node) !== null) return buildArgumentsObjectReference(candidate, node, context)
       const classification = classifyIdentifier(node)
       if (classification.kind === 'skip') return { kind: 'operations', operations: [], edges: [] }
       if (classification.kind === 'blocked') {

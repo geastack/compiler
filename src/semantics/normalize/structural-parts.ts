@@ -720,12 +720,19 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
       }
       return [parameterOf(parameter, index === semanticRestIndex)]
     }
+    // Behind declared formals the phantom slot is the whole `arguments` list
+    // (`SignatureParameter.argumentsFrame`), so its callers pack every argument
+    // into it and `arguments.length` is the count they passed.
+    const phantomParameter = (symbol: ts.Symbol): SignatureParameter => {
+      const parameter = parameterOf(symbol, true)
+      return phantomIndex !== null && phantomIndex > 0 ? { ...parameter, argumentsFrame: true } : parameter
+    }
     const parameterShapes =
       phantomIndex === null
         ? signatureParameters.flatMap(parametersOf)
         : [
             ...signatureParameters.slice(0, phantomIndex).flatMap(parametersOf),
-            parameterOf(signatureParameters[phantomIndex] as ts.Symbol, true)
+            phantomParameter(signatureParameters[phantomIndex] as ts.Symbol)
           ]
     // The census's arguments frame: a closed tuple when every body read names
     // a fixed position (each position its own joined fact, the ones some

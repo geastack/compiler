@@ -12,13 +12,7 @@ import {
 } from '../../../identity/ids.js'
 import { normalCompletion, pureEffects, type SemanticCaller, type SemanticOperand } from '../../model/operands.js'
 import type { SemanticEdge } from '../../model/edges.js'
-import type {
-  AllocationOperation,
-  BindingOperation,
-  DestructuringOperation,
-  ReferenceOperation,
-  SemanticOperation
-} from '../../model/operations.js'
+import type { BindingOperation, DestructuringOperation, ReferenceOperation, SemanticOperation } from '../../model/operations.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { CensusCandidate } from '../census.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
@@ -159,19 +153,16 @@ export interface ArgumentsObjectValue {
  * directly from the frame at `{kind:'parameter', ordinal}` for every
  * position, the same source `contributeParameter`'s own binding reads.
  *
- * A `restFrom` REST PARAMETER (real or, through `implicitArgumentsSlotOf`, the checker's own phantom) is a DIFFERENT ECMAScript
- * concept: it packs only the TAIL of the argument list, from its own ordinal
- * onward, into a fresh array. `arguments`, by contrast, is EVERY argument, so
- * where the phantom sits at ordinal `P > 0`, `arguments` is P declared
- * parameters concatenated with that tail -- built as a range copy through the
- * same array-literal-with-spread shape `allocations.ts`'s own producer
- * builds for `[a, b, ...c]` (see `spread-arguments.ts`'s module comment: "the
- * same `appendRange`... an array literal's own admitted spread emits"), never
- * an alias of either source.
- *
- * `P === 0` (every forwarding shim this compiler has seen: `function
- * texImage2D(){ gl.texImage2D(...arguments) }`) degenerates to exactly the
- * phantom's own rest array -- no concatenation needed, so none is built.
+ * A written rest parameter packs only the TAIL of the argument list, from its
+ * own ordinal onward. `arguments`, by contrast, is EVERY argument the caller
+ * passed, and its length is that count. The formals cannot rebuild it: an
+ * omitted formal binds `undefined` exactly as an explicit `undefined` does, so
+ * `P` declared formals followed by the tail say `P` for `new MathNode( m, a )`
+ * where the language says 2 -- and three's `MathNode` recurses on that count.
+ * So the phantom slot (`implicitArgumentsSlotOf`) is itself the whole list:
+ * at ordinal 0 its tail already is, and behind declared formals the
+ * convention marks it `argumentsFrame` and every caller packs from position 0
+ * (`packRestArguments`). Either way `arguments` is exactly that array.
  *
  * Every occurrence mints its own copy of these operations, the same way
  * `buildThisReference` (`references.ts`) mints one operation per `this`
@@ -181,9 +172,11 @@ export interface ArgumentsObjectValue {
  * from a second, independently-read copy, and is not admitted here.
  *
  * Returns `null` when `node` is not inside a function with this recognized
- * phantom shape at all -- callers should treat that exactly as "this is not
- * the magic `arguments` binding this compiler can bind," the same fail-closed
- * answer `citeExpressionResult` gives any other unmodelled expression.
+ * phantom shape at all, or when a slot behind declared formals does not state
+ * that it holds the whole list -- callers should treat that exactly as "this
+ * is not the magic `arguments` binding this compiler can bind," the same
+ * fail-closed answer `citeExpressionResult` gives any other unmodelled
+ * expression.
  */
 export const argumentsObjectValueAt = (
   node: ts.Node,
@@ -203,8 +196,10 @@ export const argumentsObjectValueAt = (
   // complete argument evidence is unavailable.
   if (!signature) return null
   const frame = context.table.get(context.types.resolvedSignatureTypeOf(signature, 'call')).shape
-  const restType = frame.kind === 'signature' ? frame.call[0]?.parameters[phantom.ordinal]?.type : undefined
-  if (restType === undefined) return null
+  const restParameter = frame.kind === 'signature' ? frame.call[0]?.parameters[phantom.ordinal] : undefined
+  if (restParameter === undefined) return null
+  if (phantom.ordinal > 0 && restParameter.argumentsFrame !== true) return null
+  const restType = restParameter.type
   const restId = mintOperationId(context.ordinals, mintAgainst, 'reference')
   const restResult = mintResult(restId, 'value', restType)
   // Same shape `contributeDefaultedParameter`'s raw-argument citation mints
@@ -227,38 +222,7 @@ export const argumentsObjectValueAt = (
     evaluationOrdinal
   }
 
-  if (phantom.ordinal === 0) return { operations: [restOperation], edges: [], value: restResult.id, type: restType }
-
-  const operands: SemanticOperand[] = []
-  for (let i = 0; i < phantom.ordinal; i++) {
-    const declared = fn.parameters[i]
-    const elementType = declared ? context.types.typeAt(declared) : restType
-    operands.push(operand('element', i, { kind: 'parameter', ordinal: i }, elementType))
-  }
-  operands.push(operand('spread', phantom.ordinal, { kind: 'result', result: restResult.id }, restType))
-
-  const arrayId = mintOperationId(context.ordinals, mintAgainst, 'allocation')
-  const arrayOperation: AllocationOperation = {
-    id: arrayId,
-    family: 'allocation',
-    caller,
-    allocated: 'array-literal',
-    callable: null,
-    // The census element covers the complete argument list, including the
-    // declared prefix, so the signature's array carrier also holds this copy.
-    shape: restType,
-    operands,
-    results: [mintResult(arrayId, 'value', restType)],
-    completion: normalCompletion,
-    effects: { readsMutableState: false, writesMutableState: false, allocates: true, callsUserCode: false },
-    evaluationOrdinal
-  }
-  return {
-    operations: [restOperation, arrayOperation],
-    edges: [{ kind: 'value', result: restResult.id, to: arrayId, role: 'spread', ordinal: phantom.ordinal }],
-    value: semanticResultId(arrayId, 'value'),
-    type: restType
-  }
+  return { operations: [restOperation], edges: [], value: restResult.id, type: restType }
 }
 
 /**
