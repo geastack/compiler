@@ -1,11 +1,21 @@
 // @ts-nocheck
-//! expect: 2 2 3 1 1
+//! expect-refusal: the @param type of parameter "node" of getData was erased because its callers contradict it
+//! expect-refusal: the @param type of parameter "node" of setData was erased because its callers contradict it
+//! expect-refusal: (function-escapes:uncounted-member-reference)
 // three's `BufferAttributeNode.getHash( builder )` keys the node cache by
 // `this.value` -- `InputNode`'s `@type {any}` field, which the binding census
 // carries as the `BufferAttribute | Float32Array` the constructors store --
 // under `NodeCache.getData( node )`'s `@param {Node} node`. The checker types
 // the argument `any` and says nothing; the settled census contradicts the tag,
 // which then loses, as a tag the checker could contradict does.
+//
+// Losing the tag does not make `node` dynamic. The census of `getData`'s and
+// `setData`'s callers stays open (the member proof cannot close the `cache`
+// receivers reached through `getHash`), so it cannot type `node` from its
+// complete callers, and as `any` the parameter would box the class and typed
+// array values passed to it. Both parameters are refused by name instead, as
+// main refuses this program at the call (no conversion from the census union
+// to `GNode`). The refusal moves when that member proof closes.
 let nextId = 1
 class GNode {
   constructor() {

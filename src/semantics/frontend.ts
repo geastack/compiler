@@ -1849,6 +1849,7 @@ const attemptFrontend = (
     collections,
     bags,
     parameters,
+    erasedParameterStatements: new Set([...compiled.erasedParameterStatements].map((parameter) => identities.declarationIdOf(parameter))),
     generatorDeclaration: generatorDeclarationEarly,
     asyncGeneratorDeclaration: asyncGeneratorDeclarationEarly,
     mapIteratorDeclaration: mapIteratorDeclarationEarly,

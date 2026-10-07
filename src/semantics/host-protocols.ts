@@ -1318,6 +1318,23 @@ export const keyedCollectionDeclarationsOf = (
   return found
 }
 
+/**
+ * The interface symbol of each standard keyed-collection family that owns its
+ * storage (read-only views left out), resolved as `keyedCollectionDeclarationsOf`
+ * resolves them. For a pass that runs before identities exist and compares a
+ * type's own symbol to the library's, so a program class that happens to be
+ * named `Map` is never taken for one.
+ */
+export const storageKeyedCollectionSymbolsOf = (checker: ts.TypeChecker, anchor: ts.SourceFile): Map<ts.Symbol, KeyedCollectionFamily> => {
+  const found = new Map<ts.Symbol, KeyedCollectionFamily>()
+  for (const [name, family] of keyedCollectionFamilies) {
+    if (readOnlyKeyedCollectionNames.has(name)) continue
+    const symbol = checker.resolveName(name, anchor, ts.SymbolFlags.Interface, false)
+    if (symbol) found.set(symbol, family)
+  }
+  return found
+}
+
 /** The declaration identity of each read-only keyed-collection view interface, resolved as `keyedCollectionDeclarationsOf` resolves the families. */
 export const readOnlyKeyedCollectionDeclarationsOf = (
   checker: ts.TypeChecker,

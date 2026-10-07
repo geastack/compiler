@@ -666,6 +666,7 @@ jsdoc-array-listing-positions-holds-each.runtime.js.cpp 5e2d0db076a9
 jsdoc-array-tag-contradicted-by-push.runtime.js.cpp c9a1434f19c1
 jsdoc-asserted-class-method.runtime.js.cpp a3244b66c193
 jsdoc-defaulted-class-constructor.runtime.js.cpp 54ad52eaa43a
+jsdoc-erased-map-parameter-closed-census-native-union.runtime.js.cpp a28970020172
 jsdoc-field-open-array-element.runtime.js.cpp ff4417c81fb6
 jsdoc-field-stores-contradicted-parameter.runtime.js.cpp 365251ed64e4
 jsdoc-field-tag-held-by-silent-writes.runtime.js.cpp 8ef4cd39e0e0
@@ -680,8 +681,6 @@ jsdoc-optional-parameter.runtime.js.cpp 020012b11c82
 jsdoc-override-parameter-contradicted-through-base-call.runtime.js.cpp dc26ce408ef6
 jsdoc-parameter-collection-element-invariant.runtime.js.cpp 81adac938708
 jsdoc-parameter-contradicted-by-callers.runtime.js.cpp 8dec61e3faad
-jsdoc-parameter-contradicted-by-census.runtime.js.cpp aeacf478ddc8
-jsdoc-parameter-contradicted-through-unimported-names.runtime.js.cpp 45bededaec10
 jsdoc-parameter-held-by-ancestor-argument.runtime.js.cpp 4fca6c025bcc
 jsdoc-parameter-open-array-element.runtime.js.cpp 0dd287543c93
 jsdoc-promise-void-return-contradicted-by-resolve.runtime.js.cpp fb57bb09e4aa
@@ -1049,7 +1048,7 @@ plain-regex-test-and-ascii-string-search.runtime.ts.cpp 3c67df0a9006
 populated-record-late-fields.js.cpp ccc9715a198e
 primitive-delete-arms.runtime.js.cpp 952d8957498f
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 52d4c29d6073
-printer-drift.txt ce6167dbdb13
+printer-drift.txt a03346db4044
 private-names-are-not-own-properties.ts.cpp 5a904aac80af
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp ed60c96c28c7
 promise-all-over-a-generator.ts.cpp cd9ebb8b8ee8
@@ -1374,7 +1373,7 @@ typeof-runtime-string.ts.cpp d89347bd0397
 typeof-then-discriminates-a-union.ts.cpp 3b732925872e
 unbox-nullable-union.ts.cpp 32d4df3401b7
 uncallable-member-slot-call.runtime.js.cpp 68791d94946d
-uncertified.txt b0f8faffa799
+uncertified.txt 0dbbfc035ae4
 uniform-tuple-boxed-into-any-is-an-array.runtime.ts.cpp 4884bb7f95dc
 uniform-tuple-const-object-indexed-read-in-a-free-function.runtime.ts.cpp 1364fe4a1da8
 uniform-tuple-identity-comparison-keeps-array-identity.runtime.ts.cpp 640e585c109c

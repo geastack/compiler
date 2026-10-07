@@ -356,6 +356,15 @@ export interface ProducerContext {
    */
   readonly parameters: ParameterBindingCensus
   /**
+   * The parameters whose stated `@param` type a contradiction pass erased
+   * (`CompiledProgram.erasedParameterStatements`). Such a parameter reads as
+   * untyped, and an untyped parameter the census cannot bind is the `any` the
+   * program declared; this one's program declared a type, so the binding
+   * producer refuses it instead (`producers/bindings.ts`'s
+   * `erasedStatementRefusal`).
+   */
+  readonly erasedParameterStatements: ReadonlySet<DeclarationId>
+  /**
    * The declaration identity of the standard `Generator<T, TReturn, TNext>`
    * interface, or `null` when this compilation's `lib` installs none.
    *

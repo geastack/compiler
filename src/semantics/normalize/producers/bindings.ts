@@ -492,6 +492,8 @@ const contributeParameter = (
   // introduce, the same "not every candidate names a gap" answer a
   // pattern-nested BindingElement gives above.
   if (!hasArgumentFrame(node)) return { kind: 'operations', operations: [], edges: [] }
+  const erased = erasedStatementRefusal(node, context)
+  if (erased !== null) return { kind: 'blocked', blocker: blocked(candidate.id, 'binding', erased, null) }
   if (node.initializer) {
     return contributeDefaultedParameter(candidate, node as ts.ParameterDeclaration & { initializer: ts.Expression }, context)
   }
@@ -515,6 +517,40 @@ const contributeParameter = (
     evaluationOrdinal: candidate.evaluationOrdinal
   }
   return { kind: 'operations', operations: [operation], edges: [] }
+}
+
+/**
+ * Why a parameter whose stated `@param` type a contradiction pass erased has
+ * no binding this compiler can publish, or `null` when it has one.
+ *
+ * Erased, the parameter reads as one the program never typed, and the
+ * binding census's answer stands in for the statement: a type, or a union of
+ * arms, it proved from the complete set of the parameter's callers. Where the
+ * census refused -- an escape it cannot count, a disagreement it cannot join
+ * -- an untyped parameter is the `any` its program declared, and its callers
+ * box what they pass. This one's program declared a type, so that `any` would
+ * be no declaration but a statically typed argument (a `Map`, a class
+ * instance, a typed union) losing its type at the call: the boxing the
+ * compiler never does (`docs/ARCHITECTURE.md`). The caller's value has no
+ * conversion into the stated type either, which is why the tag was erased;
+ * main refuses that conversion at the call, and this refuses the parameter,
+ * naming what the census could not prove.
+ */
+const erasedStatementRefusal = (node: ts.ParameterDeclaration, context: ProducerContext): string | null => {
+  if (!context.erasedParameterStatements.has(context.identities.declarationIdOf(node))) return null
+  const census = context.parameters
+  const arms = census.unionArmsAt(node)
+  if (arms !== null && arms.length > 0) return null
+  const bound = census.typeAt(node)
+  if (bound !== null && (bound.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) return null
+  const name = ts.isIdentifier(node.name) ? node.name.text : node.name.getText()
+  const owner = (node.parent as { readonly name?: ts.Node }).name
+  const subject = owner ? `parameter "${name}" of ${owner.getText()}` : `parameter "${name}"`
+  const reason = census.refusalOf(node) ?? (bound !== null ? 'bound-to-any' : 'no-census-binding')
+  return (
+    `the @param type of ${subject} was erased because its callers contradict it, and the parameter census ` +
+    `could not type it from its complete callers (${reason}); as a dynamic parameter it would box the statically typed values they pass`
+  )
 }
 
 /**

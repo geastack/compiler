@@ -2,6 +2,7 @@ import ts from 'typescript'
 import {
   blankedTexts,
   censusExcludes,
+  collectionKindsOf,
   isUncheckedJavaScript,
   armsExclude,
   type BlankSpan,
@@ -60,8 +61,12 @@ import { hostAbsentTypeTest } from './normalize/absent-globals.js'
  * whichever statement typed it on the way.
  *
  * The whole tag is blanked, name and description too, so the parameter is
- * what it would be had the tag never been written: the call-site census's
- * answer, the dynamic carrier where it has none. A `@param` left behind with
+ * what the call-site census answers, as if the tag had never been written.
+ * Where the census answers nothing, it is NOT the dynamic carrier an
+ * untagged parameter would be: the program stated a type there, and a typed
+ * argument boxed into `any` is no answer to a false statement. The span
+ * records the parameter (`BlankSpan.parameterAt`), and the binding producer
+ * refuses it (`producers/bindings.ts`'s `erasedStatementRefusal`). A `@param` left behind with
  * only its `{...}` blanked is not that: it is still a tag, which the census
  * reads as a statement (`parameter-bindings.ts`'s `isUnannotated`), so a
  * `[output=null]` parameter stayed the `null` its default is. Measured on
@@ -113,6 +118,7 @@ export const contradictedJsDocParameterSpans = (
   const unchecked = files.filter(isUncheckedJavaScript)
   if (unchecked.length === 0) return spans
   const checker = program.getTypeChecker()
+  const collections = collectionKindsOf(program)
   const contradicted = new Set<ts.JSDocParameterTag>()
   const parameterOfTag = new Map<ts.JSDocParameterTag, ts.ParameterDeclaration>()
   const saysNothing =
@@ -303,7 +309,7 @@ export const contradictedJsDocParameterSpans = (
     // A collection the call builds takes the parameter's element (I1), so
     // only one built elsewhere is carried by an element of its own.
     const invariant = !isFresh(argument)
-    if (census && readsAsAny(site)) return censusExcludes(checker, census, argument, stated, invariant)
+    if (census && readsAsAny(site)) return censusExcludes(checker, collections, census, argument, stated, invariant)
     const passed = checker.getNonNullableType(
       (site.flags & ts.TypeFlags.TypeParameter) !== 0 ? (checker.getBaseConstraintOfType(site) ?? site) : site
     )
@@ -316,7 +322,7 @@ export const contradictedJsDocParameterSpans = (
     // too: three's `WGSLNodeBuilder` constructs `new NodeSampler( name,
     // uniformNode.node )`, a `UniformNode` field, under `@param {TextureNode}
     // textureNode`, only for texture uniforms (`statementExcludes`).
-    return armsExclude(checker, arms, stated, invariant)
+    return armsExclude(checker, collections, arms, stated, invariant)
   }
 
   // A member tag -- `@param {T} [parameters.name]` -- states one member of an
@@ -464,7 +470,13 @@ export const contradictedJsDocParameterSpans = (
     // begins; the close itself is never part of it, but is kept out anyway.
     const text = file.text.slice(tag.getStart(file), tag.end)
     const close = text.indexOf('*/')
-    fileSpans.push({ at: tag.getStart(file), end: close < 0 ? tag.end : tag.getStart(file) + close })
+    // A member tag (`[parameters.name]`) and a field tag state no parameter.
+    const parameter = ts.isJSDocParameterTag(tag) && contradicted.has(tag) ? parameterOfTag.get(tag) : undefined
+    fileSpans.push({
+      at: tag.getStart(file),
+      end: close < 0 ? tag.end : tag.getStart(file) + close,
+      ...(parameter ? { parameterAt: parameter.getStart(parameter.getSourceFile()) } : {})
+    })
     spans.set(file, fileSpans)
   }
   return spans

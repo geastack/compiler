@@ -1,5 +1,7 @@
 import { resolve } from 'node:path'
 import ts from 'typescript'
+import { storageKeyedCollectionSymbolsOf } from './host-protocols.js'
+import type { KeyedCollectionFamily } from '../representation/policies.js'
 
 /**
  * JSDoc field types that the program's own writes contradict, in unchecked
@@ -148,6 +150,7 @@ export const contradictedJsDocTypeSpans = (
   const unchecked = files.filter(isUncheckedJavaScript)
   if (unchecked.length === 0) return spans
   const checker = program.getTypeChecker()
+  const collections = collectionKindsOf(program)
 
   const tagsOf = new Map<ts.Symbol, ts.JSDocTypeTag[]>()
   const names = new Set<string>()
@@ -223,10 +226,10 @@ export const contradictedJsDocTypeSpans = (
     return valuesWritten(value).some((written) => {
       const constructed = withoutParentheses(written)
       const type = checker.getTypeAtLocation(constructed)
-      if (saysNothing(type)) return census !== undefined && censusExcludes(checker, census, constructed, stated, true)
+      if (saysNothing(type)) return census !== undefined && censusExcludes(checker, collections, census, constructed, stated, true)
       if (censusElement !== undefined && isOpenArray(checker, type)) {
         const element = censusElement(constructed)
-        return element !== null && censusElementExcludes(checker, element, stated)
+        return element !== null && censusElementExcludes(checker, collections, element, stated)
       }
       if (isConstruction(constructed)) return !checker.isTypeAssignableTo(type, stated) && !derivesFromStatedClass(checker, type, stated)
       return excludesEachOther(type, stated)
@@ -444,12 +447,12 @@ const isOpenArray = (checker: ts.TypeChecker, type: ts.Type): boolean => {
  * which is `collectionVerdict`'s reading of an array value, asked of the
  * element because the census's array has no `ts.Type` of its own.
  */
-const censusElementExcludes = (checker: ts.TypeChecker, element: ts.Type, stated: ts.Type): boolean => {
+const censusElementExcludes = (checker: ts.TypeChecker, collections: CollectionKinds, element: ts.Type, stated: ts.Type): boolean => {
   if (saysNothing(element)) return false
   const arms = stated.isUnion() ? stated.types : [stated]
   const arrays = arms.flatMap((arm) => {
-    const collection = collectionOf(checker, arm)
-    return collection?.kind === 'Array' ? [collection] : []
+    const collection = collectionOf(checker, collections, arm)
+    return collection?.kind === 'array' ? [collection] : []
   })
   if (arrays.length === 0 || arrays.length !== arms.length) return false
   const program = (type: ts.Type): boolean => !namesDeclaredOnlyType(checker, type)
@@ -462,6 +465,16 @@ const censusElementExcludes = (checker: ts.TypeChecker, element: ts.Type, stated
 export interface BlankSpan {
   readonly at: number
   readonly end: number
+  /**
+   * Where the parameter declaration starts whose `@param` tag this span
+   * blanks. The program compiled without the tag has to know the parameter
+   * HAD a statement: blanked, it reads as one the program never typed, and
+   * the binding census's refusal would make it the `any` the program
+   * declared. It declared a type (`CompiledProgram.erasedParameterStatements`).
+   * Blanking keeps every offset, so this one finds the same declaration in
+   * the program built from the blanked text.
+   */
+  readonly parameterAt?: number
 }
 
 /** `text` with every span's bytes but line breaks turned into spaces. */
@@ -493,6 +506,7 @@ export const blankedTexts = (
  */
 export const censusExcludes = (
   checker: ts.TypeChecker,
+  collections: CollectionKinds,
   census: CensusArms,
   value: ts.Expression,
   stated: ts.Type,
@@ -502,7 +516,7 @@ export const censusExcludes = (
   if (!arms) return false
   const present = arms.filter((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0)
   if (present.length === 0 || present.some(saysNothing)) return false
-  return armsExclude(checker, present, stated, invariant)
+  return armsExclude(checker, collections, present, stated, invariant)
 }
 
 /**
@@ -526,8 +540,14 @@ export const censusExcludes = (
  * group of compute nodes the method is handed as well. The statement's arms
  * are read by domain, so `boolean` or `('vertex'|'fragment')` is one arm.
  */
-export const armsExclude = (checker: ts.TypeChecker, arms: readonly ts.Type[], stated: ts.Type, invariant: boolean): boolean => {
-  const excluded = arms.filter((arm) => statementExcludes(checker, arm, stated, invariant))
+export const armsExclude = (
+  checker: ts.TypeChecker,
+  collections: CollectionKinds,
+  arms: readonly ts.Type[],
+  stated: ts.Type,
+  invariant: boolean
+): boolean => {
+  const excluded = arms.filter((arm) => statementExcludes(checker, collections, arm, stated, invariant))
   if (excluded.length === arms.length) return true
   if (excluded.length === 0) return false
   const statedArms = [
@@ -538,7 +558,7 @@ export const armsExclude = (checker: ts.TypeChecker, arms: readonly ts.Type[], s
     )
   ]
   if (statedArms.length < 2) return false
-  return statedArms.some((statedArm) => arms.every((arm) => statementExcludes(checker, arm, statedArm, invariant)))
+  return statedArms.some((statedArm) => arms.every((arm) => statementExcludes(checker, collections, arm, statedArm, invariant)))
 }
 
 /**
@@ -578,8 +598,14 @@ export const armsExclude = (checker: ts.TypeChecker, arms: readonly ts.Type[], s
  * - A statement spelling literals (`{('vertex'|'fragment')}`) of the domain
  *   the value has states a precision, not a different storage.
  */
-export const statementExcludes = (checker: ts.TypeChecker, passed: ts.Type, stated: ts.Type, invariant: boolean): boolean => {
-  const collection = invariant ? collectionVerdict(checker, passed, stated) : null
+export const statementExcludes = (
+  checker: ts.TypeChecker,
+  collections: CollectionKinds,
+  passed: ts.Type,
+  stated: ts.Type,
+  invariant: boolean
+): boolean => {
+  const collection = invariant ? collectionVerdict(checker, collections, passed, stated) : null
   if (collection !== null) return collection
   if (namesDeclaredOnlyType(checker, stated)) return false
   if (derivesFromStatedClass(checker, passed, stated)) return false
@@ -591,13 +617,42 @@ export const statementExcludes = (checker: ts.TypeChecker, passed: ts.Type, stat
   return !domains.some((domain) => checker.isTypeAssignableTo(checker.getBaseTypeOfLiteralType(passed), domain))
 }
 
-const collectionKinds = new Set(['Array', 'Map', 'Set', 'WeakMap', 'WeakSet'])
+/** A standard collection gea carries by its element (key, value) carriers. */
+type CollectionKind = 'array' | KeyedCollectionFamily
 
-/** The kind and type arguments of an `Array`, `Map`, `Set`, `WeakMap` or `WeakSet` reference; `null` for anything else. */
-const collectionOf = (checker: ts.TypeChecker, type: ts.Type): { readonly kind: string; readonly elements: readonly ts.Type[] } | null => {
-  const kind = type.getSymbol()?.name
-  if (!kind || !collectionKinds.has(kind) || (type.flags & ts.TypeFlags.Object) === 0) return null
+/**
+ * The standard `Array`, `Map`, `Set`, `WeakMap` and `WeakSet` interfaces,
+ * keyed by the library's own symbol: a collection is the type whose symbol IS
+ * one of these, never one whose name spells it, so a program class named
+ * `Map` is no collection here. Resolved once per pass, the way
+ * `host-protocols.ts`'s `keyedCollectionDeclarationsOf` resolves the keyed
+ * families; the read-only views (`ReadonlyMap`) widen what they hand out and
+ * are left out.
+ */
+export type CollectionKinds = ReadonlyMap<ts.Symbol, CollectionKind>
+
+export const collectionKindsOf = (program: ts.Program): CollectionKinds => {
+  const checker = program.getTypeChecker()
+  const anchor = program.getSourceFiles().find((file) => !file.isDeclarationFile)
+  const kinds = new Map<ts.Symbol, CollectionKind>()
+  if (!anchor) return kinds
+  for (const [symbol, family] of storageKeyedCollectionSymbolsOf(checker, anchor)) kinds.set(symbol, family)
+  const array = checker.resolveName('Array', anchor, ts.SymbolFlags.Interface, false)
+  if (array) kinds.set(array, 'array')
+  return kinds
+}
+
+/** The kind and type arguments of a reference to one of the standard collections; `null` for anything else. */
+const collectionOf = (
+  checker: ts.TypeChecker,
+  collections: CollectionKinds,
+  type: ts.Type
+): { readonly kind: CollectionKind; readonly elements: readonly ts.Type[] } | null => {
+  if ((type.flags & ts.TypeFlags.Object) === 0) return null
   if (((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return null
+  const symbol = type.getSymbol()
+  const kind = symbol ? collections.get(symbol) : undefined
+  if (!kind) return null
   return { kind, elements: checker.getTypeArguments(type as ts.TypeReference) }
 }
 
@@ -608,11 +663,11 @@ const collectionOf = (checker: ts.TypeChecker, type: ts.Type): { readonly kind: 
  * host's, `null` where it says nothing (no collection, no such arm, or an arm
  * that differs only where a host's type is -- the boundary's question).
  */
-const collectionVerdict = (checker: ts.TypeChecker, passed: ts.Type, stated: ts.Type): boolean | null => {
-  const collection = collectionOf(checker, passed)
+const collectionVerdict = (checker: ts.TypeChecker, collections: CollectionKinds, passed: ts.Type, stated: ts.Type): boolean | null => {
+  const collection = collectionOf(checker, collections, passed)
   if (!collection) return null
   const sameKind = (stated.isUnion() ? stated.types : [stated]).flatMap((arm) => {
-    const other = collectionOf(checker, arm)
+    const other = collectionOf(checker, collections, arm)
     return other && other.kind === collection.kind ? [other] : []
   })
   if (sameKind.length === 0) return null

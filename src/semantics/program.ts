@@ -12,9 +12,9 @@ import { withoutModuleAmbientGlobalRedeclarations } from './ambient.js'
 import { scriptScopeCollisionsOf } from './script-scope-collisions.js'
 import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
 import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
-import { blankSpans, contradictedJsDocTypeBlanks, type BlankSpan } from './contradicted-jsdoc-types.js'
+import { blankedTexts, blankSpans, contradictedJsDocTypeBlanks, type BlankSpan } from './contradicted-jsdoc-types.js'
 import { absentJsDocTagWidenings } from './absent-jsdoc-tags.js'
-import { contradictedJsDocParameterBlanks } from './contradicted-jsdoc-parameters.js'
+import { contradictedJsDocParameterSpans } from './contradicted-jsdoc-parameters.js'
 import { overArityJsDocArrayRewrites } from './over-arity-jsdoc-arrays.js'
 import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
 import { isUncheckedGuardCopyArtifact, uncheckedGuardArgumentCopies } from './unchecked-guard-argument-copies.js'
@@ -195,6 +195,15 @@ export interface CompiledProgram {
   readonly diagnostics: readonly ts.Diagnostic[]
   /** Exact stale package-source directives blanked before the final checker pass. */
   readonly sourcePreparations: readonly DiagnosticSourcePreparationAudit[]
+  /**
+   * The parameters whose `@param` tag a contradiction pass blanked -- this
+   * program's own (`contradictedJsDocParameterSpans`) and an earlier
+   * attempt's (`censusContradictions`). Blanked, each reads as a parameter
+   * the program never typed; it is one whose statement its callers proved
+   * false, which the binding producer has to tell apart from an `any` the
+   * program declared (`producers/bindings.ts`'s `erasedStatementRefusal`).
+   */
+  readonly erasedParameterStatements: ReadonlySet<ts.ParameterDeclaration>
 }
 
 export const defaultCompilerOptions: ts.CompilerOptions = Object.freeze({
@@ -1073,6 +1082,34 @@ const entryFilesOf = (program: ts.Program, rootFileNames: readonly string[]): re
   return found
 }
 
+/**
+ * The parameter declarations at the recorded offsets, in the program built
+ * from the blanked text. Every preparation of an unchecked file edits in
+ * place, so the offset a span recorded is where the same declaration starts;
+ * one that names no parameter there broke that invariant, and losing the fact
+ * would let an erased statement pass for a declared `any`.
+ */
+const erasedParametersOf = (program: ts.Program, offsets: ReadonlyMap<string, ReadonlySet<number>>): Set<ts.ParameterDeclaration> => {
+  const found = new Set<ts.ParameterDeclaration>()
+  for (const [fileName, positions] of offsets) {
+    const file = program.getSourceFile(fileName)
+    if (!file) throw new Error(`erased @param statements recorded for ${fileName}, which this program does not contain`)
+    for (const position of positions) {
+      let parameter: ts.ParameterDeclaration | undefined
+      const visit = (node: ts.Node): void => {
+        if (parameter || position < node.pos || position >= node.end) return
+        if (ts.isParameter(node) && node.getStart(file) === position) parameter = node
+        else ts.forEachChild(node, visit)
+      }
+      visit(file)
+      if (!parameter)
+        throw new Error(`no parameter starts at offset ${position} of ${fileName}, where an erased @param statement was recorded`)
+      found.add(parameter)
+    }
+  }
+  return found
+}
+
 export const createProgram = (input: ProgramInput): CompiledProgram => {
   const timing = createFrontendTiming('program')
   const resolutionDiagnostics: { readonly literal: ts.StringLiteralLike; readonly diagnostic: ts.Diagnostic }[] = []
@@ -1100,12 +1137,21 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
   // prepared: each of these blanks bytes in place, so none moves another's
   // offsets (`contradicted-jsdoc-types.ts`).
   const fieldContradictions = timing.measure('contradicted-jsdoc-types', () => contradictedJsDocTypeBlanks(configured.program, restated))
-  const contradictions = new Map([
-    ...fieldContradictions,
-    ...timing.measure('contradicted-jsdoc-parameters', () =>
-      contradictedJsDocParameterBlanks(configured.program, new Map([...restated, ...fieldContradictions]), input.absentGlobals)
-    )
-  ])
+  const parameterSpans = timing.measure('contradicted-jsdoc-parameters', () =>
+    contradictedJsDocParameterSpans(configured.program, undefined, input.absentGlobals)
+  )
+  const contradictions = new Map([...fieldContradictions, ...blankedTexts(new Map([...restated, ...fieldContradictions]), parameterSpans)])
+  const erasedParameterAt = new Map<string, Set<number>>()
+  const recordErased = (fileName: string, spans: readonly BlankSpan[]): void => {
+    for (const span of spans) {
+      if (span.parameterAt === undefined) continue
+      const known = erasedParameterAt.get(fileName) ?? new Set<number>()
+      known.add(span.parameterAt)
+      erasedParameterAt.set(fileName, known)
+    }
+  }
+  for (const [file, spans] of parameterSpans) recordErased(resolve(file.fileName), spans)
+  for (const [fileName, spans] of input.censusContradictions ?? []) recordErased(resolve(fileName), spans)
   // Composed onto both, and in place like them (`absent-jsdoc-tags.ts`).
   const blanked = new Map([...restated, ...contradictions])
   const absences = timing.measure('absent-jsdoc-tags', () => absentJsDocTagWidenings(configured.program, blanked))
@@ -1184,6 +1230,7 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
     sourceFiles,
     entryFiles: entryFilesOf(program, input.rootFileNames),
     sourcePreparations: preparation.audit,
+    erasedParameterStatements: erasedParametersOf(program, erasedParameterAt),
     // A program that does not typecheck has no well-defined semantics to port.
     // Collecting these here means the compiler can refuse before normalizing,
     // rather than normalizing a program the checker never validated.
