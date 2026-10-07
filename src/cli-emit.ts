@@ -433,24 +433,15 @@ const report = (result: CompileResult, outDirName: string): number => {
     // that -- it names a component of the graph, not a place in the program.
     const where = (diagnostic: (typeof result.diagnostics.diagnostics)[number]): string =>
       diagnostic.location ? `${diagnostic.location.file}:${diagnostic.location.line}:${diagnostic.location.column}` : diagnostic.component
-    const roots = result.diagnostics.diagnostics.filter((diagnostic) => diagnostic.severity === 'root')
-    for (const diagnostic of roots) process.stderr.write(`  ${where(diagnostic)}: ${diagnostic.message}\n`)
-    // A root diagnostic is the one worth reading, so it is the only one printed
-    // WHEN THERE IS ONE. When there is not, printing nothing reported nothing:
-    // `certificate` is withheld whenever `diagnostics` is non-empty at all, so
-    // a program blocked solely by derived or unsupported diagnostics failed
-    // with an empty log, and "no certificate; 0 capability refusal(s)" was the
-    // whole message -- which names neither a cause nor a file. Four apps sat
-    // behind that message with nothing to act on.
-    if (roots.length === 0) {
-      const rest = result.diagnostics.diagnostics
-      for (const diagnostic of rest.slice(0, 20)) {
-        process.stderr.write(`  ${diagnostic.severity}  ${where(diagnostic)}: ${diagnostic.message}\n`)
-      }
-      if (rest.length > 20) process.stderr.write(`  ... and ${rest.length - 20} more diagnostic(s)\n`)
-      if (rest.length === 0 && certifyRefusals.length === 0) {
-        process.stderr.write('  (no diagnostics recorded -- the certificate was withheld for another reason)\n')
-      }
+    // Every diagnostic the header counts, each with its severity, so the rows
+    // printed are the count the header states. Printing only the roots hid
+    // every derived and unsupported row behind them, and a program with no
+    // root showed only the first 20. A root is still the one to read first;
+    // its severity says which one it is.
+    const diagnostics = result.diagnostics.diagnostics
+    for (const diagnostic of diagnostics) process.stderr.write(`  ${diagnostic.severity}  ${where(diagnostic)}: ${diagnostic.message}\n`)
+    if (diagnostics.length === 0 && certifyRefusals.length === 0) {
+      process.stderr.write('  (no diagnostics recorded -- the certificate was withheld for another reason)\n')
     }
     return 1
   }

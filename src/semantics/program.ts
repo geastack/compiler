@@ -12,7 +12,7 @@ import { withoutModuleAmbientGlobalRedeclarations } from './ambient.js'
 import { scriptScopeCollisionsOf } from './script-scope-collisions.js'
 import { resolveHostMethod, type HostMethodBindingTable } from './host-methods.js'
 import { diagnosticSourcePreparation, type DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
-import { blankedTexts, blankSpans, contradictedJsDocTypeBlanks, type BlankSpan } from './contradicted-jsdoc-types.js'
+import { blankedTexts, blankSpans, contradictedJsDocTypes, type BlankSpan } from './contradicted-jsdoc-types.js'
 import { absentJsDocTagWidenings } from './absent-jsdoc-tags.js'
 import { contradictedJsDocParameterSpans } from './contradicted-jsdoc-parameters.js'
 import { overArityJsDocArrayRewrites } from './over-arity-jsdoc-arrays.js'
@@ -147,7 +147,7 @@ export interface ProgramInput {
   }) => string | null)[]
   /**
    * Stated types an earlier frontend attempt's settled binding census
-   * contradicted (`contradictedJsDocTypeSpans`, `contradictedJsDocParameterSpans`),
+   * contradicted (`contradictedJsDocTypes`, `contradictedJsDocParameterSpans`),
    * as spans of each file's TRANSFORMED text. Blanked as the file is parsed,
    * after every transform, so the first program and every pass that reads it
    * already compile without them. Every pass blanks in place, so a span read
@@ -1135,10 +1135,12 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
   const restated = new Map([...preparation.sourceText, ...redeclarations, ...ambientRestatements])
   // On the same first program, and composed onto what the passes above
   // prepared: each of these blanks bytes in place, so none moves another's
-  // offsets (`contradicted-jsdoc-types.ts`).
-  const fieldContradictions = timing.measure('contradicted-jsdoc-types', () => contradictedJsDocTypeBlanks(configured.program, restated))
+  // offsets (`contradicted-jsdoc-types.ts`). The parameter pass reads no
+  // evidence off a statement the field pass takes away.
+  const fieldFindings = timing.measure('contradicted-jsdoc-types', () => contradictedJsDocTypes(configured.program))
+  const fieldContradictions = blankedTexts(restated, fieldFindings.spans)
   const parameterSpans = timing.measure('contradicted-jsdoc-parameters', () =>
-    contradictedJsDocParameterSpans(configured.program, undefined, input.absentGlobals)
+    contradictedJsDocParameterSpans(configured.program, undefined, input.absentGlobals, fieldFindings.invalidated)
   )
   const contradictions = new Map([...fieldContradictions, ...blankedTexts(new Map([...restated, ...fieldContradictions]), parameterSpans)])
   const erasedParameterAt = new Map<string, Set<number>>()

@@ -2,11 +2,13 @@ import ts from 'typescript'
 import {
   blankedTexts,
   censusExcludes,
-  collectionKindsOf,
+  standardSymbolsOf,
   isUncheckedJavaScript,
   armsExclude,
+  isClassInstance,
   type BlankSpan,
-  type CensusArms
+  type CensusArms,
+  type InvalidatedStatements
 } from './contradicted-jsdoc-types.js'
 import { programTypeNames } from './normalize/jsdoc-type-names.js'
 import { hostAbsentTypeTest } from './normalize/absent-globals.js'
@@ -111,14 +113,15 @@ export const contradictedJsDocParameterBlanks = (
 export const contradictedJsDocParameterSpans = (
   program: ts.Program,
   census?: CensusArms,
-  absentGlobals: ReadonlySet<string> = new Set()
+  absentGlobals: ReadonlySet<string> = new Set(),
+  invalidated?: InvalidatedStatements
 ): Map<ts.SourceFile, BlankSpan[]> => {
   const spans = new Map<ts.SourceFile, BlankSpan[]>()
   const files = program.getSourceFiles().filter((file) => !file.isDeclarationFile)
   const unchecked = files.filter(isUncheckedJavaScript)
   if (unchecked.length === 0) return spans
   const checker = program.getTypeChecker()
-  const collections = collectionKindsOf(program)
+  const standard = standardSymbolsOf(program)
   const contradicted = new Set<ts.JSDocParameterTag>()
   const parameterOfTag = new Map<ts.JSDocParameterTag, ts.ParameterDeclaration>()
   const saysNothing =
@@ -231,6 +234,37 @@ export const contradictedJsDocParameterSpans = (
       (candidate) => candidate !== method && derivesFrom(candidate.parent as ts.ClassLikeDeclaration, ownerSymbol)
     )
   }
+  // Only an override some instance of the receiver's class can run, though:
+  // one declared by that class or a class extending it. A call `this.has(
+  // renderTarget )` in three's `Textures`, which inherits `DataMap.has`,
+  // never runs `Geometries.has`, a sibling's override, and read against it
+  // the render target blanked its `@param {RenderObject}`. A receiver whose
+  // classes the checker cannot state (`null`) may be any of them; a receiver
+  // typed by the base class may be any descendant, so every override stays.
+  const receiverClassesOf = (call: ts.CallExpression | ts.NewExpression): readonly ts.Symbol[] | null => {
+    if (!ts.isCallExpression(call)) return null
+    let callee: ts.Expression = call.expression
+    while (ts.isParenthesizedExpression(callee)) callee = callee.expression
+    if (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) return null
+    const read = typeOfExpression(callee.expression)
+    // `this` is the polymorphic `this` of its class, a type parameter.
+    const receiver = checker.getNonNullableType(
+      (read.flags & ts.TypeFlags.TypeParameter) !== 0 ? (checker.getBaseConstraintOfType(read) ?? read) : read
+    )
+    const classes: ts.Symbol[] = []
+    for (const arm of armsOf(receiver)) {
+      const symbol = isClassInstance(arm) ? ((arm as ts.TypeReference).target ?? arm).getSymbol() : undefined
+      if (!symbol) return null
+      classes.push(symbol)
+    }
+    return classes.length > 0 ? classes : null
+  }
+  const runsOn = (override: ts.MethodDeclaration, receivers: readonly ts.Symbol[] | null): boolean => {
+    if (receivers === null) return true
+    const owner = override.parent as ts.ClassLikeDeclaration
+    const symbol = owner.name ? checker.getSymbolAtLocation(owner.name) : undefined
+    return receivers.some((receiver) => receiver === symbol || derivesFrom(owner, receiver))
+  }
   const derivesFrom = (subclass: ts.ClassLikeDeclaration, base: ts.Symbol): boolean => {
     const symbol = subclass.name ? checker.getSymbolAtLocation(subclass.name) : undefined
     if (!symbol) return false
@@ -309,7 +343,8 @@ export const contradictedJsDocParameterSpans = (
     // A collection the call builds takes the parameter's element (I1), so
     // only one built elsewhere is carried by an element of its own.
     const invariant = !isFresh(argument)
-    if (census && readsAsAny(site)) return censusExcludes(checker, collections, census, argument, stated, invariant)
+    const tested = testedBefore(argument)
+    if (census && readsAsAny(site)) return censusExcludes(checker, standard, census, argument, stated, invariant, tested)
     const passed = checker.getNonNullableType(
       (site.flags & ts.TypeFlags.TypeParameter) !== 0 ? (checker.getBaseConstraintOfType(site) ?? site) : site
     )
@@ -322,7 +357,54 @@ export const contradictedJsDocParameterSpans = (
     // too: three's `WGSLNodeBuilder` constructs `new NodeSampler( name,
     // uniformNode.node )`, a `UniformNode` field, under `@param {TextureNode}
     // textureNode`, only for texture uniforms (`statementExcludes`).
-    return armsExclude(checker, collections, arms, stated, invariant)
+    return armsExclude(checker, standard, arms, stated, invariant, tested)
+  }
+
+  // Whether a test of the argument's value must have held for control to
+  // reach it, inside its own function: a condition reading the same
+  // reference that the argument is inside the branch of, or an earlier
+  // statement of an enclosing block that leaves when its condition holds.
+  // Which arms that test lets through is the narrowing `armsExclude` cannot
+  // read, so a mixed union past one is no contradiction.
+  const testedBefore = (argument: ts.Expression): boolean => {
+    const reference = withoutParentheses(argument)
+    if (!ts.isIdentifier(reference) && !ts.isPropertyAccessExpression(reference)) return false
+    const reads = (condition: ts.Node): boolean =>
+      (ts.isExpression(condition) && sameReference(withoutParentheses(condition), reference)) || ts.forEachChild(condition, reads) === true
+    let child: ts.Node = reference
+    for (
+      let parent = reference.parent;
+      parent && !ts.isFunctionLike(parent) && !ts.isSourceFile(parent);
+      child = parent, parent = parent.parent
+    ) {
+      if (ts.isIfStatement(parent) && child !== parent.expression && reads(parent.expression)) return true
+      if (ts.isConditionalExpression(parent) && child !== parent.condition && reads(parent.condition)) return true
+      if (ts.isBinaryExpression(parent) && child === parent.right && isShortCircuit(parent.operatorToken.kind) && reads(parent.left))
+        return true
+      if (ts.isCaseClause(parent) && child !== parent.expression && reads(parent.parent.parent.expression)) return true
+      if (ts.isBlock(parent) || ts.isCaseClause(parent) || ts.isDefaultClause(parent)) {
+        for (const statement of parent.statements) {
+          if (statement === child) break
+          if (ts.isIfStatement(statement) && !statement.elseStatement && leaves(statement.thenStatement) && reads(statement.expression))
+            return true
+        }
+      }
+    }
+    return false
+  }
+  const sameReference = (left: ts.Expression, right: ts.Expression): boolean => {
+    const sameSymbol = (one: ts.Node, other: ts.Node): boolean => {
+      const symbol = checker.getSymbolAtLocation(one)
+      return symbol !== undefined && symbol === checker.getSymbolAtLocation(other)
+    }
+    if (ts.isIdentifier(left) && ts.isIdentifier(right)) return sameSymbol(left, right)
+    if (ts.isPropertyAccessExpression(left) && ts.isPropertyAccessExpression(right)) {
+      if (!sameSymbol(left.name, right.name)) return false
+      const [leftOwner, rightOwner] = [withoutParentheses(left.expression), withoutParentheses(right.expression)]
+      if (leftOwner.kind === ts.SyntaxKind.ThisKeyword && rightOwner.kind === ts.SyntaxKind.ThisKeyword) return true
+      return sameReference(leftOwner, rightOwner)
+    }
+    return false
   }
 
   // A member tag -- `@param {T} [parameters.name]` -- states one member of an
@@ -396,8 +478,10 @@ export const contradictedJsDocParameterSpans = (
             ts.isCallExpression(node) &&
             (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression)) &&
             node.expression.expression.kind === ts.SyntaxKind.SuperKeyword
-          if (ts.isMethodDeclaration(declaration) && !viaSuper)
-            for (const override of overridesOf(declaration)) readArguments(node, override)
+          if (ts.isMethodDeclaration(declaration) && !viaSuper) {
+            const receivers = receiverClassesOf(node)
+            for (const override of overridesOf(declaration)) if (runsOn(override, receivers)) readArguments(node, override)
+          }
         }
       }
       ts.forEachChild(node, visit)
@@ -421,8 +505,37 @@ export const contradictedJsDocParameterSpans = (
     const tag = tagOf(declaration)
     return tag !== undefined && evidence.has(tag)
   }
+  // The same holds of a value typed by a field `@type` or a `@return` the
+  // field pass of this round blanks (`InvalidatedStatements`): the program
+  // compiled next types it by what the field's writes or the function's
+  // returns give, and a later round asks again of that. three's `MemberNode`
+  // states `@type {Node}` over the `@param {string} property` it stores, a
+  // tag the field pass blanks, and passes `this.property` to every
+  // `getMemberType( builder, name )` under `@param {string} name`; read at
+  // the field's tag, the `Node` blanked all of those correct tags.
+  const statedByInvalidated = (argument: ts.Expression, seen = new Set<ts.Node>()): boolean => {
+    if (!invalidated) return false
+    const node = withoutParentheses(argument)
+    if (seen.has(node)) return false
+    seen.add(node)
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const member = ts.isPropertyAccessExpression(node) ? (checker.getSymbolAtLocation(node.name) ?? memberOf(node)) : undefined
+      return member !== undefined && member !== null && invalidated.fields.has(member)
+    }
+    if (ts.isCallExpression(node)) {
+      const declaration = checker.getResolvedSignature(node)?.declaration
+      return declaration !== undefined && !ts.isJSDocSignature(declaration) && invalidated.returns.has(declaration)
+    }
+    if (!ts.isIdentifier(node)) return false
+    // An untyped local holds what it is initialized with.
+    const declarations = checker.getSymbolAtLocation(node)?.declarations ?? []
+    const [declaration] = declarations
+    if (declarations.length !== 1 || !declaration || !ts.isVariableDeclaration(declaration)) return false
+    if (declaration.type || ts.getJSDocType(declaration) || !declaration.initializer) return false
+    return statedByInvalidated(declaration.initializer, seen)
+  }
   for (const [tag, arguments_] of evidence) {
-    const counted = arguments_.filter((argument) => !blankedParameterOf(argument))
+    const counted = arguments_.filter((argument) => !blankedParameterOf(argument) && !statedByInvalidated(argument))
     const [first] = counted
     if (!first) continue
     contradicted.add(tag)
@@ -480,6 +593,31 @@ export const contradictedJsDocParameterSpans = (
     spans.set(file, fileSpans)
   }
   return spans
+}
+
+const withoutParentheses = (value: ts.Expression): ts.Expression => {
+  let node = value
+  while (ts.isParenthesizedExpression(node)) node = node.expression
+  return node
+}
+
+const isShortCircuit = (operator: ts.SyntaxKind): boolean =>
+  operator === ts.SyntaxKind.AmpersandAmpersandToken ||
+  operator === ts.SyntaxKind.BarBarToken ||
+  operator === ts.SyntaxKind.QuestionQuestionToken
+
+/** A statement after which control never reaches the next one. */
+const leaves = (statement: ts.Statement): boolean => {
+  if (
+    ts.isReturnStatement(statement) ||
+    ts.isThrowStatement(statement) ||
+    ts.isBreakStatement(statement) ||
+    ts.isContinueStatement(statement)
+  )
+    return true
+  if (!ts.isBlock(statement)) return false
+  const last = statement.statements[statement.statements.length - 1]
+  return last !== undefined && leaves(last)
 }
 
 /** An array literal or a construction: a value the call itself builds. */

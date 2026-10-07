@@ -347,14 +347,14 @@ const describeGraph = (graphFile, packageDirs) => {
   return { modules: graph.modules.length, byArea: Object.fromEntries([...byArea].sort()) }
 }
 
-// `report()` in the compiler's `cli-emit.ts` prints one line per root
-// diagnostic: two spaces, `file:line:column: message` (or the component id when
-// there is no position).
+// `report()` in the compiler's `cli-emit.ts` prints one line per diagnostic:
+// two spaces, its severity, two spaces, `file:line:column: message` (or the
+// component id when there is no position). The roots are its `root` rows.
 const pipelineRootsIn = (stderr) => {
   const header = stderr.match(/^compile: no certificate; (\d+) capability refusal\(s\), (\d+) diagnostic\(s\)$/m)
   const roots = []
   for (const line of stderr.split(/\r?\n/)) {
-    const match = line.match(/^ {2}(\S.*?):(\d+):(\d+): (.*)$/)
+    const match = line.match(/^ {2}root {2}(\S.*?):(\d+):(\d+): (.*)$/)
     if (match) roots.push({ file: resolve(match[1]), line: Number(match[2]), column: Number(match[3]), message: match[4] })
   }
   return { capabilityRefusals: header ? Number(header[1]) : null, diagnostics: header ? Number(header[2]) : null, roots }

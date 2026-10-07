@@ -136,25 +136,23 @@ import type { KeyedCollectionFamily } from '../representation/policies.js'
  * {Array<BufferAttribute>}` over `return attributes` and `@type
  * {?Array<BufferAttribute>}` over `this.attributes = attributes`.
  */
-export const contradictedJsDocTypeBlanks = (program: ts.Program, prepared: ReadonlyMap<string, string>): Map<string, string> =>
-  blankedTexts(prepared, contradictedJsDocTypeSpans(program))
-
-/** The spans of the field and `@return` tags the program's stores contradict -- see `contradictedJsDocTypeBlanks`. */
-export const contradictedJsDocTypeSpans = (
+export const contradictedJsDocTypes = (
   program: ts.Program,
   census?: CensusArms,
   censusElement?: CensusArrayElement
-): Map<ts.SourceFile, BlankSpan[]> => {
+): ContradictedJsDocTypes => {
   const spans = new Map<ts.SourceFile, BlankSpan[]>()
+  const nothing: ContradictedJsDocTypes = { spans, invalidated: { fields: new Set(), returns: new Set() } }
   const files = program.getSourceFiles().filter((file) => !file.isDeclarationFile)
   const unchecked = files.filter(isUncheckedJavaScript)
-  if (unchecked.length === 0) return spans
+  if (unchecked.length === 0) return nothing
   const checker = program.getTypeChecker()
-  const collections = collectionKindsOf(program)
+  const standard = standardSymbolsOf(program)
 
   const tagsOf = new Map<ts.Symbol, ts.JSDocTypeTag[]>()
   const names = new Set<string>()
   const returnTags: {
+    readonly owner: ts.SignatureDeclaration
     readonly body: ts.Block | ts.Expression
     readonly tag: ts.JSDocReturnTag & { readonly typeExpression: ts.JSDocTypeExpression }
   }[] = []
@@ -181,7 +179,7 @@ export const contradictedJsDocTypeSpans = (
   for (const symbol of [...tagsOf.keys()]) {
     if (!(symbol.declarations ?? []).every((declaration) => isUncheckedJavaScript(declaration.getSourceFile()))) tagsOf.delete(symbol)
   }
-  if (tagsOf.size === 0 && returnTags.length === 0) return spans
+  if (tagsOf.size === 0 && returnTags.length === 0) return nothing
 
   /** Each contradicted field, with the store that proves it -- for the debug line below. */
   const contradicted = new Map<ts.Symbol, ts.Node>()
@@ -226,10 +224,10 @@ export const contradictedJsDocTypeSpans = (
     return valuesWritten(value).some((written) => {
       const constructed = withoutParentheses(written)
       const type = checker.getTypeAtLocation(constructed)
-      if (saysNothing(type)) return census !== undefined && censusExcludes(checker, collections, census, constructed, stated, true)
+      if (saysNothing(type)) return census !== undefined && censusExcludes(checker, standard, census, constructed, stated, true)
       if (censusElement !== undefined && isOpenArray(checker, type)) {
         const element = censusElement(constructed)
-        return element !== null && censusElementExcludes(checker, collections, element, stated)
+        return element !== null && censusElementExcludes(checker, standard, element, stated)
       }
       if (isConstruction(constructed)) return !checker.isTypeAssignableTo(type, stated) && !derivesFromStatedClass(checker, type, stated)
       return excludesEachOther(type, stated)
@@ -416,7 +414,32 @@ export const contradictedJsDocTypeSpans = (
       }
     }
   }
-  return spans
+  const returns = new Set<ts.SignatureDeclaration>()
+  for (const { owner, tag } of returnTags) if (contradictedReturns.has(tag)) returns.add(owner)
+  return { spans, invalidated: { fields: new Set(contradicted.keys()), returns } }
+}
+
+/**
+ * The field and `@return` tags the program's stores contradict -- see
+ * `contradictedJsDocTypes` -- as the spans that blank them and as the
+ * statements those spans take away.
+ */
+export interface ContradictedJsDocTypes {
+  readonly spans: Map<ts.SourceFile, BlankSpan[]>
+  readonly invalidated: InvalidatedStatements
+}
+
+/**
+ * The statements one round of these passes takes away: a value typed by one
+ * of them is typed by a statement the program compiled next no longer makes,
+ * so the parameter pass of the same round reads no evidence off it
+ * (`contradicted-jsdoc-parameters.ts`).
+ */
+export interface InvalidatedStatements {
+  /** The fields whose `@type` is blanked. */
+  readonly fields: ReadonlySet<ts.Symbol>
+  /** The functions whose `@return` is blanked. */
+  readonly returns: ReadonlySet<ts.SignatureDeclaration>
 }
 
 /**
@@ -447,11 +470,11 @@ const isOpenArray = (checker: ts.TypeChecker, type: ts.Type): boolean => {
  * which is `collectionVerdict`'s reading of an array value, asked of the
  * element because the census's array has no `ts.Type` of its own.
  */
-const censusElementExcludes = (checker: ts.TypeChecker, collections: CollectionKinds, element: ts.Type, stated: ts.Type): boolean => {
+const censusElementExcludes = (checker: ts.TypeChecker, standard: StandardSymbols, element: ts.Type, stated: ts.Type): boolean => {
   if (saysNothing(element)) return false
   const arms = stated.isUnion() ? stated.types : [stated]
   const arrays = arms.flatMap((arm) => {
-    const collection = collectionOf(checker, collections, arm)
+    const collection = collectionOf(checker, standard, arm)
     return collection?.kind === 'array' ? [collection] : []
   })
   if (arrays.length === 0 || arrays.length !== arms.length) return false
@@ -506,17 +529,18 @@ export const blankedTexts = (
  */
 export const censusExcludes = (
   checker: ts.TypeChecker,
-  collections: CollectionKinds,
+  standard: StandardSymbols,
   census: CensusArms,
   value: ts.Expression,
   stated: ts.Type,
-  invariant: boolean
+  invariant: boolean,
+  tested = false
 ): boolean => {
   const arms = census(value)
   if (!arms) return false
   const present = arms.filter((arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0)
   if (present.length === 0 || present.some(saysNothing)) return false
-  return armsExclude(checker, collections, present, stated, invariant)
+  return armsExclude(checker, standard, present, stated, invariant, tested)
 }
 
 /**
@@ -539,17 +563,29 @@ export const censusExcludes = (
  * `ComputeNode`, no arm is a `RenderContext`, and the `Array` arm is the
  * group of compute nodes the method is handed as well. The statement's arms
  * are read by domain, so `boolean` or `('vertex'|'fragment')` is one arm.
+ *
+ * That reading holds for a value no test reaches: passed as it is, every arm
+ * of it is a value the slot holds. A value `tested` past a test of it the
+ * checker and census do not read is not: which arms survive that test is
+ * not known here, and an arm that did not would be read as one that reaches.
+ * three's `Renderer.setViewport` passes its `Vector2 | Vector4` on to
+ * `Vector4.copy( v )` under `@param {Vector3|Vector4}` only past
+ * `rectangle.isVector4`. There the mixed value is inconclusive, never a
+ * contradiction: the tag stands, and whether the narrowed value converts
+ * into it is the native conversion's question, which refuses what it
+ * cannot carry.
  */
 export const armsExclude = (
   checker: ts.TypeChecker,
-  collections: CollectionKinds,
+  standard: StandardSymbols,
   arms: readonly ts.Type[],
   stated: ts.Type,
-  invariant: boolean
+  invariant: boolean,
+  tested = false
 ): boolean => {
-  const excluded = arms.filter((arm) => statementExcludes(checker, collections, arm, stated, invariant))
+  const excluded = arms.filter((arm) => statementExcludes(checker, standard, arm, stated, invariant))
   if (excluded.length === arms.length) return true
-  if (excluded.length === 0) return false
+  if (excluded.length === 0 || tested) return false
   const statedArms = [
     ...new Set(
       (stated.isUnion() ? stated.types : [stated])
@@ -558,7 +594,7 @@ export const armsExclude = (
     )
   ]
   if (statedArms.length < 2) return false
-  return statedArms.some((statedArm) => arms.every((arm) => statementExcludes(checker, collections, arm, statedArm, invariant)))
+  return statedArms.some((statedArm) => arms.every((arm) => statementExcludes(checker, standard, arm, statedArm, invariant)))
 }
 
 /**
@@ -597,61 +633,100 @@ export const armsExclude = (
  *   the standard library, and `Function` too.
  * - A statement spelling literals (`{('vertex'|'fragment')}`) of the domain
  *   the value has states a precision, not a different storage.
+ * - Bare `Function` states no calling convention, so it says nothing against
+ *   a statement of one: three's `Renderer` passes its `@type {?Function}`
+ *   `_opaqueSort` field to `RenderList.sort( customOpaqueSort )` under
+ *   `@param {?function(any, any): number}`. A callable whose signature the
+ *   statement does not admit is still outside it.
  */
 export const statementExcludes = (
   checker: ts.TypeChecker,
-  collections: CollectionKinds,
+  standard: StandardSymbols,
   passed: ts.Type,
   stated: ts.Type,
   invariant: boolean
 ): boolean => {
-  const collection = invariant ? collectionVerdict(checker, collections, passed, stated) : null
+  const collection = invariant ? collectionVerdict(checker, standard, passed, stated) : null
   if (collection !== null) return collection
   if (namesDeclaredOnlyType(checker, stated)) return false
   if (derivesFromStatedClass(checker, passed, stated)) return false
   const statedArms = stated.isUnion() ? stated.types : [stated]
   if (statedArms.some((arm) => isClassInstance(arm) && derivesFromStatedClass(checker, arm, passed))) return false
   if (isClassInstance(passed) && statedArms.every(isClassInstance)) return true
-  if (checker.isTypeAssignableTo(passed, stated)) return false
+  if (isBareFunction(standard, passed) && statedArms.some(isCallable)) return false
+  // A fresh object literal is checked for EXCESS members too, a check about
+  // what the literal spells and not about the value: the record it builds
+  // has every member the statement requires, and its extra ones are no
+  // runtime incompatibility. Read without its freshness, as the same record
+  // bound to a local first is read; a member the statement requires that the
+  // literal lacks, or writes with another type, still excludes it. three's
+  // `ShadowNode.setupShadowFilter` is passed `{ filterFn, shadowTexture,
+  // depthTexture, shadowCoord, shadow, depthLayer }` under a tag stating four
+  // of those members.
+  const value = isFreshObjectLiteral(passed) ? checker.getWidenedType(passed) : passed
+  if (checker.isTypeAssignableTo(value, stated)) return false
   const domains = statedArms.map((arm) => checker.getBaseTypeOfLiteralType(arm))
-  return !domains.some((domain) => checker.isTypeAssignableTo(checker.getBaseTypeOfLiteralType(passed), domain))
+  return !domains.some((domain) => checker.isTypeAssignableTo(checker.getBaseTypeOfLiteralType(value), domain))
 }
+
+const isFreshObjectLiteral = (type: ts.Type): boolean =>
+  (type.flags & ts.TypeFlags.Object) !== 0 && ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.FreshLiteral) !== 0
+
+const isCallable = (type: ts.Type): boolean => type.getCallSignatures().length > 0 || type.getConstructSignatures().length > 0
 
 /** A standard collection gea carries by its element (key, value) carriers. */
 type CollectionKind = 'array' | KeyedCollectionFamily
 
 /**
- * The standard `Array`, `Map`, `Set`, `WeakMap` and `WeakSet` interfaces,
- * keyed by the library's own symbol: a collection is the type whose symbol IS
- * one of these, never one whose name spells it, so a program class named
- * `Map` is no collection here. Resolved once per pass, the way
- * `host-protocols.ts`'s `keyedCollectionDeclarationsOf` resolves the keyed
- * families; the read-only views (`ReadonlyMap`) widen what they hand out and
- * are left out.
+ * The standard library's own symbols both passes read a value by, resolved
+ * once per pass, the way `host-protocols.ts`'s `keyedCollectionDeclarationsOf`
+ * resolves the keyed families: a type is one of these when its symbol IS the
+ * library's, never when its name spells it, so a program class named `Map` or
+ * `Function` is none of them here.
  */
-export type CollectionKinds = ReadonlyMap<ts.Symbol, CollectionKind>
+export interface StandardSymbols {
+  /**
+   * The `Array`, `Map`, `Set`, `WeakMap` and `WeakSet` interfaces; the
+   * read-only views (`ReadonlyMap`) widen what they hand out and are left out.
+   */
+  readonly collections: ReadonlyMap<ts.Symbol, CollectionKind>
+  /** The `Function` interface, which states no calling convention at all. */
+  readonly function: ts.Symbol | undefined
+}
 
-export const collectionKindsOf = (program: ts.Program): CollectionKinds => {
+export const standardSymbolsOf = (program: ts.Program): StandardSymbols => {
   const checker = program.getTypeChecker()
   const anchor = program.getSourceFiles().find((file) => !file.isDeclarationFile)
-  const kinds = new Map<ts.Symbol, CollectionKind>()
-  if (!anchor) return kinds
-  for (const [symbol, family] of storageKeyedCollectionSymbolsOf(checker, anchor)) kinds.set(symbol, family)
+  const collections = new Map<ts.Symbol, CollectionKind>()
+  if (!anchor) return { collections, function: undefined }
+  for (const [symbol, family] of storageKeyedCollectionSymbolsOf(checker, anchor)) collections.set(symbol, family)
   const array = checker.resolveName('Array', anchor, ts.SymbolFlags.Interface, false)
-  if (array) kinds.set(array, 'array')
-  return kinds
+  if (array) collections.set(array, 'array')
+  return { collections, function: checker.resolveName('Function', anchor, ts.SymbolFlags.Interface, false) }
 }
+
+/**
+ * Bare `Function`: the library's own interface, with no call or construct
+ * signature of its own, so it says nothing about arity or return --
+ * `parameter-bindings.ts`'s `isBareFunctionType`, which keeps it out of the
+ * census as unusable evidence for the same reason.
+ */
+const isBareFunction = (standard: StandardSymbols, type: ts.Type): boolean =>
+  standard.function !== undefined &&
+  type.getSymbol() === standard.function &&
+  type.getCallSignatures().length === 0 &&
+  type.getConstructSignatures().length === 0
 
 /** The kind and type arguments of a reference to one of the standard collections; `null` for anything else. */
 const collectionOf = (
   checker: ts.TypeChecker,
-  collections: CollectionKinds,
+  standard: StandardSymbols,
   type: ts.Type
 ): { readonly kind: CollectionKind; readonly elements: readonly ts.Type[] } | null => {
   if ((type.flags & ts.TypeFlags.Object) === 0) return null
   if (((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference) === 0) return null
   const symbol = type.getSymbol()
-  const kind = symbol ? collections.get(symbol) : undefined
+  const kind = symbol ? standard.collections.get(symbol) : undefined
   if (!kind) return null
   return { kind, elements: checker.getTypeArguments(type as ts.TypeReference) }
 }
@@ -663,11 +738,11 @@ const collectionOf = (
  * host's, `null` where it says nothing (no collection, no such arm, or an arm
  * that differs only where a host's type is -- the boundary's question).
  */
-const collectionVerdict = (checker: ts.TypeChecker, collections: CollectionKinds, passed: ts.Type, stated: ts.Type): boolean | null => {
-  const collection = collectionOf(checker, collections, passed)
+const collectionVerdict = (checker: ts.TypeChecker, standard: StandardSymbols, passed: ts.Type, stated: ts.Type): boolean | null => {
+  const collection = collectionOf(checker, standard, passed)
   if (!collection) return null
   const sameKind = (stated.isUnion() ? stated.types : [stated]).flatMap((arm) => {
-    const other = collectionOf(checker, collections, arm)
+    const other = collectionOf(checker, standard, arm)
     return other && other.kind === collection.kind ? [other] : []
   })
   if (sameKind.length === 0) return null
@@ -726,6 +801,7 @@ const taggedFieldAt = (node: ts.Node): { readonly name: ts.Identifier | ts.Priva
 const taggedReturnAt = (
   node: ts.Node
 ): {
+  readonly owner: ts.SignatureDeclaration
   readonly body: ts.Block | ts.Expression
   readonly tag: ts.JSDocReturnTag & { readonly typeExpression: ts.JSDocTypeExpression }
 } | null => {
@@ -736,7 +812,7 @@ const taggedReturnAt = (
   if (ts.getCombinedModifierFlags(node as ts.Declaration) & ts.ModifierFlags.Async) return null
   const tag = ts.getJSDocReturnTag(node)
   if (!tag?.typeExpression) return null
-  return { body, tag: tag as ts.JSDocReturnTag & { readonly typeExpression: ts.JSDocTypeExpression } }
+  return { owner: node, body, tag: tag as ts.JSDocReturnTag & { readonly typeExpression: ts.JSDocTypeExpression } }
 }
 
 const isLiteralKey = (key: ts.Expression): boolean => ts.isStringLiteralLike(key) || ts.isNumericLiteral(key)

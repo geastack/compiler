@@ -85,7 +85,7 @@ import {
 import { createProgram, defaultCompilerOptions } from './program.js'
 import { createFrontendTiming } from './frontend-timing.js'
 import { resolve as resolvePath } from 'node:path'
-import { contradictedJsDocTypeSpans, type BlankSpan, type CensusArms, type CensusArrayElement } from './contradicted-jsdoc-types.js'
+import { contradictedJsDocTypes, type BlankSpan, type CensusArms, type CensusArrayElement } from './contradicted-jsdoc-types.js'
 import { contradictedJsDocParameterSpans } from './contradicted-jsdoc-parameters.js'
 import type { DiagnosticSourcePreparationAudit } from './diagnostic-source-preparation.js'
 // The ambient host-protocol census -- what this program's own declarations
@@ -1383,10 +1383,8 @@ const attemptFrontend = (
   if (mayRestart) {
     const arms = censusArmsOf(parameters)
     const found = new Map<string, BlankSpan[]>()
-    for (const spans of [
-      contradictedJsDocTypeSpans(compiled.program, arms, censusArrayElementOf(settled.facts.collections)),
-      contradictedJsDocParameterSpans(compiled.program, arms, input.absentGlobals)
-    ])
+    const fields = contradictedJsDocTypes(compiled.program, arms, censusArrayElementOf(settled.facts.collections))
+    for (const spans of [fields.spans, contradictedJsDocParameterSpans(compiled.program, arms, input.absentGlobals, fields.invalidated)])
       for (const [file, fileSpans] of spans) {
         const fileName = resolvePath(file.fileName)
         found.set(fileName, [...(found.get(fileName) ?? []), ...fileSpans])
