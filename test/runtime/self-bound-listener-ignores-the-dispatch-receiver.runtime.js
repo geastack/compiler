@@ -3,7 +3,8 @@
 //! expect: resize renderer 2 800
 //! expect: resize renderer 3 800
 //! expect: resize renderer 4 800
-//! emitted-has: gea::CallableObject<void()> _onCanvasTargetResize;
+//! emitted-has: gea::refuseSelfBoundPrototypeRead
+//! emitted-lacks: gea::CallableObject<void()> _onCanvasTargetResize;
 
 export {}
 

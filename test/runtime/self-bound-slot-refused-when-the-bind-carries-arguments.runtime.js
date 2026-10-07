@@ -2,9 +2,10 @@
 //! expect: tick counter 5
 //! expect: tick counter 5
 //! emitted-has: >, gea::Value)> tick;
+//! emitted-lacks: gea::refuseSelfBoundPrototypeRead
 
 // A bound argument prefix changes the stored function's frame, so the slot is
-// not a self-bound slot: it keeps the method's receiver convention.
+// not a self-bound slot: every read keeps the method's receiver convention.
 
 export {}
 

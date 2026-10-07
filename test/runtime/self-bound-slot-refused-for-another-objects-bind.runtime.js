@@ -4,10 +4,11 @@
 //! expect: show b
 //! emitted-has: >)> show;
 //! emitted-lacks: gea::CallableObject<void()> show;
+//! emitted-lacks: gea::refuseSelfBoundPrototypeRead
 
 // `this.show = other.show.bind(other)` stores a function bound to another
-// object. That is not the self-bind fact, so the slot keeps the method's
-// receiver convention.
+// object. That is not the self-bind fact, so no read of the slot gets the
+// receiverless view; every read keeps the method's receiver convention.
 
 export {}
 

@@ -12,14 +12,24 @@ import { structuralCallSignatures } from './structural-callable.js'
  * ordinary certified callable adapter. The inventory is the shared flow
  * index; neither member reads nor invocation producers rescan assignments.
  *
- * A slot proven to hold only the method bound to its own instance (see
- * `selfBoundSlotOf`) is receiverless storage: the bound function ignores the
- * `this` it is called with, so a caller needs neither to have nor to pass the
- * method's receiver. Only `this.m` reads in the class's own instance members
- * see that storage; the reads that build the bind, and reads through any other
- * receiver, keep the method's own convention.
+ * The storage always takes the method's receiver: the class's native
+ * prototype object holds the original, unbound method in the same slot
+ * (`targets/cpp/class-properties/native-prototype.ts`), and that method uses
+ * the receiver its caller passes.
+ *
+ * A slot proven to hold, on every constructed instance, only the method bound
+ * to that instance (see `selfBoundSlotOf`) refines its READS instead. A bound
+ * function ignores the `this` it is called with (ECMA-262 10.4.1.1), so a read
+ * through `this` in an instance member of the family publishes a view of the
+ * stored value that takes no receiver: the read binds its own receiver into
+ * the view, and a caller such as an event dispatcher that calls
+ * `listener.call(target, event)` passes none. The reads that build the bind,
+ * stores, and reads through any other receiver keep the method's convention.
+ * The one object of the family that is no constructed instance -- a prototype
+ * object reflection handed out -- is refused at the read by the emitter
+ * (`GetOperation.selfBoundView`).
  */
-/** `this` of a non-static class member: an instance of that class family, never its prototype. */
+/** `this` of a non-static class member: an instance of that class family, or a prototype object reflection handed out. */
 const isOwnInstanceThis = (flow: ValueFlowIndex, expression: ts.Expression): boolean => {
   let receiver = expression
   while (ts.isParenthesizedExpression(receiver)) receiver = receiver.expression
@@ -33,6 +43,19 @@ const isOwnInstanceThis = (flow: ValueFlowIndex, expression: ts.Expression): boo
   )
 }
 
+/** The access is the target of an assignment: a store, not a read of the slot's value. */
+const isAssignmentTarget = (node: ts.PropertyAccessExpression): boolean => {
+  let current: ts.Node = node
+  while (ts.isParenthesizedExpression(current.parent)) current = current.parent
+  const parent = current.parent
+  return (
+    ts.isBinaryExpression(parent) &&
+    parent.left === current &&
+    parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
+    parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+  )
+}
+
 export const createMutableMethodResolver = (
   checker: ts.TypeChecker,
   table: StructuralTypeTable,
@@ -43,10 +66,12 @@ export const createMutableMethodResolver = (
 ): {
   readonly storageTypeAt: (node: ts.MethodDeclaration) => StructuralTypeId | null
   readonly readTypeAt: (node: ts.Node) => StructuralTypeId | null
+  readonly selfBoundViewAt: (node: ts.Node) => boolean
 } => {
   const cache = new Map<ts.Symbol, StructuralTypeId | null>()
   const pending = new Set<ts.Symbol>()
-  const selfBound = new Map<ts.Symbol, ReadonlySet<ts.Expression>>()
+  /** Per proven self-bound slot: the reads that build a bind, and the receiverless view of the storage. */
+  const selfBound = new Map<ts.Symbol, { readonly bindSources: ReadonlySet<ts.Expression>; readonly view: StructuralTypeId }>()
   const resolve = (symbol: ts.Symbol): StructuralTypeId | null => {
     if (cache.has(symbol)) return cache.get(symbol) ?? null
     if (!flow || pending.has(symbol)) return null
@@ -69,7 +94,6 @@ export const createMutableMethodResolver = (
     if (!replacements.some((write) => write.value !== null)) return null
     pending.add(symbol)
     try {
-      const slot = selfBoundSlotOf(checker, flow, body, replacements)
       const original = checker.getSignatureFromDeclaration(body)
       if (!original) return null
       const initial = signatureOf(original)
@@ -94,33 +118,46 @@ export const createMutableMethodResolver = (
         const members = [...new Set(values)]
         return members.length === 1 ? members[0]! : table.intern({ kind: 'union', members })
       }
-      const { implicitReceiver, ...frame } = widest
-      const result = table.intern({
-        kind: 'signature',
-        construct: [],
-        call: [
-          {
-            ...frame,
-            ...(slot === null && implicitReceiver ? { implicitReceiver } : {}),
-            thisParameter: slot === null ? initial.thisParameter : null,
-            result: join(signatures.map((signature) => signature.result)),
-            parameters: widest.parameters.map((parameter, ordinal) => {
-              const present = signatures.flatMap((signature) => (signature.parameters[ordinal] ? [signature.parameters[ordinal]!] : []))
-              return {
-                ...parameter,
-                type: join(present.map((entry) => entry.type)),
-                slot: join(present.map((entry) => entry.slot))
-              }
-            })
+      const storage: SignatureShape = {
+        ...widest,
+        thisParameter: initial.thisParameter,
+        result: join(signatures.map((signature) => signature.result)),
+        parameters: widest.parameters.map((parameter, ordinal) => {
+          const present = signatures.flatMap((signature) => (signature.parameters[ordinal] ? [signature.parameters[ordinal]!] : []))
+          return {
+            ...parameter,
+            type: join(present.map((entry) => entry.type)),
+            slot: join(present.map((entry) => entry.slot))
           }
-        ]
-      })
+        })
+      }
+      const result = table.intern({ kind: 'signature', construct: [], call: [storage] })
       cache.set(symbol, result)
-      if (slot !== null) selfBound.set(symbol, slot.bindSources)
+      const slot = selfBoundSlotOf(checker, flow, body, replacements)
+      if (slot !== null) {
+        const { implicitReceiver: _receiver, ...frame } = storage
+        const view = table.intern({ kind: 'signature', construct: [], call: [{ ...frame, thisParameter: null }] })
+        selfBound.set(symbol, { bindSources: slot.bindSources, view })
+      }
       return result
     } finally {
       pending.delete(symbol)
     }
+  }
+  const symbolAt = (node: ts.PropertyAccessExpression | ts.ElementAccessExpression, key: string | null): ts.Symbol | undefined =>
+    // A JS parameter can be checker-any while the settled parameter census
+    // proves its class. Ask that same receiver authority for the member;
+    // otherwise a call inside a helper silently rediscovers the old body ABI.
+    checker.getSymbolAtLocation(ts.isPropertyAccessExpression(node) ? node.name : node) ??
+    (key === null ? undefined : checker.getPropertyOfType(checker.getApparentType(receiverTypeAt(node.expression)), key))
+  /** The self-bound slot a read observes only as its bound value, or `null` for every other read. */
+  const selfBoundViewOf = (node: ts.Node): { readonly view: StructuralTypeId } | null => {
+    if (!flow || !ts.isPropertyAccessExpression(node) || isAssignmentTarget(node)) return null
+    const symbol = symbolAt(node, node.name.text)
+    if (!symbol || resolve(symbol) === null) return null
+    const slot = selfBound.get(symbol)
+    if (slot === undefined || slot.bindSources.has(node) || !isOwnInstanceThis(flow, node.expression)) return null
+    return slot
   }
   return {
     storageTypeAt: (node) => {
@@ -134,17 +171,12 @@ export const createMutableMethodResolver = (
         : ts.isStringLiteralLike(node.argumentExpression) || ts.isNumericLiteral(node.argumentExpression)
           ? node.argumentExpression.text
           : null
-      // A JS parameter can be checker-any while the settled parameter census
-      // proves its class. Ask that same receiver authority for the member;
-      // otherwise a call inside a helper silently rediscovers the old body ABI.
-      const symbol =
-        checker.getSymbolAtLocation(ts.isPropertyAccessExpression(node) ? node.name : node) ??
-        (key === null ? undefined : checker.getPropertyOfType(checker.getApparentType(receiverTypeAt(node.expression)), key))
+      const symbol = symbolAt(node, key)
       if (!symbol) return null
       const storage = resolve(symbol)
-      const bindSources = selfBound.get(symbol)
-      if (storage === null || bindSources === undefined || !flow) return storage
-      return bindSources.has(node) || !isOwnInstanceThis(flow, node.expression) ? null : storage
-    }
+      if (storage === null) return null
+      return selfBoundViewOf(node)?.view ?? storage
+    },
+    selfBoundViewAt: (node) => selfBoundViewOf(node) !== null
   }
 }

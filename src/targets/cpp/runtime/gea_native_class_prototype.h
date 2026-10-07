@@ -42,3 +42,20 @@ Callable nativeClassPrototypeMethod(const Ref<NativeClassMethodState>& state, Ca
   }
   detail::refusePayloadMismatch("native prototype method has no declaring class evaluation");
 }
+
+// A read the compiler gave the receiverless view of a constructor-self-bound
+// method slot (`GetOperation.selfBoundView`) binds its receiver into the value
+// it reads. That is exact for a constructed instance, whose slot holds the
+// method bound to itself. A prototype object handed out by reflection is the
+// one family object no constructor ran on: its slot holds the original,
+// unbound method, which uses the receiver its caller passes, and the view has
+// already dropped that receiver.
+template <typename NativeClass>
+void refuseSelfBoundPrototypeRead(const Ref<NativeClass>& receiver) {
+  if constexpr (requires { receiver->gea_method_state; }) {
+    if (receiver && receiver->gea_method_state && receiver->gea_method_state->prototypeObject.get() == static_cast<const void*>(receiver.get())) {
+      std::fprintf(stderr, "gea: a self-bound method slot was read through a class prototype object, which holds the unbound method\n");
+      detail::abortAfterFlush();
+    }
+  }
+}

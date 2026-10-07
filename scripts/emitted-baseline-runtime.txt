@@ -108,7 +108,7 @@ bigint-of-number-bigint-or-class-union.ts.cpp fa2543c8cadc
 bind-guarded-for-a-module-function-declaration.runtime.js.cpp aadf2313393a
 bind-guarded-when-a-boxed-instance-can-shadow-it.runtime.ts.cpp f2b08d6c5d88
 bind-guarded-when-a-logger-reaches-an-emitter.runtime.ts.cpp 8192a26e9b84
-bind-guarded-when-the-source-has-no-known-function.runtime.js.cpp 5e4232106548
+bind-guarded-when-the-source-has-no-known-function.runtime.js.cpp e885552a2093
 bind-method-value-to-receiver.ts.cpp b83cc26f70a5
 bind-of-unknown-origin-method-guards-own-bind.runtime.ts.cpp 3c68f66b5481
 bind-polymorphic-this-callback.runtime.js.cpp ce06021a60cf
@@ -1049,7 +1049,7 @@ plain-regex-test-and-ascii-string-search.runtime.ts.cpp 3c67df0a9006
 populated-record-late-fields.js.cpp ccc9715a198e
 primitive-delete-arms.runtime.js.cpp 952d8957498f
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 52d4c29d6073
-printer-drift.txt d6a7b4401ec9
+printer-drift.txt ce16669ece17
 private-names-are-not-own-properties.ts.cpp 5a904aac80af
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp ed60c96c28c7
 promise-all-over-a-generator.ts.cpp cd9ebb8b8ee8
@@ -1178,10 +1178,15 @@ runtime-size-mask-index.ts.cpp fcc93c6a9c7b
 same-block-reads-before-last-transferring-use-move.runtime.ts.cpp 4fb51774b05c
 scalar-arm-member-read-into-open-result.runtime.js.cpp 389ce2f54163
 scalar-roundtrip.ts.cpp 0a987ebc984b
-self-bound-listener-ignores-the-dispatch-receiver.runtime.js.cpp e88eb582df5d
-self-bound-method-keeps-receiver-fields-typed.runtime.js.cpp 1a8459ca10ee
+self-bound-listener-ignores-the-dispatch-receiver.runtime.js.cpp 45ac89f45573
+self-bound-listener-with-reflected-prototype.runtime.js.cpp fb13200d2a33
+self-bound-method-keeps-receiver-fields-typed.runtime.js.cpp f56b2b3ad9d8
 self-bound-slot-refused-for-another-objects-bind.runtime.js.cpp 000b6b31a60a
+self-bound-slot-refused-when-a-computed-key-replaces-it.runtime.js.cpp 5f866f9d18e3
+self-bound-slot-refused-when-a-subclass-setter-sees-the-instance.runtime.js.cpp b791eddf180f
+self-bound-slot-refused-when-object-assign-replaces-it.runtime.js.cpp b532ac58d429
 self-bound-slot-refused-when-the-bind-carries-arguments.runtime.js.cpp cbc07c41aaa2
+self-bound-slot-refused-when-the-prototype-method-is-read.runtime.js.cpp 05e823aa2199
 self-bound-slot-refused-when-the-slot-is-reassigned-unbound.runtime.js.cpp e7cb0e1bd249
 self-reading-branch-write-cell.runtime.js.cpp 77d8357edaf7
 set-and-array-into-iterable-parameters.runtime.ts.cpp d439c07cf489
@@ -1366,7 +1371,7 @@ typeof-runtime-string.ts.cpp d89347bd0397
 typeof-then-discriminates-a-union.ts.cpp 3b732925872e
 unbox-nullable-union.ts.cpp 32d4df3401b7
 uncallable-member-slot-call.runtime.js.cpp 68791d94946d
-uncertified.txt de7b433bc3fb
+uncertified.txt b0f8faffa799
 uniform-tuple-boxed-into-any-is-an-array.runtime.ts.cpp 4884bb7f95dc
 uniform-tuple-const-object-indexed-read-in-a-free-function.runtime.ts.cpp 1364fe4a1da8
 uniform-tuple-identity-comparison-keeps-array-identity.runtime.ts.cpp 640e585c109c

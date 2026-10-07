@@ -6,9 +6,10 @@
 //! expect: loud b
 //! emitted-has: >)> describe;
 //! emitted-lacks: gea::CallableObject<void()> describe;
+//! emitted-lacks: gea::refuseSelfBoundPrototypeRead
 
 // A later store of an unbound method makes the call-time receiver observable
-// again, so the slot keeps the method's receiver convention.
+// again, so every read of the slot keeps the method's receiver convention.
 
 export {}
 

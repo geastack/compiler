@@ -75,7 +75,9 @@ export interface IrBodyBuilder {
     /** See `GetOperation.provenKeyTexts`. */
     provenKeyTexts?: readonly string[],
     /** See `GetOperation.primitiveArmsLackKey`. */
-    primitiveArmsLackKey?: readonly PrimitiveArmDomain[]
+    primitiveArmsLackKey?: readonly PrimitiveArmDomain[],
+    /** See `GetOperation.selfBoundView`. */
+    selfBoundView?: true
   ) => IrValueId
   readonly set: (
     block: IrBlockId,
@@ -566,7 +568,8 @@ export const createIrBodyBuilder = (
     normalResult,
     typedComputedRead,
     provenKeyTexts,
-    primitiveArmsLackKey
+    primitiveArmsLackKey,
+    selfBoundView
   ) => {
     const result = mintResult(representation)
     append(block, {
@@ -581,7 +584,8 @@ export const createIrBodyBuilder = (
       ...(normalResult === undefined ? {} : { normalResult }),
       ...(typedComputedRead === undefined ? {} : { typedComputedRead }),
       ...(provenKeyTexts === undefined ? {} : { provenKeyTexts }),
-      ...(primitiveArmsLackKey === undefined ? {} : { primitiveArmsLackKey })
+      ...(primitiveArmsLackKey === undefined ? {} : { primitiveArmsLackKey }),
+      ...(selfBoundView === undefined ? {} : { selfBoundView })
     })
     return result.id
   }

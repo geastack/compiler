@@ -183,6 +183,13 @@ export interface PropertyOperation extends SemanticOperationBase {
    */
   readonly primitiveArmsLackKey?: readonly PrimitiveArmDomain[]
   /**
+   * A `[[Get]]` of a constructor-self-bound method slot that only ever finds
+   * the method bound to its own receiver (`structural-mutable-method.ts`): the
+   * read publishes a callable that takes no receiver, and the target binds the
+   * read's receiver into it. The slot's storage keeps the method's receiver.
+   */
+  readonly selfBoundView?: true
+  /**
    * A read of a declared host method whose value only a truthiness test
    * consumes (`buf.equals && buf.equals(x)`): the method is always present, so
    * the read is `true` and no function value is materialized.

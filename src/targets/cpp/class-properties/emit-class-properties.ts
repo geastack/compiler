@@ -182,7 +182,7 @@ const boundMethodValueRepresentation = (ctx: EmitContext, operation: GetOperatio
         'this backend only knows how to bind a receiver onto that one carrier'
     )
   }
-  if (readsReceiverlessOwnSlot(ctx, operation)) return representation
+  if (readsSelfBoundView(ctx, operation)) return representation
   // Some method-value representations already carry a receiver -- measured on
   // the real app corpus, which regressed (3 programs, `c++` 0/clang `-`)
   // under an earlier version of this fix that threw here instead. Whatever
@@ -195,27 +195,35 @@ const boundMethodValueRepresentation = (ctx: EmitContext, operation: GetOperatio
 }
 
 /**
- * Whether this read publishes, as stated, the convention of an own method
- * slot whose storage takes no receiver.
+ * Whether this read publishes the receiverless view of a constructor-self-bound
+ * method slot (`GetOperation.selfBoundView`).
  *
- * The semantic mutable-method authority gives a slot receiverless storage
- * only where no value the slot can hold uses the receiver it is called with
- * (a method self-bound in its constructor, or one declared `this: void`), and
- * types a read receiverless only where the read can only find that storage.
- * Such a read lost no receiver to the TS-derived signature, so there is
- * nothing for `boundMethodValueRepresentation` to restore, and nothing for
- * `classMethodValueReceiverClaim` to hand the call: the value is called
- * exactly as the storage holds it.
+ * The slot's storage keeps the method's receiver -- the native prototype
+ * object holds the original, unbound method in it -- while the semantic layer
+ * proved that every constructed instance holds only the method bound to
+ * itself. The view takes no receiver: `classMethodValueText` binds this read's
+ * receiver into the value it reads (`receiverBoundFieldText`, which keeps the
+ * function's identity), so there is nothing for
+ * `boundMethodValueRepresentation` to restore and nothing for
+ * `classMethodValueReceiverClaim` to hand the call. A view this printer cannot
+ * build that way is refused, never read through the method's convention.
  */
-const readsReceiverlessOwnSlot = (ctx: EmitContext, operation: GetOperation): boolean => {
+const readsSelfBoundView = (ctx: EmitContext, operation: GetOperation): boolean => {
+  if (operation.selfBoundView !== true) return false
   const receiver = operation.receiver.representation
   const published = operation.result.representation
-  if (receiver.kind !== 'class-ref' || published.kind !== 'function-value-dispatch' || published.abi.receiver !== null) return false
-  if (dispatchesStatically(ctx, operation.receiver)) return false
   const key = ctx.staticKeyTexts.get(operation.key.value)
-  if (key === undefined) return false
-  const slot = classMethodOverrideOf(ctx.classes, receiver.declaration, key)
-  return slot !== null && slot.value.kind === 'function-value-dispatch' && slot.value.abi.receiver === null
+  const slot =
+    receiver.kind === 'class-ref' && key !== undefined && !dispatchesStatically(ctx, operation.receiver)
+      ? classMethodOverrideOf(ctx.classes, receiver.declaration, key)
+      : null
+  if (slot === null || published.kind !== 'function-value-dispatch' || published.abi.receiver !== null) {
+    throw createCppEmitBlockedError(
+      `property-access:${representationKey(receiver)}:self-bound-view`,
+      `a self-bound method slot read "${key ?? '?'}" publishes a receiverless view this backend cannot bind its receiver into`
+    )
+  }
+  return true
 }
 
 /**
@@ -349,6 +357,9 @@ export const classMethodValueText = (
     dispatchesStatically(ctx, operation.receiver)
   )
   if (override === null) return { text: fallback, type: valueType, environment }
+  // `readsSelfBoundView` admitted this read only with an own slot, so the
+  // snapshot below is the receiver the view binds.
+  const selfBoundGuard = operation.selfBoundView === true ? `gea::refuseSelfBoundPrototypeRead(${heldReceiver}); ` : ''
   const ownedStorage = `${heldReceiver}->${cppRecordFieldName(key)}`
   const owned =
     alignedValueText(ctx, 'class-properties/emit-class-properties.ts:own-method', override.value, valueRepresentation, ownedStorage) ??
@@ -366,7 +377,7 @@ export const classMethodValueText = (
   // Own function properties shadow the prototype without changing the
   // prototype's identity. Snapshot the receiver once, including detached reads.
   const text =
-    `([&]() -> ${valueType} { const auto& ${heldReceiver} = ${receiverText}; ` +
+    `([&]() -> ${valueType} { const auto& ${heldReceiver} = ${receiverText}; ${selfBoundGuard}` +
     `if (${heldReceiver}->${cppRecordFieldPresenceName(key)}) return ${owned}; return ${fallback}; })()`
   return { text, type: valueType, environment }
 }
@@ -998,7 +1009,7 @@ export const classMethodValueReceiverClaim = (ctx: EmitContext, operation: GetOp
     }
     return null
   }
-  if (readsReceiverlessOwnSlot(ctx, operation)) return null
+  if (readsSelfBoundView(ctx, operation)) return null
   return classMemberOf(ctx.classes, receiver.declaration, key)?.kind === 'method' ? operation.receiver : null
 }
 

@@ -194,6 +194,8 @@ export interface StructuralMapper {
   readonly typeAt: (node: ts.Node) => StructuralTypeId
   readonly mutableMethodStorageTypeAt: (node: ts.MethodDeclaration) => StructuralTypeId | null
   readonly mutableMethodReadTypeAt: (node: ts.Node) => StructuralTypeId | null
+  /** Whether this read of a mutable method slot sees the receiverless view of a proven self-bound slot (`structural-mutable-method.ts`). */
+  readonly mutableMethodSelfBoundViewAt: (node: ts.Node) => boolean
   /**
    * Whether this read's type is the arms of the writes that reach it
    * (`valuesReachingRead`, `stored-local-read.ts`), not the cell's whole
@@ -6085,6 +6087,7 @@ const buildMapper = (
     typeAt,
     mutableMethodStorageTypeAt: mutableMethods.storageTypeAt,
     mutableMethodReadTypeAt: mutableMethods.readTypeAt,
+    mutableMethodSelfBoundViewAt: mutableMethods.selfBoundViewAt,
     readTakesReachingArms: (node) => ts.isIdentifier(node) && (typeAt(node), localUnionAt.tookReachingArms(node)),
     boundCallResultAt,
     constructResultAt,

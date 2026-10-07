@@ -860,6 +860,7 @@ const buildOperations = (
         : {}),
       ...(provenKeyTexts ? { provenKeyTexts } : {}),
       ...(lacking.length > 0 ? { primitiveArmsLackKey: lacking } : {}),
+      ...(internalMethod === 'get' && context.types.mutableMethodSelfBoundViewAt(node) ? { selfBoundView: true as const } : {}),
       id,
       family: 'property',
       internalMethod,

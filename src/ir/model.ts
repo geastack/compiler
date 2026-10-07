@@ -175,6 +175,14 @@ export interface GetOperation extends IrOperationBase {
    * Copied while the semantic graph is open; an unlisted arm has no proof.
    */
   readonly primitiveArmsLackKey?: readonly PrimitiveArmDomain[]
+  /**
+   * `PropertyOperation.selfBoundView`, copied while the semantic graph is
+   * open: the read publishes the receiverless view of a self-bound method
+   * slot whose storage takes a receiver, so the printer binds this read's
+   * receiver into the value and refuses a prototype object as that receiver
+   * (`gea_native_class_prototype.h`'s `refuseSelfBoundPrototypeRead`).
+   */
+  readonly selfBoundView?: true
   /** A field read whose synthetic ancestor slot was relocated to its real owners. */
   readonly nativeFieldOwnerRead?: import('./native-field-owner.js').NativeFieldOwnerRead
   /** Callable identity proved from an unmodified compiler-owned record allocation. */

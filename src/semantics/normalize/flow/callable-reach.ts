@@ -768,12 +768,103 @@ const slotWriteInventoryOf = (checker: ts.TypeChecker, flow: ValueFlowIndex): Sl
   return built
 }
 
-/** Every program access that writes `key` by name, on any receiver: assigned, compound-assigned, updated, deleted or destructured into. */
-export const namedSlotWritesOf = (
+/**
+ * Whether no write the program can run puts anything in the member slot `key`
+ * of `owner`'s class family -- `memberSlotWritesClosed`'s walk, shared with a
+ * proof that admits some named writes of its own (`self-bound-slot.ts`, whose
+ * self-binds are the slot's only writes). A named write of the key, a
+ * computed-key write whose key may be it, an intrinsic mutator
+ * (`Object.assign`/`defineProperty`/`defineProperties`/`setPrototypeOf`,
+ * `Reflect.set`/`defineProperty`/`setPrototypeOf`) handed a receiver that may
+ * be a family instance (or the family's `prototype`), a `__proto__`/
+ * `prototype` replacement, or a `delete` refuses unless its receiver provably
+ * lies OUTSIDE the family -- or, for a named or computed-key write, `admitted`
+ * accepts it.
+ */
+export const familySlotWritesClosed = (
   checker: ts.TypeChecker,
   flow: ValueFlowIndex,
-  key: string
-): readonly (ts.PropertyAccessExpression | ts.ElementAccessExpression)[] => slotWriteInventoryOf(checker, flow).namedWrites.get(key) ?? []
+  owner: SourceClass,
+  key: string,
+  allocationOriginsOf: (expression: ts.Expression) => ExactClassAllocationOrigins | null,
+  admitted: (access: ts.PropertyAccessExpression | ts.ElementAccessExpression) => boolean = () => false
+): boolean => {
+  const symbolOf = (node: SourceClass): ts.Symbol | undefined =>
+    node.name ? checker.getSymbolAtLocation(node.name) : checker.getTypeAtLocation(node).getSymbol()
+  const ownerSymbol = symbolOf(owner)
+  if (!ownerSymbol) return false
+  const inFamily = (node: SourceClass): boolean => {
+    const symbol = symbolOf(node)
+    return symbol !== undefined && descendsFromNominal(checker, checker.getDeclaredTypeOfSymbol(symbol), ownerSymbol)
+  }
+  const classOfReference = (expression: ts.Expression): SourceClass | null => {
+    const symbol = checker.getSymbolAtLocation(expression)
+    const declaration = symbol?.valueDeclaration
+    return declaration && (ts.isClassDeclaration(declaration) || ts.isClassExpression(declaration)) ? declaration : null
+  }
+  // A receiver is outside the family only when its allocations are exactly
+  // enumerated and none is a family class -- `this` in a member of a class
+  // outside the family included. Anything unresolvable may be an instance.
+  const mayBeFamilyInstance = (receiver: ts.Expression): boolean => {
+    const value = unwrapValueExpression(receiver)
+    if (value.kind === ts.SyntaxKind.ThisKeyword || value.kind === ts.SyntaxKind.SuperKeyword) {
+      const frame = flow.receiverOwnerOf(value)
+      const home = frame && ts.isClassElement(frame) ? frame.parent : null
+      return home === null || !(ts.isClassDeclaration(home) || ts.isClassExpression(home)) || inFamily(home)
+    }
+    // `C.prototype` / `C` for a class outside the family names no instance
+    // of it; for a family class it is the shared holder of the slot.
+    if (ts.isPropertyAccessExpression(value) && value.name.text === 'prototype') {
+      const named = classOfReference(value.expression)
+      return named === null || inFamily(named)
+    }
+    const named = classOfReference(value)
+    if (named !== null) return inFamily(named)
+    const origins = allocationOriginsOf(value)
+    if (origins === null) return true
+    for (const allocated of origins.classes) if (inFamily(allocated)) return true
+    return false
+  }
+  const literalKeysOf = spelledLiteralKeysOf
+  // A computed key whose static type is numeric, or a literal set not
+  // holding the key, cannot address this slot (`computedKeyMayBeMember`,
+  // shared with the receiver-alias walk).
+  const computedKeyMayBe = (argument: ts.Expression): boolean => computedKeyMayBeMember(checker, flow, argument, key)
+  const inventory = slotWriteInventoryOf(checker, flow)
+  for (const access of inventory.namedWrites.get(key) ?? []) if (!admitted(access) && mayBeFamilyInstance(access.expression)) return false
+  for (const access of inventory.namedWrites.get('__proto__') ?? []) if (mayBeFamilyInstance(access.expression)) return false
+  for (const access of inventory.namedWrites.get('prototype') ?? []) {
+    const named = classOfReference(unwrapValueExpression(access.expression))
+    if (named === null || inFamily(named)) return false
+  }
+  for (const access of inventory.computedWrites) {
+    if (!computedKeyMayBe(access.argumentExpression)) continue
+    if (!admitted(access) && mayBeFamilyInstance(access.expression)) return false
+  }
+  for (const { call, name } of inventory.intrinsicMutators) {
+    const target = call.arguments[0]
+    if (!target || !mayBeFamilyInstance(target)) continue
+    if (name === 'setPrototypeOf') return false
+    if (name === 'assign') {
+      for (const source of call.arguments.slice(1)) {
+        const keys = literalKeysOf(source)
+        if (keys === null || keys.has(key)) return false
+      }
+      continue
+    }
+    if (name === 'defineProperties') {
+      const keys = call.arguments[1] ? literalKeysOf(call.arguments[1]) : null
+      if (keys === null || keys.has(key)) return false
+      continue
+    }
+    // `defineProperty` / `Reflect.set` / `Reflect.defineProperty`: the key is the second operand.
+    const named = call.arguments[1]
+    if (!named) return false
+    const spelled = unwrapValueExpression(named)
+    if (ts.isStringLiteralLike(spelled) ? spelled.text === key : computedKeyMayBe(spelled)) return false
+  }
+  return true
+}
 
 const activeValueProofs = new WeakMap<ValueFlowIndex, Map<readonly ts.Expression[], Set<ClosedValueMode['terminalUse']>>>()
 /** The same terminals, flat, so the proof memo can ask whether an assumed one is still in force. */
@@ -3914,81 +4005,7 @@ const closedMemberCallableUses = (
     const owner = memberOwnerClassOf(declared)
     const key = memberKeyOf(declared)
     if (owner === null || key === null) return false
-    const symbolOf = (node: SourceClass): ts.Symbol | undefined =>
-      node.name ? checker.getSymbolAtLocation(node.name) : checker.getTypeAtLocation(node).getSymbol()
-    const ownerSymbol = symbolOf(owner)
-    if (!ownerSymbol) return false
-    const inFamily = (node: SourceClass): boolean => {
-      const symbol = symbolOf(node)
-      return symbol !== undefined && descendsFrom(checker.getDeclaredTypeOfSymbol(symbol), ownerSymbol)
-    }
-    const classOfReference = (expression: ts.Expression): SourceClass | null => {
-      const symbol = checker.getSymbolAtLocation(expression)
-      const declaration = symbol?.valueDeclaration
-      return declaration && (ts.isClassDeclaration(declaration) || ts.isClassExpression(declaration)) ? declaration : null
-    }
-    // A receiver is outside the family only when its allocations are exactly
-    // enumerated and none is a family class -- `this` in a member of a class
-    // outside the family included. Anything unresolvable may be an instance.
-    const mayBeFamilyInstance = (receiver: ts.Expression): boolean => {
-      const value = unwrapValue(receiver)
-      if (value.kind === ts.SyntaxKind.ThisKeyword || value.kind === ts.SyntaxKind.SuperKeyword) {
-        const frame = flow.receiverOwnerOf(value)
-        const home = frame && ts.isClassElement(frame) ? frame.parent : null
-        return home === null || !(ts.isClassDeclaration(home) || ts.isClassExpression(home)) || inFamily(home)
-      }
-      // `C.prototype` / `C` for a class outside the family names no instance
-      // of it; for a family class it is the shared holder of the slot.
-      if (ts.isPropertyAccessExpression(value) && value.name.text === 'prototype') {
-        const named = classOfReference(value.expression)
-        return named === null || inFamily(named)
-      }
-      const named = classOfReference(value)
-      if (named !== null) return inFamily(named)
-      const origins = allocationOriginsOf(value)
-      if (origins === null) return true
-      for (const allocated of origins.classes) if (inFamily(allocated)) return true
-      return false
-    }
-    const literalKeysOf = spelledLiteralKeysOf
-    // A computed key whose static type is numeric, or a literal set not
-    // holding the key, cannot address this slot (`computedKeyMayBeMember`,
-    // shared with the receiver-alias walk).
-    const computedKeyMayBe = (argument: ts.Expression): boolean => computedKeyMayBeMember(checker, flow, argument, key)
-    const inventory = slotWriteInventoryOf(checker, flow)
-    for (const access of inventory.namedWrites.get(key) ?? []) if (mayBeFamilyInstance(access.expression)) return false
-    for (const access of inventory.namedWrites.get('__proto__') ?? []) if (mayBeFamilyInstance(access.expression)) return false
-    for (const access of inventory.namedWrites.get('prototype') ?? []) {
-      const named = classOfReference(unwrapValue(access.expression))
-      if (named === null || inFamily(named)) return false
-    }
-    for (const access of inventory.computedWrites) {
-      if (!computedKeyMayBe(access.argumentExpression)) continue
-      if (mayBeFamilyInstance(access.expression)) return false
-    }
-    for (const { call, name } of inventory.intrinsicMutators) {
-      const target = call.arguments[0]
-      if (!target || !mayBeFamilyInstance(target)) continue
-      if (name === 'setPrototypeOf') return false
-      if (name === 'assign') {
-        for (const source of call.arguments.slice(1)) {
-          const keys = literalKeysOf(source)
-          if (keys === null || keys.has(key)) return false
-        }
-        continue
-      }
-      if (name === 'defineProperties') {
-        const keys = call.arguments[1] ? literalKeysOf(call.arguments[1]) : null
-        if (keys === null || keys.has(key)) return false
-        continue
-      }
-      // `defineProperty` / `Reflect.set` / `Reflect.defineProperty`: the key is the second operand.
-      const named = call.arguments[1]
-      if (!named) return false
-      const spelled = unwrapValue(named)
-      if (ts.isStringLiteralLike(spelled) ? spelled.text === key : computedKeyMayBe(spelled)) return false
-    }
-    return true
+    return familySlotWritesClosed(checker, flow, owner, key, allocationOriginsOf)
   }
   /**
    * Whether any instance of this family is handed to a callable this program
