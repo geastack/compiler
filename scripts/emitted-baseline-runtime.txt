@@ -108,7 +108,7 @@ bigint-of-number-bigint-or-class-union.ts.cpp fa2543c8cadc
 bind-guarded-for-a-module-function-declaration.runtime.js.cpp aadf2313393a
 bind-guarded-when-a-boxed-instance-can-shadow-it.runtime.ts.cpp f2b08d6c5d88
 bind-guarded-when-a-logger-reaches-an-emitter.runtime.ts.cpp 8192a26e9b84
-bind-guarded-when-the-source-has-no-known-function.runtime.js.cpp e885552a2093
+bind-guarded-when-the-source-has-no-known-function.runtime.js.cpp 5e4232106548
 bind-method-value-to-receiver.ts.cpp b83cc26f70a5
 bind-of-unknown-origin-method-guards-own-bind.runtime.ts.cpp 3c68f66b5481
 bind-polymorphic-this-callback.runtime.js.cpp ce06021a60cf
@@ -1049,7 +1049,7 @@ plain-regex-test-and-ascii-string-search.runtime.ts.cpp 3c67df0a9006
 populated-record-late-fields.js.cpp ccc9715a198e
 primitive-delete-arms.runtime.js.cpp 952d8957498f
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 52d4c29d6073
-printer-drift.txt 1d5f33cb9db2
+printer-drift.txt d6a7b4401ec9
 private-names-are-not-own-properties.ts.cpp 5a904aac80af
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp ed60c96c28c7
 promise-all-over-a-generator.ts.cpp cd9ebb8b8ee8
@@ -1178,7 +1178,11 @@ runtime-size-mask-index.ts.cpp fcc93c6a9c7b
 same-block-reads-before-last-transferring-use-move.runtime.ts.cpp 4fb51774b05c
 scalar-arm-member-read-into-open-result.runtime.js.cpp 389ce2f54163
 scalar-roundtrip.ts.cpp 0a987ebc984b
-self-bound-method-keeps-receiver-fields-typed.runtime.js.cpp 48d9572e4e19
+self-bound-listener-ignores-the-dispatch-receiver.runtime.js.cpp e88eb582df5d
+self-bound-method-keeps-receiver-fields-typed.runtime.js.cpp 1a8459ca10ee
+self-bound-slot-refused-for-another-objects-bind.runtime.js.cpp 000b6b31a60a
+self-bound-slot-refused-when-the-bind-carries-arguments.runtime.js.cpp cbc07c41aaa2
+self-bound-slot-refused-when-the-slot-is-reassigned-unbound.runtime.js.cpp e7cb0e1bd249
 self-reading-branch-write-cell.runtime.js.cpp 77d8357edaf7
 set-and-array-into-iterable-parameters.runtime.ts.cpp d439c07cf489
 set-constructed-from-a-string.ts.cpp 022350dd64bd

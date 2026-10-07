@@ -173,7 +173,7 @@ const methodEnvironmentText = (ctx: EmitContext, callable: FunctionId, what: str
  * no receiver and needs no correction -- this helper is only ever called from
  * the instance-member path below.
  */
-const boundMethodValueRepresentation = (operation: GetOperation): Representation => {
+const boundMethodValueRepresentation = (ctx: EmitContext, operation: GetOperation): Representation => {
   const representation = operation.result.representation
   if (representation.kind !== 'function-value-dispatch') {
     throw createCppEmitBlockedError(
@@ -182,6 +182,7 @@ const boundMethodValueRepresentation = (operation: GetOperation): Representation
         'this backend only knows how to bind a receiver onto that one carrier'
     )
   }
+  if (readsReceiverlessOwnSlot(ctx, operation)) return representation
   // Some method-value representations already carry a receiver -- measured on
   // the real app corpus, which regressed (3 programs, `c++` 0/clang `-`)
   // under an earlier version of this fix that threw here instead. Whatever
@@ -191,6 +192,30 @@ const boundMethodValueRepresentation = (operation: GetOperation): Representation
   // leaves; a value that already names one is left exactly as published.
   if (representation.abi.receiver !== null) return representation
   return { ...representation, abi: { ...representation.abi, receiver: operation.receiver.representation } }
+}
+
+/**
+ * Whether this read publishes, as stated, the convention of an own method
+ * slot whose storage takes no receiver.
+ *
+ * The semantic mutable-method authority gives a slot receiverless storage
+ * only where no value the slot can hold uses the receiver it is called with
+ * (a method self-bound in its constructor, or one declared `this: void`), and
+ * types a read receiverless only where the read can only find that storage.
+ * Such a read lost no receiver to the TS-derived signature, so there is
+ * nothing for `boundMethodValueRepresentation` to restore, and nothing for
+ * `classMethodValueReceiverClaim` to hand the call: the value is called
+ * exactly as the storage holds it.
+ */
+const readsReceiverlessOwnSlot = (ctx: EmitContext, operation: GetOperation): boolean => {
+  const receiver = operation.receiver.representation
+  const published = operation.result.representation
+  if (receiver.kind !== 'class-ref' || published.kind !== 'function-value-dispatch' || published.abi.receiver !== null) return false
+  if (dispatchesStatically(ctx, operation.receiver)) return false
+  const key = ctx.staticKeyTexts.get(operation.key.value)
+  if (key === undefined) return false
+  const slot = classMethodOverrideOf(ctx.classes, receiver.declaration, key)
+  return slot !== null && slot.value.kind === 'function-value-dispatch' && slot.value.abi.receiver === null
 }
 
 /**
@@ -249,7 +274,7 @@ export const classMethodValueText = (
   // read, or the read's own `dynamic` carrier for a computed key the census
   // could not type (`d[String(k)]()`), which boxes the method with
   // `receivesThis` so the call's `callWithReceiver` hands the instance back.
-  valueRepresentation: Representation = boundMethodValueRepresentation(operation),
+  valueRepresentation: Representation = boundMethodValueRepresentation(ctx, operation),
   receiverText: string = operandText(ctx, operation.receiver),
   receiverRepresentation: Representation = operation.receiver.representation
 ): { readonly text: string; readonly type: string; readonly environment: string } => {
@@ -864,7 +889,7 @@ export const classMemberText = (ctx: EmitContext, operation: GetOperation): Clas
   // `super.m()` is excluded: that spelling binds statically (13.3.7) and an
   // abstract base really has nothing for it, which stays a refusal.
   if (site.method.callable === null && !isSuperAccess) {
-    const carrier = cppTypeOf(boundMethodValueRepresentation(operation))
+    const carrier = cppTypeOf(boundMethodValueRepresentation(ctx, operation))
     const failure =
       `std::fprintf(stderr, "gea: \\"${key}\\" of class ${String(site.owner)} is abstract and no class in this program implements it\\n"); ` +
       'std::abort();'
@@ -973,6 +998,7 @@ export const classMethodValueReceiverClaim = (ctx: EmitContext, operation: GetOp
     }
     return null
   }
+  if (readsReceiverlessOwnSlot(ctx, operation)) return null
   return classMemberOf(ctx.classes, receiver.declaration, key)?.kind === 'method' ? operation.receiver : null
 }
 
@@ -1033,7 +1059,7 @@ export const computedClassPrototypeMethodText = (ctx: EmitContext, operation: Ge
   // need the canonical-string comparison `gea::PropertyKey` does, and no
   // caller has asked for one yet.
   if (operation.key.representation.kind !== 'string') return null
-  const target = boundMethodValueRepresentation(operation)
+  const target = boundMethodValueRepresentation(ctx, operation)
 
   // Which of the class's methods this read can actually YIELD: the ones whose
   // body convention fills the carrier the read publishes. That carrier is the

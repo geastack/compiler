@@ -62,6 +62,7 @@ import {
   sourceClassConstructorSlotIsOriginal,
   sourceClassDataMemberPlanOf,
   sourceClassKeyReadPlanOf,
+  type SourceClassFamilyQuery,
   type SourceClassKeyReadPlan
 } from './source-class-data.js'
 import { intrinsicDataDefinitionTargetOf } from './intrinsic-data-definition.js'
@@ -766,6 +767,13 @@ const slotWriteInventoryOf = (checker: ts.TypeChecker, flow: ValueFlowIndex): Sl
   slotWriteInventories.set(flow, built)
   return built
 }
+
+/** Every program access that writes `key` by name, on any receiver: assigned, compound-assigned, updated, deleted or destructured into. */
+export const namedSlotWritesOf = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  key: string
+): readonly (ts.PropertyAccessExpression | ts.ElementAccessExpression)[] => slotWriteInventoryOf(checker, flow).namedWrites.get(key) ?? []
 
 const activeValueProofs = new WeakMap<ValueFlowIndex, Map<readonly ts.Expression[], Set<ClosedValueMode['terminalUse']>>>()
 /** The same terminals, flat, so the proof memo can ask whether an assumed one is still in force. */
@@ -4675,37 +4683,16 @@ const closedMemberCallableUses = (
     )
   }
   /**
-   * The self-bind fact every arm of this proof consumes: `x.m = x.m.bind(x)`
-   * with the intrinsic `bind` intact and a store that runs no setter (the
-   * descriptor authority's `writeBodies`). The slot then holds either one of
-   * its own implementations or one bound to the slot's own object, so the
-   * store adds no body, binding calls nothing, and the receiver reaches only
-   * the `this` of the slot's bodies. The ledger obligation is owed by each
-   * consuming proof, which is why only the syntactic half is cached.
+   * `provenSelfBindWith` over this proof's own receiver family: the value
+   * origins the rest of this census reads the receiver through.
    */
-  const provenSelfBindOf = (expression: ts.Expression): ProvenSelfBind | null => {
-    let value = expression
-    while (ts.isParenthesizedExpression(value)) value = value.expression
-    if (!ts.isCallExpression(value)) return null
-    const shape = selfBindShapeAt(checker, flow, value)
-    if (shape === null) return null
-    const method = checker.getSymbolAtLocation(shape.bind.name)
-    if (!method || flow.writesToSymbol(method).length > 0) return null
-    if (deferredIntrinsicProtocolLedgerOf(flow)?.requirePrototypeKeys('Function', { names: [shape.bind.name.text] }, value) !== true)
-      return null
-    const symbol = checker.getSymbolAtLocation(shape.source.name)
-    const slot = symbol?.valueDeclaration ?? symbol?.declarations?.[0]
-    if (slot === undefined) return null
-    const object = shape.destination.expression
-    const receiver = receiverTypeAt(object) ?? checker.getTypeAtLocation(object)
-    const plan = sourceClassKeyReadPlanOf(
-      checker,
-      flow,
-      { kind: 'value', receiver, expression: object, originsOf: allocationOriginsOf },
-      shape.key
-    )
-    return plan !== null && plan.writeBodies !== null && plan.writeBodies.length === 0 ? { ...shape, slot } : null
-  }
+  const provenSelfBindOf = (expression: ts.Expression): ProvenSelfBind | null =>
+    provenSelfBindWith(checker, flow, expression, (object) => ({
+      kind: 'value',
+      receiver: receiverTypeAt(object) ?? checker.getTypeAtLocation(object),
+      expression: object,
+      originsOf: allocationOriginsOf
+    }))
   /**
    * The proven self-bind a receiver mention belongs to -- as the
    * destination's object, the bound source's object or the bound receiver --
@@ -7713,7 +7700,7 @@ const COMPARISON_TOKENS: ReadonlySet<ts.SyntaxKind> = new Set([
 const EXPLICIT_THIS_METHODS: ReadonlySet<string> = new Set(['call', 'apply'])
 
 /** The syntactic and checker half of a self-bind; `provenSelfBindOf` adds the proof-state half. */
-interface SelfBindShape {
+export interface SelfBindShape {
   readonly store: ts.BinaryExpression
   readonly destination: ts.PropertyAccessExpression
   readonly source: ts.PropertyAccessExpression
@@ -7775,9 +7762,40 @@ const selfBindShapeOf = (checker: ts.TypeChecker, flow: ValueFlowIndex, call: ts
   if (!sameReceiver(flow, receivers[0]!, receivers[1]!) || !sameReceiver(flow, receivers[0]!, receivers[2]!)) return null
   return { store, destination, source, bind, key: destination.name.text, receivers }
 }
-interface ProvenSelfBind extends SelfBindShape {
+export interface ProvenSelfBind extends SelfBindShape {
   /** The slot's canonical declaration, which `memberImplementationsOf` enumerates the family from. */
   readonly slot: ts.Declaration
+}
+/**
+ * The self-bind fact every self-bind proof consumes: `x.m = x.m.bind(x)`
+ * with the intrinsic `bind` intact and a store that runs no setter (the
+ * descriptor authority's `writeBodies` over the receiver family `familyOf`
+ * names). The slot then holds either one of its own implementations or one
+ * bound to the slot's own object, so the store adds no body, binding calls
+ * nothing, and the receiver reaches only the `this` of the slot's bodies. The
+ * ledger obligation is owed by each consuming proof, which is why only the
+ * syntactic half is cached.
+ */
+export const provenSelfBindWith = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  expression: ts.Expression,
+  familyOf: (object: ts.Expression) => SourceClassFamilyQuery
+): ProvenSelfBind | null => {
+  let value = expression
+  while (ts.isParenthesizedExpression(value)) value = value.expression
+  if (!ts.isCallExpression(value)) return null
+  const shape = selfBindShapeAt(checker, flow, value)
+  if (shape === null) return null
+  const method = checker.getSymbolAtLocation(shape.bind.name)
+  if (!method || flow.writesToSymbol(method).length > 0) return null
+  if (deferredIntrinsicProtocolLedgerOf(flow)?.requirePrototypeKeys('Function', { names: [shape.bind.name.text] }, value) !== true)
+    return null
+  const symbol = checker.getSymbolAtLocation(shape.source.name)
+  const slot = symbol?.valueDeclaration ?? symbol?.declarations?.[0]
+  if (slot === undefined) return null
+  const plan = sourceClassKeyReadPlanOf(checker, flow, familyOf(shape.destination.expression), shape.key)
+  return plan !== null && plan.writeBodies !== null && plan.writeBodies.length === 0 ? { ...shape, slot } : null
 }
 const selfBindShapes = new WeakMap<ValueFlowIndex, Map<ts.CallExpression, SelfBindShape | null>>()
 const selfBindShapeAt = (checker: ts.TypeChecker, flow: ValueFlowIndex, call: ts.CallExpression): SelfBindShape | null => {

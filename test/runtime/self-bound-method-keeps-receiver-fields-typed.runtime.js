@@ -18,10 +18,8 @@
 // global binding, whose method calls the census does not resolve with or
 // without the bind.
 //
-// Nothing calls the listener: a method slot keeps the receiver-taking
-// convention, so `listener()` and `listener.call(target)` cannot reach the
-// bound function yet, and a direct `renderer._onCanvasTargetResize()` needs
-// the slot's value reads ordered after the bind. Neither is this census.
+// Nothing calls the listener here. A call through the slot is
+// `self-bound-listener-ignores-the-dispatch-receiver.runtime.js`.
 
 export {}
 
