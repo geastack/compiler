@@ -179,6 +179,14 @@ if (ran.signal) {
   console.error(`CRASHED: ${ran.signal}`)
   process.exit(1)
 }
+// Windows has no signals. The CRT's abort() exits with status 3 (its SIGABRT
+// default) or fails fast with 0xC0000409, and a fault exits with its NTSTATUS
+// (0xC0000005 and the like), so these are the crashes `signal` reports elsewhere.
+const windowsStatus = process.platform === 'win32' && ran.status !== null ? ran.status >>> 0 : null
+if (windowsStatus === 3 || (windowsStatus !== null && windowsStatus >= 0xc0000000)) {
+  console.error(`CRASHED: 0x${windowsStatus.toString(16).toUpperCase()}`)
+  process.exit(1)
+}
 if (ran.status !== 0) {
   console.error(`EXITED ${ran.status}`)
   process.exit(1)
