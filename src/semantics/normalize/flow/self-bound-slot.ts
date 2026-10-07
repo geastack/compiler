@@ -6,7 +6,8 @@ import {
   type IntrinsicProtocolRequirement
 } from '../deferred-intrinsic-protocols.js'
 import type { DeferredIntrinsicProtocolLedger } from '../deferred-intrinsic-protocols.js'
-import { closedClassAllocationOriginsOf, familySlotWritesClosed, provenSelfBindWith, type ProvenSelfBind } from './callable-reach.js'
+import { closedClassAllocationOriginsOf, familySlotWritesClosed } from './callable-reach.js'
+import { provenSelfBindWith, type ProvenSelfBind } from './self-bind.js'
 import type { ValueFlowIndex, ValueWrite } from './model.js'
 import { sourceClassKeyReadPlanOf, type SourceClassFamilyQuery } from './source-class-data.js'
 

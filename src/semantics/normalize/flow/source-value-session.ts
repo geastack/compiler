@@ -30,6 +30,7 @@ import { exportIsUnimported } from './targets.js'
 import { inProgramImportReferencesOf } from './export-importers.js'
 import { sourceConstructionFramesOf } from './source-construction-frames.js'
 import { isSourceInstanceMethod } from './source-prototype-method-identity.js'
+import { provenSelfBindWith, selfBoundKeysOf, type ProvenSelfBind } from './self-bind.js'
 
 type Access = ts.PropertyAccessExpression | ts.ElementAccessExpression
 type Value = ts.Expression | ts.SignatureDeclaration
@@ -39,7 +40,7 @@ type Query =
   | { readonly kind: 'parameter'; readonly node: ts.ParameterDeclaration }
   | { readonly kind: 'binding-element'; readonly node: ts.BindingElement }
   | { readonly kind: 'receiver'; readonly node: ts.Node }
-  | { readonly kind: 'targets' | 'super-targets'; readonly node: ts.CallExpression }
+  | { readonly kind: 'targets' | 'super-targets' | 'bound-targets'; readonly node: ts.CallExpression }
   | { readonly kind: 'completion'; readonly node: ts.CallExpression | ts.NewExpression }
   | { readonly kind: 'construct-targets'; readonly node: ts.CallExpression | ts.NewExpression }
   | {
@@ -218,6 +219,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       | 'receiver'
       | 'targets'
       | 'super-targets'
+      | 'bound-targets'
       | 'construct-targets'
       | 'completion'
       | 'closure'
@@ -289,6 +291,27 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    */
   const unknownReadsOf = (container: ObjectRoot): Query => nodeQuery('unknown-reads', container)
   const targets = (call: ts.CallExpression): Query => nodeQuery('targets', call)
+  /**
+   * `x.m = x.m.bind( x )`, proven by the one self-bind authority
+   * (`self-bind.ts`): the intrinsic `bind` intact, no bound argument, and a
+   * store that runs no setter. The call evaluates to a fresh bound function,
+   * which this graph carries as a value of its own -- the call expression is
+   * its allocation site, as `new` is an instance's. A call through it runs
+   * the bodies the bound source holds (`bound-targets`), with the bound
+   * argument as `this`, whatever receiver the call supplies (ECMA-262
+   * 10.4.1.1). Every bind this does not prove keeps its former refusal.
+   *
+   * Asked inside a transfer, so the `Function.prototype.bind` requirement it
+   * files is owed by that query's answer, like every other intrinsic one.
+   */
+  const boundOf = (node: Value): ProvenSelfBind | null =>
+    ts.isCallExpression(node)
+      ? provenSelfBindWith(checker, flow, node, (object) => ({ kind: 'declared', receiver: checker.getTypeAtLocation(object) }))
+      : null
+  const boundTargets = (call: ts.CallExpression): Query => nodeQuery('bound-targets', call)
+  // A bound function exists only where a write stores a self-bind, so a
+  // program with none gives no frame a bound receiver to look for.
+  const programSelfBinds = selfBoundKeysOf(checker, flow).size > 0
   const superTargets = (call: ts.CallExpression): Query => nodeQuery('super-targets', call)
   /**
    * The method a lexical `super.<key>` selects, walking `extends` from the
@@ -1769,6 +1792,17 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             fail('coercing-property-key', reference)
             return
           }
+          // The callable read here is the source of a proven self-bind: it
+          // continues as the bound function the call makes, so that
+          // function's uses are this callable's too.
+          if (ts.isPropertyAccessExpression(parent) && ts.isCallExpression(parent.parent) && parent.parent.expression === parent) {
+            const bind = parent.parent
+            const bound = boundOf(bind)
+            if (bound !== null && bound.source === reference && (isBody(root) || boundOf(root) !== null)) {
+              if (root !== bind) read(closure(bind))
+              return
+            }
+          }
           const keys = keysOf(parent)
           // `new ( /** @type {new (...args: any[]) => this} */ ( this.constructor ) )()`
           // -- three's own spelling of the clone idiom wherever it JSDoc-casts
@@ -1868,7 +1902,15 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               read(nodeQuery('construct-targets', parent))
               return
             }
-            if (!isBody(root)) fail('non-callable-use', reference)
+            if (!isBody(root) && boundOf(root) === null) fail('non-callable-use', reference)
+            return
+          }
+          // The bound receiver reaches only the `this` of the bodies the bound
+          // function runs; the bind itself calls nothing.
+          if (ts.isCallExpression(parent) && parent.arguments[0] === reference && boundOf(parent) !== null) {
+            for (const body of read(boundTargets(parent)))
+              if (isBody(body) && !ts.isArrowFunction(body))
+                for (const mention of flow.receiverReferencesToDeclaration(body)) add(read(use(root, mention)))
             return
           }
           if (ts.isCallExpression(parent) && definitionPlans.has(parent)) {
@@ -2284,14 +2326,43 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             if (isBody(candidate) && flow.callableBodyIsIndexed(candidate)) {
               facts.add(candidate)
               seeded = true
+            } else if (ts.isCallExpression(candidate) && boundOf(candidate) !== null) {
+              add(read(boundTargets(candidate)))
+              seeded = true
             } else if (candidate.kind !== ts.SyntaxKind.NullKeyword && !ts.isVoidExpression(candidate))
               fail('opaque-call-target', candidate)
           }
           if (sealing && facts.size === 0 && !lookupThrows(query.node)) fail('no-source-call-target')
           break
         }
+        case 'bound-targets': {
+          // A bound function runs what its source held when bound. The source
+          // is read flow-insensitively, so it can hold this very bound
+          // function, or another one; binding a bound function keeps the
+          // inner target.
+          const bound = boundOf(query.node)
+          if (bound === null) {
+            fail('unproven-bind')
+            break
+          }
+          for (const candidate of read(value(bound.source))) {
+            if (isBody(candidate) && flow.callableBodyIsIndexed(candidate)) facts.add(candidate)
+            else if (ts.isCallExpression(candidate) && boundOf(candidate) !== null) {
+              if (candidate !== query.node) add(read(boundTargets(candidate)))
+            } else if (!isNullish(candidate)) fail('opaque-bound-target', candidate)
+          }
+          if (sealing && facts.size === 0) fail('no-bound-target')
+          break
+        }
         case 'completion': {
           if (ts.isCallExpression(query.node)) {
+            // A proven self-bind evaluates to the bound function it allocates.
+            if (boundOf(query.node) !== null) {
+              read(boundTargets(query.node))
+              facts.add(query.node)
+              seeded = true
+              break
+            }
             const bulk = bulkAssignOf(query.node)
             if (bulk !== null) {
               add(carry(value(bulk.target)))
@@ -2345,6 +2416,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           const contextual = (expression: ts.Expression): Query =>
             frameQuery('frame-value', query.node, query.body, unwrapErasedExpression(expression))
           if (query.kind === 'frame-receiver') {
+            // A call that reaches this body through a bound function runs it
+            // with the bound receiver. The supplied receiver is kept as well:
+            // the same call may reach the body unbound, and more values here
+            // only make a proof ask more.
+            const operands = programSelfBinds && ts.isCallExpression(query.node) ? sites.get(query.node)?.operands : undefined
+            if (operands && (operands.explicitThis || operands.dispatch.kind === 'direct' || operands.dispatch.kind === 'member'))
+              for (const candidate of observe(value(operands.callee))) {
+                if (!ts.isCallExpression(candidate) || boundOf(candidate) === null) continue
+                if (read(boundTargets(candidate)).has(query.body)) add(carry(value(candidate.arguments[0]!)))
+              }
             const receiver = layout.receiver
             if (receiver.kind === 'undefined') {
               facts.add(undefinedValue)
