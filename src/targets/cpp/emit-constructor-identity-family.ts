@@ -58,18 +58,20 @@ export const constructorDispatchFamilyText = (
 }
 
 const familyByDeclarationTokenText = (plan: ConstructorIdentityFamilyPlan, stateStatement: string, refusal: string): string => {
-  const familyType = cppTypeOf(plan.target)
-  const arms = plan.members.map(({ declaration, upcast }) => {
+  const targetType = cppTypeOf(plan.target)
+  const arms = plan.members.map(({ declaration, upcast, family, arm }) => {
+    const familyType = cppTypeOf(family)
     const thunk = upcast
       ? `&gea::detail::ConstructorUpcast<${familyType}, &${cppConstructThunkName(declaration)}>::construct`
       : `&${cppConstructThunkName(declaration)}`
+    const value = `${familyType}(${thunk}, gea::nativeClassMethodEnvironment(gea_class))`
     return (
       `if (gea_class->declaration == &gea::nativeClassMethodDeclaration<${cppClassName(declaration)}>) ` +
-      `return ${familyType}(${thunk}, gea::nativeClassMethodEnvironment(gea_class));`
+      `return ${arm === null ? value : `${targetType}::ofArm<${arm}>(${value})`};`
     )
   })
   return (
-    `([&]() -> ${familyType} { ${stateStatement} ` +
+    `([&]() -> ${targetType} { ${stateStatement} ` +
     `if (gea_class) { ${arms.join(' ')} } ` +
     `gea::detail::refusePayloadMismatch(${JSON.stringify(refusal)}); }())`
   )

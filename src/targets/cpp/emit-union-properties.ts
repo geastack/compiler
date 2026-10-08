@@ -60,7 +60,12 @@ import {
   constructorViewFieldFor
 } from './class-properties/emit-class-properties.js'
 import { overriddenMethodValueText, publishedMethodCopyOf } from './class-properties/computed-method-value.js'
-import { constructorValueDispatchTypedMemberText, propertyKeyText } from './emit-dynamic-properties.js'
+import {
+  constructorValueDispatchTypedMemberText,
+  isNativeCallableCarrier,
+  propertyKeyText,
+  unboxedReadText
+} from './emit-dynamic-properties.js'
 import { toStringTextOver, type ToStringLayouts } from './emit-tostring.js'
 import { recordLayoutPolicyOf } from '../../projection/fields.js'
 
@@ -458,6 +463,11 @@ const armRuntimeFieldText = (
     return classConstructorStaticMemberTextFor(ctx, arm, key, published, () => armExprText)
   }
   if (arm.kind === 'constructor-value-dispatch') return constructorValueDispatchTypedMemberText(ctx, arm, armExprText, key, published)
+  // A function's `name` and `length` are its own properties, in the table every copy of it shares, where a
+  // redefinition writes them: the read a lone callable makes (`callableSidecarGetText`). three's
+  // NodeLibrary.addType reads `nodeClass.name` off a node material class or a tone-mapping function.
+  if (isNativeCallableCarrier(arm.kind) && (key === 'name' || key === 'length'))
+    return unboxedReadText(published, `gea::callableDynamicGet(${armExprText}, ${propertyKey})`, `a Function own-property read of "${key}"`)
   if (objectPrototypeMemberNames.has(key)) return null
   // A `Record<string, any>` arm answers a named key with its own entry, or
   // `undefined` when it has none: `gea::Dictionary<gea::Value>::read`'s

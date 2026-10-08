@@ -174,6 +174,7 @@ class-arrow-field-lazy.ts.cpp d74d1f6c99e0
 class-asserted-heritage-super.runtime.ts.cpp b6668c7f5b9c
 class-cast-through-unknown-is-identity.ts.cpp a70202ce9303
 class-constructor-map-keys.runtime.js.cpp c070874153fa
+class-constructor-weak-keys.runtime.js.cpp c89af70086da
 class-defaulted-census-slot.runtime.js.cpp b21eaee6cd4c
 class-dynamic-json-reflection.ts.cpp 778f7a90c065
 class-expando-array-method-name.runtime.js.cpp 69a8adaa369a
@@ -271,6 +272,7 @@ constructor-function-array-field-of-pushed-records.runtime.js.cpp bf83fa88bb01
 constructor-function-instance-into-inline-record-param-keeps-identity.runtime.js.cpp 759f110f22ca
 constructor-function-omitted-option-dead-byte-guards.runtime.js.cpp dad887b8fd64
 constructor-function-omitted-option-dead-guards.runtime.js.cpp c487b88556e1
+constructor-function-union-name.runtime.js.cpp 610925caed05
 constructor-function-untyped-buffer-field-stays-native.runtime.js.cpp 57eb8b5fb1a1
 constructor-prototype-off-instance.runtime.js.cpp 8eb12c1c6a1b
 constructor-read-off-instance-into-family.ts.cpp c92a615dc119
@@ -338,7 +340,7 @@ document-viewed-as-typed-options.runtime.ts.cpp 4495355c6291
 document-views-array-and-map-frames.runtime.ts.cpp b7fc4db1809d
 double-asserted-record-result-into-union-without-its-arm.runtime.ts.cpp ab64026831d8
 downcast-method-read-absent-on-other-arm.ts.cpp 962282e11430
-drift.txt 994b1dbad976
+drift.txt 394a5fb86cf0
 dynamic-array-absent-element.ts.cpp 8ccaca328cb8
 dynamic-array-literal-gather.runtime.js.cpp 2ab7b45b90fd
 dynamic-array-projection.ts.cpp e4b18aaba420
@@ -600,6 +602,7 @@ inferred-polymorphic-this.js.cpp 7f2559324458
 inherited-class-family-field-projection.runtime.js.cpp 390c60a9c138
 inherited-generic-base-method-through-derived-copy.runtime.ts.cpp 4f7449c69935
 inherited-synthetic-overlay-slot.runtime.js.cpp 162f4566029c
+instance-constructor-into-class-union-keys-a-weak-map.runtime.js.cpp baf9bacef221
 instance-constructor-into-untyped-parameter-keys-a-class-map.runtime.js.cpp 64c3b05e6210
 instance-constructor-name-names-the-allocating-class.runtime.ts.cpp 5b3aac07f968
 instance-reparented-onto-field-less-subclass.ts.cpp 4e504cf3b4dc
@@ -902,6 +905,7 @@ new-through-an-any-held-class.runtime.ts.cpp bfd7d130beb0
 new-value-carried-class-scope-from-defaulted-null.runtime.js.cpp b64b0f1900c0
 new-value-carried-class-scope-into-rest-arm.runtime.js.cpp 52f8f7bc3adf
 node-global-is-globalthis.ts.cpp dd61cc5da2fa
+node-library-native-registries.runtime.js.cpp 7c9d7f16e948
 non-null-element-arithmetic.runtime.ts.cpp e405db07a7e9
 null-any-into-optional-parameter-reads-absent.runtime.ts.cpp b287c1996318
 null-cell-written-dynamic-branch-is-dynamic.runtime.js.cpp 45f8cf9828d1
@@ -1055,7 +1059,7 @@ plain-regex-test-and-ascii-string-search.runtime.ts.cpp 3c67df0a9006
 populated-record-late-fields.js.cpp ccc9715a198e
 primitive-delete-arms.runtime.js.cpp 952d8957498f
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 52d4c29d6073
-printer-drift.txt 3e4fe8be1f89
+printer-drift.txt ec9a00f02c91
 private-names-are-not-own-properties.ts.cpp 5a904aac80af
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp ed60c96c28c7
 promise-all-over-a-generator.ts.cpp cd9ebb8b8ee8
@@ -1380,7 +1384,7 @@ typeof-runtime-string.ts.cpp d89347bd0397
 typeof-then-discriminates-a-union.ts.cpp 3b732925872e
 unbox-nullable-union.ts.cpp 32d4df3401b7
 uncallable-member-slot-call.runtime.js.cpp 68791d94946d
-uncertified.txt b5857422c452
+uncertified.txt 4059b04b9e8f
 uniform-tuple-boxed-into-any-is-an-array.runtime.ts.cpp 4884bb7f95dc
 uniform-tuple-const-object-indexed-read-in-a-free-function.runtime.ts.cpp 1364fe4a1da8
 uniform-tuple-identity-comparison-keeps-array-identity.runtime.ts.cpp 640e585c109c

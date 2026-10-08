@@ -52,6 +52,14 @@ export const hasReferenceIdentity = (representation: Representation): boolean =>
     case 'data-view':
     case 'keyed-collection':
       return representation.ownership === 'shared-refcount'
+    // A class object is spelled by value (`gea::ConstructorObject`), but what
+    // `===` compares is the class evaluation it closes over, which every copy
+    // and upcast carries unchanged: `weakCollectionIdentity`'s
+    // `ConstructorObject` overload keys by it. three's NodeLibrary keys its
+    // light nodes by light class in a WeakMap.
+    case 'constructor-family':
+    case 'constructor-value-dispatch':
+      return true
     // A `dynamic` key is admitted, and `gea::Value::identity()` is why: it is
     // the address of the held payload, which for an object-tagged box is
     // exactly the reference identity ECMA-262 asks for, shared by every box

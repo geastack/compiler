@@ -12296,6 +12296,23 @@ const void* weakCollectionIdentity(const Key& key) {
 }
 
 /**
+ * A class object keys by its class evaluation: what `===` compares
+ * (`sameValueZero` above), carried unchanged by every copy and
+ * `upcastConstructor`, and the same `NativeClassMethodState` a
+ * `constructor-identity` holds. A constructor with no class evaluation has no
+ * object to key by; its construct pointer differs per upcast thunk, so keying
+ * by it would split one class into several keys, and it is refused instead.
+ */
+template <typename Result, typename... Arguments>
+const void* weakCollectionIdentity(const ConstructorObject<Result(Arguments...)>& key) {
+  if (key.environment == nullptr) {
+    std::fprintf(stderr, "gea: a constructor with no class evaluation has no identity to key a weak collection by\n");
+    detail::abortAfterFlush();
+  }
+  return key.environment;
+}
+
+/**
  * A closed union of object-reference carriers keeps the identity of whichever
  * arm is live. The compiler admits this overload only when every arm has
  * reference identity (`hasReferenceIdentity`), so the recursive generic call
