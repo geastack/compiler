@@ -27,6 +27,8 @@ import {
   callableObjectAbi,
   resultAdapterTransportOf,
   adaptsConstructorIntoDispatch,
+  CONSTRUCTOR_DISPATCH_ADAPTER,
+  constructorDispatchAdapterLiftedText,
   boxDiscriminantsOfArm,
   type BoxDiscriminant,
   conversionRecipeOf,
@@ -1313,12 +1315,13 @@ const cppConversionTables = (
       // A class stored into a construct-signature slot with its own convention:
       // the environment (and so the constructor's identity) is kept and only the
       // construct entry is adapted -- see `emit-narrowing.ts`'s
-      // `constructorDispatchAdapterText`, asked here so the two cannot disagree.
-      if (adaptsConstructorIntoDispatch(source, target)) {
+      // `constructorDispatchAdapterText`, asked here over the same layouts the
+      // printer renders it with, so the two cannot disagree.
+      if (adaptsConstructorIntoDispatch(source, target, layouts)) {
         const domain = `constructor-dispatch-adapter:${representationKey(source)}->${representationKey(target)}`
         return {
-          classifier: { id: 'gea::ConstructorObject::adapter', domain },
-          materializer: { id: 'gea::ConstructorObject::adapter', domain, allocates: false }
+          classifier: { id: CONSTRUCTOR_DISPATCH_ADAPTER, domain },
+          materializer: { id: CONSTRUCTOR_DISPATCH_ADAPTER, domain, allocates: false }
         }
       }
       if (upcastsToBase(source, target)) {
@@ -2465,6 +2468,16 @@ const cppConversionTables = (
                   : {}
         return { id: `chain:${recipe.id}`, domain: `static:${recipe.id}`, allocates: allocatingRecipes.has(recipe.id), ...native }
       }
+      // A constructor family of several classes into a construct-signature
+      // slot, or the optional of one: the context-free chain declines it, since
+      // only the layouts state each member's own construct convention
+      // (`constructorDispatchAdapterLiftedText`).
+      if (constructorDispatchAdapterLiftedText(source, target, 'gea_conversion_probe', layouts) !== null)
+        return {
+          id: CONSTRUCTOR_DISPATCH_ADAPTER,
+          domain: `constructor-dispatch-adapter:${representationKey(source)}->${representationKey(target)}`,
+          allocates: false
+        }
       // After the chain, as the printer asks (`emit.ts`'s `emitConvert`): a
       // record rebuilt as another shape it satisfies, decided by the plan the
       // printer renders from (`conversion/record-view.ts`). `viewPlanFor`

@@ -3320,41 +3320,62 @@ export const resultAdaptedCallableText = (
  * convert each slot argument into the class's formal and the class's instance
  * into the slot's result. Any piece that has no installed conversion refuses
  * the whole adapter, and the store with it.
+ *
+ * A family's `abi` is its defining class's convention, not every member's: a
+ * subclass the program stores into the slot (`derive.ts`'s
+ * `constructorSlotSubclassesOf`) keeps its own construct thunk and formals, so
+ * an optional parameter whose census closed to `undefined` in the base can
+ * still be open in the subclass. A family of several classes therefore builds
+ * each member's arguments from the convention the class table published for
+ * that member (`classSubtreeOf`, the same `ClassLayout.construct`
+ * `translation-unit.ts` spells the thunk from). Without the layouts -- the
+ * context-free chain -- only a one-class family proves its member's
+ * convention; a member whose convention is not published refuses.
  */
-const constructorDispatchAdapterText = (source: Representation, target: Representation, text: string): string | null => {
+const constructorDispatchAdapterText = (
+  source: Representation,
+  target: Representation,
+  text: string,
+  layouts?: RecordLayoutPolicy
+): string | null => {
   if (source.kind !== 'constructor-family' || target.kind !== 'constructor-value-dispatch') return null
   const members = source.members
   if (members.length === 0) return null
-  const from = source.abi
   const to = target.abi
-  if (from.receiver !== null || to.receiver !== null) return null
-  if (from.restFrom !== null || to.restFrom !== null) return null
-  if (from.parameters.slice(to.parameters.length).some((parameter) => cppUndefinedIn(parameter.value) === null)) return null
+  if (to.receiver !== null || to.restFrom !== null || to.result.kind === 'void') return null
   const formals = to.parameters.map((parameter, index) => `${cppAbiParameterType(parameter)} gea_argument_${index}`)
-  const actuals: string[] = []
-  for (const [index, slot] of from.parameters.entries()) {
-    const parameter = to.parameters[index]
-    if (parameter === undefined) {
-      actuals.push(cppUndefinedIn(slot.value)!)
-      continue
+  const actualsOf = (from: CallableAbi): readonly string[] | null => {
+    if (from.receiver !== null || from.restFrom !== null || from.result.kind === 'void') return null
+    const actuals: string[] = []
+    for (const [index, slot] of from.parameters.entries()) {
+      const parameter = to.parameters[index]
+      if (parameter === undefined) {
+        const absent = cppUndefinedIn(slot.value)
+        if (absent === null) return null
+        actuals.push(absent)
+        continue
+      }
+      const name = `gea_argument_${index}`
+      if (cppAbiParameterType(parameter) === cppAbiParameterType(slot)) {
+        actuals.push(`std::forward<${cppAbiParameterType(parameter)}>(${name})`)
+        continue
+      }
+      const converted = tryCandidateText(() => convertedValueText(parameter.value, slot.value, name))
+      if (converted === null) return null
+      actuals.push(converted)
     }
-    const name = `gea_argument_${index}`
-    if (cppAbiParameterType(parameter) === cppAbiParameterType(slot)) {
-      actuals.push(`std::forward<${cppAbiParameterType(parameter)}>(${name})`)
-      continue
-    }
-    const converted = tryCandidateText(() => convertedValueText(parameter.value, slot.value, name))
-    if (converted === null) return null
-    actuals.push(converted)
+    return actuals
   }
-  if (from.result.kind === 'void' || to.result.kind === 'void') return null
-  const invocationOf = (member: DeclarationId): string =>
+  const invocationOf = (member: DeclarationId, actuals: readonly string[]): string =>
     `${cppConstructThunkName(member)}(gea_environment${actuals.map((actual) => `, ${actual}`).join('')})`
   const resultType = cppResultTypeOf(to.result)
   let body: string
   const [sole] = members
   if (members.length === 1 && sole !== undefined) {
-    const invocation = invocationOf(sole)
+    const from = source.abi
+    const actuals = actualsOf(from)
+    if (actuals === null) return null
+    const invocation = invocationOf(sole, actuals)
     const result =
       cppTypeOf(from.result) === cppTypeOf(to.result)
         ? invocation
@@ -3369,11 +3390,19 @@ const constructorDispatchAdapterText = (source: Representation, target: Represen
     // slot's class-ref (`gea::Ref`'s converting constructor, which only
     // admits a derived-to-base pair). A class this family does not name
     // refuses rather than constructing through another body.
-    if (to.result.kind !== 'class-ref') return null
-    const arms = members.map(
-      (member) =>
-        `if (gea_class == &gea::nativeClassMethodDeclaration<${cppClassName(member)}>) return ${resultType}(${invocationOf(member)}); `
-    )
+    if (to.result.kind !== 'class-ref' || layouts === undefined) return null
+    const arms: string[] = []
+    for (const member of members) {
+      const from = layouts.classSubtreeOf?.(member)?.find((candidate) => candidate.declaration === member)?.construct ?? null
+      if (from === null) return null
+      const transport = classRefTransportKind(from.result, to.result)
+      if (transport !== 'same' && transport !== 'upcast') return null
+      const actuals = actualsOf(from)
+      if (actuals === null) return null
+      arms.push(
+        `if (gea_class == &gea::nativeClassMethodDeclaration<${cppClassName(member)}>) return ${resultType}(${invocationOf(member, actuals)}); `
+      )
+    }
     body =
       `const void* gea_class = static_cast<gea::NativeClassMethodState*>(gea_environment)->declaration; ${arms.join('')}` +
       `gea::detail::refusePayloadMismatch("a constructor family value holds a class its family does not name");`
@@ -3386,12 +3415,44 @@ const constructorDispatchAdapterText = (source: Representation, target: Represen
   )
 }
 
-/** Whether a class reaches a construct-signature slot through `constructorDispatchAdapterText`. Exported so `conversions.ts` asks the identical question the render answers. */
-export const adaptsConstructorIntoDispatch = (source: Representation, target: Representation): boolean =>
+/** The materializer id `conversions.ts` installs `constructorDispatchAdapterText` under. */
+export const CONSTRUCTOR_DISPATCH_ADAPTER = 'gea::ConstructorObject::adapter'
+
+/**
+ * `constructorDispatchAdapterText` over the layouts, also through the optional
+ * a construct slot is usually declared as (`responseType?:
+ * ReplyConstructor`). The chain's `optional-wrap-converted` and
+ * `optional-payload-convert` steps convert the payload context-free, which
+ * proves no family of several classes, so the census answers these two
+ * shapes here with the same texts those steps print.
+ */
+export const constructorDispatchAdapterLiftedText = (
+  source: Representation,
+  target: Representation,
+  text: string,
+  layouts: RecordLayoutPolicy
+): string | null => {
+  if (target.kind !== 'optional') return constructorDispatchAdapterText(source, target, text, layouts)
+  const wrapped = (payload: string): string => `${cppTypeOf(target)}{${cppTypeOf(target.payload)}{${payload}}}`
+  if (source.kind !== 'optional') {
+    const payload = evaluatedOnceText(text, (operand) => constructorDispatchAdapterText(source, target.payload, operand, layouts))
+    return payload === null ? null : wrapped(payload)
+  }
+  const payload = evaluatedOnceText(`(*${text})`, (operand) =>
+    constructorDispatchAdapterText(source.payload, target.payload, operand, layouts)
+  )
+  return payload === null ? null : `(${text}.has_value() ? ${wrapped(payload)} : ${cppTypeOf(target)}{})`
+}
+
+/**
+ * Whether a class reaches a construct-signature slot through `constructorDispatchAdapterText`. Exported so `conversions.ts` asks the
+ * identical question the render answers, over the same layouts.
+ */
+export const adaptsConstructorIntoDispatch = (source: Representation, target: Representation, layouts?: RecordLayoutPolicy): boolean =>
   source.kind === 'constructor-family' &&
   target.kind === 'constructor-value-dispatch' &&
   cppTypeOf(source) !== cppTypeOf(target) &&
-  constructorDispatchAdapterText(source, target, 'gea_probe') !== null
+  constructorDispatchAdapterText(source, target, 'gea_probe', layouts) !== null
 
 /**
  * A callable filling a slot that declares MORE parameters than it does, the
@@ -5429,6 +5490,13 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
   if (node.capability.kind === 'never') return null
   if (node.capability.kind === 'coercion') return coercionText(node.capability.operation, text, node.source, ctx.layouts)
   if (node.capability.kind === 'class-family') return classFamilyLoadText(ctx, node.source, node.target, text)
+  // `conversions.ts` approved this adapter over the layouts, which a family of
+  // several classes needs for its members' own conventions; the chain has none.
+  if (
+    (node.capability.kind === 'atom' || node.capability.kind === 'static') &&
+    node.capability.materializer.id === CONSTRUCTOR_DISPATCH_ADAPTER
+  )
+    return constructorDispatchAdapterLiftedText(node.source, node.target, text, ctx.layouts)
   // A callable the emitter saw allocated, adapted to another result convention.
   if (
     (node.capability.kind === 'atom' || node.capability.kind === 'static') &&

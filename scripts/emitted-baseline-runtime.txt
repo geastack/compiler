@@ -261,6 +261,8 @@ console-warn-member.ts.cpp 710a6aff3157
 const-held-from-forwarded-stated-return-takes-settled-records.runtime.js.cpp 19c8c7f4103d
 constant-table-repeated-negative.ts.cpp 56910de806d5
 constant-table.ts.cpp df080a9e1313
+construct-slot-family-member-conventions.runtime.js.cpp 83ae71041a6d
+construct-slot-family-member-into-optional-slot.runtime.js.cpp 42bc3b77171e
 construction-only-field-alias.runtime.ts.cpp bdd66d509608
 constructor-alias-installed-members-class.runtime.js.cpp 1211c5e9861f
 constructor-alias-installed-members.runtime.js.cpp 855d9a9af2a4
@@ -1061,7 +1063,7 @@ plain-regex-test-and-ascii-string-search.runtime.ts.cpp 3c67df0a9006
 populated-record-late-fields.js.cpp ccc9715a198e
 primitive-delete-arms.runtime.js.cpp 952d8957498f
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 52d4c29d6073
-printer-drift.txt 90d4bf08d7c2
+printer-drift.txt 158c9c761a21
 private-names-are-not-own-properties.ts.cpp 5a904aac80af
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp ed60c96c28c7
 promise-all-over-a-generator.ts.cpp cd9ebb8b8ee8
