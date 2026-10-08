@@ -1048,6 +1048,12 @@ export const createLayoutTypeResolver = (
       (choiceCell.parent.flags & ts.NodeFlags.Const) !== 0
     ) {
       const cellChoice = nominalConstructorChoiceTypeAt(checker, choiceCell.initializer, layoutTypeAt)
+      // A read keeps the checker's narrowing of absence, as a constructed
+      // choice's does: past `Chosen === null` the cell holds one of the classes.
+      if (cellChoice && ts.isIdentifier(node)) {
+        const own = checker.getTypeAtLocation(node)
+        return own === checker.getNonNullableType(own) ? checker.getNonNullableType(cellChoice) : cellChoice
+      }
       if (cellChoice) return cellChoice
     }
     // A `new` through such a choice builds one of its classes, not the one the

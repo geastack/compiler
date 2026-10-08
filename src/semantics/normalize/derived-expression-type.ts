@@ -2926,16 +2926,20 @@ export const nominalConstructorChoiceTypeAt = (
   if (operands === null) return null
   // `a ?? C` and `a || C` hold `C` only when `a` is absent, and a class
   // constructor is truthy, so both drop exactly the nullish arms of the left.
+  // The right is what an absent left evaluates to, so its own absence stays:
+  // `registry.get( key ) || null` is one of the classes or `null`.
   const absent = ts.TypeFlags.Null | ts.TypeFlags.Undefined
-  const arms = operands
-    .flatMap((operand) => {
-      const type = read(operand)
-      return type.isUnion() ? type.types : [type]
-    })
-    .filter((arm) => ts.isConditionalExpression(node) || (arm.flags & absent) === 0)
+  const arms = operands.flatMap((operand, index) => {
+    const type = read(operand)
+    const parts = type.isUnion() ? type.types : [type]
+    return ts.isConditionalExpression(node) || index === 1 ? parts : parts.filter((arm) => (arm.flags & absent) === 0)
+  })
   if (arms.length === 0) return null
   const distinct = arms.filter((arm, index) => arms.indexOf(arm) === index)
-  if (distinct.every((arm) => classOfConstructorType(arm) !== null))
+  if (
+    distinct.some((arm) => classOfConstructorType(arm) !== null) &&
+    distinct.every((arm) => (arm.flags & absent) !== 0 || classOfConstructorType(arm) !== null)
+  )
     return distinct.length === 1 ? (distinct[0] ?? null) : disjointUnionTypeOf(checker, distinct)
   // A structural constructor type beside a class's constructor: the checker
   // subtype-reduces the pair to the structural statement, which holds the
@@ -2945,7 +2949,7 @@ export const nominalConstructorChoiceTypeAt = (
   if (
     !ts.isConditionalExpression(node) &&
     distinct.some((arm) => classOfConstructorType(arm) !== null) &&
-    distinct.every((arm) => classOfConstructorType(arm) !== null || isStructuralConstructorType(arm))
+    distinct.every((arm) => (arm.flags & absent) !== 0 || classOfConstructorType(arm) !== null || isStructuralConstructorType(arm))
   ) {
     const constructing = checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }
     return typeof constructing.getUnionType === 'function' ? constructing.getUnionType(distinct) : null

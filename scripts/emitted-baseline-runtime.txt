@@ -265,6 +265,8 @@ construction-only-field-alias.runtime.ts.cpp bdd66d509608
 constructor-alias-installed-members-class.runtime.js.cpp 1211c5e9861f
 constructor-alias-installed-members.runtime.js.cpp 855d9a9af2a4
 constructor-carried-by-abi-reads-its-properties.runtime.ts.cpp a4b91e65feb0
+constructor-choice-or-null-keeps-the-null.runtime.js.cpp 2988e0b46dd1
+constructor-choice-or-number-stays-the-checker-union.runtime.js.cpp 64d39efb4134
 constructor-family-into-narrower-constructor-type.runtime.ts.cpp fb65eb5c16a0
 constructor-family-into-open-constructor-type.runtime.ts.cpp 179cd0f48e78
 constructor-function-absent-option-or-default-field.runtime.js.cpp 77e8a1e405fe
@@ -340,7 +342,7 @@ document-viewed-as-typed-options.runtime.ts.cpp 4495355c6291
 document-views-array-and-map-frames.runtime.ts.cpp b7fc4db1809d
 double-asserted-record-result-into-union-without-its-arm.runtime.ts.cpp ab64026831d8
 downcast-method-read-absent-on-other-arm.ts.cpp 962282e11430
-drift.txt 394a5fb86cf0
+drift.txt 06a33032f6de
 dynamic-array-absent-element.ts.cpp 8ccaca328cb8
 dynamic-array-literal-gather.runtime.js.cpp 2ab7b45b90fd
 dynamic-array-projection.ts.cpp e4b18aaba420
@@ -1059,7 +1061,7 @@ plain-regex-test-and-ascii-string-search.runtime.ts.cpp 3c67df0a9006
 populated-record-late-fields.js.cpp ccc9715a198e
 primitive-delete-arms.runtime.js.cpp 952d8957498f
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 52d4c29d6073
-printer-drift.txt ec9a00f02c91
+printer-drift.txt 90d4bf08d7c2
 private-names-are-not-own-properties.ts.cpp 5a904aac80af
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp ed60c96c28c7
 promise-all-over-a-generator.ts.cpp cd9ebb8b8ee8
@@ -1326,6 +1328,7 @@ then-over-a-union-of-promises.ts.cpp 48e345e88acf
 then-union-of-value-or-promise-settles-same-tick.runtime.ts.cpp 4364dc404b00
 this-constructor-clone-beside-object-typed-jsdoc-parameter.runtime.js.cpp 51dd8e298681
 to-number-of-array-arm.runtime.js.cpp d318a5cd4e36
+to-number-of-optional-object-union.runtime.js.cpp 5b9e6d3b33eb
 to-string-of-a-class-and-a-union.ts.cpp 1b009b353247
 to-string-of-a-union-of-string-and-classes-with-and-without-own-to-string.runtime.ts.cpp a8ca5271dc91
 to-string-of-an-error-and-a-typed-array.ts.cpp 8829ec914939
@@ -1384,7 +1387,7 @@ typeof-runtime-string.ts.cpp d89347bd0397
 typeof-then-discriminates-a-union.ts.cpp 3b732925872e
 unbox-nullable-union.ts.cpp 32d4df3401b7
 uncallable-member-slot-call.runtime.js.cpp 68791d94946d
-uncertified.txt 4059b04b9e8f
+uncertified.txt a6ab49606a49
 uniform-tuple-boxed-into-any-is-an-array.runtime.ts.cpp 4884bb7f95dc
 uniform-tuple-const-object-indexed-read-in-a-free-function.runtime.ts.cpp 1364fe4a1da8
 uniform-tuple-identity-comparison-keeps-array-identity.runtime.ts.cpp 640e585c109c
