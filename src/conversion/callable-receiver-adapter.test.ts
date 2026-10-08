@@ -35,7 +35,8 @@ test('a receiver-free callable fills a typed method slot without shifting its or
   assert.deepEqual(transport?.nativeConventions, { from: source.abi, to: target.abi })
   const text = resultAdaptedCallableText(source, target, 'source')
   assert.ok(text !== null)
-  assert.ok(text.includes('::adaptSource('))
+  // The adapter states the receiver it ignores, so a boxed call never converts it.
+  assert.ok(text.includes('::adaptSourcePastReceiver('))
   assert.ok(text.includes('gea_adapt_receiver'))
   assert.ok(text.includes('->call(gea_adapt_arg_0)'))
   assert.ok(!text.includes('gea::Value') && !text.includes('unbox'))

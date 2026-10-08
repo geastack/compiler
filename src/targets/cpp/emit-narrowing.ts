@@ -3299,10 +3299,16 @@ export const resultAdaptedCallableText = (
   // The adapted view is a function object created here, over the slot's own
   // convention, so it states that convention's rest position as it is created.
   const stated = statedRestOf(adapter.to)
+  // A boxed call converts every formal it binds, the receiver among them, before
+  // the adapter runs. A source that ignores the receiver says so here, while the
+  // callable is typed, or a call through the box with another `this` refuses.
+  // A source that takes nothing says it by its type (`adaptedFrameFact`).
+  const pastReceiver = adapter.from.receiver === null && adapter.to.receiver !== null && adapter.from.parameters.length > 0
+  const entry = pastReceiver ? 'PastReceiver' : ''
   const adapt =
     known === null
-      ? `adaptSource${stated === null ? '' : `<${cppStatedRestArguments(stated)}>`}`
-      : `adaptSourceInPlace<&${known}${stated === null ? '' : `, ${cppStatedRestArguments(stated)}`}>`
+      ? `adaptSource${entry}${stated === null ? '' : `<${cppStatedRestArguments(stated)}>`}`
+      : `adaptSourceInPlace${entry}<&${known}${stated === null ? '' : `, ${cppStatedRestArguments(stated)}`}>`
   return `${cppTypeOf(target)}::${adapt}(${sourceType}{${text}}, [](${formals.join(', ')}) -> ${cppResultTypeOf(adapter.to.result)} { ${body} })`
 }
 

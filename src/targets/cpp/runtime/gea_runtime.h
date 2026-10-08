@@ -5164,22 +5164,50 @@ struct CallableObject<Result(Arguments...)> {
     }};
   }
 
+  // A boxed call converts every formal it binds before the adapter runs, so a
+  // formal the adapter never hands its source has to be stated unread where
+  // the view is minted, or converting it refuses a call the source answers:
+  // a self-bound listener called with another object as `this`. A source
+  // that takes nothing reads no formal, which its type says. A source that
+  // ignores the receiver its slot passes cannot be told from its type -- a
+  // `(Ref<C>)` source fits a `(Ref<C>, Ref<C>)` slot either way -- so the
+  // emitter states it (`adaptSourcePastReceiver`).
+  template <int RestFrom, int PackedFrom, typename Source>
+  static constexpr int adaptedFrameFact() {
+    static_assert(restStatable(RestFrom, PackedFrom), "a rest array packs from its slot or from an earlier argument");
+    if constexpr (Source::arity == 0 && arity > 0) return restUnreadFrom(0);
+    else return restStated(RestFrom, PackedFrom);
+  }
+
+  template <int Fact, bool ReadsLeading, typename Adapter>
+  static void registerAdaptedFrame(Adapter adapter) {
+    static_assert(ReadsLeading || arity > 0, "a discarded receiver is a formal of the slot");
+    if constexpr (Fact != restUnstated || !ReadsLeading) {
+      static const RestRegistration rest{+adapter, Fact, nullptr, ReadsLeading || restIsUnread(Fact)};
+    } else {
+      (void)adapter;
+    }
+  }
+
   // `RestFrom` is the adapted view's own convention, which the emitter states
   // from the slot's ABI where the view ends in an array: the adapter is one
   // lambda per emitting site, so its registration is one per site too.
-  template <int RestFrom = restUnstated, int PackedFrom = RestFrom, typename Source, typename Adapter>
+  template <int RestFrom = restUnstated, int PackedFrom = RestFrom, bool DiscardsReceiver = false, typename Source, typename Adapter>
   static CallableObject adaptSource(Source source, Adapter adapter) {
-    static_assert(restStatable(RestFrom, PackedFrom), "a rest array packs from its slot or from an earlier argument");
     static const SourceRegistration registration{+adapter, {}, 0, {}, +[](void* environment_) -> CallableFacts {
       const auto source = static_cast<const Source*>(environment_)->facts();
       return CallableFacts{source.name, source.text, source.length};
     }};
-    if constexpr (RestFrom != restUnstated) {
-      static const RestRegistration rest{+adapter, restStated(RestFrom, PackedFrom), nullptr};
-    }
+    registerAdaptedFrame<adaptedFrameFact<RestFrom, PackedFrom, Source>(), !DiscardsReceiver>(adapter);
     CallableObject adapted{+adapter, packEnvironment(std::move(source))};
     adapted.shareFunctionObject(*static_cast<const Source*>(adapted.environment));
     return adapted;
+  }
+
+  /** `adaptSource` for an adapter whose source ignores the receiver its slot passes (`adaptedFrameFact`). */
+  template <int RestFrom = restUnstated, int PackedFrom = RestFrom, typename Source, typename Adapter>
+  static CallableObject adaptSourcePastReceiver(Source source, Adapter adapter) {
+    return adaptSource<RestFrom, PackedFrom, true>(std::move(source), adapter);
   }
 
   /**
@@ -5194,19 +5222,22 @@ struct CallableObject<Result(Arguments...)> {
    * is why this is rendered only for a source whose representation names its one
    * function.
    */
-  template <auto Known, int RestFrom = restUnstated, int PackedFrom = RestFrom, typename Source, typename Adapter>
+  template <auto Known, int RestFrom = restUnstated, int PackedFrom = RestFrom, bool DiscardsReceiver = false, typename Source, typename Adapter>
   static CallableObject adaptSourceInPlace(const Source& source, Adapter adapter) {
-    static_assert(restStatable(RestFrom, PackedFrom), "a rest array packs from its slot or from an earlier argument");
     static const SourceRegistration registration{+adapter, {}, 0, {}, +[](void* environment_) -> CallableFacts {
       const auto own = Source::factsFor(Known, environment_);
       return CallableFacts{own.name, own.text, own.length};
     }};
-    if constexpr (RestFrom != restUnstated) {
-      static const RestRegistration rest{+adapter, restStated(RestFrom, PackedFrom), nullptr};
-    }
+    registerAdaptedFrame<adaptedFrameFact<RestFrom, PackedFrom, Source>(), !DiscardsReceiver>(adapter);
     CallableObject adapted{+adapter, PackedEnvironment{source.environment, source.environmentOwner, nullptr}};
     adapted.shareFunctionObject(source);
     return adapted;
+  }
+
+  /** `adaptSourceInPlace` for an adapter whose source ignores its slot's receiver (`adaptSourcePastReceiver`). */
+  template <auto Known, int RestFrom = restUnstated, int PackedFrom = RestFrom, typename Source, typename Adapter>
+  static CallableObject adaptSourceInPlacePastReceiver(const Source& source, Adapter adapter) {
+    return adaptSourceInPlace<Known, RestFrom, PackedFrom, true>(source, adapter);
   }
 
   static CallableFacts factsFor(Invoke invoke, void* environment) {
@@ -5246,8 +5277,11 @@ struct CallableObject<Result(Arguments...)> {
     Invoke entry;
     int restFrom;
     int (*resolve)(void*);
+    /** False for an adapter whose source ignores the receiver its slot passes (`adaptedFrameFact`). */
+    bool readsLeading;
     const RestRegistration* next;
-    RestRegistration(Invoke entry_, int restFrom_, int (*resolve_)(void*)) : entry(entry_), restFrom(restFrom_), resolve(resolve_) {
+    RestRegistration(Invoke entry_, int restFrom_, int (*resolve_)(void*), bool readsLeading_ = true)
+        : entry(entry_), restFrom(restFrom_), resolve(resolve_), readsLeading(readsLeading_) {
       auto& head = restRegistrations();
       next = head.load(std::memory_order_relaxed);
       while (!head.compare_exchange_weak(next, this, std::memory_order_release, std::memory_order_relaxed)) {}
@@ -5306,6 +5340,13 @@ struct CallableObject<Result(Arguments...)> {
   }
 
   int statedRest() const { return statedRestOf(invoke, environment); }
+
+  static bool readsLeadingOf(Invoke invoke) {
+    for (auto* entry = restRegistrations().load(std::memory_order_acquire); entry; entry = entry->next) {
+      if (entry->entry == invoke) return entry->readsLeading;
+    }
+    return true;
+  }
 
   /** A source's stated rest seen through a view that drops its leading receiver formal. */
   static constexpr int restPastReceiver(int source) {
@@ -6526,6 +6567,7 @@ struct CallableRestView<CallableObject<Result(Arguments...)>> {
   static constexpr bool tailed = View::restTailed;
   static constexpr int last = static_cast<int>(sizeof...(Arguments)) - 1;
   static int stated(const View& value) { return value.invoke == nullptr ? -1 : value.statedRest(); }
+  static bool readsLeading(const View& value) { return value.invoke == nullptr || View::readsLeadingOf(value.invoke); }
 };
 
 template <typename Result, typename... Arguments, typename Constructed, typename... ConstructArguments>
@@ -6535,6 +6577,9 @@ struct CallableRestView<CallableConstructorObject<Result(Arguments...), Construc
   static constexpr int last = static_cast<int>(sizeof...(Arguments)) - 1;
   static int stated(const CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>& value) {
     return value.invoke == nullptr ? -1 : View::statedRestOf(value.invoke, value.environment);
+  }
+  static bool readsLeading(const CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>& value) {
+    return value.invoke == nullptr || View::readsLeadingOf(value.invoke);
   }
 };
 
@@ -15766,12 +15811,12 @@ struct NativeCallOps;
 template <typename T>
 const NativeCallOps* nativeCallOpsFor();
 /** A `PackedFrom` below `RestFrom` is an `arguments` frame (`CallableObject::restStated`). */
-template <typename T, std::size_t RestFrom, std::size_t PackedFrom = RestFrom>
+template <typename T, std::size_t RestFrom, std::size_t PackedFrom = RestFrom, bool ReadsLeading = true>
 const NativeCallOps* nativeRestCallOpsFor();
 /** `restUnstated` or `restConflict` (`callableMetadataFor`): reflectable, and a boxed call refuses by name. */
 template <typename T, int Refusal>
 const NativeCallOps* nativeRefusedRestCallOpsFor();
-template <typename T, std::size_t FirstUnread>
+template <typename T, std::size_t FirstUnread, bool ReadsLeading = true>
 const NativeCallOps* nativeUnreadTailCallOpsFor();
 /** `CallableObject`'s unread-tail encoding, for the metadata selection below that is not specific to one signature. */
 using RestFacts = CallableObject<void()>;
@@ -16102,17 +16147,24 @@ struct ValueMetadata {
 };
 inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false, false, nullptr, nullptr, nullptr};
 
-template <typename T, int RestFrom = -1>
+/**
+ * `ReadsLeading` is false for a callable whose leading formal -- the receiver
+ * its adapter's source ignores (`CallableObject::adaptedFrameFact`) -- a
+ * boxed call binds empty rather than converting whatever `this` it is given.
+ */
+template <typename T, int RestFrom = -1, bool ReadsLeading = true>
 const ValueMetadata* valueMetadataFor() {
   static const ValueMetadata metadata = [] {
     const NativeCallOps* calls;
-    if constexpr (RestFrom == -1) calls = nativeCallOpsFor<T>();
-    else if constexpr (RestFacts::restIsUnread(RestFrom)) calls = nativeUnreadTailCallOpsFor<T, RestFacts::restFirstUnread(RestFrom)>();
+    if constexpr (RestFrom == -1 && ReadsLeading) calls = nativeCallOpsFor<T>();
+    else if constexpr (RestFrom == -1)
+      calls = nativeUnreadTailCallOpsFor<T, static_cast<std::size_t>(CallableRestView<T>::last + 1), false>();
+    else if constexpr (RestFacts::restIsUnread(RestFrom)) calls = nativeUnreadTailCallOpsFor<T, RestFacts::restFirstUnread(RestFrom), ReadsLeading>();
     else if constexpr (RestFrom < -1) calls = nativeRefusedRestCallOpsFor<T, RestFrom>();
     else if constexpr (RestFacts::restIsFrame(RestFrom))
       calls = nativeRestCallOpsFor<T, static_cast<std::size_t>(RestFacts::restSlotOf(RestFrom)),
-                                   static_cast<std::size_t>(RestFacts::restPackedFromOf(RestFrom))>();
-    else calls = nativeRestCallOpsFor<T, static_cast<std::size_t>(RestFrom)>();
+                                   static_cast<std::size_t>(RestFacts::restPackedFromOf(RestFrom)), ReadsLeading>();
+    else calls = nativeRestCallOpsFor<T, static_cast<std::size_t>(RestFrom), static_cast<std::size_t>(RestFrom), ReadsLeading>();
     return ValueMetadata{nativeFieldOpsFor<T>(), nativePrototypeOpsFor<T>(), calls,
                          nativeArrayOpsFor<T>(), payloadTypeTagFor<T>(), RestFrom,
                          IsArrayPayload<T>::value, IsMapPayload<T>::value, IsNativeErrorRefPayload<T>::value,
@@ -16142,8 +16194,26 @@ const ValueMetadata* unreadTailMetadataFor(std::size_t first, std::index_sequenc
   return metadata;
 }
 
+template <typename T, bool ReadsLeading>
+const ValueMetadata* statedFrameMetadataFor(int fact) {
+  constexpr int unstated = -2;
+  constexpr int last = CallableRestView<T>::last;
+  if (fact == -1) return valueMetadataFor<T, -1, ReadsLeading>();
+  if (fact == last) return valueMetadataFor<T, last, ReadsLeading>();
+  // An `arguments` frame packs from the first argument past any receiver, and
+  // those are the only packing starts the compiler states (`restStated`).
+  if constexpr (last >= 1) {
+    if (fact == RestFacts::restStated(last, 0)) return valueMetadataFor<T, RestFacts::restStated(last, 0), ReadsLeading>();
+  }
+  if constexpr (last >= 2) {
+    if (fact == RestFacts::restStated(last, 1)) return valueMetadataFor<T, RestFacts::restStated(last, 1), ReadsLeading>();
+  }
+  if (fact == unstated) return valueMetadataFor<T, unstated>();
+  return valueMetadataFor<T, restConflict>();
+}
+
 template <typename T>
-const ValueMetadata* callableMetadataFor(int stated, int site) {
+const ValueMetadata* callableMetadataFor(int stated, int site, bool readsLeading) {
   constexpr int unstated = -2;
   constexpr int last = CallableRestView<T>::last;
   // `registerUnreadTail` asserted the first unread formal is below the arity,
@@ -16151,19 +16221,25 @@ const ValueMetadata* callableMetadataFor(int stated, int site) {
   if (RestFacts::restIsUnread(stated))
     return unreadTailMetadataFor<T>(RestFacts::restFirstUnread(stated), std::make_index_sequence<static_cast<std::size_t>(last) + 1>{});
   const int fact = stated == unstated ? site : site == unstated || site == stated ? stated : restConflict;
-  if (fact == -1) return valueMetadataFor<T>();
-  if (fact == last) return valueMetadataFor<T, last>();
-  // An `arguments` frame packs from the first argument past any receiver, and
-  // those are the only packing starts the compiler states (`restStated`).
-  if constexpr (last >= 1) {
-    if (fact == RestFacts::restStated(last, 0)) return valueMetadataFor<T, RestFacts::restStated(last, 0)>();
-  }
-  if constexpr (last >= 2) {
-    if (fact == RestFacts::restStated(last, 1)) return valueMetadataFor<T, RestFacts::restStated(last, 1)>();
-  }
-  if (fact == unstated) return valueMetadataFor<T, unstated>();
-  return valueMetadataFor<T, restConflict>();
+  return readsLeading ? statedFrameMetadataFor<T, true>(fact) : statedFrameMetadataFor<T, false>(fact);
 }
+
+/**
+ * The metadata of one fixed-frame callable box: an adapter that leaves formals
+ * unread states so at its creation (`CallableObject::adaptedFrameFact`), and
+ * its boxed call binds those formals empty instead of converting what the
+ * caller passed there. A fixed frame states nothing else, so every other
+ * payload keeps the plain thunk.
+ */
+template <typename T>
+const ValueMetadata* fixedFrameMetadataFor(int stated, bool readsLeading) {
+  if constexpr (CallableRestView<T>::last >= 0) {
+    if (stated == RestFacts::restUnreadFrom(0)) return valueMetadataFor<T, RestFacts::restUnreadFrom(0)>();
+    if (!readsLeading) return valueMetadataFor<T, -1, false>();
+  }
+  return valueMetadataFor<T>();
+}
+
 }  // namespace detail
 
 namespace detail {
@@ -16289,7 +16365,13 @@ class Value {
     // Type facts are immutable and shared by every value of this payload
     // type. The exact payload identity and all dispatch tables travel together.
     if constexpr (detail::CallableRestView<std::decay_t<T>>::tailed) {
-      result.metadata_ = detail::callableMetadataFor<std::decay_t<T>>(detail::CallableRestView<std::decay_t<T>>::stated(value), restSite);
+      using View = detail::CallableRestView<std::decay_t<T>>;
+      result.metadata_ = detail::callableMetadataFor<std::decay_t<T>>(View::stated(value), restSite, View::readsLeading(value));
+    } else if constexpr (
+        detail::IsNativeCallableObject<std::decay_t<T>>::value || detail::IsNativeCallableConstructorObject<std::decay_t<T>>::value) {
+      (void)restSite;
+      using View = detail::CallableRestView<std::decay_t<T>>;
+      result.metadata_ = detail::fixedFrameMetadataFor<std::decay_t<T>>(View::stated(value), View::readsLeading(value));
     } else {
       (void)restSite;
       result.metadata_ = detail::valueMetadataFor<std::decay_t<T>>();
@@ -20647,7 +20729,8 @@ struct DynamicCarrier<CallableObject<Result(Arguments...)>> {
       // any` into node-compat's `(req, res) => void` slot. Calling it natively
       // and dropping the result is exactly what the language does with it; the
       // generic adapter below boxed both arguments on every request instead.
-      if (!targetReceivesThis && targetRestFrom == -1 && !value.receivesThis() && value.restFrom() == -1) {
+      if (!targetReceivesThis && targetRestFrom == -1 && !value.receivesThis() &&
+          (value.restFrom() == -1 || Self::restIsUnread(value.restFrom()))) {
         Self discarding;
         if (discardingAdapt<Promise<void>>(value, discarding) || discardingAdapt<Promise<Undefined>>(value, discarding) ||
             discardingAdapt<Undefined>(value, discarding) || discardingAdapt<Value>(value, discarding) ||
@@ -21926,19 +22009,38 @@ struct RestElementOf<gea::Ref<gea::ArrayObject<Element>>> {
  * `arguments.length`): the formals before the slot still bind by position, and
  * the array holds every argument the caller passed, so its length is that count.
  */
-template <typename T, std::size_t RestFrom, std::size_t PackedFrom = RestFrom>
+/**
+ * One fixed formal of a boxed call: converted from the argument at its
+ * position, or, for the leading formal of a callable that does not read it
+ * (`valueMetadataFor`'s `ReadsLeading`), bound empty -- the receiver an
+ * adapter's source ignores, whatever `this` the call supplies.
+ */
+template <typename Formal, std::size_t Position, bool ReadsLeading>
+Formal dynamicFixedArgument(const Value* arguments, std::size_t count) {
+  if constexpr (!ReadsLeading && Position == 0) return Formal{};
+  else return DynamicCallableCarrier<Formal>::in(dynamicCallArgument(arguments, count, Position), Position);
+}
+
+template <bool ReadsLeading, typename... Arguments>
+struct LeadingBindsEmpty : std::true_type {};
+template <typename First, typename... Rest>
+struct LeadingBindsEmpty<false, First, Rest...> : std::is_default_constructible<First> {};
+
+template <typename T, std::size_t RestFrom, std::size_t PackedFrom = RestFrom, bool ReadsLeading = true>
 struct DynamicRestCallSignature {
   static constexpr bool supported = false;
 };
 
-template <std::size_t RestFrom, std::size_t PackedFrom, typename Result, typename... Arguments>
-struct DynamicRestCallSignature<CallableObject<Result(Arguments...)>, RestFrom, PackedFrom> {
+template <std::size_t RestFrom, std::size_t PackedFrom, bool ReadsLeading, typename Result, typename... Arguments>
+struct DynamicRestCallSignature<CallableObject<Result(Arguments...)>, RestFrom, PackedFrom, ReadsLeading> {
   using Args = std::tuple<Arguments...>;
-  static constexpr bool shaped = sizeof...(Arguments) > 0 && RestFrom + 1 == sizeof...(Arguments) && PackedFrom <= RestFrom;
+  // A leading formal left unread is a fixed one: the rest array cannot be it.
+  static constexpr bool shaped =
+    sizeof...(Arguments) > 0 && RestFrom + 1 == sizeof...(Arguments) && PackedFrom <= RestFrom && (ReadsLeading || RestFrom > 0);
   using RestParam = typename RestSlotOf<shaped, Args>::type;
   static constexpr bool supported = shaped && DynamicRestArgument<RestParam>::supported &&
                                     (std::is_void_v<Result> || DynamicCallableCarrier<Result>::supported) &&
-                                    (DynamicCallableCarrier<Arguments>::supported && ...);
+                                    (DynamicCallableCarrier<Arguments>::supported && ...) && LeadingBindsEmpty<ReadsLeading, Arguments...>::value;
 
   static Value call(const void* payload, const Value* arguments, std::size_t count) {
     return invoke(*static_cast<const CallableObject<Result(Arguments...)>*>(payload), arguments, count,
@@ -21951,14 +22053,11 @@ struct DynamicRestCallSignature<CallableObject<Result(Arguments...)>, RestFrom, 
                       std::index_sequence<Fixed...>) {
     RestParam rest = DynamicRestArgument<RestParam>::pack(arguments, count, PackedFrom);
     if constexpr (std::is_void_v<Result>) {
-      callable.call(
-        DynamicCallableCarrier<std::tuple_element_t<Fixed, Args>>::in(dynamicCallArgument(arguments, count, Fixed), Fixed)...,
-        rest);
+      callable.call(dynamicFixedArgument<std::tuple_element_t<Fixed, Args>, Fixed, ReadsLeading>(arguments, count)..., rest);
       return Value();
     } else {
-      return DynamicCallableCarrier<Result>::out(callable.call(
-        DynamicCallableCarrier<std::tuple_element_t<Fixed, Args>>::in(dynamicCallArgument(arguments, count, Fixed), Fixed)...,
-        rest));
+      return DynamicCallableCarrier<Result>::out(
+        callable.call(dynamicFixedArgument<std::tuple_element_t<Fixed, Args>, Fixed, ReadsLeading>(arguments, count)..., rest));
     }
   }
 };
@@ -21978,15 +22077,18 @@ struct DynamicRestCallSignature<CallableObject<Result(Arguments...)>, RestFrom, 
  * Only the `[[Call]]` half is erased here, exactly as above -- `new` through a
  * box is a capability this compiler does not offer whatever the payload is.
  */
-template <std::size_t RestFrom, std::size_t PackedFrom, typename Result, typename... Arguments, typename Constructed, typename... ConstructArguments>
-struct DynamicRestCallSignature<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>, RestFrom, PackedFrom> {
+template <std::size_t RestFrom, std::size_t PackedFrom, bool ReadsLeading, typename Result, typename... Arguments, typename Constructed,
+          typename... ConstructArguments>
+struct DynamicRestCallSignature<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>, RestFrom, PackedFrom,
+                                ReadsLeading> {
   using Callable = CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>;
   using Args = std::tuple<Arguments...>;
-  static constexpr bool shaped = sizeof...(Arguments) > 0 && RestFrom + 1 == sizeof...(Arguments) && PackedFrom <= RestFrom;
+  static constexpr bool shaped =
+    sizeof...(Arguments) > 0 && RestFrom + 1 == sizeof...(Arguments) && PackedFrom <= RestFrom && (ReadsLeading || RestFrom > 0);
   using RestParam = typename RestSlotOf<shaped, Args>::type;
   static constexpr bool supported = shaped && DynamicRestArgument<RestParam>::supported &&
                                     (std::is_void_v<Result> || DynamicCallableCarrier<Result>::supported) &&
-                                    (DynamicCallableCarrier<Arguments>::supported && ...);
+                                    (DynamicCallableCarrier<Arguments>::supported && ...) && LeadingBindsEmpty<ReadsLeading, Arguments...>::value;
 
   static Value call(const void* payload, const Value* arguments, std::size_t count) {
     return invoke(*static_cast<const Callable*>(payload), arguments, count, std::make_index_sequence<RestFrom>{});
@@ -21997,27 +22099,24 @@ struct DynamicRestCallSignature<CallableConstructorObject<Result(Arguments...), 
   static Value invoke(const Callable& callable, const Value* arguments, std::size_t count, std::index_sequence<Fixed...>) {
     RestParam rest = DynamicRestArgument<RestParam>::pack(arguments, count, PackedFrom);
     if constexpr (std::is_void_v<Result>) {
-      callable.call(
-        DynamicCallableCarrier<std::tuple_element_t<Fixed, Args>>::in(dynamicCallArgument(arguments, count, Fixed), Fixed)...,
-        rest);
+      callable.call(dynamicFixedArgument<std::tuple_element_t<Fixed, Args>, Fixed, ReadsLeading>(arguments, count)..., rest);
       return Value();
     } else {
-      return DynamicCallableCarrier<Result>::out(callable.call(
-        DynamicCallableCarrier<std::tuple_element_t<Fixed, Args>>::in(dynamicCallArgument(arguments, count, Fixed), Fixed)...,
-        rest));
+      return DynamicCallableCarrier<Result>::out(
+        callable.call(dynamicFixedArgument<std::tuple_element_t<Fixed, Args>, Fixed, ReadsLeading>(arguments, count)..., rest));
     }
   }
 };
 
-template <typename T, std::size_t RestFrom, std::size_t PackedFrom>
+template <typename T, std::size_t RestFrom, std::size_t PackedFrom, bool ReadsLeading>
 const NativeCallOps* nativeRestCallOpsFor() {
   // Same split as `nativeCallOpsFor`: `name`/`length` are facts about the
   // declaration and do not depend on whether the rest-taking ABI could be
   // adapted across the dynamic boundary.
   if constexpr (HasCallableFacts<T>::value) {
-    if constexpr (DynamicRestCallSignature<T, RestFrom, PackedFrom>::supported) {
+    if constexpr (DynamicRestCallSignature<T, RestFrom, PackedFrom, ReadsLeading>::supported) {
       static const NativeCallOps ops{
-        &DynamicRestCallSignature<T, RestFrom, PackedFrom>::call,
+        &DynamicRestCallSignature<T, RestFrom, PackedFrom, ReadsLeading>::call,
         +[](const void* payload) { return std::string(static_cast<const T*>(payload)->sourceText()); },
         +[](const void* payload) { return static_cast<const T*>(payload)->name(); },
         +[](const void* payload) { return static_cast<const T*>(payload)->length(); }};
@@ -22065,13 +22164,23 @@ const NativeCallOps* nativeRefusedRestCallOpsFor() {
  * trailing array among them -- are bound empty rather than packed or
  * converted. Nothing bound there reaches the source, and converting an
  * argument into one could only refuse a call the source would have answered.
+ * Without `ReadsLeading` the leading formal is one of them: the receiver an
+ * adapter's source ignores (`CallableObject::adaptSourcePastReceiver`), which
+ * a call through the box may fill with any `this`.
  */
-template <typename Callable, std::size_t FirstUnread, typename Result, typename... Arguments>
+template <typename Callable, std::size_t FirstUnread, bool ReadsLeading, typename Result, typename... Arguments>
 struct DynamicUnreadTailCall {
   using Args = std::tuple<Arguments...>;
-  static constexpr bool supported = FirstUnread < sizeof...(Arguments) &&
+  template <std::size_t Position>
+  static constexpr bool reads = Position < FirstUnread && (ReadsLeading || Position > 0);
+  template <std::size_t... Positions>
+  static constexpr bool unreadDefaults(std::index_sequence<Positions...>) {
+    return ((reads<Positions> || std::is_default_constructible_v<std::tuple_element_t<Positions, Args>>) && ...);
+  }
+  static constexpr bool supported = (FirstUnread < sizeof...(Arguments) || (!ReadsLeading && FirstUnread == sizeof...(Arguments))) &&
                                     (std::is_void_v<Result> || DynamicCallableCarrier<Result>::supported) &&
-                                    (DynamicCallableCarrier<Arguments>::supported && ...) && (std::is_default_constructible_v<Arguments> && ...);
+                                    (DynamicCallableCarrier<Arguments>::supported && ...) &&
+                                    unreadDefaults(std::index_sequence_for<Arguments...>{});
 
   static Value call(const void* payload, const Value* arguments, std::size_t count) {
     return invoke(*static_cast<const Callable*>(payload), arguments, count, std::index_sequence_for<Arguments...>{});
@@ -22081,7 +22190,7 @@ struct DynamicUnreadTailCall {
   template <std::size_t Position>
   static std::tuple_element_t<Position, Args> bound(const Value* arguments, std::size_t count) {
     using Formal = std::tuple_element_t<Position, Args>;
-    if constexpr (Position < FirstUnread) return DynamicCallableCarrier<Formal>::in(dynamicCallArgument(arguments, count, Position), Position);
+    if constexpr (reads<Position>) return DynamicCallableCarrier<Formal>::in(dynamicCallArgument(arguments, count, Position), Position);
     else return Formal{};
   }
 
@@ -22096,25 +22205,25 @@ struct DynamicUnreadTailCall {
   }
 };
 
-template <typename T, std::size_t FirstUnread>
+template <typename T, std::size_t FirstUnread, bool ReadsLeading>
 struct DynamicUnreadTailCallSignature {
   static constexpr bool supported = false;
 };
 
-template <std::size_t FirstUnread, typename Result, typename... Arguments>
-struct DynamicUnreadTailCallSignature<CallableObject<Result(Arguments...)>, FirstUnread>
-    : DynamicUnreadTailCall<CallableObject<Result(Arguments...)>, FirstUnread, Result, Arguments...> {};
+template <std::size_t FirstUnread, bool ReadsLeading, typename Result, typename... Arguments>
+struct DynamicUnreadTailCallSignature<CallableObject<Result(Arguments...)>, FirstUnread, ReadsLeading>
+    : DynamicUnreadTailCall<CallableObject<Result(Arguments...)>, FirstUnread, ReadsLeading, Result, Arguments...> {};
 
-template <std::size_t FirstUnread, typename Result, typename... Arguments, typename Constructed, typename... ConstructArguments>
-struct DynamicUnreadTailCallSignature<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>, FirstUnread>
-    : DynamicUnreadTailCall<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>, FirstUnread, Result,
-                            Arguments...> {};
+template <std::size_t FirstUnread, bool ReadsLeading, typename Result, typename... Arguments, typename Constructed, typename... ConstructArguments>
+struct DynamicUnreadTailCallSignature<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>, FirstUnread, ReadsLeading>
+    : DynamicUnreadTailCall<CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>, FirstUnread, ReadsLeading,
+                            Result, Arguments...> {};
 
-template <typename T, std::size_t FirstUnread>
+template <typename T, std::size_t FirstUnread, bool ReadsLeading>
 const NativeCallOps* nativeUnreadTailCallOpsFor() {
   // Same split as `nativeCallOpsFor`: reflection does not depend on whether
   // the call can cross the dynamic boundary.
-  using Signature = DynamicUnreadTailCallSignature<T, FirstUnread>;
+  using Signature = DynamicUnreadTailCallSignature<T, FirstUnread, ReadsLeading>;
   using Call = Value (*)(const void*, const Value*, std::size_t);
   Call call = nullptr;
   if constexpr (Signature::supported) call = &Signature::call;
