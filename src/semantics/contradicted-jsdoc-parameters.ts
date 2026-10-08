@@ -522,8 +522,11 @@ export const contradictedJsDocParameterSpans = (
       const member = ts.isPropertyAccessExpression(node) ? (checker.getSymbolAtLocation(node.name) ?? memberOf(node)) : undefined
       return member !== undefined && member !== null && invalidated.fields.has(member)
     }
+    // Resolved as the evidence was: three's `WebGLBackend` reads
+    // `renderObject.getAttributes()` off a `@param {RenderObject}` its file
+    // never imports, which the checker resolves to no declaration at all.
     if (ts.isCallExpression(node)) {
-      const declaration = checker.getResolvedSignature(node)?.declaration
+      const declaration = calleeOf(node)
       return declaration !== undefined && !ts.isJSDocSignature(declaration) && invalidated.returns.has(declaration)
     }
     if (!ts.isIdentifier(node)) return false

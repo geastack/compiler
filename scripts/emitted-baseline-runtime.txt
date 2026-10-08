@@ -685,8 +685,10 @@ jsdoc-parameter-contradicted-by-callers.runtime.js.cpp 8dec61e3faad
 jsdoc-parameter-held-by-ancestor-argument.runtime.js.cpp 4fca6c025bcc
 jsdoc-parameter-open-array-element.runtime.js.cpp 0dd287543c93
 jsdoc-parameter-record-excess-members-keeps-tag.runtime.js.cpp 553402f996e9
+jsdoc-parameter-record-nullable-member-keeps-tag.runtime.js.cpp 6bc189724173
 jsdoc-parameter-sibling-override-receiver-keeps-tag.runtime.js.cpp 5a867cf192bc
 jsdoc-parameter-stale-field-evidence-keeps-tag.runtime.js.cpp 96b3db18cf7d
+jsdoc-parameter-stale-return-unimported-receiver-keeps-tag.runtime.js.cpp 5152ab8bff10
 jsdoc-parameter-tested-union-arm-keeps-tag.runtime.js.cpp 020de5827585
 jsdoc-promise-void-return-contradicted-by-resolve.runtime.js.cpp fb57bb09e4aa
 jsdoc-return-absence-tag-contradicted-by-return.runtime.js.cpp f2b3a4c7c922
@@ -1378,7 +1380,7 @@ typeof-runtime-string.ts.cpp d89347bd0397
 typeof-then-discriminates-a-union.ts.cpp 3b732925872e
 unbox-nullable-union.ts.cpp 32d4df3401b7
 uncallable-member-slot-call.runtime.js.cpp 68791d94946d
-uncertified.txt b217cb53198b
+uncertified.txt b5857422c452
 uniform-tuple-boxed-into-any-is-an-array.runtime.ts.cpp 4884bb7f95dc
 uniform-tuple-const-object-indexed-read-in-a-free-function.runtime.ts.cpp 1364fe4a1da8
 uniform-tuple-identity-comparison-keeps-array-identity.runtime.ts.cpp 640e585c109c

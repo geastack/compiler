@@ -654,15 +654,15 @@ export const statementExcludes = (
   if (statedArms.some((arm) => isClassInstance(arm) && derivesFromStatedClass(checker, arm, passed))) return false
   if (isClassInstance(passed) && statedArms.every(isClassInstance)) return true
   if (isBareFunction(standard, passed) && statedArms.some(isCallable)) return false
-  // A fresh object literal is checked for EXCESS members too, a check about
-  // what the literal spells and not about the value: the record it builds
-  // has every member the statement requires, and its extra ones are no
-  // runtime incompatibility. Read without its freshness, as the same record
-  // bound to a local first is read; a member the statement requires that the
-  // literal lacks, or writes with another type, still excludes it. three's
-  // `ShadowNode.setupShadowFilter` is passed `{ filterFn, shadowTexture,
-  // depthTexture, shadowCoord, shadow, depthLayer }` under a tag stating four
-  // of those members.
+  const record = recordExcludes(checker, standard, passed, stated)
+  if (record !== null) return record
+  // Under any other statement, a fresh object literal is checked for EXCESS
+  // members too, a check about what the literal spells and not about the
+  // value: the record it builds has every member the statement requires, and
+  // its extra ones are no runtime incompatibility. Read without its
+  // freshness, as the same record bound to a local first is read; a member
+  // the statement requires that the literal lacks, or writes with another
+  // type, still excludes it.
   const value = isFreshObjectLiteral(passed) ? checker.getWidenedType(passed) : passed
   if (checker.isTypeAssignableTo(value, stated)) return false
   const domains = statedArms.map((arm) => checker.getBaseTypeOfLiteralType(arm))
@@ -671,6 +671,44 @@ export const statementExcludes = (
 
 const isFreshObjectLiteral = (type: ts.Type): boolean =>
   (type.flags & ts.TypeFlags.Object) !== 0 && ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.FreshLiteral) !== 0
+
+/**
+ * Whether a fresh object literal is outside a statement whose every present
+ * arm is a plain record, or `null` where the statement is no such record.
+ *
+ * Each member is read as a direct argument is (`armsExclude`), by its present
+ * arms: whole-record assignability reads a nullable member as a contradiction
+ * even where its present value is the one the statement names, while absence
+ * in a direct argument is left to the native conversion. three's
+ * `ShadowNode.setupShadowFilter` is passed `{ ..., shadow, ... }`, a
+ * `?LightShadow` the caller has already dereferenced, under `@param
+ * {LightShadow} inputs.shadow`. A required member the literal lacks, or one
+ * whose present value the statement excludes, still excludes the literal;
+ * a member the statement does not name is no evidence.
+ */
+const recordExcludes = (checker: ts.TypeChecker, standard: StandardSymbols, passed: ts.Type, stated: ts.Type): boolean | null => {
+  if (!isFreshObjectLiteral(passed)) return null
+  const absence = ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void
+  const records = (stated.isUnion() ? stated.types : [stated]).filter((arm) => (arm.flags & absence) === 0)
+  const isRecord = (type: ts.Type): boolean =>
+    (type.flags & ts.TypeFlags.Object) !== 0 &&
+    ((type as ts.ObjectType).objectFlags & ts.ObjectFlags.Anonymous) !== 0 &&
+    !isCallable(type) &&
+    checker.getIndexInfosOfType(type).length === 0
+  if (records.length === 0 || !records.every(isRecord)) return null
+  const saysNothingPresent = (type: ts.Type): boolean => saysNothing(type) || (type.flags & absence) !== 0
+  return records.every((record) =>
+    checker.getPropertiesOfType(record).some((member) => {
+      const written = checker.getPropertyOfType(passed, member.name)
+      if (!written) return (member.flags & ts.SymbolFlags.Optional) === 0
+      const slot = checker.getNonNullableType(checker.getTypeOfSymbol(member))
+      const value = checker.getNonNullableType(checker.getTypeOfSymbol(written))
+      const arms = value.isUnion() ? value.types : [value]
+      if (saysNothingPresent(slot) || arms.some(saysNothingPresent)) return false
+      return armsExclude(checker, standard, arms, slot, false)
+    })
+  )
+}
 
 const isCallable = (type: ts.Type): boolean => type.getCallSignatures().length > 0 || type.getConstructSignatures().length > 0
 
