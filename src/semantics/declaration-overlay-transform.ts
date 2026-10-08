@@ -352,7 +352,11 @@ const modulesReachableFrom = (start: string): ReadonlySet<string> => {
 }
 
 /** The declaration file mirroring this source file, or `null`. */
-const declarationPathFor = (fileName: string): string | null => {
+const declarationPathFor = (spelledFileName: string): string | null => {
+  // A Windows program spells files with backslashes (`...\node_modules\three\...`)
+  // wherever the module graph stated them; matched as-is, no JS file there ever
+  // found its `@types` mirror and three's sources compiled untyped.
+  const fileName = spelledFileName.replaceAll('\\', '/')
   const marker = '/node_modules/'
   const at = fileName.lastIndexOf(marker)
   if (at < 0) return null
