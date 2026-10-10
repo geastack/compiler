@@ -89,6 +89,7 @@ import { indexedAccessMemberTypes } from './structural-indexed-access.js'
 import { joinedCallableOf } from './structural-joins.js'
 import {
   censusFreshDictionaryStorage,
+  isNullPrototypeCreate,
   dictionaryArmIndexOf,
   type FreshDictionaryStorageCensus,
   type FreshDictionaryStorageFact
@@ -859,7 +860,8 @@ const buildMapper = (
     }
     const fact = freshDictionaries.storageAt(node)
     if (fact === null) return null
-    if (ts.isObjectLiteralExpression(node)) return dictionaryStorageType(fact)
+    if (ts.isObjectLiteralExpression(node) || (ts.isCallExpression(node) && isNullPrototypeCreate(checker, node)))
+      return dictionaryStorageType(fact)
     return replaceDictionaryArms(checker.getTypeAtLocation(node), fact)
   }
   const indexedStorageResultAt = (node: ts.Node): StructuralTypeId | null => {

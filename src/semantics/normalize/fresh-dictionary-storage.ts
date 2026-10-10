@@ -145,6 +145,7 @@ export const censusFreshDictionaryStorage = (
   const aliases: { readonly from: ts.Node; readonly to: ts.Node }[] = []
   const inputs: { readonly node: ts.Node; readonly origin: ts.Node | null }[] = []
   const writes: { readonly node: ts.Node; readonly value: ts.Type }[] = []
+  const aliasResults = new Map<ts.SignatureDeclaration, ts.Node>()
   const connect = (from: ts.Node, to: ts.Node): void => {
     aliases.push({ from, to })
     if (nodes.get(from) !== nodes.get(to)) {
@@ -152,9 +153,15 @@ export const censusFreshDictionaryStorage = (
       blocked.add(to)
     }
   }
-  const makeOrigin = (expression: ts.ObjectLiteralExpression, key: Key): ts.Node | null => {
+  const makeOrigin = (expression: ts.ObjectLiteralExpression | ts.CallExpression, key: Key): ts.Node | null => {
     if (fresh.has(expression)) return expression
     const entries: ts.Type[] = []
+    if (ts.isCallExpression(expression)) {
+      fresh.add(expression)
+      nodes.set(expression, key)
+      origins.push({ node: expression, entries })
+      return expression
+    }
     for (const property of expression.properties) {
       if (ts.isPropertyAssignment(property)) {
         if (
@@ -178,6 +185,19 @@ export const censusFreshDictionaryStorage = (
     const target = targets?.length === 1 ? targets[0] : undefined
     return target && flow.callableBodyIsIndexed(target) ? target : null
   }
+  // A write into a table the program states as several views stores the one
+  // view its value fits: `results[name] = []` over `Record<string, string> |
+  // Record<string, string[]>` stores a `string[]`, which the `never[]` the
+  // checker gives the empty literal says nothing about.
+  const writtenEntryTypeOf = (receiver: ts.Expression, value: ts.Expression): ts.Type => {
+    const declared = indexesOf(typeAt(receiver)).map((index) => index.value)
+    if (declared.length > 1) {
+      const actual = checker.getTypeAtLocation(unwrapErasedExpression(value))
+      const fits = declared.filter((entry) => checker.isTypeAssignableTo(actual, entry))
+      if (fits.length === 1) return fits[0]!
+    }
+    return entryTypeAt(value)
+  }
   const excludesTable = (type: ts.Type): boolean => {
     if (type.isUnion()) return type.types.every(excludesTable)
     if (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.TypeParameter | ts.TypeFlags.NonPrimitive)) return false
@@ -194,6 +214,11 @@ export const censusFreshDictionaryStorage = (
     // that node has no checker-owned type, but contributes no table identity.
     if (ts.isVoidExpression(source)) return []
     if (ts.isObjectLiteralExpression(source)) return [makeOrigin(source, targetKey)]
+    // `Object.create(null)` is an empty table with no prototype to read
+    // through, exactly the storage a closed component lays out. Hono's
+    // `_getQueryParam` starts its results this way; typed `any`, it was an
+    // unknown input that refused the whole component.
+    if (isNullPrototypeCreate(checker, source)) return [makeOrigin(source, targetKey)]
     if (ts.isConditionalExpression(source)) return [...sourcesOf(source.whenTrue, targetKey), ...sourcesOf(source.whenFalse, targetKey)]
     if (ts.isBinaryExpression(source)) {
       const operator = source.operatorToken.kind
@@ -247,8 +272,12 @@ export const censusFreshDictionaryStorage = (
     if (targetKey === null) continue
     for (const source of sourcesOf(receiver, targetKey)) {
       if (source === null) continue
-      if (!write.value || (write.edge !== 'property-assignment' && write.edge !== 'index-assignment')) blocked.add(source)
-      else writes.push({ node: source, value: entryTypeAt(write.value) })
+      if (
+        !write.value ||
+        (write.edge !== 'property-assignment' && write.edge !== 'index-assignment' && write.edge !== 'logical-assignment')
+      )
+        blocked.add(source)
+      else writes.push({ node: source, value: writtenEntryTypeOf(receiver, write.value) })
     }
   }
   for (const [node, key] of nodes) {
@@ -282,6 +311,11 @@ export const censusFreshDictionaryStorage = (
             continue
           }
           connect(node, site.call)
+          // A call through a cast alias (`getQueryParam = _getQueryParam as
+          // (...) => ...`) selects the alias's own signature; it names the
+          // same function, so its result is this component's too.
+          const selected = checker.getResolvedSignature(site.call)?.declaration
+          if (selected && selected !== node && ts.isFunctionTypeNode(selected)) aliasResults.set(selected, node)
         }
     }
   }
@@ -357,6 +391,14 @@ export const censusFreshDictionaryStorage = (
   }
   const referenceIsAccounted = (node: ts.Node, reference: ts.Expression): boolean => {
     if (isTypePositionReference(reference)) return true
+    // An assertion to a type no table can be -- `query(url, key) as string` --
+    // takes the call's other arm; the table never reaches what follows.
+    for (let erased: ts.Node = reference; erased !== outermostErasureOf(reference);) {
+      const outer: ts.Node = erased.parent
+      if ((ts.isAsExpression(outer) || ts.isTypeAssertionExpression(outer)) && excludesTable(checker.getTypeFromTypeNode(outer.type)))
+        return true
+      erased = outer
+    }
     const owner = ts.findAncestor(reference, ts.isFunctionLike)
     const storageOwner = ts.findAncestor(node, ts.isFunctionLike)
     if (owner && owner !== storageOwner && callable.closedCallerSitesOf?.(owner) == null) return false
@@ -463,13 +505,14 @@ export const censusFreshDictionaryStorage = (
     for (const reference of flow.referencesToDeclaration(node))
       if (!proofFor(node, () => referenceIsAccounted(node, reference))) blocked.add(node)
   }
+  const exits = exitsOf(blocked, aliases, (node) => indexesOf(resultTypeOf(node)).length === 1)
   const authority = createFreshIndexedStorageAuthority({
     origins,
-    aliases,
-    writes,
-    inputs,
-    blocked: [...blocked],
-    nodes: [...nodes.keys()]
+    aliases: aliases.filter((alias) => !exits.has(alias.to)),
+    writes: writes.filter((write) => !exits.has(write.node)),
+    inputs: inputs.filter((input) => !exits.has(input.node)),
+    blocked: [...blocked].filter((node) => !exits.has(node)),
+    nodes: [...nodes.keys()].filter((node) => !exits.has(node))
   })
   const published = new Set<Component>()
   const factOf = (node: ts.Node): FreshDictionaryStorageFact | null => {
@@ -489,7 +532,7 @@ export const censusFreshDictionaryStorage = (
     return { key, component }
   }
   return {
-    resultOf: factOf,
+    resultOf: (declaration) => factOf(aliasResults.get(declaration) ?? declaration),
     storageAt: (node) => {
       if (nodes.has(node)) return factOf(node)
       if (!ts.isExpression(node)) return null
@@ -511,4 +554,62 @@ export const censusFreshDictionaryStorage = (
       return declaration ? factOf(declaration) : null
     }
   }
+}
+
+/** `Object.create(null)` on the standard `Object`: a fresh object with no prototype and no own keys. */
+export const isNullPrototypeCreate = (checker: ts.TypeChecker, node: ts.Expression): node is ts.CallExpression => {
+  if (!ts.isCallExpression(node) || node.arguments.length !== 1 || node.arguments[0]?.kind !== ts.SyntaxKind.NullKeyword) return false
+  const callee = unwrapErasedExpression(node.expression)
+  return (
+    ts.isPropertyAccessExpression(callee) && callee.name.text === 'create' && isStandardGlobalValue(checker, callee.expression, 'Object')
+  )
+}
+
+/**
+ * Blocked nodes the table only flows INTO, each stating one table view.
+ *
+ * A component reaching a public method is the ordinary case, not the
+ * exception: hono's `HonoRequest.query()` returns the query parser's table to
+ * whatever the application does with it -- `JSON.stringify`, a field, a
+ * callback -- and no closed proof covers that. Blocking such a consumer
+ * refused the whole component, and the parser's one null-prototype object
+ * fell back to a sum of two dictionaries no write could fill. A consumer that
+ * never hands a table back keeps its declared single view and receives the
+ * table through a dictionary VIEW at the edge -- the same object, read and
+ * written through its own entry carrier -- so nothing downstream needs the
+ * component's storage. Its whole downstream must be single-view too, or the
+ * view would have to widen back into a table of several views.
+ */
+const exitsOf = (
+  blocked: ReadonlySet<ts.Node>,
+  aliases: readonly { readonly from: ts.Node; readonly to: ts.Node }[],
+  singleView: (node: ts.Node) => boolean
+): ReadonlySet<ts.Node> => {
+  const downstream = new Map<ts.Node, ts.Node[]>()
+  const upstream = new Map<ts.Node, ts.Node[]>()
+  for (const { from, to } of aliases) {
+    if (from === to) continue
+    downstream.set(from, [...(downstream.get(from) ?? []), to])
+    upstream.set(to, [...(upstream.get(to) ?? []), from])
+  }
+  const exits = new Set<ts.Node>()
+  for (const start of blocked) {
+    if (exits.has(start) || !singleView(start) || !upstream.has(start)) continue
+    const closure = new Set<ts.Node>([start])
+    const pending = [start]
+    let closed = true
+    while (closed && pending.length > 0) {
+      for (const next of downstream.get(pending.pop()!) ?? []) {
+        if (closure.has(next)) continue
+        if (!singleView(next)) closed = false
+        closure.add(next)
+        pending.push(next)
+      }
+    }
+    if (!closed) continue
+    // Every edge into the closure from outside it is a view boundary; an
+    // edge out of the closure back into the component would widen.
+    for (const node of closure) exits.add(node)
+  }
+  return exits
 }

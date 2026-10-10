@@ -702,7 +702,7 @@ merge-arm-empty-array-into-native-array.ts.cpp 318aa6aeae9c
 merge-arm-nullish-fallback-is-dead.ts.cpp 43ce4f731a1a
 merged-interface-emit-dispatch.runtime.ts.cpp a1d187daedff
 method-with-tagged-view-parameter-into-wider-view-union-slot.runtime.ts.cpp b45df814b502
-mixed-dictionary-union.ts.cpp ea0f525d1df0
+mixed-dictionary-union.ts.cpp 6a4343b7df48
 mixed-dynamic-callable-union.ts.cpp a38a67edcb37
 modifier-only-mapped-type.ts.cpp 27b84f1fd9ea
 module-let-union-narrowed-by-in-after-lazy-load.runtime.ts.cpp 6e4187152108
@@ -1006,6 +1006,7 @@ proxy-non-normal-method-get-retains-effects.runtime.ts.cpp 227acf6ffdf5
 proxy-static-field-logical-assignment-carries-the-proxy.runtime.ts.cpp 70cb824a17c0
 proxy-static-no-traps.runtime.ts.cpp cdb0550460b5
 proxy-static-traps.runtime.ts.cpp 812e9a610968
+query-parser-reached-through-a-cast-alias-and-a-public-method.runtime.ts.cpp 6e077bb11284
 reactive-inherited-cell-no-list-tick.ts.cpp 98ad35435e78
 readonly-tuple-literal-into-union-with-string-array.runtime.ts.cpp 9e359b7e3112
 recast-record-keeps-required-presence.runtime.ts.cpp 15d1400e3e5b
@@ -1255,6 +1256,7 @@ union-array-arm-own-property.runtime.ts.cpp 8200a0e74109
 union-key-borrowed-name-scan.runtime.ts.cpp 5103b0943185
 union-member-absent-on-promise-arm.ts.cpp 0e3b59d04bdb
 union-method-absent-on-one-arm-discarded.ts.cpp 6efcd637ea94
+union-of-dictionaries-filled-by-a-flag.runtime.ts.cpp e067f38d1c14
 union-of-tuples-array-pattern.ts.cpp b2d0f6ac58c5
 union-of-tuples-indexed-past-the-shorter-tuple.runtime.ts.cpp b78ed660ded6
 union-of-tuples-nested-array-pattern.ts.cpp b66ac554c2e7

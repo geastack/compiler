@@ -2277,6 +2277,58 @@ const closedMemberCallableUses = (
       ? valueMode.explicitInvocationIsIntact(call)
       : deferredIntrinsicProtocolLedgerOf(flow)?.requirePrototypeKeys('Function', { names: [wrapper.name.text] }, call) === true
   }
+  /**
+   * Every caller of the function value `value` holds, when the cell it
+   * initializes is the function's only handle: a `const` written once, whose
+   * every executable use -- in its own module or an importer's -- is an
+   * entered call, or initializes another such cell. Hono exports its query
+   * parser twice, `getQueryParam = _getQueryParam as (...) => ...` and a
+   * wrapper calling it directly; the cast alias is one more name for the same
+   * function, and its calls are this function's calls.
+   */
+  const closedBindingCallsOf = (value: ts.Node, counted: ReadonlySet<ts.Node>, sites: FlowCallSite[], depth: number): boolean => {
+    if (depth > 4) return false
+    const initializer = outermostErasureOf(value)
+    const binding = initializer.parent
+    if (
+      !ts.isVariableDeclaration(binding) ||
+      binding.initializer !== initializer ||
+      !ts.isIdentifier(binding.name) ||
+      !localBindingWritesAreComplete(flow, binding)
+    )
+      return false
+    const writes = flow.writesToDeclaration(binding).filter((write) => write.slot === 'whole')
+    if (
+      writes.length === 0 ||
+      writes.some(
+        (write) =>
+          write.edge !== 'declaration-initializer' ||
+          write.value === null ||
+          unwrapValue(write.value) !== unwrapValue(value as ts.Expression)
+      )
+    )
+      return false
+    const exported = isModuleExportedDeclaration(checker, binding, checker.getSymbolAtLocation(binding.name) ?? null)
+    const imported = exported ? inProgramImportReferencesOf(checker, flow, binding) : []
+    if (imported === null) return false
+    for (const reference of new Set([...flow.referencesToDeclaration(binding), ...imported])) {
+      if (reference === binding.name || isTypePositionReference(reference)) continue
+      const parent = reference.parent
+      if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isExportSpecifier(parent)) continue
+      const use = outermostErasureOf(reference)
+      const call = use.parent
+      if (ts.isCallExpression(call) && call.expression === use) {
+        if (counted.has(call)) continue
+        const site = callsOf(flow).sites.get(call)
+        if (site === undefined) return false
+        if (!sites.includes(site)) sites.push(site)
+        continue
+      }
+      if (ts.isVariableDeclaration(call) && call.initializer === use && closedBindingCallsOf(reference, counted, sites, depth + 1)) continue
+      return false
+    }
+    return true
+  }
   const closedCallerSitesUncached = (declaration: ts.SignatureDeclaration): readonly FlowCallSite[] | null => {
     if (ts.isConstructorDeclaration(declaration)) {
       const calls = constructorCallsOf(checker, flow, declaration)
@@ -2388,32 +2440,9 @@ const closedMemberCallableUses = (
       // A function expression has no declaration binding of its own. Its
       // exact initializer cell can nevertheless name every caller, provided
       // that cell never changes and every executable use is an entered call.
-      const value = outermostErasureOf(declaration)
-      const binding = value.parent
-      if (
-        !ts.isVariableDeclaration(binding) ||
-        binding.initializer !== value ||
-        !ts.isIdentifier(binding.name) ||
-        !flow.callableBodyIsIndexed(declaration) ||
-        (argumentsUsesAt(declaration)?.length ?? 0) > 0 ||
-        !localBindingWritesAreComplete(flow, binding) ||
-        isModuleExportedDeclaration(checker, binding, checker.getSymbolAtLocation(binding.name) ?? null)
-      )
-        return null
-      const writes = flow.writesToDeclaration(binding).filter((write) => write.slot === 'whole')
-      if (
-        writes.length === 0 ||
-        writes.some((write) => write.edge !== 'declaration-initializer' || write.value === null || unwrapValue(write.value) !== declaration)
-      )
-        return null
-      for (const reference of flow.referencesToDeclaration(binding)) {
-        if (reference === binding.name || isTypePositionReference(reference)) continue
-        const use = outermostErasureOf(reference)
-        const parent = use.parent
-        if (ts.isCallExpression(parent) && parent.expression === use && counted.has(parent)) continue
-        return null
-      }
-      return calls
+      if (!flow.callableBodyIsIndexed(declaration) || (argumentsUsesAt(declaration)?.length ?? 0) > 0) return null
+      const sites = [...calls]
+      return closedBindingCallsOf(declaration, counted, sites, 0) ? sites : null
     }
     if (!ts.isFunctionDeclaration(declaration) || !declaration.name || !declaration.body) return null
     if (!sourceGlobalCallableBindingIsClosed(checker, flow, declaration)) return null
