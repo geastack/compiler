@@ -391,12 +391,17 @@ export const censusFreshDictionaryStorage = (
   }
   const referenceIsAccounted = (node: ts.Node, reference: ts.Expression): boolean => {
     if (isTypePositionReference(reference)) return true
-    // An assertion to a type no table can be -- `query(url, key) as string` --
-    // takes the call's other arm; the table never reaches what follows.
+    // A downcast to a type no table can be -- `query(url, key) as string` --
+    // selects the call's other arm, a checked selection the table never
+    // passes. Only a true downcast: an `as unknown` hop keeps the table's
+    // identity (`table as unknown as string[]` iterates the table itself).
     for (let erased: ts.Node = reference; erased !== outermostErasureOf(reference);) {
       const outer: ts.Node = erased.parent
-      if ((ts.isAsExpression(outer) || ts.isTypeAssertionExpression(outer)) && excludesTable(checker.getTypeFromTypeNode(outer.type)))
-        return true
+      if (ts.isAsExpression(outer) || ts.isTypeAssertionExpression(outer)) {
+        const asserted = checker.getTypeFromTypeNode(outer.type)
+        if (asserted.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) break
+        if (excludesTable(asserted) && checker.isTypeAssignableTo(asserted, checker.getTypeAtLocation(reference))) return true
+      }
       erased = outer
     }
     const owner = ts.findAncestor(reference, ts.isFunctionLike)

@@ -3422,10 +3422,13 @@ test('checked array reads preserve native payloads without admitting optional wr
   const rejected: IrOperation[] = [
     write,
     { ...read, result: { ...read.result, representation: { ...checked, absence: 'null' } } },
-    { ...read, result: { ...read.result, representation: { ...checked, payload: { kind: 'string' } } } },
-    { ...read, key: operand('unknown-property', { kind: 'string' }) }
+    { ...read, result: { ...read.result, representation: { ...checked, payload: { kind: 'string' } } } }
   ]
   for (const operation of rejected) assert.equal(nativeArrayTransportOf(operation, null), false)
+  // A runtime string key is the `for (const i in array)` key; the emitter reads
+  // it through CanonicalNumericIndexString (`arrayIndexFromKeyText`), where a
+  // non-index key answers absent and never reaches the Array's own properties.
+  assert.equal(nativeArrayTransportOf({ ...read, key: operand('runtime-key', { kind: 'string' }) }, null), true)
 })
 
 test('array boxing, adapting copies and unknown keys retain element exposure', () => {
@@ -3449,7 +3452,9 @@ test('array boxing, adapting copies and unknown keys retain element exposure', (
     kind: 'get',
     lineage,
     receiver: operand('array', array),
-    key: operand('index', { kind: 'string' }),
+    // An unknown key is a dynamic one: a runtime STRING key is read through
+    // CanonicalNumericIndexString as an element access (native transport).
+    key: operand('index', dynamic),
     result: { id: 'read' as never, representation: point }
   }
   const options = { representations: [array, point], shakeComplete: true }

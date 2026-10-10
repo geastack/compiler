@@ -2137,7 +2137,11 @@ export const reflectionExposureOf = (
         converting.push(slot.value.representation.element)
         return true
       })
-      if (native && operation.result.representation.ownership === 'shared-refcount') {
+      // Boxing an element publishes the whole of it, and a conversion the
+      // program never certified is no recipe to cite: both stay on the
+      // ordinary demand path below.
+      const certified = converting.every((source) => options.conversions?.nodeById(conversionNodeIdOf(source, element)) != null)
+      if (native && certified && element.kind !== 'dynamic' && operation.result.representation.ownership === 'shared-refcount') {
         for (const source of converting) {
           const id = conversionNodeIdOf(source, element)
           const node = options.conversions?.nodeById(id)

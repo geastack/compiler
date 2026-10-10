@@ -261,7 +261,9 @@ test('an ordinary class arm contributes its actual native storage independently 
       { key: 'shown', getter, setter: null, representation: { kind: 'function-value-dispatch', abi: { ...publicAbi, result: number } } }
     ]
   }
-  assert.equal(nativeFieldViewDomainsOf([], null, () => bodyAbi, new Map([[declaration, unsupported]]))(instance), null)
+  // An accessor with no admitted route states no route for ITS key; the
+  // class's other members keep theirs (a reader of `shown` is then refused).
+  assert.equal(nativeFieldViewDomainsOf([], null, () => bodyAbi, new Map([[declaration, unsupported]]))(instance)?.has('shown'), false)
 })
 
 test('a key no live descriptor names reads each original allocation expando, never a guessed slot', () => {
