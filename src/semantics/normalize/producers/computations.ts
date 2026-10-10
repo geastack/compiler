@@ -27,7 +27,7 @@ import {
 } from '../../model/operands.js'
 import type { BindingOperation, ComputationOperation } from '../../model/operations.js'
 import { propertyExpressionValueTypeAt } from './properties.js'
-import { objectCreateResultOverride } from './invocations.js'
+import { citedValueTypeAt } from './cited-value-type.js'
 import { ordinaryObjectDataWriteIsAbsent } from '../callable-data-write.js'
 
 type ComputationNode =
@@ -176,7 +176,28 @@ const finishComputation = (
       const first = branches[0]
       const second = branches[1]
       if (!first || !second) throw new Error('a conditional computation must carry consequent and alternate operands')
-      return first.type === second.type ? first.type : context.table.intern({ kind: 'union', members: [first.type, second.type] })
+      if (first.type === second.type) return first.type
+      // An element-less array arm (`never[]`, or the zero-length tuple) beside
+      // an array arm is already a value of that array: 13.2.4.2 gives it
+      // length 0, and with no element it disagrees with no element type. The
+      // checker subtype-reduces `cond ? xs.map(f) : []` to the populated arm
+      // for the same reason, and `structural.ts` drops the identical arm from
+      // a checker union. Kept as a second arm, the merge was a tagged union of
+      // two arrays the binding had to select from (hono's RegExpRouter
+      // `ownRoute`), where `mergeIncoming` builds the empty literal directly
+      // in the populated arm's carrier.
+      const shapeOf = (id: typeof first.type) => (context.table.isOpen(id) ? undefined : context.table.get(id).shape)
+      const elementless = (id: typeof first.type): boolean => {
+        const shape = shapeOf(id)
+        if (shape?.kind === 'tuple') return shape.elements.length === 0
+        if (shape?.kind !== 'array') return false
+        const element = shapeOf(shape.element)
+        return element?.kind === 'primitive' && element.primitive === 'never'
+      }
+      const populatedArray = (id: typeof first.type): boolean => shapeOf(id)?.kind === 'array' && !elementless(id)
+      if (elementless(second.type) && populatedArray(first.type)) return first.type
+      if (elementless(first.type) && populatedArray(second.type)) return second.type
+      return context.table.intern({ kind: 'union', members: [first.type, second.type] })
     }
     if (
       form === 'binary' &&
@@ -267,8 +288,8 @@ const contributeLogical = (
   const takenWhen: 'truthy' | 'falsy' | 'nullish' =
     kind === ts.SyntaxKind.AmpersandAmpersandToken ? 'truthy' : kind === ts.SyntaxKind.BarBarToken ? 'falsy' : 'nullish'
 
-  const left = operand('left', 0, leftSource, context.types.typeAt(node.left))
-  const right = operand('right', 0, sourceForValue(context, node.right), context.types.typeAt(node.right), {
+  const left = operand('left', 0, leftSource, citedValueTypeAt(context, node.left))
+  const right = operand('right', 0, sourceForValue(context, node.right), citedValueTypeAt(context, node.right), {
     kind: 'conditional',
     guard: leftSource.result,
     takenWhen
@@ -399,7 +420,7 @@ const contributeConditional = (
   const branchValueTypeAt = (branch: ts.Expression) =>
     ts.isPropertyAccessExpression(branch) || ts.isElementAccessExpression(branch)
       ? propertyExpressionValueTypeAt(context, branch)
-      : context.types.typeAt(branch)
+      : citedValueTypeAt(context, branch)
   const consequent = operand('consequent', 0, sourceForValue(context, node.whenTrue), branchValueTypeAt(node.whenTrue), {
     kind: 'conditional',
     guard: conditionSource.result,
@@ -590,10 +611,6 @@ const contributeBinary = (context: ProducerContext, candidate: CensusCandidate, 
     // it (a name's GetValue, a property's [[Get]]), and this cites it, so the
     // value combined is the same one any other consumer of that target sees.
     const assignedObjectTarget = compound === null ? objectAssignTargetType(context.checker, node.right) : null
-    const createdObjectTarget =
-      compound === null && assignedObjectTarget === null && ts.isCallExpression(node.right)
-        ? objectCreateResultOverride(context, node.right, unwrapErased(node.right.expression))
-        : null
     const operands = compound
       ? [
           operand('left', 0, sourceForValue(context, node.left), context.types.typeAt(node.left)),
@@ -608,9 +625,7 @@ const contributeBinary = (context: ProducerContext, candidate: CensusCandidate, 
             'value',
             0,
             sourceForValue(context, node.right),
-            assignedObjectTarget !== null
-              ? context.types.typeOf(assignedObjectTarget)
-              : (createdObjectTarget ?? context.types.typeAt(node.right))
+            assignedObjectTarget !== null ? context.types.typeOf(assignedObjectTarget) : citedValueTypeAt(context, node.right)
           )
         ]
 

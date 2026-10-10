@@ -14,7 +14,7 @@ import type { Representation } from './model.js'
  * one side could drift from the other, and the frame would then describe C++
  * the printer no longer emits.
  */
-export type HostTemplate = 'object-assign' | 'array-is-array' | 'array-from' | 'typed-array-set' | 'json-stringify'
+export type HostTemplate = 'object-assign' | 'object-create' | 'array-is-array' | 'array-from' | 'typed-array-set' | 'json-stringify'
 
 /**
  * The host protocol a member read off this receiver is looked up on, or `null`.
@@ -46,9 +46,11 @@ export const hostMemberTemplateOf = (protocol: string, member: string): HostTemp
       ? 'array-from'
       : protocol === 'ObjectConstructor' && member === 'assign'
         ? 'object-assign'
-        : protocol === 'JSON' && member === 'stringify'
-          ? 'json-stringify'
-          : null
+        : protocol === 'ObjectConstructor' && member === 'create'
+          ? 'object-create'
+          : protocol === 'JSON' && member === 'stringify'
+            ? 'json-stringify'
+            : null
 
 /** A union whose every arm is a typed array: one `%TypedArray%.prototype` receiver whose arm the invoker dispatches. */
 export const typedArrayUnionOnly = (representation: Representation): boolean =>

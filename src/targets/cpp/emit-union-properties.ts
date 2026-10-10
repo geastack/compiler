@@ -142,12 +142,20 @@ const armFieldSite = (
   ctx: EmitContext,
   arm: Representation,
   armExprText: string,
-  key: string
+  key: string,
+  write = false
 ): { readonly text: string; readonly representation: Representation; readonly presence: string | null } | null => {
   if (!addressableArmKind(arm.kind)) return null
   if (arm.kind === 'class-ref') {
     const member = classMemberOf(ctx.classes, arm.declaration, key)
-    if (member?.kind !== 'field' && (member !== null || !nativeBaseFieldOf(ctx.deriver, arm, key, ctx.classes))) return null
+    // A method some write shadows with an own property (hono's routers'
+    // `this.match = match`) has a physical override slot, and a STORE lands in
+    // it: that slot is the field `declaredRecordFieldOf` answers, the one the
+    // IR certified the store's conversion against, and a lone class receiver
+    // writes it the same way. A read is not a slot read -- the slot is absent
+    // until that store runs, and the prototype method answers until then.
+    const overridden = write && member?.kind === 'method' && classMethodOverrideOf(ctx.classes, arm.declaration, key) !== null
+    if (member?.kind !== 'field' && !overridden && (member !== null || !nativeBaseFieldOf(ctx.deriver, arm, key, ctx.classes))) return null
   }
   const declared = declaredFieldRepresentationOf(ctx.deriver, arm, key, ctx.classes)
   if (declared === null) return null
@@ -1257,7 +1265,7 @@ const unionLeafSetText = (
   if (leaf.representation.kind === 'null' || leaf.representation.kind === 'undefined') {
     return `gea::host::throwGetPropertyOfNullish<void>("${leaf.representation.kind}", "set");`
   }
-  const site = armFieldSite(ctx, leaf.representation, leaf.text, key)
+  const site = armFieldSite(ctx, leaf.representation, leaf.text, key, true)
   if (site !== null) {
     const converted = alignedValueText(
       ctx,

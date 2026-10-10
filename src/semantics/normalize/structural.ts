@@ -28,6 +28,8 @@ import {
 } from './bivariant-slot-parameter.js'
 import { emptyDeclaredMemberCensus, type DeclaredMemberCensus } from './structural-declarations.js'
 import { createLocalUnionResolver } from './structural-local-union.js'
+import { createAnyBindingConsumerLayout } from './structural-any-binding-consumer.js'
+import { anyCastMemberCallOf } from './any-cast-member-call.js'
 import { createMutableMethodResolver } from './structural-mutable-method.js'
 import { createMutableFieldResolver } from './structural-mutable-field.js'
 import { structuralArrayReadAt } from './structural-array-read.js'
@@ -204,6 +206,8 @@ export interface StructuralMapper {
   readonly typeAt: (node: ts.Node) => StructuralTypeId
   /** A source-keyed closed fresh allocation channel, shared by bindings and native frames. */
   readonly indexedStorageTypeAt: (node: ts.Node) => StructuralTypeId | null
+  /** A fresh value inside a stated-`any` binding laid out at its one consumer's type (`structural-any-binding-consumer.ts`). */
+  readonly statedAnyBindingLayoutAt: (node: ts.Node) => StructuralTypeId | null
   readonly indexedStorageResultAt: (node: ts.Node) => StructuralTypeId | null
   readonly mutableMethodStorageTypeAt: (node: ts.MethodDeclaration) => StructuralTypeId | null
   readonly mutableMethodReadTypeAt: (node: ts.Node) => StructuralTypeId | null
@@ -3312,6 +3316,13 @@ const buildMapper = (
     signatureOf,
     ordinaryOwnCallableSourceAt
   )
+  const anyBindingConsumerLayoutAt = createAnyBindingConsumerLayout({
+    checker,
+    identities,
+    specializations,
+    flow,
+    layoutAt: (copy, type) => mapperFor(copy).typeOf(type)
+  })
   const localUnionAt = createLocalUnionResolver(
     checker,
     table,
@@ -4751,6 +4762,17 @@ const buildMapper = (
   )
   const structuralRules: readonly StructuralRule[] = [
     {
+      name: 'stated-any-binding-at-consumer-layout',
+      forms: [
+        ts.SyntaxKind.VariableDeclaration,
+        ts.SyntaxKind.Identifier,
+        ts.SyntaxKind.ArrayLiteralExpression,
+        ts.SyntaxKind.ObjectLiteralExpression,
+        ts.SyntaxKind.CallExpression
+      ],
+      resolve: (node) => anyBindingConsumerLayoutAt(node)
+    },
+    {
       name: 'mutable-field-storage',
       forms: [ts.SyntaxKind.PropertyAccessExpression, ts.SyntaxKind.ElementAccessExpression],
       resolve: mutableFields.readTypeAt
@@ -4793,6 +4815,23 @@ const buildMapper = (
         return standIn === undefined || recordIds === null
           ? null
           : table.intern({ kind: 'union', members: [typeOf(standIn), ...recordIds] })
+      }
+    },
+    {
+      // `(this as any).buildAllMatchers()` into a stated slot: see `any-cast-member-call.ts`.
+      name: 'any-cast-member-call',
+      forms: [ts.SyntaxKind.PropertyAccessExpression, ts.SyntaxKind.CallExpression],
+      resolve: (node) => {
+        const found = anyCastMemberCallOf(checker, node)
+        if (found === null) return null
+        const result = typeOf(found.stated)
+        if (ts.isCallExpression(node)) return result
+        const callable = table.intern({
+          kind: 'signature',
+          call: [{ parameters: [], minimumArity: 0, thisParameter: mapper.typeAt(found.receiver), result }],
+          construct: []
+        })
+        return table.intern({ kind: 'union', members: [callable, typeOf(checker.getUndefinedType())] })
       }
     },
     {
@@ -5951,6 +5990,7 @@ const buildMapper = (
     typeAt,
     indexedStorageTypeAt,
     indexedStorageResultAt,
+    statedAnyBindingLayoutAt: anyBindingConsumerLayoutAt,
     mutableMethodStorageTypeAt: mutableMethods.storageTypeAt,
     mutableMethodReadTypeAt: mutableMethods.readTypeAt,
     mutableFieldStorageTypeOf: mutableFields.storageTypeOf,

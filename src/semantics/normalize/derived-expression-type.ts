@@ -2529,9 +2529,32 @@ export const containsUnstatedPosition = (checker: ts.TypeChecker, anchor: ts.Nod
     return declared.types.some((part) => containsUnstatedPosition(checker, anchor, part, depth + 1))
   }
   if ((declared.flags & ts.TypeFlags.Object) === 0) return false
+  // Checked before the reference: `Record<string, V>` is a mapped-type
+  // instantiation that carries a `target` but no type arguments. A table whose
+  // value is `any` itself (`{ [key: string]: any }`) is the open Document
+  // carrier, a stated choice rather than an open position: counting it let a
+  // `WireDocument[]` binding narrow to the `{}` records it was initialized with.
+  const dictionary = pureDictionaryIndexesOf(checker, declared)
+  if (dictionary !== null)
+    return dictionary.some(
+      (index) => (index.type.flags & ts.TypeFlags.Any) === 0 && containsUnstatedPosition(checker, anchor, index.type, depth + 1)
+    )
   const reference = declared as ts.TypeReference
   if (reference.target === undefined) return false
   return checker.getTypeArguments(reference).some((part) => containsUnstatedPosition(checker, anchor, part, depth + 1))
+}
+
+/**
+ * The index signatures of an object type that is NOTHING but index
+ * signatures -- `Record<string, V>` and `{ [key: string]: V }`, which the
+ * checker resolves to an anonymous type rather than a reference with type
+ * arguments -- or `null` for any other type.
+ */
+const pureDictionaryIndexesOf = (checker: ts.TypeChecker, type: ts.Type): readonly ts.IndexInfo[] | null => {
+  if ((type.flags & ts.TypeFlags.Object) === 0 || type.isUnion() || type.isIntersection()) return null
+  if (type.getProperties().length > 0 || type.getCallSignatures().length > 0 || type.getConstructSignatures().length > 0) return null
+  const indexes = checker.getIndexInfosOfType(type)
+  return indexes.length > 0 ? indexes : null
 }
 
 /**
@@ -2589,6 +2612,25 @@ export const narrowsOnlyUnstatedPositions = (
       .some((index) => !actualIndexes.some((candidate) => checker.isTypeAssignableTo(index.keyType, candidate.keyType)))
   )
     return false
+  // `Record<string, unknown>` fed a `Record<string, Node>`: a dictionary's one
+  // stated thing besides its key is its value, and that is compared position
+  // by position like a reference's type arguments below. The actual must be
+  // a dictionary over the same keys and nothing else -- asked BEFORE the
+  // mutual-assignability shortcut, which calls `{}` and `{ [key: string]: any }`
+  // one type and so narrowed a stated `WireDocument[]` to empty records.
+  const declaredIndexes = pureDictionaryIndexesOf(checker, declared)
+  if (declaredIndexes !== null) {
+    const actualDictionary = pureDictionaryIndexesOf(checker, actual)
+    if (actualDictionary === null || actualDictionary.length !== declaredIndexes.length) return false
+    return declaredIndexes.every((index) => {
+      const other = actualDictionary.find((candidate) => candidate.keyType === index.keyType)
+      return (
+        other !== undefined &&
+        other.isReadonly === index.isReadonly &&
+        narrowsOnlyUnstatedPositions(checker, anchor, index.type, other.type, depth + 1)
+      )
+    })
+  }
   // Two spellings of one type -- an alias and its expansion, `Params` and
   // `Record<string, string>` -- state the identical thing at every position.
   if (checker.isTypeAssignableTo(actual, declared) && checker.isTypeAssignableTo(declared, actual)) return true

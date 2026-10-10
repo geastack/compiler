@@ -222,8 +222,20 @@ if (wanted('apple')) {
   }
 }
 
-if (wanted('node-compat'))
-  add('node-compat', 'test:package', checkout('node-compat', 'scripts/test-package.mjs'), ['npm', 'run', 'test:package'])
+if (wanted('node-compat')) {
+  const nodeCompat = checkout('node-compat', 'scripts/test-package.mjs')
+  add('node-compat', 'test:package', nodeCompat, ['npm', 'run', 'test:package'])
+  // The full Hono app, compiled from source and served: `test:package` checks
+  // only the package's shape, so the 1.0.29 compiler released with hono-hello
+  // failing to certify and nothing here noticed. The build must emit a binary
+  // and every route must answer exactly.
+  add('node-compat', 'hono-hello build + routes', nodeCompat, [
+    'bash',
+    '-c',
+    'rm -rf apps/hono-hello/dist && node scripts/build.mjs apps/hono-hello/server.ts --out apps/hono-hello/dist && ' +
+      'test -x apps/hono-hello/dist/server && node scripts/test-hono.mjs'
+  ])
+}
 
 // A skip is a test that did not run. node:test reports one as `ℹ skipped N`,
 // core's shell tests as a `SKIP` line.

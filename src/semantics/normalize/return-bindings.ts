@@ -306,6 +306,13 @@ const isScopeBoundary = (node: ts.Node): boolean =>
 /** Duplicated from `parameter-bindings.ts` (not exported there): `any` is the absence this module exists to fill. */
 const isAnyType = (type: ts.Type): boolean => (type.flags & ts.TypeFlags.Any) !== 0
 
+/** The class a type is an instance of, or `null` for anything that is not one class's instance type. */
+const classDeclarationOf = (type: ts.Type): ts.ClassLikeDeclaration | null => {
+  if (type.isUnionOrIntersection()) return null
+  const declarations = type.getSymbol()?.getDeclarations()?.filter(ts.isClassLike) ?? []
+  return declarations.length === 1 ? declarations[0]! : null
+}
+
 /**
  * A refusal's `owner`, rendered -- the declaration's own name where the
  * declaration syntax carries one (a function/method/getter's own name, or the
@@ -1165,11 +1172,47 @@ export const censusReturnBindings = (
    * `x as any` therefore still refuses -- the cast said `any`, and honouring
    * a statement is not the same as improving on it.
    */
+  /**
+   * `return this as any` from an unannotated function expression written
+   * into a slot whose every signature returns a type the operand already is:
+   * the assertion changes only the checker's view, so the function returns
+   * the operand's own type, exactly as `physicalAssertionReturns` reads an
+   * `as unknown as T` past its assertion. Hono's constructor installs
+   * `this[method] = (...) => { ...; return this as any }` under overloaded
+   * `HandlerInterface`s that all return the app; laid out as `any`, each
+   * return boxed the app and published its whole router to dynamic code.
+   */
+  const anyAssertionReturnOf = (assertion: ts.AsExpression | ts.TypeAssertion, owner: ReturnCandidateDeclaration): ts.Type | null => {
+    if (assertion.type.kind !== ts.SyntaxKind.AnyKeyword) return null
+    if (!ts.isArrowFunction(owner) && !ts.isFunctionExpression(owner)) return null
+    const contextual = checker.getContextualType(owner)
+    const signatures = contextual ? checker.getNonNullableType(contextual).getCallSignatures() : []
+    if (signatures.length === 0) return null
+    const operand = knownOrResolve(assertion.expression, owner)
+    if (operand === null || isAnyType(operand)) return null
+    if (signatures.every((signature) => checker.isTypeAssignableTo(operand, checker.getReturnTypeOfSignature(signature)))) return operand
+    // The slot's signatures may name the operand's own class at other type
+    // arguments -- hono's return `HonoBase<E, S & ToSchema<...>, BasePath>`
+    // while `this` is `HonoBase<E, S, BasePath>`, which is why the source
+    // needed the assertion at all. The value is still that one instance of
+    // that one class; the type arguments are the checker's bookkeeping.
+    const instance = checker.getApparentType(operand)
+    const declaration = classDeclarationOf(instance)
+    return declaration !== null &&
+      signatures.every(
+        (signature) => classDeclarationOf(checker.getApparentType(checker.getReturnTypeOfSignature(signature))) === declaration
+      )
+      ? instance
+      : null
+  }
+
   const knownOrResolve = (node: ts.Expression, owner: ReturnCandidateDeclaration): ts.Type | null => {
     const unwrapped = unwrapParens(node)
     if (ts.isAsExpression(unwrapped) || ts.isTypeAssertionExpression(unwrapped)) {
       const physical = physicalAssertionReturns.has(owner) ? sourcePastUnknownAssertion(checker, unwrapped) : null
-      return physical ? knownOrResolve(physical, owner) : known(unwrapped)
+      if (physical) return knownOrResolve(physical, owner)
+      const erased = anyAssertionReturnOf(unwrapped, owner)
+      return erased ?? known(unwrapped)
     }
     // A CELL A CENSUS NARROWED WITHIN ITS OWN STATEMENT OUTRANKS THE CHECKER
     // here, for the reason `field-bindings.ts` states at the identical hop:

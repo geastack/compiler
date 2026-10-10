@@ -7,6 +7,8 @@ import { nativeFieldPolicyType, staticKeyOrderText } from './records.js'
 import { tracksKeyOrder } from './key-order-tracking.js'
 import { cppTypeOf, cppStringLiteral, cppRecordFieldKeyIsSymbol, fieldPropertyKeyText } from './types.js'
 import { propertyKeyText } from './emit-dynamic-properties.js'
+import { nativeDataPropertyText } from './emit-buffers.js'
+import { nativeDataPropertyOf } from '../../representation/native-data-properties.js'
 
 const tokenOf = (type: string): string => `gea::detail::payloadTypeTagFor<${type}>()`
 const routeTokenOf = (value: Representation): string =>
@@ -29,16 +31,20 @@ export const withFieldReceiver = (
   value: Representation,
   text: string,
   emit: (carrier: Representation) => string,
-  dynamic?: (carrier: Representation, text: string) => string
+  dynamic?: (carrier: Representation, text: string) => string,
+  nativeData?: (carrier: Representation, text: string) => string
 ): string => {
-  if (value.kind === 'borrowed-ref') return withFieldReceiver(value.referent, text, emit, dynamic)
+  if (value.kind === 'borrowed-ref') return withFieldReceiver(value.referent, text, emit, dynamic, nativeData)
   if (value.kind === 'optional')
     return (
       `if (!${text}.has_value()) gea::host::throwRuntimeError("TypeError", "Cannot access a nullish native view"); ` +
-      withFieldReceiver(value.payload, `(*${text})`, emit, dynamic)
+      withFieldReceiver(value.payload, `(*${text})`, emit, dynamic, nativeData)
     )
   // A `dynamic` arm is a `gea::Value` already; its own [[Get]] is the read.
   if (value.kind === 'dynamic' && dynamic !== undefined) return dynamic(value, text)
+  // A binary-view arm reads its own internal slot (`nativeData` routes).
+  if ((value.kind === 'typed-array' || value.kind === 'data-view' || value.kind === 'array-buffer') && nativeData !== undefined)
+    return nativeData(value, text)
   if (value.kind === 'tagged-union')
     return (
       value.arms
@@ -46,7 +52,7 @@ export const withFieldReceiver = (
         // templates are dependent names.
         .map(
           (arm, index) =>
-            `if (${text}.template is<${index}>()) { ${withFieldReceiver(arm.value, `${text}.template get<${index}>()`, emit, dynamic)} }`
+            `if (${text}.template is<${index}>()) { ${withFieldReceiver(arm.value, `${text}.template get<${index}>()`, emit, dynamic, nativeData)} }`
         )
         .join(' ') + ' gea::host::throwRuntimeError("TypeError", "No native field-view receiver arm");'
     )
@@ -108,6 +114,16 @@ export const nativeFieldViewReadForText = (
         ? 'gea::host::throwRuntimeError("TypeError", "Cannot access a non-object native view receiver");'
         : `return ${renderedLeaf(ctx, route.conversion, `${text}.getProperty(${viewKeyText(key)})`)};`
     }
+  const nativeDataRead =
+    (key: string) =>
+    (carrier: Representation, text: string): string => {
+      const property = nativeDataPropertyOf(carrier, key)
+      const route = property && receipt.sources.find((entry) => representationKey(entry.source) === representationKey(property.result))
+      const read = property && route ? nativeDataPropertyText(text, carrier, property) : null
+      return read === null || !route
+        ? 'gea::host::throwRuntimeError("TypeError", "a binary view arm has no certified native data route");'
+        : `return ${renderedLeaf(ctx, route.conversion, read)};`
+    }
   const forKey = (key: string): string =>
     withFieldReceiver(
       receiver.representation,
@@ -118,10 +134,15 @@ export const nativeFieldViewReadForText = (
         // A getter is the plain allocation's whole answer: there is no own
         // field for the native route to find, and a live view still answers
         // first through `readLiveField`.
-        const getterAnswer = ordinary && actual?.accessor === true ? `return ${renderedLeaf(ctx, ordinary.conversion, actual.text)};` : null
+        // `gea_field_receiver` is a generic lambda's parameter, so its member
+        // is a dependent expression, and a recipe spelling a union's
+        // `.is<N>()` on it does not parse. Read through the source's own
+        // carrier type and the recipe sees a concrete value.
+        const concrete = actual ? `static_cast<const ${cppTypeOf(actual.source)}&>(${actual.text})` : ''
+        const getterAnswer = ordinary && actual?.accessor === true ? `return ${renderedLeaf(ctx, ordinary.conversion, concrete)};` : null
         const plain =
           ordinary && actual && actual.source.kind === 'optional'
-            ? `return ${renderedLeaf(ctx, ordinary.conversion, actual.text)};`
+            ? `return ${renderedLeaf(ctx, ordinary.conversion, concrete)};`
             : 'gea::host::throwRuntimeError("TypeError", "a native view receiver has no admitted plain allocation");'
         const property = `${viewKeyText(key)}`
         const native =
@@ -147,7 +168,8 @@ export const nativeFieldViewReadForText = (
           `${adapter}, ${accepted}, [&]() -> ${result} { ${getterAnswer ?? `${native}${plain}`} });`
         )
       },
-      dynamicRead(key)
+      dynamicRead(key),
+      nativeDataRead(key)
     )
   // The receiver is the statement-lambda's ARGUMENT, not a local bound inside
   // it: a withheld receiver can be `(*presentOrThrow(<element read>))`, a

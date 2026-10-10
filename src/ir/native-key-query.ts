@@ -22,8 +22,11 @@ export const nativeKeyQueryOf = (operation: IrOperation, closedLayoutOf: (value:
   if (operation.kind !== 'call' || !operation.intrinsicOwnKeys || operation.argumentsAreSpread) return false
   const queried = operation.arguments[0]?.representation
   // Lowering authenticates this intrinsic. A same-shaped arbitrary callable
-  // has no such contract and must retain its ordinary call effects.
-  if (queried === undefined || !closedLayoutOf(queried)) return false
+  // has no such contract and must retain its ordinary call effects. The
+  // queried object is read through its carrier exactly as an enumeration's
+  // receiver is: an absent arm makes `ToObject` throw a TypeError and runs no
+  // user code (hono's `Object.keys(this.#routes!)` over an optional table).
+  if (queried === undefined || !closedReceiver(queried)) return false
   // `Object.hasOwn(o, key)` is the one member of this family that takes a
   // second argument -- the queried KEY, not a second object -- and
   // `HasOwnProperty` runs `ToPropertyKey` on it (7.1.19) before ever

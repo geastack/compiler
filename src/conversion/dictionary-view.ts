@@ -162,6 +162,23 @@ const checkedDynamicWrapperRead = (node: ConversionNode, resolve?: (id: string) 
   )
 }
 
+/**
+ * An entry read into the table's declared any/unknown carrier: `gea::Value::box`
+ * of a primitive keeps the ECMAScript value, and of a shared class reference
+ * holds that same object. The box allocates only its envelope, so the read is
+ * live -- `Record<string, Node>` reaching `Record<string, unknown>` (Hono's
+ * `hasChildren`) or `Record<string, number>` likewise.
+ */
+const boxedEntryIsLive = (node: ConversionNode): boolean => {
+  if (node.target.kind !== 'dynamic' || node.target.reason === 'untyped-callable' || node.capability.kind !== 'atom') return false
+  const materializer = node.capability.materializer
+  if (materializer.id !== 'gea::Value::box') return false
+  return (
+    materializer.primitiveIdentityTransport === 'preserved' ||
+    (node.source.kind === 'class-ref' && node.source.ownership === 'shared-refcount')
+  )
+}
+
 export const dictionaryEntryReadIsLive = (node: ConversionNode, resolve?: (id: string) => ConversionNode | null): boolean => {
   if (!recipeIsMaterializableWithoutPriorSourceGuard(node, resolve)) return false
   // A by-value record (`representation/value-records.ts`) is one the whole
@@ -169,6 +186,7 @@ export const dictionaryEntryReadIsLive = (node: ConversionNode, resolve?: (id: s
   // primitives, so its checked product copy IS the entry's value: there is no
   // identity or later write for a copy to lose.
   if (node.target.kind === 'record' && node.target.ownership === 'owned' && node.capability.kind === 'product') return true
+  if (boxedEntryIsLive(node)) return true
   if (!preservesReadValue(node.capability)) return false
   const needsCheck =
     (node.source.kind === 'dynamic' && node.target.kind !== 'dynamic') || conversionRequiresSourceGuard(node.capability, resolve)

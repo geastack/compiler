@@ -1070,6 +1070,10 @@ export const objectCreateResultOverride = (
   if (node.arguments.length !== 1 || node.arguments[0]?.kind !== ts.SyntaxKind.NullKeyword) return null
   const assertion = enclosingTypeAssertion(node)
   if (assertion) return context.types.typeAt(assertion)
+  // Part of a stated-`any` binding's one object, laid out at the type its
+  // consumer wants rather than the annotation's open positions.
+  const consumerLayout = context.types.statedAnyBindingLayoutAt(node)
+  if (consumerLayout !== null) return consumerLayout
   // Contextual typing reaches destinations an immediate parent check cannot:
   // an object-literal field, an argument slot, and an indexed assignment are
   // all real declarations of the carrier this fresh null-prototype object

@@ -79,7 +79,7 @@ import { bufferReadNeedsLogicalReceiver, hostReadIgnoresLogicalReceiver, nativeL
 import { authenticatedTemplateCallEntry } from './call-entry.js'
 import { nativeCallableFlowOf } from './callable-class-flow.js'
 import { nativeFieldOwnerReadMatches } from './native-field-owner.js'
-import { absentClassArmsHold } from './absent-class-arm.js'
+import { absentClassArmsHold, requiredAbsentClassArmsStamped } from './absent-class-arm.js'
 import type { ReflectionExposure } from './reflection-demand.js'
 import { objectValueConversionInputsOf, objectValueConversionsMatch } from './object-value-conversions.js'
 import { operationConversionInputsOf, operationConversionsMatch } from './operation-conversions.js'
@@ -349,6 +349,17 @@ const abiDemands = (manifest: TargetRuntimeManifest, abi: CallableAbi | null): C
 }
 
 const getDemandsOf = (operation: Extract<IrOperation, { kind: 'get' }>, ctx: CertifyContext): CapabilityDemand[] => {
+  {
+    const key = ctx.definitionOf(operation.key.value)
+    if (!requiredAbsentClassArmsStamped(operation, key?.kind === 'constant' && key.literal === 'string' ? key.text : null, ctx.classes))
+      return [
+        {
+          key: 'property-access:union:get:absent-class-arm',
+          verdict: 'missing',
+          detail: 'an object-valued read was admitted on proving a class arm absent, and the closed census did not prove it'
+        }
+      ]
+  }
   if (operation.absentClassArms !== undefined) {
     const key = ctx.definitionOf(operation.key.value)
     if (

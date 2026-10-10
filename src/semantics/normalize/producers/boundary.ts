@@ -6,9 +6,9 @@ import type { BindingOperation, BoundaryOperation } from '../../model/operations
 import type { CensusCandidate } from '../census.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'
-import { assertsType, unwrapErased } from './erasure.js'
+import { assertsType, unwrapErasedExpression } from './erasure.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
-import { logicalMergeTypeOf } from './logical-merge-type.js'
+import { citedValueTypeAt } from './cited-value-type.js'
 import { citeExpressionResult } from './references.js'
 import { valueEdgesInto } from './shared.js'
 
@@ -36,36 +36,9 @@ export const resolveExpressionOperand = (
   if (cited.kind === 'unmodelled') return null
   return {
     source: cited.source,
-    type: citedTypeAt(context, unwrapErased(node)),
+    type: citedValueTypeAt(context, unwrapErasedExpression(node)),
     ...(assertsType(node, context.checker) ? { asserted: true as const } : {})
   }
-}
-
-/**
- * The type a citation of `node`'s published value carries: the checker's view
- * of the node, except for a logical merge, whose result `computations.ts`
- * publishes under `logicalMergeTypeOf` -- and a citation must name the value
- * that result actually holds, not a second checker query at the same node.
- */
-const citedTypeAt = (context: ProducerContext, node: ts.Node): StructuralTypeId => {
-  if (ts.isBinaryExpression(node)) {
-    const operator = node.operatorToken.kind
-    if (
-      operator === ts.SyntaxKind.QuestionQuestionToken ||
-      operator === ts.SyntaxKind.BarBarToken ||
-      operator === ts.SyntaxKind.AmpersandAmpersandToken
-    ) {
-      const merged = logicalMergeTypeOf(
-        context,
-        ts.tokenToString(operator) ?? '',
-        node,
-        context.types.typeAt(node.left),
-        context.types.typeAt(node.right)
-      )
-      if (merged !== null) return merged
-    }
-  }
-  return context.types.typeAt(node)
 }
 
 /**

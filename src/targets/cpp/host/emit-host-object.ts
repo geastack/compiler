@@ -3823,7 +3823,7 @@ export const objectMemberText = (ctx: EmitContext, member: string, operation: Ca
   if (member === 'getOwnPropertyDescriptor') return getOwnPropertyDescriptorText(ctx, operation)
   if (hostMemberTemplateOf('ObjectConstructor', member) === 'object-assign') return assignText(ctx, operation)
   if (member === 'fromEntries') return fromEntriesText(ctx, operation)
-  if (member === 'create') return createText(operation)
+  if (hostMemberTemplateOf('ObjectConstructor', member) === 'object-create') return createText(operation)
   if (member === 'defineProperty') return definePropertyText(ctx, operation)
   throw createCppEmitBlockedError(
     `host-member-call:Object.${member}`,

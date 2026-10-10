@@ -2594,7 +2594,7 @@ const computeNativeCallableFlow = (
         // The selected heaps already prove each allocation's own slot or its
         // absence; a union arm's certified absence is the unknown-receiver
         // answer (`native-field-view-domains.ts`) and is no route behind them.
-        if (routes.some((route) => route.originalAbsent === true || route.dynamicGet === true)) continue
+        if (routes.some((route) => route.originalAbsent === true || route.dynamicGet === true || route.nativeData === true)) continue
         domains.set(name, [
           ...(domains.get(name) ?? []),
           ...(present && name === key ? routes.filter((route) => route.sourceAbsent !== true) : routes)

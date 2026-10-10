@@ -8,6 +8,7 @@ import type { ClassLayout } from '../projection/classes.js'
 import { classMemberOf } from '../projection/fields.js'
 import { extendsClass } from '../projection/dispatch.js'
 import { abiOfCallee } from '../projection/callee.js'
+import { nativeDataPropertyOf } from '../representation/native-data-properties.js'
 
 export interface NativeFieldStorageDomain {
   readonly read: Representation
@@ -23,6 +24,13 @@ export interface NativeFieldStorageDomain {
   readonly sourceAbsent?: true
   /** A union's `dynamic` arm: the read is that `gea::Value`'s own [[Get]]. */
   readonly dynamicGet?: true
+  /**
+   * A union's binary-view arm (`typed-array`, `data-view`, `array-buffer`):
+   * the read is that arm's own native data property (`nativeDataPropertyOf`),
+   * which no descriptor can replace -- `buffer`, `byteOffset` and
+   * `byteLength` are prototype accessors over the view's internal slots.
+   */
+  readonly nativeData?: true
 }
 
 export interface NativeFieldViewDomains {
@@ -37,6 +45,8 @@ export interface NativeFieldViewDomains {
    */
   readonly absentRoutesOf: (receiver: Representation, key: string | null) => readonly NativeFieldStorageDomain[] | null
 }
+
+const binaryViewDataKeys = ['buffer', 'byteLength', 'byteOffset', 'length', 'BYTES_PER_ELEMENT'] as const
 
 const isDocumentPlan = (plan: NativeFieldViewPlan): boolean =>
   plan.source.kind === 'dictionary' && plan.fields.every((field) => field.declaredAnyEntry === true)
@@ -155,6 +165,19 @@ export const nativeFieldViewDomainsOf = (
       cache.set(identity, common)
       return common
     }
+    // A binary view beside a live record view in one union -- node-compat's
+    // `BodyInit` holds `Buffer` and `ArrayBufferView<ArrayBuffer>`, and the
+    // latter is a live view of a Document a dynamic body was read as. Only as
+    // an ordinary union arm: a binary view is never itself a view target.
+    if (ordinaryArm && (receiver.kind === 'typed-array' || receiver.kind === 'data-view' || receiver.kind === 'array-buffer')) {
+      const fields = new Map<string, NativeFieldStorageDomain[]>()
+      for (const key of binaryViewDataKeys) {
+        const property = nativeDataPropertyOf(receiver, key)
+        if (property !== null) fields.set(key, [{ read: property.result, write: null, nativeData: true }])
+      }
+      cache.set(identity, fields)
+      return fields
+    }
     if (receiver.kind === 'class-ref' && receiver.ownership === 'shared-refcount') {
       if (!classes.has(receiver.declaration)) return null
       const family = [...classes.values()].filter(
@@ -180,16 +203,26 @@ export const nativeFieldViewDomainsOf = (
             if (selected?.kind !== 'accessor' || selected.owner !== declaration) continue
             const getter = accessor.getter === null ? null : abiOf(accessor.getter)
             const setter = accessor.setter === null ? null : abiOf(accessor.setter)
+            // An accessor with no admitted ABI (a getter nothing calls has
+            // no body) states no route for ITS key; it does not void the
+            // class's other members. node-compat's `ResponseImpl` declares
+            // every WHATWG attribute as a getter and hono reads only
+            // `headers` off `Response | ResponseInit`.
             if (
               !getter ||
               getter.parameters.length !== 0 ||
               getter.restFrom !== null ||
               (accessor.setter !== null && (!setter || setter.parameters.length !== 1 || setter.restFrom !== null))
-            )
-              return null
+            ) {
+              fields.delete(accessor.key)
+              continue
+            }
             const read =
               getter.result.kind === 'void' ? accessor.representation && abiOfCallee(accessor.representation)?.result : getter.result
-            if (read === undefined || (getter.result.kind === 'void' && read.kind !== 'undefined')) return null
+            if (read === undefined || (getter.result.kind === 'void' && read.kind !== 'undefined')) {
+              fields.delete(accessor.key)
+              continue
+            }
             fields.set(accessor.key, [{ read, write: setter?.parameters[0]?.value ?? null }])
           }
         }

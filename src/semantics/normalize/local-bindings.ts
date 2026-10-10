@@ -2,6 +2,7 @@ import ts from 'typescript'
 import {
   annotationStatesNothing,
   exactEmptyObjectLiteralType,
+  arrayPredicateNarrowedElementTypeOf,
   derivedExpressionType,
   disjointUnionMembersOf,
   indexedTypeOf,
@@ -1709,6 +1710,12 @@ export const censusLocalBindings = (
     if (ts.isElementAccessExpression(node) && node.argumentExpression) {
       const upstream = parameters.typeAt(node)
       if (upstream) return upstream
+      // `Array.isArray(pattern) ? pattern[0] : p` reads the tuple the
+      // predicate narrowed to, not the receiver's declared union: resolving
+      // the receiver through its declaration loses the narrowing, and hono's
+      // trie-router `key` stayed `any` and was boxed into every lookup.
+      const predicateNarrowed = arrayPredicateNarrowedElementTypeOf(checker, node)
+      if (predicateNarrowed) return predicateNarrowed
       const receiver = knownOrResolve(node.expression)
       if (!receiver) return collections.arrayElementForRead(node.expression) ?? bags.slotTypeAt(node)
       // A literal key is a named member spelled with brackets; any other key

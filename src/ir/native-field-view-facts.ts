@@ -187,7 +187,7 @@ const fieldSourcesOf = (
   receiver: IrValueId,
   key: string,
   at?: GetOperation
-): readonly Pick<NativeFieldStorageDomain, 'read' | 'checkedRead' | 'originalAbsent' | 'dynamicGet'>[] | null => {
+): readonly Pick<NativeFieldStorageDomain, 'read' | 'checkedRead' | 'originalAbsent' | 'dynamicGet' | 'nativeData'>[] | null => {
   const actual = at === undefined ? undefined : flow.nativeFieldOperationStorageValues?.get(at)
   if (actual !== undefined) return actual.get(key) ?? null
   const data = flow.nativeFieldStorageValues.get(receiver)?.get(key)
@@ -202,7 +202,9 @@ const fieldSourcesOf = (
   if (physical === null) return carried ?? (at === undefined ? null : (flow.nativeFieldViewAbsentRoutesOf?.(receiver, key) ?? null))
   // Physical allocation slots are the whole answer where they exist; a union
   // arm's certified absence speaks only for a receiver with none.
-  const domains = carried?.some((entry) => entry.originalAbsent === true || entry.dynamicGet === true) ? undefined : carried
+  const domains = carried?.some((entry) => entry.originalAbsent === true || entry.dynamicGet === true || entry.nativeData === true)
+    ? undefined
+    : carried
   const routes = physical.flatMap((read) => {
     const selected = domains?.filter((entry) => representationKey(entry.read) === representationKey(read))
     return selected?.length ? selected : [{ read }]
@@ -238,14 +240,23 @@ export const nativeFieldViewReadFor = (
       abiOfCallee(source) !== null && abiOfCallee(target) !== null
         ? (conversions.nativeMethodFor(source, target) ?? conversions.nodeFor(source, target))
         : conversions.nodeFor(source, target)
-    const selected =
+    const unguarded =
       (checkedRead === undefined
         ? null
         : representationKey(checkedRead.source) === representationKey(source) &&
             representationKey(checkedRead.target) === representationKey(target)
           ? checkedRead
           : conversions.checkedFieldReadFor(source, target, checkedRead)) ?? node
-    if (!recipeIsMaterializableWithoutPriorSourceGuard(selected, conversions.nodeById)) return null
+    // A read the program's flow narrowed (`arg.headers instanceof Headers ?
+    // arg.headers : ...` over `Response | ResponseInit`) selects an arm of
+    // the slot's union on the strength of a guard evaluated on an EARLIER
+    // read of the same member. Through a live view or a getter that read is
+    // a second [[Get]], so the selection is the checked dispatch: the arm the
+    // guard proved, a TypeError for any other -- never an unchecked `get<k>`.
+    const selected = recipeIsMaterializableWithoutPriorSourceGuard(unguarded, conversions.nodeById)
+      ? unguarded
+      : conversions.assertedUnionFor(source, target, false)
+    if (selected === null || !recipeIsMaterializableWithoutPriorSourceGuard(selected, conversions.nodeById)) return null
     const previous = sources.get(representationKey(source))
     if (previous !== undefined && previous.conversion !== selected.id) {
       const canonical = documentEntryReadOf(source, target, previous.conversion, selected, checkedRead !== undefined, conversions)
@@ -370,7 +381,12 @@ export const nativeFieldViewWriteOf = (
   if ((data && accessor) || (!data?.length && !accessor?.length && !descriptors?.length)) return null
   // A certified absence is a read route: storing the key on that arm creates
   // an expando property, which no setter-less descriptor route performs.
-  if (!data && !accessor && descriptors?.some((entry) => entry.originalAbsent === true || entry.dynamicGet === true)) return null
+  if (
+    !data &&
+    !accessor &&
+    descriptors?.some((entry) => entry.originalAbsent === true || entry.dynamicGet === true || entry.nativeData === true)
+  )
+    return null
   const targets = new Map<string, NativeFieldViewWrite['targets'][number]>()
   for (const target of data ?? accessor?.map((entry) => entry.write) ?? descriptors!.map((entry) => entry.write)) {
     if (target === null) {

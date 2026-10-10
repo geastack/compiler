@@ -461,6 +461,14 @@ export const hostTemplateFrameOf = (
     }
     return dataTree(argument.representation)
   }
+  // `createText` renders only the one-argument null-prototype form, as the
+  // empty table or struct the result carrier states (or an empty box): a
+  // fresh object with no own property, which publishes nothing it could
+  // hand to dynamic code. Without this frame `Object.create(null)` was an
+  // unknown call whose result published every carrier its value type
+  // reaches -- hono's `Record<string, HandlerSet<T>>` made the router's
+  // handler tuples fully reflected.
+  if (template === 'object-create') return operation.arguments.length === 1 && operation.arguments[0]?.representation.kind === 'null'
   if (template === 'typed-array-set') {
     const [source, offset] = operation.arguments
     return (

@@ -2813,6 +2813,14 @@ const cppConversionTables = (
       if (classArmWithoutHome(layouts, source, target)) return null
       if (proxyArmWithoutHome(source, target)) return null
       const recipe = conversionRecipeOf(source, target)
+      // An element the chain converts inline (`convertedValueText`) is
+      // spelled by the chain's own recipe for that pair: a `narrowed-load`
+      // out of a sum is the native arm read (`.get<N>()`) whose contract
+      // `nativeNarrowing` states, anything else the wrapped-payload claim.
+      const elementPairUnused = (from: Representation, to: Representation): boolean =>
+        conversionRecipeOf(from, to)?.id === 'narrowed-load' && (from.kind === 'optional' || from.kind === 'tagged-union')
+          ? nativeNarrowing(from, to).nativeFieldProtocol === 'unused'
+          : heldPairUnusedOf(nativeWrappedPayload)(from, to)
       if (recipe !== null && recipe.renders) {
         // `unreachable-value` spells either `unreachableValue<T>()` (a throw that
         // reads nothing) or a discard into `undefined`: no field is read and no
@@ -2837,7 +2845,20 @@ const cppConversionTables = (
                     // the same shape around the payload's own conversion.
                     recipe.id === 'optional-payload-convert' && source.kind === 'optional' && target.kind === 'optional'
                     ? nativeWrappedPayload(source.payload, target.payload)
-                    : {}
+                    : // `array-to-tuple` reads each position by index
+                      // (`readElement`) and `array-copy-recast` copies by
+                      // `appendRangeConverted`; neither touches a field
+                      // table, so each reads one exactly when its element
+                      // conversions do.
+                      recipe.id === 'array-to-tuple' && source.kind === 'array-object' && target.kind === 'record'
+                      ? target.fields.every((field) => elementPairUnused(source.element, field.value))
+                        ? { nativeFieldProtocol: 'unused' }
+                        : {}
+                      : recipe.id === 'array-copy-recast' && source.kind === 'array-object' && target.kind === 'array-object'
+                        ? elementPairUnused(source.element, target.element)
+                          ? { nativeFieldProtocol: 'unused' }
+                          : {}
+                        : {}
         return {
           id: `chain:${recipe.id}`,
           domain: `static:${recipe.id}`,

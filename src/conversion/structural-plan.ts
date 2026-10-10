@@ -172,8 +172,23 @@ const unionLeavesOf = (value: Representation): readonly Representation[] =>
 const recordArmsCarriedExactly = (source: Representation, target: Representation): boolean => {
   if (source.kind !== 'tagged-union' || target.kind !== 'tagged-union') return false
   const carried = new Set(unionLeavesOf(target).map(representationKey))
-  return unionLeavesOf(source).every((leaf) => !hasRecordViewSource(leaf) || carried.has(representationKey(leaf)))
+  const homes = new Set(typedUnionLeavesOf(target).map((leaf) => leaf.semanticType))
+  // A record leaf whose type has no arm anywhere in the target was narrowed
+  // OUT by flow (`else if (body instanceof Blob)` leaves the later reads
+  // without the Blob arm): the selection's tag check discards it, so it has
+  // no layout to rebuild. A leaf whose type the target still holds at another
+  // carrier is a real recast and keeps needing the structural plan.
+  return typedUnionLeavesOf(source).every(
+    ({ value, semanticType }) =>
+      !hasRecordViewSource(value) || carried.has(representationKey(value)) || (semanticType !== undefined && !homes.has(semanticType))
+  )
 }
+
+const typedUnionLeavesOf = (
+  value: Representation,
+  semanticType?: string
+): readonly { readonly value: Representation; readonly semanticType: string | undefined }[] =>
+  value.kind === 'tagged-union' ? value.arms.flatMap((arm) => typedUnionLeavesOf(arm.value, arm.semanticType)) : [{ value, semanticType }]
 
 /** A value read as `undefined`/`null`/`void` is DISCARDED (`chain:unreachable-value`,
  * `chain:discard-into-void`): correct only where flow already proved the read

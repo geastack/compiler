@@ -502,7 +502,19 @@ const sliceBody = (
     ) {
       const text = constants.get(operation.key.value)
       const scopes = receiverClassScopes(operation.receiver.representation, structuralViewScopes)
-      if (text !== undefined) for (const scope of scopes) spelledKeys.add(`${scope}#${text}`)
+      // A computed key the semantic graph proved to a finite name set
+      // (`GetOperation.provenKeyTexts`) names exactly those members, the same
+      // fact `reflection-demand.ts` demands fields by. Hono's
+      // `bodyCache[key]` for `key: keyof Body` reads a cache boxed because
+      // `Body` states `json: any`; filed as an unknown key on an unknown
+      // receiver, it kept every method of every class -- `HonoRequest#query`
+      // and the query-string parser nothing calls among them.
+      const proven =
+        text === undefined && (operation.kind === 'get' || operation.kind === 'set') && operation.provenKeyTexts?.length
+          ? operation.provenKeyTexts
+          : undefined
+      if (proven !== undefined) for (const scope of scopes) for (const key of proven) spelledKeys.add(`${scope}#${key}`)
+      else if (text !== undefined) for (const scope of scopes) spelledKeys.add(`${scope}#${text}`)
       // A dynamic key is a hazard only where it READS. `fieldInitializerRuns`
       // asks one question -- can anything observe the value this initializer
       // would leave in the field -- and a store answers no: whatever key it

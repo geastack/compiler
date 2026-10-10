@@ -60,11 +60,29 @@ const primitiveLeaf = (representation: Representation): boolean =>
   representation.kind === 'string'
 
 /** A result that holds `undefined` without a box, and nothing but primitives otherwise. */
-const holdsAbsentPrimitive = (representation: Representation): boolean => {
+export const holdsAbsentPrimitive = (representation: Representation): boolean => {
   if (representation.kind === 'undefined') return true
   if (representation.kind === 'optional') return representation.absence === 'undefined' && primitiveLeaf(representation.payload)
   if (representation.kind === 'tagged-union')
     return representation.arms.some((arm) => arm.value.kind === 'undefined') && representation.arms.every((arm) => primitiveLeaf(arm.value))
+  return false
+}
+
+/**
+ * A result that holds `undefined` without a box, whatever else it holds.
+ *
+ * An object-valued read -- a method read through an `as any` receiver
+ * (`semantics/normalize/any-cast-member-call.ts`) publishes `(() => R) |
+ * undefined` -- has no safe fallback: the expando read a full class keeps
+ * hands back a box, and unboxing it into a callable publishes the callable's
+ * inputs, which the census did not count. Such a read is admitted only on the
+ * condition `absentClassArmsRequired` names: every lacking arm must end up
+ * proven, or certification refuses the read.
+ */
+const holdsAbsent = (representation: Representation): boolean => {
+  if (representation.kind === 'undefined') return true
+  if (representation.kind === 'optional') return representation.absence === 'undefined'
+  if (representation.kind === 'tagged-union') return representation.arms.some((arm) => arm.value.kind === 'undefined')
   return false
 }
 
@@ -89,8 +107,43 @@ export const absentClassArmRead = (
 ): surface is Extract<Representation, { kind: 'class-ref' }> =>
   surface.kind === 'class-ref' &&
   (unionOf(receiver)?.arms.some((arm) => arm.value === surface) ?? false) &&
-  holdsAbsentPrimitive(result) &&
+  holdsAbsent(result) &&
   classFamilyLacksKey(classes, surface.declaration, key)
+
+/**
+ * The class arms a non-primitive read was admitted on the condition of
+ * proving absent (`holdsAbsent`), in arm order; empty for a primitive read,
+ * whose arms may keep the expando fallback.
+ */
+const absentClassArmsRequired = (
+  operation: GetOperation,
+  key: string,
+  classes: ReadonlyMap<DeclarationId, ClassLayout>
+): readonly DeclarationId[] => {
+  const receiver = operation.receiver.representation
+  const result = operation.result.representation
+  if (holdsAbsentPrimitive(result)) return []
+  const arms: DeclarationId[] = []
+  for (const arm of unionOf(receiver)?.arms ?? [])
+    if (absentClassArmRead(receiver, arm.value, key, result, classes) && !arms.includes(arm.value.declaration))
+      arms.push(arm.value.declaration)
+  return arms
+}
+
+/** Certification's check that a non-primitive read left no lacking arm on the expando fallback. */
+export const requiredAbsentClassArmsStamped = (
+  operation: GetOperation,
+  key: string | null,
+  classes: ReadonlyMap<DeclarationId, ClassLayout>
+): boolean => {
+  if (key === null || unionOf(operation.receiver.representation) === null) return true
+  // A read nothing stamped kept the expando fallback whole, and that read is
+  // certified on its own terms; only a read admitted by proving SOME arm
+  // absent has to have proven every lacking one.
+  const stamped = operation.absentClassArms ?? []
+  if (stamped.length === 0) return true
+  return absentClassArmsRequired(operation, key, classes).every((declaration) => stamped.includes(declaration))
+}
 
 /** A class the closed exposure left without a dynamic protocol. A class it never rowed is fail-closed full. */
 const withoutDynamicProtocol = (exposure: ReflectionExposure, declaration: DeclarationId): boolean => {

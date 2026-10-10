@@ -352,7 +352,16 @@ export const physicalInitializerTypeOf = (
   // shared authority; a function/arrow literal is rarely `any`-degraded, so
   // this mostly falls straight through to the checker exactly as before,
   // but stays uniform with every other "what does this hold" question.
-  const physical = censusedTypeAt(checker, parameters, initializer)
+  //
+  // Except that for a function LITERAL the composed census answers its
+  // RETURN (`structural.ts` rebuilds the callable shape from the literal's
+  // own signature for exactly that reason, and `signatureOf` reads the bound
+  // return through it). Taking that answer as the literal's type made a
+  // member whose arrow had a settled return -- hono's `this[method] = (...)
+  // => { ...; return this as any }` -- look non-callable, and the member fell
+  // back to its overload set's `callable-identity`.
+  const censused = censusedTypeAt(checker, parameters, initializer)
+  const physical = censused.getCallSignatures().length > 0 ? censused : checker.getTypeAtLocation(initializer)
   if (physical.getCallSignatures().length !== 1) return null
   if (declaredSignatures.length >= 2) return physical
   const soleDeclared = declaredSignatures[0]

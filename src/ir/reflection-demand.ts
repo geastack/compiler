@@ -41,6 +41,7 @@ import { closePhysicalClassReflection } from './physical-class-reflection.js'
 import { absentClassArmRead, classFamilyLacksKey } from './absent-class-arm.js'
 import type { ProgramConversionRecipe } from './program-conversions.js'
 import { nativeAbsentPropertyReadOf } from './native-absent-property.js'
+import { isPrivateNameKey } from '../semantics/model/structural-types.js'
 
 /** A constructor carrier's own construct convention, seen through presence and borrowing; see its use in `closedConstructOperations`. */
 const constructorCarrierOf = (
@@ -330,6 +331,26 @@ const publishedChildrenOf = (
       return [representation.call.result, representation.construct.result]
     case 'native-handle':
       return [representation.call, representation.construct].flatMap((abi) => (abi ? [abi.result] : []))
+    case 'class-ref': {
+      // A `#private` element is reachable only from the class's own body,
+      // never by dynamic code holding the instance: the reflected protocol
+      // leaves it out (`records.ts`), so publishing the instance publishes
+      // none of what it holds there. Hono's Context keeps the router's
+      // `#matchResult` that way; walking it made every handler tuple in the
+      // router fully reflected.
+      const layout = classes.get(representation.declaration)
+      if (layout?.nativeStorage === undefined) return directChildrenOf(representation, classes, deriver)
+      const raw = deriver?.layoutOf(representation.shapeId as StructuralTypeId)
+      const visible = <T extends { readonly key: string }>(members: readonly T[]): readonly T[] =>
+        members.filter((member) => !isPrivateNameKey(member.key))
+      return [
+        ...visible(layout.methods).flatMap((method) => (method.representation ? [method.representation] : [])),
+        ...visible(layout.nativeStorage.fields).map((field) => field.value),
+        ...layout.staticFields.flatMap((field) => (field.representation ? [field.representation] : [])),
+        ...(raw?.kind === 'record' ? visible(raw.accessors).map((accessor) => accessor.value) : []),
+        ...(raw?.kind === 'record-with-index' ? raw.indexes.map((index) => index.value) : [])
+      ]
+    }
     default:
       return directChildrenOf(representation, classes, deriver)
   }
@@ -518,6 +539,70 @@ const callMatchesAbi = (operation: Extract<IrOperation, { readonly kind: 'call' 
       (argument, index) => representationKey(argument.representation) === representationKey(abi.parameters[index]!.value)
     )
   )
+}
+
+const unwrappedCallableAbi = (representation: Representation): CallableAbi | null => {
+  if (representation.kind === 'optional') return unwrappedCallableAbi(representation.payload)
+  if (representation.kind === 'borrowed-ref') return unwrappedCallableAbi(representation.referent)
+  return callableAbiOf(representation)
+}
+
+/**
+ * The inputs a callable adapter from `sourceAbi` to `targetAbi` converts, and
+ * so may hand a dynamic source listener: every target input the source does
+ * not state in the target's own carrier.
+ *
+ * A source whose own convention declares no receiver is never handed the
+ * target's: the adapter ignores it (`emit-narrowing.ts`'s `resultAdapterOf`,
+ * `ignoresReceiver`), which is how an arrow keeps its lexical `this` in a
+ * method slot. An event library's async iterator class stores exactly such
+ * arrows as `this: EventEmitter` listeners, and promoting that receiver
+ * published every emitter subclass and all their fields reach -- loggers and
+ * connections -- to full reflection, refusing their `this.method.bind(this)`
+ * calls. An input the source convention states in the target's own carrier is
+ * forwarded unchanged; only a converted one can reach a dynamic listener.
+ */
+const callableAdapterInputsOf = (sourceAbi: CallableAbi | null, targetAbi: CallableAbi): readonly Representation[] => {
+  const forwarded = (target: Representation, source: Representation | undefined): boolean =>
+    source !== undefined && representationKey(source) === representationKey(target)
+  const inputs: Representation[] = []
+  if (
+    targetAbi.receiver !== null &&
+    (sourceAbi === null || (sourceAbi.receiver !== null && !forwarded(targetAbi.receiver, sourceAbi.receiver)))
+  )
+    inputs.push(targetAbi.receiver)
+  targetAbi.parameters.forEach((parameter, index) => {
+    const source =
+      sourceAbi !== null && sourceAbi.restFrom === targetAbi.restFrom && sourceAbi.argumentsFrame === targetAbi.argumentsFrame
+        ? sourceAbi.parameters[index]?.value
+        : undefined
+    if (!forwarded(parameter.value, source)) inputs.push(parameter.value)
+  })
+  return inputs
+}
+
+/**
+ * The inputs of the installed callable adapter a member store or read
+ * performs inline between two native conventions, or `null` when the pair is
+ * not two native callables joined by an installed conversion. The adapter is
+ * the same one a `convert` installs, so it publishes exactly what that
+ * `convert` would (`callableAdapterInputsOf`) and never the callable's own
+ * result graph. Hono's `this.match = match` stores a receiver-less arrow into
+ * RegExpRouter's `this`-stating `match` slot; as an unproven slot value it
+ * published every handler tuple the router returns.
+ */
+const inlineCallableAdapterInputsOf = (
+  source: Representation,
+  target: Representation,
+  node: ConversionNode | null | undefined
+): readonly Representation[] | null => {
+  const sourceAbi = unwrappedCallableAbi(source)
+  const targetAbi = unwrappedCallableAbi(target)
+  if (sourceAbi === null || targetAbi === null || node === null || node === undefined) return null
+  if (node.capability.kind !== 'atom' && node.capability.kind !== 'static') return null
+  if (representationKey(node.source) !== representationKey(source) || representationKey(node.target) !== representationKey(target))
+    return null
+  return callableAdapterInputsOf(sourceAbi, targetAbi)
 }
 
 const promote = (
@@ -1226,8 +1311,18 @@ export const reflectionExposureOf = (
         operation
       )
     }
-    if (operation.kind === 'convert')
-      citeViewNode(operation.conversionUse, operation.source.representation, operation.result.representation, operation)
+    if (operation.kind === 'convert') {
+      // An unshared-array rebuild names the ELEMENT conversion each copied
+      // element goes through (`ConvertOperation.rebuild`), so its node pairs
+      // the element carriers, not the arrays this operation converts between.
+      // Matched against the arrays it never cited, and an element converted
+      // into a live view (hono's RegExpRouter maps routes to `[handler, any]`
+      // tuples stored as `[handler, ParamIndexMap]`) read through a source
+      // protocol nothing demanded.
+      const node = operation.rebuild === 'unshared-array' ? options.conversions?.nodeById(operation.conversionUse) : null
+      if (node) citeViewNode(node.id, node.source, node.target, operation)
+      else citeViewNode(operation.conversionUse, operation.source.representation, operation.result.representation, operation)
+    }
     if (operation.kind === 'call' && operation.nativeArrayDescriptorSnapshot) {
       const node = options.conversions?.nodeById(operation.nativeArrayDescriptorSnapshot.conversion)
       if (node) citeViewNode(node.id, node.source, node.target, operation)
@@ -1526,6 +1621,64 @@ export const reflectionExposureOf = (
       })
     if (closed || unionArmCallClosed(operation)) closedCallOperations.add(operation)
   }
+  // A member read whose value is only ever the callee of a closed call is
+  // that call's own dispatch, not a value: the printer calls each proven
+  // function with the receiver it was read from and never materializes the
+  // read. Hono's `this.router.match(method, path)` over a union of routers is
+  // the shape -- RegExpRouter's `match` states its `this` in its ABI and the
+  // joined read cannot, so the read looked inexact and published the
+  // router's whole match result.
+  // Read lazily: `closedCallOperations` is completed by later loops.
+  let closedCalleeOnlyReadSet: Set<IrOperation> | null = null
+  const nativeUnboundMethodReadOf = (field: Representation, value: Representation): boolean => {
+    const node = options.conversions?.nodeById(`${conversionNodeIdOf(field, value)}#native-method`)
+    return (
+      node !== null &&
+      node !== undefined &&
+      node.capability.kind === 'static' &&
+      node.capability.materializer.nativeMethod !== undefined &&
+      node.capability.materializer.nativeFieldProtocol === 'unused'
+    )
+  }
+  // `router.match.bind(router)` lowers to one `bind-callable` op over the
+  // method value; the `bind` read it was spelled with is left unused and
+  // never emitted. Reading Function.prototype's `bind`/`call`/`apply` off a
+  // callable carrier publishes nothing of the callable -- its value was
+  // treated as an unproven slot and every router's match tuple went full.
+  const functionPrototypeKeys = new Set(['bind', 'call', 'apply'])
+  const unusedFunctionPrototypeRead = (read: IrOperation, receiver: Representation, key: string): boolean => {
+    if (read.kind !== 'get' || !functionPrototypeKeys.has(key)) return false
+    if (
+      receiver.kind !== 'function' &&
+      receiver.kind !== 'function-family' &&
+      receiver.kind !== 'function-value-dispatch' &&
+      receiver.kind !== 'function-value-family'
+    )
+      return false
+    closedCalleeOnlyRead(read)
+    return !(operandUseCounts?.has(read.result.id) ?? true)
+  }
+  let operandUseCounts: Map<IrValueId, number> | null = null
+  const closedCalleeOnlyRead = (read: IrOperation): boolean => {
+    if (closedCalleeOnlyReadSet === null) {
+      const found = new Set<IrOperation>()
+      const uses = new Map<IrValueId, number>()
+      const calleeUses = new Map<IrValueId, number>()
+      for (const operation of operations) {
+        for (const operand of operandsOfIrOperation(operation)) uses.set(operand.value, (uses.get(operand.value) ?? 0) + 1)
+        if (operation.kind === 'call' && closedCallOperations.has(operation) && !operation.argumentsAreSpread)
+          calleeUses.set(operation.callee.value, (calleeUses.get(operation.callee.value) ?? 0) + 1)
+      }
+      for (const operation of operations) {
+        if (operation.kind !== 'get') continue
+        const count = calleeUses.get(operation.result.id) ?? 0
+        if (count > 0 && uses.get(operation.result.id) === count) found.add(operation)
+      }
+      closedCalleeOnlyReadSet = found
+      operandUseCounts = uses
+    }
+    return closedCalleeOnlyReadSet.has(read)
+  }
   const closedConstructOperations = new Set<IrOperation>()
   for (const operation of operations) {
     if (operation.kind !== 'construct') continue
@@ -1631,11 +1784,6 @@ export const reflectionExposureOf = (
       }
     }
     if (closed) closedConstructOperations.add(operation)
-  }
-  const unwrappedCallableAbi = (representation: Representation): CallableAbi | null => {
-    if (representation.kind === 'optional') return unwrappedCallableAbi(representation.payload)
-    if (representation.kind === 'borrowed-ref') return unwrappedCallableAbi(representation.referent)
-    return callableAbiOf(representation)
   }
   // A public nil method frame may wrap an explicitly dynamic source receiver.
   // Internal next/return calls have no ordinary callee SSA operand, so follow
@@ -1970,6 +2118,39 @@ export const reflectionExposureOf = (
       for (const walked of hostObjectWalkedSourcesOf(operation)) demandEnumeratedViewOrigins(walked.representation, operation)
     if (nativeKeyQueryOf(operation, nativePropertyLayoutOf)) continue
     if (nativeArrayTransportOf(operation, keyOf(keyOperandOf(operation), constants))) continue
+    // A spread the lowering admitted with a per-element conversion
+    // (`IrArrayElement.element`) copies each element through the ordinary
+    // `array-element` recipe (`internal-operation-conversions.ts`), so its
+    // demand is that recipe's, exactly as a `convert` citing the same node.
+    // Hono's `routes.push(...(ownRoute as [string, H[]][]))` is the case: the
+    // elements are read by index and converted, never through a field protocol.
+    if (operation.kind === 'allocate-array-object' && operation.result.representation.kind === 'array-object') {
+      const element = operation.result.representation.element
+      const elementKey = representationKey(element)
+      const converting: Representation[] = []
+      const native = operation.elements.every((slot) => {
+        if (slot.kind === 'hole') return true
+        if (slot.kind === 'element') return representationKey(slot.value.representation) === elementKey
+        if (slot.kind !== 'spread' || slot.value.representation.kind !== 'array-object') return false
+        if (slot.element === undefined) return representationKey(slot.value.representation.element) === elementKey
+        if (representationKey(slot.element) !== elementKey) return false
+        converting.push(slot.value.representation.element)
+        return true
+      })
+      if (native && operation.result.representation.ownership === 'shared-refcount') {
+        for (const source of converting) {
+          const id = conversionNodeIdOf(source, element)
+          const node = options.conversions?.nodeById(id)
+          if (
+            (node?.capability.kind === 'atom' || node?.capability.kind === 'static' || node?.capability.kind === 'class-family') &&
+            node.capability.materializer.nativeFieldProtocol === 'unused'
+          )
+            continue
+          promoteCitedConversion(id, source, element, 'array-element-conversion')
+        }
+        continue
+      }
+    }
     if (nativeDictionaryTransportOf(operation)) continue
     if (nativeRecordIndexTransportOf(operation, deriver, options.conversions, keyOf(keyOperandOf(operation), constants))) continue
     if (nativeSequenceTransportOf(operation)) continue
@@ -2085,10 +2266,15 @@ export const reflectionExposureOf = (
         // carriers say -- see `storesIntoDeclaredSlot` -- so the exact-carrier
         // and static-slot proofs below are asked only of a write that takes the
         // ordinary member store.
+        // Inputs of an inline callable adapter an exact store or read
+        // performs; published only when the access is otherwise exact.
+        const adapterInputs: Representation[] = []
         const exact =
           value !== null &&
           !(operation.kind === 'define-own-property' && !storesIntoDeclaredSlot(operation)) &&
-          (nativeStaticSlotHolds(receiver.representation, key, value) ||
+          ((operation.kind === 'get' && closedCalleeOnlyRead(operation)) ||
+            unusedFunctionPrototypeRead(operation, receiver.representation, key) ||
+            nativeStaticSlotHolds(receiver.representation, key, value) ||
             (operation.kind === 'get' && classPrototypeReadOf(classes, receiver.representation, key, value) !== null) ||
             (surfaces.length > 0 &&
               surfaces.every((surface) => {
@@ -2096,6 +2282,13 @@ export const reflectionExposureOf = (
                 return (
                   (field !== null &&
                     (representationKey(field.value) === representationKey(value) ||
+                      // A `this`-stating callable field read as a plain
+                      // function value -- SmartRouter's `router.match` off a
+                      // RegExpRouter whose `match` field holds `function
+                      // match(this: R, ...)` -- is the native unbound-method
+                      // view `fieldReadFor` mints (`#native-method`): the
+                      // receiver is resolved later by native type tests.
+                      (operation.kind === 'get' && nativeUnboundMethodReadOf(field.value, value)) ||
                       (operation.kind === 'get' &&
                         nativePayloadTransportMatches(
                           field.value,
@@ -2107,7 +2300,26 @@ export const reflectionExposureOf = (
                           value,
                           field.value,
                           options.conversions?.nodeById(conversionNodeIdOf(value, field.value))
-                        )))) ||
+                        )) ||
+                      (() => {
+                        const inputs =
+                          operation.kind === 'get'
+                            ? inlineCallableAdapterInputsOf(
+                                field.value,
+                                value,
+                                options.conversions?.nodeById(conversionNodeIdOf(field.value, value))
+                              )
+                            : storesIntoDeclaredSlot(operation)
+                              ? inlineCallableAdapterInputsOf(
+                                  value,
+                                  field.value,
+                                  options.conversions?.nodeById(conversionNodeIdOf(value, field.value))
+                                )
+                              : null
+                        if (inputs === null) return false
+                        adapterInputs.push(...inputs)
+                        return true
+                      })())) ||
                   (operation.kind === 'get' &&
                     // An index read of one arm that is an Array -- a tuple
                     // carried as an Array beside a sibling tuple carried as
@@ -2130,7 +2342,7 @@ export const reflectionExposureOf = (
         if (!exact) {
           promoteNamedField(receiver.representation, key, operation)
           if (value) promoteFull(value, 'unproven-native-slot-value')
-        }
+        } else for (const input of adapterInputs) promoteFull(input, 'callable-adapter-input')
       }
       continue
     }
@@ -2154,6 +2366,37 @@ export const reflectionExposureOf = (
       // rebuilt Array.
       for (const record of dynamicallyAdoptedRecords(operation.source.representation, operation.result.representation))
         promoteFull(record, 'dynamic-document-adoption')
+    }
+    // An unshared array rebuilt at another element carrier
+    // (`ConvertOperation.rebuild`) cites the ELEMENT conversion each copied
+    // element goes through, so its demand is that conversion's -- the copy
+    // itself is `appendRangeConverted` over native storage. Hono's static
+    // route table (`[handlers.map(([h]) => [h, Object.create(null)]),
+    // emptyParam]`) is the case: the `[T, any]` tuples are rebuilt as `[T,
+    // ParamIndexMap]`, and only the unboxed dictionary is read dynamically.
+    if (operation.kind === 'convert' && operation.rebuild === 'unshared-array') {
+      const unwrap = (value: Representation): Representation => (value.kind === 'promise' ? value.value : value)
+      const source = unwrap(operation.source.representation)
+      const target = unwrap(operation.result.representation)
+      const node = options.conversions?.nodeById(operation.conversionUse)
+      if (
+        source.kind === 'array-object' &&
+        target.kind === 'array-object' &&
+        node !== null &&
+        node !== undefined &&
+        representationKey(node.source) === representationKey(source.element) &&
+        representationKey(node.target) === representationKey(target.element)
+      ) {
+        const capability = node.capability
+        if (
+          capability.kind === 'identity' ||
+          ((capability.kind === 'atom' || capability.kind === 'static' || capability.kind === 'class-family') &&
+            capability.materializer.nativeFieldProtocol === 'unused')
+        )
+          continue
+        promoteCitedConversion(operation.conversionUse, source.element, target.element, 'unshared-array-element-conversion')
+        continue
+      }
     }
     if (operation.kind === 'convert') {
       const node = options.conversions?.nodeById(operation.conversionUse)
@@ -2209,34 +2452,9 @@ export const reflectionExposureOf = (
         console.error(
           `[REFLECTION-ADAPTER] lineage=${String(operation.lineage)} node=${operation.conversionUse} capability=${node?.capability.kind ?? 'none'}`
         )
-      if (targetAbi !== null) {
-        // A source whose own convention declares no receiver is never handed
-        // the target's: the adapter ignores it (`emit-narrowing.ts`'s
-        // `resultAdapterOf`, `ignoresReceiver`), which is how an arrow keeps
-        // its lexical `this` in a method slot. An event library's async
-        // iterator class stores exactly such arrows as `this: EventEmitter` listeners, and
-        // promoting that receiver published every emitter subclass and all
-        // their fields reach -- loggers and connections -- to full
-        // reflection, refusing their `this.method.bind(this)` calls.
-        const sourceAbi = unwrappedCallableAbi(operation.source.representation)
-        // An input the source convention states in the target's own carrier
-        // is forwarded unchanged by the adapter; only a converted one can
-        // reach a dynamic listener.
-        const forwarded = (target: Representation, source: Representation | undefined): boolean =>
-          source !== undefined && representationKey(source) === representationKey(target)
-        if (
-          targetAbi.receiver !== null &&
-          (sourceAbi === null || (sourceAbi.receiver !== null && !forwarded(targetAbi.receiver, sourceAbi.receiver)))
-        )
-          promoteFull(targetAbi.receiver, 'callable-adapter-input')
-        targetAbi.parameters.forEach((parameter, index) => {
-          const source =
-            sourceAbi !== null && sourceAbi.restFrom === targetAbi.restFrom && sourceAbi.argumentsFrame === targetAbi.argumentsFrame
-              ? sourceAbi.parameters[index]?.value
-              : undefined
-          if (!forwarded(parameter.value, source)) promoteFull(parameter.value, 'callable-adapter-input')
-        })
-      }
+      if (targetAbi !== null)
+        for (const input of callableAdapterInputsOf(unwrappedCallableAbi(operation.source.representation), targetAbi))
+          promoteFull(input, 'callable-adapter-input')
     }
     if (observesNativeCarrierOnly(operation)) continue
     if (

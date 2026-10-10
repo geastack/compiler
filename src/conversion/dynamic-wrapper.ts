@@ -38,6 +38,11 @@ export type DynamicWrapperPlan =
          * selects it exactly; a dynamic Array is selected by its elements,
          * after every exact test, in arm order (`nativeArrayViewElementsAccept`). */
         readonly byElements?: true
+        /** A string-keyed dictionary arm: its own native table selects it
+         * exactly; an ordinary dynamic object or open Document is selected by
+         * its values, after every exact test, in arm order
+         * (`dynamicDictionaryEntriesAccept`). */
+        readonly byEntries?: true
       }[]
     }
 
@@ -96,12 +101,15 @@ export const dynamicWrapperPlanOf = (
       conversion.capability.kind === 'static' &&
       conversion.capability.materializer.documentRecordView !== undefined &&
       (armValue.kind === 'record' || armValue.kind === 'record-with-index' || armValue.kind === 'native-record-ref')
+    const byEntries = armValue.kind === 'dictionary' && armValue.key === 'string' && armValue.value.kind !== 'dynamic'
     arms.push(
       byShape
         ? { index, classifier, conversion, byShape }
         : byElements
           ? { index, classifier, conversion, byElements }
-          : { index, classifier, conversion }
+          : byEntries
+            ? { index, classifier, conversion, byEntries }
+            : { index, classifier, conversion }
     )
   }
   return arms.length === 0 ? null : { kind: 'union', source, target, arms }

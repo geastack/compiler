@@ -24287,6 +24287,43 @@ gea::Ref<Dictionary<V>> unboxDynamicDictionary(const Value& value, const char* s
 }
 
 /**
+ * Dictionary arms of one union, read out of a dynamic value. A native table of
+ * an arm's own carrier is that arm (its exact payload test). An ordinary
+ * dynamic object or an open Document -- what `unboxDynamicDictionary` rebuilds
+ * -- is told apart by its values instead: the arm whose value carrier admits
+ * every enumerable own string-keyed data value, tried after every exact test,
+ * in arm order, so an empty object is the first such arm. Hono's static routes
+ * store `Object.create(null)` in an `any` tuple slot that is later read as
+ * `ParamIndexMap | Params`.
+ */
+template <typename V>
+bool dynamicDictionaryEntriesAccept(const Value& value) {
+  if constexpr (std::is_same_v<V, Value> || !requires { DynamicCarrier<V>::accepts(std::declval<const Value&>()); }) {
+    return false;
+  } else {
+    if (value.tag() != Value::Tag::Object) return false;
+    if (value.payloadType() == payloadTypeTagFor<gea::Ref<Dictionary<Value>>>()) {
+      const auto& source = value.as<gea::Ref<Dictionary<Value>>>();
+      if (!source) return false;
+      bool accepted = true;
+      auto scratch = gea::makeRef<Dictionary<bool>>();
+      source->copyInto(*scratch, [&](const Value& entry) {
+        accepted = accepted && DynamicCarrier<V>::accepts(entry);
+        return true;
+      });
+      return accepted;
+    }
+    const gea::Ref<DynamicObject> table = value.asDynamicObject();
+    if (!table) return false;
+    for (const auto& property : table->properties()) {
+      if (property.key.isSymbol() || !property.descriptor.enumerable) continue;
+      if (property.descriptor.isAccessor() || !DynamicCarrier<V>::accepts(property.descriptor.dataValue())) return false;
+    }
+    return true;
+  }
+}
+
+/**
  * A `Map<K, U>` read as `Map<unknown, unknown>`: the same map, every key and
  * value boxed as it leaves and checked as it enters.
  *

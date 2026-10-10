@@ -3925,6 +3925,15 @@ const unboxedLoadTextAt = (target: Representation, text: string, receiverFactory
     const refused = `([]() -> ${targetType} { gea::detail::refusePayloadMismatch("a dynamic value admitted by no union arm"); }())`
     const typed = target.arms.map((_, index) => index).filter((index) => index !== catchAll)
     let result = catchAll >= 0 ? armText(catchAll) : refused
+    // A string-keyed dictionary arm also admits an ordinary dynamic object by
+    // its values (`dynamicDictionaryEntriesAccept`), after every exact test --
+    // the same rebuild `unboxDynamicDictionary` performs for a lone dictionary.
+    if (catchAll < 0)
+      for (let position = typed.length - 1; position >= 0; position--) {
+        const arm = target.arms[typed[position]!]!.value
+        if (arm.kind !== 'dictionary' || arm.key !== 'string' || arm.value.kind === 'dynamic') continue
+        result = `(gea::detail::dynamicDictionaryEntriesAccept<${cppTypeOf(arm.value)}>(${text}) ? ${armText(typed[position]!)} : ${result})`
+      }
     for (let position = typed.length - 1; position >= 0; position--) {
       const index = typed[position]!
       result =
@@ -5306,8 +5315,9 @@ const dynamicWrapperText = (ctx: ConversionSite, plan: DynamicWrapperPlan, node:
   // arm admits is the TypeError a program may catch, never an abort.
   const shaped = plan.arms.filter((entry) => entry.byShape)
   const elementwise = plan.arms.filter((entry) => entry.byElements)
+  const entrywise = plan.arms.filter((entry) => entry.byEntries)
   let result =
-    shaped.length === 0 && elementwise.length === 0
+    shaped.length === 0 && elementwise.length === 0 && entrywise.length === 0
       ? `([]() -> ${targetType} { gea::detail::refusePayloadMismatch("a dynamic value admitted by no union arm"); }())`
       : `([]() -> ${targetType} { gea::host::throwRuntimeError("TypeError", ${cppStringLiteral("a dynamic value is none of the union's object arms")}); }())`
   for (let index = shaped.length - 1; index >= 0; index--) {
@@ -5339,6 +5349,14 @@ const dynamicWrapperText = (ctx: ConversionSite, plan: DynamicWrapperPlan, node:
     result =
       `(gea::detail::nativeArrayViewElementsAccept<${cppTypeOf(element)}, ${nativeFieldPolicyType(element)}>(${text}) ? ` +
       `${targetType}::ofArm<${entry.index}>(${payload}) : ${result})`
+  }
+  for (let index = entrywise.length - 1; index >= 0; index--) {
+    const entry = entrywise[index]!
+    const value = plan.target.arms[entry.index]!.value
+    if (value.kind !== 'dictionary') return null
+    const payload = recipeText(ctx, entry.conversion, text)
+    if (payload === null) return null
+    result = `(gea::detail::dynamicDictionaryEntriesAccept<${cppTypeOf(value.value)}>(${text}) ? ${targetType}::ofArm<${entry.index}>(${payload}) : ${result})`
   }
   for (let index = plan.arms.length - 1; index >= 0; index--) {
     const arm = branch(plan.arms[index]!)

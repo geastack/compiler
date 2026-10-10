@@ -88,7 +88,7 @@ logical-merge-boolean-left.ts.cpp 1a3c140a092b
 logical-merge-nullable-reference.ts.cpp 20b87cd1c8db
 logical.ts.cpp f9b3a5edd223
 loop-iteration-helper-repro.ts.cpp 7e3761773480
-merge-array-materialization.ts.cpp a9e683db4045
+merge-array-materialization.ts.cpp 0da9f8655406
 method.ts.cpp b453978f861f
 namespace-generic-member.ts.cpp 2e55cd707939
 namespace-plain.ts.cpp 273e67cc3b9b
@@ -158,7 +158,7 @@ typed-array-pcm-map.ts.cpp 89932eb1d3ff
 typeof-narrowed-union-field-store.js.cpp c3c1ab9d99eb
 typeof-narrowed-union-field-store.ts.cpp 4a84f26512d1
 uncertified.txt 15859d998310
-uniform-value-union.ts.cpp 07030f392049
+uniform-value-union.ts.cpp 28217e8337f4
 uninhabited-intersection-branch.ts.cpp 29f22acdb74e
 uninstantiated-generic.ts.cpp 1621e1aebca3
 union-absent-class-arm.js.cpp 88ac4ecab857

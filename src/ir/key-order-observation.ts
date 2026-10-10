@@ -160,6 +160,8 @@ export const keyOrderObservationOf = (
           for (const source of sources) feed(target.representation, source.representation)
           return
         }
+        // A fresh null-prototype object has no key to read and none to order.
+        if (operation.hostTemplate === 'object-create' && !operation.argumentsAreSpread) return
         if (operation.intrinsicOwnKeys || operation.hostTemplate !== undefined || operation.argumentsAreSpread) observeAll(operation)
         return
       }
