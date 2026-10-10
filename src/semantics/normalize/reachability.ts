@@ -157,9 +157,9 @@ export const wholeProgram: ProgramReachability = {
  *
  * Every census in the parameter-binding family walks a file this way, and a
  * walk that still visited a pruned statement counted references in code the
- * program never runs: test262's propertyHelper ends with the inert, unreached
- * `var verifyPrimordialProperty = verifyProperty`, and that one alias made
- * the parameter census refuse `verifyProperty` as "escaping" -- so its `obj`
+ * program never runs: a conformance harness's property-helper file ends with
+ * the inert, unreached `var legacyHelper = helper`, and that one alias made
+ * the parameter census refuse `helper` as "escaping" -- so its `obj`
  * never learned it is only ever called with `Math`, and every helper under it
  * went dynamic. A declaration file has no statements the program evaluates,
  * the same exclusion the walks made for themselves before.
@@ -176,8 +176,7 @@ const liveStatementSets = new WeakMap<ProgramReachability, Map<ts.SourceFile, Re
  * program reaches, and under no member it pruned -- the boundary
  * `forEachReachableStatement` draws for a walk, asked of one node a walk did
  * not produce. A module the checker loaded but the program never evaluates
- * (three's `ColorSpaceNode.js`, pulled in beside the node materials) answers
- * false everywhere.
+ * (a sibling module pulled in only for its types) answers false everywhere.
  */
 export const nodeIsReachable = (reachable: ProgramReachability, node: ts.Node): boolean => {
   let current = node
@@ -234,8 +233,8 @@ export interface ReachabilityInput {
  * own intrinsic rather than of a user object where `get` could run code.
  *
  * Without this, `class X { [Symbol.dispose]() {} }` was kept in every program
- * that so much as imported its module -- and node-compat's `events.ts` has two
- * such classes, whose bodies need a deferred `Promise` this runtime does not
+ * that so much as imported its module -- and an event-emitter module can have
+ * two such classes, whose bodies need a deferred `Promise` this runtime does not
  * have.
  */
 const computedKeyIsInert = (checker: ts.TypeChecker, name: ts.ComputedPropertyName): boolean => {
@@ -280,8 +279,8 @@ const computedKeyIsInert = (checker: ts.TypeChecker, name: ts.ComputedPropertyNa
  * subclass NOTHING names, whose struct nothing emits.
  *
  * The blanket rule's cost was every unused hierarchy in a rooted script:
- * node-compat's `whatwg-streams.ts` and `abort-events.ts` are roots of every
- * program, so every program carried `ReadableByteStreamController`,
+ * a host whose streams and abort-signal scripts are roots of every program
+ * made every program carry `ReadableByteStreamController`,
  * `TextEncoderStream`, `DOMException` and, through them, the whole stream
  * implementation -- ~2.4k emitted lines in a program that prints one number.
  */
@@ -409,7 +408,7 @@ const objectMemberIsInert = (checker: ts.TypeChecker, member: ts.ObjectLiteralEl
   // provably not an action, and the object literal it sits in can be dropped
   // when nothing names it.
   //
-  // What this buys: node-compat's `events.ts` ends with a CommonJS-style
+  // What this buys: an event-emitter module may end with a CommonJS-style
   // namespace listing every export by shorthand. Kept, it made `once` and the
   // async-iterator machinery live in every program that imports the module at
   // all -- and those need a deferred `Promise` this runtime deliberately does
@@ -448,8 +447,8 @@ const objectMemberIsInert = (checker: ts.TypeChecker, member: ts.ObjectLiteralEl
  * the ambient intrinsic for the reason `computedKeyIsInert` gives: a user
  * `Symbol` is an ordinary call.
  *
- * A module-private brand token is what reaches it: node-compat's
- * `abort-events.ts` is a root of every program and declares
+ * A module-private brand token is what reaches it: a host's abort-signal
+ * script, a root of every program, declares
  * `const abortSignalConstructionToken = Symbol('AbortSignal construction')`,
  * so every program kept a module body whose whole content was that call.
  */
@@ -471,13 +470,13 @@ const initializerIsInert = (checker: ts.TypeChecker, node: ts.Expression): boole
   if (ts.isArrayLiteralExpression(node)) {
     return node.elements.every((element) => ts.isOmittedExpression(element) || initializerIsInert(checker, element))
   }
-  // A bare identifier naming a binding THIS FILE declares -- test262's
-  // propertyHelper ends with `var verifyPrimordialProperty = verifyProperty`.
+  // A bare identifier naming a binding THIS FILE declares -- a harness file
+  // ending with `var legacyHelper = helper`.
   // The one observable effect an identifier read can have is a
   // temporal-dead-zone throw, and the shorthand case above already states why
   // that is provably absent within one file: TypeScript reports it itself
   // (TS2448) and refuses the program. A function declaration cannot even be in
-  // a dead zone. Kept live, that alias counted as `verifyProperty` ESCAPING to
+  // a dead zone. Kept live, that alias counted as `helper` ESCAPING to
   // a value position (`parameter-bindings.ts`'s `escapeReason`), which refused
   // every call-site type its parameters would otherwise have carried.
   if (ts.isIdentifier(node)) {
@@ -494,8 +493,8 @@ const initializerIsInert = (checker: ts.TypeChecker, node: ts.Expression): boole
   // observable effect an identifier read can have, and TypeScript reports the
   // within-a-file case itself.
   //
-  // `events.ts` exports `prototype = EventEmitter.prototype` as a CommonJS
-  // compatibility shim. This runtime models no prototype object at all, so
+  // An event-emitter module may export `prototype = EventEmitter.prototype`
+  // as a CommonJS compatibility shim. This runtime models no prototype object at all, so
   // emitting that read has no right answer -- and pruning a statement nothing
   // reads is the answer that does not invent one.
   if (ts.isPropertyAccessExpression(node) && node.name.text === 'prototype' && ts.isIdentifier(node.expression)) {
@@ -569,14 +568,14 @@ const transitiveModuleTargetsOf = (checker: ts.TypeChecker, file: ts.SourceFile)
 }
 
 /**
- * `export const upgradeWebSocket = defineWebSocketHelper(async (c, events) =>
- * {...})` -- a call whose whole effect is a closure over inert arguments.
+ * `export const helper = defineHelper(async (c, events) => {...})` -- a call
+ * whose whole effect is a closure over inert arguments.
  *
- * `@hono/node-server` re-exports `upgradeWebSocket` from its package entry, so
- * every app that imports `serve` evaluates `websocket.ts`, and a call is an
- * action the statement rule keeps. But hono's `defineWebSocketHelper` only
- * returns an arrow closing over `handler`; the handler runs when that arrow is
- * called, and the arrow lives in `upgradeWebSocket` alone. So this is the
+ * A package that re-exports `helper` from its entry makes every importer of
+ * any other export evaluate the defining module, and a call is an action the
+ * statement rule keeps. But `defineHelper` only returns an arrow closing over
+ * `handler`; the handler runs when that arrow is called, and the arrow lives
+ * in `helper` alone. So this is the
  * `const X = () => ...` the whitelist already drops, reached through one call.
  *
  * The callee must be one declaration this program compiles, whose body
@@ -620,7 +619,7 @@ const isPrunableDeclaration = (checker: ts.TypeChecker, statement: ts.Statement)
   // `openStatement` is called unconditionally for them -- which is what keeps
   // a library's own default export a root when the library IS the program.
   //
-  // Without this, node-compat's `events.ts` kept its whole CommonJS-style
+  // Without this, an event-emitter module kept its whole CommonJS-style
   // default namespace alive, and with it `once`, `on` and the async-iterator
   // machinery, in an application that imports only `node:http` -- five
   // capabilities demanded by code no call in the program can reach.
@@ -643,9 +642,9 @@ const isPrunableDeclaration = (checker: ts.TypeChecker, statement: ts.Statement)
  *
  * `erasure` states the program's import elision: an import or re-export
  * TypeScript erases (`typeOnlyModuleUse` -- every binding a type) evaluates
- * nothing, exactly like `import type`. The MongoDB driver's
- * `import { type MongoCrypt } from 'mongodb-client-encryption'` is one: the
- * shipped JavaScript requires nothing there, and counting the edge made the
+ * nothing, exactly like `import type`. `import { type Native } from
+ * 'optional-native-package'` is one: the shipped JavaScript requires nothing
+ * there, and counting the edge made the
  * optional native package's whole module body live. `null` keeps every edge,
  * which only ever over-approximates -- right for a cycle test.
  */
@@ -666,13 +665,12 @@ const moduleTargetsOf = (
     }
   }
   const visit = (node: ts.Node): void => {
-    // `import type { Context } from 'hono'` is ERASED: it emits nothing, so the
+    // `import type { Context } from 'pkg'` is ERASED: it emits nothing, so the
     // module it names never evaluates and nothing in it is reachable through
-    // this edge. Counting it made an app that wants one TYPE from a barrel
-    // pull in every module the barrel re-exports -- hono's `index.ts` reaches
-    // `RegExpRouter`, `TrieRouter` and `SmartRouter`, none of which
-    // `hono/tiny` uses, and their generic bodies accounted for 33 of the
-    // program's mandatory obligations. A module imported for a value ANYWHERE
+    // this edge. Counting it made a program that wants one TYPE from a barrel
+    // pull in every module the barrel re-exports -- alternative
+    // implementations the program never uses, whose generic bodies then
+    // became mandatory obligations. A module imported for a value ANYWHERE
     // else is still reached by that edge; this drops only the edge that
     // carries no evaluation.
     if (ts.isImportDeclaration(node)) {
@@ -731,11 +729,11 @@ const declarationsOf = (checker: ts.TypeChecker, symbol: ts.Symbol): readonly ts
  * `[[RequestedModules]]` and the post-order walk above can never reach it --
  * yet every module can see what it declared. The only order consistent with
  * that is all scripts before any module, which is also the order a host
- * evaluates them in. node-compat's `runtime/node/globals.ts` is one: it
+ * evaluates them in. A host's global-declaring script is one: it
  * declares `Request`/`Response`/`Headers`/`URL` into the global scope for
  * library code that constructs them by name, and without this its class
- * objects were left value-initialized -- hono's `new Request(...)` jumped
- * through a null constructor thunk on the first served request.
+ * objects were left value-initialized -- a library's `new Request(...)`
+ * jumped through a null constructor thunk on its first call.
  */
 /**
  * Whether a source file evaluates anything at all.
@@ -744,8 +742,8 @@ const declarationsOf = (checker: ts.TypeChecker, symbol: ts.Symbol): readonly ts
  * module: it exists to put names into the checker's global scope and lowers
  * no body, exactly like a `.d.ts` -- it only carries a `.ts` extension so the
  * project can name it as a real root when a stated module set filters the
- * staged project's file list down to declarations (node-compat's
- * `standard-library.ts`, `node-globals.ts`). Scheduling such a file as a
+ * staged project's file list down to declarations (a host's standard-library
+ * and global declaration files). Scheduling such a file as a
  * module body would ask the entry to call a function nothing defines, which
  * the printer refuses rather than skips (`entryDefinitionOf`).
  *
@@ -782,8 +780,8 @@ const evaluatesNothing = (file: ts.SourceFile): boolean =>
  * module-body region -- and by `layoutClasses`' own definition it runs no
  * constructor, no initializer and no module effect, so lowering gives that
  * region no body. A rooted script whose every class is pruned except one some
- * annotation names (node-compat's `whatwg-streams.ts`, in a program that
- * touches no stream) was scheduled on the strength of the region and refused
+ * annotation names (a host's streams script, in a program that touches no
+ * stream) was scheduled on the strength of the region and refused
  * by the printer for want of the body.
  */
 export const fileEvaluates = (reachable: ProgramReachability, file: ts.SourceFile): boolean =>
@@ -805,8 +803,8 @@ export const fileEvaluates = (reachable: ProgramReachability, file: ts.SourceFil
  * has run, and a class it declares is initialized only then. Among scripts,
  * then, a script that reads another's declarations is evaluated after it --
  * the order any host that runs the program without a ReferenceError uses.
- * File order alone put node-compat's entry SCRIPT ahead of its own
- * `global-timers.ts` (the entry is the first root), and the entry's
+ * File order alone put a program's entry SCRIPT ahead of its host's
+ * global-timers script (the entry is the first root), and the entry's
  * `setTimeout(...)` constructed a `Timeout` through a class object nothing had
  * initialized yet: a jump through a null constructor thunk.
  *
@@ -884,8 +882,8 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
   // statics still waiting for one. `C.m` names one declaration, but a value
   // typed `typeof Base` or a structural `{ new (...): T; make(...): T }` can
   // hold any class that fits, and its read names only the statement's own
-  // member: mongodb's `(responseType ?? MongoDBResponse).make(bson)` runs
-  // `ExplainedCursorResponse.make` whenever that class is what was handed in.
+  // member: `(responseType ?? DefaultResponse).make(bytes)` runs
+  // `DerivedResponse.make` whenever that class is what was handed in.
   // Opening such a static by symbol alone pruned the override the value really
   // dispatches to.
   const constructorReads = new Map<string, ts.Type[]>()
@@ -922,9 +920,9 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
     // `import`/`export`, ECMA-262 16.1) exports nothing: its roots are exactly
     // the statements that act, and a function declaration nothing in the
     // program names is as dead there as in any other file. Keeping a script
-    // whole made every test262 case carry the obligations of the harness's
-    // deprecated, never-called helpers (`verifyEqualTo`, `verifyWritable`, ...
-    // in propertyHelper.js), whose unannotated parameters no call site ever
+    // whole made every conformance case carry the obligations of its
+    // harness's deprecated, never-called helpers, whose unannotated
+    // parameters no call site ever
     // types -- a refusal inside a body no program reaches denied thousands of
     // cases their certificate.
     const whole = entries.has(file) && ts.isExternalModule(file)
@@ -1066,14 +1064,14 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
    * this walk; but the member LAYOUT the emitter consults comes from the
    * class-lifecycle census over the statements this walk kept, so every read
    * of a member on such an instance refused at emission as "no class
-   * evaluation published". Three's `Skeleton` is the shape: `SkinnedMesh`
-   * names it in `@param {Skeleton}` and reads `skeleton.boneTexture`, and
-   * nothing in an application without skinning ever constructs one.
+   * evaluation published". The shape: a class names `Helper` only in
+   * `@param {Helper}` and reads `helper.data`, and nothing in a program that
+   * never uses that feature ever constructs one.
    *
    * The trigger is the read, not the annotation. Opening every class a live
-   * annotation names was measured: three's JSDoc forms one connected graph,
-   * and following it from `Skeleton` opened the whole `Curve` hierarchy and
-   * more, each carrying walls in code no path executes. A read is what the
+   * annotation names was measured: a library's JSDoc can form one connected
+   * graph, and following it from one class opened whole unrelated
+   * hierarchies, each carrying walls in code no path executes. A read is what the
    * emitter actually needs a layout for, and a read inside a member only
    * counts once that member is live, so the closure stays bounded by what
    * runs.
@@ -1118,10 +1116,9 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
    * (`classBaseLinks` reads the same empty row), and `hasClosedFixedLayout`
    * reports its storage unproven for want of a layout that was never missing
    * -- so the object gets the unrestricted field protocol over a struct that
-   * repeats every inherited member. In the three.js app that is fourteen carriers, and
-   * three of them (`Bone`, `Node`, `InstancedBufferAttribute`, each named only
-   * inside a JSDoc annotation in a live file) were the program's three largest
-   * reflection consumers.
+   * repeats every inherited member. Classes named only inside a JSDoc
+   * annotation in a live file became a program's largest reflection
+   * consumers this way.
    *
    * Over-marking is the safe direction here for the reason this module's
    * header already gives, and layout-only is the smallest promotion there is:
@@ -1158,9 +1155,10 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
    * The same question for a JSDoc annotation, which `ts.forEachChild` does not
    * reach: JSDoc hangs off a node's comment ranges rather than its child list,
    * so a `@type`/`@param`/`@returns` type node is invisible to this walk while
-   * being fully visible to the checker. Three.js types its whole public
-   * surface this way, which is why every carrier in the state described above
-   * is a class whose only mention in live code is inside a JSDoc comment.
+   * being fully visible to the checker. A JavaScript library can type its
+   * whole public surface this way, so a carrier in the state described above
+   * is often a class whose only mention in live code is inside a JSDoc
+   * comment.
    */
   const markJsDocNamedClasses = (node: ts.Node): void => {
     for (const tag of ts.getJSDocTags(node)) {
@@ -1281,7 +1279,7 @@ export const censusReachability = (input: ReachabilityInput): ProgramReachabilit
       markReference(node)
       // EVERY identifier, not only one in member position, and measured that
       // way: narrowing this to `o.close` / `const { close } = o` and letting a
-      // bare identifier spell nothing left the mongodb probe on the same 1635
+      // bare identifier spell nothing left a large probe program on the same
       // unmet obligations, so precision bought nothing there while
       // over-marking costs only dead code left in. Under-marking is the one
       // direction that could drop a live body, which is why the walk stays

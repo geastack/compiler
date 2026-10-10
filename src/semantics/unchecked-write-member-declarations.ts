@@ -11,26 +11,24 @@ import { interfaceFlowImplementorsOf } from './interface-implementors.js'
  * where it is collected below):
  *
  * - An `any` right-hand side. `any` is the unchecked top: the checker lets it
- *   into every position. mongodb's `ServerDescription` declares
- *   `$clusterTime?: ClusterTime` and writes
- *   `this.$clusterTime = hello?.$clusterTime ?? null` with `hello` a
- *   `Document`; node stores the `null` the `?? null` produces. Only a `null`
+ *   into every position. A class that declares
+ *   `time?: Clock` and writes `this.time = reply?.time ?? null` with
+ *   `reply` an `any`-typed document is the case; node stores the `null` the `?? null` produces. Only a `null`
  *   the program SPELLS counts -- the literal, the fallback arm of `??`/`||`,
  *   an arm of a conditional. A `null` hidden inside an opaque `any` is not
  *   visible here and still meets the checked unwrap.
  * - A `null` an overload implementation typed `any` returns. The checker
  *   relates that `any` to none of the overload signatures callers are typed
- *   by. mongodb's `OnDemandDocument.toJSValue` declares
- *   `toJSValue<T>(element, as: T): JSTypeOf[T]` and its `any` implementation
- *   returns `null` when the element is of another BSON type; `get` then tests
+ *   by. A method declared as overloads
+ *   `toValue<T>(element, as: T): ValueOf[T]` whose `any` implementation
+ *   returns `null` when the element is of another kind; a caller then tests
  *   `value == null`, which the declaration says is impossible for `boolean`.
  * - An object-literal computed key whose type is a union of literals. The
  *   checker cannot tell which member such a key names, so it types the
  *   property as an index-signature entry and never relates the value to the
- *   member the key actually lands on. mongodb's `prepareHandshakeDocument`
- *   builds `{ [serverApi ? 'hello' : 'ismaster']: 1, ... }` as a
- *   `HandshakeDocument` whose `hello?: boolean` / `ismaster?: boolean` then
- *   hold the number `1`. Only a primitive value type counts, so the restated
+ *   member the key actually lands on. A function that builds
+ *   `{ [flag ? 'a' : 'b']: 1, ... }` as an `Options` whose `a?: boolean` /
+ *   `b?: boolean` then hold the number `1` is the case. Only a primitive value type counts, so the restated
  *   type is always nameable where the member is declared.
  *
  * Every later stage takes the declaration at its word -- the field is laid
@@ -155,15 +153,16 @@ export const uncheckedWriteMemberDeclarations = (program: ts.Program, checker: t
   // Arguments the checker narrowed to `never`: a declared member read after
   // every guard its declared type allows has failed, handed to a primitive
   // parameter. The program is stating what the member holds when it is not
-  // what the declaration says. mongodb's `TopologyVersion.counter: Long` is
-  // read as `Long.isLong(tv.counter) ? tv.counter : Long.fromNumber(tv.counter)`
-  // -- and node's BSON reader promotes the server's int64 to a `number`, so
-  // that last arm is the one that runs, and the any-to-record assertion of
-  // the hello's `topologyVersion` refused the number.
+  // what the declaration says. A member declared `counter: Int64` (a library
+  // integer class) read as
+  // `Int64.isInt64(v.counter) ? v.counter : Int64.fromNumber(v.counter)` --
+  // where a decoder actually stores a `number`, so that last arm is the one
+  // that runs, and the any-to-record assertion of the decoded document
+  // refused the number.
   //
   // One occurrence's evidence must not break another: widening by `bigint`
-  // because `typeof c === 'bigint' ? Long.fromBigInt(c) : ...` names it would
-  // hand `bigint` to a `Long.fromNumber(c)` elsewhere that has no such guard.
+  // because `typeof c === 'bigint' ? Int64.fromBigInt(c) : ...` names it would
+  // hand `bigint` to an `Int64.fromNumber(c)` elsewhere that has no such guard.
   // So each candidate primitive is kept only while every occurrence it would
   // reach (after the `typeof` guards around that occurrence) accepts it.
   interface NeverOccurrence {
@@ -271,8 +270,8 @@ export const uncheckedWriteMemberDeclarations = (program: ts.Program, checker: t
   // (`interfaceFlowImplementorsOf`), so a member read through it reads THEIR
   // member. Where the interface spells that member as an anonymous object
   // type, no class can inhabit it: the read rebuilt a fresh object out of
-  // each instance's member, and a write through it -- mongodb's
-  // `stateTransition` doing `target.s.state = newState` over `ObjectWithState
+  // each instance's member, and a write through it -- a function doing
+  // `target.s.state = next` over `interface WithState
   // { s: { state: string } }` -- landed in the copy. The member's declared
   // type gains each implementor's own member type, spelled as an import type
   // (erased; no module edge), so the read carries the implementor's object.

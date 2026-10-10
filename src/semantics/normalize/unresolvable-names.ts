@@ -5,8 +5,7 @@ import { isUnresolvableModuleAmbient } from '../ambient.js'
  * Which value-position names resolve to no binding anywhere in the program.
  *
  * `typeof Float16Array !== 'undefined' && array instanceof Float16Array` --
- * three's `WebGLAttributes.js:24`, and the same shape for `XRWebGLBinding`,
- * `XRWebGLLayer` and `__THREE_DEVTOOLS__` -- names a global no declaration in
+ * and the same shape for WebXR names or a `__DEVTOOLS__` hook -- names a global no declaration in
  * this program introduces and no host declares. `getSymbolAtLocation` returns
  * `undefined` for it, so there is no cell for `GetValue` to read and no
  * `binding` operation any producer could mint, exactly as for the magic
@@ -20,7 +19,7 @@ import { isUnresolvableModuleAmbient } from '../ambient.js'
  * the two disagreeing is not an error anywhere, only a withheld citation that
  * silently takes its consumers with it. That is precisely what happened: the
  * producer published a Reference Record and no read, the predictor predicted a
- * read, and every `typeof`/`instanceof` feature-detection guard in three.js
+ * read, and every `typeof`/`instanceof` feature-detection guard in the program
  * was withheld along with the operations around it.
  *
  * ⛔ This census states only that a name has NO CELL. It says nothing about
@@ -190,8 +189,8 @@ export const censusUnresolvableNames = (
       // with nothing to initialize it, states that it is that object under
       // another name -- `@types/node`'s own spelling is precisely this. Read
       // as an ordinary ambient binding it becomes an `extern` the emitter
-      // expects a host to define, and no host does: `@hono/node-server`'s
-      // `global.Request !== LightweightRequest` linked against an undefined
+      // expects a host to define, and no host does: a library's
+      // `global.Request !== OwnRequest` linked against an undefined
       // `_global`. So the alias publishes the same direct value result the
       // intrinsic does, and every consumer (the reference producer, the
       // global-host-mutation census) sees one object.

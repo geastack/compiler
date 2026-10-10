@@ -3,7 +3,7 @@
 // `conversion/derive.ts` refused `native-record-ref` out of a box outright,
 // and the only other route -- `recordMaterializer`, the field-by-field product
 // rebuild -- was never installed by the C++ registry at all, so every
-// `conversion:dynamic->native-record-ref` (50 rows in the mongodb probe),
+// `conversion:dynamic->native-record-ref` (50 rows in a database-client probe),
 // `->dictionary`, `->optional(native-record-ref)` and the discriminated unions
 // built out of them refused together.
 //

@@ -5,9 +5,11 @@ import ts from 'typescript'
 import { censusArgumentsObjects } from '../arguments-objects.js'
 import { wholeProgram } from '../reachability.js'
 import { attachDeferredIntrinsicProtocolLedger, createDeferredIntrinsicProtocolLedger } from '../deferred-intrinsic-protocols.js'
-import { closedCallableAuthorityOf } from './callable-reach.js'
+import { closedCallableAuthorityOf, sourceInvocationFactHasJointTargets } from './callable-reach.js'
 import type { SourceInvocationFact } from './invocation-facts.js'
+import type { FlowInvocationOperands } from './model.js'
 import { indexValueFlow } from './value-flow.js'
+import { hypothesisGuardIsOpen, hypothesisSettledAsTruth } from './proof-hypotheses.js'
 
 const inspect = (source: string) => {
   const entry = resolve('test/fixtures/invocation-dispatch.ts')
@@ -55,8 +57,34 @@ const inspect = (source: string) => {
       assert.ok(ts.isClassLike(frame.body.parent))
       return `${frame.body.parent.name?.text}.${frame.body.name.getText(file)}`
     }) ?? null
-  return { calls, fact, callInMethod, callNamed, file, targetNames }
+  return { calls, fact, callInMethod, callNamed, file, flow, targetNames }
 }
+
+test('joint source permission belongs to the exact admitted fact, operands and frame', () => {
+  const checked = inspect('const owner = {copy(value: number) {return value}}; owner.copy(1)')
+  const fact = checked.fact(checked.callNamed('owner.copy'))!
+  assert.ok(fact)
+  assert.equal(fact.targetAuthority, 'source-values')
+  assert.equal(sourceInvocationFactHasJointTargets(checked.flow, fact), true)
+  assert.equal(sourceInvocationFactHasJointTargets(checked.flow, { ...fact }), false)
+  assert.equal(
+    sourceInvocationFactHasJointTargets(checked.flow, {
+      ...fact,
+      targetAuthority: 'source-values',
+      operands: { ...fact.operands },
+      frames: [...fact.frames]
+    }),
+    false,
+    'a source stamp alone cannot mint admitted target authority'
+  )
+  assert.equal(sourceInvocationFactHasJointTargets({} as never, fact), false, 'a different flow cannot borrow the receipt')
+  const operands = fact.operands as { -readonly [Key in keyof FlowInvocationOperands]: FlowInvocationOperands[Key] }
+  const original = operands.receiver
+  operands.receiver = fact.operands.args[0]!
+  assert.equal(sourceInvocationFactHasJointTargets(checked.flow, fact), false, 'the admitted receiver is exact')
+  operands.receiver = original
+  assert.equal(sourceInvocationFactHasJointTargets(checked.flow, fact), true)
+})
 
 test('ordinary overrides and lexical super calls select different method bodies', () => {
   const checked = inspect(`
@@ -194,4 +222,21 @@ test('super dispatch refuses instance-mediated prototype writes and receiver pub
   `)
   assert.deepEqual(ownPrimitiveWrite.targetNames(ownPrimitiveWrite.fact(ownPrimitiveWrite.callNamed('held.run'))), ['Derived.run'])
   assert.deepEqual(ownPrimitiveWrite.targetNames(ownPrimitiveWrite.fact(ownPrimitiveWrite.callNamed('super.copy'))), ['Base.copy'])
+})
+
+test('source invocation refusal settles its re-entry without settling successful frames', () => {
+  const checked = inspect(`
+    const items = [1, 2];
+    items.map(value => value + 1);
+    const owner = { copy(value: number) { return value } };
+    owner.copy(1);
+  `)
+  const intrinsic = checked.calls.find(checked.callNamed('items.map'))!
+  const source = checked.calls.find(checked.callNamed('owner.copy'))!
+  assert.equal(checked.fact(checked.callNamed('items.map')), null)
+  assert.equal(hypothesisGuardIsOpen(intrinsic), false)
+  assert.equal(hypothesisSettledAsTruth(intrinsic), true, 'an actual refusal discharges enclosing provenance hypotheses')
+  assert.ok(checked.fact(checked.callNamed('owner.copy')))
+  assert.equal(hypothesisGuardIsOpen(source), false)
+  assert.equal(hypothesisSettledAsTruth(source), false, 'a successful frame cannot promote a recursive refusal to truth')
 })

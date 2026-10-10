@@ -22,7 +22,7 @@ export interface SourceRecordOriginAuthority {
   /** Whole-program proof for record slots the local alias walk cannot follow. */
   readonly recordSlotClosed: (receiver: ts.Expression, key: string, roots: readonly ts.ObjectLiteralExpression[]) => boolean
   /** The complete values a slot read yields, from the joint value graph, or
-   * null where it refuses: `renderer.state` filled by `_this.state = state`
+   * null where it refuses: `owner.state` filled by `_this.state = state`
    * in a constructor, which no record-literal plan can see through. */
   readonly slotValuesOf?: (access: ts.PropertyAccessExpression | ts.ElementAccessExpression) => readonly ts.Expression[] | null
   /** The complete values any expression holds, from the joint value graph, or null where it refuses. */
@@ -48,8 +48,8 @@ export interface OriginAuthority extends SourceRecordOriginAuthority, ClosedCall
    * authority only through its parks (the members, families, record and
    * value proofs assumed open up the stack) and its two key functions, not on
    * which proof happened to ask -- yet the caller-identity caches above are
-   * keyed on the authority OBJECT, which every proof mints afresh, so the three.js app
-   * rebuilt the same origin solvers 115 million times. The authority records
+   * keyed on the authority OBJECT, which every proof mints afresh, so a large
+   * program rebuilt the same origin solvers millions of times. The authority records
    * which parks the computation leaned on and replays the answer wherever
    * those same parks are in force; `shareable` withholds an answer -- refusal
    * or not -- that the caller knows was computed from an incomplete view (a

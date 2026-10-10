@@ -2,7 +2,7 @@
 // [string, string][]`, in a program that also boxes an object holding a
 // HeaderBag and reads an `any` back as `{}`.
 //
-// hono's query parser starts from `const results: Record<string, string> |
+// An HTTP framework's query parser starts from `const results: Record<string, string> |
 // Record<string, string[]> = {}`, and that `{}` literal is spelled with the
 // same carrier as every `{}`-typed value unboxed out of an `any`. The view
 // census keyed what a value may hold by carrier alone, so the literal "held"

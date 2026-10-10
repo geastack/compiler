@@ -1,6 +1,6 @@
 // AN `unknown` OPTION VALUE SPREAD AFTER A TYPED OPTION INTO ONE LITERAL.
 //
-// mongodb's `connection_string.ts` resolves `readConcern`/`writeConcern`
+// A database client's connection-string parser resolves `readConcern`/`writeConcern`
 // options with `ReadConcern.fromOptions({ ...options.readConcern, ...value }
 // as any)`, where `value` comes from `values: unknown[]` and was narrowed by
 // `value instanceof ReadConcern || isRecord(value, ['level'])`. Object spread

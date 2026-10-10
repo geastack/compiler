@@ -28,7 +28,17 @@ console.log('field', field(values))
 
 const zero = 0
 const big = 2 ** 32 + 7
-console.log('clz', Math.clz32(zero), Math.clz32(1), Math.clz32(-1), Math.clz32(-2147483648), Math.clz32(NaN), Math.clz32(0.5), Math.clz32(big - 2 ** 32 - 3 + 2 ** 32), Math.clz32(1 << 30))
+console.log(
+  'clz',
+  Math.clz32(zero),
+  Math.clz32(1),
+  Math.clz32(-1),
+  Math.clz32(-2147483648),
+  Math.clz32(NaN),
+  Math.clz32(0.5),
+  Math.clz32(big - 2 ** 32 - 3 + 2 ** 32),
+  Math.clz32(1 << 30)
+)
 const negativeZero = -0
 const notNumber = NaN
 console.log('abs', Math.abs(-2.5), 1 / Math.abs(negativeZero), Math.abs(notNumber), Math.abs(-7))

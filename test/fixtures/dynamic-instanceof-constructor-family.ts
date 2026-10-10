@@ -1,4 +1,4 @@
-// `error instanceof MongoError`-shaped code: a BOXED left operand (`dynamic`)
+// `error instanceof ServiceError`-shaped code: a BOXED left operand (`dynamic`)
 // tested against a program class (`constructor-family`). The naive fix -- OR
 // together `payloadType() == tagFor<Ref<S>>` for every member -- is unsound in
 // exactly the direction this fixture exercises: `Value::box`'s payload type is

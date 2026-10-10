@@ -1,6 +1,6 @@
 // A generic class instantiated at two layout-distinct types is two physical
 // classes; iterating either with for-of reads its own copy's [Symbol.iterator]
-// (mongodb's utils.ts List<T>, iterated as List<Connection> and List<Session>).
+// (a database client's List<T>, iterated as List<Connection> and List<Session>).
 class Node<T> {
   constructor(
     readonly value: T,

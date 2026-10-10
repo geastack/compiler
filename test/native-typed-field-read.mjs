@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -10,7 +11,7 @@ execFileSync(
   'clang++',
   [
     '-std=c++20',
-    '-O1',
+    ...nativeOptimization('allocation'),
     '-DGEA_PROFILE_ALLOCATIONS=1',
     '-fsanitize=address,undefined',
     `-I${resolve(root, 'src/targets/cpp/runtime')}`,
@@ -32,7 +33,7 @@ execFileSync(
   'clang++',
   [
     '-std=c++20',
-    '-O1',
+    ...nativeOptimization('allocation'),
     '-DGEA_PROFILE_ALLOCATIONS=1',
     '-fsanitize=address,undefined',
     `-I${resolve(root, 'src/targets/cpp/runtime')}`,

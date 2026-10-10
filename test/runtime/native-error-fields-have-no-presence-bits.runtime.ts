@@ -4,8 +4,8 @@
 //! expect: frozen:true
 
 // node-compat's `nodeNotImplemented` writes `error.name` on a plain `new
-// Error(...)`, and mongodb's server_description.ts reads `this.error?.stack`
-// through a `class MongoError extends Error`. Both members belong to the
+// Error(...)`, and a database client's server description reads `this.error?.stack`
+// through a `class ServiceError extends Error`. Both members belong to the
 // native `gea::runtime::Error`, which has no presence bit or attribute triple
 // for them -- only `cause` carries one -- so neither the store's
 // writability guard nor the read's presence test may name generated-struct
@@ -22,7 +22,7 @@ function notImplemented(member: string): NotImplementedError {
   return error
 }
 
-class MongoError extends Error {
+class ServiceError extends Error {
   code?: number
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options)
@@ -30,8 +30,8 @@ class MongoError extends Error {
 }
 
 class Description {
-  error: MongoError | null
-  constructor(error: MongoError | null) {
+  error: ServiceError | null
+  constructor(error: ServiceError | null) {
     this.error = error
   }
   stackText(): string {
@@ -43,7 +43,7 @@ class Description {
 const settings = Object.freeze({ strict: true })
 const failure = notImplemented('fs.watch')
 console.log('name:' + failure.name + ' code:' + failure.code)
-const described = new Description(new MongoError('down', { cause: 'boom' }))
+const described = new Description(new ServiceError('down', { cause: 'boom' }))
 // The runtime captures no stack trace, so the program writes the one it reads.
 described.error!.stack = 'at main'
 console.log('stack:' + described.stackText())

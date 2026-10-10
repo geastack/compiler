@@ -1,5 +1,5 @@
 // A named read through a string index signature whose value is a union
-// array: `morphAttributes.position` on three's `BufferGeometry`.
+// array: `morphAttributes.position` on a 3D library's `BufferGeometry`.
 class Attr {
   constructor(n) {
     this.count = n

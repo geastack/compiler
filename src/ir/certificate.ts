@@ -29,6 +29,7 @@ export interface CapabilityCertificateSubjects {
 }
 
 export interface CapabilityCertificate {
+  readonly conversionNodeIds: readonly string[]
   readonly id: string
   readonly planDigest: string
   readonly semanticSnapshotDigest: string
@@ -150,5 +151,8 @@ export const mintCapabilityCertificate = (
   const manifestDigest = digestOf(subjects.manifest)
   const certificationDigest = sha256Lines(certification.demanded.map((key) => `${key}\n`))
   const id = sha256([planDigest, semanticSnapshotDigest, manifestDigest, certificationDigest].join('|'))
-  return Object.freeze({ id, planDigest, semanticSnapshotDigest, manifestDigest, certificationDigest })
+  const conversionNodeIds = Object.freeze(
+    certification.demanded.filter((key) => key.startsWith('conversion:')).map((key) => key.slice('conversion:'.length))
+  )
+  return Object.freeze({ id, planDigest, semanticSnapshotDigest, manifestDigest, certificationDigest, conversionNodeIds })
 }

@@ -1,5 +1,6 @@
 // The instruction cost of minting and dropping an open-Document view of an
-// array or Map: bson's serializer mints one per nested container per command.
+// array or Map: a binary-document serializer mints one per nested container
+// per command.
 // Build against the runtime header and read `instructions:u` from perf stat.
 #include "gea_runtime.h"
 #include <cstdio>

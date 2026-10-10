@@ -1,7 +1,7 @@
 // ECMA-262 7.1.17 ToString of an object runs its own `toString` with NO
 // arguments (OrdinaryToPrimitive, 7.1.1.1), so a declared optional parameter
-// binds to `undefined`. bson's `ObjectId.toString(encoding?: 'hex' | 'base64')`
-// is interpolated by the mongodb driver as `${id}`.
+// binds to `undefined`. An id class's `toString(encoding?: 'hex' | 'base64')`
+// is interpolated by a database client as `${id}`.
 
 class Id {
   private readonly value: number

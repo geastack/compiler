@@ -1,4 +1,4 @@
-// mongodb's `collection.insertOne` runs `executeOperation(client, new
+// A database client's `collection.insertOne` runs `executeOperation(client, new
 // InsertOneOperation(...) as any)` typed `Promise<InsertOneResult>`, and
 // `tryOperation` returns `operation.handleOk(result)` -- whose override
 // returns a `Document` literal `{ acknowledged, insertedId }`. The document

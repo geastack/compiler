@@ -22,8 +22,8 @@ interface WebGLHostShims {
   readonly hostNativeArrayFunctions?: readonly string[]
   readonly hostExternDeclarations?: Readonly<Record<string, readonly string[]>>
   /**
-   * Ambient browser type names three's own JSDoc (and `@types/three`'s
-   * mirrored declarations) states for a WebGL context, to the concrete
+   * Ambient browser type names a library's own JSDoc (and its mirrored
+   * declarations) states for a WebGL context, to the concrete
    * class this package's own runtime actually hands a program -- see
    * `plugins/model.ts`'s `ambientTypeRealizations`.
    */
@@ -85,8 +85,8 @@ export const adoptWebglPackage = (file: string): void => {
  * are not host types at all -- they are ordinary TypeScript classes, shipped as
  * source in the package's own `src/nativeWebGL.ts`, whose methods this compiler
  * compiles natively like any other class. What crosses into the host is one
- * layer below them: `threeWebGLCreateBuffer()` and its 126 siblings, ambient
- * names declared in `nativeWebGLHost.ts` and defined in `angle_webgl_host.mm`.
+ * layer below them: one ambient free function per GL entry point, declared in
+ * the package's host declarations and defined in its Objective-C++ bridge.
  *
  * v1 states much more -- 88 `runtimeMemberCalls` and 333 `runtimeMemberReads`
  * that recognize a call ON the context object and emit the host call directly,
@@ -108,7 +108,7 @@ export const webglHostFunctions = (): ReadonlyMap<string, string> => {
  * What a unit must declare before it may name one of those spellings.
  *
  * Keyed by the spelling, which is how the package already states it: a program
- * that calls two of these carries two `extern "C"` lines and not 127.
+ * that calls two of these carries two `extern "C"` lines and not the whole set.
  */
 export const webglHostPreambles = (): ReadonlyMap<string, readonly string[]> => {
   const rows = new Map<string, readonly string[]>()
@@ -130,10 +130,11 @@ export const webglSourceTransform = (input: PluginSourceFile): string | null => 
  * That is the surface this plugin replaces: `NativeWebGLCanvas` is the canvas,
  * and there is no DOM behind it.
  *
- * Every name here is one three.js itself guards with `typeof X !== 'undefined'`,
- * because three is written to run where they may not exist. Stating the absence
- * is what makes that guard mean what it says; without it the guard folds to
- * `true`, three takes a branch that reads `image.displayWidth` off something
+ * Every name here is one a portable rendering library guards with
+ * `typeof X !== 'undefined'`, because it is written to run where they may not
+ * exist. Stating the absence is what makes that guard mean what it says;
+ * without it the guard folds to `true`, the program takes a branch that reads
+ * `image.displayWidth` off something
  * that is not a `VideoFrame`, and the unit emits an `extern` for a symbol no
  * object file defines.
  *
@@ -141,18 +142,18 @@ export const webglSourceTransform = (input: PluginSourceFile): string | null => 
  * so a name goes in only when this host is sure:
  *
  * - `performance`, `URL`, `Blob`, `fetch` and the network types: nothing about
- *   an ANGLE context says whether the target implements them, and `three` calls
- *   `performance.now()` unguarded. That is a different host's answer.
+ *   an ANGLE context says whether the target implements them, and libraries
+ *   call `performance.now()` unguarded. That is a different host's answer.
  * - `WebGL2RenderingContext`: its constructor identity needs a native binding
  *   for programs that use it to detect WebGL 2. The WebGL 1 constructor is
- *   absent: this host only creates NativeWebGL2RenderingContext. In three's
- *   WebGL 1 rejection guard, absence correctly skips the rejected path.
+ *   absent: this host only creates NativeWebGL2RenderingContext. In a
+ *   library's WebGL 1 rejection guard, absence correctly skips the rejected path.
  * - `postMessage`, `importScripts`: worker globals, and whether this target
  *   has workers is not a fact about its GL context. `self` IS stated -- by the
- *   package, in its own `absentGlobals` -- because the package ships the
- *   `self`-less animation driver three's renderer is aliased to
- *   (`nativeWebGLAnimation.ts`): the one fact the package does know about
- *   `self` is that three's only use of it has already been answered natively.
+ *   package, in its own `absentGlobals` -- because the package ships a
+ *   `self`-less animation driver of its own: the one fact the package does
+ *   know about `self` is that its animation loop has already been answered
+ *   natively.
  */
 export const webglAbsentGlobals = (): ReadonlySet<string> =>
   new Set<string>([
@@ -167,9 +168,8 @@ export const webglAbsentGlobals = (): ReadonlySet<string> =>
     'HTMLVideoElement',
     'createImageBitmap',
     // WebXR. A native ANGLE context can no more start an XR session than it can
-    // decode an `ImageBitmap`, and three says so in its own source the same way:
-    // `const supportsGlBinding = typeof XRWebGLBinding !== 'undefined'`
-    // (`renderers/webxr/WebXRManager.js`, `renderers/common/XRManager.js`).
+    // decode an `ImageBitmap`, and libraries guard XR support the same way:
+    // `typeof XRWebGLBinding !== 'undefined'`.
     //
     // These arrive from `@types/webxr` rather than `lib.dom.d.ts`, which is why
     // `absent-globals.ts` asks whether a declaration is the PLATFORM's rather
@@ -181,15 +181,14 @@ export const webglAbsentGlobals = (): ReadonlySet<string> =>
   ])
 
 /**
- * The ambient WebGL context names three's own source (and `@types/three`'s
- * mirrored declarations) states, to the concrete class
- * `@geastack/native-webgl-angle` actually hands a program.
+ * The ambient WebGL context names a library's own source (and its mirrored
+ * declarations) states, to the concrete class `@geastack/native-webgl-angle`
+ * actually hands a program.
  *
- * Both `WebGLRenderingContext` (`@types/three`'s stale declared type for
- * three's internal `_gl` parameters -- see `WebGLRenderer`'s own comment in
- * a three.js app's entry module) and `WebGL2RenderingContext` (what
- * three's own JSDoc states for `WebGLRenderer~Options.context`) name it: two
- * ambient interfaces, one real replacement, so both keys route to the same
+ * A library may declare its internal context parameters as
+ * `WebGLRenderingContext` (often a stale declaration) and its public context
+ * option as `WebGL2RenderingContext`: two ambient interfaces, one real
+ * replacement, so both keys route to the same
  * `NativeWebGL2RenderingContext`. A package with nothing to state here
  * answers an empty map, and every ambient name keeps whatever the census
  * already does with it -- exactly `nativeTypes`'s own convention.

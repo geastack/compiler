@@ -13,6 +13,275 @@ import { nativeKeyQueryOf } from './native-key-query.js'
 import { hasClosedFixedLayout, hasNativePropertyLayout } from './native-fixed-layout.js'
 import { nativeCallableBindTransportOf } from './native-callable-bind.js'
 
+test('internal next calls expose the native origin at an explicit any-this method boundary', () => {
+  const step = record('dynamic-this-step', [
+    { key: 'done', value: { kind: 'scalar', domain: 'boolean' } },
+    { key: 'value', value: { kind: 'string' } }
+  ])
+  const method: Representation = {
+    kind: 'function-value-dispatch',
+    abi: { receiver: { kind: 'dynamic', reason: 'declared-any-never-narrowed' }, parameters: [], restFrom: null, result: step }
+  }
+  const source = record(
+    'dynamic-this-source-cursor',
+    [
+      { key: 'tag', value: { kind: 'string' } },
+      { key: 'next', value: method }
+    ],
+    'shared-refcount'
+  )
+  const target = record(
+    'dynamic-this-public-cursor',
+    [{ key: 'next', value: { ...method, abi: { ...method.abi, receiver: null } } }],
+    'shared-refcount'
+  )
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const node = conversions.nodeFor(source, target)
+  assert.notEqual(node.capability.kind, 'never')
+  const convert: IrOperation = {
+    kind: 'convert',
+    lineage,
+    source: operand('original', source),
+    result: { id: 'cursor' as never, representation: target },
+    conversionUse: node.id
+  }
+  const next: IrOperation = {
+    kind: 'iterator-next',
+    lineage,
+    iterator: operand('cursor', target),
+    value: null,
+    result: { id: 'value' as never, representation: { kind: 'string' } }
+  }
+  const callable = target.fields[0]!.value
+  const readNode = conversions.nativeMethodFor(method, callable)!
+  const acquired: IrOperation = {
+    kind: 'get-iterator',
+    lineage,
+    protocol: 'iterator',
+    receiver: operand('cursor', target),
+    method: null,
+    result: { id: 'acquired' as never, representation: target },
+    nativeNextMethodRead: {
+      value: callable,
+      read: {
+        receiver: 'acquired' as never,
+        carrier: representationKey(target),
+        key: 'next',
+        result: representationKey(callable),
+        sources: [{ source: method, conversion: readNode.id }]
+      }
+    }
+  }
+  for (const operations of [
+    [convert, next],
+    [convert, acquired]
+  ]) {
+    const exposure = reflectionExposureOf([bodyOf(operations)], new Map(), null, {
+      representations: [source, target, step],
+      conversions,
+      shakeComplete: true
+    })
+    const origin = exposure.records.get('dynamic-this-source-cursor' as never)
+    assert.equal(origin?.level, 'full')
+    assert.ok(origin?.reasons.has('dynamic-iterator-logical-receiver-origin'))
+  }
+})
+
+test('a finite native field-view receipt retains each named protocol without exposing unrelated fields', () => {
+  const boolean: Representation = { kind: 'scalar', domain: 'boolean' }
+  const flags = record(
+    'computed-field-origin',
+    [
+      { key: 'debug', value: boolean },
+      { key: 'error', value: boolean },
+      { key: 'hidden', value: boolean }
+    ],
+    'shared-refcount'
+  )
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const conversion = conversions.nodeFor(boolean, boolean).id
+  const write: IrOperation = {
+    kind: 'set',
+    lineage,
+    strict: true,
+    result: null,
+    receiver: operand('flags', flags),
+    key: operand('key', { kind: 'string' }),
+    value: operand('written', boolean),
+    nativeFieldViewWrite: {
+      receiver: 'flags' as never,
+      carrier: representationKey(flags),
+      key: 'debug',
+      keyDomain: ['debug', 'error'],
+      value: 'written' as never,
+      source: representationKey(boolean),
+      targets: [{ target: boolean, conversion }]
+    }
+  }
+  const demand = reflectionExposureOf([bodyOf([write])], new Map(), null, {
+    representations: [flags],
+    conversions,
+    shakeComplete: true
+  }).records.get('computed-field-origin' as never)
+  assert.equal(demand?.level, 'full')
+  assert.deepEqual([...demand!.fieldOperations!.keys()].sort(), ['debug', 'error'])
+  for (const operations of demand!.fieldOperations!.values()) assert.deepEqual([...operations], ['native-write'])
+})
+
+test('retained uncalled native converters keep physical field hooks without publishing unrelated payloads', () => {
+  const hidden = record('retained-converter-hidden', [{ key: 'secret', value: { kind: 'string' } }])
+  const source = record(
+    'retained-converter-origin',
+    [
+      { key: 'shown', value: { kind: 'string' } },
+      { key: 'hidden', value: hidden }
+    ],
+    'shared-refcount'
+  )
+  const target = record('retained-converter-view', [{ key: 'shown', value: { kind: 'string' } }], 'shared-refcount')
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const node = conversions.nodeFor(source, target)
+  assert.notEqual(node.capability.kind, 'never')
+  const converted: IrOperation = {
+    kind: 'convert',
+    lineage,
+    source: operand('argument', source),
+    result: { id: 'retained-view' as never, representation: target },
+    conversionUse: node.id
+  }
+  const abi: NonNullable<IrBody['abi']> = {
+    receiver: null,
+    parameters: [{ value: source, ownership: 'shared-refcount', passing: 'const-ref' }],
+    restFrom: null,
+    result: target
+  }
+  const retained = functionBodyOf('retained-converter', abi, [converted], operand('retained-view', target))
+  const exposure = reflectionExposureOf([bodyOf([]), retained], new Map(), null, {
+    representations: [source, target, hidden],
+    conversions,
+    shakeComplete: true
+  })
+  const origin = exposure.records.get(source.shapeId as never)
+  assert.equal(origin?.level, 'full')
+  assert.deepEqual([...origin!.fieldOperations!.keys()], ['shown'])
+  assert.deepEqual([...origin!.fieldOperations!.get('shown')!].sort(), ['native-read', 'native-write'])
+  assert.equal(exposure.records.get(hidden.shapeId as never)?.level, 'keys-only')
+  assert.equal(exposure.records.get(target.shapeId as never)?.level, 'keys-only')
+})
+
+test('a native data definition through a view retains the original field definition protocol', () => {
+  const text: Representation = { kind: 'string' }
+  const source = record(
+    'definition-origin',
+    [
+      { key: 'value', value: text },
+      { key: 'marker', value: { kind: 'scalar', domain: 'boolean' } }
+    ],
+    'shared-refcount'
+  )
+  const target = record('definition-view', [{ key: 'value', value: text }], 'shared-refcount')
+  const descriptor = record('definition-input', [{ key: 'value', value: text }], 'shared-refcount')
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const node = conversions.nodeFor(source, target)
+  assert.notEqual(node.capability.kind, 'never')
+  const convert: IrOperation = {
+    kind: 'convert',
+    lineage,
+    source: operand('original', source),
+    result: { id: 'view' as never, representation: target },
+    conversionUse: node.id
+  }
+  const call: Extract<IrOperation, { kind: 'call' }> = {
+    kind: 'call',
+    lineage,
+    callee: operand('define-property', { kind: 'dynamic', reason: 'declared-any-never-narrowed' }),
+    receiver: null,
+    arguments: [operand('view', target), operand('key', text), operand('descriptor', descriptor)],
+    result: null,
+    nativeDataDefinition: {
+      receiver: 'view' as never,
+      descriptor: 'descriptor' as never,
+      key: 'key' as never,
+      keyText: 'value',
+      source: text,
+      held: text,
+      conversion: conversions.nodeFor(text, text).id,
+      delegatesView: true,
+      destinations: [source, target].map((carrier) => ({
+        carrier: representationKey(carrier),
+        shape: carrier.kind === 'record' ? carrier.shapeId : '',
+        field: { key: 'value', value: text, required: true }
+      }))
+    }
+  }
+  const exposure = reflectionExposureOf([bodyOf([convert, call])], new Map(), null, {
+    representations: [source, target, descriptor],
+    conversions,
+    shakeComplete: true
+  })
+  const origin = exposure.records.get('definition-origin' as never)!
+  assert.ok(origin.fieldOperations?.get('value')?.has('define'))
+  assert.equal(origin.fieldOperations?.has('marker'), false)
+})
+
+test('enumerating a live view demands its original own descriptors, and only an enumeration does', () => {
+  const text: Representation = { kind: 'string' }
+  const source = record(
+    'enumerated-origin',
+    [
+      { key: 'tint', value: text },
+      { key: 'strength', value: text }
+    ],
+    'shared-refcount'
+  )
+  const target = record(
+    'enumerated-view',
+    [
+      { key: 'tint', value: text },
+      { key: 'strength', value: text }
+    ],
+    'shared-refcount'
+  )
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const node = conversions.nodeFor(source, target)
+  assert.notEqual(node.capability.kind, 'never')
+  const convert: IrOperation = {
+    kind: 'convert',
+    lineage,
+    source: operand('original', source),
+    result: { id: 'view' as never, representation: target },
+    conversionUse: node.id
+  }
+  const forIn: IrOperation = {
+    kind: 'get-iterator',
+    lineage,
+    protocol: 'enumerate',
+    receiver: operand('view', target),
+    method: null,
+    result: { id: 'keys' as never, representation: { kind: 'dynamic', reason: 'declared-any-never-narrowed' } }
+  }
+  const ownKeys = {
+    kind: 'call',
+    lineage,
+    callee: operand('intrinsic-keys', { kind: 'dynamic', reason: 'declared-any-never-narrowed' }),
+    receiver: null,
+    arguments: [operand('view', target)],
+    result: null,
+    intrinsicOwnKeys: true
+  } as IrOperation
+  const options = { representations: [source, target], conversions, shakeComplete: true }
+  for (const enumeration of [forIn, ownKeys]) {
+    const exposure = reflectionExposureOf([bodyOf([convert, enumeration])], new Map(), null, options)
+    const origin = exposure.records.get('enumerated-origin' as never)!
+    assert.equal(origin.level, 'full')
+    assert.deepEqual([...origin.fieldOperations!.keys()].sort(), ['strength', 'tint'])
+    for (const operations of origin.fieldOperations!.values()) assert.ok(operations.has('descriptor'))
+  }
+  const unenumerated = reflectionExposureOf([bodyOf([convert])], new Map(), null, options)
+  const untouched = unenumerated.records.get('enumerated-origin' as never)
+  assert.equal(untouched?.fieldOperations?.get('tint')?.has('descriptor') ?? false, false)
+})
+
 test('certified numeric absence needs no reflected fields, but an undefined result alone is no proof', () => {
   const declaration = 'absent-context' as never
   const receiver: Representation = {
@@ -68,7 +337,6 @@ test('native bind retains its typed prefix without exposing fields; dynamic and 
     thisArgument: null,
     receiver: null,
     bound: [operand('prefix', payload)],
-    detached: false,
     result: {
       id: 'bound' as never,
       representation: { kind: 'function-value-dispatch', abi: { ...abi, parameters: abi.parameters.slice(1) } }
@@ -89,12 +357,16 @@ test('native bind retains its typed prefix without exposing fields; dynamic and 
   assert.equal(demand(mismatched), 'full')
 })
 
-const record = (shapeId: string, fields: readonly { key: string; value: Representation }[]): Representation => ({
+const record = (
+  shapeId: string,
+  fields: readonly { key: string; value: Representation }[],
+  ownership: 'owned' | 'shared-refcount' = 'owned'
+): Extract<Representation, { kind: 'record' }> => ({
   kind: 'record',
   shapeId,
   fields: fields.map((field) => ({ ...field, required: true })),
   accessors: [],
-  ownership: 'owned'
+  ownership
 })
 
 const recordWithIndex = (shapeId: string, fields: readonly { key: string; value: Representation }[]): Representation => ({
@@ -685,6 +957,46 @@ test('optional payload loads and absence selections retain native records withou
       shakeComplete: true
     })
     assert.equal(escaped.records.get('optional-native-record' as never)?.level, 'full')
+  }
+})
+
+test('native object samples retain exact descriptor reads and only publish genuinely dynamic child conversions', () => {
+  const child = record('native-sample-child', [{ key: 'amount', value: { kind: 'scalar', domain: 'number' } }], 'shared-refcount')
+  const source = record('native-sample-source', [], 'shared-refcount')
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  for (const value of [child, { kind: 'dynamic', reason: 'declared-any-never-narrowed' } as const]) {
+    const target = record('native-sample-target', [{ key: 'child', value }]) as Extract<Representation, { kind: 'record' }>
+    const present = conversions.nodeFor(child, value)
+    const node = conversions.nativeObjectSampleFor('closed-native-sample', {
+      source: source as Extract<Representation, { kind: 'record' }>,
+      target,
+      fields: [{ field: target.fields[0]!, from: 'extension', storage: child, presence: 'proven', present, absent: null }]
+    })
+    assert.ok(node)
+    assert.equal(node.capability.kind === 'static' && node.capability.materializer.nativeFieldProtocol, undefined)
+    const convert: IrOperation = {
+      kind: 'convert',
+      lineage,
+      conversionUse: node.id,
+      source: operand('original', source),
+      result: { id: 'sampled' as never, representation: target }
+    }
+    const exposure = reflectionExposureOf([bodyOf([convert])], new Map(), null, {
+      representations: [source, target, child],
+      conversions,
+      shakeComplete: true
+    })
+    const original = exposure.records.get('native-sample-source' as never)
+    assert.equal(original?.level, 'full')
+    assert.deepEqual([...original!.fieldOperations!.keys()], ['child'])
+    assert.deepEqual([...original!.fieldOperations!.get('child')!], ['native-read'])
+    assert.equal(exposure.records.get('native-sample-target' as never)?.level, 'keys-only')
+    assert.equal(exposure.records.get('native-sample-child' as never)?.level, value === child ? 'keys-only' : 'full')
+    const detached = reflectionExposureOf([bodyOf([convert])], new Map(), null, {
+      representations: [source, target, child],
+      shakeComplete: true
+    })
+    assert.equal(detached.records.get('native-sample-source' as never)?.fieldOperations, undefined)
   }
 })
 
@@ -1298,7 +1610,7 @@ test('retaining a prototype accessor does not expose a class own-field protocol'
 })
 
 test('a class setter entry consumes a cited payload-preserving argument conversion', () => {
-  // three's `this.image = images` (CubeDepthTexture.js:35): the setter's formal
+  // `this.image = images` through an inherited accessor: the setter's formal
   // is a sum the written array is one arm of.
   const declaration = 'AccessorTexture' as never
   const number: Representation = { kind: 'scalar', domain: 'number' }
@@ -1484,6 +1796,95 @@ const provenFamilyLayoutOf = (declaration: never, instance: Representation, key:
     length: null
   }) as never
 
+test('an admitted native view exposes its original fields only at a dynamic logical receiver boundary', () => {
+  const declaration = 'NativeViewOrigin' as never
+  const string: Representation = { kind: 'string' }
+  const source: Representation = {
+    kind: 'class-ref',
+    declaration,
+    shapeId: 'native-origin',
+    ownership: 'shared-refcount',
+    ancestors: []
+  }
+  const view: Representation = { kind: 'native-record-ref', shapeId: 'native-origin-view', native: null, ownership: 'shared-refcount' }
+  const chained: Representation = { ...view, shapeId: 'native-origin-chain' }
+  const fields = [
+    { key: 'shown', value: string, required: true },
+    { key: 'hidden', value: string, required: true }
+  ]
+  const classes = new Map([[declaration, provenFamilyLayoutOf(declaration, source, 'hidden', string)]])
+  const conversions = createConversionNodes({
+    registry: createCppConversionRegistry({
+      indexesForShape: () => [],
+      accessorsForShape: () => [],
+      forShape: (shape) => (shape === source.shapeId ? fields : shape === view.shapeId ? fields.slice(0, 1) : [])
+    }),
+    nodes: new Map()
+  })
+  const viewNode = conversions.nodeFor(source, view)
+  const chainNode = conversions.nodeFor(view, chained)
+  assert.notEqual(viewNode.capability.kind, 'never')
+  assert.notEqual(chainNode.capability.kind, 'never')
+  const callable: Representation = {
+    kind: 'function-value-dispatch',
+    abi: { receiver: null, parameters: [], restFrom: null, result: string }
+  }
+  const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+  const adapter = conversions.nodeFor(dynamic, callable)
+  assert.notEqual(adapter.capability.kind, 'never')
+  const viewOperation: IrOperation = {
+    kind: 'convert',
+    lineage,
+    conversionUse: viewNode.id,
+    source: operand('origin', source),
+    result: { id: 'view' as never, representation: view }
+  }
+  const chainOperation: IrOperation = {
+    kind: 'convert',
+    lineage,
+    conversionUse: chainNode.id,
+    source: operand('view', view),
+    result: { id: 'chain' as never, representation: chained }
+  }
+  const adapterOperation: IrOperation = {
+    kind: 'convert',
+    lineage,
+    conversionUse: adapter.id,
+    source: operand('unknown-function', dynamic),
+    result: { id: 'adapter' as never, representation: callable }
+  }
+  const call: IrOperation = {
+    kind: 'call',
+    lineage,
+    callee: operand('adapter', callable),
+    receiver: null,
+    thisArgument: operand('chain', chained),
+    arguments: [],
+    result: null
+  }
+  const demand = (operations: readonly IrOperation[]) =>
+    reflectionExposureOf([bodyOf(operations)], classes, { layoutOf: () => record('native-origin', fields) } as never, {
+      representations: [source, view, chained, callable],
+      conversions,
+      shakeComplete: true
+    }).classes.get(declaration)
+  const native = demand([viewOperation, chainOperation, call])
+  assert.equal(native?.level, 'full', 'the live source retains its named native protocol')
+  assert.deepEqual([...native!.fieldOperations!.keys()], ['shown'])
+  assert.deepEqual([...native!.fieldOperations!.get('shown')!].sort(), ['native-read', 'native-write'])
+  assert.equal(demand([adapterOperation, call])?.level, 'keys-only', 'an unrequested census recipe proves no origin transport')
+  assert.equal(
+    demand([viewOperation, chainOperation, adapterOperation, call])?.level,
+    'full',
+    'dynamic entry can read omitted source fields through a chain'
+  )
+  assert.equal(
+    demand([viewOperation, chainOperation, adapterOperation, call])?.fieldOperations,
+    undefined,
+    'dynamic this exposes omitted source fields'
+  )
+})
+
 test('a computed key with a proven finite name set publishes only the proven fields, not the whole class family graph', () => {
   const base = 'ProvenBase' as never
   const derived = 'ProvenDerived' as never
@@ -1506,10 +1907,10 @@ test('a computed key with a proven finite name set publishes only the proven fie
     [derived, derivedLayout]
   ]) as never
   const dynamicKey = operand('dynamic-key', { kind: 'dynamic', reason: 'declared-any-never-narrowed' })
-  // `this[ key ] = newValue` under a computed key three's `Material.setValues`
-  // shape produces -- where the census closed `key` to `{ 'y' }`. `y` is
-  // declared only on the SUBCLASS, exactly like `MeshPhongMaterial.shininess`
-  // read off a `this` typed `Material`.
+  // `this[ key ] = newValue` under a computed key a generic `setValues` loop
+  // produces -- where the census closed `key` to `{ 'y' }`. `y` is declared
+  // only on the SUBCLASS, exactly like a subclass-only field read off a
+  // `this` typed as the base class.
   const proven = {
     kind: 'get',
     lineage,
@@ -2687,11 +3088,75 @@ test('an adapter boxing a typed result never receives a no-field-transport contr
   const from = { receiver: null, parameters: [], restFrom: null, result: value }
   const to = { ...from, result: { kind: 'dynamic' as const, reason: 'declared-any-never-narrowed' as const } }
   const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
-  const node = conversions.nodeFor({ kind: 'function-value-dispatch', abi: from }, { kind: 'function-value-dispatch', abi: to })
+  const source: Representation = { kind: 'function-value-dispatch', abi: from }
+  const target: Representation = { kind: 'function-value-dispatch', abi: to }
+  const node = conversions.nodeFor(source, target)
   assert.equal(node.capability.kind, 'atom')
   const capability = node.capability as Extract<typeof node.capability, { kind: 'atom' }>
   assert.equal(capability.materializer.callableAdapter, undefined)
   assert.equal(capability.materializer.nativeFieldProtocol, undefined)
+  assert.equal(capability.materializer.callableView?.result?.source, value)
+  const converted: IrOperation = {
+    kind: 'convert',
+    lineage,
+    conversionUse: node.id,
+    source: operand('native-result-source', source),
+    result: { id: 'boxed-result-target' as never, representation: target }
+  }
+  const exposure = reflectionExposureOf([bodyOf([converted])], new Map(), null, {
+    representations: [source, target, value],
+    conversions,
+    shakeComplete: true
+  })
+  assert.equal(exposure.records.get('boxed-adapter-result' as never)?.level, 'full')
+})
+
+test('native receiver erasure keeps typed result reflection demand through its exact frame adapter', () => {
+  const value = record('boxed-native-method-result', [{ key: 'code', value: { kind: 'scalar', domain: 'number' } }])
+  const receiver: Representation = {
+    kind: 'class-ref',
+    declaration: 'native-result-owner' as never,
+    shapeId: 'native-result-owner',
+    ownership: 'shared-refcount',
+    ancestors: []
+  }
+  const source: Representation = {
+    kind: 'function-value-dispatch',
+    abi: { receiver, parameters: [], restFrom: null, result: value }
+  }
+  const target: Representation = {
+    kind: 'function-value-dispatch',
+    abi: { receiver: null, parameters: [], restFrom: null, result: { kind: 'dynamic', reason: 'declared-any-never-narrowed' } }
+  }
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const node = conversions.nativeMethodFor(source, target)
+  assert.ok(node)
+  assert.equal(node.capability.kind, 'static')
+  const capability = node.capability as Extract<typeof node.capability, { kind: 'static' }>
+  assert.equal(capability.materializer.nativeFieldProtocol, undefined)
+  assert.ok(capability.materializer.nativeMethod?.frameAdaptation)
+  const converted: IrOperation = {
+    kind: 'convert',
+    lineage,
+    conversionUse: node.id,
+    source: operand('native-method-result-source', source),
+    result: { id: 'boxed-native-method-result-target' as never, representation: target }
+  }
+  const exposure = reflectionExposureOf([bodyOf([converted])], new Map(), null, {
+    representations: [source, target, value],
+    conversions,
+    shakeComplete: true
+  })
+  assert.equal(exposure.records.get('boxed-native-method-result' as never)?.level, 'full')
+  const noResult: Representation = { ...source, abi: { ...source.abi, result: { kind: 'void' } } }
+  const erased: Representation = { ...target, abi: { ...noResult.abi, receiver: null } }
+  const receiverOnly = conversions.nativeMethodFor(noResult, erased)
+  assert.ok(receiverOnly)
+  assert.equal(receiverOnly.capability.kind, 'static')
+  assert.equal(
+    (receiverOnly.capability as Extract<typeof receiverOnly.capability, { kind: 'static' }>).materializer.nativeFieldProtocol,
+    'unused'
+  )
 })
 
 test('native fixed definitions do not publish their intrinsic return ABI, but other uses still do', () => {
@@ -3165,4 +3630,50 @@ test('whole-object publication overrides field masks regardless of operation ord
     assert.equal(exposure.records.get('published-masked-holder' as never)?.level, 'full')
     assert.equal(exposure.records.get('published-masked-holder' as never)?.fieldOperations, undefined)
   }
+})
+
+test('a data definition of a key the class family never declares demands that key alone', () => {
+  const declaration = 'defined-source' as never
+  const receiver: Representation = {
+    kind: 'class-ref',
+    declaration,
+    shapeId: 'defined-source-shape',
+    ownership: 'shared-refcount',
+    ancestors: []
+  }
+  const number: Representation = { kind: 'scalar', domain: 'number' }
+  const classes = new Map([[declaration, provenFamilyLayoutOf(declaration, receiver, 'version', number)]])
+  const shape = record('defined-source-shape', [{ key: 'version', value: number }])
+  const descriptor = record('defined-source-descriptor', [{ key: 'value', value: number }])
+  const key = (text: string): IrOperation =>
+    ({
+      kind: 'constant',
+      lineage,
+      literal: 'string',
+      text,
+      result: { id: `key-${text}` as never, representation: { kind: 'string' } }
+    }) as never
+  const define = (text: string): IrOperation =>
+    ({
+      kind: 'call',
+      lineage,
+      callee: operand('define-property', { kind: 'dynamic', reason: 'declared-any-never-narrowed' }),
+      receiver: null,
+      arguments: [operand('source', receiver), operand(`key-${text}`, { kind: 'string' }), operand('descriptor', descriptor)],
+      result: null,
+      intrinsicDataDefinition: true,
+      namedDataDefinitionKey: text
+    }) as never
+  const demand = (text: string) =>
+    reflectionExposureOf([bodyOf([key(text), define(text)])], classes, { layoutOf: () => shape } as never, {
+      representations: [receiver],
+      shakeComplete: true
+    }).classes.get(declaration)
+  const undeclared = demand('id')
+  assert.equal(undeclared?.level, 'full')
+  assert.deepEqual([...(undeclared?.fieldOperations?.keys() ?? [])], ['id'])
+  assert.deepEqual([...(undeclared?.fieldOperations?.get('id') ?? [])], ['define'])
+  // A declared field belongs to the fixed data-definition recipe; absent it,
+  // the call stays an open boundary over the whole instance.
+  assert.equal(demand('version')?.fieldOperations, undefined)
 })

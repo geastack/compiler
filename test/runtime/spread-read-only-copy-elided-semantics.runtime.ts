@@ -1,4 +1,4 @@
-// bson's `deserializeObject` opens with `options = { ...options }` and then
+// A binary-document deserializer's `deserializeObject` opens with `options = { ...options }` and then
 // only reads `options` by constant key before its first call. The fresh copy
 // is unobservable there, so the compiler reads the source in its place
 // (`ir/spread-copy-elision.ts`); every answer below must be the one the copy

@@ -74,8 +74,11 @@ export const reactiveOriginsOf = (ctx: EmitContext, body: IrBody): ReactiveOrigi
       // Presence narrowing unwraps the same object, rather than allocating a
       // new record. Array element aliases must retain their owning revision
       // across this optional-to-payload conversion before entering a binding.
-      if (operation.kind === 'convert' && operation.source.representation.kind === 'optional' &&
-          representationKey(operation.source.representation.payload) === representationKey(operation.result.representation)) {
+      if (
+        operation.kind === 'convert' &&
+        operation.source.representation.kind === 'optional' &&
+        representationKey(operation.source.representation.payload) === representationKey(operation.result.representation)
+      ) {
         const origin = origins.get(operation.source.value)
         if (origin !== undefined) origins.set(operation.result.id, origin)
         continue

@@ -1,6 +1,6 @@
 // ECMA-262 20.1.2.5 Object.entries walks EnumerableOwnProperties, and an
 // optional field that was never written is not an own key at all -- so the
-// array's length is a run-time fact. The mongodb driver's
+// array's length is a run-time fact. A database client's
 // `Object.entries(options)` over `{ replicaSet?: string; ... }` is the shape.
 
 interface Options {

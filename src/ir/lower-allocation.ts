@@ -150,14 +150,17 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
         candidate.kind === 'dictionary' ||
         candidate.kind === 'record-with-index'
       const native = isNativeObject(carrier)
-      // A literal stored into a cell that holds MORE than an object -- mongodb's
+      // A literal stored into a cell that holds MORE than an object --
       // `let finalHint = undefined` later given `{}`, whose cell is
       // `optional(string | Document)` -- is still one object when it is made.
       // It is allocated at the one object arm that cell holds, and the value
       // enters the cell through the ordinary widening every other store takes.
       const objectArm = native ? null : soleNativeObjectArm(carrier, isNativeObject)
       if (!native && objectArm !== null) {
-        const made = { value: ctx.builder.allocateRecord(block, lineage, [], objectArm), representation: objectArm }
+        const made = {
+          value: ctx.builder.allocateRecord(block, lineage, [], objectArm, operation.ordinaryObjectPrototype),
+          representation: objectArm
+        }
         const widened = convertTo(ctx, block, lineage, made, representation, 'object-literal-arm')
         if (widened === null)
           throw new IrLoweringBlockedError(
@@ -166,7 +169,7 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
         registerResult(ctx, operation, widened.value)
         return
       }
-      // A literal laid out as a CLASS (`writeConcern: WriteConcern = { w: 0 }`)
+      // A literal laid out as a CLASS (`concern: Concern = { w: 0 }`)
       // is an ordinary object with that class's layout, never its instance.
       // Only a data-only class can lend its layout (`isDataOnlyClass`); the
       // emitter gives the block a plain-object identity so instance tests
@@ -177,12 +180,12 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
             `an object literal is laid out as class ${carrier.declaration}, which has behaviour (methods, accessors, field initializers ` +
               'or a native base) a plain object would not inherit'
           )
-        registerResult(ctx, operation, ctx.builder.allocateRecord(block, lineage, [], representation))
+        registerResult(ctx, operation, ctx.builder.allocateRecord(block, lineage, [], representation, operation.ordinaryObjectPrototype))
         return
       }
       const allocate = native
-        ? ctx.builder.allocateRecord(block, lineage, [], representation)
-        : ctx.builder.allocateOrdinaryObject(block, lineage, representation)
+        ? ctx.builder.allocateRecord(block, lineage, [], representation, operation.ordinaryObjectPrototype)
+        : ctx.builder.allocateOrdinaryObject(block, lineage, representation, operation.ordinaryObjectPrototype)
       registerResult(ctx, operation, allocate)
       return
     }
@@ -283,9 +286,9 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
             )
           }
           // An Array or Set whose element the census converts into this
-          // literal's own element -- mongodb's `return [...compressionList]`
-          // spreads a `Set<string>` into the `unknown[]` its transform
-          // returns. The literal is fresh, so each element is converted on
+          // literal's own element -- `return [...list]` spreading a
+          // `Set<string>` into the `unknown[]` its transform returns. The
+          // literal is fresh, so each element is converted on
           // the way in (`IrArrayElement.element`) and no source array is
           // recast.
           if (
@@ -324,11 +327,11 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
       // `contributeClass` call, and both name the class through the
       // producer's identities -- which, inside a monomorphized copy of a
       // generic class, carry that copy's specialization (`decl|f80|43@0` for
-      // hono's `Hono<E, S, BasePath>`). The structural shape names the class
+      // a generic `App<E, S, BasePath>`). The structural shape names the class
       // by its unspecialized declaration, which is right for the one C++
       // struct every copy shares but pairs with no event of a generic class:
-      // `Hono` was evaluated with no heritage, its method-state owner had no
-      // parent, and the first `HonoBase` method read as a value on an instance
+      // `App` was evaluated with no heritage, its method-state owner had no
+      // parent, and the first `AppBase` method read as a value on an instance
       // aborted with "no matching class evaluation". A class expression with
       // no members publishes no `classDeclaration`; the shape is its name.
       const evaluatedClass = operation.classDeclaration ?? shape.declaration
@@ -384,7 +387,11 @@ export const lowerAllocation = (ctx: LoweringContext, block: IrBlockId, operatio
       // over nothing carries none, and that is the whole capture set, not a
       // partial one this layer would have to complete from elsewhere.
       const captures = orderedOperandsOf(operation, 'capture').map((operand) => resolveRequiredOperand(ctx, block, lineage, operand))
-      registerResult(ctx, operation, ctx.builder.allocateCallable(block, lineage, callable, captures, representation))
+      registerResult(
+        ctx,
+        operation,
+        ctx.builder.allocateCallable(block, lineage, callable, captures, representation, operation.ownPrototypeProperty)
+      )
       return
     }
     case 'template-object': {

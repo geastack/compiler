@@ -108,8 +108,8 @@ test('dynamic constructor reads consider runtime classes while keeping unused su
   assert.equal(native.status, 0, native.stderr)
 })
 
-// Three's universal `clone() { return new this.constructor().copy( this ) }`
-// idiom (Object3D/Material/Texture/Camera/BufferGeometry/RenderTarget): a
+// The common JS `clone() { return new this.constructor().copy( this ) }`
+// idiom, used across a library's whole class hierarchy: a
 // subclass never literally `new`'d anywhere -- reached only through the
 // family `new this.constructor()` closes over `extends` -- still overrides
 // `copy`, and `.copy(this)`'s own dispatch has to reach that override at
@@ -124,8 +124,8 @@ const cloneFamilyInput = (source: string) => ({
   options: { ...defaultCompilerOptions, types: [] },
   sourceOverlay: new Map([[cloneFamilyEntry, source]])
 })
-// Three spells the JSDoc-cast form of the idiom in plain `.js` files (Texture.js,
-// BufferGeometry.js, Object3D.js, Camera.js): TypeScript applies a JSDoc `@type`
+// JS libraries spell the JSDoc-cast form of the idiom in plain `.js` files:
+// TypeScript applies a JSDoc `@type`
 // cast only under `checkJs` on a `.js` source -- inside a `.ts` file the same
 // comment is inert and `this.constructor` stays typed `Function`, which has no
 // construct signature and makes the fixture fail on an unrelated checker
@@ -166,11 +166,11 @@ test('a copy override reached only through new this.constructor().copy(this) is 
 })
 
 test('the JSDoc type-cast spelling of the clone idiom also keeps its family fully live', () => {
-  // Texture.js, BufferGeometry.js, Object3D.js and Camera.js all spell the
+  // Plain `.js` library classes spell the
   // idiom behind a JSDoc `@type` cast paren purely to anchor the comment:
   // `new ( /** @type {new (...args: any[]) => this} */ ( this.constructor ) )()`.
-  // Plain JS (no `: Type` annotations) on a `.js` entry, matching how three
-  // itself is authored and the only shape that makes checkJs apply the cast.
+  // Plain JS (no `: Type` annotations) on a `.js` entry, matching how such a
+  // library is authored and the only shape that makes checkJs apply the cast.
   const result = compile(
     cloneFamilyJsInput(`
       class Base {

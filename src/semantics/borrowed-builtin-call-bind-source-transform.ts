@@ -1,24 +1,22 @@
 import ts from 'typescript'
+import type { SourceTransformOutput, SourceTransformProtocol } from './source-transform-protocol.js'
 
 const isJavaScriptSource = (file: ts.SourceFile): boolean => /\.[cm]?jsx?$/i.test(file.fileName)
 
 /**
- * A borrowed built-in method -- `Function.prototype.call.bind(Array.prototype.join)`,
- * or the one-hop-shorter `Array.prototype.join.call(xs, sep)` -- rewritten into
- * an ordinary member call where that path is installed. Object's tag algorithm
- * is preserved as Object.prototype.toString.call: dispatching receiver.toString
- * would instead invoke Array/Function overrides and compute a different answer.
+ * Recognize borrowed built-in calls before checker inference loses their
+ * callable frame. Array calls retain the existing native member-call path.
+ * Object own-property queries use the corresponding static algorithm, rather
+ * than dispatching through a receiver method that may be overridden. Object's
+ * tag algorithm retains Object.prototype.toString.call for the same reason.
  *
  * ## The fact this states
  *
- * test262's `harness/propertyHelper.js` opens with exactly this idiom:
+ * A conformance harness's property-helper file opens with exactly this idiom:
  * `var __push = Function.prototype.call.bind(Array.prototype.push)`, so that
- * every later `__push(failures, msg)` mutates `failures` precisely as
- * `failures.push(msg)` would, without depending on `failures` never having
- * shadowed its own `.push`. Nothing about that is a runtime decision --
- * `Function.prototype.call.bind` applied to a NAMED built-in prototype method
- * is a compile-time-known fact about which method is being borrowed, from a
- * source that never changes underneath the program.
+ * later `__push(failures, msg)` calls explicitly select Array.prototype.push.
+ * That spelling identifies the intended algorithm; it does not prove that a
+ * builtin remains intact or that a receiver method selects the same function.
  *
  * TypeScript does not see it that way. `Function.prototype.call`'s own
  * signature is generic over the callee it is bound to
@@ -40,15 +38,12 @@ const isJavaScriptSource = (file: ts.SourceFile): boolean => /\.[cm]?jsx?$/i.tes
  * derivation rule, its own preflight claims, and its own IR lowering that
  * turns a call through it into a member call built from operands the call
  * site no longer has in AST form. That is real machinery for a fact that is
- * entirely syntactic: `receiver.push(msg)` and
- * `__push(receiver, msg)`/`Array.prototype.push.call(receiver, msg)` are the
- * SAME expression, and the checker's own inference already handles the first
- * spelling perfectly (an ordinary `Array.prototype.push` method call is
- * exactly what `emit-prototype-array.ts`'s `arrayMethods` renders). So this
- * rewrites the SPELLING, before the checker ever runs, the same move
- * `thisConstructorSourceTransform` makes for `new this.constructor(...)`:
- * every producer, every census and every emitter downstream sees an ordinary
- * member call and needs no awareness that a borrow ever happened.
+ * represented by source operands still available here. The checker already
+ * understands the supported replacement calls. The own-query rewrite also
+ * returns versioned protocol requirements for both the original capture and
+ * replacement. The frontend must retain those requirements and discharge
+ * them against the final checker-backed mutation ledger; replacing text does
+ * not grant intrinsic permission.
  *
  * A receiver the borrowed member cannot natively serve (an array-like object
  * with only `length` and index keys, say) is refused exactly as
@@ -60,18 +55,17 @@ const isJavaScriptSource = (file: ts.SourceFile): boolean => /\.[cm]?jsx?$/i.tes
  *
  * Two shapes, both requiring the identical `<Owner>.prototype.<member>`
  * spelling for the borrowed method, with `Owner` restricted to a small
- * allowlist of ambient built-ins whose prototype methods are never
- * polymorphic over a user subclass the way an ordinary class's methods can
- * be -- `Array.prototype.join.call(other, x)` and `other.join(x)` can never
- * disagree, because nothing in this compiler's model lets a program override
- * `Array.prototype.join`. The identical rewrite for an ARBITRARY user class's
+ * allowlist of ambient built-ins supported by the native host tables. A
+ * prototype algorithm and receiver dispatch can disagree when the receiver
+ * overrides a member. The identical rewrite for an ARBITRARY user class's
  * `Foo.prototype.bar.call(other, x)` would be unsound the moment `other`'s own
  * class overrides `bar`: that call explicitly runs FOO's implementation
  * unpolymorphically, while `other.bar(x)` would dispatch to the override. So
- * only the two built-ins this compiler's host tables already model natively
- * are recognised; extending the allowlist to more (`String`, `Number`, `Map`,
- * `Set`, ...) is the identical, mechanical addition and deliberately left out
- * of this first cut.
+ * only the existing Array/Object domain is recognized here. Object own-query
+ * replacements avoid receiver dispatch and require the original Object
+ * prototype method, Function call/bind protocol, and replacement Object member
+ * to remain intact. A lexical Object/Function shadow leaves the original text.
+ * Final integrity is deliberately conservative over the complete program.
  *
  * `Array.prototype.join.call(xs, sep)`/`Object.prototype.hasOwnProperty.call(o, k)`
  * are rewritten per call site, with no declaration to track. The `.bind` form
@@ -85,12 +79,11 @@ const isJavaScriptSource = (file: ts.SourceFile): boolean => /\.[cm]?jsx?$/i.tes
  * documents for the same reason.
  *
  * The original `.bind(...)` initializer is replaced with a bare `null` --
- * removing the exotic, uncompilable ABI from the program rather than leaving
- * an unread declaration of it in place, and safe because every call this
- * transform found has already been rewritten to no longer read the binding at
- * all. A call this transform left alone (the name used as a plain value, never
- * called directly) is not part of test262's own idiom and is left exactly as
- * written, refusing downstream under its own name if it is ever reached.
+ * removing its opaque ABI after replacement calls are queued. An own-query
+ * binding is neutralized only when every mention is a supported direct call;
+ * value publication, spread arguments, omitted receivers, shadows, and
+ * reassignment retain the original capture. Its removed intrinsic reads still
+ * contribute mandatory final-ledger requirements.
  */
 
 const borrowableOwners: ReadonlySet<string> = new Set(['Array', 'Object'])
@@ -183,18 +176,20 @@ const memberCallText = (file: ts.SourceFile, owner: string, member: string, args
   // member call dispatches to the wrong function or to nothing. ES2022's
   // `Object.hasOwn` is the same algorithm (ToObject, then HasOwnProperty)
   // without the dispatch. The `as {}` keeps what the borrowed call accepted:
-  // any receiver type, `unknown` included -- the MongoDB driver's
-  // `HAS_OWN = (object: unknown, prop: string) => ...` failed to type-check as
-  // a member call on `unknown`. A type assertion is TypeScript-only syntax,
-  // so JavaScript sources keep the borrowed call, which already type-checks
-  // there (JS reads an unannotated receiver as `any`).
-  if (owner === 'Object' && member === 'hasOwnProperty' && !isJavaScriptSource(file))
-    return `Object.hasOwn((${receiverText}) as {}, ${rest[0] ?? 'undefined'})`
+  // any receiver type, `unknown` included -- a helper like
+  // `hasOwn = (object: unknown, prop: string) => ...` failed to type-check as
+  // a member call on `unknown`. JavaScript needs no TypeScript assertion.
+  // Both replacement and original capture protocols remain final-ledger
+  // obligations; receiver shape does not authenticate either algorithm.
+  if (owner === 'Object' && member === 'hasOwnProperty')
+    return `Object.hasOwn(${isJavaScriptSource(file) ? receiverText : `(${receiverText}) as {}`}, ${rest.length ? rest.join(', ') : 'undefined'})`
+  if (owner === 'Object' && member === 'propertyIsEnumerable')
+    return `(Object.getOwnPropertyDescriptor(${receiverText}, ${rest.length ? rest.join(', ') : 'undefined'})?.enumerable === true)`
   // A typed array has its OWN `map`/`filter`/`slice`, typed and behaving as
   // the typed array's: `new Uint8Array(buffer).map(cb)` must produce another
   // Uint8Array, so the checker refuses a string-returning `cb` (TS2322), while
   // the borrowed `Array.prototype.map.call(new Uint8Array(buffer), cb)` --
-  // hono's `utils/crypto.ts` hex encoder -- produces a plain array of whatever
+  // a common hex-encoder idiom -- produces a plain array of whatever
   // `cb` returns. The two spellings are not the same expression there, so the
   // rewrite goes through `Array.from`, which is the borrowed algorithm's own
   // view of the receiver (a plain array of the same elements) and gives the
@@ -214,15 +209,22 @@ const memberCallText = (file: ts.SourceFile, owner: string, member: string, args
   return `${base}.${member}(${rest.join(', ')})`
 }
 
-/** Every `<Owner>.prototype.<member>.call(receiver, ...rest)` in the file, rewritten to `receiver.member(...rest)`. */
-const directCallEdits = (file: ts.SourceFile): Edit[] => {
+/** Rewrite supported direct borrows and retain the own-query protocol requirements. */
+const directCallEdits = (file: ts.SourceFile, objectProtocolsClosed: boolean, protocols: SourceTransformProtocol[]): Edit[] => {
   const found: Edit[] = []
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'call') {
       const borrowed = borrowedMemberOf(node.expression.expression)
       const objectTag = borrowed?.owner === 'Object' && borrowed.member === 'toString'
-      const text = borrowed && !objectTag ? memberCallText(file, borrowed.owner, borrowed.member, node.arguments) : null
-      if (text !== null) found.push({ start: node.getStart(file), end: node.end, text })
+      const objectQuery = borrowed?.owner === 'Object' && ownQueryMember(borrowed.member)
+      const text =
+        borrowed && !objectTag && (!objectQuery || objectProtocolsClosed) && !node.arguments.some(ts.isSpreadElement)
+          ? memberCallText(file, borrowed.owner, borrowed.member, node.arguments)
+          : null
+      if (text !== null) {
+        found.push({ start: node.getStart(file), end: node.end, text })
+        if (objectQuery && borrowed) protocols.push(...ownQueryProtocols(borrowed.member, false))
+      }
     }
     ts.forEachChild(node, visit)
   }
@@ -285,7 +287,65 @@ const borrowedBindDeclarations = (
   return found
 }
 
-export const borrowedBuiltinCallBindSourceTransform = (input: { readonly fileName: string; readonly text: string }): string | null => {
+const ownQueryMember = (member: string): boolean => member === 'hasOwnProperty' || member === 'propertyIsEnumerable'
+const ownQueryProtocols = (member: string, bound: boolean): readonly SourceTransformProtocol[] => [
+  { intrinsic: 'Object', member: member === 'hasOwnProperty' ? 'hasOwn' : 'getOwnPropertyDescriptor' },
+  { intrinsic: 'Object', prototypeKeys: [member] },
+  { intrinsic: 'Function', prototypeKeys: bound ? ['call', 'bind'] : ['call'] },
+  { intrinsic: 'Object', callablePrototypeMember: member, ownKeys: ['call'] },
+  ...(bound ? ([{ intrinsic: 'Function', callablePrototypeMember: 'call', ownKeys: ['bind'] }] as const) : [])
+]
+
+const hasObjectProtocolShadow = (file: ts.SourceFile): boolean => {
+  let shadowed = false
+  const visit = (node: ts.Node): void => {
+    if (shadowed) return
+    if (
+      (ts.isVariableDeclaration(node) ||
+        ts.isParameter(node) ||
+        ts.isFunctionDeclaration(node) ||
+        ts.isClassDeclaration(node) ||
+        ts.isBindingElement(node) ||
+        ts.isImportSpecifier(node) ||
+        ts.isImportClause(node) ||
+        ts.isNamespaceImport(node)) &&
+      node.name &&
+      ts.isIdentifier(node.name) &&
+      (node.name.text === 'Object' || node.name.text === 'Function')
+    )
+      shadowed = true
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return shadowed
+}
+
+const ownQueryBindingCallsAreComplete = (file: ts.SourceFile, name: string): boolean => {
+  let closed = true
+  const visit = (node: ts.Node): void => {
+    if (!closed) return
+    if (ts.isIdentifier(node) && node.text === name) {
+      const parent = node.parent
+      if (!(ts.isVariableDeclaration(parent) && parent.name === node)) {
+        if (
+          !ts.isCallExpression(parent) ||
+          parent.expression !== node ||
+          parent.arguments.length === 0 ||
+          parent.arguments.some(ts.isSpreadElement)
+        )
+          closed = false
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return closed
+}
+
+export const borrowedBuiltinCallBindSourceTransformWithProtocols = (input: {
+  readonly fileName: string
+  readonly text: string
+}): SourceTransformOutput | null => {
   // Neither shape can appear without the word "bind" or the word "prototype"
   // both occurring somewhere in the file -- one substring test each is what a
   // file with neither idiom costs.
@@ -298,7 +358,9 @@ export const borrowedBuiltinCallBindSourceTransform = (input: { readonly fileNam
         ? ts.ScriptKind.JS
         : ts.ScriptKind.TS
   const file = ts.createSourceFile(input.fileName, input.text, ts.ScriptTarget.Latest, true, scriptKind)
-  const edits: Edit[] = [...directCallEdits(file)]
+  const protocols: SourceTransformProtocol[] = []
+  const objectProtocolsClosed = !hasObjectProtocolShadow(file)
+  const edits: Edit[] = [...directCallEdits(file, objectProtocolsClosed, protocols)]
   const declarations = borrowedBindDeclarations(file)
   if (declarations.size > 0) {
     const disqualified = new Set([...multiplyDeclaredNames(file), ...assignedNames(file)])
@@ -344,6 +406,9 @@ export const borrowedBuiltinCallBindSourceTransform = (input: { readonly fileNam
       [...declarations].filter(
         ([name, bound]) =>
           !disqualified.has(name) &&
+          (bound.member.owner !== 'Object' ||
+            !ownQueryMember(bound.member.member) ||
+            (objectProtocolsClosed && ownQueryBindingCallsAreComplete(file, name))) &&
           !((shadowsTagOwner || mayMutateTagBuiltin) && bound.member.owner === 'Object' && bound.member.member === 'toString')
       )
     )
@@ -361,8 +426,9 @@ export const borrowedBuiltinCallBindSourceTransform = (input: { readonly fileNam
       // transform is going to rewrite has already been queued above, so by the
       // time these edits apply, nothing left in the program still reads the
       // exotic `(...args: any[]) => any` value this produced.
-      for (const { initializer } of usable.values()) {
+      for (const { initializer, member } of usable.values()) {
         edits.push({ start: initializer.getStart(file), end: initializer.end, text: 'null' })
+        if (member.owner === 'Object' && ownQueryMember(member.member)) protocols.push(...ownQueryProtocols(member.member, true))
       }
     }
   }
@@ -371,5 +437,8 @@ export const borrowedBuiltinCallBindSourceTransform = (input: { readonly fileNam
   for (const edit of [...edits].sort((a, b) => b.start - a.start)) {
     rewritten = rewritten.slice(0, edit.start) + edit.text + rewritten.slice(edit.end)
   }
-  return rewritten
+  return { protocolVersion: 1, text: rewritten, protocols }
 }
+
+export const borrowedBuiltinCallBindSourceTransform = (input: { readonly fileName: string; readonly text: string }): string | null =>
+  borrowedBuiltinCallBindSourceTransformWithProtocols(input)?.text ?? null

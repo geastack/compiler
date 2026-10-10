@@ -9,13 +9,13 @@ import { classHeritageTarget } from './class-alias.js'
  * Which classes each class INHERITS FROM, transitively -- the one fact two
  * separate carrier questions both need and neither can answer on its own.
  *
- * `representation/derive.ts` reduces `T & AggregateOperation` -- what
- * `operation instanceof AggregateOperation` narrows a `T extends
- * AbstractOperation` parameter to -- and a reduction is only sound when one
+ * `representation/derive.ts` reduces `T & DerivedOperation` -- what
+ * `operation instanceof DerivedOperation` narrows a `T extends
+ * Operation` parameter to -- and a reduction is only sound when one
  * member is provably the other's ancestor, in which case the intersection IS
  * the more-derived class. `conversion/build.ts` enumerates the widening from
- * `class-ref(MongoRuntimeError)` to `class-ref(MongoError)` that `previous ??
- * new MongoRuntimeError(...)` needs, and a widening is only sound in the
+ * `class-ref(RuntimeError)` to `class-ref(LibError)` that `previous ??
+ * new RuntimeError(...)` needs, and a widening is only sound in the
  * ancestor direction. Both live below the semantic layer and neither may
  * import `typescript`, so the answer is resolved once here and installed as a
  * policy, the same way `KeyedCollectionPolicy` and `DateDeclarationPolicy`
@@ -289,8 +289,9 @@ const nativeCollectionInterfaceNames: ReadonlySet<string> = new Set(['Map', 'Set
  * fields, and a subclass accessor over them is skipped. One override is
  * answered rather than refused: a `get name()` / `get message()` that returns
  * a string constant, declared by the family's root -- the class extending
- * `Error` itself -- and re-declared anywhere below it. Every mongodb error
- * class is one (`override get name(): string { return 'MongoError'; }`), and
+ * `Error` itself -- and re-declared anywhere below it. A library whose every
+ * error class is one (`override get name(): string { return 'LibError'; }`)
+ * is the shape, and
  * construction writes the most-derived constant into the error's field
  * through the root's dispatch (`emit-callable.ts`'s `emitSuperInitialize`),
  * so the field and the getter agree for the object's whole life. Anything

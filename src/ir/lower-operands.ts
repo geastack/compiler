@@ -9,8 +9,11 @@ import {
   type StructuralTypeId
 } from '../identity/ids.js'
 import { exactArmIndexOf, type ConversionCensus } from '../conversion/nodes.js'
-import type { ConversionNode } from '../conversion/algebra.js'
-import { detachedMethodAbiOf, isClosedContiguousTupleRecord } from '../projection/callee.js'
+import { conversionRequiresSourceGuard, type ConversionCapability, type ConversionNode } from '../conversion/algebra.js'
+import { SIBLING_CLASS_ARGUMENT } from '../conversion/sibling-class.js'
+import { nativeCallableSourceOf } from './native-callable-argument.js'
+import { nativeObjectSampleEntryOf } from './native-object-sample.js'
+import { isClosedContiguousTupleRecord } from '../projection/callee.js'
 import type { ClassLayout } from '../projection/classes.js'
 import { classMemberOf } from '../projection/fields.js'
 import type { SlotCensus } from '../projection/slots.js'
@@ -80,7 +83,7 @@ export interface LoweringProgram {
    * Every property read that produced a method VALUE -- a callable carrier
    * stating a receiver -- keyed by the value it produced, with the object it
    * was read from and the body it names. `enter` binds the two when such a
-   * value reaches a receiver-less slot (see `BindCallableOperation.detached`).
+   * value reaches a receiver-less slot through the certified native method protocol.
    */
   readonly methodValueReceivers: Map<IrValueId, { readonly receiver: IrOperand; readonly method: FunctionId }>
   /**
@@ -229,11 +232,10 @@ export const resolveRequiredOperand = (
   // genuinely take nothing (`return f()` in a `void` function, an expression
   // statement) asks `namesVoidResult` itself before resolving. A `never`-typed
   // result shares the void carrier and is the opposite fact -- the point past
-  // `return Debug.fail(...)` is unreachable, not undefined. `return` asks
+  // `return fail(...)` is unreachable, not undefined. `return` asks
   // first and renders nothing (`emit-return.ts`). Every other consumer --
-  // `const b: Bindings = load()` past node-compat's rewritten
-  // `require('<x>.node')`, `await readFile(...)` on an unimplemented
-  // `fs/promises` member -- reads a value no execution observes, because the
+  // `const b: Bindings = load()` past a rewritten native-module
+  // `require`, an `await` on an unimplemented host member -- reads a value no execution observes, because the
   // call already threw. It gets the one value a dead point can honestly hold,
   // the one `lower-narrow.ts` hands a `never` merge arm: an `undefined` whose
   // conversion into any real carrier `emit.ts` renders as
@@ -307,7 +309,7 @@ export const resolveRequiredOperand = (
         `${describeOperand(operand)} captures the enclosing receiver, and no carrier is derivable for it: ${representation.reason}`
       )
     }
-    return { value: ctx.builder.receiver(block, lineage, representation), representation }
+    return { value: ctx.builder.receiver(block, lineage, representation, 'lexical'), representation }
   }
   const representation = ctx.constantDeriver.derive(operand.type)
   if (representation.kind === 'unresolved') {
@@ -408,7 +410,32 @@ export const convertTo = (
   // The owner's own declaration asked for the projection; where the slot is
   // not exactly one arm the census answers `null` and the ordinary pair runs.
   const exact = ctx.exactArmNarrowing ? ctx.program.conversions.exactArmFor(operand.representation, slot) : null
-  const node = exact ?? ctx.program.conversions.nodeFor(operand.representation, slot)
+  const ordinary = exact ?? ctx.program.conversions.nodeFor(operand.representation, slot)
+  if (exact === null && ordinary.capability.kind === 'never') {
+    const sample = nativeObjectSampleEntryOf(operand, slot, ctx.builder.operationsOf(block), {
+      graph: ctx.graph,
+      deriver: ctx.constantDeriver,
+      conversions: ctx.program.conversions,
+      placements: ctx.program.slots.input.placements,
+      selected: ctx.plan.selected,
+      calleeRendering: ctx.program.slots.input
+    })
+    if (sample !== null)
+      return {
+        value: ctx.builder.convert(block, lineage, sample.receipt.conversion, sample.source, slot, undefined, undefined, sample.receipt),
+        representation: slot
+      }
+  }
+  // A complete reader also takes precedence over a partial subset load:
+  // subtype reduction may remove a dictionary arm that still reaches the
+  // wider table through an entry view. Explicit exact-arm reads keep their
+  // own narrowing. Every provisional reader still needs the final whole-
+  // program use census to prove that every alias stays readonly.
+  const node =
+    exact === null &&
+    (ordinary.capability.kind === 'never' || conversionRequiresSourceGuard(ordinary.capability, ctx.program.conversions.nodeById))
+      ? (ctx.program.conversions.readOnlyDictionaryFor(operand.representation, slot) ?? ordinary)
+      : ordinary
   if (node.capability.kind === 'never') return null
   const value = ctx.builder.convert(block, lineage, node.id, operand, slot)
   traceSpeculativeLoad(lineage, via, node, value)
@@ -461,8 +488,28 @@ export const enter = (
     return { value: ctx.builder.convert(block, lineage, node.id, resolved, node.target), representation: node.target }
   }
   if (answer.kind !== 'slot') return resolved
-  const bound = bindDetachedMethod(ctx, block, lineage, resolved, answer.representation)
-  if (bound !== null) return bound
+  const nativeSource = nativeCallableSourceOf(
+    operation,
+    operand,
+    resolved.representation,
+    answer.representation,
+    ctx.program.callableOrigins,
+    ctx.program.abis,
+    { graph: ctx.graph, classes: ctx.program.classes, representations: ctx.plan.selected, abis: ctx.program.abis }
+  )
+  if (nativeSource !== null) {
+    const node = ctx.program.conversions.nativeMethodFor(resolved.representation, answer.representation)
+    if (node !== null)
+      return {
+        value: ctx.builder.convert(block, lineage, node.id, resolved, answer.representation, undefined, nativeSource),
+        representation: answer.representation
+      }
+  }
+  if (operation.family === 'invocation' && (operand.role === 'argument' || operand.role === 'receiver')) {
+    const node = ctx.program.conversions.callArgumentFor(resolved.representation, answer.representation)
+    if (node.capability.kind === 'static' && node.capability.materializer.id === SIBLING_CLASS_ARGUMENT)
+      return { value: ctx.builder.convert(block, lineage, node.id, resolved, answer.representation), representation: answer.representation }
+  }
   // An `alias` slot is a VIEW the consuming lowering builds itself -- an
   // object-source step's frozen view, an array pattern's cursor -- not a value
   // converted on the way in; converting here would hand the view builder a
@@ -482,7 +529,8 @@ export const enter = (
     convertTo(ctx, block, lineage, resolved, answer.representation) ??
     familyMemberEntry(ctx, block, lineage, operation, operand, resolved, answer.representation) ??
     assertedArmEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
-    freshIntrinsicArrayEntry(ctx, block, lineage, operand, resolved, answer.representation)
+    freshIntrinsicArrayEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
+    assertedViewEntry(ctx, block, lineage, operand, resolved, answer.representation)
   if (entered !== null) return entered
   recordDrift(ctx, block, operation.id, operand.role, operand.ordinal, resolved.representation, answer.representation)
   return resolved
@@ -536,11 +584,52 @@ const exactArmEntry = (
  * and the author has written which arm it is.
  */
 /**
+ * A whole union whose census pair is a native sum SELECTION that drops an arm
+ * -- a selection is a load behind a narrowing, and its dropped arms abort --
+ * entering a slot every arm of it converts into: the per-arm dispatch
+ * (`nodes.ts`'s `assertedUnionFor`) instead. `mark || checkDefined` entering
+ * `mark?: AnyFunction`, whose second arm is a callable adapted into the rest
+ * frame; a conditional's `string[] | RegExpMatchArray` arm merged into the
+ * `string[] | null` the plan chose. Only for a value no guard narrowed: the
+ * callers are unguarded slot entries and merges.
+ */
+export const perArmUnionEntry = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  resolved: IrOperand,
+  slot: Representation,
+  via: string
+): IrOperand | null => {
+  const source = resolved.representation
+  const union = source.kind === 'optional' ? source.payload : source
+  if (union.kind !== 'tagged-union') return null
+  const capability = ctx.program.conversions.nodeFor(source, slot).capability
+  if (
+    capability.kind !== 'atom' ||
+    capability.materializer.armSelection !== 'native-sum' ||
+    capability.materializer.requiresSourceGuard !== true
+  )
+    return null
+  const slotKey = representationKey(slot)
+  const arms = [...union.arms.map((arm) => arm.value), ...(source.kind === 'optional' ? [{ kind: source.absence } as const] : [])]
+  const everyArmConverts = arms.every(
+    (arm) => representationKey(arm) === slotKey || ctx.program.conversions.nodeFor(arm, slot).capability.kind !== 'never'
+  )
+  if (!everyArmConverts) return null
+  const node = ctx.program.conversions.assertedUnionFor(source, slot, false)
+  if (node === null) return null
+  const value = ctx.builder.convert(block, lineage, node.id, resolved, slot)
+  traceSpeculativeLoad(lineage, via, node, value)
+  return { value, representation: slot }
+}
+
+/**
  * A whole union entering a slot whose conversion SELECTS one of its arms,
  * where the operand's own type is still that whole union: nothing narrowed it,
  * so the checker proved no arm. TypeScript never lets a union reach one
- * member's slot unnarrowed; a census-built union does -- bson's
- * `makeFrame(sourceObject: Document)` holds `Document | any[] | Map | any`
+ * member's slot unnarrowed; a census-built union does -- a
+ * `makeFrame(sourceObject: Document)` parameter holds `Document | any[] | Map | any`
  * because callers and guards put all four there, and `{ sourceObject }`
  * stores it into a `Document` field. The census's arm selection
  * (`gea::TaggedUnion::is`/`get`) trusts a narrowing that never happened, and
@@ -570,11 +659,11 @@ const unprovenArmEntry = (
   if (target.kind === 'tagged-union' || target.kind === 'dynamic') return null
   if (representationKey(ctx.constantDeriver.derive(operand.type)) !== representationKey(source)) return null
   const capability = ctx.program.conversions.nodeFor(source, slot).capability
-  const selects =
-    (capability.kind === 'atom' &&
-      capability.classifier.id === 'gea::TaggedUnion::is' &&
-      capability.materializer.id === 'gea::TaggedUnion::get') ||
-    (capability.kind === 'static' && capability.materializer.id === 'chain:narrowed-load')
+  // A native sum selection that drops an arm (its source guard is the narrowing
+  // that never happened) is the same unchecked choice; see `perArmUnionEntry`.
+  const perArm = perArmUnionEntry(ctx, block, lineage, resolved, slot, 'unproven-native-selection')
+  if (perArm !== null) return perArm
+  const selects = selectsGuardedArm(capability)
   if (!selects) return null
   const uncovered = union.arms.find(
     (arm) =>
@@ -676,8 +765,7 @@ const bodyCannotObserveArrayAlias = (graph: SemanticGraph, at: SemanticOperation
 
 /**
  * A whole union the program's own `as T` asserts to one carrier, where the
- * ordinary pair SELECTS an arm and some other arm has no conversion into the
- * slot. The assertion proves nothing about the live arm -- only a guard does,
+ * ordinary pair SELECTS an arm. The assertion proves nothing about the live arm -- only a guard does,
  * and a guard is not an `asserted` operand -- so the selection's unchecked
  * `get<k>()` would read a live sibling arm as the selected one. The dispatch
  * node (`nodes.ts`'s `assertedUnionFor`) converts each arm that can be the
@@ -695,24 +783,29 @@ const assertedUnionEntry = (
 ): IrOperand | null => {
   const source = resolved.representation
   if (operand.asserted !== true || source.kind !== 'tagged-union') return null
-  const capability = ctx.program.conversions.nodeFor(source, slot).capability
-  const selects =
-    (capability.kind === 'atom' &&
-      capability.classifier.id === 'gea::TaggedUnion::is' &&
-      capability.materializer.id === 'gea::TaggedUnion::get') ||
-    (capability.kind === 'static' && capability.materializer.id === 'chain:narrowed-load')
-  if (!selects) return null
-  const slotKey = representationKey(slot)
-  const uncovered = source.arms.some(
-    (arm) => representationKey(arm.value) !== slotKey && ctx.program.conversions.nodeFor(arm.value, slot).capability.kind === 'never'
-  )
-  if (!uncovered) return null
+  if (!selectsOneArm(ctx.program.conversions.nodeFor(source, slot).capability)) return null
   const node = ctx.program.conversions.assertedUnionFor(source, slot, bodyCannotObserveArrayAlias(ctx.graph, operation))
   if (node === null) return null
   const value = ctx.builder.convert(block, lineage, node.id, resolved, slot)
   traceSpeculativeLoad(lineage, 'asserted-union', node, value)
   return { value, representation: slot }
 }
+
+/**
+ * Whether a union's conversion into a slot loads ONE arm. Whether or not every
+ * arm has a conversion: a narrowed load reads one arm, and `(cond ? items[0] :
+ * items) as S[]` over `any | unknown[]` read the dynamic arm's payload
+ * whichever arm was live.
+ */
+const selectsOneArm = (capability: ConversionCapability): boolean =>
+  (capability.kind === 'atom' &&
+    capability.materializer.armSelection === 'native-sum' &&
+    capability.materializer.requiresSourceGuard === true) ||
+  selectsGuardedArm(capability)
+
+/** A load of the one arm a tag test selected (`armSelection: 'guarded-load'`). */
+const selectsGuardedArm = (capability: ConversionCapability): boolean =>
+  (capability.kind === 'atom' || capability.kind === 'static') && capability.materializer.armSelection === 'guarded-load'
 
 /** Why an arm has no conversion into a slot, as the conversion census states it. */
 const uncoveredReason = (ctx: LoweringContext, arm: Representation, slot: Representation): string => {
@@ -756,7 +849,7 @@ const readsCaughtValue = (ctx: LoweringContext, operand: SemanticOperand): boole
 /**
  * A caught value (`catch (error)`, typed `any`) handed to a class-typed slot:
  * the census's `caughtHandoffFor` read, which throws the value on when it is
- * not the class instead of aborting. See that node for the mongodb case.
+ * not the class instead of aborting. See that node for the worked case.
  */
 const caughtHandoffEntry = (
   ctx: LoweringContext,
@@ -860,11 +953,11 @@ const nullishOptionalArgumentEntry = (
  * the census's family-member view (`nodes.ts`'s `familyMemberViewFor`),
  * planned knowing which members the parameter's declared type names.
  *
- * mongodb's `WriteConcern.fromOptions(this.client.s.options)` is the shape:
- * `options?: WriteConcernOptions | WriteConcern | W`, whose record arm is the
- * family's one layout, holding the sibling `GridFSBucketWriteStreamOptions`'
- * `metadata?: Document` beside `writeConcern`. `MongoOptions` carries an
- * unrelated `metadata: Promise<ClientMetadata>`, which that field cannot hold
+ * `Concern.fromOptions(this.client.options)` is the shape:
+ * `options?: ConcernOptions | Concern | W`, whose record arm is the family's
+ * one layout, holding a sibling options type's `metadata?: Document` beside
+ * `concern`. The client's options carry an unrelated
+ * `metadata: Promise<Metadata>`, which that field cannot hold
  * without boxing, so the pair -- keyed by carriers alone -- refuses: it cannot
  * tell this site from one naming the stream options, where leaving the field
  * out would read `undefined` for the promise. The parameter's own type says
@@ -957,14 +1050,41 @@ const assertedArmEntry = (
 }
 
 /**
+ * A record the program asserts into a slot whose object homes are classes,
+ * where no other entry converts the pair: a generic `setValues` passes a
+ * parameter value to `Color.set( /** @type {number|string|Color|undefined} *\/ ( newValue ) )`,
+ * and the values this program passes are records. JavaScript erases the
+ * assertion and hands the object itself to `set`; a record is a Color only as
+ * a view of a Color's allocation, so the census's asserted-view node loads
+ * that origin and otherwise throws -- the author's promise checked, as every
+ * `as T` projection is (`SemanticOperand.asserted`). Asked last, so it decides
+ * only operands that had no conversion at all.
+ */
+const assertedViewEntry = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operand: SemanticOperand,
+  resolved: IrOperand,
+  slot: Representation
+): IrOperand | null => {
+  if (operand.asserted !== true && operand.jsdocAsserted !== true) return null
+  const node = ctx.program.conversions.assertedViewFor(resolved.representation, slot)
+  if (node === null) return null
+  const value = ctx.builder.convert(block, lineage, node.id, resolved, slot)
+  traceSpeculativeLoad(lineage, 'asserted-view', node, value)
+  return { value, representation: slot }
+}
+
+/**
  * The array a native array's own `map`/`filter`/`slice`/... call just
  * allocated (`InvocationOperation.freshIntrinsicArrayResult`), entering a
  * slot of another element carrier: rebuilt once at the slot's element, as
  * `unsharedArrayRebuildOf` rebuilds a program body's fresh result. The
  * operand is the call's own result, consumed here and nowhere else, so no
- * other reference can observe the copy. mongodb's `insertMany` hands
- * `docs.map(doc => ({ insertOne: { document: doc } }))` -- an array of that
- * record -- to `bulkWrite(operations: ReadonlyArray<AnyBulkWriteOperation>)`.
+ * other reference can observe the copy. `docs.map(doc => ({ insertOne: {
+ * document: doc } }))` -- an array of that record -- handed to
+ * `bulkWrite(operations: ReadonlyArray<AnyWriteOperation>)` is the case.
  */
 const freshIntrinsicArrayEntry = (
   ctx: LoweringContext,
@@ -1010,7 +1130,7 @@ export const nativeBaseReceiverView = (
 ): IrOperand | null => nativeBaseViewEntry(ctx, block, lineage, operand, resolved, ctx.constantDeriver.derive(operand.type))
 
 /**
- * An open `Document` iterated as the collection its `as` asserts: bson's
+ * An open `Document` iterated as the collection its `as` asserts:
  * `for (const [key, value] of target as Map<string, unknown>)` under
  * `instanceof Map`. The Document can be that Map only by viewing it, so the
  * iterated value is the viewed object's checked read, refusing any other.
@@ -1029,7 +1149,7 @@ export const assertedDocumentIterationView = (
 /**
  * A receiver the program asserts to one native collection while the census
  * holds it as a sum with a boxed arm (`properties.ts`'s
- * `receiverIsAssertedCensusUnion`): bson's `(sourceObject as Map<unknown,
+ * `receiverIsAssertedCensusUnion`): `(sourceObject as Map<unknown,
  * unknown>).entries()` under `instanceof Map`, where the boxed arm -- or a
  * Document arm viewing one -- may hold a Map too. Selecting the typed arm by
  * its tag would misread either, so each arm is converted: the typed arm as it
@@ -1116,62 +1236,18 @@ export const convertOrDrift = (
   target: Representation,
   via = 'lowering'
 ): IrOperand => {
+  if (via === 'field-read') {
+    const node = ctx.program.conversions.fieldReadFor(operand.representation, target)
+    if (node.capability.kind !== 'never')
+      return representationKey(operand.representation) === representationKey(target)
+        ? operand
+        : { value: ctx.builder.convert(block, lineage, node.id, operand, target), representation: target }
+  }
   const converted = convertTo(ctx, block, lineage, operand, target, via)
   if (converted !== null) return converted
   recordDrift(ctx, block, operation, role, ordinal, operand.representation, target)
   const node = ctx.program.conversions.nodeFor(operand.representation, target)
   return { value: ctx.builder.convert(block, lineage, node.id, operand, target), representation: target }
-}
-
-/**
- * A method value entering a receiver-less slot, bound to the object it was
- * read from -- the receiver converted into the convention's own receiver
- * carrier first, the way any receiver enters a frame. `null` when the pair is
- * not that, or when the value's origin is not a method read this body saw.
- */
-const bindDetachedMethod = (
-  ctx: LoweringContext,
-  block: IrBlockId,
-  lineage: SemanticResultId,
-  resolved: IrOperand,
-  slot: Representation
-): IrOperand | null => {
-  const abi = detachedMethodAbiOf(resolved.representation, slot)
-  if (abi === null || abi.receiver === null) return null
-  const origin = ctx.program.methodValueReceivers.get(resolved.value)
-  if (origin === undefined) return null
-  const receiver = convertTo(ctx, block, lineage, origin.receiver, abi.receiver) ?? origin.receiver
-  return {
-    value: ctx.builder.bindCallable(block, lineage, resolved, origin.method, abi, null, receiver, [], slot, true),
-    representation: slot
-  }
-}
-
-/**
- * A method defined onto `holder` whose member slot declares no receiver,
- * bound to the holder (`BindCallableOperation.detached`'s `'holder'`). `null`
- * when the operand is not such a value, or the holder cannot enter the
- * method's own receiver carrier -- the ordinary `enter` then answers.
- */
-export const bindInstalledMethod = (
-  ctx: LoweringContext,
-  block: IrBlockId,
-  lineage: SemanticResultId,
-  operation: SemanticOperation,
-  operand: SemanticOperand,
-  resolved: IrOperand,
-  holder: IrOperand
-): IrOperand | null => {
-  const answer = ctx.program.slots.slotOf(operation, operand)
-  if (answer.kind !== 'slot') return null
-  const abi = detachedMethodAbiOf(resolved.representation, answer.representation)
-  if (abi === null || abi.receiver === null) return null
-  const receiver = convertTo(ctx, block, lineage, holder, abi.receiver)
-  if (receiver === null) return null
-  return {
-    value: ctx.builder.bindCallable(block, lineage, resolved, null, abi, null, receiver, [], answer.representation, 'holder'),
-    representation: answer.representation
-  }
 }
 
 /**
@@ -1207,8 +1283,20 @@ export const narrowedBindingRead = (
   // answer: the runtime-checked arm projection, as `assertedArmEntry` takes
   // for an `as T`.
   const pair = ctx.program.conversions.nodeFor(held, representation)
-  const narrowed = pair.capability.kind === 'never' && operation.operands.some((operand) => operand.asserted === true)
-  const node = (narrowed ? ctx.program.conversions.exactArmFor(held, representation) : null) ?? pair
+  const asserted = operation.operands.some((operand) => operand.asserted === true)
+  const narrowed = pair.capability.kind === 'never' && asserted
+  // A program's own guard (`isBytes(schemaMap)`) proves the TYPE it names,
+  // not which arm holds it when the union has a dynamic arm: a
+  // `Document | any` cell narrowed to its Document arm may hold the value in
+  // either. Each arm converts on its own, exactly as an `as T` read does
+  // (`assertedUnionEntry`).
+  // Only a dynamic arm can hold a value of another arm's type: a guard over a
+  // union of closed arms (`typeof body === 'string'`) still proves the arm.
+  const union = held.kind === 'tagged-union' ? held : held.kind === 'optional' && held.payload.kind === 'tagged-union' ? held.payload : null
+  const dynamicArm = union !== null && union.arms.some((arm) => arm.value.kind === 'dynamic')
+  const dispatched =
+    asserted && dynamicArm && selectsOneArm(pair.capability) ? ctx.program.conversions.assertedUnionFor(held, representation, false) : null
+  const node = dispatched ?? (narrowed ? ctx.program.conversions.exactArmFor(held, representation) : null) ?? pair
   if (node.capability.kind === 'never') {
     recordDrift(ctx, block, operation.id, 'read', 0, held, representation)
     return ctx.builder.bindingRead(block, lineage, declaration, representation, reactive)
@@ -1283,7 +1371,13 @@ export const recordLayoutOf = (ctx: LoweringContext, props: Representation): rea
  * literal's own admitted spread already uses. A `spread` slot anywhere a
  * FIXED count is required has no rendering at all, and is refused.
  */
-export type ArgumentSlot = { readonly kind: 'value' | 'spread'; readonly value: IrOperand; readonly from?: number }
+export type ArgumentSlot = {
+  readonly kind: 'value' | 'spread'
+  readonly value: IrOperand
+  /** The evaluated JS value before its named formal receives a physical view. */
+  readonly actualValue?: IrOperand
+  readonly from?: number
+}
 
 export const packRestArguments = (
   ctx: LoweringContext,
@@ -1308,6 +1402,9 @@ export const packRestArguments = (
   if (!slot) {
     throw new IrLoweringBlockedError('a variadic convention declares no parameter at its own rest position and cannot be packed')
   }
+  const packingFrom = abi.argumentsFrame === 'actual' ? 0 : abi.restFrom
+  const packingValueOf = (entry: ArgumentSlot): IrOperand =>
+    abi.argumentsFrame === 'actual' ? (entry.actualValue ?? entry.value) : entry.value
   if (firstSpread >= 0 && firstSpread < abi.restFrom) {
     throw new IrLoweringBlockedError(
       `a call range-copies a spread argument at position ${firstSpread}, before this convention's rest slot at ${abi.restFrom}; ` +
@@ -1348,7 +1445,7 @@ export const packRestArguments = (
   // Optional trailing positions may be omitted: leave those fields absent,
   // preserving the difference from a present argument whose value is undefined.
   if (isClosedContiguousTupleRecord(slot.value)) {
-    const tail = args.slice(abi.restFrom)
+    const tail = passed.slice(packingFrom)
     if (firstSpread >= 0) {
       throw new IrLoweringBlockedError(
         'a call range-copies a spread argument into a rest slot whose convention is a fixed-arity tuple, not a runtime-sized array; ' +
@@ -1368,7 +1465,7 @@ export const packRestArguments = (
           throw new IrLoweringBlockedError(`a tuple-shaped rest slot's required field ${index} has no matching trailing argument`)
         return []
       }
-      return [{ key: field.key, value: entry.value }]
+      return [{ key: field.key, value: packingValueOf(entry) }]
     })
     const packed = ctx.builder.allocateRecord(block, lineage, fields, slot.value)
     return [...args.slice(0, abi.restFrom).map((entry) => entry.value), { value: packed, representation: slot.value }]
@@ -1385,12 +1482,14 @@ export const packRestArguments = (
   // it rather than aliasing it. That is also why a mixed `f(a, ...xs, b)`
   // needs no special case: the copy and the push are both just elements of the
   // array being built, in written order.
-  const elements = args.slice(abi.restFrom).map((entry) => {
+  const elements = passed.slice(packingFrom).map((entry) => {
     // A positional element enters the pack's element slot the way a literal's
     // element enters an array literal's: converted here, so the printer's
     // folded push (`emit-arrays.ts`) and the packed array agree on the carrier.
-    if (entry.kind !== 'spread')
-      return { kind: 'element' as const, value: convertTo(ctx, block, lineage, entry.value, restArray.element) ?? entry.value }
+    if (entry.kind !== 'spread') {
+      const actual = packingValueOf(entry)
+      return { kind: 'element' as const, value: convertTo(ctx, block, lineage, actual, restArray.element) ?? actual }
+    }
     if (entry.value.representation.kind === 'dynamic') {
       if (restArray.element.kind !== 'dynamic') {
         throw new IrLoweringBlockedError(

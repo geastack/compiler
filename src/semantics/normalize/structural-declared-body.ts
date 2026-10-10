@@ -83,8 +83,7 @@ export const createDeclaredBodyResolver = ({ table, typeOf, signatureOf, objectS
     // overload set is a claim that one value has several conventions, which
     // `sharedAbiOf` (derive.ts) then has to join or refuse. A union is the
     // opposite claim: several values, each with its own convention, told apart
-    // by the arm. hono's `type H = Handler<...> | MiddlewareHandler<...>`
-    // (`types.ts:90`) is the case -- two arrow types whose return types differ,
+    // by the arm. `type H = Handler<...> | Middleware<...>` is the case -- two arrow types whose return types differ,
     // refused as "no primitive joining 2 overload signatures" at every site
     // that holds a handler.
     //
@@ -121,10 +120,10 @@ export const createDeclaredBodyResolver = ({ table, typeOf, signatureOf, objectS
     // A name for a UNION or an INTERSECTION is a name for a structure that has
     // no layout of its own, and reporting no body at all for it is not honest
     // -- it says the declaration is ambient, which is what `derive.ts` then
-    // reports ("is ambient and has no installed host protocol"). hono's
-    // `export type Result<T> = [[T, ParamIndexMap][], ParamStash] | [[T,
-    // Params][]]` (`router.ts`) is the case: an ordinary source type alias, 32
-    // mandatory obligations, refused as though nothing had declared it.
+    // reports ("is ambient and has no installed host protocol"). A
+    // `export type Result<T> = [[T, IndexMap][], Stash] | [[T, Params][]]`
+    // is the case: an ordinary source type alias, with its mandatory
+    // obligations refused as though nothing had declared it.
     //
     // The members are walked here rather than by re-entering `typeOf` on the
     // alias itself, which would resolve straight back to the anchor this body
@@ -146,14 +145,14 @@ export const createDeclaredBodyResolver = ({ table, typeOf, signatureOf, objectS
     // A CONDITIONAL that never resolved is not an ambient declaration, and
     // saying so out loud is the whole point of this branch. `null` here is read
     // downstream as "the compiler did not define this shape, so a host protocol
-    // must carry it" -- which sent every reader of the mongodb probe's compass
-    // toward installing bindings for `EnhancedOmit`, `InferIdType`,
-    // `OptionalUnlessRequiredId`, `AlternativeType`, `IsAny` and lib.es5's own
+    // must carry it" -- which sent every reader of a program's diagnostics
+    // toward installing bindings for a library's own conditional helper types
+    // (`Omit`-like, `IsAny`-like ...) and lib.es5's own
     // `Awaited`/`ReturnType`/`Parameters`/`InstanceType`/`ThisParameterType`.
     // Not one of those wants a binding: they are ordinary type-level functions
     // the checker evaluates as soon as it is given a concrete argument, and the
-    // argument is still a type parameter. 378 of that probe's 644 mandatory
-    // obligations were this, reported as something else.
+    // argument is still a type parameter. More than half of one program's
+    // mandatory obligations were this, reported as something else.
     //
     // The reason is interned as the BODY rather than returned as `null` so it
     // reaches `derive.ts` intact; nothing else about a declared name changes.

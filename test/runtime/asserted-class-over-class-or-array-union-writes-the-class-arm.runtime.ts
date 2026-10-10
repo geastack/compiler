@@ -1,4 +1,4 @@
-// `mesh.material as Phong` where `material: Material | Material[]` (three.js):
+// `mesh.material as Phong` where `material: Material | Material[]` (a 3D scene-graph library):
 // the assertion to a class that descends from the union's class arm names that
 // arm, so the write is a typed field store through the checked downcast -- never
 // a per-arm `nativeDynamicSet` that boxes the value and plants an expando on the

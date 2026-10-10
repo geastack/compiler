@@ -1,6 +1,6 @@
 // ECMA-262 25.5.2.2 step 2: JSON.stringify replaces an object that answers
 // `toJSON` with that method's result before serializing anything. The
-// mongodb driver's monitor timer prints itself with `JSON.stringify(this)`
+// a database client's monitor timer prints itself with `JSON.stringify(this)`
 // from its own `toString`, and its `toJSON` returns a plain summary object.
 
 class Timer {

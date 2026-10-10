@@ -1,6 +1,6 @@
 // An interface no class declares it implements, whose slots the program only
 // ever fills with class instances, holds those instances -- not a rebuilt
-// copy of the interface's fields. mongodb's `stateTransition(target:
+// copy of the interface's fields. A database client's `stateTransition(target:
 // ObjectWithState, newState)` writes `target.s.state`; with the target rebuilt
 // per call the write landed in the copy and the topology stayed `closed`.
 interface ObjectWithState {

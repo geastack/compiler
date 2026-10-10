@@ -1,6 +1,6 @@
 // A CLASS FIELD KEEPS THE `null` AN `any` VALUE WRITES INTO IT.
 //
-// mongodb's `ServerDescription` constructor (`sdam/server_description.ts`)
+// A database client's `ServerDescription` constructor (in its topology monitor)
 // declares `$clusterTime?: ClusterTime` and writes
 // `this.$clusterTime = hello?.$clusterTime ?? null`. `hello` is a `Document`,
 // so the right-hand side is `any` and the checker accepts the `null` the

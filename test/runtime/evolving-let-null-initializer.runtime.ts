@@ -43,7 +43,7 @@ else console.log('loaded', failed.name, failed.version)
 //! expect: error client-encryption optional dependency missing
 
 // The same shape where the assigned value is one no census can type (as
-// mongodb's `require(...)` is): the binding's evidence for that write is the
+// a database client's `require(...)` is): the binding's evidence for that write is the
 // function's stated return type, and the initializer's null must still join it.
 function parseEncryption(text: string): Encryption {
   let encryption = null

@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
@@ -8,7 +9,7 @@ const include = `-I${resolve(root, 'src/targets/cpp/runtime')}`
 const binary = resolve(root, 'dist/worker-realms-test')
 const flags = [
   '-std=c++20',
-  '-O1',
+  ...nativeOptimization('correctness'),
   '-fsanitize=address,undefined',
   '-DGEA_RUNTIME_REALMS=1',
   '-DGEA_RUNTIME_SINGLE_THREADED=1',

@@ -1,4 +1,4 @@
-// mongodb's cursors retype THEMSELVES: `AbstractCursor.map` composes a
+// A database client's cursors retype THEMSELVES: `AbstractCursor.map` composes a
 // transform and returns `this as unknown as AbstractCursor<T>`, and
 // `AggregationCursor.map` re-asserts `super.map(transform) as
 // AggregationCursor<T>`. One object, viewed at several instantiations -- and

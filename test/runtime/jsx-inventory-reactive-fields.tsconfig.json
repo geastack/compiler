@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@geastack/core": ["./_component-framework-styled.tsx"]
+    }
+  }
+}

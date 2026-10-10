@@ -146,7 +146,8 @@ export const hostResultText = (representation: Representation, text: string, spe
   // program holds whatever the compiler proved -- so the crossing back is the
   // same checked unbox a dynamic property read performs, and a no-op when the
   // program's own carrier is dynamic too.
-  if (spelling?.result === 'dynamic') return unboxedReadText(representation, text, `${hostCallName(spelling)} result`)
+  if (spelling?.result === 'dynamic')
+    return unboxedReadText(representation, text, `${hostCallName(spelling)} result`, spelling.freshResult === true)
   if (representation.kind === 'array-object') return `gea::detail::hostArrayResult(${text})`
   if (representation.kind === 'typed-array') return `gea::detail::hostTypedArrayResult<${cppScalarType(representation.element)}>(${text})`
   // TypeScript tuples derive as records with required consecutive numeric

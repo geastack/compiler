@@ -1,7 +1,8 @@
 // The first override of an abstract method leaves out the parameters it does
 // not read; a later override reads them. The dispatch slot keeps the abstract
-// signature's full parameter list (mongodb's CommandOperation.buildCommandDocument,
-// overridden as `buildCommandDocument()` by AggregateOperation).
+// signature's full parameter list (a database client's command operation's
+// `buildCommandDocument`, overridden as `buildCommandDocument()` by its
+// pipeline operation).
 class Connection {
   constructor(readonly address: string) {}
 }

@@ -5,8 +5,7 @@ import { enclosingCallIfCallee } from './producers/erasure.js'
  * Whether a named read through a type assertion may land on a union arm that
  * has no such member at all.
  *
- * `typeof (options?.body as ReadableStream)?.getReader` in `@hono/node-server`
- * reads off a `string | Buffer | ReadableStream | ...` value. The assertion
+ * `typeof (options?.body as ReadableStream)?.getReader` reads off a `string | Buffer | ReadableStream | ...` value. The assertion
  * changes the checker's type and never the value, and the property producer
  * already dispatches the read on the value's real arms; on the string arm
  * 6.2.5.5 GetV answers `undefined`. The checker's type for the read is the

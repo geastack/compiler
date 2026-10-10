@@ -18,7 +18,7 @@ class Chain<T> {
 }
 
 const one = new Chain<number>(3)
-// Discarded, like a hono route registration's `Hono<...>` result.
+// Discarded, like an HTTP framework route registration's `App<...>` result.
 one.tag()
 
 //! expect: describe=chain(3)

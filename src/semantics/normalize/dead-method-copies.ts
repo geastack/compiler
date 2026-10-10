@@ -8,14 +8,14 @@ import type { SpecializationCensus } from './specialization.js'
  * Which copies of an abstract generic class's method body no instance can run.
  *
  * `reachability.ts` opens an instance method by KEY, for every copy at once:
- * a live spelling of `handleOk` anywhere keeps `AbstractOperation.handleOk` in
+ * a live spelling of `handleOk` anywhere keeps `Operation.handleOk` in
  * the program. That is the right cut for a method with one body, and too
  * coarse for a generic class's method, which has one body PER COPY with a
- * different type in it. mongodb's
+ * different type in it. A
  *
- *   abstract class AbstractOperation<TResult> {
- *     handleOk(response: MongoDBResponse): TResult {
- *       return response.toObject(this.bsonOptions) as TResult
+ *   abstract class Operation<TResult> {
+ *     handleOk(response: Response): TResult {
+ *       return response.toObject(this.options) as TResult
  *     }
  *   }
  *

@@ -1,5 +1,6 @@
 import type { MaterializerContract } from '../../conversion/algebra.js'
 import { narrowsToDescendantClassUnion } from '../../conversion/build.js'
+import { nativeSumPlan, nativeSumPreservesPayload } from '../../conversion/native-sum.js'
 import type { ConversionRuntimeRegistry } from '../../conversion/registry.js'
 import { representationKey, type Representation } from '../../representation/model.js'
 import { conversionRecipeOf } from './emit-narrowing.js'
@@ -24,9 +25,11 @@ import { conversionRecipeOf } from './emit-narrowing.js'
  * (`nativePayloadTransportMatches`' statement: non-allocating, field protocol
  * unused, payload preserved). A leaf pair the chain cannot spell is never a
  * candidate: the discriminant selects among the remaining alternatives, which
- * is the narrowing authority's own proof. Callable and dynamic alternatives
- * are refused outright: their sets and adapters convert as a whole rather than
- * leaf by leaf.
+ * is the narrowing authority's own proof. An unchanged callable or dynamic
+ * alternative transfers by native tag identity, just like any other payload.
+ * Its injection into the target's enclosing native sum also preserves that
+ * payload. Every other candidate involving either refuses this contract: its
+ * set, unbox or adapter converts as a whole rather than leaf by leaf.
  */
 const opaqueKinds: ReadonlySet<Representation['kind']> = new Set([
   'dynamic',
@@ -75,6 +78,11 @@ const statesNativeTransport = (materializer: MaterializerContract | null | undef
   !materializer.allocates &&
   materializer.nativeFieldProtocol === 'unused' &&
   materializer.nativePayloadTransport === 'preserved'
+
+const opaquePayloadInjection = (source: Representation, target: Representation): boolean => {
+  const transfer = nativeSumPlan(source, target)
+  return transfer !== null && nativeSumPreservesPayload(transfer)
+}
 
 const chainSpells = new WeakMap<Representation, Map<string, boolean>>()
 const chainSpellsPair = (source: Representation, target: Representation): boolean => {
@@ -145,6 +153,19 @@ export const chainFieldProtocolUnused = (registry: ConversionRuntimeRegistry, so
   )
 }
 
+/** An ordinary wrapper cannot turn its selected payload's partial domain into a total store conversion. */
+export const chainPayloadNeedsSourceGuard = (
+  registry: ConversionRuntimeRegistry,
+  source: Representation,
+  target: Representation
+): boolean => {
+  if (representationKey(source) === representationKey(target)) return false
+  if (narrowsToDescendantClassUnion(source, target)) return true
+  const installed = registry.narrowing(source, target) ?? registry.widening(source, target) ?? registry.recasting(source, target)
+  const materializer = installed ? installed.materializer : registry.staticRecipe(source, target)
+  return materializer?.requiresSourceGuard === true
+}
+
 export const nativeSumNarrowingTransports = (
   registry: ConversionRuntimeRegistry,
   source: Representation,
@@ -157,14 +178,16 @@ export const nativeSumNarrowingTransports = (
   if (known !== undefined) return known
   const leaves = collect(source, false)
   const parts = collect(target, true)
-  const native =
-    ![...leaves, ...parts].some((value) => opaqueKinds.has(value.kind)) &&
-    leaves.every((leaf) =>
-      parts.every(
-        (part) =>
-          representationKey(leaf) === representationKey(part) || !chainSpellsPair(leaf, part) || leafTransports(registry, leaf, part)
-      )
+  const native = leaves.every((leaf) =>
+    parts.every(
+      (part) =>
+        representationKey(leaf) === representationKey(part) ||
+        !chainSpellsPair(leaf, part) ||
+        (opaqueKinds.has(leaf.kind) || opaqueKinds.has(part.kind)
+          ? opaquePayloadInjection(leaf, part)
+          : leafTransports(registry, leaf, part))
     )
+  )
   verdicts.set(pair, native)
   return native
 }

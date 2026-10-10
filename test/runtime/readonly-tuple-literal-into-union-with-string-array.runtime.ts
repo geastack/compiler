@@ -1,5 +1,5 @@
 // A tuple literal annotated `readonly [string, Direction]` and passed where a
-// union also admits `ReadonlyArray<string>` -- mongodb's `Sort` -- keeps its
+// union also admits `ReadonlyArray<string>` -- a database client's `Sort` -- keeps its
 // tuple layout.
 type Direction = 1 | -1 | { readonly $meta: string }
 type Sort = string | ReadonlyArray<string> | readonly [string, Direction]

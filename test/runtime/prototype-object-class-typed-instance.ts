@@ -1,6 +1,6 @@
 // SYMBOL-KEYED DATA SLOTS ON AN OBJECT-LITERAL PROTOTYPE, INSTANTIATED WITH
 // `Object.create` -- `prototypeObjectClassSourceTransform`'s own target
-// shape (`@hono/node-server`'s lightweight `Request`: a literal of methods
+// shape (an HTTP server adapter's lightweight `Request`: a literal of methods
 // and accessors, re-parented onto a host class, instantiated with
 // `Object.create`, then grown with `instance[symbolKey] = value` right where
 // it is created), not the "already a class" shapes
@@ -10,7 +10,7 @@
 // Before this file, the transform rewrote the literal into a class but kept
 // every instance `(new C() as any)`, so a per-instance symbol slot like
 // `k` below had nowhere to live except a fully dynamic side table -- the
-// defect the hono `newRequest()` census measured (1.17M of 1.59M tracked
+// defect an HTTP server's `newRequest()` census measured (1.17M of 1.59M tracked
 // allocations). This pins the fix: the class now declares a field for each
 // slot the module proves it writes (`k`, `shared` below), and the instance
 // keeps the class as its own static type instead of losing it to
@@ -19,7 +19,7 @@
 const k = Symbol('k')
 const shared = Symbol('shared')
 
-// Declared before the prototype literal, matching `@hono/node-server` itself:
+// Declared before the prototype literal, matching the server adapter itself:
 // `export class Request extends GlobalRequest {...}` sits above
 // `const requestPrototype = {...}`. `prototype-reparenting.ts`'s own
 // `nothingRunsBetween` only tolerates declarations and reflective calls

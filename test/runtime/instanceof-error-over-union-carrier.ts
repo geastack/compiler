@@ -2,7 +2,7 @@
 //! expect: bytes 3
 //! expect: absent
 
-// `@hono/node-server` reads a buffered body back as `Buffer | Error` and as
+// An HTTP server adapter reads a buffered body back as `Buffer | Error` and as
 // `Buffer | Error | undefined`, then asks `instanceof Error` to tell the
 // failure apart from the payload. Both carriers are composite -- a tagged
 // union and an optional over one -- and the arms are settled physical

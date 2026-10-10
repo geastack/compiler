@@ -1,6 +1,6 @@
 // A CLASS WHOSE PROTOTYPE IS RE-PARENTED ONTO ANOTHER CLASS'S PROTOTYPE.
 //
-// `@hono/node-server`'s `RequestHeaders` declares no `extends`, answers every
+// An HTTP server adapter's `RequestHeaders` declares no `extends`, answers every
 // `Headers` method itself from the incoming message, and then runs
 // `Object.setPrototypeOf(RequestHeaders.prototype, GlobalHeaders.prototype)`
 // so `request.headers instanceof Headers` holds. Its instances are handed out

@@ -19,7 +19,6 @@ import {
   type CallCalleeIdentity,
   type CallDispatchTarget,
   type CallOperation,
-  type CallUnionArmTarget,
   type GetOperation,
   type IrBlock,
   type IrBlockId,
@@ -27,6 +26,7 @@ import {
   type IrNonTerminatorOperation
 } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
+import { nativeUnionMethodTargetsOf } from './native-union-method-targets.js'
 
 /**
  * Fills the post-shake call facts. `CallOperation.target` says which
@@ -257,9 +257,9 @@ const callableAbisOf = (carrier: Representation): readonly CallableAbi[] | null 
  * Which classes' views each view carrier can hold, keyed by the carrier's
  * `representationKey` -- the per-carrier refinement of `viewedClassesOf`.
  *
- * mongodb's `ReadConcern.fromOptions` tests `readConcern instanceof
- * ReadConcern` over `ReadConcern | { level } | string`, and the program views
- * some ReadConcern as a document elsewhere. That view is a DIFFERENT carrier
+ * A static `Concern.fromOptions` tests `value instanceof Concern` over
+ * `Concern | { level } | string`, and the program views some `Concern` as a
+ * document elsewhere. That view is a DIFFERENT carrier
  * from the union's `{ level }` arm, so the arm cannot hold one -- but the
  * program-wide `viewed` set cannot say so, and the test refused.
  *
@@ -274,7 +274,7 @@ const callableAbisOf = (carrier: Representation): readonly CallableAbi[] | null 
  * seeds every view carrier anywhere in the target. A `dynamic` value is one
  * more carrier: a view that is boxed reaches what the box is unboxed into.
  *
- * mongodb's driver converts enough to defeat a whole-carrier walk: an
+ * A large program converts enough to defeat a whole-carrier walk: an
  * operation upcast to its base (whose fields carry the union), one options
  * record converted into another (whose other fields hold class instances),
  * each operation constructor passed as `{ aspects?: Set<symbol> }` (whose
@@ -287,7 +287,7 @@ const viewHoldersOf = (
   deriver: RepresentationDeriver
 ): ReadonlyMap<string, ReadonlySet<DeclarationId>> => {
   const dynamicKey = 'dynamic'
-  // Keyed by carrier identity, not object identity: mongodb's lowered program
+  // Keyed by carrier identity, not object identity: a large lowered program
   // carries the same carrier as thousands of distinct objects, and every miss
   // walks the field layouts of every class the carrier reaches.
   const carriersCache = new Map<string, { readonly keys: readonly string[]; readonly classes: readonly DeclarationId[] }>()
@@ -458,10 +458,10 @@ const viewHoldersOf = (
     // Boxing a callable is the mirror of unboxing one (above): a caller of the
     // box passes boxed arguments in, unboxed into the parameters, and the
     // result comes out boxed. The classes its parameters name are not boxed
-    // by it -- read whole, hono's `(c: Context, next) => ...` middleware in an
-    // `any` slot put every class a Context reaches into every record the
-    // program unboxes an `any` into, and node-compat's `init instanceof
-    // Headers` refused as possibly viewed.
+    // by it -- read whole, a `(c: Context, next) => ...` middleware in an `any`
+    // slot put every class a Context reaches into every record the program
+    // unboxes an `any` into, and an unrelated `init instanceof Headers`
+    // refused as possibly viewed.
     if (sourceAbis !== null && target.kind === 'dynamic') {
       for (const abi of sourceAbis) {
         pair(abi.result, target)
@@ -527,7 +527,7 @@ const viewHoldersOf = (
     const targetElement = elementOf(target)
     if (sourceElement !== null && targetElement !== null) return pair(sourceElement, targetElement)
     // A tuple read as the record of its index keys, or the other way round
-    // (hono's router `Result`, `[[H, Params][]]` beside
+    // (a router result typed `[[H, Params][]]` beside
     // `[[H, ParamIndexMap][], ParamStash]`): each element lands in a field and
     // each field in the element, never the whole of one in every view the
     // other carries anywhere.
@@ -543,8 +543,8 @@ const viewHoldersOf = (
     // element by element, each element from its own boxed value
     // (`unboxDynamicArray`). Its elements' own fields are no views: walking
     // them whole let every class a box ever held land in a `Record<string,
-    // string>` some tuple element declares, and hono's `init instanceof
-    // Headers` over `HeadersInit` refused as possibly viewed.
+    // string>` some tuple element declares, and an `init instanceof Headers`
+    // over `HeadersInit` refused as possibly viewed.
     if (source.kind === 'dynamic' && targetElement !== null) return pair(source, targetElement)
     if (source.kind === 'promise' && target.kind === 'promise') return pair(source.value, target.value)
     coarse(source, target)
@@ -573,7 +573,7 @@ const viewHoldersOf = (
         }
         if (operation.kind !== 'convert') continue
         // An object literal is a fresh object: it is no class instance, so
-        // it holds no view whatever carrier it is spelled with. hono's
+        // it holds no view whatever carrier it is spelled with. A
         // `const results: Record<string, string> | Record<string, string[]> =
         // {}` spells `{}` with the SAME carrier as every `{}`-typed value
         // unboxed out of an `any`, and keyed by carrier alone the literal
@@ -664,7 +664,7 @@ const callableBindingsOf = (
     // The cell and the function it holds can disagree about the CONVENTION
     // even when the language calls them the same function -- see
     // `targets/cpp/captures.ts`'s `buildDirectCallableIndex` for the worked
-    // hono example this guards against.
+    // example this guards against.
     const cell = placements.get(declaration)?.representation
     const held = writtenCarriers.get(declaration)
     if (cell && held && representationKey(cell) !== representationKey(held)) continue
@@ -761,7 +761,11 @@ const parameterCallablesOf = (
           // The cell and the function can disagree about the convention even
           // when both are the same function -- `callableBindingsOf`'s guard.
           const cell = placements.get(cells.get(ordinal)!)?.representation
-          const agrees = argument !== undefined && cell !== undefined && cell !== null && representationKey(cell) === representationKey(argument.representation)
+          const agrees =
+            argument !== undefined &&
+            cell !== undefined &&
+            cell !== null &&
+            representationKey(cell) === representationKey(argument.representation)
           const held = agrees ? (directDenotes.get(argument.value) ?? null) : null
           const previous = seen.get(ordinal)
           seen.set(ordinal, previous === undefined || previous === held ? held : null)
@@ -875,6 +879,7 @@ const methodCopyPreferenceOf = (
   const fits = (caller: CallableAbi, body: CallableAbi, depth: number): boolean =>
     caller.parameters.length === body.parameters.length &&
     caller.restFrom === body.restFrom &&
+    caller.argumentsFrame === body.argumentsFrame &&
     caller.parameters.every((parameter, index) => {
       const slot = body.parameters[index]
       return slot !== undefined && admits(parameter.value, slot.value, depth)
@@ -941,30 +946,6 @@ const resolveClassMethod = (
   }
 }
 
-/** All union arms must resolve through the same closed member authority. */
-const resolveUnionArms = (
-  representation: Representation,
-  classes: ReadonlyMap<DeclarationId, ClassLayout>,
-  key: string,
-  path: readonly number[]
-): readonly CallUnionArmTarget[] | null => {
-  if (representation.kind === 'tagged-union') {
-    const arms: CallUnionArmTarget[] = []
-    for (const [index, arm] of representation.arms.entries()) {
-      const nested = resolveUnionArms(arm.value, classes, key, [...path, index])
-      if (nested === null) return null
-      arms.push(...nested)
-    }
-    return arms
-  }
-  if (representation.kind !== 'class-ref') return null
-  if (classMethodOverrideOf(classes, representation.declaration, key)) return null
-  const site = classMemberOf(classes, representation.declaration, key)
-  if (site === null || site.kind !== 'method' || site.method.callable === null) return null
-  if (classFamilyOverridesOf(classes, representation.declaration, key).length > 0) return null
-  return [{ path, declaration: representation.declaration, functionId: site.method.callable }]
-}
-
 const resolveCall = (
   operation: CallOperation,
   body: IrBody,
@@ -1006,13 +987,35 @@ const resolveCall = (
   const key = constantStringKeyOf(producer.key.value, producers)
   if (key === null) return unresolvedCall
   const classCall = resolveClassMethod(producer, body, producers, classes, abiOf, capturesNothing, verdict, key)
-  if (classCall !== null) return classCall
-  const arms = resolveUnionArms(producer.receiver.representation, classes, key, [])
+  if (classCall !== null) {
+    // A method value snapshots the Function selected by this Get. Its public
+    // receiverless frame invokes that Function through the logical-this entry;
+    // naming the physical body would bypass the certified receiver protocol.
+    // A receiver-bearing immediate call may still dispatch through the object,
+    // but only when its actual this is the same object used for the Get. In
+    // `a.method.call(b)`, dispatching on b would select b's override instead of
+    // the Function already selected from a.
+    const heldAbi = abiOfCallee(operation.callee.representation)
+    const actual = operation.thisArgument ?? operation.receiver
+    if (heldAbi === null || heldAbi.receiver === null || actual?.value !== producer.receiver.value)
+      return { target: unresolvedTarget, ...(classCall.closedCallee ? { closedCallee: classCall.closedCallee } : {}) }
+    return classCall
+  }
+  const arms = nativeUnionMethodTargetsOf(producer.receiver.representation, classes, key)
   if (arms === null || arms.length === 0) return unresolvedCall
+  const actual = operation.thisArgument ?? operation.receiver
+  const heldAbi = abiOfCallee(operation.callee.representation)
+  // Static arms run bodies that read no this, so only an unbound call (no
+  // receiver supplied at all) selects them; a borrowed this would not.
+  const statics = arms.every((arm) => arm.static === true)
+  const physical = statics
+    ? (actual === null || actual === undefined) && arms.every((arm) => abiOf(arm.functionId)?.receiver === null)
+    : heldAbi !== null && heldAbi.receiver !== null && actual?.value === producer.receiver.value && !arms.some((arm) => arm.static === true)
   return {
-    target: arms.every((arm) => capturesNothing(arm.functionId) && abiOf(arm.functionId) !== null)
-      ? { kind: 'union-arm', arms }
-      : unresolvedTarget,
+    target:
+      physical && arms.every((arm) => capturesNothing(arm.functionId) && abiOf(arm.functionId) !== null)
+        ? { kind: 'union-arm', arms }
+        : unresolvedTarget,
     closedCallee: identityOfFunctions(arms.map((arm) => arm.functionId))
   }
 }

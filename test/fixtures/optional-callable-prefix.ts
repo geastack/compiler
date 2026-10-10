@@ -1,6 +1,6 @@
 /**
  * A shorter callable returned where a LONGER one, optionally absent, is
- * expected -- three's `getSingularSetter`, whose `switch` returns
+ * expected -- a 3D renderer's uniform-setter lookup, whose `switch` returns
  * `setValueV1f( gl, v )` and `setValueT1( gl, v, textures )` alike and whose
  * fall-through makes the slot optional.
  *

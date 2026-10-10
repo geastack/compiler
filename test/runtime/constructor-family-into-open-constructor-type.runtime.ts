@@ -1,8 +1,8 @@
 // The escaping twin of `constructor-family-into-narrower-constructor-type`.
-// mongodb's `Connection.command` cannot be narrowed to its callers' closed
+// A database client's `Connection.command` cannot be narrowed to its callers' closed
 // response family: `new ConnectionType(socket, options)` constructs a class
 // read out of an options record, so no proof can enumerate every receiver of
-// `.command`, and `responseType?: MongoDBResponseConstructor` stays the stated
+// `.command`, and `responseType?: ServerResponseConstructor` stays the stated
 // structural constructor type. The family therefore has to enter that slot as
 // itself -- a checked construct-entry adapter that keeps the class evaluation
 // as its environment -- and the stated static `make` is read back through the

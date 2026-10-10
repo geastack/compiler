@@ -1,5 +1,5 @@
 // A generic type guard whose type parameter no argument mentions --
-// mongodb's `isReadonlyArray<T>(value: any): value is readonly T[]`, called
+// a library's `isReadonlyArray<T>(value: any): value is readonly T[]`, called
 // as `isReadonlyArray(sort)`. `T` falls to `unknown` and the call has one
 // copy to run, not a set of copies to dispatch over.
 function isReadonlyArray<T>(value: any): value is readonly T[] {

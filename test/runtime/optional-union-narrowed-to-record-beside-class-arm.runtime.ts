@@ -1,5 +1,5 @@
-// bson's `Timestamp` constructor takes `low?: bigint | Long | { t: number;
-// i: number }` and narrows it with `Long.isLong(low)` and then
+// A binary-document serializer's `Timestamp` constructor takes `low?: bigint |
+// Long | { t: number; i: number }` and narrows it with `Long.isLong(low)` and then
 // `typeof low === 'object' && 't' in low && 'i' in low`. The read of `low`
 // under that guard is exactly the record arm, beside a class arm (`Long`) the
 // record cannot be viewed as: the checker's narrowing takes the runtime-checked

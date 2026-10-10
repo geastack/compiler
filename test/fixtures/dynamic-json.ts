@@ -5,7 +5,7 @@ const parsedRecord = parsed as Record<string, any>
 console.log(parsedRecord.name, parsedRecord.count, parsedRecord.active)
 
 const table: Record<string, any> = {}
-table['name'] = 'mongo'
+table['name'] = 'store'
 table['count'] = 4
 table['missing'] = undefined
 console.log(JSON.stringify(table))

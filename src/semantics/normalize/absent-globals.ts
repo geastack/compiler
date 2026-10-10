@@ -17,9 +17,9 @@ import { noHostProvidedNames, valueSymbolAt } from './unresolvable-names.js'
  * is not a `VideoFrame`, and the failure lands in the linker or at runtime
  * rather than here.
  *
- * three.js is written to run where these may not exist and says so in its own
- * source, guarding every one with `typeof X !== 'undefined'`. A native ANGLE
- * context is exactly such a place. `PluginCapabilities.absentGlobals` is where
+ * Portable library code is written to run where these may not exist and says
+ * so in its own source, guarding every one with `typeof X !== 'undefined'`. A
+ * native graphics context outside a browser is exactly such a place. `PluginCapabilities.absentGlobals` is where
  * a host states it; this turns that statement into the one thing the rest of
  * the compiler already knows how to reason about -- the type `undefined`.
  *
@@ -61,7 +61,7 @@ export interface AbsentGlobalCensus {
    * `absentGlobals` is a fact about a VALUE (`typeAt` above): a host saying
    * `HTMLImageElement` is absent says the *constructor* is not there. It says
    * nothing yet about the TYPE `HTMLImageElement` -- the interface a program's
-   * own ambient declarations (three.js's JSDoc `@param
+   * own ambient declarations (a JSDoc `@param
    * {(HTMLImageElement|HTMLCanvasElement)} image`, straight off lib.dom) can
    * still name in a position this compiler never asked the value for. This is
    * that missing type-level counterpart, built the same way and for the same
@@ -152,7 +152,7 @@ const ambientValueDeclarationOf = (symbol: ts.Symbol, platform: PlatformTest): t
 /**
  * Whether a declaration introduces a VALUE a program could hold.
  *
- * `declare class XRWebGLBinding { ... }` is one declaration that is BOTH the
+ * `declare class XRSession { ... }` is one declaration that is BOTH the
  * type and the constructor value, so it belongs here as much as `declare var`
  * does -- `@types/webxr` declares its whole surface that way, and leaving
  * classes out meant a host could not deny a single WebXR name. `interface`
@@ -189,10 +189,10 @@ type PlatformTest = (node: ts.Declaration) => boolean
  * program that `lib.dom.d.ts` does -- the program installed it, did not write
  * it, and holds no opinion about whether the platform implements it. Restricted
  * to `hasNoDefaultLib`, a host could deny `HTMLImageElement` and not
- * `XRWebGLLayer`, which is an accident of which file TypeScript happens to ship
- * rather than a distinction about authority. It cost the three.js app 81 unmet
- * obligations for `XRWebGLLayer@1`/`XRWebGLBinding@1` -- names three.js itself
- * guards with `typeof XRWebGLBinding !== 'undefined'`.
+ * `XRSession`, which is an accident of which file TypeScript happens to ship
+ * rather than a distinction about authority. It left unmet obligations for
+ * WebXR names that the program itself guards with
+ * `typeof XRSession !== 'undefined'`.
  *
  * What the original narrowness protected is still protected: a PROGRAM's own
  * `declare var VideoFrame` is an assertion about its own environment, and

@@ -116,7 +116,7 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // `emit-properties.ts`'s `emitGet` fallback (the same one `:get:false`
     // above claims) resolves its key through `staticKeyTextOf`, which reads
     // `ctx.constantTexts` and does not consult `operation.keyIsComputed` at
-    // all: `mesh['position']` and `mesh.position` reach the identical struct
+    // all: `obj['position']` and `obj.position` reach the identical struct
     // member load once the key is a literal, because the census already
     // records both spellings as the same `constant` key operand. So a
     // computed get needs nothing this backend has not already written --
@@ -221,9 +221,9 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     'class-ref:set:false',
     'class-ref:define-own-property:false',
     // The constructor side of a class -- a static method or get-only
-    // accessor read off the class value itself (`Quaternion.fromEuler`), and
-    // the assignment-only static field three.js spells as a bare
-    // `Object3D.DEFAULT_UP = new Vector3(0, 1, 0)`. That second kind is real
+    // accessor read off the class value itself (`Point.fromPolar`), and
+    // the assignment-only static field a program spells as a bare
+    // `Point.ORIGIN = new Point(0, 0)` after the class body. That second kind is real
     // emitted storage: `class-layout.ts`'s `censusClassStaticFieldStorage`
     // claims one global per (class, key) the whole program writes,
     // `records.ts` defines them ahead of every body, and both directions
@@ -400,8 +400,8 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // member table in front of a per-protocol runtime sidecar
     // (`gea::detail::hostIntrinsicSidecar`). See `computedNativeHandleGetText`
     // in emit-host-properties.ts for the design and its one stated limit.
-    // test262's `verifyProperty` reaches all three on every host-intrinsic
-    // `prop-desc` case.
+    // A property-descriptor conformance check reaches all three on every
+    // host-intrinsic member it verifies.
     'native-handle:get:true',
     'native-handle:set:true',
     'native-handle:delete:true',
@@ -571,11 +571,12 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // computed read through the identical `member.read(key)`/`.has(key)`
     // pair regardless of its value type, so only each arm's own VALUE needs
     // reconciling to what the union's `get` publishes
-    // (`dictionaryArmReadText`'s `widenedStoreText` call) -- hono's
-    // `ParamIndexMap | Params` route table and `Record<string, string> |
-    // Record<string, string[]>` query-string result are both this shape.
+    // (`dictionaryArmReadText`'s `widenedStoreText` call) -- a
+    // `Record<string, number> | Record<string, string>` lookup table and a
+    // `Record<string, string> | Record<string, string[]>` parse result are
+    // both this shape.
     // `:set:true` is deliberately absent: a computed WRITE into one of these
-    // arms is not a per-arm dispatch at all -- hono's own
+    // arms is not a per-arm dispatch at all -- a
     // `results[name] = []` writes through the SAME live dictionary whichever
     // arm it is, other keys included, so "switch the union's tag to answer
     // this one write" would silently reinterpret every other entry already
@@ -591,8 +592,8 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // `elementAt`/`hasElement` pair regardless of its own element type, so
     // only each arm's own ELEMENT needs reconciling to what the union's
     // `get` publishes (`arrayArmReadText`'s `widenedStoreText` call) --
-    // hono's `[T, ParamIndexMap][] | [T, Params][]` router match result
-    // (indexed by `routeIndex`) is this shape. `:set:true` stays unclaimed
+    // a `[T, A][] | [T, B][]` list of tuples, indexed by a runtime
+    // position, is this shape. `:set:true` stays unclaimed
     // for the same reason the dictionary-arms case above declines it.
     'tagged-union(array-arms):get:true',
     // A runtime key over a tagged union of generated shared records/classes
@@ -713,7 +714,7 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     'function-value-dispatch(expando):get:false',
     'function-value-dispatch(own-symbol):get:true',
     'function-value-dispatch(own-symbol):set:true',
-    // A RUNTIME string key on a callable -- test262's property helper reads,
+    // A RUNTIME string key on a callable -- a conformance property helper reads,
     // writes and deletes `obj[name]` on a builtin function to verify its own
     // `name`/`length`. The one shared function-object table answers all three
     // (`callableDynamicGet`/`callableDynamicSet`/`deleteOwnProperty`, facts
@@ -1016,7 +1017,7 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     'allocation:function-object:function-value-dispatch',
     // The identical allocation for a class method the checker marked OPTIONAL
     // (`?`) for structural-compatibility reasons alone (`bodyString?(): string`
-    // in node-compat's `globals.ts`, matching `ClientResponse`'s narrower
+    // declared optional so the class matches a narrower interface's
     // shape) -- the payload built is the same `CallableObject`, wrapped in
     // `gea::Optional<T>` because the FIELD's type admits absence, not because
     // this allocation ever produces one. `emitAllocateCallable`'s `payloadCarrier`/
@@ -1024,9 +1025,9 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // to `Optional` as the one value its constructor takes.
     'allocation:function-object:optional',
     // A pre-`class` JavaScript constructor function -- one `function
-    // WebGLClipping( properties ) { this.uniform = uniform; ... }` that is
-    // both called and `new`ed, which is how three.js writes its whole
-    // renderer. The carrier is `gea::CallableConstructorObject`, holding two
+    // Widget( options ) { this.state = state; ... }` that is
+    // both called and `new`ed, which is how pre-ES2015 libraries write
+    // their classes. The carrier is `gea::CallableConstructorObject`, holding two
     // function pointers because `[[Call]]` and `[[Construct]]` differ at both
     // ends: one is handed a receiver and returns what the body returns, the
     // other manufactures the receiver (ECMA-262 10.2.2) and evaluates to it.
@@ -1143,8 +1144,8 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     'destructuring:array-pattern:record',
     // A tuple's element, read back by position, when the source is a
     // `tagged-union` all of whose arms are themselves tuples --
-    // `[T, ParamIndexMap][] | [T, Params][]`'s own per-entry type
-    // (`[T, ParamIndexMap] | [T, Params]`), hono's own router match result:
+    // `[T, A][] | [T, B][]`'s own per-entry type
+    // (`[T, A] | [T, B]`):
     // fixed arity at fixed positions in EVERY arm, so `.map(([[, route]]) =>
     // route)`'s pattern reads position 0 the same closed-shape way a lone
     // tuple's positional field get already does. `ir/lower-destructuring.ts`'s
@@ -1359,10 +1360,10 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // `gea::detail::requireIterablePresent` in front of the same cursor
     // constructor, and `producers/shared.ts`'s `presentIterationArm` is what
     // routes such a source onto this path at all rather than demanding an
-    // `@@iterator` lookup this backend has no representation for. Measured on
-    // three.js: `this.materialCache.get( material )` is `Set<T> | undefined`
-    // from the collection census, and every `for`-`of` over one refused with
-    // an unclaimed `protocol:iterator:get-method:optional`.
+    // `@@iterator` lookup this backend has no representation for. A
+    // `Map<K, Set<T>>`'s `cache.get( key )` is `Set<T> | undefined` from the
+    // collection census, and without this every `for`-`of` over one refused
+    // with an unclaimed `protocol:iterator:get-method:optional`.
     //
     // Claimed under their OWN keys rather than folded into the four above --
     // `preflight/runtime-helper-key.ts`'s `optionalIterationSourceKind`
@@ -1380,8 +1381,8 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     'protocol:iterator:get-iterator:optional(keyed-collection)',
     'protocol:iterator:get-iterator:optional(string)',
     'protocol:iterator:get-iterator:optional(iterator)',
-    // `for await` over `AsyncGenerator | null` (mongodb's `readMany` over
-    // `this.dataEvents`, a field a call may reset): the same presence
+    // `for await` over `AsyncGenerator | null` (a generator held in a
+    // field a call may reset): the same presence
     // assertion in front of the same generator cursor.
     'protocol:async-iterator:get-iterator:optional(async-generator)',
     // A sum whose every arm is a shared Array or Set (`carrier-keys.ts`'s
@@ -1427,10 +1428,9 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // `for`-`in` over `undefined`/`null` zero times, so `emit-iterator.ts`
     // spells it as `gea::detail::enumerateIfPresent` -- the table's own key
     // cursor when present, a default-constructed, already-done cursor when
-    // not. Three's `WebGLPrograms.getProgramCacheKey` walks
-    // `parameters.defines`, which the base-class overlay states
-    // `Record | undefined` on `Material`, through an untyped JS parameter the
-    // checker cannot narrow at the site's own `!== undefined` guard. Only
+    // not. A `for`-`in` over an optional `Record | undefined` field reached
+    // through an untyped JS parameter is the shape: the checker cannot
+    // narrow it at the site's own `!== undefined` guard. Only
     // the two table domains: an absent record/class/host struct stays refused
     // by name (`runtime-helper-key.ts`'s `enumerateGetIteratorCarrierKind`)
     // because the static-snapshot walks read fields off the receiver itself.
@@ -1471,8 +1471,8 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     'protocol:spread:next:dictionary(string->string)',
     'protocol:spread:next:dictionary(symbol->symbol)',
     'protocol:spread:next:tagged-union(record-or-dictionary)',
-    // An `optional` source -- `headers?: HeaderRecord` in hono's own
-    // `setDefaultContentType` (`...headers,` inside an object literal) --
+    // An `optional` source -- an optional `headers?: Fixed | Record<string, string>`
+    // parameter spread as `...headers,` inside an object literal --
     // refines the identical way one layer out: `CopyDataProperties` copies
     // nothing for `null`/`undefined`, so `emitSpreadCopy`'s `optional`
     // branch renders that absent case as no write at all, and the present
@@ -1560,8 +1560,8 @@ export const currentCppRuntimeCapabilities: CppRuntimeCapabilities = Object.free
     // from `dynamic` -- `carrier-keys.ts`'s `isDynamicCopyableIntoFieldRecord`.
     'protocol:spread:next:field-record<-dynamic',
     // A genuinely dynamic source into a STRING-keyed dictionary receiver --
-    // mongodb's `mechanismProperties = { ...optionValue }` over an `unknown`
-    // bounded only by `isRecord`. `emit-allocation.ts`'s
+    // `props = { ...optionValue }` over an `unknown` bounded only by an
+    // `isRecord` guard. `emit-allocation.ts`'s
     // `emitDynamicSpreadIntoDictionary` walks the source's own enumerable
     // string keys and stores each value through the dictionary's checked
     // conversion from `dynamic`, the walk `Object.assign` of a dynamic source

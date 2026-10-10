@@ -8,7 +8,7 @@ import type { PairConvertible } from './record-view.js'
  * An Array or a Set read as the iterable OBJECT an interface declares --
  * `Iterable<T>`, whose one member is `[Symbol.iterator]()`.
  *
- * node-compat's `Readable.from(iterable: Iterable<unknown>)` is a static
+ * A stream library's `Readable.from(iterable: Iterable<unknown>)` is a static
  * method the parameter census cannot count every caller of, so its parameter
  * keeps the declared `Iterable<unknown>` record, and every caller hands it an
  * array (`Readable.from(['a', 'b'])`), a Set, or a Buffer list. The array is

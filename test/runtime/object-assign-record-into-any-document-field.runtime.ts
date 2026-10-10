@@ -1,6 +1,6 @@
 // `Object.assign` FROM A TYPED RECORD INTO A VALUE THE PROGRAM DECLARES `any`.
 //
-// mongodb's `applySession` (`sessions.ts`) does
+// A database client's `applySession` does
 // `command.readConcern = command.readConcern || {}` over a `Document`
 // (`{ [key: string]: any }`) and then
 // `Object.assign(command.readConcern, { afterClusterTime: session.operationTime })`.

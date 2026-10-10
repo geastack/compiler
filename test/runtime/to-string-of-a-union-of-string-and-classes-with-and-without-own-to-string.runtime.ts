@@ -3,7 +3,7 @@
 // arm runs its own `toString` (7.1.17 -> 7.1.1.1 OrdinaryToPrimitive), and
 // the arm that declares none is the "[object Object]" tag.
 //
-// mongodb-connection-string-url's `ConnectionString extends URL` overrides
+// A connection-string helper library's `ConnectionString extends URL` overrides
 // `toString`, so the URL arm's method is not one body: 7.1.1.1 step 5.b.i
 // looks the method up on the ALLOCATED object, and a `ConnectionString` held
 // as a `URL` must run its own. `x.toString()` over a union already dispatched

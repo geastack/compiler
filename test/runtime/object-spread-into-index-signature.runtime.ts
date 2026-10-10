@@ -1,5 +1,5 @@
 // A static record spread into a literal whose type carries an index signature
-// (mongodb's `MongoWriteConcernError`: `{ ...result.writeConcernError, ...result }`
+// (a database client's `WriteConcernError`: `{ ...result.writeConcernError, ...result }`
 // with `result: { ...; [x: string]: unknown }`). Every copied key lands in the
 // literal's dictionary, so the copy runs as `CopyDataProperties`.
 interface Result {

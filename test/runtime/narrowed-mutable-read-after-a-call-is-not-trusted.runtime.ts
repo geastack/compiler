@@ -9,7 +9,7 @@
 //! emitted-lacks: unreachableValue
 //! emitted-once: requireIterablePresent
 
-// mongodb's `autoConnect` (operations/execute_operation.ts): TypeScript keeps
+// A database client's `autoConnect` (in its operation executor): TypeScript keeps
 // the narrowing `client.topology: undefined` across `await client.connect()`,
 // so the second `== null` test reads as `undefined`-only. It is not: the
 // awaited call wrote the field. A narrowed read of a mutable property -- or of
@@ -28,13 +28,13 @@ class Client {
   }
 }
 
-class MongoRuntimeError extends Error {}
+class ServiceRuntimeError extends Error {}
 
 async function autoConnect(client: Client): Promise<Topology> {
   if (client.topology == null) {
     await client.connect()
     if (client.topology == null) {
-      throw new MongoRuntimeError('client.connect did not create a topology but also did not throw')
+      throw new ServiceRuntimeError('client.connect did not create a topology but also did not throw')
     }
     return client.topology
   }
@@ -84,7 +84,7 @@ function noCall(holder: Holder): string {
   return 'no-call: preset'
 }
 
-// mongodb's `Connection.readMany`: `for await` over a field assigned just
+// A database client's `Connection.readMany`: `for await` over a field assigned just
 // before a call that may reset it walks `AsyncGenerator | null`, and an
 // absent source is the language's TypeError, not a static impossibility.
 async function* numbers(): AsyncGenerator<number, void, void> {

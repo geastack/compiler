@@ -12,6 +12,15 @@ import {
 } from '../dist/representation/template-object.js'
 import { createCppTargetManifest, currentCppRuntimeCapabilities } from '../dist/targets/cpp/manifest.js'
 import { indexValueFlow } from '../dist/semantics/normalize/flow/value-flow.js'
+import { attachClosedScriptScope } from '../dist/semantics/normalize/flow/targets.js'
+import {
+  attachDeferredIntrinsicProtocolLedger,
+  createDeferredIntrinsicProtocolLedger,
+  failedIntrinsicProtocolRequirements
+} from '../dist/semantics/normalize/deferred-intrinsic-protocols.js'
+import { createIdentityTable } from '../dist/semantics/normalize/identities.js'
+import { censusGlobalHostMutations } from '../dist/semantics/normalize/global-host-mutations.js'
+import { censusUnresolvableNames } from '../dist/semantics/normalize/unresolvable-names.js'
 import { indexParameterBindingProgram, censusParameterBindings } from '../dist/semantics/normalize/parameter-bindings.js'
 import { censusArgumentsObjects } from '../dist/semantics/normalize/arguments-objects.js'
 import { memberTypeOf, overloadInvariantReturnTypeAt } from '../dist/semantics/normalize/derived-expression-type.js'
@@ -22,7 +31,10 @@ import { sweepDiagnostics } from '../dist/diagnostics/sweep.js'
 import { mintCapabilityCertificate } from '../dist/ir/certificate.js'
 import { componentId, nodeId, operationId, semanticResultId } from '../dist/identity/ids.js'
 import { obligationId, predicate } from '../dist/preflight/obligations.js'
-import { unboxedLoadText, widenedStoreText } from '../dist/targets/cpp/emit-narrowing.js'
+import { dynamicValueLoadText, recipeText, unboxedLoadText, widenedStoreText } from '../dist/targets/cpp/emit-narrowing.js'
+import { emptyCaptureIndex } from '../dist/targets/cpp/emit-context.js'
+import { createConversionNodes } from '../dist/conversion/nodes.js'
+import { recipeClosureOf } from '../dist/conversion/recipe-closure.js'
 import { cppTypeOf } from '../dist/targets/cpp/types.js'
 import { createConversionDerivationContext, deriveConversionCapability } from '../dist/conversion/derive.js'
 import { buildConversionGraph } from '../dist/conversion/build.js'
@@ -123,7 +135,47 @@ function checkedProgram(source, scriptKind = ts.ScriptKind.TS) {
   host.getSourceFile = (name, version, ...rest) =>
     resolve(name) === resolve(filename) ? ts.createSourceFile(name, source, version, true, scriptKind) : read(name, version, ...rest)
   const program = ts.createProgram([filename], options, host)
-  return { checker: program.getTypeChecker(), file: program.getSourceFile(filename) }
+  return { checker: program.getTypeChecker(), file: program.getSourceFile(filename), program }
+}
+
+// A source member frame can depend on the integrity of a Script binding or
+// intrinsic prototype. Exercise the same captured proof and final mutation
+// discharge as normalization rather than treating a bare census as authority.
+const withClosedParameterBindings = ({ checker, file, program }, inspect) => {
+  const files = [file]
+  const flow = indexValueFlow(checker, files, wholeProgram)
+  attachClosedScriptScope(flow, { files: new Set(files) })
+  const ledger = createDeferredIntrinsicProtocolLedger()
+  attachDeferredIntrinsicProtocolLedger(flow, ledger)
+  const proof = ledger.capture(() => {
+    const index = indexParameterBindingProgram(checker, files, wholeProgram, flow)
+    const census = censusParameterBindings(checker, files, wholeProgram, undefined, index, flow)
+    return inspect(census)
+  })
+  const identities = createIdentityTable(program, checker)
+  const globalHostMutationTaint = censusGlobalHostMutations(
+    checker,
+    identities,
+    files,
+    censusUnresolvableNames(checker, files),
+    new Set(),
+    flow,
+    wholeProgram
+  )
+  assert.deepEqual(
+    failedIntrinsicProtocolRequirements(
+      {
+        checker,
+        identities,
+        globalHostMutationTaint,
+        isStandardLibraryDeclaration: (declaration) => program.isSourceFileDefaultLibrary(declaration.getSourceFile())
+      },
+      proof.requirements
+    ),
+    [],
+    'the complete caller proof must survive the actual final mutation census'
+  )
+  return proof.value
 }
 
 test('parameter evidence consumes the shared call, reference, and mutation inventory', () => {
@@ -168,17 +220,17 @@ test('parameter evidence consumes the shared call, reference, and mutation inven
 })
 
 test('a factory method reached through object-literal members keeps its call sites', () => {
-  // Three's `WebGLState` shape: a factory returns a literal of methods, that
+  // A GPU state tracker's shape: a factory returns a literal of methods, that
   // literal is stored as a member of another literal, and the call arrives two
   // hops away and across a parameter -- `state.buffers.color.setClear(...)`.
   // The checker types `new ColorBuffer()` as `any` (a JS factory declares no
   // construct signature), so it resolves NONE of these calls; the census's own
   // resolution is the only thing that can, and it lost the receiver at the
   // property assignment, where the literal's member widened back to `any`.
-  // Every method on all three WebGLState buffer literals was left with no call
+  // Every method on all three state-tracker buffer literals was left with no call
   // sites and every parameter dynamic, which is what made `r *= a` in
   // `setClear` a dynamic multiply with no C++ spelling.
-  const { checker, file } = checkedProgram(
+  const { checker, file, program } = checkedProgram(
     `
     function ColorBuffer() {
       return { setClear: function (r, g, b, a) { r *= a; g *= a; b *= a; return r + g + b } };
@@ -189,7 +241,6 @@ test('a factory method reached through object-literal members keeps its call sit
   `,
     ts.ScriptKind.JS
   )
-  const census = censusParameterBindings(checker, [file], wholeProgram)
   let setClear
   const visit = (node) => {
     if (!setClear && ts.isFunctionExpression(node)) setClear = node
@@ -197,11 +248,13 @@ test('a factory method reached through object-literal members keeps its call sit
   }
   visit(file)
   assert.ok(setClear, 'the fixture must contain the factory method')
-  for (const parameter of setClear.parameters) {
-    const type = census.typeAt(parameter)
-    assert.ok(type, `${parameter.name.text} must bind: ${census.debugReport?.() ?? ''}`)
-    assert.equal(checker.typeToString(type), 'number', parameter.name.text)
-  }
+  withClosedParameterBindings({ checker, file, program }, (census) => {
+    for (const parameter of setClear.parameters) {
+      const type = census.typeAt(parameter)
+      assert.ok(type, `${parameter.name.text} must bind: ${census.debugReport?.() ?? ''}`)
+      assert.equal(checker.typeToString(type), 'number', parameter.name.text)
+    }
+  })
 })
 
 test('inferred parameter unions remain typed through forwarding calls and local aliases', () => {
@@ -440,7 +493,7 @@ test('arguments element inference does not replace named arguments properties', 
 })
 
 test('implicit arguments follow closed returned members and refuse aliases', () => {
-  const { checker, file } = checkedProgram(
+  const { checker, file, program } = checkedProgram(
     `
     function closedFactory() {
       function method() { return arguments[0] }
@@ -531,7 +584,6 @@ test('implicit arguments follow closed returned members and refuse aliases', () 
   `,
     ts.ScriptKind.JS
   )
-  const census = censusParameterBindings(checker, [file], wholeProgram)
   const methods = []
   const visit = (node) => {
     if (ts.isFunctionDeclaration(node) && node.name?.text === 'method') methods.push(node)
@@ -568,20 +620,22 @@ test('implicit arguments follow closed returned members and refuse aliases', () 
     [9, ['number']],
     [11, ['number']]
   ])
-  for (const [index, method] of methods.entries()) {
-    const frame = census.implicitArgumentsTupleAt(method)
-    const expected = binds.get(index)
-    if (expected === undefined) {
-      assert.equal(frame, null, `${index}: ${method.getText()}`)
-      continue
+  withClosedParameterBindings({ checker, file, program }, (census) => {
+    for (const [index, method] of methods.entries()) {
+      const frame = census.implicitArgumentsTupleAt(method)
+      const expected = binds.get(index)
+      if (expected === undefined) {
+        assert.equal(frame, null, `${index}: ${method.getText()}`)
+        continue
+      }
+      assert.equal(frame?.frame, 'tuple', `${index}: ${method.getText()}`)
+      assert.deepEqual(
+        frame.elements.map((type) => checker.typeToString(type)),
+        expected,
+        `${index}`
+      )
     }
-    assert.equal(frame?.frame, 'tuple', `${index}: ${method.getText()}`)
-    assert.deepEqual(
-      frame.elements.map((type) => checker.typeToString(type)),
-      expected,
-      `${index}`
-    )
-  }
+  })
 })
 
 test('ordinary parameters retain callable member inference', () => {
@@ -903,7 +957,7 @@ test('dynamic number boundaries assert an exact tag while Number explicitly coer
   assert.match(result.source ?? '', /gea::dynamicToNumber\([^)]*\)/)
 })
 
-test('dynamic records materialize a checked object product instead of an identity-only cast', () => {
+test('dynamic shared records require a cited live native field plan instead of an identity-only cast', () => {
   const target = {
     kind: 'record',
     shapeId: 'contract-dynamic-record',
@@ -925,13 +979,45 @@ test('dynamic records materialize a checked object product instead of an identit
     ]
   )
 
-  const emitted = unboxedLoadText(target, 'readDynamicRecord()')
-  assert.match(emitted ?? '', /Tag::Object/)
-  assert.match(emitted ?? '', /dynamicRecordHasField/)
-  assert.match(emitted ?? '', /lacks required field count/)
-  assert.match(emitted ?? '', /unboxValue<double>/)
-  assert.match(emitted ?? '', /unboxValue<std::string>/)
+  const layouts = {
+    forShape: (shape) => (shape === target.shapeId ? target.fields : null),
+    plainFieldsForShape: (shape) => (shape === target.shapeId ? target.fields : null),
+    indexesForShape: () => [],
+    accessorsForShape: () => []
+  }
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(layouts), nodes: new Map() })
+  const conversion = conversions.nodeFor({ kind: 'dynamic', reason: 'declared-any-never-narrowed' }, target)
+  assert.equal(conversion.capability.kind, 'static')
+  const plan = conversion.capability.materializer.documentRecordView
+  assert.ok(plan?.step.kind === 'document' && plan.step.payload.kind === 'view')
+  const closure = recipeClosureOf([conversion], conversions.nodeById)
+  const site = {
+    conversions,
+    conversionIsCertified: (id) => closure.has(id),
+    layouts,
+    classes: new Map(),
+    captures: emptyCaptureIndex,
+    printerDrift: [],
+    owner: 'public-native-record-loader'
+  }
+  assert.equal(unboxedLoadText(target, 'readDynamicRecord()'), null)
+  assert.equal(dynamicValueLoadText(layouts, target, 'readDynamicRecord()'), null)
+  const emitted = dynamicValueLoadText(layouts, target, 'readDynamicRecord()', { site, conversion })
+  assert.match(emitted ?? '', /unboxDynamicDictionary/)
+  assert.match(emitted ?? '', /makeDocumentViewWithOrigin/)
+  assert.match(emitted ?? '', /readDocumentField/)
+  assert.match(emitted ?? '', /writeDocumentField/)
+  assert.doesNotMatch(emitted ?? '', /adoptProduct|dynamicRecordField|unboxValue<gea::Ref/)
+  const readers = plan.step.payload.view.fields.map((field) => recipeText(site, field.read, 'futureEntry'))
+  assert.match(readers[0] ?? '', /checkedPayloadEntry<double>/)
+  assert.match(readers[1] ?? '', /checkedPayloadEntry<std::string>/)
+  assert.ok(plan.dependencies.every((child) => closure.get(child.id) === child))
   assert.equal((emitted?.match(/readDynamicRecord\(\)/g) ?? []).length, 1, 'the dynamic record source is evaluated once')
+  assert.throws(
+    () =>
+      dynamicValueLoadText(layouts, target, 'readDynamicRecord()', { site: { ...site, conversionIsCertified: () => false }, conversion }),
+    /requires the exact certified recipe/
+  )
 })
 
 test('dynamic native records remain an exact payload recovery, never a structural cast', () => {
@@ -1001,7 +1087,11 @@ test('callable adapters preserve undefined absence and fail closed for nullable 
       { tag: 'derived', semanticType: 'callable-contract-derived-type', runtimeDiscriminator: { kind: 'carrier' }, value: derived }
     ]
   }
-  assert.equal(registry.functionValueDispatchMaterializer(callable([overlapping])), null)
+  // An argument is only boxed out to the dynamic callee, which needs every arm
+  // boxable, not disjoint; reading an overlapping union back in as the result
+  // still has no single arm to pick.
+  assert.ok(registry.functionValueDispatchMaterializer(callable([overlapping])))
+  assert.equal(registry.functionValueDispatchMaterializer(callable([number], overlapping)), null)
 
   const unsupportedRest = {
     kind: 'array-object',

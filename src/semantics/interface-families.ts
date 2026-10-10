@@ -18,7 +18,7 @@ export interface InterfaceFamily extends InterfaceFamilyGroup {
   readonly members: readonly ts.InterfaceDeclaration[]
   /**
    * Anonymous all-optional object types the program intersects a member with
-   * (`FindOptions & Abortable`), laid out into the family as optional fields
+   * (`ReadOptions & WithSignal`), laid out into the family as optional fields
    * -- see `absorbIntersectionParts`.
    */
   readonly absorbed: readonly ts.Type[]
@@ -123,7 +123,7 @@ export interface InterfaceFamilyGroups {
   /**
    * The family a type is a VIEW of: a member itself, or an intersection of
    * members of one family with source object literals naming only the
-   * family's keys (`FindOptions & Abortable`, `FindOptions & { writeConcern?:
+   * family's keys (`ReadOptions & WithSignal`, `ReadOptions & { mode?:
    * never }`) -- every such value is one object of the family's layout.
    */
   readonly familyViewOf: (type: ts.Type) => InterfaceFamilyGroup | null
@@ -223,22 +223,22 @@ const collectInterfaceFamilyGroups = (checker: ts.TypeChecker, files: readonly t
   // own fields are what the checker resolves through the alias
   // (`getPropertiesOfType`, which `familyLayoutOf` reads), and the family
   // layout is the union over members anyway, so the edge is to `I` itself.
-  // Tainting it instead split mongodb's whole options tree -- every options
-  // interface descends from `BSONSerializeOptions extends Omit<SerializeOptions,
+  // Tainting it instead split a whole options tree -- where every options
+  // interface descends from `BaseOptions extends Omit<SerializeOptions,
   // 'index'>` -- into one struct per interface, and every hand-off of one
   // options object to a function naming another became a field-by-field copy:
-  // identity lost, and 4,488 inline copies of one record in the ping build.
+  // identity lost, and thousands of inline copies of one record.
   const keyRemappingAliases = new Set(['Omit', 'Pick', 'Partial', 'Required', 'Readonly'])
   const isLibAlias = (symbol: ts.Symbol): boolean =>
     (symbol.declarations ?? []).length > 0 &&
     (symbol.declarations ?? []).every((declaration) => declaration.getSourceFile().isDeclarationFile)
   //
   // Two more bases are fields and nothing else: an alias of an object type
-  // literal the program declares (mongodb's `ListCollectionsOptions extends
-  // ..., Abortable`, `Abortable = { signal?: AbortSignal }`), which gives the
-  // member those fields and connects it to nothing; and an alias of an
-  // intersection of such bases (`ListIndexesOptions = AbstractCursorOptions &
-  // { omitMaxTimeMS?: boolean }`), whose candidate parts are the edges. The
+  // literal the program declares (`ListOptions extends ..., WithSignal`, with
+  // `WithSignal = { signal?: AbortSignal }`), which gives the member those
+  // fields and connects it to nothing; and an alias of an intersection of such
+  // bases (`IndexOptions = CursorOptions & { flag?: boolean }`), whose
+  // candidate parts are the edges. The
   // member's own property list already holds every field either brings.
   // The answer is the edges, or `null` for a base the family cannot own.
   const heritageCandidatesOf = (base: ts.Type): readonly ts.InterfaceDeclaration[] | null => {
@@ -340,9 +340,9 @@ const collectInterfaceFamilyGroups = (checker: ts.TypeChecker, files: readonly t
   // copied into the interface's at the store. So a literal may adopt a lone
   // interface through a family of one, minted here and known ONLY to the
   // adoption map: `familyOfType` never answers it for the interface itself,
-  // and the interface's layout is untouched. mongodb's
-  // `opts: WriteConcernSettings | WriteConcern | undefined = { w: options }`
-  // is the measured case (`WriteConcernSettings` extends nothing).
+  // and the interface's layout is untouched.
+  // `opts: Options | OptionsClass | undefined = { w: value }` is the
+  // measured case (`Options` extends nothing).
   const loneFamilies = new Map<ts.InterfaceDeclaration, InterfaceFamilyGroup>()
   const loneFamilyOf = (type: ts.Type): InterfaceFamilyGroup | null => {
     const symbol = type.getSymbol()
@@ -386,8 +386,8 @@ const collectInterfaceFamilyGroups = (checker: ts.TypeChecker, files: readonly t
     for (const absorbed of family.absorbed) for (const property of checker.getPropertiesOfType(absorbed)) keys.add(property.getName())
     return keys
   }
-  // A program alias of such a view -- mongodb's `type RemoveUserOptions =
-  // Omit<CommandOperationOptions, 'rawData'>` -- carries the PROGRAM's alias,
+  // A program alias of such a view -- `type RemoveOptions =
+  // Omit<OperationOptions, 'raw'>` -- carries the PROGRAM's alias,
   // not `Omit`'s, so the remapping is read off the alias's declaration.
   const remappedNodeOf = (node: ts.TypeNode, remapped: boolean): InterfaceFamilyGroup | null => {
     if (ts.isParenthesizedTypeNode(node)) return remappedNodeOf(node.type, remapped)
@@ -414,9 +414,9 @@ const collectInterfaceFamilyGroups = (checker: ts.TypeChecker, files: readonly t
     let found: InterfaceFamilyGroup | null = null
     const literals: ts.Type[] = []
     for (const part of type.types) {
-      // A part may itself be a remapped view: mongodb's
-      // `ServerCommandOptions = Omit<CommandOptions, ...> & { timeoutContext } & Abortable`.
-      // Refused, `buildOptions`' literal took a shape of its own, every option
+      // A part may itself be a remapped view:
+      // `ServerOptions = Omit<RequestOptions, ...> & { context } & WithSignal`.
+      // Refused, an options-building function's literal took a shape of its own, every option
       // key its spread source carries landed in that shape's expando one
       // `nativeDynamicSet` at a time, and `conn.command` rebuilt the family
       // record from it again -- per operation.
@@ -435,7 +435,7 @@ const collectInterfaceFamilyGroups = (checker: ts.TypeChecker, files: readonly t
   }
   widenBySpreadExcess(checker, files, familyViewOf, memberKeysOf)
   // An intersection view's own literal part may admit `null` where every
-  // member declares the key non-nullable: `ServerCommandOptions`' `{
+  // member declares the key non-nullable: `ServerOptions`' `{
   // returnFieldSelector?: Document | null }` over `OpQueryOptions`'
   // `returnFieldSelector?: Document`, and get_more stores `null` there. Laid
   // out as the family, the family's field must carry it, so the declared type
@@ -489,8 +489,8 @@ const collectInterfaceFamilyGroups = (checker: ts.TypeChecker, files: readonly t
   }
   const layoutMember = new Map<InterfaceFamilyGroup, ts.Type | null>()
   const viewMemberOf = (type: ts.Type): ts.Type | null => {
-    // An intersection view (`ServerCommandOptions = Omit<CommandOptions, ...> &
-    // { timeoutContext } & Abortable`) too: adopting only the literal left the
+    // An intersection view (`ServerOptions = Omit<RequestOptions, ...> &
+    // { context } & WithSignal`) too: adopting only the literal left the
     // function returning it typed as a record of its own, so every operation
     // converted the family record into that shape and back.
     const viewed = type.isIntersection() ? familyViewOf(type) : null
@@ -529,12 +529,12 @@ const isSourceObjectLiteral = (checker: ts.TypeChecker, type: ts.Type): boolean 
  * The optional-only object types the program intersects a family member with,
  * absorbed into that family's layout.
  *
- * mongodb passes its options as `FindOptions & Abortable`, `CommandOptions &
- * Abortable`, `OperationOptions & Abortable` -- where `Abortable = { signal?:
- * AbortSignal }` -- and hands the same object on to functions naming the bare
- * member. The intersection names a field the family does not declare, so it
+ * A program can pass its options as `ReadOptions & WithSignal`,
+ * `RequestOptions & WithSignal`, `OperationOptions & WithSignal` -- where
+ * `WithSignal = { signal?: AbortSignal }` -- and hand the same object on to
+ * functions naming the bare member. The intersection names a field the family does not declare, so it
  * interned as its own record, and every hand-off between the two spellings
- * was a field-by-field copy of a 200-field options object: identity lost, and
+ * was a field-by-field copy of a large options object: identity lost, and
  * the operations' redeclared `options` slot (`override-field-arms.ts`) became
  * a union whose every read converted between the two. The object is still one
  * object: laying `signal` out in the family, optional behind a presence bit
@@ -569,9 +569,8 @@ const absorbIntersectionParts = (
           else admissible = false
         }
         // A key the family already lays out may be restated required
-        // (mongodb's `InternalAbstractCursorOptions` = `Omit<AbstractCursorOptions,
-        // 'readPreference'> & { readPreference: ReadPreference; exhaust?: boolean
-        // }`); only a key the literal ADDS must be optional.
+        // (`InternalOptions = Omit<BaseOptions, 'mode'> & { mode: Mode;
+        // flag?: boolean }`); only a key the literal ADDS must be optional.
         const members = family === null ? null : memberKeysOf(family)
         const addsOnlyOptional = (literal: ts.Type): boolean => {
           const properties = checker.getPropertiesOfType(literal)
@@ -593,12 +592,12 @@ const absorbIntersectionParts = (
 
 /**
  * Whether some member's own declaration of `key` already holds a `type` value
- * as it is. mongodb's `filter: Filter<TSchema>` spread into a view is a
- * `Document`, which `ListDatabasesOptions.filter` holds; widening that slot
- * made it a union of two indexed object carriers no dynamic read can choose
- * between. An `any` string index takes every object in the checker, but only
- * an object that is itself indexed is held by it: a `Promise<ClientMetadata>`
- * spread under `GridFSBucketWriteStreamOptions.metadata?: Document` is not a
+ * as it is. A `query: Query<T>` spread into a view is a `Bag` (an interface
+ * with an `any` string index), which `ListOptions.query` holds; widening that
+ * slot made it a union of two indexed object carriers no dynamic read can
+ * choose between. An `any` string index takes every object in the checker,
+ * but only an object that is itself indexed is held by it: a
+ * `Promise<Metadata>` spread under `StreamOptions.metadata?: Bag` is not a
  * dictionary, so that slot widens.
  */
 const declarationHolds = (checker: ts.TypeChecker, family: InterfaceFamilyGroup, key: string, type: ts.Type): boolean =>
@@ -616,10 +615,10 @@ const declarationHolds = (checker: ts.TypeChecker, family: InterfaceFamilyGroup,
  *
  * A family's layout is the union of every member's fields, so a literal typed
  * as one member has a slot for a key only ANOTHER member declares -- typed as
- * that member says. A spread is not checked for excess properties: mongodb's
- * `const handshakeOptions: CommandOptions = { ...options, raw: false }` copies
- * `ConnectionOptions.id` (`number | '<monitor>'`) into an object whose layout
- * holds `GridFSBucketWriteStreamOptions.id?: ObjectId`. The copy is an own
+ * that member says. A spread is not checked for excess properties:
+ * `const opts: RequestOptions = { ...options, raw: false }` copies
+ * `ConnectionOptions.id` (`number | '<tag>'`) into an object whose layout
+ * holds `StreamOptions.id?: Id`. The copy is an own
  * property of the object like any other, and the layout's slot for it is the
  * only place the object has for that key (a declared name is never an
  * expando), so the slot's carrier must admit what the program stores there:
@@ -681,15 +680,15 @@ const objectLiteralSymbolOf = (checker: ts.TypeChecker, type: ts.Type): ts.Symbo
  * Object literals the program builds for a family's view, laid out in the
  * family's one layout from the moment they are allocated.
  *
- * mongodb assembles most operation options as a literal somewhere else than
- * the constructor that takes them: `const options = { ...this.findOptions,
- * ...this.cursorOptions, session }` then `new FindOperation(ns, filter,
- * options)`, or `resolveOptions(undefined, { ...resolveBSONOptions(options),
- * timeoutMS })`, whose generic result IS the literal's type. Laid out as its
+ * A program can assemble most operation options as a literal somewhere else
+ * than the constructor that takes them: `const options = { ...this.findOptions,
+ * ...this.cursorOptions, session }` then `new Operation(ns, query,
+ * options)`, or `resolveOptions(undefined, { ...resolveBaseOptions(options),
+ * timeout })`, whose generic result IS the literal's type. Laid out as its
  * own record, each such literal entered the operations' redeclared `options`
  * slot (`override-field-arms.ts`) as one more arm, and every read of the slot
  * dispatched over twenty records, each viewed field by field into the
- * family's 131-field struct: a 491 MB `server.cpp`. The literal is the options
+ * family's large struct: hundreds of megabytes of emitted C++. The literal is the options
  * object; nothing but the family ever holds it as that record.
  *
  * Adopted where a value of the literal's type meets a family view as its
@@ -710,10 +709,10 @@ const adoptFlowingLiterals = (
     (type.isUnion() ? type.types : [type]).filter((member) => (member.flags & (ts.TypeFlags.Undefined | ts.TypeFlags.Null)) === 0)
   // A union slot adopts too, when exactly one of its present members is a
   // family and every other is something a literal can never be -- a class
-  // (an instance has an identity a literal lacks) or a primitive. mongodb's
-  // `opts: WriteConcernSettings | WriteConcern | undefined = { w }` allocated
-  // the literal at its own shape and then copied it into the settings record
-  // at the store, one struct per call of `WriteConcern.fromOptions`.
+  // (an instance has an identity a literal lacks) or a primitive.
+  // `opts: Settings | SettingsClass | undefined = { w }` allocated the
+  // literal at its own shape and then copied it into the settings record at
+  // the store, one struct per call.
   const soleFamilyOf = (views: readonly ts.Type[]): InterfaceFamilyGroup | null => {
     let family: InterfaceFamilyGroup | null = null
     for (const view of views) {

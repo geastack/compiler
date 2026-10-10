@@ -1,6 +1,6 @@
 // A CALL THROUGH A BASE ANNOTATION WHOSE SUBCLASS OVERRIDE NARROWS `unknown`.
 //
-// `@hono/node-server`'s `listener.ts` writes `(outgoing as Writable).write(value)`
+// A Node HTTP adapter's request listener writes `(outgoing as Writable).write(value)`
 // over a value that really is node-compat's `ServerResponse`. Our `node:stream`
 // declares `Writable.write(chunk: unknown, encodingOrCallback?: unknown,
 // callback?: unknown)`, and `ServerResponse` overrides it as

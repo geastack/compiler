@@ -5,27 +5,26 @@ import { documentationRangesIn } from './documentation-ranges.js'
  * A declared type a feature package's own runtime REPLACES with a concrete
  * type it ships as ordinary source.
  *
- * `WebGLRenderer`'s `_gl` parameter is documented, by `@types/three` and by
- * three's own JSDoc, as an AMBIENT browser interface -- `WebGLRenderingContext`
- * in one place, the correct `WebGL2RenderingContext` in another -- because
- * that is the type a browser host would hand it. This build's host is not a
- * browser: `@geastack/native-webgl-angle` ships `NativeWebGL2RenderingContext`,
- * an ordinary TypeScript class this compiler already compiles from source, and
- * every `_gl` this program ever actually holds is one of ITS instances
- * (`createNativeWebGLCanvas(...).getContext('webgl2')`).
+ * A library's JSDoc or its separately published declarations can type a
+ * parameter as an AMBIENT browser interface -- `@param {WebGLRenderingContext}
+ * gl` on a function that is actually handed a WebGL 2 context, the correct
+ * `WebGL2RenderingContext` in another place -- because that is the type a
+ * browser host would hand it. A native build's host is not a browser: a
+ * feature package ships a concrete context class as ordinary TypeScript this
+ * compiler already compiles from source, and every such parameter the program
+ * ever actually holds is one of ITS instances.
  *
  * The ambient interface and the concrete class are structurally unrelated --
- * `WebGLRenderingContext` is the WebGL 1 surface and lacks
- * `renderbufferStorageMultisample`/`blitFramebuffer`/`invalidateFramebuffer`
- * and the WebGL 2 framebuffer constants three's own renderer calls -- so a
- * member read through the STATED type either does not exist (the checker
- * answers `any`, and every read of it boxes) or answers a DIFFERENT host's
- * member than the one that will ever run.
+ * `WebGLRenderingContext` is the WebGL 1 surface and lacks the WebGL 2
+ * methods and constants a WebGL 2 caller uses -- so a member read through the
+ * STATED type either does not exist (the checker answers `any`, and every
+ * read of it boxes) or answers a DIFFERENT host's member than the one that
+ * will ever run.
  *
  * `type`/`importedFrom` name the concrete replacement and where a value
- * consumer imports it from, exactly as three's own source already does
- * (`import { createNativeWebGLCanvas } from '@geastack/native-webgl-angle/nativeWebGL'`)
- * -- so respelling a stated ambient name to this one is not inventing a fact,
+ * consumer imports it from, exactly as the program's own value layer already
+ * does when it constructs the context through the feature package -- so
+ * respelling a stated ambient name to this one is not inventing a fact,
  * it is stating in the type layer what the program's own value layer already
  * says.
  */
@@ -93,7 +92,7 @@ const boundNamesIn = (file: ts.SourceFile): ReadonlySet<string> => {
  * test on a file with no `~`.
  *
  * Runs after `declarationOverlayTransform` in `compiler.ts`'s own pipeline so
- * it sees what THAT transform injects -- `@types/three`'s own `_gl:
+ * it sees what THAT transform injects -- a declaration package's own `gl:
  * WebGLRenderingContext` -- and not only what the program's own source
  * already wrote.
  *
@@ -158,12 +157,10 @@ export const createAmbientTypeRealizationTransform = (
     for (const range of ranges) {
       const comment = input.text.slice(range.pos, range.end)
       // Only a JSDoc TYPE EXPRESSION names a type -- the `{...}` of `@param
-      // {WebGLRenderingContext} gl`. Prose does not: three's
-      // PointsMaterial documents `sizeAttenuation` with a link to
-      // `.../Web/API/WebGLRenderingContext/getParameter`, and respelling that
-      // URL imported the native WebGL package into a program that never
-      // touches WebGL (gea-threejs on the Mosaico), which then failed to
-      // resolve it.
+      // {WebGLRenderingContext} gl`. Prose does not: a doc comment that links
+      // to `.../Web/API/WebGLRenderingContext/getParameter`, respelled, imported
+      // the native WebGL package into a program that never touches WebGL,
+      // which then failed to resolve it.
       const respelled = comment.replace(/\{[^{}]*\}/g, (expression) => {
         let typed = expression
         for (const entry of usable) {

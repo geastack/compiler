@@ -1,6 +1,6 @@
 // `co_return u;` / `co_await gea::awaitValue(u)` where `u` is a sum whose live
-// arm is either a plain value or a `Promise<V>` to adopt -- mongodb's
-// `execute_operation` family and `cmap/wire_protocol/on_data.ts`'s hand-written
+// arm is either a plain value or a `Promise<V>` to adopt -- a database
+// client's operation-execution family and its hand-written
 // async iterator both pass a value through exactly this shape (an operation,
 // or a generator step, that may answer synchronously or not, met by a
 // declared `Promise<V>` result).

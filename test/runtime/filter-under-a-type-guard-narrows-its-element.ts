@@ -3,8 +3,8 @@
 //
 // `lib.es5.d.ts` declares `Array.prototype.filter` twice, and the second
 // declaration -- `filter<S extends T>(predicate: (value: T) => value is S):
-// S[]` -- states that every value the guard kept is an `S`. hono's
-// `utils/html.ts` selects it with `res.filter<string>(Boolean as any)` over a
+// S[]` -- states that every value the guard kept is an `S`. an HTTP
+// framework's HTML helper selects it with `res.filter<string>(Boolean as any)` over a
 // `(string | undefined)[]`, and the checker publishes the call as `string[]`.
 //
 // The runtime template answers with the RECEIVER's element, so the store into

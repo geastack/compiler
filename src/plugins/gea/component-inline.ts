@@ -17,11 +17,11 @@ import { isReactiveComponentChild, openingOf, namesAComponent } from './reactive
  * which on every change builds a WHOLE NEW SUBTREE, inserts it, and destroys
  * the old one.
  *
- * For the analog clock that is three nodes replaced per second for a value that
+ * For a clock face that is three nodes replaced per second for a value that
  * only ever changes one style property. It is not merely wasteful: the node the
  * program had is GONE, so every local-refresh path the engine has -- the one
  * that rerecords one node's display commands instead of rebuilding the display
- * list -- is skipped, and `test_gea_analog_clock_main` fails on exactly that
+ * list -- is skipped, and the engine's local-refresh test fails on exactly that
  * (`expected hand transform update to rerecord the second-hand commands`, the
  * captured id having been destroyed rather than left dirty).
  *

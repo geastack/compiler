@@ -19,8 +19,8 @@ import {
  * - `tuple`: every read names a FIXED position -- a literal index, or a final
  *   `...arguments` spread into a callee convention with no rest formal, which
  *   reads positions `0..n-1` exactly. Each position is then its own fact,
- *   joined over the closed callers that fill it. This is the shape three's
- *   WebGL forwarding shims need: `texImage3D()` is called with numbers in its
+ *   joined over the closed callers that fill it. This is the shape WebGL
+ *   forwarding shims need: `texImage3D()` is called with numbers in its
  *   leading positions and `ArrayBufferView | null` in its last, and one element
  *   type over all ten positions could only be a union no caller wrote.
  *   Positions from `required` on are ones some closed caller omits, so they
@@ -33,9 +33,15 @@ import {
  *   every supplied position -- the frame this fact published before positions
  *   existed.
  */
-export type ImplicitArgumentsTuple =
+export type ImplicitArgumentsTuple = (
   | { readonly frame: 'tuple'; readonly elements: readonly ts.Type[]; readonly required: number }
   | { readonly frame: 'array'; readonly element: ts.Type }
+) & {
+  /** The same admitted caller writes before joining checker types loses source-only carrier identities. */
+  readonly sourcePositions?: readonly (readonly ts.Expression[])[]
+  /** A recursive numeric read of this frame can supply its native absence value. */
+  readonly sourceUndefined?: true
+}
 
 /** The one convention fact the fixed-spread admission reads off a callee. */
 export interface ArgumentsSpreadConvention {
@@ -179,11 +185,11 @@ export const inferImplicitArgumentsTuple = (evidence: ImplicitArgumentsEvidence)
   if (evidence.calls.length === 0) return { refused: 'implicit-arguments-no-callers' }
   const passed: ts.Type[] = []
   const positions: ts.Type[][] = []
+  const sourcePositions: ts.Expression[][] = []
   let required = Number.POSITIVE_INFINITY
   let readsOwnElement = false
   for (const call of evidence.calls) {
     const args = evidence.argumentsOf(call)
-    if (args.length < slot.ordinal) return { refused: 'implicit-arguments-omitted-prefix' }
     if (args.some(ts.isSpreadElement)) return { refused: 'implicit-arguments-spread-caller' }
     required = Math.min(required, args.length)
     for (const [position, argument] of args.entries()) {
@@ -205,6 +211,7 @@ export const inferImplicitArgumentsTuple = (evidence: ImplicitArgumentsEvidence)
       const widened = type.isLiteral() ? checker.getBaseTypeOfLiteralType(type) : type
       passed.push(widened)
       ;(positions[position] ??= []).push(widened)
+      ;(sourcePositions[position] ??= []).push(argument)
     }
   }
   if (passed.length === 0) return { refused: 'implicit-arguments-no-element-evidence' }
@@ -217,7 +224,7 @@ export const inferImplicitArgumentsTuple = (evidence: ImplicitArgumentsEvidence)
       if (!element) return { refused: 'implicit-arguments-disjoint-position' }
       elements[position] = element
     }
-    return { tuple: { frame: 'tuple', elements, required: Math.min(required, elements.length) } }
+    return { tuple: { frame: 'tuple', elements, required: Math.min(required, elements.length), sourcePositions } }
   }
   // An annotation can supply a common upper bound absent from the
   // observed subclasses. It is only a candidate: every supplied position,
@@ -227,7 +234,14 @@ export const inferImplicitArgumentsTuple = (evidence: ImplicitArgumentsEvidence)
     evidence.statedElements.map((stated) => joinOfWrites(checker, [...passed, stated])).find((joined) => joined !== null) ??
     disjointUnionTypeOf(checker, passed)
   return element
-    ? { tuple: { frame: 'array', element: readsOwnElement ? checker.getNullableType(element, ts.TypeFlags.Undefined) : element } }
+    ? {
+        tuple: {
+          frame: 'array',
+          element: readsOwnElement ? checker.getNullableType(element, ts.TypeFlags.Undefined) : element,
+          sourcePositions,
+          ...(readsOwnElement ? { sourceUndefined: true as const } : {})
+        }
+      }
     : { refused: 'implicit-arguments-disjoint-elements' }
 }
 
@@ -264,6 +278,21 @@ export const implicitArgumentsReadTypeAt = (
 
 /** Two settled frame facts state the same frame: the fixpoint's identity test for this query. */
 export const sameImplicitArgumentsTuple = (left: ImplicitArgumentsTuple, right: ImplicitArgumentsTuple): boolean => {
+  const leftSources = left.sourcePositions
+  const rightSources = right.sourcePositions
+  if (
+    left.sourceUndefined !== right.sourceUndefined ||
+    (leftSources === undefined) !== (rightSources === undefined) ||
+    (leftSources !== undefined &&
+      rightSources !== undefined &&
+      (leftSources.length !== rightSources.length ||
+        !leftSources.every(
+          (sources, position) =>
+            sources.length === rightSources[position]?.length &&
+            sources.every((source, index) => source === rightSources[position]?.[index])
+        )))
+  )
+    return false
   if (left.frame === 'array' || right.frame === 'array') {
     return left.frame === 'array' && right.frame === 'array' && left.element === right.element
   }

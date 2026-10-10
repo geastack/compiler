@@ -13,7 +13,7 @@ import { booleanConstantsOf, stringConstantsOf } from './dead-values.js'
  * attribute bit, the process-wide restriction counter and, when that counter
  * is nonzero, a registry lookup in a call the C++ compiler has to assume can
  * write anything. In a loop that is the difference between a field living in
- * a register and a field living in memory: `method_calls` reloaded
+ * a register and a field living in memory: a method-call loop reloaded
  * `this.value` through the guard on every turn, 25.6 ms against 18.6 for the
  * same loop with the field in a register.
  *
@@ -29,7 +29,7 @@ import { booleanConstantsOf, stringConstantsOf } from './dead-values.js'
  *
  * The answer is per CARRIER, because the object a restriction reaches is the
  * one its call's first argument holds, and that argument's carrier says which
- * struct it can be. The mongodb driver freezes 41 things -- its option
+ * struct it can be. A large library may freeze dozens of things -- its option
  * constants, a handful of description objects, some string arrays -- and a
  * program-wide answer put the guard, an inline throw path and the counter
  * load on every field store of every one of its hundreds of structs. A class
@@ -169,8 +169,11 @@ const restrictingNamespaceEscapes = (bodies: readonly IrBody[]): boolean => {
           if (
             operation.kind === 'call' &&
             !operation.arguments.some((argument) => argument.value === operand.value) &&
-            ((operation.callee.value === operand.value && operation.receiver?.value !== operand.value) ||
-              (operation.receiver?.value === operand.value && memberReadsOf.get(operation.callee.value) === operand.value))
+            ((operation.callee.value === operand.value &&
+              operation.receiver?.value !== operand.value &&
+              operation.thisArgument?.value !== operand.value) ||
+              ((operation.receiver?.value === operand.value || operation.thisArgument?.value === operand.value) &&
+                memberReadsOf.get(operation.callee.value) === operand.value))
           )
             continue
           // A test of the value (`typeof`, `=== null`, `'x' in Object`) reads it and keeps nothing.
@@ -405,8 +408,8 @@ const fieldDeletionKeysOf = (bodies: readonly IrBody[]): ReadonlySet<string> | n
  * it; an attribute triple only the integrity operations above ever change. So
  * when neither can happen, both are program-wide constants for every struct,
  * and `records.ts` states them once per struct (`static inline` members)
- * instead of once per instance -- on `bench/comparison/fixtures/binary_trees.ts`
- * that is three presence bytes and three attribute bytes off every one of a
+ * instead of once per instance -- on a recursive binary-tree build that is
+ * three presence bytes and three attribute bytes off every one of a
  * million nodes whose whole cost is cache misses.
  *
  * Fail-closed the same way `integrityRestrictionsOf` is: a `delete` whose

@@ -7,7 +7,7 @@
 //! expect: merged:{"a":1,"b":2}
 //! emitted-has: gea::bindCallable
 
-// mongodb's mongo_logger.ts / cmap/connection.ts, reached through
+// A database client's logger and connection, reached through
 // node-compat's `events.ts`: `EventIterator` reads an emitter as
 // `emitter as unknown as PausableEmitterMethods` to probe for `pause` and
 // `resume`, and stores arrows as its `this: EventEmitter` listeners. The

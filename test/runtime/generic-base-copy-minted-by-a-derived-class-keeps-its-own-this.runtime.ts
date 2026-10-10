@@ -1,5 +1,5 @@
 // `this` inside a generic class, in the copy a non-generic DERIVED class's
-// `extends` clause mints: the MongoDB driver's
+// `extends` clause mints: a database client's
 // `ListSearchIndexesCursor extends AggregationCursor<{ name: string }>`, where
 // `AggregationCursor`'s constructor does `this.pipeline = pipeline` and its
 // `match()` returns `this.addStage(...)`. TypeScript's instantiated spelling of

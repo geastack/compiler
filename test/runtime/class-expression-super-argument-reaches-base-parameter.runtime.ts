@@ -1,4 +1,4 @@
-// `@hono/node-server`'s websocket.ts declares its own `CloseEvent` and
+// An HTTP server adapter's websocket module declares its own `CloseEvent` and
 // `ErrorEvent` as class EXPRESSIONS behind a feature test, each forwarding its
 // own init dictionary to the base constructor:
 //

@@ -13,7 +13,7 @@
 // widen out of it.
 //
 // Reduced from node-compat's `ReadableStream<R>` (`private queue_: R[]`) held
-// at `R = unknown` and `R = Uint8Array`, which is what the whole hono build
+// at `R = unknown` and `R = Uint8Array`, which is what a whole HTTP-framework build
 // stopped emitting on.
 class Queue<R> {
   private items: R[] = []

@@ -41,7 +41,7 @@ export const mergeMaterialization = (
   // an absence state, materialize that state solely to give C++ a typed
   // incoming expression for the unreachable edge. Otherwise the edge gets an
   // unreachable value of the merge's own carrier: `k === 0 ? a : k === 1 ? b
-  // : Debug.fail()` is tsc's standing idiom (17 rows on the self-compile),
+  // : fail()` is a standing idiom for an exhaustive chain,
   // and its last arm never delivers anything to convert. Both are
   // branch-local: neither installs a general `void -> object` conversion.
   if (shape?.kind === 'primitive' && shape.primitive === 'never') return carriesMergeAbsence(target) ? 'absence' : 'unreachable'

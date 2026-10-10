@@ -228,10 +228,10 @@ export const createStructuralTypeTable = (): StructuralTypeTable => {
     // "field X is stored as ... and this read publishes ..." refusal with two
     // sides that print the same thing.
     //
-    // Measured on hono: the `H` handler union's own call signature was
-    // anchored as `type|955` and re-interned as `type|1307`, which split the
-    // router's `Result` tuple, its `add`/`match` member conventions and the
-    // `#matchResult` cell into twins in five separate refusals.
+    // Measured on one program: a handler union's own call signature was
+    // anchored as `type|955` and re-interned as `type|1307`, which split a
+    // `Result` tuple, `add`/`match` member conventions and a cached-result
+    // cell into twins in five separate refusals.
     //
     // Nominal identity is not at risk: `declared`, `class-instance`,
     // `class-constructor` and `object-anchor` all carry their declaration in
@@ -280,7 +280,7 @@ export const createStructuralTypeTable = (): StructuralTypeTable => {
    * rest is not conservative, it MINTS DUPLICATES: an anchor whose key is
    * released and whose declaration is walked again by a later specialization
    * view gets a second id for one type, and every consumer keyed on the id
-   * then sees two carriers where the language has one. Measured on hono:
+   * then sees two carriers where the language has one. Measured on one program:
    * `Headers` held three ids and `Request` two, which is where
    * `binding-read-conversion:function-value-dispatch(...)->...(identical...)`
    * came from -- a conversion between a carrier and itself, unsatisfiable

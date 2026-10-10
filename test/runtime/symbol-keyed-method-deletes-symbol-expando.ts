@@ -1,4 +1,4 @@
-// @hono/node-server's `Response`: the method that deletes and re-installs the
+// A Node HTTP adapter's `Response`: the method that deletes and re-installs the
 // instance's symbol-keyed expandos is ITSELF symbol-keyed, and every caller
 // reaches it as `this[getCache]()`. The callable flow that decides which
 // bodies the reflection census walks must count that computed-key invocation

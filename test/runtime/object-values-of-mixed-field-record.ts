@@ -1,5 +1,5 @@
 // ECMA-262 20.1.2.23: `Object.values` of a record whose fields carry different
-// types. mongodb validates `CANONICALIZE_HOST_NAME` with
+// types. A database client validates `CANONICALIZE_HOST_NAME` with
 // `Object.values(GSSAPICanonicalizationValue).includes(value)`, where the frozen
 // table maps names to `true | false | 'none' | ...`; each field widens into the
 // `(boolean | string)[]` element in declaration order.

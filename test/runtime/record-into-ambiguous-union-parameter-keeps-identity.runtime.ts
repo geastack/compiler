@@ -1,5 +1,5 @@
 // A record handed to a private method whose parameter is a union of two
-// option records that it fits equally well: mongodb's `Server.command` passes
+// option records that it fits equally well: a database client's `Server.command` passes
 // its `ServerCommandOptions` to `decorateCommandError(..., options:
 // CommandOptions | GetMoreOptions | undefined, ...)`. Neither arm declares
 // every key the other does, so no arm is the record's home; viewing it into

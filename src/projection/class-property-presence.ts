@@ -49,7 +49,7 @@ export const classPrototypeMemberIsPresent = (
  * asks the receiver's virtual `gea_ownFieldPresent` before the sidecar, and a
  * generated class answers that from the field's own presence bit for every
  * key it declares, symbols included (`symbol-keyed-this-slots.ts` lays out
- * hono's `cacheKey` cache that way) -- so the one call still sees both halves.
+ * a symbol-keyed cache field that way) -- so the one call still sees both halves.
  * What it cannot see is a symbol-keyed method or accessor, which lives on the
  * prototype; those, and a plain record's symbol field, still refuse.
  */

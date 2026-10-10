@@ -141,6 +141,17 @@ int main(int argc, char** argv) {
   using UnsupportedRestCallable =
     gea::CallableObject<void(gea::Ref<gea::ArrayObject<UnsupportedDynamicCarrier>>)>;
   static_assert(!gea::detail::DynamicRestCallSignature<UnsupportedRestCallable, 0>::supported);
+  static_assert(gea::detail::DynamicRestCallSignature<UnsupportedRestCallable, 0>::callWithNativeReceiver == nullptr);
+  using UnsupportedFixedCallable = gea::CallableObject<void(UnsupportedDynamicCarrier)>;
+  static_assert(!gea::detail::DynamicCallSignature<UnsupportedFixedCallable>::supported);
+  static_assert(gea::detail::DynamicCallSignature<UnsupportedFixedCallable>::callWithNativeReceiver == nullptr);
+  using UnsupportedFixedConstructor = gea::CallableConstructorObject<void(UnsupportedDynamicCarrier), double()>;
+  static_assert(!gea::detail::DynamicCallSignature<UnsupportedFixedConstructor>::supported);
+  static_assert(gea::detail::DynamicCallSignature<UnsupportedFixedConstructor>::callWithNativeReceiver == nullptr);
+  using UnsupportedRestConstructor =
+    gea::CallableConstructorObject<void(gea::Ref<gea::ArrayObject<UnsupportedDynamicCarrier>>), double()>;
+  static_assert(!gea::detail::DynamicRestCallSignature<UnsupportedRestConstructor, 0, true>::supported);
+  static_assert(gea::detail::DynamicRestCallSignature<UnsupportedRestConstructor, 0, true>::callWithNativeReceiver == nullptr);
   Value value = number(-0.0);
   assert(value.payloadType() == gea::detail::payloadTypeTagFor<double>());
   assert(std::signbit(value.as<double>()));
@@ -278,7 +289,14 @@ int main(int argc, char** argv) {
     return receiver->label + "/" + std::to_string(static_cast<int>(sum));
   }, nullptr);
   Value boxedSourceMethodRest = Value::boxMethod<1>(sourceMethodRest);
+  const auto methodReceiver = gea::makeRef<Receiver>(Receiver{"ctx"});
+  if (argc > 1 && std::string(argv[1]) == "method-rest-without-factory") {
+    auto unsupported = gea::detail::DynamicCarrier<TargetMethodRest>::template inWithReceiverAndRest<2>(boxedSourceMethodRest, 0);
+    (void)unsupported(methodReceiver, 4, gea::arrayOf<double>({5}));
+    return 93;
+  }
   TargetMethodRest adaptedMethodRest =
-    gea::detail::DynamicCarrier<TargetMethodRest>::template inWithReceiverAndRest<2>(boxedSourceMethodRest, 0);
-  assert(adaptedMethodRest(gea::makeRef<Receiver>(Receiver{"ctx"}), 4, gea::arrayOf<double>({5})) == "ctx/9");
+    gea::detail::DynamicCarrier<TargetMethodRest>::template inWithReceiverAndRest<2>(boxedSourceMethodRest, 0,
+      +[](const ReceiverRef& receiver) { return gea::NativeCallReceiver::object(receiver); });
+  assert(adaptedMethodRest(methodReceiver, 4, gea::arrayOf<double>({5})) == "ctx/9");
 }

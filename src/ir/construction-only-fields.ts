@@ -15,7 +15,7 @@ import type { ReflectionDemand, ReflectionFieldOperation } from './reflection-de
  * whole life, so a method's `const socket = this.socket` names the same value
  * at every use and needs no copy of its own. The copy was a retain/release
  * pair per read, and reads of `this`'s own fields into temporaries were a
- * twentieth of every retain the mongodb driver made.
+ * twentieth of every retain one large program made.
  *
  * A write is a construction write when a class's constructor or one of its
  * field initializers (`ClassConstruction`) stores the key on its own

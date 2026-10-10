@@ -7,7 +7,13 @@ import {
   type ValueFlowIndex
 } from './model.js'
 import { outermostErasureOf, unwrapErasedExpression } from '../producers/erasure.js'
-import { isTypePositionReference, namespaceMemberDeclarationOf, resolveFlowSymbolAlias, unwrapNaming } from './targets.js'
+import {
+  isModuleExportedDeclaration,
+  isTypePositionReference,
+  namespaceMemberDeclarationOf,
+  resolveFlowSymbolAlias,
+  unwrapNaming
+} from './targets.js'
 import { sourceClassHasDefaultInstanceOfShape } from './source-class-instanceof.js'
 import { sourceClassStaticDataUseOf } from './source-class-static-data.js'
 import { sourcePrototypeMethodIdentityUseOf } from './source-prototype-method-identity.js'
@@ -27,6 +33,7 @@ import { exportIsUnimported } from './targets.js'
 import { inProgramImportReferencesOf } from './export-importers.js'
 import { classConstructorSlotIsOriginal } from './source-class-data.js'
 import { sourceClassFamilyOf } from './owned-class-receivers.js'
+import { localBindingValuesOf } from './value-provenance.js'
 
 export interface ExactClassAllocationOrigins {
   readonly classes: ReadonlySet<SourceClass>
@@ -42,6 +49,28 @@ export interface SourceConstructionFact {
 const sourceBindingIsUnwritten = (flow: ValueFlowIndex, declaration: ts.Declaration): boolean =>
   !flow.writesToDeclaration(declaration).some((write) => write.slot === 'whole' && write.edge !== 'return' && write.edge !== 'yield')
 
+/** An immutable local constructor cell has the same indexed initializer in
+ * both the selection and consumer inventories. Its asserted type is irrelevant;
+ * an exported or incomplete cell cannot close the constructor's consumers. */
+const immutableConstructorAliasValueOf = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  declaration: ts.VariableDeclaration
+): ts.Expression | null => {
+  const list = declaration.parent
+  if (
+    !ts.isIdentifier(declaration.name) ||
+    !declaration.initializer ||
+    !ts.isVariableDeclarationList(list) ||
+    (list.flags & ts.NodeFlags.Const) === 0 ||
+    (ts.getCombinedModifierFlags(declaration) & (ts.ModifierFlags.Export | ts.ModifierFlags.Default)) !== 0 ||
+    isModuleExportedDeclaration(checker, declaration, checker.getSymbolAtLocation(declaration.name) ?? null)
+  )
+    return null
+  const values = localBindingValuesOf(flow, declaration)
+  return values?.length === 1 && values[0] === declaration.initializer ? declaration.initializer : null
+}
+
 export const namedDeclarationAt = (checker: ts.TypeChecker, expression: ts.Expression): ts.Declaration | null => {
   const named = unwrapNaming(expression)
   if (!ts.isIdentifier(named)) return namespaceMemberDeclarationOf(checker, named)
@@ -53,14 +82,14 @@ export const namedDeclarationAt = (checker: ts.TypeChecker, expression: ts.Expre
  * A conditional is not an alias escape when its complete result is constructed;
  * checker union shapes alone cannot establish these actual constructor values. */
 /**
- * `WebGLUniforms.seqWithValue( seq, values )`: the class name naming the
+ * `Uniforms.select( seq, values )`: the class name naming the
  * receiver of an IMMEDIATE call to one of its own static methods.
  *
  * `Class.staticMethod( ... )` neither constructs nor publishes the
  * constructor, but nothing recognised it, so a single static call anywhere in
  * the program refused the class's whole family -- and through
- * `ownedClassReceiverInventoryOf`, every `new` of it. Three's `WebGLUniforms`
- * publishes `upload` and `seqWithValue` that way and `WebGLRenderer` calls both.
+ * `ownedClassReceiverInventoryOf`, every `new` of it. A class that publishes
+ * helper functions as static methods, called from another module, is the case.
  *
  * Two guards, each load-bearing rather than decorative:
  *
@@ -229,38 +258,82 @@ export const thisConstructorFamilyOf = (
   return [...family.keys()]
 }
 
-const constructorSelections = new WeakMap<ValueFlowIndex, Map<ts.Expression, readonly SourceClass[] | null>>()
+interface ConstructorSelectionInventory {
+  readonly alternatives: readonly SourceClass[] | null
+  /** An unresolved source may promise this family without proving any
+   * allocation. These are refusal obligations, never admitted selections. */
+  readonly promised: readonly SourceClass[]
+}
+const constructorSelections = new WeakMap<ValueFlowIndex, Map<ts.Expression, ConstructorSelectionInventory>>()
+const constructorSelectionInventoryOf = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  expression: ts.Expression
+): ConstructorSelectionInventory => {
+  let known = constructorSelections.get(flow)
+  if (!known) constructorSelections.set(flow, (known = new Map()))
+  const previous = known.get(expression)
+  if (previous !== undefined) return previous
+  const answer = sourceConstructorSelectionsUncached(checker, flow, expression)
+  known.set(expression, answer)
+  return answer
+}
 export const sourceConstructorSelectionsOf = (
   checker: ts.TypeChecker,
   flow: ValueFlowIndex,
   expression: ts.Expression
 ): readonly SourceClass[] | null => {
-  let known = constructorSelections.get(flow)
-  if (!known) constructorSelections.set(flow, (known = new Map()))
-  if (known.has(expression)) return known.get(expression)!
-  const answer = sourceConstructorSelectionsUncached(checker, flow, expression)
-  known.set(expression, answer)
-  return answer
+  return constructorSelectionInventoryOf(checker, flow, expression).alternatives
 }
+
+/** Preserve unresolved construction promises across erased immutable cells.
+ * The same selection worklist owns these edges; a promise cannot authenticate
+ * an origin, but cannot be silently omitted from its family's inventory.
+ * @semanticCategory generic-primitive
+ */
+export const sourceConstructorPromisedClassesOf = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  expression: ts.Expression
+): readonly SourceClass[] => constructorSelectionInventoryOf(checker, flow, expression).promised
 
 const sourceConstructorSelectionsUncached = (
   checker: ts.TypeChecker,
   flow: ValueFlowIndex,
   expression: ts.Expression
-): readonly SourceClass[] | null => {
+): ConstructorSelectionInventory => {
   const classes = new Set<SourceClass>()
+  const promised = new Set<SourceClass>()
+  const notePromises = (expression: ts.Expression): void => {
+    const type = checker.getTypeAtLocation(expression)
+    for (const alternative of type.isUnion() ? type.types : [type]) {
+      for (const signature of alternative.getConstructSignatures()) {
+        const result = signature.getReturnType()
+        for (const returned of result.isUnion() ? result.types : [result]) {
+          if (!returned.isClassOrInterface()) continue
+          const owner = returned.getSymbol()?.valueDeclaration
+          if (owner && (ts.isClassDeclaration(owner) || ts.isClassExpression(owner) || isConstructorFunction(owner))) promised.add(owner)
+        }
+      }
+    }
+  }
   // Parameters are a WORKLIST, not a recursive descent with a visited guard.
   // Mutually forwarding callables (`f` hands the constructor to `g`, `g` hands
   // it back) would otherwise need an "already visiting" answer, and §2 forbids
   // one: `true` invents a selection nobody proved, `false` refuses a program
   // whose every cell IS named. A cell already scheduled is a cell already
   // answered, so a cycle converges.
-  const cells: ts.ParameterDeclaration[] = []
-  const scheduled = new Set<ts.ParameterDeclaration>()
+  const cells: (ts.ParameterDeclaration | ts.VariableDeclaration)[] = []
+  const scheduled = new Set<ts.ParameterDeclaration | ts.VariableDeclaration>()
   const visit = (expression: ts.Expression): boolean => {
+    notePromises(expression)
     const value = unwrapErasedExpression(expression)
-    if (ts.isConditionalExpression(value)) return visit(value.whenTrue) && visit(value.whenFalse)
-    // `new this.constructor( ... )` -- three's universal `clone()`. In an
+    if (ts.isConditionalExpression(value)) {
+      const left = visit(value.whenTrue)
+      const right = visit(value.whenFalse)
+      return left && right
+    }
+    // `new this.constructor( ... )` -- the `clone()` idiom. In an
     // instance member of a class-spelled source class `C`, `this.constructor`
     // is the constructor of whatever object the member runs on, one of `C`'s
     // owned family while no write replaces a `constructor` slot on it. Every
@@ -275,7 +348,11 @@ const sourceConstructorSelectionsUncached = (
       return true
     }
     const declaration = namedDeclarationAt(checker, value)
-    if (declaration && ts.isParameter(declaration)) {
+    if (declaration && (ts.isParameter(declaration) || ts.isVariableDeclaration(declaration))) {
+      if (ts.isVariableDeclaration(declaration) && immutableConstructorAliasValueOf(checker, flow, declaration) === null) {
+        if (declaration.initializer) notePromises(declaration.initializer)
+        return false
+      }
       if (!scheduled.has(declaration)) {
         scheduled.add(declaration)
         cells.push(declaration)
@@ -292,12 +369,15 @@ const sourceConstructorSelectionsUncached = (
     classes.add(declaration)
     return true
   }
-  if (!visit(expression)) return null
+  let closed = visit(expression)
   for (let index = 0; index < cells.length; index++) {
-    const values = parameterBoundValuesOf(checker, flow, cells[index]!)
-    if (values === null || !values.every(visit)) return null
+    const cell = cells[index]!
+    const alias = ts.isVariableDeclaration(cell) ? immutableConstructorAliasValueOf(checker, flow, cell) : null
+    const values = ts.isParameter(cell) ? parameterBoundValuesOf(checker, flow, cell) : alias === null ? null : [alias]
+    if (values === null) closed = false
+    else for (const value of values) if (!visit(value)) closed = false
   }
-  return classes.size > 0 ? [...classes] : null
+  return { alternatives: closed && classes.size > 0 ? [...classes] : null, promised: [...promised] }
 }
 
 /** Possible explicit completions of source construction, including inherited
@@ -442,6 +522,15 @@ const classConstructorKeepsInstanceUncached = (checker: ts.TypeChecker, flow: Va
   const referenceUsesAreClosed = (declaration: ts.Node, declaredName: ts.Node | undefined, type: ts.InterfaceType): boolean => {
     const pending: { readonly declaration: ts.Node; readonly declaredName: ts.Node | undefined }[] = [{ declaration, declaredName }]
     const scheduled = new Set<ts.Node>([declaration])
+    const scheduleAliasOf = (value: ts.Expression): boolean => {
+      const alias = value.parent
+      if (!ts.isVariableDeclaration(alias) || immutableConstructorAliasValueOf(checker, flow, alias) !== value) return false
+      if (!scheduled.has(alias)) {
+        scheduled.add(alias)
+        pending.push({ declaration: alias, declaredName: alias.name })
+      }
+      return true
+    }
     for (let index = 0; index < pending.length; index++) {
       const cell = pending[index]!
       for (const reference of flow.referencesToDeclaration(cell.declaration)) {
@@ -466,6 +555,7 @@ const classConstructorKeepsInstanceUncached = (checker: ts.TypeChecker, flow: Va
             }
             break
           }
+          if (scheduleAliasOf(selection)) continue
           const construction = selection.parent
           const choices = sourceConstructorSelectionsOf(checker, flow, selection)
           if (
@@ -483,7 +573,13 @@ const classConstructorKeepsInstanceUncached = (checker: ts.TypeChecker, flow: Va
         }
         if (ts.isNewExpression(parent) && parent.expression === use) continue
         if (ts.isExpressionWithTypeArguments(parent) && parent.expression === use) continue
-        if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent) || ts.isExportSpecifier(parent))
+        if (scheduleAliasOf(use)) continue
+        if (
+          ts.isImportSpecifier(parent) ||
+          ts.isImportClause(parent) ||
+          ts.isNamespaceImport(parent) ||
+          (ts.isExportSpecifier(parent) && !ts.isVariableDeclaration(cell.declaration))
+        )
           continue
         if (sourceClassStaticDataUseOf(checker, flow, use)) continue
         if (sourcePrototypeMethodIdentityUseOf(checker, flow, use, type)) continue
@@ -630,9 +726,9 @@ export interface ClassAllocationAuthority {
    * The caches below are keyed on the authority OBJECT, and every proof mints
    * a fresh one, so they answer a proof's own repeats and nothing else. That
    * is the difference between a walk that runs once per question and one that
-   * runs once per (proof, question): a live three.js profile counted 11,363,007
-   * seeded-origin solvers built from zero, and charged the resulting Tarjan
-   * walk 35% of self time, with this walk the largest named caller.
+   * runs once per (proof, question): a profile of a large program counted
+   * millions of seeded-origin solvers built from zero, and charged the
+   * resulting Tarjan walk a third of self time, with this walk the largest named caller.
    *
    * Optional because the answer only depends on the asking proof through its
    * parks and its key functions, which is a property of the authorities this
@@ -875,9 +971,9 @@ const exactClassAllocationOriginsUncached = (
  * declares, or null when the declaration is not that shape or does not sit
  * inside a source constructor function.
  *
- * Three's pre-class renderer factories declare every member this way:
- * `function WebGLTextures( _gl, ... ) { function setTexture2D( texture, slot
- * ) { ... } this.setTexture2D = setTexture2D }`. TypeScript files such an
+ * Pre-ES6 constructor functions often declare every member this way:
+ * `function Textures( context, ... ) { function bind( texture, slot ) { ... }
+ * this.bind = bind }`. TypeScript files such an
  * assignment's `this.<key>` as the property's OWN declaration -- there is no
  * `MethodDeclaration` to find -- so the former class-only forwarding resolver refused
  * every call through the whole factory family before this recognized the

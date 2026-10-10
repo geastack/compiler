@@ -1,10 +1,10 @@
-// bson's on-demand parser (`parser/on_demand/parse_to_elements.ts`) pushes a
-// closed, HOMOGENEOUS 5-tuple -- `type BSONElement = [type: number, nameOffset:
-// number, nameLength: number, offset: number, length: number]` -- into a plain
-// local `BSONElement[]` for every field of every document, and mongodb's
-// `OnDemandDocument` (`wire_protocol/on_demand/document.ts`) stores that array
-// in a `ReadonlyArray<BSONElement>` field, reads positions back out through a
-// `const` lookup object exactly the way `BSONElementOffset.nameLength` does,
+// A binary-document library's on-demand parser pushes a closed, HOMOGENEOUS
+// 5-tuple -- `type WireElement = [type: number, nameOffset: number, nameLength:
+// number, offset: number, length: number]` -- into a plain local
+// `WireElement[]` for every field of every document, and a database client's
+// on-demand document class stores that array in a
+// `ReadonlyArray<WireElement>` field, reads positions back out through a
+// `const` lookup object exactly the way `WireElementOffset.nameLength` does,
 // and has private methods parameterized on a single element
 // (`isElementName(name, element)`). Every element carries the SAME scalar
 // domain, so before this program a closed tuple like this widened to
@@ -20,7 +20,7 @@
 // `elements.push(x)` calling a non-generic class's own method has no type
 // argument for the census to read the container's element type off of, so
 // gets judged like any other call whose target escapes static proof. The real
-// bson/mongodb code never goes through such a wrapper: it pushes directly onto
+// library code never goes through such a wrapper: it pushes directly onto
 // a plain array and stores that same array (or reads its elements by index)
 // directly, which is exactly what this program does instead.
 type Elem = [type: number, nameOffset: number, nameLength: number, offset: number, length: number]
@@ -61,10 +61,10 @@ console.log('matches1-wrong=' + doc.matches(1, 'xy'))
 const [type, nameOffset, nameLength, offset, byteLength] = elements[2]!
 console.log(`destructured=${type},${nameOffset},${nameLength},${offset},${byteLength}`)
 
-// The realistic bson-like usage: iterate the ARRAY OF tuples, consuming each
-// element as a whole unit exactly the way `OnDemandDocument`'s own lookups do
+// The realistic parser-like usage: iterate the ARRAY OF tuples, consuming each
+// element as a whole unit exactly the way the on-demand document's own lookups do
 // -- never iterate INTO a single tuple's own scalar positions, which is not a
-// pattern bson's BSONElement ever needs (its positions are named offsets, not
+// pattern the parser's WireElement ever needs (its positions are named offsets, not
 // a sequence meant to be walked) and which is a different, unrelated
 // question from this program's own proof (iterating a value at all crosses
 // this compiler's iteration protocol, which is judged the same for every

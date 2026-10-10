@@ -1,5 +1,6 @@
 // A static method called through a union of class constructors read out of an
-// `as const` table -- bson's EJSON `deserializeValue`:
+// `as const` table -- a binary-document serializer's extended-JSON
+// `deserializeValue`:
 // `const c = keysToCodecs[key]; if (c) return c.fromExtendedJSON(value, options)`.
 // Each class declares its own `fromExtendedJSON`, with its own parameters (one
 // takes the options, one does not); the call runs the selected class's body
@@ -17,7 +18,7 @@ class Int32 {
   }
 }
 class MinKey {
-  get _bsontype(): 'MinKey' {
+  get _wiretype(): 'MinKey' {
     return 'MinKey'
   }
   static fromExtendedJSON(): MinKey {

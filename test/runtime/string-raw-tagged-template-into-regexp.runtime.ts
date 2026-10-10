@@ -1,6 +1,6 @@
 // `String.raw` AS THE TAG OF A TEMPLATE THAT BUILDS A REGEXP SOURCE.
 //
-// mongodb's `connection_string.ts` checks an auth mechanism against a
+// A database client's connection-string parser checks an auth mechanism against a
 // `new RegExp(String.raw\`\b${mechanism}\b\`, 'i')`. `String.raw` joins the
 // template's RAW segments (so `\b` stays a backslash and a `b`, not a
 // backspace) with each substitution's ToString, per ECMA-262 22.1.2.4.

@@ -58,8 +58,8 @@ export const guardedReceiverTypeOf = (context: ProducerContext, receiver: ts.Exp
  * publishes the merge's result under this type, and `boundary.ts`'s
  * `resolveExpressionOperand` types every CITATION of that result with it. They
  * had disagreed: the citation re-asked the checker at the whole expression, so
- * mongodb's `for (const d of descriptions ?? [])` over `descriptions?:
- * Iterable<ServerDescription>` saw the subtype-reduced `Iterable<...>` while
+ * `for (const d of descriptions ?? [])` over `descriptions?:
+ * Iterable<Description>` saw the subtype-reduced `Iterable<...>` while
  * the merge it cited published the census's array. The `for`-`of` then minted
  * a dynamic `[Symbol.iterator]` lookup over a value carried as an
  * `array-object`, which nothing lowers
@@ -89,15 +89,15 @@ export const logicalMergeTypeOf = (
     // it there.
     //
     // The checker's answer also fails to stand where it ABSORBED an arm that
-    // is not a member of it: `sd || { maxWireVersion }` (mongodb's
-    // `Topology.lastHello`) is typed `ServerDescription` outright, because
+    // is not a member of it: `sd || { version }` (a fallback
+    // literal for an optional class instance) is typed `Description` outright, because
     // the literal is contextually typed by the left operand and then reduced
-    // away -- yet the literal is no `ServerDescription` (it has none of the
+    // away -- yet the literal is no `Description` (it has none of the
     // class's required members or methods), and it is what the merge holds
     // whenever `sd` is absent.
     const checkerRight = context.checker.getTypeAtLocation(node.right)
     const checkerWhole = context.checker.getTypeAtLocation(node)
-    // A class constructor is a nominal choice: `responseType ?? WireResponse`
+    // A class constructor is a nominal choice: `responseType ?? DefaultResponse`
     // is typed by the checker as the structural constructor type the class
     // satisfies, which holds the right operand's values but not its class
     // identity, so the merge's family would lose the classes it selects among.
@@ -108,11 +108,11 @@ export const logicalMergeTypeOf = (
     const absorbsRight = absorbsClass || !context.checker.isTypeAssignableTo(checkerRight, checkerWhole)
     if (rightType === context.types.typeOf(checkerRight) && !absorbsRight) return null
     // The LEFT half is read from the left operand's own cited type when a
-    // census re-typed it too. mongodb's `parseOptions` fills `const
-    // mongoOptions = Object.create(null)`, which the checker types `any` at
+    // census re-typed it too. An options parser that fills `const
+    // parsed = Object.create(null)`, which the checker types `any` at
     // every read while the bag census proves `proxyPort?: number` and
     // `proxyUsername?: string`: the checker's left half made
-    // `mongoOptions.proxyPort || mongoOptions.proxyUsername` a `dynamic |
+    // `parsed.proxyPort || parsed.proxyUsername` a `dynamic |
     // string` merge that the number the left operand really carries had no
     // conversion into. Only nullish members are dropped -- the falsy literals
     // `||` also discards stay, a wider but sound arm.
@@ -127,15 +127,15 @@ export const logicalMergeTypeOf = (
   // coming from a second checker query at the whole expression -- which is
   // exactly the query that cannot see what the operand censuses proved.
   //
-  // Measured on the three.js app: `WebGLPrograms.js`'s `fogExp2: ( !! fog &&
-  // fog.isFogExp2 )`. `fog` is `?(Fog|FogExp2)` and `isFogExp2` is declared on
+  // The shape: a JavaScript record field `denseFog: ( !! fog &&
+  // fog.isDenseFog )`. `fog` is `?(Fog|DenseFog)` and `isDenseFog` is declared on
   // only ONE arm, so the checker types the property read `any` (a missing
   // member on a union is an error type, silent in JS) and therefore types the
   // whole `&&` `any`. The member census does NOT agree: it publishes the read
   // as `optional`, having proved the absent arm. The operation's own right
   // operand thus cites `optional` while its result cited `dynamic` -- one
   // expression, two authorities -- and the `dynamic` propagated into the
-  // 130-field `parameters` record that every program build copies.
+  // large record literal holding that field.
   //
   // The kept half of the left operand is the FALSY arms, not
   // `getNonNullableType`: `&&` discards the truthy ones. Where there are none

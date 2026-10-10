@@ -1,24 +1,24 @@
 // A function destructured out of a module namespace TYPE and called bare --
-// mongodb's `const { initializeClient } = krb; await initializeClient(spn,
-// initOptions)` in cmap/auth/gssapi.ts, where `krb` is `typeof
-// import('kerberos') | { kModuleError }` narrowed by `'kModuleError' in krb`.
-// `kerberos` is types-only in the native build, so the module arm is never
+// a database client's `const { initializeClient } = plugin; await initializeClient(spn,
+// initOptions)` in its authentication mechanism, where `plugin` is `typeof
+// import('auth-plugin') | { kModuleError }` narrowed by `'kModuleError' in plugin`.
+// `auth-plugin` is types-only in the native build, so the module arm is never
 // the live one; the call must still compile, and a module's exported function
-// has no receiver, so the bare call supplies none. (mongodb's own `krb` also
+// has no receiver, so the bare call supplies none. (The client's own `plugin` also
 // carries the `makeErrorModule` Proxy arm, whose `in`/destructuring loads are
 // a separate open row.)
 //! expect: missing
-type Kerberos = typeof import('./_destructured-ambient-module') | { kModuleError: Error }
+type AuthPlugin = typeof import('./_destructured-ambient-module') | { kModuleError: Error }
 
-let krb: Kerberos | undefined
+let plugin: AuthPlugin | undefined
 
-function loadKrb(): Kerberos {
-  if (!krb) krb = { kModuleError: new Error('missing') }
-  return krb
+function loadAuthPlugin(): AuthPlugin {
+  if (!plugin) plugin = { kModuleError: new Error('missing') }
+  return plugin
 }
 
 async function makeClient(): Promise<string> {
-  const loaded = loadKrb()
+  const loaded = loadAuthPlugin()
   if ('kModuleError' in loaded) {
     throw loaded['kModuleError']
   }

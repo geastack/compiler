@@ -65,16 +65,15 @@ import { geaAfterRenderMemberName, geaMountedElementMemberName, geaRenderBridgeM
  * bridge is a textual pass with no type in hand; here the field is a real
  * member of the component's struct -- `component-classes.ts` publishes the
  * `define-field` event `Component`'s ambient body never did -- and the node
- * goes in as the host handle it already is. That matters beyond tidiness: six
- * corpus apps (`bubble-grid`, `canvas-3d-cube`, `e-reader`, `image-demo`,
- * `maps`, `ttf-bench`) do all of their work from `onAfterRender()`, and every
- * one of them guards on `this.el` before doing any of it.
+ * goes in as the host handle it already is. That matters beyond tidiness: a
+ * component that does all of its work from `onAfterRender()` commonly guards
+ * on `this.el` before doing any of it.
  *
  * `onAfterRender` is then called, because otherwise nothing calls it: the hook
  * is a method no other code reaches, so the emitter -- correctly -- emits
  * nothing for it, and the app compiles clean, links clean, and draws nothing.
- * `bubble-grid` did exactly that. The framework's own JS component runtime ends
- * its `render` with the same two steps, and v1 gets them by keeping that
+ * The framework's own JS component runtime ends its `render` with the same two
+ * steps, and v1 gets them by keeping that
  * runtime whole for any component declaring a lifecycle member
  * (`geatsc-plugin-gea/src/index.ts`'s `componentHasRuntimeLifecycle`); this
  * bridge performs them directly instead, which is the same behaviour without

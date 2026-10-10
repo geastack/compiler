@@ -1,5 +1,6 @@
 // A typed array intersected with structural additions is still the same byte
-// view. BSON uses this shape for its local Node buffer type.
+// view. A binary-document serializer uses this shape for its local Node
+// buffer type.
 type ExtendedBytes = ArrayBufferView<ArrayBufferLike> &
   Uint8Array<ArrayBufferLike> & {
     write(value: string): number

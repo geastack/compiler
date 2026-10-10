@@ -598,6 +598,57 @@ test('holdersOf finds every state that publishes the same fact', () => {
   assert.deepEqual([...result.facts].sort(), ['candidate-a', 'candidate-b'])
 })
 
+test('holdersOf answers over seeded candidates only, including facts published before seeding', () => {
+  const { solve, seed } = dependencyFactSolver<string, string, string>((key) => {
+    if (key === 'subscriber')
+      return {
+        transfer: (read, _observe, holdersOf) => {
+          read('bystander')
+          return new Set(holdersOf('shared-fact'))
+        },
+        seal: () => ({ locallyComplete: true })
+      }
+    if (key === 'bystander' || key === 'candidate')
+      return { transfer: () => new Set(['shared-fact']), seal: () => ({ locallyComplete: true }) }
+    throw new Error(`unexpected node: ${key}`)
+  }, 'all-dependencies')
+
+  const before = solve('subscriber')
+  if (before.status !== 'complete') throw new Error('expected a complete subscriber')
+  assert.deepEqual([...before.facts], [], 'a state that merely holds the value is not a candidate')
+
+  solve('candidate')
+  seed('candidate')
+  const after = solve('subscriber')
+  if (after.status !== 'complete') throw new Error('expected a complete subscriber')
+  assert.deepEqual([...after.facts], ['candidate'], 'seeding a state that already published wakes the subscriber')
+})
+
+test('a later seal change evicts every cached answer that reaches it, and only those', () => {
+  const { solve, seed } = dependencyFactSolver<string, string, string>((key) => {
+    if (key === 'outer') return { transfer: (read) => new Set(read('inner')), seal: () => ({ locallyComplete: true }) }
+    if (key === 'inner')
+      return {
+        transfer: () => new Set(['inner-fact']),
+        seal: (_read, _observe, holdersOf) => {
+          const opaque = [...holdersOf('poison')].length > 0
+          return opaque ? { locallyComplete: false, causes: ['poisoned'] } : { locallyComplete: true }
+        }
+      }
+    if (key === 'unrelated' || key === 'poisoner')
+      return { transfer: () => new Set(key === 'poisoner' ? ['poison'] : ['ok']), seal: () => ({ locallyComplete: true }) }
+    throw new Error(`unexpected node: ${key}`)
+  }, 'all-dependencies')
+
+  assert.equal(solve('outer').status, 'complete')
+  assert.equal(solve('unrelated').status, 'complete')
+  seed('poisoner')
+  assert.equal(solve('poisoner').status, 'complete')
+  assert.equal(solve('inner').status, 'refused', 'the re-sealed node itself is re-answered')
+  assert.equal(solve('outer').status, 'refused', 'a cached answer reaching it over a required edge is evicted')
+  assert.equal(solve('unrelated').status, 'complete')
+})
+
 test('holdersOf returns nothing for a fact nobody has ever published', () => {
   const { solve } = dependencyFactSolver<string, string, string>((key) => {
     if (key === 'subscriber')

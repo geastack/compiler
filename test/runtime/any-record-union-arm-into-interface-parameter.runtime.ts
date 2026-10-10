@@ -1,4 +1,4 @@
-// The MongoDB driver's log transform takes `LoggableEvent | Record<string,
+// A database client's log transform takes `LoggableEvent | Record<string,
 // any>` -- 26 event types -- and after `switch (logObject.name)` hands the
 // value to a helper typed by the one event the case names. The checker
 // narrows a union of ten or more object types through its discriminant key

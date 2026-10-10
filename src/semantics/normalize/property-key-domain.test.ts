@@ -7,7 +7,7 @@ import { indexValueFlow } from './flow/value-flow.js'
 import { wholeProgram } from './reachability.js'
 
 // Each declaration's initializer is the key expression under test; the
-// parameters are typed so the domain reader sees `number` where three does.
+// parameters are typed so the domain reader sees `number` where a JS checker would.
 const source = `
 export function keys(index: number, indexArray: number, name: string, digits: number) {
   const underscore = index + '_' + indexArray
@@ -49,7 +49,7 @@ const domainsOf = () => {
 
 test('a concatenation with an interior piece no canonical numeric string contains cannot name a numeric key', () => {
   const mayNameNumeric = domainsOf()
-  // three's `WebGLUniformsGroups` cache key: two numbers around an underscore.
+  // A cache key of two numbers around an underscore.
   assert.equal(mayNameNumeric('underscore'), false)
   assert.equal(mayNameNumeric('template'), false)
   assert.equal(mayNameNumeric('named'), false)

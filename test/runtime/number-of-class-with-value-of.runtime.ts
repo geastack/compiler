@@ -1,4 +1,4 @@
-// `Number(x)` over `number | Int32` -- bson's `Timestamp` constructor
+// `Number(x)` over `number | Int32` -- a binary-document library's `Timestamp` constructor
 // (`const t = Number(low.t)`). ToNumber of an object is ToPrimitive with hint
 // "number" (ECMA-262 7.1.1), so the class's own `valueOf` runs and its
 // primitive answer converts; a string answer goes through StringToNumber.

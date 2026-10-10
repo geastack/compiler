@@ -1,7 +1,7 @@
 // A class viewed as an interface whose field is itself a record the class
-// holds under a DIFFERENT declared interface: the MongoDB driver's
+// holds under a DIFFERENT declared interface: a database client's
 // `Collection.s` is a `CollectionPrivate` and `OperationParent` reads it as
-// `s: { namespace: MongoDBNamespace }`. No conversion turns one record into
+// `s: { namespace: Namespace }`. No conversion turns one record into
 // the other, but the field is a record the target field's shape views, so
 // the view builds it one level down.
 class Namespace {

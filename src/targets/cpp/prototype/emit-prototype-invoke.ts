@@ -1,9 +1,18 @@
+import { keyedCollectionPrototypeMethods } from '../../../representation/prototype-domains.js'
+export {
+  keyedCollectionPrototypeMethods,
+  promisePrototypeMethods,
+  numberPrototypeMethods,
+  dictionaryPrototypeMethods
+} from '../../../representation/prototype-domains.js'
+export type { KeyedCollectionFamilyTag } from '../../../representation/prototype-domains.js'
 import type { CallOperation, IrOperand, IrResult } from '../../../ir/model.js'
 import type { CallableAbi, Representation } from '../../../representation/model.js'
 import { dictionaryKeyDomainOf, representationKey } from '../../../representation/model.js'
 import { hasReferenceIdentity } from '../../../representation/collections.js'
 import { thrownValueCarrier } from '../../../ir/lower-exceptions.js'
 import { alignedValueText, callableObjectAbi, readOnlyMapViewText } from '../emit-narrowing.js'
+import { operationConversionText } from '../emit-certified-conversion.js'
 import { declaredFieldRepresentationOf } from '../../../projection/fields.js'
 import { cppConstantLiteral, cppStringLiteral, cppTypeOf, cppUndefinedValue } from '../types.js'
 import {
@@ -179,8 +188,8 @@ const settledResultName = 'gea_then_settled'
  * the CHECKER gave it, which TypeScript only requires `V` to be assignable to
  * -- and assignable is not the same as physically identical. A per-arm
  * dispatch of a union of promises is where the two come apart at their widest:
- * hono's `HonoRequest.#cachedBody` reads `bodyCache[anyCachedKey]`, whose
- * carrier is a `TaggedUnion` of five `Promise`s, and calls `.then(body => ...)`
+ * a class reading `cache[anyCachedKey]` off a record of five promise-typed
+ * fields gets back a value whose carrier is a `TaggedUnion` of five `Promise`s, and calls `.then(body => ...)`
  * on it with one handler declaring the UNION of the five payloads.
  * `prototype-method-reads.ts`'s mixed-union claim rightly renders that as five
  * arms, one per promise, and each arm then hands `then` a handler whose
@@ -205,7 +214,8 @@ const fulfilledHandlerText = (
   ctx: EmitContext,
   receiverCarrier: Extract<Representation, { kind: 'promise' }> | undefined,
   abi: CallableAbi | null,
-  handlerText: string
+  handlerText: string,
+  operation: CallOperation
 ): string => {
   if (receiverCarrier === undefined || abi === null) return handlerText
   const payload = receiverCarrier.value
@@ -213,7 +223,7 @@ const fulfilledHandlerText = (
   const slot = abi.parameters[0]
   if (slot === undefined || abi.parameters.length !== 1 || abi.receiver !== null || abi.restFrom !== null) return handlerText
   if (representationKey(slot.value) === representationKey(payload)) return handlerText
-  const converted = alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:then-handler-value', payload, slot.value, fulfilledValueName)
+  const converted = operationConversionText(ctx, operation, 'promise-reaction', payload, slot.value, fulfilledValueName)
   if (converted === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(payload)}->${representationKey(slot.value)}`,
@@ -274,7 +284,8 @@ const promiseThenText = (
   receiverText: string,
   args: readonly IrOperand[],
   result: IrResult | null,
-  receiverCarrier: Extract<Representation, { kind: 'promise' }> | undefined
+  receiverCarrier: Extract<Representation, { kind: 'promise' }> | undefined,
+  operation: CallOperation
 ): string => {
   const onFulfilled = args[0]
   if (args.length > 2 || !onFulfilled) {
@@ -294,17 +305,18 @@ const promiseThenText = (
     operand !== undefined && (operand.representation.kind === 'undefined' || operand.representation.kind === 'null')
   const onRejected = statedAbsent(args[1]) ? undefined : args[1]
   if (statedAbsent(onFulfilled)) {
-    if (onRejected !== undefined) return promiseReactionText(ctx, 'then', receiverText, undefined, onRejected, result, receiverCarrier)
+    if (onRejected !== undefined)
+      return promiseReactionText(ctx, 'then', receiverText, undefined, onRejected, result, receiverCarrier, operation)
     throw createCppEmitBlockedError(
       'host-invocation:Promise.prototype.then',
       '"Promise.prototype.then" with no callable handler at all is a pass-through this backend does not render (27.2.5.4)'
     )
   }
   if (onRejected !== undefined) {
-    return promiseReactionText(ctx, 'then', receiverText, onFulfilled, onRejected, result, receiverCarrier)
+    return promiseReactionText(ctx, 'then', receiverText, onFulfilled, onRejected, result, receiverCarrier, operation)
   }
   const abi = callableObjectAbi(onFulfilled.representation)
-  const text = `${receiverText}.then(${fulfilledHandlerText(ctx, receiverCarrier, abi, operandText(ctx, onFulfilled))})`
+  const text = `${receiverText}.then(${fulfilledHandlerText(ctx, receiverCarrier, abi, operandText(ctx, onFulfilled), operation)})`
   // `gea::Promise<V>::then` DEDUCES its result from the handler's own result --
   // 27.2.5.4.1 adopts a thenable, so `U` and `Promise<U>` both land on
   // `Promise<U>` -- while the emitter has ALREADY placed a cell for this call.
@@ -322,7 +334,7 @@ const promiseThenText = (
   const handlerResult = abi === null ? null : abi.result
   if (result === null || handlerResult === null || handlerResult.kind === 'tagged-union') return text
   const deduced: Representation = { kind: 'promise', value: handlerResult.kind === 'promise' ? handlerResult.value : handlerResult }
-  const aligned = alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:then', deduced, result.representation, text)
+  const aligned = operationConversionText(ctx, operation, 'promise-reaction', deduced, result.representation, text)
   if (aligned === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(deduced)}->${representationKey(result.representation)}`,
@@ -377,7 +389,8 @@ const promiseReactionText = (
   onFulfilled: IrOperand | undefined,
   onRejected: IrOperand,
   result: IrResult | null,
-  receiverCarrier: Extract<Representation, { kind: 'promise' }> | undefined
+  receiverCarrier: Extract<Representation, { kind: 'promise' }> | undefined,
+  operation: CallOperation
 ): string => {
   const label = family === 'catch' ? 'Promise.prototype.catch' : 'Promise.prototype.then'
   const clause = family === 'catch' ? '27.2.5.1' : '27.2.5.4'
@@ -390,8 +403,8 @@ const promiseReactionText = (
     )
   }
   // A result NOBODY reads is not a reason to drop the reaction. `p.catch(h)`
-  // and `p.then(f, g)` as STATEMENTS are how @hono/node-server spells every
-  // stream teardown, and the handlers still have to run; what is absent is only
+  // and `p.then(f, g)` as STATEMENTS are how stream-adapter code commonly
+  // spells every teardown, and the handlers still have to run; what is absent is only
   // a cell for the two arms to agree on. So the rendering publishes the one
   // carrier that needs no agreement -- a `Promise<void>` -- and every arm
   // settles it by running rather than by producing a value. The value the
@@ -428,12 +441,12 @@ const promiseReactionText = (
     abi: NonNullable<ReturnType<typeof callableObjectAbi>>,
     source: Representation,
     text: string,
-    site: string,
+    _site: string,
     note: string
   ): string => {
     const slot = abi.parameters[0]
     if (slot === undefined) return ''
-    const converted = alignedValueText(ctx, site, source, slot.value, text)
+    const converted = operationConversionText(ctx, operation, 'promise-reaction', source, slot.value, text)
     if (converted === null) {
       throw createCppEmitBlockedError(
         `conversion:${representationKey(source)}->${representationKey(slot.value)}`,
@@ -445,7 +458,7 @@ const promiseReactionText = (
     // bound to `undefined` (10.2.1.3 OrdinaryCallBindThis / FunctionDeclarationInstantiation
     // step 25), which `trailingParametersTakeUndefined` already proved each one holds.
     const rest = abi.parameters.slice(1).map((parameter) => {
-      const absent = alignedValueText(ctx, `${site}:absent`, { kind: 'undefined' }, parameter.value, cppUndefinedValue)
+      const absent = operationConversionText(ctx, operation, 'promise-reaction', { kind: 'undefined' }, parameter.value, cppUndefinedValue)
       if (absent === null) {
         throw createCppEmitBlockedError(
           `conversion:undefined->${representationKey(parameter.value)}`,
@@ -480,18 +493,12 @@ const promiseReactionText = (
       // A function that falls off its end produced `undefined` (ECMA-262
       // 10.2.1.4: an implicit return completion carries it), and the result
       // resolves WITH that. TypeScript writes exactly this as the `| void` arm
-      // of `Promise<T | void>` -- `p.catch((e) => { log(e) })` in
-      // @hono/node-server's listener -- so refusing here would refuse the
+      // of `Promise<T | void>` -- `p.catch((e) => { log(e) })` in an
+      // event listener -- so refusing here would refuse the
       // program's own declared type. What has to exist is a rendering of
       // absence in the result's payload; where the payload cannot hold one,
       // the handler genuinely cannot settle it and that is still a refusal.
-      const absent = alignedValueText(
-        ctx,
-        'prototype/emit-prototype-invoke.ts:void-handler',
-        { kind: 'undefined' },
-        carrier.value,
-        cppUndefinedValue
-      )
+      const absent = operationConversionText(ctx, operation, 'promise-reaction', { kind: 'undefined' }, carrier.value, cppUndefinedValue)
       if (absent === null) {
         throw createCppEmitBlockedError(
           `conversion:void->${representationKey(carrier.value)}`,
@@ -505,7 +512,7 @@ const promiseReactionText = (
     // test, not a per-type one -- a thenable is adopted and anything else,
     // `undefined` included, resolves to itself -- so an `optional` over a
     // promise settles the result one way when it is present and the other when
-    // it is not. @hono/node-server's `writeFromReadableStream` is the shape:
+    // it is not. A readable-stream pump loop is the shape:
     // its pump is `(result) => Promise<void> | undefined`, the next hop while
     // the source has one and nothing once it is drained, handed straight to
     // `read().then(pump, onError)`.
@@ -518,23 +525,11 @@ const promiseReactionText = (
     // would be the quieter version of the same loss: the returned promise's
     // rejection is the only part of that chain still observable from here.
     if (abi.result.kind === 'optional' && abi.result.payload.kind === 'promise') {
-      const adopted = alignedValueText(
-        ctx,
-        'prototype/emit-prototype-invoke.ts:optional-thenable',
-        abi.result.payload,
-        carrier,
-        `(*${settledResultName})`
-      )
+      const adopted = operationConversionText(ctx, operation, 'promise-reaction', abi.result.payload, carrier, `(*${settledResultName})`)
       const absent =
         carrier.value.kind === 'void'
           ? ''
-          : alignedValueText(
-              ctx,
-              'prototype/emit-prototype-invoke.ts:optional-thenable-absent',
-              { kind: 'undefined' },
-              carrier.value,
-              cppUndefinedValue
-            )
+          : operationConversionText(ctx, operation, 'promise-reaction', { kind: 'undefined' }, carrier.value, cppUndefinedValue)
       if (adopted === null || absent === null) {
         throw createCppEmitBlockedError(
           `conversion:${representationKey(abi.result)}->${representationKey(carrier)}`,
@@ -556,7 +551,7 @@ const promiseReactionText = (
     // `alignedValueText` renders for the payload is the discard `(void)(x)`,
     // which the `resultType(...)` wrapper below then tried to build a promise
     // out of ("no matching conversion for functional-style cast from 'void'").
-    // @hono/node-server's stream pump is the shape: `reader.read().then(handler,
+    // A readable-stream pump loop is the shape: `reader.read().then(handler,
     // onError)` whose handler returns a value nothing reads, published as a
     // `Promise<void>` because the program's own type says so.
     //
@@ -567,9 +562,9 @@ const promiseReactionText = (
     if (carrier.value.kind === 'void' && abi.result.kind !== 'promise') return `${handled}; ${catchResultName}.resolve();`
     const arm =
       abi.result.kind === 'promise'
-        ? alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:269', abi.result, carrier, handled)
+        ? operationConversionText(ctx, operation, 'promise-reaction', abi.result, carrier, handled)
         : ((payload) => (payload === null ? null : `${resultType}(${payload})`))(
-            alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:271', abi.result, carrier.value, handled)
+            operationConversionText(ctx, operation, 'promise-reaction', abi.result, carrier.value, handled)
           )
     if (arm === null) {
       throw createCppEmitBlockedError(
@@ -622,7 +617,7 @@ const promiseReactionText = (
     }
     const passedThrough = voidPayload
       ? ''
-      : alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:280', receiverCarrier.value, carrier.value, caughtValueName)
+      : operationConversionText(ctx, operation, 'promise-reaction', receiverCarrier.value, carrier.value, caughtValueName)
     if (passedThrough === null) {
       throw createCppEmitBlockedError(
         `conversion:${representationKey(receiverCarrier.value)}->${representationKey(carrier.value)}`,
@@ -653,7 +648,8 @@ const promiseCatchText = (
   receiverText: string,
   args: readonly IrOperand[],
   result: IrResult | null,
-  receiverCarrier: Extract<Representation, { kind: 'promise' }> | undefined
+  receiverCarrier: Extract<Representation, { kind: 'promise' }> | undefined,
+  operation: CallOperation
 ): string => {
   const onRejected = args[0]
   if (args.length !== 1 || !onRejected) {
@@ -662,7 +658,7 @@ const promiseCatchText = (
       `"Promise.prototype.catch" takes one rejection handler (27.2.5.1); this call passes ${args.length}`
     )
   }
-  return promiseReactionText(ctx, 'catch', receiverText, undefined, onRejected, result, receiverCarrier)
+  return promiseReactionText(ctx, 'catch', receiverText, undefined, onRejected, result, receiverCarrier, operation)
 }
 
 /**
@@ -691,7 +687,8 @@ const promiseFinallyText = (
   receiverText: string,
   args: readonly IrOperand[],
   result: IrResult | null,
-  receiverCarrier: Extract<Representation, { kind: 'promise' }> | undefined
+  receiverCarrier: Extract<Representation, { kind: 'promise' }> | undefined,
+  operation: CallOperation
 ): string => {
   const onFinally = args[0]
   if (args.length !== 1 || !onFinally) {
@@ -738,7 +735,7 @@ const promiseFinallyText = (
   const passThrough = ((): string | null => {
     if (discarded || carrier.value.kind === 'void') return ''
     if (voidPayload) return null
-    return alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:finally', receiverCarrier.value, carrier.value, caughtValueName)
+    return operationConversionText(ctx, operation, 'promise-reaction', receiverCarrier.value, carrier.value, caughtValueName)
   })()
   if (passThrough === null) {
     throw createCppEmitBlockedError(
@@ -795,7 +792,8 @@ type PromiseCallRenderer = (
   receiverText: string,
   args: readonly IrOperand[],
   result: IrResult | null,
-  receiverCarrier: Extract<Representation, { kind: 'promise' }> | undefined
+  receiverCarrier: Extract<Representation, { kind: 'promise' }> | undefined,
+  operation: CallOperation
 ) => string
 
 const promiseMethods: ReadonlyMap<string, PromiseCallRenderer> = new Map([
@@ -806,7 +804,6 @@ const promiseMethods: ReadonlyMap<string, PromiseCallRenderer> = new Map([
 ])
 
 /** The keys `promiseMemberText` may defer -- one authority for "is this method implemented", as above. */
-export const promisePrototypeMethods: ReadonlySet<string> = new Set(promiseMethods.keys())
 
 /**
  * The keyed-collection prototype methods this backend renders, per family.
@@ -828,15 +825,6 @@ export const promisePrototypeMethods: ReadonlySet<string> = new Set(promiseMetho
  *   / `Set.prototype.symmetricDifference` -- unbuilt, not refused on
  *   principle.
  */
-const strongMapMethods: ReadonlySet<string> = new Set(['get', 'set', 'has', 'delete', 'clear', 'entries', 'keys', 'values'])
-const strongSetMethods: ReadonlySet<string> = new Set(['add', 'has', 'delete', 'clear', 'forEach'])
-const weakMapMethods: ReadonlySet<string> = new Set(['get', 'set', 'has', 'delete'])
-const weakSetMethods: ReadonlySet<string> = new Set(['add', 'has', 'delete'])
-
-export type KeyedCollectionFamilyTag = 'map' | 'set' | 'weak-map' | 'weak-set'
-
-export const keyedCollectionPrototypeMethods = (family: KeyedCollectionFamilyTag): ReadonlySet<string> =>
-  family === 'map' ? strongMapMethods : family === 'set' ? strongSetMethods : family === 'weak-map' ? weakMapMethods : weakSetMethods
 
 /**
  * The call text for one deferred keyed-collection method.
@@ -870,7 +858,7 @@ const returnedReceiverText = (
 ): string => {
   const published = result?.representation
   // A class split at `any` types `this` as the union of its copies
-  // (mongodb's `CaseInsensitiveMap<Value = any>`): the receiver is the one
+  // (a `class Store<Value = any> extends Map<string, Value>`): the receiver is the one
   // copy whose native base IS this view's carrier, so the downcast re-enters
   // the union at that arm. More than one such arm leaves the receiver's copy
   // unnamed by the view, and the text stays as it was.
@@ -897,7 +885,8 @@ const keyedCollectionCallText = (
   member: string,
   receiverText: string,
   args: readonly IrOperand[],
-  result: IrResult | null
+  result: IrResult | null,
+  operation: CallOperation
 ): string => {
   const family = carrier.family
   if (family === 'set' && member === 'forEach') {
@@ -910,7 +899,7 @@ const keyedCollectionCallText = (
       )
     }
     const convert = (source: Representation, target: Representation, text: string): string => {
-      const converted = alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:set-forEach', source, target, text)
+      const converted = operationConversionText(ctx, operation, 'prototype-callback', source, target, text)
       if (converted === null) {
         throw createCppEmitBlockedError('host-invocation:set.prototype.forEach', 'Set.forEach callback argument has no native conversion')
       }
@@ -958,10 +947,10 @@ const keyedCollectionCallText = (
   // of it. For a fully typed collection the source and target carriers are
   // identical and it returns the text unchanged, so nothing native is
   // disturbed.
-  // BSONPERF-identity-membership: `Set<Document>.has(value)` where the value is
+  // Identity membership: `Set<object>.has(value)` where the value is
   // an object the program holds as a dynamic box (a native record, class
-  // instance, Array or Map -- bson's serializer `path.has(value)`) is an
-  // identity question. Converting the box into the Document the set stores
+  // instance, Array or Map -- a serializer's cycle check `seen.has(value)`) is an
+  // identity question. Converting the box into the object the set stores
   // would mint a view (a Dictionary, a shared alias and a registry entry) only
   // to throw it away: a member's view is registered while the set holds it, so
   // the registry answers membership without allocating anything.
@@ -987,7 +976,7 @@ const keyedCollectionCallText = (
       // erase only its identity after the checker has admitted the call.
       return text
     }
-    const converted = alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:438', argument.representation, slot, text)
+    const converted = operationConversionText(ctx, operation, 'prototype-argument', argument.representation, slot, text)
     if (converted === null) {
       throw createCppEmitBlockedError(
         `conversion:${representationKey(argument.representation)}->${representationKey(slot)}`,
@@ -1071,7 +1060,7 @@ const keyedCollectionCallText = (
     // The runtime returns Optional<V> in the collection's storage order.
     // The call site's union can have a different order or a narrowed payload.
     const source: Representation = { kind: 'optional', payload: carrier.value, absence: 'undefined' }
-    const converted = alignedValueText(ctx, 'prototype/emit-prototype-invoke.ts:collection-get', source, result.representation, invocation)
+    const converted = operationConversionText(ctx, operation, 'prototype-result', source, result.representation, invocation)
     if (converted === null) {
       throw createCppEmitBlockedError(
         `conversion:${representationKey(source)}->${representationKey(result.representation)}`,
@@ -1151,19 +1140,19 @@ export const nativeBaseMethodCallText = (
   member: string,
   receiverText: string,
   args: readonly IrOperand[],
-  result: IrResult | null
+  result: IrResult | null,
+  operation: CallOperation
 ): string | null => {
   if (carrier.kind === 'promise') {
     const render = promiseMethods.get(member)
-    return render ? render(ctx, receiverText, args, result, carrier) : null
+    return render ? render(ctx, receiverText, args, result, carrier, operation) : null
   }
   if (carrier.kind !== 'keyed-collection' || !keyedCollectionPrototypeMethods(carrier.family).has(member)) return null
   const walked = walkedMapCarrier(ctx, carrier, member, receiverText, result)
-  return keyedCollectionCallText(ctx, walked.carrier, member, walked.text, args, result)
+  return keyedCollectionCallText(ctx, walked.carrier, member, walked.text, args, result, operation)
 }
 
 /** The keys `scalarMemberText` may defer off a number receiver -- one authority for "is this method implemented", as above. */
-export const numberPrototypeMethods: ReadonlySet<string> = new Set(numberMethods.keys())
 
 /**
  * `Object.prototype` methods reached through a `dictionary` receiver.
@@ -1184,7 +1173,6 @@ export const numberPrototypeMethods: ReadonlySet<string> = new Set(numberMethods
  * ask about an object identity a `dictionary` does not carry, so they stay
  * unclaimed and refuse at the read rather than compiling to something else.
  */
-export const dictionaryPrototypeMethods: ReadonlySet<string> = new Set(['hasOwnProperty'])
 
 /**
  * The call text for a deferred `Object.prototype` read off a dictionary.
@@ -1280,7 +1268,7 @@ const renderPrototypeMethodCall = (
         `"${read.member}" was recorded as a deferred Promise.prototype read but this file renders no call for it`
       )
     }
-    return render(ctx, receiverText, operation.arguments, operation.result, read.promiseCarrier)
+    return render(ctx, receiverText, operation.arguments, operation.result, read.promiseCarrier, operation)
   }
   if (read.receiverKind === 'iterator') {
     return iteratorCallText(ctx, read.member, receiverText, read.iteratorCarrier, operation)
@@ -1405,7 +1393,7 @@ const renderPrototypeMethodCall = (
     // its own method returns, and `Array.prototype.push` returns a number even
     // when nobody reads it. C++'s conditional operator has no common type for
     // `void` and `double`, so the whole statement was refused for a program
-    // that is perfectly well formed: hono's `_getQueryParam` writes
+    // that is perfectly well formed: a query-string parser writing
     // `;(results[name] as string[]).push(value)` over a `string | string[]`,
     // where the `as` names the arm the author means and the string arm is
     // proved to have no `push`.
@@ -1523,7 +1511,7 @@ const renderPrototypeMethodCall = (
       )
     }
     const walked = walkedMapCarrier(ctx, read.collectionCarrier, read.member, receiverText, operation.result)
-    return keyedCollectionCallText(ctx, walked.carrier, read.member, walked.text, operation.arguments, operation.result)
+    return keyedCollectionCallText(ctx, walked.carrier, read.member, walked.text, operation.arguments, operation.result, operation)
   }
   const render = arrayMethods.get(read.member)
   if (!render) {
@@ -1546,5 +1534,21 @@ const renderPrototypeMethodCall = (
         'that no longer has the receiver'
     )
   }
-  return render(ctx, receiverText, read.arrayCarrier.element, operation.arguments, operation.result)
+  const rendered = render(ctx, receiverText, read.arrayCarrier.element, operation.arguments, operation.result, operation)
+  // `join` and `toString` answer a fresh string whatever holds it. A borrowed
+  // call -- `Array.prototype.join.call(arguments, ':')` -- is typed by
+  // `Function.prototype.call`'s own `any` result, so the call's result is
+  // dynamic and the string must cross into it like any other written value.
+  const held = operation.result?.representation
+  if (!stringResultMembers.has(read.member) || held === undefined || held.kind === 'string') return rendered
+  const aligned = alignedValueText(ctx, `prototype/emit-prototype-invoke.ts:array-${read.member}`, { kind: 'string' }, held, rendered)
+  if (aligned === null) {
+    throw createCppEmitBlockedError(
+      `host-invocation:Array.prototype.${read.member}`,
+      `Array.prototype.${read.member} answers a string, which this call's result "${representationKey(held)}" cannot hold`
+    )
+  }
+  return aligned
 }
+
+const stringResultMembers: ReadonlySet<string> = new Set(['join', 'toString'])

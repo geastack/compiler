@@ -10,6 +10,7 @@ import type { ClassLayout } from '../projection/classes.js'
 import { createConversionNodes } from '../conversion/nodes.js'
 import { createCppConversionRegistry } from '../targets/cpp/conversions.js'
 import { nativeMergeTransportOf } from './native-merge-transport.js'
+import { createIrBodyBuilder } from './build.js'
 
 const lineage = 'callable-entry-test' as never
 const operand = (value: string, representation: Representation): IrOperand => ({ value: value as never, representation })
@@ -38,6 +39,68 @@ const body = (id: string, operations: readonly IrNonTerminatorOperation[], frame
     tryRegions: []
   }
 }
+
+test('an exact dynamic sum preserves its installed unknown destinations through a later Proxy-only selection', () => {
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const target: Representation = { kind: 'record', shapeId: 'decoded-object', fields: [], accessors: [], ownership: 'shared-refcount' }
+  const handler: Representation = {
+    kind: 'record',
+    shapeId: 'private-handler',
+    fields: [{ key: 'get', value: callable, required: true }],
+    accessors: [],
+    ownership: 'shared-refcount'
+  }
+  const proxy: Representation = { kind: 'proxy-object', target, handler }
+  const sum: Representation = {
+    kind: 'tagged-union',
+    arms: [target, proxy].map((value, index) => ({
+      tag: String(index),
+      value,
+      semanticType: String(index) as never,
+      runtimeDiscriminator: { kind: 'carrier' }
+    }))
+  }
+  const decoded = conversions.nodeFor(dynamic, sum)
+  const stored = conversions.nodeFor(proxy, sum)
+  const selected = conversions.nodeFor(sum, proxy)
+  const builder = createIrBodyBuilder('module' as never, 'module' as never, null)
+  const entry = builder.openBlock()
+  const left = builder.openBlock()
+  const right = builder.openBlock()
+  const join = builder.openBlock()
+  const trap = builder.allocateCallable(entry, lineage, 'trap' as never, [], callable)
+  const targetObject = builder.allocateRecord(entry, lineage, [], target)
+  const handlerObject = builder.allocateRecord(entry, lineage, [{ key: 'get', value: operand(trap, callable) }], handler)
+  const knownProxy = builder.allocateProxy(entry, lineage, operand(targetObject, target), operand(handlerObject, handler), proxy)
+  const unknownObject = builder.bindingRead(entry, lineage, 'external-object' as never, dynamic)
+  const condition = builder.constant(entry, lineage, 'true', 'boolean', { kind: 'scalar', domain: 'boolean' })
+  builder.branch(entry, lineage, operand(condition, { kind: 'scalar', domain: 'boolean' }), left, right)
+  const decodedObject = builder.convert(left, lineage, decoded.id, operand(unknownObject, dynamic), sum)
+  builder.jump(left, lineage, join)
+  const storedProxy = builder.convert(right, lineage, stored.id, operand(knownProxy, proxy), sum)
+  builder.jump(right, lineage, join)
+  const merged = builder.phi(
+    join,
+    lineage,
+    [
+      { block: left, value: operand(decodedObject, sum) },
+      { block: right, value: operand(storedProxy, sum) }
+    ],
+    sum
+  )
+  const chosenProxy = builder.convert(join, lineage, selected.id, operand(merged, sum), proxy)
+  const chosenHandler = builder.proxyPart(join, lineage, operand(chosenProxy, proxy), 'handler', handler)
+  const key = builder.constant(join, lineage, 'get', 'string', { kind: 'string' })
+  const read = builder.get(join, lineage, operand(chosenHandler, handler), operand(key, { kind: 'string' }), callable)
+  builder.return(join, null, null)
+  const program = builder.seal()
+  const bodies = [program, body('trap', [])]
+  const flow = nativeCallableFlowOf(bodies, new Map(), new Map(), conversions)
+  assert.deepEqual(flow.callables.get(read), { kind: 'exact', functionId: 'trap' })
+  const unproved = { nodeById: (id: string) => (id === decoded.id ? null : conversions.nodeById(id)), nodeFor: conversions.nodeFor }
+  const unknown = nativeCallableFlowOf(bodies, new Map(), new Map(), unproved)
+  assert.equal(unknown.callables.has(read), false)
+})
 const allocate = (id: string, representation = callable): IrNonTerminatorOperation => ({
   kind: 'allocate-callable',
   lineage,
@@ -54,8 +117,191 @@ const unknownCall = (...args: IrOperand[]): Extract<IrNonTerminatorOperation, { 
   result: null
 })
 
+for (const exposure of ['proxy', 'handler', 'returned-this', 'returned-alias'] as const)
+  test(`Proxy internal handler provenance survives only actual handler publication: ${exposure}`, () => {
+    const handler: Representation = { kind: 'native-record-ref', shapeId: 'proxy-handler', native: null, ownership: 'shared-refcount' }
+    const returnsHandler = exposure === 'returned-this' || exposure === 'returned-alias'
+    const trapAbi: CallableAbi = {
+      ...abi,
+      receiver: exposure === 'returned-this' ? handler : null,
+      result: returnsHandler ? handler : { kind: 'void' }
+    }
+    const trap: Representation = { kind: 'function-value-dispatch', abi: trapAbi }
+    const handlerLayout = record('proxy-handler', 'get', trap)
+    const target = record('proxy-target', 'callback', callable)
+    const proxy: Representation = { kind: 'proxy-object', target, handler }
+    const operations: IrNonTerminatorOperation[] = [
+      allocate('getter', trap),
+      allocate('target-callback'),
+      {
+        kind: 'allocate-record',
+        lineage,
+        fields: [{ key: 'get', value: operand('getter-value', trap) }],
+        result: result('handler', handler)
+      },
+      {
+        kind: 'binding-write',
+        lineage,
+        declaration: 'handler-alias' as never,
+        value: operand('handler', handler)
+      },
+      {
+        kind: 'allocate-record',
+        lineage,
+        fields: [{ key: 'callback', value: operand('target-callback-value', callable) }],
+        result: result('target', target)
+      },
+      {
+        kind: 'allocate-proxy',
+        lineage,
+        target: operand('target', target),
+        handler: operand('handler', handler),
+        result: result('proxy', proxy)
+      },
+      unknownCall(operand(exposure === 'handler' ? 'handler' : 'proxy', exposure === 'handler' ? handler : proxy)),
+      { kind: 'proxy-part', lineage, proxy: operand('proxy', proxy), part: 'handler', result: result('proxy-handler', handler) },
+      { kind: 'constant', lineage, literal: 'string', text: 'get', result: result('get-key', { kind: 'string' }) },
+      {
+        kind: 'get',
+        lineage,
+        receiver: operand('proxy-handler', handler),
+        key: operand('get-key', { kind: 'string' }),
+        result: result('trap-read', trap)
+      },
+      { kind: 'constant', lineage, literal: 'string', text: 'callback', result: result('callback-key', { kind: 'string' }) },
+      {
+        kind: 'get',
+        lineage,
+        receiver: operand('target', target),
+        key: operand('callback-key', { kind: 'string' }),
+        result: result('target-read', callable)
+      }
+    ]
+    let getter = body(
+      'getter',
+      exposure === 'returned-this'
+        ? [{ kind: 'receiver', lineage, result: result('handler-answer', handler) }]
+        : exposure === 'returned-alias'
+          ? [{ kind: 'binding-read', lineage, declaration: 'handler-alias' as never, result: result('handler-answer', handler) }]
+          : [],
+      trapAbi
+    )
+    if (returnsHandler)
+      getter = {
+        ...getter,
+        blocks: new Map(
+          [...getter.blocks].map(([id, block]) => [
+            id,
+            { ...block, terminator: { kind: 'return', lineage, value: operand('handler-answer', handler) } }
+          ])
+        )
+      }
+    const flow = nativeCallableFlowOf(
+      [body('root', operations, null), getter, body('target-callback', [])],
+      new Map([['handler-alias' as never, { representation: handler, storage: { kind: 'region' as const, owner: 'root' as never } }]]),
+      new Map(),
+      undefined,
+      undefined,
+      { layoutOf: () => handlerLayout }
+    )
+    assert.equal(flow.callables.has('trap-read' as never), exposure === 'proxy')
+    assert.equal(flow.callables.has('target-read' as never), exposure === 'handler', 'only Proxy observers expose the target')
+  })
+
+test('native source-only method frames compose through nil storage and consume the supplied logical receiver', () => {
+  const nativeRecord = record('native-logical-instance', 'run', callable) as Extract<Representation, { kind: 'record' }>
+  const instance: Representation = { ...nativeRecord, ownership: 'shared-refcount' }
+  const physical: CallableAbi = { ...abi, receiver: instance }
+  const native: Representation = { kind: 'function-value-dispatch', abi: physical }
+  const stored: Representation = { kind: 'function-value-dispatch', abi }
+  const publicFrame: CallableAbi = {
+    ...physical,
+    parameters: [{ value: { kind: 'scalar', domain: 'number' }, ownership: 'owned', passing: 'by-value' }]
+  }
+  const publicMethod: Representation = { kind: 'function-value-dispatch', abi: publicFrame }
+  for (const composed of [false, true])
+    for (const supplied of [false, true])
+      for (const trusted of [false, true]) {
+        const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+        const erasure = conversions.nativeMethodFor(native, stored)!
+        const getter = conversions.nodeFor(stored, publicMethod)
+        assert.ok(erasure)
+        assert.notEqual(getter.capability.kind, 'never')
+        const root = body(
+          'root',
+          [
+            allocate('worker', native),
+            allocate('callback'),
+            {
+              kind: 'allocate-record',
+              lineage,
+              fields: [{ key: 'run', value: operand('callback-value', callable) }],
+              result: result('instance', instance)
+            },
+            {
+              kind: 'convert',
+              lineage,
+              source: operand('worker-value', native),
+              conversionUse: erasure.id,
+              result: result('stored', stored)
+            },
+            ...(composed
+              ? [
+                  {
+                    kind: 'convert',
+                    lineage,
+                    source: operand('stored', stored),
+                    conversionUse: getter.id,
+                    result: result('public', publicMethod)
+                  } as IrNonTerminatorOperation,
+                  {
+                    kind: 'constant',
+                    lineage,
+                    literal: 'number',
+                    text: '1',
+                    result: result('extra', { kind: 'scalar', domain: 'number' })
+                  } as IrNonTerminatorOperation
+                ]
+              : []),
+            {
+              kind: 'call',
+              lineage,
+              callee: operand(composed ? 'public' : 'stored', composed ? publicMethod : stored),
+              receiver: composed ? operand('instance', instance) : null,
+              ...(supplied ? { thisArgument: operand('instance', instance) } : {}),
+              arguments: composed ? [operand('extra', { kind: 'scalar', domain: 'number' })] : [],
+              result: null
+            }
+          ],
+          null
+        )
+        const worker = body(
+          'worker',
+          [
+            { kind: 'receiver', lineage, result: result('incoming', instance) },
+            { kind: 'constant', lineage, literal: 'string', text: 'run', result: result('key', { kind: 'string' }) },
+            {
+              kind: 'get',
+              lineage,
+              receiver: operand('incoming', instance),
+              key: operand('key', { kind: 'string' }),
+              result: result('read', callable)
+            }
+          ],
+          physical
+        )
+        const flow = nativeCallableFlowOf([root, worker, body('callback', [])], new Map(), new Map(), {
+          nodeById: (id) => (trusted ? conversions.nodeById(id) : null)
+        })
+        assert.equal(flow.callables.has('read' as never), trusted && (supplied || composed))
+        assert.equal(flow.enteredBodies.has('worker' as never), true)
+      }
+})
+
 test('an observed receiver-ignoring adapter preserves callable flow only with its cited conversion and held frame', () => {
-  const receiver = record('adapter-receiver', 'marker', { kind: 'scalar', domain: 'number' })
+  const ownedReceiver = record('adapter-receiver', 'marker', { kind: 'scalar', domain: 'number' })
+  assert.ok(ownedReceiver.kind === 'record')
+  const receiver: Representation = { ...ownedReceiver, ownership: 'shared-refcount' }
   const payload = record('adapter-payload', 'run', callable)
   const sourceAbi: CallableAbi = { ...abi, parameters: [{ value: payload, ownership: 'owned', passing: 'by-value' }] }
   const source: Representation = { kind: 'function-value-dispatch', abi: sourceAbi }
@@ -65,6 +311,12 @@ test('an observed receiver-ignoring adapter preserves callable flow only with it
     for (const validReceiver of [true, false]) {
       const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
       const conversion = conversions.nodeFor(source, held)
+      const ownedHeld: Representation = { kind: 'function-value-dispatch', abi: { ...sourceAbi, receiver: ownedReceiver } }
+      assert.equal(
+        conversions.nodeFor(source, ownedHeld).capability.kind,
+        'never',
+        'a by-value receiver cannot retain the original logical owner for an erased source entry'
+      )
       const root = body(
         'root',
         [
@@ -128,6 +380,92 @@ test('an observed receiver-ignoring adapter preserves callable flow only with it
         assert.equal(flow.enteredBodies.has('worker' as never), true)
       }
     }
+})
+
+test('admitted result adapters preserve logical receiver irrelevance without guessing from public nil frames', () => {
+  const from: Representation = { kind: 'function-value-dispatch', abi: { ...abi, result: { kind: 'scalar', domain: 'number' } } }
+  const into: Representation = {
+    kind: 'function-value-dispatch',
+    abi: { ...abi, result: { kind: 'optional', payload: { kind: 'scalar', domain: 'number' }, absence: 'undefined' } }
+  }
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const node = conversions.nodeFor(from, into)
+  assert.notEqual(node.capability.kind, 'never')
+  const adapted: IrNonTerminatorOperation = {
+    kind: 'convert',
+    lineage,
+    conversionUse: node.id,
+    source: operand('worker-value', from),
+    result: result('adapted', into)
+  }
+  const phi: IrNonTerminatorOperation = {
+    kind: 'phi',
+    lineage,
+    incoming: [
+      { block: 'first' as never, value: operand('adapted', into) },
+      { block: 'second' as never, value: operand('adapted', into) }
+    ],
+    result: result('joined', into)
+  }
+  const root = body('root', [allocate('worker', from), adapted, phi], null)
+  const worker = body('worker', [], from.abi)
+  const flow = nativeCallableFlowOf([root, worker], new Map(), new Map(), conversions)
+  assert.equal(flow.ignoredLogicalReceiverValues.has('adapted' as never), true)
+  assert.equal(flow.ignoredLogicalReceiverValues.has('joined' as never), true)
+  const noRecipe = nativeCallableFlowOf([root, worker], new Map(), new Map(), { nodeById: () => null })
+  assert.equal(noRecipe.ignoredLogicalReceiverValues.has('adapted' as never), false)
+  const mixed = { ...phi, incoming: [phi.incoming[0]!, { block: 'second' as never, value: operand('unresolved', into) }] }
+  const mixedFlow = nativeCallableFlowOf(
+    [body('root', [allocate('worker', from), adapted, mixed], null), worker],
+    new Map(),
+    new Map(),
+    conversions
+  )
+  assert.equal(mixedFlow.ignoredLogicalReceiverValues.has('joined' as never), false)
+  const sibling = { ...body('worker-variant', [], from.abi), sourceOwner: worker.sourceOwner }
+  const siblings = nativeCallableFlowOf([root, worker, sibling], new Map(), new Map(), conversions)
+  assert.equal(
+    siblings.ignoredLogicalReceiverValues.has('joined' as never),
+    true,
+    'every physical source variant can prove receiver irrelevance'
+  )
+  const received = { ...sibling, abi: { ...from.abi, receiver: record('receiver-variant', 'name', { kind: 'string' }) } }
+  const different = nativeCallableFlowOf([root, worker, received], new Map(), new Map(), conversions)
+  assert.equal(
+    different.ignoredLogicalReceiverValues.has('joined' as never),
+    false,
+    'one receiver-bearing physical source variant revokes the proof'
+  )
+})
+
+test('a sealed result view preserves receiver irrelevance while its result crosses a dynamic boundary', () => {
+  const value = record('receiver-irrelevant-boxed-result', 'label', { kind: 'string' })
+  const from: Representation = { kind: 'function-value-dispatch', abi: { ...abi, result: value } }
+  const into: Representation = { kind: 'function-value-dispatch', abi: { ...abi, result: dynamic } }
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const node = conversions.nodeFor(from, into)
+  assert.ok(node.capability.kind === 'atom')
+  assert.equal(node.capability.materializer.callableAdapter, undefined)
+  assert.equal(node.capability.materializer.nativeFieldProtocol, undefined)
+  assert.ok(node.capability.materializer.callableView)
+  const converted: IrNonTerminatorOperation = {
+    kind: 'convert',
+    lineage,
+    conversionUse: node.id,
+    source: operand('worker-value', from),
+    result: result('boxed-result-view', into)
+  }
+  const root = body('root', [allocate('worker', from), converted], null)
+  const worker = body('worker', [], from.abi)
+  const flow = nativeCallableFlowOf([root, worker], new Map(), new Map(), conversions)
+  assert.equal(flow.ignoredLogicalReceiverValues.has('boxed-result-view' as never), true)
+  assert.equal(flow.callables.has('boxed-result-view' as never), false)
+  const exposure = reflectionExposureOf([root, worker], new Map(), null, {
+    representations: [from, into, value],
+    conversions,
+    shakeComplete: true
+  })
+  assert.equal(exposure.records.get('receiver-irrelevant-boxed-result' as never)?.level, 'full')
 })
 
 test('native dictionary reads retain stored callable origins and actual publication revokes them', () => {
@@ -983,6 +1321,143 @@ test('allocation isolation covers native class slots, arrays and dictionary entr
   }
 })
 
+test('native bulk insertion keeps Function origins through an array field and its exact packed elements', () => {
+  for (const member of ['push', 'unshift'])
+    for (const exposedMethod of [false, true]) {
+      const array: Representation = { kind: 'array-object', element: callable, ownership: 'shared-refcount', extension: null }
+      const holder = record(`bulk-${member}`, 'handlers', array)
+      const number: Representation = { kind: 'scalar', domain: 'number' }
+      const insertionMethod: Representation = {
+        kind: 'function-value-dispatch',
+        abi: { ...abi, parameters: [{ value: array, ownership: 'shared-refcount', passing: 'by-value' }], restFrom: 0, result: number }
+      }
+      const root = body(
+        'root',
+        [
+          allocate('worker'),
+          { kind: 'allocate-array-object', lineage, elements: [], result: result('handlers', array) },
+          {
+            kind: 'allocate-record',
+            lineage,
+            fields: [{ key: 'handlers', value: operand('handlers', array) }],
+            result: result('holder', holder)
+          },
+          { kind: 'constant', lineage, literal: 'string', text: 'handlers', result: result('field-key', { kind: 'string' }) },
+          {
+            kind: 'get',
+            lineage,
+            receiver: operand('holder', holder),
+            key: operand('field-key', { kind: 'string' }),
+            result: result('array-alias', array)
+          },
+          { kind: 'constant', lineage, literal: 'string', text: member, result: result('member-key', { kind: 'string' }) },
+          {
+            kind: 'get',
+            lineage,
+            receiver: operand('array-alias', array),
+            key: operand('member-key', { kind: 'string' }),
+            result: result('insertion', insertionMethod)
+          },
+          {
+            kind: 'allocate-array-object',
+            lineage,
+            elements: [{ kind: 'element', value: operand('worker-value', callable) }],
+            result: result('packed', array)
+          },
+          {
+            kind: 'call',
+            lineage,
+            callee: operand('insertion', insertionMethod),
+            receiver: null,
+            thisArgument: operand('array-alias', array),
+            arguments: [operand('packed', array)],
+            result: result('length', number)
+          },
+          { kind: 'constant', lineage, literal: 'number', text: '0', result: result('index', number) },
+          {
+            kind: 'get',
+            lineage,
+            receiver: operand('handlers', array),
+            key: operand('index', number),
+            result: result('selected', callable)
+          },
+          ...(exposedMethod ? [unknownCall(operand('insertion', insertionMethod))] : [])
+        ],
+        null
+      )
+      const flow = nativeCallableFlowOf([root, body('worker', [])], new Map(), new Map())
+      assert.equal(flow.ignoredLogicalReceiverValues.has('selected' as never), !exposedMethod, member)
+      assert.deepEqual(flow.callables.get('selected' as never), exposedMethod ? undefined : { kind: 'exact', functionId: 'worker' }, member)
+    }
+})
+
+test('bulk insertion cannot turn unknown or receiver-dependent Functions into ignored-this sources', () => {
+  for (const unknown of [false, true]) {
+    const number: Representation = { kind: 'scalar', domain: 'number' }
+    const layout = record('insert-receiver', 'id', number) as Extract<Representation, { kind: 'record' }>
+    const instance: Representation = { ...layout, ownership: 'shared-refcount' }
+    const physical: CallableAbi = { ...abi, receiver: instance }
+    const native: Representation = { kind: 'function-value-dispatch', abi: physical }
+    const array: Representation = { kind: 'array-object', element: callable, ownership: 'shared-refcount', extension: null }
+    const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+    const erasure = conversions.nativeMethodFor(native, callable)!
+    assert.ok(erasure)
+    const root = body(
+      'root',
+      [
+        ...(unknown
+          ? []
+          : [
+              allocate('worker', native),
+              {
+                kind: 'convert',
+                lineage,
+                source: operand('worker-value', native),
+                conversionUse: erasure.id,
+                result: result('stored', callable)
+              } as IrNonTerminatorOperation
+            ]),
+        { kind: 'allocate-array-object', lineage, elements: [], result: result('array', array) },
+        { kind: 'constant', lineage, literal: 'string', text: 'push', result: result('member', { kind: 'string' }) },
+        {
+          kind: 'get',
+          lineage,
+          receiver: operand('array', array),
+          key: operand('member', { kind: 'string' }),
+          result: result('insert', callable)
+        },
+        {
+          kind: 'allocate-array-object',
+          lineage,
+          elements: [{ kind: 'element', value: operand(unknown ? 'external-worker' : 'stored', callable) }],
+          result: result('packed', array)
+        },
+        {
+          kind: 'call',
+          lineage,
+          callee: operand('insert', callable),
+          receiver: null,
+          thisArgument: operand('array', array),
+          arguments: [operand('packed', array)],
+          result: result('length', number)
+        },
+        { kind: 'constant', lineage, literal: 'number', text: '0', result: result('index', number) },
+        {
+          kind: 'get',
+          lineage,
+          receiver: operand('array', array),
+          key: operand('index', number),
+          result: result('selected', callable)
+        }
+      ],
+      null
+    )
+    const flow = nativeCallableFlowOf([root, body('worker', [], physical)], new Map(), new Map(), conversions)
+    assert.equal(flow.ignoredLogicalReceiverValues.has('selected' as never), false)
+    assert.equal(flow.logicalReceiverValues.has('selected' as never), !unknown)
+  }
+})
+
 test('an actual alias or nested publication still exposes the original allocation', () => {
   for (const route of ['alias', 'nested', 'return'] as const) {
     const receiver = record('alias-target', 'run', callable)
@@ -1362,6 +1837,65 @@ test('instance initializers enter on construction or publication, never on class
       assert.equal(flow.enteredBodies.has(initializer.owner), construct || publish)
       if (construct) assert.equal(flow.callables.has('constructed-read' as never), false)
     }
+})
+
+test('a prefix retains complete constructor topology without executing later instance initializers', () => {
+  const fixture = constructionFixture({ construct: false })
+  const derived = fixture.classes.get('Derived' as never)!
+  const initializer = body(
+    'later-initializer',
+    [{ kind: 'receiver', lineage, result: result('later-this', derived.instance!) }, unknownCall(operand('later-this', derived.instance!))],
+    { ...abi, receiver: derived.instance! }
+  )
+  fixture.classes.set(derived.declaration, {
+    ...derived,
+    fields: [
+      {
+        declaration: 'later-field' as never,
+        key: 'extra',
+        initializer: 'later-initializer' as never,
+        representation: { kind: 'void' },
+        syntheticSubclassMemberOverlay: false
+      }
+    ]
+  })
+  const topology = [...fixture.bodies, initializer]
+  const root = fixture.bodies[0]!
+  const prefix = body(
+    'construction-root',
+    root.blocks
+      .get(root.entry)!
+      .operations.filter((operation) => operation.kind !== 'allocate-constructor' || operation.declaration !== derived.declaration),
+    null
+  )
+  const bodies = [prefix, ...fixture.bodies.slice(1), initializer]
+  const placements = new Map()
+  const unresolved = nativeCallableFlowOf(bodies, placements, fixture.classes)
+  assert.equal(unresolved.enteredBodies.has(initializer.owner), true)
+  const selected = nativeCallableFlowOf(bodies, placements, fixture.classes, undefined, undefined, undefined, undefined, topology)
+  assert.equal(selected.enteredBodies.has(initializer.owner), false)
+  assert.equal(selected.enteredBodies.has('Derived-constructor' as never), false)
+  // Withdrawing the complete allocation topology must not reuse the closed
+  // entry result, even though the observed bodies and class layouts are equal.
+  assert.equal(nativeCallableFlowOf(bodies, placements, fixture.classes).enteredBodies.has(initializer.owner), true)
+  const published = [
+    body(
+      'construction-root',
+      [
+        ...prefix.blocks.get(prefix.entry)!.operations,
+        unknownCall(
+          operand(
+            'base-value',
+            root.blocks.get(root.entry)!.operations.find((operation) => operation.kind === 'allocate-constructor')!.result.representation
+          )
+        )
+      ],
+      null
+    ),
+    ...bodies.slice(1)
+  ]
+  const opened = nativeCallableFlowOf(published, placements, fixture.classes, undefined, undefined, undefined, undefined, topology)
+  assert.equal(opened.enteredBodies.has('Base-constructor' as never), true)
 })
 
 test('an unproven super frame keeps its base body observable with unknown inputs', () => {

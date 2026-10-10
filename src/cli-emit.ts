@@ -1,8 +1,10 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { nodeOfOperation as nodeOfOperationRt, operationOfResult as operationOfResultRt } from './identity/ids.js' // RTTEMP
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { compile } from './compiler.js'
 import { refusalSourceLocation } from './cli-refusal-location.js'
+import type { SemanticResultId } from './identity/ids.js'
 import { loadCliPlugins } from './plugins/load.js'
 import type { CompilerPlugin } from './plugins/model.js'
 import { readModuleGraph } from './cli-module-graph.js'
@@ -375,9 +377,22 @@ const report = (result: CompileResult, outDirName: string): number => {
             `${result.emissionRefusals.length} emission refusal(s)\n`
     )
     for (const blocker of result.loweringBlockers) process.stderr.write(`  lowering  ${blocker.owner}: ${blocker.reason}\n`)
-    for (const refusal of certifyRefusals.slice(0, 40))
-      process.stderr.write(`  certify   ${refusal.owner}: ${refusal.key}: ${refusal.reason}\n`)
-    if (certifyRefusals.length > 40) process.stderr.write(`  ... and ${certifyRefusals.length - 40} more capability refusal(s)\n`)
+    // The owner is an ordinal into the TRANSFORMED source, which no reader can
+    // walk back by hand once a source transform has added nodes; the cited
+    // site's own location is the only readable answer.
+    const certifyLocation = (refusal: (typeof certifyRefusals)[number]): string => {
+      const site = /\(first at (result\|[^)\s]+)\)/.exec(refusal.reason)?.[1]
+      if (site === undefined) return refusal.owner
+      try {
+        const where = `${refusal.owner} @ ${refusalSourceLocation(result, { owner: refusal.owner, lineage: site as SemanticResultId })}` // RTTEMP
+        return `${where} TEXT<<${(result.textOfNode(nodeOfOperationRt(operationOfResultRt(site as SemanticResultId))) ?? '?').slice(0, 400)}>>` // RTTEMP
+      } catch {
+        return refusal.owner
+      }
+    }
+    for (const refusal of certifyRefusals.slice(0, 80))
+      process.stderr.write(`  certify   ${certifyLocation(refusal)}: ${refusal.key}: ${refusal.reason}\n`)
+    if (certifyRefusals.length > 80) process.stderr.write(`  ... and ${certifyRefusals.length - 80} more capability refusal(s)\n`)
     for (const refusal of result.emissionRefusals)
       process.stderr.write(`  emission  ${refusalSourceLocation(result, refusal)}: ${refusal.reason}\n`)
     // The location, when there is one. A build's log is where someone finds
@@ -417,18 +432,11 @@ const report = (result: CompileResult, outDirName: string): number => {
   // nothing about where this compiler keeps its header -- and should not: which
   // runtime a unit needs is the compiler's fact, stated by putting it there.
   // Same placement `scripts/corpus.mjs` already uses to compile emitted units.
-  writeIfChanged(join(outDir, 'gea_runtime.h'), readFileSync(join(compilerRoot, 'src/targets/cpp/runtime/gea_runtime.h'), 'utf8'))
-  writeIfChanged(join(outDir, 'gea_pcm.h'), readFileSync(join(compilerRoot, 'src/targets/cpp/runtime/gea_pcm.h'), 'utf8'))
-  writeIfChanged(join(outDir, 'gea_runtime_rtc.h'), readFileSync(join(compilerRoot, 'src/targets/cpp/runtime/gea_runtime_rtc.h'), 'utf8'))
-  writeIfChanged(
-    join(outDir, 'gea_dynamic_proxy.h'),
-    readFileSync(join(compilerRoot, 'src/targets/cpp/runtime/gea_dynamic_proxy.h'), 'utf8')
-  )
-  writeIfChanged(join(outDir, 'gea_eval.h'), readFileSync(join(compilerRoot, 'src/targets/cpp/runtime/gea_eval.h'), 'utf8'))
-  writeIfChanged(
-    join(outDir, 'gea_native_class_prototype.h'),
-    readFileSync(join(compilerRoot, 'src/targets/cpp/runtime/gea_native_class_prototype.h'), 'utf8')
-  )
+  const runtimeDirectory = join(compilerRoot, 'src/targets/cpp/runtime')
+  for (const header of readdirSync(runtimeDirectory)
+    .filter((name) => name.endsWith('.h'))
+    .sort())
+    writeIfChanged(join(outDir, header), readFileSync(join(runtimeDirectory, header), 'utf8'))
   writeIfChanged(
     join(outDir, 'gea_runtime_builtins.cpp'),
     readFileSync(join(compilerRoot, 'src/targets/cpp/runtime/gea_runtime_builtins.cpp'), 'utf8')

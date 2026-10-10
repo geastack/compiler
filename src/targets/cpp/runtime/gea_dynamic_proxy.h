@@ -213,6 +213,13 @@ inline Value dynamicAdd(const Value& left, const Value& right) {
   return Value::box(Value::Tag::Number, dynamicToNumber(a) + dynamicToNumber(b));
 }
 
+inline bool dynamicArrayPrototypeHas(const PropertyKey& key) {
+  if (key.isSymbol()) return false;
+  for (const char* name : {"push", "pop", "join", "toString", "map", "filter", "forEach", "slice"})
+    if (key.text() == name) return true;
+  return false;
+}
+
 inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
   if (key.isSymbol()) return Value();
   using Args = gea::Ref<ArrayObject<Value>>;
@@ -220,7 +227,7 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
   if (key.text() == "push") {
     static const Value method = Value::boxMethod<1>(Method(+[](void*, Value receiver, Args args) -> Value {
       double length = dynamicToNumber(receiver.getProperty(PropertyKey::string("length")));
-      for (std::size_t i = 0; i < args->size(); ++i) receiver.setProperty(PropertyKey::string(std::to_string(static_cast<std::size_t>(length++))), args->at(i));
+      for (std::size_t i = 0; i < args->size(); ++i) receiver.setProperty(PropertyKey::string(std::to_string(static_cast<std::size_t>(length++))), args->readElement(i));
       receiver.setProperty(PropertyKey::string("length"), Value::box(Value::Tag::Number, length));
       return Value::box(Value::Tag::Number, length);
     }, nullptr));
@@ -249,7 +256,7 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
           const std::string& method = *gea::unpackEnvironment<std::string>(environment, slot);
           const double rawLength = dynamicToNumber(receiver.getProperty(PropertyKey::string("length")));
           const std::size_t length = rawLength > 0 ? static_cast<std::size_t>(std::min(std::floor(rawLength), 9007199254740991.0)) : 0;
-          const Value first = args->size() ? args->at(0) : Value();
+          const Value first = args->size() ? args->readElement(0) : Value();
           if (method == "join") {
             const std::string separator = first.tag() == Value::Tag::Undefined ? "," : host::detail::toString(first);
             std::string text;
@@ -270,7 +277,7 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
               return static_cast<std::size_t>(std::clamp(integer < 0 ? static_cast<double>(length) + integer : integer, 0.0, static_cast<double>(length)));
             };
             const std::size_t from = bound(first, 0);
-            const std::size_t to = bound(args->size() > 1 ? args->at(1) : Value(), length);
+            const std::size_t to = bound(args->size() > 1 ? args->readElement(1) : Value(), length);
             for (std::size_t i = from; i < to; ++i) {
               const auto index = PropertyKey::string(std::to_string(i));
               if (receiver.hasProperty(index)) output->push(receiver.getProperty(index));
@@ -279,7 +286,7 @@ inline Value dynamicArrayPrototypeGet(const PropertyKey& key) {
             return Value::box(Value::Tag::Object, output);
           }
           if (first.tag() != Value::Tag::Function) host::throwRuntimeError("TypeError", "Array callback must be callable");
-          const Value thisArg = args->size() > 1 ? args->at(1) : Value();
+          const Value thisArg = args->size() > 1 ? args->readElement(1) : Value();
           for (std::size_t i = 0; i < length; ++i) {
             const auto index = PropertyKey::string(std::to_string(i));
             if (!receiver.hasProperty(index)) { if (method == "map") output->pushHole(); continue; }
@@ -322,8 +329,8 @@ inline Value dynamicStringPrototypeGet(const PropertyKey& key) {
         if (receiver.tag() == Value::Tag::Null || receiver.tag() == Value::Tag::Undefined)
           host::throwRuntimeError("TypeError", "String.prototype method called on null or undefined");
         const std::string text = dynamicToString(receiver);
-        const Value first = args->size() ? args->at(0) : Value();
-        const Value second = args->size() > 1 ? args->at(1) : Value();
+        const Value first = args->size() ? args->readElement(0) : Value();
+        const Value second = args->size() > 1 ? args->readElement(1) : Value();
         const auto string = [](std::string value) { return Value::box(Value::Tag::String, std::move(value)); };
         const auto position = [](const Value& value, double fallback) {
           if (value.tag() == Value::Tag::Undefined) return fallback;
@@ -443,6 +450,8 @@ inline bool dynamicProxyDescriptor(const Value& proxy, const PropertyKey& key, P
 }
 
 inline void Value::freezeIntegrity() const {
+  Value viewed;
+  if (nativeViewValue(viewed)) { viewed.freezeIntegrity(); return; }
   if (tag_ == Tag::Function) {
     functionProperties()->freezeIntegrity();
     return;
@@ -459,6 +468,8 @@ inline void Value::freezeIntegrity() const {
 }
 
 inline bool Value::hasFrozenIntegrity() const {
+  Value viewed;
+  if (nativeViewValue(viewed)) return viewed.hasFrozenIntegrity();
   if (tag_ == Tag::Function) return functionProperties()->hasFrozenIntegrity();
   if (proxy_) host::throwRuntimeError("TypeError", "Object.isFrozen over a Proxy is not implemented");
   if (dynamic_) return asDynamicObject()->hasFrozenIntegrity();
@@ -471,6 +482,8 @@ inline bool Value::hasFrozenIntegrity() const {
 }
 
 inline bool Value::isExtensible() const {
+  Value viewed;
+  if (nativeViewValue(viewed)) return viewed.isExtensible();
   if (tag_ == Tag::Function) return functionProperties()->extensible();
   if (proxy_) {
     const DynamicProxy state = proxyState();
@@ -488,6 +501,8 @@ inline bool Value::isExtensible() const {
 }
 
 inline std::vector<PropertyKey> Value::ownPropertyKeys() const {
+  Value viewed;
+  if (nativeViewValue(viewed)) return viewed.ownPropertyKeys();
   if (proxy_) {
     const DynamicProxy state = proxyState();
     Value trap = proxyTrap(state, "ownKeys");
@@ -538,8 +553,12 @@ inline std::vector<PropertyKey> Value::ownPropertyKeys() const {
   if (metadata_->fields) metadata_->fields->ownKeys(payload(), keys);
   if (metadata_->elements) {
     for (std::size_t i = 0; i < metadata_->elements->length(payload()); ++i) {
-      Value ignored;
-      if (metadata_->elements->element(payload(), i, ignored)) keys.push_back(PropertyKey::string(std::to_string(i)));
+      if (metadata_->elements->has != nullptr) {
+        if (metadata_->elements->has(payload(), i)) keys.push_back(PropertyKey::string(std::to_string(i)));
+      } else {
+        Value ignored;
+        if (metadata_->elements->element(payload(), i, ignored)) keys.push_back(PropertyKey::string(std::to_string(i)));
+      }
     }
     keys.push_back(PropertyKey::string("length"));
   }
@@ -550,6 +569,8 @@ inline std::vector<PropertyKey> Value::ownPropertyKeys() const {
 }
 
 inline bool Value::defineProperty(const PropertyKey& key, const PropertyDescriptor& descriptor) const {
+  Value viewed;
+  if (nativeViewValue(viewed)) return viewed.defineProperty(key, descriptor);
   if (proxy_) {
     const DynamicProxy state = proxyState();
     Value trap = proxyTrap(state, "defineProperty");
@@ -602,12 +623,8 @@ inline bool Value::defineProperty(const PropertyKey& key, const PropertyDescript
   // `dictionary->read(key)` afterwards still saw the old table, unmodified.
   if (metadata_->payloadType == detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<gea::Value>>>()) {
     if (const gea::Value* gea_viewed = gea::dictionary::viewedObjectOf(*this)) return gea_viewed->defineProperty(key, descriptor);
-    if (key.isSymbol() || descriptor.isAccessor()) return false;
     const gea::Ref<gea::Dictionary<gea::Value>>& dictionary = as<gea::Ref<gea::Dictionary<gea::Value>>>();
-    if (!dictionary) return false;
-    if (!descriptor.hasValue) return dictionary->has(key.text());
-    (*dictionary)[key.text()] = descriptor.value;
-    return true;
+    return dictionary && detail::nativeDocumentDefine(dictionary, key, descriptor);
   }
   if (tag_ == Tag::Function) return functionProperties()->defineOwnProperty(key, descriptor);
   // The fixed half first, exactly as `nativeDynamicDefineProperty` orders it:
@@ -621,6 +638,12 @@ inline bool Value::defineProperty(const PropertyKey& key, const PropertyDescript
   }
   if (metadata_->fields != nullptr && metadata_->fields->matchesIndex(payload(), key)) {
     return metadata_->fields->defineIndex(payload(), key, descriptor, isExtensible());
+  }
+  if (metadata_->elements && metadata_->elements->define != nullptr) {
+    std::size_t index;
+    if (detail::arrayIndexOfKey(key, index)) return metadata_->elements->define(payload(), index, descriptor);
+    if (!key.isSymbol() && key.text() == "length" && metadata_->elements->defineLength != nullptr)
+      return metadata_->elements->defineLength(payload(), descriptor);
   }
   PropertyDescriptor current;
   if (ownDescriptor(key, current)) {
@@ -649,6 +672,8 @@ inline bool Value::defineProperty(const PropertyKey& key, const PropertyDescript
 }
 
 inline bool Value::ownDescriptor(const PropertyKey& key, PropertyDescriptor& out) const {
+  Value viewed;
+  if (nativeViewValue(viewed)) return viewed.ownDescriptor(key, out);
   if (proxy_) return dynamicProxyDescriptor(*this, key, out);
   if (tag_ == Tag::Function) {
     const auto* descriptor = functionProperties()->ownProperty(key);
@@ -668,11 +693,8 @@ inline bool Value::ownDescriptor(const PropertyKey& key, PropertyDescriptor& out
   // which filter through `ownDescriptor`) never see what the table holds.
   if (metadata_->payloadType == detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<gea::Value>>>()) {
     if (const gea::Value* gea_viewed = gea::dictionary::viewedObjectOf(*this)) return gea_viewed->ownDescriptor(key, out);
-    if (key.isSymbol()) return false;
     const gea::Ref<gea::Dictionary<gea::Value>>& dictionary = as<gea::Ref<gea::Dictionary<gea::Value>>>();
-    if (!dictionary || !dictionary->has(key.text())) return false;
-    out = PropertyDescriptor::assignment(dictionary->read(key.text()));
-    return true;
+    return dictionary && detail::nativeDocumentDescriptor(dictionary, key, out);
   }
   if (tag_ == Tag::String && detail::stringOwnDescriptor(as<std::string>(), key, out)) return true;
   if (metadata_->fields) {
@@ -690,10 +712,12 @@ inline bool Value::ownDescriptor(const PropertyKey& key, PropertyDescriptor& out
     if (!key.isSymbol() && key.text() == "length") {
       out = PropertyDescriptor::assignment(Value::box(Tag::Number, static_cast<double>(metadata_->elements->length(payload()))));
       out.enumerable = out.configurable = false;
-      out.writable = !frozen;
+      out.writable = !frozen && (metadata_->elements->writableLength == nullptr || metadata_->elements->writableLength(payload()));
       return true;
     }
     std::size_t index = 0;
+    if (detail::arrayIndexOfKey(key, index) && metadata_->elements->ownDescriptor != nullptr)
+      return metadata_->elements->ownDescriptor(payload(), index, out);
     Value found;
     if (detail::arrayIndexOfKey(key, index) && metadata_->elements->element(payload(), index, found)) {
       out = PropertyDescriptor::assignment(found);
@@ -708,13 +732,25 @@ inline bool Value::ownDescriptor(const PropertyKey& key, PropertyDescriptor& out
   return true;
 }
 
-inline Value dynamicProxyCall(const Value& proxy, const Value& receiver, const std::vector<Value>& arguments) {
+template <typename Receiver>
+inline Value dynamicProxyCallEntry(const Value& proxy, const Receiver& receiver, const std::vector<Value>& arguments) {
   const DynamicProxy state = proxy.proxyState();
   Value trap = proxyTrap(state, "apply");
   if (trap.tag() == Value::Tag::Undefined) return state.target.callWithReceiver(receiver, arguments);
   auto array = gea::makeRef<ArrayObject<Value>>();
   for (const Value& argument : arguments) array->push(argument);
-  return trap.callWithReceiver(state.handler, {state.target, receiver, Value::box(Value::Tag::Object, array)});
+  const Value logical = [&]() -> Value {
+    if constexpr (std::is_same_v<Receiver, NativeCallReceiver>) return receiver.dynamicValue();
+    else return receiver;
+  }();
+  return trap.callWithReceiver(state.handler, {state.target, logical, Value::box(Value::Tag::Object, array)});
+}
+
+inline Value dynamicProxyCall(const Value& proxy, const Value& receiver, const std::vector<Value>& arguments) {
+  return dynamicProxyCallEntry(proxy, receiver, arguments);
+}
+inline Value dynamicProxyCall(const Value& proxy, const NativeCallReceiver& receiver, const std::vector<Value>& arguments) {
+  return dynamicProxyCallEntry(proxy, receiver, arguments);
 }
 
 inline Value dynamicProxyGet(const Value& proxy, const PropertyKey& key, const Value& receiver) {
@@ -770,6 +806,8 @@ inline bool dynamicProxyDelete(const Value& proxy, const PropertyKey& key) {
 }
 
 inline bool Value::reflectSet(const PropertyKey& key, const Value& value, const Value& receiver) {
+  Value viewed;
+  if (nativeViewValue(viewed)) return viewed.reflectSet(key, value, receiver);
   if (!isObjectValue(*this)) host::throwRuntimeError("TypeError", "Reflect.set target must be an object");
   if (proxy_) return dynamicProxySet(*this, key, value, receiver);
   PropertyDescriptor descriptor;
@@ -789,6 +827,11 @@ inline bool Value::reflectSet(const PropertyKey& key, const Value& value, const 
   }
   if (exists) {
     if (descriptor.isAccessor()) {
+      // A native setter runs through its own published dynamic frame.
+      if (descriptor.hasSet && descriptor.nativeSet) {
+        descriptor.nativeSet.observeWrite(NativeCallReceiver::fromValue(receiver), value);
+        return true;
+      }
       if (!descriptor.set) return false;
       descriptor.set(receiver, value);
       return true;
@@ -951,9 +994,9 @@ inline std::string dynamicIntrinsicObjectTag(const Value& value, const char* bui
 }
 
 inline std::string objectTag(const Value& value, const char* = "Object", const char* = nullptr) {
-  // BSONPERF-objecttag-document: a plain open document (a `Dictionary<Value>` that views nothing) is no Array, Date, RegExp, Error, Map or
+  // A plain open document (a `Dictionary<Value>` that views nothing) is no Array, Date, RegExp, Error, Map or
   // ArrayBuffer, and its symbol-keyed read is always `undefined` (`getProperty` stores no symbols in it), so its tag is "Object".
-  // bson's isDate/isRegExp ask this of every nested document it serializes.
+  // A serializer's isDate/isRegExp brand checks may ask this of every nested document it visits.
   if (value.tag() == Value::Tag::Object && !value.isProxy() && !value.isDynamicObject() &&
       value.payloadType() == detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<Value>>>() && gea::dictionary::viewedObjectOf(value) == nullptr)
     return objectTagText("Object");
@@ -979,7 +1022,7 @@ inline std::string objectTag(const Value& value, const char* = "Object", const c
     else if (value.isMapPayload()) return dynamicIntrinsicObjectTag(value, "Object", "Map");
     else if (host::instanceOfArrayBuffer(value)) return dynamicIntrinsicObjectTag(value, "Object", "ArrayBuffer");
   }
-  // BSONPERF-tag-literal: the @@toStringTag read of a native record or class instance is a remembered miss like any literal-keyed read.
+  // The @@toStringTag read of a native record or class instance is a remembered miss like any literal-keyed read.
   static const PropertyKey toStringTagKey = PropertyKey::symbol(wellKnownSymbol(detail::WellKnownSymbol::ToStringTag));
   static detail::LiteralReadCache toStringTagCache;
   return objectTagWithOverride(value.getLiteralProperty(toStringTagKey, toStringTagCache), builtinTag);

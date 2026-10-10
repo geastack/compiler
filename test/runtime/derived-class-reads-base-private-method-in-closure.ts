@@ -1,4 +1,4 @@
-// hono's `Hono extends HonoBase`: the base's `#addRoute` is called from an
+// An HTTP framework's `App extends AppBase`: the base's `#addRoute` is called from an
 // arrow inside a base method (`args.forEach((h) => this.#addRoute(...))`),
 // which reads the private method as a value on the DERIVED instance. That
 // read walks the instance's method-state chain for the base class's

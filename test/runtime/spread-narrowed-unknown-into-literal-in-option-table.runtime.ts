@@ -1,4 +1,4 @@
-// mongodb's `connection_string.ts` option table: each descriptor's
+// A database client's connection-string option table: each descriptor's
 // `transform({ values: [value], options })` takes `values: unknown[]`, so the
 // destructured `value` is stored dynamic, and a guard narrows it before
 // `{ ...options.readConcern, ...value }` spreads it into a literal.

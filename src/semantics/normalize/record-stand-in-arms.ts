@@ -6,11 +6,10 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * A plain record that spreads a class instance, stored where the statement
  * names that CLASS as its only home.
  *
- * mongodb's `emitAndLogCommand` logs `{ databaseName, ...args[0] }` as
- * `CommandStartedEvent | LoggableCommandFailedEvent |
- * LoggableCommandSucceededEvent`. In the copy that spreads a started event the
- * literal is the event's own data fields: an object, never an instance (no
- * `hasServiceId` getter, `instanceof` false), and both record arms require a
+ * A generic logging helper that logs `{ name, ...args[0] }` as
+ * `StartedEvent | LoggableFailedEvent | LoggableSucceededEvent`. In the copy
+ * that spreads a started event the literal is the event's own data fields: an
+ * object, never an instance (no class getter, `instanceof` false), and both record arms require a
  * `duration` it lacks. The checker allows it only because the generic body
  * types the literal `any`. A class arm is nominal -- a flat struct of exactly
  * that class -- so no arm of the statement can hold the record, and building an

@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -220,9 +221,30 @@ const compileAndRun = (result, binaryName) => {
   const binary = resolve(root, 'measurements', binaryName)
   execFileSync(
     'clang++',
-    ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
+    [
+      '-std=c++20',
+      ...nativeOptimization('correctness'),
+      '-fsanitize=address,undefined',
+      `-I${resolve(root, 'src/targets/cpp/runtime')}`,
+      '-x',
+      'c++',
+      '-',
+      '-o',
+      binary
+    ],
     {
-      input: `${result.source}\nint main() { try { __gea_top_level(); } catch (...) { return 1; } }\n`,
+      input: `${result.source}\nint main() {
+  try { __gea_top_level(); }
+  catch (const gea::Value& error) {
+    std::fprintf(stderr, "%s\\n", gea::host::runtimeErrorString(error).c_str());
+    return 1;
+  }
+  catch (const std::exception& error) {
+    std::fprintf(stderr, "%s\\n", error.what());
+    return 1;
+  }
+  catch (...) { std::fprintf(stderr, "Unknown native exception\\n"); return 1; }
+}\n`,
       stdio: ['pipe', 'pipe', 'inherit']
     }
   )
@@ -330,8 +352,8 @@ test('ESM source files never authenticate authored require redeclarations as a C
   }
 })
 
-test('a physical CommonJS JavaScript Fastify require keeps exact host provenance end to end', () => {
-  const result = compilePhysicalFixture('fastify-js/index.js')
+test('a physical CommonJS JavaScript scoped-package require keeps exact host provenance end to end', () => {
+  const result = compilePhysicalFixture('scoped-require-js/index.js')
   assert.equal(staticRequiresOf(result).length, 1)
   assert.doesNotMatch(JSON.stringify(result.manifest), /Require@1/)
   assert.ok(result.source, JSON.stringify(result.diagnostics.diagnostics))
@@ -354,7 +376,10 @@ test('authenticated callable and constructor exports emit matching native record
     (operation) => operation.family === 'binding' && operation.commonJs?.global === 'module'
   )
   const nativeModuleBindings = moduleBindings.filter((binding) => binding.commonJs.nativeRecord === true)
-  assert.equal(nativeModuleBindings.length, 2)
+  // Both required modules and the root itself: the root's `module.exports`
+  // write has no dynamic reader either, so its record is native too.
+  assert.equal(nativeModuleBindings.length, 3)
+  assert.equal(nativeModuleBindings.length, moduleBindings.length)
   for (const binding of nativeModuleBindings) {
     const value = binding.results.find((result) => result.role === 'value')
     assert.ok(value)
@@ -457,7 +482,17 @@ test('exact host declarations lower CommonJS wrappers to compiler-owned module r
   const binary = resolve(root, `measurements/commonjs-module-record${executableSuffix}`)
   execFileSync(
     'clang++',
-    ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
+    [
+      '-std=c++20',
+      ...nativeOptimization('correctness'),
+      '-fsanitize=address,undefined',
+      `-I${resolve(root, 'src/targets/cpp/runtime')}`,
+      '-x',
+      'c++',
+      '-',
+      '-o',
+      binary
+    ],
     {
       input: `${result.source}\nint main() { try { __gea_top_level(); } catch (...) { return 1; } }\n`,
       stdio: ['pipe', 'pipe', 'inherit']
@@ -470,8 +505,8 @@ test('exact host declarations lower CommonJS wrappers to compiler-owned module r
 // ambient wrapper `require` states no host effect contract, so the global
 // host-mutation census used to stamp `every` on the intrinsics that string
 // reaches and re-run distrusting every intrinsic -- losing the
-// `%TypedArray%.prototype[ Symbol.toStringTag ]` getter proof bson's
-// `isUint8Array` depends on. The call is lowered to a module record with no
+// `%TypedArray%.prototype[ Symbol.toStringTag ]` getter proof a binary-document
+// serializer's `isUint8Array` depends on. The call is lowered to a module record with no
 // operands and runs only the compiled module body, so it must not.
 test('a static CommonJS require leaves the intrinsics the program relies on trusted', () => {
   const result = compile(
@@ -502,8 +537,8 @@ if (record.value !== 1) throw new Error('record')
 // host-mutation census refused as a host native and answered by distrusting
 // every intrinsic -- losing the typed-array tag getter proof below.
 test('a require inside an uncalled function body is static when the module never writes require', () => {
-  const result = compile(
-    request({
+  const result = compile({
+    ...request({
       'host-wrapper.d.ts': hostWrapper,
       'entry.ts': `
 const lib = require('./lib')
@@ -520,10 +555,33 @@ class Loader { get() { return require('./cache') } }
 module.exports = { load, loader: new Loader() }
 `,
       'cache.ts': `export {}; module.exports = { value: 1 }`
-    })
-  )
+    }),
+    includeIr: true
+  })
   assert.ok(result.certificate, JSON.stringify(result.diagnostics.diagnostics))
   assert.equal(staticRequiresOf(result).length, 3)
+  assert.equal(
+    staticRequiresOf(result).every((operation) => operation.commonJsRequire.nativeRecord === true),
+    true
+  )
+  assert.equal(
+    (result.irBodies ?? []).some((body) =>
+      [...body.blocks.values()].some((block) =>
+        block.operations.some(
+          (operation) =>
+            operation.kind === 'convert' &&
+            ['class-ref', 'record', 'record-with-index', 'native-record-ref'].includes(operation.source.representation.kind) &&
+            operation.result.representation.kind === 'dynamic' &&
+            // A thrown value is JavaScript's own untyped carrier; the entry's
+            // `throw new Error(...)` checks are that boundary, not the records.
+            operation.result.representation.reason !== 'thrown-error-carrier'
+        )
+      )
+    ),
+    false,
+    'the typed Loader and cache records must retain their native source allocations'
+  )
+  assert.doesNotMatch(result.source, /gea::Value::box\(gea::Value::Tag::Object,\s*(?:static_cast<)?gea::Ref<gea_class_/)
   compileAndRun(result, 'commonjs-require-function-body')
 })
 
@@ -546,13 +604,13 @@ module.exports = { load, replace }
 })
 
 // Node throws a catchable `MODULE_NOT_FOUND` error for a package that is not
-// installed, and optional-dependency probes (mongodb's `deps.ts`) rely on
+// installed, and optional-dependency probes (a library's optional-peer loader) rely on
 // catching it. A compiled binary contains exactly the modules its build
 // found, so a static require of a package absent from the build throws that
 // same error instead of refusing the program.
 // Node loads a `.json` module through the CommonJS loader: `module.exports` is
 // the parsed document, so `require('./package.json').version` is the string.
-// mongodb reads its own driver version this way (`client_metadata.ts`); the
+// A library reads its own package version this way for client metadata; the
 // ES `export default` spelling left the required module's exports empty.
 test('a static require of a JSON document answers the parsed document as module.exports', () => {
   const result = compile(
@@ -634,11 +692,11 @@ if (outcome !== 'MODULE_NOT_FOUND') throw new Error(outcome)
   compileAndRun(result, 'commonjs-require-types-only-package')
 })
 
-// mongodb's `getGcpMetadata()` (src/deps.ts): the absent peer's require
+// An optional-peer loader such as `getCloudMetadata()`: the absent peer's require
 // throws, so the probe's only value is its `catch` arm's stub, and a call
 // typed by the peer's own declarations -- `peer.instance({ ... })` -- is made
 // on that stub, not on host code. The census must not stamp `Object` or
-// `Object.prototype` for it, or bson's typed-array brand check (the getter of
+// `Object.prototype` for it, or a serializer's typed-array brand check (the getter of
 // `%TypedArray%.prototype[@@toStringTag]`, reached through
 // `Object.getOwnPropertyDescriptor`) loses its proof.
 test('an absent optional peer hands its probe no value, so a call typed by its declarations taints no intrinsic', () => {
@@ -781,7 +839,17 @@ test('the native module record retries failed initialization and preserves alias
   const binary = resolve(root, `measurements/commonjs-module-record-runtime${executableSuffix}`)
   execFileSync(
     'clang++',
-    ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
+    [
+      '-std=c++20',
+      ...nativeOptimization('correctness'),
+      '-fsanitize=address,undefined',
+      `-I${resolve(root, 'src/targets/cpp/runtime')}`,
+      '-x',
+      'c++',
+      '-',
+      '-o',
+      binary
+    ],
     {
       input: `
 #include "gea_runtime.h"

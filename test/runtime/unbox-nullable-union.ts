@@ -10,7 +10,7 @@ const pick = (raw: any): number | string | null | undefined => raw as number | s
 
 // Deliberately does NOT narrow to a present arm. Reading a union DOWN to one
 // of its arms is a separate, still-unmet conversion
-// (`binding-read-conversion:tagged-union(...)->scalar(number)`), which the three.js app
+// (`binding-read-conversion:tagged-union(...)->scalar(number)`), which an app
 // also wants; what this program pins is the boxed read INTO the union, and
 // telling the three absent/present states apart is enough to prove every arm
 // was built from the right tag.

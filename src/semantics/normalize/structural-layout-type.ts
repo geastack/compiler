@@ -8,6 +8,7 @@ import {
   impliedPatternElementRootOf,
   impliedPatternParameterOf,
   impliedPatternTargetOf,
+  isGlobalObjectMember,
   objectAssignFreshTargetType,
   objectAssignTargetType,
   nominalConstructorChoiceTypeAt
@@ -17,6 +18,7 @@ import ts from 'typescript'
 import { inheritedImplementationOf } from './merged-declaration.js'
 import { emptyAbsentGlobalCensus, type AbsentGlobalCensus } from './absent-globals.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
+import { unsharedArrayResultBodyOf } from './unshared-array-result.js'
 
 /**
  * Which type an object or array literal is laid out as.
@@ -28,7 +30,8 @@ import { emptyParameterBindingCensus, type ParameterBindingCensus } from './para
 export const createLayoutTypeResolver = (
   checker: ts.TypeChecker,
   parameters: ParameterBindingCensus = emptyParameterBindingCensus,
-  absent: AbsentGlobalCensus = emptyAbsentGlobalCensus
+  absent: AbsentGlobalCensus = emptyAbsentGlobalCensus,
+  nativeClassAliasTypeAt?: (node: ts.Node) => ts.Type | null
 ): ((node: ts.Node) => ts.Type) => {
   /**
    * An array-pattern element read past the end of a plain array binds
@@ -114,9 +117,9 @@ export const createLayoutTypeResolver = (
   /**
    * The single arm of a union that could have been written as a literal, or nothing when the choice is genuinely ambiguous.
    *
-   * An OBJECT literal is never an array: against mongodb's `updateOne(filter,
-   * update: UpdateFilter<TSchema> | Document[])` the only arm with the
-   * `Object` flag is `Document[]` (the filter arm is an intersection), and
+   * An OBJECT literal is never an array: against a parameter
+   * `update: UpdateFilter<T> | Doc[]` the only arm with the
+   * `Object` flag is `Doc[]` (the filter arm is an intersection), and
    * adopting it laid `{ $set: ... }` out as an array object -- a carrier no
    * object literal can be allocated as. For an object literal the array and
    * tuple arms are not candidates, and a plain object intersection is one.
@@ -144,25 +147,6 @@ export const createLayoutTypeResolver = (
     )
 
   /**
-   * The property names every object already carries, declared shape or not --
-   * resolved from the checker's own global `Object` type rather than
-   * hardcoded, so it tracks whatever lib version this program actually
-   * compiles against.
-   *
-   * Memoized once: `Object`'s own members do not vary by call site, and
-   * `resolveName` walks scope from whatever node is handed to it, which is
-   * wasted work to repeat per literal.
-   */
-  let objectBaselineMembers: ReadonlySet<string> | null = null
-  const objectBaselineMembersOf = (node: ts.Node): ReadonlySet<string> => {
-    if (objectBaselineMembers) return objectBaselineMembers
-    const symbol = checker.resolveName('Object', node, ts.SymbolFlags.Type, false)
-    const baseline = symbol ? checker.getDeclaredTypeOfSymbol(symbol).getProperties() : []
-    objectBaselineMembers = new Set(baseline.map((property) => property.getName()))
-    return objectBaselineMembers
-  }
-
-  /**
    * Whether a contextual candidate adds nothing beyond what `Object` itself
    * already carries -- the JSDoc `{Object}` escape hatch (`Object` is
    * assignable from any non-nullish value, precisely because it declares
@@ -171,41 +155,44 @@ export const createLayoutTypeResolver = (
    *
    * Both are `TypeFlags.Object` and both pass every check above, but neither
    * is "the declared shape a literal was checked against" the way `Point` or
-   * `CameraCaptureOptions` is: substituting one in throws the literal's own
+   * `CaptureOptions` is: substituting one in throws the literal's own
    * real fields away for a handful of methods (or nothing) every value
-   * already has. `three/src/core/EventDispatcher.js`'s own `@param {Object}
-   * event` is the concrete case -- `{ type, handedness, target }` contextually
+   * already has. A JSDoc `@param {Object} event` on an event-dispatch method
+   * is the concrete case -- `{ type, detail, target }` contextually
    * types as `Object`, and adopting that as the layout produced a record
-   * whose only fields were `Object.prototype`'s, with `handedness` nowhere
+   * whose only fields were `Object.prototype`'s, with `detail` nowhere
    * in it. A type that genuinely adds members (`EventInit`, also declared in
    * a lib file) does not match this test, because its own properties are not
-   * a subset of the baseline.
+   * all `Object`'s. Asked member by member through `isGlobalObjectMember`, the
+   * one rule `structural.ts` lays shapes out by: a same-named member a program
+   * declares itself is its own data, not `Object.prototype`'s.
    */
-  const isVacuousObjectType = (node: ts.Node, type: ts.Type): boolean => {
+  const isVacuousObjectType = (type: ts.Type): boolean => {
     // An INDEX SIGNATURE is a declared shape, and it declares no named members
     // at all -- so a test that reads only `getProperties()` calls
     // `Record<string, string>` vacuous for exactly the reason it is not.
-    // `voice-notes` proved it: `{ Authorization, 'Content-Type' }` written into
+    // Measured: `{ Authorization, 'Content-Type' }` written into
     // a `Record<string, string> | undefined` header field stopped adopting the
     // dictionary and minted its own struct, and `Optional<Ref<Dictionary<...>>>
     // = gea_record_type_974` has no viable assignment. One value, two layouts,
     // and no conversion between them -- which is the very thing the contextual
     // rule above exists to prevent.
     if (checker.getIndexInfosOfType(type).length > 0) return false
-    const baseline = objectBaselineMembersOf(node)
-    return type.getProperties().every((property) => baseline.has(property.getName()))
+    return type.getProperties().every((property) => isGlobalObjectMember(checker, property))
   }
 
   /**
-   * Whether a type is TypeScript's own evolving-array placeholder: an array
-   * whose element the checker has not finalized yet at this location.
+   * The `any[]` shape an inferred empty array may have before its element
+   * settles. Empty-literal declarations prove evolution; other array bindings
+   * require the complete storage census. Flow-narrowed parameter reads can
+   * have this shape without declaring an array cell at all.
    *
    * `let arr = []` is `any[]` at its own declaration, and at every mutating
    * reference reachable from it, because ECMA-262 says nothing about the
    * elements an empty array literal will ever hold and the checker widens the
    * element type across every `push`/index write it can still see ahead of
    * that point. It only settles a first-class element type -- `number[]`,
-   * `BufferAttribute[]` -- once flow analysis knows no more assignments
+   * `Item[]` -- once flow analysis knows no more assignments
    * follow, typically where the array escapes (a `return`, an argument, a
    * property write). Treating the placeholder as the cell's PHYSICAL storage
    * type is a defect in this compiler, not a fact about the program: the
@@ -213,7 +200,7 @@ export const createLayoutTypeResolver = (
    * it at the one location -- the declaration, or an intermediate mutation --
    * where the checker has not computed it yet.
    */
-  const isEvolvingArrayType = (type: ts.Type): boolean => {
+  const isArrayPlaceholderType = (type: ts.Type): boolean => {
     if (!checker.isArrayType(type)) return false
     const [element] = checker.getTypeArguments(type as ts.TypeReference)
     return element !== undefined && (element.flags & ts.TypeFlags.Any) !== 0
@@ -289,9 +276,26 @@ export const createLayoutTypeResolver = (
    * one every reference to it already agreed on.
    */
   const settleEvolving = (node: ts.Node, own: ts.Type): ts.Type => {
-    if (!isEvolvingArrayType(own)) return own
+    if (!isArrayPlaceholderType(own)) return own
     const symbol = boundSymbolOf(node)
     if (!symbol) return own
+    const declaration = symbol.valueDeclaration
+    // `Array.isArray` also produces `any[]`, including for an open document
+    // parameter. That is a view at this read, not an evolving array binding.
+    // A later read of the same parameter may be a document again and cannot
+    // replace the array view here.
+    if (
+      !declaration ||
+      !ts.isVariableDeclaration(declaration) ||
+      !isArrayPlaceholderType(checker.getTypeOfSymbolAtLocation(symbol, declaration))
+    )
+      return own
+    const inferredEmptyArray =
+      declaration.type === undefined &&
+      ts.getJSDocType(declaration) === undefined &&
+      declaration.initializer !== undefined &&
+      ts.isArrayLiteralExpression(declaration.initializer) &&
+      declaration.initializer.elements.length === 0
     let settled = settledEvolvingType.get(symbol)
     if (settled === undefined) {
       const last = lastReferenceTo(symbol, node.getSourceFile())
@@ -301,11 +305,35 @@ export const createLayoutTypeResolver = (
       // any other read of this symbol -- the census has no reason to answer
       // differently at the last reference than it would anywhere else this
       // binding is read.
-      const candidate = last ? censusedTypeAt(checker, parameters, last) : null
-      settled = candidate && !isEvolvingArrayType(candidate) ? candidate : null
+      // Other array bindings, including generic array annotations and native
+      // Array.from results, settle only from the complete storage census.
+      // A later checker-only predicate narrowing cannot rewrite their cell.
+      const candidate = last ? (parameters.typeAt(last) ?? (inferredEmptyArray ? checker.getTypeAtLocation(last) : null)) : null
+      settled =
+        candidate && (checker.isArrayType(candidate) || checker.isTupleType(candidate)) && !isArrayPlaceholderType(candidate)
+          ? candidate
+          : null
       settledEvolvingType.set(symbol, settled)
     }
     return settled ?? own
+  }
+
+  const awaitedFreshArrayType = (node: ts.Node): ts.Type | null => {
+    if (!ts.isAwaitExpression(node) || !isArrayPlaceholderType(checker.getTypeAtLocation(node))) return null
+    const binding = node.parent
+    if (
+      !ts.isVariableDeclaration(binding) ||
+      binding.initializer !== node ||
+      (binding.type === undefined && ts.getJSDocType(binding) === undefined)
+    )
+      return null
+    const stored = checker.getTypeAtLocation(binding)
+    if (!checker.isArrayType(stored) || isArrayPlaceholderType(stored)) return null
+    let expression: ts.Expression = node.expression
+    while (ts.isParenthesizedExpression(expression)) expression = expression.expression
+    // Only the same unshared result proof that lowering authenticates against
+    // the actual class method may select another element storage here.
+    return ts.isCallExpression(expression) && unsharedArrayResultBodyOf(checker, expression) !== null ? stored : null
   }
 
   /**
@@ -319,13 +347,13 @@ export const createLayoutTypeResolver = (
    * excess-property checking, not for layout.
    *
    * A union contextual type contributes its arm only when exactly ONE arm has
-   * a layout at all. `capture(options?: CameraCaptureOptions)` gives the
-   * literal a contextual type of `CameraCaptureOptions | undefined`, and
+   * a layout at all. `capture(options?: CaptureOptions)` gives the
+   * literal a contextual type of `CaptureOptions | undefined`, and
    * `undefined` is not a shape a literal could have been written as -- there is
    * one candidate, so choosing it is reading the program, not guessing at it.
-   * Refusing the whole union instead left `Camera.capture({ mirror: true })`
+   * Refusing the whole union instead left `device.capture({ mirror: true })`
    * allocating a fresh anonymous `record(mirror: boolean)` and handing it to a
-   * slot carrying `optional(native-record-ref(CameraCaptureOptions),
+   * slot carrying `optional(native-record-ref(CaptureOptions),
    * undefined)`: two layouts for one value, and no conversion between them
    * because there is no real conversion to write.
    *
@@ -372,11 +400,11 @@ export const createLayoutTypeResolver = (
    * `getPropertyOfType` answers for a union only when EVERY arm declares the
    * key, which is the right rule for a type the program must be able to use
    * without knowing which arm it holds. It is not the only readable case.
-   * three's `Matrix4.makeTranslation( x, y, z )` takes `{number|Vector3} x` and
-   * reads `x.x`, `x.y`, `x.z` after its own `if ( x.isVector3 )` brand check --
-   * a check TypeScript cannot narrow on, because `isVector3` is not declared on
-   * `number` either, so `x` stays the union and all three reads come back `any`
-   * with no symbol. Ten of the prototype's unmet obligations are those reads.
+   * A JSDoc method `translate( x, y, z )` that takes `{number|Vec} x` and
+   * reads `x.x`, `x.y`, `x.z` after its own `if ( x.isVec )` brand check is
+   * the case -- a check TypeScript cannot narrow on, because `isVec` is not
+   * declared on `number` either, so `x` stays the union and all three reads
+   * come back `any` with no symbol.
    *
    * ECMA-262 10.1.8 says what the other arms answer: `[[Get]]` walks the
    * prototype chain, finds no property, and returns `undefined` at step 3 --
@@ -428,15 +456,15 @@ export const createLayoutTypeResolver = (
    * failing that, again of the checker at the member's own declaration --
    * when the checker's answer for the actual READ location is `any`/`unknown`.
    *
-   * Measured on the three.js app: `renderer.shadowMap` off the IDENTICAL receiver
-   * carrier (`class-ref` for `WebGLRenderer`, proven by
-   * `_this.shadowMap = shadowMap` at `WebGLRenderer.js:516`) answers
-   * `native-record-ref` when read from the app's entry module and `dynamic` when
-   * read from `WebGLPrograms.js:439` -- the same `getPropertyOfType` +
+   * Measured: `renderer.shadows` off the IDENTICAL receiver carrier
+   * (`class-ref` for a JavaScript constructor-function class, proven by
+   * `_this.shadows = shadows` in its constructor) answers
+   * `native-record-ref` when read from the program's entry module and `dynamic`
+   * when read from another module -- the same `getPropertyOfType` +
    * `getTypeOfSymbolAtLocation` pair, on the same property symbol,
    * disagreeing only by which node is handed to `getTypeOfSymbolAtLocation`
-   * as `at`. `shadowMap` is a `this`-property whose type TypeScript derives
-   * by control-flow analysis of its assignment(s) inside `WebGLRenderer`'s
+   * as `at`. `shadows` is a `this`-property whose type TypeScript derives
+   * by control-flow analysis of its assignment(s) inside the class's
    * own constructor; asking for that type "at" a node with no flow edge to
    * the assignment is not guaranteed to reach the same settled answer a
    * read from at or near the declaring scope gets.
@@ -503,7 +531,7 @@ export const createLayoutTypeResolver = (
     const isProperty = ts.isPropertyAccessExpression(node)
     // An ELEMENT access is the same read with the key written differently, and
     // it has to follow the receiver for the identical reason: `v[ i ]`,
-    // `units[ i ]` and `this[ key ]` are 749 of the three.js app's boxed nodes. A
+    // `units[ i ]` and `this[ key ]` are a large share of boxed nodes. A
     // string-literal key is a named member and resolves exactly as `.name`
     // does; any other key resolves through the receiver's INDEX signature,
     // which is the only thing that can answer a key not known until runtime.
@@ -552,8 +580,9 @@ export const createLayoutTypeResolver = (
    * the checker declines and hands back the error type, which reads as `any`.
    *
    * `export default <literal>` is one such position, and it is not a rare one:
-   * measured on the three.js app, 110 modules are exactly `export default \`...\``, a
-   * plain string with no substitutions in it, and every one of them boxed. The
+   * a library that ships shader or template sources as modules that are exactly
+   * `export default \`...\``, a plain string with no substitutions in it, had
+   * every one of them boxed. The
    * same decline is reproducible in five lines of ordinary TypeScript --
    * `export default "hello"` and `export default 42` both answer `any`, while
    * `export default true` (a keyword, not a literal token) and `export default
@@ -617,7 +646,7 @@ export const createLayoutTypeResolver = (
    * defect rather than the value.
    *
    * `res instanceof Promise` on a `res` the checker can only call `any` before
-   * the guard (hono's `let res: ReturnType<H>`, `H` a type parameter the
+   * the guard (`let res: ReturnType<H>`, `H` a type parameter the
    * checker cannot resolve at this call) narrows to `Promise<any>`, not
    * `Promise<Response>` -- TypeScript's own `instanceof` narrowing against a
    * *generic* ambient class has no union arm to match against when the
@@ -727,7 +756,7 @@ export const createLayoutTypeResolver = (
    * The standard predicate deliberately narrows every array-shaped value to
    * `any[]`; it does not retain the element type of an array arm inside a
    * union. That is sufficient for checking JavaScript, but it is not a new
-   * allocation and therefore cannot change `Material[]` into an
+   * allocation and therefore cannot change `Item[]` into an
    * `Array<any>` physical carrier. When the binding's declared type contains
    * exactly one arm assignable to the checker's narrowed `any[]`, that arm is
    * the only carrier the predicate can have selected. Returning it preserves
@@ -786,10 +815,10 @@ export const createLayoutTypeResolver = (
     const arms = declared.isUnion() ? declared.types : [declared]
     // A `ReadonlyArray<T>` arm is an Array at runtime -- `Array.isArray` is
     // true for it -- though it is not assignable to the mutable `any[]` the
-    // checker narrowed to. The MongoDB driver's `Collection.bulkWrite(operations:
-    // ReadonlyArray<...>)` guards exactly such a parameter. A tuple arm, readonly
-    // or not, is an Array just the same: mongodb's `Sort` holds both
-    // `ReadonlyArray<string>` and `readonly [string, SortDirection]`, and
+    // checker narrowed to. A method `write(operations: ReadonlyArray<...>)`
+    // guards exactly such a parameter. A tuple arm, readonly
+    // or not, is an Array just the same: a `Sort` union holding both
+    // `ReadonlyArray<string>` and `readonly [string, Direction]`, and
     // counting only the first made it the "sole" arm and read a tuple through
     // the string array's unchecked payload (a segfault, not a refusal).
     const compatible = arms.filter(
@@ -812,7 +841,7 @@ export const createLayoutTypeResolver = (
   /**
    * The dictionary a const binding aliases through a closed structural view.
    *
-   * `const attrs: { position?: T; normal?: T } = geometry.morphAttributes`
+   * `const attrs: { position?: T; normal?: T } = source.extraAttributes`
    * does not allocate or copy an object. The annotation proves which named
    * reads are valid, but the value in the cell is still the initializer's
    * string-indexed dictionary. Placing the cell as the closed record would
@@ -848,8 +877,8 @@ export const createLayoutTypeResolver = (
   /**
    * The nominal class carrier behind a control-flow view of one member.
    *
-   * After `Array.isArray(source.material)`, TypeScript can describe `source`
-   * itself as an anonymous/intersection view whose `material` member is
+   * After `Array.isArray(source.items)`, TypeScript can describe `source`
+   * itself as an anonymous/intersection view whose `items` member is
    * narrowed. The object was not rebuilt into that record: it remains the
    * class instance bound to the parameter, while the subsequent property read
    * independently publishes the narrowed member type. Keeping the anonymous
@@ -926,6 +955,8 @@ export const createLayoutTypeResolver = (
     // are one cell. See `absent-globals.ts`.
     const absentType = absent.typeAt(node)
     if (absentType) return absentType
+    const awaitedArray = awaitedFreshArrayType(node)
+    if (awaitedArray) return awaitedArray
     const constructorChoice = nominalConstructorChoiceTypeAt(checker, node, layoutTypeAt)
     if (constructorChoice) return constructorChoice
     // The cell an unannotated `const` makes of such a choice holds the choice,
@@ -953,8 +984,8 @@ export const createLayoutTypeResolver = (
     // with. The guarded fallback below cannot serve it: the guard fires only
     // where the checker had `any` or a vacuous type, and the whole point here
     // is that the checker's answer is a perfectly good structure whose one
-    // unstated leaf the program's only caller filled in concretely (hono's
-    // `matchResult: Result<[unknown, RouterRoute]>`). Narrow by construction
+    // unstated leaf the program's only caller filled in concretely (a
+    // `matchResult: Result<[unknown, Route]>` parameter). Narrow by construction
     // -- `statedTypeAt` answers only for a parameter the census admitted
     // under `statedUpperBound` and for identifiers that read it -- and taken
     // FIRST for the reason the file's own header gives about splits: the ABI
@@ -981,10 +1012,10 @@ export const createLayoutTypeResolver = (
       if (throughStatement) return throughStatement
     }
     // HOLDS, and yet deliberately asked of the checker FIRST, not through
-    // `censusedTypeAt`. Tried census-first here and measured it directly
-    // (isolated build, three.js app): boxed fell (20181->19852) but `withheld`
-    // rose 6->14, all fourteen "cites result ... which no installed producer
-    // publishes" -- a real disagreement, not noise. This is the ONE place in
+    // `censusedTypeAt`. Tried census-first here and measured it directly:
+    // boxed fell slightly but `withheld` more than doubled, every new one
+    // "cites result ... which no installed producer publishes" -- a real
+    // disagreement, not noise. This is the ONE place in
     // the file that answers `own` for every node kind `layoutTypeAt` is ever
     // asked about, including nodes OTHER producers derive their own answer
     // for independently (an invocation's own result, a binding's own read);
@@ -1069,12 +1100,12 @@ export const createLayoutTypeResolver = (
       // receiver the census typed perfectly well produced a boxed member read,
       // and every value derived from that read boxed in turn.
       //
-      // Measured: `WebGLTextures.js`'s `_gl` parameter is bound to
-      // `NativeWebGL2RenderingContext | null` -- and ALL 421 `_gl.<member>`
-      // reads in that file were boxed anyway. That file carries 4435 of
-      // the three.js app's 27902 boxed carriers, and 6836 of them program-wide are
-      // property accesses; the 14349 identifier reads are largely what those
-      // accesses flow into. One unfollowed edge, not thousands of decisions.
+      // Measured: a factory function's `context` parameter bound by the
+      // census to a host interface `| null` -- and EVERY `context.<member>`
+      // read in that module was boxed anyway. Property accesses like these
+      // dominate a program's boxed carriers, and the identifier reads are
+      // largely what those accesses flow into. One unfollowed edge, not
+      // thousands of decisions.
       //
       // Resolving the receiver through `layoutTypeAt` itself rather than
       // through the checker is what makes this compose: a chain
@@ -1142,17 +1173,17 @@ export const createLayoutTypeResolver = (
     // mis-inference and not a statement), and its own contextual type is no
     // help when the outer literal's contextual type is a union: the checker
     // reports the union of what EVERY arm's element could be, while the outer
-    // literal has already committed to one arm. hono's
-    // `matchResult: Result<[unknown, RouterRoute]> = [[]]` is the case -- the
+    // literal has already committed to one arm. A parameter
+    // `matchResult: Result<[unknown, Route]> = [[]]` is the case -- the
     // outer `[[]]` resolves to `Result`'s one-element arm by arity below, and
     // the inner `[]` then has exactly one thing it can be.
     const nestedPosition = emptyArrayPositionTypeOf(node)
     if (nestedPosition) return nestedPosition
     // A DEFAULT VALUE is contextually typed by the cell it fills, and when the
     // census narrowed that cell the annotation is no longer what it fills.
-    // hono's `matchResult: Result<[unknown, RouterRoute]> = [[]]` is the pair:
+    // `matchResult: Result<[unknown, Route]> = [[]]` is the pair:
     // the annotation states `unknown` where the only caller passes `H`, so the
-    // slot carries the caller's `Result<[H, RouterRoute]>` and a literal
+    // slot carries the caller's `Result<[H, Route]>` and a literal
     // resolved against the annotation instead builds the one shape the slot
     // cannot hold. Asked here rather than left to a conversion for the reason
     // the arity rule below states -- reconciling the two rebuilds arrays.
@@ -1195,7 +1226,7 @@ export const createLayoutTypeResolver = (
       const declaration = node.parent
       if (!ts.isVariableDeclaration(declaration) || declaration.initializer !== node || declaration.type !== undefined) return null
       const inferred = checker.getTypeAtLocation(declaration)
-      if ((inferred.flags & ts.TypeFlags.Object) === 0 || isVacuousObjectType(declaration, inferred)) return null
+      if ((inferred.flags & ts.TypeFlags.Object) === 0 || isVacuousObjectType(inferred)) return null
       return inferred
     })()
     // A literal written against a pattern whose type the checker merely
@@ -1216,9 +1247,9 @@ export const createLayoutTypeResolver = (
     if (isProxyHandlerLiteral(checker, node)) return own
     const contextual = narrowedSlot ?? narrowedCallSlot ?? checkerContext ?? inferredDeclarationContext
     // An intersection of plain object shapes is one object shape to the
-    // language -- mongodb's `Filter<TSchema>`, a mapped record `&` the
-    // index-signed `RootFilterOperators`, which `collection.deleteOne({ _id })`
-    // fills. The literal is laid out as the slot it fills, exactly as against
+    // language -- a `Filter<T>`, a mapped record `&` an index-signed
+    // operator record, which `store.remove({ _id })` fills. The literal is laid
+    // out as the slot it fills, exactly as against
     // an interface; otherwise it builds a record no conversion takes into the
     // slot's record-with-index. Callable, class-bearing or primitive-branded
     // intersections keep the literal's own layout.
@@ -1239,9 +1270,9 @@ export const createLayoutTypeResolver = (
       // A union can contain several object shapes while this literal satisfies
       // exactly one of them. TypeScript has already checked that relation; ask
       // its assignability rather than rebuilding a key discriminator here.
-      // BSON's legacy/modern EJSON records are the concrete case: both arms
-      // are objects, while `$binary: string` and `$binary: { ... }` each fit
-      // only one. Allocating that declared arm directly preserves the fresh
+      // A union of a legacy and a modern record encoding is the concrete case:
+      // both arms are objects, while `$binary: string` and `$binary: { ... }`
+      // each fit only one. Allocating that declared arm directly preserves the fresh
       // object's identity and avoids a later shared-record reconstruction.
       const assignable = contextual.types.filter(
         (member) => (member.flags & ts.TypeFlags.Object) !== 0 && checker.isTypeAssignableTo(own, member)
@@ -1278,7 +1309,8 @@ export const createLayoutTypeResolver = (
       // `checker.getTypeAtLocation` directly, NOT a recursive `layoutTypeAt`
       // call: this closure is already inside `layoutTypeAt`'s own body, and a
       // spread source that is itself an object/array literal with a
-      // deeply-generic contextual type (hono's router chains, measured) can
+      // deeply-generic contextual type (chained generic builder APIs,
+      // measured) can
       // drive the checker's own resolution deep enough that a second,
       // mutually-recursive entry into this function overflows the call
       // stack. The raw checker type is exactly what `own` above is already
@@ -1304,11 +1336,11 @@ export const createLayoutTypeResolver = (
     if (candidate === null && contextual.isUnion() && ts.isArrayLiteralExpression(node)) {
       // A TUPLE LITERAL PICKS ITS ARM BY LENGTH, which is the language's own
       // rule and not a preference invented here: `[[]]` against
-      // `[[T, ParamIndexMap][], ParamStash] | [[T, Params][]]` can only be
+      // `[[T, IndexMap][], Stash] | [[T, Params][]]` can only be
       // the second, because the first states two elements and the literal
       // writes one. `soleShapedArm`'s refusal above is deliberately
       // conservative about picking between arms of a union and has no notion
-      // of arity to refuse on, so hono's `Result<T>` fell back to the
+      // of arity to refuse on, so such a `Result<T>` fell back to the
       // literal's own `[never[]]` -- a carrier the declared parameter cannot
       // hold, and the conversion that would fix it up rebuilds two arrays,
       // which is a COPY of an array the caller may still hold.
@@ -1319,8 +1351,8 @@ export const createLayoutTypeResolver = (
         (member) => checker.isTupleType(member) && checker.getTypeArguments(member as ts.TypeReference).length === node.elements.length
       )
       candidate = fitted.length === 1 ? (fitted[0] ?? null) : null
-      // AN ARRAY LITERAL IS AN ARRAY: against `T | readonly T[]` (mongodb's
-      // `writeErrors: OneOrMore<WriteError> = []`, src/bulk/common.ts:606)
+      // AN ARRAY LITERAL IS AN ARRAY: against `T | readonly T[]` (a field
+      // `errors: OneOrMore<ErrorRecord> = []`)
       // the only arm the literal can be is the array one, whatever object
       // arms sit beside it. `soleShapedArm` counts the class arm too and
       // refused, so the empty literal kept its own `never[]`, was boxed as
@@ -1340,9 +1372,9 @@ export const createLayoutTypeResolver = (
       )
     )
       return own
-    if (isVacuousObjectType(node, candidate)) return own
-    // A contextual type is not an assignment target: `sd || { maxWireVersion }`
-    // (mongodb topology.ts) types the literal by the LEFT operand's class,
+    if (isVacuousObjectType(candidate)) return own
+    // A contextual type is not an assignment target: `existing || { version }`
+    // types the literal by the LEFT operand's class,
     // which the literal does not satisfy -- it has none of the class's
     // required members or methods. A class layout is adopted only by a literal
     // the checker accepts AS that class; anything else is its own object.
@@ -1353,7 +1385,7 @@ export const createLayoutTypeResolver = (
     )
       return own
     // A type assertion is not a statement about storage either: `[...names,
-    // ...symbols] as string[]` (mongodb encrypter.ts) contextually types the
+    // ...symbols] as string[]` contextually types the
     // literal by the NARROWER asserted type, which its own elements do not
     // satisfy. The literal is built as what it holds; the assertion is a
     // conversion of the built value.
@@ -1420,8 +1452,8 @@ export const createLayoutTypeResolver = (
    *
    * An index signature is a statement about what a READ of an unnamed key
    * yields, not about how a NAMED member the literal itself declares is
-   * physically stored. `@hono/node-server`'s `request.ts` types its whole
-   * prototype object `Record<string | symbol, any>` -- an escape hatch for
+   * physically stored. A module that types a whole prototype object
+   * `Record<string | symbol, any>` -- an escape hatch for
    * attaching private state under keys the declared type cannot enumerate --
    * and then declares `get method() { return this[methodKey] }` as a real
    * accessor. `Record<K, V>` instantiated over a non-literal key (`string |
@@ -1440,7 +1472,7 @@ export const createLayoutTypeResolver = (
    * ACCESSOR. Ordinary data needs no named slot to be installed into a
    * dictionary -- `CreateDataPropertyOrThrow` writes through the index the
    * same way regardless, which is exactly why `isVacuousObjectType` above
-   * deliberately treats an index-signature type as non-vacuous (voice-notes'
+   * deliberately treats an index-signature type as non-vacuous (a
    * `Record<string, string>` header literal). And a candidate that DOES name
    * the key, even as plain data (`interface C { get next(): T }`, spelled as
    * data on purpose -- see `typed-custom-iterator-close.ts`), is untouched:
@@ -1494,7 +1526,7 @@ export const createLayoutTypeResolver = (
    * strand the body). Sharing the predicates rather than restating them is
    * what keeps the cell and the value one answer: an annotation the literal
    * declined, left standing on the cell, IS the store the literal rule exists
-   * to avoid -- `@hono/node-server`'s `requestPrototype` built a
+   * to avoid -- such a prototype object built a
    * `native-record-ref` while its `Record<string | symbol, any>` cell
    * declared a `record-with-index`, and there is no conversion between them.
    */
@@ -1521,8 +1553,8 @@ export const createLayoutTypeResolver = (
    * `structural-receiver.ts`'s `implicitReceiverOf` takes from
    * `layoutTypeAt(literal)`, and the read of it inside the body. Leaving the
    * read on the refused annotation is that split, and `ir/verify.ts` names it
-   * exactly -- `@hono/node-server`'s `get method() { return this[methodKey] }`
-   * reported nine bodies whose `this` operand expected the annotation's
+   * exactly -- `get method() { return this[methodKey] }` and its siblings
+   * reported bodies whose `this` operand expected the annotation's
    * `record-with-index` while its definition selected the literal's own
    * `native-record-ref`. The layout is the authority for what the value
    * physically is, so it answers the read too.
@@ -1585,7 +1617,7 @@ export const createLayoutTypeResolver = (
   /**
    * A UNION NARROWED BY A NARROWING OF ONE OF ITS MEMBERS.
    *
-   * `arg: ResponseInit | Response`, and hono's `#newResponse` writes
+   * `arg: ResponseInit | Response`, and a method writes
    *
    *   const argHeaders = arg.headers instanceof Headers ? arg.headers : new Headers( arg.headers )
    *
@@ -1637,6 +1669,10 @@ export const createLayoutTypeResolver = (
   // answer here cannot cross binding-fixpoint rounds or checker lifetimes.
   const answers = new WeakMap<ts.Node, ts.Type>()
   const layoutTypeAt = (node: ts.Node): ts.Type => {
+    // The frontend seals intrinsic obligations after its host census. A
+    // pre-seal `any` memo cannot outrank a later authenticated native alias.
+    const nativeClassAlias = nativeClassAliasTypeAt?.(node)
+    if (nativeClassAlias) return nativeClassAlias
     const known = answers.get(node)
     if (known) return known
     const answer = layoutTypeOf(node)

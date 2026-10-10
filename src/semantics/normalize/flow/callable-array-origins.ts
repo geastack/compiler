@@ -62,9 +62,9 @@ export interface CallableArrayOriginAuthority extends ClosedCallableAuthority {
  * cells, parameters and operators that carry it. Vacuous origins (`null`,
  * `undefined`) name no body and refuse nothing.
  *
- * The shape this exists for is three's `WebGLRenderList.sort`:
+ * The shape this exists for is a list's `sort` taking an optional comparator:
  * `opaque.sort( customOpaqueSort || painterSortStable )`, reached from
- * `currentRenderList.sort( _opaqueSort, ... )` where the renderer's `let
+ * `currentRenderList.sort( _opaqueSort, ... )` where the owning module's `let
  * _opaqueSort = null` is written only by `this.setOpaqueSort = function (
  * method ) { _opaqueSort = method }`. With `setOpaqueSort`'s caller set closed
  * and empty, `method` holds nothing, `_opaqueSort` holds only `null`, and the
@@ -133,7 +133,7 @@ const closedCallableResolver = (
 /**
  * The complete set of source function bodies `expression` can denote, or
  * null when it is not closed. Empty means the expression only ever holds
- * `null`/`undefined`. See `closedCallableResolver` for the three.js shape.
+ * `null`/`undefined`. See `closedCallableResolver` for the optional-comparator shape.
  */
 export const closedCallableTargetsOf = (
   checker: ts.TypeChecker,

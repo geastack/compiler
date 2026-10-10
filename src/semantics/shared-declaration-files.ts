@@ -4,7 +4,12 @@ import ts from 'typescript'
 
 /**
  * A process-wide cache of the PARSED declaration files every program re-reads:
- * TypeScript's own `lib.*.d.ts` and `node_modules/@types/**`.
+ * TypeScript's own `lib.*.d.ts` and every declaration file an installed
+ * package ships under `node_modules/` -- `@types/**` and the packages those
+ * reach (`@types/node` alone pulls in some seventy files of `undici-types`,
+ * which were re-parsed and re-bound by every compile while only `@types` was
+ * shared). A symlinked package resolves to its real path outside
+ * `node_modules/` and is read per compile like any other source.
  *
  * WHY. A compile reads the same few hundred declaration files every time --
  * `lib.dom.d.ts` alone is over a megabyte -- and a process that compiles more
@@ -52,7 +57,7 @@ interface SharedDeclaration {
 
 const shared = new Map<string, SharedDeclaration>()
 
-const typesDirectoryMarker = '/node_modules/@types/'
+const packagesDirectoryMarker = '/node_modules/'
 
 const isDeclarationFileName = (fileName: string): boolean => /\.d\.[cm]?ts$/.test(fileName)
 
@@ -69,7 +74,7 @@ export const sharedDeclarationReader = (
   const isShared = (fileName: string): boolean => {
     if (!isDeclarationFileName(fileName)) return false
     const absolute = resolve(fileName)
-    if (absolute.split('\\').join('/').includes(typesDirectoryMarker)) return true
+    if (absolute.split('\\').join('/').includes(packagesDirectoryMarker)) return true
     return dirname(absolute) === libDirectory && basename(absolute).startsWith('lib.')
   }
   return (fileName, languageVersionOrOptions, onError, shouldCreateNewSourceFile) => {

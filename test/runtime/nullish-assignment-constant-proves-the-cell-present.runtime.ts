@@ -1,7 +1,7 @@
 //! expect: 8 4 5 0
 //! emitted-lacks: presentOrThrow
 
-// bson's `parseToElements(bytes, startOffset: number | null = 0)` opens with
+// A binary-document parser's `parseToElements(bytes, startOffset: number | null = 0)` opens with
 // `startOffset ??= 0`. The fallback `0` is minted straight into the cell's
 // `number | null` carrier, so no `convert` from a bare number stands between
 // the literal and the write -- and every later read of `startOffset` was

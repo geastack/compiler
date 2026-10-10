@@ -100,11 +100,11 @@ const receiverBoundedPropertyKeyOf = (key: Representation): boolean => {
  * one -- `{ type: 0, nameOffset: 1, nameLength: 2, offset: 3, length: 4 } as
  * const` gives `Offset.nameLength` the literal type `2`, not the wide `number`
  * domain, so `element[Offset.nameLength]` names ONE fixed position as
- * certainly as `options[LEGAL_TLS_SOCKET_OPTIONS[i]]` names one fixed string
+ * certainly as `options[LEGAL_OPTIONS[i]]` names one fixed string
  * field. A record's own positional fields are already keyed by the decimal
  * spelling of their position (`derive.ts`'s `deriveTuple`, `String(position)`),
- * which is exactly a numeric literal shape's own `text` -- bson's
- * `BSONElementOffset`-style lookup table over a homogeneous tuple is the
+ * which is exactly a numeric literal shape's own `text` -- an
+ * enum-offset lookup table over a homogeneous tuple is the
  * motivating case this widening exists for. Originally string-only (the
  * doc comment this replaced said so): a specific number literal was excluded
  * for no reason that still holds once tuples can be data records, and falling
@@ -136,6 +136,17 @@ const literalKeyTextsOf = (
   return [...new Set(texts)].sort()
 }
 
+/** A specialized key type can narrow the sealed source key domain before its literal identity is erased by native storage. */
+export const computedPropertyKeyTextsOf = (graph: SemanticGraph, operation: PropertyOperation): readonly string[] | undefined => {
+  if (!operation.keyIsComputed) return operation.provenKeyTexts
+  const key = operandOf(operation, 'key')
+  const literal = key === undefined ? null : literalKeyTextsOf(graph, key.type)
+  if (literal === null) return operation.provenKeyTexts
+  if (operation.provenKeyTexts === undefined) return literal
+  const proven = new Set(operation.provenKeyTexts)
+  return literal.filter((text) => proven.has(text))
+}
+
 /**
  * Publishes a candidate fixed-field computed-read recipe from the
  * semantic/representation contracts. A later whole-program reflection census
@@ -164,7 +175,7 @@ export const typedComputedReadRecipeOf = (
   // the bare payload, so by the time this recipe is actually rendered the
   // receiver in hand is always the peeled record, never the optional. Peeling
   // here too, rather than refusing, is what lets `array[i]![Offset.field]` --
-  // bson's `BSONElement` read through `this.elements[index]` -- reach the same
+  // a tuple element read through `this.elements[index]` -- reach the same
   // switch a directly-typed parameter does; `finalizeTypedComputedReads`
   // peels identically before comparing, so the two stay in agreement.
   const peeledReceiver = receiver.kind === 'optional' ? receiver.payload : receiver
@@ -210,9 +221,9 @@ export const typedComputedReadRecipeOf = (
 /**
  * The same sealed read over a layout with OPTIONAL members -- an interface's
  * shared layout (`native-record-ref`) or a record -- bounded only by the key's
- * own literal set: mongodb's `parseSslOptions` copies `options[name]` for each
- * `name` of the `as const` tuple `LEGAL_TLS_SOCKET_OPTIONS`, every one a
- * declared, mostly optional, member of `ConnectionOptions`.
+ * own literal set: a parser copying `options[name]` for each `name` of an
+ * `as const` tuple `LEGAL_OPTIONS`, every one a declared, mostly optional,
+ * member of the options interface.
  *
  * Each arm is the constant-key read of that member, spelled once per key:
  * the member's own storage converted by its own census node into the read's
@@ -238,7 +249,7 @@ const declaredMemberReadRecipeOf = (
 ): TypedComputedReadRecipe | null => {
   if (receiver.kind === 'native-record-ref' && (receiver.native !== null || receiver.ownership !== 'shared-refcount')) return null
   // Inside a monomorphized copy the key's literal set is the COPY's type
-  // argument, not a bound on the run-time key: hono's `cached = <Key extends
+  // argument, not a bound on the run-time key: `cached = <Key extends
   // keyof Readers>(key: Key) => ...` stores one copy in a callable field that
   // every caller invokes with its own key, so the `'text'` copy is asked for
   // `'count'`. The dynamic read answers that; a switch closed over `'text'`

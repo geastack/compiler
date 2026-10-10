@@ -1,6 +1,6 @@
 // A live instance re-classed onto a field-less subclass that a mixin factory
 // builds from the instance's own `.constructor` -- the shape
-// mongodb-connection-string-url's ConnectionString gives its searchParams.
+// a connection-string URL library's ConnectionString gives its searchParams.
 //
 // After the re-parent, calls through the base-typed field must reach the
 // subclass overrides (both the one that calls `super` and the one that does

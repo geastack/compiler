@@ -1,5 +1,5 @@
 // `new NS.Cls(...)` through a namespace import of a class with overloaded
-// constructors -- mongodb's `new BSON.Long(lo, hi)` in cmap/commands.ts. The
+// constructors -- a database client's `new Wire.Long(lo, hi)` in its command builder. The
 // namespace's member is the class's constructor object itself, carried by its
 // one construct convention, not re-derived from its first overload.
 import * as NS from './_overloaded-constructor-module'

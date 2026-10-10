@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 // `records.ts`'s sparse `gea::RecordTail<Tail>` layout exists so an object
 // that never touches its non-inline optional fields never pays for the block
 // that would hold them -- see the runtime header's `RecordTail` comment and
@@ -58,7 +59,7 @@ execFileSync(
   'clang++',
   [
     '-std=c++20',
-    '-O1',
+    ...nativeOptimization('allocation'),
     '-DGEA_PROFILE_ALLOCATIONS=1',
     '-fsanitize=address,undefined',
     `-I${resolve(root, 'src/targets/cpp/runtime')}`,

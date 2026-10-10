@@ -1,9 +1,9 @@
 // @ts-nocheck
 //! expect: true 1 2
-// WebGLRenderer's own shape: a plain JS constructor function keeps a
+// A 3D scene-graph library's renderer has this shape: a plain JS constructor function keeps a
 // `const _this = this` alias and installs most of its DATA slots through
 // that alias instead of the literal keyword -- often from inside a nested
-// helper (`initGLContext`), which is exactly how `WebGLRenderer.js` installs
+// helper (`initGLContext`), which is exactly how that renderer installs
 // `shadowMap`, `capabilities`, `extensions`, `properties`, `renderLists`,
 // `state` and `info`. A member-declaration authority that only recognises
 // the bare `this` keyword sees no member at all for a key written this way,

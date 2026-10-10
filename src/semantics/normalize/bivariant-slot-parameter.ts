@@ -5,11 +5,11 @@ import ts from 'typescript'
  * STATES a type the slot's own parameter is not assignable to.
  *
  * TypeScript accepts the pair only through method-parameter bivariance (or an
- * assertion's comparability): mongodb's `OPTIONS` table types every
- * `transform` as `(args: { name; options: MongoOptions; values: unknown[] })
- * => unknown`, and `readPreferenceTags` writes its own
+ * assertion's comparability): a table of option descriptors may type every
+ * `transform` as `(args: { name; options: Options; values: unknown[] })
+ * => unknown`, while one entry writes its own
  * `transform({ values, options }: { values: Array<string | Record<string,
- * string>[]>; options: MongoClientOptions })`. Every call reaches the method
+ * string>[]>; options: ClientOptions })`. Every call reaches the method
  * through the slot, so the arguments that physically arrive are the slot's:
  * `values` IS the caller's `unknown[]`. The stated type is a claim about those
  * values, never a second storage for them.
@@ -190,7 +190,7 @@ const aliasVisiting = new WeakSet<ts.Node>()
  * Every value that IS such a slot array by identity, inside the function that
  * receives it: a read of the bound name, an assertion or a parenthesis over
  * one, a `?:`/`||`/`??` choosing it, a `const` initialized with one and a read
- * of that `const`. mongodb's `readPreferenceTags` is the shape:
+ * of that `const`. Such a table entry is the shape:
  *
  *   const tags: Array<string | Record<string, string>> =
  *     Array.isArray(values[0]) ? values[0] : (values as Array<string>)
@@ -313,7 +313,7 @@ const elementTypes = new WeakMap<ts.TypeChecker, WeakMap<ts.Node, ts.Type | null
 /**
  * An ELEMENT of such an array, where the checker reads it as the stated
  * element: the element's box, not the stated type. `Array.isArray(values[0])`
- * and `for (const tag of tags)` over mongodb's `values` read what the caller
+ * and `for (const tag of tags)` over such a `values` read what the caller
  * put there -- an array built as `unknown[]`, a string -- and a stated element
  * type the box does not hold is exactly the claim TypeScript never checked.
  * Classifying the box into the stated union at the read would abort on a

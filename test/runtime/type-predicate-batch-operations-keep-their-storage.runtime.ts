@@ -1,4 +1,4 @@
-// mongodb's bulk writer: every batch is allocated as `Batch<Document>`, holds
+// A database client's bulk writer: every batch is allocated as `Batch<Document>`, holds
 // update statements pushed as documents, and a type predicate re-reads the
 // same batch as `Batch<UpdateStatement>`. No `Batch<UpdateStatement>` is ever
 // allocated, so the narrowed read is the stored array under another name.
@@ -28,7 +28,7 @@ class Batch<T = Doc> {
   constructor(readonly batchType: BatchType) {}
 }
 
-// mongodb's own shape: a declared field written from the parameter, a
+// The client's own shape: a declared field written from the parameter, a
 // subclass filling it with a fresh one-statement array through `super`, and
 // the class value handed to a helper that stamps it (`defineAspects`).
 class UpdateOperation {

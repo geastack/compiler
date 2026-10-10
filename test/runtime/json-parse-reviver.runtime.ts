@@ -2,7 +2,7 @@
 // reviver sees every property bottom-up (children before their holder, the
 // root last under the key ""), an `undefined` answer DELETES the property
 // (an array keeps its length and gets a hole), and its `this` is the holder.
-// bson's `EJSON.parse` is the shape: a reviver that maps `{ $numberInt: "7" }`
+// An extended-JSON parser is the shape: a reviver that maps `{ $numberInt: "7" }`
 // wrappers to values and passes everything else through, whose result is the
 // `any` the program then reads.
 const seen: string[] = []

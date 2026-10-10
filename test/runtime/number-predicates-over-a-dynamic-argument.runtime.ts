@@ -4,15 +4,15 @@
 //! expect: safe:true,false
 //! expect: retry:0
 
-// mongodb's error.ts: `const code = error.result.writeConcernError.code ??
+// A database client's error module: `const code = error.result.writeConcernError.code ??
 // Number(error.code)` reads `code` off a `Document` (`any`), so `code` is a
 // dynamic value and `Number.isNaN(code)` receives the box. ECMA-262 21.1.2.x:
 // each predicate answers `false` for anything that is not already a Number
 // -- a numeric string included -- and asks its question of a Number.
 
-type BsonDocument = { [key: string]: any }
+type WireDocument = { [key: string]: any }
 
-function retryCode(result: BsonDocument, fallback: string): number {
+function retryCode(result: WireDocument, fallback: string): number {
   const code = result.writeConcernError.code ?? Number(fallback)
   return Number.isNaN(code) ? 0 : code
 }

@@ -15,6 +15,7 @@ import { createFrontendTiming, type FrontendTiming } from './frontend-timing.js'
 import { isUncheckedGuardCopyArtifact, uncheckedGuardArgumentCopies } from './unchecked-guard-argument-copies.js'
 import { knownCallerPredicateParameters } from './known-caller-predicate-parameters.js'
 import { uncheckedWriteMemberDeclarations } from './unchecked-write-member-declarations.js'
+import type { SourceTransform, SourceTransformProtocol } from './source-transform-protocol.js'
 
 /**
  * The TypeScript program host.
@@ -55,14 +56,13 @@ export interface ProgramInput {
    * Packages the build installs for their TYPES only: the checker reads their
    * declarations, but the binary carries none of their code. An application's
    * devDependencies are exactly this -- `npm install --omit=dev`, the install
-   * a deployed Node server runs from, leaves them out -- and the MongoDB
-   * driver is the case that needs it: its typed source imports the TYPES of
-   * its optional peers (`kerberos`, `gcp-metadata`, `mongodb-client-encryption`),
-   * so the app installs them as devDependencies, and loads their code with a
-   * guarded `require` that a production Node answers with MODULE_NOT_FOUND.
-   * Compiling that `require` against the dev install instead pulled
-   * gcp-metadata's whole HTTP stack (gaxios, node-fetch, ...) into a program
-   * that never runs it. A runtime `require` of one of these names is therefore
+   * a deployed Node server runs from, leaves them out -- and a package with
+   * optional peers is the case that needs it: its typed source imports the
+   * TYPES of those peers, so the app installs them as devDependencies, and
+   * loads their code with a guarded `require` that a production Node answers
+   * with MODULE_NOT_FOUND. Compiling that `require` against the dev install
+   * instead pulls the peer's whole dependency stack into a program that never
+   * runs it. A runtime `require` of one of these names is therefore
    * an absent package (`absentRequirePackageOf`) and never a module edge.
    */
   readonly typesOnlyPackages?: ReadonlySet<string>
@@ -125,11 +125,7 @@ export interface ProgramInput {
    * become ordinary TypeScript before checking, not after. Empty is the normal
    * case and costs nothing.
    */
-  readonly sourceTransforms?: readonly ((input: {
-    readonly fileName: string
-    readonly text: string
-    readonly declarationFileName?: string
-  }) => string | null)[]
+  readonly sourceTransforms?: readonly SourceTransform[]
 }
 
 export interface CompiledProgram {
@@ -171,6 +167,7 @@ export interface CompiledProgram {
   readonly diagnostics: readonly ts.Diagnostic[]
   /** Exact stale package-source directives blanked before the final checker pass. */
   readonly sourcePreparations: readonly DiagnosticSourcePreparationAudit[]
+  readonly sourceTransformProtocols?: ReadonlyMap<ts.SourceFile, readonly SourceTransformProtocol[]>
 }
 
 export const defaultCompilerOptions: ts.CompilerOptions = Object.freeze({
@@ -240,8 +237,8 @@ const fixedOptions: ts.CompilerOptions = { noEmit: true }
  * off, every resolved `.js` module is reported as "could not find a declaration
  * file ... implicitly has an `any` type" and the module is not compiled at all.
  * That is how a staged project -- which no author wrote, and which therefore
- * says nothing about vendor JavaScript -- silently removed `three`'s 388 real
- * source modules from every application that imports them.
+ * says nothing about vendor JavaScript -- silently removed a JavaScript
+ * package's real source modules from every application that imports them.
  *
  * Carried, never invented: the values are the caller's own
  * (`frontend.ts` sets them from `javaScriptSources`), so a compilation that
@@ -338,7 +335,7 @@ const functionBodyOf = (node: ts.SignatureDeclaration): ts.Node | undefined => {
  * so it has to be tested for every bit, not for any. Tested with `!== 0` it
  * matched every plain `const`, whose own flag is the `Const` bit inside it,
  * and so declared a top-level await in essentially every script file: it
- * appended `export {}` to node-compat's `runtime/node/globals.ts`, turning a
+ * appended `export {}` to a host's global-declaring script, turning a
  * deliberate SCRIPT into a module and deleting `Headers`/`Request`/`Response`
  * from the global scope every library file resolves them through. `tsc` on
  * the same project reported nothing, because the project is fine; only this
@@ -453,8 +450,9 @@ const statedSourceSpecifiers = (stated: ReadonlyMap<string, ReadonlyMap<string, 
  * the caller's `moduleResolution` table.  TypeScript nevertheless loads an
  * ambient `declare module "node:events"` before the source module a project
  * maps that spelling to, unless the declaration block is removed below.  That
- * splits the program in two: emission evaluates node-compat's `events.ts`,
- * while the checker gives values the unrelated `@types/node` EventEmitter.
+ * splits the program in two: emission evaluates the project's own mapped
+ * event-emitter module, while the checker gives values the unrelated
+ * ambient `@types/node` EventEmitter.
  *
  * Only non-pattern keys participate.  A `*` key describes an open family and
  * cannot prove one particular ambient module is shadowed; an exact key has a
@@ -486,23 +484,21 @@ const pathMappedSourceSpecifiers = (options: ts.CompilerOptions, host: ts.Module
  *
  * TypeScript resolves a non-relative specifier against ambient module
  * declarations BEFORE it resolves files, so a single
- * `declare module 'troika-three-text' { ... }` anywhere in the program decides
+ * `declare module 'some-package' { ... }` anywhere in the program decides
  * what the CHECKER thinks that import is -- while the emitter compiles the
  * module the caller's own resolution named. Two authorities for one specifier,
  * and the checker's loses every fact the real module states.
  *
- * Measured on the three.js app: its `src/troika-shims.d.ts` declares
- * `export class Text extends Object3D` for the web build (where the npm package
- * ships no types), while the native module graph resolves the same specifier to
- * `native-webgl-angle/src/troika-three-text.ts` -- a real class the program
- * compiles. Two things went wrong at once, both invisible: the ambient `Text`
- * re-introduced the very name the real shim renames itself to avoid (gea maps
- * the DOM `Text` onto `NodeHandle`, so the HUD's text objects were carried as
- * DOM nodes), and the ambient class's `extends Object3D` resolved -- from a
- * `.d.ts`, whose own imports the caller states nothing about -- to
- * `@types/three`, binding `Vector3`/`Euler`/`Quaternion` as carrier-less host
- * protocols. `native-boundary:Vector3@1`, 26 rows, all of them
- * `<text>.position.set(...)`.
+ * The shape: an application's shim `.d.ts` declares
+ * `export class Text extends Node` for a build where the npm package ships no
+ * types, while the native module graph resolves the same specifier to a real
+ * source module the program compiles. Two things go wrong at once, both
+ * invisible: the ambient `Text` re-introduces a name the real module may
+ * rename itself to avoid (gea maps the DOM `Text` onto `NodeHandle`, so the
+ * objects are carried as DOM nodes), and the ambient class's `extends Node`
+ * resolves -- from a `.d.ts`, whose own imports the caller states nothing
+ * about -- to a separate type package, binding its classes as carrier-less
+ * host protocols (`native-boundary:<Class>@1` rows at every member use).
  *
  * The caller's stated resolution wins, because it is the module the program
  * actually compiles and emits. The block is blanked rather than cut so every
@@ -520,9 +516,9 @@ const pathMappedSourceSpecifiers = (options: ts.CompilerOptions, host: ts.Module
  * there is nothing here to protect the program from. Blanking one deletes a
  * declaration the application made about the very module this compilation
  * resolved, and a path-mapped framework is exactly where an app states one:
- * `notes-jsx`'s `env.d.ts` augments `@geastack/core` with the macOS shell's
- * own JSX tags, and with the block blanked every `<glass-pane>` in the app was
- * reported as not existing on `JSX.IntrinsicElements` -- an error about a
+ * an application's `env.d.ts` augments `@geastack/core` with a host shell's
+ * own JSX tags, and with the block blanked every such custom tag in the app
+ * was reported as not existing on `JSX.IntrinsicElements` -- an error about a
  * declaration this function had removed.
  */
 const withoutShadowedAmbientModules = (
@@ -547,7 +543,46 @@ const withoutShadowedAmbientModules = (
 }
 
 /** The text each file's source transforms last produced, with the inputs that produced it. */
-type TransformOutputs = Map<string, { readonly input: string; readonly declarationFileName: string | undefined; readonly output: string }>
+type TransformOutputs = Map<
+  string,
+  {
+    readonly input: string
+    readonly declarationFileName: string | undefined
+    readonly output: string
+    readonly protocols: readonly SourceTransformProtocol[]
+  }
+>
+
+/**
+ * The host's `fileExists`/`directoryExists`, each answered from the filesystem
+ * once per path for the life of this host.
+ *
+ * Module resolution asks the same paths over and over: every specifier walks
+ * the importer's ancestors for `node_modules`, and the type-reference, module
+ * and runtime-view resolvers each keep a separate cache, so one runtime test
+ * made 5,900 filesystem calls of which 4,200 repeated an earlier one -- 11% of
+ * a whole gate shard's CPU was `stat`. A host lives for one compile, and the
+ * compile writes nothing a probe could observe (package sources are prepared
+ * before it starts), so within it the answer cannot change. Nothing outlives
+ * the host: a later compile asks the filesystem again.
+ */
+const memoizeExistenceProbes = (host: ts.CompilerHost): void => {
+  const fileExists = host.fileExists.bind(host)
+  const files = new Map<string, boolean>()
+  host.fileExists = (fileName) => {
+    let exists = files.get(fileName)
+    if (exists === undefined) files.set(fileName, (exists = fileExists(fileName)))
+    return exists
+  }
+  const directoryExists = host.directoryExists?.bind(host)
+  if (directoryExists === undefined) return
+  const directories = new Map<string, boolean>()
+  host.directoryExists = (directoryName) => {
+    let exists = directories.get(directoryName)
+    if (exists === undefined) directories.set(directoryName, (exists = directoryExists(directoryName)))
+    return exists
+  }
+}
 
 const transformingHost = (
   input: ProgramInput,
@@ -561,6 +596,7 @@ const transformingHost = (
   const transforms = input.sourceTransforms ?? []
   const overlay = input.sourceOverlay
   const host = ts.createCompilerHost(options, true)
+  memoizeExistenceProbes(host)
   // Declaration files (`lib.*.d.ts`, `@types`) are parsed once per process; see `shared-declaration-files.ts`.
   const read = sharedDeclarationReader(host.getSourceFile.bind(host), options, host.getDefaultLibFileName(options))
   // An overlaid path must answer every question the filesystem would, not just
@@ -585,14 +621,22 @@ const transformingHost = (
   const stated = input.moduleResolution
   const shadowedSpecifiers = new Set([...(stated ? statedSourceSpecifiers(stated) : []), ...pathMappedSourceSpecifiers(options, host)])
   const resolver = createModuleResolver(host, options, input.declarationModules, input.packageSources)
+  // A host that resolves module literals itself gets no resolution cache from
+  // `ts.createProgram`, and so no package.json cache either: every source file
+  // re-read and re-parsed its package scope's manifest to decide its module
+  // format (one test read `@types/node/package.json` 71 times). The program
+  // only consults this cache's package.json table -- resolution stays ours --
+  // and it lives as long as the host, one compile.
+  const programCache = ts.createModuleResolutionCache(host.getCurrentDirectory(), (file) => host.getCanonicalFileName(file), options)
+  host.getModuleResolutionCache = () => programCache
   const declarations = new Map<string, string>()
   host.resolveModuleNameLiterals = (literals, containingFile, _redirected, compilerOptions, containingSource) => {
     const answers = stated?.get(resolve(containingFile))
     // TypeScript keeps ONE resolution per (specifier, mode) in a file and the
-    // last literal's answer wins, so `import { MongoClient } from 'mongodb'`
-    // followed by `import type { Document } from 'mongodb'` bound the VALUE
+    // last literal's answer wins, so `import { Client } from 'pkg'`
+    // followed by `import type { Document } from 'pkg'` bound the VALUE
     // import to the declaration file too: every class it named became a
-    // carrier-less host protocol (`native-boundary:MongoClient@1`). A specifier
+    // carrier-less host protocol (`native-boundary:Client@1`). A specifier
     // is type-only in a file only when every one of its literals there is.
     const modeOf = (literal: ts.StringLiteralLike): ts.ResolutionMode =>
       ts.getModeForUsageLocation(containingSource, literal, compilerOptions)
@@ -648,13 +692,19 @@ const transformingHost = (
     const remembered = transformed.get(fileName)
     if (remembered && remembered.input === original && remembered.declarationFileName === declarationFileName) text = remembered.output
     else {
+      const protocols: SourceTransformProtocol[] = []
       for (const [index, transform] of transforms.entries()) {
-        text = timing.measure(
-          `transform:${index}:${transform.name}`,
-          () => transform({ fileName, text, ...(declarationFileName ? { declarationFileName } : {}) }) ?? text
+        const output = timing.measure(`transform:${index}:${transform.name}`, () =>
+          transform({ fileName, text, ...(declarationFileName ? { declarationFileName } : {}) })
         )
+        if (typeof output === 'string') text = output
+        else if (output !== null) {
+          if (output.protocolVersion !== 1) throw new Error('source transform returned an unsupported intrinsic protocol version')
+          text = output.text
+          protocols.push(...output.protocols)
+        }
       }
-      transformed.set(fileName, { input: original, declarationFileName, output: text })
+      transformed.set(fileName, { input: original, declarationFileName, output: text, protocols })
     }
     const transformedFile =
       text === file.text ? file : ts.createSourceFile(fileName, text, languageVersionOrOptions, true, scriptKindOf(fileName))
@@ -1017,6 +1067,12 @@ export const createProgram = (input: ProgramInput): CompiledProgram => {
     sourceFiles,
     entryFiles: entryFilesOf(program, input.rootFileNames),
     sourcePreparations: preparation.audit,
+    sourceTransformProtocols: new Map(
+      sourceFiles.flatMap((file) => {
+        const protocols = transformOutputs.get(file.fileName)?.protocols
+        return protocols?.length ? [[file, protocols] as const] : []
+      })
+    ),
     // A program that does not typecheck has no well-defined semantics to port.
     // Collecting these here means the compiler can refuse before normalizing,
     // rather than normalizing a program the checker never validated.

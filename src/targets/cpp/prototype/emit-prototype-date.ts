@@ -1,3 +1,20 @@
+import { nativePrototypeMethodOf } from '../../../ir/native-prototype-calls.js'
+import {
+  cppDateType,
+  isDateCarrier,
+  dateGetters,
+  dateStringForms,
+  dateSetters,
+  datePrototypeMethods
+} from '../../../representation/prototype-domains.js'
+export {
+  cppDateType,
+  isDateCarrier,
+  dateGetters,
+  dateStringForms,
+  dateSetters,
+  datePrototypeMethods
+} from '../../../representation/prototype-domains.js'
 import type { CallOperation, ConstructOperation, IrOperand } from '../../../ir/model.js'
 import type { Representation } from '../../../representation/model.js'
 import type { IrValueId, StructuralTypeId } from '../../../identity/ids.js'
@@ -54,11 +71,8 @@ import { toStringText, toStringRefusal } from '../emit-tostring.js'
  * from the carrier's own `native` field, and `isDateCarrier` below recognizes
  * it again at every member access and construction.
  */
-export const cppDateType = 'gea::runtime::Date'
 
 /** Whether a carrier is a Date -- the `native-record-ref` whose stated native type is `gea::runtime::Date`. */
-export const isDateCarrier = (representation: Representation): representation is Extract<Representation, { kind: 'native-record-ref' }> =>
-  representation.kind === 'native-record-ref' && representation.native === cppDateType
 
 /**
  * A Date method's call text.
@@ -125,8 +139,8 @@ const recordToNumberText = (ctx: EmitContext, text: string, carrier: Representat
     const abi = field.value.kind === 'function-value-dispatch' || field.value.kind === 'function' ? field.value.abi : null
     if (abi === null) return null
     // ToPrimitive calls the method with NO arguments. A convention whose only
-    // formal is the rest slot (a body reading `arguments` -- test262's
-    // `arg-coercion-order.js` records them) receives an empty pack, spelled as
+    // formal is the rest slot (a body reading `arguments` -- a coercion-order
+    // check records them) receives an empty pack, spelled as
     // `virtual-methods.ts` spells an omitted rest: a fresh array of the slot's
     // own element carrier. Any positional formal is a frame this cannot fill.
     const rest = abi.restFrom === 0 && abi.parameters.length === 1 ? (abi.parameters[0] ?? null) : null
@@ -141,7 +155,13 @@ const recordToNumberText = (ctx: EmitContext, text: string, carrier: Representat
       ...(abi.receiver === null ? [] : [text]),
       ...(rest === null || rest.value.kind !== 'array-object' ? [] : [`gea::makeRef<gea::ArrayObject<${cppTypeOf(rest.value.element)}>>()`])
     ]
-    const call = `${text}->${cppRecordFieldName(method)}.call(${actuals.join(', ')})`
+    // A receiverless frame still runs with this record as its logical `this`
+    // (an ES5 `valueOf: function () { ... this ... }` is stored as an unbound
+    // method), exactly as `o.m()` invokes the same field.
+    const call =
+      abi.receiver === null
+        ? `${text}->${cppRecordFieldName(method)}.callWithReceiver(${['gea::NativeCallReceiver::object(' + text + ')', ...actuals].join(', ')})`
+        : `${text}->${cppRecordFieldName(method)}.call(${actuals.join(', ')})`
     // A method answering nothing is still CALLED -- for its effects, and for
     // the throw it may be -- and its result is ToNumber(undefined).
     if (abi.result.kind === 'void') return `(${call}, gea::host::detail::toNumberUndefined())`
@@ -208,8 +228,8 @@ const setterText =
       return `${receiverText}->${member}(${numbers.join(', ')})`
     }
     // The time value is read BEFORE any argument is coerced (each setter's
-    // step 3 `Let t be dateObject.[[DateValue]]` precedes its ToNumber steps;
-    // test262 `date-value-read-before-tonumber-when-date-is-{valid,invalid}.js`):
+    // step 3 `Let t be dateObject.[[DateValue]]` precedes its ToNumber steps,
+    // for a valid and an invalid date alike):
     // a `valueOf` that calls `setTime` on this very date is observed by the
     // coercion and forgotten by the setter, whose result derives from `t`. So
     // `t` is read first and put back before the member computes from it -- and
@@ -297,49 +317,6 @@ const toJsonText = (ctx: EmitContext, receiverText: string, args: readonly IrOpe
 }
 
 /** Every zero-argument getter, each named exactly as `gea::runtime::Date` spells it. */
-export const dateGetters: readonly string[] = [
-  'getTime',
-  'valueOf',
-  'getFullYear',
-  'getMonth',
-  'getDate',
-  'getDay',
-  'getHours',
-  'getMinutes',
-  'getSeconds',
-  'getMilliseconds',
-  'getTimezoneOffset',
-  'getUTCFullYear',
-  'getUTCMonth',
-  'getUTCDate',
-  'getUTCDay',
-  'getUTCHours',
-  'getUTCMinutes',
-  'getUTCSeconds',
-  'getUTCMilliseconds'
-]
-
-/** The zero-argument string forms. `toLocale*` are not here: they take arguments this backend refuses rather than ignores. */
-export const dateStringForms: readonly string[] = ['toISOString', 'toString', 'toDateString', 'toTimeString', 'toUTCString']
-
-/** Each setter, with the maximum number of arguments `lib.es5.d.ts` declares for it. */
-export const dateSetters: ReadonlyMap<string, number> = new Map([
-  ['setTime', 1],
-  ['setFullYear', 3],
-  ['setMonth', 2],
-  ['setDate', 1],
-  ['setHours', 4],
-  ['setMinutes', 3],
-  ['setSeconds', 2],
-  ['setMilliseconds', 1],
-  ['setUTCFullYear', 3],
-  ['setUTCMonth', 2],
-  ['setUTCDate', 1],
-  ['setUTCHours', 4],
-  ['setUTCMinutes', 3],
-  ['setUTCSeconds', 2],
-  ['setUTCMilliseconds', 1]
-])
 
 const dateMethods: ReadonlyMap<string, DateRenderer> = new Map<string, DateRenderer>([
   ...dateGetters.map((member): [string, DateRenderer] => [member, nullaryText]),
@@ -359,7 +336,6 @@ const dateMethods: ReadonlyMap<string, DateRenderer> = new Map<string, DateRende
  * call to be stated accurately, and refusing at the access would say "not
  * implemented" about something that is.
  */
-export const datePrototypeMethods: ReadonlySet<string> = new Set([...dateMethods.keys(), 'toJSON'])
 
 /**
  * `Date.prototype` members this backend states no rendering for, each with the
@@ -408,7 +384,7 @@ export const deferredDateMethodClaim = (
 ): PrototypeMethodRead | null => {
   if (!isDateCarrier(receiver.representation)) return null
   const staticKey = staticKeyTexts.get(key.value)
-  if (staticKey === undefined || !datePrototypeMethods.has(staticKey)) return null
+  if (staticKey === undefined || nativePrototypeMethodOf(receiver.representation, staticKey) !== 'date') return null
   return { receiverKind: 'date', member: staticKey, receiver: { kind: 'operand', operand: receiver }, receiverElement: null }
 }
 

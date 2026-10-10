@@ -1,4 +1,4 @@
-// The MongoDB driver's `updateOne(filter: Filter<TSchema>, ...)` hands its
+// A database client's `updateOne(filter: Filter<TSchema>, ...)` hands its
 // filter -- named query operators plus `[key: string]: any` -- to
 // `new UpdateOneOperation(ns, filter: Document, ...)`. A `Document` is an open
 // `any` document, so the filter reaches it as every own property it has: the
@@ -13,9 +13,9 @@ interface Filter {
   [key: string]: any
 }
 
-type BsonDocument = { [key: string]: any }
+type WireDocument = { [key: string]: any }
 
-function describe(filter: BsonDocument): string {
+function describe(filter: WireDocument): string {
   return Object.keys(filter)
     .map((key) => `${key}=${Array.isArray(filter[key]) ? `[${filter[key].length}]` : String(filter[key])}`)
     .join(',')

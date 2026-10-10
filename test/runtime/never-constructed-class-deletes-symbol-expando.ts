@@ -1,4 +1,4 @@
-// @hono/node-server's lightweight `Response` once its global override is
+// An HTTP server adapter's lightweight `Response` once its global override is
 // gone: the class is evaluated (its binding is read), so its members are
 // emitted, but nothing ever constructs it, so the callable flow proves every
 // method body never entered and the reflection census leaves the struct's

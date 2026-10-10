@@ -1,5 +1,6 @@
 import type { DeclarationId, FunctionId, IrValueId } from '../identity/ids.js'
 import type { Representation } from '../representation/model.js'
+import type { ConversionNodeId } from '../conversion/algebra.js'
 import { booleanConstantsOf, deadValuesOf, unreadValuesOf, type DeadValueRules } from './dead-values.js'
 import { deferrableValuesOf } from './deferral.js'
 import type { ForwardedBinding, ForwardingPolicy } from './deferral.js'
@@ -25,7 +26,7 @@ import {
 import { numericIntrinsicsOf, type NumericIntrinsic } from './numeric-intrinsics.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { sharedStringLayoutsOf, straightLineStringLayoutsOf, type SharedStringLayout } from './string-layout-reuse.js'
-import { stringLengthReuseOf } from './string-length-reuse.js'
+import { stableStringReceiversOf, stringLengthReuseOf } from './string-length-reuse.js'
 import { typeQueryResultsOf, type TypeQueryComparison } from './type-query-results.js'
 
 /**
@@ -250,9 +251,10 @@ export const irBodyCensusOf = (body: IrBody, policy: IrBodyCensusPolicy): IrBody
   const loopInvariantValues = loopInvariantValuesOf(body)
   const hoists = loopInvariantHoistsOf(body, policy.integerStorage.cellConstants, policy.copiedCapture)
   const hoistedStringLayouts = sharedStringLayoutsOf(body, hoists, dead)
+  const stringReceivers = stableStringReceiversOf(body, stableFormals, policy.stringQueryCell)
   const straightLineStringLayouts = straightLineStringLayoutsOf(
     body,
-    stableFormals,
+    stringReceivers,
     new Set([...dead, ...hoists.relocated]),
     Math.max(-1, ...[...hoistedStringLayouts.values()].map((layout) => layout.ordinal)) + 1
   )
@@ -270,7 +272,7 @@ export const irBodyCensusOf = (body: IrBody, policy: IrBodyCensusPolicy): IrBody
 
   const reusedStringLengths = stringLengthReuseOf(
     body,
-    stableFormals,
+    stringReceivers,
     new Set([...dead, ...hoists.relocated, ...straightLineStringLayouts.keys()])
   )
   // A reused result must be stored at its dominating definition, even if its
@@ -340,6 +342,8 @@ export interface BodyValueOrigins {
   readonly bindingReadDeclarations: ReadonlyMap<IrValueId, DeclarationId>
   /** The operand every `convert` result was converted FROM, so a consumer can walk a value's history through a carrier change. */
   readonly conversionSources: ReadonlyMap<IrValueId, IrOperand>
+  /** The certified recipe every `convert` result was produced by, beside its source above. */
+  readonly conversionUses: ReadonlyMap<IrValueId, ConversionNodeId>
   /**
    * The callee value behind every call's result -- which value it CALLED,
    * which is the same fact whichever of the printer's dispatch paths spells
@@ -516,6 +520,7 @@ export const bodyValueOriginsOf = (
   const propertyReadOrigins = new Map<IrValueId, GetOperation>()
   const bindingReadDeclarations = new Map<IrValueId, DeclarationId>()
   const conversionSources = new Map<IrValueId, IrOperand>()
+  const conversionUses = new Map<IrValueId, ConversionNodeId>()
   const callCallees = new Map<IrValueId, IrValueId>()
   const recordFieldSources = new Map<IrValueId, ReadonlyMap<string, IrOperand>>()
   const thunkValues = new Map<IrValueId, FunctionId>()
@@ -539,8 +544,8 @@ export const bodyValueOriginsOf = (
     // The object's latest note. Each note states the whole order through its
     // store, and nothing can look at a fresh object between two of its own
     // stores, so a later note makes the earlier one dead: a literal written
-    // out of layout order (the driver's ten-key BSON options) re-stated a
-    // growing prefix at every key, ten runtime calls where one says it all.
+    // out of layout order (a ten-key options literal) re-stated a growing
+    // prefix at every key, ten runtime calls where one says it all.
     const notedThrough = new Map<{ last: number; readonly keys: Set<string> }, IrOperation>()
     // A literal is built through its binding (`const o = {}; o.a = 1`): the
     // store's receiver is a `binding-read`, not the allocation. A cell that
@@ -615,8 +620,10 @@ export const bodyValueOriginsOf = (
       if (operation.kind === 'compute') computeOrigins.set(operation.result.id, operation)
       else if (operation.kind === 'get') propertyReadOrigins.set(operation.result.id, operation)
       else if (operation.kind === 'binding-read') bindingReadDeclarations.set(operation.result.id, operation.declaration)
-      else if (operation.kind === 'convert') conversionSources.set(operation.result.id, operation.source)
-      else if (operation.kind === 'constant') staticKeyTexts.set(operation.result.id, operation.text)
+      else if (operation.kind === 'convert') {
+        conversionSources.set(operation.result.id, operation.source)
+        conversionUses.set(operation.result.id, operation.conversionUse)
+      } else if (operation.kind === 'constant') staticKeyTexts.set(operation.result.id, operation.text)
       else if (operation.kind === 'call') {
         if (operation.result) callCallees.set(operation.result.id, operation.callee.value)
       } else if (operation.kind === 'allocate-callable') {
@@ -670,6 +677,7 @@ export const bodyValueOriginsOf = (
     staticKeyTexts,
     bindingReadDeclarations,
     conversionSources,
+    conversionUses,
     callCallees,
     calleeOnlyValues: new Set([...calleeReads].filter(([value, count]) => reads.get(value) === count).map(([value]) => value)),
     recordFieldSources,

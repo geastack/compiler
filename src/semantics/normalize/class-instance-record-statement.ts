@@ -4,7 +4,7 @@ import ts from 'typescript'
  * A class instance handed to a parameter the program states as a plain data
  * record.
  *
- * memory-pager's `Pager.prototype.updated(page)` is handed the `Page` a
+ * An ES5 `Pager.prototype.updated(page)` is handed the `Page` a
  * `function Page (i, buf) { this.offset = ...; this.buffer = buf; ... }`
  * constructor built, and writes `page.updated = true` so the caller's next
  * call returns early. State the parameter as the record it is read as --

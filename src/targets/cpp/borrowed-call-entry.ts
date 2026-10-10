@@ -48,9 +48,9 @@ export const stableBorrowEntryOf = (
   // No callee-side effect condition. An earlier revision refused the entry
   // to any body that calls a known callee the whole-program effect proof had
   // not shown pure -- which is nearly every body, since that proof admits
-  // only leaves made of field reads and arithmetic (bson's serializer, the
-  // driver's command path and the options plumbing all carried a by-value
-  // handle per level because of it). The hazard it guarded, a callee
+  // only leaves made of field reads and arithmetic (a recursive serializer, a
+  // request path and options plumbing all carried a by-value handle per
+  // level because of it). The hazard it guarded, a callee
   // writing the slot a reference formal is bound to, is ruled out on the
   // CALLER's side already: `stableBorrowEntryAccepts` binds a reference
   // formal only to a private cell, a parameter, a constant or `this` of the

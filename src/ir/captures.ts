@@ -500,7 +500,7 @@ const computeCaptureFacts = (
   // A boxed cell is allocated by the first write the owning frame renders,
   // and every later write fills the already-shared pointee. That is sound only
   // when the first write dominates every other one. A `let` first assigned on
-  // either arm of a branch (bson's deserializer: `let validationSetting:
+  // either arm of a branch (a deserializer's `let validationSetting:
   // boolean;` set from a boolean option on one arm, from the first key's value
   // on the other, then captured by `values.every(item => item ===
   // validationSetting)`) has no such write: whichever arm is rendered first

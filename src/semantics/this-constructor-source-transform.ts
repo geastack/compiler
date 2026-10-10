@@ -1,7 +1,7 @@
 import ts from 'typescript'
 
 /**
- * `new this.constructor(...)`, three's universal clone idiom
+ * `new this.constructor(...)`, a common JavaScript clone idiom
  * (`clone() { return new this.constructor().copy( this ); }`), rewritten so
  * the checker's OWN answer for the expression is TypeScript's `this` type,
  * instead of `any`.
@@ -15,18 +15,17 @@ import ts from 'typescript'
  * exactly the type that stays correct when a subclass inherits the method
  * without overriding it (`new this.constructor()` on a `Derived` produces a
  * `Derived`, not the `Base` the method is textually declared on) -- which is
- * exactly why three's classes lean on this idiom for `clone()`.
+ * exactly why class libraries lean on this idiom for `clone()`.
  *
  * TypeScript itself does not draw this conclusion: `Object`'s ambient
  * `constructor: Function` (`lib.es5.d.ts`) types every `.constructor` access
  * as the bare `Function` interface, which the checker special-cases as
  * callable/constructible with argument and result type `any` -- so
  * `new this.constructor()` types as `any`, and everything downstream of a
- * `clone()` call inherits it. Measured on the three.js app: 100 boxed carriers root at
- * that one `lib.es5.d.ts` declaration; the 34 clone-idiom call sites (three's
- * math/core classes) account for on the order of 80-90 boxed operations per
- * program once the `new`, the `.copy(this)` call, and the `return` around
- * each are all counted (`.scratch/fleet/w3/tmp/clone-census.mjs`).
+ * `clone()` call inherits it. In a library that uses the idiom throughout,
+ * every clone site boxes several operations -- the `new`, the `.copy(this)`
+ * call, and the `return` around each -- all rooted at that one
+ * `lib.es5.d.ts` declaration.
  *
  * ## Why a source transform, not a census rule
  *
@@ -81,7 +80,7 @@ import ts from 'typescript'
  * offsets are never invalidated by a later match's replacement -- the same
  * discipline `definePropertySourceTransform` documents for the same reason.
  * Only the callee (`this.constructor`) is replaced; the call's arguments and
- * everything chained onto the `new` expression (three's `.copy( this )`
+ * everything chained onto the `new` expression (a `.copy( this )`
  * included) are left exactly as written.
  */
 
@@ -171,8 +170,8 @@ const fileReassignsConstructor = (file: ts.SourceFile): boolean => {
  * the measurement looked clean, but the transform was writing source the
  * language does not have. JavaScript's own spelling for the same assertion is
  * a parenthesised JSDoc type cast, which `checkJs` reads with identical
- * meaning and no diagnostic. Every three.js file this transform touches is
- * `.js`; a TypeScript class reaches the same rule through `as`.
+ * meaning and no diagnostic. A JavaScript file this transform touches gets
+ * the JSDoc cast; a TypeScript class reaches the same rule through `as`.
  */
 const castTo = (fileName: string, expression: string, type: string): string =>
   fileName.endsWith('.ts') || fileName.endsWith('.tsx') ? `(${expression} as ${type})` : `(/** @type {${type}} */ (${expression}))`

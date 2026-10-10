@@ -1,6 +1,5 @@
-// The MongoDB driver's operations pick the response class they construct
-// per operation (src/operations/aggregate.ts:87, find.ts:107,
-// list_collections.ts:59):
+// A database client's operations pick the response class they construct
+// per operation (aggregate, find and list-collections all do):
 //
 //   override SERVER_COMMAND_RESPONSE_TYPE = CursorResponse
 //   ...

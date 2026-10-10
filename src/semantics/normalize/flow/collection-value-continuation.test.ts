@@ -155,7 +155,7 @@ const keyIsInert = (source: string, callText: string, index = 0): boolean => {
 }
 
 test('a closed native map only compares its key arguments by identity', () => {
-  // Three's `WebGLObjects.update`: the drawable itself keys the frame map.
+  // A per-frame update cache: the drawable itself keys the frame map.
   const source = `const updateMap = new WeakMap<object, number>(); const object = {};
     if (updateMap.get(object) !== 1) updateMap.set(object, 1); updateMap.has(object); updateMap.delete(object);`
   for (const call of ['updateMap.get(object)', 'updateMap.set(object, 1)', 'updateMap.has(object)', 'updateMap.delete(object)'])

@@ -1,7 +1,7 @@
 //! expect: indexes:_id_,name_1
 //! expect: unique:false,true
 
-// mongodb's collection.ts `indexInformation`: `const indexes:
+// A database client's collection `indexInformation`: `const indexes:
 // IndexDescriptionInfo[] = await this.listIndexes(options).toArray()`, where
 // `ListIndexesCursor extends AbstractCursor` (its `TSchema` defaults to
 // `any`), so `toArray()` answers `Promise<any[]>`. The binding the program

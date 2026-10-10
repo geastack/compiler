@@ -1,7 +1,7 @@
 // A generic class constructed at `any` AND at a concrete filling, whose
 // parameter reaches its storage only through members that hold no datum of
 // that filling: an indexed access that is the top either way, a stored
-// callable, and the class itself. hono's `Context<E>`: `#dispatch` builds
+// callable, and the class itself. An HTTP framework's `Context<E>`: `#dispatch` builds
 // `new Context<any>` while every user handler is compiled for
 // `Context<BlankEnv>`, and the program hands one to the other on every
 // request. Splitting the two copies on the parameter's name alone left that

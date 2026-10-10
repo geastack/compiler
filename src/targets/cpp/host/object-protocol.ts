@@ -1,6 +1,6 @@
+import { nativePrototypeMethodOf, nativePrototypeShapeMethodOf } from '../../../ir/native-prototype-calls.js'
 import { isNativeCallableCarrier, ownershipOfGeneratedCarrier, propertyKeyText } from '../emit-dynamic-properties.js'
 import { intrinsicMemberValueOf } from './emit-host-object.js'
-import { objectShapePrototypeMethods } from '../../../projection/callee.js'
 import type { RecordField, Representation } from '../../../representation/model.js'
 import { representationKey } from '../../../representation/model.js'
 import type { GetOperation, IrOperand } from '../../../ir/model.js'
@@ -8,6 +8,8 @@ import { createCppEmitBlockedError, operandText, type EmitContext, type Prototyp
 import type { IrValueId } from '../../../identity/ids.js'
 import { classMemberOf, lazyArrowFieldPlanOf, lazyMaterializedFieldText } from '../class-layout.js'
 import { alignedValueText } from '../emit-narrowing.js'
+import { evaluatedOnceText } from '../evaluated-once.js'
+import { presenceTestText } from '../emit-presence.js'
 import { certifiedConversionText } from '../emit-certified-conversion.js'
 import { memberAccessOperator } from '../emit-carrier-members.js'
 import {
@@ -48,7 +50,7 @@ import {
  * everything else: `keys` and `values` grew a static arm, `entries`, `assign`
  * and `defineProperty` refused every known shape outright, and the refusal
  * they printed explained enumeration even when the member was not enumerating
- * anything. `Object.assign(this, opts)` in hono's own constructor refused with
+ * anything. `Object.assign(this, opts)` in a class constructor refused with
  * "a class instance's own enumerable keys are the fields its constructor
  * actually assigned" -- a true sentence about the SOURCE position, printed for
  * a failure in the TARGET position, where nothing enumerates the class at all.
@@ -393,12 +395,17 @@ export const ownEnumerableKeysText = (member: string, view: ObjectView, dynamicC
   // emitting only the compile-time field list would make Object.keys disagree
   // with the reads and writes that already use the same sidecar.
   if (ownership === 'shared-refcount') {
-    if (member === 'getOwnPropertyNames') {
-      // This is intentionally a runtime-owned merge: generated slots and the
-      // identity sidecar must be globally ordered before symbols are filtered.
-      return `gea::host::ObjectConstructor::staticKeys(gea::nativeOwnPropertyNames(${view.receiver}))`
-    }
-    return `gea::host::ObjectConstructor::staticKeys(gea::nativeDynamicKeys(${view.receiver}))`
+    return evaluatedOnceText(view.receiver, (receiver) => {
+      // The native key protocol also serves CopyDataProperties, which skips
+      // nullish sources. Object.keys/getOwnPropertyNames first perform ToObject.
+      // Keep that boundary here, before the same runtime-owned key merge.
+      const helper = member === 'getOwnPropertyNames' ? 'nativeOwnPropertyNames' : 'nativeDynamicKeys'
+      const keys = `gea::host::ObjectConstructor::staticKeys(gea::${helper}(${receiver}))`
+      const present = presenceTestText(receiver, view.representation)
+      return present === 'true'
+        ? keys
+        : `([&]() { if (!(${present})) gea::host::throwRuntimeError("TypeError", "Cannot convert undefined or null to object"); return ${keys}; }())`
+    })
   }
   const ordered = ownKeyFields(view)
   const presences = ordered.map((field) => {
@@ -518,9 +525,9 @@ export const setOwnText = (
       // `gea::Value` -- the one home an own property created at run time has.
       // The source's carrier is converted there the way any store into a
       // dynamic slot is: an interface family's struct holds fields its static
-      // view never names (mongodb's `Object.assign({}, client.options,
-      // dbOptions)` copies a `DbOptions` whose object may be a
-      // `CommandOperationOptions` carrying `comment`), and ECMAScript's
+      // view never names (`Object.assign({}, client.options, dbOptions)`
+      // copies an options object that may really be a wider options type
+      // carrying `comment`), and ECMAScript's
       // `Object.assign` copies every one of them.
       const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
       const boxed = certifiedConversionText(ctx, value.representation, dynamic, value.text)
@@ -621,13 +628,8 @@ export const setOwnText = (
  */
 export const deferredObjectShapeMethodClaim = (ctx: EmitContext, operation: GetOperation): PrototypeMethodRead | null => {
   const staticKey = ctx.staticKeyTexts.get(operation.key.value)
-  if (staticKey === undefined || !objectShapePrototypeMethods.has(staticKey)) return null
   const representation = operation.receiver.representation
-  const known =
-    representation.kind === 'record' ||
-    representation.kind === 'class-ref' ||
-    (representation.kind === 'native-record-ref' && representation.native === null)
-  if (!known) return null
+  if (staticKey === undefined || !nativePrototypeShapeMethodOf(representation, staticKey, ctx.classes, ctx.deriver)) return null
   const view = objectViewFrom(ctx, staticKey, representation, '', 'receiver')
   if (view.kind !== 'known') return null
   return {
@@ -807,7 +809,7 @@ export const nativeHandleShapeCallText = (ctx: EmitContext, member: string, prot
   // membership is a compile-time fact. Every other key -- a configurable
   // member, or a name the table lacks -- is answered by the intrinsic's
   // dynamic-property sidecar first (`hostIntrinsicSidecar`, gea_runtime.h):
-  // test262's `isConfigurable` deletes the member and then asks exactly this
+  // a configurability check deletes the member and then asks exactly this
   // question, and an answer read off the static table alone would say the
   // deleted member is still there.
   if (named !== undefined && !intrinsicMemberValueOf(ctx, protocol, named, site).configurable) return 'true'
@@ -856,8 +858,7 @@ export const deferredDynamicObjectMethodClaim = (
   key: IrOperand
 ): PrototypeMethodRead | null => {
   const staticKey = staticKeyTexts.get(key.value)
-  if (staticKey === undefined || !dynamicObjectPrototypeMethods.has(staticKey)) return null
-  if (receiver.representation.kind !== 'dynamic') return null
+  if (staticKey === undefined || nativePrototypeMethodOf(receiver.representation, staticKey) !== 'dynamic-object') return null
   return { receiverKind: 'dynamic-object', member: staticKey, receiver: { kind: 'operand', operand: receiver }, receiverElement: null }
 }
 

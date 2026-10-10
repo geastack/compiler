@@ -1,7 +1,7 @@
 // An abstract method whose overrides each return their OWN class -- declared
-// `this` (mongodb's `BulkOperationBase.addToOperationsList`) or the root type
-// narrowed per override (`TimeoutContext.refreshed(): TimeoutContext`, with
-// `override refreshed(): CSOTTimeoutContext`). The slot's result is the join
+// `this` (a database client's bulk-operation builder's `addToOperationsList`)
+// or the root type narrowed per override (`TimeoutContext.refreshed():
+// TimeoutContext`, with `override refreshed(): OperationTimeoutContext`). The slot's result is the join
 // of the siblings, so a base-typed call reaches each override.
 abstract class Bulk {
   readonly ops: string[] = []

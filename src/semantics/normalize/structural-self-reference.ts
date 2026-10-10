@@ -101,7 +101,7 @@ export const selfReferentialShapeOf = (
   // or the object-literal anchor in `structural.ts`.
   const callable = callableShapeOf ? callableShapeOf(type) : null
   if (callable) return callable
-  // A DICTIONARY closes a cycle without a declared name too: hono's router is
+  // A DICTIONARY closes a cycle without a declared name too: a trie router is
   // `class Node { #children: Record<string, Node> }`, and `Record<string, V>`
   // is a homomorphic mapped-type instantiation whose own symbol answers the
   // anonymous `__type` of the `MappedTypeNode` rather than the
@@ -120,9 +120,9 @@ export const selfReferentialShapeOf = (
     if (index.length > 0) return { kind: 'object', members: [], index, membersDropped: false }
   }
   // An anonymous object with named members that closes a cycle through them:
-  // a mapped type over a class's keys used as a mixin base (bson's
-  // `LongWithoutOverrides`, `{ [P in Exclude<keyof Long, ...>]: Long[P] }`,
-  // whose `compare(other: Long | Timestamp)` names the subclass that extends
+  // a mapped type over a class's keys used as a mixin base
+  // (`BaseWithoutOverrides`, `{ [P in Exclude<keyof Base, ...>]: Base[P] }`,
+  // whose `compare(other: Base | Derived)` names the subclass that extends
   // it). The anchor is reserved already, so the member walk resolves the
   // mention of this very type to it, exactly as the non-retry path does.
   if (checker.getPropertiesOfType(type).length > 0 && type.getCallSignatures().length === 0 && type.getConstructSignatures().length === 0) {
@@ -139,21 +139,22 @@ export const selfReferentialShapeOf = (
  * `ts.Type` object identity -- can never see one twice, and the walk does not
  * terminate on its own.
  *
- * mongodb's `Filter` is the concrete case, and it is worth reading in full
- * because it is the shape of the whole problem:
+ * A recursive query-filter type is the concrete case, and it is worth reading
+ * in full because it is the shape of the whole problem (`Keyed<T>` adds a
+ * required key to `T`, and is idempotent):
  *
  * ```ts
- * type Filter<T> = { [P in keyof WithId<T>]?: Condition<WithId<T>[P]> } & RootFilterOperators<WithId<T>>
- * interface RootFilterOperators<T> extends Document { $and?: Filter<T>[]; $nor?: Filter<T>[]; $or?: Filter<T>[] }
+ * type Query<T> = { [P in keyof Keyed<T>]?: Condition<Keyed<T>[P]> } & Operators<Keyed<T>>
+ * interface Operators<T> extends Bag { and?: Query<T>[]; nor?: Query<T>[]; or?: Query<T>[] }
  * ```
  *
- * `Filter<T>` does not refer to `Filter<T>`. It refers to `Filter<WithId<T>>`,
- * whose `$and` refers to `Filter<WithId<WithId<T>>>`, forever. TypeScript mints
- * a new type for each -- measured on the mongodb driver: type#34381, #34389,
- * #34397, ... one per level, each argument a fresh `WithId` instantiation.
+ * `Query<T>` does not refer to `Query<T>`. It refers to `Query<Keyed<T>>`,
+ * whose `and` refers to `Query<Keyed<Keyed<T>>>`, forever. TypeScript mints
+ * a new type for each -- one per level, each argument a fresh `Keyed`
+ * instantiation.
  *
  * Every one of those types has the same layout. The unfolding is infinite as a
- * TREE and finite as a GRAPH: one node whose `$and` field points back at that
+ * TREE and finite as a GRAPH: one node whose `and` field points back at that
  * same node. That is an ordinary recursive record, and the compiler already
  * carries one -- `native-record-ref`, a name plus a forward declaration, which
  * is what `representation/derive.ts` hands any record that re-enters itself.
@@ -164,7 +165,7 @@ export const selfReferentialShapeOf = (
  * ⛔ This used to be a depth counter that refused at 16 levels. A counter
  * cannot distinguish the two cases that matter:
  *
- *   - REGULAR recursion (`Filter`): every level has the same layout, the graph
+ *   - REGULAR recursion (`Query`): every level has the same layout, the graph
  *     is finite, and the right answer is to fold -- which is what `within`
  *     does now, typically at level 2.
  *   - IRREGULAR recursion (`type Nest<T> = { value: T; next: Nest<[T]> }`):
@@ -174,7 +175,7 @@ export const selfReferentialShapeOf = (
  * A counter answers neither. It stops at an arbitrary number in both cases and
  * reports "I stopped looking" as though it were a verdict -- and the number is
  * wrong in both directions at once, because the work between levels multiplies:
- * `Filter`'s three recursive fields made the SELECTED CARRIER for level 1
+ * `Query`'s three recursive fields made the SELECTED CARRIER for level 1
  * contain 3^15 copies of level 16, and `representationKey` overflowed V8's
  * 512 MB string limit (a `RangeError` out of `Array.join`) long before the
  * refusal at 16 could be reported. Raising the limit explodes; lowering it
@@ -215,8 +216,8 @@ export interface AliasRecurrence<T> {
  * Mutual assignability is TypeScript's own structural relation, and it is
  * already coinductive over recursive types -- which is exactly the decision
  * procedure needed here, computed by the one component that has the whole type
- * graph. Measured on mongodb: `Filter<WithId<Doc>>` against
- * `Filter<WithId<WithId<Doc>>>` answers `true` both ways in 32 ms cold and
+ * graph. Measured: `Query<Keyed<Doc>>` against
+ * `Query<Keyed<Keyed<Doc>>>` answers `true` both ways in 32 ms cold and
  * ~0 ms after, because the checker memoizes its relation.
  *
  * ⛔ The `any`/`unknown` exclusions are not defensive noise. A top type is
@@ -279,7 +280,7 @@ export const createAliasRecurrence = <T>(checker: ts.TypeChecker): AliasRecurren
   // builds one view per specialization path with its own guard state, and this
   // unfolding crosses views: a per-view stack sees depth 0 every lap and never
   // folds. That was measured on the counter this replaces -- a per-view version
-  // of exactly that code left all 334 hono laps in place.
+  // of exactly that code left every lap of a real program's unfolding in place.
   //
   // Shared, but not view-blind. An OPEN instantiation -- one whose alias
   // arguments still mention a type parameter -- is the same checker object in
@@ -306,12 +307,12 @@ export const createAliasRecurrence = <T>(checker: ts.TypeChecker): AliasRecurren
         if (ancestor !== undefined && equivalent(ancestor.type, type)) return ancestor.fold(ancestor.type)
       }
       // One growth step is admitted before refusing, because a growing
-      // argument can SATURATE: `Filter<Document>` re-enters as
-      // `Filter<WithId<Document>>`, and the pair is not equivalent --
-      // `Document`'s index signature does not supply `WithId`'s required
-      // `_id` -- but `WithId` is idempotent from there on, so the level below
-      // (`Filter<WithId<WithId<Document>>>`) folds onto this one. Refusing at
-      // the first grown edge refused mongodb's `raw()` over plain `Document`.
+      // argument can SATURATE: `Query<Bag>` re-enters as
+      // `Query<Keyed<Bag>>`, and the pair is not equivalent --
+      // `Bag`'s index signature does not supply `Keyed`'s required
+      // key -- but `Keyed` is idempotent from there on, so the level below
+      // (`Query<Keyed<Keyed<Bag>>>`) folds onto this one. Refusing at
+      // the first grown edge refused a method returning `Query<Bag>`.
       // Still finite: an irregular chain (`Nest<T>` -> `Nest<[T]>` ->
       // `Nest<[[T]]>`) has grown from two ancestors by its second level and
       // is refused there, one level later than before.
@@ -329,8 +330,8 @@ export const createAliasRecurrence = <T>(checker: ts.TypeChecker): AliasRecurren
       // `Count<N> = { next: Count<Inc<N>> }` walked 200+ levels with this file's
       // sub-term measure and never refused, where the pre-`grewFrom` formula
       // refused at the first re-entry. Every REAL finite chain in this file's own
-      // regression history closes far shallower than this -- mongodb's `Filter`
-      // folds by level 2, hono's `Record` siblings never exceed depth 2 -- so a
+      // regression history closes far shallower than this -- the recursive
+      // `Query` folds by level 2, sibling `Record`s never exceed depth 2 -- so a
       // stack this deep for one alias symbol is never a legitimate finite program;
       // it is exactly the growth `guards` was supposed to catch and could not see.
       // Refusing here trades a rare, generous-margin false refusal for turning an
@@ -372,9 +373,9 @@ export const createAliasRecurrence = <T>(checker: ts.TypeChecker): AliasRecurren
  * argument is a proper sub-term of the ancestor's. `Record<string,
  * Record<string, H[]>>` re-enters `Record` at `Record<string, H[]>`, and both
  * are open, so the rule above alone refuses it -- yet the type is plainly
- * finite, and nothing about it is recursion. That single refusal was 255 of
- * hono-hello's 487 roots: every one of `RegExpRouter`'s
- * `Record<string, Record<string, HandlerWithMetadata<T>[]>>` fields, and every
+ * finite, and nothing about it is recursion. That single refusal was over half
+ * of a real program's roots: every one of a router class's
+ * `Record<string, Record<string, Handler<T>[]>>` fields, and every
  * obligation minted off the `dictionary(string, unresolved, shared-refcount)`
  * they produced.
  *
@@ -387,7 +388,7 @@ export const createAliasRecurrence = <T>(checker: ts.TypeChecker): AliasRecurren
  *
  * ⛔ A re-entry at an UNRELATED argument -- neither a sub-term of the
  * ancestor's nor a super-term of it -- is not a back edge of this alias's own
- * unfolding at all, and refusing it was hono's `Node<T>`: walking
+ * unfolding at all, and refusing it was a trie's `Node<T>`: walking
  * `#children: Record<string, Node<T>>` unfolds the value `Node<T>`, which is
  * a DECLARED class reached through its own anchor, and that class's member
  * census incidentally revisits `#methods: Record<string, HandlerSet<T>>[]`
@@ -395,16 +396,15 @@ export const createAliasRecurrence = <T>(checker: ts.TypeChecker): AliasRecurren
  * because the class's own census happened to run underneath, not because
  * `Record`'s definition refers to itself again. `Node<T>` and `HandlerSet<T>`
  * share no sub-term relationship in either direction: the pair is not
- * growing (measured on mongodb's `Filter`, `descends(type, ancestor)` is
- * true there -- `WithId<T>` unfolds *from* `T`) and not shrinking (`descends`
+ * growing (measured on the recursive `Query`, `descends(type, ancestor)` is
+ * true there -- `Keyed<T>` unfolds *from* `T`) and not shrinking (`descends`
  * above is false). It is two unconnected instantiations that merely share a
  * call stack, and `HandlerSet<T>` does not itself recur into `Record` or
- * `Node`, so admitting it is finite by construction: this was 22 of
- * hono-hello's roots at lines 35/39/76/94/95 of `node.ts`.
+ * `Node`, so admitting it is finite by construction.
  *
  * Requiring GROWTH -- `descends(type, ancestor)`, the same sub-term measure
  * with the pair reversed -- keeps refusing every case the file's own
- * regression history cares about (mongodb's `Filter<T>` -> `Filter<WithId<T>>`
+ * regression history cares about (`Query<T>` -> `Query<Keyed<T>>`
  * still growing, still refused until the fold catches an equivalent ancestor)
  * while admitting a re-entry that is simply unrelated to the ancestor it
  * happened to be nested under.
@@ -464,7 +464,7 @@ const descends = (ancestor: ts.Type, type: ts.Type): boolean => subtermReach(anc
 /**
  * Whether `type` re-enters the alias having GROWN out of `ancestor` -- the
  * ancestor's own arguments reappearing as sub-terms of the new ones, which is
- * the shape that unfolds without bound (`Filter<T>` -> `Filter<WithId<T>>`).
+ * the shape that unfolds without bound (`Query<T>` -> `Query<Keyed<T>>`).
  *
  * Fail-closed, and that is the whole reason this is not just
  * `descends(type, ancestor)`. The measure has two blind spots -- an alias with

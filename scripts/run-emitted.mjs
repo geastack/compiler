@@ -17,6 +17,9 @@ import { nativeHostIncludes } from './native-host-includes.mjs'
  * Native object caching and a reusable runtime PCH are enabled by default.
  * `--timings` reports their use; `--no-native-cache` disables both for a
  * control run, and `--no-pch` retains ccache while preserving textual includes.
+ * `--runtime prebuilt|single` overrides how the program reaches the runtime's
+ * code (docs/NATIVE-BUILD-CACHE.md); the default comes from
+ * `native-optimization.mjs`.
  * Default output is measurements/cxx, created if absent. Concurrent
  * invocations need exclusive output directories; never share the default
  * between workers.
@@ -147,6 +150,16 @@ const pchExcludedUnits = [
   }),
   join(out, 'main_shim.cpp')
 ]
+// The prebuilt runtime object is the runtime as the PCH sees it. A unit built
+// without the PCH may see it through a prelude that changes its ABI, and its
+// copies would then be merged with the object's by the linker, so such a
+// program compiles the runtime into itself instead.
+const requestedRuntime = flag('--runtime', null)
+if (requestedRuntime !== null && requestedRuntime !== 'prebuilt' && requestedRuntime !== 'single') {
+  console.error(`--runtime takes "prebuilt" or "single", not "${requestedRuntime}"`)
+  process.exit(2)
+}
+const runtime = units.some((unit) => pchExcludedUnits.includes(unit)) ? 'single' : (requestedRuntime ?? undefined)
 try {
   const timing = buildNative({
     out,
@@ -155,7 +168,8 @@ try {
     pchExcludedUnits,
     compileOnly,
     cache: !argv.includes('--no-native-cache'),
-    pch: !argv.includes('--no-pch')
+    pch: !argv.includes('--no-pch'),
+    ...(runtime ? { runtime } : {})
   })
   if (argv.includes('--timings')) console.error(`NATIVE BUILD ${JSON.stringify(timing)}`)
 } catch (error) {

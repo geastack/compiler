@@ -1,4 +1,4 @@
-// hono's router `Result<T>` is `[[T, Params][]] | [[T, ParamIndexMap][],
+// An HTTP framework's router `Result<T>` is `[[T, Params][]] | [[T, ParamIndexMap][],
 // ParamStash]`, and `Context`'s param lookup reads `result[1]`, which the
 // checker types `ParamStash | undefined` because it knows the first tuple has
 // one element. The Array carrier keeps no length, so the one-element arm's

@@ -1,7 +1,7 @@
 // AN `as`-ASSERTION FROM A DYNAMIC VALUE INTO A UNION OF TWO CLASSES, ONE OF
 // WHICH DESCENDS FROM THE OTHER.
 //
-// `@hono/node-server`'s request helpers keep the connection on a symbol key of
+// An HTTP server adapter's request helpers keep the connection on a symbol key of
 // a `Record<string | symbol, any>` and read it back with
 // `request[incomingKey] as IncomingMessage | Http2ServerRequest`. On this
 // target `Http2ServerRequest extends IncomingMessage` (the shim in

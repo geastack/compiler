@@ -4,8 +4,8 @@
 // created. A native record keeps its declared fields in its layout and every
 // other key in a sidecar (the typed index sidecar, or the expando a dynamic
 // write creates), and used to list the layout first whatever order the keys
-// arrived in. mongodb builds command documents this way, and a BSON command's
-// FIRST key must be the command name.
+// arrived in. A database client builds command documents this way, and a wire
+// command's FIRST key must be the command name.
 
 interface Command {
   find?: string
@@ -39,10 +39,10 @@ function reassigned(): string {
 console.log(`reassigned=${reassigned()}`)
 
 // The typed index sidecar of an open record.
-interface BsonDocument {
+interface WireDocument {
   [key: string]: any
 }
-interface FindCommand extends BsonDocument {
+interface FindCommand extends WireDocument {
   find: string
   sort?: number
   limit?: number

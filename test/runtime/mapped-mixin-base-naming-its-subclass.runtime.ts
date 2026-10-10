@@ -1,4 +1,4 @@
-// bson's `Timestamp extends LongWithoutOverridesClass`: the base is a MAPPED
+// A binary-document library's `Timestamp extends LongWithoutSomeMethods`: the base is a MAPPED
 // type over the keys of `Long`, minus the ones the subclass overrides, and one
 // of the methods it keeps names the subclass (`equals(other: Long | Timestamp)`).
 // The mapped type is anonymous and closes a cycle through its own members, so

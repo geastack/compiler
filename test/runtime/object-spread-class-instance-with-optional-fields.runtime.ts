@@ -1,5 +1,5 @@
 // Spreading a class instance whose optional fields may or may not have been
-// assigned: the MongoDB driver logs `{ databaseName, ...args[0] }` where
+// assigned: a database client logs `{ databaseName, ...args[0] }` where
 // `args[0]` is a `CommandStartedEvent`, whose `serviceId?` is written only
 // when the connection has one. Under `useDefineForClassFields: false` an
 // unassigned field is not an own property, so `CopyDataProperties` must not

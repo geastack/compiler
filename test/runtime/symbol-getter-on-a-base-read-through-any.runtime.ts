@@ -2,29 +2,29 @@
 //! expect: Long 7 Long
 //! expect: plain undefined
 
-// bson's serializer: every BSON value class extends `BSONValue`, whose
-// symbol-keyed getters `[BSON_VERSION_SYMBOL]` and `[bsonType]` answer for
+// A binary-document serializer: every value class extends `WireValue`, whose
+// symbol-keyed getters `[WIRE_VERSION_SYMBOL]` and `[wireType]` answer for
 // every subclass. The serializer reads them off an `any` document value
-// (`value[constants.BSON_VERSION_SYMBOL] !== constants.BSON_MAJOR_VERSION`),
+// (`value[constants.WIRE_VERSION_SYMBOL] !== constants.WIRE_MAJOR_VERSION`),
 // so the dynamic read has to find a getter the BASE declares under a
 // registered-symbol key.
 
-const BSON_VERSION_SYMBOL = Symbol.for('@@mdb.bson.version')
-const bsonType = Symbol.for('@@mdb.bson.type')
-const BSON_MAJOR_VERSION = 7 as const
+const WIRE_VERSION_SYMBOL = Symbol.for('@@wire.version')
+const wireType = Symbol.for('@@wire.type')
+const WIRE_MAJOR_VERSION = 7 as const
 
-abstract class BSONValue {
-  abstract get _bsontype(): string
-  get [bsonType](): this['_bsontype'] {
-    return this._bsontype
+abstract class WireValue {
+  abstract get _wiretype(): string
+  get [wireType](): this['_wiretype'] {
+    return this._wiretype
   }
-  get [BSON_VERSION_SYMBOL](): typeof BSON_MAJOR_VERSION {
-    return BSON_MAJOR_VERSION
+  get [WIRE_VERSION_SYMBOL](): typeof WIRE_MAJOR_VERSION {
+    return WIRE_MAJOR_VERSION
   }
 }
 
-class Binary extends BSONValue {
-  get _bsontype(): 'Binary' {
+class Binary extends WireValue {
+  get _wiretype(): 'Binary' {
     return 'Binary'
   }
   bytes: number[]
@@ -34,8 +34,8 @@ class Binary extends BSONValue {
   }
 }
 
-class Long extends BSONValue {
-  get _bsontype(): 'Long' {
+class Long extends WireValue {
+  get _wiretype(): 'Long' {
     return 'Long'
   }
   high = 0
@@ -43,8 +43,8 @@ class Long extends BSONValue {
 }
 
 function describe(value: any): string {
-  if (value._bsontype == null) return 'plain ' + String(value[BSON_VERSION_SYMBOL])
-  return value._bsontype + ' ' + String(value[Symbol.for('@@mdb.bson.version')]) + ' ' + String(value[bsonType])
+  if (value._wiretype == null) return 'plain ' + String(value[WIRE_VERSION_SYMBOL])
+  return value._wiretype + ' ' + String(value[Symbol.for('@@wire.version')]) + ' ' + String(value[wireType])
 }
 
 const doc: Record<string, unknown> = { id: new Binary([1, 2]), n: new Long(), p: { a: 1 } }

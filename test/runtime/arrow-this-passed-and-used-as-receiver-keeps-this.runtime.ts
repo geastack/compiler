@@ -1,6 +1,6 @@
 // AN ARROW'S LEXICAL `this` PASSED AS AN ARGUMENT IS STILL THE RECEIVER AFTER.
 //
-// mongodb's `ConnectionPool` constructor schedules
+// a database client's `ConnectionPool` constructor schedules
 // `process.nextTick(() => this.emitAndLog(CREATED, new ConnectionPoolCreatedEvent(this)))`.
 // The arrow's body evaluates the receiver `this`, then the argument `this`,
 // and calls. The native body moved `this` into the event's constructor as a

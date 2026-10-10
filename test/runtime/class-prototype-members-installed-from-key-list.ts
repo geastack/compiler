@@ -1,6 +1,6 @@
 // PROTOTYPE MEMBERS INSTALLED FROM A LITERAL KEY LIST, ON A RE-PARENTED CLASS.
 //
-// `@hono/node-server`'s lightweight `Response` declares only the members it
+// An HTTP server adapter's lightweight `Response` declares only the members it
 // answers cheaply, re-parents its prototype onto the platform `Response`, and
 // installs every other member with `Object.defineProperty` over a literal key
 // list: each installed getter or method builds the real platform response and

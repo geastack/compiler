@@ -22,12 +22,11 @@ import { enterHypothesisGuard, exitHypothesisGuard, noteHypothesis } from './pro
  * Every value ever stored into a native array, for a consumer that reads one
  * of its elements.
  *
- * Three keeps its per-frame records in arrays it owns outright:
- * `WebGLRenderList` recycles `renderItems[ renderItemsIndex ]`, and
- * `WebGLRenderer` keeps `renderListStack` and reads back
- * `renderListStack[ renderListStack.length - 1 ]`. An escape proof that stops
- * at the element read has nothing to say about the object that comes out, so
- * a Mesh followed into a render list was lost there. The element read is
+ * Programs commonly keep per-frame records in arrays they own outright: a
+ * list that recycles `items[ itemsIndex ]`, or a stack read back as
+ * `stack[ stack.length - 1 ]`. An escape proof that stops at the element read
+ * has nothing to say about the object that comes out, so an object followed
+ * into such a list was lost there. The element read is
  * closed exactly when the array's whole family -- every allocation that can
  * reach the same storage, and every cell and native-map slot holding one --
  * is enumerated, and every use of that family either stores a value this
@@ -39,17 +38,16 @@ import { enterHypothesisGuard, exitHypothesisGuard, noteHypothesis } from './pro
  * itself as their third argument) all refuse.
  *
  * The value-flow index states `array-append` and `index-assignment` edges only
- * where the checker types the receiver as an array. Three's
- * `const listArray = lists.get( scene )` is `any` in JavaScript, so its
+ * where the checker types the receiver as an array. A JavaScript
+ * `const listArray = lists.get( key )` is `any`, so its
  * `listArray.push( list )` records nothing there; the family is walked through
  * the references of its cells instead, and the index's receiver-named writes
  * serve only as the completeness gate for element and member stores.
  *
  * ## Public fields
  *
- * Most of three's arrays are public fields -- `Texture.mipmaps`,
- * `BufferGeometry.groups`, `Object3D.children` -- reachable through every
- * holder of their instance. Such a field is ONE cell across the closed class
+ * Most arrays in a class-based library are public fields -- `node.children`,
+ * `geometry.groups` -- reachable through every holder of their instance. Such a field is ONE cell across the closed class
  * family declaring it (see `FieldCell`), and it is a cell exactly when that
  * family's whole inventory is enumerable: every instance is attributed
  * (`sourceClassKeyReadPlanOf`, through `ownedClassReceiverInventoryOf`), no
@@ -408,8 +406,8 @@ const classTyped = (type: ts.Type): boolean =>
   )
 
 /**
- * `o.k` through a receiver the checker cannot confine -- three's JSDoc-less
- * `uploadTexture( textureProperties, texture, slot )` -- when every value that
+ * `o.k` through a receiver the checker cannot confine -- a JSDoc-less
+ * JavaScript parameter such as `upload( properties, item, slot )` -- when every value that
  * reaches `o` (`valueLeavesOf`) is an instance of one family whose field is `k`.
  */
 const provenanceFieldCellOf = (
@@ -692,7 +690,7 @@ const reflectiveCallsOf = (checker: ts.TypeChecker, flow: ValueFlowIndex): NonNu
 
 /**
  * A field's named origins while the rest of its facts are being proven.
- * EventDispatcher's `listeners[ type ] = []` through
+ * An event emitter's `listeners[ type ] = []` through
  * `listeners = this._listeners` asks what `_listeners` may hold while
  * `_listeners` itself is being proven. Its values are the least fixpoint of
  * "named origins plus whatever a keyed store adds". The named origins seed
@@ -826,6 +824,7 @@ const computeFieldFacts = (
   }
   const keyRequirements: KeyRequirement[] = []
   const typedHolding = (expression: ts.Expression): Holding => holdingOfType(checker, family, checker.getTypeAtLocation(expression))
+  const activeHoldings = new Set<ts.Expression>()
   /** One value `valueLeavesOf` reached: its syntax, its constructor, or another field's own origins sharpen its type. */
   const leafHolding = (leaf: ts.Expression): Holding => {
     const typed = typedHolding(leaf)
@@ -871,22 +870,33 @@ const computeFieldFacts = (
     if (!expression) return 'unknown'
     const typed = typedHolding(expression)
     if (typed === 'no') return typed
-    const leaves = valueLeavesOf(flow, expression, authority, (value) => typedHolding(value) === 'no')
-    if (!leaves) return typed
-    let held: Holding = 'no'
-    for (const leaf of leaves) {
-      const answer = leafHolding(leaf)
-      if (answer === 'unknown') return typed
-      if (answer === 'may') held = answer
+    const current = unwrapErasedExpression(expression)
+    // A provisional field origin may lead back to this same expression.
+    // Re-entry provides no sharper fact than the original type; keep that
+    // conservative answer rather than recursively treating the hypothesis
+    // as a completed source family. In particular unknown never becomes no.
+    if (activeHoldings.has(current)) return typed
+    activeHoldings.add(current)
+    try {
+      const leaves = valueLeavesOf(flow, expression, authority, (value) => typedHolding(value) === 'no')
+      if (!leaves) return typed
+      let held: Holding = 'no'
+      for (const leaf of leaves) {
+        const answer = leafHolding(leaf)
+        if (answer === 'unknown') return typed
+        if (answer === 'may') held = answer
+      }
+      return held
+    } finally {
+      activeHoldings.delete(current)
     }
-    return held
   }
   const state = fieldStateOf(flow)
   const keys = (state.keys ??= createPropertyKeyDomains(checker, flow, () => true))
   const keyMayName = (expression: ts.Expression | undefined): boolean => {
     if (expression === undefined || ts.isSpreadElement(expression)) return true
     if (numericType(checker, expression) || !keys.mayName(keys.of(expression), cell.key)) return false
-    // Three's `setValues`: `this[ key ] = newValue` for `key` of
+    // An options-bag `setValues`: `this[ key ] = newValue` for `key` of
     // `for ( const key in values )`, a key set the program's own literals close.
     const requirements = keyRequirements
     const recording: ComputedKeySetAuthority = {
@@ -1076,7 +1086,7 @@ const computeInventory = (
   }
   // A copy (`slice`, `concat`, `Array.from`, a literal spread) is a fresh
   // allocation holding what its source held. A copy of a cell this family
-  // already holds -- three's `this.mipmaps = source.mipmaps.slice( 0 )` --
+  // already holds -- a `copy()` method's `this.items = source.items.slice( 0 )` --
   // holds nothing the family does not: every store into that cell is already
   // in this inventory. Any other source is proven on its own.
   const copied = (source: ts.Expression): boolean => {
@@ -1171,7 +1181,7 @@ const computeInventory = (
       if (method === 'concat' && !value.arguments.every(copied)) return REFUSED
       return seed(value, [])
     }
-    // `lists.get( scene )` in `WebGLRenderLists.get`: whatever the native map
+    // `lists.get( key )` in a cache's `get`: whatever the native map
     // ever stored under any key, each of which must itself be a family origin.
     if (method === 'get') {
       const stored = collectionStoredValuesOf(checker, flow, value, assume)
@@ -1349,7 +1359,10 @@ const computeInventory = (
         const reads = collectionValueContinuationsOf(checker, flow, parent, reference, assume)
         return reads !== null && reads.every(use)
       }
-      return false
+      // `output.setEffects( effects || [] )`: a method whose every target is a
+      // source frame binds the array to that frame's formal exactly as a plain
+      // function call does. A host or unresolved callee has no fact and refuses.
+      return bound(parent, reference)
     }
     // `new CompressedTexture( mipmaps, ... )`: the constructor's parameter joins the family.
     if (ts.isNewExpression(parent) && parent.arguments?.some((argument) => argument === reference)) return bound(parent, reference)
@@ -1421,7 +1434,7 @@ const inventoryOf = (
   }
   const frame: Frame = { key, tainted: false }
   frames.push(frame)
-  enterHypothesisGuard(key)
+  enterHypothesisGuard(key, true)
   try {
     const ledger = deferredIntrinsicProtocolLedgerOf(flow)
     const compute = (): ArrayInventory | null => computeInventory(checker, flow, expression, authority)
@@ -1460,8 +1473,8 @@ const inventoryOf = (
  *
  * The authority's `protocolClosed` is asked for the intrinsic Array plan, and for every
  * native-map plan the family passes through, on EVERY call. Its `numericKey`
- * discharges index keys the checker cannot type as numbers -- three's
- * `listArray[ renderCallDepth ]` indexes by an unannotated parameter -- and
+ * discharges index keys the checker cannot type as numbers -- a JavaScript
+ * `listArray[ depth ]` indexing by an unannotated parameter -- and
  * without it such a key refuses.
  *
  * The same complete caller authority closes computed-key sets and every

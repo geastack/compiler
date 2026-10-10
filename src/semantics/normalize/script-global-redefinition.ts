@@ -39,7 +39,7 @@ export interface ScriptGlobalRedefinition {
  * `Object.defineProperty(globalThis, 'K', { value: V })` where `K` is the
  * program's own script-level `var`, read as the plain store `K = V` it is.
  *
- * `@hono/node-server` swaps the platform's `Request` and `Response` this way.
+ * A server adapter library may swap the platform's `Request` and `Response` this way.
  * A script `var` is an own data property of the global object that is
  * writable, enumerable and NOT configurable (9.1.1.4.17). For a descriptor
  * naming only `value`, ValidateAndApplyPropertyDescriptor (10.1.6.3) keeps

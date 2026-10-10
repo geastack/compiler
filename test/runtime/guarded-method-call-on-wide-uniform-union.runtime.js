@@ -1,4 +1,4 @@
-// three.js `ShaderMaterial.toJSON` walks `this.uniforms` and, behind
+// A 3D scene-graph library's material `toJSON` walks `this.uniforms` and, behind
 // `value && value.isColor`, calls `value.getHex()`. The uniform values the
 // program stores are numbers, booleans, arrays and several classes, so the
 // read of `getHex` is off a wide tagged union, and the call must still pass

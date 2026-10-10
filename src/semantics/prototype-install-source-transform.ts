@@ -6,12 +6,11 @@ import ts from 'typescript'
  *
  * ## The shape
  *
- * `@hono/node-server`'s lightweight `Response` declares the members it can
- * answer cheaply and installs the rest after the class, from literal key
- * lists:
+ * A lightweight `Response` class that declares the members it can answer
+ * cheaply and installs the rest after the class, from literal key lists:
  *
  *     ;['body', 'bodyUsed'].forEach((k) => {
- *       Object.defineProperty(Response.prototype, k, { get() { return this[getResponseCache]()[k] } })
+ *       Object.defineProperty(Response.prototype, k, { get() { return this[getCache]()[k] } })
  *     })
  *     Object.defineProperty(Response, 'json', { value: function json(...) {...}, writable: true, configurable: true })
  *

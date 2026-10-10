@@ -1,8 +1,8 @@
-// bson's `Timestamp extends LongWithoutOverridesClass`, where the base is a
-// `const` annotated with a construct-signature type and initialized with the
-// class itself behind `as unknown as`. The assertion allocates nothing: the
-// cell holds `Long`'s own constructor, heritage and `super()` run `Long`, and
-// reads of the alias see the same class.
+// A binary-document serializer's `Timestamp extends LongWithoutOverridesClass`,
+// where the base is a `const` annotated with a construct-signature type and
+// initialized with the class itself behind `as unknown as`. The assertion
+// allocates nothing: the cell holds `Long`'s own constructor, heritage and
+// `super()` run `Long`, and reads of the alias see the same class.
 
 class Long {
   low: number

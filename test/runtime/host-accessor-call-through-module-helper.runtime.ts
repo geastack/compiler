@@ -1,4 +1,4 @@
-// bson's `parser/utils.ts` shape exactly: the captured accessor call sits in
+// A binary-document serializer's parser-utility shape exactly: the captured accessor call sits in
 // a module-level IIFE result that an EXPORTED predicate uses, and the
 // predicate's callers compare its result against a string.
 //! emitted-lacks: adaptSource

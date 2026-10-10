@@ -1,5 +1,5 @@
-// The exact shape of three.js's `AnimationClip.parse`/`toJSON`/
-// `CreateFromMorphTargetSequence`/`clone`: a class member builds an empty
+// The exact shape of a 3D library's animation-clip `parse`/`toJSON`/
+// `fromSequence`/`clone`: a class member builds an empty
 // array literal, `.push`es well-typed elements into it in a loop, and returns
 // it -- but nothing anywhere in this program calls `Clip.parse`, so
 // `reachable.memberIsPruned` correctly marks the method dead. Nothing inside

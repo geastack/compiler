@@ -1,6 +1,6 @@
 // A `string[]` PASSED TO A `Set<any> | any[]` PARAMETER THAT IS REBOUND.
 //
-// mongodb's `isRecord(value, requiredKeys)` (`utils.ts`) calls
+// A database client's `isRecord(value, requiredKeys)` helper calls
 // `isSuperset(Object.keys(value), requiredKeys)`, and `isSuperset(set: Set<any>
 // | any[], subset: Set<any> | any[])` rebinds each parameter to `new Set(...)`
 // when `Array.isArray` holds, then asks `set.has(elem)` for every element of

@@ -1,6 +1,6 @@
 // A match result IS an Array (ECMA-262 22.1.3.13 builds one and then adds
-// `index`/`input`/`groups`), so a program may write a capture slot. hono's
-// `Trie.insert` does: it tokenizes with `path.match(re) || []` -- a union that
+// `index`/`input`/`groups`), so a program may write a capture slot. An HTTP
+// router's `Trie.insert` does: it tokenizes with `path.match(re) || []` -- a union that
 // collapses to the match result alone, since an empty array literal names no
 // value the other arm does not already hold -- and then rewrites the token it
 // just scanned in place.
@@ -10,7 +10,7 @@ const scanned = 'abc'.match(/./g) || []
 scanned[1] = 'X'
 console.log(scanned.join('|'))
 
-// The computed-key store, which is the shape hono writes.
+// The computed-key store, which is the shape that router writes.
 const tokens = '/:id/x'.match(/(?::[^/]+)|./g) || []
 for (let i = tokens.length - 1; i >= 0; i--) {
   if (tokens[i]! === 'x') {

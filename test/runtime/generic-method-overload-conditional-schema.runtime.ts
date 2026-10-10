@@ -1,5 +1,5 @@
 // An overloaded method of a generic class, read and called off an
-// instantiated receiver from outside the class (mongodb's `fetchKeys`:
+// instantiated receiver from outside the class (a database client's `fetchKeys`:
 // `client.db(n).collection<DataKey>(c).find(filter, options)`). The one
 // physical frame is the implementation's, whose `Filter<T>`/`WithId<T>`
 // conditionals only the receiver's class copy can close.

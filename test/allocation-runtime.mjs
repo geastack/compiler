@@ -1,10 +1,21 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
+import { mkdirSync } from 'node:fs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFile, spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
+import { promisify } from 'node:util'
+
+// Its own build directory, so the suite can run it beside the other native scripts.
+mkdirSync(new URL('../measurements/cxx-allocation-runtime', import.meta.url), { recursive: true })
 
 const root = resolve(import.meta.dirname, '..')
-for (const name of [
+const run = promisify(execFile)
+// Each unit is an independent sanitized build of the whole runtime (~30 s), so
+// a serial loop made this script the suite's long pole by a factor of two.
+const nativeJobs = Number(process.env.GEA_TEST_NATIVE_JOBS ?? '4')
+if (!Number.isInteger(nativeJobs) || nativeJobs < 1) throw new Error('GEA_TEST_NATIVE_JOBS must be a positive integer')
+const units = [
   'allocation-profile',
   'allocation-cycle-safepoint',
   'compact-cycle-collection',
@@ -22,10 +33,12 @@ for (const name of [
   'host-array-snapshot',
   'host-numeric-argument',
   'jsx-numeric-style',
+  'native-view-json',
   'dictionary-read-snapshot',
   'compact-number-format',
   'callable-box-equality',
   'holder-and-shared-environment',
+  'callable-pointer-adapters',
   'cycle-self-loop-reclaim',
   'cycle-dead-candidate-forgotten',
   'cycle-dip-cache',
@@ -35,13 +48,14 @@ for (const name of [
   'borrowed-executor-environment',
   'optional-ref-one-word',
   'small-array-inline'
-]) {
-  const binary = resolve(root, 'measurements/cxx', `${name}-test${executableSuffix}`)
-  execFileSync(
+]
+const check = async (name) => {
+  const binary = resolve(root, 'measurements/cxx-allocation-runtime', `${name}-test${executableSuffix}`)
+  const built = await run(
     process.env.CXX || 'clang++',
     [
       '-std=c++20',
-      '-O1',
+      ...nativeOptimization('allocation'),
       '-g',
       '-fsanitize=address,undefined',
       '-DGEA_PROFILE_ALLOCATIONS=1',
@@ -59,9 +73,10 @@ for (const name of [
       '-o',
       binary
     ],
-    { stdio: 'inherit' }
+    { maxBuffer: 64 * 1024 * 1024 }
   )
-  execFileSync(binary, { stdio: 'inherit' })
+  const ran = await run(binary, { maxBuffer: 64 * 1024 * 1024 })
+  process.stdout.write(built.stdout + built.stderr + ran.stdout + ran.stderr)
   if (name === 'host-array-snapshot' || name === 'host-numeric-argument') {
     const sparse = spawnSync(binary, ['hole'], { encoding: 'utf8' })
     assert.notEqual(sparse.status, 0)
@@ -75,3 +90,20 @@ for (const name of [
   }
   console.log(name + ': passed with ASan/UBSan')
 }
+
+const failures = []
+const queue = [...units]
+await Promise.all(
+  Array.from({ length: Math.min(nativeJobs, queue.length) }, async () => {
+    while (queue.length) {
+      const name = queue.shift()
+      try {
+        await check(name)
+      } catch (error) {
+        failures.push(name)
+        console.error(`${name}: FAILED\n${error.stdout ?? ''}${error.stderr ?? ''}${error.message}`)
+      }
+    }
+  })
+)
+assert.deepEqual(failures, [], 'allocation runtime units failed')

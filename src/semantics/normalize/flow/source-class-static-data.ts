@@ -21,8 +21,8 @@ const dataValue = (type: ts.Type): boolean =>
  * Data-ness is judged by the values actually written, never by the declared
  * type. Because the caller has explained every mention of the constructor,
  * no alias can store into the static, so its named writes are all it holds.
- * A declared type only states what a write MAY store: three's
- * `@type {?Image} Texture.DEFAULT_IMAGE = null` names a constructor type that
+ * A declared type only states what a write MAY store: a JSDoc
+ * `@type {?Image} Subject.DEFAULT_IMAGE = null` names a constructor type that
  * no write realises.
  */
 export const sourceClassStaticDataUseOf = (checker: ts.TypeChecker, flow: ValueFlowIndex, reference: ts.Expression): boolean => {

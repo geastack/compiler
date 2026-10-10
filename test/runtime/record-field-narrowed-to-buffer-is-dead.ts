@@ -1,5 +1,5 @@
 // A record-carried field narrowed to a byte array by a guard no record can
-// pass -- mongodb's `AutoEncrypter`:
+// pass -- a database client's `AutoEncrypter`:
 // `!Buffer.isBuffer(this._kmsProviders) ? serialize(this._kmsProviders) : this._kmsProviders`
 // with `_kmsProviders: KMSProviders`. A plain data record is never a
 // `Uint8Array`, so the guard answers false and the narrowed read is dead.

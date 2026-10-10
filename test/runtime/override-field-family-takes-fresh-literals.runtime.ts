@@ -1,5 +1,5 @@
 // A class field redeclared down a hierarchy as successive members of ONE
-// interface family (mongodb's operations: `options: OperationOptions &
+// interface family (a database client's operations: `options: OperationOptions &
 // Abortable`, `override options: CommandOperationOptions`, ...) holds one
 // layout, so a fresh literal handed to a constructor -- `{ ...options, dbName }`
 // -- is simply stored in it, and the object a caller passes by name keeps its

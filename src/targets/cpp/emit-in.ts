@@ -134,7 +134,7 @@ const taggedUnionInPropertyText = (
     // A base class without this physical slot can still hold a descendant
     // that owns it, or an instance with an expando. Use the same native
     // presence route as a non-union receiver, rather than claiming absence.
-    if (arm.value.kind === 'class-ref') return layoutAnswerFor(ctx, arm.value, () => armAt(receiver, index), key)
+    if (generatedSharedObjectCarrier(arm.value)) return layoutAnswerFor(ctx, arm.value, () => armAt(receiver, index), key)
     const fields = fieldsOf(ctx, arm.value)
     if (fields !== null) {
       const field = fields.find((candidate) => candidate.key === staticKey)
@@ -185,6 +185,18 @@ const layoutAnswerFor = (ctx: EmitContext, carrier: Representation, receiverText
     return `(${receiverText()}.has_value() ? (${inner}) : (gea::host::throwInPropertyNonObject(), false))`
   }
   if (carrier.kind === 'tagged-union') return taggedUnionInPropertyText(ctx, carrier, receiverText, key)
+  // A live wrapper's struct contains inert public slots. Its presence bits
+  // cannot answer whether the retained allocation owns this key. The same
+  // native internal method covers ordinary allocations and delegated views.
+  if (generatedSharedObjectCarrier(carrier)) {
+    const receiver = receiverText()
+    const property = propertyKeyText(ctx, key, 'an "in" test on an original native receiver')
+    return (
+      `([&](const auto& gea_in_receiver, const gea::PropertyKey& gea_in_key) -> bool { ` +
+      'if (!gea_in_receiver) { gea::host::throwInPropertyNonObject(); return false; } ' +
+      `return gea::nativeDynamicHasProperty(gea_in_receiver, gea_in_key); })(${receiver}, ${property})`
+    )
+  }
   // Same claim as above: whether this key names a field the layout declares
   // must come from what the program wrote, not from anything render-time
   // folding has since added to `constantTexts`.
@@ -292,7 +304,7 @@ const layoutAnswerFor = (ctx: EmitContext, carrier: Representation, receiverText
     // TypeError. Converting first and testing the tag afterwards keeps the two
     // spellings of the same question answering the same thing.
     //
-    // hono's trie router is what needs it: `key in curNode.#children`, where
+    // A trie router is what needs it: `key in node.#children`, where
     // `key` is `Array.isArray(pattern) ? pattern[0] : p` and TypeScript types
     // the true arm `any` -- `Array.isArray`'s `arg is any[]` filters nothing
     // out of a union whose array member is a READONLY tuple, so the narrowing
@@ -317,7 +329,7 @@ const errorPrototypeMemberNames: ReadonlySet<string> = new Set(['constructor', '
 /**
  * `'k' in e` over the native `Error` carrier -- the intrinsic one, a compiled
  * `class X extends Error`, or an `interface X extends Error` the program carries
- * as it (`Error | HTTPResponseError`, hono's default error handler).
+ * as it (an `Error | ResponseError` parameter of a default error handler).
  *
  * The receiver is `Ref<gea::runtime::Error>` whatever the allocation was, so
  * the answer is the allocation's: its own fields (the virtual field hooks a
@@ -435,8 +447,8 @@ export const hasPropertyHelperClaims: readonly string[] = [
   // A SYMBOL key over the same shared sidecar -- `layoutAnswerFor`'s own
   // `key.representation.kind === 'symbol'` branch above, gated on the layout
   // declaring no symbol-keyed slot of its own so the sidecar's verdict is the
-  // complete one (`symbolKeyedMemberIsDeclared`). `@hono/node-server`'s
-  // `cacheKey in res` is what needed it, three times over.
+  // complete one (`symbolKeyedMemberIsDeclared`). A symbol-keyed cache probe
+  // (`cacheKey in res`) is what needed it.
   'computation:in:symbol:record(symbol-sidecar)',
   'computation:in:symbol:record(disjoint-index)',
   'computation:in:number:record(disjoint-index)',
@@ -465,8 +477,8 @@ export const hasPropertyHelperClaims: readonly string[] = [
   // branch, which renders ToPropertyKey (7.1.19) off the box's tag.
   'computation:in:dynamic:dynamic',
   // The identical six rows one `optional` layer out -- a receiver the checker
-  // left nullable (`this.image` typed `HTMLVideoElement | null`, three.js's
-  // own `if ('requestVideoFrameCallback' in video)`), answered by
+  // left nullable (a field typed `HTMLVideoElement | null` probed with
+  // `if ('requestVideoFrameCallback' in video)`), answered by
   // `layoutAnswerFor`'s presence test plus the SAME record/dictionary rule
   // asked of the unwrapped payload. `optional(record(unproven))` and
   // `optional(dynamic)` are deliberately absent: both recurse to the same
@@ -498,8 +510,9 @@ export const hasPropertyHelperClaims: readonly string[] = [
   'computation:in:static-string:tagged-union',
   // The same dispatch behind `layoutAnswerFor`'s presence test: a module `let`
   // with no initializer holds `undefined` until written, so its union-typed
-  // reads carry the absence (`unassigned-binding-cells.ts`), and mongodb's
-  // `'kModuleError' in zstd` over `let zstd: ZStandard` is exactly this row.
+  // reads carry the absence (`unassigned-binding-cells.ts`), and a
+  // `'kModuleError' in mod` over a lazily-assigned `let mod: Module` is
+  // exactly this row.
   'computation:in:static-string:optional(tagged-union)',
   // A static numeric key against an Array's own indexed elements --
   // `layoutAnswerFor`'s `array-object` branch above, which reduces `in` to

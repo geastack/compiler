@@ -1,5 +1,5 @@
 // An abstract method declares an optional trailing parameter its implementors
-// leave out (mongodb's CallbackWorkflow.execute(connection, credentials, response?)
+// leave out (a database client's auth workflow `execute(connection, credentials, response?)`
 // implemented as execute(connection, credentials)); calls through the interface
 // and the abstract base pass every argument, and a call inside the base passes two.
 interface Credentials {

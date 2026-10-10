@@ -1,6 +1,6 @@
 // `super.flag` names the base's own accessor (13.3.7: the home object's
 // prototype), so it dispatches statically even though a subclass overrides
-// the accessor. mongodb's `get canRetryWrite() { return super.canRetryWrite
+// the accessor. A database client's `get canRetryWrite() { return super.canRetryWrite
 // && ... }` is this read, and treating it as a virtual one published the
 // whole class family to full reflection.
 class Base {

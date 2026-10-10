@@ -161,8 +161,8 @@ const probeTargets = (source: string, callers = true) => {
 }
 
 test('closed callable targets follow || defaults through a never-called setter', () => {
-  // Three's `WebGLRenderList.sort( customOpaqueSort, ... )` fed from the
-  // renderer's `_opaqueSort`, written only by an uncalled `setOpaqueSort`.
+  // A list's `sort( customOpaqueSort, ... )` fed from the owning module's
+  // `_opaqueSort`, written only by an uncalled `setOpaqueSort`.
   const source = `function painterSortStable(a, b) { return 0 }
     function sort(customOpaqueSort) { probe(customOpaqueSort || painterSortStable) }
     let opaqueSort = null;

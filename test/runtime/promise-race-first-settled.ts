@@ -1,7 +1,7 @@
 //! expect: first
 //! expect: value
 
-// `@hono/node-server`'s `readWithoutBlocking` races a body read against an
+// An HTTP framework's Node server adapter's `readWithoutBlocking` races a body read against an
 // already-resolved promise so that a body which is not ready does not stall the
 // response. `Promise.race` therefore may not READ any element: it registers
 // each on the result and lets the first settlement win, which is the whole

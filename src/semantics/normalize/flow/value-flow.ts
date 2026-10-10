@@ -1,10 +1,5 @@
 import ts from 'typescript'
-import {
-  isGlobalObjectConstructor,
-  isStandardInterfaceType,
-  invocationOperandsOf,
-  literalMemberNameOf
-} from '../derived-expression-type.js'
+import { isGlobalObjectAssign, isStandardInterfaceType, invocationOperandsOf, literalMemberNameOf } from '../derived-expression-type.js'
 import { typedArrayInstanceInterfaceNames } from '../../host-protocols.js'
 import {
   heritageClassOrInterfaceOf,
@@ -200,7 +195,6 @@ const LOGICAL_TOKENS: ReadonlySet<ts.SyntaxKind> = new Set([
   ts.SyntaxKind.QuestionQuestionEqualsToken
 ])
 
-/** Whether this call is `Object.assign(...)` on the real global, resolved by DECLARATION IDENTITY (`isGlobalObjectConstructor`) rather than by the spelling `'ObjectConstructor'`. */
 /**
  * The body-carrying implementation behind a bodiless overload signature, or
  * `null` for any other declaration. An overload is a compile-time view only:
@@ -224,13 +218,6 @@ export const implementationOfOverload = (
         candidate.parent === declaration.parent
     )
   return implementation ?? null
-}
-
-export const isGlobalObjectAssign = (checker: ts.TypeChecker, call: ts.CallExpression): boolean => {
-  const callee = call.expression
-  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'assign') return false
-  if (!ts.isIdentifier(callee.expression)) return false
-  return isGlobalObjectConstructor(checker, callee.expression, checker.getTypeAtLocation(callee.expression))
 }
 
 interface Mutable {
@@ -270,8 +257,8 @@ export const indexValueFlow = (
    *
    * It is what makes rule 1 above conditional rather than absolute: an `any`
    * receiver has no member symbols and no array/collection identity, so
-   * `container.seq.push(x)` -- three's `WebGLUniforms.addUniform`, with
-   * `container` unannotated -- names no cell and records no append, and the
+   * `container.seq.push(x)` -- a JavaScript helper that appends to a
+   * parameter's array field, with `container` unannotated -- names no cell and records no append, and the
    * `seq` it fills is refused `array:no-writes` while every element it holds
    * sits at that push. The checker's answer is used whenever it HAS one; the
    * census is consulted only where the checker said `any`, so no edge this
@@ -566,7 +553,7 @@ export const indexValueFlow = (
    * explain?"), so a mention filed under one key too many can only make it
    * refuse. Filing one under too FEW is what makes an escape analysis
    * silently claim closure it has not proved -- and the two
-   * property-symbol resolutions disagree on 1339 of the three.js app's 22556
+   * property-symbol resolutions disagree on about 6% of one large program's
    * property accesses, so picking one would do exactly that.
    */
   const recordReference = (expression: ts.Expression): void => {

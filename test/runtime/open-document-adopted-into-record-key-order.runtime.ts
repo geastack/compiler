@@ -2,13 +2,13 @@
 // declared) is ADOPTED: its keys the record does not declare move into the
 // record's sidecar and the record enumerates them in the document's own
 // order. A document whose declared fields come first, in declared order --
-// every BSON document with `_id` first -- needs no order log; one whose order
+// every wire-format document with `_id` first -- needs no order log; one whose order
 // departs from that takes the document's.
 
-interface BsonDocument {
+interface WireDocument {
   [key: string]: any
 }
-interface Doc extends BsonDocument {
+interface Doc extends WireDocument {
   _id: number
   name?: string
 }

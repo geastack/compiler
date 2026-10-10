@@ -1,7 +1,7 @@
 // READING A MEMBER OFF A UNION ONE OF WHOSE ARMS IS A PROMISE THAT CANNOT
 // HAVE IT.
 //
-// hono's `resolveCallback` reads `(str as HtmlEscapedString).callbacks` off a
+// An HTTP framework's `resolveCallback` reads `(str as HtmlEscapedString).callbacks` off a
 // `string | HtmlEscapedString | Promise<string>` and immediately tests
 // `!callbacks?.length`. The `as` names the arm the author means; the other two
 // arms are expected to answer `undefined`, which is what the test is for.

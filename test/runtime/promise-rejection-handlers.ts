@@ -81,7 +81,7 @@ console.log('discarded-then2=' + notes)
 // --- a handler that returns nothing into a valued result ---------------------
 
 // `(e) => { ... }` with no `return` is typed `void`, so the call's own type is
-// `Promise<number | void>` -- the shape `@hono/node-server`'s listener writes
+// `Promise<number | void>` -- the shape an HTTP server adapter's listener writes
 // around every stream read. The handler settles the result with `undefined`.
 //! expect: void-handler-recovered=undefined
 const recovered: number | void = await failed.catch((): void => {

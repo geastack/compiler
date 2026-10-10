@@ -1,6 +1,6 @@
-// Repro for the mongodb CMAP-ping probe's `binding-carrier:selected` unmet
-// obligations (51 rows on that probe). The dominant shape (29 of 51, all at
-// mongodb/src/operations/execute_operation.ts:198): a generic function
+// Repro for a database-client connection-pool probe's `binding-carrier:selected`
+// unmet obligations (51 rows on that probe). The dominant shape (29 of 51, all
+// at one site in the client's operation executor): a generic function
 // monomorphized for a concrete subclass narrows its own type parameter via
 // `instanceof` against an UNRELATED sibling subclass. TypeScript computes the
 // narrowed type as an intersection of the two nominal classes
@@ -15,7 +15,7 @@ abstract class AbstractOperation {
   abstract readonly name: string
 }
 
-class AggregateOperation extends AbstractOperation {
+class PipelineOperation extends AbstractOperation {
   readonly name = 'aggregate'
   hasWriteStage = true
 }
@@ -26,7 +26,7 @@ class FindOperation extends AbstractOperation {
 }
 
 function tryOperation<T extends AbstractOperation>(operation: T): boolean {
-  if (operation instanceof AggregateOperation) {
+  if (operation instanceof PipelineOperation) {
     return operation.hasWriteStage
   }
   return false

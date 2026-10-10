@@ -1,4 +1,4 @@
-// hono `router/reg-exp-router/trie.ts:10` and `router.ts:132` --
+// An HTTP framework's regular-expression router (its trie and router sources) --
 // `(path.match(/\/:/g) || []).length`. `String.prototype.match` publishes the
 // native `gea::runtime::regex::MatchResult` or null, and the union join drops
 // the `[]` arm (an array literal with no elements is already a value of the arm

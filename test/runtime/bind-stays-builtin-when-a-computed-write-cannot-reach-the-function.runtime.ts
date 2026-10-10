@@ -3,10 +3,10 @@
 //! expect: merged:{"a":1,"b":2}
 //! emitted-has: gea::bindCallable
 
-// mongodb's mongo_logger.ts / cmap/connection.ts: `this.log.bind(this, 'warn')`
+// A database client's logger and connection: `this.log.bind(this, 'warn')`
 // and `this.clearPendingLog.bind(this)` on a class whose instances never enter
 // a dynamic value, in a program that elsewhere writes a computed key on an
-// `any`-typed object (utils.ts's option merging). That write can only reach
+// `any`-typed object (the client's option merging). That write can only reach
 // objects the box can hold; neither the logger's methods nor its instances
 // ever become one, so `bind` stays the intrinsic Function.prototype.bind.
 

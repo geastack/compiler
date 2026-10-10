@@ -1,6 +1,6 @@
 // `JSON.stringify` returns `undefined`, not a string, for a value with no JSON
 // form -- `undefined` itself, a function, a symbol -- although lib.d.ts
-// declares it `string`. The MongoDB driver's handshake relies on it:
+// declares it `string`. A database client's handshake relies on it:
 // `JSON.stringify(hello.maxWireVersion) ?? 0` reads a field an old server
 // omits, and the `?? 0` arm TypeScript considers dead is the live one.
 type Doc = { [key: string]: any }

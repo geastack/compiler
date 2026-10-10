@@ -1,5 +1,5 @@
 // `super(message, options)` where the options bag states a TYPED cause --
-// mongodb's `MongoError` (`options?: { cause?: Error }`) and `TimeoutError`
+// a database client's `ServiceError` (`options?: { cause?: Error }`) and `TimeoutError`
 // (`options: { cause?: Error; duration: number }`). The intrinsic Error's own
 // `cause` slot is declared `unknown`, so the typed cause widens into it.
 class DriverError extends Error {

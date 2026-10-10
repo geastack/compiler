@@ -111,9 +111,9 @@ export interface IterationOrigin {
  *   what `field-bindings.ts` keys a class field on, and what makes a
  *   subclass's `this.aspect = ...` land on the BASE class's slot.
  * - `nameSymbol` is the same call asked at a property access's `.name`. It is
- *   NOT the same symbol: measured on the three.js app, 1339 of 22556 property accesses
- *   resolve to a different symbol object through the two spellings, and 55
- *   resolve through `.name` alone. Both are recorded rather than one being
+ *   NOT the same symbol: measured on a large JS library, about 6% of property
+ *   accesses resolve to a different symbol object through the two spellings,
+ *   and some resolve through `.name` alone. Both are recorded rather than one being
  *   picked, because picking would silently change what an existing consumer
  *   sees, and this layer's whole point is that a census's answer may change
  *   only by seeing MORE writes, never by seeing different ones.
@@ -232,8 +232,8 @@ export interface FlowCallSite {
  * Six modules spelled this out identically and each re-derived it the same way
  * -- `type.getSymbol()?.valueDeclaration`, gated on the two class kinds and on
  * `!isDeclarationFile`. It is one concept with one answer, and the duplication
- * is the reason widening it (three's pre-ES6 `function F() { this.x = ... }`
- * renderer idiom is not a `ClassDeclaration`) reads as a six-file change
+ * is the reason widening it (the pre-ES6 `function F() { this.x = ... }`
+ * class idiom is not a `ClassDeclaration`) reads as a six-file change
  * instead of a one-line one.
  */
 export type SourceClass = ts.ClassDeclaration | ts.ClassExpression | ts.FunctionDeclaration | ts.FunctionExpression
@@ -280,7 +280,7 @@ export const heritageClassOrInterfaceOf = (type: ts.Type): ts.InterfaceType | nu
 
 /**
  * Whether a plain function is a CLASS: the pre-ES6 `function F() { this.x = ... }`
- * idiom three's whole renderer is written in.
+ * idiom pre-ES6 libraries write whole subsystems in.
  *
  * TypeScript already models these as classes -- `getDeclaredTypeOfSymbol` on
  * such a function returns a type carrying `ObjectFlags.Class`, answering
@@ -297,8 +297,8 @@ export const heritageClassOrInterfaceOf = (type: ts.Type): ts.InterfaceType | nu
  *   one cannot disagree about which functions are classes.
  * - no top-level `return <expression>` OTHER THAN `return this`. `new F()`
  *   yields the returned object instead of `this` when a constructor returns
- *   one, so a revealing-module factory (`function WebGLState() { ... return {
- *   setMask, ... } }` -- three has as many of those as it has of these) is a
+ *   one, so a revealing-module factory (`function State() { ... return {
+ *   setMask, ... } }` -- libraries in this style mix both freely) is a
  *   DIFFERENT mechanism whose instances are object literals, and admitting it
  *   here would attribute its instances to a family they are not in. A bare
  *   `return;` is the ordinary early exit and is not a value.
@@ -308,11 +308,11 @@ export const heritageClassOrInterfaceOf = (type: ts.Type): ts.InterfaceType | nu
  *   consumer actually depends on (`classConstructorKeepsInstanceUncached`
  *   spells it "construction always yields `this`"). Refusing it tested the
  *   PROXY -- "does a return statement carry an expression" -- instead of the
- *   property, and three's `WebGLProgram` ends exactly that way, which starved
- *   `familyRootsOf` for every receiver typed `WebGLProgram` and left
- *   `program.usedTimes` unattributable in `WebGLPrograms.acquireProgram`.
+ *   property, and a constructor function ending in `return this` then starved
+ *   `familyRootsOf` for every receiver typed as it, leaving its fields
+ *   unattributable at every caller that reads them.
  *   Widen this ONLY to `this`: dropping the check, or admitting any return,
- *   readmits the `WebGLState` factory above and turns a refusal into a wrong
+ *   readmits the `State` factory above and turns a refusal into a wrong
  *   answer.
  * - no prototype-chain heritage. `F.prototype = Object.create( B.prototype )`
  *   and `B.call( this, ... )` are how this idiom spells `extends`, and
@@ -321,16 +321,16 @@ export const heritageClassOrInterfaceOf = (type: ts.Type): ts.InterfaceType | nu
  *   answer as "no base, the family ends here", so a chained constructor
  *   function would make the family silently SMALLER than it is -- a wrong
  *   answer, not a refusal. Refusing the candidate outright is what keeps the
- *   empty answer honest. (Measured: none of three's constructor functions
- *   chains, so this guard costs nothing and buys the soundness argument.)
+ *   empty answer honest. (Constructor functions that chain this way are rare,
+ *   so this guard costs little and buys the soundness argument.)
  */
 /**
  * ⚠ Memoized because it is asked tens of thousands of times per node, not as a
  * micro-optimization. Ten call sites across the hottest modules ask it, several
  * from INSIDE the coinductive escape proof, which re-enters per (path,
  * reference) -- and `spellsPrototypeHeritage` walks the whole function body on
- * every call. Measured unmemoized at 154 s of a 746 s three.js compile: 20.7%,
- * the single hottest frame in the program. The answer is a pure, deterministic
+ * every call. Measured unmemoized at about a fifth of a large program's compile, the
+ * single hottest frame in the program. The answer is a pure, deterministic
  * classification of an immutable AST node, so caching it by node identity
  * changes nothing but the repeated work.
  */

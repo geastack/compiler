@@ -1,4 +1,4 @@
-// mongodb's aws4 signing hands a `Uint8Array` to Web Crypto's
+// A database client's request signing hands a `Uint8Array` to Web Crypto's
 // `digest(algorithm, data: BufferSource)`; the body tells a view from a bare
 // ArrayBuffer with `ArrayBuffer.isView` and reads the view's window.
 function windowOf(data: BufferSource): string {

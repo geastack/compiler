@@ -1,5 +1,5 @@
-// `x?.toString()` over `string | Address`: mongodb's Azure KMS request builds
-// `new URL(options.url?.toString() ?? AZURE_BASE_URL)` with `url?: string | URL`.
+// `x?.toString()` over `string | Address`: a cloud key-service request builds
+// `new URL(options.url?.toString() ?? BASE_URL)` with `url?: string | URL`.
 // The call dispatches on the arm the union holds -- String.prototype.toString
 // for the string, the class's own method for the instance.
 

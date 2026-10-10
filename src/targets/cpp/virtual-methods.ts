@@ -1,6 +1,9 @@
 import type { DeclarationId, FunctionId } from '../../identity/ids.js'
-import type { AbiParameter, CallableAbi, Representation } from '../../representation/model.js'
+import { representationKey, type AbiParameter, type CallableAbi, type Representation } from '../../representation/model.js'
 import type { ClassLayout } from '../../projection/classes.js'
+import { nativeClassReferenceTransportMatches } from '../../conversion/native-class-reference.js'
+import { isNativeCallableCarrier } from '../../representation/callable-object.js'
+import { prototypeSetterValue, virtualConversionOwnerOf, type ProgramConversionRole } from '../../ir/program-conversions.js'
 import {
   extendsClass,
   virtualDispatchKey,
@@ -24,7 +27,7 @@ export {
   type VirtualMethodImplementor
 }
 import { cppFormalName } from './emit-context.js'
-import { wellKnownSymbolEnumNameOf } from './records.js'
+import { nativeFieldPolicyType, wellKnownSymbolEnumNameOf } from './records.js'
 import {
   cppAbiParameterType,
   cppBodyName,
@@ -37,7 +40,7 @@ import {
   cppTypeOf,
   cppUndefinedIn
 } from './types.js'
-import { alignedValueText, dynamicCarrierBoxText, type ConversionSite } from './emit-narrowing.js'
+import { programConversionText, dynamicCarrierBoxText, type ConversionSite } from './emit-narrowing.js'
 
 /**
  * Dispatch for a method the program overrides.
@@ -49,9 +52,9 @@ import { alignedValueText, dynamicCarrierBoxText, type ConversionSite } from './
  * Binding the body the upward walk found is therefore right only while nothing
  * below redeclares the key -- and when something does, the emitted program runs
  * the base's body for every instance of a subclass, compiles, links, and is
- * silently wrong. gea3d-cube is the worked case: `Object3D.collectSelf` is
- * empty and `Mesh`/`Light` override it, so the renderer's scene walk collected
- * zero meshes and painted a cleared frame with no diagnostic anywhere.
+ * silently wrong. The worked case: a scene-graph base class's `collectSelf` is
+ * empty and its `Mesh`/`Light` subclasses override it, so a scene walk
+ * collected zero meshes and painted a cleared frame with no diagnostic anywhere.
  *
  * The mechanism here is C++'s own. The emitted structs already model the
  * language's inheritance as C++ inheritance (`records.ts`), single and with the
@@ -149,12 +152,15 @@ const classRefConversionText = (
 const virtualValueConversionText = (
   site: ConversionSite,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  role: ProgramConversionRole,
+  owner: string,
+  slot: string,
   source: Representation,
   target: Representation,
   text: string
 ): string | null => {
   if (source.kind === 'class-ref' && target.kind === 'class-ref') return classRefConversionText(classes, source, target, text)
-  return alignedValueText(site, 'virtual-methods.ts:189', source, target, text)
+  return programConversionText(site, role, owner, slot, source, target, text)
 }
 
 interface VirtualMethodAdapter {
@@ -192,10 +198,14 @@ const virtualMethodAdapterOf = (
   const receiverAbi = actualAbi.receiver ?? drift('a receiver')
   const instanceValue = classes.get(implementor.declaration)?.instance ?? null
   const instance = instanceValue !== null && instanceValue.kind === 'class-ref' ? instanceValue : drift('a class-ref instance carrier')
+  const owner = virtualConversionOwnerOf(family, implementor.declaration)
   const receiverText =
     virtualValueConversionText(
       site,
       classes,
+      'virtual-receiver',
+      owner,
+      '',
       instance,
       receiverAbi,
       `gea::Ref<${cppClassName(implementor.declaration)}>::adopt(this, true)`
@@ -205,7 +215,16 @@ const virtualMethodAdapterOf = (
     const source = rootAbi.parameters[position]
     if (source !== undefined) {
       actuals.push(
-        virtualValueConversionText(site, classes, source.value, parameter.value, cppFormalName(position)) ?? drift(`parameter ${position}`)
+        virtualValueConversionText(
+          site,
+          classes,
+          'virtual-parameter',
+          owner,
+          String(position),
+          source.value,
+          parameter.value,
+          cppFormalName(position)
+        ) ?? drift(`parameter ${position}`)
       )
       continue
     }
@@ -216,7 +235,9 @@ const virtualMethodAdapterOf = (
     actuals.push(cppUndefinedIn(parameter.value) ?? drift(`an undefined default for parameter ${position}`))
   }
   const invocation = `${cppBodyName(implementor.callable)}(${actuals.join(', ')})`
-  const result = virtualValueConversionText(site, classes, actualAbi.result, rootAbi.result, invocation) ?? drift('the result')
+  const result =
+    virtualValueConversionText(site, classes, 'virtual-result', owner, '', actualAbi.result, rootAbi.result, invocation) ??
+    drift('the result')
   return { result }
 }
 
@@ -316,11 +337,12 @@ export const virtualMethodEmission = (
       if (stored === null) throw new Error(`virtual field implementation ${declaration}.${family.key} has no carrier`)
       const member = cppVirtualMemberName(family.key, family.role, family.copy)
       const slot = `this->${cppRecordFieldName(family.key)}`
+      const owner = virtualConversionOwnerOf(family, declaration)
       const written = rootAbi.parameters[0]?.value
       const body =
         family.role === 'get'
-          ? `return ${virtualValueConversionText(site, classes, stored, rootAbi.result, slot) ?? throwVirtualFieldDrift(declaration, family.key)};`
-          : `${slot} = ${(written && virtualValueConversionText(site, classes, written, stored, cppFormalName(0))) ?? throwVirtualFieldDrift(declaration, family.key)};` +
+          ? `return ${virtualValueConversionText(site, classes, 'virtual-field', owner, '', stored, rootAbi.result, slot) ?? throwVirtualFieldDrift(declaration, family.key)};`
+          : `${slot} = ${(written && virtualValueConversionText(site, classes, 'virtual-field', owner, '', written, stored, cppFormalName(0))) ?? throwVirtualFieldDrift(declaration, family.key)};` +
             (result === 'void' ? '' : ` return ${cppUndefinedIn(rootAbi.result) ?? throwVirtualFieldDrift(declaration, family.key)};`)
       membersByStruct.set(structName, [...(membersByStruct.get(structName) ?? []), `  ${result} ${member}(${formals}) override;`])
       definitions.push(`${result} ${structName}::${member}(${formals}) { ${body} }`)
@@ -438,7 +460,7 @@ export interface PrototypeReadHooks {
  *
  * A class accessor has no storage (`ClassLayout.accessors`), so the boxed
  * payload's field table cannot see it, and `Value::getProperty` found nothing
- * and answered `undefined` -- `@hono/node-server` reads `request.method` off
+ * and answered `undefined` -- a program that reads `request.method` off
  * an `Object.create`d instance it only holds as `any`. The hook calls the
  * getter's own body on the instance and boxes its result; a getter whose
  * result has no boxed form is left out rather than answered wrongly.
@@ -451,7 +473,7 @@ export interface PrototypeReadHooks {
  * `full`-demand answer `records.ts` spells the struct's own dynamic field
  * protocol from, bases included): only a class some box can hold is ever
  * asked for a prototype property through `gea::Value`, and a class no box
- * holds gets no hook -- the hook's method arm boxes every method into a
+ * holds gets no value-reading hook -- the hook's method arm boxes every method into a
  * `gea::Value` function object, which a program whose classes never reach a
  * dynamic carrier must not spell at all (`test/stored-listener-native-flow`,
  * `native-method-overrides`' `emitted-lacks: gea::Value::box`).
@@ -461,12 +483,14 @@ export const prototypeReadHooks = (
   abiOf: (callable: FunctionId) => CallableAbi | null,
   capturesNothing: (callable: FunctionId) => boolean,
   readDynamically: (declaration: DeclarationId) => boolean,
-  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map()
+  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map(),
+  hasNatively: (declaration: DeclarationId) => boolean = () => false,
+  site?: ConversionSite
 ): PrototypeReadHooks => {
   // A method read yields the ONE function object its class evaluation holds
   // for that method (`gea::nativeClassMethodValue`), the object a native read
   // of it yields too. A fresh object per read made `box.m === box.m` false and
-  // dropped every write through it: mongodb-shaped code that patches a
+  // dropped every write through it: code that patches a
   // method's `bind` through a boxed instance wrote onto a throwaway, and a
   // native `this.m.bind(this)` guarded on that object's own `bind`
   // (`emit-callable.ts`'s `guardedBindLines`) could not see the write.
@@ -498,43 +522,218 @@ export const prototypeReadHooks = (
     ...layout.accessors.flatMap((accessor) => {
       if (accessor.getter === null || !capturesNothing(accessor.getter)) return []
       const abi = abiOf(accessor.getter)
-      if (abi === null || abi.receiver === null || abi.parameters.length > 0 || abi.restFrom !== null) return []
-      if (layout.instance?.kind !== 'class-ref' || abi.receiver.kind !== 'class-ref') return []
+      if (abi === null || abi.parameters.length > 0 || abi.restFrom !== null || !layout.instance || site === undefined) return []
       const self = `gea::Ref<${cppClassName(layout.declaration)}>::adopt(const_cast<${cppClassName(layout.declaration)}*>(this), true)`
-      const receiver = classRefConversionText(classes, layout.instance, abi.receiver, self)
+      const receiver =
+        abi.receiver === null
+          ? ''
+          : programConversionText(
+              site,
+              'prototype-getter-receiver',
+              String(layout.declaration),
+              accessor.key,
+              layout.instance,
+              abi.receiver,
+              self
+            )
       if (receiver === null) return []
       const invocation = `${cppBodyName(accessor.getter)}(${receiver})`
-      if (abi.result.kind === 'undefined' || cppResultTypeOf(abi.result) === 'void') return []
-      const boxed = abi.result.kind === 'dynamic' ? invocation : dynamicCarrierBoxText(abi.result, invocation)
+      if (cppResultTypeOf(abi.result) === 'void') return [{ key: accessor.key, text: `(${invocation}, gea::Value())` }]
+      const boxed = programConversionText(
+        site,
+        'prototype-getter-result',
+        String(layout.declaration),
+        accessor.key,
+        abi.result,
+        prototypeSetterValue,
+        invocation
+      )
       return boxed === null ? [] : [{ key: accessor.key, text: boxed }]
     }),
     ...methods(layout)
   ]
+  const setters = (layout: ClassLayout): { readonly key: string; readonly text: string }[] =>
+    layout.accessors.map((accessor) => {
+      if (accessor.setter === null) return { key: accessor.key, text: 'return gea::detail::NativePrototypeOps::SetResult::Rejected;' }
+      const abi = abiOf(accessor.setter)
+      if (
+        site === undefined ||
+        !layout.instance ||
+        abi === null ||
+        !capturesNothing(accessor.setter) ||
+        abi.parameters.length !== 1 ||
+        abi.restFrom !== null
+      ) {
+        return {
+          key: accessor.key,
+          text: 'gea::host::throwRuntimeError("TypeError", "a native prototype setter has no authenticated body entry");'
+        }
+      }
+      const argument = programConversionText(
+        site,
+        'prototype-setter-argument',
+        String(layout.declaration),
+        accessor.key,
+        prototypeSetterValue,
+        abi.parameters[0]!.value,
+        'gea_value'
+      )
+      const source = `gea_receiver.as<${cppClassName(layout.declaration)}>()`
+      const receiver =
+        abi.receiver === null
+          ? null
+          : programConversionText(
+              site,
+              'prototype-setter-receiver',
+              String(layout.declaration),
+              accessor.key,
+              layout.instance,
+              abi.receiver,
+              source
+            )
+      if (argument === null || (abi.receiver !== null && receiver === null))
+        return {
+          key: accessor.key,
+          text: 'gea::host::throwRuntimeError("TypeError", "a native prototype setter has no certified physical conversion");'
+        }
+      return {
+        key: accessor.key,
+        text:
+          `${cppBodyName(accessor.setter)}(${[...(receiver === null ? [] : [receiver]), argument].join(', ')}); ` +
+          'return gea::detail::NativePrototypeOps::SetResult::Accepted;'
+      }
+    })
+  // A typed entry writer owns its already-certified argument adapters. Ask
+  // that adapter for the retained setter body's exact carrier/policy, rather
+  // than materializing the stored payload through the legacy Value entry.
+  const nativeSetters = (layout: ClassLayout): { readonly key: string; readonly text: string }[] =>
+    layout.accessors.map((accessor) => {
+      if (accessor.setter === null) return { key: accessor.key, text: 'return gea::detail::NativePrototypeOps::SetResult::Rejected;' }
+      const abi = abiOf(accessor.setter)
+      const argument = abi?.parameters.length === 1 ? abi.parameters[0]!.value : null
+      // Leaf type/policy tags cannot authenticate a Function's rest or actual
+      // argument frame. Such payloads require a distinct entry ABI receipt.
+      const erasedArgument = (value: Representation): boolean =>
+        value.kind === 'optional'
+          ? erasedArgument(value.payload)
+          : value.kind === 'tagged-union'
+            ? value.arms.some((arm) => erasedArgument(arm.value))
+            : value.kind === 'dynamic' || value.kind === 'unresolved' || value.kind === 'void' || isNativeCallableCarrier(value.kind)
+      if (
+        site === undefined ||
+        !layout.instance ||
+        abi === null ||
+        !capturesNothing(accessor.setter) ||
+        argument === null ||
+        erasedArgument(argument) ||
+        abi.restFrom !== null
+      )
+        return {
+          key: accessor.key,
+          text: 'gea::host::throwRuntimeError("TypeError", "a native prototype setter has no authenticated typed body entry");'
+        }
+      const source = `gea_receiver.as<${cppClassName(layout.declaration)}>()`
+      let receiver: string | null = null
+      if (abi.receiver !== null) {
+        const recipe = site.programConversionRecipes?.find(
+          (entry) => entry.role === 'prototype-setter-receiver' && entry.owner === String(layout.declaration) && entry.slot === accessor.key
+        )
+        if (
+          abi.receiver.kind !== 'class-ref' ||
+          (representationKey(abi.receiver) !== representationKey(layout.instance) &&
+            !nativeClassReferenceTransportMatches(layout.instance, abi.receiver, recipe?.conversion))
+        )
+          return {
+            key: accessor.key,
+            text: 'gea::host::throwRuntimeError("TypeError", "a native prototype setter has no native receiver entry");'
+          }
+        receiver = programConversionText(
+          site,
+          'prototype-setter-receiver',
+          String(layout.declaration),
+          accessor.key,
+          layout.instance,
+          abi.receiver,
+          source
+        )
+        if (receiver === null)
+          return {
+            key: accessor.key,
+            text: 'gea::host::throwRuntimeError("TypeError", "a native prototype setter has no certified receiver conversion");'
+          }
+      }
+      return {
+        key: accessor.key,
+        text:
+          `std::optional<${cppTypeOf(argument)}> gea_argument; ` +
+          `if (!gea_written.read<${nativeFieldPolicyType(argument)}>(gea_argument)) ` +
+          'gea::host::throwRuntimeError("TypeError", "a native prototype setter has no selected argument conversion"); ' +
+          `${cppBodyName(accessor.setter)}(${[...(receiver === null ? [] : [receiver]), 'std::move(*gea_argument)'].join(', ')}); ` +
+          'return gea::detail::NativePrototypeOps::SetResult::Accepted;'
+      }
+    })
   const own = new Map<DeclarationId, { readonly key: string; readonly text: string }[]>()
+  const writable = new Map<DeclarationId, { readonly key: string; readonly text: string }[]>()
+  const nativeWritable = new Map<DeclarationId, { readonly key: string; readonly text: string }[]>()
+  const presence = new Map<DeclarationId, readonly string[]>()
   for (const [declaration, layout] of classes) {
-    if (!readDynamically(declaration)) continue
-    const getters = readable(layout)
-    if (getters.length > 0) own.set(declaration, getters)
+    const keys = [
+      ...new Set([
+        ...layout.methods.filter((method) => method.callable !== null).map((method) => method.key),
+        ...layout.accessors.filter((accessor) => accessor.getter !== null || accessor.setter !== null).map((accessor) => accessor.key)
+      ])
+    ]
+    if (hasNatively(declaration)) presence.set(declaration, keys)
+    if (readDynamically(declaration)) {
+      const getters = readable(layout)
+      const stores = setters(layout)
+      if (getters.length > 0 || stores.length > 0) {
+        own.set(declaration, getters)
+        writable.set(declaration, stores)
+        nativeWritable.set(declaration, nativeSetters(layout))
+        // The runtime installs a prototype table only for a type stating the
+        // whole read/has/set triple (`NativePrototypeTable`); a read hook with
+        // no `has` beside it was compiled out, and a boxed instance's getter
+        // read `undefined`.
+        presence.set(declaration, keys)
+      }
+    }
   }
-  const hookedAncestorOf = (declaration: DeclarationId): DeclarationId | null => {
+  const hookedAncestorOf = (declaration: DeclarationId, dynamic: boolean): DeclarationId | null => {
     for (let base = classes.get(declaration)?.base ?? null; base !== null; base = classes.get(base)?.base ?? null)
-      if (own.has(base)) return base
+      if ((dynamic ? own : presence).has(base)) return base
     return null
   }
   const membersByStruct = new Map<string, string[]>()
   const definitions: string[] = []
-  for (const [declaration, getters] of own) {
+  const extendedClasses = new Set([...classes.values()].flatMap((layout) => (layout.base === null ? [] : [layout.base])))
+  for (const declaration of new Set([...presence.keys(), ...own.keys()])) {
+    const keys = presence.get(declaration)
+    const getters = own.get(declaration) ?? []
+    const stores = writable.get(declaration) ?? []
+    const nativeStores = nativeWritable.get(declaration) ?? []
+    const dynamic = own.has(declaration)
     const struct = cppClassName(declaration)
-    const ancestor = hookedAncestorOf(declaration)
-    const [lead, tail] = ancestor === null ? ['virtual ', ''] : ['', ' override']
+    const ancestor = hookedAncestorOf(declaration, false)
+    const dynamicAncestor = hookedAncestorOf(declaration, true)
+    const rootLead = extendedClasses.has(declaration) ? 'virtual ' : ''
+    const [lead, tail] = ancestor === null ? [rootLead, ''] : ['', ' override']
+    const [dynamicLead, dynamicTail] = dynamicAncestor === null ? [rootLead, ''] : ['', ' override']
     membersByStruct.set(struct, [
-      `  ${lead}bool gea_readPrototypeProperty(const gea::PropertyKey& gea_key, gea::Value& gea_out) const${tail};`,
-      `  ${lead}bool gea_hasPrototypeProperty(const gea::PropertyKey& gea_key) const${tail};`,
-      `  ${lead}gea::detail::NativePrototypeOps::SetResult gea_setPrototypeProperty(const gea::PropertyKey& gea_key, const gea::Value& gea_value, const gea::Value& gea_receiver)${tail};`
+      ...(!dynamic
+        ? []
+        : [
+            `  ${dynamicLead}bool gea_readPrototypeProperty(const gea::PropertyKey& gea_key, gea::Value& gea_out) const${dynamicTail};`,
+            `  ${dynamicLead}gea::detail::NativePrototypeOps::SetResult gea_setPrototypeProperty(const gea::PropertyKey& gea_key, const gea::Value& gea_value, const gea::Value& gea_receiver)${dynamicTail};`,
+            `  ${dynamicLead}gea::detail::NativePrototypeOps::SetResult gea_setPrototypePropertyNative(const gea::PropertyKey& gea_key, const gea::Value& gea_value, const gea::NativeCallReceiver& gea_receiver)${dynamicTail};`,
+            `  ${dynamicLead}gea::detail::NativePrototypeOps::SetResult gea_setPrototypePropertyFieldNative(const gea::PropertyKey& gea_key, const gea::NativeFieldWrite& gea_written, const gea::NativeCallReceiver& gea_receiver)${dynamicTail};`
+          ]),
+      ...(keys === undefined ? [] : [`  ${lead}bool gea_hasPrototypeProperty(const gea::PropertyKey& gea_key) const${tail};`])
     ])
     const inherited = ancestor === null ? null : cppClassName(ancestor)
-    // A symbol-keyed member (`get [BSON_VERSION_SYMBOL]()` on bson's
-    // `BSONValue`) is laid out under its `sym(<declaration>)` marker, which no
+    const dynamicInherited = dynamicAncestor === null ? null : cppClassName(dynamicAncestor)
+    // A symbol-keyed member (`get [VERSION_SYMBOL]()` on a base class) is
+    // laid out under its `sym(<declaration>)` marker, which no
     // text key ever equals: it matches by the symbol's runtime id -- a
     // well-known symbol's fixed one, or the id the program's own symbol cell
     // registered (`gea::detail::registerDeclaredSymbol`), exactly as the
@@ -548,39 +747,75 @@ export const prototypeReadHooks = (
         : `gea_key.symbolId() == static_cast<std::uint32_t>(gea::detail::WellKnownSymbol::${wellKnown})`
     }
     const has = [
-      ...(texts.length === 0
+      ...((keys ?? []).every((key) => cppRecordFieldKeyIsSymbol(key))
         ? []
-        : [`(!gea_key.isSymbol() && (${texts.map((getter) => `gea_key.text() == ${cppStringLiteral(getter.key)}`).join(' || ')}))`]),
-      ...(symbols.length === 0 ? [] : [`(gea_key.isSymbol() && (${symbols.map((getter) => symbolTest(getter.key)).join(' || ')}))`])
+        : [
+            `(!gea_key.isSymbol() && (${keys!
+              .filter((key) => !cppRecordFieldKeyIsSymbol(key))
+              .map((key) => `gea_key.text() == ${cppStringLiteral(key)}`)
+              .join(' || ')}))`
+          ]),
+      ...(keys?.some(cppRecordFieldKeyIsSymbol)
+        ? [`(gea_key.isSymbol() && (${keys.filter(cppRecordFieldKeyIsSymbol).map(symbolTest).join(' || ')}))`]
+        : [])
     ]
     definitions.push(
       [
-        `bool ${struct}::gea_readPrototypeProperty(const gea::PropertyKey& gea_key, gea::Value& gea_out) const {`,
-        ...(texts.length === 0
+        ...(!dynamic
           ? []
           : [
-              '  if (!gea_key.isSymbol()) {',
-              '    const std::string& gea_name = gea_key.text();',
-              ...texts.map((getter) => `    if (gea_name == ${cppStringLiteral(getter.key)}) { gea_out = ${getter.text}; return true; }`),
-              '  }'
+              `bool ${struct}::gea_readPrototypeProperty(const gea::PropertyKey& gea_key, gea::Value& gea_out) const {`,
+              ...(texts.length === 0
+                ? []
+                : [
+                    '  if (!gea_key.isSymbol()) {',
+                    '    const std::string& gea_name = gea_key.text();',
+                    ...texts.map(
+                      (getter) => `    if (gea_name == ${cppStringLiteral(getter.key)}) { gea_out = ${getter.text}; return true; }`
+                    ),
+                    '  }'
+                  ]),
+              ...(symbols.length === 0
+                ? []
+                : [
+                    '  if (gea_key.isSymbol()) {',
+                    ...symbols.map((getter) => `    if (${symbolTest(getter.key)}) { gea_out = ${getter.text}; return true; }`),
+                    '  }'
+                  ]),
+              `  return ${dynamicInherited === null ? 'false' : `${dynamicInherited}::gea_readPrototypeProperty(gea_key, gea_out)`};`,
+              '}'
             ]),
-        ...(symbols.length === 0
+        ...(keys === undefined
           ? []
           : [
-              '  if (gea_key.isSymbol()) {',
-              ...symbols.map((getter) => `    if (${symbolTest(getter.key)}) { gea_out = ${getter.text}; return true; }`),
-              '  }'
+              `bool ${struct}::gea_hasPrototypeProperty(const gea::PropertyKey& gea_key) const {`,
+              ...(has.length === 0 ? [] : [`  if (${has.join(' || ')}) return true;`]),
+              `  return ${inherited === null ? 'false' : `${inherited}::gea_hasPrototypeProperty(gea_key)`};`,
+              '}'
             ]),
-        `  return ${inherited === null ? 'false' : `${inherited}::gea_readPrototypeProperty(gea_key, gea_out)`};`,
-        '}',
-        `bool ${struct}::gea_hasPrototypeProperty(const gea::PropertyKey& gea_key) const {`,
-        `  if (${has.join(' || ')}) return true;`,
-        `  return ${inherited === null ? 'false' : `${inherited}::gea_hasPrototypeProperty(gea_key)`};`,
-        '}',
-        // Setters stay on the static paths; a dynamic write falls through to the payload's own fields.
-        `gea::detail::NativePrototypeOps::SetResult ${struct}::gea_setPrototypeProperty(const gea::PropertyKey&, const gea::Value&, const gea::Value&) {`,
-        '  return gea::detail::NativePrototypeOps::SetResult::Absent;',
-        '}'
+        ...(!dynamic
+          ? []
+          : [
+              `gea::detail::NativePrototypeOps::SetResult ${struct}::gea_setPrototypeProperty(const gea::PropertyKey& gea_key, const gea::Value& gea_value, const gea::Value& gea_receiver) {`,
+              '  return gea_setPrototypePropertyNative(gea_key, gea_value, gea::NativeCallReceiver::fromValue(gea_receiver));',
+              '}',
+              `gea::detail::NativePrototypeOps::SetResult ${struct}::gea_setPrototypePropertyNative(const gea::PropertyKey& gea_key, const gea::Value& gea_value, const gea::NativeCallReceiver& gea_receiver) {`,
+              '  (void)gea_key; (void)gea_value; (void)gea_receiver;',
+              ...stores.map(
+                (store) =>
+                  `  if (${cppRecordFieldKeyIsSymbol(store.key) ? `gea_key.isSymbol() && ${symbolTest(store.key)}` : `!gea_key.isSymbol() && gea_key.text() == ${cppStringLiteral(store.key)}`}) { ${store.text} }`
+              ),
+              `  return ${dynamicInherited === null ? 'gea::detail::NativePrototypeOps::SetResult::Absent' : `${dynamicInherited}::gea_setPrototypePropertyNative(gea_key, gea_value, gea_receiver)`};`,
+              '}',
+              `gea::detail::NativePrototypeOps::SetResult ${struct}::gea_setPrototypePropertyFieldNative(const gea::PropertyKey& gea_key, const gea::NativeFieldWrite& gea_written, const gea::NativeCallReceiver& gea_receiver) {`,
+              '  (void)gea_key; (void)gea_written; (void)gea_receiver;',
+              ...nativeStores.map(
+                (store) =>
+                  `  if (${cppRecordFieldKeyIsSymbol(store.key) ? `gea_key.isSymbol() && ${symbolTest(store.key)}` : `!gea_key.isSymbol() && gea_key.text() == ${cppStringLiteral(store.key)}`}) { ${store.text} }`
+              ),
+              `  return ${dynamicInherited === null ? 'gea::detail::NativePrototypeOps::SetResult::Absent' : `${dynamicInherited}::gea_setPrototypePropertyFieldNative(gea_key, gea_written, gea_receiver)`};`,
+              '}'
+            ])
       ].join('\n')
     )
   }

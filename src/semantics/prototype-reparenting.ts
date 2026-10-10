@@ -206,7 +206,7 @@ const nothingRunsBetween = (checker: ts.TypeChecker, derived: ts.ClassDeclaratio
  * of the module that declares the class `C`, where `C` has no `extends` and
  * `B` is a class this program compiles.
  *
- * `@hono/node-server`'s `RequestHeaders` is the shape: it answers the
+ * A library's own `Headers`-like class is the shape: it answers the
  * `Headers` surface itself and re-parents its prototype so its instances are
  * `instanceof Headers`. After the call `C.prototype`'s [[Prototype]] is
  * `B.prototype`, so for member lookup a `C` instance is exactly what an

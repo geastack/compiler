@@ -11,7 +11,7 @@
 // promise or a union of one, so an `Optional<Promise<T>>` reached the result
 // cell unresolved and clang refused the store.
 //
-// Both shapes here are @hono/node-server's own. `responseViaCache` awaits
+// Both shapes here are an HTTP server adapter's own. `responseViaCache` awaits
 // `writeFromReadableStream(body, outgoing)?.catch(...)`, which is
 // `Promise<undefined> | undefined`; `responseViaResponseObject` awaits
 // `options.errorHandler(err)`, whose `CustomErrorHandler` result is

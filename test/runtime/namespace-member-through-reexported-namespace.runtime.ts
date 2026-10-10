@@ -1,7 +1,7 @@
 // A member read off a module namespace that is itself reached through an
-// import binding: `import { BSON } from 'bson'` (bson's index.ts does
-// `import * as BSON from './bson'; export { BSON }`) followed by
-// `BSON.serialize(...)`, and `dns.promises.lookup(...)` where `promises` is a
+// import binding: `import { Wire } from 'wire-format'` (whose index does
+// `import * as Wire from './wire'; export { Wire }`) followed by
+// `Wire.serialize(...)`, and `dns.promises.lookup(...)` where `promises` is a
 // namespace re-exported by `node:dns`. Both name the member's own binding --
 // the namespace object is a path, and no cell holds it.
 import { inner } from './_namespace-reexport-outer'

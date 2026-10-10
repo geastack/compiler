@@ -1,5 +1,5 @@
 // A `{ [key: number]: any }` table returned where `{ [key: number]: Id }` is
-// declared (mongodb's `insertMany`: the bulk result's id map becomes
+// declared (a database client's `insertMany`: the bulk result's id map becomes
 // `InsertManyResult.insertedIds`, typed by the collection's id). Every entry
 // is checked into the declared carrier, keys kept in their order.
 

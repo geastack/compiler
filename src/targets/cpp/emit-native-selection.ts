@@ -5,7 +5,12 @@ import { renderNativeSumPlan } from './emit-sum-widening.js'
 import { cppClassName, cppTypeOf, cppUndefinedValue, unitFunctionName } from './types.js'
 
 /** The census already chose every arm and transfer; this renderer only spells them. */
-export const nativeSelectionBody = (recipe: NativeSelectionRecipe, source: Representation, target: Representation): string | null => {
+export const nativeSelectionBody = (
+  recipe: NativeSelectionRecipe,
+  source: Representation,
+  target: Representation,
+  mismatch: 'compiler' | 'type-error' = 'compiler'
+): string | null => {
   if (recipe.source !== representationKey(source) || recipe.target !== representationKey(target)) return null
   const alias = 'GeaSelectionTarget'
   const spell = (value: Representation): string => (representationKey(value) === recipe.target ? alias : cppTypeOf(value))
@@ -17,7 +22,9 @@ export const nativeSelectionBody = (recipe: NativeSelectionRecipe, source: Repre
       case 'null':
         return `return ${alias}{};`
       case 'reference-null':
-        return `if (!(${value})) { ${render(step.absent, 'nullptr')} }`
+        return step.undefined === undefined
+          ? `if (!(${value}) && !(${value}).isUndefined()) { ${render(step.absent, 'nullptr')} }`
+          : `if ((${value}).isUndefined()) { ${render(step.undefined, cppUndefinedValue)} } else if (!(${value})) { ${render(step.absent, 'nullptr')} }`
       case 'transfer':
         return `return ${renderNativeSumPlan(step.plan, value, spell, true)};`
       case 'class-cast':
@@ -32,7 +39,11 @@ export const nativeSelectionBody = (recipe: NativeSelectionRecipe, source: Repre
           .join(' ')
     }
   }
-  const body = `${render(recipe.step, 'gea_selection')} gea::detail::refusePayloadMismatch("native sum selection has no matching alternative");`
+  const failure =
+    mismatch === 'compiler'
+      ? 'gea::detail::refusePayloadMismatch("native sum selection has no matching alternative");'
+      : 'gea::host::throwRuntimeError("TypeError", "dictionary entry has no matching native alternative");'
+  const body = `${render(recipe.step, 'gea_selection')} ${failure}`
   // Only a body that spells the target needs the alias: a `downcastClassRef`
   // or `identity` arm does not, and an unused local typedef is an error under
   // the ESP-IDF build's `-Werror=unused-local-typedefs`.
@@ -43,9 +54,10 @@ export const nativeSelectionText = (
   recipe: NativeSelectionRecipe,
   source: Representation,
   target: Representation,
-  text: string
+  text: string,
+  mismatch: 'compiler' | 'type-error' = 'compiler'
 ): string | null => {
-  const body = nativeSelectionBody(recipe, source, target)
+  const body = nativeSelectionBody(recipe, source, target, mismatch)
   if (body === null) return null
   // The census chose every arm, so the selection depends on the two carriers
   // alone: one unit function per pair (`unitFunctionName`), the same shape the

@@ -1,6 +1,6 @@
 //! expect: one a
 //! expect: two b
-// hono's `utils/url.ts` publishes its wide implementation through a narrower
+// An HTTP framework's URL utilities publish a wide implementation through a narrower
 // declared type:
 //
 //   export const getQueryParam: (url: string, key?: string) => ... = _getQueryParam as (...)

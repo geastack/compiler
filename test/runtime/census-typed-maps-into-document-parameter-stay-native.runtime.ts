@@ -1,7 +1,7 @@
-// mongodb's handshake `LimitedSizeDocument` (cmap/handshake/client_metadata.ts)
-// hands bson's `serialize(object: Document)` two maps: its own
+// A database client's handshake `LimitedSizeDocument` hands a binary-document
+// serializer's `serialize(object: Document)` two maps: its own
 // `private document = new Map()` field, and a probe `new Map().set(key, value)`
-// built per candidate entry. bson walks either under `object instanceof Map`.
+// built per candidate entry. The serializer walks either under `object instanceof Map`.
 // Both are `Map<any, any>` to the checker and `Map<string, Doc | string>` to
 // every write the program makes, so the parameter's map arm is that native map:
 // the field enters as itself, with no box and no dynamic view.

@@ -1,5 +1,5 @@
 // Declarations that have drifted from the JS they describe, the way
-// `WebGLState.d.ts`'s `setBlending` lags three's own source.
+// a 3D library's GPU-state declaration of `setBlending` lags its own source.
 export declare function inserted(blending: number, blendDst: number, premultiplyAlpha: boolean): void
 export declare function renamed(value: boolean, depth: number): void
 export declare function swapped(width: number, label: string): void

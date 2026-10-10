@@ -3,7 +3,7 @@
 // `runtime/node/globals.ts`'s `class MessageEvent<T = any> extends Event`
 // writes `constructor(type, init = {}) { super(type); this.data = init.data }`.
 // Its three non-generic siblings -- `CloseEventImpl`, `ErrorEventImpl`, and
-// @hono/node-server's own two -- all got that body; the generic one was
+// an HTTP server adapter's own two -- all got that body; the generic one was
 // constructed as though it had written NO constructor, which is two wrong
 // answers at once: `data` is never assigned, and the implicit `super(...args)`
 // forwards the DERIVED signature's own second parameter (a `MessageEventInit`)

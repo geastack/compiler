@@ -13,7 +13,7 @@ abstract class AbstractCursor<TSchema = any> {
   constructor(docs: any[]) {
     this.buffer = docs
   }
-  // mongodb's own shape: the cursor is reinterpreted, not re-created, so every
+  // A database client's own shape: the cursor is reinterpreted, not re-created, so every
   // copy of the family folds onto one class and `toArray` hands back `any[]`.
   map<T = any>(transform: (doc: TSchema) => T): AbstractCursor<T> {
     this.transform = transform
@@ -80,8 +80,8 @@ async function aliasing(db: Db): Promise<string> {
 
 async function main() {
   // The documents are typed records held as `any`, which an element
-  // assertion reads back by identity; a JSON-parsed dictionary (mongodb's
-  // BSON documents) is adopted into the record instead.
+  // assertion reads back by identity; a JSON-parsed dictionary (a database
+  // client's wire documents) is adopted into the record instead.
   const docs: any[] = []
   const a: CollectionInfo = { name: 'a', type: 'collection', options: { capped: true } }
   const b: CollectionInfo = { name: 'b' }

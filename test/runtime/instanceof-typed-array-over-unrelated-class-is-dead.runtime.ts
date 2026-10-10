@@ -1,4 +1,4 @@
-// `@hono/node-server`'s `responseViaCache` (listener.ts:186) reads a cached
+// An HTTP server adapter's `responseViaCache` reads a cached
 // body typed `string | ReadableStream | null` and tests it against a typed
 // array it can never be:
 //

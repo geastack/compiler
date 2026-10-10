@@ -15,9 +15,8 @@ import { unwrapErasedExpression } from '../producers/erasure.js'
  * this.constructor()` allocates from the enclosing class's family. That is
  * the same slot-closure question the surrounding receiver-family proof is
  * already inside whenever a clone chains into another family's own clone --
- * three's universal `clone() { return new this.constructor().copy(this) }`,
- * repeated verbatim across Object3D/Material/Texture/Camera/BufferGeometry/
- * RenderTarget/Sphere -- so a caller-enumeration proof for one clone method
+ * the `clone() { return new this.constructor().copy(this) }` idiom, repeated
+ * verbatim across every class of a hierarchy -- so a caller-enumeration proof for one clone method
  * can end up depending on the very question it is answering.
  *
  * The fix asks a weaker, still SOUND question instead: is the clone method's
@@ -64,10 +63,9 @@ const cloneCopyTargets = (source: string): readonly ts.SignatureDeclaration[] | 
       ts.isPropertyAccessExpression(node.expression) &&
       node.expression.name.text === 'copy' &&
       ts.isNewExpression(node.expression.expression) &&
-      // Three itself spells this behind a JSDoc type-cast paren
-      // (`new ( /** @type {...} */ ( this.constructor ) )()` in Texture.js,
-      // BufferGeometry.js, Object3D.js, Camera.js) purely to anchor the
-      // comment -- unwrap it the same way the flow layer's own
+      // JavaScript libraries often spell this behind a JSDoc type-cast paren
+      // (`new ( /** @type {...} */ ( this.constructor ) )()`) purely to
+      // anchor the comment -- unwrap it the same way the flow layer's own
       // `thisConstructorFamilyOf` does, so this matcher finds that spelling too.
       unwrapErasedExpression(node.expression.expression.expression).getText(file) === 'this.constructor'
     ) {
@@ -107,6 +105,118 @@ test('several ordinary callers of clone still resolve the family', () => {
     widgets[0]!.clone()
   `)
   assert.equal(targets?.length, 1)
+})
+
+test('recursive sibling methods keep their indexed callers while untyped clone callers join the inventory', () => {
+  const targets = cloneCopyTargets(`
+    class Widget {
+      value = 0
+      clone() { return new this.constructor().copy(this) }
+      copy(source: Widget) { this.value = source.value; this.reset(false); return this }
+      reset(again: boolean) { if (again) this.copy(this); return this }
+    }
+    class NamedWidget extends Widget {
+      copy(source: NamedWidget) { super.copy(source); return this }
+    }
+    const constructor: any = NamedWidget
+    const held = new constructor()
+    held.clone()
+    new NamedWidget().copy(new NamedWidget())
+  `)
+  assert.equal(targets?.length, 2)
+  assert.deepEqual(
+    new Set(targets?.map((target) => (ts.isClassLike(target.parent) ? target.parent.name?.getText() : undefined))),
+    new Set(['Widget', 'NamedWidget'])
+  )
+})
+
+test('computed constructor callers do not close recursive slots with mutated constructors, foreign receivers or publications', () => {
+  const source = `
+    class Widget {
+      value = 0
+      clone() { return new this.constructor().copy(this) }
+      copy(source: Widget) { this.value = source.value; this.reset(false); return this }
+      reset(again: boolean) { if (again) this.copy(this); return this }
+    }
+    class NamedWidget extends Widget {
+      copy(source: NamedWidget) { super.copy(source); return this }
+    }
+    const constructor: any = NamedWidget
+    const held = new constructor()
+    held.clone()
+    new NamedWidget().copy(new NamedWidget())
+  `
+  for (const open of [
+    'held.constructor = class Other { copy(source: unknown) { return source } }',
+    'declare function replacement(this: NamedWidget, source: NamedWidget): NamedWidget; NamedWidget.prototype.copy = replacement',
+    'declare function retain(value: unknown): void; retain([held])',
+    'held.copy.call({ value: 0 }, held)'
+  ])
+    assert.equal(cloneCopyTargets(source + open), null, open)
+})
+
+test('a clone receiver projection retains both original target arms and rejects a foreign override receiver', () => {
+  const source = `
+    class Widget {
+      value = 0
+      clone() { return new this.constructor().copy(this) }
+      copy(source: Widget) { this.value = source.value; return this }
+    }
+    class NamedWidget extends Widget { copy(source: NamedWidget) { super.copy(source); return this } }
+    const constructor: any = NamedWidget
+    const held = new constructor()
+    new Widget().clone()
+    held.clone()
+  `
+  const targets = cloneCopyTargets(source)
+  assert.deepEqual(
+    new Set(targets?.map((target) => (ts.isClassLike(target.parent) ? target.parent.name?.getText() : undefined))),
+    new Set(['Widget', 'NamedWidget'])
+  )
+  for (const mutation of [
+    'held.copy.call({ value: 0 }, held)',
+    'declare function replacement(this: NamedWidget, source: NamedWidget): NamedWidget; NamedWidget.prototype.copy = replacement',
+    "Object.defineProperty(NamedWidget.prototype, 'copy', { get() { return () => held } })"
+  ])
+    assert.equal(cloneCopyTargets(source + mutation), null, mutation)
+})
+
+test('indexed recursive methods still refuse an opaque retained receiver or a foreign override', () => {
+  for (const exposure of [
+    'declare function retain(values: unknown[]): void; retain([held]);',
+    'declare function replacement(this: Widget): Widget; Widget.prototype.clone = replacement;'
+  ]) {
+    const targets = cloneCopyTargets(`
+      ${widget}
+      const held = new Widget(1)
+      held.copy(held)
+      ${exposure}
+      held.clone()
+    `)
+    assert.equal(targets, null, exposure)
+  }
+})
+
+test('an untyped constructor alias cannot hide a recursive family constructor publication or replacement', () => {
+  for (const mutation of [
+    'declare function retain(value: unknown): void; retain(constructor);',
+    'declare function replacement(this: Widget): Widget; constructor.prototype.clone = replacement;',
+    'constructor = class Other {};'
+  ]) {
+    const targets = cloneCopyTargets(`
+      class Widget {
+        clone() { return new this.constructor().copy(this) }
+        copy(source: Widget) { this.reset(false); return this }
+        reset(again: boolean) { if (again) this.copy(this); return this }
+      }
+      class NamedWidget extends Widget { copy(source: NamedWidget) { super.copy(source); return this } }
+      const constructor: any = NamedWidget
+      ${mutation}
+      const held = new constructor()
+      held.clone()
+    `)
+    assert.equal(targets, null, mutation)
+  }
 })
 
 test('a clone reached through an uninherited subclass still resolves the family', () => {
@@ -164,7 +274,7 @@ test('an own constructor store leaves the clone slot intact but makes the alloca
 })
 
 test('a subclass override of the copy target is part of the resolved family', () => {
-  // Three's own shape: EVERY subclass overrides `copy`, calling
+  // The common hierarchy shape: EVERY subclass overrides `copy`, calling
   // `super.copy(source)` first. `.copy(this)` inside `clone()` must resolve
   // to every override the family can dispatch to, not just the base's.
   const targets = cloneCopyTargets(`
@@ -183,7 +293,7 @@ test('a subclass override of the copy target is part of the resolved family', ()
 })
 
 test('the JSDoc type-cast spelling of the clone idiom still resolves the receiver family', () => {
-  // Texture.js, BufferGeometry.js, Object3D.js and Camera.js all spell
+  // JavaScript libraries commonly spell
   // `new this.constructor()` behind a JSDoc `@type` cast paren
   // (`new ( /** @type {new (...args: any[]) => this} */ ( this.constructor ) )()`)
   // purely to anchor the comment. A plain `node.parent` walk from the read

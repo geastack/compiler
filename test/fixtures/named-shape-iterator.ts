@@ -5,7 +5,7 @@
 // the structural `record` only. `emitDynamicGetIterator` never looks at the
 // receiver's kind (it calls the resolved `function-value-dispatch` operand and
 // nothing else), so the render was already general; only the claim was not, and
-// 26 of the mongodb probe's obligations were two rows of it per site.
+// 26 of a database-client probe's obligations were two rows of it per site.
 //
 // The refinement `record` gets comes with it rather than after it. A `record`
 // with no discoverable `@@iterator` FIELD -- an open tuple spread through its

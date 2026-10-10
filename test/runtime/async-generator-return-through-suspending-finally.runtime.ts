@@ -1,6 +1,6 @@
 // A RETURN OUT OF AN ASYNC GENERATOR'S TRY STATEMENT WHOSE FINALLY AWAITS.
 //
-// mongodb's `AbstractCursor[Symbol.asyncIterator]` is the shape: the body
+// A database client's `AbstractCursor[Symbol.asyncIterator]` is the shape: the body
 // returns from inside `try`, and the `finally` awaits cleanup. The return
 // value is evaluated (and awaited) first, parked while the clause runs, and
 // completes the generator once it has. `for await` never sees the completion

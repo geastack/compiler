@@ -1,4 +1,4 @@
-// bson's typed-array brand check (src/parser/utils.ts): the getter of
+// A binary-document library's typed-array brand check: the getter of
 // %TypedArray%.prototype[@@toStringTag], read off the intrinsic prototype and
 // called with an arbitrary receiver.
 const TypedArrayPrototypeGetSymbolToStringTag = (() => {

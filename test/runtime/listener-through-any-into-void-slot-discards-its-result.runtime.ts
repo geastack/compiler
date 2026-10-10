@@ -1,4 +1,4 @@
-// `@hono/node-server` creates its server through a `createServer: any`, so its
+// An HTTP server adapter creates its server through a `createServer: any`, so its
 // `async (req, res) => Promise<void>` listener reaches node-compat's typed
 // `(req, res) => void` slot as a boxed Function. The slot calls it and drops
 // whatever it returns -- a promise, a number -- exactly as the language does,

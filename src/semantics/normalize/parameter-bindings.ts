@@ -66,6 +66,7 @@ import {
   objectAssignTargetType,
   nameOfCallable,
   synthesizedUnionArmsAt,
+  readsWholeSynthesizedCell,
   widestOf,
   impliedPatternElementRootOf,
   impliedPatternParameterOf
@@ -84,9 +85,9 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * An unannotated parameter in a JavaScript file is typed `any` by the checker.
  * That answer describes where TypeScript looked, not what the program says:
  * TypeScript infers a parameter's type from its annotation and from nothing
- * else, and never from the arguments a call passes it. `function WebGLTextures(
- * _gl, extensions, state, ... )` is called exactly once in a program, from
- * `WebGLRenderer`, with seven arguments whose types are all known -- so the
+ * else, and never from the arguments a call passes it. A factory `function
+ * Textures( gl, extensions, state, ... )` called exactly once in a program,
+ * from `Renderer`, with seven arguments whose types are all known -- the
  * types exist, they are simply not written down anywhere the checker consults.
  *
  * This is the same shape of question `structural-layout-type.ts` already
@@ -103,8 +104,9 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * reasons, one of which is "the program itself declared `any`/`unknown` and
  * never narrowed it". A parameter with no annotation declared NOTHING. Filing
  * it under that reason reads the absence of a statement as a statement, which
- * is how 925 unannotated parameters in three.js's renderer came to cascade
- * 33,275 boxed carriers through a program whose types are all knowable.
+ * is how a few hundred unannotated parameters in an untyped JavaScript library
+ * came to cascade tens of thousands of boxed carriers through a program whose
+ * types are all knowable.
  *
  * A parameter the program DID annotate `: any` is untouched here, and must be:
  * that one is a statement, and honoring it is the rule working.
@@ -174,7 +176,7 @@ export interface ParameterBindingCensus {
    * NOTHING (`structural-layout-type.ts`'s `any`/vacuous guard), which is the
    * right rule for a parameter that stated no type and the wrong one here:
    * the checker has a perfectly good answer for `matchResult: Result<[unknown,
-   * RouterRoute]>` and it is the answer that has to be overridden. Answered
+   * Route]>` and it is the answer that has to be overridden. Answered
    * for the declaration AND for every identifier that reads it, because a
    * parameter and its reads are one storage cell, and a cell whose slot
    * narrowed while its reads did not is the two-authority split this exists
@@ -299,14 +301,14 @@ const isBareFunctionType = (type: ts.Type): boolean => {
  * - `void` is a statement about a RESULT nobody may read. It and `undefined`
  *   are one runtime value and two facts, so a call passing the result of a void
  *   function binds `void` into a cell whose ABI correctly says `undefined` --
- *   measured, as an ABI disagreement in `PolyhedronGeometry`.
+ *   measured, as an ABI disagreement.
  * - `never` is REACHABILITY, not storage. `const v = [];` before any write is
  *   `never[]`, so `v[ i ][ k + 1 ]` reads `never` -- and `pushVertex( v[ i ][ k
  *   + 1 ] )` is a call that plainly does happen. Binding its parameter to
  *   "no value ever arrives" describes the empty literal, not the argument.
  * - bare `Function` is `isUnannotated`'s own exception admitted as a
  *   CANDIDATE, and it must stay non-evidence everywhere else in this module
- *   for the same reason: `Object3D.traverse( callback ) { callback( this );
+ *   for the same reason: `Node.traverse( callback ) { callback( this );
  *   children[i].traverse( callback ); }` passes `callback` to a recursive
  *   call of `traverse` itself, and if the declared `Function` type were
  *   usable evidence, `known()` would read it straight off the checker at that
@@ -368,9 +370,9 @@ const isGenericCallableType = (type: ts.Type): boolean =>
  * value is permitted only by the checker's own error tolerance; the type
  * declares no call signature and no construct signature, so for THIS
  * question -- what does a call here actually pass -- it is exactly as
- * uninformative as no annotation at all. `Object3D.traverse`'s `callback`
- * parameter is declared this way and the body calls `callback( this )`: one
- * argument, where the annotation states none. A type that DOES declare a call
+ * uninformative as no annotation at all. A `Node.traverse`'s `callback`
+ * parameter declared this way and the body calls `callback( this )`: one
+ * argument, where the annotation states none, is the case. A type that DOES declare a call
  * signature -- `(x: T) => U`, a JSDoc `@callback` typedef -- is real evidence
  * and keeps stopping the census exactly as before; only the signature-free
  * case is let through.
@@ -442,8 +444,8 @@ const isUnannotated = (checker: ts.TypeChecker, parameter: ts.ParameterDeclarati
   if (jsDocType) {
     // HELD, not landed: candidacy itself is sound (see the doc above), but
     // admitting it before `.call`/`.apply` attribution exists (see
-    // `unwrapExplicitThisCall`) measurably regressed `EventDispatcher.
-    // addEventListener`'s `listener` -- `callsByDeclaration` only ever saw
+    // `unwrapExplicitThisCall`) measurably regressed an event emitter's
+    // `addEventListener( type, listener )` -- `callsByDeclaration` only ever saw
     // the 2 direct-call sites in the whole corpus, both coincidentally
     // zero-arg, so the join correctly found no disagreement among evidence
     // that was itself an incomplete sample and bound `() => void`, while
@@ -462,12 +464,11 @@ const isUnannotated = (checker: ts.TypeChecker, parameter: ts.ParameterDeclarati
     // configuration fields. Parameter refinement does not discard that tag on
     // return cells. At that point the program has stated nothing this
     // compiler can read, so refusing the parameter is refusing it for a fact
-    // that isn't there. Measured on the three.js corpus: 31/38 obligations (82%)
-    // and 20/24 distinct parameters (83%) in this bucket resolve to nothing
-    // and are exactly the unimported cross-module-name pattern documented on
-    // `jsDocTypeIsUninformative`; the remaining 17-18% resolve to a real type
-    // (`number | Vector3`, ...) and keep being excluded here, same as before
-    // this change.
+    // that isn't there. Measured: the large majority of obligations in this
+    // bucket resolve to nothing and are exactly the unimported
+    // cross-module-name pattern documented on `jsDocTypeIsUninformative`; the
+    // remainder resolve to a real type (`number | Point`, ...) and keep being
+    // excluded here, same as before this change.
     if (!(
       jsDocTypeStatesNothing(checker, jsDocType) || annotationStatesNothing(checker, jsDocType, checker.getTypeFromTypeNode(jsDocType))
     ))
@@ -483,18 +484,18 @@ const isUnannotated = (checker: ts.TypeChecker, parameter: ts.ParameterDeclarati
     // which is the ONLY reason the `any`/`unknown` half of `jsDocTypeStates
     // Nothing` ever reached this point undetected before. `{} | undefined`
     // does not absorb the same way, so an empty-object tag marked optional
-    // -- `InterleavedBuffer.clone( [data] )` via `@types/three`'s own `data:
+    // -- a `clone( [data] )` method whose declaration states `data?:
     // {}` -- hit the `isAnyType` test below, found a `Union`, and was
     // silently re-excluded even though the line above had already judged the
     // tag to state nothing. Measured: this was the entire reason widening
-    // `jsDocTypeStatesNothing` alone moved zero boxes on the three.js app.
+    // `jsDocTypeStatesNothing` alone moved zero boxes.
     return true
   }
   // A DEFAULT VALUE is not a type. `constructor( parameters = {} )` states what
   // the parameter holds when a caller omits it, and TypeScript widens that into
   // `{}` -- a type with no members, which every real call site contradicts.
-  // `WebGLRenderer`'s whole configuration arrives through this parameter, so
-  // `{}` is the wall the entire renderer's typing stands behind.
+  // A class whose whole configuration arrives through this parameter has
+  // `{}` as the wall its entire typing stands behind.
   //
   // Binding it is sound only when the default is UNREACHABLE, and that is a
   // condition this census already tests for its own reasons: every call site
@@ -513,8 +514,8 @@ const isUnannotated = (checker: ts.TypeChecker, parameter: ts.ParameterDeclarati
  * Such a type is not a carrier and never becomes one: the representation
  * deriver has nothing to resolve `E['Bindings']` against and publishes
  * `unresolved(...)`, which fails preflight as an unmet obligation rather than
- * as a refusal anyone can read. hono's `Hono` is generic in `E` and every
- * copy of it shares one parameter node, so a census answer taken from a call
+ * as a refusal anyone can read. A class `App<E>` generic in `E` has every
+ * copy of it sharing one parameter node, so a census answer taken from a call
  * site INSIDE the generic carries `E` out with it -- 10 unmet obligations
  * reading "an indexed access whose object type is still a type parameter has
  * no member set to resolve", measured the first time this admission ran
@@ -572,9 +573,9 @@ const isFalsyGuardedWriteOf = (checker: ts.TypeChecker, value: ts.Expression, sy
  * annotation constrains every position it mentions, which is nearly all of
  * them and which this census must not touch.
  *
- * hono's `HonoRequest( ..., matchResult: Result<[unknown, RouterRoute]> )` and
+ * A constructor `Request( ..., matchResult: Result<[unknown, Route]> )` and a
  * `compose( middleware: [[Function, unknown], unknown][] | [[Function]][] )`
- * are the two measured cases: both state a full structure and leave exactly
+ * are the two measured shapes: both state a full structure and leave exactly
  * the handler slot unstated, and both are handed a fully concrete value by the
  * program's only caller. See `narrowsOnlyUnstatedPositions` for why reading
  * such an annotation as the last word forces an unrenderable aggregate rebuild.
@@ -600,9 +601,9 @@ const statedUpperBound = (checker: ts.TypeChecker, parameter: ts.ParameterDeclar
   // callers, whatever its annotation spells: the absence is what the default
   // exists to answer. Testing the agreed argument type against the bare `T`
   // refuses every such parameter whose caller passes a possibly-absent value
-  // -- hono's `new HonoRequest( ..., this.#matchResult )` passing a `Result<
-  // [H, RouterRoute]> | undefined` into `matchResult: Result<[unknown,
-  // RouterRoute]> = [[]]` is the measured case, and it is ordinary
+  // -- `new Request( ..., this.#matchResult )` passing a `Result<
+  // [H, Route]> | undefined` into `matchResult: Result<[unknown,
+  // Route]> = [[]]` is the measured case, and it is ordinary
   // TypeScript. `contributeDefaultedParameter` (`producers/bindings.ts`)
   // already splits this answer back into the raw slot (with the absence) and
   // the body's own binding (without it), so handing it the union is what
@@ -637,7 +638,7 @@ const narrowsStatement = (checker: ts.TypeChecker, anchor: ts.Node, stated: ts.T
  * A pure open object dictionary whose values the program explicitly leaves
  * dynamic.
  *
- * BSON's `Document` is exactly `{ [key: string]: any }`. TypeScript permits a
+ * A `Document` type declared exactly `{ [key: string]: any }` is the case. TypeScript permits a
  * value with that annotation to be flow-narrowed to Array, Map or a named
  * record by `Array.isArray`, `instanceof` and user predicates. Those narrowed
  * values do not become dictionaries at runtime; the annotation is an upper
@@ -650,11 +651,11 @@ const openDynamicObjectUpperBound = (checker: ts.TypeChecker, parameter: ts.Para
   if (!parameter.type || !ts.isIdentifier(parameter.name) || parameter.dotDotDotToken) return null
   const declared = checker.getTypeFromTypeNode(parameter.type)
   if (isOpenDynamicObject(checker, declared)) return declared
-  // mongodb's `decorateDecryptionResult(decrypted: Document & {
+  // A `decorate(value: Document & {
   // [kDecoratedKeys]?: Array<string> })`: the open document beside members
   // keyed only by program symbols, all optional. No caller's string key can
   // name one, so the document is exactly as open as it is alone -- and the
-  // function recurses with `decrypted[k]`, an `any` that is a string or a
+  // function recurses with `value[k]`, an `any` that is a string or a
   // number as often as an object, which the body's own `typeof` guard is for.
   if (declared.isIntersection()) {
     const open = declared.types.filter((member) => isOpenDynamicObject(checker, member))
@@ -668,7 +669,7 @@ const openDynamicObjectUpperBound = (checker: ts.TypeChecker, parameter: ts.Para
         .every((property) => (property.flags & ts.SymbolFlags.Optional) !== 0 && String(property.escapedName).startsWith('__@'))
     return open.length === 1 && declared.types.every((member) => open.includes(member) || symbolKeyedOnly(member)) ? declared : null
   }
-  // mongodb's `ifItFitsItSits(key, value: Record<string, any> | string)`: the
+  // A `fits(key, value: Record<string, any> | string)`: the
   // open dictionary is one arm of a union whose other arms are primitives.
   // Those primitives state their whole carrier and have no container a
   // caller's Map could be mistaken for, so the dictionary arm is exactly as
@@ -699,7 +700,7 @@ const isOpenDynamicObject = (checker: ts.TypeChecker, declared: ts.Type): boolea
  * names to dictionary properties; treating that view as a second allocation
  * kind loses negative narrowing when control leaves the predicate branch.
  */
-/** `{ [key: string]: any }` -- mongodb's and bson's `Document`, the one object type that can view an Array or a Map. */
+/** `{ [key: string]: any }` -- an open `Document` type, the one object type that can view an Array or a Map. */
 const isOpenDocumentBound = (checker: ts.TypeChecker, type: ts.Type): boolean => {
   if ((type.flags & ts.TypeFlags.Object) === 0 || checker.isArrayType(type) || checker.isTupleType(type)) return false
   const index = checker.getIndexInfoOfType(type, ts.IndexKind.String)
@@ -748,7 +749,7 @@ interface ParameterCandidate {
  *
  * It is hoisted out because the census does not run once. `frontend.ts`
  * composes it against its own settled output until `boundCount` stops moving,
- * which is 5 rounds on the three.js app, and each round used to rebuild all
+ * which can be several rounds on a large program, and each round used to rebuild all
  * of this from scratch: a `getSymbolAtLocation` for every identifier in the
  * program, a `getResolvedSignature` for every call, `isUnannotated` and
  * `statedUpperBound` for every parameter, and the whole alias index. Built
@@ -914,9 +915,8 @@ export const indexParameterBindingProgram = (
     // Its parameters were therefore gathered as candidates, `agreedArgumentType`
     // asked `calls` a question about a body that never runs, and the correct
     // answer -- no call sites, no counted references -- was published as a
-    // refusal. The three.js app's `Quaternion.setFromUnitVectors`,
-    // `Vector3.project`/`unproject` and the whole pruned `BufferGeometry`
-    // helper set are refusals of exactly this kind: evidence that was never
+    // refusal. Pruned methods of a library class, and whole pruned helper
+    // sets, are refusals of exactly this kind: evidence that was never
     // going to exist for code that is never emitted.
     const visit = (node: ts.Node): void => {
       if (reachable.memberIsPruned(node)) return
@@ -976,7 +976,7 @@ export const indexParameterBindingProgram = (
   // A reassignment makes a parameter's value differ from the argument's -- but
   // not, on its own, its TYPE. `function f(r, a) { r *= a; }` called as
   // `f(1, 2)` holds a number on entry and a number after the write, and
-  // refusing it outright bound neither: three's
+  // refusing it outright bound neither: a
   // `setClear( r, g, b, a, premultipliedAlpha )` lost all five parameters
   // because three of them are scaled in the body. An assignment is a WRITE to
   // the parameter's cell, exactly as a `let`'s later assignment is a write to
@@ -1003,13 +1003,12 @@ export const indexParameterBindingProgram = (
    * by the base's own declaration.
    *
    * A call is written against the declaration the checker resolves it to,
-   * which for `this.interpolate_( i1, t0, t, t1 )` inside `Interpolant` is
-   * `Interpolant`'s own declaration -- never `LinearInterpolant`'s override,
+   * which for `this.interpolate_( i1, t0, t, t1 )` inside a base class is
+   * the base's own declaration -- never a subclass's override,
    * even though that override is what actually runs. The override therefore
    * looks callerless (`no-call-site`) and its parameters stay `any`, which is
-   * how three's whole interpolant, loader and curve hierarchy stays dynamic:
-   * `interpolate_`, `load`, `getTangentAt` are each defined once with real
-   * callers on the base and re-declared with none on every subclass.
+   * how a whole class hierarchy stays dynamic: methods defined once with
+   * real callers on the base and re-declared with none on every subclass.
    *
    * Inheriting the base's calls is sound because it states LESS than the
    * program does, not more: a virtual call may dispatch into ANY override, so
@@ -1074,18 +1073,18 @@ export const indexParameterBindingProgram = (
    * through `extends`. This links the OTHER way one symbol gets more than one
    * body: a class's own declared shape of a key alongside a `receiver.<name>
    * = function ( ... ) { ... }` write that overrides it on ONE instance,
-   * never through inheritance. Three's `mesh.onBeforeRender = function (
-   * renderer, object ) { ... }` next to `Object3D`'s declared (empty)
-   * `onBeforeRender(){}` is exactly this: `object.onBeforeRender( this,
+   * never through inheritance. `node.onUpdate = function (
+   * renderer, object ) { ... }` next to a `Node` class's declared (empty)
+   * `onUpdate(){}` is exactly this: `object.onUpdate( this,
    * object )` resolves, through the checker, to the STATED stub -- TypeScript
    * has no flow model of "this one instance was later given its own property"
-   * -- so every call through an `Object3D`-typed receiver is attributed there
+   * -- so every call through a `Node`-typed receiver is attributed there
    * and never to the override that actually runs and reads its parameters.
    * `nameOfCallable` already draws the member name out of both shapes;
    * grouping by the SYMBOL the checker resolves that name to (never by
    * spelling) is what keeps this sound against an unrelated look-alike: an
-   * object literal's own `onBeforeRender(){}` gets its OWN anonymous-type
-   * property symbol, never `Object3D`'s, so it is never grouped with the
+   * object literal's own `onUpdate(){}` gets its OWN anonymous-type
+   * property symbol, never `Node`'s, so it is never grouped with the
    * class's declaration and never receives its calls.
    *
    * No separate "is this slot closed" gate is needed here: attributing a call
@@ -1205,7 +1204,7 @@ export const censusParameterBindings = (
    * output, but nothing ever composed back INTO it, so it answered every
    * question -- including "what does this call site's argument hold" -- with
    * only the checker's own evidence and its own internal fixpoint. That is
-   * why `texture`, `attribute` and `geometry` stayed `any` in the three.js app even
+   * why parameters like `texture`, `attribute` and `geometry` stayed `any` even
    * after the other two censuses learned their receivers: those parameters'
    * call sites pass expressions -- `state.buffers`, `const me = m.elements`
    * one step removed -- whose types only exist once a LATER census has run,
@@ -1232,8 +1231,8 @@ export const censusParameterBindings = (
    * session in a WeakMap keyed on the `ValueFlowIndex` object identity, so
    * every round on this chain that was ever asked a call-target/receiver
    * question keeps its whole session alive for as long as `settled.parameters`
-   * (`frontend.ts`) is reachable -- which is the rest of the compile. Measured
-   * on the three.js app: 4 rounds, 4 live `[SOLVER]` sessions at exit, not 1.
+   * (`frontend.ts`) is reachable -- which is the rest of the compile. Measured:
+   * N rounds leave N live `[SOLVER]` sessions at exit, not 1.
    *
    * Not cut here. Forcing `known()`/`computeStatedTypeAt()` to resolve eagerly
    * instead of lazily falling through to `upstream` would answer a node
@@ -1357,6 +1356,33 @@ export const censusParameterBindings = (
     const matching = arms.filter((arm) => arm === flow || (checker.isTypeAssignableTo(arm, flow) && checker.isTypeAssignableTo(flow, arm)))
     return matching.length === 1 ? matching[0]! : null
   }
+  /**
+   * The arms a READ of a union-armed parameter holds, or `null` where the
+   * checker's own type for the read stands. The one answer both `typeAt`
+   * (as `parameterTypeOf`'s union) and `unionArmsAt` (as the arm list
+   * `structural.ts` interns) publish for the read: answering it twice let the
+   * two drift, and a read typed as the cell by one and as the checker's flow
+   * type by the other is a conversion between two unions that each authority
+   * believes is the same value.
+   *
+   * A read the flow narrowed to exactly one arm is that arm. Otherwise a
+   * STATED union's read is the whole cell: its checker type is the statement,
+   * or a narrowing of it (`ArrayBuffer.isView` narrowing `BufferSource` to
+   * `ArrayBufferView`) that names no arm of the cell exactly, and the cell's
+   * arms are the only physical values it can hold. A SYNTHESIZED union's
+   * declaration states nothing (`any`, `object`, `{}`), so a read the checker
+   * types as anything other than `any` or that declared type was narrowed by
+   * `instanceof`/`typeof` and keeps the narrowed type -- see
+   * `readsWholeSynthesizedCell`.
+   */
+  const unionReadArmsOf = (node: ts.Identifier, parameter: ts.ParameterDeclaration): readonly ts.Type[] | null => {
+    const flowArm = flowArmOf(node, parameter)
+    if (flowArm !== null) return [flowArm]
+    const arms = unionArms.get(parameter)
+    if (!arms) return null
+    if (statedUnionParameters.has(parameter)) return arms
+    return readsWholeSynthesizedCell(checker, node, parameter) ? arms : null
+  }
   /** What each array-pattern element reads before its default -- see `patternReadTypeAt`. */
   const patternReadTypes = new Map<ts.BindingElement, ts.Type>()
   /** Physical object arms proven by flow narrowing of an open dynamic-object upper bound. */
@@ -1366,8 +1392,8 @@ export const censusParameterBindings = (
   const recordHomeArms = new Map<ts.ParameterDeclaration, readonly ts.Type[]>()
   /**
    * The one physical arm a read of an open-document cell holds where the
-   * checker's flow narrowed it to a container: bson's `makeFrame(sourceObject:
-   * Document)` reads `sourceObject` as `any[]` under `Array.isArray`. The cell
+   * checker's flow narrowed it to a container: a `makeFrame(source:
+   * Document)` reads `source` as `any[]` under `Array.isArray`. The cell
    * is the arm union, and typing that read as the whole cell let the store
    * into a `Document` slot select the dictionary arm out of an array --
    * certified, and reading the array's bytes as a dictionary. A read at the
@@ -1415,15 +1441,15 @@ export const censusParameterBindings = (
    * Whether every value a cell can hold was ALLOCATED here -- following a
    * write that merely FORWARDS another cell's value into it.
    *
-   * A factory result reaches its reader by being PASSED. Three builds `state`
-   * once in `WebGLRenderer` and hands it to `WebGLTextures`, so the cell this
-   * proof actually examines is `WebGLTextures`'s own `state` parameter, whose
+   * A factory result reaches its reader by being PASSED. A program that builds
+   * `state` once in `Renderer` and hands it to a `Textures` factory makes the
+   * cell this proof actually examines `Textures`'s own `state` parameter, whose
    * only write is the argument edge naming `state` -- a bare identifier.
    * Refusing that outright refused the ordinary way a record travels, which
    * is the very case the caller's own comment describes, and it proved
    * nothing: an identifier names a cell whose writes this same index holds,
-   * so the question is answerable one hop out rather than unanswerable. All
-   * ten of `WebGLState`'s `arguments` shims died here.
+   * so the question is answerable one hop out rather than unanswerable. A
+   * factory's `arguments` shims all died here.
    *
    * A forward is followed only to a cell whose OWN writes satisfy the same
    * test, so nothing is admitted that an allocation does not ultimately back.
@@ -1708,8 +1734,8 @@ export const censusParameterBindings = (
         const publishedMember = publishedMemberOf(reference)
         const publicationOwner = publishedMember?.declarations?.[0] && ts.findAncestor(publishedMember.declarations[0], isTrackedCallable)
         if (publishedMember && publicationOwner === declaration && isDirectReturnedPublication(reference)) continue
-        // The record's uses reach past one cell -- three's `WebGLState` is
-        // handed to `WebGLTextures` and kept on `renderer.state` -- and the
+        // The record's uses reach past one cell -- a factory's `State` record
+        // handed to a `Textures` factory and kept on `renderer.state` -- and the
         // shared member proof is the one that walks call arguments and
         // fields: every mention of the slot a counted call, every receiver of
         // the record closed.
@@ -1721,8 +1747,8 @@ export const censusParameterBindings = (
           continue
         // WHICH half of the published-member proof failed is the only thing a
         // reader needs here, and the refusal string cannot carry it: all four
-        // ways to miss spell the same word. `WebGLState`'s ten `arguments`
-        // shims are refused here and nothing said which.
+        // ways to miss spell the same word. A factory's `arguments`
+        // shims were refused here and nothing said which.
         if (process.env['GEA_ESCAPE_DEBUG']) {
           const site = reference.getSourceFile()
           console.error(
@@ -1751,14 +1777,14 @@ export const censusParameterBindings = (
    *
    * `lateAssignment` is the difference, and it is a soundness boundary rather
    * than a tuning knob. `let extensions;` filled later by `extensions = new
-   * WebGLExtensions( _gl )` tells you exactly what the CALL passes -- the call
+   * Extensions( gl )` tells you exactly what the CALL passes -- the call
    * is downstream of the assignment -- so binding a parameter from it is right.
    * It does not tell you what the variable's own CELL holds, because that cell
    * begins empty. Publishing the assignment's type for the cell asks the
    * compiler to convert `null` into a `class-ref`, which is what preflight
    * reported the moment this was tried both ways: twelve new
    * `binding-read-conversion:null->...` obligations, one per late-filled
-   * binding in three's renderer.
+   * binding.
    *
    * So the strong resolver propagates and the weak one publishes. A variable
    * the weak resolver will not answer for stays exactly as it is today --
@@ -1771,7 +1797,7 @@ export const censusParameterBindings = (
    * literally `this` -- because the checker is answering for every possible
    * subclass, not this one. That is the right answer for the METHOD's own
    * signature, but wrong the moment `this` is READ as a plain value and
-   * handed somewhere else: `object.onBeforeRender( this, object )` passes
+   * handed somewhere else: `object.onUpdate( this, object )` passes
    * the calling `Renderer`, not an unspellable self-type, and a parameter
    * bound from it must carry the concrete class the same way any other
    * argument's checker type does.
@@ -1949,9 +1975,9 @@ export const censusParameterBindings = (
      * called with `new` has no construct signature, so `cb` is `any` to the
      * checker and so is `{ color: cb }.color`. This census has ALREADY resolved
      * `cb` to the literal it holds -- that is what it exists to do -- and
-     * throwing that away at the property assignment is what made three's
+     * throwing that away at the property assignment is what made
      * `state.buffers.color.setClear(...)` unattributable, leaving every method
-     * on all three WebGLState buffer literals with no call sites and all their
+     * on such factory-built literals with no call sites and all their
      * parameters dynamic.
      *
      * Asked only where the checker's own answer is unusable, so nothing that
@@ -1962,7 +1988,7 @@ export const censusParameterBindings = (
       const answer = memberTypeOf(checker, receiver, name, at, valueFlow, upstream)
       if (answer !== null && !isUnusableEvidence(answer)) return answer
       // A member only some classes of the receiver's closed family declare:
-      // three's `material.glslVersion` through a `Material`. See
+      // `shape.version` read through a base-class `Shape`. See
       // `flow/class-family-member-read.ts`.
       const family = answer === null ? classFamilyMemberReadTypeOf(checker, valueFlow, receiver, name, upstream) : null
       if (family !== null) return family
@@ -2046,9 +2072,9 @@ export const censusParameterBindings = (
     /**
      * What a `var`/`let`/`const` cell holds, read from EVERY write to it.
      *
-     * Its initializer is one write; so is every later assignment. `let _gl =
-     * context; ... _gl = getContext( contextName, contextAttributes );` in
-     * `WebGLRenderer` writes twice, and reading only the initializer would
+     * Its initializer is one write; so is every later assignment. `let gl =
+     * context; ... gl = getContext( contextName, contextAttributes );`
+     * writes twice, and reading only the initializer would
      * describe a value the program does not have -- the second write is how a
      * context that arrived as `null` gets created, and the cell has to hold
      * both. The writes settling on one carrier is the answer (`widestOf`);
@@ -2062,7 +2088,7 @@ export const censusParameterBindings = (
      *
      * `let extensions, capabilities, state, info;` filled later inside
      * `initGLContext()` is the same rule with no initializer among the writes,
-     * and it is the hop every chain into three's sub-modules passes through --
+     * and it is the hop every chain into a factory's sub-modules passes through --
      * which is exactly why only the propagating resolver may use it. See
      * `createResolver`.
      */
@@ -2254,11 +2280,16 @@ export const censusParameterBindings = (
       if (ts.isIdentifier(node)) {
         const declaration = declarationOf(node)
         if (!declaration) return null
-        if (ts.isParameter(declaration)) return flowArmOf(node, declaration) ?? parameterTypeOf(declaration)
+        if (ts.isParameter(declaration)) {
+          const flowArm = flowArmOf(node, declaration)
+          if (flowArm !== null) return flowArm
+          if (unionArms.has(declaration) && unionReadArmsOf(node, declaration) === null) return null
+          return parameterTypeOf(declaration)
+        }
         // A binding holds what is written into it, and EVERY write counts. Its
-        // initializer is one; so is every later assignment -- `let _gl = context;
-        // ... _gl = getContext( contextName, contextAttributes );` in
-        // `WebGLRenderer` writes twice, and reading only the initializer would
+        // initializer is one; so is every later assignment -- `let gl = context;
+        // ... gl = getContext( contextName, contextAttributes );`
+        // writes twice, and reading only the initializer would
         // describe a value the program does not have. All the writes agreeing is
         // one answer; anything else is refused rather than merged, because the
         // union that would describe two is not a type this can build without
@@ -2266,7 +2297,7 @@ export const censusParameterBindings = (
         //
         // `let extensions, capabilities, state, info;` filled later inside
         // `initGLContext()` is the same rule with no initializer among the
-        // writes, and it is the hop every chain into three's sub-modules passes
+        // writes, and it is the hop every chain into a factory's sub-modules passes
         // through -- which is exactly why only the propagating resolver may use
         // it. See `createResolver`.
         // A reference to a destructured name is a read of the SAME storage the
@@ -2334,7 +2365,7 @@ export const censusParameterBindings = (
         // A JavaScript factory called with `new` that returns an object is typed
         // by what it returns, which is why the call signature is consulted for a
         // `new` whose callee declares no construct signature -- `new
-        // WebGLExtensions( _gl )` is `function WebGLExtensions( gl ) { ...;
+        // Extensions( gl )` is `function Extensions( gl ) { ...;
         // return { has, init, get }; }`, and the record it returns is the whole
         // of what the expression holds.
         const constructed = ts.isNewExpression(node) ? callee.getConstructSignatures() : []
@@ -2437,7 +2468,7 @@ export const censusParameterBindings = (
    * every call in `callsByDeclaration.get(declaration)` by construction) AND
    * lexically inside `declaration`'s OWN body -- so this is `declaration`
    * calling itself, directly or through a different receiver of the same
-   * method (`children[i].traverse( callback )` inside `Object3D.traverse`'s
+   * method (`children[i].traverse( callback )` inside `Node.traverse`'s
    * own body is the same declaration, called again, from within itself).
    *
    * Direct self-reference only, deliberately: mutual recursion (`a` calling
@@ -2522,7 +2553,7 @@ export const censusParameterBindings = (
    * library declares `any` (`desc.value` on lib's PropertyDescriptor) has no
    * evidence to come: the value is dynamic in every authority. Skipping it
    * and binding the parameter from the other sites would unbox the value at
-   * this call -- test262's `isSameValue(desc.value, obj[name])` bound `b` to
+   * this call -- a harness's `isSameValue(desc.value, obj[name])` bound `b` to
    * `string` from `newValue` and aborted on the first numeric `length`.
    */
   const isSuppliedDynamic = (argument: ts.Expression): boolean => {
@@ -2594,8 +2625,8 @@ export const censusParameterBindings = (
         continue
       }
       if (!argument) return { refused: 'call-passes-no-argument' }
-      // A BACK EDGE, not a second opinion. `projectObject( children[ i ],
-      // camera, groupOrder, sortObjects )`, called from inside `projectObject`
+      // A BACK EDGE, not a second opinion. `visit( children[ i ],
+      // context, groupOrder, sortObjects )`, called from inside `visit`
       // itself, hands `groupOrder` its OWN value right back unchanged --
       // carrying no information about what the parameter holds until the
       // parameter is already bound. Joining it as if it were a disagreeing
@@ -2659,7 +2690,7 @@ export const censusParameterBindings = (
    * The statement a GENERIC declaration makes at this parameter, as its
    * callers instantiate it.
    *
-   * mongodb's `setDifference<T>(setA: Iterable<T>, setB: Iterable<T>)` states
+   * A `setDifference<T>(setA: Iterable<T>, setB: Iterable<T>)` states
    * `Iterable<T>`, and no concrete argument is assignable to an open `T` -- so
    * the upper-bound census refused a `Set<string>` and a `string[]` and the
    * parameters fell back to a record layout for the protocol view. What the
@@ -2698,9 +2729,9 @@ export const censusParameterBindings = (
   /**
    * Whether a synthesized disjoint union of call-site types may stand for a
    * STATED parameter: held to the statement exactly as a single agreed type
-   * is, with the arms read together as the one union they are. mongodb's
-   * `isSuperset(set: Set<any> | any[], ...)` is passed a `string[]` and
-   * rebinds itself to `new Set(set)`: the cell holds `string[] | Set<string>`,
+   * is, with the arms read together as the one union they are. An
+   * `isSuperset(set: Set<any> | any[], ...)` that is passed a `string[]` and
+   * rebinds itself to `new Set(set)` is the case: the cell holds `string[] | Set<string>`,
    * each arm the statement's own member with only its `any` element refined.
    * `null` when admitted, otherwise the refusal to record.
    */
@@ -2759,9 +2790,9 @@ export const censusParameterBindings = (
     // back edge IS the only evidence -- `excluding.passed` comes back empty
     // -- there is nothing left to improve on, and refusing here would make
     // a parameter the OLD, pre-exclusion join could still answer WORSE than
-    // before this exclusion existed: measured on the three.js app, paying the
-    // exclusion unconditionally cost +6002 boxed carriers (+21%) for +14
-    // resolved rows elsewhere, because most exclusions landed exactly here,
+    // before this exclusion existed: measured, paying the exclusion
+    // unconditionally cost about a fifth more boxed carriers for a handful
+    // of resolved rows elsewhere, because most exclusions landed exactly here,
     // on parameters recursion-only in this program. Fall back to the
     // previous reading instead: join every call site, back edge included.
     // The same soundness argument above still covers it -- a bare re-read
@@ -2906,8 +2937,8 @@ export const censusParameterBindings = (
   }
 
   // A fixpoint, because an argument can itself be an unannotated parameter one
-  // frame up: `WebGLRenderer`'s own `context` is bound from the application
-  // before `WebGLTextures`'s `_gl` can be bound from `WebGLRenderer`. Rounds
+  // frame up: a `Renderer`'s own `context` is bound from the application
+  // before a `Textures` factory's `gl` can be bound from `Renderer`. Rounds
   // stop when a pass adds nothing, which terminates because a binding is only
   // ever added and there are finitely many parameters.
   /**
@@ -2915,7 +2946,7 @@ export const censusParameterBindings = (
    * bindings where the checker had no answer.
    *
    * `getResolvedSignature` gives up on `extensions.has( ... )` while
-   * `extensions` is `any`, and never revisits it -- so the functions three's
+   * `extensions` is `any`, and never revisits it -- so the functions JavaScript
    * factories return as members of a record have, from the checker's view, no
    * callers at all. They have exactly one each, and it becomes visible the
    * moment the record has a type. That is why attribution belongs INSIDE the
@@ -3032,16 +3063,16 @@ export const censusParameterBindings = (
       // `array[ i ].call( this, event )` -- a computed element read with no
       // literal key names no symbol at all, so the lookup above finds nothing
       // and the call is attributed to no declaration. That is exactly how
-      // three's `EventDispatcher.dispatchEvent` invokes EVERY listener, which
-      // is why each `on*Dispose( event )` body sees an untyped `event` and
+      // an event emitter's `dispatchEvent` invokes EVERY listener, which
+      // is why each `on*( event )` listener body sees an untyped `event` and
       // every object recovered from `event.target` boxes.
       //
       // `arrayCalleeAuthority().arrayElementTargetsOf` is the identical
       // closed-array proof that `flow/callable-reach.ts`'s own `.call`/
       // `.apply` branch already trusts for ESCAPE closure (`callableArray-
       // TargetsOf`, with a record/dictionary-storage fallback via
-      // `arrayStoredValuesOf` for a plain-object listener map like three's
-      // `EventDispatcher._listeners[ type ]`); asked here for TYPE
+      // `arrayStoredValuesOf` for a plain-object listener map like an
+      // emitter's `this._listeners[ type ]`); asked here for TYPE
       // ATTRIBUTION instead, so a listener's declaration receives this call
       // site as real parameter evidence the same way an override receives a
       // base's calls. It returns null unless the array's whole allocation
@@ -3137,9 +3168,9 @@ export const censusParameterBindings = (
         if (ts.isFunctionLike(declaration)) resolvedCallDeclarations.set(call, declaration)
         // An overload signature is a compile-time view: the body that runs,
         // and whose parameters these arguments land in, is the one
-        // implementation. mongodb's `Connection.command` is called only
-        // through its three overloads, so its implementation saw no call
-        // site at all and every parameter of it stayed the annotation.
+        // implementation. A method called only through its overloads so its implementation saw no call
+        // otherwise sees no call site at all, and every parameter of it stays
+        // the annotation.
         const implementation = implementationOfOverload(checker, declaration)
         if (implementation !== null) pushCall(implementation, call)
       }
@@ -3430,16 +3461,16 @@ export const censusParameterBindings = (
   // consumers inferred strictly can still depend on a provisional producer.
   //
   // ESCAPE is re-tested here too, not only inside `bindingSweep`, for a gap
-  // measured on the three.js app's `WebGLCapabilities( gl, extensions, parameters,
+  // measured on a factory `Capabilities( gl, extensions, parameters,
   // utils )`: `gl` and `parameters` bind in an early sweep, while `extensions`
-  // and `utils` each depend on a whole separate factory (`WebGLExtensions`,
-  // `WebGLUtils`) resolving first and so are still unbound several sweeps
+  // and `utils` each depend on a whole separate factory (`Extensions`,
+  // `Utils`) resolving first and so are still unbound several sweeps
   // later. `escapeReason`'s export/import check (`isModuleExportedDeclaration`
   // + `inProgramImportReferencesOf`) is re-evaluated fresh every sweep and, by
   // the time `extensions`/`utils` finally have argument evidence, it has
-  // started returning `function-escapes:exported` for `WebGLCapabilities`
-  // itself -- confirmed against the real corpus (the app's actual refusal
-  // list carries exactly this reason for both parameters). `bindingSweep`'s
+  // started returning `function-escapes:exported` for `Capabilities`
+  // itself -- confirmed against a real refusal list carrying exactly this
+  // reason for both parameters). `bindingSweep`'s
   // per-candidate loop skips any parameter already in `bindings`, so
   // `gl`/`parameters` are never asked again and keep a binding taken before
   // the escape was visible -- while their siblings on the SAME declaration,
@@ -3456,8 +3487,8 @@ export const censusParameterBindings = (
   // surface: the member-closure reasons (`function-escapes:
   // uncounted-member-reference`, `function-escapes:uncounted-reference`, and
   // the generic reference-walk fallback) read `propagating`/`calls` for
-  // OTHER declarations reachable through the same receiver -- three's
-  // `renderer` argument that Object3D's `add` walks through its own
+  // OTHER declarations reachable through the same receiver -- a
+  // `renderer` argument that a `Node.add` walks through its own
   // `arguments` frame is exactly this shape, closed by `memberClosed`. Once
   // any sibling candidate in that same chain withdraws earlier in this same
   // pass, `propagating.reset()` (a few lines below) clears the cache
@@ -3465,7 +3496,7 @@ export const censusParameterBindings = (
   // read a still-valid closure proof as open -- breaking
   // `arguments-frame-member-closure.test.ts`'s positive case and
   // `implicit-arguments-tuple.test.ts`'s "closed callers" case. The
-  // export/import check has no such dependency: whether `WebGLCapabilities`
+  // export/import check has no such dependency: whether `Capabilities`
   // is reachable from outside the compiled program is a property of the
   // module graph, invariant to which of ITS OWN parameters is currently
   // bound. Re-running exactly that check, and no more, makes the one
@@ -3545,8 +3576,8 @@ export const censusParameterBindings = (
       const narrowed: ts.Type[] = []
       // The union form (`Record<string, any> | string`) is admitted for what
       // callers physically hand over, not for what a body guard could imagine:
-      // mongodb's `normalizeHintField(hint?: string | Document)` tests
-      // `Array.isArray(hint)` though no caller passes an array, and a speculative
+      // a `normalizeHint(hint?: string | Document)` that tests
+      // `Array.isArray(hint)` though no caller passes an array is the case: a speculative
       // array arm there only makes every later object read a three-way sum.
       for (const reference of upper.isUnion() ? [] : references) {
         const type = checker.getTypeAtLocation(reference)
@@ -3586,14 +3617,14 @@ export const censusParameterBindings = (
           continue
         }
         // A caller handing over a Map, Set or Array hands over THAT object:
-        // `makeClientMetadata` passes its `os` Map and keeps deleting from it
-        // afterwards, so a dictionary rebuilt from it would be a copy the
+        // a function that passes its own `info` Map and keeps deleting from it
+        // afterwards is the case, so a dictionary rebuilt from it would be a copy the
         // caller's later writes never reach. Its container is a carrier arm of
         // this cell exactly as a body `instanceof Map` narrowing makes one.
-        // A caller's own union hands over each of its members: mongodb's
-        // `updateOne(filter, update: UpdateFilter<TSchema> | Document[])`
-        // passes `update` on to `UpdateOneOperation(..., update: Document)`,
-        // whose cell then holds the pipeline array as well as the document.
+        // A caller's own union hands over each of its members: an
+        // `update(filter, change: Patch<T> | Document[])` that
+        // passes `change` on to `new UpdateOperation(..., change: Document)`
+        // gives a cell that then holds the pipeline array as well as the document.
         for (const member of passed.isUnion() ? passed.types : [passed]) {
           if (!isFlowContainerType(checker, argument, member)) continue
           if (!checker.isTypeAssignableTo(member, upper)) continue
@@ -3614,7 +3645,7 @@ export const censusParameterBindings = (
       // This late flow-container publication is a second synthesized-arm entry
       // point. It must preserve the same declared absence as the ordinary
       // `unionArms` path above; otherwise an optional open-document parameter
-      // (BSON's `DBRef(..., fields?: Document)`) binds a required body union
+      // (a `Ref(..., fields?: Document)`) binds a required body union
       // while its callable slot remains optional.
       flowCarrierArms.set(candidate.parameter, published)
       flowCarrierBounds.set(candidate.parameter, upper)
@@ -3650,8 +3681,8 @@ export const censusParameterBindings = (
     // A cell that grew may forward its new arms to the cells it is passed to.
   }
   // A stated JS parameter the census does not infer can still be left out by
-  // a caller: three's `colorBuffer.setClear( 0, 0, 0, 1 )` against the
-  // overlay's `@param {boolean} premultipliedAlpha`. Its cell then holds the
+  // a caller: `colorBuffer.setClear( 0, 0, 0, 1 )` against a declared
+  // `@param {boolean} premultipliedAlpha`. Its cell then holds the
   // statement plus `undefined` -- see `omitted-stated-parameter.ts`. Asked of
   // the settled attribution after every withdrawal, so no argument binding it
   // reads can still be taken back; the closure proof runs under the ledger
@@ -3782,8 +3813,8 @@ export const censusParameterBindings = (
   // agreed type. A generic body is not one body: monomorphization gives it one
   // copy per instantiation (`specialization.ts`), each with its own frame, so
   // "what does this parameter receive" is a question about the callers of ONE
-  // copy. mongodb's `shuffle<T>(sequence: Iterable<T>)` is called with a
-  // `Set<string>`, a `HostAddress[]` and a `ServerDescription[]`: across the
+  // copy. A `shuffle<T>(sequence: Iterable<T>)` called with a
+  // `Set<string>`, an `Address[]` and a `Description[]` is the case: across the
   // declaration those disagree and no single carrier holds all three, but each
   // copy is called with exactly one of them. Refused per declaration, every
   // copy's slot stayed the `Iterable` protocol's record, which no concrete
@@ -3858,9 +3889,9 @@ export const censusParameterBindings = (
    * undefined-free type -- which is precisely what
    * `producers/bindings.ts`'s `contributeDefaultedParameter` builds as its
    * `bodyType`. Answering a read with the slot's union instead is a
-   * cell-versus-read split: hono's `this.#matchResult = matchResult` had the
-   * cell holding `Result<[H, RouterRoute]>` while the read of the very same
-   * parameter published `Result<[H, RouterRoute]> | undefined`.
+   * cell-versus-read split: `this.#matchResult = matchResult` had the
+   * cell holding `Result<[H, Route]>` while the read of the very same
+   * parameter published `Result<[H, Route]> | undefined`.
    *
    * An initializer that IS `undefined` replaces nothing and the body really
    * can observe one -- the same carve-out, for the same reason, that
@@ -3894,7 +3925,7 @@ export const censusParameterBindings = (
     // parameter.ts`'s `@param {boolean} premultipliedAlpha` that
     // `colorBuffer.setClear( 0, 0, 0, 1 )` leaves out -- reads as `boolean` at
     // every mention, so stripping on that basis undid the widening at each
-    // read: three's `premultipliedAlpha === true` converted the omitted
+    // read: `premultipliedAlpha === true` converted the omitted
     // argument to a bare boolean and threw where the language answers false.
     const declared = flagsOf(checker.getTypeAtLocation(parameter))
     const dropped = (ts.TypeFlags.Undefined | ts.TypeFlags.Null) & ~present & declared
@@ -4064,9 +4095,9 @@ export const censusParameterBindings = (
       // A SETTLED frame can still be settled on a type nothing can carry, and
       // that outcome has no refusal to read: the census records only the
       // frames it turned down, so a frame that joined to a union no consumer
-      // can lower looks identical to one that joined to a class. The three.js app's
-      // largest nested-dynamic group -- 1382 carriers, every `.add( ... )` in
-      // the program -- is one such frame, and nothing printed it.
+      // can lower looks identical to one that joined to a class. A program's
+      // largest nested-dynamic group -- every variadic `.add( ... )` in the
+      // program -- can be one such frame, and nothing printed it.
       if (process.env['GEA_IMPLICIT_FRAME_DEBUG']) {
         const file = owner.getSourceFile()
         const line = file.getLineAndCharacterOfPosition(owner.getStart()).line + 1
@@ -4124,9 +4155,9 @@ export const censusParameterBindings = (
    * passes -- leaving the checker's own (dynamic) answer exactly as it was
    * before this existed.
    *
-   * The call-site tail is not the only writer of this cell: three's
-   * `utils.js` reassigns its own rest parameter outright --
-   * `params = enhanceLogMessage( params )` inside `warn`/`error` -- and that
+   * The call-site tail is not the only writer of this cell: a logging helper
+   * that reassigns its own rest parameter outright --
+   * `params = decorate( params )` inside `warn`/`error` -- is the case, and that
    * write replaces the SAME binding the tail above is joined into, not a
    * different question. `assignedEvidence` already carries it: the ordinary
    * sweep's own reassignment index (`indexParameterBindingProgram`, above)
@@ -4195,7 +4226,7 @@ export const censusParameterBindings = (
    * A rest parameter whose body forwards its ENTIRE array on, via a bare
    * `...name` spread naming its own binding as a call's ONLY argument, hands
    * that same array to whatever the call resolves to. `warnOnce( ...params )`
-   * calling `warn( ...params )` in three's `utils.js` is exactly this: the
+   * calling `warn( ...params )` is exactly this: the
    * array `warnOnce` narrowed to `string` from its own callers' tail is the
    * IDENTICAL array `warn` receives, and `warn`'s own reassignment above
    * already forces it dynamic. A forwarder narrower than what its own target
@@ -4271,7 +4302,10 @@ export const censusParameterBindings = (
       (ts.isParameter(node) ? parameterTypeOf(node) : publishing.resolve(node)),
     argumentsAt: (parameter) => {
       const known = argumentsByParameter.get(parameter)
-      return known === undefined || !bindings.has(parameter) ? null : [...known]
+      // Both publications have passed the same caller/withdrawal proof. A
+      // synthesized union cannot lose its source identities just because it
+      // has no single checker Type to enter in `bindings`.
+      return known === undefined || (!bindings.has(parameter) && !unionArms.has(parameter)) ? null : [...known]
     },
     patternReadTypeAt: (element) => {
       publishing.resolve(element)
@@ -4285,7 +4319,7 @@ export const censusParameterBindings = (
       // settled. The propagating view deliberately keeps no memo, because its
       // answers are answers to a smaller set of bindings.
       //
-      // It earns the memo: this was 23% of a 58s three.js compile. Every
+      // It earns the memo: this was nearly a quarter of a large compile. Every
       // identifier in the program reaches it, and the body below asks the
       // checker for a symbol -- the single most expensive thing this compiler
       // can ask -- once per call.
@@ -4323,12 +4357,10 @@ export const censusParameterBindings = (
       }
       const recordArms = declaration ? recordHomeArms.get(declaration) : undefined
       if (recordArms) return ts.isParameter(node) ? recordArms : recordHomeArmsAtRead(checker, recordArms, checker.getTypeAtLocation(node))
-      // A stated-union read the checker's flow narrowed to one arm is typed
-      // as that arm (`flowArmOf`), not as the cell's whole union: a one-arm
-      // list, which `structural.ts`'s `parameter-union-arms` rule publishes
-      // as the arm itself.
-      const flowArm = declaration && ts.isIdentifier(node) ? flowArmOf(node, declaration) : null
-      if (flowArm !== null) return [flowArm]
+      // A read the checker's flow narrowed to one arm is a one-arm list, which
+      // `structural.ts`'s `parameter-union-arms` rule publishes as the arm
+      // itself; every other read answers exactly what `typeAt` does.
+      if (declaration && ts.isIdentifier(node)) return unionReadArmsOf(node, declaration)
       return synthesizedUnionArmsAt(checker, node, unionArms)
     },
     boundCount: bindings.size + unionArms.size + flowCarrierArms.size + recordHomeArms.size + implicitTuples.size,

@@ -30,6 +30,7 @@ import {
 } from './derived-expression-type.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
+import { emptyCommonJsModuleRecordCensus, type CommonJsModuleRecordCensus } from './commonjs-module-record.js'
 
 /**
  * The type an unannotated JavaScript function actually RETURNS.
@@ -41,9 +42,9 @@ import { censusRefusal, type CensusRefusal } from './census-refusal.js'
  * return type from the function's own `return` statements, and usually
  * succeeds, but for a function complicated enough (mutually recursive with
  * its own return, too large a body, a shape the inferencer's heuristics give
- * up on) it bails to `any` rather than reporting nothing. `properties.get(
- * object)` in three.js's `WebGLProperties.js` returns `materialProperties`,
- * an object literal the checker can type exactly -- the declared/inferred
+ * up on) it bails to `any` rather than reporting nothing. A
+ * factory's `properties.get(object)` that returns `entryProperties`, an
+ * object literal the checker can type exactly -- the declared/inferred
  * return of the enclosing factory is simply `any`, and every call to it reads
  * as a dynamic value even though the object it hands back has a real shape.
  *
@@ -231,15 +232,15 @@ const contextualReturnTypeOf = (checker: ts.TypeChecker, node: ts.ArrowFunction 
   //
   // The slot that produces one is a union of callable types, whose signatures
   // the checker COMBINES into a single one with a union return -- so the
-  // `signatures.length === 1` gate above does not see it. hono's handler slot
-  // is exactly that: `H<R> = Handler<R> | MiddlewareHandler<R>` combines to a
+  // `signatures.length === 1` gate above does not see it. A handler slot typed
+  // `H<R> = Handler<R> | MiddlewareHandler<R>` is exactly that: it combines to a
   // return of `R | Promise<R | void>`, which for an async handler (`R` is then
   // inferred as `Promise<Response>`) reads `Promise<Response> | Promise<void |
   // Promise<Response>>`. `flattenedUnionSlot` above does not catch it because
   // BOTH arms are thenable, yet the two are the same admission list one
   // promise-wrap further out: awaiting either yields `Response | void`.
-  // Published as the convention it made node-compat's hono-hello refuse four
-  // `return c.text(...)` statements for want of a `Response -> tagged-union(
+  // Published as the convention it made a program refuse every
+  // `return c.text(...)` statement for want of a `Response -> tagged-union(
   // promise(Response) | promise(undefined | promise(Response)))` conversion.
   //
   // Held only against a return that is not a single promise, so the honest
@@ -353,19 +354,18 @@ const hasAsyncModifier = (declaration: ReturnCandidateDeclaration): boolean =>
  *
  * The tag's mere presence is not the question. `checker.getTypeFromTypeNode`
  * degrades to `any` when a JSDoc node names a type the checker cannot bind at
- * that site, and three.js does this throughout -- `@returns {Texture}` in a
- * file that never imports `Texture`. Treating that as a stated type refuses
+ * that site, and JSDoc-typed JavaScript does this routinely -- `@returns
+ * {Node}` in a file that never imports `Node`. Treating that as a stated type refuses
  * this census for a fact that is not there, and the declaration then carries
  * `dynamic(declared-any-never-narrowed)`: the program is recorded as having
  * declared the value dynamic when it did the opposite. `parameter-bindings.ts`
  * has drawn exactly this distinction since the call-site census landed; the
  * asymmetry was an oversight, not a rule.
  *
- * Measured on the three.js app: 1035 unannotated functions carry a JSDoc return tag,
- * and 48 of them resolve to `any`/`unknown` -- `{Texture}`, `{TypedArray}`,
- * `{AnimationClip}`, `{BufferAttribute}`, `{Group}`, `{Object3D}` and friends,
- * every one an unimported cross-module name. The other 987 resolve to a real
- * type and keep stopping this census exactly as before.
+ * Measured: of the unannotated functions that carry a JSDoc return tag, a
+ * small fraction resolve to `any`/`unknown`, every one an unimported
+ * cross-module name. The rest resolve to a real type and keep stopping this
+ * census exactly as before.
  */
 const hasStatedReturnType = (checker: ts.TypeChecker, declaration: ReturnCandidateDeclaration): boolean => {
   // A real annotation that resolves to a NON-STATEMENT is the same absence
@@ -388,12 +388,12 @@ const hasStatedReturnType = (checker: ts.TypeChecker, declaration: ReturnCandida
  * and `field-bindings.ts`'s `statedUpperBoundOfField`, asked of the third
  * kind of cell the same value passes through.
  *
- * hono's `HonoRequest` is the measured case, and all three forms of the rule
- * are ONE value: the constructor parameter `matchResult: Result<[unknown,
- * RouterRoute]>` is narrowed to the concrete `Result<[H, RouterRoute]>` its
- * only caller passes, the field it is stored in narrows with it, and then
- * `get [GET_MATCH_RESULT](): Result<[unknown, RouterRoute]> { return
- * this.#matchResult }` hands it back out through an annotation that states
+ * A request wrapper class is the measured case, and all three forms of the
+ * rule are ONE value: the constructor parameter `match: Result<[unknown,
+ * Route]>` is narrowed to the concrete `Result<[H, Route]>` its only caller
+ * passes, the field it is stored in narrows with it, and then
+ * `get [MATCH](): Result<[unknown, Route]> { return this.#match }` hands it
+ * back out through an annotation that states
  * the same upper bound a third time. Reading that annotation as the last word
  * asks the backend to convert one `Result` carrier into the other at the
  * return -- which rebuilds two arrays, and an array rebuild is a COPY of an
@@ -524,10 +524,9 @@ export const censusReturnBindings = (
    * Consulted at exactly one point below (the element-access arm of
    * `resolveExpr`), as `collections.arrayElementForRead` -- the element type
    * of a tracked accumulator array, asked at the RECEIVER expression rather
-   * than the whole indexed read. `findLightProbeGrid( volumes, object )`
-   * (`WebGLRenderer.js`) is the exemplar: `return volumes[ 0 ]` where
-   * `volumes` is an unannotated parameter whose real evidence is a
-   * module-scope `const lightProbeGridArray = []` filled by `.push` calls
+   * than the whole indexed read. `find( items, key )` is the exemplar:
+   * `return items[ 0 ]` where `items` is an unannotated parameter whose real
+   * evidence is a module-scope `const itemArray = []` filled by `.push` calls
    * elsewhere -- exactly what `collection-bindings.ts`'s array census exists
    * to type, and exactly the shape this module's own resolvers could not
    * reach before, because that census ran only after this whole fixpoint
@@ -552,7 +551,15 @@ export const censusReturnBindings = (
    */
   bags: ObjectBagCensus = emptyObjectBagCensus,
   /** The prior round's whole composed view -- asked only for a member read no other evidence here answers. */
-  upstream: ParameterBindingCensus = emptyParameterBindingCensus
+  upstream: ParameterBindingCensus = emptyParameterBindingCensus,
+  /**
+   * A proven static `require('./m')` evaluates to `m`'s one `module.exports`
+   * record, which the checker types `any` through the host's `require`
+   * declaration -- the same answer `local-bindings.ts`'s `known` reads, so
+   * `function load() { return require('./cache') }` returns that record
+   * rather than boxing it.
+   */
+  moduleRecords: CommonJsModuleRecordCensus = emptyCommonJsModuleRecordCensus
 ): ReturnBindingCensus => {
   const objectAssignedValueType = (node: ts.Node): ts.Type | null => objectAssignedValueTypeOf(checker, node)
 
@@ -702,7 +709,8 @@ export const censusReturnBindings = (
   /** The checker's own answer at this node, when it says something usable. */
   /** The checker's own answer, when usable -- `annotationStatesNothing` beside `isUnusableEvidence` for the reason `field-bindings.ts`'s `known` documents: a vacuous type dominates a `widestOf` join. */
   const known = (node: ts.Node): ts.Type | null => {
-    const type = objectAssignedValueType(node) ?? checker.getTypeAtLocation(node)
+    const required = moduleRecords.requiredExportExpressionAt(node)
+    const type = required ? checker.getTypeAtLocation(required) : (objectAssignedValueType(node) ?? checker.getTypeAtLocation(node))
     return isUnusableEvidence(type) || annotationStatesNothing(checker, node, type) ? null : type
   }
 
@@ -718,10 +726,9 @@ export const censusReturnBindings = (
    * - it never took `singleConventionAt`, so an overloaded member would have
    *   been answered in a shape the other three layers never produce.
    *
-   * Measured: three's `WebGLBindingStates.js:52`, `function
-   * createVertexArrayObject() { return gl.createVertexArray() }`. The composed
-   * view types `gl` as `NativeWebGL2RenderingContext | null` and the whole call
-   * as `NativeHandle`; this copy refused it `return-member-not-found`, so the
+   * Measured: `function createHandle() { return ctx.createHandle() }` in
+   * JavaScript. The composed view types `ctx` as `HostContext | null` and the
+   * whole call as `NativeHandle`; this copy refused it `return-member-not-found`, so the
    * declaration got NO census return, `producers/invocations.ts` fell back to
    * the checker's `any`, and `validateInvocationResult` -- correctly -- failed
    * the producer for disagreeing with its own invocation result. The call and
@@ -863,11 +870,10 @@ export const censusReturnBindings = (
    * that did not, so `let state = stateMap[ wireframe ];` (an untyped
    * element read from a plain object bag, real evidence of nothing) vetoed
    * the cell even where a later `state = createBindingState( ... )` gave a
-   * real, checkable type -- three.js's `WebGLBindingStates.js:getBindingState`
-   * is the exact case: the FIRST write's own failure attributed
+   * real, checkable type -- that was the exact case: the FIRST write's own failure attributed
    * `return-index-signature-absent` before the second write was ever asked.
-   * `let lut = null;` filled in later by `lut = new DataTexture( ... )`
-   * (`DFGLUTData.js`) is the same shape one level simpler -- `null` states an
+   * `let table = null;` filled in later by `table = new Table( ... )` is the
+   * same shape one level simpler -- `null` states an
    * absence, not a disagreeing type, which is exactly what `joinOfWrites`
    * (not the plainer `widestOf`) exists to recognise.
    *
@@ -1094,7 +1100,7 @@ export const censusReturnBindings = (
       if (containerGet) return containerGet
     }
     if (ts.isNewExpression(node) && thisConstructorFamilyOf(checker, flow, node.expression) !== null) {
-      // `new this.constructor(...)` -- three's `clone() { return new
+      // `new this.constructor(...)` -- the `clone() { return new
       // this.constructor().copy( this ) }` idiom. `this.constructor`'s own
       // static type is the inherited `Object.prototype.constructor: Function`,
       // which the checker gives no construct signature, so the generic
@@ -1169,8 +1175,8 @@ export const censusReturnBindings = (
     // here, for the reason `field-bindings.ts` states at the identical hop:
     // the checker keeps answering the annotation in full, so reading it makes
     // the returned value's carrier disagree with the carrier of the cell it
-    // was just read out of. hono's `get [GET_MATCH_RESULT](): Result<[unknown,
-    // RouterRoute]> { return this.#matchResult }` is the measured case -- the
+    // was just read out of. `get [MATCH](): Result<[unknown, Route]> { return
+    // this.#match }` is the measured case -- the
     // field census had already narrowed that field, and the checker had not.
     return parameters.statedTypeAt(node) ?? known(node) ?? resolveExpr(node, owner)
   }
@@ -1252,9 +1258,9 @@ export const censusReturnBindings = (
     // ONE authority answers "what single type does a cell several values reach
     // hold", and this census was asking only the narrower half of it.
     // `widestOf` above picks a COVERING MEMBER of the set it is handed, so a
-    // function whose returns are all literals of one primitive -- three's
-    // `WebGLUtils.convert`, sixty-odd `readonly UNSIGNED_BYTE = 0x1401`
-    // constants read off the WebGL context, plus `null` -- has no member that
+    // function whose returns are all literals of one primitive -- a `convert`
+    // mapping enums to dozens of `readonly CONST = 0x1401` constants read off
+    // a host context, plus `null` -- has no member that
     // covers the rest and refused outright. `joinOfWrites` is the whole
     // question: covering member, else the present arms' join with the nullish
     // ones split off, else that join with the literal forms widened. Asked
@@ -1265,8 +1271,8 @@ export const censusReturnBindings = (
     // covering member and no sound disjoint reading, which is the one fact a
     // reader already knows; WHICH types they are is the whole of what decides
     // whether the fix belongs to a return arm, to `widestOf`, or to
-    // `disjointUnionMembersOf`. three's `WebGLUtils.convert` refused here with
-    // no way to tell those apart.
+    // `disjointUnionMembersOf`. Such a `convert` function refused here with no
+    // way to tell those apart.
     else
       refusalOf.set(
         declaration,
@@ -1481,9 +1487,11 @@ export const composeReturnBindings = (
   /** The same-round property-bag census -- see `censusReturnBindings`'s own parameter. */
   bags: ObjectBagCensus = emptyObjectBagCensus,
   /** The prior round's composed view -- see `censusReturnBindings`'s own parameter. */
-  upstream: ParameterBindingCensus = emptyParameterBindingCensus
+  upstream: ParameterBindingCensus = emptyParameterBindingCensus,
+  /** Proven CommonJS module records -- see `censusReturnBindings`'s own parameter. */
+  moduleRecords: CommonJsModuleRecordCensus = emptyCommonJsModuleRecordCensus
 ): { readonly view: ParameterBindingCensus; readonly returns: ReturnBindingCensus } => {
-  const returns = censusReturnBindings(checker, files, reachable, parameters, collections, flow, bags, upstream)
+  const returns = censusReturnBindings(checker, files, reachable, parameters, collections, flow, bags, upstream, moduleRecords)
   // Both sides already publish `CensusRefusal[]` -- a plain concat forwards
   // every one of the upstream census's refusals undiminished, rather than
   // collapsing them into counts the way this composition used to (`return:

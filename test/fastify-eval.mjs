@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -37,7 +38,7 @@ execFileSync(
   'clang++',
   [
     '-std=c++20',
-    '-O0',
+    ...nativeOptimization('correctness'),
     '-g',
     '-fsanitize=address,undefined',
     '-I',

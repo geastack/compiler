@@ -1,4 +1,4 @@
-//! expect-refusal: body convention cannot fill its published bound-method convention
+//! expect-refusal: a method compiled for receivers of class
 // KNOWN GAP, pinned as a refusal: the same program as `generic-reader-family-at-any-and-concrete-copies`
 // with a subclass reader that OVERRIDES `read` with a different convention. A method read through the
 // receiver spelled at `any` (the union of every copy) publishes the any copy's exact receiver while

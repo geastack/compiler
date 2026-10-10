@@ -52,10 +52,10 @@ export const classHeritageTarget = (checker: ts.TypeChecker, expression: ts.Expr
 /**
  * The class VALUE `extends` evaluates, for lowering: the alias target only when
  * it is in the same file, since an expression from another module has no
- * result in this owner. node-compat's `whatwg-url.ts` exports
- * `const URLAlias = URL`; `mongodb-connection-string-url`'s
- * `class URLWithoutHost extends URL` resolved through that import to the
- * `URL` read inside `whatwg-url.ts`, and lowering its module body refused
+ * result in this owner. A URL module that exported
+ * `const URLAlias = URL` showed it: a package's
+ * `class LooseURL extends URL` resolved through that import to the
+ * `URL` read inside the URL module, and lowering its module body refused
  * ("a value produced by a different owner needs capture lowering"). The import
  * itself reads the same class object through its binding.
  */

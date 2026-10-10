@@ -1,6 +1,6 @@
 // ECMA-262 27.2.5.4 hands both handlers to `PerformPromiseThen`, and a handler
 // that is not callable is ABSENT there: `then(undefined, g)` is `catch(g)` and
-// `then(f, undefined)` is `then(f)`. The mongodb driver spells every
+// `then(f, undefined)` is `then(f)`. A database client spells every
 // fire-and-forget close as `close().then(undefined, squashError)`, and hands a
 // Node-style `(error?, result?) => void` callback as the rejection handler --
 // the reaction supplies only the reason and the second parameter is bound to

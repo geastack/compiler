@@ -60,13 +60,29 @@ export interface DependencyComponentResult<K, R> {
 export const dependencyComponentSolver = <K, R>(
   expand: (key: K) => DependencyComponentNode<K, R>,
   mode: DependencyComponentMode
-): ((key: K) => DependencyComponentResult<K, R>) => {
+): ((key: K) => DependencyComponentResult<K, R>) => invalidatableComponentSolver(expand, mode).solve
+
+/**
+ * The same solver, plus eviction for a graph that keeps growing underneath it.
+ * `invalidate` forgets every cached answer that could have read a changed
+ * node: the changed nodes themselves and everything that reaches them over
+ * required edges. A node nothing cached ever expanded cannot have contributed
+ * to a cached answer, so the walk stops there. Every other answer is a pure
+ * function of nodes that did not change, and stays.
+ */
+const invalidatableComponentSolver = <K, R>(
+  expand: (key: K) => DependencyComponentNode<K, R>,
+  mode: DependencyComponentMode
+): {
+  readonly solve: (key: K) => DependencyComponentResult<K, R>
+  readonly invalidate: (changed: Iterable<K>, requiredDependentsOf: (key: K) => Iterable<K>) => void
+} => {
   const nodes = new Map<K, DependencyComponentNode<K, R>>()
   // No `groundedDomains` here. It is a pure function of the expanded graph
   // (`groundingDomainsFrom`, memoized by key), never of how components closed,
   // so storing it per node only meant computing it for every node of every
   // component -- the whole value-origin subgraph walked ~115,000 times on
-  // the three.js app -- when the only places it can change an answer are a cyclic
+  // a large program -- when the only places it can change an answer are a cyclic
   // component's requirement check and the published result of a node someone
   // actually asks about.
   const results = new Map<
@@ -246,7 +262,7 @@ export const dependencyComponentSolver = <K, R>(
     }
   }
 
-  return (root) => {
+  const solve = (root: K): DependencyComponentResult<K, R> => {
     const known = results.get(root)
     if (known !== undefined) return publish(root, known)
 
@@ -337,6 +353,23 @@ export const dependencyComponentSolver = <K, R>(
     visit(root)
     return publish(root, results.get(root)!)
   }
+
+  const invalidate = (changed: Iterable<K>, requiredDependentsOf: (key: K) => Iterable<K>): void => {
+    const queue = [...changed]
+    const seen = new Set<K>()
+    for (let cursor = 0; cursor < queue.length; cursor++) {
+      const key = queue[cursor]!
+      if (seen.has(key)) continue
+      seen.add(key)
+      if (!nodes.delete(key)) continue
+      results.delete(key)
+      componentOf.delete(key)
+      groundingCache.delete(key)
+      for (const dependent of requiredDependentsOf(key)) queue.push(dependent)
+    }
+  }
+
+  return { solve, invalidate }
 }
 
 /** A node whose fact set is transferred monotonically from discovered dependencies. */
@@ -351,11 +384,11 @@ export type DependencyFactObserve<K, V> = (dependency: K) => ReadonlySet<V>
  * for the shape where the dependency is not knowable up front -- "which of an
  * unbounded candidate set holds this" -- which a per-key whole-program scan
  * inside a transfer is the usual symptom of. `unknownReadsOf` in
- * `source-value-session.ts` used to `observe` all 968 of the three.js app's
- * computed-key reads from every one of 570 containers, to ask a question that
+ * `source-value-session.ts` used to `observe` every computed-key read in a
+ * large program from every one of its hundreds of containers, to ask a question that
  * does not depend on the key: whether the read's RECEIVER can be this
  * container. Asked in reverse, each container asks once, "who holds me",
- * instead of 570 containers each asking the same 968 receivers.
+ * instead of every container asking the same receivers again.
  *
  * Calling this still makes the caller a dependent, exactly as `observe`
  * would -- a node that comes to hold this fact LATER still wakes every past
@@ -369,12 +402,14 @@ export type DependencyFactObserve<K, V> = (dependency: K) => ReadonlySet<V>
  * whether one named node is complete. A consumer that needs this fact's
  * completeness must `read` a query that owns it directly.
  *
- * Only finds nodes that already EXIST and have already transferred at least
- * once. A candidate nothing else in the program ever depends on is never
- * created and never runs, so its facts never reach here -- the caller must
- * materialise every candidate explicitly (`DependencyFactSolver.seed`) rather
- * than relying on this call to do it, the way the 968 `observe` calls it
- * replaces used to as a side effect of `read`/`observe`'s own `stateOf`.
+ * Only finds SEEDED nodes (`DependencyFactSolver.seed`), and only once they
+ * have transferred. The candidate set is the caller's to name: a candidate
+ * nothing else depends on would otherwise never be created, and a node that
+ * merely happens to hold the same value is not a candidate. Indexing every
+ * state instead made each call enumerate every holder in the program -- on
+ * a large program, thousands of value queries holding one shared object, walked per
+ * root per re-evaluation, a third of the whole first solve -- only for every
+ * consumer to discard all but the seeded receivers it actually asked about.
  */
 export type DependencyFactHoldersOf<K, V> = (fact: V) => Iterable<K>
 
@@ -391,8 +426,8 @@ export interface DependencyFactDefinition<K, V, R> {
    * iterates this return value while it is still mutating the node's own
    * `facts` -- adding each yielded value before pulling the next one -- and
    * `read`/`observe` hand a dependency's `facts` out LIVE, with no defensive
-   * copy (a copy per edge read was quadratic and unfinishable on three's
-   * WebGLRenderer; a copy per node doubled the three.js app's peak memory into a 4 GB
+   * copy (a copy per edge read was quadratic and unfinishable on a large
+   * class; a copy per node doubled a large program's peak memory into a 4 GB
    * OOM -- see `factsFrom`). An `Iterable` return invites a generator, and a
    * generator's continuation runs interleaved with that iteration: for a
    * self- or mutually-cyclic node, a `read`/`observe` call made partway
@@ -465,8 +500,8 @@ export type DependencyFactResult<K, V, R> =
  *
  * A consumer that walks "what did this node read" must not keep its own copy
  * of the answer: the solver records every required edge anyway, and the second
- * copy is a whole duplicate dependency graph. The three.js app's was ~115,000 nodes per
- * solve and three solves deep when the heap ran out.
+ * copy is a whole duplicate dependency graph -- on a large program, ~115,000
+ * nodes per solve, enough to exhaust the heap a few solves in.
  */
 export interface DependencyFactSolver<K, V, R> {
   readonly solve: (key: K) => DependencyFactResult<K, V, R>
@@ -477,14 +512,15 @@ export interface DependencyFactSolver<K, V, R> {
    *
    * `holdersOf` only ever finds nodes that already exist, because it has
    * nothing to expand from -- it is handed a fact value, not a key. A caller
-   * that builds a fixed candidate list up front (the three.js app's 968 computed-key
-   * receivers) used to force each candidate into existence as a SIDE EFFECT
+   * that builds a fixed candidate list up front (every computed-key receiver in the
+   * program) used to force each candidate into existence as a SIDE EFFECT
    * of subscribing to it with `observe`; inverting the question removes the
    * subscription but does not remove the need for the candidate to exist and
    * have run at least once. This is that need, named: create-and-schedule
    * with no subscriber, so `seed`ing a whole candidate list costs one
    * scheduling operation per candidate and stores zero edges, instead of one
-   * stored edge per (candidate, asker) pair.
+   * stored edge per (candidate, asker) pair. Seeding is also what makes a
+   * node a candidate: `holdersOf` answers over seeded nodes only.
    */
   readonly seed: (key: K) => void
 }
@@ -498,7 +534,7 @@ export const dependencyFactSolver = <K, V, R>(
      * Carried on the state so `dependents` and the propagation queue (below)
      * can hold States directly instead of keys. Both used to hold `K`, and
      * every drain re-resolved `states.get(key)` per edge fire -- on
-     * the three.js app's 14.7M observe edges, a Map lookup the caller already had the
+     * a large program's millions of observe edges, a Map lookup the caller already had the
      * answer to, since the State is in hand at both the point an edge is
      * created (`factsFrom`'s `dependencyState`) and the point it fires
      * (`propagate`'s queue). Added here, in the literal, so the shape is
@@ -511,7 +547,7 @@ export const dependencyFactSolver = <K, V, R>(
      * key. A transfer re-reads the same edges on every re-evaluation, so
      * resolving the key through the global state map each time was a lookup
      * per edge read across the whole solve -- the single largest self-time
-     * entry in the three.js app's profile. The owner already has to touch this map to
+     * entry in a large program's profile. The owner already has to touch this map to
      * know the edge exists; carrying the state in it makes the repeat read
      * free.
      */
@@ -543,12 +579,14 @@ export const dependencyFactSolver = <K, V, R>(
      * even though most states never call it.
      */
     holdersOf: DependencyFactHoldersOf<K, V>
+    /** Seeded: this state's facts are visible to `holdersOf`. */
+    indexed: boolean
   }
 
   const states = new Map<K, State>()
   // States, not keys: `propagate` used to hold keys and call `stateOf(key)`
-  // on every drain, a Map lookup per edge fire across the three.js app's 14.7M
-  // observe edges. The State is already in hand wherever an edge fires or is
+  // on every drain, a Map lookup per edge fire across a large program's millions
+  // of observe edges. The State is already in hand wherever an edge fires or is
   // created, so the queue (and `dependents`, on State above) carry it
   // directly and dedupe on State identity, which is 1:1 with key identity
   // because `states` is the only minter.
@@ -581,7 +619,8 @@ export const dependencyFactSolver = <K, V, R>(
         dependents: new Set(),
         read: (dependency) => readFrom(built, dependency),
         observe: (dependency) => observeFrom(built, dependency),
-        holdersOf: (fact) => holdersOfFrom(built, fact)
+        holdersOf: (fact) => holdersOfFrom(built, fact),
+        indexed: false
       }
       state = built
       states.set(key, state)
@@ -598,18 +637,33 @@ export const dependencyFactSolver = <K, V, R>(
    * run, not to make anyone depend on it.
    */
   const seed = (key: K): void => {
-    stateOf(key)
+    const state = stateOf(key)
+    if (state.indexed) return
+    state.indexed = true
+    // Facts it published before it was seeded never reached the index.
+    for (const fact of state.facts) index(state, fact)
   }
 
   // The reverse of `observedDependencies`/`dependents`: every state that has
   // published a given fact VALUE, and every state that has ever asked
-  // `holdersOf` about it. Global across every query kind on purpose -- a fact
-  // is a fact regardless of which kind of node published it, and the size
-  // this costs is bounded by facts actually published (three.js app: ~205,000
-  // (state, fact) pairs total), not by how many candidates asked about them
-  // (the 456,000 edges this primitive exists to avoid storing).
+  // `holdersOf` about it. Only seeded states publish here (see
+  // `DependencyFactHoldersOf`), so its size is bounded by the candidates'
+  // facts, not by every (state, fact) pair in the program.
   const holders = new Map<V, Set<State>>()
   const valueSubscribers = new Map<V, Set<State>>()
+  // A node that asked `holdersOf(fact)` before this state held it named no
+  // `K` to depend on, so an ordinary dependent edge cannot wake it; this is
+  // the other half of that subscription. Without it, a container whose holder
+  // shows up only after `unknown-reads` first ran would publish an incomplete
+  // answer forever and never be asked again, which is the silently-wrong
+  // result SEMANTIC-AUTHORITY ranks below a slow one.
+  const index = (state: State, fact: V): void => {
+    let holding = holders.get(fact)
+    if (holding === undefined) holders.set(fact, (holding = new Set()))
+    holding.add(state)
+    const subscribers = valueSubscribers.get(fact)
+    if (subscribers !== undefined) for (const subscriber of subscribers) enqueue(subscriber)
+  }
   const NO_HOLDERS: readonly K[] = []
   const holdersOfFrom = (ownerState: State, fact: V): Iterable<K> => {
     let subscribers = valueSubscribers.get(fact)
@@ -630,8 +684,8 @@ export const dependencyFactSolver = <K, V, R>(
 
   // The owner's state is handed in rather than looked up: every transfer and
   // every seal reads its dependencies through this, so a map lookup per edge
-  // for a state the caller is already holding was, on the three.js app, a quarter of
-  // the whole compile.
+  // for a state the caller is already holding was, on a large program, a quarter
+  // of the whole compile.
   const factsFrom = (ownerState: State, dependency: K, required: boolean): ReadonlySet<V> => {
     let dependencyState = ownerState.observedDependencies.get(dependency)
     let changed = false
@@ -644,6 +698,7 @@ export const dependencyFactSolver = <K, V, R>(
     }
     if (required && !ownerState.requiredDependencies.has(dependency)) {
       ownerState.requiredDependencies.add(dependency)
+      componentDirty.add(ownerState.key)
       dependencyRevision++
       changed = true
     }
@@ -651,9 +706,9 @@ export const dependencyFactSolver = <K, V, R>(
     // invalidates the current seal even though the fact edge already existed.
     if (changed) enqueue(ownerState)
     // The fact set is handed over as `ReadonlySet`, not as a copy. Copying per
-    // edge read was quadratic and made three's WebGLRenderer unfinishable;
+    // edge read was quadratic and made a large class unfinishable;
     // copying per (node, size) fixed the time and doubled the memory, which is
-    // what put the three.js app's third solve into a 4 GB OOM. Neither is necessary:
+    // what put a large program's later solves into a 4 GB OOM. Neither is necessary:
     // `propagate` adds a node's facts only AFTER its transfer has returned --
     // `evaluate` builds its result eagerly and hands back a set of its own --
     // so no reader is ever iterating a set that is being written.
@@ -669,25 +724,21 @@ export const dependencyFactSolver = <K, V, R>(
       queued.delete(state)
       counts.transfers++
       if (countsEnabled && counts.transfers % 200000 === 0) report()
+      // Dependents are woken once per transfer, not once per new fact: nothing
+      // is dequeued while this loop runs, so a repeat wake-up finds each
+      // dependent already queued. The set can still grow mid-transfer (a state
+      // that reads itself), and then the newcomer must be woken too.
+      let wokenSize = -1
       for (const fact of state.definition.transfer(state.read, state.observe, state.holdersOf)) {
         if (state.facts.has(fact)) continue
         state.facts.add(fact)
-        // This state is now a holder of `fact` -- recorded at the exact point
-        // a fact is genuinely NEW, same as `state.facts.add` beside it, so
-        // `holders` never grows for a re-observed fact.
-        let holding = holders.get(fact)
-        if (holding === undefined) holders.set(fact, (holding = new Set()))
-        holding.add(state)
-        for (const dependent of state.dependents) enqueue(dependent)
-        // A node that asked `holdersOf(fact)` before this state held it named
-        // no `K` to depend on -- there was nothing to name -- so an ordinary
-        // dependent edge cannot wake it. This is the other half of that
-        // subscription: without it, a container whose holder shows up only
-        // after `unknown-reads` first ran would publish an incomplete answer
-        // forever and never be asked again, which is the silently-wrong
-        // result SEMANTIC-AUTHORITY ranks below a slow one.
-        const subscribers = valueSubscribers.get(fact)
-        if (subscribers !== undefined) for (const subscriber of subscribers) enqueue(subscriber)
+        if (wokenSize !== state.dependents.size) {
+          wokenSize = state.dependents.size
+          for (const dependent of state.dependents) enqueue(dependent)
+        }
+        // Recorded at the exact point a fact is genuinely NEW, so `holders`
+        // never grows for a re-observed fact.
+        if (state.indexed) index(state, fact)
       }
     }
     queue.length = 0
@@ -700,20 +751,26 @@ export const dependencyFactSolver = <K, V, R>(
   // query of a large program paid for all of it. Only what `enqueue` marked is
   // re-sealed, which is exactly what could have changed.
   const sealed = new Map<K, ReturnType<DependencyFactDefinition<K, V, R>['seal']>>()
-  // `sealRevision` invalidates the hoisted component-solve memo below, so
-  // bumping it on a re-seal that reproduces the same answer throws that memo
-  // away and forces a full component rebuild for nothing -- on the three.js app every
-  // seal was doing exactly that. The grounding fields compare soundly by
+  // Nodes whose seal or required-edge set moved since the component solve last
+  // ran: the only facts a component answer reads.
+  const componentDirty = new Set<K>()
+  const requiredDependentsOf = function* (key: K): Iterable<K> {
+    const state = states.get(key)
+    if (state === undefined) return
+    for (const dependent of state.dependents) if (dependent.requiredDependencies.has(key)) yield dependent.key
+  }
+  // A changed seal evicts every cached component answer that reaches it, so
+  // reporting a change for a re-seal that reproduces the same answer evicts
+  // those answers for nothing -- on a large program nearly every seal was doing
+  // exactly that. The grounding fields compare soundly by
   // value: `DependencyGroundingDomain` is `string | symbol`, and a grounding
   // edge's `dependency` is a `K`, which this solver's own contract already
   // requires to have stable identity. `causes` is `R`, a type this solver
-  // never gives an equality contract to -- source-value-session's `Cause` is
-  // a fresh `{reason, node}` object literal built on every seal call, so
-  // `===` per element is the only sound comparison available here. That
-  // reports "changed" for a content-identical-but-freshly-allocated cause
-  // list, which only over-invalidates (safe, never wrong); the common case --
-  // a node that resolves, whose `causes` is `[]` on every seal -- still
-  // compares equal by length alone, which is where the savings are.
+  // never gives an equality contract to, so `===` per element is the only
+  // sound comparison available here. A client that mints a fresh cause per
+  // seal over-invalidates (safe, never wrong) and pays a full component
+  // rebuild for every unchanged refusal; source-value-session interns its
+  // `Cause` per (node, reason) for exactly that reason.
   const domainsEqual = (a: readonly DependencyGroundingDomain[], b: readonly DependencyGroundingDomain[]): boolean =>
     a.length === b.length && a.every((domain, index) => domain === b[index])
   const groundingEdgesEqual = (
@@ -745,7 +802,7 @@ export const dependencyFactSolver = <K, V, R>(
     // This solver is generic over K by design -- SEMANTIC-AUTHORITY section 3
     // requires one solved graph, not a solver bespoke to one key shape -- so
     // nothing outside this debug path may assume a key has a `kind`. But
-    // attributing the three.js app's 14.7M observe edges to a fix means knowing which
+    // attributing a large program's millions of observe edges to a fix means knowing which
     // caller's loop owns them, and the one real caller's key (`Query` in
     // source-value-session.ts) is a `{ kind: ... }` discriminated union. This
     // reflects into that shape defensively, only inside the
@@ -775,15 +832,35 @@ export const dependencyFactSolver = <K, V, R>(
       .join('')
     return ` observed=${observed} required=${required} dependents=${dependents} facts=${facts}${byKind}`
   }
-  let sealRevision = 0
-  let componentSolve: ((key: K) => DependencyComponentResult<K, R>) | null = null
-  let componentDependencyRevision = -1
-  let componentSealRevision = -1
+  let componentSolver: ReturnType<typeof invalidatableComponentSolver<K, R>> | null = null
   const countsEnabled = process.env['GEA_SOLVER_COUNTS'] !== undefined
+  // Which question is being answered when the graph grows, and who asked it.
+  // Reflective for the same reason `sizes` is: generic K, debug path only.
+  let currentRoot: K | undefined
+  let reportedRoot: K | undefined
+  const describeRoot = (): string => {
+    if (currentRoot === undefined || currentRoot === reportedRoot) return ''
+    reportedRoot = currentRoot
+    const key = currentRoot as { readonly kind?: unknown; readonly node?: unknown; readonly key?: unknown }
+    const node = key.node as
+      | {
+          getSourceFile?: () => { fileName: string; getLineAndCharacterOfPosition: (p: number) => { line: number } }
+          getStart?: () => number
+          getText?: () => string
+        }
+      | undefined
+    let where = ''
+    if (node?.getSourceFile && node.getStart) {
+      const file = node.getSourceFile()
+      where = ` ${file.fileName}:${file.getLineAndCharacterOfPosition(node.getStart()).line + 1} ${(node.getText?.() ?? '').slice(0, 80).replace(/\s+/g, ' ')}`
+    }
+    const stack = (new Error().stack ?? '').split('\n').slice(3, 40).join('\n')
+    return `\n[SOLVER-ROOT] kind=${String(key.kind)}${key.key === undefined ? '' : ` key=${String(key.key)}`}${where}\n${stack}`
+  }
   const report = (): void => {
     if (!countsEnabled) return
     console.error(
-      `[SOLVER] roots=${counts.roots} states=${states.size} transfers=${counts.transfers} seals=${counts.seals} component-expansions=${counts.componentNodes}${sizes()}`
+      `[SOLVER] roots=${counts.roots} states=${states.size} transfers=${counts.transfers} seals=${counts.seals} component-expansions=${counts.componentNodes}${sizes()}${describeRoot()}`
     )
   }
   if (countsEnabled) process.on('exit', report)
@@ -791,6 +868,7 @@ export const dependencyFactSolver = <K, V, R>(
   const NO_DEPENDENCIES: readonly K[] = []
   const solve = (root: K): DependencyFactResult<K, V, R> => {
     counts.roots++
+    if (countsEnabled) currentRoot = root
     // Reported as it goes, not only at exit: a run that has to be killed to be
     // observed reports nothing, which is how a 20-minute compile stayed
     // unattributed for two profiling attempts.
@@ -809,23 +887,23 @@ export const dependencyFactSolver = <K, V, R>(
         counts.seals++
         if (countsEnabled && counts.seals % 200000 === 0) report()
         const next = state.definition.seal(state.read, state.observe, state.holdersOf)
-        if (sealChanged(sealed.get(key), next)) sealRevision++
+        if (sealChanged(sealed.get(key), next)) componentDirty.add(key)
         sealed.set(key, next)
       }
       if (queue.length === 0 && sealDirty.size === 0 && dependencyRevision === revisionBeforeSeal) break
     }
 
-    // The component solve reads the SEALED graph, so its answer stands for
-    // exactly as long as no node's seal and no node's dependency set has moved
-    // -- and both of those are counted. Built inside this per-root call it was
-    // thrown away and rebuilt for every root, taking its `results`, `nodes` and
-    // `componentOf` caches with it: on the three.js app the graph stopped growing at the
-    // eighth root and the next twenty-two thousand each re-expanded ~470 nodes
-    // of it, 10.4M expansions of an answer that had not changed. Rebuilding on
-    // a revision rather than on every call is the same walk, done once per
-    // change instead of once per question.
-    if (componentSolve === null || componentDependencyRevision !== dependencyRevision || componentSealRevision !== sealRevision) {
-      componentSolve = dependencyComponentSolver<K, R>((key) => {
+    // The component solve reads the SEALED graph, so an answer stands for
+    // exactly as long as no node it reached has changed its seal or its
+    // required edges. Built inside this per-root call it was thrown away for
+    // every root: on a large program the graph stopped growing after a handful
+    // of roots and the next tens of thousands each re-expanded hundreds of its
+    // nodes. Rebuilt whole on any revision instead, it still re-expanded every
+    // one of hundreds of thousands of sealed nodes whenever a later root added one state or one
+    // observe edge -- neither of which any component answer reads. Only the
+    // answers that could have read a changed node are evicted.
+    if (componentSolver === null)
+      componentSolver = invalidatableComponentSolver<K, R>((key) => {
         counts.componentNodes++
         if (countsEnabled && counts.componentNodes % 200000 === 0) report()
         const state = states.get(key)
@@ -833,10 +911,9 @@ export const dependencyFactSolver = <K, V, R>(
         if (state === undefined || local === undefined) throw new Error('unsealed dependency fact node')
         return { ...local, dependencies: [...state.requiredDependencies] }
       }, mode)
-      componentDependencyRevision = dependencyRevision
-      componentSealRevision = sealRevision
-    }
-    const result = componentSolve(root)
+    else if (componentDirty.size > 0) componentSolver.invalidate(componentDirty, requiredDependentsOf)
+    componentDirty.clear()
+    const result = componentSolver.solve(root)
     if (result.status === 'complete')
       return {
         status: 'complete',

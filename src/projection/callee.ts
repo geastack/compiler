@@ -1,16 +1,20 @@
 import type { DeclarationId, FunctionId, SemanticResultId } from '../identity/ids.js'
 import { narrowedOperandView } from '../conversion/operand-view.js'
+import { hostTemplateOfRead, type HostTemplate } from '../representation/host-templates.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
-import { abiKey, type CallableAbi, type Representation } from '../representation/model.js'
+import type { CallableAbi, Representation } from '../representation/model.js'
 import type { SealedRepresentationPlan } from '../representation/plan.js'
 import { hostMemberOf, type HostMemberTable } from '../targets/cpp/host/host-members.js'
+import { mixedPrototypeCallArmsOf, nativeHostReflectionMemberOf, nativePrototypeTemplateOf } from './native-prototype-methods.js'
+import { functionSourceReadProtocolOf } from './function-source.js'
+export { objectShapePrototypeMethods } from './native-prototype-methods.js'
 import type { BindingPlacement } from './bindings.js'
 import type { ClassLayout } from './classes.js'
 import { classMemberOf, classMethodOverrideOf, classStaticMemberOf } from './fields.js'
 import { callableBindResolution, callableInvokeResolution, callableMutationFactsOf } from '../semantics/callable-origins.js'
 import { unboxedMethodAssumptionOf, type UnboxedMethodAssumption } from './method-value-escapes.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
-import { operandOf, resultOf, type SemanticOperand } from '../semantics/model/operands.js'
+import { identityOperandOf, immutableBindingInitializerOf, operandOf, resultOf, type SemanticOperand } from '../semantics/model/operands.js'
 import type { InvocationOperation, SemanticOperation } from '../semantics/model/operations.js'
 
 /**
@@ -53,20 +57,6 @@ export const abiOfCallee = (representation: Representation): CallableAbi | null 
 export const constructAbiOfCallee = (representation: Representation): CallableAbi | null => {
   if (representation.kind === 'function-and-constructor') return representation.construct
   return abiOfCallee(representation)
-}
-
-/**
- * The convention a method VALUE carries when a receiver-less slot takes it:
- * the source states a receiver and the slot states the identical convention
- * without one. Such a value is bound to the object it was read from before it
- * enters the slot (`ir/lower-operands.ts`'s `enter`, minting a detached
- * `bind-callable`); `null` for any other pair.
- */
-export const detachedMethodAbiOf = (source: Representation, target: Representation): CallableAbi | null => {
-  const from = abiOfCallee(source)
-  const to = abiOfCallee(target)
-  if (from === null || to === null || from.receiver === null || to.receiver !== null) return null
-  return abiKey({ ...from, receiver: null }) === abiKey(to) ? from : null
 }
 
 /**
@@ -179,9 +169,8 @@ export interface DeferredCalleeInput {
  * value whose convention states no receiver (a bound callable, an arrow
  * field), which the read cannot have produced from a method body.
  *
- * Asked by the property lowering, which records the receiver a method value
- * must be bound to (`LoweringProgram.methodValueReceivers`), and by the
- * `Function.prototype.bind` rewrite below, which binds the same body.
+ * Asked by property lowering for source provenance and by the explicit
+ * `Function.prototype.bind` rewrite below, which binds that function.
  */
 export const methodValueOriginOf = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
@@ -274,7 +263,7 @@ export const deferredCalleeOf = (input: DeferredCalleeInput, operation: Invocati
   // keeps the ordinary property read. `apply` is deliberately NOT taken here:
   // its direct lowering range-copies the array into the callee's rest slot
   // (`lowerDeferredFunctionApply`), where the `.apply` frame it would replace
-  // forwards the caller's array itself, and node-compat's `runListener` runs
+  // forwards the caller's array itself, and an event emitter that runs
   // every listener through that one `fn.apply(this, args)` -- the copy is one
   // allocation per listener call the driver never paid. The frame's aliasing
   // is the older defect; the copy is not the fix for it without a callee-side
@@ -370,8 +359,6 @@ export type CalleeRendering = 'callable' | 'template'
  * this call's ABI apply would convert a literal string key into the
  * `PropertyKey` tagged union, which `objectShapeCallText` explicitly refuses.
  */
-export const objectShapePrototypeMethods: ReadonlySet<string> = new Set(['hasOwnProperty', 'propertyIsEnumerable'])
-
 export interface CalleeRenderingInput {
   readonly graph: SemanticGraph
   readonly plan: SealedRepresentationPlan
@@ -379,15 +366,64 @@ export interface CalleeRenderingInput {
   readonly placements: ReadonlyMap<DeclarationId, BindingPlacement>
   /** Declarations that hold one host method forever -- see `hostMethodAliasDeclarations`. */
   readonly hostMethodAliasDeclarations: ReadonlySet<DeclarationId>
-  readonly hostMembers?: HostMemberTable
+  /** The host member table of this build; never substituted by the core one. */
+  readonly hostMembers: HostMemberTable
+  readonly classes?: ReadonlyMap<DeclarationId, ClassLayout>
+  readonly hostIntrinsicProtocols?: ReadonlySet<string>
 }
+
+/** The host frame this canonical read plans. A native carrier preserves its
+ * argument slots even when source integrity later refuses execution. */
+export const plannedHostTemplateOf = (
+  input: CalleeRenderingInput,
+  operation: InvocationOperation,
+  actualCallee?: Representation
+): HostTemplate | null => {
+  const callee = operandOf(operation, 'callee')
+  if (callee?.source.kind !== 'result') return null
+  const published = actualCallee ?? input.plan.selected.get(callee.source.result)
+  if (published === undefined) return null
+  let source = callee.source.result
+  const seen = new Set<SemanticResultId>()
+  while (!seen.has(source)) {
+    seen.add(source)
+    const id = input.graph.results.get(source)
+    const producer = id === undefined ? undefined : input.graph.operations.get(id)
+    if (producer === undefined) return null
+    if (producer.family === 'property' && producer.internalMethod === 'get') {
+      if (producer.hostMethod !== undefined || producer.resolvedBinding !== undefined) return null
+      const receiver = operandOf(producer, 'receiver')
+      const key = operandOf(producer, 'key')
+      if (receiver === undefined || key?.source.kind !== 'constant' || key.source.literal !== 'string') return null
+      const held =
+        receiver.source.kind === 'result'
+          ? input.plan.selected.get(receiver.source.result)
+          : receiver.source.kind === 'constant'
+            ? input.deriver.derive(receiver.type)
+            : undefined
+      return held === undefined ? null : hostTemplateOfRead(narrowedOperandView(held, receiver, input.deriver), key.source.text, published)
+    }
+    if (producer.family === 'binding' && producer.action === 'read' && !input.hostMethodAliasDeclarations.has(producer.declaration))
+      return null
+    const identity = identityOperandOf(producer) ?? immutableBindingInitializerOf(input.graph, producer)
+    if (identity?.source.kind !== 'result') return null
+    source = identity.source.result
+  }
+  return null
+}
+
+/** A stock mutation's executable protocol belongs to normalization's final
+ * source-integrity proof. Ambient placement and a matching frame are not a
+ * second permission to execute the original member after that proof is lost. */
+export const hostTemplateSourceAdmitted = (operation: InvocationOperation, template: HostTemplate | null | undefined): boolean =>
+  template !== 'object-assign' || operation.intrinsicMutation === 'object-assign'
 
 /** A direct read of a host callable whose numeric rest frame need not escape to an array. */
 export const numericRestHostCallOf = (
   input: CalleeRenderingInput,
   operation: InvocationOperation
 ): { readonly protocol: string; readonly member: string } | null => {
-  if (operation.internalMethod !== 'call' || operation.optionalChain || !input.hostMembers) return null
+  if (operation.internalMethod !== 'call' || operation.optionalChain) return null
   const callee = operandOf(operation, 'callee')
   if (callee?.source.kind !== 'result') return null
   const producerId = input.graph.results.get(callee.source.result)
@@ -406,7 +442,7 @@ export const numericRestHostCallOf = (
 
 /**
  * Declarations written exactly once, from a direct read of a host METHOD --
- * `var __isArray = Array.isArray`, the shape test262's propertyHelper and any
+ * `var __isArray = Array.isArray`, the shape a test harness and any
  * program guarding a later monkey-patch names a builtin through.
  *
  * `targets/cpp/host/host-method-aliases.ts` proves the identical fact, but
@@ -430,9 +466,9 @@ export const hostMethodAliasDeclarations = (
 ): ReadonlySet<DeclarationId> => {
   const methodReads = new Set<SemanticResultId>()
   for (const operation of graph.operations.values()) {
-    if (operation.family !== 'property' || operation.internalMethod !== 'get' || operation.keyIsComputed) continue
+    if (operation.family !== 'property' || operation.internalMethod !== 'get') continue
     const key = operandOf(operation, 'key')
-    if (!key || key.source.kind !== 'constant') continue
+    if (!key || key.source.kind !== 'constant' || key.source.literal !== 'string') continue
     const receiver = operandOf(operation, 'receiver')
     if (!receiver) continue
     const held =
@@ -465,28 +501,6 @@ export const hostMethodAliasDeclarations = (
   return aliases
 }
 
-const templateReceiverKinds: ReadonlySet<Representation['kind']> = new Set<Representation['kind']>([
-  'native-handle',
-  'string',
-  'scalar',
-  'array-object',
-  'typed-array',
-  'keyed-collection',
-  'promise',
-  'iterator',
-  'dictionary',
-  'array-buffer',
-  'shared-array-buffer',
-  'data-view',
-  'dense-buffer',
-  'native-sequence',
-  'proxy-object',
-  'dynamic',
-  'optional',
-  'tagged-union',
-  'symbol'
-])
-
 export const calleeRenderingOf = (input: CalleeRenderingInput, operation: InvocationOperation): CalleeRendering => {
   // `Object.keys`/`getOwnPropertyNames`/`getOwnPropertySymbols`/`Reflect.ownKeys`
   // are already checker-authenticated above this call
@@ -517,6 +531,12 @@ export const calleeRenderingOf = (input: CalleeRenderingInput, operation: Invoca
   // the license this function was always supposed to grant instead of gating
   // it behind a receiver classification that was never going to recognize it.
   if (operation.intrinsicOwnKeys) return 'template'
+  // Normalization authenticates the intact standard member, just as it does
+  // for OwnPropertyKeys. Its native frame accepts the actual subject carrier.
+  if (operation.intrinsicReflection !== undefined) return 'template'
+  // This fact names the exact intact Object member, authenticated together
+  // with its actual target at normalization; its frame accepts that carrier.
+  if (operation.intrinsicReturnIdentity !== undefined) return 'template'
   // `Object.defineProperty` on a closed data descriptor is the same shape of
   // authenticated fact, one call later: `intrinsic-data-definition.ts`'s
   // `intrinsicDataDefinitionTargetOf` (consumed by `producers/invocations.ts`
@@ -533,11 +553,11 @@ export const calleeRenderingOf = (input: CalleeRenderingInput, operation: Invoca
   // `defineProperty`'s OWN ambient `(o, p, attributes: PropertyDescriptor &
   // ThisType<any>) => any` signature as the call's ABI -- `PropertyDescriptor`
   // types `value` as `any`, so THAT declared signature, not the literal
-  // descriptor each call site actually writes, became the carrier: three's
-  // `Object3D` constructor defines `position`/`rotation`/`quaternion`/`scale`
-  // this way, and every one of those `Object.defineProperty` call sites
-  // selected a `dynamic` `.value` field for a descriptor whose own literal
-  // states a concrete `Vector3`/`Euler`/`Quaternion`. Answering `'template'`
+  // descriptor each call site actually writes, became the carrier: a
+  // constructor defining `position`/`rotation`/`quaternion`/`scale` this way
+  // made every one of those `Object.defineProperty` call sites
+  // select a `dynamic` `.value` field for a descriptor whose own literal
+  // states a concrete `Vector3`/`Matrix3`. Answering `'template'`
   // here closes the same license `intrinsicOwnKeys` closes above, from the
   // same authenticated fact, instead of a receiver classification that was
   // never going to recognize `Object` as one either.
@@ -563,7 +583,24 @@ export const calleeRenderingOf = (input: CalleeRenderingInput, operation: Invoca
     return input.hostMethodAliasDeclarations.has(producer.declaration) ? 'template' : 'callable'
   }
   if (producer.family !== 'property' || producer.internalMethod !== 'get') return 'callable'
-  if (producer.hostMethod !== undefined) return 'template'
+  if (producer.hostMethod !== undefined) {
+    if (
+      nativeHostReflectionMemberOf(
+        input.hostMembers,
+        input.hostIntrinsicProtocols,
+        producer.hostMethod.protocol,
+        producer.hostMethod.member
+      )
+    )
+      return 'template'
+    const row = hostMemberOf(input.hostMembers, producer.hostMethod.protocol, producer.hostMethod.member)
+    if (row?.kind === 'method') {
+      const produced = resultOf(producer, 'value')
+      const result = produced === undefined ? undefined : input.plan.selected.get(produced.id)
+      return row.arity === 'call-site' && result?.kind === 'dynamic' ? 'callable' : 'template'
+    }
+    return 'callable'
+  }
   const receiver = operandOf(producer, 'receiver')
   if (!receiver) return 'callable'
   const held =
@@ -572,7 +609,7 @@ export const calleeRenderingOf = (input: CalleeRenderingInput, operation: Invoca
       : receiver.source.kind === 'constant'
         ? input.deriver.derive(receiver.type)
         : null
-  if (held === null) return 'template'
+  if (held === null) return 'callable'
   // A class extending `Promise` whose `then`/`catch`/`finally` is read off its
   // native promise (`SemanticOperand.nativeBaseView`) is called as the
   // promise's own member, exactly as a promise receiver is.
@@ -582,17 +619,27 @@ export const calleeRenderingOf = (input: CalleeRenderingInput, operation: Invoca
   // flow analysis proved dead) registers no template read at all, so the
   // printer falls through to the callable path and the ABI's slots apply.
   const carrier = view.kind === 'borrowed-ref' ? view.referent : view
-  // `hasOwnProperty`/`propertyIsEnumerable` off a shape the object-shape
-  // protocol claims (see `objectShapePrototypeMethods`'s own comment) render
-  // from a template no matter which of those shapes the receiver is, ahead
-  // of the general per-kind answer below -- a `record`/`class-ref` is not in
-  // `templateReceiverKinds` at all (its OTHER members are real ABI calls),
-  // and a `native-record-ref` naming no native type answers 'callable' next.
   const key = operandOf(producer, 'key')
-  const staticKey = key?.source.kind === 'constant' ? key.source.text : null
-  const knownObjectShape =
-    carrier.kind === 'record' || carrier.kind === 'class-ref' || (carrier.kind === 'native-record-ref' && carrier.native === null)
-  if (staticKey !== null && knownObjectShape && objectShapePrototypeMethods.has(staticKey)) return 'template'
-  if (carrier.kind === 'native-record-ref') return carrier.native === null ? 'callable' : 'template'
-  return templateReceiverKinds.has(carrier.kind) ? 'template' : 'callable'
+  if (key?.source.kind !== 'constant' || key.source.literal !== 'string') return 'callable'
+  const staticKey = key.source.text
+  const produced = resultOf(producer, 'value')
+  const published = produced === undefined ? undefined : input.plan.selected.get(produced.id)
+  if (staticKey === 'toString' && published !== undefined && functionSourceReadProtocolOf(carrier, published) !== null) return 'template'
+  const template = (receiver: Representation): boolean => {
+    if (receiver.kind === 'optional') return template(receiver.payload)
+    if (receiver.kind === 'borrowed-ref') return template(receiver.referent)
+    if (receiver.kind === 'tagged-union')
+      return mixedPrototypeCallArmsOf(receiver, staticKey, (arm) => (template(arm) ? true : null)) !== null
+    if (receiver.kind === 'native-handle') {
+      const protocol = receiver.native ?? receiver.protocol
+      if (nativeHostReflectionMemberOf(input.hostMembers, input.hostIntrinsicProtocols, protocol, staticKey)) return true
+      const row = hostMemberOf(input.hostMembers, protocol, staticKey)
+      if (row?.kind !== 'method') return false
+      const produced = resultOf(producer, 'value')
+      const result = produced === undefined ? undefined : input.plan.selected.get(produced.id)
+      return row.arity !== 'call-site' || result?.kind !== 'dynamic'
+    }
+    return nativePrototypeTemplateOf(receiver, staticKey, input.deriver, input.classes)
+  }
+  return template(carrier) ? 'template' : 'callable'
 }

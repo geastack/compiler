@@ -1,10 +1,10 @@
 // THE `{}` OF `Object.assign({}, a, b)` WHEN THE CALL'S RESULT IS AN INTERSECTION.
 //
-// mongodb's `resolveOptions<T>` (`utils.ts`) is
-// `const result: T = Object.assign({}, options, resolveBSONOptions(options, parent))`
-// with `options?: T`, and `MongoClient.db` is
+// A database client's `resolveOptions<T>` is
+// `const result: T = Object.assign({}, options, resolveWireOptions(options, parent))`
+// with `options?: T`, and `Client.db` is
 // `Object.assign({}, this.options, options)`. The checker types each call as
-// an intersection (`T & BSONSerializeOptions`, `MongoOptions & DbOptions`) --
+// an intersection (`T & WireSerializeOptions`, `ClientOptions & DbOptions`) --
 // not an object type -- so the fresh `{}` kept its own empty layout and every
 // key a source carries had nowhere to go. The target is allocated for the
 // call and observed nowhere else; it is laid out as what the call makes of it.

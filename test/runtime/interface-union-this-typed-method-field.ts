@@ -1,5 +1,5 @@
 // An interface implemented by several constructed classes derives to the
-// tagged union of their carriers, and hono's `Router<T>` is one: `RegExpRouter`
+// tagged union of their carriers, and an HTTP framework's `Router<T>` is one: `RegExpRouter`
 // declares `match` as a FIELD holding a free function whose `this` parameter is
 // the interface itself (`match: typeof match<Router<T>, T> = match`), while the
 // trie and smart routers declare it as an ordinary method. So one arm stores a

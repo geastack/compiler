@@ -3,7 +3,7 @@ type Sink = {
 }
 
 // Several optional calls on the same member, one after another, inside a
-// narrowing branch, each taking a closure argument -- the shape `sky-hop`'s
+// narrowing branch, each taking a closure argument -- the shape an app's
 // `bindInput` binds its listeners with.
 export function report(sink: Sink | undefined, count: number): number {
   let seen = count

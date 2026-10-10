@@ -1,6 +1,6 @@
 // BOUND `() => void` METHODS HANDED TO `then` AS ITS OPTIONAL CALLBACKS.
 //
-// mongodb's `MongoLogger.log` (`mongo_logger.ts`) chains a pending sink write
+// A database client's `ClientLogger.log` chains a pending sink write
 // with `.then(this.clearPendingLog.bind(this), this.logWriteFailureHandler.bind(this))`.
 // `then`'s parameters are `((value) => TResult | PromiseLike<TResult>) | undefined | null`,
 // so with `TResult = void` each slot's result is `void | PromiseLike<void>`;

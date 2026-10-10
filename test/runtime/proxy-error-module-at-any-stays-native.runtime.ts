@@ -1,9 +1,9 @@
-//! expect: kerberos missing: kerberos is not installed
-//! expect: zstd missing: zstd is not installed
-//! expect: zstd get threw: zstd is not installed
-//! expect: kerberos set threw: kerberos is not installed
+//! expect: auth-plugin missing: auth-plugin is not installed
+//! expect: compressor missing: compressor is not installed
+//! expect: compressor get threw: compressor is not installed
+//! expect: auth-plugin set threw: auth-plugin is not installed
 
-// mongodb's `deps.ts`: `makeErrorModule` returns `new Proxy(props, handler)`
+// A library's optional-dependency loader: `makeErrorModule` returns `new Proxy(props, handler)`
 // whose trap parameters are annotated `any`, so the checker infers
 // `Proxy<any>` and the function returns `any`. Its result then flows into
 // several optional-dependency slots of DIFFERENT module types, so no single
@@ -33,60 +33,60 @@ function makeErrorModule(error: any) {
   })
 }
 
-interface KerberosModule {
+interface AuthPluginModule {
   initializeClient(service: string): string
 }
-type Kerberos = KerberosModule | { kModuleError: MissingDependencyError }
+type AuthPlugin = AuthPluginModule | { kModuleError: MissingDependencyError }
 
-interface ZStandardLib {
+interface CompressorLib {
   compress(level: number): number
 }
-type ZStandard = ZStandardLib | { kModuleError: MissingDependencyError }
+type Compressor = CompressorLib | { kModuleError: MissingDependencyError }
 
-function loadKerberos(): KerberosModule {
-  throw new Error('Cannot find module kerberos')
+function loadAuthPlugin(): AuthPluginModule {
+  throw new Error('Cannot find module auth-plugin')
 }
-function loadZstd(): ZStandardLib {
-  throw new Error('Cannot find module zstd')
+function loadCompressor(): CompressorLib {
+  throw new Error('Cannot find module compressor')
 }
 
-function getKerberos(): Kerberos {
-  let kerberos: Kerberos
+function getAuthPlugin(): AuthPlugin {
+  let authPlugin: AuthPlugin
   try {
-    kerberos = loadKerberos()
+    authPlugin = loadAuthPlugin()
   } catch {
-    kerberos = makeErrorModule(new MissingDependencyError('kerberos is not installed'))
+    authPlugin = makeErrorModule(new MissingDependencyError('auth-plugin is not installed'))
   }
-  return kerberos
+  return authPlugin
 }
 
-function getZstdLibrary(): ZStandard {
-  let zstd: ZStandard
+function getCompressorLibrary(): Compressor {
+  let compressor: Compressor
   try {
-    zstd = loadZstd()
+    compressor = loadCompressor()
   } catch {
-    zstd = makeErrorModule(new MissingDependencyError('zstd is not installed'))
+    compressor = makeErrorModule(new MissingDependencyError('compressor is not installed'))
   }
-  return zstd
+  return compressor
 }
 
-const kerberos = getKerberos()
-if ('kModuleError' in kerberos) console.log('kerberos missing: ' + kerberos.kModuleError.message)
-else console.log('kerberos loaded: ' + kerberos.initializeClient('svc'))
+const authPlugin = getAuthPlugin()
+if ('kModuleError' in authPlugin) console.log('auth-plugin missing: ' + authPlugin.kModuleError.message)
+else console.log('auth-plugin loaded: ' + authPlugin.initializeClient('svc'))
 
-const zstd = getZstdLibrary()
-if ('kModuleError' in zstd) {
-  console.log('zstd missing: ' + zstd.kModuleError.message)
+const compressor = getCompressorLibrary()
+if ('kModuleError' in compressor) {
+  console.log('compressor missing: ' + compressor.kModuleError.message)
   try {
-    console.log('unexpected ' + (zstd as unknown as ZStandardLib).compress(1))
+    console.log('unexpected ' + (compressor as unknown as CompressorLib).compress(1))
   } catch (error) {
-    console.log('zstd get threw: ' + (error as MissingDependencyError).message)
+    console.log('compressor get threw: ' + (error as MissingDependencyError).message)
   }
-} else console.log('zstd loaded: ' + zstd.compress(1))
+} else console.log('compressor loaded: ' + compressor.compress(1))
 
 try {
-  ;(kerberos as { kModuleError: MissingDependencyError }).kModuleError = new MissingDependencyError('other')
+  ;(authPlugin as { kModuleError: MissingDependencyError }).kModuleError = new MissingDependencyError('other')
   console.log('unexpected set')
 } catch (error) {
-  console.log('kerberos set threw: ' + (error as MissingDependencyError).message)
+  console.log('auth-plugin set threw: ' + (error as MissingDependencyError).message)
 }

@@ -1,6 +1,6 @@
 // Returning an existing promise from an async body adopts its state and
-// converts the fulfillment value into the declared result carrier. Hono's
-// request helpers use this exact shape: Promise<string> returned from a body
+// converts the fulfillment value into the declared result carrier. An HTTP
+// framework's request helpers use this exact shape: Promise<string> returned from a body
 // declared Promise<string | Response>.
 
 const promisedText = (): Promise<string> => Promise.resolve('ready')
@@ -12,7 +12,7 @@ async function widenedPromise(): Promise<string | number> {
 //! expect: promise=ready
 console.log('promise=' + (await widenedPromise()))
 
-// Hono's HtmlEscapedString implementation constructs a String wrapper and
+// An HTTP framework's HtmlEscapedString implementation constructs a String wrapper and
 // exposes its [[StringData]] through a primitive-string return type.
 type EscapedText = string & { readonly isEscaped: true }
 

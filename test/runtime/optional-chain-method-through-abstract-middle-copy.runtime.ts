@@ -1,8 +1,8 @@
 // A method of a split generic base called through an optional field holding a
-// copy of a class two levels down: the MongoDB driver's GridFS read stream
-// does `await this.s.cursor?.close(...)` with `cursor?: FindCursor<GridFSChunk>`,
+// copy of a class two levels down: a database client's chunked-file read
+// stream does `await this.s.cursor?.close(...)` with `cursor?: FindCursor<FileChunk>`,
 // and `FindCursor<T> extends ExplainableCursor<T> extends AbstractCursor<T>`.
-// The call's receiver is the `AbstractCursor` copy that `FindCursor<GridFSChunk>`
+// The call's receiver is the `AbstractCursor` copy that `FindCursor<FileChunk>`
 // really extends, through the abstract middle class's own copy.
 abstract class AbstractCursor<TSchema = any> {
   private transform?: (doc: TSchema) => unknown

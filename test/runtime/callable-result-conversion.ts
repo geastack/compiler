@@ -1,7 +1,7 @@
 // A CALLABLE WHOSE RESULT NEEDS A CONVERSION AT THE SLOT IT FILLS.
 //
-// `type Slot = (n: number) => any` is an ordinary TypeScript slot, and hono's
-// `H = Handler | MiddlewareHandler` is two of them: `Handler<E, P, I, R = any>`
+// `type Slot = (n: number) => any` is an ordinary TypeScript slot, and an HTTP
+// framework's `H = Handler | MiddlewareHandler` is two of them: `Handler<E, P, I, R = any>`
 // defaults its result parameter to `any`. Every handler a program actually
 // writes returns something concrete, so filling such a slot means converting
 // the RESULT of a callable that already exists.
@@ -30,7 +30,8 @@ console.log('boxed=' + boxedSlot(1))
 console.log('boxed-negative=' + boxedSlot(-1))
 
 // A promise's payload, boxed INSIDE the promise -- `Promise<string |
-// undefined>` into `Promise<any>`, which is hono's middleware arm exactly.
+// undefined>` into `Promise<any>`, which is an HTTP framework's middleware
+// arm exactly.
 const promiseSlot: PromiseSlot = promised
 promiseSlot(2).then((v) => {
   //! expect: promised=yes

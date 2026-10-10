@@ -1,5 +1,5 @@
-// The MongoDB driver's operations redeclare the options field their base
-// declares with a wider options type (src/operations/find.ts):
+// A database client's operations redeclare the options field their base
+// declares with a wider options type:
 //
 //   class CommandOperation { options: CommandOperationOptions }
 //   class FindOperation extends CommandOperation {

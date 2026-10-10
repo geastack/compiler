@@ -1,11 +1,19 @@
-import { irValueId, type IrValueId, type PhysicalBodyId, type SemanticResultId, type StructuralTypeId } from '../identity/ids.js'
-import type { Representation } from '../representation/model.js'
+import {
+  irValueId,
+  type IrValueId,
+  type OperationId,
+  type PhysicalBodyId,
+  type SemanticResultId,
+  type StructuralTypeId
+} from '../identity/ids.js'
+import { carriesNativeUndefined, type Representation } from '../representation/model.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import type { OperandSource } from '../semantics/model/operands.js'
 import { allOperationsOf, type IrBlock, type IrBlockId, type IrBody, type IrNonTerminatorOperation } from './model.js'
 import type { SlotDrift } from './lower-operands.js'
 import { resultOfIrOperation, successorsOfTerminator } from './queries.js'
 import { verifyIrBody } from './verify.js'
+import { closedNormalResultsOf, type ClosedNormalResultInput } from './closed-normal-results.js'
 
 const nonNullPrimitive = (representation: Representation): boolean =>
   representation.kind === 'scalar' ||
@@ -50,7 +58,9 @@ const referenceKinds: ReadonlySet<Representation['kind']> = new Set<Representati
  * Which JS types a value in `carrier` can be, or `null` when the carrier does
  * not say. Every object -- a function included -- is one `reference` tag,
  * joined with `null` because a refcounted reference can be the collapsed
- * `null` of `T | null`: strict equality between two references is identity,
+ * `null` of `T | null`. Strict native receivers also retain `undefined`,
+ * which a detached method can return through its declared object result.
+ * Strict equality between two references is identity,
  * so only different primitive types, or a reference against a primitive, are
  * decided by the carrier alone.
  */
@@ -58,7 +68,8 @@ const jsTypeTagsOf = (carrier: Representation): ReadonlySet<string> | null => {
   if (carrier.kind === 'scalar') return new Set([carrier.domain === 'boolean' || carrier.domain === 'bigint' ? carrier.domain : 'number'])
   if (carrier.kind === 'string' || carrier.kind === 'symbol' || carrier.kind === 'null' || carrier.kind === 'undefined')
     return new Set([carrier.kind])
-  if (referenceKinds.has(carrier.kind)) return new Set(['reference', 'null'])
+  if (referenceKinds.has(carrier.kind))
+    return new Set(carriesNativeUndefined(carrier) ? ['reference', 'null', 'undefined'] : ['reference', 'null'])
   if (carrier.kind === 'optional') {
     const payload = jsTypeTagsOf(carrier.payload)
     return payload === null ? null : new Set([...payload, carrier.absence === 'null' ? 'null' : 'undefined'])
@@ -77,7 +88,7 @@ const jsTypeTagsOf = (carrier: Representation): ReadonlySet<string> | null => {
 
 /**
  * `a === b` is false -- and `a !== b` true -- when no JS type both carriers
- * can hold is shared. test262's harness `isSameValue(a, b)` guards `1 / b`
+ * can hold is shared. A typical `isSameValue(a, b)` helper guards `1 / b`
  * behind `b === 0` with `b` a string or a function, which is code that never
  * runs and must not demand a ToNumber of the function.
  */
@@ -95,8 +106,8 @@ export const provenResultTruthiness = (
 ): ReadonlyMap<SemanticResultId, boolean> => {
   const facts = new Map<SemanticResultId, boolean>()
   // A value whose sealed type is `null` or `undefined` and nothing else is
-  // falsy wherever it completes normally: memory-pager's `this.deduplicate`,
-  // a field only ever written `null`, guards code that never runs. `void` is
+  // falsy wherever it completes normally: a `this.flag` field only ever
+  // written `null` guards code that never runs. `void` is
   // left out -- a `() => void` callee may return anything.
   const onlyNullish = (type: StructuralTypeId): boolean => {
     const shape = graph.structuralTypes?.get(type)?.shape
@@ -170,7 +181,7 @@ export const provenResultTruthiness = (
   // `typeof v` of a value whose sealed type is `undefined` and nothing else is
   // the string "undefined" wherever it completes normally. A host that states
   // a global absent (`PluginCapabilities.absentGlobals`) turns the reference
-  // into exactly such a value, and three.js guards every browser-only branch
+  // into exactly such a value, and portable libraries guard browser-only branches
   // with `typeof Global !== 'undefined'`; the guard must decide, or the dead
   // branch keeps every DOM-typed value it names alive into certification.
   const onlyUndefined = (type: StructuralTypeId): boolean => {
@@ -196,6 +207,16 @@ export const provenResultTruthiness = (
       if (operation.family === 'property' && operation.internalMethod === 'get' && operation.normalResult === 'undefined') truth = false
       // `lower-property.ts` lowers such a read to the constant `true`.
       else if (operation.family === 'property' && operation.internalMethod === 'get' && operation.methodPresenceTest) truth = true
+      else if (
+        operation.family === 'computation' &&
+        operation.form === 'unary' &&
+        operation.operator === '!' &&
+        operation.operandObjectTruthy === true &&
+        operation.operands.length === 1 &&
+        operation.operands[0]?.role === 'operand' &&
+        operation.operands[0].ordinal === 0
+      )
+        truth = false
       else if (operation.family === 'computation' && operation.form === 'logical') {
         const left = read(operation.operands.find((operand) => operand.role === 'left')?.source)
         const right = read(operation.operands.find((operand) => operand.role === 'right')?.source)
@@ -233,9 +254,14 @@ export const provenResultTruthiness = (
 export const pruneProvenBranches = (
   bodies: ReadonlyMap<PhysicalBodyId, IrBody>,
   graph: Pick<SemanticGraph, 'operations'> & Partial<Pick<SemanticGraph, 'structuralTypes'>>,
-  slotDrift: readonly SlotDrift[] = []
+  slotDrift: readonly SlotDrift[] = [],
+  normalResults?: ClosedNormalResultInput
 ): { readonly bodies: ReadonlyMap<PhysicalBodyId, IrBody>; readonly slotDrift: readonly SlotDrift[] } => {
   const semantic = provenResultTruthiness(graph)
+  const semanticResults = new Map(
+    [...graph.operations.values()].flatMap((operation) => operation.results.map((result) => [result.id, operation] as const))
+  )
+  const closed = normalResults === undefined ? null : closedNormalResultsOf(bodies, graph, normalResults)
   const absentReads = new Set<SemanticResultId>()
   for (const operation of graph.operations.values()) {
     if (operation.family === 'property' && operation.internalMethod === 'get' && operation.normalResult === 'undefined')
@@ -243,6 +269,7 @@ export const pruneProvenBranches = (
   }
   const output = new Map(bodies)
   const removedBlocks = new Set<IrBlockId>()
+  const truncatedDrift = new Map<IrBlockId, ReadonlySet<OperationId>>()
   let changedAny = false
   for (const [id, body] of bodies) {
     // These regions have entry/cleanup edges beyond ordinary terminators.
@@ -250,9 +277,39 @@ export const pruneProvenBranches = (
     const protectedFlow = Boolean(
       body.tryRegions.length || body.iteratorCloseRegions?.length || body.generator || body.generatorPrologueBoundary
     )
-    const facts = new Map<string, boolean>()
+    const facts = new Map<string, boolean>(closed?.truthiness)
     const operations = [...body.blocks.values()].flatMap((block) => block.operations)
+    const definitions = new Map(
+      operations.flatMap((operation) => {
+        const result = resultOfIrOperation(operation)
+        return result === null ? [] : [[result.id, operation] as const]
+      })
+    )
     for (const operation of operations) {
+      if (operation.kind === 'compute' && operation.form === 'unary' && operation.operator === '!') {
+        const source = semanticResults.get(operation.lineage)
+        const expected = source?.operands[0]?.source
+        const actual = operation.operands.length === 1 ? definitions.get(operation.operands[0]!.value) : undefined
+        const sameSource =
+          expected?.kind === 'result'
+            ? actual?.lineage === expected.result && actual.kind !== 'convert'
+            : expected?.kind === 'parameter'
+              ? actual?.kind === 'parameter' && actual.ordinal === expected.ordinal
+              : expected?.kind === 'receiver' && actual?.kind === 'receiver'
+        if (
+          source?.family === 'computation' &&
+          source.form === 'unary' &&
+          source.operator === '!' &&
+          source.operandObjectTruthy === true &&
+          body.sourceOwner === (source.caller.kind === 'function' ? source.caller.functionId : source.caller.regionId) &&
+          sameSource &&
+          operation.result.representation.kind === 'scalar' &&
+          operation.result.representation.domain === 'boolean' &&
+          semantic.get(operation.lineage) === false
+        )
+          facts.set(operation.result.id, false)
+        continue
+      }
       // A decided string equality (`typeof Absent === 'undefined'`) is the branch
       // condition itself, a `compute` carrying the equality's own lineage.
       if (operation.kind === 'compute' && operation.form === 'equality') {
@@ -285,7 +342,53 @@ export const pruneProvenBranches = (
     const expandedValues = new Map(body.values)
     let ordinal = 0
     let changed = false
-    for (const [blockId, original] of blocks) {
+    for (const [blockId, unbounded] of blocks) {
+      // GetValue on a receiver that can only be `undefined` or `null` throws
+      // (ECMA-262 GetV -> ToObject) before anything after it in the block runs.
+      // `_effects[ i ].render( renderer, ... )` over an array that never
+      // holds anything still lowered the call, and boxing its arguments for a
+      // callee that is never reached demanded full reflection of the renderer.
+      const throwing = protectedFlow
+        ? -1
+        : unbounded.operations.findIndex(
+            (operation) =>
+              operation.kind === 'get' &&
+              (operation.receiver.representation.kind === 'undefined' || operation.receiver.representation.kind === 'null')
+          )
+      let original = unbounded
+      if (throwing >= 0) {
+        const get = unbounded.operations[throwing] as Extract<IrNonTerminatorOperation, { kind: 'get' }>
+        while (expandedValues.has(irValueId(body.owner, ordinal))) ordinal++
+        const checked = irValueId(body.owner, ordinal++)
+        expandedValues.set(checked, get.receiver.representation)
+        original = {
+          ...unbounded,
+          operations: [
+            ...unbounded.operations.slice(0, throwing),
+            {
+              kind: 'compute',
+              lineage: get.lineage,
+              form: 'require-object-coercible',
+              operator: 'RequireObjectCoercible',
+              operands: [get.receiver],
+              result: { id: checked, representation: get.receiver.representation }
+            }
+          ],
+          terminator: { kind: 'throw', lineage: get.lineage, value: { value: checked, representation: get.receiver.representation } }
+        }
+        // A conversion the census could not supply for an operation that now
+        // never runs is not a refusal; one also lowered before the throw is.
+        const operationOf = (lineage: SemanticResultId | null): OperationId | undefined =>
+          lineage === null ? undefined : semanticResults.get(lineage)?.id
+        const kept = new Set(unbounded.operations.slice(0, throwing + 1).map((operation) => operationOf(operation.lineage)))
+        const dropped = new Set<OperationId>()
+        for (const operation of [...unbounded.operations.slice(throwing + 1), unbounded.terminator]) {
+          const semanticId = operationOf(operation.lineage)
+          if (semanticId !== undefined && !kept.has(semanticId)) dropped.add(semanticId)
+        }
+        if (dropped.size) truncatedDrift.set(blockId, dropped)
+        changed = true
+      }
       const operations = original.operations.flatMap((operation): IrNonTerminatorOperation[] => {
         if (
           operation.kind !== 'get' ||
@@ -393,6 +496,9 @@ export const pruneProvenBranches = (
   // and surviving failures still reach the unchanged certification guard.
   return {
     bodies: changedAny ? output : bodies,
-    slotDrift: removedBlocks.size ? slotDrift.filter((row) => !removedBlocks.has(row.block)) : slotDrift
+    slotDrift:
+      removedBlocks.size || truncatedDrift.size
+        ? slotDrift.filter((row) => !removedBlocks.has(row.block) && !truncatedDrift.get(row.block)?.has(row.operation))
+        : slotDrift
   }
 }

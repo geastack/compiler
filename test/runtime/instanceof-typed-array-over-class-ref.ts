@@ -1,7 +1,7 @@
 //! expect: not bytes
 //! expect: bytes
 
-// `@hono/node-server` narrows a cached response body down to one shim class
+// An HTTP server adapter narrows a cached response body down to one shim class
 // and still asks `body instanceof Uint8Array`. A program class's instance is a
 // C++ object of that class's own layout and the only native base this compiler
 // links is the intrinsic Error family, so the answer is settled `false` -- and

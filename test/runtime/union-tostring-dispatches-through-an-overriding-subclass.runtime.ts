@@ -1,4 +1,4 @@
-// mongodb's azure.ts `options.url?.toString() ?? AZURE_BASE_URL` with
+// A cloud key-service request's `options.url?.toString() ?? BASE_URL` with
 // `url?: URL | string`, where `ConnectionString extends URL` overrides
 // `toString`: the call on the union's class arm must run the allocated
 // object's own override, not the base's.
@@ -27,9 +27,9 @@ function resolve(options: RequestOptions): string {
 console.log(resolve({}))
 console.log(resolve({ url: 'https://plain.example/' }))
 console.log(resolve({ url: new SiteUrl('https://base.example/') }))
-console.log(resolve({ url: new RedactedSiteUrl('mongodb://user:secret@host/') }))
+console.log(resolve({ url: new RedactedSiteUrl('db://user:secret@host/') }))
 
 //! expect: https://default.example/
 //! expect: https://plain.example/
 //! expect: https://base.example/
-//! expect: mongodb://user:****@host/
+//! expect: db://user:****@host/

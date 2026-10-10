@@ -1,7 +1,7 @@
 //! expect: text/plain
 //! expect: b
 //! expect: none
-// `@hono/node-server` response.ts `get headers()`, spelled exactly: the cache's
+// An HTTP server adapter's response `get headers()`, spelled exactly: the cache's
 // header slot is `Record<string, string> | [string, string][] | Headers |
 // OutgoingHttpHeaders | undefined`, the `instanceof` guard removes the class
 // arm, and `||` supplies a `Record<string, string>` literal contextually typed

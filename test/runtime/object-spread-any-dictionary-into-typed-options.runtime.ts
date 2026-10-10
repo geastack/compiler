@@ -1,10 +1,10 @@
-// The MongoDB driver's bulk builder keeps the pending operation as a
+// A database client's bulk builder keeps the pending operation as a
 // `Document` and spreads it into the options of the statement it makes:
 // `makeDeleteStatement(currentOp.selector, { ...currentOp, limit: 1 })`, whose
 // parameter names only the keys it reads. Each run-time key the options type
 // names lands in that field through a checked unbox; the explicit key written
 // after the spread wins.
-interface BsonDocument {
+interface WireDocument {
   [key: string]: any
 }
 
@@ -14,11 +14,11 @@ interface DeleteOptions {
   limit?: number
 }
 
-function current(): BsonDocument {
+function current(): WireDocument {
   return { selector: { a: 1 }, hint: 'a_1', limit: 7 }
 }
 
-function makeDeleteStatement(filter: BsonDocument, options: DeleteOptions): string {
+function makeDeleteStatement(filter: WireDocument, options: DeleteOptions): string {
   return `${Object.keys(filter).join('')}:${options.hint ?? '-'}:${options.comment ?? '-'}:${options.limit ?? '-'}`
 }
 

@@ -157,7 +157,7 @@ export interface RegionRendering {
  *
  * Reachability alone is not ownership, and a jump OUT of the part is what
  * exposes the difference. A `continue` written inside a catch handler --
- * hono's `SmartRouter.match` skipping a router that rejected the route set --
+ * a router dispatcher skipping a candidate that rejected the route set --
  * targets the enclosing loop's latch, so the plain walk collected the latch,
  * then the loop header, then the header's test, and then walked straight back
  * into the try body: the handler "owned" the body's blocks and emission

@@ -49,6 +49,7 @@ export interface SourceInvocationFact {
   readonly operands: FlowInvocationOperands
   readonly frames: readonly SourceInvocationFrame[]
   readonly requirements: readonly IntrinsicProtocolRequirement[]
+  readonly targetAuthority: 'legacy' | 'source-values'
 }
 
 /** Only the invocation authority may publish an admitted frame family. */
@@ -56,8 +57,9 @@ export const sourceInvocationFact = (
   call: ts.CallExpression,
   operands: FlowInvocationOperands,
   frames: readonly SourceInvocationFrame[],
-  requirements: readonly IntrinsicProtocolRequirement[]
-): SourceInvocationFact => ({ [invocationFactIdentity]: true, call, operands, frames, requirements })
+  requirements: readonly IntrinsicProtocolRequirement[],
+  targetAuthority: SourceInvocationFact['targetAuthority'] = 'legacy'
+): SourceInvocationFact => ({ [invocationFactIdentity]: true, call, operands, frames, requirements, targetAuthority })
 
 /** The frame access is written, deleted, or appears in a destructuring target. */
 const frameWrite = (access: ts.Expression): boolean => {
@@ -120,9 +122,10 @@ export const sourceInvocationFrame = (
   flow: ValueFlowIndex,
   call: ts.CallExpression,
   body: ts.SignatureDeclaration,
-  argumentsUsesAt: (body: ts.SignatureDeclaration) => readonly ts.Identifier[] | undefined
+  argumentsUsesAt: (body: ts.SignatureDeclaration) => readonly ts.Identifier[] | undefined,
+  ordinaryOwnOperands?: FlowInvocationOperands
 ): SourceInvocationFrame | null => {
-  const layout = sourceInvocationFrameLayoutOf(flow, call, body)
+  const layout = sourceInvocationFrameLayoutOf(flow, call, body, ordinaryOwnOperands)
   const completionSummary = callableCompletionSummaryOf(flow, body)
   if (layout === null || completionSummary === null) return null
   const { parameters, receiverUses, operands } = layout

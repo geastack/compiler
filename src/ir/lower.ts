@@ -186,7 +186,7 @@ const lowerComputation = (ctx: LoweringContext, flow: FlowController, block: IrB
   // (`semantics/normalize/producers/computations.ts`'s `contributeUpdate`,
   // the ONLY producer that ever mints `form: 'coercion'`, and always with
   // `operator: 'ToNumeric'`) over a `dynamic` operand landing on
-  // `scalar(number)` -- three.js's `let i` / an untyped loop counter
+  // `scalar(number)` -- a JS `let i` / an untyped loop counter
   // incremented with `++`. `targets/cpp/emit.ts`'s `emitCompute` renders it
   // (operator `'ToNumeric'`, checked before the ordinary numeric-unary table)
   // via `targets/cpp/emit-tonumber.ts`'s `dynamicToNumericText`, which
@@ -390,7 +390,11 @@ const lowerComputation = (ctx: LoweringContext, flow: FlowController, block: IrB
       if (value !== null) registerResult(ctx, operation, value)
       return
     }
-    registerResult(ctx, operation, ctx.builder.hasProperty(block, lineage, object, keyValue, representation))
+    registerResult(
+      ctx,
+      operation,
+      ctx.builder.hasProperty(block, lineage, object, keyValue, representation, operation.ordinaryObjectPrototypeKeyAbsent)
+    )
     return
   }
   // `void x` is the one operator that never READS its operand: it orders the
@@ -961,7 +965,12 @@ const lowerOneOperation = (
             return
           }
         }
-        const value = ctx.builder.receiver(block, lineage, representation)
+        const value = ctx.builder.receiver(
+          block,
+          lineage,
+          representation,
+          receiverOperand?.role === 'captured-receiver' ? 'lexical' : undefined
+        )
         registerResult(ctx, operation, value)
         return
       }
@@ -1011,8 +1020,8 @@ const lowerOneOperation = (
         // is why `targets/cpp/types.ts`'s `cppConstantLiteral` had to gain a
         // `dynamic` case for the `undefined`/`null` literal forms alongside
         // this: a boxed `gea::Value()` for exactly this constant, not
-        // something specific to this call site. `three.js`'s `typeof
-        // Float16Array !== 'undefined'` is exactly this shape, and is the
+        // something specific to this call site. A `typeof
+        // Float16Array !== 'undefined'` feature test is exactly this shape, and is the
         // reason this branch exists at all rather than falling to the refusal
         // below: reaching that refusal here would silently withhold every
         // host-absence feature-detection guard in the corpus, the defect
@@ -1404,8 +1413,8 @@ const lowerOwner = (
     // the catch part never entered, `IrTryRegion.catchEntry` null, and the whole
     // try statement refused at emission -- "no catch clause and no finally
     // primitive to explain the gap", a message describing an internal
-    // inconsistency for what is an ordinary ES2019 program (`maps`'s network
-    // handler, and `test/fixtures/try-catch-empty.ts`). The ordering hazard that
+    // inconsistency for what is an ordinary ES2019 program (an empty-catch network
+    // handler, or a bare `try {...} catch {}`). The ordering hazard that
     // motivated skipping it is gone: `orderOwnerOperations` now schedules a
     // catch part's own opener before every non-prologue member of that part
     // (`lower-graph.ts`), so the scope is entered before anything in the
@@ -1429,8 +1438,8 @@ const lowerOwner = (
     // loop whose body cannot fall out of the bottom reaches its own marker
     // with every path already terminated. `while (true)` inside a `try`, with
     // the only ways out a `return` and a `yield`, is exactly that shape --
-    // mongodb's `AbstractCursor[Symbol.asyncIterator]` and
-    // `test/fixtures/loop-iteration-helper-repro.ts`. The block opened for the
+    // an async-iterator method of a cursor class, or a loop-iteration helper
+    // that only ever leaves by `return`. The block opened for the
     // marker there held zero operations and was reached from nothing, and
     // `builder.seal` rejected the whole body: certified clean, 0 lines of C++.
     const placesNothing =

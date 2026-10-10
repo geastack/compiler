@@ -12,11 +12,9 @@ import {
   deferredStringMethodClaim,
   deferredTypedArrayMethodClaim
 } from '../emit-carrier-members.js'
-import { deferredArrayBufferMethodClaim, deferredDataViewMethodClaim } from '../emit-buffers.js'
+import { deferredDataViewMethodClaim } from '../emit-buffers.js'
 import { deferredTypedArrayUnionMethodClaim, deferredUnionToStringClaim } from '../emit-union-properties.js'
-import { isDeclaredStringPrototypeKey } from '../emit-carrier-members.js'
-import { objectPrototypeMemberNames } from '../../../representation/record-fields.js'
-import type { Representation } from '../../../representation/model.js'
+import { mixedPrototypeCallArmsOf } from '../../../projection/native-prototype-methods.js'
 
 import { deferredCallableShapeMethodClaim } from '../emit-dynamic-properties.js'
 import { deferredDynamicObjectMethodClaim, deferredObjectShapeMethodClaim } from '../host/object-protocol.js'
@@ -78,7 +76,6 @@ const claimOf = (ctx: EmitContext, receiver: IrOperand, operation: GetOperation)
     deferredUnionToStringClaim(ctx, receiver, key) ??
     deferredArrayMethodClaim(texts, receiver, key) ??
     deferredTypedArrayMethodClaim(texts, receiver, key) ??
-    deferredArrayBufferMethodClaim(texts, receiver, key) ??
     deferredDataViewMethodClaim(texts, receiver, key) ??
     deferredStringMethodClaim(texts, receiver, key) ??
     deferredScalarMethodClaim(texts, receiver, key) ??
@@ -124,24 +121,8 @@ const mixedUnionClaimOf = (ctx: EmitContext, receiver: IrOperand, operation: Get
   if (carrier.kind !== 'tagged-union') return null
   const member = ctx.staticKeyTexts.get(operation.key.value)
   if (member === undefined) return null
-  // An `Object.prototype` name (`valueOf`) exists on EVERY object, so no arm
-  // can be proven to lack it; it is claimed only when every arm answers it
-  // natively -- `number | string`'s `valueOf()` (bson's `Int32` constructor),
-  // each arm's own `%X%.prototype.valueOf`.
-  const inheritedByEveryObject = objectPrototypeMemberNames.has(member)
-  const arms: (PrototypeMethodRead | null)[] = []
-  let answered = 0
-  for (const arm of carrier.arms) {
-    const armClaim = claimOf(ctx, { value: receiver.value, representation: arm.value }, operation)
-    if (armClaim !== null) {
-      arms.push(armClaim)
-      answered += 1
-      continue
-    }
-    if (inheritedByEveryObject || !armHasNoCallableMember(arm.value, member)) return null
-    arms.push(null)
-  }
-  if (answered === 0) return null
+  const arms = mixedPrototypeCallArmsOf(carrier, member, (arm) => claimOf(ctx, { value: receiver.value, representation: arm }, operation))
+  if (arms === null) return null
   return {
     receiverKind: 'mixed-union',
     member,
@@ -150,61 +131,4 @@ const mixedUnionClaimOf = (ctx: EmitContext, receiver: IrOperand, operation: Get
     mixedUnionCarrier: carrier,
     mixedUnionArms: arms
   }
-}
-
-/**
- * Whether this arm PROVABLY holds no callable under this name.
- *
- * Only four shapes can be proven here, and each is proven from a table this
- * backend already owns rather than from the absence of a renderer:
- *
- * - a `string` arm: `String.prototype`'s own member set is the modelled one
- *   (`isDeclaredStringPrototypeKey`), so a name outside it reads `undefined`;
- * - a `dictionary` arm: the read is an ENTRY, whose carrier is the table's own
- *   value carrier, and a value carrier that can never be callable can never be
- *   called -- a number-keyed table additionally has no such key at all;
- * - a `symbol` arm: `Symbol.prototype`'s callable members are `toString` and
- *   `valueOf`, so any other name reads `undefined`;
- * - `null`/`undefined` arms, which throw on the property read itself and are
- *   already rendered that way by `armRuntimeFieldText`.
- *
- * Everything else -- a record, a class, a dynamic value, a callable, anything
- * with a sidecar -- can hold a callable this backend has simply not rendered,
- * and answers `false`.
- */
-const armHasNoCallableMember = (arm: Representation, member: string): boolean => {
-  if (arm.kind === 'string') return !isDeclaredStringPrototypeKey(member)
-  // `Symbol.prototype` declares `toString`/`valueOf` (and `description`, an
-  // accessor answering a string), and inherits the rest of `Object.prototype`
-  // -- a name `mixedUnionClaimOf` already refuses before it asks. Any other
-  // name reads `undefined` off a symbol, so calling it is the TypeError the
-  // claim renders.
-  if (arm.kind === 'symbol') return !symbolPrototypeCallableMembers.has(member)
-  // A dictionary can genuinely HOLD this key -- `Record<string, string>` admits
-  // a "join" entry -- so absence is not what is proven here. What is proven is
-  // that whatever it holds is not callable, and JavaScript's answer to calling
-  // a non-callable is the same TypeError as calling an absent one.
-  if (arm.kind === 'dictionary') return arm.key === 'number' || !mayBeCallable(arm.value)
-  return false
-}
-
-const symbolPrototypeCallableMembers: ReadonlySet<string> = new Set(['toString', 'valueOf', 'constructor'])
-
-const mayBeCallable = (representation: Representation): boolean => {
-  // A union is callable if ANY arm is, and an optional if its payload is:
-  // `Record<string, string | string[]>` holds neither a function nor a
-  // container of one, and answering that needs the carrier looked THROUGH
-  // rather than judged by its top kind.
-  if (representation.kind === 'tagged-union') return representation.arms.some((arm) => mayBeCallable(arm.value))
-  if (representation.kind === 'optional') return mayBeCallable(representation.payload)
-  return (
-    representation.kind === 'dynamic' ||
-    representation.kind === 'function' ||
-    representation.kind === 'function-family' ||
-    representation.kind === 'function-value-family' ||
-    representation.kind === 'function-value-dispatch' ||
-    representation.kind === 'function-and-constructor' ||
-    representation.kind === 'generic-function-set' ||
-    representation.kind === 'callable-identity'
-  )
 }

@@ -1,4 +1,4 @@
-// The MongoDB driver tags each operation CLASS with its aspects:
+// A database client tags each operation CLASS with its aspects:
 // `defineAspects(AggregateOperation, [Aspect.READ_OPERATION, ...])` passes the
 // class itself as `{ aspects?: Set<symbol> }` and `Object.defineProperty`s
 // `aspects` onto it; `hasAspect` reads it back through

@@ -1,16 +1,20 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
 import { adoptGeaPackage } from '../dist/plugins/gea/host.js'
 
 const root = resolve(import.meta.dirname, '..')
-process.env.TMPDIR = resolve(root, 'dist')
+const output = resolve(root, 'measurements/cxx-native-rtc')
+mkdirSync(output, { recursive: true })
+process.env.TMPDIR = output
 const core = resolve(root, '../core')
 adoptGeaPackage(resolve(core, 'packages/geatsc-plugin-gea/dist/index.js'))
 const flags = [
   '-std=c++20',
-  '-O0',
+  ...nativeOptimization('correctness'),
   `-I${resolve(core, 'packages/host/include')}`,
   `-I${resolve(core, 'packages/core/include')}`,
   `-I${resolve(core, 'packages/engine')}`,
@@ -42,7 +46,7 @@ for (const fixture of ['native-rtc', 'native-rtc-dom']) {
     /gea::Value::box/
   )
   assert.doesNotMatch(result.source, /->createDataChannel|->addTransceiver/)
-  const generatedBinary = resolve(root, `dist/test_${fixture}_generated`)
+  const generatedBinary = resolve(output, `test_${fixture}_generated`)
   // Execute the emitted JavaScript behavior with a transport test double. The
   // real network/codec path is exercised separately; no room is opened here.
   execFileSync(
@@ -54,6 +58,7 @@ for (const fixture of ['native-rtc', 'native-rtc-dom']) {
       '-',
       resolve(core, 'packages/host/host/rtc.cpp'),
       resolve(core, 'packages/host/host/media.cpp'),
+      resolve(core, 'packages/host/host/worker.cpp'),
       '-o',
       generatedBinary
     ],
@@ -101,7 +106,7 @@ int main() {
     assert.match(generatedOutput, /DOM message hello/)
   }
 }
-const binary = resolve(root, 'dist/test_rtc_adapter')
+const binary = resolve(output, 'test_rtc_adapter')
 execFileSync(
   'clang++',
   [...flags, resolve(root, 'test/runtime/rtc-objects-adapter.cpp'), resolve(core, 'packages/host/host/rtc.cpp'), '-o', binary],

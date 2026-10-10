@@ -100,7 +100,7 @@ export const handClaimedProtocols: ReadonlySet<string> = new Set<string>([
   //
   // The claim exists only so a program that merely NAMES the global
   // (`typeof BigInt64Array !== "undefined"`, which lib.d.ts declares
-  // unconditionally and every test262 typed-array harness file pastes into
+  // unconditionally and every typed-array conformance harness pastes into
   // every test) binds without a native-boundary refusal for a value nothing
   // ever calls through. No table in this directory states that, because no
   // renderer answers for it -- the claim is exactly as wide as "the value

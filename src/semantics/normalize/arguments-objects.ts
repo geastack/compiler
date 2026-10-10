@@ -29,6 +29,8 @@ export interface ArgumentsObjectCensus {
    * and must keep failing closed rather than be guessed at.
    */
   readonly phantomOrdinalOf: (node: ts.Node) => number | null
+  /** Final closed caller evidence selected the full actual-argument frame. */
+  readonly actualFrameOf?: (node: ts.Node) => boolean
   /** How many reference sites this census recognized, for measurement. */
   readonly count: number
 }
@@ -41,7 +43,7 @@ export const emptyArgumentsObjectCensus: ArgumentsObjectCensus = { phantomOrdina
  * Only identifiers spelled `arguments` are asked about at all: the predicate's
  * own first test is that spelling, so every other node would cost a symbol
  * resolution to answer `null`, and this walk runs over every source file of a
- * program the size of three.js.
+ * large program.
  */
 export const censusArgumentsObjects = (checker: ts.TypeChecker, files: readonly ts.SourceFile[]): ArgumentsObjectCensus => {
   const ordinals = new Map<ts.Node, number>()

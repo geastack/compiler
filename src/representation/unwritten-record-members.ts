@@ -19,13 +19,13 @@ import type { HostBindingPolicy } from './policies.js'
  * `hasOwnProperty` and `Object.keys` do not see it. The declared type
  * `b: Inner` says nothing about that window.
  *
- * mongodb's `parseOptions(...): MongoOptions` builds `const mongoOptions =
+ * An options parser `parseOptions(...): Options` builds `const options =
  * Object.create(null)`, writes only the options it was given, and then asks
- * `if (mongoClient && mongoOptions.autoEncryption)`. `autoEncryption` is
- * required in `MongoOptions`; laid out required, the struct started it
- * present (an empty `Ref` behind a presence bit fixed `true`), the read was
- * the bare member, and an object's truthiness is `true` -- so
- * `Encrypter.checkForMongoCrypt()` ran and threw where node skips it.
+ * `if (client && options.encryption)`. `encryption` is required in `Options`;
+ * laid out required, the struct started it present (an empty `Ref` behind a
+ * presence bit fixed `true`), the read was the bare member, and an object's
+ * truthiness is `true` -- so the guarded setup ran and threw where node
+ * skips it.
  *
  * Such a member is therefore laid out the way an optional one is: its own
  * presence bit, starting absent, set by every write, and a value carrier that
@@ -120,7 +120,7 @@ const isObjectCreateNull = (graph: SemanticGraph, binding: HostBindingPolicy, op
  * out as the call's whole `T & U` (`objectAssignFreshTargetType`), yet it is
  * created empty and holds afterwards exactly the keys the sources hold at the
  * copy -- which an `any`-built source (`parseOptions`' `Object.create(null)`
- * behind `this.options` in mongodb's `MongoClient.db`) need not.
+ * behind a client's `this.options`) need not.
  */
 const objectAssignTargetOf = (graph: SemanticGraph, binding: HostBindingPolicy, operation: SemanticOperation): SemanticResultId | null => {
   const target = operandOf(operation, 'argument', 0)

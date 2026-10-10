@@ -1,4 +1,4 @@
-// `sd || { maxWireVersion }` -- mongodb's `Topology.lastHello` -- types the
+// `sd || { maxWireVersion }` -- a database client's `Topology.lastHello` -- types the
 // literal contextually by the left operand's class, but the literal is not
 // that class: it lacks the class's required fields and methods. It keeps its
 // own layout and the merge holds either.

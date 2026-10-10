@@ -37,10 +37,20 @@ const audit = (source: string) => {
     find(file)
     return found
   }
+  const call = (callee: string): ts.CallExpression | null => {
+    let found: ts.CallExpression | null = null
+    const find = (node: ts.Node): void => {
+      if (found === null && ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === callee) found = node
+      ts.forEachChild(node, find)
+    }
+    find(file)
+    return found
+  }
   return {
     checker,
     bags,
     accessNamed,
+    call,
     shape: (name: string) => bags.shapeForOwner(declarations.get(name)!),
     type: (name: string) => checker.getTypeAtLocation(declarations.get(name)!)
   }
@@ -179,15 +189,15 @@ test('type queries keep the augmented allocation shape without changing an unrel
 })
 
 /**
- * three's `InterleavedBuffer.clone( data )` shape: a `@param {Object}`
+ * A library `clone( data )` method's shape: a `@param {Object}`
  * parameter filled with `data.arrayBuffers = {}` and then keyed into.
  *
  * `{Object}` resolves to the REAL `lib.es5` `Object` interface, which passes
  * every vacuity test and declares no `arrayBuffers`, so the checker has no
  * symbol for the member and this census had no identity to key the bag on.
- * That one slot is the receiver of the keyed write blocking both the
- * class-family absence proof and the WebGL context's numeric-absence proof,
- * and it is the three.js app's only `typedPropertyBoxes` row.
+ * That one slot is the receiver of the keyed write that blocked both a
+ * class-family absence proof and a numeric-absence proof, and it was the only
+ * `typedPropertyBoxes` row in the program it was reduced from.
  */
 const interleaved = (tail = ''): string => `export {};
   /** @param {Object} [data] */
@@ -274,4 +284,73 @@ test('a literal-key read shares native indexed bag storage rather than creating 
   const read = bags.slotTypeAt(access)
   assert.ok(read)
   assert.ok(read.isUnion() && read.types.some((type) => (type.flags & ts.TypeFlags.Undefined) !== 0))
+})
+
+test('a bag stored in another bag member keeps its own later members', () => {
+  const { checker, bags, shape } = audit(`
+    const declared = { data: 0 };
+    const data = { metadata: 1 };
+    data.data = { attributes: {} };
+    const inner = data.data;
+    inner.index = 'i';
+    const key = String(Math.random());
+    data.data.attributes[key] = 2;
+    console.log(declared.data, data.data.index, data.data.attributes[key]);
+  `)
+  const outer = shape('data')
+  assert.ok(outer)
+  const stored = bags.shapeForType(outer.members.get('data')!)
+  assert.ok(stored, checker.typeToString(outer.members.get('data')!))
+  assert.deepEqual([...stored.members.keys()], ['attributes', 'index'])
+  const attributes = bags.shapeForType(stored.members.get('attributes')!)
+  assert.ok(attributes)
+  assert.equal(checker.typeToString(checker.getBaseTypeOfLiteralType(attributes.index!)), 'number')
+})
+
+test('an empty allocation written into a declared member slot takes the declaration', () => {
+  const { checker, shape } = audit(`
+    /** @param {{ buffers?: Record<string, number[]> }} target */
+    function fill(target) {
+      target.buffers = {};
+      target.buffers['a'] = [1];
+    }
+    const data = {};
+    fill(data);
+    console.log(data);
+  `)
+  const data = shape('data')
+  assert.ok(data)
+  assert.match(checker.typeToString(data.members.get('buffers')!), /Record<string, number\[\]>/)
+})
+
+test('a vacuous JSDoc return tag does not hide the bag a function returns', () => {
+  const { bags, call } = audit(`
+    /** @return {Object} */
+    function make() {
+      const out = { kind: 'made' };
+      out.count = 1;
+      return out;
+    }
+    console.log(make().count);
+  `)
+  const made = bags.callResultShapeAt(call('make')!)
+  assert.ok(made)
+  assert.deepEqual([...made.members.keys()], ['kind', 'count'])
+})
+
+test('a read of a member slot minted by a later write is not the written bag', () => {
+  const { bags, shape, accessNamed } = audit(`
+    const declared = { cache: 0 };
+    const data = { kind: 1 };
+    if (data.cache === undefined) data.cache = {};
+    data.cache['a'] = 2;
+    console.log(declared.cache, data.cache);
+  `)
+  const guard = accessNamed('cache')
+  assert.ok(guard)
+  assert.equal(bags.shapeAt(guard), null)
+  const data = shape('data')
+  assert.ok(data)
+  assert.ok(data.members.has('cache'))
+  assert.ok(!data.required?.has('cache'))
 })

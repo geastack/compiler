@@ -77,7 +77,7 @@ const probe = (sources: Readonly<Record<string, string>>, options: ProbeOptions 
   }
 }
 
-/** Three's `WebGLRenderLists` shape: a factory whose record's `get` looks a
+/** A list-pool factory's shape: a factory whose record's `get` looks a
  * list up in a WeakMap-held pool, or makes one with another factory. */
 const LISTS = `
   function List() { return { target: null as unknown, items: [] as unknown[] } }
@@ -96,10 +96,10 @@ const USE = `
   const list = lists.get({}, 0)
   list.target = null
   lists.dispose()`
-const threeShape = (between = '', factory = LISTS) => `export {};\n${factory}\n  const lists = Lists()\n${between}\n${USE}`
+const factoryShape = (between = '', factory = LISTS) => `export {};\n${factory}\n  const lists = Lists()\n${between}\n${USE}`
 
 test('a record method call originates from the callable its slot holds', () => {
-  const { plan, targets, results } = probe({ main: threeShape() })
+  const { plan, targets, results } = probe({ main: factoryShape() })
   assert.deepEqual(targets, ['get'])
   assert.deepEqual(results, ['list'])
   assert.equal(plan?.roots.length, 1)
@@ -156,35 +156,35 @@ test('an imported factory is the function its module declares, closed through it
 })
 
 test('a replaceable slot refuses, even under a caller closure proof', () => {
-  const replaced = threeShape('  lists.get = () => ({ target: 1, items: [] })')
+  const replaced = factoryShape('  lists.get = () => ({ target: 1, items: [] })')
   assert.equal(probe({ main: replaced }).targets, null)
   assert.equal(probe({ main: replaced }).plan === null, true)
   assert.equal(probe({ main: replaced }, { slotClosed: () => true }).targets, null)
   // Through an untyped alias the flow index names no slot; the alias proof refuses the store.
-  assert.equal(probe({ main: threeShape('  const alias: any = lists\n  alias.get = () => ({})') }).plan === null, true)
+  assert.equal(probe({ main: factoryShape('  const alias: any = lists\n  alias.get = () => ({})') }).plan === null, true)
   // A reassigned binding may no longer be the function the literal copied.
-  assert.equal(probe({ main: threeShape('', LISTS.replace('function dispose() {', 'function dispose() { get = get;')) }).targets, null)
+  assert.equal(probe({ main: factoryShape('', LISTS.replace('function dispose() {', 'function dispose() { get = get;')) }).targets, null)
 })
 
 test('an escaping record refuses unless the caller proves the slot closed', () => {
   const external = 'declare function external(value: unknown): void\n'
-  const argument = threeShape(`  ${external}  external(lists)`)
+  const argument = factoryShape(`  ${external}  external(lists)`)
   assert.equal(probe({ main: argument }).targets, null)
   assert.equal(probe({ main: argument }).plan === null, true)
   assert.deepEqual(probe({ main: argument }, { slotClosed: () => true }).targets, ['get'])
-  // Three's own shape: the record published onto another object.
-  const published = threeShape('  const renderer: { renderLists?: unknown } = {}\n  renderer.renderLists = lists')
+  // The record published onto another object.
+  const published = factoryShape('  const owner: { lists?: unknown } = {}\n  owner.lists = lists')
   assert.equal(probe({ main: published }).targets, null)
   assert.deepEqual(probe({ main: published }, { slotClosed: () => true }).targets, ['get'])
   // The factory itself handed away: its callers are no longer enumerable.
-  assert.equal(probe({ main: threeShape(`  ${external}  external(Lists)`) }).targets, null)
+  assert.equal(probe({ main: factoryShape(`  ${external}  external(Lists)`) }).targets, null)
   // A sibling slot that writes through \`this\` when called as a method.
   const self = LISTS.replace('function dispose() { lists = new WeakMap() }', 'function dispose(this: any) { this.get = null }')
-  assert.equal(probe({ main: threeShape('', self) }).targets, null)
+  assert.equal(probe({ main: factoryShape('', self) }).targets, null)
 })
 
 test('a receiver that may also be a real Map is not a record', () => {
-  const mixed = threeShape().replace(
+  const mixed = factoryShape().replace(
     'const lists = Lists()',
     'declare const choose: boolean\n  const lists: any = choose ? Lists() : new Map<object, unknown>()'
   )
@@ -219,8 +219,8 @@ test('a construction whose factory mentions `this` refuses', () => {
   assert.equal(probe({ main: source }).plan === null, true)
 })
 
-test("three's `new WebGLRenderLists()` shape stays admitted", () => {
-  const constructed = threeShape().replace('const lists = Lists()', 'const lists = new (Lists as any)()')
+test('a factory called with `new` stays admitted', () => {
+  const constructed = factoryShape().replace('const lists = Lists()', 'const lists = new (Lists as any)()')
   const { plan, targets } = probe({ main: constructed })
   assert.deepEqual(targets, ['get'])
   assert.equal(plan?.roots.length, 1)

@@ -3,7 +3,7 @@
 // bounded number of live objects (hot-path-shapes.mjs asserts it after a full
 // collection), whether the cycle closes on itself or runs through an emitter
 // that also holds the listener.
-// The shape of mongodb's `onData`: several `let`s that closures share, and
+// The shape of a database client's `onData`: several `let`s that closures share, and
 // closures that capture each other. Every captured declaration of the call
 // lives in ONE frame, so the call allocates that frame and a closure's
 // environment is a handle to it, instead of one cell per variable and one

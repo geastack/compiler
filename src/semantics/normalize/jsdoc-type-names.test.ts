@@ -7,13 +7,13 @@ import { wholeProgram } from './reachability.js'
 
 /**
  * A tiny multi-file JS program, type-checked exactly the way the frontend
- * checks three.js: `allowJs`/`checkJs` on, no project `lib` override. Each
- * fixture below reproduces one of the three tag shapes found among the three.js app's
- * `jsdoc-type-name` census refusals (`docs/SEMANTIC-AUTHORITY.md` S:7 item 0):
- * a name no file in the program exports under any spelling (three's
- * `TypedArray`), a qualified/dotted type reference (three's
- * `Window.AudioContext`), and a generic instantiation carried over from a
- * `.d.ts` by `declaration-overlay-transform.ts` (three's `Curve<TVector>`).
+ * checks a JS library: `allowJs`/`checkJs` on, no project `lib` override. Each
+ * fixture below reproduces one of the three JSDoc tag shapes the
+ * `jsdoc-type-name` census refuses (`docs/SEMANTIC-AUTHORITY.md` S:7 item 0):
+ * a name no file in the program exports under any spelling (`TypedArray`), a
+ * qualified/dotted type reference (`Window.AudioContext`), and a generic
+ * instantiation carried over from a `.d.ts` by
+ * `declaration-overlay-transform.ts` (`Box<T>`).
  *
  * None of these are bugs in `referencedNameOf`/`censusJsDocTypeNames` -- this
  * pins the EXISTING refusal behaviour (kept deliberately, see the module's own
@@ -75,7 +75,7 @@ test('a tag naming a type no file in the program exports refuses name-is-not-an-
 })
 
 test('a qualified (dotted) type reference refuses tag-is-not-a-bare-reference, with the tag text in the reason', () => {
-  // Mirrors three's `@param {Window.AudioContext} value` in a file that also
+  // A `@param {Window.AudioContext} value` in a file that also
   // declares its OWN `AudioContext` class: the qualifier exists so the tag
   // does NOT mean the local class, so resolving only "AudioContext" would be
   // exactly the wrong answer -- this shape must stay refused. (`Window` here
@@ -107,7 +107,7 @@ test('a qualified (dotted) type reference refuses tag-is-not-a-bare-reference, w
 })
 
 test('a generic instantiation refuses tag-is-not-a-bare-reference, with the tag text in the reason', () => {
-  // Mirrors three's `@param {Curve<TVector>} source`, synthesised by
+  // A `@param {Box<T>} source`, synthesised by
   // `declaration-overlay-transform.ts` from a generic base class's `.d.ts`
   // signature onto a subclass override that has no JSDoc of its own.
   // Resolving only the head (`Box`) is the exact "answers with a type the tag
@@ -141,11 +141,11 @@ test('a bare reference the file cannot bind but the program exports uniquely sti
   const entry = '/entry.js'
   const { census, entryFile } = censusOf(
     new Map([
-      [lib, `export class Vector3 { x = 0; y = 0; z = 0; }`],
+      [lib, `export class Point3 { x = 0; y = 0; z = 0; }`],
       [
         entry,
         `
-          /** @param {Vector3} v */
+          /** @param {Point3} v */
           function magnitude(v) { return v.x; }
           magnitude(1);
         `
@@ -155,6 +155,6 @@ test('a bare reference the file cannot bind but the program exports uniquely sti
   )
   const declaration = declarationNamed(entryFile, 'v') as ts.ParameterDeclaration
   const type = census.typeAt(declaration)
-  assert.ok(type, 'expected the program-wide Vector3 to resolve')
+  assert.ok(type, 'expected the program-wide Point3 to resolve')
   assert.equal(census.refusals.length, 0)
 })

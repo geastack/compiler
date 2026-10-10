@@ -1,8 +1,8 @@
 // A method of a generic base class is one body per class copy -- here
 // `Operation<TResult>.handleOk` at `Doc`, `number` and `boolean` -- and a
 // subclass overrides the copy its OWN heritage names, whatever convention the
-// override states. mongodb's `RunCursorCommandOperation extends
-// RunCommandOperation` (so `AbstractOperation<Document>`) overrides
+// override states. A database client's `RunCursorCommandOperation extends
+// RunCommandOperation` (so `Operation<Document>`) overrides
 // `handleOk` to answer a `CursorResponse`, while `CountOperation extends
 // CommandOperation<number>` answers a number; `executeOperation<T>` calls
 // `operation.handleOk(result)` through a receiver typed as each operation

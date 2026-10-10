@@ -3,6 +3,10 @@ import { errorConstructorGetText, errorConstructorMemberText } from './emit-erro
 import { dictionaryKeyDomainOf, isOpenDocument, ownershipOf, representationKey } from '../../representation/model.js'
 import { carrierDifference, shortCarrierText } from '../../representation/difference.js'
 import { nativeFieldOwnerReadText } from './emit-field-owner.js'
+import { nativeFieldViewOperandContext, nativeFieldViewReadText, nativeFieldViewWriteText } from './emit-native-field-view.js'
+import { nativeObjectDataGetText, nativeObjectDataSetText } from './emit-native-object-data.js'
+import { nativeDocumentEntryText } from './emit-native-document-entry.js'
+import { nativeCallableOptionalDataReadText } from './emit-native-callable-data.js'
 import type { DefineOwnPropertyOperation, GetOperation, IrOperand, SetOperation } from '../../ir/model.js'
 import type { FunctionId, IrValueId } from '../../identity/ids.js'
 import {
@@ -11,6 +15,7 @@ import {
   createCppEmitBlockedError,
   defineValue,
   defineValueAlias,
+  nameOfValue,
   operandText,
   prototypeMethodReceiverText,
   unwrapPresentValue,
@@ -23,6 +28,7 @@ import {
 import { declaredHostMethodRead, emitNativeHostStore, nativeHostMemberText } from './host/emit-host-properties.js'
 import { hostResultText } from './host/emit-host-arity.js'
 import {
+  classFamilyOverridesOf,
   classMemberOf,
   dispatchesStatically,
   fieldDeclaringStructOf,
@@ -79,7 +85,9 @@ import {
   dynamicGetText,
   emitDynamicSet,
   emitNativeSidecarSet,
-  nativeSidecarGetText
+  nativeSidecarGetText,
+  propertyKeyText,
+  unboxedReadText
 } from './emit-dynamic-properties.js'
 import { dynamicObjectPrototypeMemberRead, objectShapePrototypeMemberRead } from './host/object-protocol.js'
 import {
@@ -165,7 +173,7 @@ import {
   typedArrayAccessText,
   integerTypedArrayElements
 } from './emit-carrier-members.js'
-import { arrayBufferAccessText, dataViewAccessText, sharedArrayBufferAccessText } from './emit-buffers.js'
+import { arrayBufferAccessText, dataViewAccessText, nativeBufferMethodValueText, sharedArrayBufferAccessText } from './emit-buffers.js'
 import { functionSourceReadClaimOf } from './function-source-reads.js'
 import { deferredCallableBuiltinReadClaimOf, recordWithIndexFieldClaimOf } from './property-read-claims.js'
 
@@ -239,8 +247,8 @@ export const dictionaryTableOf = (
  */
 const dictionaryReadText = (ctx: EmitContext, operation: GetOperation): string | null => {
   // A string-keyed Document holds no symbol-keyed entry, but the object it
-  // views may (`gea::dictionary::adopt`): mongodb's decrypted replies carry a
-  // non-enumerable `Symbol.for('@@mdb.decryptedKeys')` array. The object's own
+  // views may (`gea::dictionary::adopt`): an object can carry a
+  // non-enumerable `Symbol.for('...')`-keyed array beside its string keys. The object's own
   // protocol answers, and an unviewed Document answers `undefined`.
   if (isOpenDocument(operation.receiver.representation) && operation.key.representation.kind === 'symbol') {
     const raw =
@@ -301,8 +309,8 @@ const dictionaryReadText = (ctx: EmitContext, operation: GetOperation): string |
  * presence bits rather than in a `length` member. Without this the read fell
  * through every native branch to the dynamic sidecar, which has no such key:
  * the program certified and then aborted at runtime in `refusePayloadMismatch`.
- * three's WebGL forwarding shims are the shape that needs it -- `texImage2D(
- * ...args )` selects its 6-argument form with `args.length === 6`.
+ * A forwarding shim over an overloaded host method is the shape that needs
+ * it -- `draw( ...args )` selects its 6-argument form with `args.length === 6`.
  *
  * Synthesizing `length` for a positional record cannot capture a plain object
  * that merely has numeric keys: `({ 0: "a" }).length` is a type error, so the
@@ -502,7 +510,7 @@ const denseCellText = (
   // The flag is stated as LIKELY at every site rather than left to the
   // backend's own guess. It is loop-invariant and true for every array a
   // program actually builds, but clang schedules the two halves as if either
-  // could run: measured on `bench/comparison/fixtures/object_create.ts`,
+  // could run: measured on an object-creation loop,
   // 9.05ms without the hint and 8.49ms with it, for the same instructions in a
   // better order.
   //
@@ -559,10 +567,95 @@ const denseElementText = (ctx: EmitContext, operation: GetOperation): string | n
       ? `static_cast<double>(gea::TypedArray<${cppScalarType(operation.receiver.representation.element)}>::readInBounds(${dense.pointer}, ${dense.index}))`
       : dense.text
   const fast = element === null ? null : presentElementText(ctx, element, operation.result, value)
+  // The general half reads by value (a live view or an indexed accessor
+  // answers an element that is not a cell), and a conditional with one
+  // prvalue arm is a prvalue: the hot arm then copies its cell, a retain and a
+  // release per iteration for a callable or a reference. Materializing the
+  // cold read into a frame-local slot keeps both arms lvalues, so the hot arm
+  // is the cell itself again, read-only as `elementAtIndex` answered it (a
+  // `std::move` of the read must not empty the array's cell). The slot is per
+  // site and per frame, so a reference bound to the read outlives the
+  // expression safely.
+  if (
+    operation.receiver.representation.kind === 'array-object' &&
+    element !== null &&
+    element.kind !== 'scalar' &&
+    (fast ?? dense.text) === dense.text
+  ) {
+    const slot = `gea_dense_read_${ctx.declarations.length}`
+    ctx.declarations.push({ name: slot, type: `std::optional<${cppTypeOf(element)}>` })
+    return `(${dense.flag} ? ${dense.text} : std::as_const(${slot}.emplace(${general})))`
+  }
   return `(${dense.flag} ? ${fast ?? dense.text} : ${general})`
 }
 
 export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperation): void => {
+  const objectData = nativeObjectDataGetText(ctx, operation)
+  if (objectData !== null) {
+    lines.push(`${defineValue(ctx, operation.result)} = ${objectData};`)
+    return
+  }
+  if (operation.nativeCallableDataSlot) {
+    const receipt = operation.nativeCallableDataSlot
+    const optional = nativeCallableOptionalDataReadText(ctx, operation)
+    if (optional !== null) {
+      lines.push(`${defineValue(ctx, operation.result)} = ${optional};`)
+      return
+    }
+    if (operation.receiver.representation.kind === 'dynamic') {
+      const value = unboxedReadText(
+        receipt.storage,
+        `${operandText(ctx, operation.receiver)}.getProperty(${propertyKeyText(ctx, operation.key, 'native Function data read')})`,
+        'native Function data on a dynamic owner'
+      )
+      lines.push(`${defineValue(ctx, operation.result)} = ${value};`)
+      return
+    }
+    lines.push(
+      `${defineValue(ctx, operation.result)} = gea::callableNativeDataGet<${cppTypeOf(receipt.storage)}>(${operandText(ctx, operation.receiver)}, ${propertyKeyText(ctx, operation.key, 'native Function data read')});`
+    )
+    return
+  }
+  if (operation.privateNativeCallableSlot) {
+    // Preserve deferred operand evaluation; the certificate proves the data
+    // slot itself has no accessor, mutation or external observation.
+    lines.push(`(void)(${operandText(ctx, operation.receiver)});`, `(void)(${operandText(ctx, operation.key)});`)
+    lines.push(`${defineValue(ctx, operation.result)} = ${operandText(ctx, operation.privateNativeCallableSlot.value)};`)
+    return
+  }
+  if (operation.nativeDocumentEntry) {
+    const rendered = nativeDocumentEntryText(ctx, operation)
+    if (rendered === null) throw new Error('a Document entry read lost its original source receipt')
+    lines.push(`${defineValue(ctx, operation.result)} = ${rendered};`)
+    return
+  }
+  if (operation.nativeFieldViewRead) {
+    const rendered = nativeFieldViewReadText(ctx, operation, (carrier, key) => {
+      // A class arm answering the key from a getter has no own field to
+      // read natively: the plain allocation's answer is the getter's body
+      // (`parent?.options` over `A | B | ...`, each a getter).
+      if (carrier.kind === 'class-ref') {
+        const site = classMemberOf(ctx.classes, carrier.declaration, key)
+        if (site?.kind === 'accessor') {
+          const getter = site.accessor.getter
+          const abi = getter === null ? null : ctx.abiOfCallable(getter)
+          if (getter === null || abi === null || classFamilyOverridesOf(ctx.classes, carrier.declaration, key).length > 0) return null
+          return { source: abi.result, text: `${cppBodyName(getter)}(gea_field_receiver)`, accessor: true }
+        }
+      }
+      const source = declaredRecordFieldOf(ctx.deriver, carrier, key, ctx.classes)
+      if (!source) return null
+      const plainOperation = { ...operation, receiver: { ...operation.receiver, representation: carrier } }
+      const plain = nativeFieldViewOperandContext(ctx, plainOperation)
+      let read = plainFieldReadText(plain, plainOperation, key)
+      if (source.value.kind === 'scalar') read = `static_cast<${cppTypeOf(source.value)}>(${read})`
+      if (!source.required) read = `(gea_field_receiver->${cppRecordFieldPresenceName(key)} ? ${read} : ${cppTypeOf(source.value)}())`
+      return { source: source.value, text: read }
+    })
+    if (rendered === null) throw new Error('a published field-view read lost its receipt')
+    lines.push(`${defineValue(ctx, operation.result)} = ${rendered};`)
+    return
+  }
   const ownerRead = nativeFieldOwnerReadText(ctx, operation)
   if (ownerRead !== null) {
     lines.push(`${defineValue(ctx, operation.result)} = ${ownerRead};`)
@@ -579,7 +672,7 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
   // reads through `undefined`: a generic narrowed by `instanceof` to a class
   // its own monomorphized copy cannot be gives the narrowed binding an
   // uninhabited intersection, and `derive.ts` answers that with `never`'s
-  // storage-free carrier (mongodb's `execute_operation.ts:198`, 28 copies).
+  // storage-free carrier.
   // Refusing to lower it reported an emission blocker for code that cannot
   // run; throwing is what the language says and costs the branch nothing.
   // A read standing in for a removed spread copy of a possibly absent source:
@@ -704,6 +797,22 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
   }
   // The two other members of the ECMA-262 binary family, rendered by
   // `emit-buffers.ts` alongside the typed array's own block-shaped members.
+  const bufferKey = ctx.staticKeyTexts.get(operation.key.value)
+  const nativeBufferMethod =
+    bufferKey === undefined
+      ? null
+      : nativeBufferMethodValueText(
+          ctx,
+          operation,
+          operation.receiver.representation,
+          () => operandText(ctx, operation.receiver),
+          bufferKey,
+          operation.result.representation
+        )
+  if (nativeBufferMethod !== null) {
+    lines.push(`${defineValue(ctx, operation.result)} = ${nativeBufferMethod};`)
+    return
+  }
   const arrayBufferAccess = arrayBufferAccessText(ctx, operation.receiver, operation.key, operation.result.id)
   if (arrayBufferAccess !== null) {
     if (arrayBufferAccess === '') return
@@ -1031,7 +1140,7 @@ export const emitGet = (ctx: EmitContext, lines: string[], operation: GetOperati
     // never even looks at as a completed `CallableObject`.
     const rendering = ctx.lazyCalleeReads.has(operation.result.id)
       ? lazyFieldSnapshotReadText(ctx, operation, fieldName)
-      : lazyMaterializedFieldReadText(ctx, operation, fieldName, lazyField.plan)
+      : narrowedFieldReadText(ctx, operation, fieldName, lazyMaterializedFieldReadText(ctx, operation, fieldName, lazyField.plan))
     lines.push(`${defineValue(ctx, operation.result)} = ${rendering};`)
     return
   }
@@ -1144,7 +1253,7 @@ const constructorViewReceiverText = (ctx: EmitContext, receiver: IrOperand, fiel
  * Whether a member is a NATIVE struct's own, with no generated presence bit
  * or attribute triple beside it: every declared member of a native record
  * (`name` on a plain `new Error(..)`), and a member a class inherits from
- * its native base (`stack` on `class MongoError extends Error`). `cause` is
+ * its native base (`stack` on `class AppError extends Error`). `cause` is
  * the one native member that does carry a bit -- `gea::runtime::Error`
  * declares `gea_present_cause`, since ECMA-262 20.5.8.1 installs it only
  * when the options bag has one. The read's presence test and the store's
@@ -1397,15 +1506,95 @@ export const emitFieldStore = (
   operation: SetOperation | DefineOwnPropertyOperation,
   label: string
 ): void => {
+  if (operation.kind === 'set' && operation.nativeCallableReadonlySet) {
+    emitNativeSidecarSet(ctx, lines, operation)
+    return
+  }
+  if (operation.kind === 'set' && operation.nativeDocumentEntry) {
+    let source = ctx
+    if (operation.result) {
+      lines.push(`${defineValue(ctx, operation.result)} = ${operandText(ctx, operation.receiver)};`)
+      const deferredTexts = new Map(ctx.deferredTexts)
+      const pendingPacks = new Map(ctx.pendingPacks)
+      deferredTexts.delete(operation.receiver.value)
+      pendingPacks.delete(operation.receiver.value)
+      source = {
+        ...ctx,
+        valueNames: new Map(ctx.valueNames).set(operation.receiver.value, nameOfValue(ctx, operation.result.id)),
+        deferredTexts,
+        pendingPacks
+      }
+    }
+    const rendered = nativeDocumentEntryText(source, operation)
+    if (rendered === null) throw new Error('a Document entry store lost its original source receipt')
+    lines.push(
+      operation.strict
+        ? `if (!${rendered}) gea::host::throwRuntimeError("TypeError", "Cannot assign Document entry");`
+        : `void(${rendered});`
+    )
+    return
+  }
+  if (operation.kind === 'set' && operation.nativeObjectDataSlot) {
+    let stored = ctx
+    if (operation.result) {
+      lines.push(`${defineValue(ctx, operation.result)} = ${operandText(ctx, operation.receiver)};`)
+      const deferredTexts = new Map(ctx.deferredTexts)
+      const pendingPacks = new Map(ctx.pendingPacks)
+      deferredTexts.delete(operation.receiver.value)
+      pendingPacks.delete(operation.receiver.value)
+      stored = {
+        ...ctx,
+        valueNames: new Map(ctx.valueNames).set(operation.receiver.value, nameOfValue(ctx, operation.result.id)),
+        deferredTexts,
+        pendingPacks
+      }
+    }
+    const rendered = nativeObjectDataSetText(stored, operation)
+    if (rendered === null) throw new Error('a published native object data store lost its receipt')
+    lines.push(
+      operation.strict
+        ? `if (!${rendered}) gea::host::throwRuntimeError("TypeError", "Cannot assign native object data property");`
+        : `void(${rendered});`
+    )
+    return
+  }
+  if (operation.kind === 'set' && operation.privateNativeCallableSlot) {
+    for (const operand of [operation.receiver, operation.key, operation.value]) lines.push(`(void)(${operandText(ctx, operand)});`)
+    if (operation.result) defineValueAlias(ctx, operation.result, operandText(ctx, operation.receiver))
+    return
+  }
+  if (operation.kind === 'set' && operation.nativeFieldViewWrite) {
+    let viewContext = ctx
+    if (operation.result) {
+      lines.push(`${defineValue(ctx, operation.result)} = ${operandText(ctx, operation.receiver)};`)
+      const deferredTexts = new Map(ctx.deferredTexts)
+      const pendingPacks = new Map(ctx.pendingPacks)
+      deferredTexts.delete(operation.receiver.value)
+      pendingPacks.delete(operation.receiver.value)
+      viewContext = {
+        ...ctx,
+        valueNames: new Map(ctx.valueNames).set(operation.receiver.value, nameOfValue(ctx, operation.result.id)),
+        deferredTexts,
+        pendingPacks
+      }
+    }
+    const rendered = nativeFieldViewWriteText(viewContext, operation)
+    if (rendered === null) throw new Error('a published field-view write lost its receipt')
+    lines.push(
+      operation.strict
+        ? `if (!${rendered}) gea::host::throwRuntimeError("TypeError", "Cannot assign to native view property");`
+        : `void(${rendered});`
+    )
+    return
+  }
   emitFieldStoreLines(ctx, lines, operation, label)
   // REPLACING a revision-backed field, before the store-INTO-it rule below.
-  // `this.pageAnchors = builder.anchors` is the largest change such a field can
+  // `this.items = builder.items` is the largest change such a field can
   // undergo -- every element at once -- and it was the one change nothing
   // ticked: the revision cell is only reached through `reactiveOrigins`, which
   // is carried by a value read OUT of the array, and a whole-field assignment
-  // reads nothing out of it. So the e-reader published a finished fourteen-
-  // hundred page pagination over the one-page preview the reader had entered
-  // on, and every slot bound to `pageAnchors__rev` kept rendering the preview.
+  // reads nothing out of it. So a replaced array never reached the UI, and
+  // every slot bound to `items__rev` kept rendering the old contents.
   //
   // Asked of `revisions` -- the struct renderer's own record of which fields
   // GOT a revision cell -- so this cannot tick a companion that was never
@@ -1561,8 +1750,8 @@ const emitFieldStoreLines = (
       )
     }
   }
-  // `ClassName.KEY = value` on the class value itself -- three.js's own
-  // spelling for a class static (`Object3D.DEFAULT_UP = new Vector3(0,1,0)`),
+  // `ClassName.KEY = value` on the class value itself -- the pre-ES2022
+  // spelling for a class static (`Point.ORIGIN = new Point(0, 0)`),
   // which the language admits as an ordinary property store and no `static`
   // member declares. The storage is the whole-program census's own global
   // (`class-layout.ts`), emitted before any body runs, and the census refused
@@ -1736,8 +1925,8 @@ const emitFieldStoreLines = (
     // never runs still costs that: a value whose address is taken anywhere in
     // the loop cannot be kept in registers, so the record this iteration just
     // built is written to a stack slot and read back before every dense store.
-    // Copying into the arm's own local is the whole cure -- `object_create`
-    // 8.2ms to 4.5ms against 3.8ms for the hand-written baseline, from one
+    // Copying into the arm's own local is the whole cure -- an object-creation
+    // loop 8.2ms to 4.5ms against 3.8ms for the hand-written baseline, from one
     // `auto` -- and it costs the cold path a copy it was already paying for.
     // The name is block-scoped, so every arm may reuse it.
     const cold = `{ auto gea_cold = ${stored}; ${arrayReceiver}->${writer}(${at}, gea_cold); }`
@@ -1944,8 +2133,8 @@ const emitFieldStoreLines = (
   // The structural interface view, asked only where the ordinary conversion
   // has refused -- the same order `emit-callable.ts`'s argument path uses, and
   // for the same reason: the view does not preserve identity, so a pair with a
-  // real conversion must never reach it. hono's `this.router = new
-  // PatternRouter()` stores a class instance into a field declared as the
+  // real conversion must never reach it. `this.router = new
+  // TrieRouter()` stores a class instance into a field declared as a
   // `Router` interface, which is a rebuild and not a cast.
   const reconciled =
     held === null
@@ -1961,7 +2150,7 @@ const emitFieldStoreLines = (
   // This was gated on `setter !== null` alone until this fix, which reads as
   // "an accessor's argument must convert, but a PLAIN FIELD'S needn't" -- a
   // distinction the language does not draw. A `null`-declared JS record field
-  // (`const state = { rectAreaLTC1: null }`, three's `WebGLLights.js`) later
+  // (`const state = { texture: null }`) later
   // stored from an optional class-ref falls through this exact gap: preflight
   // reports the store clean, a certificate mints, and the raw unconverted
   // `gea::Optional<gea::Ref<T>>` expression lands in a `std::nullptr_t` field

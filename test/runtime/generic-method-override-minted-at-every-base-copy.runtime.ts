@@ -2,8 +2,8 @@
 // a type argument nothing ever calls the subclass with. A receiver typed as
 // the base still runs whichever class allocated it, so the override needs its
 // own copy at that instantiation even though no call is written against it:
-// mongodb's `OnDemandDocument.getNumber` reads `this.get(name, 'bool')`, and a
-// `MongoDBResponse` -- which overrides `get<T>` and is only called at
+// a database client's lazy document's `getNumber` reads `this.get(name, 'bool')`,
+// and a `ServerResponse` -- which overrides `get<T>` and is only called at
 // `'object'` itself -- must answer that call with its own (wrapping) body.
 // The reverse holds too: `Reply.read<'tag'>` is only ever called on a
 // `Reply`, and the base's copy at `'tag'` is what its `super.read` runs.

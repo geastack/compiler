@@ -4,7 +4,7 @@
 //! expect: b|2|7
 //! expect: A|1|7
 //! expect: B|2|7
-// `@hono/node-server` headers.ts: `RequestHeaders` derives from the captured
+// An HTTP server adapter's headers: `RequestHeaders` derives from the captured
 // `Headers` and OVERRIDES `forEach` with a wider callback, then forwards to the
 // caller's own through `callback.call(thisArg, value, key, parent)`.
 //

@@ -1,5 +1,10 @@
-//! emitted-has: bindHolderInPlace
-// mongodb's `onData` (src/cmap/wire_protocol/on_data.ts): a hand-written
+//! emitted-lacks: bindHolder
+//! emitted-lacks: bindReceiver
+//! emitted-has: next.callWithReceiver(gea::NativeCallReceiver::object(gea_protocol_holder)
+// The literal's methods are stored unbound and each protocol step calls them
+// with the holder as the logical receiver: no bound callable is allocated per
+// method, and no holder <-> bound-method cycle needs a weak edge to break.
+// A database client's `onData`: a hand-written
 // object literal typed `AsyncGenerator<Buffer>` whose `next` returns a
 // `Promise` of one arm of `IteratorResult<T>` (a fresh `{ value, done: false }`
 // or the shared `{ value: undefined, done: true }`) from some branches and a

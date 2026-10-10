@@ -1,5 +1,5 @@
 // `Array.prototype.concat` with an ARRAY argument, which is the first
-// overload's `ConcatArray<T>` rest element -- hono's `RegExpRouter`
+// overload's `ConcatArray<T>` rest element -- an HTTP framework's regexp router
 // (`Object.keys(a).concat(Object.keys(b))`) and its trie router
 // (`tempNodes.concat(shifted)`) both take it.
 //! expect: a,b,c,d

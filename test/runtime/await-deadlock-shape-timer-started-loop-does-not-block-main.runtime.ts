@@ -8,7 +8,7 @@
 // first. The program ends when no timer is left, with `heartbeat` still
 // suspended -- a monitor's awaiting heartbeat when the client is finished.
 //
-// This is the mongodb monitor shape: the streaming heartbeat is an async loop
+// This is a database client's monitor shape: the streaming heartbeat is an async loop
 // started from a timer that awaits a server reply held open for the heartbeat
 // interval, while the user's operation awaits its own reply.
 //

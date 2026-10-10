@@ -1,4 +1,4 @@
-// three.js `ShaderMaterial.toJSON` reads each uniform of an `Object` bag and,
+// A 3D scene-graph library's `ShadedMaterial.toJSON` reads each uniform of an `Object` bag and,
 // behind `value && value.isTexture`, calls `value.toJSON( meta )`. The values
 // the program stores are a number, a string and a class instance, so the read
 // of `toJSON` is a read off a union with arms that have no such member, and the

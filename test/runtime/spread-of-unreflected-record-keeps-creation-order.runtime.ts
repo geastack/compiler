@@ -2,7 +2,7 @@
 // site's static per-field copy, with the order learned from the source's
 // presence bits: neither record carries the Value-based property protocol,
 // and the copy still enumerates in the source's creation order, not the
-// receiver's layout order. mongodb's `{ ...options, ...cursorOptions }` is
+// receiver's layout order. A database client's `{ ...options, ...cursorOptions }` is
 // this copy, and reading it as a dynamic one published the options record to
 // full reflection.
 interface Options {

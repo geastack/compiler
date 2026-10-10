@@ -47,7 +47,7 @@ export const widestSubsumingAbi = (abis: readonly CallableAbi[]): CallableAbi | 
     // since a shorter overload's absent trailing parameter is the same
     // "the caller did not supply it" the optional carrier already holds.
     // `test: (node: Node) => node is TOut` beside `test?: (node: Node) =>
-    // boolean` (TypeScript's own `NodeVisitor`) is one slot, not two frames:
+    // boolean` (a visitor overload set) is one slot, not two frames:
     // every call through the set that omits it reaches the value through the
     // optional slot, and every call that passes it fills the same slot.
     let joined: AbiParameter | null = null
@@ -76,8 +76,7 @@ export const widestSubsumingAbi = (abis: readonly CallableAbi[]): CallableAbi | 
     // widened one -- `realpathSync(path)` beside `realpathSync(path, options)`
     // is node's own spelling of a single entry point, and refusing it left
     // every value read of such a set with no calling convention at all (288
-    // rows in tsc's self-compile, concentrated in `sys.ts`, `checker.ts` and
-    // `tracing.ts`). Only the ARITY widens: every shared position must already
+    // rows in one large program, concentrated in its host-facing modules). Only the ARITY widens: every shared position must already
     // agree, and so must the result, which the checks above enforce.
     if (omitted && joined.value.kind !== 'optional') {
       const widened = optionalOf(joined.value, 'undefined')
@@ -97,8 +96,8 @@ const widensTo = (narrower: Representation, wider: Representation): boolean =>
 
 /**
  * A PROGRAM overload set whose members differ by a trailing callback and a
- * `void` result -- Node's callback-or-promise idiom, mongodb's
- * `KerberosClient.step(challenge): Promise<string>` beside
+ * `void` result -- Node's callback-or-promise idiom,
+ * `Client.step(challenge): Promise<string>` beside
  * `step(challenge, callback): void` -- as one frame: the widest arity, each
  * position joined exactly as `widestSubsumingAbi` joins it, and the valued
  * overloads' one result made optional, since the callback form answers

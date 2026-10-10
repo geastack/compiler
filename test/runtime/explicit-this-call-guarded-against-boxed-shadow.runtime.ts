@@ -5,8 +5,8 @@
 // a run-time fact about one object, read off its own-property table before
 // the call (`CallOperation.builtinShadowGuard`), not a whole-program reason
 // to route every unknown-origin `.call` through `.call`'s own generic frame
-// with a heap adapter per invocation. bson's `parser/utils.ts` is exactly
-// this shape inside the mongodb driver, where the driver's own `any`-typed
+// with a heap adapter per invocation. A binary-document serializer's parser
+// utilities are exactly this shape inside a database client, where the client's own `any`-typed
 // option writes put the computed-key wildcard into the facts.
 //! emitted-lacks: adaptSource
 //! emitted-has: callableBuiltinIsIntrinsic

@@ -1,4 +1,4 @@
-// hono's `Context.redirect`: a class field initialized with a GENERIC arrow
+// An HTTP framework's `Context.redirect`: a class field initialized with a GENERIC arrow
 // (`<T extends RedirectStatusCode = 302>(location, status?) => ...`) that the
 // program never calls. The specialization census has no copy of it and the
 // census walks it not at all, so the field must be recorded as one with no

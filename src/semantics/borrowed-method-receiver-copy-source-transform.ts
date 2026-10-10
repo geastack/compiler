@@ -6,10 +6,10 @@ import ts from 'typescript'
  * -- rewritten to `this.<copy>(...args)` against a copy of `m`'s declaration
  * placed in the calling class.
  *
- * `mongodb-connection-string-url` is the measured case: its case-insensitive
- * `URLSearchParams` subclass normalizes keys with
- * `CaseInsensitiveMap.prototype._normalizeKey.call(this, name)`, whose body
- * iterates `this.keys()`. Compiled once, that body is `CaseInsensitiveMap`'s:
+ * The measured shape: a case-insensitive `URLSearchParams` subclass that
+ * normalizes keys with `LowerCaseMap.prototype._normalizeKey.call(this, name)`,
+ * where `LowerCaseMap` is an unrelated `Map` subclass whose body iterates
+ * `this.keys()`. Compiled once, that body is `LowerCaseMap`'s:
  * its `this` is a `Map` subclass's layout and `this.keys()` is `Map`'s, so no
  * conversion makes a `URLSearchParams` instance its receiver
  * (`conversion/nodes.ts`'s foreign-receiver reason). The language, though,

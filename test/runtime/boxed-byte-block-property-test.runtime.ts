@@ -1,6 +1,6 @@
 // `in` and a prototype read on a boxed TypedArray, ArrayBuffer, SharedArrayBuffer
 // and DataView. A byte block reaches a box wherever a library types it
-// `unknown`; bson's `isAnyArrayBuffer` then asks `Symbol.toStringTag in value`
+// `unknown`; a binary-document serializer's `isAnyArrayBuffer` then asks `Symbol.toStringTag in value`
 // of it and reads the tag back. The runtime holds no property table for these
 // -- their surface is the closed prototype chain the spec states (23.2.3,
 // 25.1.6, 25.2.5, 25.3.4) plus in-range integer indices -- so both answers

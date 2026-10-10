@@ -1,6 +1,6 @@
 // A closed tuple is stored as a positional struct, but it IS an Array exotic
 // object. Erased into `any`, it has to keep answering `Array.isArray`,
-// `length` and its indexed elements -- mongodb's `formatSort` dispatches a
+// `length` and its indexed elements -- a database client's `formatSort` dispatches a
 // `readonly [string, SortDirection]` through `isReadonlyArray(value: any)`,
 // and a `false` there sent the tuple down the Map arm.
 function isArrayLike(value: any): boolean {

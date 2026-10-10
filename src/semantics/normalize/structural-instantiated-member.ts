@@ -9,14 +9,13 @@ import type { SpecializationCensus } from './specialization.js'
  * Substitution rewrites a BARE type parameter and nothing else. That is all it
  * can do -- the public checker API offers no way to instantiate a type, a gap
  * `specialization.ts`'s `induceFromHeritage` records for the same reason -- so a
- * member whose type merely *mentions* a parameter keeps the hole: `filter:
- * Filter<TSchema>`, `Promise<WithId<TSchema> | null>`, `AlternativeType<WithId<
- * TSchema>["_id"]>`. Every deferred conditional inside such a type stays
- * deferred, because a conditional is deferred exactly while its check type is
- * open, and representation then has no structure to lay out. On the mongodb
- * CMAP probe that one gap was 312 of 642 mandatory obligations, spread over five
- * copies of `Collection` whose fillings -- `Document`, `GridFSFile`,
- * `GridFSChunk`, `any`, `DataKey` -- were all recorded and all available.
+ * member whose type merely *mentions* a parameter keeps the hole: `query:
+ * Query<T>`, `Promise<Keyed<T> | null>`, `Alternative<Keyed<T>["key"]>`.
+ * Every deferred conditional inside such a type stays deferred, because a
+ * conditional is deferred exactly while its check type is open, and
+ * representation then has no structure to lay out. On a real program that one
+ * gap was about half of all mandatory obligations, spread over several copies
+ * of one generic class whose fillings were all recorded and all available.
  *
  * The instantiated spelling closes it without instantiating anything. A copy
  * minted from a type reference carries the type the checker resolved that
@@ -48,8 +47,8 @@ import type { SpecializationCensus } from './specialization.js'
  *
  * `getTypeOfSymbolAtLocation` on an overloaded member publishes the overload
  * signatures and not the implementation, so the implementation's own parameter
- * declarations -- which is where `Collection.findOne`'s `filter: Filter<TSchema>
- * = {}` actually is -- have no instantiated signature of their own to read.
+ * declarations -- which is where `Store.find`'s `query: Query<T> = {}`
+ * actually is -- have no instantiated signature of their own to read.
  * They do not need one. The table is keyed by the OPEN TYPE, and the checker
  * interns types: the implementation's annotation and the overload's are one
  * `ts.Type` object whenever they are the same written type, so the entry the
@@ -100,6 +99,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
   const tables = new Map<ts.Declaration, (Map<ts.Type, ts.Type> | null)[]>()
   // The tables of copies with an `any` filling, where an `any` image is real.
   const anyFilledTables = new WeakSet<Map<ts.Type, ts.Type>>()
+  /** How many instantiable types `isOpen` has handed to `isCopyHole`; see `isOpenFor`. */
+  let holesAsked = 0
 
   /**
    * Whether `type` has a hole in it at all -- a type parameter, or one of the
@@ -109,8 +110,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
    * records an answer for CLOSED types too. That is not a harmless extra row:
    * `through` is asked before every other question in `structural.ts`'s
    * `translate`, so one wrong row redefines that type for the whole copy.
-   * hono's `PatternRouter<T>` produced exactly that -- `string` paired against
-   * `[T, ParamIndexMap]` through a positional walk whose two sides did not
+   * A generic router class `Router<T>` produced exactly that -- `string`
+   * paired against `[T, ParamIndexMap]` through a positional walk whose two sides did not
    * correspond -- and every `string` in the copy then translated as that
    * tuple, which surfaced four functions away as `parts.join('')` refusing to
    * ToString its elements.
@@ -124,7 +125,10 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     // or a template-literal mapping -- every form that is unresolved only
     // while something it names is open. Open in THIS copy's parameters,
     // though, not in any parameter at all: see `isCopyHole`.
-    if (type.flags & ts.TypeFlags.Instantiable) return isCopyHole(type, owner, depth)
+    if (type.flags & ts.TypeFlags.Instantiable) {
+      holesAsked++
+      return isCopyHole(type, owner, depth)
+    }
     // A primitive, a literal or an enum member has no structure to hold a
     // hole and no image other than itself. Its apparent members are the
     // global interface's (`Number`, `String`), which is where the walk below
@@ -199,20 +203,28 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
    * the answer is a function of the type and the owner alone, and the walk
    * behind it is the expensive part of building a table -- every property and
    * every signature parameter of the type, each through the checker, six
-   * levels down. hono asked it for the same closed member types (`Response`,
-   * `Promise<...>`, `Headers`) once per signature position that mentioned
-   * them, and paid the whole walk every time; on `hono-hello` that was the
+   * levels down. A large overload set asked it for the same closed member
+   * types (`Response`, `Promise<...>`, `Headers`) once per signature position
+   * that mentioned them, and paid the whole walk every time; that was once the
    * single largest checker cost in the frontend. Remembered per owner because
    * `isCopyHole` reads the owner.
    */
   const openness = new Map<ts.Declaration, Map<ts.Type, boolean>>()
+  // The owner is read only by `isCopyHole`, so a walk that never reached an
+  // instantiable type answered `false` without consulting it, and gives that
+  // same answer for every owner. The closed lib types (`string[]`, `Promise`,
+  // `Response`) are asked once per owner and are most of the walk's cost.
+  const closedForEveryOwner = new Set<ts.Type>()
   const isOpenFor = (type: ts.Type, owner: ts.Declaration): boolean => {
+    if (closedForEveryOwner.has(type)) return false
     let known = openness.get(owner)
     if (!known) openness.set(owner, (known = new Map()))
     const remembered = known.get(type)
     if (remembered !== undefined) return remembered
+    const asked = holesAsked
     const answer = isOpen(type, 0, new Set(), owner)
-    known.set(type, answer)
+    if (!answer && holesAsked === asked) closedForEveryOwner.add(type)
+    else known.set(type, answer)
     return answer
   }
 
@@ -223,9 +235,9 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
    *
    * Reading the closed side is what costs. A closed member's type on the
    * instantiated parent is minted by instantiating the member's declared type
-   * under the copy's arguments, and for hono's overload sets that is the
-   * conditional-and-intersection machinery of `HandlerInterface` evaluated per
-   * overload, per verb -- only for `pair` to look at the open side first and
+   * under the copy's arguments, and for a large overload set typed through
+   * conditional and intersection types that machinery is evaluated per
+   * overload -- only for `pair` to look at the open side first and
    * return, because the open side had no hole. The open side is read off the
    * generic parent and is cheap; asking it first skips the instantiation for
    * every member that was never going to be paired.
@@ -279,10 +291,9 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     // the entry falls back to substitution, which is the same answer when the
     // image genuinely is any/unknown, and the correct signature otherwise.
     //
-    // Except in a copy the program itself filled with `any` (mongodb's
-    // `Collection<any>`): there `any` IS the instantiation, and a hole with no
-    // substitution of its own -- a conditional such as
-    // `OptionalUnlessRequiredId<TSchema>`, whose check type `any` takes both
+    // Except in a copy the program itself filled with `any` (`Box<any>`): there
+    // `any` IS the instantiation, and a hole with no substitution of its own --
+    // a conditional such as `OptionalUnlessKeyed<T>`, whose check type `any` takes both
     // branches and collapses to `any` -- has no other way to reach it.
     if ((closed.flags & ts.TypeFlags.Unknown) !== 0) return
     if ((closed.flags & ts.TypeFlags.Any) !== 0 && !anyFilledTables.has(into)) return
@@ -297,8 +308,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     // array: `console.log`'s own `...optionalParams: any[]` among them.
     if (open.flags & ts.TypeFlags.Conditional) return
     // Deliberately NOT cut short at `depth === pairingDepth`, although every
-    // child below is refused at `depth + 1` and the cut would be exact. On hono
-    // 83% of the signatures this walk touches are those leaves, and skipping
+    // child below is refused at `depth + 1` and the cut would be exact. On a real
+    // program most of the signatures this walk touches are those leaves, and skipping
     // them saved two seconds here -- then cost ten downstream: the types the
     // leaves resolve are the ones `translate`, representation and lowering go
     // on to ask the checker for, and resolving them on this walk, top-down
@@ -311,9 +322,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     // below relies on: the synthesized `push` of `[[T, Params][]] | [[T,
     // ParamIndexMap][], ParamStash]` carries a parameter built out of both
     // arms, and pairing it positionally against the instantiated union's
-    // synthesized `push` recorded `[T, Params][] => [[H, RouterRoute],
-    // ParamIndexMap][]` -- hono's `PatternRouter.match`, whose `[handlers]`
-    // then had the wrong tuple element and matched neither arm of its own
+    // synthesized `push` recorded `[T, Params][] => [[H, Route],
+    // ParamIndexMap][]` -- a router's `match`, whose `[handlers]` then had the wrong tuple element and matched neither arm of its own
     // declared result. The arms themselves are matched safely, so nothing is
     // lost by stopping here.
     if (open.isUnion() || closed.isUnion()) {
@@ -321,8 +331,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
       return
     }
     if (open.isIntersection() && closed.isIntersection()) pairArms(open.types, closed.types, into, depth, seen, owner)
-    // The ARGUMENTS of a reference, so `Promise<WithId<TSchema>>` records an
-    // entry for `WithId<TSchema>` too. The target is checked, not just the
+    // The ARGUMENTS of a reference, so `Promise<Keyed<T>>` records an
+    // entry for `Keyed<T>` too. The target is checked, not just the
     // count: two references of the same arity to different generics have
     // nothing to do with each other, and a positional pairing across them
     // would record an answer for an unrelated type.
@@ -340,8 +350,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
       }
     }
     // Members BY NAME. A record's own fields are where the remaining holes sit
-    // once the signature positions are paired -- mongodb's `Filter<TSchema>` is
-    // a mapped type whose every property is a `Condition<WithId<TSchema>[P]>` --
+    // once the signature positions are paired -- a `Query<T>` that is a mapped
+    // type whose every property is a `Condition<Keyed<T>[P]>` --
     // and a name is an exact correspondence rather than a position, so nothing
     // has to be assumed about ordering or about a collapse.
     for (const property of open.getProperties()) {
@@ -354,10 +364,10 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
       pair(openMember, checker.getTypeOfSymbolAtLocation(counterpart, at), into, depth + 1, seen, owner)
     }
     // Index signatures BY KEY TYPE, the same exact correspondence a name is:
-    // mongodb's `InsertManyResult<TSchema>.insertedIds` is `{ [key: number]:
-    // InferIdType<TSchema> }`, whose only hole sits in its number index -- a
-    // record with no named member to pair, so without this the conditional
-    // stayed deferred in every copy while its image read `ObjectId`.
+    // `Result<T>.ids` typed `{ [key: number]: InferId<T> }` has its only hole
+    // in its number index -- a record with no named member to pair, so
+    // without this the conditional stayed deferred in every copy while its
+    // image read a concrete id class.
     const closedIndexes = checker.getIndexInfosOfType(closed)
     for (const index of checker.getIndexInfosOfType(open)) {
       const counterpart = closedIndexes.find((candidate) => candidate.keyType === index.keyType)
@@ -374,7 +384,7 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
    * The checker orders a union's members by internal type id, and an
    * instantiated arm is a freshly interned type whose id bears no relation to
    * the one it replaced, so the two lists are routinely in different orders.
-   * hono's `PatternRouter<T>` produced exactly that: an open
+   * A generic `Router<T>` produced exactly that: an open
    * `ArrayIterator<[T, ParamIndexMap]> | ArrayIterator<string> |
    * ArrayIterator<[T, Params]>` against a closed list whose `Params` arm had
    * moved to the front. Pairing those by position records an answer relating
@@ -406,8 +416,8 @@ export const createInstantiatedMembers = (checker: ts.TypeChecker, specializatio
     }
     // An instantiated object type keeps its declaration's SYMBOL, so an open
     // arm whose symbol exactly one closed arm shares is identified the same
-    // way: `WithId<T>`'s `{ _id: InferIdType<T> }` against `{ _id: string }`,
-    // which leaves `EnhancedOmit<T, '_id'>` and its `Pick<...>` image as the
+    // way: `Keyed<T>`'s `{ key: InferId<T> }` against `{ key: string }`,
+    // which leaves `Omit<T, 'key'>` and its `Pick<...>` image as the
     // one-to-one leftover. Two arms of one generic (`ArrayIterator<A> |
     // ArrayIterator<B>`) share a symbol and so are never matched this way.
     unmatched = unmatched.filter((arm) => {

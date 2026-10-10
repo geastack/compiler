@@ -6,9 +6,10 @@ import { censusParameterBindings, indexParameterBindingProgram } from './paramet
 import { wholeProgram } from './reachability.js'
 import { indexValueFlow } from './flow/value-flow.js'
 import { attachClosedScriptScope } from './flow/targets.js'
+import { sameImplicitArgumentsTuple } from './implicit-arguments-tuple.js'
 
 /**
- * three's WebGL forwarding shims, reduced: `function texImage3D() {
+ * A graphics library's forwarding shims, reduced: `function texImage3D() {
  * gl.texImage3D( ...arguments ) }`, called with numbers in its leading
  * positions and a typed array or `null` in its last.
  */
@@ -32,8 +33,8 @@ const censusOf = (body: string) => {
   attachClosedScriptScope(valueFlow, { files: new Set([file]) })
   const index = indexParameterBindingProgram(checker, [file], wholeProgram, valueFlow)
   const census = censusParameterBindings(checker, [file], wholeProgram, undefined, index, valueFlow)
-  // Nested too: three's shims are inner functions of a factory
-  // (`WebGLState` declares `texImage3D` inside itself), and a finder over
+  // Nested too: such shims are inner functions of a factory
+  // (`GpuState` declares `texImage3D` inside itself), and a finder over
   // top-level statements alone hands `implicitArgumentsTupleAt` nothing.
   const functionNamed = (name: string): ts.FunctionDeclaration => {
     let found: ts.FunctionDeclaration | undefined
@@ -60,6 +61,18 @@ const censusOf = (body: string) => {
 }
 
 const callers = 'texImage3D( 1, 0, new Uint8Array( 4 ) ); texImage3D( 2, 1, null ); texImage3D( 3, 2 );'
+
+test('equal checker frame types cannot hide a changed prototype-versus-instance source inventory', () => {
+  const { frameOf } = censusOf(`function read(value) { return arguments.length; } read(Date.prototype); read(new Date());`)
+  const frame = frameOf('read')
+  assert.ok(frame && frame.frame === 'array' && frame.sourcePositions)
+  const sources = frame.sourcePositions[0]!
+  assert.equal(sources.length, 2)
+  assert.equal(sources[0]!.getText(), 'Date.prototype')
+  assert.equal(sources[1]!.getText(), 'new Date()')
+  assert.equal(sameImplicitArgumentsTuple(frame, { ...frame, sourcePositions: [[...sources]] }), true)
+  assert.equal(sameImplicitArgumentsTuple(frame, { ...frame, sourcePositions: [[sources[0]!, sources[0]!]] }), false)
+})
 
 test('a forwarded arguments frame is typed per position over its closed callers', () => {
   const { frameOf, spelled } = censusOf(`function texImage3D() { upload( ...arguments ); } ${callers}`)
@@ -98,19 +111,28 @@ test('a frame read at a runtime index keeps the runtime-sized array of one eleme
   assert.deepEqual(spelled(frame.element), ['number'])
 })
 
+test('the actual arguments frame includes supplied values but does not reject omitted named formals', () => {
+  const { frameOf, spelled } = censusOf(`
+    function count(first, second, third) { return arguments.length; }
+    count(); count(undefined); count(null); count(1, 2); count(3, 4, 5);`)
+  const frame = frameOf('count')
+  assert.ok(frame && frame.frame === 'array')
+  assert.deepEqual(spelled(frame.element), ['null', 'number', 'undefined'])
+})
+
 /**
- * three's shape exactly: `WebGLState` publishes the shim on a returned record,
- * the renderer keeps that record in a cell, hands it to `WebGLTextures` (whose
+ * The full library shape: `GpuState` publishes the shim on a returned record,
+ * the renderer keeps that record in a cell, hands it to `GpuTextures` (whose
  * uploads are the only callers) and stores it on a field other code reads
  * members through.
  */
 const handedOn = (tail: string) => `
-  function WebGLState() {
+  function GpuState() {
     function texImage3D() { upload( ...arguments ); }
     function bindTexture( target ) { return target; }
     return { texImage3D: texImage3D, bindTexture: bindTexture };
   }
-  function WebGLTextures( state ) {
+  function GpuTextures( state ) {
     function uploadTexture() { state.bindTexture( 1 ); state.texImage3D( 1, 0, new Uint8Array( 4 ) ); state.texImage3D( 2, 1, null ); }
     return { uploadTexture };
   }
@@ -118,8 +140,8 @@ const handedOn = (tail: string) => `
     constructor() {
       const _this = this;
       let state;
-      state = new WebGLState();
-      const textures = new WebGLTextures( state );
+      state = new GpuState();
+      const textures = new GpuTextures( state );
       _this.state = state;
       this.textures = textures;
     }

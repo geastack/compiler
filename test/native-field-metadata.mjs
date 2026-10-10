@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -20,7 +21,7 @@ execFileSync(
   'clang++',
   [
     '-std=c++20',
-    '-O1',
+    ...nativeOptimization('correctness'),
     '-fsanitize=address,undefined',
     '-fno-sanitize-recover=all',
     `-I${resolve(root, 'src/targets/cpp/runtime')}`,

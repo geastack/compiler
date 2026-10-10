@@ -1,4 +1,5 @@
 import { implicitArgumentsSlotOf } from './implicit-arguments.js'
+import type { ImplicitArgumentsTuple } from './implicit-arguments-tuple.js'
 import { neverOverrideResultOf } from './never-override-result.js'
 import ts from 'typescript'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
@@ -98,6 +99,10 @@ export interface StructuralPartsInput {
    * `projection/abi.ts` raises.
    */
   readonly parameterOverrideAt?: (parameter: ts.ParameterDeclaration) => StructuralTypeId | null
+  /** Actual caller sources may carry prototype handles or physical method frames their checker join erases. */
+  readonly implicitArgumentsTypeAt?: (declaration: ts.SignatureDeclaration, frame: ImplicitArgumentsTuple) => StructuralTypeId | null
+  /** A closed fresh allocation result keeps its physical entry storage across the callable frame. */
+  readonly resultOverrideAt?: (declaration: ts.SignatureDeclaration) => StructuralTypeId | null
   /**
    * The whole-program census of what K/(V) a bare `new Map()`/`new Set()`/
    * `new WeakMap()`/`new WeakSet()` allocation, its owning declaration, or a
@@ -147,6 +152,7 @@ export interface StructuralPartsInput {
   readonly sloppyAbsence?: SloppyAbsenceCensus
   /** A member slot a suppressed type error stores a foreign value into, widened by it -- `suppressed-write-arms.ts`. */
   readonly foreignArmsOfMember?: (symbol: ts.Symbol, type: StructuralTypeId) => StructuralTypeId
+  readonly mutableFieldStorageTypeOf?: (symbol: ts.Symbol, stated: StructuralTypeId) => StructuralTypeId | null
 }
 
 export interface StructuralParts {
@@ -241,9 +247,9 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
    * node and handed to `getTypeOfSymbolAtLocation`, which reads `location.parent`
    * and crashed inside TypeScript on `Cannot read properties of undefined
    * (reading 'kind')`. Every candidate whose type reached one of those
-   * signatures was blocked by a producer failure -- 496 of the three.js app's, 392 of
-   * three-angle-metal's -- because three.js is compiled from source and its
-   * signatures are inferred, not declared.
+   * signatures was blocked by a producer failure -- hundreds per program for a
+   * JavaScript library compiled from source, whose signatures are inferred,
+   * not declared.
    *
    * `getTypeOfSymbol` is the location-free form of the same question and the
    * right one to ask when there is no location; `structural-indexed-access.ts`
@@ -344,10 +350,9 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // as written: bare `any`, never wrapped in an array. `abi.ts`'s
     // `derive.ts` (`abiOf`) has one primitive for a rest slot, `array`, so a
     // bare `any` reaching it derives to plain `dynamic` and every call that
-    // spreads a real array into it refuses to pack -- hono's `mount()`
-    // (`hono-base.ts`) forwards `...getOptions(c)`, a genuine `unknown[]`,
-    // into `applicationHandler: (request, ...args: any) => ...` this exact
-    // way. A rest parameter is ALWAYS the array ECMAScript's own
+    // spreads a real array into it refuses to pack -- a method that forwards
+    // `...getOptions(c)`, a genuine `unknown[]`, into
+    // `handler: (request, ...args: any) => ...` reaches it this exact way. A rest parameter is ALWAYS the array ECMAScript's own
     // `FunctionDeclarationInstantiation` binds it to (see this file's
     // `parameterSlotTypeOf` sibling comment for the identical fact about the
     // UNANNOTATED case) -- an explicit `any` describes the ELEMENT the
@@ -372,11 +377,11 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // here would publish Array<Array<number>> for T extends [number, number].
     const restContainer = flags.rest ? (checker.getBaseConstraintOfType(declared) ?? declared) : declared
     // The checker's type can be a container only this mapper can close: in a
-    // copy of mongodb's `emitAndLog<K>(event, ...args: Parameters<Events[K]>)`
+    // copy of a generic `emit<K>(event, ...args: Parameters<Events[K]>)`
     // the checker still holds the deferred conditional, while `typeOf`
     // answers the copy's closed parameter tuple (`structural.ts`'s
     // `parametersOperatorShape`). That tuple IS the container the body binds;
-    // wrapping it again declared `[Connection[]]` as `Connection[][][]`.
+    // wrapping it again declared `[Item[]]` as `Item[][][]`.
     const restMappedContainer = (): boolean => {
       if (!table) return false
       const kind = table.get(typeOf(declared)).shape.kind
@@ -595,8 +600,7 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // An `async` function's own declared type really IS `Promise<T>` -- this
     // used to unwrap it to `T` here via `checker.getAwaitedType`, making
     // every async function compile as an ordinary synchronous function. That
-    // was scaffolding for an earlier false-certification patch (see
-    // `.scratch/HANDOVER-2026-08-31-session3.md`), not the target design; it
+    // was scaffolding for an earlier false-certification patch, not the target design; it
     // is reverted now that `promise` is a real, statically-typed carrier
     // (`representation/derive.ts`'s `PromiseDeclarationPolicy`). `await`
     // still unwraps at its own site (`contributeAwait`,
@@ -653,10 +657,11 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // caller omits optional), the runtime-sized Array of one element when the
     // body indexes it at run time. See `implicit-arguments-tuple.ts`.
     const implicitFrame = declaration && phantomIndex !== null ? parameters.implicitArgumentsTupleAt?.(declaration) : null
-    if (implicitFrame && phantomIndex !== null) {
+    if (implicitFrame && phantomIndex !== null && declaration) {
       const parameter = parameterShapes[phantomIndex]
       const type =
-        implicitFrame.frame === 'array'
+        input.implicitArgumentsTypeAt?.(declaration, implicitFrame) ??
+        (implicitFrame.frame === 'array'
           ? internArray(typeOf(implicitFrame.element))
           : table?.intern({
               kind: 'tuple',
@@ -667,8 +672,8 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
                 rest: false,
                 variadic: false
               }))
-            })
-      if (parameter && type !== undefined) parameterShapes[phantomIndex] = { ...parameter, type, slot: type }
+            }))
+      if (parameter && type !== undefined) parameterShapes[phantomIndex] = { ...parameter, type, slot: type, argumentsFrame: 'actual' }
     }
     return {
       parameters: parameterShapes,
@@ -678,6 +683,7 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
       thisParameter: receiverType,
       ...(written === null && receiverType !== null ? { implicitReceiver: true as const } : {}),
       result:
+        (resultOverride === undefined && declaration ? input.resultOverrideAt?.(declaration) : null) ??
         (neverOverrideResult ? typeOf(neverOverrideResult) : null) ??
         (declaredMemberResult ? typeOf(declaredMemberResult) : null) ??
         (contextualSlotResult ? typeOf(contextualSlotResult) : null) ??
@@ -724,8 +730,9 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // An accessor pair that does nothing but forward to another field IS that
     // field, so it must be answered by the SAME authority -- this function,
     // recursively -- rather than by its own annotation. See
-    // `accessorPassthroughMemberTargetOf`: three's `Texture.image` is
-    // `get image() { return this.source.data }` carrying `@type {?Object}`,
+    // `accessorPassthroughMemberTargetOf`: a JavaScript class's
+    // `get image() { return this.source.data }` carrying `@type {?Object}` is
+    // the shape,
     // and that upper bound otherwise wins outright over the census that knows
     // the slot holds `Source.data`.
     //
@@ -806,8 +813,8 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // in `structural-layout-type.ts`'s `layoutTypeAt`, which takes it FIRST for
     // the same reason -- the one census answer this module takes over a checker
     // answer it is happy with. The `isUnusableEvidence` gate above cannot serve
-    // it: the checker's answer for hono's `#matchResult: Result<[unknown,
-    // RouterRoute]>` is a perfectly good two-armed union of tuples, and the
+    // it: the checker's answer for a field like `#result: Result<[unknown,
+    // Route]>` is a perfectly good two-armed union of tuples, and the
     // fact is that its one `unknown` leaf is filled in concretely by the
     // program's only writer. This is the ABI side of that one storage
     // location; the body side already answers the narrowing, so leaving this
@@ -863,7 +870,8 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     // onto a refcounted reference, so the field became a bare
     // `gea::Ref<Extension>` whose only absent state, `nullptr`, was already
     // spoken for by `null` -- and `{}` read its slot back as `null`.
-    // `test/fixtures/optional-slot-holds-null.ts` printed `null,null,value:7`
+    // A program storing absent, `null` and a value into one optional
+    // `T | null` slot printed `null,null,value:7`
     // where the language says `absent,null,value:7`: compiled, linked, ran,
     // wrong. Widening restores the third state, and `union.ts` gives it an
     // arm of its own.
@@ -875,7 +883,8 @@ export const createStructuralParts = (input: StructuralPartsInput): StructuralPa
     const stated = physical ?? declared
     const statedMemberType =
       inferredBag ?? arraySlot ?? inferredCollection ?? typeOf(optional ? checker.getNullableType(stated, ts.TypeFlags.Undefined) : stated)
-    const memberType = input.foreignArmsOfMember ? input.foreignArmsOfMember(symbol, statedMemberType) : statedMemberType
+    const storage = input.mutableFieldStorageTypeOf?.(symbol, statedMemberType) ?? statedMemberType
+    const memberType = input.foreignArmsOfMember ? input.foreignArmsOfMember(symbol, storage) : storage
     return {
       key,
       type: table && input.sloppyAbsence ? withAbsences(table, memberType, input.sloppyAbsence.absencesOfCell(symbol)) : memberType,

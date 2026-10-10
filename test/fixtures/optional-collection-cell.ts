@@ -1,6 +1,6 @@
 /**
  * A collection cell the program lets go ABSENT, whose type arguments the
- * program never states -- three's `WebGLRenderer.js`:
+ * program never states -- a 3D renderer's program cache:
  *
  *     let programs = materialProperties.programs;
  *     if ( programs === undefined ) { programs = new Map(); ... }

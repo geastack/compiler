@@ -1,11 +1,11 @@
 //! expect: null
 //! expect: str:hi
 //! expect: stream:reader
-// `@hono/node-server` listener.ts `responseViaCache`, line 192. node prints
+// A Node HTTP adapter's cached-response writer. node prints
 // `null` / `str:hi` / `stream:reader`.
 //
 // `InternalCache[1]` is declared `string | ReadableStream | null`, and the
-// function still asks `body instanceof Uint8Array`: hono stores a whole
+// function still asks `body instanceof Uint8Array`: the adapter stores a whole
 // `BodyInit` through an `any`-typed symbol key and reads it back with an
 // unchecked `as InternalCache`. TypeScript cannot discard the arm, so the
 // branch's type is `StreamLite & Uint8Array`.

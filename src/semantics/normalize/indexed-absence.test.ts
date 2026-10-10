@@ -16,7 +16,7 @@ import { censusGlobalHostMutations } from './global-host-mutations.js'
 import { censusUnresolvableNames } from './unresolvable-names.js'
 
 /**
- * three's `WebGLUtils.convert`, reduced: a closed class whose members no number
+ * A library's constant-conversion helper, reduced: a closed class whose members no number
  * can name, read with a numeric key and folded by `!== undefined`.
  */
 const program = (
@@ -321,20 +321,4 @@ test('numeric absence authority is an explicit provisional ledger proof', () => 
   )
   assert.equal(rejected.value, true, 'this proof is provisional until the mutation census settles')
   assert.equal(revoked.requirementsHold(rejected.requirements), false, 'opaque exposure must revoke the numeric absence obligation')
-})
-
-test('a host stating refusesObjectPrototypeAbsenceProofs refuses numeric absence before it records an obligation', () => {
-  const proven = program()
-  const refusing = createDeferredIntrinsicProtocolLedger({ refuseObjectPrototypeAbsenceProofs: true })
-  attachDeferredIntrinsicProtocolLedger(proven.flow, refusing)
-  const refused = refusing.capture(() =>
-    numericIndexAbsenceProven(
-      proven.checker,
-      proven.flow,
-      proven.checker.getTypeAtLocation(proven.access.expression),
-      proven.checker.getTypeAtLocation(proven.access.argumentExpression)
-    )
-  )
-  assert.equal(refused.value, false)
-  assert.deepEqual(refused.requirements, [])
 })

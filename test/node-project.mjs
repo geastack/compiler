@@ -131,7 +131,7 @@ test('a bundled public entry maps to the unique matching source below an explici
   )
 })
 test('a monorepo package whose tsconfig extends a sibling workspace package maps its outputs', () => {
-  // `@mongodb-js/saslprep`'s shape: its tsconfig is only an `extends` of a
+  // A scoped monorepo package's shape: its tsconfig is only an `extends` of a
   // config package that lives in the same unbuilt, uninstalled checkout.
   assert.equal(
     implementation(
@@ -527,7 +527,7 @@ test('a shipped src/ without build metadata is acquired; one its tsconfig maps i
     asked.push(name)
     return { name, version, gitHead: 'a'.repeat(40), repository: 'https://github.com/example/sample' }
   }
-  // bson's shape: a Rollup bundle plus `src/`, but no config naming the input.
+  // A bundled library's shape: a Rollup bundle plus `src/`, but no config naming the input.
   {
     const { data, files } = preparationFixture()
     data.set(
@@ -549,7 +549,7 @@ test('a shipped src/ without build metadata is acquired; one its tsconfig maps i
     })
     assert.deepEqual(asked, ['sample'])
   }
-  // mongodb's shape: `src/` plus the tsconfig whose outDir/rootDir maps `lib/`.
+  // A compiled library's shape: `src/` plus the tsconfig whose outDir/rootDir maps `lib/`.
   {
     const { data, files } = preparationFixture()
     data.set(

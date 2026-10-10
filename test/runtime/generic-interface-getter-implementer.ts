@@ -19,7 +19,7 @@
 // accessor whose allocated shape declares the member as ordinary data has
 // nowhere to install its body; reading it would call an unset slot".
 //
-// hono's `WSContext<T>` is the shape this came from: `@hono/node-server` writes
+// An HTTP framework's `WSContext<T>` is the shape this came from: its Node server adapter writes
 // `new WSContext<WebSocketLike>({ ..., get readyState() { return ws.readyState },
 // ... })` against `interface WSContextInit<T> { readyState: WSReadyState; ... }`.
 // Both spellings are exercised here: `raw: T` names the type parameter (always

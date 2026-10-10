@@ -1,17 +1,17 @@
-//! expect: kerberos missing: kerberos is not installed
-//! expect: kerberos loaded: svc@host
-//! expect: zstd missing: zstd is not installed
-//! expect: zstd loaded: 3 bytes at level 5
-//! expect: zstd other: TypeError
+//! expect: auth-plugin missing: auth-plugin is not installed
+//! expect: auth-plugin loaded: svc@host
+//! expect: compressor missing: compressor is not installed
+//! expect: compressor loaded: 3 bytes at level 5
+//! expect: compressor other: TypeError
 //! emitted-has: a dynamic value is none of the union's object arms
 
-// mongodb's deps.ts: `kerberos = require('kerberos')` and `ZStandard =
-// require('@mongodb-js/zstd')`, where `require` answers `any` and the slot is
-// `Module | { kModuleError }` -- carried as the module's record, the error
-// record, and `makeErrorModule`'s Proxy. The `any` enters the union by a
-// checked conversion: an object is adopted as the record arm whose required
-// keys it holds, a box can never hold the native Proxy, and anything else is
-// a TypeError. The union itself is never boxed.
+// A library's optional-dependency loader: `authPlugin = require('auth-plugin')`
+// and `Compressor = require('@scope/compressor')`, where `require` answers
+// `any` and the slot is `Module | { kModuleError }` -- carried as the module's
+// record, the error record, and `makeErrorModule`'s Proxy. The `any` enters
+// the union by a checked conversion: an object is adopted as the record arm
+// whose required keys it holds, a box can never hold the native Proxy, and
+// anything else is a TypeError. The union itself is never boxed.
 
 class MissingDependencyError extends Error {
   constructor(message: string) {
@@ -35,20 +35,20 @@ function makeErrorModule(error: any) {
   })
 }
 
-interface KerberosModule {
+interface AuthPluginModule {
   initializeClient(service: string): Promise<string>
 }
-type Kerberos = KerberosModule | { kModuleError: MissingDependencyError }
+type AuthPlugin = AuthPluginModule | { kModuleError: MissingDependencyError }
 
-type ZStandardLib = {
+type CompressorLib = {
   compress(buf: Uint8Array, level?: number): Promise<string>
   decompress(buf: Uint8Array): Promise<Uint8Array>
 }
-type ZStandard = ZStandardLib | { kModuleError: MissingDependencyError }
+type Compressor = CompressorLib | { kModuleError: MissingDependencyError }
 
 const installed: Record<string, any> = {
-  kerberos: { initializeClient: async (service: string) => service + '@host' },
-  zstd: {
+  authPlugin: { initializeClient: async (service: string) => service + '@host' },
+  compressor: {
     compress: async (buf: Uint8Array, level?: number) => buf.length + ' bytes at level ' + level,
     decompress: async (buf: Uint8Array) => buf
   },
@@ -61,62 +61,62 @@ function loadOptional(name: string): any {
   return found
 }
 
-function getKerberos(name: string): Kerberos {
-  let kerberos: Kerberos
+function getAuthPlugin(name: string): AuthPlugin {
+  let authPlugin: AuthPlugin
   try {
-    kerberos = loadOptional(name)
+    authPlugin = loadOptional(name)
   } catch (error) {
-    kerberos = makeErrorModule(new MissingDependencyError('kerberos is not installed'))
+    authPlugin = makeErrorModule(new MissingDependencyError('auth-plugin is not installed'))
   }
-  return kerberos
+  return authPlugin
 }
 
-function getZstdLibrary(name: string): ZStandardLib | { kModuleError: MissingDependencyError } {
-  let ZStandard: ZStandardLib | { kModuleError: MissingDependencyError }
+function getCompressorLibrary(name: string): CompressorLib | { kModuleError: MissingDependencyError } {
+  let Compressor: CompressorLib | { kModuleError: MissingDependencyError }
   try {
-    ZStandard = loadOptional(name)
+    Compressor = loadOptional(name)
   } catch (error) {
-    ZStandard = makeErrorModule(new MissingDependencyError('zstd is not installed'))
+    Compressor = makeErrorModule(new MissingDependencyError('compressor is not installed'))
   }
-  return ZStandard
+  return Compressor
 }
 
 // The same slot filled outside the `try`: a module that is none of the arms
 // is a TypeError -- node's from the `in` below, this one's from the checked
 // conversion itself -- and the caller catches it either way.
-function getZstdUnguarded(name: string): ZStandard {
-  let ZStandard: ZStandard = makeErrorModule(new MissingDependencyError('zstd is not installed'))
-  ZStandard = loadOptional(name)
-  return ZStandard
+function getCompressorUnguarded(name: string): Compressor {
+  let Compressor: Compressor = makeErrorModule(new MissingDependencyError('compressor is not installed'))
+  Compressor = loadOptional(name)
+  return Compressor
 }
 
-async function kerberos(name: string): Promise<string> {
-  const krb = getKerberos(name)
-  if ('kModuleError' in krb) return 'kerberos missing: ' + krb.kModuleError.message
-  return 'kerberos loaded: ' + (await krb.initializeClient('svc'))
+async function authPlugin(name: string): Promise<string> {
+  const plugin = getAuthPlugin(name)
+  if ('kModuleError' in plugin) return 'auth-plugin missing: ' + plugin.kModuleError.message
+  return 'auth-plugin loaded: ' + (await plugin.initializeClient('svc'))
 }
 
-async function zstd(name: string): Promise<string> {
-  const lib: ZStandard = getZstdLibrary(name)
-  if ('kModuleError' in lib) return 'zstd missing: ' + lib.kModuleError.message
-  return 'zstd loaded: ' + (await lib.compress(new Uint8Array([1, 2, 3]), 5))
+async function compressor(name: string): Promise<string> {
+  const lib: Compressor = getCompressorLibrary(name)
+  if ('kModuleError' in lib) return 'compressor missing: ' + lib.kModuleError.message
+  return 'compressor loaded: ' + (await lib.compress(new Uint8Array([1, 2, 3]), 5))
 }
 
-async function zstdUnguarded(name: string): Promise<string> {
-  const lib = getZstdUnguarded(name)
-  if ('kModuleError' in lib) return 'zstd missing: ' + lib.kModuleError.message
-  return 'zstd loaded: ' + (await lib.compress(new Uint8Array([1, 2, 3]), 5))
+async function compressorUnguarded(name: string): Promise<string> {
+  const lib = getCompressorUnguarded(name)
+  if ('kModuleError' in lib) return 'compressor missing: ' + lib.kModuleError.message
+  return 'compressor loaded: ' + (await lib.compress(new Uint8Array([1, 2, 3]), 5))
 }
 
 async function main(): Promise<void> {
-  console.log(await kerberos('absent-kerberos'))
-  console.log(await kerberos('kerberos'))
-  console.log(await zstd('absent-zstd'))
-  console.log(await zstd('zstd'))
+  console.log(await authPlugin('absent-auth-plugin'))
+  console.log(await authPlugin('authPlugin'))
+  console.log(await compressor('absent-compressor'))
+  console.log(await compressor('compressor'))
   try {
-    console.log('zstd other: ' + (await zstdUnguarded('other')))
+    console.log('compressor other: ' + (await compressorUnguarded('other')))
   } catch (error) {
-    console.log('zstd other: ' + (error as Error).name)
+    console.log('compressor other: ' + (error as Error).name)
   }
 }
 

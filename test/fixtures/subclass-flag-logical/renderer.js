@@ -1,8 +1,8 @@
 import { Material, MeshBasicMaterial, MeshPhongMaterial, ShaderMaterial } from './materials.js'
 
-// three's `WebGLProperties`: one lazily created `{}` per object, handed out
+// A 3D renderer's per-object property store: one lazily created `{}` per object, handed out
 // through the factory's returned `get`.
-function WebGLProperties() {
+function GpuProperties() {
   let properties = new WeakMap()
 
   function get(object) {
@@ -20,9 +20,9 @@ function WebGLProperties() {
   }
 }
 
-const properties = WebGLProperties()
+const properties = GpuProperties()
 
-// three's `WebGLRenderer.materialNeedsLights`, reduced: a `MeshBasicMaterial`
+// A 3D renderer's `materialNeedsLights`, reduced: a `MeshBasicMaterial`
 // declares none of these flags, so the chain ends on `undefined && ...` and
 // the call returns `undefined`, not `false`.
 function materialNeedsLights(material) {

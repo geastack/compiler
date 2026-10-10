@@ -51,6 +51,11 @@ export interface SelectedSignature {
   readonly typeArguments: TypeArgumentProvenance
   /** The instantiated structural return type of the selected signature. */
   readonly returnType: StructuralTypeId
+  /** A closed native own-data replacement supplies the executable frame.
+   * `declaration`/`provenance` retain the checker's original attribution;
+   * this receipt names the source that owns parameters, this and returnType.
+   */
+  readonly sourceFrame?: { readonly kind: 'ordinary-own-data'; readonly declaration: DeclarationId }
 }
 
 /**
@@ -144,6 +149,11 @@ export type InvocationResultDivergence =
    * to compile. See `producers/invocations.ts`'s `objectCreateResultOverride`.
    */
   | { readonly kind: 'object-create-type-annotation' }
+  /** The authenticated zero-argument Object allocation creates an empty
+   * native dictionary in the stated index storage. No fixed field presence
+   * is inferred from that storage; the dictionary begins with no entries.
+   */
+  | { readonly kind: 'fresh-object-native-storage' }
   /**
    * `Object.fromEntries(pairs)` resolved to the `any`-returning
    * `Iterable<readonly any[]>` overload, into a destination annotated as a
@@ -177,12 +187,12 @@ export type InvocationResultDivergence =
    */
   | { readonly kind: 'collection-member-type-inference' }
   /**
-   * A call that RETURNS an object bag: three's `WebGLProperties.get`, whose
-   * body is `let map = properties.get( object ); if ( map === undefined ) {
+   * A call that RETURNS an object bag: a per-object property store's `get`,
+   * whose body is `let map = properties.get( object ); if ( map === undefined ) {
    * map = {}; ... } return map`. Nothing in the source states that return
    * type, so `buildSelectedSignature` derives `any` from the resolved
    * signature, while `object-bag-bindings.ts`'s whole-program census bound the
-   * 47 members the renderer then reads off it and `structural.ts`'s `typeAt`
+   * members the program then reads off it and `structural.ts`'s `typeAt`
    * publishes them (`bagShapeTypeAt` via `callResultShapeAt`).
    *
    * The bag census REFUSES to answer at a call unless a caller takes on this
@@ -222,6 +232,10 @@ export type InvocationResultDivergence =
    * see `producers/invocations.ts`'s `isExplicitThisCallWithAuthenticatedReceiver`.
    */
   | { readonly kind: 'explicit-this-call-return' }
+  /** The joint source-value proof selects an installed own callable, whose
+   * result replaces the inherited wrapper result (void observes undefined).
+   */
+  | { readonly kind: 'ordinary-own-data-call-return' }
   /**
    * `Array.from(source)` over a source the checker typed `any` and a census
    * bound: the checker instantiated `from<T>(...): T[]` at `any`, while

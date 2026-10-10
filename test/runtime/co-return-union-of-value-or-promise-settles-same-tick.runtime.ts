@@ -1,5 +1,5 @@
 // A coroutine's `return x` where `x`'s static type is `string | Promise<string>`
-// -- mongodb's execute_operation family passes an operation's result through
+// -- a database client's operation-execution family passes an operation's result through
 // exactly this shape (an operation may answer synchronously or not, and the
 // wrapping function's own declared result is `Promise<string>`).
 //

@@ -1,6 +1,6 @@
 // RegExp.prototype.test / exec ToString their argument (ECMA-262 22.2.6.16
-// step 3). The mongodb connection-string parser tests a regex against an
-// option value typed `any`, and bson's deserializer against `name as string`
+// step 3). A database client's connection-string parser tests a regex against
+// an option value typed `any`, and its deserializer against `name as string`
 // where `name` is `string | number` -- the assertion changes no carrier.
 
 const digits = /^\d+$/

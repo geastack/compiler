@@ -2,20 +2,21 @@
 // translation unit and called by name at every site that needs it.
 //
 // Each of these used to be pasted in full at every use: an `any -> record`
-// load as an immediately invoked lambda rebuilding the record field by field,
+// load as an immediately invoked lambda building its live Document view with
+// all five field adapters,
 // `Object.assign` between two known shapes as a static copy plus a
 // creation-order walk routing every run-time key through the target's field
 // list, a spread's run-time key routing the same way, and `Object.entries` of
-// a known shape as a push per field. mongodb's 131-field options family made
+// a known shape as a push per field. A database client's 131-field options family made
 // each copy tens of kilobytes; the ping driver's unit was 77 MB with lines of
 // 390 KB. The assertions below pin that each renders once however many sites
 // ask for it, and the run pins that calling the one definition still answers
 // what node answers at every site.
 //
 //! emitted-lacks: [](const gea::Value& gea_dynamic_record)
-//! emitted-once: const bool gea_dynamic_record_present_0 = gea::detail::dynamicRecordHasField(gea_dynamic_record, "alpha");
+//! emitted-once: gea::record::makeDocumentViewWithOrigin<
 //! emitted-once: gea::assignOwnPropertiesUnorderedWith(gea_assign_source,
-//! emitted-once: gea::assignOwnPropertiesInCreationOrderWith(gea_assign_source,
+//! emitted-has: gea::nativeObjectDataSet<
 //! emitted-once: if (gea_spread_key == "alpha")
 //! emitted-once: gea::copyOwnPropertiesInCreationOrder(gea_entries_source,
 //! expect: first 1 x
@@ -61,6 +62,10 @@ const again: Wider = { alpha: 0, delta: 10 }
 Object.assign(again, second)
 console.log('again', again.alpha, again.beta, again.delta)
 
+// `Listed` has no `gamma`, which `Settings` declares: a typed key the
+// target's layout lacks lands in its native object data, never a box. `first`
+// is no closed literal family, so its own carrier describes its keys, read
+// in its own key order (a Document view's entries included).
 interface Listed {
   alpha: number
   beta?: string

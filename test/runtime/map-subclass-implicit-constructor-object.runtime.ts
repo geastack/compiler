@@ -1,7 +1,7 @@
 // A class with no constructor of its own, extending `Map`: its constructor
 // object inherits Map's two ambient construct overloads, and reading the
 // class as a VALUE (`Lower.prototype.normalize.call(...)`, as
-// mongodb-connection-string-url's `CaseInsensitiveMap` does) needs one
+// a connection-string parser's case-insensitive map does) needs one
 // calling convention for it.
 class Lower<K extends string = string> extends Map<K, string> {
   normalize(name: K): string {

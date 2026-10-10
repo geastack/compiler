@@ -1,8 +1,8 @@
 // A `Map` stored where a `ReadonlyMap` is declared is the SAME object read
 // through the read-only name -- never a copy.
 //
-// The MongoDB driver's `FindCursor` does `this.findOptions.sort =
-// formatSort(sort)` (find_cursor.ts:55 and :422), storing a
+// A database client's query cursor does `this.findOptions.sort =
+// formatSort(sort)` (twice in its cursor source), storing a
 // `Map<string, SortDirectionForCmd>` (`1 | -1 | { $meta }`) into `Sort`, whose
 // arm is `ReadonlyMap<string, SortDirection>` (which also admits 'asc',
 // 'desc', ...). TypeScript allows it by covariance. The value carriers differ,

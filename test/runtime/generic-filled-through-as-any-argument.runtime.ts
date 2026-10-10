@@ -1,5 +1,5 @@
 // A generic's type parameter the checker infers as `any` only because the one
-// argument that binds it was erased with `as any` (mongodb's
+// argument that binds it was erased with `as any` (a database client's
 // `executeOperation(client, new InsertOneOperation(...) as TODO_NODE_3286)`).
 // The assertion is erased at runtime, so the copy receives the operation class
 // itself and must take it natively rather than boxed.

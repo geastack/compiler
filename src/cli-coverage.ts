@@ -133,8 +133,8 @@ const parseArguments = (argv: readonly string[]): CoverageArguments => {
 
 /**
  * The plugin module's factory, the same contract `analyze` reads: the default
- * export, or the one exported function, called with no arguments. A host such
- * as node-compat (`plugin/v2.mjs`) exports `geatscNodePluginV2` this way.
+ * export, or the one exported function, called with no arguments. A host
+ * plugin package exports its factory this way.
  */
 const loadPlugin = async (modulePath: string): Promise<CompilerPlugin | null> => {
   const loaded: unknown = await import(pathToFileURL(resolve(modulePath)).href)

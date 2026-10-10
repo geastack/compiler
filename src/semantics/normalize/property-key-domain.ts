@@ -45,7 +45,7 @@ export const createPropertyKeyDomains = (
     if (ts.isStringLiteralLike(current)) result = literal(current.text)
     else if (ts.isNumericLiteral(current)) result = numeric
     // A key the checker types as a number is carried as one, whatever spelled
-    // it: memory-pager's `page.buffer[o] = b`, with `o` from `i & mask` and
+    // it: a paging buffer's `page.buffer[o] = b`, with `o` from `i & mask` and
     // `o += this.pageOffset`, stores through a numeric key and so can never
     // name `pageOffset` -- none of the syntax below states that.
     else if (typeDomain(checker.getTypeAtLocation(current)).kind === 'number') result = numeric
@@ -138,12 +138,12 @@ const domainLiteralPieces = (domain: PropertyKeyDomain): string[] =>
  * (NaN) and ends with a digit, `y` or `N`, and every spelled piece between
  * must be a substring of such a name; an unknown domain may name anything.
  *
- * The interior rule is what three's `WebGLUniformsGroups.js` needs: its cache
- * is keyed `index + '_' + indexArray`, two numbers around an underscore. The
- * edges are unspelled, so the edge rule alone kept this write as a possible
- * numeric key on the WebGL context, refused the context's numeric-absence
- * proof, and left `WebGLUtils.convert`'s `gl[ p ]` fallback -- and every
- * `glFormat`/`glType` downstream of it -- dynamic.
+ * The interior rule is what a cache keyed `index + '_' + indexArray` -- two
+ * numbers around an underscore -- needs. The edges are unspelled, so the edge
+ * rule alone kept this write as a possible numeric key on the host object it
+ * was written to, refused that object's numeric-absence proof, and left an
+ * unrelated `ctx[ p ]` constant lookup on the same object -- and every value
+ * downstream of it -- dynamic.
  */
 export const domainMayNameNumeric = (domain: PropertyKeyDomain): boolean => {
   switch (domain.kind) {

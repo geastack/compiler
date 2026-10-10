@@ -1,6 +1,6 @@
 //! expect: connect:start sync-after connect:finally connected:true lock:undefined
 // `try { await lock; return this } finally { this.lock = undefined }` --
-// mongodb's `MongoClient.connect`. The finally does not suspend, so it is
+// a database client's `Client.connect`. The finally does not suspend, so it is
 // emitted as a scope-exit guard inside the coroutine; the guard must still see
 // a live frame when `co_return` leaves the try.
 export {}

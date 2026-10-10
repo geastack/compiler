@@ -8,7 +8,7 @@
 // annotation `Skeleton | null`), which goes through `openClassOfReceiver` --
 // never through `markReference` on a value use. Naming the class in a type
 // position alone opens nothing: following every annotation was measured to
-// pull three.js's whole `Curve` hierarchy into a program that never runs it.
+// pull a 3D library's whole curve hierarchy into a program that never runs it.
 //
 // `use` is reachable (it is called below), so its whole body must lower --
 // including the `s.boneTexture` / `s.calculateInverses()` reads in the

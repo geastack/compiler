@@ -24,8 +24,8 @@ import { verifyIrBody } from './verify.js'
  * anything can change its source, is the source: the copy is dropped and each
  * read asks the source what the copy would have held.
  *
- * bson's `deserializeObject` opens with `options = { ...options }` ("strips the
- * prototype chain") and then reads a dozen options by constant key before its
+ * A deserializer opening with `options = { ...options }` (to strip the
+ * prototype chain) and then reads a dozen options by constant key before its
  * first call. Built for real that is an allocation plus a key-order-preserving
  * copy of a ~134-field native record, and its destruction, for every document
  * deserialized -- to answer reads the source answers identically. The copy is
@@ -206,7 +206,7 @@ const rewriteBody = (
 
   // Asked of the one block the spread sits in. `cyclicBlocksOf` answers "all
   // cyclic" for a body past its size cap, and the bodies this exists for --
-  // bson's `deserializeObject` -- are exactly the large ones.
+  // large deserializers -- are exactly the large ones.
   const onCycle = (block: IrBlockId): boolean => {
     const seen = new Set<IrBlockId>()
     const pending = [...successorsOf(block)]
@@ -398,7 +398,10 @@ const rewriteBody = (
           if (!holdsUndefined(use.result.representation)) return false
           const useSite = sites.get(use)
           if (useSite === undefined || !cleanAt(useSite)) return false
-          rewritten.set(use, { ...use, receiver: copy.source, spreadSnapshot: true })
+          // The standard-prototype absence fact named the copy, a fresh
+          // ordinary object; the source the read now loads from is another.
+          const { ordinaryObjectPrototypeKeyAbsent: _copyFact, ...sourceRead } = use
+          rewritten.set(use, { ...sourceRead, receiver: copy.source, spreadSnapshot: true })
         }
         return true
       }

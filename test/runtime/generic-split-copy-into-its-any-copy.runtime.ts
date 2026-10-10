@@ -1,5 +1,5 @@
 // A copy of a generic class handed where the program spells the class at its
-// `any` default: the MongoDB driver's `AbstractCursor<TSchema>.stream()` does
+// `any` default: a database client's `AbstractCursor<TSchema>.stream()` does
 // `new ReadableCursorStream(this)`, whose parameter is a bare `AbstractCursor`
 // (= `AbstractCursor<any>`), and `trackCursor` adds `this` to a
 // `Set<AbstractCursor>`. `AbstractCursor` stores `TSchema` (its `transform`

@@ -1,9 +1,8 @@
-// The MongoDB driver's `AbstractOperation<TResult>` (src/operations/
-// operation.ts:151) has a default `handleOk` that returns the server's reply
-// document `as TResult`:
+// A database client's abstract `Operation<TResult>` base has a default
+// `handleOk` that returns the server's reply document `as TResult`:
 //
-//   handleOk(response: MongoDBResponse): TResult {
-//     return response.toObject(this.bsonOptions) as TResult
+//   handleOk(response: ServerResponse): TResult {
+//     return response.toObject(this.wireOptions) as TResult
 //   }
 //
 // Every operation whose TResult is not a document (`CountOperation`'s

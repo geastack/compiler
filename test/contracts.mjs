@@ -9,7 +9,7 @@ const tests = [
   'host-method-overloads.mjs',
   'native-cpu-proofs.mjs',
   'inference-fact-stability.mjs',
-  'mongodb-language-primitives.mjs',
+  'language-primitives.mjs',
   'local-iteration.mjs',
   'optional-class-field-initializer.mjs',
   'inherited-synthetic-overlay-slot.mjs',

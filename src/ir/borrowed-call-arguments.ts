@@ -15,9 +15,9 @@ export type PrivateBorrowCell = (declaration: DeclarationId) => Representation |
  * minting for. `passingOf` answers it for a bare handle or string, but an
  * `optional` states no ownership of its own, a tagged union of handles is
  * copied arm by arm -- and
- * the mongodb driver passes its options record as `Optional<Ref<...>>` at
- * nearly every level (18 records per operation, 16 of them buffered as
- * cycle candidates from exactly these by-value copies).
+ * an options-heavy library passes its options record as `Optional<Ref<...>>`
+ * at nearly every level, and most of the records each operation touches were
+ * buffered as cycle candidates from exactly these by-value copies.
  */
 const containsBox = (value: Representation): boolean =>
   value.kind === 'dynamic' ||
@@ -35,9 +35,9 @@ export const borrowWorthy = (value: Representation): boolean => {
     return !value.arms.some((arm) => containsBox(arm.value)) && value.arms.some((arm) => borrowWorthy(arm.value))
   // Not a `dynamic` box: a property store through it (`reflectSet`) is a
   // non-const operation on the box itself, and the read-only proof sees only
-  // binding writes, not stores through the value -- mongodb's
-  // `connection_string.ts` writes `options[key] = value` through exactly such
-  // a formal and the borrowed entry then failed to compile.
+  // binding writes, not stores through the value -- an `options[key] = value`
+  // written through exactly such a formal made the borrowed entry fail to
+  // compile.
   return passingOf(value) === 'const-ref'
 }
 
@@ -47,10 +47,10 @@ export const borrowWorthy = (value: Representation): boolean => {
  * `borrowWorthy` refuses a `dynamic` box outright because a store through it
  * (`reflectSet`) is a non-const operation on the box, which does not compile
  * against a `const Value&`. That is a fact about the body, not the carrier: a
- * type guard such as bson's `isDate(x)`/`isRegExp(x)`/`isUint8Array(x)` asks
+ * type guard such as `isDate(x)`/`isRegExp(x)`/`isUint8Array(x)` asks
  * the box a question (`instanceof`, `typeof`, the Object.prototype.toString
- * tag, an equality) and passes it on, and every nested value bson serializes
- * paid a by-value copy of the box -- one retain, and on release one
+ * tag, an equality) and passes it on, and every nested value a serializer
+ * visits paid a by-value copy of the box -- one retain, and on release one
  * cycle-candidate buffering of the object it holds -- per guard.
  *
  * Closed allowlist rather than a denylist of stores: a use this function does

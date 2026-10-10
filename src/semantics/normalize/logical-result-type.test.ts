@@ -78,8 +78,8 @@ test('all expression consumers receive the shared logical result instead of the 
 // The left half alone is what a caller holding an operand carrier the checker
 // disagrees with needs: it unions that against its OWN right-hand answer
 // instead of re-asking the checker at the whole expression (see
-// `producers/computations.ts`'s `&&` case, and the three.js app's `!! fog &&
-// fog.isFogExp2`, where the checker types the right operand `any` and the
+// `producers/computations.ts`'s `&&` case, and a JS library's `!! fog &&
+// fog.isExponential`, where the checker types the right operand `any` and the
 // member census types it `boolean | undefined`).
 test('the kept left half of && is the falsy arms, and is absent for an always-truthy guard', () => {
   // `obj && obj.x` keeps NOTHING from `obj`: the expression is the right

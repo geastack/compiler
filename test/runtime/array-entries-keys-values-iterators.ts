@@ -1,5 +1,5 @@
 // ECMA-262 23.1.3.5 / .19 / .38: `entries()`, `keys()` and `values()` return an
-// Array Iterator that re-reads the length every step. The mongodb driver walks
+// Array Iterator that re-reads the length every step. A database client walks
 // `for (const [index, host] of hosts.entries())`.
 
 const hosts: string[] = ['a:1', 'b:2']

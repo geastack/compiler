@@ -11,11 +11,10 @@ import { operandsOfIrOperation } from './queries.js'
  * `callable-identity-demand.ts` answers per CONVENTION: one `===` on a
  * `() => void` anywhere makes every `() => void` closure in the program
  * allocate a `FunctionObjectIdentity` (a pooled heap cell and, once it is
- * buffered, a cycle-collector candidate). In the mongodb driver three stray
+ * buffered, a cycle-collector candidate). In one large program three stray
  * reads of that kind -- a property read on a `{ (): void; version?: string }`
  * global that never exists, an `EventIterator` that removes its own listeners,
- * a module-level box -- made every per-operation `cleanup`/`checkBackIn`/
- * `() => ...` closure pay for an identity nothing ever looked at.
+ * a module-level box -- made every per-operation `() => ...` closure pay for an identity nothing ever looked at.
  *
  * This is the other half: the VALUE-FLOW answer for one allocation. Starting
  * from the allocation's result it follows every copy -- phi, a non-boxing
@@ -162,7 +161,7 @@ export const unobservedCallableAllocationsOf = (
   }
 
   const callFlowOf = (value: IrValueId, operation: CallOperation): IrValueId[] | false => {
-    if (operation.receiver?.value === value) return false
+    if (operation.receiver?.value === value || operation.thisArgument?.value === value) return false
     const flows: IrValueId[] = []
     if (blindHostReads.has(operation.callee.value)) return flows
     const calleeInfo = reads.get(operation.callee.value)

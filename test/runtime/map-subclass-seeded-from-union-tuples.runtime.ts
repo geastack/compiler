@@ -1,5 +1,5 @@
 // A Map subclass seeds its base from `[K | V, K | V]` tuples, which travel as
-// arrays of the shared union rather than pair records (mongodb's SeverityLevelMap).
+// arrays of the shared union rather than pair records (a client logger's severity-level map).
 const Level = Object.freeze({ ERROR: 'error', WARNING: 'warn', DEBUG: 'debug' } as const)
 type Level = (typeof Level)[keyof typeof Level]
 

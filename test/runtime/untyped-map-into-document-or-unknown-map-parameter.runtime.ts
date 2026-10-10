@@ -1,11 +1,11 @@
 // AN UNTYPED `new Map()` HANDED TO A `Document` PARAMETER WHOSE OTHER CALLERS PASS `Map<unknown, unknown>`.
 //
-// mongodb's `LimitedSizeDocument` (cmap/handshake/client_metadata.ts) holds
+// A database client's size-limited handshake document holds
 // `private document = new Map()` -- a `Map<any, any>` the program only ever
-// keys by strings -- and calls `BSON.serialize(this.document)`. The parameter's
+// keys by strings -- and calls `Wire.serialize(this.document)`. The parameter's
 // union names that map as `Map<unknown, unknown>`, which the string-keyed
 // carrier is not, so the map enters that arm as a view of the SAME object:
-// bson walks it under `object instanceof Map`, and entries set after the call
+// the serializer walks it under `object instanceof Map`, and entries set after the call
 // are the entries it reads.
 
 interface Doc {

@@ -43,10 +43,16 @@ import { censusAbsentGlobals, platformDeclarationTest, type AbsentGlobalCensus }
 import { censusDeadTypeofGuards, type DeadTypeofGuardCensus } from './normalize/dead-typeof-guards.js'
 import { censusArgumentsObjects } from './normalize/arguments-objects.js'
 import { censusUnresolvableNames, noHostProvidedNames } from './normalize/unresolvable-names.js'
+import { installedGlobalPropertiesOf } from './normalize/installed-global-properties.js'
 import { censusGlobalHostMutations } from './normalize/global-host-mutations.js'
 import { HostMutationTaint } from './normalize/host-mutation-keys.js'
 import { createCensusComputedKeysOf } from './normalize/host-mutation-computed-keys.js'
 import { closedCallableAuthorityOf } from './normalize/flow/callable-reach.js'
+import { sourceDescriptorOwnProtocolOf } from './normalize/flow/source-descriptor-protocol.js'
+import { sourceAccessorDescriptorOf, sourceAccessorDescriptorOwnNamesOf } from './normalize/flow/source-accessor-descriptor.js'
+import { retireSourceValueSession, sourceValueSessionOf } from './normalize/flow/source-value-session.js'
+import { sourceNativeClassAliasTypeAt } from './normalize/flow/source-native-class-alias.js'
+import { createSpecializedSourceFrames } from './normalize/specialized-source-frames.js'
 import {
   attachDeferredIntrinsicProtocolLedger,
   createDeferredIntrinsicProtocolLedger,
@@ -61,6 +67,8 @@ import { createCommonJsRequireCensus, staticRequireOutcomeOf } from './normalize
 import { censusCommonJsModuleRecords } from './normalize/commonjs-module-record.js'
 import { censusNamespacePaths } from './normalize/namespace-paths.js'
 import { numericIndexAbsenceProven, closedLiteralMemberAbsenceProven } from './normalize/derived-expression-type.js'
+import { logicalLeftObjectTruthyAt } from './normalize/logical-object-truthiness.js'
+import { sourceCallableReadonlySetOf } from './normalize/flow/source-callable-readonly-set.js'
 import {
   censusParameterBindings,
   emptyParameterBindingCensus,
@@ -204,19 +212,10 @@ export interface FrontendInput {
    */
   readonly hostReachedMemberKeys?: ReadonlySet<string>
   /**
-   * The `hostFunctions` of every installed host whose programs take the host
-   * mutation census's wildcard (`PluginCapabilities.refusesObjectPrototypeAbsenceProofs`).
-   * When reachable code names one of them, the two absence proofs that rest
-   * on an `Object.prototype` key obligation refuse up front, and the read
-   * stays boxed instead of costing the program its certificate. Carried on
-   * the deferred ledger, which is what both proofs consult.
-   */
-  readonly hostFunctionsRefusingObjectPrototypeAbsenceProofs?: ReadonlySet<string>
-  /**
    * Every name an installed host defines by linkage -- the keys of its
    * `hostFunctions`/`nativeConstants` tables and their per-declaration
-   * variants. A module-local `declare function` of one (node-compat's
-   * `__gea_http_serve`) is an external cell, not an unresolvable reference
+   * variants. A module-local `declare function` of one (a host HTTP
+   * module's `__gea_http_serve`) is an external cell, not an unresolvable reference
    * (`isUnresolvableModuleAmbient`). Absent means no host defines anything.
    */
   readonly hostProvidedNames?: ReadonlySet<string>
@@ -276,7 +275,7 @@ export interface FrontendInput {
    * library's own syntax means is the library's to say, and the one place
    * saying it can still change what the checker sees is before the parse.
    */
-  readonly sourceTransforms?: readonly ((input: { readonly fileName: string; readonly text: string }) => string | null)[]
+  readonly sourceTransforms?: readonly import('./source-transform-protocol.js').SourceTransform[]
   /**
    * Whether the roots are JavaScript that carries its own types in JSDoc.
    *
@@ -692,11 +691,11 @@ const nodeAtPosition = (file: ts.SourceFile, position: number): ts.Node => {
  *
  * A package compiled from source is type-checked against the dependency
  * versions this build resolved, not the ones its authors built with:
- * `@hono/node-server`'s `upgradeWebSocket` handler assigns an object literal
- * to hono's `WSContext`, whose newer source declares `#init`. The handler is
- * pruned (`reachability.ts`, a closure factory nothing reads) and none of its
- * types reach the compiled program, so its error describes nothing this
- * compiler emits. A syntax error is never waived, and neither is anything
+ * an adapter package's handler can assign an object literal to a context
+ * class whose newer source declares a private `#field` the literal cannot
+ * supply. When that handler is pruned (`reachability.ts`, a closure factory
+ * nothing reads) none of its types reach the compiled program, so its error
+ * describes nothing this compiler emits. A syntax error is never waived, and neither is anything
  * outside a compiled source file or among the premises above.
  */
 const diagnosticIsInPrunedCode = (
@@ -728,8 +727,8 @@ const isJavaScriptFile = (fileName: string): boolean => /\.(?:js|mjs|cjs|jsx)$/.
  * reached a JavaScript package that was never written under it.
  *
  * `checkJs` is how JSDoc types are read at all, so a published JavaScript
- * package is checked with the project's own `strict`: memory-pager and
- * sparse-bitfield, under the MongoDB driver's SCRAM, report "implicitly has an
+ * package is checked with the project's own `strict`: a small untyped
+ * dependency deep in a package's graph reports "implicitly has an
  * `any` type" for every parameter and "'arr' is possibly 'undefined'" where
  * their own control flow already guarantees the array. TypeScript has no
  * per-file strictness to say the package opted out, so the two options' own
@@ -839,22 +838,6 @@ const absentBindingIds = (absent: AbsentGlobalCensus, identities: IdentityTable)
   const denied = new Set<DeclarationId>()
   for (const declaration of absent.declarations) denied.add(identities.declarationIdOf(declaration))
   return denied
-}
-
-/**
- * Whether reachable, non-declaration code spells any of `names` -- the
- * `hostFunctions` of a host whose programs take the census wildcard
- * (`FrontendInput.hostFunctionsRefusingObjectPrototypeAbsenceProofs`). The
- * built-in plugins are installed for every compile, so the host's statement
- * alone would refuse the proofs for programs that never touch it; naming one
- * of its functions is what makes a program that host's. A name suffices: the
- * host owns those spellings, and the emitter treats a call by name as a call
- * into it.
- */
-const reachableCodeNamesAny = (files: readonly ts.SourceFile[], reachable: ProgramReachability, names: ReadonlySet<string>): boolean => {
-  if (names.size === 0) return false
-  const visit = (node: ts.Node): boolean => (ts.isIdentifier(node) && names.has(node.text)) || ts.forEachChild(node, visit) === true
-  return files.some((file) => !file.isDeclarationFile && reachable.statementsOf(file).some(visit))
 }
 
 /**
@@ -1003,19 +986,17 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // `upstream`, closes that gap: `parameter-bindings.ts`'s `known()` now
   // tries `upstream.typeAt(node)` wherever the checker's own answer is
   // unusable, ahead of its own machinery reconstructing one. See the commit
-  // this landed in for the measured effect on the three.js app and the
-  // check for whether a third round moves anything further.
+  // this landed in for the measured effect and the check for whether a third
+  // round moves anything further.
   //
   // `withFieldBindings` sits LAST in each round, where its own header says it
   // belongs. A class field is the fourth storage position with no annotation
-  // and a knowable answer, and it was the one still unread: three.js writes
-  // `this.image`, `this.format`, `this.colorSpace` in a constructor and never
-  // types them, so every `texture.format` read is `any` and every parameter
-  // that receives one inherits it. That is what the boxed carriers in
-  // `WebGLTextures.js` (4435) and `WebGLRenderer.js` (3982) are made of -- not
-  // thousands of independent decisions, but one unread position cascading
-  // through reads and member accesses (14349 `Identifier`, 6836
-  // `PropertyAccessExpression` across the three.js app).
+  // and a knowable answer, and it was the one still unread: a JavaScript class
+  // that writes `this.format`, `this.size` in a constructor and never types
+  // them makes every `instance.format` read `any`, and every parameter that
+  // receives one inherits it. Large boxed carriers are made of exactly that --
+  // not thousands of independent decisions, but one unread position cascading
+  // through reads and member accesses.
   // `withJsDocTypeNames` sits OUTERMOST, so a type the program STATED outranks
   // one inferred from an observed sample of call sites -- the same precedence a
   // TS annotation already has, which stops the call-site census outright. It is
@@ -1031,9 +1012,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // nothing is settled yet) and handed to every census the round runs below,
   // not only to `createStructuralMapper` after the whole fixpoint has
   // already finished with it. This closes the gap `hCALL`'s investigation
-  // traced end to end: `findLightProbeGrid( volumes, object )`
-  // (`WebGLRenderer.js`) returns `volumes[ 0 ]`, where `volumes`'s real
-  // evidence is a module-scope `const lightProbeGridArray = []` filled by
+  // traced end to end: a function `find( items, key )` returns
+  // `items[ 0 ]`, where `items`'s real evidence is a module-scope `const entries = []` filled by
   // `.push` elsewhere -- exactly what this census exists to type, and
   // exactly the shape `return-bindings.ts` (and, the same way,
   // `local-bindings.ts`/`field-bindings.ts`) could not reach before, because
@@ -1064,10 +1044,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
    *
    * A `.push`/`.set`/`.fill` receiver is admitted by its TYPE
    * (`isArrayReceiver` and friends), so a receiver nothing has typed yet
-   * records no write at all: three's `WebGLShaderCache` fills
-   * `materialShaders` and `WebGLPrograms` fills its `array` through receivers
-   * the checker cannot type, and every element they hold sat at a push this
-   * index did not state. 170 such receivers on the three.js app.
+   * records no write at all: a JavaScript module that fills a cache map or a
+   * list through receivers the checker cannot type leaves every element they
+   * hold at a push this index did not state.
    *
    * `any`/`unknown` is filtered here rather than in the index so that a census
    * answer no better than the checker's cannot displace it.
@@ -1083,13 +1062,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // this replaced; the last round's is what `bags` below reads, since that
   // census is composed against the settled `parameters` and must see the same
   // write edges the census that settled it saw.
-  const intrinsicProtocols = createDeferredIntrinsicProtocolLedger({
-    refuseObjectPrototypeAbsenceProofs: reachableCodeNamesAny(
-      compiled.sourceFiles,
-      reachable,
-      input.hostFunctionsRefusingObjectPrototypeAbsenceProofs ?? new Set()
-    )
-  })
+  const intrinsicProtocols = createDeferredIntrinsicProtocolLedger()
   const buildIsStrict = buildIsAlwaysStrict(compiled.program.getCompilerOptions())
   const baseValueFlow = indexValueFlow(compiled.checker, compiled.sourceFiles, reachable, undefined, undefined, undefined, buildIsStrict)
   attachDeferredIntrinsicProtocolLedger(baseValueFlow, intrinsicProtocols)
@@ -1118,7 +1091,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     compiled.program.getSourceFiles(),
     input.commonJsGlobals ?? new Map(),
     compiled.runtimeModuleTargetOf,
-    compiled.sourceFileOf
+    compiled.sourceFileOf,
+    baseValueFlow
   )
   // This index retains syntax and checker facts from the initial flow view.
   // Unlike receiver protocol recognition in `valueFlow`, those do not change
@@ -1148,13 +1122,14 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     readonly valueFlow: ValueFlowIndex
   }
 
+  const roundFlows: ValueFlowIndex[] = []
   const compose = (upstream?: ParameterBindingCensus): RoundCensus<RoundFacts> => {
     // Round one has no census to refine the index with, and
     // `GEA_FLOW_CENSUS_OFF` pins every round to that same base -- which is what
     // makes the flag's arm comparable with the one it measures against.
     // Rebuilt every round on purpose: reusing the previous round's index when
-    // the census answers it consulted are unchanged was tried and measured on
-    // the three.js app (2026-09-14) -- no round ever qualified, because the answers
+    // the census answers it consulted are unchanged was tried and measured
+    // -- no round ever qualified, because the answers
     // move until the very round that settles, and holding the previous index
     // alive across the boundary raised the peak from 7 GB to 11 GB.
     const valueFlow =
@@ -1170,7 +1145,13 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
             upstream.explicitThisAt
           )
         : baseValueFlow
+    // A round's solver is asked nothing once the next round's index replaces
+    // it (`retireSourceValueSession`); keeping it cost ~1 GB per round.
+    for (const earlier of roundFlows) if (earlier !== valueFlow) retireSourceValueSession(earlier)
+    roundFlows.length = 0
+    roundFlows.push(valueFlow)
     attachDeferredIntrinsicProtocolLedger(valueFlow, intrinsicProtocols)
+    commonJsModuleRecords.attachToFlow(valueFlow)
     if (statedModules) attachStatedModuleSet(valueFlow, statedModules)
     if (scriptScope) attachClosedScriptScope(valueFlow, scriptScope)
     const collectionsThisRound = censusCollectionBindings(
@@ -1188,14 +1169,11 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     // observed types are plain `ts.Type`s (`ObjectBagShape.members` and
     // `.index` hold them), which is what `slotTypeAt` hands back.
     //
-    // The refusal that bought: three's `WebGLExtensions` caches every
-    // extension in a `{}` and reads it straight back, so
-    // `return extensions[ name ]` refused as `return-index-signature-absent`
-    // while this census had already typed the index from the very next line's
-    // `extensions[ name ] = extension`. Everything downstream of
-    // `extensions.get( ... )` -- `WebGLUtils.convert`'s `extension`, the
-    // largest single boxed declaration in the three.js build -- was dynamic
-    // behind that one refusal.
+    // The refusal that bought: a cache that stores every entry in a `{}` and
+    // reads it straight back makes `return cache[ name ]` refuse as
+    // `return-index-signature-absent` while this census had already typed the
+    // index from the very next line's `cache[ name ] = entry`. Everything
+    // downstream of the cache's getter was dynamic behind that one refusal.
     const bagsThisRound = process.env['GEA_BAG_OFF']
       ? emptyObjectBagCensus
       : censusObjectBagBindings(compiled.checker, compiled.sourceFiles, reachable, upstream ?? emptyParameterBindingCensus, valueFlow)
@@ -1221,7 +1199,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       collectionsThisRound,
       valueFlow,
       bagsThisRound,
-      upstream
+      upstream,
+      commonJsModuleRecords
     )
     const parameters = withSharedArrayStorage(
       compiled.checker,
@@ -1268,9 +1247,9 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
    * REWRITE the text every census then reads, so a line number from a compass
    * names a position in a file that exists only in memory, and the type at it
    * is not the type the same line has on disk. The DECLARATION list is what
-   * turns a wrong type into a located defect: `Object3D.parent` reading back
+   * turns a wrong type into a located defect: `Node.parent` reading back
    * `boolean | undefined` says nothing until the symbol is seen resolving to
-   * `EventDispatcher.js`, at which point the whole class of defect
+   * a base class's file, at which point the whole class of defect
    * (a synthesized field on a base shadowing every declarer's own `@type`) is
    * visible at once. Two commits came out of exactly that.
    */
@@ -1353,9 +1332,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   // parameter/return/local/field censuses while they produced `parameters`
   // -- reusing it rather than recomputing keeps the mapper and the fixpoint's
   // own censuses looking at the identical answer for the identical question.
-  // On the three.js app it binds 10 collections and 40 empty array literals whose
-  // element type TypeScript inferred as `never`, same totals as the
-  // once-recomputed version -- the round-two view this reuses already had
+  // It binds the same collections and empty array literals (element type
+  // inferred as `never`) as the once-recomputed version -- the round-two view this reuses already had
   // round one's settled parameter census as its own upstream, which is the
   // same evidence a fresh recomputation over `parameters` would have added.
   // Beside `collections`, and now on the same terms: the instance the LAST
@@ -1436,6 +1414,25 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     isStandardLibraryDeclaration: (declaration: ts.Declaration) => compiled.program.isSourceFileDefaultLibrary(declaration.getSourceFile()),
     globalHostMutationTaint
   }
+  /**
+   * The one pre-seal policy for the mapper's source receipts (own callable
+   * source, accessor descriptor, native class alias), whose proofs lean on
+   * intrinsic/prototype obligations the host-mutation census settles only
+   * when it seals. `types.rawTypeAt` is read both before the seal (by that
+   * census itself) and after it, so the three must not answer one node by
+   * different rules. Before the seal a receipt is answered PROVISIONALLY:
+   * its obligations ride the open ledger capture, which publishes them with
+   * whatever inference survives and re-checks them at certification; with
+   * no capture open to carry them the receipt is withheld rather than taken
+   * on faith. After the seal the same receipt is replayed against the sealed
+   * facts. A receipt with no obligations is the same answer at both stages.
+   */
+  const receiptUnderIntrinsicObligations = <T>(work: () => T | null): T | null => {
+    const proof = intrinsicProtocols.capture(work)
+    if (!hostMutationFactsSealed)
+      return proof.requirements.length === 0 || intrinsicProtocols.include(proof.requirements) ? proof.value : null
+    return failedIntrinsicProtocolRequirements(intrinsicPropertyContext, proof.requirements).length === 0 ? proof.value : null
+  }
   const types = createStructuralMapper(
     compiled.checker,
     identities,
@@ -1478,7 +1475,10 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     censusAssertedArgumentArms(compiled.checker, compiled.sourceFiles, reachable),
     // A module-private symbol a class writes on `this` without declaring it is
     // a native optional field -- see `symbol-keyed-this-slots.ts`.
-    censusSymbolKeyedThisSlots(compiled.checker, compiled.sourceFiles, reachable)
+    censusSymbolKeyedThisSlots(compiled.checker, compiled.sourceFiles, reachable),
+    (call) => receiptUnderIntrinsicObligations(() => sourceValueSessionOf(compiled.checker, valueFlow).ordinaryOwnCallableSourceOf(call)),
+    (call) => receiptUnderIntrinsicObligations(() => sourceAccessorDescriptorOf(compiled.checker, valueFlow, call)),
+    (node) => receiptUnderIntrinsicObligations(() => sourceNativeClassAliasTypeAt(compiled.checker, valueFlow, node))
   )
   // The frontend's evidence-policy tables: built from the same
   // `identities`/`valueFlow`/`reachable` the fixpoint above already settled,
@@ -1547,6 +1547,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     classCopyHeritage
   )
   const census = censusProgram(compiled.sourceFiles, identities, reachable, specializations, namespacePaths, deadMethodCopies)
+  const sourceValueSession = sourceValueSessionOf(compiled.checker, valueFlow)
+  const specializedSourceFramesOf = createSpecializedSourceFrames(census, identities, specializations, types, sourceValueSession)
   // Before normalization, not after: the table seals when the graph does, and a
   // census that interns a type it is the first to ask about would be asking a
   // sealed table to grow. The types are the same either way -- interning is
@@ -1595,8 +1597,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   const arrayIteratorDeclarationEarly = arrayIteratorDeclarationOf(compiled.checker, identities, compiled.sourceFiles)
   const standardBuffers = standardBufferDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
   const wellKnownSymbols = wellKnownSymbolDeclarationsOf(compiled.checker, identities, compiled.sourceFiles)
-  // A computed write key narrowed to a proven finite set -- three's
-  // `this[ key ] = newValue` in `Material.setValues`/`Texture.setValues`. Built
+  // A computed write key narrowed to a proven finite set -- a
+  // `setValues(values)` method writing `this[ key ] = newValue` for each key. Built
   // once and shared by BOTH readers that must agree it proves the same thing:
   // the global-host-mutation census below (which narrows a WRITE's taint) and
   // `computedKeyTextsOf` a few lines down (which narrows a `get`/`set`
@@ -1684,13 +1686,56 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   }
   const nativeCollectionOverrides = nativeCollectionOverridesOf(compiled.checker, identities, compiled.sourceFiles, classHeritage)
   const nativeErrorOverrides = nativeErrorOverridesOf(compiled.checker, identities, compiled.sourceFiles, classHeritage)
+  const installedGlobalProperties = new Map<ts.PropertyAccessExpression, DeclarationId>()
+  const ownedGlobalProperties = new Set<DeclarationId>()
+  // The final parameter census is also the signature mapper's authority for
+  // full actual-argument frames. Publication and citation share these sites.
+  const actualArgumentSites = new Set<ts.Node>()
+  for (const [owner, sites] of argumentsObjects.usesByOwner)
+    if (parameters.implicitArgumentsTupleAt?.(owner)) for (const site of sites) actualArgumentSites.add(site)
+  const settledArgumentsObjects = { ...argumentsObjects, actualFrameOf: (node: ts.Node) => actualArgumentSites.has(node) }
   const context: ProducerContext = {
+    installedGlobalPropertyBindingAt: (node) =>
+      ts.isPropertyAccessExpression(node) ? (installedGlobalProperties.get(node) ?? null) : null,
+    ownsInstalledGlobalProperty: (declaration) => ownedGlobalProperties.has(declaration),
     nativeCollectionOverrides,
     deadMethodCopies,
     isStandardLibraryDeclaration: (declaration) => compiled.program.isSourceFileDefaultLibrary(declaration.getSourceFile()),
     hostMethodOf: (node) =>
       resolveHostMethod(compiled.checker, hostMethodBindings, node, (receiver) => types.rawTypeAt(receiver), packageDeclarationNameOf),
     computedKeyTextsOf,
+    readonlyCallableSetAt: (access) => {
+      if (!hostMutationFactsSealed) return null
+      const proof = intrinsicProtocols.capture(() => sourceCallableReadonlySetOf(access, valueFlow, intrinsicPropertyContext))
+      return failedIntrinsicProtocolRequirements(intrinsicPropertyContext, proof.requirements).length === 0 ? proof.value : null
+    },
+    descriptorOwnProtocolAt: (definition) => {
+      if (!hostMutationFactsSealed) return null
+      const proof = intrinsicProtocols.capture(() =>
+        sourceDescriptorOwnProtocolOf(compiled.checker, valueFlow, definition, (descriptor) =>
+          sourceAccessorDescriptorOwnNamesOf(compiled.checker, valueFlow, descriptor, definition)
+        )
+      )
+      return failedIntrinsicProtocolRequirements(intrinsicPropertyContext, proof.requirements).length === 0 ? proof.value : null
+    },
+    ownAssignmentAt: (call, path, describedKeysOf) => {
+      if (!hostMutationFactsSealed) return null
+      const proof = intrinsicProtocols.capture(() => {
+        const frames = specializedSourceFramesOf(call, path)
+        return frames === null ? null : sourceValueSession.ownAssignmentOf(call, frames, describedKeysOf)
+      })
+      return failedIntrinsicProtocolRequirements(intrinsicPropertyContext, proof.requirements).length === 0 ? proof.value : null
+    },
+    ownSlotAt: (expression, key) => {
+      if (!hostMutationFactsSealed) return null
+      const proof = intrinsicProtocols.capture(() => sourceValueSessionOf(compiled.checker, valueFlow).ownSlotOf(expression, key))
+      return failedIntrinsicProtocolRequirements(intrinsicPropertyContext, proof.requirements).length === 0 ? proof.value : null
+    },
+    logicalLeftObjectTruthyAt: (left) => {
+      if (!hostMutationFactsSealed) return false
+      const proof = intrinsicProtocols.capture(() => logicalLeftObjectTruthyAt(compiled.checker, valueFlow, left))
+      return proof.value && failedIntrinsicProtocolRequirements(intrinsicPropertyContext, proof.requirements).length === 0
+    },
     deadEventCallAt: deadEventCallsOf(compiled.checker, compiled.sourceFiles, identities, classHeritage),
     numericIndexAbsenceProvenAt: (receiver, key) => {
       if (!hostMutationFactsSealed) return false
@@ -1756,7 +1801,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     absentRequirePackageOf: compiled.absentRequirePackageOf,
     sourceFileOf: compiled.sourceFileOf,
     absentGlobals: absent,
-    argumentsObjects,
+    argumentsObjects: settledArgumentsObjects,
     unresolvableNames,
     reassignedBindings: createReassignedBindingCensus(compiled.checker, valueFlow),
     namespacePaths,
@@ -1929,6 +1974,44 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     )
   )
   hostMutationFactsSealed = true
+  for (const [file, protocols] of compiled.sourceTransformProtocols ?? []) {
+    const proof = intrinsicProtocols.capture(() => {
+      for (const protocol of protocols) {
+        if ('callablePrototypeMember' in protocol)
+          intrinsicProtocols.include([
+            {
+              intrinsic: protocol.intrinsic,
+              callableOwnKeys: { prototypeMember: protocol.callablePrototypeMember, keys: { names: protocol.ownKeys } },
+              location: file
+            }
+          ])
+        else if (protocol.member !== undefined) intrinsicProtocols.requireMember(protocol.intrinsic, protocol.member, file)
+        else intrinsicProtocols.requirePrototypeKeys(protocol.intrinsic, { names: protocol.prototypeKeys }, file)
+      }
+    })
+    // These assumptions belong to text already selected for this source file.
+    // They cannot disappear as a failed inference alternative, and a revoked
+    // protocol must not fall through to the replacement's host template.
+    intrinsicProtocols.replace(protocols, proof.requirements)
+  }
+  const installedGlobals = installedGlobalPropertiesOf(
+    compiled.checker,
+    identities,
+    compiled.sourceFiles,
+    {
+      isIntrinsicGlobalThis: unresolvableNames.isIntrinsicGlobalThis,
+      hostProvidedNames: new Set([...unresolvableNames.hostProvidedNames, ...(input.absentGlobals ?? [])])
+    },
+    input.closedScriptScope === true,
+    !globalHostMutationTaint.has('*'),
+    census.candidates
+  )
+  for (const [access, declaration] of installedGlobals.accesses) installedGlobalProperties.set(access, declaration)
+  for (const declaration of installedGlobals.declarations) {
+    ownedGlobalProperties.add(declaration)
+    hosts.externals.delete(declaration)
+    hosts.externalFiles.delete(declaration)
+  }
   const failedIntrinsicRequirements = failedIntrinsicProtocolRequirements(intrinsicPropertyContext, intrinsicProtocols.requirements())
   // `GEA_LEDGER_DEBUG=1` pairs with the publish-time `[LEDGER]` lines
   // `createDeferredIntrinsicProtocolLedger`'s `replace` prints for every scope:
@@ -1942,11 +2025,13 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     for (const requirement of failedIntrinsicRequirements) {
       const query = requirement.member !== undefined ? 'all' : (requirement.prototypeKeys ?? 'all')
       const why =
-        requirement.member !== undefined
-          ? intrinsicPropertyContext.globalHostMutationTaint.has('*')
-            ? '*'
-            : 'member'
-          : explainIntrinsicProtocolFailure(intrinsicPropertyContext, requirement.intrinsic, requirement.location, query)
+        requirement.sourceGlobalBinding !== undefined
+          ? 'source-global-binding'
+          : requirement.member !== undefined
+            ? intrinsicPropertyContext.globalHostMutationTaint.has('*')
+              ? '*'
+              : 'member'
+            : explainIntrinsicProtocolFailure(intrinsicPropertyContext, requirement.intrinsic, requirement.location, query)
       clauses.set(why, (clauses.get(why) ?? 0) + 1)
       const file = requirement.location.getSourceFile()
       const line = file.getLineAndCharacterOfPosition(requirement.location.getStart(file)).line + 1
@@ -1961,6 +2046,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
   const intrinsicProtocolDiagnostics: DiagnosticEvidence[] = failedIntrinsicRequirements.map((requirement, ordinal) => {
     const file = requirement.location.getSourceFile()
     const position = file.getLineAndCharacterOfPosition(requirement.location.getStart(file))
+    const bindingName = requirement.sourceGlobalBinding?.name
+    const bindingText = bindingName && ts.isIdentifier(bindingName) ? bindingName.text : '<unnamed>'
     return {
       id: `intrinsic-protocol/${requirement.intrinsic}/${ordinal}`,
       component: checkerComponent,
@@ -1969,13 +2056,18 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
       // Names the exact obligation: a per-key requirement fails only when the
       // census recorded one of those keys, a whole-prototype one under any
       // unattributed key write at all -- which of the two is what to fix.
-      message: `Inferred callable closure requires the intrinsic ${requirement.intrinsic}${
-        requirement.member === undefined
-          ? requirement.prototypeKeys
-            ? ` prototype keys [${prototypeKeyQuerySignature(requirement.prototypeKeys)}]`
-            : ' prototype (whole)'
-          : `.${requirement.member}`
-      } to remain intact; the final host mutation census did not prove that requirement.`,
+      message:
+        requirement.sourceGlobalBinding !== undefined
+          ? `Inferred callable closure requires the exact source global binding ${bindingText} to remain intact; the final host mutation census did not prove that requirement.`
+          : `Inferred callable closure requires the intrinsic ${requirement.intrinsic}${
+              requirement.callableOwnKeys !== undefined
+                ? `.prototype.${requirement.callableOwnKeys.prototypeMember} own keys [${prototypeKeyQuerySignature(requirement.callableOwnKeys.keys)}]`
+                : requirement.member === undefined
+                  ? requirement.prototypeKeys
+                    ? ` prototype keys [${prototypeKeyQuerySignature(requirement.prototypeKeys)}]`
+                    : ' prototype (whole)'
+                  : `.${requirement.member}`
+            } to remain intact; the final host mutation census did not prove that requirement.`,
       location: { file: file.fileName, line: position.line + 1, column: position.character + 1 }
     }
   })
@@ -2019,7 +2111,7 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
         operations,
         reachable,
         specializations,
-        argumentsObjects,
+        argumentsObjects: settledArgumentsObjects,
         unresolvableNames,
         namespacePaths
       })
@@ -2080,6 +2172,8 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
     const name = found ? ts.getNameOfDeclaration(found as ts.Declaration) : undefined
     return name && ts.isIdentifier(name) ? name.text : null
   }
+
+  for (const flow of roundFlows) retireSourceValueSession(flow)
 
   return {
     dynamicFallbackTypes,

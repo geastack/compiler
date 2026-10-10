@@ -1,5 +1,6 @@
 import { representationKey, type Representation } from '../../../representation/model.js'
-import { optionalOf } from '../../../representation/optional.js'
+import { awaitedRepresentation, holdsThenable } from '../../../representation/promise-resolution.js'
+export { awaitedRepresentation } from '../../../representation/promise-resolution.js'
 import { type ConversionSite, alignedValueText } from '../emit-narrowing.js'
 import { cppConstantLiteral, cppTypeOf } from '../types.js'
 import { nativePromiseBaseOf } from '../class-ref-transport.js'
@@ -21,7 +22,7 @@ import { createCppEmitBlockedError } from '../emit-context.js'
  * The case this exists for is the THIRD one, which neither half of that
  * sentence covers on its own: a union of both. `string | Promise<string>` is
  * what every `Promise.all` argument and every conditionally-async helper is
- * made of (hono's `utils/html.ts` is exactly that), and it is neither "a
+ * made of (an HTML-escaping template helper is exactly that), and it is neither "a
  * promise" nor "not a promise" -- it is a discriminant test away from either.
  * `emitAwait` used to ask only `kind === 'promise'` and pass such a union
  * through untouched, handing a `TaggedUnion<...>` to a consumer that had been
@@ -58,7 +59,7 @@ export const awaitedText = (
   // holds the fulfillment value.
   const nativePromise = nativePromiseAwaitedText(carrier, text)
   if (nativePromise !== null) return nativePromise
-  // A box may hold a promise (hono's `#cachedBody` returns one as `any`), and
+  // A box may hold a promise (a cache returning one as `any`), and
   // `await` adopts it; the awaited value of an `any` is itself `any`.
   if (carrier.kind === 'dynamic' && (target === null || target.kind === 'dynamic' || target.kind === 'void'))
     return `gea::detail::awaitedDynamic(${text})`
@@ -75,8 +76,8 @@ export const awaitedText = (
       ? `${text}.get<${index}>().awaited()`
       : (nativePromiseAwaitedText(arm.value, `${text}.get<${index}>()`) ?? `${text}.get<${index}>()`)
   )
-  // Arms resolving to DIFFERENT carriers (`Promise<SrvRecord[]> |
-  // Promise<string[][]>`, mongodb's `retryDNSTimeoutFor`) meet only in the
+  // Arms resolving to DIFFERENT carriers (`Promise<Entry[]> |
+  // Promise<string[][]>` from a retry wrapper) meet only in the
   // result cell's union, so each is entered into that cell -- a conditional
   // expression has no common type to find between two unrelated arms.
   const armTexts: string[] = []
@@ -139,11 +140,10 @@ const nativePromiseAwaitedText = (carrier: Representation, text: string): string
  * the carrier for such a value is an `optional` WRAPPER around the thing that
  * may be a promise, never a promise or a union of one. Asking only the three
  * kinds above therefore passed it through untouched, and the result cell was
- * then told it held the payload while it was handed the wrapper: five of the
- * @hono/node-server stores clang refused were exactly that
- * (`responseViaCache`'s `await writeFromReadableStream(...)?.catch(...)`,
- * `Optional<Promise<undefined>>`, and `responseViaResponseObject`'s
- * `await options.errorHandler(err)`, an optional over a union).
+ * then told it held the payload while it was handed the wrapper, and clang
+ * refused the store (`await writeStream(...)?.catch(...)`,
+ * `Optional<Promise<undefined>>`, and `await options.errorHandler(err)`,
+ * an optional over a union).
  *
  * The presence test is the resolution: present resolves the payload by the
  * same three rules one level in, absent resolves to the absence itself. Which
@@ -198,43 +198,6 @@ const awaitedOptionalText = (
 }
 
 /**
- * What `awaitedText` resolves a carrier TO -- the carrier's `Awaited<T>`.
- *
- * Stated beside the render rather than derived by a caller, so the two cannot
- * disagree about which arms survive. A union of promises over one payload
- * resolves to that payload; a union mixing a payload with a promise of the
- * same payload resolves to the payload as well, which is the ordinary case.
- * `null` when the arms do not agree, which is a real hole rather than a
- * missing recipe: `string | Promise<number>` resolves to `string | number`,
- * a union this cannot mint without the census's own arm ordering.
- */
-export const awaitedRepresentation = (carrier: Representation): Representation | null => {
-  if (carrier.kind === 'promise') return carrier.value
-  // An absence survives the resolution -- `PromiseResolve(undefined)` is
-  // `undefined` -- so the wrapper is kept over whatever the payload resolves
-  // to. Through `optionalOf` rather than a literal wrapper because the payload
-  // may already carry its own absence (a refcounted instance, a handle, a box,
-  // or a second optional), and stacking a flag onto one of those is the carrier
-  // the census forbids rather than a type this backend can spell.
-  if (carrier.kind === 'optional') {
-    const payload = awaitedRepresentation(carrier.payload)
-    return payload === null ? null : optionalOf(payload, carrier.absence)
-  }
-  if (carrier.kind === 'class-ref' && carrier.nativeBase?.kind === 'promise') return carrier.nativeBase.value
-  if (carrier.kind !== 'tagged-union') return carrier
-  const resolved = carrier.arms.map((arm) =>
-    arm.value.kind === 'promise'
-      ? arm.value.value
-      : arm.value.kind === 'class-ref' && arm.value.nativeBase?.kind === 'promise'
-        ? arm.value.nativeBase.value
-        : arm.value
-  )
-  const [first, ...rest] = resolved
-  if (!first) return null
-  return rest.every((entry) => representationKey(entry) === representationKey(first)) ? first : null
-}
-
-/**
  * `await` inside an async COROUTINE: the same four resolution shapes
  * `awaitedText` states, rendered as statements that suspend.
  *
@@ -281,14 +244,6 @@ export const coroutineAwaitStatements = (
 interface AwaitCell {
   readonly name: string
   readonly carrier: Representation
-}
-
-/** Whether resolving a carrier can adopt anything -- the same cases `awaitedText` answers non-`null` for. */
-const holdsThenable = (carrier: Representation): boolean => {
-  if (carrier.kind === 'promise' || isNativePromiseClass(carrier) || carrier.kind === 'dynamic') return true
-  if (carrier.kind === 'optional') return holdsThenable(carrier.payload)
-  if (carrier.kind === 'tagged-union') return carrier.arms.some((arm) => holdsThenable(arm.value))
-  return false
 }
 
 /** `PromiseResolve` of a box, as a promise to suspend on. */

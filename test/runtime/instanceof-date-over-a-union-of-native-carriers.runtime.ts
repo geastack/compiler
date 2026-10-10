@@ -1,4 +1,4 @@
-// bson's `isDate(value)` asks `value instanceof Date` of whatever carrier its
+// A binary-document serializer's `isDate(value)` asks `value instanceof Date` of whatever carrier its
 // caller holds. Over a union the discriminant answers every arm that is a
 // settled physical allocation -- a string, a Map, a dictionary are never a
 // Date -- and only the Date arm itself reads true. The Date composite was the

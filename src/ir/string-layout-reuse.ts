@@ -1,4 +1,4 @@
-import type { DeclarationId, IrValueId } from '../identity/ids.js'
+import type { IrValueId } from '../identity/ids.js'
 import { stringConstantsOf } from './dead-values.js'
 import { dominatorTreeOf } from './dominance.js'
 import type { HoistPlan } from './hoist.js'
@@ -50,35 +50,28 @@ export const sharedStringLayoutsOf = (
 
 /**
  * The same sharing for reads that never left their block: a run of
- * `s.charCodeAt(k)` over one stable formal in straight-line code -- bson's
- * `ObjectId.setFromHex` reads 24 characters of its parameter in a row -- paid
+ * `s.charCodeAt(k)` over one stable formal in straight-line code -- a hex
+ * decoder reading 24 characters of its parameter in a row -- paid
  * the UTF-16 layout scan of the whole string at every read, because the
  * per-call `charCodeAt` classifies the string before indexing it. The
- * receiver's identity is the one `string-length-reuse.ts` already trusts: a
- * read of a formal the policy proved stable, or the SSA parameter itself.
- * Nothing else -- a local a closure may write, a value a call may replace --
- * is grouped. The first read of a group that dominates a later one
+ * receiver's identity is the one `string-length-reuse.ts` already trusts
+ * (`stableStringReceiversOf`): a read of a formal the policy proved stable,
+ * the SSA parameter itself, or a read of a private cell's single dominating
+ * write. Nothing else -- a local a closure may write, a value a call may
+ * replace -- is grouped. The first read of a group that dominates a later one
  * initializes the layout; a read no earlier member dominates starts a group
  * of its own, so the initializer always runs before every read that uses it.
  * Groups of one are left alone: one scan is what the plain call does.
  */
 export const straightLineStringLayoutsOf = (
   body: IrBody,
-  stableFormals: ReadonlySet<DeclarationId>,
+  receivers: ReadonlyMap<IrValueId, string>,
   excluded: ReadonlySet<IrValueId>,
   firstOrdinal: number
 ): ReadonlyMap<IrValueId, SharedStringLayout> => {
   const layouts = new Map<IrValueId, SharedStringLayout>()
   if (body.tryRegions.length > 0 || (body.iteratorCloseRegions?.length ?? 0) > 0) return layouts
   const keys = stringConstantsOf(body)
-  const receivers = new Map<IrValueId, string>()
-  for (const block of body.blocks.values()) {
-    for (const operation of block.operations) {
-      if (operation.kind === 'binding-read' && stableFormals.has(operation.declaration))
-        receivers.set(operation.result.id, `formal:${operation.declaration}`)
-      if (operation.kind === 'parameter') receivers.set(operation.result.id, `parameter:${operation.ordinal}`)
-    }
-  }
   const dominance = dominatorTreeOf(body)
   let ordinal = firstOrdinal
   const groups = new Map<string, { block: IrBlockId; ordinal: number; members: GetOperation[] }[]>()

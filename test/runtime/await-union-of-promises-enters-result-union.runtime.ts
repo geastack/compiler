@@ -2,7 +2,7 @@
 //! expect: txt:authSource=admin
 //! expect: retried:1
 
-// mongodb's connection_string.ts `retryDNSTimeoutFor`: `await
+// A database client's connection-string parser, `retryDNSTimeoutFor`: `await
 // dns.promises[api](address)` where `api` is `'resolveSrv' | 'resolveTxt'`
 // awaits a UNION of two promises whose payloads differ (`SrvRecord[]` and
 // `string[][]`). Each arm resolves to its own payload, and the two meet only

@@ -1,7 +1,7 @@
 import type { IrOperand, IrResult } from '../../ir/model.js'
 import { representationKey, type Representation } from '../../representation/model.js'
 import type { DeclarationId } from '../../identity/ids.js'
-import { classMethodOverrideOf, recordLayoutPolicyOf } from '../../projection/fields.js'
+import { classMethodOverrideOf } from '../../projection/fields.js'
 import { createCppEmitBlockedError, defineValue, operandText, type EmitContext } from './emit-context.js'
 import { cppBodyName, cppTypeOf } from './types.js'
 
@@ -113,7 +113,7 @@ export const classToPrimitiveOf = (
   ctx: EmitContext,
   carrier: Extract<Representation, { kind: 'class-ref' }>
 ): { readonly call: (receiver: string) => string; readonly result: Representation } | null => {
-  const layouts = recordLayoutPolicyOf(ctx.deriver, ctx.classes)
+  const layouts = ctx.layouts
   const direct = layouts.classDirectMethodFor?.(carrier.declaration, 'valueOf') ?? null
   if (direct === null || classMethodOverrideOf(ctx.classes, carrier.declaration, 'valueOf') !== null) return null
   const seen = new Set<DeclarationId>()
@@ -139,7 +139,7 @@ export const classToPrimitiveOf = (
 /**
  * ToNumber of a program class instance: ECMA-262 7.1.4 step 2, ToPrimitive
  * with hint "number" (7.1.1), which for an ordinary object with no
- * `@@toPrimitive` is OrdinaryToPrimitive -- `valueOf` first. bson's
+ * `@@toPrimitive` is OrdinaryToPrimitive -- `valueOf` first. A
  * `Number(low.t)` over `number | Int32` is the shape: `Int32.prototype.valueOf`
  * answers the wrapped number.
  *

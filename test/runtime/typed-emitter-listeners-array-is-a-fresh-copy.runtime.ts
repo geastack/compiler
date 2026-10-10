@@ -1,4 +1,4 @@
-// The MongoDB driver's `TypedEventEmitter<Events>` re-declares `listeners`
+// A database client's `TypedEventEmitter<Events>` re-declares `listeners`
 // through a merged interface as `Events[K][]`, while the body it runs is
 // node's `EventEmitter.listeners`, whose elements are stored `Listener`s --
 // callables that declare `this: EventEmitter` because `emit` applies them to
@@ -6,9 +6,9 @@
 // them can supply that receiver, so no stored listener converts into the
 // view, and the result is the body's own `Listener[]`.
 //
-// Two driver shapes: `AbstractCursor.trackCursor` asks
+// Two client shapes: a cursor tracker asks
 // `this.listeners('close').includes(removeActiveCursor)` before `once`, and
-// `Topology.detectShardedTopology` asks the same through an optional chain,
+// a topology's sharding detection asks the same through an optional chain,
 // `this.s.srvPoller?.listeners(...)`, whose result keeps its `undefined`.
 // `includes` must find the registered function by identity, and the array a
 // `listeners()` call returns is its own copy: node returns a new one per call.

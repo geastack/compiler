@@ -8,7 +8,7 @@ import type { DeclarationId } from '../../identity/ids.js'
  * touched at all" -- plus one wildcard, `*`, for any write it could not pin to
  * an object. A single `o.needsUpdate = true` through a receiver it could not
  * prove non-global therefore failed every proof about every intrinsic
- * prototype, including "Object.prototype lacks `glslVersion`". The write's KEY
+ * prototype, including "Object.prototype lacks `version`". The write's KEY
  * was always known; only its receiver was not. This module keeps the key.
  *
  * Soundness is carried by three rules, and nothing here may weaken them:
@@ -27,19 +27,21 @@ import type { DeclarationId } from '../../identity/ids.js'
  * WELL-KNOWN symbols. No write ever records a symbol key by name, so such an
  * obligation is touched only by `every`.
  *
- * A symbol key the program itself declared is the one case that records NO key
- * rather than `every`: it can name no string member, and it can name no
- * `@@well-known` member either, so it touches nothing this module models. That
- * is not a fourth kind -- it is the empty key set, decided in
- * `host-mutation-key-reader.ts`'s `isProgramDeclaredSymbolKey`, which is also
- * where the soundness argument lives.
+ * Proven program-created symbol keys have their own domain. They can name no
+ * string or well-known member, but they can intercept a later write using a
+ * program-created symbol. That absence obligation must observe these writes.
  */
 
 /** @semanticCategory generic-primitive */
-export type MutationKey = { readonly kind: 'name'; readonly name: string } | { readonly kind: 'numeric' } | { readonly kind: 'every' }
+export type MutationKey =
+  | { readonly kind: 'name'; readonly name: string }
+  | { readonly kind: 'numeric' }
+  | { readonly kind: 'program-symbol' }
+  | { readonly kind: 'every' }
 
 export const everyKey: MutationKey = { kind: 'every' }
 export const numericKeys: MutationKey = { kind: 'numeric' }
+export const programSymbolKeys: MutationKey = { kind: 'program-symbol' }
 export const namedKey = (name: string): MutationKey => ({ kind: 'name', name })
 
 /** @semanticCategory generic-primitive */
@@ -47,6 +49,8 @@ export interface MutationKeySet {
   readonly names: ReadonlySet<string>
   /** Some `ToString(Number)` key: canonical numeric strings, "NaN" and "Infinity" included. */
   readonly numeric: boolean
+  /** A symbol created by the stock Symbol factory or registry, never a well-known symbol. */
+  readonly programSymbols?: boolean
   /** A key nobody can name: every key, prototype replacement included. */
   readonly every: boolean
 }
@@ -78,22 +82,25 @@ export interface PrototypeKeyQuery {
   readonly arrayIndices?: boolean
   /** Every ToString(Number) key, including fractions, infinities and NaN. */
   readonly numeric?: boolean
+  /** Every program-created symbol, for inherited write-interception obligations. */
+  readonly programSymbols?: boolean
 }
 
 /** A stable spelling of a query, for ledgers that deduplicate obligations. */
 export const prototypeKeyQuerySignature = (query: PrototypeKeyQuery): string =>
-  `${[...new Set(query.names ?? [])].sort().join(',')}${query.arrayIndices ? '|indices' : ''}${query.numeric ? '|numeric' : ''}`
+  `${[...new Set(query.names ?? [])].sort().join(',')}${query.arrayIndices ? '|indices' : ''}${query.numeric ? '|numeric' : ''}${query.programSymbols ? '|program-symbols' : ''}`
 
 /** Does a write set reach any key the query depends on? `'all'` is the whole-object query. */
 export const keySetTouches = (keys: MutationKeySet | undefined, query: PrototypeKeyQuery | 'all'): boolean => {
   if (!keys) return false
   if (keys.every) return true
-  if (query === 'all') return keys.numeric || keys.names.size > 0
+  if (query === 'all') return keys.numeric || keys.programSymbols === true || keys.names.size > 0
   for (const name of query.names ?? []) {
     if (keys.names.has(name) || (keys.numeric && isCanonicalNumericKey(name))) return true
   }
   if (query.arrayIndices && (keys.numeric || [...keys.names].some(isArrayIndexKey))) return true
   if (query.numeric && (keys.numeric || [...keys.names].some(isCanonicalNumericKey))) return true
+  if (query.programSymbols && keys.programSymbols) return true
   return false
 }
 
@@ -124,10 +131,10 @@ export interface GlobalHostMutationTaint extends ReadonlySet<DeclarationId | '*'
 /**
  * TEMPORARY INSTRUMENT -- not for landing. `GEA_KEY_BLOCK_DEBUG=1` names, per
  * distinct outcome, WHICH of the three disjuncts refused and which key matched.
- * Suppressing the wildcard alone left the three.js app's 300 census diagnostics at 300,
- * so the question this answers is whether the NAMED surface keys (three's own
- * `linecap`, `version`, `isTexture` ... written through opaque receivers) are
- * doing the blocking on their own.
+ * Suppressing the wildcard alone can leave the census diagnostics unchanged,
+ * so the question this answers is whether the NAMED surface keys (a library's
+ * own property names written through opaque receivers) are doing the
+ * blocking on their own.
  */
 const keyBlockDebug = process.env['GEA_KEY_BLOCK_DEBUG'] === '1'
 const reportedKeyBlocks = new Set<string>()
@@ -136,9 +143,11 @@ const matchedKeys = (keys: MutationKeySet | undefined, query: PrototypeKeyQuery 
     ? ''
     : keys.every
       ? 'every'
-      : query === 'all'
-        ? [...keys.names].join(',')
-        : [...(query.names ?? [])].filter((name) => keys.names.has(name)).join(',')
+      : [
+          ...(query === 'all' ? keys.names : (query.names ?? []).filter((name) => keys.names.has(name))),
+          ...(keys.numeric && (query === 'all' || query.numeric || query.arrayIndices) ? ['|numeric'] : []),
+          ...(keys.programSymbols && (query === 'all' || query.programSymbols) ? ['|program-symbols'] : [])
+        ].join(',')
 
 /** May a proof that depends on `query` of this intrinsic object still stand? */
 export const intrinsicObjectKeysIntact = (
@@ -166,15 +175,15 @@ export const intrinsicObjectKeysIntact = (
   return !star && !surface && !own
 }
 
-type MutableKeySet = { names: Set<string>; numeric: boolean; every: boolean }
-const emptyKeys = (): MutableKeySet => ({ names: new Set(), numeric: false, every: false })
+type MutableKeySet = { names: Set<string>; numeric: boolean; programSymbols: boolean; every: boolean }
+const emptyKeys = (): MutableKeySet => ({ names: new Set(), numeric: false, programSymbols: false, every: false })
 
 /**
  * TEMPORARY EXPERIMENT -- not for landing. `GEA_NO_WILDCARD=1` drops every
  * `every`-kind key, at the ONE place all of them are recorded, so a single
- * three.js run answers the question that decides what to work on next: with the
- * wildcard gone, do the 300 census diagnostics clear, or do the 64 NAMED
- * surface keys block them anyway? Guarding `markWildcard` alone was not enough
+ * run answers the question that decides what to work on next: with the
+ * wildcard gone, do the census diagnostics clear, or do the NAMED surface
+ * keys block them anyway? Guarding `markWildcard` alone was not enough
  * -- `taintIntrinsicMember` and `markIntrinsicPrototypeKeys` reach these two
  * methods with `everyKey` without passing through it.
  */
@@ -223,7 +232,7 @@ export class HostMutationTaint extends Set<DeclarationId | '*'> implements Globa
       // first object it reached and swallowed every other -- which reads as
       // "one intrinsic is wildcarded" when the truth is "this loop wildcards
       // all of them". That is the shape of the answer, and it was invisible:
-      // located hono-hello's whole remaining census gap at ONE site only after
+      // located a program's whole remaining census gap at ONE site only after
       // cross-checking the printed frames against the source by hand.
       const seen = `${object} :: ${stack}`
       if (!reportedWildcardStacks.has(seen)) {
@@ -248,6 +257,7 @@ export class HostMutationTaint extends Set<DeclarationId | '*'> implements Globa
     const surface = other.surfaceKeys
     for (const name of surface.names) this.taintSurface(namedKey(name))
     if (surface.numeric) this.taintSurface(numericKeys)
+    if (surface.programSymbols) this.taintSurface(programSymbolKeys)
     if (surface.every) this.taintSurface(everyKey)
     for (const entry of other) {
       if (entry === '*') {
@@ -261,7 +271,8 @@ export class HostMutationTaint extends Set<DeclarationId | '*'> implements Globa
       }
       for (const name of keys.names) this.taintObject(entry, namedKey(name))
       if (keys.numeric) this.taintObject(entry, numericKeys)
-      if (keys.every || (keys.names.size === 0 && !keys.numeric)) this.taintObject(entry, everyKey)
+      if (keys.programSymbols) this.taintObject(entry, programSymbolKeys)
+      if (keys.every || (keys.names.size === 0 && !keys.numeric && !keys.programSymbols)) this.taintObject(entry, everyKey)
     }
   }
 }
@@ -269,5 +280,6 @@ export class HostMutationTaint extends Set<DeclarationId | '*'> implements Globa
 const record = (keys: MutableKeySet, key: MutationKey): void => {
   if (key.kind === 'every') keys.every = true
   else if (key.kind === 'numeric') keys.numeric = true
+  else if (key.kind === 'program-symbol') keys.programSymbols = true
   else keys.names.add(key.name)
 }

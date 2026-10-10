@@ -2,7 +2,7 @@
 //! expect: 1 0
 // A module-level generic function called from inside a generic CLASS, with a
 // COMPOSITE over the class's own type parameter as the instantiation --
-// `findMiddleware(middleware[m], path)` inside hono's `RegExpRouter<T>.add`,
+// `findMiddleware(middleware[m], path)` inside an HTTP router's `RegExpRouter<T>.add`,
 // where `findMiddleware`'s `T` binds to `HandlerWithMetadata<T>`, not to `T`.
 // The class copy is minted from a written type reference, which pairs only the
 // type ARGUMENTS, so the composite had no image and the call named no copy:

@@ -2,14 +2,13 @@ import type { Representation } from '../../representation/model.js'
 import { dictionaryKeyDomainOf, representationKey } from '../../representation/model.js'
 import { typedArrayUnionOnly } from '../../representation/host-templates.js'
 import type { IrValueId } from '../../identity/ids.js'
-import type { DefineOwnPropertyOperation, GetOperation, IrBody, IrOperand, SetOperation } from '../../ir/model.js'
+import type { DefineOwnPropertyOperation, GetOperation, IrBody, IrOperand, IrOperation, SetOperation } from '../../ir/model.js'
 import { allOperationsOf } from '../../ir/model.js'
 import { operandsOfIrOperation } from '../../ir/queries.js'
 import {
   createCppEmitBlockedError,
   defineValueAlias,
   operandText,
-  wellKnownSymbolMemberOf,
   type EmitContext,
   type PrototypeMethodRead,
   type UnionMemberTypeofAnswer,
@@ -19,14 +18,13 @@ import {
 } from './emit-context.js'
 import { functionSourceReadClaimOf } from './function-source-reads.js'
 import {
-  literalPropertyKeyText,
   cppBodyName,
-  cppRecordFieldKeyIsSymbol,
   cppRecordFieldName,
   cppRecordFieldPresenceName,
   cppStringLiteral,
   cppTypeOf,
-  cppUndefinedIn
+  cppUndefinedIn,
+  fieldPropertyKeyText
 } from './types.js'
 import { declaredFieldCreationText, declaredFieldRepresentationOf, declaredRecordFieldOf } from './records.js'
 import { tracksKeyOrder } from './key-order-tracking.js'
@@ -36,19 +34,23 @@ import {
   memberAccessOperator,
   positionalRecordArityText
 } from './emit-carrier-members.js'
-import { alignedValueText, classFamilyLoadText, receiverBoundFieldText } from './emit-narrowing.js'
+import { alignedValueText, classFamilyLoadText } from './emit-narrowing.js'
+import { nativeMethodValueRecipeText } from './emit-native-method.js'
 import { operationConversionText } from './emit-certified-conversion.js'
+import { nativeExpandoSidecarOf } from '../../projection/native-expando.js'
+import { nativeInheritedMemberOf } from '../../representation/prototype-domains.js'
 import { canonicalIndexLiteral, stringIndexText, isDeclaredStringPrototypeKey } from './emit-carrier-members.js'
+import { nativeDataPropertyOf } from '../../representation/native-data-properties.js'
 import { objectPrototypeMemberNames } from '../../representation/record-fields.js'
 import { classFamilyOverridesOf, classMemberOf } from './class-layout.js'
-import { classMethodOverrideOf, classStaticMemberOf } from '../../projection/fields.js'
-import { classMethodValueArmsOf, virtualDispatchKey } from '../../projection/dispatch.js'
+import { classMethodOverrideOf, classStaticMemberOf, nativeBaseFieldOf } from '../../projection/fields.js'
+import { virtualDispatchKey } from '../../projection/dispatch.js'
 import { cppVirtualMemberName } from './virtual-methods.js'
 import { abiOfCallee } from '../../projection/callee.js'
 import { recordAccessorsOfShape } from './records.js'
 import { cppRecordIndexSidecarName } from './records.js'
 import { hasNativeNumericIndexArms, nativeNumericIndexOf } from '../../representation/numeric-index.js'
-import { binaryToStringTagText, typedArrayBufferMemberText, typedArrayPrototypeMethods } from './emit-buffers.js'
+import { nativeDataPropertyText, nativeBufferMethodValueText, typedArrayPrototypeMethods } from './emit-buffers.js'
 import { typeofTextFor } from './emit-typeof.js'
 import { keyedCollectionPrototypeMethods, promisePrototypeMethods } from './prototype/emit-prototype-invoke.js'
 import { arrayInheritedMemberRefusals, arrayMemberRefusals, arrayPrototypeMethods } from './prototype/emit-prototype-array.js'
@@ -61,7 +63,6 @@ import {
 import { overriddenMethodValueText, publishedMethodCopyOf } from './class-properties/computed-method-value.js'
 import { constructorValueDispatchTypedMemberText, propertyKeyText } from './emit-dynamic-properties.js'
 import { toStringTextOver, type ToStringLayouts } from './emit-tostring.js'
-import { recordLayoutPolicyOf } from '../../projection/fields.js'
 
 /**
  * Whether a read off a union whose every arm is a typed array is a deferred
@@ -92,56 +93,6 @@ export const deferredTypedArrayUnionMethodClaim = (
 }
 
 /**
- * The receiver a tagged union's per-arm class-method read has to keep, or
- * `null` -- the union twin of `classMethodValueReceiverClaim`.
- *
- * A class arm materializes a method value whose physical convention leads with
- * the arm's own receiver, while the read's receiver is the whole union, so the
- * call that consumes it has to be handed that union back
- * (`EmitContext.directCallReceivers`).
- *
- * `deferredUnionMethodArms` is ASKED rather than restated: a union whose EVERY
- * arm answers this key is claimed whole, before the per-arm walk runs, and
- * only a union it declines reaches `armRuntimeFieldText`. Its text arguments
- * do not affect whether it claims, so passing empty ones asks exactly the
- * question without spelling anything.
- */
-export const unionClassMethodValueReceiverClaim = (ctx: EmitContext, operation: GetOperation): IrOperand | null => {
-  const receiver = operation.receiver.representation
-  if (receiver.kind !== 'tagged-union') return null
-  // Only a read that PUBLISHES the receiver-leading convention leaves the
-  // receiver for its call to supply. Where the published callable states none,
-  // each arm has already bound its own receiver into the value
-  // (`receiverBoundFieldText`), and handing the union back at the call would
-  // pass it as the first ARGUMENT.
-  // A union whose other arms lack the member publishes the method as
-  // `optional(callable)`: those arms answer `undefined`. The call behind a
-  // guard (`value && value.isColor ? value.getHex() : ...`) still fills the
-  // callable's receiver slot, so the claim reads the convention through that
-  // absence. three.js's `ShaderMaterial.toJSON` reads `getHex` this way.
-  const published = operation.result.representation
-  const callable = published.kind === 'optional' && published.absence === 'undefined' ? published.payload : published
-  const publishedAbi = abiOfCallee(callable)
-  if (publishedAbi === null || publishedAbi.receiver === null) return null
-  const key = ctx.staticKeyTexts.get(operation.key.value)
-  if (key === undefined || objectPrototypeMemberNames.has(key)) return null
-  if (ctx.unionMethodReads.has(operation.result.id)) return null
-  for (const leaf of unionPropertyLeaves(receiver, '')) {
-    const arm = leaf.representation
-    if (arm.kind !== 'class-ref') continue
-    const site = classMemberOf(ctx.classes, arm.declaration, key)
-    if (site === null || site.kind !== 'method' || site.method.callable === null) continue
-    if (classFamilyOverridesOf(ctx.classes, arm.declaration, key).length > 0) {
-      if (classMethodValueArmsOf(ctx.classes, arm.declaration, key) !== null) return operation.receiver
-      continue
-    }
-    if (ctx.captures.of(site.method.callable).kind !== 'none' || ctx.abiOfCallable(site.method.callable) === null) continue
-    return operation.receiver
-  }
-  return null
-}
-
-/**
  * Property access over a native tagged union dispatches on the live arm.
  * Declared fields, native indexed storage, and ordinary string properties
  * retain their carriers. Nullish indexed arms throw. Unsupported prototype
@@ -153,52 +104,7 @@ const addressableArmKind = (kind: Representation['kind']): boolean =>
   kind === 'record' || kind === 'record-with-index' || kind === 'native-record-ref' || kind === 'class-ref'
 
 /** Native object carriers whose ordinary expando properties live in the runtime sidecar. */
-const sidecarArm = (representation: Representation): boolean => {
-  if (!('ownership' in representation) || representation.ownership !== 'shared-refcount') return false
-  return (
-    representation.kind === 'record' ||
-    representation.kind === 'record-with-index' ||
-    representation.kind === 'native-record-ref' ||
-    representation.kind === 'class-ref' ||
-    representation.kind === 'array-object' ||
-    representation.kind === 'typed-array' ||
-    representation.kind === 'array-buffer' ||
-    representation.kind === 'shared-array-buffer' ||
-    representation.kind === 'data-view' ||
-    representation.kind === 'keyed-collection'
-  )
-}
-
-/**
- * ECMA-262's whole prototype member set for each keyed-collection family
- * (24.1.3, 24.2.3, 24.3.3, 24.4.3) -- every member the language defines, not
- * only the ones this backend renders, because the question asked of it is
- * "does the object answer this key from its prototype", and an unrendered
- * `forEach` is still not `undefined`.
- */
-const keyedCollectionIntrinsicMembers: Readonly<Record<'map' | 'set' | 'weak-map' | 'weak-set', ReadonlySet<string>>> = {
-  map: new Set(['clear', 'delete', 'entries', 'forEach', 'get', 'has', 'keys', 'set', 'size', 'values']),
-  set: new Set([
-    'add',
-    'clear',
-    'delete',
-    'difference',
-    'entries',
-    'forEach',
-    'has',
-    'intersection',
-    'isDisjointFrom',
-    'isSubsetOf',
-    'isSupersetOf',
-    'keys',
-    'size',
-    'symmetricDifference',
-    'union',
-    'values'
-  ]),
-  'weak-map': new Set(['delete', 'get', 'has', 'set']),
-  'weak-set': new Set(['add', 'delete', 'has'])
-}
+const sidecarArm = nativeExpandoSidecarOf
 
 /**
  * Whether the arm's native object -- the arm itself, or the collection or
@@ -208,21 +114,15 @@ const keyedCollectionIntrinsicMembers: Readonly<Record<'map' | 'set' | 'weak-map
  * The expando sidecar (`gea::nativeDynamicGet`) reads the declared fields and
  * the identity-keyed own-property table, and nothing else: an inherited
  * `Map.prototype.entries` is in neither, so routing such a key there answers
- * `undefined` for a member the object has. mongodb's
- * `Object.fromEntries(DEFAULT_OPTIONS.entries())` in the Topology constructor
- * read `entries` off the union of `CaseInsensitiveMap`'s two layout copies that
- * way, and the call that followed adapted the `undefined` box into a callable
+ * `undefined` for a member the object has.
+ * `Object.fromEntries(defaults.entries())` over a `Map` subclass read
+ * `entries` off the union of that class's two layout copies that way, and the
+ * call that followed adapted the `undefined` box into a callable
  * returning `gea::Iterator` -- a carrier no box can hold. Such an arm is one
  * that "does not answer this member" in the sense the union read refuses by
  * name.
  */
-const nativePrototypeAnswers = (arm: Representation, key: string): boolean => {
-  const native = arm.kind === 'class-ref' ? arm.nativeBase : arm
-  if (native === undefined) return false
-  if (native.kind === 'keyed-collection') return keyedCollectionIntrinsicMembers[native.family].has(key)
-  if (native.kind === 'promise') return promisePrototypeMethods.has(key)
-  return false
-}
+const nativePrototypeAnswers = nativeInheritedMemberOf
 
 /**
  * One arm's own field access, or `null` when this arm cannot answer the key at
@@ -247,7 +147,7 @@ const armFieldSite = (
   if (!addressableArmKind(arm.kind)) return null
   if (arm.kind === 'class-ref') {
     const member = classMemberOf(ctx.classes, arm.declaration, key)
-    if (member === null || member.kind !== 'field') return null
+    if (member?.kind !== 'field' && (member !== null || !nativeBaseFieldOf(ctx.deriver, arm, key, ctx.classes))) return null
   }
   const declared = declaredFieldRepresentationOf(ctx.deriver, arm, key, ctx.classes)
   if (declared === null) return null
@@ -257,7 +157,8 @@ const armFieldSite = (
   const ownership = (arm as Extract<Representation, { kind: 'record' | 'record-with-index' | 'native-record-ref' | 'class-ref' }>).ownership
   const accessor = memberAccessOperator(ownership)
   const field = declaredRecordFieldOf(ctx.deriver, arm, key, ctx.classes)
-  const generated = arm.kind !== 'native-record-ref' || arm.native === null
+  const nativeBase = nativeBaseFieldOf(ctx.deriver, arm, key, ctx.classes)
+  const generated = (arm.kind !== 'native-record-ref' || arm.native === null) && (!nativeBase || key === 'cause')
   return {
     text: `${armExprText}${accessor}${cppRecordFieldName(key)}`,
     representation: declared,
@@ -301,13 +202,9 @@ const absentArmText = (published: Representation, key: string, arm: string): str
  * looked up by the marker its cell registered at creation -- the id the
  * generated field dispatchers (`records.ts`) compare against. Asked by its
  * spelling as a STRING, the box answered `undefined` for a member it held:
- * mongodb's `decrypted[kDecoratedKeys]` off the nested document
- * `decorateDecryptionResult` recursed into.
+ * `doc[kSymbolKey]` off a nested document a recursive walk descended into.
  */
-const unionArmPropertyKeyText = (key: string): string =>
-  cppRecordFieldKeyIsSymbol(key)
-    ? `gea::PropertyKey::symbol(gea::Symbol(gea::detail::declaredSymbolId<${cppStringLiteral(key)}>()))`
-    : literalPropertyKeyText(key)
+const unionArmPropertyKeyText = fieldPropertyKeyText
 
 const armRuntimeFieldText = (
   ctx: EmitContext,
@@ -320,9 +217,10 @@ const armRuntimeFieldText = (
   if (arm.kind === 'null' || arm.kind === 'undefined') {
     return `gea::host::throwGetPropertyOfNullish<${cppTypeOf(published)}>("${arm.kind}")`
   }
-  if (wellKnownSymbolMemberOf(ctx, operation.key) === 'toStringTag') {
-    const tag = binaryToStringTagText(arm)
-    if (tag !== null) return alignedValueText(ctx, 'emit-union-properties.ts:116', { kind: 'string' }, published, tag)
+  const nativeProperty = nativeDataPropertyOf(arm, key, ctx.wellKnownSymbols)
+  if (nativeProperty !== null) {
+    const text = nativeDataPropertyText(armExprText, arm, nativeProperty)
+    if (text !== null) return operationConversionText(ctx, operation, 'field-read', nativeProperty.result, published, text)
   }
   const boxed: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
   const propertyKey = unionArmPropertyKeyText(key)
@@ -330,33 +228,17 @@ const armRuntimeFieldText = (
     return alignedValueText(ctx, 'emit-union-properties.ts:120', arm, published, `${armExprText}.getProperty(${propertyKey})`)
   const index = canonicalIndexLiteral(key)
   if (arm.kind === 'string') {
-    if (key === 'length')
-      return alignedValueText(
-        ctx,
-        'emit-union-properties.ts:124',
-        { kind: 'scalar', domain: 'number' },
-        published,
-        `static_cast<double>(gea::runtime::string::utf16Length(${armExprText}))`
-      )
     if (index !== null) return stringIndexText(armExprText, index, operation.result, key)
     if (objectPrototypeMemberNames.has(key) || isDeclaredStringPrototypeKey(key)) return null
     return absentArmText(published, key, 'string')
   }
   if (arm.kind === 'array-object') {
-    if (key === 'length')
-      return alignedValueText(
-        ctx,
-        'emit-union-properties.ts:134',
-        { kind: 'scalar', domain: 'number' },
-        published,
-        `${armExprText}->length()`
-      )
-    if (index !== null) return arrayArmReadText(ctx, operation, armExprText, 'elementAt', index, arm.element, published)
+    if (index !== null) return arrayArmReadText(ctx, operation, armExprText, 'readElementAt', index, arm.element, published)
     // An ORDINARY own property of the Array object -- a name no Array
     // inherits and its extended interface does not declare -- lives in the
     // identity-keyed expando table every native object shares, exactly as the
-    // lone-array read hands it there (`arrayAccessText`). bson's size walk
-    // reads `(obj as any)?.toBSON` off a `Document` whose arms include the
+    // lone-array read hands it there (`arrayAccessText`): a serializer walk
+    // reading `(obj as any)?.toJSON` off a `Document` whose arms include the
     // array view.
     if (
       !arrayPrototypeMethods.has(key) &&
@@ -375,47 +257,20 @@ const armRuntimeFieldText = (
       )
     return null
   }
-  if (arm.kind === 'typed-array') {
-    if (key === 'length') {
-      return alignedValueText(
-        ctx,
-        'emit-union-properties.ts:139',
-        { kind: 'scalar', domain: 'number' },
-        published,
-        `${armExprText}->length()`
-      )
-    }
-    const bufferMember = typedArrayBufferMemberText(armExprText, arm, key)
-    if (bufferMember !== null) {
-      const source: Representation =
-        key === 'buffer' ? { kind: arm.buffer, ownership: 'shared-refcount' } : { kind: 'scalar', domain: 'number' }
-      return alignedValueText(ctx, 'emit-union-properties.ts:145', source, published, bufferMember)
-    }
-  }
-  // A block's one data property. `view.buffer` is typed `ArrayBufferLike`, so
-  // `view.buffer.byteLength` reads it off an `ArrayBuffer | SharedArrayBuffer`
-  // sum; the sidecar below holds no such key and would abort the read.
-  if ((arm.kind === 'array-buffer' || arm.kind === 'shared-array-buffer') && key === 'byteLength') {
-    return alignedValueText(
-      ctx,
-      'emit-union-properties.ts:block-byte-length',
-      { kind: 'scalar', domain: 'number' },
-      published,
-      `static_cast<double>(${armExprText}->size())`
-    )
-  }
+  const bufferMethod = nativeBufferMethodValueText(ctx, operation, arm, () => armExprText, key, published)
+  if (bufferMethod !== null) return bufferMethod
   if (arm.kind === 'scalar') {
     // Ordinary named properties on a primitive are read through its wrapper
     // object. This runtime has no mutable Number/Boolean prototype, so a name
     // outside Object.prototype is absent on the primitive arm. That is the
-    // native answer for overload probes such as `number | Vector3` reading
-    // `isVector3`: the scalar arm contributes `undefined`, while the class arm
+    // native answer for overload probes such as `number | Point` reading
+    // `isPoint`: the scalar arm contributes `undefined`, while the class arm
     // contributes the declared boolean marker.
     //
     // A `dynamic` result holds that `undefined` as well as an optional does:
-    // three.js's `ShaderMaterial.toJSON` reads `value.toJSON` off a uniform
-    // whose arms are numbers, booleans and textures, and the member's result is
-    // the open carrier because the class arms publish a method there.
+    // a serializer reading `value.toJSON` off a union whose arms are numbers,
+    // booleans and class instances gets the open carrier, because the class
+    // arms publish a method there.
     if (
       !objectPrototypeMemberNames.has(key) &&
       (published.kind === 'dynamic' || (published.kind === 'optional' && published.absence === 'undefined'))
@@ -426,8 +281,8 @@ const armRuntimeFieldText = (
     // integer key, so the language answers `undefined` -- the absence a string
     // arm's out-of-range index answers too, and spelled into a `string` result
     // exactly as that read spells it (`stringIndexText`'s `charAt`
-    // convention). bson's `(name as string)[0] === '$'` over the
-    // `string | number` key its array frames produce.
+    // convention). `(name as string)[0] === '$'` over a `string | number`
+    // key, as an array-or-object walk produces.
     if (index !== null) {
       if (published.kind === 'string') return 'std::string()'
       const absent = cppUndefinedIn(published)
@@ -441,8 +296,8 @@ const armRuntimeFieldText = (
   if (objectPrototypeMemberNames.has(key)) return null
   // A `Record<string, any>` arm answers a named key with its own entry, or
   // `undefined` when it has none: `gea::Dictionary<gea::Value>::read`'s
-  // value-initialized miss IS `undefined`. mongodb's log transform switches on
-  // `logObject.name` over `LoggableEvent | Record<string, any>`.
+  // value-initialized miss IS `undefined`. A switch on `event.name` over
+  // `SomeEvent | Record<string, any>` reads it.
   if (arm.kind === 'dictionary' && arm.key === 'string' && arm.value.kind === 'dynamic' && arm.ownership === 'shared-refcount')
     return alignedValueText(
       ctx,
@@ -461,8 +316,8 @@ const armRuntimeFieldText = (
   // instance, whose sidecar can hold a key the layout never declared -- so
   // nothing can put `callbacks` on one at runtime.
   //
-  // hono's `resolveCallback` is the shape: `(str as HtmlEscapedString)
-  // .callbacks` off a `string | HtmlEscapedString | Promise<string>`, where
+  // The shape: `(str as TaggedString).callbacks` off a
+  // `string | TaggedString | Promise<string>`, where
   // the `as` names the arm the author means and the other two arms answer
   // `undefined` -- which is exactly what `!callbacks?.length` then tests. The
   // string arm already answers that way a few lines above; refusing the whole
@@ -510,14 +365,6 @@ const armRuntimeFieldText = (
       const method = publishedMethodCopyOf(ctx, site.method, key, published)
       if (method.callable === null || ctx.captures.of(method.callable).kind !== 'none') return null
       const converted = classMethodValueText(ctx, operation, key, method, published, armExprText, arm).text
-      // This arm materializes a class method even though the property read's
-      // receiver is the whole tagged union. That receiver's SSA operand is
-      // retained beside the method value so an immediate `value.method()` call
-      // can narrow it back to the receiver-bearing ABI's class arm -- recorded
-      // by `emit.ts`'s prepass, which asked
-      // `unionClassMethodValueReceiverClaim`. A detached method crosses a
-      // binding/result and therefore has a different SSA callee;
-      // `emit-callable.ts` will not consult the entry for it.
       return converted
     }
     // No member anywhere on this class's chain, and the closed reflection
@@ -530,7 +377,7 @@ const armRuntimeFieldText = (
   if (accessors?.some((accessor) => accessor.key === key)) return null
   // A tuple arm's `length` is its arity, exactly as on a bare tuple receiver
   // (`emit-properties.ts`); the sidecar below holds no such key and aborts.
-  // mongodb's `isPair` reads it off `ReadonlyArray<string> | readonly [string, SortDirection]`.
+  // A pair test reads it off `ReadonlyArray<string> | readonly [string, number]`.
   const arity = arm.kind === 'record' && key === 'length' ? positionalRecordArityText(arm, () => armExprText) : null
   if (arity !== null)
     return alignedValueText(ctx, 'emit-union-properties.ts:tuple-arity', { kind: 'scalar', domain: 'number' }, published, arity)
@@ -620,7 +467,15 @@ const nativeNumericUnionAccess = (
         : `${at}${memberAccessOperator(storage.ownership)}`
     if (operation.kind === 'get') {
       return storage.kind === 'elements'
-        ? arrayArmReadText(ctx, operation, at, 'elementAt', key, storage.value, operation.result.representation)
+        ? arrayArmReadText(
+            ctx,
+            operation,
+            at,
+            arm.value.kind === 'array-object' ? 'readElementAt' : 'elementAt',
+            key,
+            storage.value,
+            operation.result.representation
+          )
         : dictionaryArmReadText(ctx, operation, member, key, storage.value, operation.result.representation)
     }
     const written = alignedValueText(
@@ -666,8 +521,8 @@ const emitNativeNumericUnionSet = (ctx: EmitContext, lines: string[], operation:
  * Whether every arm of this union is a typed array -- the one shape for which
  * a COMPUTED key needs no reconciliation between arms.
  *
- * `TypedArray` is a union of nine views (`@types/three` states it, and so does
- * every other package that names the family), and the arms differ only in
+ * `TypedArray` is a union of nine views (as every declaration that names the
+ * family states it), and the arms differ only in
  * element WIDTH: `canonicalMembersOf` keeps all nine because `int8` and
  * `float32` really are different carriers. But `TypedArray::elementAt`
  * returns `double` for all eight domains whatever the view holds, so a
@@ -824,10 +679,10 @@ const dictionaryArmReadText = (
  * above, over `dictionaryArmReadText` instead of `elementAt`. This is the
  * exact shape `manifest/capabilities.ts`'s withheld `tagged-union:get:true`
  * comment names as needing "reconciliation" and declines to build blind --
- * hono's own `Record<string, string> | Record<string, string[]>` (a
- * `multiple`/single-value query-string result) and `ParamIndexMap |
- * Params` (`Record<string, number> | Record<string, string>`, a route's
- * resolved-vs-unresolved parameter table) are both this, and nothing else in
+ * `Record<string, string> | Record<string, string[]>` (a single- vs
+ * multi-value query-string result) and `Record<string, number> |
+ * Record<string, string>` (a resolved-vs-unresolved parameter table) are both
+ * this, and nothing else in
  * the corpus needed the `array-object`-armed case the withheld comment also
  * names, so that half stays unbuilt rather than guessed at.
  */
@@ -872,9 +727,8 @@ const taggedUnionDictionaryGetText = (ctx: EmitContext, operation: GetOperation)
  * element type is, so the only reconciliation left is the ordinary per-arm
  * VALUE one -- widening each arm's own element into the published union the
  * same way `dictionaryArmReadText` widens a dictionary arm's value.
- * `[T, ParamIndexMap][] | [T, Params][]` (hono's own router match result,
- * `Result<T>`'s first slot -- two element arrays differing only in their
- * element's second tuple slot) is exactly this.
+ * `[T, A][] | [T, B][]` (two element arrays differing only in their element's
+ * second tuple slot) is exactly this.
  */
 export const taggedUnionHasOnlyArrayObjectArms = (representation: Representation): boolean =>
   representation.kind === 'tagged-union' && representation.arms.every((arm) => arm.value.kind === 'array-object')
@@ -986,7 +840,7 @@ const arrayArmReadText = (
   ctx: EmitContext,
   operation: GetOperation,
   armText: string,
-  reader: 'elementAt' | 'elementAtIndex',
+  reader: 'elementAt' | 'elementAtIndex' | 'readElementAt' | 'readElementAtIndex',
   keyText: string,
   element: Representation,
   published: Representation
@@ -998,7 +852,7 @@ const arrayArmReadText = (
   // aborts. Guard only the exact dynamic/dynamic pair, leaving typed arms on
   // their existing carrier reconciliation path.
   if (element.kind === 'dynamic' && published.kind === 'dynamic') {
-    const has = reader === 'elementAtIndex' ? 'hasElementAtIndex' : 'hasElement'
+    const has = reader === 'elementAtIndex' || reader === 'readElementAtIndex' ? 'hasElementAtIndex' : 'hasElement'
     return `(${armText}->${has}(${keyText}) ? ${rawRead} : gea::Value())`
   }
   if (published.kind !== 'optional') {
@@ -1012,16 +866,17 @@ const arrayArmReadText = (
     )
   }
   const presentText =
-    representationKey(element) === representationKey(published.payload) ? rawRead : operationConversionText(ctx, operation, 'index-read', element, published.payload, rawRead)
-  const has = reader === 'elementAtIndex' ? 'hasElementAtIndex' : 'hasElement'
+    representationKey(element) === representationKey(published.payload)
+      ? rawRead
+      : operationConversionText(ctx, operation, 'index-read', element, published.payload, rawRead)
+  const has = reader === 'elementAtIndex' || reader === 'readElementAtIndex' ? 'hasElementAtIndex' : 'hasElement'
   const carrier = cppTypeOf(published)
   // An arm whose element no arm of the published read holds is a tuple the
-  // read indexes past: hono's router `Result` is `[[H, Params][]] |
-  // [[H, ParamIndexMap][], ParamStash]`, and `result[1]` is `ParamStash |
-  // undefined` only because the checker knows the first tuple's length. The
-  // carrier does not, so the arm answers the absence the read publishes and
+  // read indexes past: for `[[H, A][]] | [[H, B][], C]`, `result[1]` is
+  // `C | undefined` only because the checker knows the first tuple's length.
+  // The carrier does not, so the arm answers the absence the read publishes and
   // refuses a present element at run time (`absentTupleElement`) -- a
-  // TypeError, never the element's bytes as a `ParamStash`.
+  // TypeError, never the element's bytes as a `C`.
   if (presentText === null) return `gea::host::absentTupleElement<${carrier}>(${armText}->${has}(${keyText}))`
   return `(${armText}->${has}(${keyText}) ? ${carrier}(${presentText}) : ${carrier}())`
 }
@@ -1045,7 +900,7 @@ const taggedUnionArrayGetText = (ctx: EmitContext, operation: GetOperation): str
   if (operation.key.representation.kind !== 'scalar') return null
   const receiverText = operandText(ctx, operation.receiver)
   const keyText = operandText(ctx, operation.key)
-  const reader = ctx.integerValues.has(operation.key.value) ? 'elementAtIndex' : 'elementAt'
+  const reader = ctx.integerValues.has(operation.key.value) ? 'readElementAtIndex' : 'readElementAt'
   const published = operation.result.representation
   const armTexts = receiver.arms.map((arm, index) => {
     const array = arm.value
@@ -1110,9 +965,9 @@ const deferredUnionMethodArmsOf = (ctx: EmitContext, representation: Representat
   // body as a class method's.
   if (key === 'valueOf' && (representation.kind === 'string' || (representation.kind === 'scalar' && representation.domain !== 'bigint')))
     return [{ path: [], receiverRepresentation: representation, callable: null }]
-  // A STATIC method through one arm's class constructor -- bson's EJSON
-  // `keysToCodecs[k].fromExtendedJSON(value, options)` over a table of codec
-  // classes whose statics each declare their own parameters. Joining those into
+  // A STATIC method through one arm's class constructor --
+  // `codecs[k].fromJSON(value, options)` over a table of codec classes whose
+  // statics each declare their own parameters. Joining those into
   // one function value made TypeScript's union-call parameter (the
   // INTERSECTION of every arm's document type) the conversion target of the
   // argument, which no single document satisfies; calling the selected arm's
@@ -1137,8 +992,8 @@ const deferredUnionMethodArmsOf = (ctx: EmitContext, representation: Representat
   const site = classMemberOf(ctx.classes, representation.declaration, key)
   if (site === null) return nativeBaseMethodArmOf(ctx, representation, key)
   if (site.kind !== 'method' || site.method.callable === null) return null
-  // An own property written over the method (`this.match = ...`, which hono's
-  // SmartRouter does to memoise its choice) shadows the prototype for every
+  // An own property written over the method (`this.match = ...`, which a class
+  // does to memoise its choice) shadows the prototype for every
   // later read. Calling the declared body straight from the union tag would
   // answer with the body the assignment replaced. The lone-class twins of this
   // claim already decline on the same question; this one did not, and the
@@ -1162,8 +1017,8 @@ const deferredUnionMethodArmsOf = (ctx: EmitContext, representation: Representat
  * Stated once; `taggedUnionGetText` and the prepass walk both ask it.
  */
 /**
- * `x.toString()` where `x` is a tagged union -- hono's own `input =
- * input.toString()` over `string | URL`.
+ * `x.toString()` where `x` is a tagged union -- `input = input.toString()`
+ * over `string | URL`.
  *
  * This is the EXPLICIT spelling of the operation `${x}` already renders for
  * the same carrier, so it is answered by the same table (`toStringTextOver`),
@@ -1204,7 +1059,7 @@ export const deferredUnionToStringClaim = (ctx: EmitContext, receiver: IrOperand
  * object whichever spelling reached the ToString.
  */
 export const toStringLayoutsOf = (ctx: EmitContext): ToStringLayouts => ({
-  ...recordLayoutPolicyOf(ctx.deriver, ctx.classes),
+  ...ctx.layouts,
   virtualMethodCallFor: (declaration, key) => {
     const abi = ctx.virtualDispatch.get(virtualDispatchKey(declaration, key, 'call'))
     // ToPrimitive calls it with no arguments (7.1.1.1 step 5.b.i), so every
@@ -1355,30 +1210,23 @@ export const taggedUnionGetText = (ctx: EmitContext, lines: string[], operation:
     if (representationKey(site.representation) === representationKey(published)) return site.text
     // `convertedValueText`, not `narrowedLoadText` alone: this arm's field can
     // need to WIDEN into what the whole union's `get` publishes just as often
-    // as it needs to narrow out of one -- hono's own `Result<T>` (`request.ts`'s
-    // `#matchResult[0]`) is a tuple union whose "0" field is a plain
+    // as it needs to narrow out of one -- `#result[0]` over a tuple union
+    // whose "0" field is a plain
     // `array-object` on one arm and the census still publishes the READ as the
     // two-arm union, because the other tuple arm's own "0" differs. That is a
     // widen (`widenedStoreText`'s job), and `narrowedLoadText` alone only ever
     // reads FROM a union, never INTO one (its own `inner.kind !== 'tagged-union'
     // -> null` at the top) -- `convertedValueText` is the superset that tries
-    // both, plus the optional-payload wrap (`this.#matchResult[1]`, present-or-
+    // both, plus the optional-payload wrap (`this.#result[1]`, present-or-
     // absent), before it is asked to fail closed.
     const converted =
       classFamilyLoadText(ctx, site.representation, published, site.text) ??
       // A `this`-typed function stored in one arm's field, read through a
-      // member the union's own declaration states as a method -- hono's
-      // `RegExpRouter.match` against `Router<T>.match`. The receiver the
-      // language binds is the object this read went through, and it is in
-      // hand here.
-      receiverBoundFieldText(
-        ctx,
-        site.representation,
-        published,
-        site.text,
-        operation.receiver.representation,
-        operandText(ctx, operation.receiver)
-      ) ??
+      // member the union's own declaration states as a method -- an
+      // implementing class's `match` field read against an interface's
+      // `match()` method. The read preserves
+      // the source Function; the later invocation supplies its own receiver.
+      nativeMethodValueRecipeText(ctx, operation, key, site.representation, published, site.text, 'own', null) ??
       alignedValueText(ctx, 'emit-union-properties.ts:788', site.representation, published, site.text)
     if (converted !== null) return converted
     throw createCppEmitBlockedError(
@@ -1465,9 +1313,9 @@ const unionLeafSetText = (
       return `${cppBodyName(member.accessor.setter)}(${leaf.text}, ${converted});`
     }
   }
-  // A string-keyed table arm (mongodb's `hello: Document` handed a `Document`
-  // by one caller and a declared `any` by another, then `hello.isWritablePrimary
-  // = ...`) stores into its own live table, exactly as a lone dictionary's
+  // A string-keyed table arm (a `reply: Document` handed a `Document` by one
+  // caller and a declared `any` by another, then `reply.flag = ...`) stores
+  // into its own live table, exactly as a lone dictionary's
   // `set` does in `emit-properties.ts`: the value reconciled to THIS table's
   // declared value carrier, through `setProperty` so a non-writable entry
   // still refuses. No tag changes -- the write lands in whichever table the
@@ -1508,7 +1356,11 @@ const unionLeafSetText = (
 }
 
 /** The written value in the boxed carrier an arm's expando sidecar holds, or `null` when it has no boxed store. */
-const sidecarStoredValueText = (ctx: EmitContext, operation: SetOperation | DefineOwnPropertyOperation, valueText: string): string | null => {
+const sidecarStoredValueText = (
+  ctx: EmitContext,
+  operation: SetOperation | DefineOwnPropertyOperation,
+  valueText: string
+): string | null => {
   const boxed: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
   // `widenedStoreText` answers `null` for a value ALREADY in the held carrier
   // -- no widening to do -- which is not the same null as "cannot be stored":
@@ -1543,9 +1395,8 @@ const emitTaggedUnionNativeSidecarSet = (ctx: EmitContext, lines: string[], oper
   // A dictionary arm is its own keyed table (the expando is for a struct's
   // UNdeclared keys), and a primitive arm is 10.1.9's [[Set]] on a primitive
   // base: no own property to create, so strict code throws and sloppy code
-  // discards. mongodb's `normalizeHintField` stores into
-  // `let finalHint = undefined` narrowed only to `string | Document` inside
-  // its `forEach` callback.
+  // discards. A store into `let result = undefined` narrowed only to
+  // `string | Document` inside a `forEach` callback reaches here.
   const leafStore = (leaf: UnionPropertyLeaf): string | null => {
     const arm = leaf.representation
     if (arm.kind === 'dictionary') {
@@ -1772,13 +1623,18 @@ export const unionMemberTypeofReadsOf = (ctx: EmitContext, body: IrBody): Readon
 
 export const unionMethodReadsOf = (ctx: EmitContext, body: IrBody): ReadonlyMap<IrValueId, UnionMethodRead> => {
   const reads = new Map<IrValueId, UnionMethodRead>()
+  const calls = new Map<IrValueId, Extract<IrOperation, { kind: 'call' }>[]>()
   // A claimed read renders nothing and its CALL renders the dispatch, so a
-  // read anything else consumes -- `union.m.bind(union)`, hono's
-  // `router.match.bind(router)` -- keeps the per-arm value walk instead of
+  // read anything else consumes -- `union.m.bind(union)` -- keeps the per-arm value walk instead of
   // naming a value that was never defined.
   const otherwiseConsumed = new Set<IrValueId>()
   for (const block of body.blocks.values())
-    for (const operation of allOperationsOf(block))
+    for (const operation of allOperationsOf(block)) {
+      if (operation.kind === 'call') {
+        const uses = calls.get(operation.callee.value) ?? []
+        uses.push(operation)
+        calls.set(operation.callee.value, uses)
+      }
       for (const operand of operandsOfIrOperation(operation)) {
         if (
           operation.kind === 'call' &&
@@ -1789,11 +1645,32 @@ export const unionMethodReadsOf = (ctx: EmitContext, body: IrBody): ReadonlyMap<
           continue
         otherwiseConsumed.add(operand.value)
       }
+    }
   for (const block of body.blocks.values()) {
     for (const operation of allOperationsOf(block)) {
       if (operation.kind !== 'get' || otherwiseConsumed.has(operation.result.id)) continue
+      // A deferred call dispatches from the Get's object. Borrowing the
+      // already-selected Function with another this must materialize it here.
+      // A call that passes no this at all -- the joined convention of
+      // `keysToCodecs[k].fromExtendedJSON(...)` declares no receiver -- is
+      // claimed only when no arm's body reads one either, so dispatching from
+      // the Get's object cannot hand a body a this its call never supplied.
+      const uses = calls.get(operation.result.id)
+      const unbound = (call: Extract<IrOperation, { kind: 'call' }>): boolean => call.thisArgument == null && call.receiver == null
+      if (!uses?.every((call) => (call.thisArgument ?? call.receiver)?.value === operation.receiver.value || unbound(call))) continue
+      const published = operation.result.representation
+      const held = abiOfCallee(published.kind === 'optional' ? published.payload : published)
+      if (operation.methodValueRecipes?.length && held?.receiver === null) continue
       const claim = deferredUnionMethodClaim(ctx, operation.receiver, operation.key)
-      if (claim !== null) reads.set(operation.result.id, claim)
+      if (claim === null) continue
+      if (
+        uses.some(unbound) &&
+        claim.arms.some(
+          (arm) => arm.callable === null || arm.nativeBase !== undefined || ctx.abiOfCallable(arm.callable)?.receiver !== null
+        )
+      )
+        continue
+      reads.set(operation.result.id, claim)
     }
   }
   return reads

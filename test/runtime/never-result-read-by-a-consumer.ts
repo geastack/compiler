@@ -5,9 +5,9 @@
 // initializer, an `await` operand, a store. The point after the call is
 // unreachable, so the read needs a value that is never observed, not a
 // refusal. node-compat rewrites `require('<x>.node')` into a `never` call
-// (mongodb-client-encryption's `bindings.ts`, `export const mc = load()`),
-// and its unimplemented `fs/promises.readFile` is `never` too (mongodb's
-// `k8s_machine_workflow.ts`, `state_machine.ts`'s `setTlsOptions`).
+// (an encryption plugin's native bindings, `export const mc = load()`),
+// and its unimplemented `fs/promises.readFile` is `never` too (a database
+// client's cloud-credential workflow and its TLS-option setup).
 function unavailable(specifier: string): never {
   throw new Error('unavailable ' + specifier)
 }

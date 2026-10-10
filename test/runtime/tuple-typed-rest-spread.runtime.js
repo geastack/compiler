@@ -1,5 +1,5 @@
 // @ts-nocheck
-// three's `WebGLState.js` as the native-webgl-angle plugin rewrites it:
+// A 3D scene-graph library's GPU-state module as the native-webgl-angle plugin rewrites it:
 // `function texStorage2D() { gl.texStorage2D( ...arguments ) }` becomes a
 // rest frame with a STATED tuple contract, `/** @param {[number, number, number,
 // number, number]} args */ function texStorage2D( ...args ) { gl.texStorage2D(
@@ -8,7 +8,7 @@
 // five positional reads -- the same expansion `f(...pair)` gets when `pair`
 // is a closed tuple LOCAL. Read through the rest parameter's own cell it was
 // refused as "a spread argument whose source has a native iteration cursor
-// can only be range-copied into a rest parameter" (the three.js app, 2026-09-14): the
+// can only be range-copied into a rest parameter" (an app, 2026-09-14): the
 // cell's census type is the array the rest slot materializes, and the
 // declared tuple was never consulted.
 /** @param {[number, number]} args */

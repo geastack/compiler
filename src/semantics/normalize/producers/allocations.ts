@@ -689,7 +689,7 @@ const isCallAndConstructShape = (context: ProducerContext, id: StructuralTypeId)
  * non-method, non-generator, non-async function real `[[Construct]]`
  * behavior and a real own "prototype" property. A program that casts such a
  * value to a call+construct interface (`function (v) {...} as unknown as
- * DualCallableConstructor`, an ajv-style `((v) => boolean) & { new (...): T
+ * DualCallableConstructor`, a validator-style `((v) => boolean) & { new (...): T
  * }` intersection) is not lying about the runtime -- it is naming a fact the
  * checker's own inference just does not surface for typed function syntax
  * the way it does for the untyped `this.x = ` constructor-function idiom
@@ -916,6 +916,13 @@ export const createAllocationProducer = (context: ProducerContext): FamilyProduc
           }
         : {}),
       shape,
+      ...(ts.isObjectLiteralExpression(node) &&
+      !node.properties.some(
+        (property) =>
+          ts.isPropertyAssignment(property) && !ts.isComputedPropertyName(property.name) && keyTextOf(property.name) === '__proto__'
+      )
+        ? { ordinaryObjectPrototype: true as const }
+        : {}),
       ...(allocated === 'array-literal' ? { conversionRoles: arrayLiteralElementRolesOf(context, shape, operands) } : {}),
       ...(isBodyLevelFunctionDeclaration(node) ? { hoistedFunctionInitialization: true } : {}),
       operands,

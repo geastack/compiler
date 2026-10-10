@@ -1,16 +1,16 @@
 //! expect: loads 1
-//! expect: compress: zstd:abc zstd:def
+//! expect: compress: compressor:abc compressor:def
 //! expect: before: true
 //! expect: count: 0 1 2
 //! expect: local: 7
 //! expect: lazy: 41 41
-//! expect: library: missing zstd / zstd 2
+//! expect: library: missing compressor / compressor 2
 
 // A module `let` declared without an initializer holds `undefined` until the
 // first write, and the checker never proves definite assignment across
-// functions. mongodb's `compression.ts` (`let zstd: ZStandard` then
-// `if (!zstd) zstd = loadZstd()`) is the idiom: carried as its declared type,
-// `!zstd` folds to false and the loader never runs.
+// functions. A database client's compression module (`let compressor: Compressor` then
+// `if (!compressor) compressor = loadCompressor()`) is the idiom: carried as its declared type,
+// `!compressor` folds to false and the loader never runs.
 
 interface Codec {
   readonly name: string
@@ -22,7 +22,7 @@ let loads = 0
 
 function loadCodec(): Codec {
   loads++
-  return { name: 'zstd', encode: (input: string) => `zstd:${input}` }
+  return { name: 'compressor', encode: (input: string) => `compressor:${input}` }
 }
 
 function compress(input: string): string {
@@ -67,7 +67,7 @@ function lazy(): number {
 }
 console.log(`lazy: ${lazy()} ${lazy()}`)
 
-// The mongodb shape exactly: the cell's declared type is itself a union, and
+// The database client's shape exactly: the cell's declared type is itself a union, and
 // the reads narrow it with `in` after the lazy load.
 type Library = { kModuleError: string } | { compress(input: string): string }
 let library: Library
@@ -75,7 +75,7 @@ let libraryLoads = 0
 function loadLibrary(): void {
   if (!library) {
     libraryLoads++
-    library = libraryLoads > 5 ? { compress: (input: string) => input } : { kModuleError: 'missing zstd' }
+    library = libraryLoads > 5 ? { compress: (input: string) => input } : { kModuleError: 'missing compressor' }
   }
 }
 function useLibrary(): string {
@@ -83,4 +83,4 @@ function useLibrary(): string {
   if ('kModuleError' in library) return library.kModuleError
   return library.compress('x')
 }
-console.log(`library: ${useLibrary()} / zstd ${useLibrary() === 'missing zstd' ? libraryLoads + 1 : 0}`)
+console.log(`library: ${useLibrary()} / compressor ${useLibrary() === 'missing compressor' ? libraryLoads + 1 : 0}`)

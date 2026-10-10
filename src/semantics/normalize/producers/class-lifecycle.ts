@@ -945,15 +945,15 @@ export const createClassLifecycleProducer = (context: ProducerContext): FamilyPr
     // is absent rather than a function that returns undefined.
     let initializerObject: AllocationOperation | null = null
     // A field initialized with a GENERIC function literal the program never
-    // instantiates -- hono's `redirect = <T extends RedirectStatusCode = 302>(
-    // location, status?) => ...` in a program that never calls `c.redirect` --
+    // instantiates -- `redirect = <T extends StatusCode = 302>(location,
+    // status?) => ...` in a program that never calls `c.redirect` --
     // is a body `census.ts` walks not at all ("there is no such function in
     // this program"), the same rule `declaration-lifecycle.ts`'s
     // `namesUninstantiatedGeneric` applies to an import of one. Stating an
     // initializer here anyway minted a thunk over an empty region: its return
     // carried no value, the emitter spelled that as the `never` trap it is
-    // for a `return fail()`, and every `new Context(...)` threw before hono's
-    // handler ran. The field is recorded exactly as one declared with no
+    // for a `return fail()`, and every construction of the class threw before
+    // the program's own code ran. The field is recorded exactly as one declared with no
     // initializer -- the only reads that could tell the difference are
     // dynamic ones, and an uninstantiated generic has no value in this
     // program for them to see either. A generic literal the program DOES

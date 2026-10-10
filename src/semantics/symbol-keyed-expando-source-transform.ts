@@ -18,10 +18,10 @@ import ts from 'typescript'
  * calls `getLateBoundSymbol` on `undefined`, and the checker throws
  * `Cannot read properties of undefined (reading 'flags')` from
  * `getMembersOfSymbol` inside the FIRST `getTypeAtLocation` that touches the
- * holder. Measured on the 2026-09-05 test262 sample: 23 cases crash the
- * compiler this way, every one of them a hand-rolled iterable of exactly
- * this shape (`var iterable = {}; iterable[Symbol.iterator] = function ...`,
- * `harness/testTypedArray.js`-style protocol objects included).
+ * holder. Measured on a sample of conformance tests (2026-09-05): 23 cases
+ * crash the compiler this way, every one of them a hand-rolled iterable of
+ * exactly this shape (`var iterable = {}; iterable[Symbol.iterator] =
+ * function ...`, typed-array harness protocol objects included).
  *
  * The program's meaning is unchanged by parentheses: `o[k] = (function () {})`
  * evaluates identically at runtime. What changes is that the binder's expando

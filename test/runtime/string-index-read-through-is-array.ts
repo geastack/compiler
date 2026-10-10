@@ -1,5 +1,5 @@
 // `Array.isArray(x) ? x[0] : x` -- the one-or-many normalization that
-// `@hono/node-server`'s `createUpgradeRequest` and hono's trie router both
+// an HTTP framework's Node adapter (`createUpgradeRequest`) and its trie router both
 // write, over a type NO constituent of which is assignable to `any[]`:
 //
 //   headers.append(key, Array.isArray(value) ? value[0] : value)   // value: string
@@ -37,7 +37,7 @@ console.log('h=' + firstHeaderValue('abc'))
 // the read emits at all: a closed tuple is laid out as a record, `record` is
 // among the kinds `Array.isArray` answers `false` for from the kind alone, and
 // the whole predicate folded to `false` at compile time -- so the tuple arm
-// was unreachable in the emitted program and hono's router would have
+// was unreachable in the emitted program and the framework's router would have
 // registered no parameterized route at all. See `isTupleShape`.
 type RoutePattern = readonly [string, string, boolean] | '*'
 

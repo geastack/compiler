@@ -1,4 +1,4 @@
-// hono's `SmartRouter.match` (router/smart-router/router.ts) picks the first
+// An HTTP framework's `SmartRouter.match` picks the first
 // router that accepts every route, then replaces ITSELF on the instance:
 //
 //   this.match = router.match.bind(router)

@@ -1,6 +1,6 @@
 // `for...of` OVER THE ARRAY ARM OF `Document | Document[]` AFTER `Array.isArray`.
 //
-// mongodb's `hasAtomicOperators` (`utils.ts`) takes `doc: Document |
+// A database client's `hasAtomicOperators` takes `doc: Document |
 // Document[]`, and under `Array.isArray(doc)` iterates it with `for (const
 // document of doc)`, recursing per element; otherwise it reads the document's
 // keys and answers whether the first one starts with `$`. `Document` is an

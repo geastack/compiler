@@ -1,6 +1,6 @@
 // `Object.assign( table, extra )` where `table` is a string-keyed dictionary of
-// typed values and `extra` is an `any` -- three's
-// `ColorManagement.define( colorSpaces )` merging definitions into `spaces`.
+// typed values and `extra` is an `any` -- a 3D scene-graph library's
+// color-management `define( colorSpaces )` merging definitions into `spaces`.
 // Each enumerable own key of the dynamic source is stored through the checked
 // unbox of the table's value type.
 interface Space {

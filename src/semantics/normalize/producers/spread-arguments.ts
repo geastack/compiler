@@ -8,7 +8,7 @@ import { isFixedArgumentsSpreadAt } from '../implicit-arguments-tuple.js'
 import type { CensusCandidate } from '../census.js'
 import type { ProducerContext } from '../producer-context.js'
 import { argumentsObjectValueAt, isArgumentsObjectIdentifier } from './bindings.js'
-import { assertsType } from './erasure.js'
+import { assertsJsDocType, assertsType } from './erasure.js'
 import { operand } from './mint.js'
 import { hasNativeIterationCursor, sourceForValue } from './shared.js'
 import { isDynamicIterationSource, mintIteratorSteps } from './protocol.js'
@@ -243,7 +243,7 @@ const fixedArraySpreadElementOf = (
 
 /**
  * `Array.from(source)` whose source is a program iterable -- a class with its
- * own `*[Symbol.iterator]()`, the mongodb driver's linked `List<T>` -- reads
+ * own `*[Symbol.iterator]()`, a hand-written linked `List<T>` -- reads
  * that source through GetIterator (ECMA-262 23.1.2.1 step 5), exactly as
  * `[...source]` does. The array literal consumes the record its spread
  * element's protocol candidate mints; a call argument has no such candidate,
@@ -534,7 +534,13 @@ export const buildArgumentOperands = (
       continue
     }
     const argumentOperand = operand('argument', position, sourceForValue(context, argument), context.types.typeAt(argument), evaluation)
-    operands.push(assertsType(argument, context.checker) ? { ...argumentOperand, asserted: true as const } : argumentOperand)
+    operands.push(
+      assertsType(argument, context.checker)
+        ? { ...argumentOperand, asserted: true as const }
+        : assertsJsDocType(argument, context.checker)
+          ? { ...argumentOperand, jsdocAsserted: true as const }
+          : argumentOperand
+    )
     position += 1
   }
   return { kind: 'operands', operands, operations, edges }

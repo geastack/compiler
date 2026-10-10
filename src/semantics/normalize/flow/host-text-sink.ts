@@ -40,15 +40,16 @@ export const coercesWithoutSourceCode = (checker: ts.TypeChecker, type: ts.Type)
  * `consoleArgumentsText` rendering every operand at the call site. The host
  * never receives the object, only characters -- so an argument is not a
  * publication of the value, provided the rendering itself runs no source code.
- * Three's `Object3D.add` reports `object` to the console on its
- * added-to-itself guard, and that one argument was the terminal of 35 escapes.
+ * A tree's `add( object )` that reports `object` to the console on an
+ * added-to-itself guard is the typical case: that one argument can otherwise
+ * be the terminal of many escapes.
  *
  * `null` means the site is not a text sink and the caller's other rules apply.
  */
 export const hostTextSinkArgumentOf = (checker: ts.TypeChecker, reference: ts.Expression): boolean | null => {
   // A spread argument is not one value the sink might keep: it is however many
   // the array holds, each rendered on its own. `console.error( message,
-  // ...params )` is the shape three's logging shim ends in.
+  // ...params )` is the shape a logging wrapper ends in.
   const spread = ts.isSpreadElement(reference.parent) && reference.parent.expression === reference ? reference.parent : null
   const call = spread?.parent ?? reference.parent
   if (!ts.isCallExpression(call) || !call.arguments.includes(spread ?? reference)) return null

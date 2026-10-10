@@ -37,7 +37,7 @@ export const narrowedOperandView = (source: Representation, operand: SemanticOpe
   if (source.kind === 'tagged-union' && source.arms.some(isProxyArm)) return narrowedKeepingProxies(source, target)
   // The same sum behind an absence -- a module `let` with no initializer, read
   // where it may still be unwritten (`representation/unassigned-binding-cells.ts`):
-  // mongodb's `'kModuleError' in zstd` over the proxy-carrying `ZStandard`. A
+  // `'kModuleError' in mod` over a proxy-carrying optional module. A
   // use that states the arm ran on a present value (`in` throws on
   // `undefined`, and so does a member read), so the view is the payload's own
   // proxy-keeping selection -- the payload itself when the checker's arm is

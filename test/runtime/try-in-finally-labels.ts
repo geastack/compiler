@@ -1,7 +1,7 @@
 // A try/catch nested inside a finally clause, in an async method whose try
 // body returns early. The finally clause renders inside a scope guard's
 // lambda, so every block the clause jumps to -- the nested try's join and the
-// clause's own exit -- has to render inside that lambda too; mongodb's cursor
+// clause's own exit -- has to render inside that lambda too; a database client's cursor
 // cleanup emitted `goto block39` / `goto block41` with neither label defined.
 //! expect: run0:body,close,done
 //! expect: run1:killed,close-fail,done

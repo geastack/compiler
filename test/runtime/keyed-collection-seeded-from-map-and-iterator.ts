@@ -1,5 +1,5 @@
 // ECMA-262 24.1.1.1 / 24.2.1.1: `new Map(iterable)` and `new Set(iterable)`
-// drain the argument's own iterator. mongodb's TopologyDescription copies its
+// drain the argument's own iterator. A database client's topology description copies its
 // server table with `new Map(this.servers)` and takes the key set with
 // `new Set(this.servers.keys())`.
 

@@ -59,7 +59,7 @@ export const isAmbientDeclaration = (declaration: ts.Declaration): boolean =>
   // answer to this exact question and is what the checker itself consults.
   //
   // Missing it made a host function look like one this program defines:
-  // `canvas-3d` declares `requestAnimationFrame` that way, and the symbol
+  // a program declaring `requestAnimationFrame` that way, and the symbol
   // -- ambient in `lib`'s own `.d.ts` and ambient again here -- was judged
   // non-ambient on the strength of the second declaration. It then
   // allocated a function object with no body behind it, whose ABI declared
@@ -126,14 +126,14 @@ export const declaredBaseTypesOf = (checker: ts.TypeChecker, type: ts.Type): rea
  * such global -- no binding at all.
  *
  * `declare const atob: ( s: string ) => string` at the top of a module
- * (bson's `web_byte_utils.ts`) brings nothing into being: it tells the
+ * brings nothing into being: it tells the
  * checker a binding of that name exists, and JavaScript emits nothing for it,
  * so at run time the identifier reads the global. When the program's own
  * environment declares that global (the standard library, a host's
  * declarations), the name is that global and every host fact about the
  * global -- its native implementation, its namespace root, its effect
- * contract -- is the name's. When nothing declares it (mongodb's `declare
- * const Deno`, bson's `declare const WebAssembly: any`), the name is an
+ * contract -- is the name's. When nothing declares it (a library's `declare
+ * const Deno` or `declare const WebAssembly: any`), the name is an
  * unresolvable reference on this host exactly as an undeclared identifier
  * is: `typeof` answers `'undefined'` and a bare read throws ReferenceError
  * (ECMA-262 9.1.2.1, 13.5.1.2). Neither answer is a cell of the module's own,
@@ -189,8 +189,8 @@ export const moduleAmbientGlobalOf = (checker: ts.TypeChecker, symbol: ts.Symbol
  * Whether reading a module-local ambient name reads nothing at run time.
  *
  * `moduleAmbientGlobalOf` asks the checker's global scope, which knows only
- * declarations. An installed host also defines names by linkage: node-compat's
- * `http.ts` states `declare function __gea_http_serve(...)` module-locally, no
+ * declarations. An installed host also defines names by linkage: a host's
+ * HTTP module states `declare function __gea_http_serve(...)` module-locally, no
  * global declares it, and the reactor defines it -- it is one of the plugin's
  * `hostFunctions`. Such a name is an external cell, not an unresolvable
  * reference; answering `unresolvable` for it turned every `server.listen` into
@@ -207,8 +207,8 @@ export const isUnresolvableModuleAmbient = (checker: ts.TypeChecker, symbol: ts.
  * The module's declaration is the type its code was checked against; the
  * global's is the one the host implements. Binding the name to the host's
  * native is sound only when every value of the global's type is a value of
- * the declared one -- bson declares `new (label: 'utf8', options: {...})`
- * against a host `new (label?: string, options?: {...})`, which is.
+ * the declared one -- a module declaring `new (label: 'utf8', options: {...})`
+ * against a host `new (label?: string, options?: {...})` is such a case.
  */
 export const moduleAmbientGlobalSatisfiesDeclaration = (checker: ts.TypeChecker, local: ts.Symbol, global: ts.Symbol): boolean => {
   const localDeclaration = local.valueDeclaration ?? local.declarations?.find((declaration) => !introducesNoBinding(declaration))
@@ -239,8 +239,8 @@ export const globalSymbolBehindModuleAmbientConst = (checker: ts.TypeChecker, sy
  * The program's source text with every module-local ambient declaration of a
  * global blanked, keyed by resolved file name, for the files that carry one.
  *
- * bson's `web_byte_utils.ts` declares `TextEncoder`, `TextDecoder`, `atob` and
- * `btoa` itself so it needs no DOM lib; JavaScript emits nothing for those
+ * A library module that declares `TextEncoder`, `TextDecoder`, `atob` and
+ * `btoa` itself so it needs no DOM lib is the case; JavaScript emits nothing for those
  * statements, so every read of the names is the GLOBAL (`moduleAmbientGlobalOf`).
  * The checker, though, resolves them to the module's own symbol and types every
  * expression through the module's own shapes -- `new TextEncoder()` is then a
@@ -256,10 +256,10 @@ export const globalSymbolBehindModuleAmbientConst = (checker: ts.TypeChecker, sy
  * (`moduleAmbientGlobalSatisfiesDeclaration`): the module's code was checked
  * against its own declaration, and retyping it against a global that does not
  * satisfy it would be a different program. Such a declaration is left in place
- * and keeps the treatment it had: an ambient cell linked by its name (mongodb's
- * probe states `declare const process: { exitCode: number | undefined }`, which
- * node-compat's `process` does not satisfy, and bson's `declare const Buffer:
- * NodeJsBufferConstructor` states overloads the host's `Buffer` does not match
+ * and keeps the treatment it had: an ambient cell linked by its name (a module stating
+ * `declare const process: { exitCode: number | undefined }`, which
+ * the host's `process` does not satisfy, or a `declare const Buffer:
+ * BufferConstructorLike` stating overloads the host's `Buffer` does not match
  * one for one). A declaration naming a global nothing
  * declares is left in place too: it is the program's only statement that the
  * name exists, and its reads are unresolvable references, not cells.
@@ -279,7 +279,7 @@ export const withoutModuleAmbientGlobalRedeclarations = (
     const behind = moduleAmbientGlobalOf(checker, symbol)
     return behind?.kind === 'global' && moduleAmbientGlobalSatisfiesDeclaration(checker, symbol, behind.symbol)
   }
-  // The TYPE a restated value's name also declares in the module (bson's
+  // The TYPE a restated value's name also declares in the module (a module's
   // `type TextDecoder = { decode(...) }` beside `declare const TextDecoder`)
   // is the module's view of the global's instance type: `let decoder:
   // TextDecoder` holds what the global's constructor makes. Left in place it

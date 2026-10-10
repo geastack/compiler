@@ -1,4 +1,5 @@
 import { nativeHostIncludes } from './native-host-includes.mjs'
+import { nativeOptimization } from './native-optimization.mjs'
 /**
  * Upstream Test262 against THIS compiler, with the legacy sweep's denominator.
  *
@@ -581,7 +582,9 @@ console.log(__gea_verdict)
 // ---------------------------------------------------------------------------
 
 const runtimeDir = join(here, 'src', 'targets', 'cpp', 'runtime')
-const runtimeHeaders = ['gea_runtime.h', 'gea_pcm.h', 'gea_dynamic_proxy.h', 'gea_eval.h', 'gea_native_class_prototype.h']
+const runtimeHeaders = readdirSync(runtimeDir)
+  .filter((name) => name.endsWith('.h'))
+  .sort()
 
 const normalizeReason = (reason) => reason.replace(/\d+/g, 'N').replace(/\s+/g, ' ').trim().slice(0, 140)
 
@@ -711,10 +714,14 @@ const runWorker = async () => {
     const shim = join(caseDir, 'main_shim.cpp')
     writeFileSync(shim, 'extern void __gea_top_level();\nint main() { __gea_top_level(); return 0; }\n')
     const binary = join(caseDir, 'program')
-    const built = spawnSync('clang++', ['-std=c++20', '-O0', ...pchArguments, `-I${caseDir}`, ...includes, '-o', binary, ...units, shim], {
-      encoding: 'utf8',
-      timeout: buildTimeoutMs
-    })
+    const built = spawnSync(
+      'clang++',
+      ['-std=c++20', ...nativeOptimization('correctness'), ...pchArguments, `-I${caseDir}`, ...includes, '-o', binary, ...units, shim],
+      {
+        encoding: 'utf8',
+        timeout: buildTimeoutMs
+      }
+    )
     if (built.status !== 0) {
       const firstError =
         (built.stderr ?? '').split('\n').find((line) => line.includes('error:')) ?? (built.stderr ?? '').split('\n')[0] ?? ''
@@ -778,9 +785,13 @@ const prepareIncludeDir = () => {
   // C++ and every emitted unit re-parses it. The unit's own
   // `#include "gea_runtime.h"` is then a no-op behind the header guard.
   const pch = join(includeDir, 'gea_runtime.h.pch')
-  const built = spawnSync('clang++', ['-std=c++20', '-O0', '-x', 'c++-header', join(includeDir, 'gea_runtime.h'), '-o', pch], {
-    encoding: 'utf8'
-  })
+  const built = spawnSync(
+    'clang++',
+    ['-std=c++20', ...nativeOptimization('correctness'), '-x', 'c++-header', join(includeDir, 'gea_runtime.h'), '-o', pch],
+    {
+      encoding: 'utf8'
+    }
+  )
   if (built.status !== 0) {
     rmSync(pch, { force: true })
     process.stderr.write(`test262: no runtime PCH (${(built.stderr ?? '').split('\n')[0]}); units will parse the runtime each time\n`)

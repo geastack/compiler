@@ -9,9 +9,14 @@ import type {
   TaggedUnionArm,
   TypedArrayElementDomain
 } from '../../representation/model.js'
-import { arrayExtensionKey, representationKey } from '../../representation/model.js'
+import { arrayExtensionKey, carriesNativeUndefined, representationKey } from '../../representation/model.js'
 import type { ConstantLiteral } from '../../semantics/model/operands.js'
 import { symbolPropertyKeyDeclarationOf } from '../../semantics/model/structural-types.js'
+
+/** Physical position, actual packing origin, and physical-this convention
+ * are supplied together whenever a native entry crosses an erased boundary. */
+export const cppCallableFrameArguments = (abi: CallableAbi): string =>
+  `${abi.restFrom === null ? -1 : abi.restFrom + (abi.receiver === null ? 0 : 1)}, ${abi.argumentsFrame === 'actual'}, ${abi.receiver !== null}`
 
 /**
  * Representation -> physical C++ type spelling. This is the one authoritative
@@ -646,6 +651,7 @@ export const cppUndefinedValue = 'gea::Undefined{}'
  */
 export const cppUndefinedIn = (representation: Representation): string | null => {
   if (representation.kind === 'undefined') return cppUndefinedValue
+  if (carriesNativeUndefined(representation)) return `${cppTypeOf(representation)}::undefined()`
   if (representation.kind === 'dynamic') return `${cppTypeOf(representation)}()`
   if (representation.kind === 'optional' && representation.absence === 'undefined') return `${cppTypeOf(representation)}()`
   if (representation.kind === 'tagged-union') {
@@ -710,6 +716,7 @@ export const cppConstantLiteral = (text: string, literal: ConstantLiteral, repre
     // use, the same way reading a property of `undefined` faults. A carrier
     // with no such value -- a `double`, where an empty one is `0` and would
     // answer arithmetic instead of faulting -- is refused rather than zeroed.
+    if (literal === 'undefined' && carriesNativeUndefined(representation)) return `${cppTypeOf(representation)}::undefined()`
     if (!carriesAbsence(representation)) {
       throw new Error(
         `the constant \`${literal}\` was asserted into a ${representationKey(representation)} carrier, which has no absent value that faults when used`
@@ -872,6 +879,12 @@ export const cppStringLiteral = (content: string): string => {
 export const literalPropertyKeyText = (key: string): string =>
   key.includes('\u0000') ? `gea::PropertyKey::string(${cppStringLiteral(key)})` : `gea::literalPropertyKey<${cppStringLiteral(key)}>()`
 
+/** The runtime key of a representation field: a declared symbol member (`sym(...)`) is that symbol, found by the marker its declaration registered. */
+export const fieldPropertyKeyText = (key: string): string =>
+  cppRecordFieldKeyIsSymbol(key)
+    ? `gea::PropertyKey::symbol(gea::Symbol(gea::detail::declaredSymbolId<${cppStringLiteral(key)}>()))`
+    : literalPropertyKeyText(key)
+
 /** The emitted class name for a nominal class declaration. */
 export const cppClassName = (declaration: DeclarationId): string => `gea_class_${sanitizeForCppIdentifier(declaration)}`
 
@@ -1029,7 +1042,7 @@ export const cppAbiParameterType = (parameter: AbiParameter): string => {
  * A body that takes one BY VALUE increments and decrements a count on every
  * call, for an object the caller already holds for the whole call -- so the
  * count buys nothing and sits on the hot path of every method. Measured on
- * `bench/comparison/fixtures/method_calls.ts`: 31.9ms taking the receiver by
+ * a method-call loop: 31.9ms taking the receiver by
  * value, 15.9ms taking it by reference, against 19.0ms for the hand-written
  * baseline whose receiver is a stack object.
  *
@@ -1084,9 +1097,9 @@ export const cppAbiType = (abi: CallableAbi): string => {
 /**
  * Every tagged union a translation unit spells, bound to one short name.
  *
- * A union's C++ spelling is its whole arm list, and the arm list of three's
- * `NativeUniformValue | null | undefined` is 1.3KB. Spelled at every field,
- * formal, local, cast and `ofArm<k>` site, unions were 12.9MB of the three.js app's
+ * A union's C++ spelling is its whole arm list, and the arm list of a wide
+ * `UniformValue | null | undefined` is 1.3KB. Spelled at every field,
+ * formal, local, cast and `ofArm<k>` site, unions were 12.9MB of one
  * 38.7MB unit -- 25,410 spellings of a few hundred distinct types. While a
  * unit is being rendered (`beginUnionAliasing` .. `endUnionAliasing`,
  * `translation-unit.ts`), `cppTypeOf` answers the alias instead and records
@@ -1131,8 +1144,8 @@ const unionAliasing: {
  * spelling. A conversion whose text depends on nothing but its target -- an
  * `any -> record` load, rebuilding the record field by field out of checked
  * dynamic reads -- was pasted as an immediately invoked lambda at every site
- * that asked for it: mongodb's 131-field options record was 10.6 MB of the
- * ping driver's 77 MB unit in 63 identical copies, most of them inside the
+ * that asked for it: a 131-field options record was 10.6 MB of one
+ * 77 MB unit in 63 identical copies, most of them inside the
  * reflection handlers each record struct carries per field. While a unit
  * renders, such a conversion is recorded here under its full text and the site
  * calls `name(operand)`; the unit declares every recorded function ahead of

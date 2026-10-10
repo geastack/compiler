@@ -4,7 +4,7 @@
 //! expect: has:true
 //! expect: objects:3
 
-// mongodb's connection_string.ts `CaseInsensitiveMap<Value = any> extends
+// A connection-string parser's `CaseInsensitiveMap<Value = any> extends
 // Map<string, Value>`: instantiated at `any` (DEFAULT_OPTIONS) and at
 // `unknown[]`, the class splits into layout-distinct copies, and the `any`
 // copy's `this` is the union of the copies. Its `set` returns `super.set(..)`

@@ -1,4 +1,4 @@
-// mongodb's `readMany` PIPELINE, END TO END, WITH TIMER-DELIVERED DATA.
+// A DATABASE CLIENT'S `readMany` PIPELINE, END TO END, WITH TIMER-DELIVERED DATA.
 //
 // `Connection.readMany` is an async generator doing `for await` over
 // `onData(messageStream)`: a hand-written async iterator OBJECT LITERAL whose
@@ -15,7 +15,7 @@
 //
 // The blocking model parked the consumer in a nested pump inside the promise
 // `next()` returned. Here the first `await` blocks at the top level before any
-// timer runs; in the real driver, where the event loop is already running,
+// timer runs; in the real client, where the event loop is already running,
 // the pipeline ran inside the pump of whichever await started it, and a second
 // pipeline started meanwhile deadlocked behind it. Observed on the blocking
 // build: nothing printed, then

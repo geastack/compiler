@@ -10,8 +10,8 @@ import { isStandardInterfaceType } from './derived-expression-type.js'
  * `never[]` IS NOT A TYPE THE PROGRAM ASKED FOR.
  *
  * `this.children = []` and `state.probe = []` type as `never[]`, and TS's
- * evolving-array widening does not cross a function boundary -- so the nine
- * `Vector3`s `WebGLLights.js` pushes into `state.probe` one line later never
+ * evolving-array widening does not cross a function boundary -- so the class
+ * instances the program pushes into `state.probe` one line later never
  * reach the cell's type, and every read of it derives a carrier for a value
  * that cannot exist. `collection-bindings.ts` already answers what the writes
  * actually produce; this is the one place its answer enters the type system.
@@ -28,8 +28,8 @@ import { isStandardInterfaceType } from './derived-expression-type.js'
  * type nothing else would recognise.
  *
  * ⛔ This is NOT the reachability question. A `never` here is TypeScript's
- * mis-inference, not a proof of anything -- `state.probe[ i ].set( 0, 0, 0 )`
- * at `WebGLLights.js:216` is unconditional and runs every frame. Marking such
+ * mis-inference, not a proof of anything -- a `state.probe[ i ].set( 0, 0, 0 )`
+ * in a per-frame update loop is unconditional and runs every time. Marking such
  * an operand unreachable was tried and miscompiled live code. Correcting the
  * ELEMENT TYPE is the opposite move: it gives that line the carrier it always
  * needed instead of declaring it dead.
@@ -45,8 +45,8 @@ import { isStandardInterfaceType } from './derived-expression-type.js'
  * `array-object(undefined)` -- a claim that the array can hold NOTHING -- while
  * the cell it fills and every read of it carry the checker's own evolving
  * `any[]`. Two authorities over one storage, and the compiler had picked the
- * strictly less true one: three's `WebGLUniforms.seqWithValue` does `const r =
- * []`, pushes into it, and returns it, and the conversion the return needed
+ * strictly less true one: a helper that does `const r = []`, pushes into it,
+ * and returns it is the case, and the conversion the return needed
  * (`array-object(undefined) -> array-object(dynamic)`) can never exist, because
  * a carrier that holds nothing is not a carrier the program's values fit.
  *
@@ -70,8 +70,8 @@ import { isStandardInterfaceType } from './derived-expression-type.js'
  * gives `never` the same physical nothing as `void`, which `storedCarrier`
  * spells `undefined` in a stored position. So the carrier came out
  * `array-object(undefined)` -- a claim that the array can hold NOTHING -- while
- * the program pushes into it. three's `WebGLUniforms.seqWithValue` is the case:
- * `const r = []`, `r.push( u )` in a loop, `return r`, and the conversion the
+ * the program pushes into it. A helper that builds and returns a list is the
+ * case: `const r = []`, `r.push( u )` in a loop, `return r`, and the conversion the
  * return needs (`array-object(undefined) -> array-object(dynamic)`) can never
  * exist, because a carrier that holds nothing is not one the program's values
  * fit. The refusal was right and the carrier was wrong.
@@ -101,7 +101,7 @@ import { isStandardInterfaceType } from './derived-expression-type.js'
  * than by a contextual type. Boxing it puts two authorities over one merge --
  * `array-object(dynamic)` on the arm, `array-object(native-record-ref)` on the
  * merge -- and no load converts between them, so the program certified and was
- * then refused at emission (`examples/apps/voice-notes`, its whole file).
+ * then refused at emission (a whole application file, measured).
  *
  * Refusing to box is the entire fix: `ir/lower-narrow.ts`'s `mergeIncoming`
  * already handles this idiom by name, materializing the empty array in the
@@ -141,14 +141,14 @@ const mergeStatesElement = (checker: ts.TypeChecker, layoutTypeAt: (node: ts.Nod
  * The element an empty `[]` holds when it is the fallback arm of a merge the
  * checker types as the standard `Iterable<T>`.
  *
- * mongodb's `DeprioritizedServers` constructor walks `descriptions ?? []` over
- * `descriptions?: Iterable<ServerDescription>`. TS gives the literal no
+ * A constructor that walks `items ?? []` over an optional
+ * `items?: Iterable<Item>` is the shape. TS gives the literal no
  * contextual type -- a `for`-`of` source has none -- so it types `never[]`,
- * and the merge subtype-reduces `Iterable<ServerDescription> | never[]` to the
+ * and the merge subtype-reduces `Iterable<Item> | never[]` to the
  * interface. `mergeStatesElement` above reads a stated element only off an
  * ARRAY-typed merge, so this arm fell through to `unstatedNeverArray` and was
  * boxed: `array-object(dynamic)`, for a value whose every element the
- * expression it belongs to states is a `ServerDescription`.
+ * expression it belongs to states is an `Item`.
  *
  * `Iterable<T>` states the element and nothing about the implementation
  * (`derived-expression-type.ts`'s `containsUnstatedPosition`), and the arm is
@@ -186,9 +186,9 @@ const iterableMergeArmElement = (
  * `Object.defineProperty(target, key, { value: [] })` installs on a member the
  * target's type declares an array.
  *
- * mongodb's `decorateDecryptionResult` defines a non-enumerable
- * `[kDecoratedKeys]?: Array<string>` as `{ value: [], ... }` and pushes every
- * decrypted key into it. `PropertyDescriptor.value` is `any`, so the literal
+ * A function that defines a non-enumerable symbol-keyed
+ * `[kKeys]?: Array<string>` as `{ value: [], ... }` and then pushes every key
+ * it processes into it is the shape. `PropertyDescriptor.value` is `any`, so the literal
  * has no array context and types `never[]`; built as `array-object(undefined)`
  * it is an array the declared `string[]` field cannot take, and the define
  * failed at run time. The member's declaration states the element, and the
@@ -234,8 +234,8 @@ const definedPropertyArrayElement = (checker: ts.TypeChecker, node: ts.ArrayLite
   return (element.flags & open) === 0 ? element : null
 }
 
-/** `{ [key: string]: any }` with nothing else an array literal could be checked against: mongodb's and bson's `Document`. */
-const isOpenDocumentType = (checker: ts.TypeChecker, type: ts.Type): boolean => {
+/** `{ [key: string]: any }` with nothing else an array literal could be checked against: an open string-keyed record type. */
+const isOpenStringIndexType = (checker: ts.TypeChecker, type: ts.Type): boolean => {
   if ((type.flags & ts.TypeFlags.Object) === 0 || checker.isArrayType(type) || checker.isTupleType(type)) return false
   const index = checker.getIndexInfoOfType(type, ts.IndexKind.String)
   return index !== undefined && (index.type.flags & ts.TypeFlags.Any) !== 0 && type.getCallSignatures().length === 0
@@ -260,8 +260,8 @@ export const unstatedNeverArray = (
     // evidence-free case the box exists for.
     const contextual = checker.getContextualType(node)
     if (contextual && checker.isArrayType(contextual)) return false
-    // A property of an object literal (`{ ok: 1, nextBatch: [] }`, mongodb's
-    // `CursorResponse.emptyGetMore`) is stored in the literal's own record,
+    // A property of an object literal (`{ ok: 1, nextBatch: [] }`, a
+    // module-level constant response record) is stored in the literal's own record,
     // whose field carrier derives from the literal's own type -- this
     // `never[]` -- and nothing rewrites it. Boxing the element here put two
     // authorities over one field (`array-object(dynamic)` built,
@@ -270,9 +270,9 @@ export const unstatedNeverArray = (
     // without a cast the checker would see, so the record's carrier is the
     // true one and the literal takes it.
     // Unless the property is declared an open `Document` (`{ [key: string]:
-    // any }`): bson's deserializer builds `{ holdingDocument: [], ... }` into a
-    // `NestedParsingFrame` and then writes every parsed element through that
-    // Document. The field is the Document, the array is the object it views
+    // any }`): a deserializer that builds `{ holder: [], ... }` into a parsing
+    // frame and then writes every parsed element through that open record is
+    // the shape. The field is the Document, the array is the object it views
     // (`gea::dictionary::aliasOf`), and every write it takes is an `any` -- so
     // the box is the element the program's own writes state, and an
     // `undefined` element would refuse the first of them.
@@ -283,7 +283,7 @@ export const unstatedNeverArray = (
       ts.isPropertyAssignment(arm.parent) &&
       arm.parent.initializer === arm &&
       ts.isObjectLiteralExpression(arm.parent.parent) &&
-      !(contextual !== undefined && isOpenDocumentType(checker, contextual))
+      !(contextual !== undefined && isOpenStringIndexType(checker, contextual))
     )
       return false
     return node.elements.length === 0 && collections.arrayElementAt(node) === null && neverElement(layoutTypeAt(node))
@@ -318,11 +318,11 @@ export const unstatedNeverArray = (
     // letting one read take TypeScript's narrower evolving-array answer gives
     // one array two carriers, and the emitter's only bridge between two
     // `array-object` carriers is a fresh array. For a mutable `ArrayObject`
-    // that silently drops everything a callee pushes (three's
-    // `getProgramCacheKey`: every program cache key came out identical).
+    // that silently drops everything a callee pushes (a cache-key builder that
+    // passes its array to helpers came out with every key identical).
     // Gated on the checker STILL calling this reference an array: where its
-    // own answer is a bare `any` (three's `WebGLOutput`, whose `_effects` is
-    // assigned an unannotated parameter) the reference is not an array read at
+    // own answer is a bare `any` (a module-level `let effects = []` that is
+    // later assigned an unannotated parameter) the reference is not an array read at
     // all, and boxing it as one gives `_effects.length` an `any` member type
     // over an `ArrayObject` receiver -- two authorities again, the other way.
     if (collections.arrayRefusalForRead(node) !== null && checker.isArrayType(layoutTypeAt(node))) return true
@@ -429,8 +429,8 @@ export const inferredArrayElementAt = (
  * the allocation against it.
  *
  * It has to be answered here, in the type system, rather than only as the
- * invocation's published result: `partOffsets = new Array(len)` (hono's trie
- * router, over `let partOffsets: number[] | null = null`) puts the allocation
+ * invocation's published result: `partOffsets = new Array(len)` (over
+ * `let partOffsets: number[] | null = null`) puts the allocation
  * behind an assignment whose own value the mapper reads from its right-hand
  * side, and the merge that cell's later reads join would otherwise publish
  * `array-object(dynamic)` against an allocation the invocation published as
@@ -674,8 +674,9 @@ export const inferredCollectionTypeArgumentsAt = (
           : null
   if (!bound) return null
   const generic = table.get(typeOf(own)).shape
-  // A cell's own type need not be the collection at all -- bson's `object:
-  // Document` holds a map in one arm and a dictionary in the other -- so only
+  // A cell's own type need not be the collection at all -- an `object:
+  // Record | Map` parameter holds a map in one arm and a dictionary in the
+  // other -- so only
   // a collection is overridden, never the declaration beside it.
   const direct = isLibKeyedCollection(own) ? overriddenCollectionShape(table, typeOf, bags, bound, generic) : null
   if (direct !== null) return direct
@@ -684,7 +685,7 @@ export const inferredCollectionTypeArgumentsAt = (
   // checker's on the declaration -- the exact two-authorities failure the
   // owner-keyed accessor exists to prevent, one level down.
   //
-  // `WebGLRenderer.js`'s `let programs = materialProperties.programs` is the
+  // `let programs = properties.programs` is the
   // shape: the initializer is `Map<any, any> | undefined`, so this refused
   // and the cell kept `optional(keyed-collection(map, dynamic, dynamic))`,
   // while every read past the `if ( programs === undefined )` guard is a
@@ -702,7 +703,7 @@ export const inferredCollectionTypeArgumentsAt = (
   // is no single collection for the census's answer to be about.
   //
   // A cell whose OTHER substantive members are not collections at all --
-  // bson's `serialize(object: Document)`, whose cell is the open dictionary
+  // a `serialize(object: OpenRecord)`, whose cell is the open dictionary
   // beside the map callers hand it -- still holds exactly one collection, in
   // exactly one arm, and the census's answer is about that arm's storage.
   if (generic.kind !== 'union') return null
@@ -735,8 +736,8 @@ const isLibKeyedCollection = (type: ts.Type): boolean => {
 }
 
 /**
- * `(object as Map<unknown, unknown>)` over a cell the census bound: bson
- * restates what `instanceof Map` already narrowed, with arguments that say
+ * `(object as Map<unknown, unknown>)` over a cell the census bound: a program
+ * that restates what `instanceof Map` already narrowed, with arguments that say
  * nothing. The assertion names the same storage, so it reads the storage's
  * own K/V -- a `Map<Value, Value>` here is a second carrier for one map, and
  * the only way to reach it is a copy. An assertion stating a real argument
@@ -839,9 +840,9 @@ const boundValueTypeId = (
  * that is not enough: a prototype call's result comes from the CALLEE'S
  * SIGNATURE, which the checker instantiates from the receiver EXPRESSION's
  * type, never from whatever this compiler later selected for it. So
- * `properties.get( renderTarget )` over a `WeakMap` the census bound stays
- * `any`, and every `renderTargetProperties = properties.get( ... )` in three's
- * renderer is a `dynamic -> record` conversion nothing installs -- while the
+ * `properties.get( target )` over a `WeakMap` the census bound stays
+ * `any`, and every `targetProperties = properties.get( ... )` in such a
+ * program is a `dynamic -> record` conversion nothing installs -- while the
  * cell the value came OUT of is laid out natively. One storage, two
  * authorities, exactly one operation apart.
  *

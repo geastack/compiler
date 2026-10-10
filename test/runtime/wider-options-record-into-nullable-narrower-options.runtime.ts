@@ -1,6 +1,6 @@
 // A NAMED OPTIONS RECORD HANDED TO A `Narrower | null = null` PARAMETER.
 //
-// mongodb's `Topology` constructor passes its whole `TopologyOptions` to
+// A database client's `Topology` constructor passes its whole `TopologyOptions` to
 // `new TopologyDescription(..., options)`, whose last formal is
 // `TopologyDescriptionOptions | null = null`: a different named interface
 // declaring two of the source's members as optional, under a nullable,

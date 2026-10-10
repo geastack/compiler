@@ -1,6 +1,6 @@
 //! expect: raw true 1
 //! expect: hello 5
-// hono's `utils/html.ts`: `type HtmlEscapedString = string & HtmlEscaped`, and
+// An HTTP framework's HTML-escaping helper: `type HtmlEscapedString = string & HtmlEscaped`, and
 // `raw()` mints one with `new String(value) as HtmlEscapedString`, then writes
 // both declared fields onto it. `new String` is the WRAPPER OBJECT, so the
 // fields have somewhere to live -- the native dynamic-property sidecar the

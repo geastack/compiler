@@ -6,7 +6,7 @@
 // to the checker, so a handler returning `Promise<void> | undefined` -- a
 // recursive pump that hands back the next hop while there is one and nothing
 // once the source is drained -- publishes a result carrying no payload at all.
-// @hono/node-server's `writeFromReadableStream` is written exactly this way,
+// A Node HTTP adapter's `writeFromReadableStream` is written exactly this way,
 // and its pump is held in a box so it can name itself.
 //
 // The two-handler form renders both arms as lambdas that settle the call's own

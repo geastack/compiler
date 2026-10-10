@@ -178,8 +178,8 @@ const KEYED_METHODS: ReadonlySet<string> = new Set(['get', 'has', 'delete', 'set
 /**
  * Whether handing `reference` to this call as its KEY exposes nothing.
  *
- * Three's `WebGLObjects.update` keys its per-frame `updateMap` WeakMap by the
- * drawable itself: `updateMap.get( object ) !== frame`, then
+ * A per-frame update cache keys its `updateMap` WeakMap by the drawable
+ * object itself: `updateMap.get( object ) !== frame`, then
  * `updateMap.set( object, frame )`. A native map only compares a key by
  * identity, and the closed map family (`collectionValueFlowOf`) already
  * refuses every way to get a key back out -- `keys`/`entries`/`forEach`,

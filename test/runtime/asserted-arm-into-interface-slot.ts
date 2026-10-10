@@ -2,7 +2,7 @@
 //! expect: wrong TypeError
 //! expect: held 1
 // The sibling of `class-arm-without-view-into-interface-slot-refused.ts` with
-// the store written the way hono's `Context.executionCtx` writes it: `return
+// the store written the way an HTTP framework's `Context.executionCtx` writes it: `return
 // this.#ctx as ContextLike` off a `NativeContext | ContextLike` field. The
 // class arm still has no view as the interface, so the census has no sound
 // per-arm answer -- but the author has stated the arm, and the store is that

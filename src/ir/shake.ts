@@ -5,6 +5,9 @@ import type { ClassField, ClassLayout } from '../projection/classes.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { isOpenDocument, representationKey, walkRepresentation, type CallableAbi, type Representation } from '../representation/model.js'
 import { restForwards } from '../conversion/record-view.js'
+import type { ConversionCensus } from '../conversion/nodes.js'
+import { classAllocationDomainOf } from './class-allocation-domain.js'
+import { nativeCallableFlowOf } from './callable-class-flow.js'
 import { allOperationsOf, type IrBlock, type IrBlockId, type IrBody, type IrNonTerminatorOperation, type IrOperation } from './model.js'
 import { arrayAllocationDrainsDynamicIterator, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { verifyIrBody, type IrViolation } from './verify.js'
@@ -200,6 +203,7 @@ export const effectOf = (operation: IrNonTerminatorOperation): OperationEffect =
     // result's absent value when the source itself is absent. No arm of that
     // is program code either.
     case 'merge-live-arm-rebuild':
+    case 'dead-logical-merge-value':
       return 'pure'
     case 'compute':
       if (
@@ -466,8 +470,8 @@ const sliceBody = (
       // `native-handle` holds a HOST constructor and nothing else: `new
       // Error(...)`, `new Promise(...)`, `new Map()` all land here, and none of
       // them can reach a class this program projects. They are the overwhelming
-      // majority of open constructions in a node-compat program (176 of them in
-      // `apps/raw-http-hello`), so reading the carrier here is the difference
+      // majority of open constructions in a Node-API server program (176 of
+      // them in a minimal HTTP server), so reading the carrier here is the difference
       // between this demand answering something and answering nothing at all.
       // A `constructor-family` names its class objects exactly. Anything else
       // -- a dynamic carrier, a callable dispatch -- really can be any of them.
@@ -502,8 +506,8 @@ const sliceBody = (
       // A dynamic key is a hazard only where it READS. `fieldInitializerRuns`
       // asks one question -- can anything observe the value this initializer
       // would leave in the field -- and a store answers no: whatever key it
-      // lands on, it overwrites rather than reads. hono's `Hono` constructor
-      // does `allMethods.forEach((method) => { this[method] = ... })`, and
+      // lands on, it overwrites rather than reads. A constructor doing
+      // `allMethods.forEach((method) => { this[method] = ... })`, and
       // treating that store as a read kept the initializer of every field the
       // class declares, `fire = (event: FetchEventLike) => ...` among them.
       //
@@ -675,9 +679,9 @@ const documentViewScope = 'document-view'
  *
  * `c.text('hi')` and `response.text()` spell one key and mean two members of
  * two unrelated classes, and filing the key without its receiver made either
- * one keep the other. hono is where that stops being academic: `Response#text`
- * is reached on the app's own reply path, and filing `text` globally kept
- * `HonoRequest#text` -- and with it `#cachedBody`, `JSON.stringify` of a
+ * one keep the other. A web framework is where that stops being academic:
+ * `Response#text` is reached on the app's own reply path, and filing `text`
+ * globally kept the request wrapper's `text` -- and with it its body cache, `JSON.stringify` of a
  * `BodyInit`, and a refusal in a body nothing runs.
  *
  * A `class-ref` names its class exactly, and a record names whichever class
@@ -960,9 +964,9 @@ const memberIsReachable = (reach: MemberReach, scopes: readonly string[], key: s
  * and a virtual dispatch through a base-typed receiver runs a DERIVED
  * override, so it has to reach downward too. Those are two directed walks,
  * not an undirected component: sibling classes cannot answer one another's
- * dispatch. BSON has many siblings below `BSONValue`; treating the hierarchy
- * as one component made using `ObjectId#toString` retain Decimal128's whole
- * conversion implementation as though a runtime ObjectId could be one.
+ * dispatch. A value hierarchy with many siblings below one base, treated as
+ * one component, made using one sibling's `toString` retain another sibling's
+ * whole conversion implementation as though a runtime instance could be both.
  */
 const inheritanceScopesOf = (classes: ReadonlyMap<DeclarationId, ClassLayout>): ReadonlyMap<DeclarationId, readonly string[]> => {
   const children = new Map<DeclarationId, DeclarationId[]>()
@@ -1019,9 +1023,9 @@ const inheritanceScopesOf = (classes: ReadonlyMap<DeclarationId, ClassLayout>): 
  * unconditionally, so it is only sound for an initializer that does nothing
  * but produce a value. `effectFree` is that: every operation in its body is
  * `pure` -- an allocation, a constant, a read, a conversion -- with no store,
- * no call, and no cell write. hono's are exactly this shape: `#cachedBody =
- * (key) => { ... }` and `html = (c, ...) => ...` allocate a closure and return
- * it.
+ * no call, and no cell write. Arrow-function field initializers are exactly
+ * this shape: `#cached = (key) => { ... }` and `html = (c, ...) => ...`
+ * allocate a closure and return it.
  *
  * What an elided initializer leaves behind is a member C++ default-constructs,
  * because the struct member itself is rendered from the class's SHAPE and not
@@ -1210,6 +1214,8 @@ export interface IrShakeInput {
   readonly deriver: RepresentationDeriver
   /** Whether one method body can fill the callable carrier published by a computed class read. */
   readonly computedMethodCanFill: (callable: FunctionId, target: Representation) => boolean
+  /** Admitted receiver transports used by the exact allocation census. Missing authority publishes no exclusion. */
+  readonly conversions?: Pick<ConversionCensus, 'nodeById'>
 }
 
 export interface IrShakeResult {
@@ -1488,6 +1494,15 @@ export const shakeProgram = (input: IrShakeInput): IrShakeResult => {
   }
 
   const prunedClasses = new Map<DeclarationId, ClassLayout>()
+  const allocationDomain = input.conversions
+    ? classAllocationDomainOf(
+        [...shaken.values()],
+        input.classes,
+        input.placements,
+        input.deriver,
+        nativeCallableFlowOf([...shaken.values()], input.placements, input.classes, input.conversions, undefined, input.deriver)
+      )
+    : null
   // Which classes survived as constructible, and how many did not. The answer
   // is one line per class and the question is only asked while sizing a binary,
   // so it is env-gated rather than carried in the result.
@@ -1495,7 +1510,11 @@ export const shakeProgram = (input: IrShakeInput): IrShakeResult => {
     console.log(`[SHAKE] construction open=${anyConstruction} constructible=${constructible.size}/${input.classes.size}`)
   for (const [declaration, layout] of input.classes) {
     if (process.env['GEA_SHAKE_DEBUG'] && !isConstructible(declaration)) console.log(`[SHAKE] not constructed: ${declaration}`)
-    prunedClasses.set(declaration, prunedClass(layout, liveOwners, isConstructible(declaration)))
+    const { allocationAbsent, ...unclassified } = prunedClass(layout, liveOwners, isConstructible(declaration))
+    prunedClasses.set(declaration, {
+      ...unclassified,
+      ...(allocationDomain !== null && !allocationDomain.has(declaration) ? { allocationAbsent: true as const } : {})
+    })
   }
   return { bodies: shaken, classes: prunedClasses, unreferencedCells, droppedBodies, droppedOperations, refused: null }
 }

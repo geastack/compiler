@@ -1,4 +1,4 @@
-// A family member intersected with an all-optional object type (mongodb's
+// A family member intersected with an all-optional object type (a database client's
 // `FindOptions & Abortable`, `Abortable = { signal?: AbortSignal }`) is the
 // same object as the bare member: handing it between the two spellings keeps
 // identity, a write through one is seen through the other, and the partner's

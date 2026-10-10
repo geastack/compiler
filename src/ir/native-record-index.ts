@@ -34,7 +34,7 @@ export const disjointNativeRecordIndexOf = (
 
 /** An erased read recovering undefined must test entry presence before reading
  * the native slot. Keep that lookup carrier shared with reflection demand. */
-export const nativeRecordIndexReadCarrierOf = (index: RecordIndexSidecar, result: Representation): Representation => {
+export const nativeRecordIndexReadCarrierOf = (index: Pick<RecordIndexSidecar, 'value'>, result: Representation): Representation => {
   if (result.kind !== 'optional' || result.absence !== 'undefined') return index.value
   if (index.value.kind === 'optional' && index.value.absence === 'undefined') return index.value
   return { kind: 'optional', payload: index.value, absence: 'undefined' }

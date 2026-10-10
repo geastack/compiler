@@ -1,13 +1,13 @@
 // A TYPED OPTIONS RECORD WHOSE NESTED-INTERFACE FIELDS ARE WRITTEN AND READ
 // THROUGH A STRING KEY ON AN `any` RECEIVER.
 //
-// mongodb's `parseOptions` builds `MongoOptions` from `Object.create(null)`
-// and fills it in `setOption(mongoOptions: any, key, descriptor, values)` with
-// `mongoOptions[name] = values[0]`. `driverInfo: DriverInfo` is a required
+// A database client's `parseOptions` builds `ClientOptions` from
+// `Object.create(null)` and fills it in `setOption(clientOptions: any, key, descriptor, values)` with
+// `clientOptions[name] = values[0]`. `driverInfo: DriverInfo` is a required
 // field whose carrier is a reference to the `DriverInfo` record, and its
 // descriptor default is `{}`. The field dispatcher could box that field for a
 // read but had no write recipe for it, so the program compiled and then aborted
-// in the MongoClient constructor with "a declared field whose carrier this
+// in the client constructor with "a declared field whose carrier this
 // runtime cannot box or unbox". The write now takes the same checked
 // `any -> DriverInfo` conversion an assertion takes: the exact struct by
 // identity, any other object rebuilt as a checked record product, an array of

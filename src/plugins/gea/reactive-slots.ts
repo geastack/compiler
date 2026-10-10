@@ -91,10 +91,10 @@ const containsPropertyAccess = (node: ts.Node): boolean => {
  * field's own cell (`emit-jsx.ts`'s `reactiveMemberPointer`), so a thunk would
  * only take that away. True of a FIELD. A getter is spelled identically and has
  * no cell: `{reader.pageNumberLabel}` is a call, `reactiveFieldReads` has no
- * entry for it, and the slot fell through to the once-only `leafText` -- the
- * page counter froze at whatever it read on the first render, which on the
- * e-reader was the one-page entry preview of a walk still in progress ("1 / 1"
- * for a book of fourteen hundred pages). The same wrongness
+ * entry for it, and the slot fell through to the once-only `leafText` -- a
+ * derived label froze at whatever it read on the first render, typically a
+ * placeholder computed before the data it summarizes had finished loading.
+ * The same wrongness
  * `enclosingLocalConstInitializer` below was written for: the screen said
  * "already something better" and the truth was "nothing at all".
  *
@@ -134,8 +134,8 @@ const isDirectOrConstant = (expression: ts.Expression): boolean => {
  * the ternary's control flow -- so `reactiveMemberPointer` finds nothing to
  * point at and the slot falls through to the once-only path. The screen said
  * "already something better"; the truth was "nothing at all", and the button
- * kept its first label for the life of the program (`examples/apps/
- * stopwatch-jsx`: Start never became Pause).
+ * kept its first label for the life of the program (a Start button that
+ * never became Pause).
  *
  * The re-runnable unit is the const's INITIALIZER, so that is what is claimed:
  * the identifier's range is replaced by the initializer's text, and the thunk

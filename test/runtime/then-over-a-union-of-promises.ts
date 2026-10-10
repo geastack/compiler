@@ -11,8 +11,8 @@
 // So every arm failed inside the header (`callSettledHandler` substitution
 // failure) and the call's own type degenerated to the `promise_result_t` of a
 // failed deduction, which lands on the caller as "no viable conversion from
-// 'Promise<int>'" -- a type nothing in the program named. hono's
-// `HonoRequest.#cachedBody` reaches it over five arms at once, reading
+// 'Promise<int>'" -- a type nothing in the program named. An HTTP
+// framework's `AppRequest.#cachedBody` reaches it over five arms at once, reading
 // `bodyCache[anyCachedKey]` (a `TaggedUnion` of five body promises) and
 // `.then`-ing it with one handler over the union of the five payloads.
 //

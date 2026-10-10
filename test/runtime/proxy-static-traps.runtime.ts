@@ -3,14 +3,14 @@
 //! expect: set-trap threw: read-only
 //! expect: no-get-trap a=1 b=two
 //! expect: in-no-has a=true z=false
-//! expect: kerberos missing: kerberos is not installed
+//! expect: auth-plugin missing: auth-plugin is not installed
 //! expect: error-module key=present
-//! expect: error-module set threw: kerberos is not installed
+//! expect: error-module set threw: auth-plugin is not installed
 
 // `new Proxy(target, handler)` compiled statically: the handler is an object
 // literal, so which traps exist is known at compile time and every access on
-// the proxy either calls its trap or loads the target natively. mongodb's
-// `deps.ts` `makeErrorModule` is the shape this exists for.
+// the proxy either calls its trap or loads the target natively. A library's
+// optional-dependency `makeErrorModule` is the shape this exists for.
 
 class MissingDependencyError extends Error {
   constructor(message: string) {
@@ -69,34 +69,34 @@ function makeErrorModule(error: any) {
   })
 }
 
-interface KerberosModule {
+interface AuthPluginModule {
   initializeClient(service: string): string
 }
 
-type Kerberos = KerberosModule | { kModuleError: MissingDependencyError }
+type AuthPlugin = AuthPluginModule | { kModuleError: MissingDependencyError }
 
-function loadKerberos(): KerberosModule {
-  throw new Error('Cannot find module kerberos')
+function loadAuthPlugin(): AuthPluginModule {
+  throw new Error('Cannot find module auth-plugin')
 }
 
-function getKerberos(): Kerberos {
-  let kerberos: Kerberos
+function getAuthPlugin(): AuthPlugin {
+  let authPlugin: AuthPlugin
   try {
-    kerberos = loadKerberos()
+    authPlugin = loadAuthPlugin()
   } catch {
-    kerberos = makeErrorModule(new MissingDependencyError('kerberos is not installed'))
+    authPlugin = makeErrorModule(new MissingDependencyError('auth-plugin is not installed'))
   }
-  return kerberos
+  return authPlugin
 }
 
-const kerberos = getKerberos()
-if ('kModuleError' in kerberos) {
-  console.log('kerberos missing: ' + kerberos.kModuleError.message)
+const authPlugin = getAuthPlugin()
+if ('kModuleError' in authPlugin) {
+  console.log('auth-plugin missing: ' + authPlugin.kModuleError.message)
 } else {
-  console.log('kerberos loaded: ' + kerberos.initializeClient('svc'))
+  console.log('auth-plugin loaded: ' + authPlugin.initializeClient('svc'))
 }
 
-const errorModule = makeErrorModule(new MissingDependencyError('kerberos is not installed'))
+const errorModule = makeErrorModule(new MissingDependencyError('auth-plugin is not installed'))
 console.log('error-module key=' + (errorModule.kModuleError === undefined ? 'absent' : 'present'))
 try {
   errorModule.kModuleError = 1

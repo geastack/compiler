@@ -20,9 +20,12 @@ import type { ValueFlowIndex } from './flow/model.js'
  * cell, and every mention of the cell (its declaration, its reads, its write
  * targets) is typed with it, so the declare-site and the reads keep agreeing.
  *
- * Only fields and locals: a parameter's absence is its callers' question, a
- * record member's is its literal's, and a function result's is the return
- * census's. A cell whose carrier is already `any`/`unknown` is left alone:
+ * Fields, locals and parameters. A parameter's ARGUMENTS are its callers'
+ * question, but its default initializer is a writer of the cell itself: it
+ * runs whenever a call omits the argument, so `constructor(data = null)` holds
+ * `null` beside the arrays its callers pass, and a carrier taken from those
+ * callers alone has no arm to receive the default. A record member's absence
+ * is its literal's, and a function result's is the return census's. A cell whose carrier is already `any`/`unknown` is left alone:
  * the box holds both absent values itself.
  */
 export type SloppyAbsence = 'null' | 'undefined'
@@ -77,6 +80,9 @@ const isClassMember = (declaration: ts.Node): boolean => {
 const isLocal = (declaration: ts.Node): declaration is ts.VariableDeclaration =>
   ts.isVariableDeclaration(declaration) && ts.isIdentifier(declaration.name)
 
+const isParameterCell = (declaration: ts.Node): declaration is ts.ParameterDeclaration =>
+  ts.isParameter(declaration) && ts.isIdentifier(declaration.name)
+
 export const createSloppyAbsenceCensus = (checker: ts.TypeChecker, flow: ValueFlowIndex | undefined): SloppyAbsenceCensus => {
   const memo = new Map<ts.Symbol, readonly SloppyAbsence[]>()
   const inProgress = new Set<ts.Symbol>()
@@ -84,12 +90,15 @@ export const createSloppyAbsenceCensus = (checker: ts.TypeChecker, flow: ValueFl
   const isCell = (symbol: ts.Symbol): boolean => {
     if ((symbol.flags & (ts.SymbolFlags.Variable | ts.SymbolFlags.Property)) === 0) return false
     const declarations = symbol.declarations ?? []
-    return declarations.length > 0 && declarations.every((declaration) => isLocal(declaration) || isClassMember(declaration))
+    return (
+      declarations.length > 0 &&
+      declarations.every((declaration) => isLocal(declaration) || isParameterCell(declaration) || isClassMember(declaration))
+    )
   }
 
   const cellSymbolOf = (node: ts.Node): ts.Symbol | null => {
     const named =
-      ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node)
+      ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node) || ts.isParameter(node)
         ? node.name
         : ts.isPropertyAccessExpression(node)
           ? node.name
@@ -171,7 +180,8 @@ export const createSloppyAbsenceCensus = (checker: ts.TypeChecker, flow: ValueFl
       if (isLocal(declaration)) {
         if (declaration.initializer) expressionAbsences(declaration.initializer, found)
         else if (!isIterationBinding(declaration) && !hasAmbientModifier(declaration)) found.add('undefined')
-      } else if (ts.isPropertyDeclaration(declaration)) {
+      } else if (ts.isPropertyDeclaration(declaration) || isParameterCell(declaration)) {
+        // A parameter with no default holds only what its callers pass.
         if (declaration.initializer) expressionAbsences(declaration.initializer, found)
       } else if (ts.isBinaryExpression(declaration)) {
         expressionAbsences(declaration.right, found)
@@ -200,6 +210,7 @@ export const createSloppyAbsenceCensus = (checker: ts.TypeChecker, flow: ValueFl
       if (
         ts.isVariableDeclaration(node) ||
         ts.isPropertyDeclaration(node) ||
+        ts.isParameter(node) ||
         ts.isIdentifier(node) ||
         ts.isPropertyAccessExpression(node)
       ) {

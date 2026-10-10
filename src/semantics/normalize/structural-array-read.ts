@@ -54,7 +54,7 @@ export const structuralArrayReadAt = (
     if (shape.kind === 'array' && numeric) return { id: shape.element, present: false }
     // A String's integer index reads one code unit (10.4.3.5) -- reached here
     // only where the checker left the read unstated, which a receiver typed
-    // by a type parameter it closes per copy does: saslprep's `first = <T
+    // by a type parameter it closes per copy does: a helper `first = <T
     // extends string | any[]>(x: T): T[number] => x[0]` is `any` to the
     // checker in the generic body and a string read in its `T = string` copy.
     // A copy bound at a literal (`first('abc')` binds `T = "abc"`) reads the
@@ -113,8 +113,8 @@ export const structuralArrayReadAt = (
   // JavaScript read becomes ArrayObject::elementAt's native abort.
   //
   // Except where the walk above PROVED the position present. `children[0]` on
-  // `/** @type {[Object3D]} */` is the case: the tuple branch answers
-  // `Object3D` because position 0 of a closed 1-tuple is not optional, and then
+  // `/** @type {[Node]} */` is the case: the tuple branch answers
+  // `Node` because position 0 of a closed 1-tuple is not optional, and then
   // this recovery unioned `undefined` straight back in because the checker's
   // own answer for the read is `any` -- one rule undoing the other, and the
   // emitted read paying for it with a presence test and an `Optional` round

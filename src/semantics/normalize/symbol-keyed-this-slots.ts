@@ -5,13 +5,13 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * A module-private `Symbol()` key a class writes onto its own instances
  * without declaring it, laid out as an optional native field of that class.
  *
- * `@hono/node-server`'s `LightweightResponse` (response.ts) is the case. Its
- * per-response cache lives under `cacheKey`, which the class never declares:
+ * A response class that keeps a per-instance cache under a module-private
+ * `cacheKey`, which the class never declares, is the case:
  *
  *   ;(this as any)[cacheKey] = [init?.status || 200, body ?? null, headers || init?.headers]
- *   const cache = (this as LightResponse)[cacheKey]
- *   delete (this as LightResponse)[cacheKey]
- *   return ((this as LightResponse)[responseCache] ||= new GlobalResponse(...))
+ *   const cache = (this as Cached)[cacheKey]
+ *   delete (this as Cached)[cacheKey]
+ *   return ((this as Cached)[otherKey] ||= new BaseResponse(...))
  *
  * and the listener asks `cacheKey in res` / `(res as any)[cacheKey]` once per
  * request. Without a field, every one of those went to the object's expando
@@ -24,7 +24,7 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * receiver typed as a base class (`cacheKey in res`) reaches it too.
  *
  * Its type is the one the program itself states for the key -- the property
- * an `as T` cast on `this` declares (`LightResponse[cacheKey]`). A key no such
+ * an `as T` cast on `this` declares (`Cached[cacheKey]`). A key no such
  * interface types stays an expando: inventing a type from the writes would be
  * a guess.
  *
@@ -114,7 +114,7 @@ export const censusSymbolKeyedThisSlots = (
   // Every spelling a fresh symbol can be referenced by: its own name, plus any
   // local name an import or export renames it to, to a fixpoint. Only those
   // identifiers are resolved -- asking the checker for every identifier in a
-  // three.js-sized program is the cost this filter exists to avoid -- and a
+  // large program is the cost this filter exists to avoid -- and a
   // missed rename would be a missed escape, so the closure is taken in full.
   const spellings = new Set<string>()
   const sources = files.filter((file) => !file.isDeclarationFile)
@@ -218,10 +218,10 @@ export const censusSymbolKeyedThisSlots = (
    * element by element for an array literal against a tuple.
    *
    * Comparable rather than assignable, because the program this exists for
-   * writes wider than it declares: hono stores a `Blob`/`Uint8Array` body into
-   * the `string | ReadableStream | null` element its `InternalCache` states.
+   * writes wider than it declares: it stores a `Blob`/`Uint8Array` body into
+   * the `string | ReadableStream | null` element its cache type states.
    * Every read of the key is a conversion to that declared type
-   * (`(res as any)[cacheKey] as InternalCache`), so such a value already
+   * (`(res as any)[cacheKey] as Cache`), so such a value already
    * refused at its first read through the expando; the native write refuses
    * it at the store instead. A value of a type DISJOINT from the slot's could
    * never be read back at all, so it withdraws the key.

@@ -1,7 +1,7 @@
 //! expect: lazy:b
 //! expect: eager:b
 //! expect: true
-// `@hono/node-server` headers.ts: `RequestHeaders` derives from the captured
+// An HTTP server adapter's headers: `RequestHeaders` derives from the captured
 // `GlobalHeaders` (a const alias of the class), overrides every accessor, and
 // `newHeadersFromIncoming` merges `new RequestHeaders(...)` with a plain
 // `GlobalHeaders` in one conditional -- the upcast happens in the merge and

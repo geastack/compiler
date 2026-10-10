@@ -200,8 +200,8 @@ interface JsDocCarrier {
  * what `const x: { start: number }` declares in TypeScript -- and the checker
  * hands that node back as a declaration like any other. Reached only through
  * `node.jsDoc`, it never entered the map, so `declarationIdOf` threw and every
- * producer that touched the type reported a failure instead of a type. That was
- * 3291 of the three.js app's 6492 diagnostics: three.js is compiled from source, so its
+ * producer that touched the type reported a failure instead of a type. For a JavaScript
+ * library compiled from source that was about half of all diagnostics: its
  * JSDoc is load-bearing.
  *
  * The JSDoc pass runs *after* the whole child walk rather than inline with it,
@@ -242,9 +242,9 @@ const computeOrdinals = (file: ts.SourceFile): Map<ts.Node, number> => {
 
   // The attached comments themselves, which `forEachChild` skips and no public
   // accessor reports in full: `ts.getJSDocTags` was tried first and drops whole
-  // blocks -- a host carrying three comments, one of them a `@callback`, hands
-  // back only the tags of the other two, so every `JSDocSignature` in
-  // `three/src/loaders/Loader.js` stayed unreachable. `node.jsDoc` is the
+  // blocks -- a host carrying several comments, one of them a `@callback`, hands
+  // back only the tags of the others, so every `JSDocSignature` such a
+  // file declares stayed unreachable. `node.jsDoc` is the
   // parser's own list and is complete; it is `@internal` in the shipped
   // declarations, so the field is named here in a structural type rather than
   // reached through `any`. `forEachChild` DOES descend once inside a JSDoc node,
@@ -326,7 +326,7 @@ export const createIdentityTable = (
    * result is stored into, and its declaration is the variable, not the
    * target module's `module.exports = ...` assignment. Following it named a
    * declaration the program never introduces (`native-boundary:external-
-   * binding` on fastify's `const AjvCompiler = require(...)`). An alias whose
+   * binding` on a `const Compiler = require(...)` cell). An alias whose
    * own declaration is a variable or a binding element is that cell.
    */
   const aliasTargetOf = (symbol: ts.Symbol): ts.Symbol => {
@@ -339,8 +339,8 @@ export const createIdentityTable = (
   /**
    * The value an `export =` function hands out under one of its own names.
    *
-   * `saslprep.saslprep = saslprep; saslprep.default = saslprep; export =
-   * saslprep` (@mongodb-js/saslprep) makes `import { saslprep }` resolve to the
+   * `prep.prep = prep; prep.default = prep; export = prep` (a common CommonJS
+   * package shape) makes `import { prep }` resolve to the
    * EXPANDO property, whose declaration is the assignment's left side -- a
    * property of a function object, no binding cell anywhere, so every read of
    * the import named a declaration this program never introduces. Every
@@ -469,6 +469,10 @@ export const createIdentityTable = (
     at: ts.Node | undefined,
     substitute?: (type: ts.Type) => ts.Type
   ): SpecializationPath | null => {
+    // A host implements one ambient binding. Its call signature can be
+    // instantiated, but neither an explicit call-site copy nor the sole-copy
+    // fallback below creates another binding the program introduces.
+    if (isAmbientDeclaration(declaration)) return null
     // The node the census keys copies on, which for `const f = <T>...` is the
     // arrow rather than the declaration naming it -- see `genericSubjectOf`.
     // Both the comparison and the path entry use it, so a name resolves to the
@@ -497,10 +501,10 @@ export const createIdentityTable = (
     // subject is the arrow and the declaration the variable naming it.
     // Applied to every generic instead, it re-keyed names that were resolving
     // to the root correctly and had every right to: measured over the corpus,
-    // `image-demo` lost its certificate to a `return-conversion:
+    // one program lost its certificate to a `return-conversion:
     // native-handle(GeaEmbeddedImage) -> native-record-ref` that did not
-    // exist before, `e-reader` stopped emitting on a `SetConstructor` handle
-    // that "carries no [[Construct]] convention", and `dialer` stopped
+    // exist before, another stopped emitting on a `SetConstructor` handle
+    // that "carries no [[Construct]] convention", and a third stopped
     // compiling.
     //
     // Every one of those is a declaration a HOST owns: `Set`, `Map`,
@@ -514,11 +518,10 @@ export const createIdentityTable = (
     // A generic this program DEFINES is the other side: `census.ts` records
     // it per copy and never at the root, so a name that falls back to the
     // root names a declaration the program does not introduce, which the
-    // emitter then refuses by name at the read. hono reaches this with
-    // `new HonoRequest(...)` (introduced as `decl|f77|148@0`, read as
-    // `decl|f77|148`) and with a plain generic function declaration called
-    // from one of its own copies.
-    if (isAmbientDeclaration(declaration)) return null
+    // emitter then refuses by name at the read. A program reaches this with
+    // `new Request<P>(...)` of its own generic class (introduced as
+    // `decl|fN|M@0`, read as `decl|fN|M`) and with a plain generic function
+    // declaration called from one of its own copies.
     const copies = specializations.specializationsOf(subject)
     const only = copies.length === 1 ? copies[0] : undefined
     if (only) return [{ owner: subject, ordinal: only.ordinal }]

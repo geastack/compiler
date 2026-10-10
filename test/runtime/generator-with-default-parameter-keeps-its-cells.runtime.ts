@@ -1,7 +1,7 @@
 //! expect: 0 5 1 6 2 7
 //! expect: 10 11 12
 
-// mongodb's utils.ts `makeCounter`: a generator whose parameter has a default
+// A database client's `makeCounter`: a generator whose parameter has a default
 // and whose loop locals persist across `yield`. The locals live in cells the
 // generator's frame owns; they must outlive the call that created the
 // iterator, since every `next()` resumes into them after it has returned.

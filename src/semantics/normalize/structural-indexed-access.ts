@@ -83,7 +83,7 @@ export const indexedAccessMemberTypes = (checker: ts.TypeChecker, objectType: ts
   // for a STRING it is `string`: ECMA-262 10.4.3 gives a String exotic object
   // one integer-indexed own property per code unit, each a one-unit string,
   // which is the `readonly [index: number]: string` `lib.es5.d.ts` declares on
-  // `String`. saslprep's `first = <T extends string | any[]>(x: T): T[number]`
+  // `String`. A helper `first = <T extends string | any[]>(x: T): T[number]`
   // copied at `T = string` is the shape; without this its read fell to the
   // open constraint's `string | any`.
   if ((indexType.flags & ts.TypeFlags.Number) !== 0) {
@@ -124,7 +124,7 @@ export const indexedAccessMemberTypes = (checker: ts.TypeChecker, objectType: ts
     // enumerated from `keyof` cannot land here at all -- that list is built
     // from `getProperties()`, so every one of them resolves above.
     //
-    // hono is the case this exists for. `class Hono<E extends Env = Env>`'s
+    // The case this exists for: a `class App<E extends Env = Env>` whose
     // body reads `E['Bindings']` throughout, and the copy the program actually
     // instantiates binds `E` to `BlankEnv`, which is `{}` -- so `Bindings` is
     // declared by the CONSTRAINT and absent from the ARGUMENT, and the value

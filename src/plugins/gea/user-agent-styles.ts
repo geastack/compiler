@@ -10,7 +10,7 @@
  * `cpp-template-renderer.ts` emits `Tree::setDefaultStyle` calls next to the
  * node it just built.
  *
- * v2 emitted none of them, and the visible result was the `typography` app's
+ * v2 emitted none of them, and the visible result was a typical
  * intro paragraph: `<p>` + three `<span>`s rendered as narrow columns of one
  * character each instead of a line of prose. The stylesheet was NOT the
  * difference -- `gea-style-registration.cppfrag` is produced by the shared

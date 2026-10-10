@@ -1,8 +1,8 @@
 // A COMPUTED READ OFF A VALUE THAT IS EITHER A TYPED DICTIONARY OR `any`.
 //
-// mongodb's monitor `onHeartbeatSucceeded(hello: Document)` (`sdam/monitor.ts`)
+// A database client's monitor `onHeartbeatSucceeded(hello: Document)`
 // is handed a `Document` by one caller and an `any` by another, and reads
-// `hello[LEGACY_HELLO_COMMAND]`; `decorateDecryptionResult` (`utils.ts`) reads
+// `hello[LEGACY_HELLO_COMMAND]`; `decorateDecryptionResult` reads
 // `original[k]` for every own key of a `Document` the same way. Each arm
 // answers the read with its own ordinary [[Get]].
 

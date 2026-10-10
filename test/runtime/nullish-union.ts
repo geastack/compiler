@@ -10,7 +10,7 @@
 // This fixture covers the two shapes a small program can actually be made to
 // select -- `optional(tagged-union(...))` here -- and pins the answers the
 // third has to agree with. The optional-ARM shape itself comes from a planner
-// grouping no fixture this size reproduces; hono's `Context.body` selects it.
+// grouping no fixture this size reproduces; an HTTP framework's `Context.body` selects it.
 
 type Slot = { readonly label: string }
 type Maybe = Slot | undefined

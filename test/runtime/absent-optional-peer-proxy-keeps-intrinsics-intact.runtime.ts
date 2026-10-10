@@ -1,9 +1,9 @@
 //! dynamic-fallback
-// mongodb's optional-peer probe (`getGcpMetadata` in src/deps.ts,
-// `loadGCPCredentials` in src/client-side-encryption/providers/gcp.ts), in a
-// program that also uses bson's typed-array brand check (src/parser/utils.ts)
-// and the driver's `this.commandObj = {}; this.commandObj[name] = true`
-// (src/cmap/command_monitoring_events.ts).
+// A database client's optional-peer probe (the cloud-metadata loader its
+// dependency module and its encryption credential provider share), in a
+// program that also uses a binary-document serializer's typed-array brand
+// check and the driver's `this.commandObj = {}; this.commandObj[name] = true`
+// (its command-monitoring events).
 //
 // The peer is absent (in the driver its `require` throws MODULE_NOT_FOUND;
 // this harness has no CommonJS loader, so the probe goes straight to its

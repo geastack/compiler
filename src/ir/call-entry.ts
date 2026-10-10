@@ -6,11 +6,28 @@ import type { RecordField, Representation } from '../representation/model.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { isNativeCallableCarrier } from '../representation/callable-object.js'
 import { isArrayConstantOf, typedArraySetSourceAccepted } from '../representation/host-templates.js'
-import { abiOfCallee, constructAbiOfCallee } from '../projection/callee.js'
+import {
+  abiOfCallee,
+  calleeRenderingOf,
+  constructAbiOfCallee,
+  hostTemplateSourceAdmitted,
+  plannedHostTemplateOf,
+  type CalleeRenderingInput
+} from '../projection/callee.js'
+import { evaluatedResultIdentityOf, operandOf, resultOf } from '../semantics/model/operands.js'
+import type { SemanticOperation } from '../semantics/model/operations.js'
 import type { ClassLayout } from '../projection/classes.js'
-import { declaredFieldRepresentationOf, recordFieldsOfShape, recordLayoutPolicyOf } from '../projection/fields.js'
+import { declaredFieldRepresentationOf, recordFieldsOfShape, recordShapeLayoutsOf } from '../projection/fields.js'
 import { abiKey, representationKey, type CallableAbi } from '../representation/model.js'
-import type { CallCalleeIdentity, CallOperation, ConstructOperation, GetIteratorOperation, IrOperand } from './model.js'
+import type {
+  BindCallableOperation,
+  CallCalleeIdentity,
+  CallOperation,
+  ConstructOperation,
+  GetIteratorOperation,
+  IrOperand,
+  IrOperation
+} from './model.js'
 
 /**
  * A fixed frame receives only its declared formals. Normalization publishes a
@@ -180,6 +197,64 @@ const unwrappedCalleeOf = (representation: IrOperand['representation']): IrOpera
       : representation
 
 /**
+ * The operand entering the erased logical receiver channel of a generic call or bind.
+ * Physical native receiver slots and already-dynamic call frames use their own certified
+ * operand conversions instead. A dynamic arm of a callable sum still uses this channel.
+ * Host templates are excluded only by the authenticated callee-rendering authority.
+ */
+export const genericNativeLogicalReceiverOf = (operation: CallOperation | BindCallableOperation): IrOperand | null => {
+  if (operation.kind === 'bind-callable') return operation.sourceAbi.receiver === null ? operation.thisArgument : null
+  const logical = operation.thisArgument
+  if (logical === undefined) return null
+  const callee = unwrappedCalleeOf(operation.callee.representation)
+  if (callee.kind === 'tagged-union')
+    return callee.arms.some((arm) => arm.value.kind === 'dynamic' || abiOfCallee(arm.value)?.receiver === null) ? logical : null
+  if (callee.kind === 'dynamic') return operation.receiver?.representation.kind === 'dynamic' ? null : logical
+  return abiOfCallee(callee)?.receiver === null ? logical : null
+}
+
+/** A template exemption cites the source invocation and the intact callee SSA producer, never an emitter flag alone. */
+export const authenticatedTemplateCallEntry = (
+  operation: CallOperation,
+  semantic: SemanticOperation | null,
+  rendering: CalleeRenderingInput | undefined,
+  definitionOf: (value: IrOperand['value']) => IrOperation | null
+): boolean => {
+  if (
+    semantic?.family !== 'invocation' ||
+    semantic.internalMethod !== 'call' ||
+    rendering === undefined ||
+    rendering.graph.operations.get(semantic.id) !== semantic ||
+    resultOf(semantic, 'value')?.id !== operation.lineage ||
+    calleeRenderingOf(rendering, semantic) !== 'template' ||
+    !hostTemplateSourceAdmitted(semantic, plannedHostTemplateOf(rendering, semantic, operation.callee.representation)) ||
+    !hostTemplateSourceAdmitted(semantic, operation.hostTemplate)
+  )
+    return false
+  const source = operandOf(semantic, 'callee')?.source
+  if (source?.kind !== 'result') return false
+  const sourceProducerId = rendering.graph.results.get(source.result)
+  const sourceProducer = sourceProducerId === undefined ? undefined : rendering.graph.operations.get(sourceProducerId)
+  // An authenticated always-present optional Get publishes its normal value
+  // for both results. Lowering retains the value's lineage, so the source's
+  // short-circuit alias must cite that same sealed producer before it can
+  // enter the template convention.
+  const producerLineage = sourceProducer === undefined ? source.result : evaluatedResultIdentityOf(sourceProducer, source.result)
+  if (producerLineage === undefined) return false
+  const visited = new Set<IrValueId>()
+  let held = operation.callee.value
+  while (!visited.has(held)) {
+    visited.add(held)
+    const producer = definitionOf(held)
+    if (producer === null) return false
+    if ('result' in producer && producer.result?.id === held && producer.lineage === producerLineage) return true
+    if (producer.kind !== 'convert') return false
+    held = producer.source.value
+  }
+  return false
+}
+
+/**
  * A method read through a union of classes -- `shadowMaterial.dispose()` on a
  * `MeshDepthMaterial | MeshDistanceMaterial` -- reaches a convention whose
  * receiver is the classes' shared ancestor. Lowering leaves such a receiver in
@@ -309,7 +384,7 @@ export const nativeCallFrameOf = (
  *   it returns. The frame holds only when that element IS the mapper's first
  *   formal, the mapper takes no receiver, and its result IS the result array's
  *   element, so nothing is converted and nothing reaches a `gea::Value`.
- *   mongodb's `Array.from(this.s.activeCursors, cursor => cursor.close())`
+ *   `Array.from(this.activeCursors, cursor => cursor.close())` once
  *   read as an open boundary and published every cursor class to full
  *   reflection. Every other shape answers `undefined`.
  * - `typed-array-set` -- `typedArrayCallText` (emit-buffers.ts):
@@ -354,7 +429,7 @@ export const hostTemplateFrameOf = (
     const argument = operation.arguments[0]
     if (argument === undefined || operation.arguments.length !== 1 || deriver === null || classes === null) return false
     if (result !== undefined && result.kind !== 'string' && !(result.kind === 'optional' && result.payload.kind === 'string')) return false
-    const layouts = recordLayoutPolicyOf(deriver, classes)
+    const layouts = recordShapeLayoutsOf(deriver, classes)
     const visiting = new Set<string>()
     // The typed JSON writer reads these plain fields directly. Accessors,
     // toJSON methods, index tables and replacers keep their existing boundary
@@ -438,7 +513,7 @@ const arrayFromFrameOf = (operation: CallOperation): true | undefined => {
  * by name, and `emitDynamicGetIterator` calls that `function-value-dispatch`
  * natively through its own ABI. True when the receiver reaches that ABI's
  * receiver slot natively and the result is exactly the ABI's, so nothing is
- * boxed. mongodb's `for await (const doc of this)` in `AbstractCursor.toArray`
+ * boxed. A `for await (const doc of this)` in a base cursor class's `toArray`
  * otherwise read as a computed key and published the cursor family.
  */
 export const nativeIteratorMethodFrameOf = (operation: GetIteratorOperation, conversions?: Pick<ConversionCensus, 'nodeById'>): boolean => {

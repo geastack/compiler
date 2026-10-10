@@ -3,13 +3,13 @@
 //! expect: done
 //! emitted-lacks: WebAssembly;
 
-// bson's `long.ts`: `declare const WebAssembly: any`, then an unconditional
+// A binary-document library's 64-bit integer module: `declare const WebAssembly: any`, then an unconditional
 // `new WebAssembly.Instance(new WebAssembly.Module(bytes))` inside a
 // try/catch. A host with no WebAssembly makes the read throw ReferenceError,
 // which the catch absorbs; node has it and throws a CompileError on these
 // bytes instead. Either way the catch runs, and nothing is an `extern`.
 // Checked under `lib: ["ES2022"]` (the sibling `.runtime.tsconfig.json`), as
-// bson is: the shared config's DOM lib would declare a `WebAssembly` global.
+// that library is: the shared config's DOM lib would declare a `WebAssembly` global.
 export {}
 
 declare const WebAssembly: any

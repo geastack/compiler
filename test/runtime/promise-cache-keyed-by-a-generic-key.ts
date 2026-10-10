@@ -1,6 +1,6 @@
 // A PER-KEY PROMISE CACHE READ AND WRITTEN THROUGH A GENERIC KEY.
 //
-// hono's `HonoRequest` caches each body reader's promise in one record keyed
+// An HTTP framework's `AppRequest` caches each body reader's promise in one record keyed
 // by the reader's name, and declared that record `Partial<Body>` where `Body`
 // maps the key to the AWAITED payload -- `size: number`, not
 // `Promise<number>`. The code stores the promise and never awaits on the way

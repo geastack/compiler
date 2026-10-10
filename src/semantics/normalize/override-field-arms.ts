@@ -5,16 +5,16 @@ import type { SuppressedWriteArmCensus } from './suppressed-write-arms.js'
 /**
  * A class field a subclass redeclares with a different record type.
  *
- * mongodb's operations declare their options three times over one property:
- * `AbstractOperation { options: OperationOptions & Abortable }`,
- * `CommandOperation { override options: CommandOperationOptions }`,
- * `CreateCollectionOperation { override options: CreateCollectionOptions }`.
+ * A class hierarchy may declare its options several times over one property:
+ * `Operation { options: Options & Abortable }`,
+ * `CommandOperation { override options: CommandOptions }`,
+ * `CreateOperation { override options: CreateOptions }`.
  * JavaScript has ONE property and it holds the object the program stored,
  * whichever declaration the write names. The class struct has one slot too --
  * the topmost declaration's (`projection/fields.ts`, storage is base-first) --
  * and it was typed by that declaration alone, so a subclass's store of its
  * wider options VIEWED the value into the base's record: a copy of only the
- * base's members. `op.options.capped` then read `undefined`, and the stored
+ * base's members. `op.options.someFlag` then read `undefined`, and the stored
  * object was no longer the one the caller holds.
  *
  * Each redeclaration names what a value in the slot MAY be, exactly as a
@@ -47,8 +47,8 @@ const isPlainRecordType = (checker: ts.TypeChecker, type: ts.Type): boolean => {
 
 /**
  * One checker type. Two record types with the same members may still derive
- * two carriers (mongodb's `EstimatedDocumentCountOptions` restates
- * `CommandOperationOptions`' `maxTimeMS` and interns apart from it), and a
+ * two carriers (an `Options` that restates a member of its base `CommandOptions`
+ * interns apart from it), and a
  * value of the one dropped would have no single home among overlapping arms.
  * A repeated carrier is folded where arms are interned.
  */
@@ -172,9 +172,8 @@ const collectOverrideFieldArms = (checker: ts.TypeChecker, files: readonly ts.So
     for (const override of overrides) {
       const type = checker.getTypeFromTypeNode(override.type!)
       const present = presentMembersOf(type)
-      // A redeclaration to a union of records (mongodb's `FindAndModifyOperation`
-      // states `FindOneAndUpdateOptions | FindOneAndReplaceOptions |
-      // FindOneAndDeleteOptions`) adds each of them.
+      // A redeclaration to a union of records (`override options:
+      // AOptions | BOptions | COptions`) adds each of them.
       if (present.length === 0 || !present.every((member) => isPlainRecordType(checker, member))) {
         plain = false
         break
@@ -228,9 +227,9 @@ const collectOverrideFieldArms = (checker: ts.TypeChecker, files: readonly ts.So
   // A FRESH object literal entering a slot whose statement is an interface
   // family's view needs no arm of its own: the family's one layout holds every
   // key the literal names, so the store's conversion into it drops nothing,
-  // and no one else holds the literal to observe that it was copied. mongodb's
-  // operations take `{ ...options, dbName: ns.db }` and `{ timeoutMS, ...options
-  // }` literals into their family-typed options; as arms they made the slot a
+  // and no one else holds the literal to observe that it was copied. Constructors
+  // that take `{ ...options, name: ns.name }` and `{ timeout, ...options }`
+  // literals into their family-typed options are the case; as arms they made the slot a
   // union of a dozen records that every read had to dispatch over.
   const copiedLiteralsOf = (expression: ts.Expression, statement: ts.Type): readonly ts.Symbol[] => {
     const family = familyOfStatement(statement)
@@ -341,9 +340,9 @@ const collectOverrideFieldArms = (checker: ts.TypeChecker, files: readonly ts.So
 
 /**
  * A constructor parameter stated as one plain record: the base constructor a
- * subclass's `super(options)` hands its own, wider, options to. mongodb's
- * `AbstractOperation` constructor stores `this.options = options` from
- * `options: OperationOptions & Abortable`, and a subclass that redeclares the
+ * subclass's `super(options)` hands its own, wider, options to. A base
+ * `Operation` constructor stores `this.options = options` from
+ * `options: Options & Abortable`, and a subclass that redeclares the
  * field passes the record its redeclaration names. Viewing that record into
  * the statement at the call is the same copy the slot's arms exist to avoid:
  * the base would store the copy, and the subclass would read its own members

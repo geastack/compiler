@@ -2,11 +2,12 @@ import type ts from 'typescript'
 import type { ValueFlowIndex } from './flow/model.js'
 import { arrayIterationKeys, computedKeySetOf, type ComputedKeySetAuthority } from './flow/computed-key-set.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
+import { sourceExecutingParameterValuesOf } from './flow/source-executing-parameter-values.js'
 
 /**
  * A computed write key the host-mutation census may narrow from `every` to a
- * finite set -- three's `this[ key ] = newValue` under `for ( const key in
- * values )` in `Material.setValues` and `Texture.setValues`.
+ * finite set -- `this[ key ] = newValue` under `for ( const key in
+ * values )` in a `setValues(values)` method.
  *
  * `computedKeySetOf` proves the set under intrinsic assumptions. The census
  * cannot publish those as ledger obligations (a failed one would be a
@@ -51,6 +52,14 @@ export const createCensusComputedKeysOf = (
       computedKeySetOf(checker, flow, key, {
         ...authority,
         checker,
+        // A stated public key annotation need not nominate inferred storage.
+        // It still has exact actual inputs when the shared caller/consumer
+        // graph and every executing frame close. That complete execution
+        // receipt takes precedence over a nominal inventory which includes
+        // callers inside proven unentered wrappers. An incomplete execution
+        // proof leaves the existing conservative family query responsible.
+        parameterValuesOf: (parameter) =>
+          sourceExecutingParameterValuesOf(checker, flow, parameter) ?? authority.parameterValuesOf(parameter),
         intrinsicIntact: (intrinsic, member, location) => {
           if (intrinsic === 'Object' && member === undefined) inherits = true
           else if (intrinsic === 'Object') assumed.push({ intrinsic, member: member!, location })

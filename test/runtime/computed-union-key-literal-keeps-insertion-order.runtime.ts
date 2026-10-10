@@ -1,6 +1,6 @@
-// mongodb's Monitor.checkServer builds its heartbeat command as
+// A database client's Monitor.checkServer builds its heartbeat command as
 // `{ [helloOk ? 'hello' : 'isMaster']: 1, ...(awaitable ? { maxAwaitTimeMS } : {}) }`.
-// The command name must be the FIRST key (BSON commands are ordered), so the
+// The command name must be the FIRST key (wire-format commands are ordered), so the
 // computed key keeps its insertion position ahead of the spread's keys.
 const LEGACY = 'isMaster'
 const command = (helloOk: boolean, awaitable: boolean, maxAwaitTimeMS: number) => {

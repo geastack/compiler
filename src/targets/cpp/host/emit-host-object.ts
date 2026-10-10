@@ -4,16 +4,23 @@ import { hostMemberTemplateOf } from '../../../representation/host-templates.js'
 import type { FixedDataDefinitionRecipe } from '../../../ir/fixed-data-definition.js'
 import type { CallOperation, IrOperand } from '../../../ir/model.js'
 import { instanceReparentVerdictOf, isClassConstructorCarrier, type ReparentReads } from '../../../ir/instance-reparenting.js'
-import { createCppEmitBlockedError, isCppEmitBlockedError, operandText, type EmitContext } from '../emit-context.js'
+import { createCppEmitBlockedError, operandText, type EmitContext } from '../emit-context.js'
 import { evaluatedOnceText } from '../evaluated-once.js'
 import { canonicalIndexLiteral, memberAccessOperator } from '../emit-carrier-members.js'
+import { callableIdentityEqualityText } from '../emit-equality.js'
 import { classMemberOf, lazyArrowFieldPlanOf } from '../class-layout.js'
-import { alignedValueText, dynamicCarrierBoxText, recipeText } from '../emit-narrowing.js'
+import { alignedValueText, dynamicCarrierBoxText, namedConversionText, recipeText } from '../emit-narrowing.js'
+import { nativeAccessorDefinitionText, nativeAccessorObservedFunctionText } from '../emit-native-accessor-definition.js'
+import { nativeOwnAssignmentText } from '../emit-native-own-assignment.js'
+import { nativeArrayDescriptorSnapshotText, nativeDescriptorSnapshotDefinitionLines } from '../emit-descriptor-snapshot.js'
+import { nativeCallablePrototypeObservationText } from '../emit-native-callable-data.js'
 import {
   getOwnValue,
   isDynamicCarrier,
   objectViewFrom,
   objectViewOf,
+  nativeHandleShapeCallText,
+  callableShapeCallText,
   type ObjectView,
   ownEnumerableKeysText,
   ownKeyFields,
@@ -29,7 +36,7 @@ import { hostFunctionValueText, hostPrototypeMethodValueText } from './emit-host
 import { armAt, armIs } from '../emit-union-properties.js'
 import { constructorStateText, constructorViewFieldFor } from '../class-properties/emit-class-properties.js'
 import { isNativeError } from '../error-types.js'
-import { nativeBaseFieldOf, recordFieldsOfShape, recordIndexesOfShape } from '../records.js'
+import { nativeBaseFieldOf, nativeFieldPolicyType, recordFieldsOfShape, recordIndexesOfShape } from '../records.js'
 import { keyOrderUnobservedIn } from '../key-order-tracking.js'
 import { indexedRecordViewOf } from '../../../ir/certify/carrier-keys.js'
 import type { HostIntrinsicMember } from '../../../semantics/host-protocols.js'
@@ -54,6 +61,9 @@ import {
 } from '../emit-dynamic-properties.js'
 import { regexpRoleOf } from '../prototype/emit-prototype-regexp.js'
 import { ownPropertySymbolsText } from './emit-host-reflect.js'
+import { hostObjectRouteKey, type HostObjectWalkPlan } from '../../../ir/host-template-conversions.js'
+import { structuralConversionKey } from '../../../conversion/structural-plan.js'
+import { nativeCallableDataDefinitionValueText } from '../emit-native-callable-data.js'
 
 /**
  * `Object`'s statics -- the call-site half of the `ObjectConstructor@1`
@@ -168,9 +178,9 @@ const targetOf = (ctx: EmitContext, member: string, operation: CallOperation): I
  * chain is well typed whatever mix of records and dictionaries the union
  * holds.
  *
- * hono's `#newResponse` is the measured case: `Object.entries( headers )`
- * where `headers: HeaderRecord` is `Record<'Content-Type', BaseMime> |
- * Record<ResponseHeader, string> | Record<string, string>` -- two records and
+ * The case: `Object.entries( headers )` where `headers` is
+ * `Record<'Content-Type', Mime> | Record<HeaderName, string> |
+ * Record<string, string>` -- two records and
  * a dictionary, and refusing the union outright refused a program in which
  * every arm on its own is renderable.
  *
@@ -194,11 +204,11 @@ const overCarrier = (
  * A deferred value's text IS the expression that computes it
  * (`isDeferredValue`), and the static arms of `entries`, `values` and `keys`
  * name the receiver once per field -- in the read, the presence test, the
- * `[[Enumerable]]` test and the creation-order walk. mongodb's
- * `Object.entries(this.options)` reads a class's options through a record
- * conversion, and pasting that conversion 188 times made one 8 MB statement
- * (`CreateCollectionOperation.execute`) that no C++ compiler finishes, and
- * evaluated the options' sidecar reads 188 times at run time. A named value is
+ * `[[Enumerable]]` test and the creation-order walk.
+ * `Object.entries(this.options)` reading a class's options through a record
+ * conversion pasted that conversion once per field use -- hundreds of times
+ * over a wide options family, one multi-megabyte statement no C++ compiler
+ * finishes -- and evaluated the options' sidecar reads as often at run time. A named value is
  * already evaluated once and renders unchanged; `evaluated-once.ts` is the one
  * binding rule, shared with the conversion printer.
  */
@@ -345,15 +355,6 @@ const valuesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectVi
   }
   const element = representationKey(result.element)
   const ordered = ownKeyFields(view)
-  for (const field of ordered) {
-    if (!field.required) {
-      throw createCppEmitBlockedError(
-        'host-member-call:Object.values',
-        `"Object.values" cannot include the optional field "${field.key}": an absent field contributes no element, and ` +
-          'the length of the array would then depend on a presence flag this arm does not test'
-      )
-    }
-  }
   // A field whose carrier differs from the element (`{ on: true, none: 'none' }`
   // read as `(boolean | string)[]`) widens into it through the conversion
   // census, the same authority every other slot write uses; a pair the census
@@ -371,17 +372,32 @@ const valuesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectVi
     }
     return converted
   })
-  const fixed = `gea::detail::hostArrayResult(std::vector<${cppTypeOf(result.element)}>{${reads.join(', ')}})`
   // The one own-key order `keys` and `entries` also take: a key outside the
   // layout contributes its value, where it was created.
-  const creationOrdered = creationOrderedOwnCopyText(ctx, view, (_key, value) => {
-    const converted = alignedValueText(ctx, 'host/emit-host-object.ts:values-in-creation-order', dynamicCarrier, result.element, value)
+  const creationOrdered = creationOrderedOwnCopyText(ctx, view, 'values', (_key, value, walkCtx) => {
+    const converted = alignedValueText(walkCtx, 'host/emit-host-object.ts:values-in-creation-order', dynamicCarrier, result.element, value)
     return converted === null ? null : `__gea_values.push_back(${converted});`
   })
-  if (creationOrdered === null) return fixed
+  if (ordered.every((field) => field.required)) {
+    const fixed = `gea::detail::hostArrayResult(std::vector<${cppTypeOf(result.element)}>{${reads.join(', ')}})`
+    if (creationOrdered === null) return fixed
+    return (
+      `([&]() { std::vector<${cppTypeOf(result.element)}> __gea_values; ` +
+      `if (${creationOrdered}) return gea::detail::hostArrayResult(std::move(__gea_values)); return ${fixed}; })()`
+    )
+  }
+  // An optional field is an own key only while its presence bit says so, so
+  // the array's LENGTH is a run-time fact: the same presence-and-enumerable
+  // gate `entries` and `keys` apply, so the three cannot disagree.
+  const pushes = ordered.map((field, index) => {
+    const present = ownKeyPresenceText('values', view, field)
+    const enumerable = `${view.receiver}${view.accessor}${cppRecordFieldAttributesName(field.key)}.enumerable`
+    return `if (${present === null ? enumerable : `(${present} && ${enumerable})`}) __gea_values.push_back(${reads[index]});`
+  })
+  const walked = creationOrdered === null ? pushes.join(' ') : `if (!${creationOrdered}) { ${pushes.join(' ')} }`
   return (
-    `([&]() { std::vector<${cppTypeOf(result.element)}> __gea_values; ` +
-    `if (${creationOrdered}) return gea::detail::hostArrayResult(std::move(__gea_values)); return ${fixed}; })()`
+    `([&]() { std::vector<${cppTypeOf(result.element)}> __gea_values; ${walked} ` +
+    `return gea::detail::hostArrayResult(std::move(__gea_values)); })()`
   )
 }
 
@@ -451,7 +467,7 @@ const entryCarrierOf = (ctx: EmitContext, operation: CallOperation): EntryCarrie
   // The KEY has to be a string -- `OwnPropertyKeys` yields one and there is
   // nothing to convert it into. The VALUE slot is whatever the checker typed
   // it: `dynamic` for a target the program declared `any`, and a real carrier
-  // wherever the source's own values have one -- hono's `HeaderRecord` entries
+  // wherever the source's own values have one -- a header record's entries
   // are `[string, string | string[]]`, a tagged union and not a box. Demanding
   // `dynamic` here refused that program for having stated MORE than the arm
   // expected; each value is reconciled into the slot by `convertedValueText`
@@ -512,8 +528,8 @@ const entriesText = (ctx: EmitContext, operation: CallOperation): string =>
 /**
  * A known view's entries depend on nothing at the site but the receiver: a
  * push per declared field behind its presence and `[[Enumerable]]` tests,
- * after the creation-order walk. Over mongodb's options family that is a
- * 60 KB expression per call, so a unit defines it once per receiver carrier
+ * after the creation-order walk. Over a 100+-field options family that is a
+ * tens-of-KB expression per call, so a unit defines it once per receiver carrier
  * and entry carrier and every site calls it (`unitFunctionName`).
  */
 const entriesOfKnownView = (ctx: EmitContext, operation: CallOperation, view: ObjectView): string => {
@@ -532,8 +548,8 @@ const entriesOfKnownView = (ctx: EmitContext, operation: CallOperation, view: Ob
 /**
  * `Object.entries` of an Array: one entry per present index, then one per
  * enumerable sidecar key (`gea::host::ObjectConstructor::arrayEntriesOf`).
- * mongodb's `constructIndexDescriptionMap` reaches it through a union whose
- * `ReadonlyArray` arm `Array.isArray` has already excluded -- the checker
+ * A program reaches it through a union whose `ReadonlyArray` arm
+ * `Array.isArray` has already excluded -- the checker
  * keeps the arm, so the dispatch must still be able to spell it.
  */
 const arrayEntriesText = (
@@ -606,8 +622,8 @@ const entriesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectV
     const value = intoSlot(read.representation, read.text, `the field "${field.key}"`)
     return `[&]() { ${entryText(entry, cppStringLiteral(field.key), value)} }()`
   }
-  const creationOrdered = creationOrderedOwnCopyText(ctx, view, (key, value) => {
-    const converted = alignedValueText(ctx, 'host/emit-host-object.ts:entries-in-creation-order', dynamicCarrier, entry.value, value)
+  const creationOrdered = creationOrderedOwnCopyText(ctx, view, 'entries', (key, value, walkCtx) => {
+    const converted = alignedValueText(walkCtx, 'host/emit-host-object.ts:entries-in-creation-order', dynamicCarrier, entry.value, value)
     return converted === null ? null : `__gea_entries.push_back([&]() { ${entryText(entry, key, converted)} }());`
   })
   if (creationOrdered === null && ordered.every((field) => field.required)) {
@@ -647,23 +663,38 @@ const entriesOfView = (ctx: EmitContext, operation: CallOperation, view: ObjectV
  * one key and its property value, or null when that value has no conversion
  * into the destination; there is then no runtime walk.
  */
+type HostObjectContext = EmitContext & { readonly hostObjectWalkPlan?: HostObjectWalkPlan }
+
 const creationOrderedOwnCopyText = (
   ctx: EmitContext,
   view: Extract<ObjectView, { kind: 'known' }>,
-  each: (key: string, value: string) => string | null,
+  destination: string,
+  each: (key: string, value: string, ctx: EmitContext) => string | null,
   assigned: { readonly target: string; readonly staticCopy: string; readonly orderless?: boolean } | null = null
 ): string | null => {
   const indexed = indexedRecordViewOf(ctx.deriver, view.representation)
   const ownership = indexed !== null ? indexed.ownership : ownershipOfGeneratedCarrier(view.representation)
   if (ownership !== 'shared-refcount') return null
-  let body: string | null
-  try {
-    body = each('__gea_ordered_key', '__gea_ordered_value')
-  } catch (error) {
-    if (isCppEmitBlockedError(error)) return null
-    throw error
+  const leaves = (ctx as HostObjectContext).hostObjectWalkPlan?.routes.get(hostObjectRouteKey(view.representation, destination))
+  if (leaves === undefined) return null
+  const walkCtx: EmitContext = {
+    ...ctx,
+    conversions: {
+      ...ctx.conversions,
+      nodeFor: (source, target) => {
+        const node = leaves.get(structuralConversionKey(source, target))
+        if (node === undefined)
+          throw createCppEmitBlockedError(
+            'runtime-helper:host-object-walk-recipes',
+            'an Object walk requested a conversion outside its sealed callback'
+          )
+        return node
+      }
+    }
   }
-  if (body === null) return null
+  const body = each('__gea_ordered_key', '__gea_ordered_value', walkCtx)
+  if (body === null)
+    throw createCppEmitBlockedError('runtime-helper:host-object-walk-recipes', 'an admitted Object walk callback has no rendering')
   // A copy into a known target with its static copy in hand: the runtime runs
   // that copy itself when the source's keys only left layout order
   // (`gea::assignOwnPropertiesInCreationOrderWith`).
@@ -765,17 +796,9 @@ const declaredFixedFieldOf = (ctx: EmitContext, representation: Representation, 
   return fields?.find((field) => field.key === key) ?? null
 }
 
-/**
- * Do not send a named native slot through nativeDynamicDefineProperty first:
- * a deleted configurable fixed field no longer reads as present, but it is
- * still a declared slot and must be redefined there rather than shadowed in
- * the expando. The generated match hooks retain that distinction.
- */
+/** The native substrate dispatches fixed fields, available index hooks and expandos against one property identity. */
 const generatedDefineOwnText = (receiver: string, key: string, descriptor: string): string =>
-  `([&]() -> bool { const gea::PropertyKey __gea_key = ${key}; ` +
-  `if (${receiver}->gea_matchesOwnField(__gea_key)) return ${receiver}->gea_defineOwnField(__gea_key, ${descriptor}, gea::nativeIsExtensible(${receiver})); ` +
-  `if (${receiver}->gea_matchesOwnIndex(__gea_key)) return ${receiver}->gea_defineOwnIndex(__gea_key, ${descriptor}, gea::nativeIsExtensible(${receiver})); ` +
-  `return gea::nativeDynamicDefineProperty(${receiver}, __gea_key, ${descriptor}); })()`
+  `gea::record::defineLiveField(${receiver}, ${key}, ${descriptor})`
 
 /**
  * `Object.freeze` / `Object.isFrozen` -- the two members of this family that
@@ -793,6 +816,37 @@ const integrityText = (
   call: 'freeze' | 'isFrozen' | 'isExtensible' | 'seal' | 'isSealed' | 'preventExtensions'
 ): string => {
   const target = targetOf(ctx, member, operation)
+  if (isNativeCallableCarrier(target.representation.kind) && target.representation.kind !== 'function-and-constructor') {
+    if (operation.nativeCallableIntegrity === undefined)
+      return refuseObjectCarrier(member, target.representation, 'the source Function own-prototype descriptors are not authenticated')
+    // Own facts and native payload holders share this exact Function table.
+    // Integrity changes descriptor attributes without observing those payloads
+    // or requesting the Function's dynamic materializer.
+    const prepare =
+      `const auto __gea_callable = ${operandText(ctx, target)}; ` +
+      'const auto& __gea_identity = __gea_callable.functionObjectIdentity(); ' +
+      `if (!__gea_identity) return ${call === 'isExtensible' ? 'false' : call === 'isFrozen' || call === 'isSealed' ? 'true' : '__gea_callable'}; ` +
+      'gea::installCallableOwnFacts(__gea_identity, __gea_callable.name(), __gea_callable.length()); ' +
+      (operation.nativeCallableIntegrity.prototype ? 'gea::installCallableNativePrototype(__gea_callable); ' : '') +
+      'const auto& __gea_properties = __gea_identity->properties; '
+    if (call === 'freeze') return `([&]() { ${prepare}__gea_properties->freezeIntegrity(); return __gea_callable; })()`
+    if (call === 'isFrozen') return `([&]() -> bool { ${prepare}return __gea_properties->hasFrozenIntegrity(); })()`
+    if (call === 'isExtensible') return `([&]() -> bool { ${prepare}return __gea_properties->extensible(); })()`
+    if (call === 'preventExtensions') return `([&]() { ${prepare}__gea_properties->preventExtensions(); return __gea_callable; })()`
+    if (call === 'seal')
+      return (
+        `([&]() { ${prepare}for (const auto& __gea_key : __gea_properties->ownKeys()) { ` +
+        'gea::PropertyDescriptor __gea_update; __gea_update.hasConfigurable = true; __gea_update.configurable = false; ' +
+        'if (!__gea_properties->defineOwnProperty(__gea_key, __gea_update)) gea::host::throwRuntimeError("TypeError", "Cannot seal Function own property"); } ' +
+        '__gea_properties->preventExtensions(); return __gea_callable; })()'
+      )
+    return (
+      `([&]() -> bool { ${prepare}if (__gea_properties->extensible()) return false; ` +
+      'for (const auto& __gea_key : __gea_properties->ownKeys()) { ' +
+      'const gea::PropertyDescriptor* __gea_descriptor = __gea_properties->ownProperty(__gea_key); ' +
+      'if (__gea_descriptor != nullptr && __gea_descriptor->configurable) return false; } return true; })()'
+    )
+  }
   if (target.representation.kind === 'array-object' && target.representation.ownership === 'shared-refcount') {
     if (call === 'seal' || call === 'isSealed' || call === 'preventExtensions') {
       return refuseObjectCarrier(member, target.representation, 'this array path has no native seal/preventExtensions implementation')
@@ -842,19 +896,23 @@ const integrityText = (
       view.representation.kind === 'class-ref' ||
       (view.representation.kind === 'native-record-ref' && view.representation.native === null)
     const receiver = view.receiver
+    const indexed =
+      view.representation.kind === 'class-ref'
+        ? ctx.classIndexProtocols.get(view.representation.declaration) !== false
+        : recordIndexesOfShape(ctx.deriver, view.representation.shapeId).length > 0
     const expando = `gea::detail::expandoFor(gea::refCastToVoid(${receiver}), true)`
     if (call === 'freeze') {
-      const fields = generated ? `${receiver}->gea_freezeOwnFields(); ${receiver}->gea_freezeOwnIndex(); ` : ''
+      const fields = generated ? `${receiver}->gea_freezeOwnFields(); ${indexed ? `${receiver}->gea_freezeOwnIndex(); ` : ''}` : ''
       return `([&]() { ${fields}gea::nativeFreeze(${receiver}); return ${receiver}; })()`
     }
     if (call === 'isFrozen') {
-      const fields = generated ? `${receiver}->gea_ownFieldsFrozen() && ${receiver}->gea_ownIndexFrozen() && ` : ''
+      const fields = generated ? `${receiver}->gea_ownFieldsFrozen() && ${indexed ? `${receiver}->gea_ownIndexFrozen() && ` : ''}` : ''
       return `${fields}gea::nativeIsFrozen(${receiver})`
     }
     if (call === 'isExtensible') return `gea::nativeIsExtensible(${receiver})`
     if (call === 'preventExtensions') return `([&]() { ${expando}->preventExtensions(); return ${receiver}; })()`
     if (call === 'seal') {
-      const fields = generated ? `${receiver}->gea_sealOwnFields(); ${receiver}->gea_sealOwnIndex(); ` : ''
+      const fields = generated ? `${receiver}->gea_sealOwnFields(); ${indexed ? `${receiver}->gea_sealOwnIndex(); ` : ''}` : ''
       return (
         `([&]() { ${fields}const auto __gea_sidecar = ${expando}; ` +
         'for (const auto& __gea_key : __gea_sidecar->ownKeys()) { gea::PropertyDescriptor __gea_update; __gea_update.hasConfigurable = true; __gea_update.configurable = false; ' +
@@ -862,14 +920,16 @@ const integrityText = (
         `__gea_sidecar->preventExtensions(); return ${receiver}; })()`
       )
     }
-    const fields = generated ? `if (!${receiver}->gea_ownFieldsSealed() || !${receiver}->gea_ownIndexSealed()) return false; ` : ''
+    const fields = generated
+      ? `if (!${receiver}->gea_ownFieldsSealed()${indexed ? ` || !${receiver}->gea_ownIndexSealed()` : ''}) return false; `
+      : ''
     return (
       `([&]() -> bool { ${fields}const auto __gea_sidecar = gea::detail::expandoFor(gea::refCastToVoid(${receiver}), false); ` +
       'if (!__gea_sidecar || __gea_sidecar->extensible()) return false; for (const auto& __gea_key : __gea_sidecar->ownKeys()) { ' +
       'const gea::PropertyDescriptor* __gea_descriptor = __gea_sidecar->ownProperty(__gea_key); if (__gea_descriptor != nullptr && __gea_descriptor->configurable) return false; } return true; })()'
     )
   }
-  // A shared Document (the `{ ...command }` a driver freezes before handing it
+  // A shared Document (a `{ ...doc }` copy a program freezes before handing it
   // on) has identity; its frozen state lives in the object the table migrates
   // into, see `gea::dictionary::freeze`. seal/preventExtensions are not wired.
   if (
@@ -1003,6 +1063,10 @@ const hasOwnText = (ctx: EmitContext, operation: CallOperation): string => {
   if (regexpRoleOf(target.representation) === 'pattern') {
     return `gea::nativeDynamicHas(${operandText(ctx, target)}, ${propertyKeyText(ctx, 'hasOwn', key)})`
   }
+  if (target.representation.kind === 'native-handle')
+    return nativeHandleShapeCallText(ctx, 'hasOwnProperty', target.representation.native ?? target.representation.protocol, [key])
+  if (isNativeCallableCarrier(target.representation.kind))
+    return callableShapeCallText(ctx, 'hasOwnProperty', operandText(ctx, target), [key])
   if (target.representation.kind === 'array-object') return arrayHasOwnText(ctx, target.representation, operandText(ctx, target), key)
   const view = objectViewOf(ctx, 'hasOwn', target, 'object')
   if (view.kind === 'dynamic') return `gea::host::ObjectConstructor::hasOwn(${view.receiver}, ${propertyKeyText(ctx, 'hasOwn', key)})`
@@ -1142,7 +1206,8 @@ const mathPackedRestHostMethodValueText = (spelling: string): string | null => {
 const descriptorAggregateBuilder = (
   ctx: EmitContext,
   resultRepresentation: Representation,
-  contextLabel: string
+  contextLabel: string,
+  operation?: CallOperation
 ): {
   readonly resultType: string
   readonly someText: (aggregate: string) => string
@@ -1261,6 +1326,9 @@ const descriptorAggregateBuilder = (
   }
   const convertValueField = (source: Representation, text: string): string => {
     if (valueFieldRepresentation === null) {
+      // A source-authenticated accessor descriptor states get/set rather
+      // than a data value. aggregateOf ignores keys its native shape lacks.
+      if (operation?.nativeAccessorObservation) return cppUndefinedValue
       throw createCppEmitBlockedError(
         'host-member-call:Object.getOwnPropertyDescriptor',
         `${contextLabel} descriptor names no "value" field to store into`
@@ -1296,12 +1364,27 @@ const descriptorAggregateBuilder = (
       const field = fields.find((candidate) => candidate.key === half.key)
       if (field === undefined) continue
       const carried = field.value.kind === 'optional' ? field.value.payload : field.value
+      const observed = operation?.nativeAccessorObservation?.halves.find((candidate) => candidate.half === half.key)
+      if (observed !== undefined) {
+        if (representationKey(carried) !== representationKey(observed.target))
+          throw createCppEmitBlockedError(
+            `conversion:${observed.conversion}`,
+            'a reflected accessor field changed its published Function carrier'
+          )
+        const built = nativeAccessorObservedFunctionText(ctx, observed, object)
+        const fieldType = cppTypeOf(field.value)
+        const presentFunction = `(${object}.${half.has} && static_cast<bool>(${object}.${half.key === 'get' ? 'nativeGet' : 'nativeSet'}))`
+        overrides[half.key] = field.value.kind === 'optional' ? `(${presentFunction} ? ${fieldType}(${built}) : ${fieldType}())` : built
+        present[half.key] = `${object}.${half.has}`
+        continue
+      }
       if (cppTypeOf(carried) !== half.type) continue
       const built = `gea::${half.helper}(${object})`
       const fieldType = cppTypeOf(field.value)
       // A complete accessor property states both halves, and a missing one is
       // present as `undefined` (10.1.6.3): the key is there, the callable is not.
-      const callable = `(${object}.${half.has} && static_cast<bool>(${object}.${half.key}))`
+      const native = half.key === 'get' ? 'nativeGet' : 'nativeSet'
+      const callable = `(${object}.${half.has} && (static_cast<bool>(${object}.${half.key}) || static_cast<bool>(${object}.${native})))`
       overrides[half.key] = field.value.kind === 'optional' ? `(${callable} ? ${fieldType}(${built}) : ${fieldType}())` : built
       present[half.key] = `${object}.${half.has}`
     }
@@ -1347,7 +1430,8 @@ const descriptorAggregateBuilder = (
  * below) and a COMPUTED-key access -- `obj[name]`, `obj[name] = v`,
  * `delete obj[name]` over a namespace-shaped native-handle
  * (`emit-host-properties.ts`, `emit-dynamic-properties.ts`) -- where
- * test262's `verifyProperty` reads the member back, writes a fresh value to
+ * a conformance check that verifies a property descriptor reads the member
+ * back, writes a fresh value to
  * probe writability and deletes it to probe configurability. Both answer from
  * this table; a member whose descriptor says non-writable and whose store
  * then succeeded would be a lie the harness detects.
@@ -1521,6 +1605,8 @@ const arrayObjectDescriptorText = (
   key: IrOperand,
   operation: CallOperation
 ): string => {
+  const snapshot = nativeArrayDescriptorSnapshotText(ctx, operation, receiver)
+  if (snapshot !== null) return snapshot
   const resultRepresentation = operation.result?.representation ?? null
   if (resultRepresentation === null) {
     throw createCppEmitBlockedError(
@@ -1590,10 +1676,13 @@ const arrayObjectDescriptorText = (
     // raw-strings array; a descriptor whose "value" field cannot hold
     // `undefined` at all (a `number[]` literal's own minted record) is one
     // no such array reaches, and the branch is not spelled for it.
-    const undefinedValue =
+    const undefinedNode =
       valueFieldRepresentation === null
-        ? null
-        : alignedValueText(ctx, 'host/emit-host-object.ts:1145', { kind: 'undefined' }, valueFieldRepresentation, cppUndefinedValue)
+        ? undefined
+        : (ctx as HostObjectContext).hostObjectWalkPlan?.routes
+            .get(hostObjectRouteKey(representation, 'array-undefined'))
+            ?.get(structuralConversionKey({ kind: 'undefined' }, valueFieldRepresentation))
+    const undefinedValue = undefinedNode === undefined ? null : recipeText(ctx, undefinedNode, cppUndefinedValue)
     if (undefinedValue === null) return descriptorWith(value)
     return `(${receiver}${accessor}elementIsUndefined(static_cast<std::size_t>(${index})) ? ${descriptorWith(undefinedValue)} : ${descriptorWith(value)})`
   }
@@ -1658,7 +1747,8 @@ const knownDescriptorText = (
   const { resultType, someText, absentText, aggregateOf, convertValueField, attributeText, accessorHalvesOf } = descriptorAggregateBuilder(
     ctx,
     resultRepresentation,
-    `"Object.${member}" of a known receiver`
+    `"Object.${member}" of a known receiver`,
+    operation
   )
   const aggregateFor = (valueSource: Representation, valueText: string, attributes: string): string =>
     aggregateOf(
@@ -1797,7 +1887,8 @@ const dynamicDescriptorConversionText = (
   const { resultType, someText, absentText, aggregateOf, attributeText, convertValueField, accessorHalvesOf } = descriptorAggregateBuilder(
     ctx,
     resultRepresentation,
-    `"Object.${member}" of a dynamic receiver`
+    `"Object.${member}" of a dynamic receiver`,
+    operation
   )
   const nativeCall = `gea::host::ObjectConstructor::${member}(${receiver}, ${propertyKeyText(ctx, member, key)})`
   const halves = accessorHalvesOf('static_cast<const gea::PropertyDescriptor&>(*__gea_native)')
@@ -1923,7 +2014,7 @@ const callableDescriptorText = (
   const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
   const aggregate = aggregateOf(
     {
-      value: convertValueField(dynamic, '__gea_descriptor->value'),
+      value: convertValueField(dynamic, '__gea_descriptor->dataValue()'),
       writable: attributeText('writable', '__gea_descriptor->hasWritable', '__gea_descriptor->writable'),
       enumerable: attributeText('enumerable', '__gea_descriptor->hasEnumerable', '__gea_descriptor->enumerable'),
       configurable: attributeText('configurable', '__gea_descriptor->hasConfigurable', '__gea_descriptor->configurable')
@@ -1947,10 +2038,9 @@ const callableDescriptorText = (
       `if (__gea_descriptor == nullptr) return ${absentText()}; return ${someText(aggregate)}; })()`
     )
   }
-  const constructorSetup =
-    representation.kind === 'function-and-constructor'
-      ? 'if (!__gea_key.isSymbol() && __gea_key.text() == "prototype") gea::installCallableConstructorPrototype(__gea_callable); '
-      : ''
+  const constructorSetup = operation.nativeCallablePrototypeDescriptor
+    ? `${nativeCallablePrototypeObservationText(ctx, operation.nativeCallablePrototypeDescriptor, '__gea_callable')}; `
+    : ''
   return (
     `([&]() -> ${resultType} { const auto& __gea_callable = ${receiver}; ` +
     // A heap-environment callable anchors its identity lazily in its
@@ -2081,14 +2171,14 @@ const createText = (operation: CallOperation): string => {
   // `DynamicObject`, so the store's `unboxValue<Ref<Dictionary<V>>>` finds a
   // payload of a different C++ type and refuses at runtime -- a program that
   // aborts on its first statement, which is what `const emptyParams: Params =
-  // Object.create(null)` did (hono's pattern router).
+  // Object.create(null)` did.
   if (result !== null && (result.kind === 'dictionary' || result.kind === 'record' || result.kind === 'record-with-index')) {
     const storage = cppTypeOf(result, 'owned')
     return result.ownership === 'shared-refcount' ? `gea::makeRef<${storage}>()` : `${storage}{}`
   }
-  // A NAMED shape is the same empty struct: mongodb's `parseOptions` fills
-  // `const mongoOptions = Object.create(null)` and returns it as the
-  // `MongoOptions` interface, so the census gives the call that interface's
+  // A NAMED shape is the same empty struct: a function fills
+  // `const options = Object.create(null)` and returns it as a named
+  // interface, so the census gives the call that interface's
   // carrier. Spelled the way `emitAllocateRecord` spells the same carrier --
   // the host's own struct when one is stated -- since `gea::Value::object()`
   // is not a value of it at all.
@@ -2143,10 +2233,10 @@ const assignedKeyFields = (ctx: EmitContext, view: Extract<ObjectView, { kind: '
  * Between two known shapes the copy's text depends on nothing but the two
  * carriers and the two receivers: a static store per source field, then the
  * creation-order walk, whose callback routes every run-time key through the
- * target's own field list. Into mongodb's 131-field options family that walk
- * alone is a 131-branch chain, and `Object.assign({}, a, b)` over the same
- * pair recurs at dozens of sites -- 3.6 MB of the ping driver's unit in chains
- * that differed only in which local named the target. Rendered over the
+ * target's own field list. Into a 100+-field options family that walk alone
+ * is a 100+-branch chain, and `Object.assign({}, a, b)` over the same pair
+ * recurs at dozens of sites -- megabytes of a unit in chains that differed
+ * only in which local named the target. Rendered over the
  * function's own formals, the pair is defined once and every site calls it
  * (`unitFunctionName`). The target is shared, so the stores the function
  * makes through its formal are stores into the site's object.
@@ -2250,12 +2340,23 @@ const assignSourceTextAt = (ctx: EmitContext, targetView: ObjectView, sourceView
       const presence = ownKeyPresenceText('assign', sourceView, field)
       return presence === null ? store : `if (${presence}) ${store}`
     })
-    const creationOrdered = creationOrderedOwnCopyText(ctx, sourceView, (key, value) => {
-      const converted = alignedValueText(ctx, 'host/emit-host-object.ts:assign-in-creation-order', dynamicCarrier, targetView.value, value)
-      return converted === null
-        ? null
-        : `if (!${targetView.receiver}.setProperty(${key}, ${converted})) gea::host::throwRuntimeError("TypeError", "Cannot assign to read only property");`
-    })
+    const creationOrdered = creationOrderedOwnCopyText(
+      ctx,
+      sourceView,
+      `assign:${representationKey(targetView.representation)}`,
+      (key, value, walkCtx) => {
+        const converted = alignedValueText(
+          walkCtx,
+          'host/emit-host-object.ts:assign-in-creation-order',
+          dynamicCarrier,
+          targetView.value,
+          value
+        )
+        return converted === null
+          ? null
+          : `if (!${targetView.receiver}.setProperty(${key}, ${converted})) gea::host::throwRuntimeError("TypeError", "Cannot assign to read only property");`
+      }
+    )
     return creationOrdered === null ? stores.join(' ') : `if (!${creationOrdered}) { ${stores.join(' ')} }`
   }
   if (
@@ -2267,8 +2368,8 @@ const assignSourceTextAt = (ctx: EmitContext, targetView: ObjectView, sourceView
     return `gea::host::ObjectConstructor::assignInto(${targetView.receiver}, ${sourceView.receiver});`
   }
   // A dynamic source into a string-keyed dictionary whose values are typed
-  // (three's `Object.assign( this.spaces, colorSpaces )` with an untyped
-  // `colorSpaces`). The source's keys exist only at runtime, so each
+  // (`Object.assign( this.table, source )` with an untyped `source`). The
+  // source's keys exist only at runtime, so each
   // enumerable own string key is read as a `gea::Value` and stored through the
   // same checked per-value conversion a typed dictionary store uses -- an
   // entry the target's value type cannot hold is refused at run time by that
@@ -2368,9 +2469,8 @@ const assignSourceTextAt = (ctx: EmitContext, targetView: ObjectView, sourceView
   }
   if (targetView.kind === 'dynamic' && sourceView.kind === 'known') {
     // The source's keys are known here and the target is an object the
-    // program declared `any` and never narrowed -- mongodb's
-    // `Object.assign(command.readConcern, { afterClusterTime })` over a
-    // `Document`. 7.3.25 is then one `[[Set]]` per present source field on
+    // program declared `any` and never narrowed --
+    // `Object.assign(doc.nested, { field })` over a `Document`. 7.3.25 is then one `[[Set]]` per present source field on
     // the dynamic object; each value is boxed because the dynamic object is
     // where it lands, not because the source is. The target is bound once:
     // an operand may be a deferred expression.
@@ -2399,6 +2499,7 @@ const assignSourceTextAt = (ctx: EmitContext, targetView: ObjectView, sourceView
     const creationOrdered = creationOrderedOwnCopyText(
       ctx,
       sourceView,
+      'assign:dynamic',
       (key, value) => `__gea_target.setProperty(gea::PropertyKey::string(${key}), ${value});`
     )
     const walked = creationOrdered === null ? stores.join(' ') : `if (!${creationOrdered}) { ${stores.join(' ')} }`
@@ -2436,7 +2537,8 @@ const assignSourceTextAt = (ctx: EmitContext, targetView: ObjectView, sourceView
     : creationOrderedOwnCopyText(
         ctx,
         sourceView,
-        (key, value) => {
+        `assign:${representationKey(targetView.representation)}`,
+        (key, value, walkCtx) => {
           // The routing depends on the target alone, whichever source is being
           // walked, so it is one unit function per target carrier.
           const at = (target: string, name: string, property: string): string => {
@@ -2445,7 +2547,7 @@ const assignSourceTextAt = (ctx: EmitContext, targetView: ObjectView, sourceView
             const branches = declared.map(
               (field) =>
                 `if (${name} == ${cppStringLiteral(field.key)}) { ` +
-                `${setOwnText(ctx, 'assign', view, field.key, { text: property, representation: dynamicCarrier })} }`
+                `${setOwnText(walkCtx, 'assign', view, field.key, { text: property, representation: dynamicCarrier })} }`
             )
             const created =
               `{ if (!gea::nativeDynamicSet(${target}, gea::PropertyKey::string(${name}), ${property})) ` +
@@ -2477,10 +2579,10 @@ const assignSourceTextAt = (ctx: EmitContext, targetView: ObjectView, sourceView
  * lambda over the two receivers, beside the source field's presence member.
  * The loop tests presence from the table and calls only the present fields'
  * stores, so the code the copy executes is proportional to the fields the
- * source has rather than to the fields the layout declares: mongodb's
- * `Object.assign({}, options, resolveBSONOptions(...))` copied one 134-field
- * family struct into another as 26 KB of straight-line code per call, 2% of
- * the driver's CPU spent in the front end on tests that nearly all failed.
+ * source has rather than to the fields the layout declares:
+ * `Object.assign({}, options, resolveOptions(...))` copied one 100+-field
+ * family struct into another as tens of KB of straight-line code per call,
+ * with measurable CPU spent in the front end on tests that nearly all failed.
  * Below `steppedAssignFields` the unrolled stores are shorter than the table
  * and its indirect calls, so a small record keeps them.
  */
@@ -2526,8 +2628,8 @@ const steppedAssignText = (
 /**
  * A native `Error` source copied into a struct target.
  *
- * mongodb's `MongoBulkWriteError` constructor ends in `Object.assign(this,
- * error)` over `AnyError`, one of whose arms is a plain `Error`. An Error's
+ * An error subclass's constructor ending in `Object.assign(this, error)` over
+ * a union one of whose arms is a plain `Error`. An Error's
  * own `name`/`message`/`stack` are non-enumerable (20.5.6.3), so its
  * enumerable own keys are exactly what the program added to its expando
  * sidecar -- a set that exists only at runtime, which `gea::nativeDynamicKeys`
@@ -2642,6 +2744,8 @@ const assignIntoCallableText = (ctx: EmitContext, operation: CallOperation, targ
 }
 
 const assignText = (ctx: EmitContext, operation: CallOperation): string => {
+  const native = nativeOwnAssignmentText(ctx, operation)
+  if (native !== null) return native
   const target = targetOf(ctx, 'assign', operation)
   const targetText = operandText(ctx, target)
   const sources = operation.arguments.slice(1)
@@ -2685,15 +2789,19 @@ const assignText = (ctx: EmitContext, operation: CallOperation): string => {
  *   struct copy that set every field would rewrite attributes the program
  *   never mentioned.
  *
- * The ACCESSOR form (`get`/`set` in the literal) is refused by name. The
- * object model stores accessors as native `std::function`s and invokes them
- * (`gea::runtime::object::get`), so the model is not the gap -- what is
- * missing is the conversion from the program's own callable carrier into that
- * signature, and inventing one that dropped the receiver would make
- * `get: () => this.x` read the wrong object.
+ * Accessor Functions stay in native holders. Each certified half names its
+ * actual zero/one-argument invocation frame, forwarding this at access time.
  */
-const defineDescriptorLines = (ctx: EmitContext, operation: CallOperation, descriptor: IrOperand, slot: string): string =>
-  descriptorSlotLines(ctx, operation, descriptor.representation, operandText(ctx, descriptor), slot)
+const defineDescriptorLines = (ctx: EmitContext, operation: CallOperation, descriptor: IrOperand, slot: string): string => {
+  const snapshot = nativeDescriptorSnapshotDefinitionLines(ctx, operation, slot)
+  if (snapshot !== null) return snapshot
+  const restored = operation.nativeAccessorReinstallation
+  if (restored !== undefined) {
+    const lookup = `gea::nativeOwnPropertyDescriptor(${operandText(ctx, restored.snapshotReceiver)}, ${propertyKeyText(ctx, 'defineProperty', restored.snapshotKey)})`
+    return `const auto ${slot}_snapshot = ${lookup}; if (!${slot}_snapshot.has_value()) gea::host::throwRuntimeError("TypeError", "An accessor descriptor snapshot lost its original property"); const gea::PropertyDescriptor& ${slot} = *${slot}_snapshot;`
+  }
+  return descriptorSlotLines(ctx, operation, descriptor.representation, operandText(ctx, descriptor), slot)
+}
 
 /**
  * The descriptor operand of `Object.defineProperty`, in every carrier a
@@ -2703,7 +2811,7 @@ const defineDescriptorLines = (ctx: EmitContext, operation: CallOperation, descr
  * OPTIONAL fields carry a presence bit -- a descriptor read back off an
  * accessor states no `value`, and `hasValue` must say so rather than copy a
  * default-constructed one); and an `optional` of that record, which is how
- * test262's `verifyProperty` holds the descriptor it restores with. The
+ * a property-descriptor check holds the descriptor it restores with. The
  * absent optional is ECMA-262 20.1.2.4 step 3's TypeError
  * (`ToPropertyDescriptor` of `undefined`), thrown where the language throws it.
  */
@@ -2744,6 +2852,67 @@ const descriptorSlotLines = (
   }
   for (const field of fields) {
     const read = `${text}${accessor}${cppRecordFieldName(field.key)}`
+    if (field.key === 'get' || field.key === 'set') {
+      const half = operation.nativeAccessorDefinition?.halves.find((candidate) => candidate.half === field.key)
+      if (half !== undefined) {
+        if (representationKey(field.value) !== representationKey(half.source))
+          throw createCppEmitBlockedError(
+            `conversion:${half.conversion}`,
+            'a native accessor field disagrees with its actual Function carrier'
+          )
+        push(
+          field,
+          `gea::${field.key === 'get' ? 'installNativeDescriptorGetter' : 'installNativeDescriptorSetter'}(${slot}, ${nativeAccessorDefinitionText(ctx, half, read)});`
+        )
+        continue
+      }
+    }
+    if (field.key === 'value' && operation.nativeCallableDataWrite?.definition) {
+      const receipt = operation.nativeCallableDataWrite
+      if (representationKey(field.value) !== representationKey(receipt.storage))
+        throw createCppEmitBlockedError(
+          `conversion:${receipt.storageConversion}`,
+          'a native Function definition disagrees with its descriptor value carrier'
+        )
+      push(field, `${slot}.hasValue = true; ${slot}.nativeValue = ${nativeCallableDataDefinitionValueText(ctx, receipt, read)};`)
+      continue
+    }
+    if (field.key === 'value' && operation.nativeDataDefinition) {
+      const recipe = operation.nativeDataDefinition
+      const node = ctx.conversions.nodeById(recipe.conversion)
+      const converted =
+        node === null ||
+        representationKey(field.value) !== representationKey(recipe.source) ||
+        representationKey(node.source) !== representationKey(recipe.source) ||
+        representationKey(node.target) !== representationKey(recipe.held)
+          ? null
+          : recipeText(ctx, node, read)
+      if (converted === null)
+        throw createCppEmitBlockedError(
+          `conversion:${recipe.conversion}`,
+          'a native descriptor value lacks its certified destination-field conversion'
+        )
+      // A dynamic observer (a `dynamic` arm, a view's original Document) reads
+      // the native payload through its certified Value boundary, run lazily.
+      const materializer = recipe.materialization === undefined ? null : ctx.conversions.nodeById(recipe.materialization)
+      const materialized =
+        materializer === null
+          ? null
+          : namedConversionText(ctx, 'emit-host-object.ts:data-definition-materializer', materializer, 'gea_data')
+      if (recipe.materialization !== undefined && materialized === null)
+        throw createCppEmitBlockedError(
+          `conversion:${recipe.materialization}`,
+          'a native descriptor value lacks its certified dynamic observation boundary'
+        )
+      const held = cppTypeOf(recipe.held)
+      push(
+        field,
+        `${slot}.hasValue = true; ${slot}.nativeValue = gea::NativeDescriptorData::make<${held}, ${nativeFieldPolicyType(recipe.held)}>(${held}{${converted}}` +
+          (materialized === null ? ')' : `, +[](const ${held}& gea_data) -> gea::Value { return ${materialized}; })`) +
+          ';'
+      )
+      continue
+    }
     // A field the descriptor record carries as `optional(T, undefined)` -- the
     // shape `Object.getOwnPropertyDescriptor` publishes for its `value?: any`
     // and `writable?: boolean` members -- states the attribute exactly when
@@ -2760,7 +2929,7 @@ const descriptorSlotLines = (
     if ((field.key === 'get' || field.key === 'set') && (!field.required || field.value.kind === 'optional')) {
       // The record `Object.getOwnPropertyDescriptor` publishes declares
       // `get?`/`set?` beside the data fields, and for every data property --
-      // which is what test262's `verifyProperty` restores -- both are absent.
+      // which is what a property-descriptor check restores -- both are absent.
       // A PRESENT accessor is the case the compile-time refusal below states,
       // reached here at runtime rather than at compile time because the same
       // record carries both kinds; it refuses by name where the language would
@@ -2775,28 +2944,22 @@ const descriptorSlotLines = (
       )
       continue
     }
-    // A literal's accessor half is the program's own function, boxed as a
-    // data property's `value` is (the cited conversion keeps its receiver
-    // convention) and installed as the half the object model calls with the
-    // receiver of each [[Get]]/[[Set]]. ToPropertyDescriptor's own check that
-    // a descriptor is not both kinds runs after every field is read, below.
+    // A genuinely dynamic half already carries Value. Typed Functions need
+    // the native receipt above; the ambient PropertyDescriptor signature
+    // cannot authorize boxing their source frame.
     if (field.key === 'get' || field.key === 'set') {
-      const boxed =
-        carried.kind === 'dynamic' ? held : objectValueConversionText(ctx, operation, 'descriptor-value', 2, field.key, carried, held)
-      push(field, `gea::${field.key === 'get' ? 'installDescriptorGetter' : 'installDescriptorSetter'}(${slot}, ${boxed});`)
+      if (carried.kind === 'undefined') {
+        push(field, `${slot}.${field.key === 'get' ? 'hasGet' : 'hasSet'} = true;`)
+        continue
+      }
+      if (carried.kind !== 'dynamic')
+        throw createCppEmitBlockedError('call-abi:object-value-conversions', 'a typed accessor Function has no native installation receipt')
+      push(field, `gea::${field.key === 'get' ? 'installDescriptorGetter' : 'installDescriptorSetter'}(${slot}, ${held});`)
       continue
     }
     if (field.key === 'value') {
-      // A descriptor's `value` is `any` -- ECMAScript's own declaration, and
-      // one of the four boundaries where a box is the correct carrier rather
-      // than a defect. But the LITERAL's field carries whatever the program
-      // wrote (`{ value }` where `value: string` carries `std::string`), so
-      // the widening has to be spelled: `gea::Value` declares no converting
-      // assignment from an arbitrary type, and relying on one would have been
-      // a clang error at every call site rather than a named refusal here.
-      //
-      // A field already carried as `dynamic` assigns straight across -- it is
-      // a `gea::Value` on both sides, and boxing a box would nest two.
+      // A genuinely dynamic descriptor already carries Value. Typed data
+      // fields use the certified native destination recipe above.
       if (carried.kind === 'dynamic') {
         push(field, stated(`${slot}.hasValue = true; ${slot}.value = ${held};`))
         continue
@@ -2883,7 +3046,7 @@ const dictionaryDefinePropertyValue = (ctx: EmitContext, descriptor: IrOperand):
  */
 /**
  * `Object.defineProperty` aimed at a namespace-shaped host intrinsic (`Math`):
- * the fourth reflection operation test262's `verifyProperty` performs on one,
+ * the fourth reflection operation a property-descriptor check performs on one,
  * restoring a member with the descriptor it read. A non-configurable member
  * (every 21.3.1 constant) is validated at runtime by
  * `gea::detail::hostIntrinsicRedefineFixed` -- the one admitted redefinition
@@ -2959,8 +3122,52 @@ const fixedFieldDefinePropertyText = (
   const accessor = memberAccessOperator(representation.ownership)
   const descriptorText = operandText(ctx, descriptor)
   const read = (member: RecordField): string => `${descriptorText}${accessor}${cppRecordFieldName(member.key)}`
-  const node = ctx.conversions.nodeById(recipe.conversion)
-  const incoming = node === null ? null : recipeText(ctx, node, read(recipe.value))
+  if (recipe.attributesOnly !== undefined) {
+    if (recipe.value !== null || recipe.conversion !== null)
+      throw createCppEmitBlockedError(
+        'host-member-call:ObjectConstructor.defineProperty',
+        'attribute-only definition carries a value recipe'
+      )
+    const receiver = 'gea_attributes_target'
+    const description = 'gea_attributes_input'
+    const fieldText = `${receiver}${view.accessor}${cppRecordFieldName(field.key)}`
+    const attributesText = `${receiver}${view.accessor}${cppRecordFieldAttributesName(field.key)}`
+    const presenceText = `${receiver}${view.accessor}${cppRecordFieldPresenceName(field.key)}`
+    const flags = recipe.attributes
+      .map(
+        (member) =>
+          `gea_attributes.has${member.key[0]!.toUpperCase()}${member.key.slice(1)} = true; ` +
+          `gea_attributes.${member.key} = ${description}${accessor}${cppRecordFieldName(member.key)};`
+      )
+      .join(' ')
+    let create = 'gea::host::throwRuntimeError("TypeError", "A native attribute definition lost its authenticated own property");'
+    if (recipe.attributesOnly.absence !== null) {
+      const node = ctx.conversions.nodeById(recipe.attributesOnly.absence)
+      const value = node && recipeText(ctx, node, cppUndefinedValue)
+      if (value === null || value === undefined)
+        throw createCppEmitBlockedError(
+          'host-member-call:ObjectConstructor.defineProperty',
+          'attribute-only Undefined creation has no renderer'
+        )
+      create =
+        `if (!gea::nativeIsExtensible(${receiver}) || !gea::applyNativeFixedDataDescriptor(` +
+        `${fieldText}, ${attributesText}, ${cppTypeOf(held)}{${value}}, false, ` +
+        'gea_attributes.hasWritable, gea_attributes.writable, gea_attributes.hasEnumerable, gea_attributes.enumerable, ' +
+        'gea_attributes.hasConfigurable, gea_attributes.configurable)) ' +
+        `gea::host::throwRuntimeError("TypeError", "Cannot redefine property: ${field.key}"); ` +
+        `gea::detail::noteNativeDeclaredKeyCreated(${receiver}, ${cppStringLiteral(field.key)}); ` +
+        `${presenceText} = true;`
+    }
+    return (
+      `([&]() { const auto& ${receiver} = ${view.receiver}; const auto& ${description} = ${descriptorText}; ` +
+      `gea::PropertyDescriptor gea_attributes; ${flags}bool gea_present = ${presenceText}; ` +
+      `if (!gea_present) { ${create} } else if (!gea::applyNativeFieldDescriptor<${cppTypeOf(held)}, ${nativeFieldPolicyType(held)}>(` +
+      `${fieldText}, ${attributesText}, gea_present, gea_attributes, true, gea::Value::Tag::Object)) ` +
+      `gea::host::throwRuntimeError("TypeError", "Cannot redefine property: ${field.key}"); return ${receiver}; })()`
+    )
+  }
+  const node = recipe.conversion === null ? null : ctx.conversions.nodeById(recipe.conversion)
+  const incoming = node === null || recipe.value === null ? null : recipeText(ctx, node, read(recipe.value))
   if (incoming === null) {
     throw createCppEmitBlockedError('host-member-call:ObjectConstructor.defineProperty', 'fixed data definition conversion has no renderer')
   }
@@ -3042,9 +3249,9 @@ const fixedFieldDefinePropertyText = (
 /**
  * `Object.defineProperty` of a union whose every arm is a generated shared
  * record or a box: the live arm defines the key through its own protocol, as
- * the two single-carrier arms of `definePropertyText` below do. mongodb's
- * `decorateDecryptionResult` holds the caller's adopted Document in the record
- * arm and every nested `decrypted[k]` its recursion passes in the box arm.
+ * the two single-carrier arms of `definePropertyText` below do. A recursive
+ * walk holds the caller's adopted Document in the record arm and every nested
+ * `doc[k]` its recursion passes in the box arm.
  * `null` for any other receiver.
  */
 const unionDefinePropertyText = (
@@ -3087,9 +3294,9 @@ const unionDefinePropertyText = (
  * class constructors are viewed as declares: the constructor's own property
  * lives in its view record (`constructorViewFieldFor`), the storage
  * `C.key = v` writes and `(this.constructor as { key?: T }).key` reads, so the
- * define goes through that record's own [[DefineOwnProperty]]. mongodb's
- * `defineAspects(operation: { aspects?: Set<symbol> }, ...)` receives each
- * operation class. `null` for any other arm, or a key no view declares.
+ * define goes through that record's own [[DefineOwnProperty]]: a helper
+ * `f(target: { tags?: Set<symbol> }, ...)` receives each class itself.
+ * `null` for any other arm, or a key no view declares.
  */
 const constructorViewDefineText = (
   ctx: EmitContext,
@@ -3121,6 +3328,55 @@ const definePropertyText = (ctx: EmitContext, operation: CallOperation): string 
     throw createCppEmitBlockedError(
       'host-member-call:ObjectConstructor.defineProperty',
       '"Object.defineProperty" takes a target, a key and a descriptor; this call passes fewer'
+    )
+  }
+  if (operation.nativeArrayDescriptorReinstallation) {
+    const receipt = operation.nativeArrayDescriptorReinstallation
+    if (
+      target.representation.kind !== 'array-object' ||
+      target.value !== receipt.receiver.value ||
+      key.value !== receipt.key.value ||
+      descriptor.value !== receipt.descriptor.value
+    )
+      throw createCppEmitBlockedError('runtime-helper:native-array-descriptor-snapshot', 'the copied descriptor has no native array owner')
+    const valueNames = new Map(ctx.valueNames)
+      .set(target.value, '__gea_target')
+      .set(key.value, '__gea_key_input')
+      .set(descriptor.value, '__gea_descriptor_input')
+    const deferredTexts = new Map(ctx.deferredTexts)
+    const pendingPacks = new Map(ctx.pendingPacks)
+    for (const operand of [target, key, descriptor]) {
+      deferredTexts.delete(operand.value)
+      pendingPacks.delete(operand.value)
+    }
+    const bound = { ...ctx, valueNames, deferredTexts, pendingPacks }
+    return (
+      `([&]() { const auto& __gea_target = ${operandText(ctx, target)}; const auto& __gea_key_input = ${operandText(ctx, key)}; ` +
+      `const auto& __gea_descriptor_input = ${operandText(ctx, descriptor)}; ` +
+      `${defineDescriptorLines(bound, operation, descriptor, '__gea_descriptor')} ` +
+      `if (!gea::nativeDynamicDefineProperty(__gea_target, ${propertyKeyOperandText(bound, key, '"Object.defineProperty" of a captured native descriptor')}, __gea_descriptor)) ` +
+      'gea::host::throwRuntimeError("TypeError", "Cannot reinstall native array descriptor"); return __gea_target; })()'
+    )
+  }
+  const delegatedReceiver = generatedRecordReceiver(target.representation, '__gea_target')
+  if (operation.nativeDataDefinition?.delegatesView && delegatedReceiver !== null) {
+    const valueNames = new Map(ctx.valueNames)
+      .set(target.value, '__gea_target')
+      .set(key.value, '__gea_key_input')
+      .set(descriptor.value, '__gea_descriptor_input')
+    const deferredTexts = new Map(ctx.deferredTexts)
+    const pendingPacks = new Map(ctx.pendingPacks)
+    for (const operand of [target, key, descriptor]) {
+      deferredTexts.delete(operand.value)
+      pendingPacks.delete(operand.value)
+    }
+    const bound = { ...ctx, valueNames, deferredTexts, pendingPacks }
+    return (
+      `([&]() { const auto& __gea_target = ${operandText(ctx, target)}; const auto& __gea_key_input = ${operandText(ctx, key)}; ` +
+      `const auto& __gea_descriptor_input = ${operandText(ctx, descriptor)}; ` +
+      `${defineDescriptorLines(bound, operation, descriptor, '__gea_descriptor')} ` +
+      `if (!${generatedDefineOwnText('__gea_target', propertyKeyOperandText(bound, key, '"Object.defineProperty" of a native view'), '__gea_descriptor')}) ` +
+      'gea::host::throwRuntimeError("TypeError", "Cannot define a native view property"); return __gea_target; })()'
     )
   }
   if (operation.fixedDataDefinition !== undefined) {
@@ -3378,7 +3634,7 @@ const pairWalkFromEntriesText = (ctx: EmitContext, operation: CallOperation, sou
   })()
   if (halves === null) return refuse(`its entry "${representationKey(pair)}" is not a two-position [key, value] pair`)
   // ToPropertyKey of an absent key is its ToString: an entry whose key is
-  // `undefined` (the mongodb driver's optional index `name`) lands under
+  // `undefined` (an optional field used as the key) lands under
   // "undefined", exactly as node stores it.
   const keyCarrier = halves.key
   const keyText =
@@ -3401,7 +3657,7 @@ const pairWalkFromEntriesText = (ctx: EmitContext, operation: CallOperation, sou
   const dictionaryType = cppTypeOf({ ...result, ownership: 'owned' })
   const walk =
     carrier.kind === 'array-object'
-      ? `if (gea_source) for (const auto& gea_slot : gea_source->slots()) { ` +
+      ? `if (gea_source) for (const auto& gea_slot : gea_source->readSlots()) { ` +
         `if (!gea_slot.present) gea::host::throwRuntimeError("TypeError", "Iterator value undefined is not an entry object"); ` +
         `const auto& gea_pair = gea_slot.value; ${store} }`
       : `auto gea_cursor = gea_source; while (true) { auto gea_pair = gea_cursor.arrayNext(); if (gea_cursor.done()) break; ${store} }`
@@ -3513,6 +3769,12 @@ const sameValueText = (
   if (leftType === 'null' || leftType === 'undefined') return 'true'
   if (leftType === 'number') return `gea::sameNumberValue(static_cast<double>(${leftText}), static_cast<double>(${rightText}))`
   if (leftType !== null) return `${leftText} == ${rightText}`
+  const callable = callableIdentityEqualityText(
+    '===',
+    { representation: leftCarrier, text: leftText },
+    { representation: rightCarrier, text: rightText }
+  )
+  if (callable !== null) return callable
   if (
     representationKey(leftCarrier) === representationKey(rightCarrier) &&
     (leftCarrier.kind === 'array-buffer' ||
@@ -3543,6 +3805,7 @@ const composite = (
 }
 
 export const objectMemberText = (ctx: EmitContext, member: string, operation: CallOperation): string => {
+  ctx = { ...ctx, hostObjectWalkPlan: operation.hostObjectWalkPlan } as HostObjectContext
   if (member === 'keys' || member === 'getOwnPropertyNames') return keysText(ctx, member, operation)
   if (member === 'getOwnPropertySymbols') return ownPropertySymbolsText(ctx, operation)
   if (member === 'values') return valuesText(ctx, operation)

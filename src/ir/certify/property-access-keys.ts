@@ -27,9 +27,9 @@ import { callableBuiltinResolution, callableMutationFactsOf, callableOriginsOf }
  * `never` -- so the access is on a branch flow analysis proved unreachable.
  *
  * The same fact `deadTypeofGuards.isDeadOperation` states for one specific
- * source of dead code, asked generally. mongodb's `execute_operation.ts:198`
- * is the case that needed it: `tryOperation<T extends AbstractOperation>`
- * narrows `operation` with `instanceof AggregateOperation`, monomorphization
+ * source of dead code, asked generally. A generic
+ * `tryOperation<T extends AbstractOperation>` narrowing `operation` with
+ * `instanceof AggregateOperation` is the case that needed it: monomorphization
  * mints one copy per concrete `T`, and in every copy whose `T` is a DIFFERENT
  * operation class the narrowed type is two unrelated classes intersected --
  * uninhabited, so nothing is ever read there (`derive.ts`'s
@@ -58,8 +58,8 @@ export const receiverIsUnreachable = (graph: SemanticGraph, operation: SemanticO
  * `constructor-family`'s emitter (`emit-properties.ts`'s
  * `classConstructorStaticMemberText`) resolves a static member by walking
  * the `ClassLayout` `projectClasses` builds from these same events -- and an
- * ambient `declare class` (an Apple/ObjC or three.js binding shipped as a
- * `.d.ts`, e.g. `UIColor`) publishes none, because `semantics/program.ts`
+ * ambient `declare class` (an Apple/ObjC or other host binding shipped
+ * as a `.d.ts`, e.g. `UIColor`) publishes none, because `semantics/program.ts`
  * deliberately keeps declaration files out of the census
  * (`!file.isDeclarationFile`). A flat manifest claim cannot see that
  * distinction -- it only knows the carrier kind, not which class -- so a
@@ -137,7 +137,7 @@ export const recordIndexesOf = (
  * typed array owes no such reconciliation, because `TypedArray::elementAt`
  * answers `double` for all eight element domains. `TypedArray` -- nine views
  * that differ only in element width -- is exactly that shape, and it is why
- * `array[ i ]` on a `BufferAttribute`'s array had no recipe.
+ * `array[ i ]` on an attribute's typed array had no recipe.
  */
 export const taggedUnionArmsAreAllTypedArrays = (representation: Representation | undefined): boolean => {
   if (representation?.kind !== 'tagged-union') return false
@@ -150,8 +150,8 @@ export const taggedUnionArmsAreAllTypedArrays = (representation: Representation 
  * per-arm-KIND reconciliation for, only the ordinary per-arm VALUE
  * reconciliation `emit-union-properties.ts`'s `dictionaryArmReadText`
  * already performs. `Record<string, number> | Record<string, string>`
- * (hono's route param table, narrowed vs. unresolved) and
- * `Record<string, string> | Record<string, string[]>` (its query-string
+ * (a router's param table, narrowed vs. unresolved) and
+ * `Record<string, string> | Record<string, string[]>` (a query-string
  * result, single vs. multi-value) are both this.
  */
 export const taggedUnionArmsAreAllDictionaries = (representation: Representation | undefined): boolean => {
@@ -165,7 +165,7 @@ export const taggedUnionArmsAreAllDictionaries = (representation: Representation
  * dictionary") a COMPUTED `get` owes no per-arm-KIND reconciliation for, only
  * the ordinary per-arm VALUE reconciliation `emit-union-properties.ts`'s
  * `arrayArmReadText` already performs. `[T, ParamIndexMap][] | [T, Params][]`
- * (hono's router match result's first slot, indexed by `routeIndex`) is
+ * (a router match result's first slot, indexed by a route index) is
  * exactly this.
  */
 export const taggedUnionArmsAreAllArrayObjects = (representation: Representation | undefined): boolean => {
@@ -203,8 +203,8 @@ export const taggedUnionArmsHaveNativeSidecar = (representation: Representation 
  * ordinary [[Get]], with at least one arm a `dictionary` -- the arms
  * `taggedUnionArmsHaveNativeSidecar` admits, plus dictionaries.
  *
- * mongodb's `onHeartbeatSucceeded(hello: Document)` is handed a `Document` by
- * one caller and a declared `any` by another, so `hello[LEGACY_HELLO_COMMAND]`
+ * A handler `onReply(reply: Document)` handed a `Document` by one caller and
+ * a declared `any` by another makes `reply[KEY]`
  * reads a `dictionary(string, dynamic) | dynamic` union. Neither refinement
  * above covers it: the dictionary one wants every arm a dictionary, and the
  * sidecar one has no dictionary arm. Each arm's read is already the one that

@@ -1,6 +1,6 @@
 // A board keeps the cycle collector's graph in fixed chunks taken with nothrow
 // `new` (`CycleGraphStorage`), because one contiguous graph doubling into a
-// fragmented heap -- 448 KB for Skytail's ~8k-node scene on the ESP32-S31 --
+// fragmented heap -- 448 KB for an app's ~8k-node scene on the ESP32-S31 --
 // is a request a board can no longer meet, and its `operator new` aborts. A
 // refused chunk must cost only that collection: no exception reaches the
 // caller (frame end has no handler), every count and pin is restored, and the

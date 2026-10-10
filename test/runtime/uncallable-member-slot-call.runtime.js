@@ -1,4 +1,4 @@
-// `this.onUpdate = null` is three's Texture hook; the app never stores a
+// `this.onUpdate = null` is a 3D scene-graph library's texture hook; the app never stores a
 // function in it, so the guarded call `texture.onUpdate( texture )` can run
 // no body. The reach proof refused it as a slot with no implementations, and
 // the host-mutation census then read the call as an unauthenticated callee

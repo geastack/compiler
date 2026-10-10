@@ -184,18 +184,19 @@ const seedStatement = (base: Collection, source: Representation, sourceText: str
     const added = add([{ representation: element, text: 'gea_slot.value' }])
     if ('refused' in added) return added
     return {
-      statement: `for (const auto& gea_slot : ${sourceText}->slots()) { if (!gea_slot.present) gea::host::throwRuntimeError("TypeError", "a hole is not a set element"); ${added.statement} }`
+      statement: `for (const auto& gea_slot : ${sourceText}->readSlots()) { if (!gea_slot.present) gea::host::throwRuntimeError("TypeError", "a hole is not a set element"); ${added.statement} }`
     }
   }
   // A `[K | V, K | V]` tuple whose two positions share one union is carried as
-  // an ARRAY of that union, not a pair record (mongodb's SeverityLevelMap).
+  // an ARRAY of that union, not a pair record (a bidirectional enum map's
+  // `[name, value]` entries).
   // 24.1.1.2 AddEntriesFromIterable reads `"0"` and `"1"` off each item all
   // the same; a missing one is the `undefined` this carrier cannot hold, which
   // stops loudly rather than inventing a key.
   if (element.kind === 'array-object') {
     const added = add([
-      { representation: element.element, text: 'gea_slot.value->elementAtIndex(0)' },
-      { representation: element.element, text: 'gea_slot.value->elementAtIndex(1)' }
+      { representation: element.element, text: 'gea_slot.value->readElementAtIndex(0)' },
+      { representation: element.element, text: 'gea_slot.value->readElementAtIndex(1)' }
     ])
     if ('refused' in added) return added
     const short = JSON.stringify(
@@ -203,7 +204,7 @@ const seedStatement = (base: Collection, source: Representation, sourceText: str
     )
     return {
       statement:
-        `for (const auto& gea_slot : ${sourceText}->slots()) { ` +
+        `for (const auto& gea_slot : ${sourceText}->readSlots()) { ` +
         `if (!gea_slot.present) gea::host::throwRuntimeError("TypeError", "Iterator value is not an entry object"); ` +
         `if (!gea_slot.value->hasElementValueAtIndex(0) || !gea_slot.value->hasElementValueAtIndex(1)) gea::detail::refuseUnloweredCollectionSeed(${short}); ` +
         `${added.statement} }`
@@ -227,7 +228,7 @@ const seedStatement = (base: Collection, source: Representation, sourceText: str
     .join('')
   return {
     statement:
-      `for (const auto& gea_slot : ${sourceText}->slots()) { ` +
+      `for (const auto& gea_slot : ${sourceText}->readSlots()) { ` +
       `if (!gea_slot.present${absent}) gea::host::throwRuntimeError("TypeError", "Iterator value is not an entry object"); ` +
       `${added.statement} }`
   }

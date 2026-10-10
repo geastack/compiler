@@ -5,21 +5,21 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * A record handed to a union-typed parameter through an explicit
  * `value as unknown as T` assertion, kept as one more native arm of that union.
  *
- * `@hono/node-server`'s websocket upgrade (websocket.ts) builds
+ * A server adapter that builds
  *
- *   const env: UpgradeBindings = { incoming: request, outgoing: undefined, wss, [WAIT_FOR_WEBSOCKET_SYMBOL]: waitForWebSocket }
- *   await fetchCallback(createUpgradeRequest(request), env as unknown as Parameters<FetchCallback>[1])
+ *   const env: ExtraBindings = { incoming: request, outgoing: undefined, extra, [WAIT_SYMBOL]: wait }
+ *   await callback(makeRequest(request), env as unknown as Parameters<Callback>[1])
  *
- * where the parameter is `HttpBindings | Http2Bindings`. The assertion emits
+ * where the parameter is `BindingsA | BindingsB`. The assertion emits
  * nothing in JavaScript: the callee receives `env` itself, and the program
- * depends on that identity -- hono's helper reads `c.env as UpgradeBindings`,
- * writes `env[CONNECTION_SYMBOL_KEY]`, and the upgrade handler reads it back
+ * depends on that identity -- a helper reads `c.env as ExtraBindings`,
+ * writes `env[CONNECTION_KEY]`, and the upgrade handler reads it back
  * off the very object it built. A converting copy would lose that write, and
  * a box would be a dynamic carrier for a statically typed record.
  *
  * So the union carries the asserted record's own carrier beside its declared
  * arms. Keyed by the union TYPE, as `record-stand-in-arms.ts` keys its arms,
- * because the parameter here belongs to a callable TYPE (`FetchCallback`):
+ * because the parameter here belongs to a callable TYPE (`Callback`):
  * every function value stored into that slot, and the call through it, must
  * agree on one carrier, and the union type is the one thing they share.
  * Adding an arm is a superset -- every value already admitted converts as

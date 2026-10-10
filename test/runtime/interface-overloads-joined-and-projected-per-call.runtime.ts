@@ -1,7 +1,7 @@
 // An interface method declared as two overloads whose arity and results
-// disagree -- mongodb's `KerberosClient.step(challenge): Promise<string>` beside
+// disagree -- a database client's `AuthPluginClient.step(challenge): Promise<string>` beside
 // `step(challenge, callback): void` -- held by a value of a class that
-// implements only the promise form (the `kerberos` package's own client).
+// implements only the promise form (the auth plugin package's own client).
 // The overloads join into one frame (`host-abi.ts`'s
 // `callbackOverloadJoinedAbi`): the widest arity, the callback optional, the
 // result `Promise<string> | undefined`. The class's methods are bound into it

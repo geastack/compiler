@@ -375,6 +375,27 @@ const keepsInstance = (source: string): boolean => {
   return classConstructorKeepsInstanceOf(checker, flow, type)
 }
 
+test('immutable constructor aliases retain all indexed consumers without borrowing asserted constructor types', () => {
+  const owner = 'class Owner { draw(value: number) { return value } }'
+  assert.equal(keepsInstance(`${owner} const chosen: any = Owner; const forwarded = chosen; void new forwarded();`), true)
+  assert.equal(
+    keepsInstance(`${owner} class Child extends Owner {} declare const flag: boolean;
+      const chosen: any = flag ? Owner : Child; void new chosen();`),
+    true,
+    'every conditional initializer alternative remains a source constructor'
+  )
+  for (const suffix of [
+    'declare function sink(value: unknown): void; sink(chosen);',
+    'declare function other(value: number): number; chosen.prototype.draw = other;',
+    'const retained = [chosen];',
+    'export { chosen };',
+    'chosen = class Other {};'
+  ])
+    assert.equal(keepsInstance(`${owner} const chosen: any = Owner; ${suffix} void new chosen();`), false, suffix)
+  assert.equal(keepsInstance(`${owner} let chosen: any = Owner; void new chosen();`), false, 'mutable aliases are not this receipt')
+  assert.equal(keepsInstance(`${owner} export const chosen: any = Owner; void new chosen();`), false, 'exports keep consumers open')
+})
+
 test('a class binding handed to a source call is forwarded into its parameter, not treated as escaped', () => {
   // `mount(App)` — `@geastack/core`'s own `primitives.ts` — is a call to an
   // ORDINARY source function whose parameter is used only as `new component()`.

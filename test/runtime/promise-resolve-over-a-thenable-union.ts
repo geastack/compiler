@@ -1,6 +1,6 @@
 // `Promise.resolve(x)` WHERE `x` IS EITHER THE VALUE OR A PROMISE OF IT.
 //
-// hono's `resolveCallback` ends in `return Promise.resolve(str)` with `str`
+// An HTTP framework's `resolveCallback` ends in `return Promise.resolve(str)` with `str`
 // carried as `string | Promise<string>` -- the two `instanceof` tests above it
 // narrow away the object arm but leave both of these -- while TypeScript types
 // the call `Promise<string>`, because `Awaited<T>` collapses a thenable into

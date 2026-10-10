@@ -1,7 +1,7 @@
 //! expect: armed
 //! expect: armed
 //! expect: rejected Expired after 1ms
-// mongodb's `onData`: `timeoutContext?.timeoutForSocketRead?.then(undefined,
+// A database client's `onData`: `timeoutContext?.timeoutForSocketRead?.then(undefined,
 // errorHandler)`, where `timeoutForSocketRead` is `Timeout | null` and
 // `Timeout` extends `Promise<never>`. The receiver reaches the read as a union
 // one arm of which is the Promise subclass; `then` is no member the class

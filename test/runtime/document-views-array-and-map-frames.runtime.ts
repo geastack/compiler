@@ -1,6 +1,6 @@
 // AN ARRAY OR A MAP HANDED WHERE AN OPEN DOCUMENT IS DECLARED, AND READ BACK.
 //
-// bson's iterative serializer (`serializer.ts`) and `calculate_size.ts` push
+// A binary-document serializer's iterative serialize and size-calculation passes push
 // every nested value -- a plain object, an array or a Map -- onto a frame stack
 // whose `object`/`sourceObject` field is a `Document` (`{ [key: string]: any
 // }`). A frame is then walked by what the object turned out to be:
@@ -85,7 +85,7 @@ selfList.push(selfList)
 //! expect: 3 3 3 [1,cycle]
 console.log(sizeOf(list), sizeOf(inner), sizeOf({ abc: 1 }), describe(selfList, new Set<Doc>()))
 
-// bson's deserializer holds the array it fills in the same `Document` slot.
+// The serializer's deserializer holds the array it fills in the same `Document` slot.
 interface Holding {
   holding: Doc
   isArray: boolean

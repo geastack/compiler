@@ -4,7 +4,7 @@
 
 // A symbol-keyed expando cached on an object the program reaches through a
 // widened view, holding `Uint8Array | Error` and read back as
-// `Uint8Array | Error | undefined` -- `@hono/node-server`'s own
+// `Uint8Array | Error | undefined` -- an HTTP server adapter's own
 // `readBodyBufferedBeforeDisconnect`, which caches the recovered body or the
 // error that replaced it on the incoming message.
 //

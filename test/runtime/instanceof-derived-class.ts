@@ -2,8 +2,8 @@
 // question `instanceof` exists to answer, and the emitter answered it at
 // compile time from the handle's STATIC class -- which says nothing, because
 // a `gea::Ref<Base>` may hold any descendant. It rendered the constant
-// `false`, so three's `Object3D.traverse( part => { if ( part instanceof Mesh )
-// ... } )` compiled, linked, ran, and skipped every branch: the three.js app's whole
+// `false`, so a 3D scene-graph library's `SceneNode.traverse( part => { if ( part instanceof Mesh )
+// ... } )` compiled, linked, ran, and skipped every branch: a 3D app's whole
 // shadow rig did nothing.
 //
 // The test is now a read of the handle's own allocated type

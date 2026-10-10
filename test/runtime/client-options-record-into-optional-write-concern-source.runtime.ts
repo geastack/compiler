@@ -1,13 +1,13 @@
 // A CLIENT'S OPTIONS RECORD HANDED TO `fromOptions(options?: Options | Concern | W)`
 // WHOSE OPTIONS ARM IS AN INTERFACE FAMILY'S LAYOUT.
 //
-// mongodb's `ClientBulkWriteExecutor` inherits its write concern with
-// `WriteConcern.fromOptions(this.client.s.options)`: the whole `MongoOptions`
+// A database client's `ClientBulkWriteExecutor` inherits its write concern with
+// `WriteConcern.fromOptions(this.client.s.options)`: the whole `ClientOptions`
 // record entering an optional sum whose arms are `WriteConcernOptions`, the
 // `WriteConcern` class and the `W` scalars. `WriteConcernOptions` is extended
-// by `GridFSBucketWriteStreamOptions` (and others), so it lays out as the
+// by a file bucket's upload-stream options (and others), so it lays out as the
 // interface FAMILY's one struct (`semantics/interface-families.ts`), which
-// also holds the sibling's `metadata?: Document`. `MongoOptions` carries an
+// also holds the sibling's `metadata?: Document`. `ClientOptions` carries an
 // UNRELATED required `metadata: Promise<ClientMetadata>`, which that field
 // cannot hold without boxing.
 //

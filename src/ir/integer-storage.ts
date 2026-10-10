@@ -14,6 +14,23 @@ import {
 import { callableMemberSlot } from './callable-member-candidates.js'
 import type { IrBody, IrNonTerminatorOperation, IrOperand } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
+import type { ReflectionDemand } from './reflection-demand.js'
+
+/** An erased field protocol exchanges the published carrier, independent of a direct numeric read's optimizations. */
+export const reflectedFieldStorageNeedsPublishedCarrier = (demand: Pick<ReflectionDemand, 'level' | 'fieldOperations'>): boolean =>
+  demand.level === 'full' &&
+  (demand.fieldOperations === undefined ||
+    [...demand.fieldOperations.values()].some((operations) =>
+      [...operations].some(
+        (operation) =>
+          operation === 'read' ||
+          operation === 'write' ||
+          operation === 'native-read' ||
+          operation === 'native-write' ||
+          operation === 'descriptor' ||
+          operation === 'define'
+      )
+    ))
 
 /**
  * Which record and class FIELDS this program may hold in a 64-bit integer.
@@ -21,9 +38,9 @@ import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
  * `ir/integers.ts` answers the same question for one body's own values and
  * cells, and stops at storage: a field is one slot shared by every body that
  * touches it, so no single body can settle what it holds. That limit is not
- * academic. `bench/comparison/fixtures/object_create.ts` carries its whole
- * result through `Point.x/y/z`, and the hand-written baseline beside it
- * declares `struct Point { long long x, y, z; }`; while those three members are
+ * academic. An object-allocation loop carries its whole result through
+ * `Point.x/y/z`, and a hand-written C++ equivalent declares
+ * `struct Point { long long x, y, z; }`; while those three members are
  * doubles the loop's `(total + o.x + o.y + o.z) % 1000000000` is four
  * floating-point operations and an `fmod` where the baseline has four integer
  * ones and a compare-subtract.
@@ -82,9 +99,9 @@ export const integerStorageSlot = (structName: string, key: string): string => `
  * its position.
  *
  * A parameter is storage in exactly the sense a field is: one slot, written by
- * every call site and read by the body. `bench/comparison/fixtures/fibonacci.ts`
- * is the whole argument -- its `n` is only ever `40`, `n - 1` and `n - 2`, and
- * the hand-written baseline beside it declares `static long long fib(int n)`.
+ * every call site and read by the body. A doubly recursive `fib(n)` is the
+ * whole argument -- its `n` is only ever `40`, `n - 1` and `n - 2`, and
+ * a hand-written C++ equivalent declares `static long long fib(int n)`.
  * A census that stopped at fields would leave that body doing its compare, its
  * two subtractions and its recursion in doubles.
  *
@@ -99,8 +116,8 @@ export const integerParameterSlot = (owner: FunctionId | RegionId, ordinal: numb
  * The half without which narrowing a formal can cost more than it saves: with
  * `tick(n)` computing in a `long long` and still DECLARED to return a double,
  * every call converts on the way out and its caller adds the result to a double
- * -- measured on `bench/comparison/fixtures/method_calls.ts`, that one
- * conversion put the fixture 33% behind where it had been before either half
+ * -- measured on a method-call loop, that one conversion put the program 33%
+ * behind where it had been before either half
  * landed. Written by every `return` in the body and read at every call site
  * whose callee this census resolved.
  */
@@ -277,7 +294,7 @@ const accountedOperations: ReadonlySet<string> = new Set([
  * thing at the other end is the one struct this compilation renders, and
  * whatever slot it is moved into is spelled from the same representation. So a
  * class mentioned in one of these positions is accounted for, and it is the
- * difference between narrowing `examples/apps/weather`'s store and striking it
+ * difference between narrowing a UI program's store class and striking it
  * -- eleven integer flags, every one of them handed to a `<View>` prop and
  * captured by an effect, and therefore `Signal<double>` on a core with no
  * double FPU.
@@ -298,7 +315,7 @@ const wholeValueMoves: ReadonlySet<string> = new Set(['element-prop', 'element-c
  * record into a cell, `get` copies it back out, `forEach` hands it whole to a
  * program callback (whose own body the census reads, and whose escape the
  * operand walk records). Without this list `ring.push({x, y, z})` alone kept
- * `object_create`'s three members doubles.
+ * the ring's three `Point` members doubles.
  *
  * Deliberately NOT here: anything that reads members through a conversion of
  * its own -- `join`, `toString`, `toLocaleString`, and `sort` without a
@@ -396,7 +413,7 @@ interface BodyScan {
    * loudly, at runtime, which is a program that used to work and now aborts.
    *
    * What decides the risk is WHAT each box carries, not that the body boxes at
-   * all. `examples/apps/weather` is the whole argument: its one box in 10,943
+   * all. One UI program is the whole argument: its one box in 10,943
    * lines of C++ is `throw new Error('gea-embedded mount root #app was not
    * found')` -- `Tag::Object` around an Error record, which cannot pun a
    * numeric member of anything. Reading that as "this program boxes" switched
@@ -709,7 +726,7 @@ const scanBody = (body: IrBody, question: IntegerStorageQuestion, disqualified: 
       // a second `get`/`set` on the element, which this census reads on its
       // own. Reading the element access as "any member" struck every struct
       // an Array held whenever the program indexed the Array by a variable --
-      // `object_create`'s whole ring, whose three members are exactly the
+      // an object-allocation loop's whole ring, whose three members are exactly the
       // ones this census exists to narrow. A STRING key into an Array can
       // still name one of its extension fields, so it keeps the strike.
       const carrier = receiver.representation.kind === 'optional' ? receiver.representation.payload : receiver.representation

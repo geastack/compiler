@@ -1,6 +1,6 @@
 // A TYPED RECORD OR CLASS INSTANCE READ THROUGH AN OPEN `Document` PARAMETER.
 //
-// bson's serializer hands every nested document to `serializeInto` as a
+// A binary-document serializer hands every nested document to `serializeInto` as a
 // `Document` and reads `object[key]` for each key of `Object.keys(object)`.
 // The view answers each read from the viewed object's declared-field
 // dispatcher directly (`Value::readDeclaredField`), and only a key that

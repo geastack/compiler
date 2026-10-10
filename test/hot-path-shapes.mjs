@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 // Shape and allocation budgets for the hot paths the comparison benchmarks
 // price (`bench/comparison/fixtures/`). Each fixture under `test/runtime/`
 // pins ONE emitted shape that a regression would silently undo, plus the
@@ -7,17 +8,29 @@
 import { executableSuffix } from './executable-suffix.mjs'
 import { sanitizerArguments, sanitizerEnvironment } from './sanitizer.mjs'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
 
 const root = resolve(import.meta.dirname, '..')
-const outDir = resolve(root, 'measurements/cxx')
+const outDir = resolve(root, 'measurements/cxx-hot-path-shapes')
 mkdirSync(outDir, { recursive: true })
 
+// Each fixture's sanitized native build takes seconds of one core; they are
+// independent, so they all build at once and are checked as each finishes.
+const jobs = []
+const clang = (args, input) =>
+  new Promise((done, fail) => {
+    const child = spawn(process.env.CXX || 'clang++', args, { stdio: ['pipe', 'inherit', 'inherit'] })
+    child.on('error', fail)
+    child.on('close', (status) => (status === 0 ? done() : fail(new Error(`clang++ exited ${status}`))))
+    child.stdin.end(input)
+  })
+
 /** Emit, compile with the allocation profile on, run, and compare against node. */
-const run = (name, { source: checkSource, epilogue = '' }) => {
+const run = (name, options) => jobs.push(check(name, options))
+const check = async (name, { source: checkSource, epilogue = '' }) => {
   const fixture = resolve(root, 'test/runtime', name + '.ts')
   const result = compile({ rootFileNames: [fixture], projectFileName: null })
   assert.ok(result.certificate, name + ': ' + JSON.stringify(result.diagnostics.diagnostics))
@@ -26,11 +39,10 @@ const run = (name, { source: checkSource, epilogue = '' }) => {
   assert.doesNotMatch(result.source, /gea_cpp_value/, name + ': a typed program must not box')
   checkSource(result.source)
   const binary = resolve(outDir, `${name}-test${executableSuffix}`)
-  execFileSync(
-    process.env.CXX || 'clang++',
+  await clang(
     [
       '-std=c++20',
-      '-O1',
+      ...nativeOptimization('allocation'),
       '-fsanitize=address,undefined',
       ...sanitizerArguments,
       '-DGEA_PROFILE_ALLOCATIONS=1',
@@ -41,10 +53,8 @@ const run = (name, { source: checkSource, epilogue = '' }) => {
       '-o',
       binary
     ],
-    {
-      input:
-        result.source +
-        `
+    result.source +
+      `
 #include <cstdio>
 int main() {
   __gea_top_level();
@@ -53,7 +63,6 @@ int main() {
   return 0;
 }
 `
-    }
   )
   // Windows opens a C++ program's stdout in text mode, so its `\n` arrives as
   // `\r\n` while node's does not. The comparison is about what the two
@@ -85,14 +94,26 @@ run('hot-path-closure-table', {
     )
     // `fns[slot] = makeKind(...)`: the call's result is move-assigned straight
     // from its return slot into the element, never through a temporary of its
-    // own (`ir/deferral.ts`'s forwarded producers).
-    assert.match(source, /\.value = \(gea_body_fn_decl_\w+\(/, 'the table store must take the factory call directly')
+    // own (`ir/deferral.ts`'s forwarded producers). With the table's dense
+    // window (`fns.length >= 16` checked once, `i % 16` in range) the hot arm
+    // is the window's cell; without one it is the general store.
+    assert.match(
+      source,
+      /(->setElementAtIndex\([^;\n]*, |gea_dense_\d+\[[^;\n]*\]\.value = )\(gea_body_fn_decl_\w+\(/,
+      'the native array store must take the factory call directly'
+    )
     // `const f = fns[...]; f(i)`: the cell is gone and the call runs on the
     // element in place -- no `CallableObject` copy per iteration.
-    assert.match(source, /->elementAtIndex\([^;]*\)\)\)\.call(Stable)?\(/, 'the callee must be the table element itself, not a copy')
+    // The cold arm reads by value into a frame slot (`std::as_const(slot.emplace(...))`)
+    // so the conditional stays an lvalue and the hot arm is the cell itself.
+    assert.match(
+      source,
+      /(->elementAtIndex\([^;]*\)\)\)|std::as_const\(gea_dense_read_\d+\.emplace\(\w+->readElementAtIndex\([^;]*\)\)\)\)\))\.call(Stable)?\(/,
+      'the callee must be the table element itself, not a copy'
+    )
     assert.doesNotMatch(
       source,
-      /^b\d+ = \(\(GEA_LIKELY\(gea_dense_ok_\d+\) \? gea_dense_\d+\[[^\n]*\]\.value : \w+->elementAtIndex/m,
+      /^[bv]\d+ = (?![^\n]*\.call(Stable)?\()\(\(?GEA_LIKELY\(gea_dense_ok_\d+[^?\n]*\) \? gea_dense_\d+\[[^\n]*\]\.value : [^;\n]*(elementAtIndex|readElementAtIndex)[^\n]*;$/m,
       'no element may be copied into a cell'
     )
     // Every factory returns its callable from the return statement itself.
@@ -129,7 +150,7 @@ run('hot-path-closure-identity', {
   source: (source) => assert.match(source, /identifyCallable</, 'identity is observed through === and a Set; closures must carry one')
 })
 
-// Mongodb's `onData` shape: the call's shared lets and the closures over them
+// A stream reader's `onData` shape: the call's shared lets and the closures over them
 // live in ONE frame, so the 56 objects the program used to create (a cell per
 // let, a block per closure) fall to 24. A regression back to per-variable cells
 // breaks the budget before it breaks any output.
@@ -263,3 +284,5 @@ run('runtime-module-int-const', {
     assert.match(source, /setElementIntegerAtIndex\(/, 'the fill index must reach the integer-index write path')
   }
 })
+
+await Promise.all(jobs)

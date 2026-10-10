@@ -1,6 +1,6 @@
 // `Object.assign(this, error)` WHERE ONE ARM OF `error` IS A PLAIN `Error`.
 //
-// mongodb's `MongoBulkWriteError` constructor copies the error it wraps onto
+// A database client's `BulkWriteError` constructor copies the error it wraps onto
 // itself. An Error's own `name`, `message` and `stack` are non-enumerable, so
 // from a plain Error only the keys added to its own property table are
 // copied; one with none copies nothing, and the wrapper keeps its own fields.

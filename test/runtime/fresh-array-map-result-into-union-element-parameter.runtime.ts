@@ -1,6 +1,6 @@
 // The array `Array.prototype.map` just allocated, handed straight to a
 // parameter whose element is a UNION the mapped record is one arm of
-// (mongodb's `insertMany`: `this.bulkWrite(docs.map(doc => ({ insertOne:
+// (a database client's `insertMany`: `this.bulkWrite(docs.map(doc => ({ insertOne:
 // { document: doc } })))` into `ReadonlyArray<AnyBulkWriteOperation>`). No
 // other reference holds the fresh array, so it is rebuilt once at the
 // parameter's element carrier.

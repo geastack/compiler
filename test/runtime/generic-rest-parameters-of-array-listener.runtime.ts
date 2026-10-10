@@ -1,5 +1,5 @@
 // A generic method whose rest parameter is `Parameters<Events[K]>` for an
-// event whose listener takes an ARRAY: the MongoDB driver's
+// event whose listener takes an ARRAY: a database client's
 // `TypedEventEmitter.emitAndLog(event, ...args: Parameters<Events[EventKey]>)`
 // forwarding `...args` into `emit(event, ...args: any[])`. `args` is the
 // tuple `[Connection[]]` -- an array OF arrays -- and each copy's calling

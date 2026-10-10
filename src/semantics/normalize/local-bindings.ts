@@ -41,9 +41,9 @@ import { contextTypedLiteralThisOf } from './structural-receiver.js'
 /**
  * The type an unannotated `let`/`var` cell holds, when the program never
  * initializes it and fills it in later -- `let extensions, capabilities,
- * state, info;` followed by `extensions = new WebGLExtensions( _gl );` deeper
- * in the same module, three.js's `WebGLRenderer.js`'s own idiom for emulating
- * a private module scope inside one constructor.
+ * state, info;` followed by `extensions = new Extensions( context );` deeper
+ * in the same function -- the JavaScript idiom of emulating a private module
+ * scope inside one large constructor function.
  *
  * `parameter-bindings.ts` already computes this exact join internally
  * (`writeSetTypeOf`, gated by its own `lateAssignment` flag) but never
@@ -68,7 +68,7 @@ import { contextTypedLiteralThisOf } from './structural-receiver.js'
  *
  * ## Why this needs its own resolver, not just `parameters.typeAt`
  *
- * `WebGLCapabilities`'s constructor reads `state.buffers` where `state` is
+ * A constructor that reads `state.buffers` where `state` is
  * itself one of these late-filled cells: `parameters.typeAt` (the composed
  * parameter+return census) already walks a property access down to its
  * receiver internally, but only ever bottoms out where ITS OWN authority
@@ -189,7 +189,7 @@ const isAmbientDeclaration = (node: ts.Node): boolean => {
  * `!declaration.initializer` was the original test, on the reasoning that a
  * cell WITH an initializer is one TypeScript already typed. That reasoning is
  * right about the ordinary case and wrong about the case this module exists
- * for. `const image = resizeImage( texture.image, false, ... )` has an
+ * for. `const image = resize( source.image, false, ... )` has an
  * initializer, and the checker types the cell `any` -- because the initializer
  * is a call into a function whose own return type it could not name. The cell
  * is no better described than `let image;` would have been; it was simply
@@ -221,10 +221,9 @@ const isAmbientDeclaration = (node: ts.Node): boolean => {
  * distinction since the call-site census landed; this is the same predicate,
  * shared rather than copied.
  *
- * Measured on the three.js app: ZERO uninitialized locals carry a JSDoc type at all, so
- * this changes nothing there today. It is landed for the symmetry, not for a
- * number -- the three censuses answering one question three different ways is
- * how the return-side gap survived, and leaving one of them holding the old
+ * It is landed for the symmetry, not for a number -- the three censuses
+ * answering one question three different ways is how the return-side gap
+ * survived, and leaving one of them holding the old
  * test preserves the trap for whichever program hits it first.
  */
 /**
@@ -238,8 +237,8 @@ const isAmbientDeclaration = (node: ts.Node): boolean => {
  * a value the program declares `any`/`unknown` and never narrows, and this
  * module must not talk it out of that. Anything else that merely EVALUATES
  * to `any`/`unknown` through the type system -- a utility type applied to a
- * library's own erased generic, `ReturnType<H>` over hono's `H = Handler |
- * MiddlewareHandler` being the concrete case -- states nothing a reader
+ * library's own erased generic, `ReturnType<H>` over a library's
+ * `H = Handler | Middleware` being the concrete case -- states nothing a reader
  * could act on, and is treated as if the position were bare.
  */
 const annotationIsGenuinelyStated = (checker: ts.TypeChecker, typeNode: ts.TypeNode): boolean => {
@@ -368,7 +367,7 @@ const returnedValueIsSymbol = (checker: ts.TypeChecker, expression: ts.Expressio
  * itself a call whose callee the checker could not type, because the
  * callee's own signature return is `any` for a reason internal to the
  * library that declared it (an erased generic default) rather than for any
- * fact about THIS program. hono's `hono-base.ts`:
+ * fact about THIS program. A class method of this shape:
  *
  *   #dispatch(...): Response | Promise<Response> {
  *     let res: ReturnType<H>
@@ -376,7 +375,7 @@ const returnedValueIsSymbol = (checker: ts.TypeChecker, expression: ts.Expressio
  *     return res instanceof Promise ? res.then(...) : (res ?? ...)
  *   }
  *
- * is the concrete case: `H = Handler | MiddlewareHandler` (`types.ts`)
+ * is the concrete case: `H = Handler | Middleware`, where one member
  * defaults its own trailing type parameter to the literal `any`, and
  * TypeScript's own union-with-`any` rule collapses `any | Promise<R | void>`
  * to plain `any` -- a TypeScript typing rule, not a physical fact about
@@ -568,8 +567,7 @@ export const censusLocalBindings = (
       // a refusal. Before this, a caught error that the handler only ever
       // READ (never reassigned -- the overwhelmingly common shape) found no
       // evidence at all and refused as
-      // `no-writes:existence-only:catch-binding`, in this program and in
-      // hono's own `#handleError`.
+      // `no-writes:existence-only:catch-binding`.
       if (write.edge === 'catch-binding' && write.value === null && write.naming) {
         writes.push({ node: write.naming, resolvedType: checker.getTypeAtLocation(write.naming) })
       }
@@ -708,8 +706,8 @@ export const censusLocalBindings = (
    * `f || "u"` in one place and `"q"` in another was then placed as
    * `std::string` -- and the branching write, whose value really can be the
    * function, was stored through a fail-open unbox that aborted at runtime
-   * (test262's propertyHelper `isWritable`, whose `value || unlikelyValue` is
-   * a function at `verifyNotWritable`'s call sites).
+   * (a conformance harness's writability helper, whose `value ||
+   * unlikelyValue` is a function at some of its call sites).
    *
    * Both operands ARE the write set -- the same reading `derivedExpressionType`
    * already gives a ternary's two arms in its own comment -- so they are
@@ -753,9 +751,9 @@ export const censusLocalBindings = (
     // The storage really does hold the box, so the expression's own `any` is
     // contributed as the arm: the cell goes dynamic instead of being placed
     // from the OTHER write and reading this one back through a fail-open
-    // unbox. (`verifyProp || name`, `value || unlikelyValue` -- test262's
-    // propertyHelper, whose parameters are bound by call sites that disagree
-    // in arity.)
+    // unbox. (`prop || name`, `value || unlikelyValue` -- a conformance
+    // harness's property helpers, whose parameters are bound by call sites
+    // that disagree in arity.)
     const dynamicOperand = branches.some((branch) => (checker.getTypeAtLocation(branch).flags & DYNAMIC_FLAGS) !== 0)
     if (!dynamicOperand) return null
     const own = checker.getTypeAtLocation(node)
@@ -778,10 +776,10 @@ export const censusLocalBindings = (
    *
    * A thrown value is a genuine dynamic boundary: nothing states what a
    * `throw` anywhere below the `try` produced. Treating the write as silent
-   * let the relaxed phase join only the writes that spoke, so mongodb's
+   * let the relaxed phase join only the writes that spoke, so
    * `let thrownError = null; try { ... } catch (error) { thrownError = error }`
-   * (src/bulk/common.ts:549) bound a `null` carrier to a cell that holds the
-   * thrown error, and `thrownError instanceof MongoWriteConcernError` tested
+   * bound a `null` carrier to a cell that holds the
+   * thrown error, and `thrownError instanceof SomeError` tested
    * the `null` it could not have held. The cell keeps the checker's own
    * declared type instead.
    */
@@ -805,8 +803,9 @@ export const censusLocalBindings = (
    * declaration bound in the strict phase is never revisited (`resolveDeclaration`
    * returns `already` before it would run the backfill again), so an answer
    * recorded only in `nodeMemo` is erased by the very next round's `clear()`
-   * and never restored -- measured directly: hono's `res = matchResult[0][0]
-   * [0][0](c, next)` backfilled correctly, then read back as the stale `null`
+   * and never restored -- measured directly: `res = matchResult[0][0]
+   * [0][0](c, next)` (the header case) backfilled correctly, then read back as
+   * the stale `null`
    * `compute` had cached before the backfill, because a LATER declaration's
    * lenient retry cleared `nodeMemo` in between the write and the query. This
    * map is never cleared, so the write keeps the cell's answer regardless of
@@ -1096,7 +1095,7 @@ export const censusLocalBindings = (
             // The stated return is evidence for the SILENT writes only. The
             // writes that did speak still hold their own values: an evolving
             // `let x = null` whose later write is an untyped `require(...)`
-            // (mongodb's `getMongoDBClientEncryption`) holds `null` until the
+            // (an optional-dependency loader) holds `null` until the
             // `try` assigns it, and answering the return type alone gave the
             // cell a carrier with no null arm for its own initializer. So the
             // return evidence joins the speaking writes: one it cannot cover
@@ -1122,7 +1121,7 @@ export const censusLocalBindings = (
             // resolved signature return is `any` for a reason internal to
             // the callee's own declaration (an erased generic default),
             // which does not become less `any` on a second look. That
-            // divergence is exactly this module's header case, hono's own
+            // divergence is exactly this module's header case,
             // `res = matchResult[0][0][0][0](c, next)` inside `#dispatch` --
             // `res`'s cell got the right answer FROM this return-evidence
             // fallback, but the call expression that fed it never did,
@@ -1143,8 +1142,8 @@ export const censusLocalBindings = (
               if (nodeMemo.get(write.node) === null) writeAnswers.set(write.node, viaReturn)
             }
           } else {
-            // The single largest refusal reason on the three.js app (2087, 39% of all
-            // binding refusals) and a pure CASCADE: every one of these cells
+            // Typically the single largest refusal reason on a large JavaScript
+            // program, and a pure CASCADE: every one of these cells
             // is refused because some write it holds is itself unresolved, so
             // ranking the cells says nothing about where to work. This prints
             // the unresolved WRITES instead, which is the set that has roots.
@@ -1168,15 +1167,15 @@ export const censusLocalBindings = (
           // is right whenever one of them states a type. It is not right when
           // every surviving write is `null`/`undefined` and some other write
           // was silent: `null` says what the cell holds when nothing else has
-          // been stored in it, never what it holds. `WebXRManager.js`'s
-          // `let session = null` is written from `setSession( value )` too,
+          // been stored in it, never what it holds. A module-scope
+          // `let session = null` that is written from `setSession( value )` too,
           // and binding the cell to bare `null` on the strength of the
           // initializer alone made every `session.removeEventListener(...)` a
-          // property access on `null` -- 69 unmet obligations on the three.js app, and
+          // property access on `null` -- unmet obligations, and
           // underneath them a store-side silent miscompile: the emitted cell
           // would hold a null pointer that the real write has no
-          // representation to fill. 76 locals program-wide were bound this
-          // way. The same rule `parameter-bindings.ts` applies to a defaulted
+          // representation to fill. The same rule `parameter-bindings.ts`
+          // applies to a defaulted
           // parameter (a default value is not a type) and `field-bindings.ts`
           // to a field initialized `null`.
           //
@@ -1694,8 +1693,18 @@ export const censusLocalBindings = (
       // `{}` receiver IS resolvable -- the checker types it as the empty
       // object -- so `propertyTypeOf` answers `null` for every slot rather
       // than failing to find a receiver. See `slotTypeAt`.
-      if (!receiver) return bags.slotTypeAt(node)
-      return propertyTypeOf(receiver, node.name.text, node) ?? bags.slotTypeAt(node)
+      //
+      // Then the prior composed round, last. `parameters` is only this
+      // round's parameter+return stage; the FIELD census is composed on top of
+      // this one, so a member it typed from its writers is visible here only
+      // through the previous round's view. A JavaScript `this.data = data`
+      // member is `any` to the checker, and without this every local reading
+      // it (`for (const v of this.data)`) stayed untyped although the field
+      // itself was a native `number[]` -- and `total += v` became a boxed
+      // dynamic `+` over a double. The fixpoint records this query, so the
+      // round does not settle until the answer it read is the one it publishes.
+      if (!receiver) return bags.slotTypeAt(node) ?? prior.typeAt(node)
+      return propertyTypeOf(receiver, node.name.text, node) ?? bags.slotTypeAt(node) ?? prior.typeAt(node)
     }
     if (ts.isElementAccessExpression(node) && node.argumentExpression) {
       const upstream = parameters.typeAt(node)
@@ -1735,15 +1744,15 @@ export const censusLocalBindings = (
       // `any` is not the only way a callee can state nothing about what it
       // returns, and a structurally EMPTY object type is the other way --
       // which is the answer the checker gives for a factory that builds a bag
-      // through a dynamic key. `fetchAttributeLocations` (WebGLProgram.js)
+      // through a dynamic key. A function that
       // opens `const attributes = {}`, fills `attributes[ name ] = { type,
       // location, locationSize }` and returns it; the checker's inferred
       // return type is `{}`, and taking that at face value bound the cell to
       // a record with no fields. That is worse than refusing: this census is
       // the FIRST half of the composed view, so its `{}` shadowed the bag
       // census's own real answer for the same node, and every
-      // `programAttributes[ name ]` behind it stayed dynamic -- 64 boxes on
-      // one read in `WebGLBindingStates.js` alone. Refusing lets the bag
+      // `attributes[ name ]` behind it stayed dynamic, boxing every read.
+      // Refusing lets the bag
       // census answer, which is the deferral `keyedCollectionRead` below
       // already makes for a container.
       if (!isAnyType(returned) && !isEmptyObjectType(returned)) return returned
@@ -1768,14 +1777,14 @@ export const censusLocalBindings = (
    * below, and asking it is the same deferral rather than a new inference.
    *
    * `V | undefined`, never bare `V`: `Map`/`WeakMap` `get` answers `undefined`
-   * for an absent key, and three's `WebGLProperties.get` tests exactly that
+   * for an absent key, and a per-object property store's `get` tests exactly that
    * (`if ( map === undefined ) { map = {}; ... }`). Dropping the absence here
    * would hand the guard a cell that cannot hold the value it tests for.
    *
    * Without this, `let map = properties.get( object )` refused as
-   * `write-unresolved`; that left `WebGLProperties.get`'s own return `any`,
-   * and every `properties.get( material ).uniforms` in `WebGLRenderer.js` and
-   * `WebGLMaterials.js` dynamic behind it.
+   * `write-unresolved`; that left the store's own `get` returning `any`,
+   * and every `properties.get( object ).field` across the program
+   * dynamic behind it.
    */
   const keyedCollectionRead = (node: ts.CallExpression | ts.NewExpression): ts.Type | null => {
     if (!ts.isCallExpression(node)) return null
@@ -1826,16 +1835,15 @@ export const censusLocalBindings = (
   const candidates: ts.VariableDeclaration[] = []
   const elementCandidates: ts.BindingElement[] = []
   /**
-   * ⛔ The single largest `no-writes` bucket -- 127 of 127 measured on
-   * the three.js app, every one of them `no-writes:initializer-unseen` -- was never a
+   * ⛔ The single largest `no-writes` bucket -- every one of them
+   * `no-writes:initializer-unseen` -- was never a
    * write-index defect. It was THIS walk disagreeing with `flow`'s own about
    * what counts as live code.
    *
    * `indexValueFlow` (`flow/value-flow.ts`) checks `reachable.memberIsPruned`
-   * on every node it descends into, so a method nothing calls (three's
-   * `Node.prototype.analyze`, `PMREMGenerator.prototype._sceneToCubeUV`, the
-   * entire `nodes/` TSL class family the app's WebGL renderer never reaches)
-   * contributes zero writes -- correctly: dead code has no evidence to give.
+   * on every node it descends into, so a method nothing calls (a library's
+   * unused prototype methods, or a whole class family the program never
+   * reaches) contributes zero writes -- correctly: dead code has no evidence to give.
    * This walk used to check only `forEachReachableStatement`'s TOP-LEVEL
    * filter and then recurse with a bare `ts.forEachChild`, never re-asking
    * `memberIsPruned` for a nested member the way `value-flow.ts` does. A
@@ -1845,12 +1853,10 @@ export const censusLocalBindings = (
    * were a defect in the index rather than the correct absence of evidence
    * for code that never runs.
    *
-   * Measured: every one of the three.js app's 127 `no-writes:initializer-unseen`
-   * refusals sits inside a member `reachable.memberIsPruned` marks pruned
-   * (`Quaternion.prototype.setFromUnitVectors`,
-   * `PMREMGenerator.prototype._sceneToCubeUV`/`_halfBlur`, the whole `Node`/
-   * `ContextNode`/`LightsNode`/`NodeMaterial` TSL base classes, and others);
-   * none were reachable declarations the index dropped. Matching `flow`'s own
+   * Measured: every `no-writes:initializer-unseen` refusal sat inside a
+   * member `reachable.memberIsPruned` marks pruned (unused prototype methods,
+   * whole unreached base-class families, and others); none were reachable
+   * declarations the index dropped. Matching `flow`'s own
    * boundary here removes the false refusal instead of teaching
    * `noEvidenceReason` to explain evidence that was never going to exist.
    */
@@ -1927,8 +1933,8 @@ export const censusLocalBindings = (
       // extra keys live in its dynamic-property sidecar, and the invocation
       // already publishes exactly that carrier. Answering the cell from the
       // intersection instead asked for a record -> record-with-index
-      // conversion of one object into another carrier (bson's
-      // `DBRef.toJSON`), which no backend can spell without a copy that would
+      // conversion of one object into another carrier (a `toJSON` that
+      // returns such an assignment), which no backend can spell without a copy that would
       // sever the returned object from the one assigned into.
       const assigned = objectAssignCellTargetType(checker, declaration ?? undefined)
       if (assigned) return assigned
@@ -1945,13 +1951,7 @@ export const censusLocalBindings = (
       // conversion explicitly selects the proven array arm.
       return normalizedArrayConditionalType(checker, declaration.initializer, (operand) => checker.getTypeAtLocation(operand))
     },
-    unionArmsAt: (node) => {
-      // `instanceof` and `typeof` can narrow even a checker-any reference.
-      // Keep that read's established type; the declaration still owns the
-      // full storage union and the ordinary narrowing conversion connects it.
-      if (ts.isIdentifier(node) && !isAnyType(checker.getTypeAtLocation(node))) return null
-      return synthesizedUnionArmsAt(checker, node, unionArms, ts.isVariableDeclaration)
-    },
+    unionArmsAt: (node) => synthesizedUnionArmsAt(checker, node, unionArms, ts.isVariableDeclaration),
     boundCount: bound.size + unionArms.size + boundElements.size,
     refusals,
     refusalOf: (declaration) => refusalOf.get(declaration) ?? null

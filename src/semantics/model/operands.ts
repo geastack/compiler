@@ -1,5 +1,14 @@
-import type { FunctionId, OperationId, RegionId, ResultRole, SemanticResultId, StructuralTypeId } from '../../identity/ids.js'
-import type { ConversionRoleTarget } from './operations.js'
+import type {
+  DeclarationId,
+  FunctionId,
+  OperationId,
+  RegionId,
+  ResultRole,
+  SemanticResultId,
+  StructuralTypeId
+} from '../../identity/ids.js'
+import type { ConversionRoleTarget, SemanticOperation } from './operations.js'
+import type { SemanticGraph } from './graph.js'
 
 /**
  * Who executes an operation.
@@ -94,13 +103,21 @@ export interface SemanticOperand {
    * lowering that must put the value into a slot that is exactly one arm of
    * its union, and that the census has no sound per-arm answer for, may take
    * the stated arm -- checked at runtime, a `TypeError` when the assertion
-   * was false. hono's `Context.executionCtx` returns `this.#executionCtx as
-   * ExecutionContext` off a `FetchEventLike | ExecutionContext` field: the
+   * was false. A getter that returns `this.#ctx as Context` off a
+   * `EventLike | Context` field is the case: the
    * class arm has no view as the interface, so without the assertion the
    * store is refused, and with it the store is the projection the author
    * wrote. An assertion to `any`/`unknown` states no arm and is not marked.
    */
   readonly asserted?: true
+  /**
+   * A JSDoc type assertion (`/** @type {T} *\/ (x)`) wraps the expression this
+   * operand cites -- the JavaScript spelling of `asserted`'s promise. It is a
+   * separate mark because `asserted` selects conversions a JSDoc cast never
+   * selected; it is read only by the asserted-view entry (`lower-operands.ts`),
+   * for an operand with no conversion into its slot otherwise.
+   */
+  readonly jsdocAsserted?: true
   /**
    * This operand reads the receiver as the native collection its class
    * extends, for a member only that collection declares: `super.get(k)` in a
@@ -197,6 +214,55 @@ export const operandOf = (operation: SemanticOperationBase, role: string, ordina
 export const resultOf = (operation: SemanticOperationBase, role: ResultRole): SemanticResult | undefined =>
   operation.results.find((result) => result.role === role)
 
+/** An always-present optional Get publishes the evaluated value under both result roles. */
+export const evaluatedResultIdentityOf = (operation: SemanticOperation, result: SemanticResultId): SemanticResultId | undefined =>
+  operation.family === 'property' &&
+  operation.internalMethod === 'get' &&
+  operation.shortCircuitAlwaysPresent === true &&
+  resultOf(operation, 'short-circuit')?.id === result
+    ? resultOf(operation, 'value')?.id
+    : result
+
 /** The operands this operation actually evaluates, in evaluation order. */
 export const runtimeOperands = (operation: SemanticOperationBase): readonly SemanticOperand[] =>
   operation.operands.filter((operand) => operand.evaluation.kind !== 'provenance')
+
+/** The evaluated operand whose identity an operation's value result preserves. */
+export const identityOperandOf = (operation: SemanticOperation): SemanticOperand | undefined => {
+  if (operation.family === 'binding' && (operation.action === 'initialize' || operation.action === 'write'))
+    return operandOf(operation, operation.action === 'initialize' ? 'initializer' : 'value')
+  // Property stores publish the receiver after the write. The enclosing
+  // assignment computation separately publishes the assigned value.
+  if (operation.family === 'property' && (operation.internalMethod === 'set' || operation.internalMethod === 'define-own-property'))
+    return operandOf(operation, 'receiver')
+  // Normalization gives compound assignments a binary computation and logical
+  // assignments a logical computation; only plain `=` has this identity form.
+  if (operation.family === 'computation' && (operation.form === 'assignment' || operation.form === 'comma'))
+    return runtimeOperands(operation).at(-1)
+  if (operation.family === 'invocation' && operation.intrinsicReturnIdentity === 'argument0') return operandOf(operation, 'argument', 0)
+  return undefined
+}
+
+const immutableInitializers = new WeakMap<ReadonlyMap<OperationId, SemanticOperation>, ReadonlyMap<DeclarationId, SemanticOperand | null>>()
+
+/** A const read aliases its one actual initializer, never a same-typed mutable or external cell. */
+export const immutableBindingInitializerOf = (
+  graph: Pick<SemanticGraph, 'operations'>,
+  operation: SemanticOperation
+): SemanticOperand | undefined => {
+  if (operation.family !== 'binding' || operation.action !== 'read' || operation.mutable) return undefined
+  let initializers = immutableInitializers.get(graph.operations)
+  if (initializers === undefined) {
+    const collected = new Map<DeclarationId, SemanticOperand | null>()
+    for (const candidate of graph.operations.values()) {
+      if (candidate.family !== 'binding' || (candidate.action !== 'initialize' && candidate.action !== 'write')) continue
+      collected.set(
+        candidate.declaration,
+        candidate.action === 'initialize' && !collected.has(candidate.declaration) ? (operandOf(candidate, 'initializer') ?? null) : null
+      )
+    }
+    initializers = collected
+    immutableInitializers.set(graph.operations, initializers)
+  }
+  return initializers.get(operation.declaration) ?? undefined
+}

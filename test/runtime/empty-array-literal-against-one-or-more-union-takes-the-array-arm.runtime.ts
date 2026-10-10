@@ -1,4 +1,4 @@
-// mongodb's `MongoBulkWriteError` (src/bulk/common.ts:606) declares
+// A database client's `BulkWriteError` declares
 // `writeErrors: OneOrMore<WriteError> = []`, where `OneOrMore<T> = T |
 // ReadonlyArray<T>`. An array literal can only be the union's array arm, so
 // the empty literal is built as an array of `WriteError` and widened into the

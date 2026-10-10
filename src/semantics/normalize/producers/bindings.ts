@@ -227,7 +227,8 @@ export const argumentsObjectValueAt = (
     evaluationOrdinal
   }
 
-  if (phantom.ordinal === 0) return { operations: [restOperation], edges: [], value: restResult.id, type: restType }
+  if (phantom.ordinal === 0 || (frame.kind === 'signature' && frame.call[0]?.parameters[phantom.ordinal]?.argumentsFrame === 'actual'))
+    return { operations: [restOperation], edges: [], value: restResult.id, type: restType }
 
   const operands: SemanticOperand[] = []
   for (let i = 0; i < phantom.ordinal; i++) {
@@ -386,12 +387,12 @@ const contributeDefaultedParameter = (
   // this operand reads. The checker's answer at an UNANNOTATED defaulted
   // parameter is not the written annotation the paragraph above is about --
   // there is none -- it is the DEFAULT INITIALIZER'S own type, and a default
-  // value is not a type. `RenderTarget.js`'s `_setTextureOptions( options =
-  // {} )` is the measured case: the ABI slot and every body read carried
-  // `RenderTarget_Options` (the census answer, from the call sites), while
+  // value is not a type. A JavaScript method `_setOptions( options = {} )`
+  // is the measured case: the ABI slot and every body read carried
+  // `Target_Options` (the census answer, from the call sites), while
   // the binding that initializes the cell both of those read through carried
   // `{}` -- 26 unmet `binding-read-conversion:record(...;)->record(... 20
-  // fields ...)` obligations on the three.js app, one per read, and not one of them a
+  // fields ...)` obligations in one large program, one per read, and not one of them a
   // capability that was missing. Three authorities over one parameter, the
   // same shape `parameter-slot.ts`'s header records for rest parameters, and
   // closed the same way. Where the parameter DOES state a type the census
@@ -413,7 +414,7 @@ const contributeDefaultedParameter = (
   // union are two different shapes. Interning `union(bodyType, undefined)`
   // directly is the spelling that differs: where `bodyType` is itself a union
   // -- `f(x: T | null = null)`, which JSDoc writes as `@param {?T} [x=null]`
-  // and three.js writes throughout -- that nests a union inside a union, and
+  // and JavaScript libraries write throughout -- that nests a union inside a union, and
   // a nested one derives as "an optional payload that is itself optional",
   // which is the carrier one flag cannot hold. `getNullableType` flattens, so
   // the three-armed union reaches the deriver as three arms.
@@ -710,7 +711,9 @@ const contributeVariableDeclaration = (
     // `extern` for it names a symbol no object file defines. The same census
     // answers the value's TYPE as `undefined` (structural-layout-type.ts), so
     // the storage class and the carrier are one decision, not two.
-    if (context.absentGlobals.typeAt(node) === null) external = { linkageName: node.name.text }
+    if (context.absentGlobals.typeAt(node) === null && !context.ownsInstalledGlobalProperty?.(declaration)) {
+      external = { linkageName: node.name.text }
+    }
   }
 
   const { mutable, temporalDeadZone } = bindingKindOf(node)

@@ -65,12 +65,14 @@ const classInstanceTestText = (test: ClassInstanceTest, text: string): string =>
       return `static_cast<bool>(${text})`
     case 'boxed-typed-array':
       return `gea::host::instanceOfTypedArray<${cppScalarType(test.domain)}>(${text})`
+    case 'viewed-typed-array':
+      return `gea::dictionary::viewedObjectIs<gea::Ref<gea::TypedArray<${cppScalarType(test.domain)}>>>(${text})`
     case 'class-family':
       if (test.members.length === 0) return `((void)(${text}), false)`
       return `gea::host::${test.boxed ? 'instanceOfClassFamily' : 'instanceOfClassFamilyRef'}<${test.members.map(cppClassName).join(', ')}>(${text})`
     case 'view-origin':
       if (test.members.length === 0) return `((void)(${text}), false)`
-      return `gea::host::instanceOfClassFamily<${test.members.map(cppClassName).join(', ')}>(gea::record::viewOrigin(${text}))`
+      return `gea::record::viewOriginClassIs<${test.members.map(cppClassName).join(', ')}>(${text})`
     case 'optional':
       return `((${text}).has_value() ? (${classInstanceTestText(test.payload, `(*${text})`)}) : false)`
     case 'union': {
@@ -138,9 +140,8 @@ const instanceofTaggedUnionPromiseText = (
  * The same question `instanceofTaggedUnionPromiseText` above answers, asked of
  * the other spelling of one absence: `T | undefined` and `T | void` are one
  * carrier (`representation/union.ts`'s `absenceOf`), and this compiler names
- * it `optional(T, undefined)`. hono's `defineWebSocketHelper` and
- * node-compat's `whatwg-streams.ts` both reach it -- `const result =
- * write(chunk, ...)` typed `void | Promise<void>`, then `result instanceof
+ * it `optional(T, undefined)`. A sink that may or may not be async reaches
+ * it -- `const result = write(chunk, ...)` typed `void | Promise<void>`, then `result instanceof
  * Promise`.
  *
  * Written as its own renderer rather than folded into the tagged-union one:
@@ -247,11 +248,11 @@ const compositeNativeInstanceProtocols: ReadonlySet<string> = new Set([
   'RegExpConstructor',
   'ArrayBufferConstructor',
   // A `Date` is one physical carrier too: a `native-record-ref` of `gea::runtime::Date`.
-  // bson's `isDate(value)` asks `value instanceof Date` of whatever its caller holds.
+  // An `isDate(value)` helper asks `value instanceof Date` of whatever its caller holds.
   'DateConstructor',
   // A `Set` is one physical carrier too: a `keyed-collection` of family
-  // `set`. mongodb's `defineAspects` asks `aspects instanceof Set` of a
-  // `symbol | symbol[] | Set<symbol>`.
+  // `set`. A helper asking `aspects instanceof Set` of a
+  // `symbol | symbol[] | Set<symbol>` is the shape.
   'SetConstructor'
 ])
 
@@ -332,8 +333,8 @@ const nativeInstanceLeafText = (ctx: EmitContext, protocol: string, carrier: Rep
     if (isNativeError(carrier)) return `(${value})->instanceOf("${errorName}")`
     // A class whose chain links the native Error derives its struct in place
     // from that layout (the same fact `emit-tostring.ts` reads its
-    // `toString` through), so the instance answers its own chain -- mongodb's
-    // `MongoError` arm of `AnyError` under `error instanceof Error`. A null
+    // `toString` through), so the instance answers its own chain -- a
+    // `class AppError extends Error` arm of a union under `error instanceof Error`. A null
     // class reference is not an instance of anything.
     if (carrier.kind === 'class-ref' && carrier.nativeBase?.kind === 'native-record-ref' && isNativeError(carrier.nativeBase)) {
       return (
@@ -458,8 +459,8 @@ export const cppInstanceofHelperKeys: ReadonlySet<string> = new Set([
   // false`), because a program class's instance is a C++ object of that
   // class's layout and the only native base this compiler ever links is the
   // intrinsic Error family -- never a typed array. It was renderable all
-  // along and merely unclaimed, which is how `@hono/node-server`'s `body
-  // instanceof Uint8Array` over a narrowed `BodyInit` slot refused.
+  // along and merely unclaimed, which is how `body instanceof
+  // Uint8Array` over a narrowed `BodyInit` slot refused.
   ...[...typedArrayConstructorDomains.keys()].map((protocol) => `computation:instanceof:class-ref:native-handle(${protocol})`),
   // `compositeNativeInstanceText` above -- an `optional`/`tagged-union` left
   // operand against a protocol whose identity is a physical carrier here.
@@ -507,7 +508,7 @@ export const cppInstanceofHelperKeys: ReadonlySet<string> = new Set([
  * A namespace root is a PATH, not a value, and the object behind it carries an
  * empty facade struct with no prototype chain 13.10.2 could walk. Node's
  * `Buffer` is exactly that shape and `x instanceof Buffer` is exactly the
- * question `@hono/node-server` asks of it. The host is the one authority that
+ * question server code asks of it. The host is the one authority that
  * can answer: `gea::node::buffer::isBuffer` reads the opaque brand a Buffer
  * factory attached to the byte view, so a `Uint8Array` no Buffer ever produced
  * answers `false` -- which is the language's answer and not a structural guess
@@ -596,8 +597,8 @@ export const instanceofText = (ctx: EmitContext, left: IrOperand, right: IrOpera
   // A native Dictionary is an ordinary object whose physical allocation is
   // neither a Map exotic nor a Date/RegExp object. Its static carrier proves
   // the result false; preserve evaluation of the left operand.
-  // An open `Document` is the exception: it may view another object -- bson's
-  // frames hold a Map in one (`gea::dictionary::aliasOf`) -- and is an
+  // An open `Document` is the exception: it may view another object -- a
+  // Map held in one (`gea::dictionary::aliasOf`) -- and is an
   // instance exactly when the object it views is.
   const documentTest = isOpenDocument(left.representation) ? dynamicNativeInstanceTests.get(constructor.protocol) : undefined
   if (documentTest !== undefined) return `${documentTest}(gea::dictionary::aliasedObject(${operandText(ctx, left)}))`

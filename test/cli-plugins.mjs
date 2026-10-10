@@ -1,7 +1,8 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { readFileSync, realpathSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -10,6 +11,13 @@ import test from 'node:test'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const fixture = resolve(root, 'test/fixtures/cli-plugins')
 const output = resolve(root, 'measurements')
+const runtime = resolve(root, 'src/targets/cpp/runtime')
+const runtimeBundle = [
+  ...readdirSync(runtime)
+    .filter((name) => name.endsWith('.h'))
+    .sort(),
+  'gea_runtime_builtins.cpp'
+]
 const require = createRequire(import.meta.url)
 const gea = require.resolve('@geastack/geatsc-plugin-gea')
 const apple = require.resolve('@geastack/geatsc-plugin-apple-native')
@@ -48,7 +56,22 @@ const succeed = (result) => {
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`)
 }
 
+const clearRuntimeBundle = () => {
+  // Previous CLI runs share this output. Remove only their runtime files so a
+  // newly required header cannot be supplied by an earlier successful export.
+  for (const file of runtimeBundle) rmSync(resolve(output, file), { force: true })
+}
+
+const assertRuntimeBundle = () => {
+  for (const file of runtimeBundle) {
+    const emitted = resolve(output, file)
+    assert.ok(existsSync(emitted), `CLI did not export runtime file ${file}`)
+    assert.ok(readFileSync(emitted).equals(readFileSync(resolve(runtime, file))), `CLI changed runtime file ${file}`)
+  }
+}
+
 const linkAndRun = (expected) => {
+  assertRuntimeBundle()
   const sources = readFileSync(resolve(output, 'geatsc-sources.txt'), 'utf8')
     .trim()
     .split(/\r?\n/)
@@ -61,10 +84,21 @@ const linkAndRun = (expected) => {
   assert.doesNotMatch(text, /extern [^;]*CallableObject[^;]*\bpb(?:Get|Set)\b/)
   assert.doesNotMatch(text, /\bpb(?:Get|Set)\.call\(/)
   const binary = resolve(output, `cli-plugin-native${executableSuffix}`)
+  // Runtime includes must resolve from the emitted bundle; the fixture supplies
+  // only the external plugin bridge. No compiler source include path is used.
   succeed(
     spawnSync(
       'clang++',
-      ['-std=c++20', '-O0', `-I${output}`, `-I${fixture}`, ...sources, resolve(fixture, 'panel_bridge.cpp'), '-o', binary],
+      [
+        '-std=c++20',
+        ...nativeOptimization('correctness'),
+        `-I${output}`,
+        `-I${fixture}`,
+        ...sources,
+        resolve(fixture, 'panel_bridge.cpp'),
+        '-o',
+        binary
+      ],
       { encoding: 'utf8', timeout: 120000 }
     )
   )
@@ -74,7 +108,8 @@ const linkAndRun = (expected) => {
 }
 
 for (const command of ['compile', 'compile-module-graph']) {
-  test(`${command}: external factories, objects, repeated paths, options and native link`, () => {
+  test(`${command}: external factories, objects, repeated paths, options, complete runtime bundle and native link`, () => {
+    clearRuntimeBundle()
     const result = invoke(command, [
       '--plugin',
       gea,

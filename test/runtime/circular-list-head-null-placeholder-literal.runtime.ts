@@ -1,6 +1,6 @@
 // A NULL-FIELD LITERAL ASSERTED INTO A SELF-REFERENTIAL NODE, THEN LINKED.
 //
-// mongodb's `List` (`utils.ts`) builds its circular head as
+// A database client's `List` builds its circular head as
 // `{ next: null, prev: null, value: null } as unknown as EmptyNode` and links
 // `head.next`/`head.prev` to the head itself on the next two lines. The literal
 // holds `null` in both links only until those writes; afterwards the empty

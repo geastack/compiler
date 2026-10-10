@@ -1,6 +1,5 @@
-// mongodb's `ClientBulkWriteResultsMerger` (src/operations/client_bulk_write/
-// results_merger.ts:94 and :162) declares `writeErrors: Map<number,
-// ClientBulkWriteError>`, allocates it with a bare `new Map()`, and keys it by
+// A database client's bulk-write results merger declares `writeErrors: Map<number,
+// BulkWriteError>`, allocates it with a bare `new Map()`, and keys it by
 // `document.idx + this.currentBatchOffset` over an `any` server document. The
 // `any` key states nothing, so the field's own annotation types the Map and
 // the call converts the dynamic key into it.

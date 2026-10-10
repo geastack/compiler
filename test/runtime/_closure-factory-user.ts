@@ -1,7 +1,8 @@
 // Helper for `closure-factory-export-never-read.ts`: a module whose export is
 // built by a closure factory, around a handler that is type-incorrect against
 // the factory's current `Session` (it lacks `#init`), exactly as
-// `@hono/node-server`'s `upgradeWebSocket` is against hono's `WSContext`.
+// an HTTP framework's node adapter's `upgradeWebSocket` is against the
+// framework's own WebSocket context.
 import { defineHelper, type Session } from './_closure-factory'
 
 export const unusedHelper = defineHelper((session) => {

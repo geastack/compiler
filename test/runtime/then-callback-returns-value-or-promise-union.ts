@@ -1,8 +1,8 @@
-// @hono/node-server's `readBodyWithFastPath`: a `then` callback whose result
+// A Node HTTP adapter's `readBodyWithFastPath`: a `then` callback whose result
 // is typed `T | Promise<T>` -- the decoder it is handed may answer either --
 // and is a plain string at runtime. The promise `then` returns must settle
-// with that string (adopting only when the arm really is a promise); hono's
-// `c.req.json()` sits on the far side of exactly this chain, and a `then`
+// with that string (adopting only when the arm really is a promise); an HTTP
+// framework's `c.req.json()` sits on the far side of exactly this chain, and a `then`
 // that never settles here is a POST that never answers.
 const readDirect = (): Promise<string> =>
   new Promise<string>((resolve) => {

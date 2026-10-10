@@ -1,4 +1,4 @@
-// hono's `SmartRouter.match` binds the winning router's method:
+// An HTTP framework's `SmartRouter.match` binds the winning router's method:
 //
 //   this.match = router.match.bind(router)
 //

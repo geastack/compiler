@@ -55,6 +55,28 @@ export const assertsType = (expression: ts.Expression, checker: ts.TypeChecker):
 }
 
 /**
+ * Whether one of the erased wrappers around `expression` is a JSDoc type
+ * assertion that names a type -- `/** @type {T} *\/ (x)` in a JavaScript
+ * file, the same erased promise `x as T` makes in TypeScript
+ * (`SemanticOperand.jsdocAsserted`). Kept apart from `assertsType` because
+ * `asserted` already steers conversions a JSDoc cast never took; this mark is
+ * read only where an operand would otherwise have no conversion at all.
+ */
+export const assertsJsDocType = (expression: ts.Expression, checker: ts.TypeChecker): boolean => {
+  let current: ts.Node = expression
+  for (;;) {
+    if (ts.isParenthesizedExpression(current)) {
+      const tag = ts.getJSDocTypeTag(current)
+      if (tag?.typeExpression !== undefined)
+        return (checker.getTypeFromTypeNode(tag.typeExpression.type).flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0
+    } else if (!ts.isNonNullExpression(current) && !ts.isSatisfiesExpression(current)) {
+      return false
+    }
+    current = current.expression
+  }
+}
+
+/**
  * Whether the checker's control flow narrowed a name to a type narrower than
  * the one it was declared with: `switch (logObject.name) { case X: use(logObject) }`
  * over `LoggableEvent | Record<string, any>` reads `logObject` as the one

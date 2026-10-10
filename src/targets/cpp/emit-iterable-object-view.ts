@@ -1,7 +1,9 @@
 import type { Representation } from '../../representation/model.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
 import { iterableObjectViewPlan, type IterableObjectViewPlan } from '../../conversion/iterable-object-view.js'
-import { alignedValueText, chainConverts, type ConversionSite } from './emit-narrowing.js'
+import type { CertifiedIterableObjectViewPlan } from '../../conversion/certified-iterator-protocols.js'
+import { structuralConversionKey } from '../../conversion/structural-plan.js'
+import { namedConversionText, chainConverts, type ConversionSite } from './emit-narrowing.js'
 import { viewPlanFor } from './emit-record-view.js'
 import {
   cppAbiParameterType,
@@ -37,12 +39,17 @@ export const iterableObjectViewText = (
   target: Representation,
   text: string
 ): string | null => {
-  if (target.kind === 'optional') {
-    const present = iterableObjectViewText(ctx, source, target.payload, text)
-    return present === null ? null : `${cppTypeOf(target)}(${present})`
-  }
-  const plan = iterableObjectViewPlanFor(ctx.layouts, source, target)
-  if (plan === null) return null
+  const node = ctx.conversions.nodeById(structuralConversionKey(source, target))
+  const materializer = node?.capability.kind === 'atom' || node?.capability.kind === 'static' ? node.capability.materializer : null
+  return materializer?.iterableObjectView === undefined ? null : certifiedIterableObjectViewText(ctx, materializer.iterableObjectView, text)
+}
+
+export const certifiedIterableObjectViewText = (
+  ctx: ConversionSite,
+  certified: CertifiedIterableObjectViewPlan,
+  text: string
+): string | null => {
+  const plan = certified.view
   const sourceType = cppTypeOf(plan.source)
   const holderType = `gea::Ref<${sourceType}>`
   const structName = cppRecordStructName(plan.target.shapeId)
@@ -56,7 +63,9 @@ export const iterableObjectViewText = (
   const resultType = cppResultTypeOf(abi.result)
   const cursorText = `${cppTypeOf(plan.cursor)}(**gea::unpackEnvironment<${holderType}>(gea_view_env, gea_view_slot))`
   const object = abi.result.kind === 'optional' ? abi.result.payload : abi.result
-  const viewed = alignedValueText(ctx, 'emit-iterable-object-view.ts:cursor', plan.cursor, object, cursorText)
+  const cursor = certified.leaves.get(structuralConversionKey(plan.cursor, object))
+  if (cursor === undefined) throw new Error('an iterable view has no certified cursor object recipe')
+  const viewed = namedConversionText(ctx, 'emit-iterable-object-view.ts:cursor', cursor, cursorText)
   if (viewed === null) return null
   const answer = abi.result.kind === 'optional' ? `${cppTypeOf(abi.result)}(${viewed})` : viewed
   const ignored = abi.parameters.map((_, ordinal) => `(void)gea_view_arg_${ordinal}; `).join('')
@@ -67,8 +76,8 @@ export const iterableObjectViewText = (
     `gea::packEnvironment<${holderType}>(gea_view_holder))`
   const stores = [`gea_view->${cppRecordFieldName(field.key)} = ${callable};`]
   if (!field.required) stores.push(`gea_view->${cppRecordFieldPresenceName(field.key)} = true;`)
-  return (
+  const built =
     `([&]() -> ${cppTypeOf(plan.target)} { ${holderType} gea_view_holder = gea::makeRef<${sourceType}>(${text}); ` +
     `auto gea_view = gea::makeRef<${structName}>(); ${stores.join(' ')} return gea_view; }())`
-  )
+  return certified.target.kind === 'optional' ? `${cppTypeOf(certified.target)}(${built})` : built
 }

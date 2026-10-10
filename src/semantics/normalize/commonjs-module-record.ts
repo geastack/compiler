@@ -2,24 +2,32 @@ import ts from 'typescript'
 import type { CommonJsWrapperDeclaration } from '../../plugins/model.js'
 import { createCommonJsWrapperIdentity } from '../commonjs-wrapper.js'
 import { createCommonJsRequireCensus } from './commonjs-require.js'
+import type { ValueFlowIndex } from './flow/model.js'
+import { sourceValueSessionOf } from './flow/source-value-session.js'
+import { attachSourceCommonJsExportIdentities, type SourceCommonJsExportIdentities } from './flow/source-commonjs-exports.js'
+import { deferredIntrinsicProtocolLedgerOf } from './deferred-intrinsic-protocols.js'
+import { isTypePositionReference } from './flow/targets.js'
 
 /**
- * Proof for the deliberately narrow native CommonJS case. This is not shape
- * inference: the source module must establish one final exports identity, and
- * every observable route to the initial exports object must be absent.
+ * Proof for a fixed native CommonJS export. The source module must establish
+ * one final exports identity, and every observable route to the initial
+ * exports object must be absent. Literal records also close their actual
+ * owner and object-valued field consumers through the joint source session.
  */
 export interface CommonJsModuleRecordCensus {
   readonly exportExpressionOf: (file: ts.SourceFile) => ts.Expression | null
   readonly exportExpressionAt: (node: ts.Node) => ts.Expression | null
   readonly requiredExportExpressionAt: (node: ts.Node) => ts.Expression | null
   readonly moduleExportExpressionAt: (node: ts.Node) => ts.Expression | null
+  readonly attachToFlow: (flow: ValueFlowIndex) => void
 }
 
 export const emptyCommonJsModuleRecordCensus: CommonJsModuleRecordCensus = {
   exportExpressionOf: () => null,
   exportExpressionAt: () => null,
   requiredExportExpressionAt: () => null,
-  moduleExportExpressionAt: () => null
+  moduleExportExpressionAt: () => null,
+  attachToFlow: () => {}
 }
 
 const unwrapExpression = (expression: ts.Expression): ts.Expression => {
@@ -58,6 +66,17 @@ const isCallableOrConstructor = (checker: ts.TypeChecker, expression: ts.Express
   return type.getCallSignatures().length > 0 || type.getConstructSignatures().length > 0
 }
 
+const literalRecordOf = (expression: ts.Expression): ts.ObjectLiteralExpression | null => {
+  const literal = unwrapExpression(expression)
+  if (!ts.isObjectLiteralExpression(literal)) return null
+  for (const property of literal.properties) {
+    if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) return null
+    if (ts.isComputedPropertyName(property.name) || property.name.text === '__proto__') return null
+    if (ts.isShorthandPropertyAssignment(property) && property.objectAssignmentInitializer !== undefined) return null
+  }
+  return literal
+}
+
 interface Candidate {
   readonly assignment: ts.BinaryExpression
   readonly statement: ts.Statement
@@ -65,6 +84,7 @@ interface Candidate {
 }
 
 interface RequireEdge {
+  readonly call: ts.CallExpression
   readonly target: ts.SourceFile
   readonly mayRunBeforeExport: boolean
 }
@@ -95,7 +115,8 @@ export const censusCommonJsModuleRecords = (
   files: readonly ts.SourceFile[],
   globals: ReadonlyMap<string, CommonJsWrapperDeclaration>,
   runtimeModuleTargetOf: (specifier: string, containingFile: string, mode: 'import' | 'require') => string | null,
-  sourceFileOf: (fileName: string) => ts.SourceFile | null
+  sourceFileOf: (fileName: string) => ts.SourceFile | null,
+  flow?: ValueFlowIndex
 ): CommonJsModuleRecordCensus => {
   if (globals.size === 0) return emptyCommonJsModuleRecordCensus
   const identity = createCommonJsWrapperIdentity(checker, files, globals)
@@ -141,7 +162,12 @@ export const censusCommonJsModuleRecords = (
       if (!isExportsAccess(expression.left)) continue
       found.push({ assignment: expression, statement, expression: expression.right })
     }
-    if (found.length === 1 && found[0] && isCallableOrConstructor(checker, found[0].expression)) candidates.set(file, found[0])
+    if (
+      found.length === 1 &&
+      found[0] &&
+      (isCallableOrConstructor(checker, found[0].expression) || literalRecordOf(found[0].expression) !== null)
+    )
+      candidates.set(file, found[0])
   }
 
   const statementOrdinals = new Map<ts.SourceFile, ReadonlyMap<ts.Statement, number>>()
@@ -264,6 +290,7 @@ export const censusCommonJsModuleRecords = (
             const statement = containingTopLevelStatement(node)
             const ordinal = statement ? statementOrdinals.get(file)?.get(statement) : undefined
             found.push({
+              call: node,
               target,
               mayRunBeforeExport:
                 candidate !== undefined &&
@@ -292,6 +319,63 @@ export const censusCommonJsModuleRecords = (
   const proofs = new Map<ts.SourceFile, Candidate>()
   for (const [file, candidate] of candidates) if (!unsafe.has(file)) proofs.set(file, candidate)
 
+  const values = new Map<ts.Expression, ts.Expression>()
+  const publications = new Map<ts.BinaryExpression, ts.Expression[]>()
+  const scopes = new Set<ts.SourceFile>()
+  for (const candidate of proofs.values()) publications.set(candidate.assignment, [])
+  for (const file of sourceFiles) {
+    for (const edge of edges.get(file) ?? []) {
+      const exported = proofs.get(edge.target)
+      if (!exported) continue
+      values.set(edge.call, exported.expression)
+      publications.get(exported.assignment)!.push(edge.call)
+    }
+    const exported = proofs.get(file)
+    const collect = (node: ts.Node): void => {
+      if (ts.isIdentifier(node) && !isTypePositionReference(node) && wrapperGlobalOf(node) !== null) scopes.add(file)
+      if (exported && ts.isExpression(node) && isExportsAccess(node) && node !== exported.assignment.left && afterWriter(node, exported)) {
+        values.set(node, exported.expression)
+        publications.get(exported.assignment)!.push(node)
+      }
+      ts.forEachChild(node, collect)
+    }
+    collect(file)
+  }
+  // These are runtime identity edges, not native-storage admission. They are
+  // sealed before the joint solver sees the flow and remain valid even when
+  // an opaque consumer makes a candidate's native closure unavailable.
+  const identities: SourceCommonJsExportIdentities = { scopes, values, publications }
+  const attachToFlow = (index: ValueFlowIndex): void => attachSourceCommonJsExportIdentities(index, identities)
+  if (flow) attachToFlow(flow)
+  for (const [file, candidate] of proofs) {
+    const literal = literalRecordOf(candidate.expression)
+    if (literal === null) continue
+    const ledger = flow && deferredIntrinsicProtocolLedgerOf(flow)
+    if (!flow || !ledger) {
+      proofs.delete(file)
+      continue
+    }
+    const session = sourceValueSessionOf(checker, flow)
+    const proof = ledger.capture(() => {
+      const roots = session.closedValuesOf(literal)
+      if (roots?.length !== 1 || roots[0] !== literal) return false
+      for (const property of literal.properties) {
+        const value = ts.isPropertyAssignment(property)
+          ? property.initializer
+          : ts.isShorthandPropertyAssignment(property)
+            ? property.name
+            : null
+        if (!value) return false
+        const type = checker.getTypeAtLocation(unwrapExpression(value))
+        if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return false
+        if ((type.flags & ts.TypeFlags.Object) !== 0 && session.closedValuesOf(value) === null) return false
+      }
+      return true
+    })
+    if (!proof.value) proofs.delete(file)
+    else ledger.replace(candidate.assignment, proof.requirements)
+  }
+
   const exportExpressionOf = (file: ts.SourceFile): ts.Expression | null => proofs.get(file)?.expression ?? null
   const moduleExportExpressionAt = (node: ts.Node): ts.Expression | null => {
     if (!ts.isIdentifier(node) || wrapperGlobalOf(node) !== 'module') return null
@@ -311,5 +395,5 @@ export const censusCommonJsModuleRecords = (
     const file = target === null ? null : sourceFileOf(target)
     return file ? exportExpressionOf(file) : null
   }
-  return { exportExpressionOf, exportExpressionAt, requiredExportExpressionAt, moduleExportExpressionAt }
+  return { exportExpressionOf, exportExpressionAt, requiredExportExpressionAt, moduleExportExpressionAt, attachToFlow }
 }

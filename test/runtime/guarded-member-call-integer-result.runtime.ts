@@ -1,5 +1,5 @@
-// A record member called through its guarded candidate (`NumberUtils.getInt32LE`
-// in bson) returns an integer on every input, so the cursor it advances is an
+// A record member called through its guarded candidate (a `getInt32LE` helper
+// in a binary-document serializer) returns an integer on every input, so the cursor it advances is an
 // integer cell. The read is checked where the call returns, because the member
 // could hold another callable by then.
 //! expect: 14 3 -2

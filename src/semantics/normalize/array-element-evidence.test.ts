@@ -20,13 +20,11 @@ import { censusReachability } from './reachability.js'
  * evidence, while `flow` -- the one place this module reads evidence from --
  * had already, correctly, recorded zero writes for a body that never runs.
  *
- * MEASURED on the three.js app: this was 44 of the 45
- * `array:no-writes` refusals and 8 of the 9 `array:element-unresolved`
- * refusals feeding the `array-element` boxed-carrier position -- all four of
- * `AnimationClip`'s `parse`/`toJSON`/`CreateFromMorphTargetSequence`/`clone`
- * among them, plus `Object3D`'s `toJSON`, `Skeleton`'s `clone`,
- * `PMREMGenerator`'s internal helpers and the TSL `Node`/`ContextNode`/
- * `LightsNode`/`NodeMaterial` base classes' unused branches.
+ * MEASURED on a large JS library: this was nearly all of the
+ * `array:no-writes` and `array:element-unresolved` refusals feeding the
+ * `array-element` boxed-carrier position -- unused static factories,
+ * serializers and clone methods, internal helpers, and unused branches of
+ * base classes nothing instantiates.
  */
 
 const programFor = (fileName: string): { readonly checker: ts.TypeChecker; readonly file: ts.SourceFile } => {

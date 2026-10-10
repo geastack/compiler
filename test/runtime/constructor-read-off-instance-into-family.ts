@@ -1,7 +1,7 @@
 // `x.constructor` handed to a `typeof Base` slot.
 //
 // `lib.es5.d.ts` types the read `Function`, so a program passes it on through
-// `as any`: `mongodb-connection-string-url` gives
+// `as any`: a connection-string parser gives
 // `this.searchParams.constructor as any` to its mixin factory's `typeof
 // URLSearchParams` parameter. The value is whichever class the instance was
 // allocated as -- here the base or its subclass -- and `new` through the

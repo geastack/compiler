@@ -1,6 +1,6 @@
 // A generic class whose own copies would share one layout -- their fillings
 // are assignable to each other -- extending a base that splits on the same
-// parameter. The MongoDB driver's `ListCollectionsCursor<T> extends
+// parameter. A database client's `ListCollectionsCursor<T> extends
 // AbstractCursor<T>` is the case: held at `CollectionInfo` and at its default
 // union, while `AbstractCursor` splits (its `transform` callback is typed by
 // `TSchema`, and other cursors fill it with unrelated documents). One derived

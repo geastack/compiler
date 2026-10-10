@@ -42,6 +42,7 @@ import type {
   ValueRecordPolicy
 } from './policies.js'
 import { withStaticFieldAbsence } from './static-field-cells.js'
+import { publicStructuralMethodAbiOf } from './structural-method-abi.js'
 import {
   defaultClassCopyPolicy,
   defaultDateDeclarationPolicy,
@@ -177,7 +178,7 @@ export interface RepresentationDeriver {
    * the carrier's kind alone (`isArrayConstantOf`), and `record` is in that
    * table's `false` set because an object literal is not an Array -- so a
    * tuple, whose record is indistinguishable from one, was answered `false`
-   * for a value the language says `true` for. hono's trie router is the
+   * for a value the language says `true` for. A trie router is the
    * measured case: `Pattern = readonly [string, string, RegExp | true] | '*'`
    * and `Array.isArray(pattern) ? pattern[0] : p` folded to the string arm at
    * compile time, so no parameterized route would ever have been registered.
@@ -190,7 +191,7 @@ export interface RepresentationDeriver {
   readonly isTupleShape: (type: StructuralTypeId) => boolean
   /**
    * The calling convention of one checker-authenticated source function that
-   * semantic publication registered for dynamic Function-object storage.
+   * semantic publication registered at its function-object allocation.
    * StructuralTypeId is intentionally not accepted: unrelated functions can
    * share one signature shape and may never borrow each other's ABI.
    */
@@ -241,10 +242,8 @@ export const signatureShapeOfSelectedSignature = (signature: SelectedSignature):
  * `WeakMapConstructor` (generic, plus an `Iterable` overload) and every
  * typed-array constructor (`length` / `ArrayLike<number>` / `buffer,
  * byteOffset?, length?`) it correctly answers "no single convention". Yet
- * every three.js renderer module builds its cache as `new WeakMap()` or
- * `new Map()` (`WebGLProperties`, `WebGLRenderStates`, `WebGLShaderCache`,
- * `WebGLGeometries`, ...), and each of those SITES resolved to exactly one
- * overload. Without a frame to test, the reflection census read each of them
+ * a library's cache modules build their caches as `new WeakMap()` or
+ * `new Map()`, and each of those SITES resolved to exactly one overload. Without a frame to test, the reflection census read each of them
  * as an unknown construction and published the new collection's key and
  * value carriers -- every field of every render-state record they hold.
  *
@@ -304,7 +303,7 @@ export const createRepresentationDeriver = (
   errors: ErrorDeclarationPolicy = defaultErrorDeclarationPolicy,
   dynamicFallback = false,
   dynamicFallbackTypes: ReadonlySet<StructuralTypeId> = new Set(),
-  dynamicCallableShapes: ReadonlyMap<FunctionId, StructuralTypeId> = new Map(),
+  sourceCallableShapes: ReadonlyMap<FunctionId, StructuralTypeId> = new Map(),
   dynamicWrittenTypes: ReadonlySet<StructuralTypeId> = new Set(),
   classCopies: ClassCopyPolicy = defaultClassCopyPolicy,
   // The required members some object of a record type is created without
@@ -648,7 +647,8 @@ export const createRepresentationDeriver = (
       // A DECLARED name that cycles is the easiest case of all, and it only
       // became reachable once `structural-self-reference.ts` started closing a
       // re-instantiated alias into a real cycle instead of unrolling it into a
-      // tower of distinct ids: mongodb reaches here 2,195 times. The answer is
+      // tower of distinct ids: one large program reaches here thousands of
+      // times. The answer is
       // the one the ordinary declared path already gives every OTHER reference
       // to a named record -- the name, not the expansion -- so the cycle takes
       // the same nominal carrier rather than a refusal. Only when the body is
@@ -664,12 +664,12 @@ export const createRepresentationDeriver = (
         // active alongside its name, so the union rule below answers.
         if (body?.kind === 'union') return derive(cyclic.body)
       }
-      // A UNION that recurs has the by-reference layout its ARMS have. tsc's
+      // A UNION that recurs has the by-reference layout its ARMS have. A
       // `type TypeMapper = { kind: Simple; ... } | { kind: Composite; mapper1:
       // TypeMapper; mapper2: TypeMapper }` re-enters the union from inside an
       // arm's own field, and the checker's narrowed `(A & Node & { name?:
       // undefined }) | (B & Node & ...)` unions re-enter through the `Node`
-      // family's parent field: 800 refusals on the tsc self-compile. Nothing
+      // family's parent field: 800 refusals on one large program. Nothing
       // about the union needs a new indirection -- every record arm stores as
       // a `native-record-ref` already, and an arm that is itself active on the
       // cycle takes the record rule above -- so the union is derived here
@@ -682,8 +682,8 @@ export const createRepresentationDeriver = (
       if (cyclic?.kind === 'union') {
         // Memoized under the top-level rule (no guard fired while deriving),
         // because every later re-entry through any of the union's arms would
-        // otherwise derive the same union again -- and tsc's Node-family
-        // unions re-enter from hundreds of fields.
+        // otherwise derive the same union again -- and node-family unions
+        // can re-enter from hundreds of fields.
         const before = guardFired
         const derived = deriveUnionShape(cyclic)
         if (guardFired === before) memo.set(id, derived)
@@ -734,7 +734,7 @@ export const createRepresentationDeriver = (
    * a `native-record-ref` without ever expanding, and the body, which is the
    * record -- so every reference to `interface Node { next: Node }` spells
    * one way no matter which walk reaches it first. An anonymous object type
-   * that recurs (tsc's `type TypeMapper = {...} | { kind: Composite; mapper1:
+   * that recurs (a `type TypeMapper = {...} | { kind: Composite; mapper1:
    * TypeMapper; mapper2: TypeMapper }`, whose fifth arm is a type literal) has
    * ONE id for both roles, and until this rule it was spelled by whichever
    * role the walk happened to be in: the cycle rule above closes a back edge
@@ -743,8 +743,8 @@ export const createRepresentationDeriver = (
    * keys for one `gea::Ref<Struct>`, decided by memo order -- `let mapper:
    * TypeMapper | undefined` held the inline spelling and the narrowed read
    * after `mapper === undefined` wanted the by-name one, and no conversion
-   * exists between them because none should: 19 binding-read rows on the tsc
-   * self-compile, plus every merge and narrowed-arm read beside them.
+   * exists between them because none should: 19 binding-read rows on one
+   * large program, plus every merge and narrowed-arm read beside them.
    *
    * Only a shared-refcount record can take the rule: the name is a pointer to
    * an as-yet-incomplete struct, which is exactly what `records.ts`'s forward
@@ -778,6 +778,7 @@ export const createRepresentationDeriver = (
     const parameters: AbiParameter[] = []
     let restFrom: number | null = null
     for (const [position, parameter] of signature.parameters.entries()) {
+      if (parameter.argumentsFrame !== undefined && (!parameter.rest || position !== signature.parameters.length - 1)) return null
       // A rest parameter's declared type is already the Array the language
       // binds it to, so the slot derives like any other. Only a rest parameter
       // that is not the last one would be a frame this layer cannot lay out,
@@ -822,11 +823,12 @@ export const createRepresentationDeriver = (
     return {
       parameters,
       restFrom,
+      ...(signature.parameters.some((parameter) => parameter.argumentsFrame === 'actual') ? { argumentsFrame: 'actual' as const } : {}),
       result: derive(signature.result),
       // `this: void` is TypeScript's declaration that a function does not use
       // or require a receiver. It is not an `undefined` value passed in a
-      // hidden receiver slot. BSON's optional WASM helpers deliberately use
-      // this form so `(condition ? helpers.a : helpers.b)(...)` is an ordinary
+      // hidden receiver slot. Libraries with optional WASM helpers deliberately
+      // use this form so `(condition ? helpers.a : helpers.b)(...)` is an ordinary
       // unbound call. Preserve every other explicit this type as stored data.
       receiver: declaredReceiver?.kind === 'void' ? null : declaredReceiver === null ? null : storedCarrier(declaredReceiver)
     }
@@ -1030,8 +1032,8 @@ export const createRepresentationDeriver = (
    * The fields an array-extending interface adds (`structural-types.ts`'s
    * `extension`), as the record fields the generated sidecar struct will
    * declare. Every field is a plain data member; an optional one carries the
-   * same presence bit `records.ts` gives a record's optional field (tsc's
-   * `JSDocArray extends Array<JSDoc>` declares `jsDocCache?`, and a read of
+   * same presence bit `records.ts` gives a record's optional field (an
+   * `interface Tags extends Array<Tag>` declaring `cache?`, and a read of
    * it before any write must be `undefined`, not a default-constructed
    * array). An accessor has a body and no storage, so it refuses by name
    * rather than laying out a member that lies.
@@ -1080,16 +1082,16 @@ export const createRepresentationDeriver = (
    * data keys is still exactly that open document. Every value it can hold,
    * named or not, is one an `any` slot takes, and nothing it states can be
    * missing, so a plain object, a class instance or an Error all satisfy it
-   * by identity -- which a sidecar record could not: mongodb's
-   * `MongoServerError(message: ErrorDescription)` keeps the object it was
-   * given (`this.errorResponse = message`). A read of a named key is the
+   * by identity -- which a sidecar record could not: an error class
+   * constructed as `new ServerError(message: ErrorDescription)` keeps the
+   * object it was given (`this.errorResponse = message`). A read of a named key is the
    * document's checked dynamic read into the key's own carrier. A required
    * key, a symbol key, an accessor or a member that can only be a callable is
    * layout the document cannot state, and keeps the record carrier. A member
-   * that MAY be a callable (mongodb's `$where?: string | ((this: T) =>
-   * boolean)`) does not: it is an `any` slot's value like any other key, and
-   * keeping the record for it made every `Filter<T>` literal a record the
-   * driver then had to view as the `Document` it forwards it as.
+   * that MAY be a callable (`$where?: string | ((this: T) => boolean)` in a
+   * query filter) does not: it is an `any` slot's value like any other key,
+   * and keeping the record for it made every `Filter<T>` literal a record the
+   * library then had to view as the `Document` it forwards it as.
    */
   const isOpenDocumentShape = (shape: Extract<StructuralShape, { kind: 'object' }>): boolean => {
     if (shape.membersDropped || shape.members.length === 0) return false
@@ -1381,7 +1383,7 @@ export const createRepresentationDeriver = (
    * argument for `T` structurally, so `number & null` reaches this deriver
    * with no checker ever having seen it. Refused as a merge ("`number` is not
    * a record shape"), that arm took the whole union down -- every
-   * `Debug.checkDefined(x)` in TypeScript's own compiler, in every copy.
+   * `checkDefined(x)` assertion helper call, in every copy.
    */
   const isUninhabitedPrimitiveIntersection = (substantive: readonly StructuralTypeId[]): boolean => {
     const domains = substantive.flatMap((member) => {
@@ -1442,7 +1444,7 @@ export const createRepresentationDeriver = (
    * A compiled class instance beside a standard TYPED ARRAY: no value is both.
    *
    * `body instanceof Uint8Array` over a declared `string | ReadableStream |
-   * null` (`@hono/node-server`'s `responseViaCache`, listener.ts:186) narrows
+   * null` narrows
    * the class arm by intersecting rather than discarding it, so the taken
    * branch reads `ReadableStream & Uint8Array`. A class instance's carrier is
    * its own struct, and a class-instance shape can name a native `Map`/`Set`,
@@ -1615,7 +1617,7 @@ export const createRepresentationDeriver = (
     // `T extends Node` -- is a value of that ONE layout seen through two of
     // its names. The checker's own reconciliation of the pair is a fresh
     // object shape, and deriving THAT below mints a by-value record no family
-    // ref converts to: 117 rows on tsc, every one a narrowed read of a Node.
+    // ref converts to: 117 rows on one program, every one a narrowed read.
     // The intersection of names for one layout is that layout's own carrier.
     const familyRef = sharedBodyRefOf(substantive)
     if (familyRef !== null) return familyRef
@@ -1623,7 +1625,7 @@ export const createRepresentationDeriver = (
     // members contribute call/construct conventions and plain object members
     // contribute fields/expandos to its existing dynamic-property sidecar.
     // Treating the latter as a record would drop [[Call]]/[[Construct]];
-    // treating the former as a record is the named AJV/Fastify census root.
+    // treating the former as a record refused every such callable schema object.
     //
     // The signatures pool through `deriveSignature`, the one ABI authority
     // that already joins compatible overloads and refuses conflicting frames.
@@ -1668,7 +1670,7 @@ export const createRepresentationDeriver = (
     // A TYPED ARRAY intersected with structural additions keeps its typed-array
     // carrier.
     //
-    // BSON spells its local Node buffer view as
+    // A library may spell its local Node buffer view as
     // `ArrayBufferView & Uint8Array & { write(...); copy(...); ... }`. The
     // intersection still denotes the same byte view: every value has the
     // Uint8Array storage, indexing and aliasing semantics, while the final
@@ -1741,9 +1743,9 @@ export const createRepresentationDeriver = (
     //
     // `x in obj` is where this shows up and it is ordinary TypeScript: narrowing
     // by a key the receiver's type does not declare produces `Vector3 &
-    // Record<"w", unknown>`, and three.js writes the idiom directly --
-    // `if ( 'w' in target ) target.w = 0;` in `Triangle.getInterpolation`, so
-    // that one line refused a carrier for `target` throughout the file.
+    // Record<"w", unknown>`, and JavaScript code writes the idiom directly --
+    // `if ( 'w' in target ) target.w = 0;` -- so that one line refused a
+    // carrier for `target` throughout the file.
     //
     // The merge below cannot answer it, and correctly says so: a class is
     // nominal, and flattening one into a structural record drops the identity
@@ -1761,18 +1763,18 @@ export const createRepresentationDeriver = (
     // refusal below still names.
     //
     // A PRIMITIVE member counts as structure here, and the class still wins.
-    // `instanceof` narrowing is where that pair comes from: mongodb's
-    // `ReadConcern.fromOptions` tests `readConcern instanceof ReadConcern`
-    // where `readConcern: ReadConcern | { level: ReadConcernLevel } |
-    // ReadConcernLevel`, and TypeScript narrows the string-literal arms by
+    // `instanceof` narrowing is where that pair comes from: a static
+    // `Concern.fromOptions` tests `concern instanceof Concern` where
+    // `concern: Concern | { level: ConcernLevel } | ConcernLevel`, and
+    // TypeScript narrows the string-literal arms by
     // intersecting rather than discarding them, so the true branch's type has
-    // `'local' & ReadConcern` in it. Only an instance can pass `instanceof`;
+    // `'local' & Concern` in it. Only an instance can pass `instanceof`;
     // a string never can, so the class carrier is the only inhabited one, and
-    // the branch's `return readConcern` really does return a `ReadConcern`.
+    // the branch's `return concern` really does return a `Concern`.
     // The checker agrees the other way and is no help: it reduces that pair to
     // `{ length, level }`, the String apparent members merged with the class's,
     // which is a carrier for neither. Note the ORDER -- the primitive branch
-    // below answers `string & HtmlEscaped`, where the structural half is an
+    // below answers `string & Escaped`, where the structural half is an
     // interface and no class is involved; when both a class and a primitive
     // are present the class is the one that can exist at runtime.
     const nominal = substantive.filter((member) => isNominalClassMember(member))
@@ -1814,8 +1816,7 @@ export const createRepresentationDeriver = (
     // pattern immediately above does. `Error` is an INTERFACE in
     // `lib.es5.d.ts`, so the nominal branch never sees it, and the checker's
     // `resolved` bag won in the merge below: `Error & { code: string }` --
-    // `@hono/node-server`'s `handleResponseError`, and Node's own
-    // `NodeJS.ErrnoException` shape -- became a by-value struct of Error's four
+    // Node's own `NodeJS.ErrnoException` shape -- became a by-value struct of Error's four
     // members plus `code`, a copy that shares no identity with the
     // `gea::runtime::Error` written into it. Nothing could produce one either:
     // both arms of `e instanceof Error ? e : new Error(...)` are the native
@@ -1854,11 +1855,11 @@ export const createRepresentationDeriver = (
     // argument the nominal-class branch above makes, at the other kind of
     // member the record merge cannot absorb.
     //
-    // `type HtmlEscapedString = string & HtmlEscaped` (hono's `utils/html.ts`,
-    // where `HtmlEscaped` is `{ isEscaped: true; callbacks?: ... }`) is the
+    // `type EscapedString = string & Escaped` (where `Escaped` is
+    // `{ isEscaped: true; callbacks?: ... }`) is the
     // case, and it is not the brand shape `isVacuousBrand` already collapses:
     // these members are real, required, and written to. But a value of
-    // `string & HtmlEscaped` IS a string -- the language has no way to make it
+    // `string & Escaped` IS a string -- the language has no way to make it
     // anything else, and every string use of one type-checks as one -- while
     // the structural half is a claim about properties ON that value. So the
     // primitive's own carrier is the answer, and reading `isEscaped` off it
@@ -1900,15 +1901,15 @@ export const createRepresentationDeriver = (
     // and it disagreed with the first wherever TypeScript's reduction is not
     // carrier equality: `{ [k: string]: number } & { [k: string]: any }` is
     // `[k: string]: any` to the checker and two irreconcilable carriers to the
-    // merge, which is why every mongodb update operator refused. Enumerating
+    // merge, which is why every update-operator type in one library refused. Enumerating
     // reductions here can never finish -- there is no end to the pairs a
     // program can write -- so the fix is to stop having a second answer, not to
     // write more cases.
     //
     // Gated on no member having a carrier of its OWN that OUTRANKS the
     // reduction, which is a different question from every member being a
-    // record shape -- and the reason the first spelling refused 53 carriers in
-    // the mongodb driver over five intersections whose reconciliation the
+    // record shape -- and the reason the first spelling refused dozens of carriers
+    // in one large program over five intersections whose reconciliation the
     // checker had already computed. `WithId<T> = EnhancedOmit<T,'_id'> & {_id:
     // ...}` is the case, and `EnhancedOmit` is a CONDITIONAL type alias, so
     // `structural-declared-body.ts` interns it with no body at all: not a
@@ -1959,11 +1960,11 @@ export const createRepresentationDeriver = (
       // storage -- `isVacuousBrand` above says the same about a member, and
       // this is that fact one spelling over. `type NotAcceptedFields<TSchema,
       // FieldType> = { readonly [key in KeysOfOtherType<TSchema, FieldType>]?:
-      // never }` (mongodb's `mongo_types.ts`) is the shape: a mapped type whose
+      // never }` is the shape: a mapped type whose
       // whole purpose is to FORBID the keys it names, intersected alongside the
       // member that really does carry them. Reading its `undefined` as a
-      // competing sidecar makes every `PushOperator`/`PullOperator`/
-      // `PullAllOperator` disagree with itself.
+      // competing sidecar makes every operator type built on it disagree
+      // with itself.
       //
       // `isAbsentMember` is the same test the named-member fence uses, asked of
       // the index's value, so the two can never disagree about what "holds
@@ -2093,13 +2094,13 @@ export const createRepresentationDeriver = (
     }
     // A rest or variadic position has no fixed arity, so the tuple is not a
     // record with a known field set -- it is an ARRAY, and its carrier is the
-    // array carrier over the union of every position's type. tsc's
-    // `[DiagnosticMessage, ...DiagnosticArguments]` (what `extraValidation`
-    // returns, spread straight into `createDiagnostic`) is a runtime Array
+    // array carrier over the union of every position's type. A
+    // `[Message, ...Arguments]` tuple (returned and spread straight into a
+    // call) is a runtime Array
     // whose length is a runtime fact; only its per-position TYPES are static,
     // and those are what the reads that know their position narrow to
     // (`spread-arguments.ts`'s open-tuple expansion, `structural-array-read.ts`).
-    // Refusing the carrier outright cost 163 rows on the self-compile.
+    // Refusing the carrier outright cost 163 rows on one large program.
     if (shape.elements.some((element) => element.rest || element.variadic)) {
       const members: StructuralTypeId[] = []
       for (const element of shape.elements) {
@@ -2156,7 +2157,7 @@ export const createRepresentationDeriver = (
    *
    * A generic class is one struct per LAYOUT, not per copy and not per
    * class: `Box<number>` and `Box<string>` store different things and are
-   * two structs, while hono's `Hono<E,S,BasePath>` across every route
+   * two structs, while an `App<E,S,BasePath>` across every route
    * registration is one, and so are `Carrier<'a' | 'b'>` and
    * `Carrier<string>`, whose `data` fields are the same carrier. The
    * layouts are the groups of the class's copies by the REPRESENTATION of
@@ -2273,12 +2274,11 @@ export const createRepresentationDeriver = (
    * A generic class spelled at its `any` filling, when its copies are
    * separate layouts, names ANY of them.
    *
-   * mongodb's `AbstractCursor<TSchema>` stores `TSchema`, so each filling the
-   * program constructs is its own struct -- the `any` one included
-   * (`RunCommandCursor extends AbstractCursor`). The driver then hands every
-   * copy's `this` to a slot typed bare `AbstractCursor`
-   * (`new ReadableCursorStream(this)`, `Set<AbstractCursor>`,
-   * `session.owner`). In JavaScript that is one object; natively it is one of
+   * A generic `AbstractCursor<TSchema>` storing `TSchema` makes each filling
+   * the program constructs its own struct -- the `any` one included
+   * (`class CommandCursor extends AbstractCursor`). A library then hands
+   * every copy's `this` to a slot typed bare `AbstractCursor`
+   * (`new CursorStream(this)`, `Set<AbstractCursor>`, `session.owner`). In JavaScript that is one object; natively it is one of
    * several structs, and neither a copy (loses identity and writes) nor one
    * shared struct (boxes a typed field) is sound. `any` is the unchecked
    * top, so the slot's honest carrier is the sum of the copies: identity is
@@ -2448,8 +2448,8 @@ export const createRepresentationDeriver = (
    *
    * `never` is uninhabited, so no call through this slot can ever supply an
    * argument, and the type is TypeScript's way of writing "some function,
-   * which nobody here calls": it is `AnyFunction` in tsc's own `core.ts`, and
-   * every use of it there ends at `Error.captureStackTrace`. Giving it a frame
+   * which nobody here calls": an `AnyFunction` alias whose every use ends at
+   * `Error.captureStackTrace`. Giving it a frame
    * is where the silent miscompile lives -- a concrete `f(a, b, c)` converted
    * into a zero-argument frame compiles and then runs with garbage the first
    * time anyone does call it -- so the truthful carrier is the identity half,
@@ -2468,7 +2468,7 @@ export const createRepresentationDeriver = (
     return declared?.kind === 'array' && isNeverType(declared.element)
   }
 
-  const deriveSignature = (shape: Extract<StructuralShape, { kind: 'signature' }>): Representation => {
+  const deriveSignature = (shape: Extract<StructuralShape, { kind: 'signature' }>, physical = false): Representation => {
     if (shape.construct.length > 0) {
       // A construct signature with no class anchor -- `new () => Component` --
       // is a constructor whose class is not proven. That is a complete answer,
@@ -2508,7 +2508,8 @@ export const createRepresentationDeriver = (
     // The target set of a first-class function value is not a structural fact,
     // so the carrier is the dispatching one. Naming a single `function` carrier
     // here would claim a proof the shape does not contain.
-    if (typeof abi !== 'string') return { kind: 'function-value-dispatch', abi }
+    if (typeof abi !== 'string')
+      return { kind: 'function-value-dispatch', abi: physical ? abi : publicStructuralMethodAbiOf(shape.call, abi) }
     // Incompatible declared overloads are missing a native storage contract,
     // not a dynamic source boundary. Normalization must publish the stored
     // implementation's signature when it can prove one; otherwise the value
@@ -2595,7 +2596,7 @@ export const createRepresentationDeriver = (
         // ALREADY bound as opaque host protocols by the ambient-value census
         // (`ArrayBuffer` through `Uint8ArrayConstructor`'s own
         // `Uint8Array<ArrayBuffer>` return type). Falling through to `binding`
-        // is what made every ArrayBuffer in three.js an opaque handle with no
+        // is what made every ArrayBuffer in a program an opaque handle with no
         // bytes behind it. See `StandardBufferPolicy`.
         const buffer = buffers.forDeclaration(shape.declaration)
         if (buffer) return { kind: buffer, ownership: ownership.forShape(shape, id) }
@@ -2766,7 +2767,7 @@ export const createRepresentationDeriver = (
         // `StringObjectDeclarationPolicy`'s own doc comment for both in full.
         // `shared-refcount` for the same reason a pattern is: this is an
         // object with identity, not a value, and a program that stores a
-        // dynamic property on one (hono's `escapedString.isEscaped = true`)
+        // dynamic property on one (`escapedString.isEscaped = true`)
         // must see that write from every reference to the same object.
         const stringObjectNative = stringObject.forDeclaration(shape.declaration)
         if (stringObjectNative !== null) {
@@ -2834,9 +2835,8 @@ export const createRepresentationDeriver = (
         // error itself, for the reason `Error & { code: string }` does in
         // `deriveIntersection`: nothing constructs an interface, so its values
         // are errors some `new Error(...)` built and the program re-typed --
-        // node-compat's `new Error(m) as NodeArgumentError`, and
-        // `(error as NodeArgumentError).code = ...` on an error it did not
-        // build. A generated struct copying `Error`'s members could be
+        // `new Error(m) as SomeError`, and `(error as SomeError).code = ...`
+        // on an error it did not build. A generated struct copying `Error`'s members could be
         // neither: it is a different object from the error written into it,
         // and it shares no base with `gea::runtime::Error`, so no pointer
         // upcast reaches an `Error` slot and a rebuild would drop identity,
@@ -2879,8 +2879,8 @@ export const createRepresentationDeriver = (
         // null carrier. Read as a handle, that demands
         // `native-boundary:RTCSessionDescriptionInit@1` -- an obligation the
         // manifest can never satisfy, because nothing ever claimed a C++ type
-        // for it -- and refuses the whole program (`examples/dialer`, every
-        // one of its twelve rows). It is not opaque either: the app writes
+        // for it -- and refuses the whole program (a WebRTC signalling
+        // program, all twelve of its rows). It is not opaque either: the program writes
         // `{ type, sdp }` object literals of it and reads their fields, which
         // is the definition of a layout this compiler owns. So it falls
         // through to the record path below, exactly as it did before anything
@@ -3041,8 +3041,8 @@ export const createRepresentationDeriver = (
         const own = withNativeBase(shape, classRef)
         if (own.kind !== 'class-ref') return own
         // The copy's own arm is its complete carrier, native base included:
-        // mongodb's `class CaseInsensitiveMap<Value = any> extends Map<string,
-        // Value>` read at `any` is the family, and the `any` copy's own
+        // `class CaseInsensitiveMap<Value = any> extends Map<string, Value>`
+        // read at `any` is the family, and the `any` copy's own
         // constructor still initializes the Map it IS.
         return anyCopyFamilyOf(id, shape, own) ?? own
       }
@@ -3096,10 +3096,10 @@ export const createRepresentationDeriver = (
 
   /**
    * The `[[Call]]`/`[[Construct]]` convention of one exact source function
-   * whose semantic allocation was registered in `dynamicCallableShapes`.
+   * whose semantic allocation was registered in `sourceCallableShapes`.
    * The lookup starts with FunctionId, not a structural signature id: two
    * unrelated functions may share the latter, while only one may own the
-   * mutable `.prototype`/expando table that required boxing.
+   * source body and its receiver authentication.
    *
    * Calling `deriveSignature` directly, rather than going through the
    * memoized `derive`, is what bypasses the override without touching it:
@@ -3110,11 +3110,11 @@ export const createRepresentationDeriver = (
    * ordinary call frame would enter the body with a slot nobody supplied.
    */
   const nativeCallableConventions = (functionId: FunctionId): { call: CallableAbi; construct: CallableAbi | null } | null => {
-    const id = dynamicCallableShapes.get(functionId)
+    const id = sourceCallableShapes.get(functionId)
     if (id === undefined) return null
     const shape = shapeOf(id)
     if (shape?.kind !== 'signature') return null
-    const native = deriveSignature(shape)
+    const native = deriveSignature(shape, true)
     if (native.kind === 'function-value-dispatch') return { call: native.abi, construct: null }
     if (native.kind === 'function-and-constructor') return { call: native.call, construct: native.construct }
     return null

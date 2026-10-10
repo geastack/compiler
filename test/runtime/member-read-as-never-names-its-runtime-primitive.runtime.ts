@@ -1,8 +1,8 @@
 // A declared member the program reads AFTER every guard its declared type
 // allows has failed -- narrowed to `never` -- and hands to a primitive
-// parameter is stating what the member really holds. mongodb declares
+// parameter is stating what the member really holds. A database client declares
 // `TopologyVersion.counter: Long`, reads it as
-// `Long.isLong(c) ? c : Long.fromNumber(c)`, and node's BSON reader delivers
+// `Long.isLong(c) ? c : Long.fromNumber(c)`, and its binary-document reader delivers
 // the server's int64 as a `number`: the any-to-record assertion of the hello's
 // `topologyVersion` refused that number.
 class Wide {

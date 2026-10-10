@@ -1,7 +1,9 @@
 import type { DeclarationId, IrValueId } from '../identity/ids.js'
 import type { ClassLayout } from '../projection/classes.js'
 import { classStaticMemberOf } from '../projection/fields.js'
-import { representationKey, type Representation } from '../representation/model.js'
+import { recordFieldsOfShape } from '../projection/fields.js'
+import type { RepresentationDeriver } from '../representation/derive.js'
+import { representationKey, type RecordField, type Representation } from '../representation/model.js'
 import type { IrBody } from './model.js'
 
 /**
@@ -77,6 +79,30 @@ export const staticFieldOwnerOf = (
 /** The class one class's static storage lives in: itself, or the generic root whose layouts it is one of. */
 export const staticStorageOwnerOf = (classes: ReadonlyMap<DeclarationId, ClassLayout>, declaration: DeclarationId): DeclarationId =>
   classes.get(declaration)?.staticOwner ?? declaration
+
+/** The emitted constructor lookup walks existing cells before the inherited member declaration. */
+export const staticFieldStorageAlongOf = <T>(
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  members: readonly DeclarationId[],
+  key: string,
+  lookup: (owner: DeclarationId, key: string) => T | null
+): { readonly owner: DeclarationId; readonly value: T } | null => {
+  const walked = new Set<DeclarationId>()
+  for (const member of members) {
+    let declaration: DeclarationId | null = member
+    while (declaration !== null && !walked.has(declaration)) {
+      walked.add(declaration)
+      const layout = classes.get(declaration)
+      if (layout?.staticAccessors.some((member) => member.key === key) || layout?.staticMethods.some((member) => member.key === key))
+        return null
+      const owner = staticStorageOwnerOf(classes, declaration)
+      const value = lookup(owner, key)
+      if (value !== null) return { owner, value }
+      declaration = layout?.base ?? null
+    }
+  }
+  return null
+}
 
 /** The carrier `ClassName.KEY` is stored in, or null when the census proved none. */
 export const staticFieldSlotOf = (
@@ -179,3 +205,14 @@ export const censusConstructorViewShapes = (bodies: readonly IrBody[]): Readonly
   }
   return shapes
 }
+
+/** Physical view storage for a constructor key, shared by recipe certification and emission. */
+export const constructorViewFieldsOf = (
+  shapes: ReadonlySet<string>,
+  deriver: RepresentationDeriver,
+  key: string
+): readonly { readonly shape: string; readonly field: RecordField }[] =>
+  [...shapes].flatMap((shape) => {
+    const field = recordFieldsOfShape(deriver, shape)?.find((field) => field.key === key)
+    return field === undefined ? [] : [{ shape, field }]
+  })

@@ -1,5 +1,5 @@
 // An open `Document` (`{ [key: string]: any }`) handed where a typed options
-// interface is declared IS that object, at another static type: mongodb's
+// interface is declared IS that object, at another static type: a database client's
 // `new Db(client, name, options?: DbOptions)` rebinds
 // `options = filterOptions(options, DB_OPTIONS_ALLOW_LIST)`, and
 // `filterOptions` returns a `Document`.
@@ -7,7 +7,7 @@
 // A write through the typed name is a read through the Document and the other
 // way round, and keys the interface does not name stay on the object. A
 // snapshot copy would print `admin false`, `admin`, `true` instead.
-interface BsonDocument {
+interface WireDocument {
   [key: string]: any
 }
 
@@ -16,15 +16,15 @@ interface DbOptions {
   retryWrites?: boolean
 }
 
-function filterOptions(options: BsonDocument, names: readonly string[]): BsonDocument {
-  const filtered: BsonDocument = {}
+function filterOptions(options: WireDocument, names: readonly string[]): WireDocument {
+  const filtered: WireDocument = {}
   for (const name in options) {
     if (names.includes(name)) filtered[name] = options[name]
   }
   return filtered
 }
 
-let seen: BsonDocument = {}
+let seen: WireDocument = {}
 
 function open(options?: DbOptions): DbOptions {
   const filtered = filterOptions(options ?? {}, ['authSource', 'retryWrites'])
@@ -40,11 +40,13 @@ console.log(options.authSource)
 options.retryWrites = false
 console.log(seen.retryWrites)
 console.log(Object.keys(seen).join(','))
-const back: BsonDocument = options
+const back: WireDocument = options
 console.log('same', back === seen)
 //! expect: admin true
 //! expect: local
 //! expect: false
 //! expect: authSource,retryWrites
 //! expect: same true
-//! emitted-has: gea::dictionary::adopt<
+//! emitted-has: gea::record::makeDocumentViewWithOrigin<
+//! emitted-has: gea::dictionary::readDocumentField(
+//! emitted-has: gea::dictionary::checkedPayloadEntry<std::string>

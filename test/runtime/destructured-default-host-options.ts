@@ -1,4 +1,4 @@
-// A stand-in for three.js's `WebGLRenderer` options bag: `constructor(parameters
+// A stand-in for a 3D scene-graph library's `Renderer` options bag: `constructor(parameters
 // = {}) { const { canvas = createCanvasElement(), context = null, ... } =
 // parameters }`, where the destructured field has a default but every real
 // call site's literal states the field outright.
@@ -7,7 +7,7 @@
 // defaulted destructuring element UNCONDITIONALLY (`fail('defaulted-binding-
 // element', ...)`), regardless of whether the default could ever run. That
 // made the allocation origin of `context` here unenumerable no matter what
-// the caller wrote, which is exactly the shape that left three's `_gl` --
+// the caller wrote, which is exactly the shape that left that renderer's `_gl` --
 // and every native WebGL call reached through it -- a wildcard. This proves
 // the shape still runs correctly once the proof can see through a literal
 // that always supplies the key, and that the default itself still runs on

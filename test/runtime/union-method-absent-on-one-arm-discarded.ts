@@ -1,7 +1,7 @@
 // CALLING A METHOD ONE ARM OF A UNION DOES NOT HAVE, AND DISCARDING THE
 // RESULT.
 //
-// hono's `_getQueryParam` (`utils/url.ts`) writes
+// An HTTP framework's query-parameter parser writes
 // `;(results[name] as string[]).push(value)` where the read carries
 // `string | string[]`: the `as` names the arm the author means, and the string
 // arm is proved to have no `push`, so 13.3.6.1 throws if it is ever the live

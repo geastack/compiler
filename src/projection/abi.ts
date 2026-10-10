@@ -144,9 +144,9 @@ const abiOfCarrier = (
     if (carrier.kind === 'function' || carrier.kind === 'function-value-dispatch') return { call: carrier.abi, construct: null }
     if (carrier.kind === 'function-family' || carrier.kind === 'function-value-family') return { call: carrier.abi, construct: null }
     // A JS CONSTRUCTOR FUNCTION: one `function F( a, b ) {}` that is both
-    // called and `new`ed, which is how three.js writes almost every internal
-    // module -- `WebGLTextures`, `WebGLProgram`, `WebGLShadowMap`, ten of them
-    // in one program, each blocked here with "no function-object allocation
+    // called and `new`ed, which is how pre-class JavaScript libraries write
+    // many of their internal modules -- ten of them in one program, each
+    // blocked here with "no function-object allocation
     // published a callable carrier" while its allocation had published a
     // perfectly good one this function had no arm for.
     //
@@ -193,13 +193,15 @@ const abiOfCarrier = (
  * wrong: `[[Construct]]` manufactures the receiver (ECMA-262 10.2.2, so
  * `representation/derive.ts` states none for it) while `[[Call]]` is handed
  * one. Keying on it made every such function's frames compare unequal and
- * blocked the body -- which is the whole of three.js's renderer -- for a
+ * blocked the body -- in one library, the whole of its renderer -- for a
  * disagreement that is the language's own.
  */
 const argumentFrameKey = (abi: CallableAbi): string =>
-  [abi.parameters.map((parameter) => `${representationKey(parameter.value)}/${parameter.ownership}`).join(','), abi.restFrom ?? '-'].join(
-    ';'
-  )
+  [
+    abi.parameters.map((parameter) => `${representationKey(parameter.value)}/${parameter.ownership}`).join(','),
+    abi.restFrom ?? '-',
+    abi.argumentsFrame ?? '-'
+  ].join(';')
 
 /**
  * The calling convention a Representation states, when it states one -- the
@@ -229,9 +231,9 @@ const callConventionOf = (representation: Representation): CallableAbi | null =>
 /**
  * Whether a convention is the fiction a checker synthesizes for a JavaScript
  * function that declares no parameters but reads the `arguments` object --
- * three.js's `function texImage2D() { gl.texImage2D( ...arguments ) }`, one
- * of ~2,315 functions across a real application and the majority shape behind
- * this projection's blockers.
+ * `function texImage2D() { gl.texImage2D( ...arguments ) }`, a forwarding
+ * shim common in JavaScript libraries and the majority shape behind this
+ * projection's blockers.
  *
  * There is no declared parameter for `structural-parts.ts`'s `parameterOf` to
  * read a `ts.ParameterDeclaration` from, so the checker's own inferred
@@ -266,8 +268,7 @@ const isArgumentsObjectFiction = (abi: CallableAbi): boolean => {
  * cites is the callee the source forwarded to. A body with zero or with more
  * than one such candidate states nothing this projection can act on, and
  * returns `null` rather than guess between them -- `console.error`'s own
- * receiver read is exactly this shape's other common case (see the shim
- * bodies in `.scratch/threejs/abi-arity.mjs`'s output), and is excluded by
+ * receiver read is exactly this shape's other common case, and is excluded by
  * being consumed by its own call.
  *
  * `isArgumentsObjectFiction` is asked of every candidate too, not only of

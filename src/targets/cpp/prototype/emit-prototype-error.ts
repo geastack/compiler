@@ -1,3 +1,4 @@
+import { nativePrototypeMethodOf } from '../../../ir/native-prototype-calls.js'
 import type { IrOperand } from '../../../ir/model.js'
 import type { IrValueId } from '../../../identity/ids.js'
 import type { EmitContext, PrototypeMethodRead } from '../emit-context.js'
@@ -25,7 +26,6 @@ import { representationKey } from '../../../representation/model.js'
  * a native-record-ref(gea::runtime::Error) receiver" -- a true statement about
  * the wrong prototype, because the ladder had no Error rung at all.
  */
-const errorPrototypeMethods: ReadonlySet<string> = new Set<string>(['toString'])
 
 export const deferredNativeErrorMethodClaim = (
   staticKeyTexts: ReadonlyMap<IrValueId, string>,
@@ -34,7 +34,7 @@ export const deferredNativeErrorMethodClaim = (
 ): PrototypeMethodRead | null => {
   if (!isNativeError(receiver.representation)) return null
   const staticKey = staticKeyTexts.get(key.value)
-  if (staticKey === undefined || !errorPrototypeMethods.has(staticKey)) return null
+  if (staticKey === undefined || nativePrototypeMethodOf(receiver.representation, staticKey) !== 'native-error') return null
   return { receiverKind: 'native-error', member: staticKey, receiver: { kind: 'operand', operand: receiver }, receiverElement: null }
 }
 

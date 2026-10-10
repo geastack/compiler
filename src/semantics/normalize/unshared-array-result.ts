@@ -17,11 +17,11 @@ import { inheritedImplementationOf } from './merged-declaration.js'
  *
  * An `async` body qualifies the same way: its promise settles with the
  * array its `return` names, and that array is still held by nothing else.
- * mongodb's `AbstractCursor.toArray` is the shape this exists for -- it
- * builds `const array: TSchema[] = []`, pushes every document and returns it,
- * while the cursor class is folded onto its `any` copy (`specialization.ts`'s
+ * A generic cursor's `async toArray()` is the shape this exists for -- it
+ * builds `const array: T[] = []`, pushes every item and returns it, while the
+ * cursor class is folded onto its `any` copy (`specialization.ts`'s
  * reinterpreted classes), so the body hands back `any[]` where the caller's
- * view declares `CollectionInfo[]`.
+ * view declares `Info[]`.
  *
  * Deliberately syntactic and small. Any use of the local outside the listed
  * forms -- passing it as an argument, storing it, capturing it in a closure,

@@ -10,7 +10,7 @@
 // callable fixtures in this suite do.
 //! expect: 17
 //! emitted-has: gea::callableDynamicGet
-//! emitted-has: gea::callableDynamicSet
+//! emitted-has: gea::callableNativeDataSetWithReceiver
 
 interface TaggedCallback {
   (value: number): number

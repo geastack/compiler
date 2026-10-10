@@ -70,11 +70,11 @@ export const settleBindingCensus = <Facts>(
   // holds that round's `ValueFlowIndex`, and `sourceValueSessionOf`
   // (flow/source-value-session.ts) memoizes an ~80,000-state, ~14.7M-edge
   // dependency graph in a WeakMap keyed on that index object -- roughly 1GB
-  // live per session on the three.js app. A `let round: RoundCensus<Facts>` reassigned
+  // live per session on a large program. A `let round: RoundCensus<Facts>` reassigned
   // only after `compose` returns keeps the PREVIOUS round's index (and its
   // graph) reachable for the whole duration of the `compose` call that builds
   // the NEXT round's index, so both graphs are live at once: measured as
-  // the three.js app's ~2.1GB fixpoint peak. Only `.parameters` is ever read back out of
+  // a ~2.1GB fixpoint peak. Only `.parameters` is ever read back out of
   // a settled round (to seed the next round's `observed` view and to compare
   // `boundCount`), so only `.parameters` needs to survive the boundary.
   let previousCensus = compose().parameters
@@ -113,7 +113,7 @@ export const settleBindingCensus = <Facts>(
     // at whatever the variable held last, so once it advanced to round N's
     // census, round N-1's wrapper forwarded into round N, whose upstream is
     // that same wrapper -- `statedTypeAt` recursed between the two until the
-    // stack died, 58s into a three.js compile.
+    // stack died, a minute into a large compile.
     const upstream = previousCensus
     const observed = { ...upstream }
     // `Object.keys` preserves the closed query table's keys. The wrapper

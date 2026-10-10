@@ -1,4 +1,4 @@
-// bson's byte-level shape: offsets derived from typed-array reads and
+// A binary-document serializer's byte-level shape: offsets derived from typed-array reads and
 // threaded through parameters and results. A byte read is an integer bounded
 // by its element type and a typed array's length is an integer, so every
 // offset here is integer arithmetic the census may hold in a `long long`; an
@@ -38,13 +38,13 @@ function serialize(names: readonly string[]): Uint8Array {
   return buffer.subarray(0, index)
 }
 
-type BsonElement = [type: number, nameOffset: number, nameLength: number]
+type WireElement = [type: number, nameOffset: number, nameLength: number]
 
-function parseToElements(bytes: Uint8Array, startOffset: number | null = 0): BsonElement[] {
+function parseToElements(bytes: Uint8Array, startOffset: number | null = 0): WireElement[] {
   startOffset ??= 0
   const documentSize = getInt32LE(bytes, startOffset)
   if (documentSize > bytes.length - startOffset) throw new Error('size mismatch')
-  const elements: BsonElement[] = []
+  const elements: WireElement[] = []
   let offset = startOffset + 4
   while (offset <= documentSize + startOffset) {
     const type = bytes[offset]!

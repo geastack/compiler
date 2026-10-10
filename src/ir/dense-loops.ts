@@ -1,8 +1,17 @@
 import type { DeclarationId, IrValueId } from '../identity/ids.js'
 import type { ConversionNode } from '../conversion/algebra.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
+import { nativeArrayViewPlansOf } from '../conversion/array-view.js'
+import { recipeClosureOf } from '../conversion/recipe-closure.js'
 import type { BindingPlacement } from '../projection/bindings.js'
-import { controlFlowGraphOf, dominatorTreeOf, naturalLoopsOf, type ControlFlowGraph, type NaturalLoop } from './dominance.js'
+import {
+  controlFlowGraphOf,
+  dominatorTreeOf,
+  naturalLoopsOf,
+  type ControlFlowGraph,
+  type DominatorTree,
+  type NaturalLoop
+} from './dominance.js'
 import { loopInvariantHoistsOf, type HoistPlan } from './hoist.js'
 import { borrowSafeOperationsOf } from './borrow-effects.js'
 import { representationKey, type Representation, type TypedArrayElementDomain } from '../representation/model.js'
@@ -17,8 +26,8 @@ import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
  * `ArrayObject`, and both of them can GROW the array -- a store past the end
  * appends, which is what `a[a.length] = x` means in JavaScript. clang has to
  * assume the storage may be reallocated on every iteration, so it reloads the
- * base pointer each time and cannot vectorize anything. Measured on
- * `bench/comparison`'s matrix_multiply: 35.5 ms, against 4.9 ms for the
+ * base pointer each time and cannot vectorize anything. Measured on a
+ * triple-loop matrix multiply: 35.5 ms, against 4.9 ms for the
  * hand-written C++ that indexes a `std::vector` it knows nobody resizes.
  *
  * Hoisting the base pointer alone does not fix it, and neither does a
@@ -68,6 +77,17 @@ export interface DenseArray {
   readonly counter: DeclarationId
   /** The loop's own bound. */
   readonly bound: IrOperand
+  /**
+   * In-loop reads this window names at its preheader and that only the
+   * target's hoist plan can put there: a cell this body never writes, read in
+   * the loop's own test. Whether that read holds one value for the whole loop
+   * is the target's capture question -- a by-value capture copy does, a shared
+   * frame member does not once the loop calls out -- which the plan published
+   * here cannot answer. `admittedDenseLoopPlanOf` keeps the window only when
+   * every one of these was relocated, so the preheader names a value that is
+   * both assigned and invariant.
+   */
+  readonly relocatedReads: readonly IrValueId[]
   /** Whether the test admits the bound itself (`<=`), so the window is one wider. */
   readonly inclusive: boolean
   /** The counter's step, checked non-negative at the preheader. */
@@ -85,7 +105,7 @@ export interface DenseArray {
    * carry no meaning for one of these.
    *
    * Worth its own shape because the ordinary bounds test is not cheap enough to
-   * leave in the loop. Measured on `bench/comparison/fixtures/object_create.ts`:
+   * leave in the loop. Measured on an object-allocation loop over a ring:
    * 11.3ms as emitted, 11.8ms with a per-access `key < size()` guard (no better
    * than doing nothing at all), 10.1ms with an unsigned integer one, and 7.9ms
    * with the bound gone. A per-access size read is what stops clang keeping the
@@ -118,6 +138,68 @@ export interface DenseArray {
    * exactly `bound` elements would fail `bound + 1 <= size` on every turn.
    */
   readonly widened: boolean
+  /**
+   * The counter's value on entry to its loop, named in place of reading the
+   * counter cell -- present when this window's check was FOLDED into an
+   * enclosing loop's flag (`DenseGroup` of that loop), whose preheader runs
+   * before the inner loop's own seed write. Folding is what keeps an inner
+   * loop's checks from being recomputed on every turn of the outer one: a
+   * flag recomputed per turn is a condition the backend cannot version the
+   * outer loop on, so the outer loop kept a cold path -- a call -- inside it,
+   * and nothing could stay in a register across its turns.
+   */
+  readonly seed?: IrOperand
+  /**
+   * A ROW keyed by the enclosing loop's own counter (`grid[k][j]` folded into
+   * the `k` loop): the check walks every row that counter can reach, once, at
+   * the enclosing preheader, while `preheader` stays the inner loop's -- where
+   * the row for the current turn is taken, behind the folded flag.
+   */
+  readonly rows?: DenseRowRange
+}
+
+/** The enclosing loop's counter range a folded row window's check walks. */
+export interface DenseRowRange {
+  readonly counter: DeclarationId
+  readonly bound: IrOperand
+  readonly step: IrOperand | null
+  readonly inclusive: boolean
+  readonly widened: boolean
+}
+
+/**
+ * A loop whose dense windows can be given the backend as non-aliasing.
+ *
+ * A dense window's pointer is reached through a refcounted object, so the
+ * backend cannot tell a stored array's cells from any other array's cells it
+ * reads in the same nest, and keeps every stored element in memory across
+ * turns -- a matrix multiply's output row reloaded and re-stored on every
+ * turn of the middle loop instead of living in registers. A `restrict`
+ * pointer says otherwise, and is sound exactly when, for as long as it is in
+ * scope, the stored array's storage is reached through nothing else:
+ *
+ *   - every access in the loop renders behind the ONE flag of `group`, so
+ *     either every access of a restricted window is the pointer or none is;
+ *   - every other operation in the loop runs no program code and names no
+ *     array except through a window, a row load a window excuses, or a
+ *     `length` read;
+ *   - and every other window of the same element carrier is a DIFFERENT
+ *     object, checked at the preheader (`distinct`) -- ordinary dense storage
+ *     is the object's own allocation, so different objects mean disjoint
+ *     cells. A typed array is a view, not an allocation, so its pairs are
+ *     every other typed window and the check is that their byte ranges do
+ *     not overlap.
+ *
+ * `blocks` is the loop; `inert` the blocks outside it that run no program
+ * code and name no array, which a target may enclose along with the loop.
+ */
+export interface DenseRegion {
+  readonly group: number
+  readonly header: IrBlockId
+  readonly blocks: readonly IrBlockId[]
+  readonly inert: readonly IrBlockId[]
+  readonly restricted: readonly number[]
+  readonly distinct: readonly { readonly restricted: number; readonly other: number }[]
 }
 
 /**
@@ -157,7 +239,7 @@ export type DenseReference =
  * because the backend's loop unswitching is what turns the ternary into two
  * loop bodies, and it versions on one invariant condition, not on several. An
  * inner body that named three flags measured 62 ms against 7.9 for the same
- * body behind one (`bench/comparison`'s matrix_multiply): clang gave up rather
+ * body behind one (a triple-loop matrix multiply): clang gave up rather
  * than emit eight versions. Anding outward is also what lets an access reached
  * inside a nested loop cite the innermost flag -- the only one that loop's own
  * unswitching can see -- and still stand for its own window's proof.
@@ -197,13 +279,17 @@ export interface DenseLoopPlan {
    * clang will not hoist the load: the element stores go through a pointer it
    * cannot prove disjoint from the vector's own header, so the length is
    * re-read on every turn and the base pointer never stays in a register.
-   * Measured on `object_create.ts`: 11.5ms as emitted, 10.3ms with only the
+   * Measured on an object-allocation ring loop: 11.5ms as emitted, 10.3ms with only the
    * length hoisted, 10.1ms with only the guard branch gone, 8.1ms with both.
    */
   readonly lengths: ReadonlyMap<IrValueId, number>
+  readonly regions?: readonly DenseRegion[]
 }
 
 export const emptyDenseLoopPlan: DenseLoopPlan = { arrays: [], groups: [], accesses: new Map(), lengths: new Map() }
+
+const denseStorageConversionIsOrdinary = (node: ConversionNode, conversions: ConversionCensus): boolean =>
+  nativeArrayViewPlansOf(recipeClosureOf([node], conversions.nodeById).values()).length === 0
 
 /** Dense preheaders perform real reads; their transport belongs to the lowered body's certificate too. */
 export const publishDenseLoopPlan = (
@@ -221,7 +307,9 @@ export const publishDenseLoopPlan = (
     const target = reference.kind === 'cell' ? reference.representation : reference.operand.representation
     if (source === undefined || source === null) return null
     const conversion = conversions.nodeFor(source, target)
-    return conversion.capability.kind === 'never' ? null : { ...reference, conversion }
+    return conversion.capability.kind === 'never' || !denseStorageConversionIsOrdinary(conversion, conversions)
+      ? null
+      : { ...reference, conversion }
   }
   const arrays = raw.arrays.flatMap((array) => {
     const reference = seal(array.reference)
@@ -230,8 +318,19 @@ export const publishDenseLoopPlan = (
   const ordinals = new Set(arrays.map((array) => array.ordinal))
   const accesses = new Map([...raw.accesses].filter(([, access]) => ordinals.has(access.array)))
   const lengths = new Map([...raw.lengths].filter(([, ordinal]) => ordinals.has(ordinal)))
-  return { ...body, denseLoopPlan: { arrays, accesses, lengths, groups: raw.groups } }
+  // A window dropped here renders through its holder, which a restricted
+  // pointer's region cannot allow.
+  const regions = (raw.regions ?? []).filter((region) =>
+    raw.arrays.every((array) => ordinals.has(array.ordinal) || !regionNames(region, array))
+  )
+  return { ...body, denseLoopPlan: { arrays, accesses, lengths, groups: raw.groups, regions } }
 }
+
+/** Whether a region's soundness argument names this window: one of its own group's, or one checked distinct from a restricted one. */
+const regionNames = (region: DenseRegion, array: DenseArray): boolean =>
+  array.group === region.group ||
+  region.restricted.includes(array.ordinal) ||
+  region.distinct.some((pair) => pair.restricted === array.ordinal || pair.other === array.ordinal)
 
 export const denseLoopConversionsOf = (plan: DenseLoopPlan): readonly ConversionNode[] => {
   const nodes = new Map<string, ConversionNode>()
@@ -249,6 +348,8 @@ export const denseLoopPlanMatches = (
   placements: ReadonlyMap<DeclarationId, BindingPlacement>,
   conversions: ConversionCensus
 ): boolean => {
+  const currentOperations = new Set([...body.blocks.values()].flatMap((block) => block.operations))
+  if ([...plan.accesses.keys()].some((operation) => !currentOperations.has(operation))) return false
   const matches = (reference: DenseReference): boolean => {
     if (reference.kind === 'element') return matches(reference.holder)
     const node = reference.conversion
@@ -262,7 +363,8 @@ export const denseLoopPlanMatches = (
     return (
       conversions.nodeById(node.id) === node &&
       representationKey(node.source) === representationKey(source) &&
-      representationKey(node.target) === representationKey(target)
+      representationKey(node.target) === representationKey(target) &&
+      denseStorageConversionIsOrdinary(node, conversions)
     )
   }
   return plan.arrays.every((array) => matches(array.reference))
@@ -287,6 +389,8 @@ export interface AdmittedDenseLoopPlan {
   readonly groups: ReadonlyMap<number, DenseGroup>
   readonly accesses: ReadonlyMap<IrNonTerminatorOperation, DenseAccess>
   readonly lengths: ReadonlyMap<IrValueId, number>
+  /** The regions whose every window and every access survived admission: one dropped renders through its holder, which a restricted pointer cannot allow. */
+  readonly regions: readonly DenseRegion[]
 }
 
 /**
@@ -315,6 +419,9 @@ const referenceIsAdmitted = (reference: DenseReference, integerValues: ReadonlyS
  *
  * - whether this body already has a plain name for the cells a window
  *   reaches through (`admitsCell`);
+ * - whether the target's hoist plan moved every read the window names at
+ *   its preheader out of the loop (`DenseArray.relocatedReads`, against
+ *   `relocated`);
  * - whether the integer census narrowed every index a window's accesses
  *   read -- an un-narrowed `number` key is not an element access at all --
  *   except a WRAPPED window, which is exempt: its own admission already
@@ -334,12 +441,19 @@ const referenceIsAdmitted = (reference: DenseReference, integerValues: ReadonlyS
 export const admittedDenseLoopPlanOf = (
   plan: DenseLoopPlan,
   integerValues: ReadonlySet<IrValueId>,
-  admitsCell: DenseCellPolicy
+  admitsCell: DenseCellPolicy,
+  relocated: ReadonlySet<IrValueId>
 ): AdmittedDenseLoopPlan => {
-  if (plan.arrays.length === 0) return { arrays: [], groups: new Map(), accesses: new Map(), lengths: new Map() }
+  if (plan.arrays.length === 0) return { arrays: [], groups: new Map(), accesses: new Map(), lengths: new Map(), regions: [] }
   const admitted = new Set<number>(
     plan.arrays
-      .filter((array) => admitsCell(array.counter) && referenceIsAdmitted(array.reference, integerValues, admitsCell))
+      .filter(
+        (array) =>
+          admitsCell(array.counter) &&
+          (array.rows === undefined || admitsCell(array.rows.counter)) &&
+          referenceIsAdmitted(array.reference, integerValues, admitsCell) &&
+          array.relocatedReads.every((value) => relocated.has(value))
+      )
       .map((array) => array.ordinal)
   )
   for (const [operation, access] of plan.accesses) {
@@ -367,7 +481,12 @@ export const admittedDenseLoopPlanOf = (
         at = group.parent
       }
     }
-  return { arrays, groups, accesses, lengths }
+  const regions = (plan.regions ?? []).filter(
+    (region) =>
+      plan.arrays.every((array) => claimed.has(array.ordinal) || !regionNames(region, array)) &&
+      [...plan.accesses].every(([operation, access]) => accesses.has(operation) || access.flag !== region.group)
+  )
+  return { arrays, groups, accesses, lengths, regions }
 }
 
 export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHoistsOf(body)): DenseLoopPlan => {
@@ -491,47 +610,100 @@ export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHois
     groupOfLoop.set(index, groups.length)
     groups.push({ ordinal: groups.length, parent: null, preheader: loop.preheader })
   }
+  const enclosingLoopOf = new Map<number, number>()
   for (const [index, group] of groupOfLoop) {
     const inner = loops[index]
     if (!inner) continue
     const enclosing = loops.findIndex((outer, at) => at !== index && outer.blocks.has(inner.header) && groupOfLoop.has(at))
+    if (enclosing >= 0) enclosingLoopOf.set(index, enclosing)
     const parent = enclosing < 0 ? null : (groupOfLoop.get(enclosing) ?? null)
     groups[group] = { ordinal: group, parent, preheader: groups[group]?.preheader ?? inner.header }
   }
 
-  /** The flag an access renders behind: the innermost enclosing loop that has one. */
+  // An inner loop whose every window can be checked before its enclosing loop
+  // runs at all hands those checks to the enclosing loop's flag. One level:
+  // a loop that received windows keeps its own flag, and innermost-first order
+  // decides an inner loop before the loop it would fold into.
+  const folds = new Map<number, { readonly host: number; readonly windows: readonly FoldedWindow[] }>()
+  const hosts = new Set<number>()
+  for (const [index, inner] of found.entries()) {
+    const host = enclosingLoopOf.get(index)
+    if (inner === null || host === undefined || hosts.has(index) || folds.has(host)) continue
+    const outer = found[host]
+    const innerLoop = loops[index]
+    const outerLoop = loops[host]
+    if (!outer || !innerLoop || !outerLoop) continue
+    const windows = foldedWindowsOf(inner, innerLoop, outer, outerLoop, {
+      body,
+      values: body.values,
+      readsCell,
+      constantTexts,
+      cellWrites,
+      usesOf,
+      operationOf,
+      definedOutside,
+      invariantOperand,
+      counter: inner.counter,
+      dominance
+    })
+    if (windows === null) continue
+    folds.set(index, { host, windows })
+    hosts.add(host)
+  }
+  const foldedGroups = new Map<number, number>()
+  for (const [index, fold] of folds) {
+    const group = groupOfLoop.get(index)
+    const host = groupOfLoop.get(fold.host)
+    if (group !== undefined && host !== undefined) foldedGroups.set(group, host)
+  }
+  const resolveGroup = (group: number | null): number | null => (group === null ? null : (foldedGroups.get(group) ?? group))
+  for (const [at, group] of groups.entries()) groups[at] = { ...group, parent: resolveGroup(group.parent) }
+
+  /** The flag an access renders behind: the innermost enclosing loop that has one, or the loop it folded into. */
   const flagAt = (blockId: IrBlockId): number | null => {
     for (const [index, loop] of loops.entries()) {
       if (!loop.blocks.has(blockId)) continue
       const group = groupOfLoop.get(index)
-      if (group !== undefined) return group
+      if (group !== undefined) return resolveGroup(group)
     }
     return null
   }
 
   const blocksOfArray = new Map<number, ReadonlySet<IrBlockId>>()
+  const excusedOf = new Map<number, readonly IrNonTerminatorOperation[]>()
   for (const [index, loop] of found.entries()) {
     const group = groupOfLoop.get(index)
     if (loop === null || group === undefined) continue
-    for (const candidate of loop.candidates) {
+    const fold = folds.get(index)
+    const host = fold === undefined ? undefined : found[fold.host]
+    for (const [at, candidate] of loop.candidates.entries()) {
       const ordinal = arrays.length
       const blocks = loops[index]?.blocks
       if (blocks) blocksOfArray.set(ordinal, blocks)
+      excusedOf.set(ordinal, candidate.excused)
+      const folded = fold?.windows[at]
+      const rows: DenseRowRange | undefined =
+        folded?.rows && host
+          ? { counter: host.counter, bound: host.bound, step: host.step, inclusive: host.inclusive, widened: host.widened }
+          : undefined
       arrays.push({
         ordinal,
-        group,
-        reference: candidate.reference,
+        group: resolveGroup(group) ?? group,
+        reference: folded?.reference ?? candidate.reference,
         element: candidate.element,
         typed: candidate.typed,
-        preheader: loop.preheader,
+        preheader: folded && host && !folded.rows ? host.preheader : loop.preheader,
         wrapped: candidate.wrapped,
         modulus: candidate.modulus,
-        bases: candidate.bases,
+        bases: folded?.bases ?? candidate.bases,
         counter: loop.counter,
-        bound: loop.bound,
+        bound: folded?.bound ?? loop.bound,
+        relocatedReads: rows && host ? host.relocatedReads : loop.relocatedReads,
         inclusive: loop.inclusive,
-        step: loop.step,
-        widened: loop.widened
+        step: folded ? folded.step : loop.step,
+        widened: loop.widened,
+        ...(folded ? { seed: folded.seed } : {}),
+        ...(rows ? { rows } : {})
       })
       for (const operation of candidate.operations) {
         const flag = flagAt(blockOfOperation.get(operation) ?? loop.preheader)
@@ -540,6 +712,19 @@ export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHois
       }
     }
   }
+
+  const regions = denseRegionsOf(
+    body,
+    hoists,
+    loops,
+    groupOfLoop,
+    new Set(folds.keys()),
+    arrays,
+    accesses,
+    blockOfOperation,
+    excusedOf,
+    constantTexts
+  )
 
   // A window whose array is reached THROUGH one (`grid[i]`) names it behind a
   // null check, and the preheader has no unconditional place to read a length.
@@ -578,7 +763,186 @@ export const denseLoopsOf = (body: IrBody, hoists: HoistPlan = loopInvariantHois
     }
   }
 
-  return { arrays, groups, accesses, lengths }
+  return { arrays, groups, accesses, lengths, regions }
+}
+
+/** One inner window's check, restated so the enclosing loop's preheader can run it. */
+interface FoldedWindow {
+  readonly reference: DenseReference
+  /** Keyed by the enclosing loop's counter: checked row by row (`DenseArray.rows`). */
+  readonly rows: boolean
+  readonly seed: IrOperand
+  readonly bound: IrOperand
+  readonly step: IrOperand | null
+  readonly bases: readonly DenseOffset[]
+}
+
+interface FoldContext extends WindowContext {
+  readonly dominance: DominatorTree
+}
+
+/**
+ * The inner loop's windows as checks its enclosing loop's preheader can run,
+ * or `null` when one of them cannot be.
+ *
+ * What the inner preheader would have read -- the counter's seed, the bound,
+ * the step, every base -- has to be nameable before the enclosing loop starts:
+ * a constant, or a value the enclosing loop does not define. The seed is the
+ * one write that starts the inner loop on every turn of the outer: the only
+ * write of the counter outside the inner loop and inside the outer one, in a
+ * block that dominates the inner preheader. An array has to be one the
+ * enclosing loop never reassigns, and a row has to be either loop-invariant
+ * there or keyed by the enclosing loop's own counter, which the check then
+ * walks. And the window's claim that nothing else touches the storage now
+ * has to hold across the whole enclosing loop, not only the inner one: the
+ * flag is computed once, and nothing between its computation and the last
+ * inner turn may resize what it vouched for. A holder may still be read --
+ * its other rows, its length -- but never written.
+ */
+const foldedWindowsOf = (
+  inner: LoopWindows,
+  innerLoop: NaturalLoop,
+  outer: LoopWindows,
+  outerLoop: NaturalLoop,
+  context: FoldContext
+): readonly FoldedWindow[] | null => {
+  const blocks = outerLoop.blocks
+  const nameable = (operand: IrOperand): IrOperand | null =>
+    context.operationOf.get(operand.value)?.kind === 'constant' ? operand : context.invariantOperand(operand, blocks)
+  if (inner.relocatedReads.length > 0) return null
+  const bound = nameable(inner.bound)
+  const step = inner.step === null ? null : nameable(inner.step)
+  if (bound === null || (inner.step !== null && step === null)) return null
+  const entries = (context.cellWrites.get(inner.counter) ?? []).filter(
+    (write) => blocks.has(write.block) && !innerLoop.blocks.has(write.block)
+  )
+  const entry = entries.length === 1 ? entries[0] : undefined
+  if (entry === undefined || !context.dominance.dominates(entry.block, inner.preheader)) return null
+  const seed = nameable(entry.value)
+  if (seed === null) return null
+  const unwritten = (reference: DenseReference): boolean =>
+    reference.kind === 'cell'
+      ? (context.cellWrites.get(reference.declaration) ?? []).every((write) => !blocks.has(write.block))
+      : reference.kind === 'value' && context.definedOutside(reference.operand.value, blocks)
+  const folded: FoldedWindow[] = []
+  for (const candidate of inner.candidates) {
+    if (candidate.typed !== null || candidate.wrapped) return null
+    const bases: DenseOffset[] = []
+    for (const base of candidate.bases) {
+      if (base === null) {
+        bases.push(null)
+        continue
+      }
+      const terms: { readonly operand: IrOperand; readonly negated: boolean }[] = []
+      for (const term of base.terms) {
+        const operand = nameable(term.operand)
+        if (operand === null) return null
+        terms.push({ operand, negated: term.negated })
+      }
+      bases.push({ terms })
+    }
+    const reference = candidate.reference
+    let placed: { readonly reference: DenseReference; readonly rows: boolean } | null = null
+    if (reference.kind !== 'element') placed = unwritten(reference) ? { reference, rows: false } : null
+    else if (unwritten(reference.holder)) {
+      const key = context.readsCell.get(reference.key.value) === outer.counter ? null : nameable(reference.key)
+      if (key !== null) placed = { reference: { ...reference, key }, rows: false }
+      else if (context.readsCell.get(reference.key.value) === outer.counter) placed = { reference, rows: true }
+    }
+    if (placed === null) return null
+    for (const held of candidate.watch)
+      for (const site of usesOfReference(held, context)) {
+        if (!blocks.has(site.block) || candidate.operations.includes(site.operation) || candidate.excused.includes(site.operation)) continue
+        const operation = site.operation
+        if (operation.kind === 'get' && (held !== candidate.reference || context.constantTexts.get(operation.key.value) === 'length'))
+          continue
+        return null
+      }
+    folded.push({ reference: placed.reference, rows: placed.rows, seed, bound, step, bases })
+  }
+  return folded
+}
+
+/** See `DenseRegion`: the loops whose stored windows may be handed to the backend as non-aliasing. */
+const denseRegionsOf = (
+  body: IrBody,
+  hoists: HoistPlan,
+  loops: readonly NaturalLoop[],
+  groupOfLoop: ReadonlyMap<number, number>,
+  folded: ReadonlySet<number>,
+  arrays: readonly DenseArray[],
+  accesses: ReadonlyMap<IrNonTerminatorOperation, DenseAccess>,
+  blockOfOperation: ReadonlyMap<IrNonTerminatorOperation, IrBlockId>,
+  excusedOf: ReadonlyMap<number, readonly IrNonTerminatorOperation[]>,
+  constantTexts: ReadonlyMap<IrValueId, string>
+): readonly DenseRegion[] => {
+  const stored = new Set<number>()
+  for (const [operation, access] of accesses) if (operation.kind === 'set') stored.add(access.array)
+  if (stored.size === 0) return []
+  const safe = borrowSafeOperationsOf(body)
+  const rendered = (blockId: IrBlockId): readonly IrNonTerminatorOperation[] => [
+    ...(body.blocks.get(blockId)?.operations ?? []),
+    ...(hoists.into.get(blockId) ?? [])
+  ]
+  const plain = (blockId: IrBlockId): boolean => {
+    const kind = body.blocks.get(blockId)?.terminator.kind
+    return kind === 'jump' || kind === 'branch' || kind === 'switch'
+  }
+  const lengthRead = (operation: IrNonTerminatorOperation): boolean =>
+    operation.kind === 'get' &&
+    operation.receiver.representation.kind === 'array-object' &&
+    constantTexts.get(operation.key.value) === 'length'
+  const inert = body.blockOrder.filter((blockId) => plain(blockId) && rendered(blockId).every((operation) => safe.has(operation)))
+  const regions: DenseRegion[] = []
+  for (const [index, group] of groupOfLoop) {
+    const loop = loops[index]
+    if (!loop || folded.has(index)) continue
+    const restricted = arrays.filter((array) => array.group === group && stored.has(array.ordinal) && array.rows === undefined)
+    if (restricted.length === 0) continue
+    const named = new Set(arrays.filter((array) => array.group === group).map((array) => array.ordinal))
+    let sound = true
+    for (const [operation, access] of accesses) {
+      const at = blockOfOperation.get(operation)
+      if (at === undefined || !loop.blocks.has(at)) continue
+      named.add(access.array)
+      if (access.flag !== group) sound = false
+    }
+    const excused = new Set([...named].flatMap((ordinal) => excusedOf.get(ordinal) ?? []))
+    for (const ordinal of named) {
+      const array = arrays[ordinal]
+      if (array?.rows !== undefined && array.group !== group) sound = false
+    }
+    for (const blockId of loop.blocks) {
+      if (!plain(blockId)) sound = false
+      for (const operation of rendered(blockId))
+        if (!safe.has(operation) && !accesses.has(operation) && !excused.has(operation) && !lengthRead(operation)) sound = false
+    }
+    if (!sound) continue
+    const distinct: { readonly restricted: number; readonly other: number }[] = []
+    for (const own of restricted)
+      for (const ordinal of named) {
+        const other = arrays[ordinal]
+        if (!other || other === own) continue
+        // Two typed arrays are views, and two different views can name the
+        // same bytes of one buffer at any element width -- so a typed window
+        // is checked against every other typed window, by the bytes each one
+        // spans. An Array's cells are its own allocation, which no view and
+        // no Array of another element carrier can reach.
+        if ((other.typed === null) !== (own.typed === null)) continue
+        if (own.typed === null && representationKey(other.element) !== representationKey(own.element)) continue
+        if (restricted.includes(other) && other.ordinal < own.ordinal) continue
+        distinct.push({ restricted: own.ordinal, other: ordinal })
+      }
+    regions.push({
+      group,
+      header: loop.header,
+      blocks: [...loop.blocks],
+      inert: inert.filter((blockId) => !loop.blocks.has(blockId)),
+      restricted: restricted.map((array) => array.ordinal),
+      distinct
+    })
+  }
+  return regions
 }
 
 /**
@@ -589,6 +953,7 @@ interface LoopWindows {
   readonly preheader: IrBlockId
   readonly counter: DeclarationId
   readonly bound: IrOperand
+  readonly relocatedReads: readonly IrValueId[]
   readonly inclusive: boolean
   readonly step: IrOperand | null
   readonly widened: boolean
@@ -613,8 +978,17 @@ const loopWindowsOf = (
   const [left, right] = test.operands
   if (!left || !right) return null
   const counter = context.readsCell.get(left.value)
-  const bound = counter === undefined ? null : context.invariantOperand(right, loop.blocks)
-  if (counter === undefined || bound === null) return null
+  if (counter === undefined) return null
+  const invariantBound = context.invariantOperand(right, loop.blocks)
+  // A bound read from a cell this body never writes -- a closure capture, a
+  // module binding -- is re-read by the test on every turn, and whether it can
+  // change under a call the loop makes is the target's capture layout, not
+  // something the IR states. The window takes it conditionally and the
+  // target admits it only when its own hoist plan moved the read out.
+  const boundCell = invariantBound === null ? context.readsCell.get(right.value) : undefined
+  const relocatedReads = boundCell !== undefined && (context.cellWrites.get(boundCell) ?? []).length === 0 ? [right.value] : []
+  const bound = invariantBound ?? (relocatedReads.length > 0 ? right : null)
+  if (bound === null) return null
   // Exactly one advance, by an amount the preheader can name. Several
   // advances, or a step the loop itself computes, and "the counter never
   // exceeds the bound" stops being something the preheader can check.
@@ -637,6 +1011,7 @@ const loopWindowsOf = (
     preheader,
     counter,
     bound,
+    relocatedReads,
     inclusive: test.operator === '<=',
     step,
     widened: advanceReachesAnAccess(loop, body, graph, advance.block, counter),
@@ -698,6 +1073,8 @@ const stepOf = (
 
 interface WindowCandidate {
   readonly reference: DenseReference
+  readonly watch: readonly DenseReference[]
+  readonly excused: readonly IrNonTerminatorOperation[]
   readonly element: Representation
   readonly typed: TypedArrayElementDomain | null
   readonly wrapped: boolean

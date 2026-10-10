@@ -1,4 +1,4 @@
-// The MongoDB driver's `deleteOne(filter: Filter<TSchema> = {})` defaults a
+// A database client's `deleteOne(filter: Filter<TSchema> = {})` defaults a
 // query document -- an open record of optional operators plus an index
 // signature -- to the empty literal. The empty literal IS such a document with
 // nothing present: no declared operator and no indexed key.

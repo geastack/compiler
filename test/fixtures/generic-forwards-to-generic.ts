@@ -1,8 +1,8 @@
 // A generic that calls ANOTHER generic, forwarding its own type parameter.
 //
-// This is the shape behind mongodb's `executeOperation` -> `tryOperation` and
-// `resolveOptions`'s `Object.assign`: two source sites that were 294 of the
-// CMAP-ping probe's unmet obligations. They looked like 98 distinct carriers
+// This is the shape behind a database client's `executeOperation` ->
+// `tryOperation` and `resolveOptions`'s `Object.assign`: two source sites that
+// were 294 of a connection-pool probe's unmet obligations. They looked like 98 distinct carriers
 // until the `@N` suffixes in the compass were read as monomorphization copy
 // ordinals rather than as sites. Rank by root, never by row.
 //

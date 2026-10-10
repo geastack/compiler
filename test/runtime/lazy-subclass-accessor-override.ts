@@ -1,7 +1,7 @@
 // A LIGHTWEIGHT SUBCLASS THAT OVERRIDES ITS BASE'S ACCESSORS AND KEEPS ITS
 // STATE ON SYMBOL KEYS.
 //
-// This is the shape `@hono/node-server`'s `requestPrototype` expresses through
+// This is the shape an HTTP server adapter's request prototype expresses through
 // prototype surgery -- an object whose `[[Prototype]]` is set to
 // `Request.prototype`, whose members are installed with `Object.defineProperty`
 // and whose instances are minted with `Object.create` -- written as the class

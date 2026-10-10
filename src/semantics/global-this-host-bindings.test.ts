@@ -6,11 +6,13 @@ import { compile } from '../compiler.js'
 import { noPluginCapabilities, type CompilerPlugin } from '../plugins/model.js'
 import { createIdentityTable } from './normalize/identities.js'
 import { indexValueFlow } from './normalize/flow/value-flow.js'
-import { attachClosedScriptScope } from './normalize/flow/targets.js'
+import { attachClosedScriptScope, attachStatedModuleSet } from './normalize/flow/targets.js'
 import { censusGlobalHostMutations, type GlobalHostMutationTaint } from './normalize/global-host-mutations.js'
 import { censusParameterBindings } from './normalize/parameter-bindings.js'
 import { wholeProgram } from './normalize/reachability.js'
 import { censusUnresolvableNames } from './normalize/unresolvable-names.js'
+import { createCensusComputedKeysOf } from './normalize/host-mutation-computed-keys.js'
+import { closedCallableAuthorityOf } from './normalize/flow/callable-reach.js'
 import type { DeclarationId } from '../identity/ids.js'
 
 const hostDeclaration = resolve('test/fixtures/global-this-host-bindings.d.ts')
@@ -31,7 +33,9 @@ const globalHostMutationAuditOf = (
   nativeReceiverNames: readonly string[] = [],
   publishedTypeProvider?: (checker: ts.TypeChecker, file: ts.SourceFile) => (expression: ts.Expression) => ts.Type,
   useSettledCalls = false,
-  modules: ReadonlyMap<string, string> = new Map()
+  modules: ReadonlyMap<string, string> = new Map(),
+  computedKeys = false,
+  statedModules = false
 ): GlobalHostMutationAudit => {
   const options: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES2022,
@@ -100,6 +104,10 @@ const globalHostMutationAuditOf = (
   // ordinary member call cannot prove its callee. Real compilation states the
   // same boundary (`ProgramInput.closedScriptScope`); see closed-script-scope.test.ts.
   attachClosedScriptScope(flow, { files: new Set(files) })
+  // Real compilation states its module set too (`ProgramInput`): the root is
+  // the entry, every other source an in-program module whose importers are
+  // all here.
+  if (statedModules) attachStatedModuleSet(flow, { files, entries: [file] })
   const taint = censusGlobalHostMutations(
     checker,
     identities,
@@ -112,7 +120,20 @@ const globalHostMutationAuditOf = (
     nativeReceiverSymbols,
     nativeConstructorSymbols,
     publishedTypeProvider?.(checker, file) ??
-      (parameters ? (expression) => parameters.typeAt(expression) ?? checker.getTypeAtLocation(expression) : undefined)
+      (parameters ? (expression) => parameters.typeAt(expression) ?? checker.getTypeAtLocation(expression) : undefined),
+    undefined,
+    computedKeys
+      ? createCensusComputedKeysOf(
+          checker,
+          flow,
+          closedCallableAuthorityOf(
+            checker,
+            flow,
+            (value) => checker.getTypeAtLocation(value),
+            () => undefined
+          )
+        )
+      : undefined
   )
   return { taint, bindings }
 }
@@ -317,6 +338,18 @@ test('shared call attribution carries actual callee mutations before and after p
   // frame. Closed caller inference must not discard that publication.
   for (const settledCalls of [false, true])
     assert.ok(globalHostMutationAuditOf(source.replace('export {}', ''), names, [], undefined, settledCalls).taint.has('*'))
+  for (const invocation of [
+    'const scope = globalThis; invoke(new Writer(), scope)',
+    'const holder = { scope: globalThis }; invoke(new Writer(), holder.scope)',
+    'function forward(scope) { invoke(new Writer(), scope) }; forward(globalThis)'
+  ]) {
+    const aliased = source.replace('invoke(new Writer(), globalThis)', invocation)
+    for (const settledCalls of [false, true]) {
+      const audit = globalHostMutationAuditOf(aliased, names, [], undefined, settledCalls)
+      assert.deepEqual([...audit.taint], [audit.bindings.get('hostProcess')])
+      assert.ok(globalHostMutationAuditOf(aliased.replace('export {}', ''), names, [], undefined, settledCalls).taint.has('*'), invocation)
+    }
+  }
   for (const alternative of [
     'declare function opaque(): any; invoke(opaque(), globalThis)',
     'declare function external(target): void; invoke({ write: external }, globalThis)',
@@ -562,20 +595,20 @@ test('authenticated globalThis host properties resolve to their native bindings'
         const viaComputed = globalThis['hostProcess'].getBuiltinModule('known')
         const buffer = globalThis['HostBuffer'].from('x')
         const missing = globalThis.hostProcess.getBuiltinModule('missing')
-        const bson = globalThis?.hostProcess?.getBuiltinModule?.('known')?.startupSnapshot
+        const snapshot = globalThis?.hostProcess?.getBuiltinModule?.('known')?.startupSnapshot
         const distinct = hostProcess === otherProcess
         if (!same) throw new Error('same-singleton')
         if (distinct) throw new Error('distinct-singleton')
         ;(globalThis as any).expando = 1
         if ((globalThis as any).expando !== 1) throw new Error('expando')
-        void [same, direct, viaGlobal, viaComputed, buffer, missing, bson, distinct]
+        void [same, direct, viaGlobal, viaComputed, buffer, missing, snapshot, distinct]
       `
       ]
     ]),
     plugins: [plugin]
   })
 
-  assert.ok(result.certificate, JSON.stringify(result.diagnostics.diagnostics))
+  assert.ok(result.certificate, JSON.stringify({ diagnostics: result.diagnostics.diagnostics, refusals: result.refusals }))
   assert.deepEqual(result.loweringBlockers, [])
   assert.deepEqual(result.emissionRefusals, [])
   const source = result.source ?? ''
@@ -590,7 +623,7 @@ test('authenticated globalThis host properties resolve to their native bindings'
   assert.match(source, /gea::runtime::globalThis\(\)/)
 })
 
-test('BSON double-optional builtin lookup keeps the deferred host method through the trailing optional read', () => {
+test('a double-optional builtin lookup keeps the deferred host method through the trailing optional read', () => {
   const result = compile({
     rootFileNames: [entry, hostDeclaration],
     projectFileName: isolatedProject,
@@ -600,7 +633,7 @@ test('BSON double-optional builtin lookup keeps the deferred host method through
         hostDeclaration,
         'interface SnapshotModule { startupSnapshot?: unknown } interface Process { getBuiltinModule?(id: string): SnapshotModule | undefined } declare var process: Process'
       ],
-      [entry, "const bson = globalThis?.process?.getBuiltinModule?.('v8')?.startupSnapshot; void bson"]
+      [entry, "const snapshot = globalThis?.process?.getBuiltinModule?.('v8')?.startupSnapshot; void snapshot"]
     ]),
     plugins: [nodeProcessPlugin]
   })
@@ -817,11 +850,11 @@ test('primitive intrinsic results and native receivers do not invent global alia
 
 // `nativeResult`'s union branch used to require EVERY member to independently
 // prove native, which an unauthenticated non-native member (here `string`,
-// standing in for the `null` three.js's `_gl` actually carries -- this
+// standing in for the `null` a nullable context field actually carries -- this
 // harness runs without `strictNullChecks`, under which `X | null` collapses
 // to plain `X` before this code ever sees a union at all) never can. That
 // made a reassigned local whose declared type is a native/primitive union --
-// exactly the shape three.js's `_gl` has at any call the compiler had not
+// exactly the shape such a nullable field has at any call the compiler had not
 // already narrowed -- answer "not proven native" at every write, so an
 // opaque sink receiving it was treated as though it might be handed the
 // global object. A primitive member carries no identity that could BE the
@@ -928,15 +961,15 @@ test('a typed callback result publishes its primitive carrier through parameter 
   assert.deepEqual([...audit.taint], [])
 })
 
-// `renderObject`/`renderObjects` mirror three.js's WebGLRenderer: a
+// `renderObject`/`renderObjects` mirror a JS renderer module: a
 // module-private helper with an unannotated parameter, called only by name
 // from other module-private helpers, all the way back to a real allocation.
-// Nobody ever reassigns `camera`, so the OLD rule ("no body write means no
+// Nobody ever reassigns `viewer`, so the OLD rule ("no body write means no
 // evidence") sealed every one of these to `OPAQUE_UNKNOWN` even though the
-// value handed to the opaque `unknown()` sink is provably a fresh `Camera`
+// value handed to the opaque `unknown()` sink is provably a fresh `Viewer`
 // instance, never `globalThis`. `enumeratedParameterValuesOf` closes exactly
 // this gap by asking every closed caller what it actually passed. This does
-// not assert an empty taint set outright: `camera`'s CHECKER type is still
+// not assert an empty taint set outright: `viewer`'s CHECKER type is still
 // bare `any` (this fix carries provenance, not a type), so the pre-existing,
 // unrelated `inheritedPrototypesOf` conservatism still lists Object/Array/Map/
 // WeakMap as reachable intrinsics -- the one thing this fix answers is
@@ -946,35 +979,35 @@ test('an unannotated parameter carries call-site provenance instead of sealing t
     export {}
     declare var hostProcess: object
     declare function unknown(value: unknown): void
-    class Camera {}
-    function renderObject(camera) {
-      unknown(camera)
+    class Viewer {}
+    function renderObject(viewer) {
+      unknown(viewer)
     }
-    function renderObjects(camera) {
-      renderObject(camera)
+    function renderObjects(viewer) {
+      renderObject(viewer)
     }
-    renderObjects(new Camera())
+    renderObjects(new Viewer())
   `)
   assert.equal(audit.taint.has('*'), false, [...audit.taint].join(','))
 })
 
 // The negative arm the soundness rule demands. `renderObject` is never
 // CALLED anywhere in this program -- only passed as a bare VALUE to the
-// opaque sink `unknown`, so `writesOf(camera)` is empty for the ordinary
+// opaque sink `unknown`, so `writesOf(viewer)` is empty for the ordinary
 // reason (no call site exists to attribute an argument to it at all, not
 // merely "no reassignment"), and `enumeratedParameterValuesOf`'s own
 // closed-caller proof (`flow/callable-reach.ts`'s `classifyMention`) must
 // read that escape as an "open" mention and refuse to enumerate callers.
-// Only a `null` from that proof may still seal `camera` to `OPAQUE_UNKNOWN`
+// Only a `null` from that proof may still seal `viewer` to `OPAQUE_UNKNOWN`
 // here; this is that path exercised for real, not merely asserted.
 test('a parameter of a function passed as a value cannot be enumerated and still seals to opaque', () => {
   const audit = globalHostMutationAuditOf(`
     export {}
     declare var hostProcess: object
     declare function unknown(value: unknown): void
-    class Camera {}
-    function renderObject(camera) {
-      unknown(camera)
+    class Viewer {}
+    function renderObject(viewer) {
+      unknown(viewer)
     }
     unknown(renderObject)
   ${globalReachesData}
@@ -982,12 +1015,12 @@ test('a parameter of a function passed as a value cannot be enumerated and still
   assert.ok(audit.taint.has('*'), [...audit.taint].join(','))
 })
 
-// Three's whole renderer is written as REVEALING MODULE factories:
-// `function WebGLProperties() { ... return { get, remove } }`, allocated once
+// A renderer written as REVEALING MODULE factories:
+// `function Properties() { ... return { get, remove } }`, allocated once
 // with `new`, into a `let` slot declared in the enclosing constructor function
 // and written from a nested `initGLContext()`. Every later `properties.remove(
-// ... )` is a method call on that slot, and the census wildcarded all 102 of
-// them in `WebGLRenderer.js` alone. What `new` yields here is the returned
+// ... )` is a method call on that slot, and the census wildcarded every one
+// of them. What `new` yields here is the returned
 // object LITERAL -- a fresh ordinary object allocated by this program, which
 // can never be `globalThis` or an intrinsic surface -- so the receiver has a
 // published representation and the call owes no wildcard.
@@ -1076,7 +1109,7 @@ for (const [name, source] of [
   })
 }
 
-test('an ambient native constructor publishes the BSON TextDecoder shape', () => {
+test('an ambient native constructor publishes a fatal utf8 TextDecoder shape', () => {
   const audit = globalHostMutationAuditOf(
     `
       export {}
@@ -1224,6 +1257,108 @@ test('an equivalent authenticated global remains fail-closed as a method receive
   assert.ok(audit.taint.has('*'), [...audit.taint].join(','))
 })
 
+// A feature-probed global call: `const g = globalThis as unknown as { fetch?: ... }; g.fetch(url)`.
+// Through the global object an unwritten ambient global function is the bare call.
+test('an ambient global function called through the global object is the bare call', () => {
+  const audit = globalHostMutationAuditOf(`
+    interface Process {}
+    declare var hostProcess: Process
+    declare function hostSend(url: string): void
+    const g = globalThis as unknown as { hostSend?: (url: string) => void }
+    if (g.hostSend) g.hostSend('about:blank')
+  `)
+  assert.ok(!audit.taint.has('*'), [...audit.taint].join(','))
+})
+
+test('an ambient global function key the program writes keeps the global receiver fail-closed', () => {
+  const audit = globalHostMutationAuditOf(`
+    interface Process {}
+    declare var hostProcess: Process
+    declare function hostSend(url: string): void
+    const g = globalThis as unknown as { hostSend?: (url: string) => void }
+    if (g.hostSend) g.hostSend('about:blank')
+    ;(globalThis as any).hostSend = function (this: any) { this.hostProcess = undefined }
+  `)
+  assert.ok(audit.taint.has('*'), [...audit.taint].join(','))
+})
+
+// A `globalField('navigator')` helper: a computed read of the global object
+// under a closed key set selects those keys, not the global object itself.
+const globalFieldSource = (keys: readonly string[], receiverKey = "'navigator'"): string => `
+  export {}
+  interface Process {}
+  declare var hostProcess: Process
+  function globalField(name: string): unknown {
+    return (globalThis as unknown as Record<string, unknown>)[name]
+  }
+  ${keys.map((key) => `globalField('${key}')`).join('\n  ')}
+  const nav = globalField(${receiverKey}) as { getGamepads?: () => unknown } | undefined
+  if (nav && nav.getGamepads) nav.getGamepads()
+`
+
+test('a closed computed read of the global object selects only its keys', () => {
+  const audit = globalHostMutationAuditOf(globalFieldSource(['document']), ['hostProcess'], [], undefined, false, new Map(), true)
+  assert.ok(!audit.taint.has('*'), [...audit.taint].join(','))
+})
+
+test('a closed computed read of the global object that names the global object stays fail-closed', () => {
+  // The key is selected per call site, so it is the receiver's own call that
+  // must name the global object.
+  const audit = globalHostMutationAuditOf(
+    globalFieldSource(['globalThis'], "'globalThis'"),
+    ['hostProcess'],
+    [],
+    undefined,
+    false,
+    new Map(),
+    true
+  )
+  assert.ok(audit.taint.has('*'), [...audit.taint].join(','))
+})
+
+test('an exported global-field helper whose every importer passes a literal selects only those keys', () => {
+  // A shared globals module: the helper is exported, so its key parameter's
+  // values are the arguments at every importing call site -- all literals.
+  const helper = `export function globalField(name: string): unknown {
+    return (globalThis as unknown as Record<string, unknown>)[name]
+  }`
+  const source = `import { globalField } from './global-host-import-source.js'
+    interface Process {}
+    declare var hostProcess: Process
+    interface NavigatorLike { getGamepads?: () => (number | null)[] }
+    interface EventTargetLike { addEventListener?: (type: string, handler: (event: never) => void) => void }
+    class Input {
+      private eventTarget(): EventTargetLike | null {
+        const win = globalField('window') as EventTargetLike | undefined
+        if (win && win.addEventListener) return win
+        return null
+      }
+      read(): number {
+        this.eventTarget()
+        const nav = globalField('navigator') as NavigatorLike | undefined
+        if (!nav || !nav.getGamepads) return 0
+        const pads = nav.getGamepads()
+        return pads.length
+      }
+    }
+    new Input().read()`
+  const audit = globalHostMutationAuditOf(
+    source,
+    ['hostProcess'],
+    [],
+    undefined,
+    true,
+    new Map([[resolve('test/fixtures/global-host-import-source.ts'), helper]]),
+    true,
+    true
+  )
+  assert.ok(!audit.taint.has('*'), [...audit.taint].join(','))
+})
+
+test('an open computed read of the global object stays fail-closed', () => {
+  assert.ok(globalHostMutationAuditOf(globalFieldSource(['document'], 'String(Date.now())')).taint.has('*'))
+})
+
 test('a local receiver cast from the global object does not acquire object provenance', () => {
   assertWildcardHostTaint(`
     class LocalValue { text(): string { return 'local' } }
@@ -1232,7 +1367,7 @@ test('a local receiver cast from the global object does not acquire object prove
   `)
 })
 
-// `hono-bridge`'s false positive: `@hono/node-server`'s own `context.ts` spells
+// A false positive seen in a server library: its source spells
 // a parameter type as `globalThis.ResponseInit` -- a dotted TYPE reference
 // (`ts.QualifiedName`), never a read of `globalThis` as a value. `ts.isExpression`
 // is a pure syntax-kind test and answered `true` for that qualifier anyway
@@ -1369,8 +1504,8 @@ test('a real global escape through an asserted native receiver remains fail-clos
 // `calleeHasNoKeySetEffect` in `global-host-mutations.ts` clears the
 // receiver-wildcard for a member call the checker resolved to a
 // key-set-inert standard-library declaration (`sort`/`has`/`add`/`slice`/
-// `subarray`) -- three's `attribute.updateRanges.sort(...)` and
-// `materialShaders.has/add(...)` reach the census exactly this way: an
+// `subarray`) -- `attribute.updateRanges.sort(...)` and
+// `shaderCache.has/add(...)` in a JS library reach the census exactly this way: an
 // unannotated JS value the checker still types concretely, but that never
 // earns a `publishedRepresentationOf` proof. The two tests below are the
 // sound/unsound pair the hard constraint on this rule requires: clearing
@@ -1689,8 +1824,8 @@ test('an unresolved call result writing an exact key records only that key', () 
   assert.deepEqual([...audit.taint.surfaceKeys.names].sort(), ['nonHostExpando', 'otherExpando'])
 })
 
-// `stateMap[ wireframe ] = state` in three's WebGLBindingStates.js, where
-// `wireframe = (material.wireframe === true)`: the key is a `===` result,
+// `stateMap[ wireframe ] = state` in a JS library, where
+// `wireframe = (options.wireframe === true)`: the key is a `===` result,
 // typed `boolean` by the checker. `ToPropertyKey` of a boolean can only be
 // "true" or "false" (ECMA-262 7.1.14), and `boolean` is its own native
 // scalar carrier (`src/representation/primitives.ts`), so a program cannot
@@ -2037,6 +2172,31 @@ for (const [name, source] of [
 ] as const) {
   test(`${name} call flow taints only the exact host binding`, () => assertExactHostProcessTaint(source))
 }
+
+test('a closed logical receiver continuation retains exact writes and actual escapes', () => {
+  for (const settledCalls of [false, true]) {
+    const prefix = 'declare var hostProcess: object;'
+    const exact = globalHostMutationAuditOf(
+      `${prefix} function write(this: any): void { this.hostProcess = undefined }
+       const scope = globalThis; write.call(scope)`,
+      ['hostProcess'],
+      [],
+      undefined,
+      settledCalls
+    )
+    assert.deepEqual([...exact.taint], [exact.bindings.get('hostProcess')])
+    const escaped = globalHostMutationAuditOf(
+      `${prefix} declare function opaque(value: unknown): void;
+       function write(this: any): void { opaque(this) }
+       write.call(globalThis)`,
+      ['hostProcess'],
+      [],
+      undefined,
+      settledCalls
+    )
+    assert.ok(escaped.taint.has('*'), 'actual receiver escape still publishes the global object')
+  }
+})
 
 for (const [name, mutation] of [
   [
@@ -2519,7 +2679,7 @@ test('a typeof-guarded host namespace re-export is still a path after its arms a
     ]),
     plugins: [plugin]
   })
-  assert.ok(result.certificate, JSON.stringify(result.diagnostics.diagnostics))
+  assert.ok(result.certificate, JSON.stringify({ diagnostics: result.diagnostics.diagnostics, refusals: result.refusals }))
   assert.deepEqual(result.loweringBlockers, [])
   assert.deepEqual(result.emissionRefusals, [])
   assert.match(result.source ?? '', /test::buffer_from/)
@@ -2748,69 +2908,69 @@ ${globalReachesData}`,
 })
 
 test('a method call on an unmodelled-frame source-class result is not a global-object candidate', () => {
-  // Mirrors the three.js app's `this.coplanarPoint( _vector1 ).applyMatrix4( matrix )`:
+  // Mirrors a library's `this.coplanarPoint( _vector1 ).applyMatrix( matrix )`:
   // `coplanarPoint`'s call-frame (how its argument forwards into the callee's
   // body) is a shape `closedCallableAuthorityOf` does not model -- the class'
   // exported instance is what makes the receiver family unenumerable, the
   // same "open; deliberate" boundary `SEMANTIC-AUTHORITY.md` item D names --
   // so the call is a "refused source invocation". Its declared/inferred
-  // result type is still an ordinary source class, `Vector3`, never
+  // result type is still an ordinary source class, `Vec3`, never
   // `globalThis`, and the unmodelled frame must not make
-  // `.applyMatrix4(...)`'s receiver opaque on that account.
+  // `.applyMatrix(...)`'s receiver opaque on that account.
   const source = `
     declare var hostProcess: object
-    class Vector3 {
+    class Vec3 {
       x = 0
-      copy(v: Vector3): Vector3 { this.x = v.x; return this }
-      applyMatrix4(_m: number): Vector3 { return this }
+      copy(v: Vec3): Vec3 { this.x = v.x; return this }
+      applyMatrix(_m: number): Vec3 { return this }
     }
     class Plane {
-      normal = new Vector3()
-      coplanarPoint(target: Vector3): Vector3 { return target.copy(this.normal) }
-      distanceToPoint(matrix: number): Vector3 {
-        const _vector1 = new Vector3()
-        return this.coplanarPoint(_vector1).applyMatrix4(matrix)
+      normal = new Vec3()
+      coplanarPoint(target: Vec3): Vec3 { return target.copy(this.normal) }
+      distanceToPoint(matrix: number): Vec3 {
+        const _vector1 = new Vec3()
+        return this.coplanarPoint(_vector1).applyMatrix(matrix)
       }
     }
     export const plane = new Plane()
     plane.distanceToPoint(1)
   `
-  // Vector3's own `x` field write still taints its own binding -- ordinary,
+  // Vec3's own `x` field write still taints its own binding -- ordinary,
   // unrelated bookkeeping -- but the unmodelled frame must not cost the
   // program its wildcard.
   assert.equal(globalHostMutationAuditOf(source, ['hostProcess'], [], undefined, true).taint.has('*'), false)
 })
 
 test('a super() call forwards its arguments into the base constructor like new Base() does', () => {
-  // three's `class DirectionalLight extends Light { constructor( color, intensity ) { super( color, intensity ) } }`:
+  // `class Directional extends Emitter { constructor( color, intensity ) { super( color, intensity ) } }`:
   // the base body is program code selected by the heritage clause, so an
   // opaque argument reaching it is no more a mutation of the host than the
-  // same argument at `new Light( ... )` is -- which the census never asks about.
+  // same argument at `new Emitter( ... )` is -- which the census never asks about.
   const classes = `
     declare function opaque(): any;
-    class Light { color: unknown; intensity: number; constructor(color: unknown, intensity = 1) { this.color = color; this.intensity = intensity } }
-    class Directional extends Light { constructor(color: unknown, intensity: number) { super(color, intensity) } }
+    class Emitter { color: unknown; intensity: number; constructor(color: unknown, intensity = 1) { this.color = color; this.intensity = intensity } }
+    class Directional extends Emitter { constructor(color: unknown, intensity: number) { super(color, intensity) } }
   `
   const source = `export {}; declare var hostProcess: object; ${classes} new Directional(1, opaque());`
   assert.equal(globalHostMutationTaintOf(source).has('*'), false, source)
   // A base whose binding the program rewrites selects no single constructor: the wildcard stands.
-  const rewritten = `export {}; declare var hostProcess: object; ${classes} Light = opaque(); new Directional(1, opaque()); ${globalReachesData}`
+  const rewritten = `export {}; declare var hostProcess: object; ${classes} Emitter = opaque(); new Directional(1, opaque()); ${globalReachesData}`
   assert.equal(globalHostMutationTaintOf(rewritten).has('*'), true, rewritten)
 })
 
 test('a call through a member slot that only ever holds null runs nothing and authenticates no callee', () => {
-  // three's `Texture`: `this.onUpdate = null`, guarded `if ( texture.onUpdate ) texture.onUpdate( texture )`.
-  const texture = 'class Texture { onUpdate: ((texture: Texture) => void) | null = null; version = 0 }'
-  const upload = 'function upload(texture: Texture) { if (texture.onUpdate) texture.onUpdate(opaque()) }'
-  const source = `export {}; declare var hostProcess: object; declare function opaque(): any; ${texture} ${upload} upload(new Texture());`
+  // A library class with `this.onUpdate = null`, guarded `if ( resource.onUpdate ) resource.onUpdate( resource )`.
+  const resource = 'class Resource { onUpdate: ((resource: Resource) => void) | null = null; version = 0 }'
+  const upload = 'function upload(resource: Resource) { if (resource.onUpdate) resource.onUpdate(opaque()) }'
+  const source = `export {}; declare var hostProcess: object; declare function opaque(): any; ${resource} ${upload} upload(new Resource());`
   assert.equal(globalHostMutationTaintOf(source).has('*'), false, source)
   // A store of an opaque value into the slot makes it callable again: the wildcard stands.
-  const stored = `${source} const held = new Texture(); held.onUpdate = opaque(); upload(held); ${globalReachesData}`
+  const stored = `${source} const held = new Resource(); held.onUpdate = opaque(); upload(held); ${globalReachesData}`
   assert.equal(globalHostMutationTaintOf(stored).has('*'), true, stored)
 })
 
 test('a `new` whose constructor is compiled here allocates a fresh object, not a possible global', () => {
-  // three's instances -- `new Vector3()`, `new Scene()` -- are allocations
+  // Library instances -- `new Vec3()`, `new Group()` -- are allocations
   // this program made. Whether the representation layer could PLACE the class
   // is a separate question from whether the value could be `globalThis`, and
   // seeding the construction opaque answered the second with the first: every
@@ -2828,10 +2988,10 @@ test('a `new` whose constructor is compiled here allocates a fresh object, not a
 })
 
 test('a static field written on the class does not replace the class or its methods', () => {
-  // three's `Object3D.DEFAULT_UP = new Vector3( 0, 1, 0 )` is a static field,
-  // not a rebinding of `Object3D`. Counting it as a write that could put a
-  // different callable in the path made every `this.scene.add( ... )`,
-  // `pilot.add( ... )` and `super.copy( ... )` in the program file a wildcard.
+  // `Node.DEFAULT_UP = new Vec3( 0, 1, 0 )` is a static field,
+  // not a rebinding of `Node`. Counting it as a write that could put a
+  // different callable in the path made every `this.root.add( ... )`,
+  // `group.add( ... )` and `super.copy( ... )` in the program file a wildcard.
   const declarations = 'declare function opaque(): any; class Holder { static DEFAULT = 1; add(value: unknown) {} }'
   const source = `export {}; declare var hostProcess: object; ${declarations}
     Holder.DEFAULT = 2

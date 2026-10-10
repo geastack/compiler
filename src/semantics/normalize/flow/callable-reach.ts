@@ -2,6 +2,7 @@ import { runtimeParametersOf } from './targets.js'
 import { seededOriginSolvers } from './seeded-origins.js'
 import {
   enterHypothesisGuard,
+  answerDependsOn,
   hypothesisSettledAsTruth,
   hypothesisStats,
   exitHypothesisGuard,
@@ -14,11 +15,13 @@ import {
 } from './proof-hypotheses.js'
 import { unwrapErasedExpression } from '../producers/erasure.js'
 import ts from 'typescript'
+import { isGlobalObjectAssign } from '../derived-expression-type.js'
 import {
   heritageClassOrInterfaceOf,
   isClassSpelledSourceClass,
   isConstructorFunction,
   type FlowCallSite,
+  type FlowInvocationOperands,
   type SourceClass,
   type ValueFlowIndex,
   type ValueWrite
@@ -45,6 +48,7 @@ import { callableArrayTargetsOf, closedCallableTargetsOf, type CallableArrayOrig
 import { arrayStoredValuesOf } from './array-element-continuation.js'
 import { nativeArrayProtocolPlanOf, type NativeCollectionProtocolPlan } from './native-collection-protocol.js'
 import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from '../deferred-intrinsic-protocols.js'
+import { sourceGlobalCallableBindingIsClosed } from './source-global-binding.js'
 import { recordMethodCallTargetsOf, sourceRecordDataWritePlanOf } from './source-record-data.js'
 import { nodePathToken, nodeSetToken } from './node-path-token.js'
 import { objectLiteralEntryKeyOf, recordLiteralReceiverClosed } from './record-alias-closure.js'
@@ -54,9 +58,11 @@ import {
   sourceInvocationFact,
   invocationValueContinuationsOf,
   invocationCompletionValuesOf,
+  type SourceInvocationFrame,
   type SourceInvocationFact
 } from './invocation-facts.js'
 import {
+  constructorInstalledMemberDeclarationsOf,
   declaredDataMemberAccess,
   reflectiveDefinitionMayInstallGetterOf,
   sourceClassConstructorSlotIsOriginal,
@@ -74,8 +80,73 @@ import { localBindingValuesOf, localBindingWritesAreComplete } from './value-pro
 import { computedKeySetOf, type ComputedKeySetAuthority } from './computed-key-set.js'
 import { callableCompletionValuesOf, constructionYieldsCompletionOf } from './callable-completions.js'
 import { sourceValueSessionOf } from './source-value-session.js'
-import { isGlobalObjectAssign } from './value-flow.js'
 import type { SharedProvenanceAnswer } from './origin-authority.js'
+import { settleProofMemoClaims, type ProvisionalProofMemo } from './proof-memo-settlement.js'
+
+interface JointSourceInvocationReceipt {
+  readonly call: ts.CallExpression
+  readonly operands: FlowInvocationOperands
+  readonly callee: ts.Expression
+  readonly receiver: ts.Expression | null
+  readonly args: readonly ts.Expression[]
+  readonly kind: FlowInvocationOperands['kind']
+  readonly explicitThis: boolean
+  readonly dispatch: FlowInvocationOperands['dispatch']
+  readonly frameArray: readonly SourceInvocationFrame[]
+  readonly frames: readonly {
+    readonly frame: SourceInvocationFrame
+    readonly body: ts.SignatureDeclaration
+    readonly layout: SourceInvocationFrame['layout']
+    readonly forwarding: SourceInvocationFrame['forwarding']
+    readonly completions: SourceInvocationFrame['completions']
+    readonly parameters: SourceInvocationFrame['parameters']
+    readonly receiverUses: SourceInvocationFrame['receiverUses']
+    readonly completionSummary: SourceInvocationFrame['completionSummary']
+    readonly receiver: SourceInvocationFrame['layout']['receiver']
+    readonly arguments: SourceInvocationFrame['layout']['arguments']
+  }[]
+  readonly requirements: readonly IntrinsicProtocolRequirement[]
+}
+const jointSourceInvocationReceipts = new WeakMap<ValueFlowIndex, WeakMap<SourceInvocationFact, JointSourceInvocationReceipt>>()
+
+/** The stamp describes provenance; only the exact fact minted by the joint
+ * target/frame authority carries permission. Clones and changed frames do not.
+ */
+export const sourceInvocationFactHasJointTargets = (flow: ValueFlowIndex, fact: SourceInvocationFact): boolean => {
+  const receipt = jointSourceInvocationReceipts.get(flow)?.get(fact)
+  return (
+    fact.targetAuthority === 'source-values' &&
+    receipt !== undefined &&
+    receipt.call === fact.call &&
+    receipt.operands === fact.operands &&
+    receipt.callee === fact.operands.callee &&
+    receipt.receiver === fact.operands.receiver &&
+    receipt.kind === fact.operands.kind &&
+    receipt.explicitThis === fact.operands.explicitThis &&
+    receipt.dispatch === fact.operands.dispatch &&
+    receipt.args.length === fact.operands.args.length &&
+    receipt.args.every((argument, index) => argument === fact.operands.args[index]) &&
+    receipt.frameArray === fact.frames &&
+    receipt.frames.length === fact.frames.length &&
+    receipt.requirements === fact.requirements &&
+    receipt.frames.every(
+      (entry, index) =>
+        entry.frame === fact.frames[index] &&
+        entry.body === entry.frame.body &&
+        entry.layout === entry.frame.layout &&
+        entry.layout.call === fact.call &&
+        entry.layout.body === entry.body &&
+        entry.layout.operands === fact.operands &&
+        entry.receiver === entry.layout.receiver &&
+        entry.arguments === entry.layout.arguments &&
+        entry.forwarding === entry.frame.forwarding &&
+        entry.completions === entry.frame.completions &&
+        entry.parameters === entry.frame.parameters &&
+        entry.receiverUses === entry.frame.receiverUses &&
+        entry.completionSummary === entry.frame.completionSummary
+    )
+  )
+}
 
 /** Source slots are stable per flow round; their resolved caller frames are proof-local. */
 interface MemberImplementationInventory {
@@ -140,8 +211,8 @@ const ownedConstructionReceiverWrappers = new WeakSet<ReceiverTypeAt>()
  * syntax alone -- never the `given` authority the wrapper closes over -- so
  * the answer is the same for every proof that asks about this expression.
  * Recomputing it inside a per-proof wrapper repeated the same two checker
- * lookups and an ancestor walk on every ask; a live three.js profile put that
- * at 6.5% of self time, the largest single cost after the proof memo itself.
+ * lookups and an ancestor walk on every ask; a live profile of a large library
+ * compile put that at 6.5% of self time, the largest single cost after the proof memo itself.
  */
 const ownedConstructionDeclaredTypes = new WeakMap<ValueFlowIndex, Map<ts.Expression, ts.Type | null>>()
 const ownedConstructionDeclaredTypeOf = (checker: ts.TypeChecker, flow: ValueFlowIndex, expression: ts.Expression): ts.Type | null => {
@@ -256,8 +327,8 @@ const callsOf = (flow: ValueFlowIndex) => {
  * this function hands the returned name to, already proves the escape
  * question for an ARBITRARY receiver via its own receiver/family walk, so
  * gating recognition to `this` here proves nothing extra; it only hides the
- * slot from that proof. Three's `mesh.onBeforeRender = function ( renderer,
- * object ) { ... }` -- `mesh` an ordinary variable, not `this` -- is exactly
+ * slot from that proof. `node.onRender = function ( renderer,
+ * object ) { ... }` -- `node` an ordinary variable, not `this` -- is exactly
  * an instance override of a class's own declared (empty) stub, and this
  * function returning null for it silently pushed every caller past the
  * closure proof and straight to a hard refusal, which is a stronger claim
@@ -305,7 +376,7 @@ const callableBindingIsWritten = (flow: ValueFlowIndex, declaration: ts.Declarat
  * caller -- but the two facts live one indirection apart, so a census looking
  * at the callback sees a value handed to a caller it cannot name, and a census
  * looking at `cb( ... )` sees a call whose callee has no declaration. Measured
- * on the three.js app: 169 unannotated parameters are refused
+ * on a large library compile: 169 unannotated parameters are refused
  * `function-escapes:unnamed:CallExpression` for exactly this, and every one of
  * them is a `function-value-dispatch` ABI publishing `dynamic` for a
  * parameter whose real type the program states at the call.
@@ -448,7 +519,7 @@ export interface ClosedValueOriginAuthority {
  * both; an authority minted per anchor -- `closedClassAllocationOriginsOf`
  * asks for one per EXPRESSION, `derived-expression-type` one per query --
  * with fresh closures gave every one of its proofs a key nothing else could
- * match, so the three.js app ran 17,000 distinct top-level walks that were the same
+ * match, so a large library compile ran tens of thousands of distinct top-level walks that were the same
  * few hundred questions.
  */
 const checkerTypeAtByChecker = new WeakMap<ts.TypeChecker, ReceiverTypeAt>()
@@ -524,6 +595,8 @@ export const closedClassAllocationOriginsOf = (
  */
 /** @semanticCategory generic-primitive */
 export interface ClosedInvocationAuthority extends ComputedKeySetAuthority {
+  /** Complete entered source frames, preserving their operand and consumer identities. */
+  readonly closedCallerSitesOf: (callable: ts.SignatureDeclaration) => readonly FlowCallSite[] | null
   /** Complete source bodies entered by this call, including member receivers. */
   readonly invocationFactOf: (call: ts.CallExpression) => SourceInvocationFact | null
   /** The call throws before entering any body: its callee cell only ever holds `null`/`undefined`. */
@@ -536,9 +609,9 @@ export interface ClosedInvocationAuthority extends ComputedKeySetAuthority {
    * that only needs "which bodies can this call enter" (a host-mutation
    * census asking whether a call can reach anything outside this program)
    * must not also demand `invocationFactOf`'s stricter promise, a complete
-   * argument-forwarding frame for every one of those bodies. Three's
-   * `properties.get( material )` -- `WebGLProperties()` is a plain factory
-   * function returning `{ get: get, ... }`, so `new WebGLProperties()` types
+   * argument-forwarding frame for every one of those bodies.
+   * `properties.get( item )` -- `Properties()` is a plain factory
+   * function returning `{ get: get, ... }`, so `new Properties()` types
    * `any` under the checker's own JS-constructor inference and no checker
    * declaration ever names this call's callee -- closes here exactly because
    * target identity is a separate fact from frame modelling.
@@ -585,9 +658,27 @@ export const closedCallableAuthorityOf = (
 }
 
 /**
+ * Every value the array `array` names can ever hold, under the shared
+ * closed-frame authority, or `null` when that set is not closed. For a census
+ * outside this module's own proofs; intrinsic obligations go to the caller's
+ * active ledger capture.
+ */
+export const closedArrayStoredValuesOf = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  array: ts.Expression
+): readonly ts.Expression[] | null =>
+  arrayStoredValuesOf(
+    checker,
+    flow,
+    array,
+    closedCallableAuthorityOf(checker, flow, checkerTypeAtOf(checker), argumentsUsesAtOf(checker, flow))
+  )
+
+/**
  * The array-callee extension of `closedCallableAuthorityOf`, for a consumer
  * that has to pass a real `CallableArrayOriginAuthority` to
- * `callableArrayTargetsOf` -- three's `EventDispatcher.dispatchEvent` calls
+ * `callableArrayTargetsOf` -- an event-emitter base class's dispatch method calls
  * every listener through `array[ i ].call( this, event )`, a computed
  * element read no symbol names, and closing it needs the same three
  * collection/protocol queries `closedMemberCallableUses` already builds for
@@ -612,7 +703,7 @@ export const closedArrayCalleeAuthorityOf = (
   /**
    * `callableArrayTargetsOf`'s own array-identity walk has no case for a
    * plain object used as a string-keyed RECORD of arrays (`this._listeners[
-   * type ]`, three's `EventDispatcher`) -- see the identical fallback and
+   * type ]`, an event-emitter base class's listener table) -- see the identical fallback and
    * its full rationale on `elementCalleeAuthority` in
    * `closedMemberCallableUses` above, which this mirrors for the external
    * caller (`parameter-bindings.ts`'s alias-declarations census) that has no
@@ -656,7 +747,7 @@ export const closedArrayCalleeAuthorityOf = (
  * per flow: named writes by key, computed-key writes, and the intrinsic
  * mutators that define or replace properties on an object they are handed.
  * `memberSlotWritesClosed` asks this per slot; scanning the reachable access
- * list per ask would be hundreds of keys times every access in three.
+ * list per ask would be hundreds of keys times every access in a large library.
  */
 interface SlotWriteInventory {
   readonly namedWrites: ReadonlyMap<string, readonly (ts.PropertyAccessExpression | ts.ElementAccessExpression)[]>
@@ -817,7 +908,7 @@ type OpenUseKind = 'receiver' | 'containing-object' | 'member-reference-inventor
 /**
  * Answers to member-closure proofs, shared across the round.
  *
- * A three.js compile runs millions of these proofs over a few hundred
+ * A large library compile runs millions of these proofs over a few hundred
  * distinct members. A top-level proof assumes nothing on entry, so its answer
  * is a pure function of (member, counted calls, receiverTypeAt,
  * argumentsUsesAt, valueMode). A NESTED proof's answer holds only under the
@@ -828,7 +919,7 @@ type OpenUseKind = 'receiver' | 'containing-object' | 'member-reference-inventor
  * proof would run the same way -- and a top-level answer (`assumed` empty)
  * is reusable anywhere. Before this, nested proofs were never cached at all,
  * and once the graph session started asking the legacy walk from inside its
- * own solve, the three.js app ran 4.9 million nested proofs in its first 150 s with
+ * own solve, one such compile ran 4.9 million nested proofs in its first 150 s with
  * 6,000 memo hits, most of them recomputing the same member under the same
  * handful of parked families.
  *
@@ -868,21 +959,34 @@ interface ProofAnswer {
    */
   readonly escaped: ReadonlySet<object>
   readonly closed: boolean
-  readonly requirements: readonly IntrinsicProtocolRequirement[]
+  readonly requirements: IntrinsicProtocolRequirement[]
   readonly opens: readonly (readonly [ts.Expression, OpenUseKind])[]
+  /** How often this answer has been replayed; decides which conditional answer a full bucket gives up. */
+  uses: number
 }
 type ReceiverTypeAtFn = (expression: ts.Expression) => ts.Type | null
 type ArgumentsUsesAtFn = (declaration: ts.SignatureDeclaration) => readonly ts.Identifier[] | undefined
 /**
  * Indexed by every identity-compared part of the key before the list, so a
  * lookup scans only answers that can match. A flat list per member scanned
- * 120 million entries in the three.js app's first 150 s: value-mode proofs mint a
+ * 120 million entries in a large library compile's first 150 s: value-mode proofs mint a
  * fresh `valueMode` object per call, so every one of them was a miss that
  * still walked the 5,000 entries before it.
  */
+/**
+ * A value mode with no `identity` is a fresh object per call and can only ever
+ * match itself, so it is held WEAKLY: a strong `Map` key kept every one of them
+ * -- and the answer list under it, whose condition sets are the bulk of a
+ * proof's memory -- for the rest of the compile (31,000 such lists in 150 s,
+ * none of them ever replayed).
+ */
+interface ValueModeBuckets {
+  readonly named: Map<string | undefined, ProofAnswer[]>
+  readonly fresh: WeakMap<ClosedValueMode, ProofAnswer[]>
+}
 type ProofAnswerIndex = WeakMap<
   ValueFlowIndex,
-  Map<ts.Symbol | null, WeakMap<ReceiverTypeAtFn, WeakMap<ArgumentsUsesAtFn, Map<ClosedValueMode | string | undefined, ProofAnswer[]>>>>
+  Map<ts.Symbol | null, WeakMap<ReceiverTypeAtFn, WeakMap<ArgumentsUsesAtFn, ValueModeBuckets>>>
 >
 const proofAnswers: ProofAnswerIndex = new WeakMap()
 const sameCountedCalls = (
@@ -902,7 +1006,7 @@ const activeFieldReadsByFlow = new WeakMap<ValueFlowIndex, Set<ts.Expression>>()
  *
  * The walk's own field-mode proof mints a fresh `terminalUse` closure per
  * call and COLLECTS the field's values as a side effect of that closure, so
- * the proof memo can neither key it nor replay it: in the three.js app 456,000 of the
+ * the proof memo can neither key it nor replay it: on a large library compile 456,000 of the
  * 459,000 answers the memo stored in three minutes were field-mode proofs
  * that no later call could match. The question is a function of (owner
  * classes, key, receiverTypeAt, argumentsUsesAt) and of the parks in force,
@@ -911,19 +1015,20 @@ const activeFieldReadsByFlow = new WeakMap<ValueFlowIndex, Set<ts.Expression>>()
  * requirements the computation reported.
  */
 interface FieldAnswer {
-  readonly assumed: ReadonlySet<object>
+  readonly assumed: Set<object>
   /** See `ProofAnswer.escaped`: replayed on a hit, never part of applicability. */
   readonly escaped: ReadonlySet<object>
   readonly values: readonly ts.Expression[] | null
-  readonly requirements: readonly IntrinsicProtocolRequirement[]
+  readonly requirements: IntrinsicProtocolRequirement[]
   readonly opens: readonly (readonly [ts.Expression, OpenUseKind])[]
+  uses: number
 }
 type FieldAnswerIndex = WeakMap<
   ValueFlowIndex,
   WeakMap<ReceiverTypeAtFn, WeakMap<ArgumentsUsesAtFn, WeakMap<ts.Expression, FieldAnswer[]>>>
 >
 const fieldAnswers: FieldAnswerIndex = new WeakMap()
-const fieldStats = { asks: 0, hits: 0, stores: 0 }
+const fieldStats = { asks: 0, hits: 0, stores: 0, scanned: 0, longest: 0, keysChecked: 0 }
 
 /**
  * A provenance answer (`OriginAuthority.sharedAnswerOf`) shared across
@@ -933,11 +1038,11 @@ const fieldStats = { asks: 0, hits: 0, stores: 0 }
  * and valid wherever the parks it leaned on are in force.
  */
 interface SharedAnswer {
-  readonly assumed: ReadonlySet<object>
+  readonly assumed: Set<object>
   /** See `ProofAnswer.escaped`: replayed on a hit, never part of applicability. */
   readonly escaped: ReadonlySet<object>
   readonly value: unknown
-  readonly requirements: readonly IntrinsicProtocolRequirement[]
+  readonly requirements: IntrinsicProtocolRequirement[]
   readonly opens: readonly (readonly [ts.Expression, OpenUseKind])[]
 }
 type SharedAnswerIndex = WeakMap<ValueFlowIndex, WeakMap<ReceiverTypeAtFn, WeakMap<ArgumentsUsesAtFn, Map<string, SharedAnswer[]>>>>
@@ -997,7 +1102,7 @@ const CONDITIONAL_ANSWER_LIMIT = Number(process.env['GEA_ANSWER_LIMIT'] ?? 8)
  * mutually-calling methods used to be 2^n conditions). See
  * `dischargeProvisionalAnswers`.
  */
-const provisionalAnswers: ProofAnswer[] = []
+const provisionalAnswers: ProvisionalProofMemo[] = []
 /** `GEA_PROOF_DISCHARGE=0` keeps every conditional answer conditional, to A/B the discharge. */
 const dischargeEnabled = process.env['GEA_PROOF_DISCHARGE'] !== '0'
 const proofStatsEvery = Number(process.env['GEA_PROOF_STATS'] ?? 0)
@@ -1070,7 +1175,7 @@ export const memberProofStats = (): string =>
   `leans: recordProof=${proofStats.assumedRecordProof} valueTerminal=${proofStats.assumedValueTerminal} fieldRead=${proofStats.assumedFieldRead} memberFamily=${proofStats.assumedMemberFamily} ` +
   `shared: asks=${sharedStats.asks} hits=${sharedStats.hits} stores=${sharedStats.stores} refusalStores=${sharedStats.refusals} ungroundedRefusals=${sharedStats.ungrounded} ` +
   `keys: members=${proofStats.members} receiverFns=${proofStats.receiverFns} argumentFns=${proofStats.argumentFns} valueModes=${proofStats.valueModes} valueModeStores=${proofStats.valueModeStores} ` +
-  `fields: asks=${fieldStats.asks} hits=${fieldStats.hits} stores=${fieldStats.stores}` +
+  `fields: asks=${fieldStats.asks} hits=${fieldStats.hits} stores=${fieldStats.stores} scanned=${fieldStats.scanned} longest=${fieldStats.longest} keysChecked=${fieldStats.keysChecked}` +
   `\n  [ASK-SITES]${topAskSites()}` +
   `\n  [QUESTIONS] ${topQuestions()}`
 
@@ -1100,8 +1205,8 @@ const memberOwnerClassIn = (flow: ValueFlowIndex, declaration: ts.Node): SourceC
   const frame = flow.receiverOwnerOf(unwrapNaming(assignment.left.expression))
   // A constructor function OWNS the `this.<key> = ...` writes in its own
   // body the way a class owns its elements -- there is no enclosing class to
-  // step out to, and asking for one is why every member of three's pre-ES6
-  // renderer factories had no owner class and so no family at all.
+  // step out to, and asking for one is why every member of a pre-ES6
+  // constructor-function factory had no owner class and so no family at all.
   if (frame && isConstructorFunction(frame)) return frame
   const owner = frame && ts.isClassElement(frame) ? frame.parent : undefined
   return owner && (ts.isClassDeclaration(owner) || ts.isClassExpression(owner)) ? owner : null
@@ -1146,13 +1251,15 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
   let byValueMode = byArgumentsUsesAt.get(argumentsUsesAt)
   if (!byValueMode) {
     proofStats.argumentFns++
-    byArgumentsUsesAt.set(argumentsUsesAt, (byValueMode = new Map()))
+    byArgumentsUsesAt.set(argumentsUsesAt, (byValueMode = { named: new Map(), fresh: new WeakMap() }))
   }
-  const modeKey = valueMode?.identity ?? valueMode
-  let answers = byValueMode.get(modeKey)
+  const modeKey = valueMode?.identity
+  let answers = valueMode !== undefined && modeKey === undefined ? byValueMode.fresh.get(valueMode) : byValueMode.named.get(modeKey)
   if (!answers) {
     proofStats.valueModes++
-    byValueMode.set(modeKey, (answers = []))
+    answers = []
+    if (valueMode !== undefined && modeKey === undefined) byValueMode.fresh.set(valueMode, answers)
+    else byValueMode.named.set(modeKey, answers)
   }
   if (!nested) proofStats.topLevelEntries++
   if (answers.length > proofStats.longest) {
@@ -1175,7 +1282,7 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
   // synchronous call returns. An answer gated on one is still correct to
   // keep -- `inherited` below still requires the guard to be open again
   // before reuse -- but it is also, for all practical purposes, gated on a
-  // fact that will never recur: the three.js app's `answers` arrays grew without
+  // fact that will never recur: on a large library compile the `answers` arrays grew without
   // bound on exactly these entries, and this proof's linear scan over them
   // (`inherited(key)` per assumed key, per stored answer, per call) was over
   // 90% of a stuck compile's sampled time (`measurements/live-*.cpuprofile`).
@@ -1186,8 +1293,7 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
     inheritedMembers.has(key as ts.Symbol) ||
     inheritedFamilies.has(key as SourceClass) ||
     (activeRecordProofs.get(flow)?.has(key as never) ?? false) ||
-    (activeValueTerminals.get(flow)?.has(key as ClosedValueMode['terminalUse']) ?? false) ||
-    (activeFieldReadsByFlow.get(flow)?.has(key as ts.Expression) ?? false)
+    (activeValueTerminals.get(flow)?.has(key as ClosedValueMode['terminalUse']) ?? false)
   const inherited = (key: object): boolean => inheritedPark(key) || hypothesisGuardIsOpen(key)
   // The three per-`flow` park sets are read once for the whole scan instead of
   // three WeakMap lookups per assumed key per stored answer. Nothing between
@@ -1198,7 +1304,7 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
   // runs AFTER the proof body and must see the sets as they are then.
   //
   // This is the scan's dominant term, not a micro-optimisation: a live profile
-  // of a three.js compile put `inheritedPark` at 14.3% of all samples on its
+  // of a large library compile put `inheritedPark` at 14.3% of all samples on its
   // own (`measurements/live-baseline.cpuprofile`), reached
   // `answers.length` x `assumed.size` times per question.
   const scanRecordProofs = activeRecordProofs.get(flow)
@@ -1222,6 +1328,7 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
       }
     if (!applies) continue
     proofStats.hits++
+    answer.uses++
     for (const key of answer.assumed) noteAssumption(key)
     for (const key of answer.escaped) noteAssumption(key)
     for (const [reference, kind] of answer.opens) onOpenUse?.(reference, kind)
@@ -1231,7 +1338,7 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
   // Deduplicated: a nested memo hit replays its open uses into THIS proof's
   // record, so the same (reference, kind) arrives once per nested question
   // that reported it, and every enclosing proof would have stored a copy.
-  // The three.js app retained 20 GB of these lists in 50 s before the map.
+  // One large library compile retained 20 GB of these lists in 50 s before the map.
   const opens = new Map<ts.Expression, Set<OpenUseKind>>()
   const record = (reference: ts.Expression, kind: OpenUseKind): void => {
     let kinds = opens.get(reference)
@@ -1257,31 +1364,20 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
     return ownFamilies
   }
   const provisionalStart = provisionalAnswers.length
-  const dischargeProvisionalAnswers = (closed: boolean, assumed: ReadonlySet<object>, escaped: ReadonlySet<object>): void => {
-    if (!closed || escaped.size !== 0) {
-      // The condition is not (known to be) a fact: the claims stay as stored,
-      // conditional, and are no longer tracked for confirmation.
-      provisionalAnswers.length = provisionalStart
-      return
-    }
-    const own: object[] = member ? [member] : []
-    for (const family of ownCoinduction()) own.push(family)
-    let kept = provisionalStart
-    for (let at = provisionalStart; at < provisionalAnswers.length; at++) {
-      const claim = provisionalAnswers[at]!
-      let leaned = false
-      for (const key of own) if (claim.assumed.delete(key)) leaned = true
-      if (leaned) for (const key of assumed) claim.assumed.add(key)
-      let pending = false
-      for (const key of claim.assumed)
-        if (inheritedMembers.has(key as ts.Symbol) || inheritedFamilies.has(key as SourceClass)) {
-          pending = true
-          break
-        }
-      if (pending) provisionalAnswers[kept++] = claim
-    }
-    provisionalAnswers.length = kept
-  }
+  const dischargeProvisionalAnswers = (
+    closed: boolean,
+    assumed: ReadonlySet<object>,
+    escaped: ReadonlySet<object>,
+    requirements: readonly IntrinsicProtocolRequirement[]
+  ): void =>
+    settleProofMemoClaims(provisionalAnswers, provisionalStart, {
+      closed,
+      own: new Set<object>([...(member ? [member] : []), ...ownCoinduction()]),
+      inherited: new Set<object>([...inheritedMembers, ...inheritedFamilies]),
+      assumed,
+      escaped,
+      requirements
+    })
   const trail = pushHypothesisTrail()
   const work = (): boolean => {
     try {
@@ -1310,11 +1406,15 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
       // alone, and a record-root proof parks `ownPark` for this call alone;
       // both are released the instant this returns. Recording them as
       // assumptions made every value-mode answer permanently inapplicable --
-      // of 157,871 answers one three.js run stored, 18 were unconditional --
+      // of 157,871 answers one large compile stored, 18 were unconditional --
       // so the memo held nothing and the same question was re-proven millions
       // of times. A park an ENCLOSING proof established is untouched by this:
       // it is not this mode's own, so it still lands in `assumed`.
       if (valueMode !== undefined && (key === valueMode.terminalUse || key === valueMode.ownPark)) continue
+      // See `hypothesisIsPessimistic`: a closed answer owes a pessimistic
+      // hypothesis nothing, so it is neither a condition of the answer nor
+      // something an enclosing proof has to hear about.
+      if (!answerDependsOn(key, closed)) continue
       if (inherited(key)) {
         assumed.add(key)
         noteAssumption(key)
@@ -1355,8 +1455,8 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
     // `exitHypothesisGuard` settles it -- discharging the key, or striking the
     // answer if the real answer contradicted it.
     //
-    // Dropping them instead was the whole cost: in 200,000 three.js proof
-    // entries this memo computed 156,070 answers and KEPT 119. Every later ask
+    // Dropping them instead was the whole cost: in 200,000 proof
+    // entries of a large library compile this memo computed 156,070 answers and KEPT 119. Every later ask
     // of the same question proved it again, which is how 64 distinct questions
     // become millions of proof entries.
     //
@@ -1365,13 +1465,33 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
     // short enough that scanning it stays cheaper than the recompute it saves.
     // Dropping a storable answer is never a correctness question -- a miss
     // recomputes and gets the same result.
-    dischargeProvisionalAnswers(closed, assumed, escaped)
-    if (assumed.size !== 0 && answers.length >= CONDITIONAL_ANSWER_LIMIT) proofStats.droppedByLimit++
-    if (assumed.size === 0 || answers.length < CONDITIONAL_ANSWER_LIMIT) {
+    dischargeProvisionalAnswers(closed, assumed, escaped, requirements)
+    // A full bucket gives up its least-replayed CONDITIONAL answer rather than
+    // refusing the new one. Keeping whichever eight arrived first froze the
+    // bucket on the answers of the first paths into a cycle -- the ones least
+    // likely to recur -- while the same question was then recomputed, and
+    // dropped again, once per later path (the identical condition set was
+    // stored and dropped 2,918 times in one run).
+    let victim = -1
+    if (assumed.size !== 0 && answers.length >= CONDITIONAL_ANSWER_LIMIT) {
+      let fewest = Number.POSITIVE_INFINITY
+      for (let at = 0; at < answers.length; at++) {
+        const held = answers[at]!
+        if (held.assumed.size !== 0 && held.uses < fewest) {
+          fewest = held.uses
+          victim = at
+        }
+      }
+      if (victim === -1) {
+        proofStats.droppedByLimit++
+      }
+    }
+    if (assumed.size === 0 || answers.length < CONDITIONAL_ANSWER_LIMIT || victim !== -1) {
       proofStats.kept++
-      const stored: ProofAnswer = { counted, assumed, escaped, closed, requirements, opens: recorded }
-      answers.push(stored)
-      if (dischargeEnabled && closed && assumed.size !== 0) provisionalAnswers.push(stored)
+      const stored: ProofAnswer = { counted, assumed, escaped, closed, requirements: [...requirements], opens: recorded, uses: 0 }
+      if (victim !== -1) answers[victim] = stored
+      else answers.push(stored)
+      if (dischargeEnabled && closed && escaped.size === 0 && assumed.size !== 0) provisionalAnswers.push(stored)
       if (leansOnReentryGuard)
         registerGuardedAnswer(stored, () => {
           const at = answers.indexOf(stored)
@@ -1399,7 +1519,7 @@ export const hasClosedMemberCallableUses = (...parameters: Parameters<typeof clo
  * this proof a question; `GEA_BINDING_DEBUG` prints the chain of open uses,
  * which simply ENDS -- with no reason attached -- whenever the refusal is one
  * of the inventory closures at the bottom of this function that report no open
- * use at all. `Object3D.copy` refused there, and both instruments showed a
+ * use at all. A scene-node class's `copy` refused there, and both instruments showed a
  * chain that terminated for no stated cause.
  */
 const memberClosureDebug = process.env['GEA_MEMBER_CLOSURE_DEBUG']
@@ -1463,7 +1583,7 @@ const recordLeafSummary = (arm: string, ownerMember: string, site: string): void
 
 const describeNode = (node: ts.Node): string => {
   const file = node.getSourceFile()
-  // The TEXT, not only the position: every three.js file the walk reports on is
+  // The TEXT, not only the position: a library file the walk reports on may be
   // rewritten by a source transform before the compiler sees it, so a reported
   // line does not address anything on disk without it.
   const text = node.getText().slice(0, 90).replace(/\s+/g, ' ')
@@ -1477,8 +1597,8 @@ const describeNode = (node: ts.Node): string => {
  * `virtualAccessorsOf` and `slotDeclarationsOf` each ask this once per
  * (candidate descendant, base) pair for EVERY reachable class declaration --
  * and a proof-scoped cache only catches repeats WITHIN one member's proof.
- * The real repetition is ACROSS proofs: the three.js app asks "does this class descend
- * from `Object3D`/`Vector3`/..." from thousands of different member proofs
+ * The real repetition is ACROSS proofs: a large library compile asks "does this class descend
+ * from `Node`/`Vector`/..." from thousands of different member proofs
  * over the course of one compile, and a proof-local cache starts over every
  * time. Measured at 5.8% of the whole compile with a proof-local cache that
  * still missed almost every call.
@@ -1516,8 +1636,8 @@ const descendsFromNominal = (checker: ts.TypeChecker, type: ts.Type, baseSymbol:
  * proof-local map in `virtualAccessorsOf` is not a substitute for it: that one
  * is keyed by the receiver EXPRESSION, so it catches only repeats of the same
  * syntactic access within one proof, while the walk itself sweeps the whole
- * round's `flow.classDeclarations` -- hundreds of classes for three.js, each
- * costing a `getDeclaredTypeOfSymbol` and a heritage descent. The three.js app ran that
+ * round's `flow.classDeclarations` -- hundreds of classes for a large library, each
+ * costing a `getDeclaredTypeOfSymbol` and a heritage descent. One such compile ran that
  * sweep once per (proof, access) and it was the largest SELF-time entry in the
  * compiler's own modules (5.5%).
  *
@@ -1588,9 +1708,9 @@ interface Hop {
    * The walk arrived at this hop BACKWARDS -- from `holder.member` or
    * `holder[ i ]` to `holder` -- so it knows the followed value is reachable
    * through SOME value in this slot but not which one. Every value ever
-   * stored into the slot then has to be published too: three reuses a pooled
+   * stored into the slot then has to be published too: a renderer that reuses a pooled
    * render item read back out of `renderItems[ i ]`, and the same item object
-   * is still referenced from last frame's `opaque` array.
+   * still references the same item object from last frame's `opaque` array.
    */
   readonly owesStores: boolean
 }
@@ -1602,9 +1722,9 @@ interface Hop {
  * A `summary` node stands for every path `hops* exit`: the followed value is
  * reachable by some sequence of the listed hops, then the exit path. It is
  * what a path becomes when it would repeat a hop -- `this.parts[0].owner =
- * this` (`RenderTarget.js`: `this.textures[ i ].renderTarget = this`)
- * extends `owner . parts . [] . owner . parts ...` forever, and three's
- * render lists put a list into an array whose elements hold the list's own
+ * this` (or `this.items[ i ].container = this`)
+ * extends `owner . parts . [] . owner . parts ...` forever, and a renderer's
+ * render lists can put a list into an array whose elements hold the list's own
  * arrays. Every unfolding is contained in the summary, so treating a read as
  * possibly carrying the value along any of its hops is only ever STRICTER
  * than the unfolded path; and because a plain chain has distinct hop ids and
@@ -1648,7 +1768,7 @@ const NO_HOPS: ReadonlySet<HopId> = new Set()
  * `plainPath` and `summaryPath` are pure functions of the program: a hop and a
  * tail name the same slot sequence no matter which member proof is asking, and
  * `declarationIdOf` only needs ids that are stable and distinct. Keeping these
- * four tables proof-local meant every one of the ~20k proofs in a three.js
+ * four tables proof-local meant every one of the ~20k proofs in a large library
  * compile rebuilt the whole interning universe -- the `MemberPath` objects, the
  * nested `Map`s that intern them, and the declaration ids -- which showed up as
  * 6.2 GB of `Map` allocation and 13% of the run in the collector.
@@ -1679,6 +1799,21 @@ const pathInterningOf = (flow: ValueFlowIndex): PathInterning => {
 
 const slotDeclarationsCaches = new WeakMap<ValueFlowIndex, Map<ts.Declaration, readonly ts.Declaration[]>>()
 
+// Caller discovery can re-enter through a fresh member proof while resolving
+// a parameter's allocation origins. Its guard therefore belongs to the flow,
+// rather than to one closedMemberCallableUses invocation.
+const allocationCallerInventoryGuards = new WeakMap<
+  ValueFlowIndex,
+  WeakMap<ts.Declaration, { readonly exact: object; readonly family: object }>
+>()
+const allocationCallerInventoryGuardOf = (flow: ValueFlowIndex, declaration: ts.Declaration, family: boolean): object => {
+  let declarations = allocationCallerInventoryGuards.get(flow)
+  if (!declarations) allocationCallerInventoryGuards.set(flow, (declarations = new WeakMap()))
+  let guards = declarations.get(declaration)
+  if (!guards) declarations.set(declaration, (guards = { exact: {}, family: {} }))
+  return family ? guards.family : guards.exact
+}
+
 const closedMemberCallableUses = (
   checker: ts.TypeChecker,
   flow: ValueFlowIndex,
@@ -1705,7 +1840,8 @@ const closedMemberCallableUses = (
   // The checker types `new this.constructor()` as `any`. The construction is
   // one of the enclosing class's owned family (`thisConstructorFamilyOf`), so
   // it is at least that class: its declared type names every member the
-  // fresh object can be read through -- `.copy` in three's `clone()` -- and
+  // fresh object can be read through -- `.copy` in a `clone()` that is
+  // `new this.constructor().copy( this )` -- and
   // the family's overrides are found from there the way any base-typed
   // receiver's are. Without this every member read on the clone had no
   // declaration and the container walk stopped at `no-declaration`.
@@ -1725,10 +1861,10 @@ const closedMemberCallableUses = (
    * `ownerOriginsClosed` asks a question about a CLASS -- is every construction
    * and every initializer receiver of this family accounted for -- but the only
    * re-entrancy guard it had was `activeMembers`, keyed by whichever METHOD
-   * happened to ask. Three's scratch-singleton idiom turns that into a cycle
-   * with no leaf: `const _v1 = new Vector3()` is read by nearly every method of
-   * `Vector3`, so proving `fromArray` closed walks `_v1`, whose `_v1.set(...)`
-   * mention launches a fresh proof of `set`, which asks the identical `Vector3`
+   * happened to ask. A math library's module-level scratch-singleton idiom turns that into a cycle
+   * with no leaf: `const _v1 = new Vector()` is read by nearly every method of
+   * `Vector`, so proving `fromArray` closed walks `_v1`, whose `_v1.set(...)`
+   * mention launches a fresh proof of `set`, which asks the identical `Vector`
    * family question again through a different member symbol -- and the guard
    * never fires because the symbols differ. Nothing in the loop is grounded by
    * an independent fact, so it unfolded to the depth limit and answered open.
@@ -1826,6 +1962,7 @@ const closedMemberCallableUses = (
       // the computation nothing, so the key is discharged -- neither an
       // assumption nor an escape. `parked` is asked FIRST so a key held open
       // for any other reason keeps scoping the answer.
+      if (!answerDependsOn(key, computed.value !== null)) continue
       if (parked(key)) assumed.add(key)
       else if (!hypothesisSettledAsTruth(key)) escaped.add(key)
       noteAssumption(key)
@@ -1840,7 +1977,7 @@ const closedMemberCallableUses = (
     // the trail now (`proof-hypotheses.ts`), so `assumed` scopes a refusal to
     // exactly the parks and open questions that produced it, and `grounded` is
     // the fail-closed half: a refusal leaning on a key this frame cannot name
-    // is still not stored. The three.js app asked `record-plan:` 1.5M times and kept
+    // is still not stored. One large library compile asked `record-plan:` 1.5M times and kept
     // 16k answers because 98% of the asks refused.
     if (computed.value === null && !grounded) sharedStats.ungrounded++
     if ((shareable?.(computed.value) ?? true) && (computed.value !== null || (grounded && refusalMemoEnabled))) {
@@ -1848,7 +1985,10 @@ const closedMemberCallableUses = (
       for (const [reference, kinds] of opens) for (const kind of kinds) recorded.push([reference, kind])
       sharedStats.stores++
       if (computed.value === null) sharedStats.refusals++
-      answers.push({ assumed, escaped, value: computed.value, requirements: computed.requirements, opens: recorded })
+      const stored: SharedAnswer = { assumed, escaped, value: computed.value, requirements: [...computed.requirements], opens: recorded }
+      answers.push(stored)
+      if (dischargeEnabled && computed.value !== null && grounded && assumed.size !== 0) provisionalAnswers.push(stored)
+      return { value: computed.value, requirements: stored.requirements }
     }
     return computed
   }
@@ -1868,7 +2008,7 @@ const closedMemberCallableUses = (
     (memberClosureDebug === '*' || memberClosureDebug.split(',').includes(member.getName()))
   const openMember = (reason: string, at?: ts.Node): false => {
     // The member NAME alone is ambiguous and was misleading: `copy` is
-    // declared by two dozen unrelated three.js classes, and the rollup read
+    // declared by two dozen unrelated classes in one library, and the rollup read
     // as one huge refusal when it is twenty small ones. The owner and the
     // nesting depth are what tell a TOP-LEVEL refusal -- the only kind a
     // caller in `parameter-bindings.ts` ever sees -- from one discovered
@@ -1916,7 +2056,7 @@ const closedMemberCallableUses = (
     if (ts.isMethodDeclaration(parent) && parent.name === reference) return true
     if (ts.isPropertyAssignment(parent) && parent.name === reference) return true
     // Every other spelling of "this is where the member is written down".
-    // `Mesh` declares `geometry;` as a bare typed field, and reading its own
+    // A class may declare `geometry;` as a bare typed field, and reading its own
     // declaration name as a use of the member left that field's receiver
     // unexplained -- the terminal of 35 escapes.
     if (
@@ -2070,8 +2210,8 @@ const closedMemberCallableUses = (
     if (!ownerSymbol) return isClassSpelledSourceClass(owner) && owner.heritageClauses?.length ? { kind: 'opaque' } : { kind: 'none' }
     // `getBaseTypes` ASSERTS its argument is a class-or-interface type; it is not
     // a query that answers "no bases" for anything else. A pre-ES6 JS constructor
-    // function whose body declares nested helper functions -- three's
-    // `WebGLRenderer` exactly -- resolves `ownerSymbol` to the FUNCTION symbol,
+    // function whose body declares nested helper functions -- a large
+    // `function Renderer() { ... }` module, for one -- resolves `ownerSymbol` to the FUNCTION symbol,
     // whose declared type is not that class type, and the cast threw out of the
     // whole proof. `heritageClassOrInterfaceOf` is the same guard the nominal
     // descent above already uses; when it declines, this class chain is simply
@@ -2095,19 +2235,31 @@ const closedMemberCallableUses = (
     {
       readonly value: readonly FlowCallSite[] | null
       readonly requirements: readonly IntrinsicProtocolRequirement[]
+      readonly assumed: ReadonlySet<object>
     }
   >()
   const closedCallerSitesOf = (declaration: ts.SignatureDeclaration): readonly FlowCallSite[] | null => {
     const ledger = deferredIntrinsicProtocolLedgerOf(flow)
     let answer = callerSites.get(declaration)
+    if (answer && [...answer.assumed].some((key) => !parked(key) && !hypothesisSettledAsTruth(key))) {
+      callerSites.delete(declaration)
+      answer = undefined
+    }
     if (!answer) {
-      answer = ledger
-        ? ledger.capture(() => closedCallerSitesUncached(declaration))
-        : { value: closedCallerSitesUncached(declaration), requirements: [] }
+      const trail = pushHypothesisTrail()
+      try {
+        const captured = ledger
+          ? ledger.capture(() => closedCallerSitesUncached(declaration))
+          : { value: closedCallerSitesUncached(declaration), requirements: [] }
+        answer = { ...captured, assumed: trail }
+      } finally {
+        popHypothesisTrail()
+      }
       // An inherited answer is taken while the base's own frame is open;
       // only a settled answer and its supporting obligations may be retained.
       if (inheritingCallerSites.size === 0) callerSites.set(declaration, answer)
     }
+    for (const key of answer.assumed) noteAssumption(key)
     if (answer.value === null) return null
     // A successful cached answer still owes its prototype dependencies to
     // each consuming proof. Replaying only the sites loses the obligation
@@ -2137,21 +2289,24 @@ const closedMemberCallableUses = (
       }
       return sites
     }
-    const own = callsOf(flow).declarations.get(declaration) ?? []
+    const own = [...(callsOf(flow).declarations.get(declaration) ?? [])]
+    const allocated = allocationMemberCallerSitesOf(declaration, false, new Set(own.map((site) => site.call)))
+    if (allocated === null) return null
+    for (const site of allocated) if (!own.includes(site)) own.push(site)
     // A call through a base-typed receiver runs the override the runtime
-    // object selects: `camera.copy( source )` resolves to the base's `copy`,
-    // and a `PerspectiveCamera`'s override runs. Its callers ARE the base's
+    // object selects: `shape.copy( source )` resolves to the base's `copy`,
+    // and a `Circle`'s override runs. Its callers ARE the base's
     // callers -- that is what dispatch means -- whether or not the override
     // also has calls written against it, and leaving them out when it did let
     // `a.m( v )` with `a: A` holding a `B` bind `B.m`'s parameter from `B`'s
     // own calls alone. Answering "no callers, therefore nothing is proven"
-    // refused every three.js `copy`/`clone` override and, through the `super`
+    // refused every `copy`/`clone` override in a class-hierarchy library and, through the `super`
     // receiver, the whole family behind it. A base whose slot has no nameable
     // callers -- abstract, data, accessor -- refuses.
     //
     // Zero call sites is an answer, not a gap: the closure proof below decides
     // whether it is a complete one. Refusing instead meant that a method this
-    // program never calls -- three's `BufferGeometry` carries a dozen,
+    // program never calls -- a library geometry class can carry a dozen,
     // `rotateX` among them -- could say nothing about its own `this`.
     const base = baseMemberOf(declaration)
     if (base.kind === 'opaque') return null
@@ -2176,8 +2331,8 @@ const closedMemberCallableUses = (
     const calls = [...own, ...inherited.filter((site) => !own.includes(site))]
     const counted = new Set(own.map((site) => site.call))
     // `this.setSize = function ( width, height ) { ... }` is a method slot
-    // written the other way round. Three's `WebGLOutput` publishes its whole
-    // API that way, and `closedCallerSitesOf` was the one place still
+    // written the other way round. A pre-ES6 constructor-function module can
+    // publish its whole API that way, and `closedCallerSitesOf` was the one place still
     // spelling "method" syntactically -- `fieldDeclaration` below already
     // states that a special assignment is a declaration form. The member slot
     // is the only handle on the function object, which is why the right-hand
@@ -2188,9 +2343,9 @@ const closedMemberCallableUses = (
     if (slot !== null && 'body' in declaration && declaration.body !== undefined) {
       const symbol = checker.getSymbolAtLocation(slot)
       // A call the checker resolves against the symbol's STATED declaration --
-      // `Object3D`'s own `onBeforeRender(){}` stub, for a call through a
-      // receiver the checker types `Object3D` -- never indexes under an
-      // INSTANCE override written elsewhere (`mesh.onBeforeRender = function
+      // a base class's own `onRender(){}` stub, for a call through a
+      // receiver the checker types `Node` -- never indexes under an
+      // INSTANCE override written elsewhere (`node.onRender = function
       // ( renderer, object ) { ... }`), because the checker has no
       // flow-sensitive model of "this receiver was later given its own
       // property". `memberImplementationsOf` is the existing, already-proven
@@ -2229,15 +2384,47 @@ const closedMemberCallableUses = (
         )
       return closedMember ? sites : null
     }
+    if (ts.isArrowFunction(declaration) || (ts.isFunctionExpression(declaration) && declaration.name === undefined)) {
+      // A function expression has no declaration binding of its own. Its
+      // exact initializer cell can nevertheless name every caller, provided
+      // that cell never changes and every executable use is an entered call.
+      const value = outermostErasureOf(declaration)
+      const binding = value.parent
+      if (
+        !ts.isVariableDeclaration(binding) ||
+        binding.initializer !== value ||
+        !ts.isIdentifier(binding.name) ||
+        !flow.callableBodyIsIndexed(declaration) ||
+        (argumentsUsesAt(declaration)?.length ?? 0) > 0 ||
+        !localBindingWritesAreComplete(flow, binding) ||
+        isModuleExportedDeclaration(checker, binding, checker.getSymbolAtLocation(binding.name) ?? null)
+      )
+        return null
+      const writes = flow.writesToDeclaration(binding).filter((write) => write.slot === 'whole')
+      if (
+        writes.length === 0 ||
+        writes.some((write) => write.edge !== 'declaration-initializer' || write.value === null || unwrapValue(write.value) !== declaration)
+      )
+        return null
+      for (const reference of flow.referencesToDeclaration(binding)) {
+        if (reference === binding.name || isTypePositionReference(reference)) continue
+        const use = outermostErasureOf(reference)
+        const parent = use.parent
+        if (ts.isCallExpression(parent) && parent.expression === use && counted.has(parent)) continue
+        return null
+      }
+      return calls
+    }
     if (!ts.isFunctionDeclaration(declaration) || !declaration.name || !declaration.body) return null
+    if (!sourceGlobalCallableBindingIsClosed(checker, flow, declaration)) return null
     if ((argumentsUsesAt(declaration)?.length ?? 0) > 0 || callableBindingIsWritten(flow, declaration)) return null
     // An export is a mention no expression spells: code outside the program
     // can call it. `inProgramImportReferencesOf` answers null when anything
     // could expose the binding outside the stated module set, and otherwise
     // names every importer's mention -- which are classified below exactly
     // like the declaring module's own. Refusing every IMPORTED export here
-    // was where three's `WebGLBackground.setClearColor`/`setClearAlpha` and
-    // `WebGLOutput.setSize`/`setEffects`/`begin` all stopped.
+    // was where every `this.method = function` slot of an imported pre-ES6
+    // constructor-function module stopped.
     const exported = isModuleExportedDeclaration(checker, declaration, checker.getSymbolAtLocation(declaration.name) ?? null)
     const imported = exported ? inProgramImportReferencesOf(checker, flow, declaration) : []
     if (imported === null) return null
@@ -2245,7 +2432,7 @@ const closedMemberCallableUses = (
     for (const reference of new Set([...flow.referencesToDeclaration(declaration), ...imported])) {
       if (reference === declaration.name || isTypePositionReference(reference)) continue
       const parent = reference.parent
-      // `@type {ReturnType<typeof WebGLRenderList>}`: a type query evaluates nothing.
+      // `@type {ReturnType<typeof RenderList>}`: a type query evaluates nothing.
       if (ts.isTypeQueryNode(parent) && parent.exprName === reference) continue
       if ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === reference) {
         if (counted.has(parent)) continue
@@ -2263,7 +2450,7 @@ const closedMemberCallableUses = (
       // `recordReference`), a namespace's whole-object uses included.
       if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent) || ts.isExportSpecifier(parent))
         continue
-      // `{ sort: sort }` / `{ sort }` in three's `WebGLRenderList`: the
+      // `{ sort: sort }` / `{ sort }` in a factory function's returned record: the
       // function goes into a record slot, and every call through the slot is
       // one of its callers -- provided the slot itself is closed.
       const slotCalls = recordSlotCallersOf(declaration, reference)
@@ -2288,22 +2475,103 @@ const closedMemberCallableUses = (
     if (!index) {
       const built = new Map<string, FlowCallSite[]>()
       for (const site of flow.calls) {
-        const callee = ts.isCallExpression(site.call) ? unwrapNaming(site.call.expression) : null
-        if (!callee || !ts.isPropertyAccessExpression(callee)) continue
-        const entries = built.get(callee.name.text)
+        const callee = ts.isCallExpression(site.call) ? site.operands.callee : null
+        if (!callee || (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee))) continue
+        const key = accessKeyOf(callee)
+        if (key === null) continue
+        const entries = built.get(key)
         if (entries) entries.push(site)
-        else built.set(callee.name.text, [site])
+        else built.set(key, [site])
       }
       callsByMemberName.set(flow, (index = built))
     }
     return index.get(key) ?? []
+  }
+  /** The checker cannot index a call through `new this.constructor()` or an
+   * untyped constructor alias under its stored body. Its exact allocation
+   * lookup still belongs to that body's caller inventory. This collects
+   * candidates only; the existing slot/use proof must close every one.
+   */
+  const allocationMemberCallerSitesOf = (
+    declaration: ts.Declaration,
+    family: boolean,
+    counted: ReadonlySet<ts.CallExpression | ts.NewExpression>
+  ): readonly FlowCallSite[] | null => {
+    const owner = memberOwnerClassOf(declaration)
+    const key = memberKeyOf(declaration)
+    if (owner === null || key === null) return []
+    // These exact call pointers already belong to the consuming inventory and
+    // still pass its complete slot/use proof. Re-discovering their candidate
+    // attribution through allocation origins adds a circular closure question,
+    // rather than a caller. Unindexed aliases and constructor calls remain.
+    const candidates = memberNamedCallsOf(key).filter((site) => !counted.has(site.call))
+    if (candidates.length === 0) return []
+    const guard = allocationCallerInventoryGuardOf(flow, declaration, family)
+    if (hypothesisGuardIsOpen(guard)) {
+      noteAssumption(guard)
+      // An unfinished inventory is unknown, not an empty caller set. In
+      // particular it cannot narrow a parameter to only the already indexed
+      // callers while another proof is still discovering an allocation call.
+      return null
+    }
+    enterHypothesisGuard(guard, true)
+    try {
+      const body =
+        ts.isMethodDeclaration(declaration) ||
+        ts.isFunctionDeclaration(declaration) ||
+        ts.isFunctionExpression(declaration) ||
+        ts.isArrowFunction(declaration)
+          ? declaration
+          : null
+      const wanted = new Set(family ? (memberImplementationsOf(declaration) ?? []) : body ? [body] : (ownMemberBodiesOf(declaration) ?? []))
+      const symbol = slotSymbolOf(declaration)
+      const found: FlowCallSite[] = []
+      for (const site of candidates) {
+        if (!ts.isCallExpression(site.call) || site.explicitThis || site.operands.dispatch.kind !== 'member') continue
+        const callee = site.operands.callee
+        if ((!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) || accessKeyOf(callee) !== key) continue
+        // Caller discovery and target admission must ask the same original
+        // construction question. A computed own constructor has no standalone
+        // allocation answer, but its closed slot and complete source family
+        // can still select this body; dropping that call makes the later use
+        // proof reject the very caller the target proof admitted.
+        const origins = memberReceiverOriginsOf(callee.expression)
+        if (origins === null || origins.classes.size === 0) continue
+        let matches = false
+        let complete = true
+        for (const source of origins.classes) {
+          const sourceSymbol = source.name ? checker.getSymbolAtLocation(source.name) : checker.getTypeAtLocation(source).getSymbol()
+          const held = sourceSymbol && checker.getPropertyOfType(checker.getDeclaredTypeOfSymbol(sourceSymbol), key)
+          const declarations = held?.declarations?.length
+            ? held.declarations
+            : constructorInstalledMemberDeclarationsOf(flow, source).get(key)
+          if (!declarations?.length) {
+            complete = false
+            break
+          }
+          for (const selected of declarations) {
+            const bodies = memberImplementationsOf(selected)
+            if (bodies === null || bodies.length === 0) {
+              complete = false
+              break
+            }
+            matches ||= (family && symbol !== undefined && slotSymbolOf(selected) === symbol) || bodies.some((body) => wanted.has(body))
+          }
+          if (!complete) break
+        }
+        if (complete && matches) found.push(site)
+      }
+      return found
+    } finally {
+      exitHypothesisGuard(guard, true)
+    }
   }
   /**
    * The calls through the record slot a function-name mention fills, or null
    * when the mention is not a record slot or the slot is not closed.
    *
    * A record method call names no declaration the checker can hand back when
-   * the record is untyped -- three reads `currentRenderList` out of an `any`
+   * the record is untyped -- e.g. a list read out of an `any`
    * -- so the calls are found by key and admitted only where
    * `recordMethodCallTargetsOf` includes this body in the complete target set. The
    * slot's own closure proof then counts exactly those calls: a call through
@@ -2375,9 +2643,9 @@ const closedMemberCallableUses = (
   /**
    * `enumeratedParameterValuesOf` (`global-host-mutations.ts`) now calls this
    * for every call-argument reference whose static declaration is an
-   * identifier parameter, program-wide -- not once per parameter. Three's
-   * heavily forwarded parameters (`material`, `object`, `camera`, `scene`)
-   * each have thousands of such reference sites across `WebGLRenderer.js` and
+   * identifier parameter, program-wide -- not once per parameter. A large
+   * library's heavily forwarded parameters (`object`, `context`, `options`)
+   * can each have thousands of such reference sites across one module and
    * its satellites, and every one of them used to redo the full
    * `closedCallerSitesOf` + call-site + write-set walk below from scratch.
    *
@@ -2509,9 +2777,10 @@ const closedMemberCallableUses = (
           return null
         }
         // An omitted argument with no default IS the value `undefined` -- a
-        // known value, not a missing one. Three constructs `new
-        // MeshDistanceMaterial()` and `new MeshDepthMaterial()` bare, and
-        // refusing those frames made `Material.setValues`' key set refuse.
+        // known value, not a missing one. A subclass constructed bare --
+        // `new DerivedStyle()` -- forwards `undefined` to a base
+        // `setValues( options )`, and refusing those frames made that
+        // method's key set refuse.
         values.add(args?.[position] ?? parameter.initializer ?? omittedArgumentOf(call, position))
       }
     }
@@ -2546,8 +2815,8 @@ const closedMemberCallableUses = (
   }
   /**
    * Every value `arguments[ i ]` can read inside `owner`, for an `i` this
-   * file already knows is numeric but not which one -- three's
-   * `Object3D.add` walks `arguments` exactly this way to admit several
+   * file already knows is numeric but not which one -- a tree node's
+   * `add( ...children )`-style method that walks `arguments` exactly this way to admit several
    * children in one call. Unlike `parameterValuesOf` (one declared position),
    * an unindexed read can land on ANY actual argument at ANY position, so
    * every position of every closed caller site is in the set, not only the
@@ -2570,8 +2839,8 @@ const closedMemberCallableUses = (
    * Every value a parameter receives when its function is used as an
    * intrinsic Array callback, or null when some use is anything else.
    *
-   * Three's `painterSortStable( a, b )` is never called by name: it is handed
-   * to `opaque.sort( customOpaqueSort || painterSortStable )`, and the sort
+   * A comparator `sortStable( a, b )` that is never called by name: it is handed
+   * to `opaque.sort( customSort || sortStable )`, and the sort
    * calls it with pairs of the array's own elements. That is a closed frame
    * -- every element the array ever stored, by `arrayStoredValuesOf` -- as
    * long as each mention of the function is a direct call or the callback of
@@ -2640,9 +2909,9 @@ const closedMemberCallableUses = (
     return [...values]
   }
   /**
-   * The whole origin authority for a record plan. Three's pooled render item
-   * is read back out of `renderItems[ renderItemsIndex ]`, and the list out of
-   * `listArray[ renderCallDepth ]`: such reads are origins only with the
+   * The whole origin authority for a record plan. A renderer's pooled render item
+   * read back out of `renderItems[ renderItemsIndex ]`, and the list out of
+   * `listArray[ renderCallDepth ]`, is an example: such reads are origins only with the
    * intrinsic protocols closed, and an index the checker types `any` (an
    * unannotated parameter) counts as numeric where this proof's census view
    * types it so.
@@ -2666,8 +2935,8 @@ const closedMemberCallableUses = (
     explicitInvocationIsIntact: (call) => explicitInvocationIsIntact(call),
     protocolClosed: (plan) => nativeProtocolClosed(plan),
     numericKey: (key) => numericArrayIndex(key),
-    // `_this.renderLists = renderLists` publishes three's render-list record
-    // onto the renderer; whether any use of those literals can replace the
+    // `_this.renderLists = renderLists` publishes a factory-built record
+    // onto the constructed object; whether any use of those literals can replace the
     // called slot is this proof's record-closure walk over the roots the
     // record-method route hands back. (Asking `constructionDataMemberOf` of
     // the receiver instead would re-derive the very plan being built.)
@@ -2831,7 +3100,7 @@ const closedMemberCallableUses = (
    * folded into a summary.
    *
    * Folding at the FIRST repeat is sound but loses the shape a nested
-   * container really has: three keeps a list of render lists, each holding
+   * container really has: a renderer can keep a list of render lists, each holding
    * arrays of render items -- `[] . opaque . [] . object` repeats the element
    * hop without any object graph closing on itself -- and a summary of `{ [],
    * opaque }` would make every mention along the way possibly an array AND
@@ -3043,7 +3312,7 @@ const closedMemberCallableUses = (
   /**
    * A member lookup asks which DECLARATION a key names, and a receiver still
    * carrying its nullish arms names the same one: `output.setEffects` where
-   * `output` is `WebGLOutput | null` reaches exactly one `setEffects`, and a
+   * `output` is `Output | null` reaches exactly one `setEffects`, and a
    * receiver that really is null throws AT the access rather than reaching some
    * other declaration -- so the null arm contributes no member and no escape
    * path. `field-bindings.ts`'s `memberSymbolOf` already states this for the
@@ -3078,9 +3347,9 @@ const closedMemberCallableUses = (
    * own, else every source class that can construct the receiver, else the
    * entry of each object literal the receiver can have been allocated as.
    *
-   * The last is how three's pooled render items are read: `renderItem` comes
+   * The last is how a renderer's pooled render items are read: `renderItem` comes
    * back out of an untyped array, so the checker names no `id` on it, but
-   * every render item is the one literal `getNextRenderItem` writes. Empty
+   * every render item is the one literal a `getNextItem()` helper writes. Empty
    * when any allocation lacks the key -- a prototype lookup is not a slot.
    */
   const fieldDeclarationsOf = (expression: ts.Expression, key: string | null): readonly ts.Declaration[] => {
@@ -3213,8 +3482,8 @@ const closedMemberCallableUses = (
     const declared = fieldDeclarationOf(access.expression, key)
     if (declared !== null) return declared
     // An untyped receiver whose every allocation carries the key in one
-    // literal entry: three reads `currentRenderList` out of an `any`, and
-    // every list is the literal `WebGLRenderList` returns.
+    // literal entry: a list read out of an `any`, where every list is the
+    // literal one factory function returns.
     const records = fieldDeclarationsOf(access.expression, key)
     return records.length === 1 ? records[0]! : null
   }
@@ -3279,8 +3548,8 @@ const closedMemberCallableUses = (
           )
         })
       const terminalUse = (reference: ts.Expression): boolean | null => {
-        // `const { object, geometry, group } = renderItem` in three's
-        // `renderObjects` reads each key exactly as `renderItem.object` would.
+        // `const { object, geometry, group } = renderItem` in a render
+        // loop reads each key exactly as `renderItem.object` would.
         // A rest element copies every own slot out, so it stays with the
         // shared engine.
         const holder = reference.parent
@@ -3380,8 +3649,8 @@ const closedMemberCallableUses = (
    * or, for `this` in a function the literal was written holding, the literal
    * itself, which the same proof makes the only possible receiver.
    *
-   * Three's `ColorManagement.convert` reads `this.enabled`, and `Color` reads
-   * the imported `ColorManagement.workingColorSpace`. The checker names the
+   * A singleton object literal's method `Settings.convert` reads `this.enabled`,
+   * and a class in another module reads the imported `Settings.workingSpace`. The checker names the
    * literal's entry for both -- a name a second literal with a getter under
    * that key would satisfy just as well, which is why it is not evidence.
    */
@@ -3431,10 +3700,10 @@ const closedMemberCallableUses = (
    * An accessor read is a CALL that runs user code with this receiver bound,
    * which is why the member-read arm below refuses one outright. That refusal
    * is stronger than it needs to be: the body is right there to be proven, the
-   * same way a method body is. Three's `Camera` states `reversedDepth` as a
-   * getter over `this._reversedDepth`, and `this.reversedDepth` inside
-   * `updateProjectionMatrix` was the terminal of 35 escapes -- `WebGLState`'s
-   * whole buffer family among them -- for a getter that does nothing but read
+   * same way a method body is. A class stating `reversed` as a
+   * getter over `this._reversed`, read as `this.reversed` inside one of its
+   * own methods, was the terminal of 35 escapes -- a whole unrelated buffer
+   * family among them -- for a getter that does nothing but read
    * one of its own fields.
    *
    * Every nominal DESCENDANT that declares the key as an accessor of the
@@ -3522,7 +3791,7 @@ const closedMemberCallableUses = (
       return [...found]
     }
     resolvingImplementations.add(declaration)
-    enterHypothesisGuard(declaration)
+    enterHypothesisGuard(declaration, true)
     // What the re-entry above hands out is a REFUSAL (`return null`). So the
     // hypothesis is confirmed exactly when this walk also refuses; then every
     // answer that leaned on it rested on something true and becomes
@@ -3654,6 +3923,17 @@ const closedMemberCallableUses = (
     }
     return { bodies, values: [...values] }
   }
+  const ownMemberBodiesOf = (declaration: ts.Declaration): readonly ts.SignatureDeclaration[] | null => {
+    const inventory = ownImplementationsOf(declaration)
+    if (inventory === null) return null
+    const bodies = new Set(inventory.bodies)
+    for (const value of inventory.values) {
+      const targets = closedCallableTargetsOf(checker, flow, value, elementCalleeAuthority)
+      if (targets === null) return null
+      for (const target of targets) bodies.add(target)
+    }
+    return [...bodies]
+  }
   /**
    * The member declarations whose slots a call through `declared` can read:
    * its own symbol's declarations, and every descendant redeclaration
@@ -3662,8 +3942,8 @@ const closedMemberCallableUses = (
   // MODULE-level, keyed by `flow`: `declared` plus the round's fixed class
   // list and checker facts fully determine the answer (`memberOwnerClassOf`/
   // `memberKeyOf` are pure syntax, not proof state), so every one of a round's
-  // many proofs asking about the same slot -- three's many `.add(...)` sites
-  // all reaching one `Object3D.prototype.add` -- can share one answer instead
+  // many proofs asking about the same slot -- a library's many `.add(...)` sites
+  // all reaching one `Node.prototype.add` -- can share one answer instead
   // of each re-walking `flow.classDeclarations` from zero.
   let slotDeclarationsCache = slotDeclarationsCaches.get(flow)
   if (!slotDeclarationsCache) slotDeclarationsCaches.set(flow, (slotDeclarationsCache = new Map()))
@@ -3710,6 +3990,13 @@ const closedMemberCallableUses = (
   const memberSlotClosed = (declaration: ts.Declaration): boolean => {
     const symbol = slotSymbolOf(declaration)
     if (!symbol) return false
+    // The nested closure already consumes this exact recursive lease. Its
+    // caller inventory must not recurse first and manufacture an open answer;
+    // retaining the assumption prevents reuse before the outer proof settles.
+    if (nestedMembers.has(symbol)) {
+      noteAssumption(symbol)
+      return true
+    }
     const held = slotClosures.get(symbol)
     const ledger = deferredIntrinsicProtocolLedgerOf(flow)
     if (held !== undefined) {
@@ -3732,6 +4019,9 @@ const closedMemberCallableUses = (
         const call = access.parent
         if (ts.isCallExpression(call) && call.expression === access) calls.add(call)
       }
+      const allocated = allocationMemberCallerSitesOf(entry, true, calls)
+      if (allocated === null) return false
+      for (const site of allocated) calls.add(site.call)
     }
     // An untyped record receiver names no declaration the index files the
     // call under: its calls are found by key and admitted where the slot is
@@ -3773,9 +4063,9 @@ const closedMemberCallableUses = (
    * unresolvable receiver is not a write, and it cannot change what the slot
    * holds for anyone. Asked as one conjunction over the whole program, one
    * `geometry.getAttribute( ... )` off an untyped parameter opened
-   * `BufferGeometry.getAttribute` for the 1,179 typed call sites of the same
-   * key in the three.js app, and every math class's `copy`/`set`/`add` the same way --
-   * so every reach proof in three's renderer refused as one cycle, and no
+   * `Geometry.getAttribute` for the 1,179 typed call sites of the same
+   * key in one large library compile, and every math class's `copy`/`set`/`add` the same way --
+   * so every reach proof in that library's renderer refused as one cycle, and no
    * fixture-sized fix ever moved the refused-site count (2,227 -> 2,227
    * across six root fixes on 2026-09-14).
    *
@@ -3988,10 +4278,10 @@ const closedMemberCallableUses = (
       // callee IS that class's own binding (TypeScript rejects assigning to a
       // class declaration's binding, TS2629). A callee that only reaches the
       // constructor through a wider value -- a `typeof Base` cell, an inherited
-      // constructor -- still refuses. Measured on mongodb: every `Document`-
-      // typed argument (`{ [key: string]: any }` admits every class instance)
+      // constructor -- still refuses. Measured on a large library compile: every
+      // index-signature-typed argument (`{ [key: string]: any }` admits every class instance)
       // handed to any source constructor made EVERY class family escape, which
-      // left `Connection.command`'s member slot open.
+      // left an ordinary method slot open.
       if (compiledBody && declaration !== undefined && ts.isConstructorDeclaration(declaration) && ts.isNewExpression(node)) {
         if (newNamesOwnConstructor(node, declaration)) continue
       }
@@ -4069,13 +4359,13 @@ const closedMemberCallableUses = (
    * <compiled function>` assignment -- or null the moment one is not.
    * `memberSlotWritesClosed` answers "does nothing write this slot", which is
    * stronger than TARGET IDENTITY needs: a write only opens the slot to an
-   * unknown callable when what it installs cannot itself be named. Three's
-   * `Object3D.prototype.onBeforeRender` is a per-instance render hook --
-   * `WebGLBackground.js` does `boxMesh.onBeforeRender = function( renderer,
-   * scene, camera ) { ... }` on a local `Mesh` instance, from OUTSIDE any
+   * unknown callable when what it installs cannot itself be named. A base
+   * class's `Node.prototype.onRender` stub is a per-instance hook --
+   * one module does `boxNode.onRender = function( renderer,
+   * scene, camera ) { ... }` on a local instance, from OUTSIDE any
    * class body, so `instanceMemberWritesOf` (which only sees `this.x =` /
-   * `super.x =`) never learns of it -- so `WebGLRenderer.js`'s
-   * `scene.onBeforeRender( ... )` calls through a slot with one such
+   * `super.x =`) never learns of it -- so another module's
+   * `scene.onRender( ... )` calls through a slot with one such
    * override, itself a compiled function this walk can name. A slot written
    * three times with three compiled functions is exactly as closed as a slot
    * written once.
@@ -4174,15 +4464,15 @@ const closedMemberCallableUses = (
   // proof, and that proof's walk asks `constructionDataMemberOf`, whose record
   // plan expands a parameter through `parameterValuesOf` back into a
   // `fieldValuesOf` -- of the nested proof, which held its own empty guard. On
-  // `object.matrix.parent = object` (three's `Object3D.parent` back-reference)
+  // `object.matrix.parent = object` (a scene-graph node's parent back-reference)
   // each level spawned a fresh proof asking the same read and the stack
   // overflowed. A re-ask of a read still being answered is the same cycle
   // whichever proof instance asks it, and it already refused within one.
   let activeFieldReads = activeFieldReadsByFlow.get(flow)
   if (!activeFieldReads) activeFieldReadsByFlow.set(flow, (activeFieldReads = new Set()))
   const callCompletionValuesAt: CallCompletionValuesAt = (call) => {
-    // `options = Object.assign( { ...defaults }, options )` in three's
-    // `RenderTarget`: the intact intrinsic returns its target. The graph
+    // `options = Object.assign( { ...defaults }, options )` in a class
+    // constructor that rebinds its options parameter: the intact intrinsic returns its target. The graph
     // models the same call (`bulkAssignOf`); this is the legacy resolver's
     // reading of it, and it goes when `parameterValuesOf` does.
     if (
@@ -4199,9 +4489,9 @@ const closedMemberCallableUses = (
     // leans on `collectionStoredValuesOf` for this identical question; the
     // exact-origin graph asked its every OTHER leaf (`fieldValuesOf`,
     // `parameterValuesOf`, `thisFamilyOf`) but never a call, so a value
-    // round-tripped through a WeakMap -- three's `WebGLEnvironments`
-    // `cubeMaps.get( texture )`, holding the very `WebGLCubeRenderTarget`
-    // `getCube` just allocated -- had no exact origin, and every method later
+    // round-tripped through a WeakMap -- a cache's
+    // `cache.get( key )`, holding the very object
+    // its `getOrCreate` just allocated -- had no exact origin, and every method later
     // called on it (`cubemap.dispose()` in the map's own dispose listener)
     // refused as `targets:origin-slot-open`.
     const stored = collectionStoredValuesOf(checker, flow, call, nativeProtocolClosed)
@@ -4244,6 +4534,13 @@ const closedMemberCallableUses = (
       return traceField('recursive-read')
     }
     activeFieldReads.add(access)
+    // A read still being answered is a re-entry guard in everything but name:
+    // it hands its re-entries a refusal. Opened as one, the refusals that
+    // leaned on it are settled when the read finishes, instead of staying
+    // conditional on this exact read being in flight for the rest of the
+    // compile -- one stored refusal per combination of reads open at the time.
+    enterHypothesisGuard(access, true)
+    let outcome: readonly ts.Expression[] | null | undefined
     try {
       const ledger = deferredIntrinsicProtocolLedgerOf(flow)
       fieldStats.asks++
@@ -4271,20 +4568,25 @@ const closedMemberCallableUses = (
       if (!byAccess) byArgumentsUsesAt.set(argumentsUsesAt, (byAccess = new WeakMap()))
       let answers = byAccess.get(access)
       if (!answers) byAccess.set(access, (answers = []))
+      if (answers.length > fieldStats.longest) fieldStats.longest = answers.length
       for (const answer of answers) {
+        fieldStats.scanned++
         let applies = true
-        for (const assumedKey of answer.assumed)
+        for (const assumedKey of answer.assumed) {
+          fieldStats.keysChecked++
           if (!parked(assumedKey)) {
             applies = false
             break
           }
+        }
         if (!applies) continue
         fieldStats.hits++
+        answer.uses++
         for (const assumedKey of answer.assumed) noteAssumption(assumedKey)
         for (const escapedKey of answer.escaped) noteAssumption(escapedKey)
         for (const [reference, kind] of answer.opens) onOpenUse(reference, kind)
         if (answer.values !== null && ledger) ledger.include(answer.requirements)
-        return answer.values ?? traceField('shared-refusal')
+        return (outcome = answer.values ?? traceField('shared-refusal'))
       }
       const trail = pushHypothesisTrail()
       const opens = new Map<ts.Expression, Set<OpenUseKind>>()
@@ -4310,6 +4612,9 @@ const closedMemberCallableUses = (
       // frame's, so no enclosing positive answer's scope changes.
       const escaped = new Set<object>()
       for (const key of trail) {
+        // See `hypothesisIsPessimistic`: a read that came out with values owes
+        // a pessimistic hypothesis nothing.
+        if (!answerDependsOn(key, computed.value !== null)) continue
         if (parked(key)) assumed.add(key)
         else escaped.add(key)
         noteAssumption(key)
@@ -4317,11 +4622,35 @@ const closedMemberCallableUses = (
       const recorded: (readonly [ts.Expression, OpenUseKind])[] = []
       for (const [reference, kinds] of opens) for (const kind of kinds) recorded.push([reference, kind])
       fieldStats.stores++
-      answers.push({ assumed, escaped, values: computed.value, requirements: computed.requirements, opens: recorded })
-      if (computed.value !== null && ledger) ledger.include(computed.requirements)
-      return computed.value
+      const stored: FieldAnswer = {
+        assumed,
+        escaped,
+        values: computed.value,
+        requirements: [...computed.requirements],
+        opens: recorded,
+        uses: 0
+      }
+      answers.push(stored)
+      if (dischargeEnabled && computed.value !== null && escaped.size === 0 && assumed.size !== 0) provisionalAnswers.push(stored)
+      // Settled like the proof memo's answers: when a re-entry guard this
+      // answer leaned on closes, the answer either sheds that key (the guard's
+      // refusal was the truth) or leaves the bucket. Unregistered, a refusal
+      // stayed conditional on every read that happened to be in flight when it
+      // was computed -- ~35 of them -- and one large app compile grew one bucket per field to
+      // thousands of refusals, each with its own signature, every one scanned
+      // on every later ask of that field.
+      if (assumed.size !== 0)
+        registerGuardedAnswer(stored, () => {
+          const at = answers.indexOf(stored)
+          if (at !== -1) answers.splice(at, 1)
+        })
+      if (computed.value !== null && ledger) ledger.include(stored.requirements)
+      return (outcome = computed.value)
     } finally {
       activeFieldReads.delete(access)
+      // The refusal handed to re-entries was the truth only if the read itself
+      // came out refused; otherwise answers that leaned on it are struck.
+      exitHypothesisGuard(access, outcome === null, outcome === null)
     }
   }
   /** Everything the memo above covers: the array-index shortcut, the value
@@ -4459,8 +4788,8 @@ const closedMemberCallableUses = (
     // whole question as one word (`member-call-argument:receiver-outside
     // -family`), and that word is true of a receiver whose allocations cannot
     // be enumerated, one whose `this` frame is static, and one whose own slot
-    // is open alike -- three different fixes. The three.js app's `scene.add( sun )`
-    // refused here and there was no way to say which.
+    // is open alike -- three different fixes. A `scene.add( light )` in one
+    // large library compile refused here and there was no way to say which.
     const familyTraced = (reason: string, detail?: () => string): false => {
       if (watchedReceiverFamily !== undefined) {
         const file = receiver.getSourceFile()
@@ -4499,7 +4828,7 @@ const closedMemberCallableUses = (
     // so the frame question below answers it exactly. Sending it to
     // `exactClassAllocationOriginsOf` instead asked "which classes can this
     // expression denote" of a keyword that denotes no cell, and every
-    // `super.copy` in three's Texture/RenderTarget/DepthTexture chain refused
+    // `super.copy` in a multi-level class chain's `copy` overrides refused
     // as `allocations-not-enumerable`.
     if (value.kind !== ts.SyntaxKind.ThisKeyword && value.kind !== ts.SyntaxKind.SuperKeyword) {
       // A receiver that arrived as a parameter is answered by THIS proof's
@@ -4507,13 +4836,13 @@ const closedMemberCallableUses = (
       // method's callers means proving its slot closed, and that is the
       // question this proof is already inside, with this proof's counted
       // calls. Without it `Renderer.render( object )` handing `object` to
-      // `object.onBeforeRender( this )` left the renderer unplaceable, which
-      // is the `object-to-dynamic-conversion` behind three's whole
-      // `onBeforeRender` family.
+      // `object.onRender( this )` left the renderer unplaceable, which
+      // is the `object-to-dynamic-conversion` behind a whole family of
+      // per-instance hook calls.
       const origins = allocationOriginsOf(value)
       if (origins === null) {
-        // `new this.constructor( ... )` -- three's universal `clone()`, and the
-        // receiver of 150 refusals off `Texture.clone` alone -- names a
+        // `new this.constructor( ... )` -- the universal `clone()` idiom, and the
+        // receiver of 150 refusals off one class's `clone` alone -- names a
         // COMPUTED callee, and `exactClassAllocationOriginsOf` resolves only
         // identifiers and namespace members. It is not missing a branch: it is
         // asked standalone, with no candidate family to check `this` against,
@@ -4524,7 +4853,13 @@ const closedMemberCallableUses = (
         // explicit receiver, and whose `constructor` slot nothing writes, the
         // allocation is `C`'s own family.
         const own = ts.isNewExpression(value) ? ownConstructorClassOf(value) : null
-        if (own !== null)
+        if (own !== null) {
+          // A complete original construction may select a base or an
+          // overriding subclass. This body receives only the arms whose
+          // actual slot selects it; the other arms still need their own
+          // complete source targets, rather than being treated as receivers
+          // of every override in the family's conservative target union.
+          if (ts.isNewExpression(value) && ownConstructorMemberReceiverOf(value, declared, inFamily)) return true
           return (
             inFamily(own) ||
             familyTraced(
@@ -4532,6 +4867,7 @@ const closedMemberCallableUses = (
               () => `owner=${owner.name?.text ?? '(anonymous)'} own=${own.name?.text ?? '(anonymous)'}`
             )
           )
+        }
         // ⛔ UNSOUND MEASUREMENT ARM (`GEA_RECEIVER_FAMILY_FORCE=1`): prices what
         // this one refusal alone is holding open. Never set it for a kept build.
         if (process.env['GEA_RECEIVER_FAMILY_FORCE'] === undefined)
@@ -4617,9 +4953,9 @@ const closedMemberCallableUses = (
     // itself gets out. A data definition stores INTO it -- the same effect as
     // `this.<key> = value` -- and hands it to nothing, so what it installs is
     // the only question: a primitive can neither be a method the proof would
-    // have to follow nor hold the receiver back. Three's `Material` defines
-    // `id` this way in its constructor, and refusing it here left every
-    // receiver-family proof over a material open.
+    // have to follow nor hold the receiver back. A base class that defines
+    // `id` this way in its constructor left every receiver-family proof over
+    // its instances open when this refused.
     const refuse = (why: string): false => {
       traceReceiver(reference, 'data-definition', false, () => `keys=${plan.keys.join(',')} ${why}`)
       return false
@@ -4633,10 +4969,10 @@ const closedMemberCallableUses = (
     // that names one of those keys, an element hop, or a hop named only by
     // its declaration (any key at runtime) could be what the definition
     // overwrites. Every other named hop is a slot the definition never
-    // touches. A SUMMARY path lists several heads -- `.renderTarget,
-    // .textures,[],.renderTarget` reaching a render target's textures from a
-    // texture in three -- and reading it as "kind is not property" refused
-    // `Object.defineProperty(this, 'id', ...)` in `Texture`'s constructor
+    // touches. A SUMMARY path lists several heads -- `.container,
+    // .items,[],.container` reaching a container's items from one of
+    // those items -- and reading it as "kind is not property" refused
+    // `Object.defineProperty(this, 'id', ...)` in the item class's constructor
     // for a definition of `id` that no head of the path names.
     // (`siblingKeyed` is that comparison: an element hop only collides with a
     // canonical index, a declaration-only hop with any key.)
@@ -4660,7 +4996,7 @@ const closedMemberCallableUses = (
    * origins.ts`) only traces an array literal through cells, conditionals,
    * `.slice()` copies and `collectionValuesOf`-backed native-map reads -- it
    * has no case at all for a plain object used as a string-keyed RECORD of
-   * arrays (`this._listeners[ type ]`, three's `EventDispatcher`), because
+   * arrays (`this._listeners[ type ]`, an event-emitter base class), because
    * that identity question is answered by a different, already-general
    * mechanism: `arrayStoredValuesOf` (`array-element-continuation.ts`),
    * which `computedKeyAuthority`/`arrayContentsOf` above already ask for
@@ -4675,7 +5011,7 @@ const closedMemberCallableUses = (
    *
    * MEASURED DEAD END (2026-09-16): the obvious next shape -- a callable at a
    * FIXED tuple slot, `for (const entry of list) entry[0]( out )`, which is
-   * how hono's `RegExpRouter` dispatches every route -- cannot be closed from
+   * how a regex-compiled router can dispatch every route -- cannot be closed from
    * here. A fixed index needs one slot plus the proof that nothing else ever
    * wrote it, and the only enumeration of writes available at this layer is
    * `arrayStoredValuesOf`, which is CIRCULAR for exactly this shape: it
@@ -4687,7 +5023,7 @@ const closedMemberCallableUses = (
    * `callableArrayTargetsOf` in `callable-array-origins.ts`, that admits an
    * element-slot callee the way that walk's own `use`/`callableUse` already
    * admits `array[ i ]( ... )`. A version built without one landed zero
-   * closed callees on `hono-hello` and was reverted.
+   * closed callees on a small web-server app and was reverted.
    */
   const arrayElementTargetsViaRecordOf = (
     element: ts.ElementAccessExpression
@@ -4749,7 +5085,7 @@ const closedMemberCallableUses = (
     }
     const argument = site.operands.args.indexOf(reference)
     if (argument < 0) return false
-    // `new WebGLTextures( state )` on a plain source function: `new` binds the
+    // `new Textures( state )` on a plain source function: `new` binds the
     // arguments to the function's own formals exactly as a call does. What
     // becomes of the fresh `this` is not this argument's question: a factory
     // discards it behind an object completion (`constructionYieldsCompletionOf`),
@@ -4758,12 +5094,12 @@ const closedMemberCallableUses = (
     // allocation whose own receiver references are walked as that function's
     // `this`. Either way the argument reaches only the formal. The
     // class-constructor authority below refuses a constructor function by
-    // design -- its body is no `ConstructorDeclaration` -- so three's factory
-    // shims were an open escape at every `new` that handed them a record, and
-    // so were its `this`-writing renderer modules: `new WebGLTextures( _gl,
+    // design -- its body is no `ConstructorDeclaration` -- so a pre-ES6
+    // library's factory shims were an open escape at every `new` that handed
+    // them a record, and so were its `this`-writing modules: `new Textures( _gl,
     // extensions, state, properties, capabilities, utils, info )` and `new
-    // WebGLShadowMap( _this, objects, capabilities )` were 746 of the three.js app's
-    // leaf refusals, every one an `objects`/`extensions`/`state` argument.
+    // ShadowMap( _this, objects, capabilities )` were 746 of one large library
+    // compile's leaf refusals, every one an `objects`/`extensions`/`state` argument.
     const factory = constructorFunctionCalleeOf(call)
     if (factory !== null) {
       const parameter = factory.parameters[argument]
@@ -4816,9 +5152,9 @@ const closedMemberCallableUses = (
       value.text === 'undefined' &&
       (checker.getSymbolAtLocation(value)?.declarations ?? []).every((entry) => entry.getSourceFile().hasNoDefaultLib))
   /**
-   * Whether every value `expression` can ever hold is nullish. Three's
-   * renderer keeps `let _nodesHandler = null` and assigns it only in
-   * `setNodesHandler( nodesHandler )`; where nothing calls that setter,
+   * Whether every value `expression` can ever hold is nullish. A
+   * renderer that keeps `let _nodesHandler = null` and assigns it only in
+   * `setNodesHandler( nodesHandler )` is an example: where nothing calls that setter,
    * `_nodesHandler.renderStart( scene, camera )` is on a receiver that throws
    * before either argument is evaluated. Only a binding whose every write is
    * a spelled value answers: one plain `let`/`var`/`const` statement
@@ -4829,6 +5165,17 @@ const closedMemberCallableUses = (
     const value = unwrapValue(expression)
     if (nullishValue(value)) return true
     if (ts.isConditionalExpression(value)) return nullishOnly(value.whenTrue, active) && nullishOnly(value.whenFalse, active)
+    // An element read yields a stored value or `undefined` (a hole or a miss).
+    // A module that keeps `let _effects = []`, fills it only through
+    // `setEffects( effects )`, and runs `_effects[ i ].render( renderer, ... )`;
+    // where nothing calls that setter the array never holds anything, so the
+    // callee lookup throws before `renderer` is evaluated -- and treating the
+    // renderer as handed to unknown code reflected all of its fields.
+    if (ts.isElementAccessExpression(value)) {
+      if (!numericArrayIndex(value.argumentExpression)) return false
+      const stored = arrayContentsOf(value.expression)
+      return stored !== null && stored.every((held) => nullishOnly(held, active))
+    }
     if (!ts.isIdentifier(value)) return false
     const target = flow.targetOf(value)
     const declaration = target?.declaration
@@ -4930,9 +5277,9 @@ const closedMemberCallableUses = (
       // NAME both halves. This is the ONE authority both walks ask about a
       // store into `<expr>.<key>` -- `receiverUseBody` and `containerUseBody`
       // each consult `publishedValue` before their own assignment arms -- and
-      // it is where three's whole scene graph stops: `this.camera = camera`
-      // (LightShadow), `object.parent = this` (Object3D.add), `this.textures[
-      // i ].renderTarget = this` (RenderTarget). Both of its refusals were a
+      // it is where a whole scene graph stops: `this.camera = camera`
+      // (a field store), `object.parent = this` (a tree node's `add`), `this.items[
+      // i ].container = this` (a container's back-reference). Both of its refusals were a
       // bare `false`, so every instrument showed a chain that ended for no
       // stated cause, and two separate investigations misattributed the
       // terminal to the `isIdentifier` guard in the caller's own arm below --
@@ -4952,7 +5299,7 @@ const closedMemberCallableUses = (
     const numeric = (type: ts.Type): boolean => (type.isUnion() ? type.types.every(numeric) : (type.flags & ts.TypeFlags.NumberLike) !== 0)
     if (numeric(receiverTypeAt(expression) ?? checker.getTypeAtLocation(expression))) return true
     // An unannotated parameter is numeric where every value its closed frame
-    // receives is: three's `listArray[ renderCallDepth ]`, whose one caller
+    // receives is: `listArray[ renderCallDepth ]`, whose one caller
     // passes `renderListStack.length`. A re-entered question refuses.
     const value = unwrapValue(expression)
     const declaration = ts.isIdentifier(value) ? flow.targetOf(value)?.declaration : undefined
@@ -4969,7 +5316,7 @@ const closedMemberCallableUses = (
    * Whether every object `expression` can denote is an Array.
    *
    * The checker says so for most arrays, but not for one read back out of an
-   * untyped container: three's `listArray = lists.get( scene )` is `any`, and
+   * untyped container: `listArray = lists.get( scene )` read off an untyped map is `any`, and
    * every value that map ever holds is the literal `[ list ]`. So the origins
    * are asked instead -- literals, the map's stored values, a binding's every
    * write. A re-entered question is assumed: the only value a cycle of
@@ -4979,8 +5326,8 @@ const closedMemberCallableUses = (
   /**
    * Whether the checker types `expression` as an object that is certainly not
    * an array: every union member a non-array, non-tuple object with no number
-   * index. `any`, `unknown` and type parameters are not certain -- three reads
-   * its render lists out of an `any` -- and answer false.
+   * index. `any`, `unknown` and type parameters are not certain -- a library
+   * can read its lists out of an `any` -- and answer false.
    */
   const definiteNonArray = (expression: ts.Expression): boolean => {
     const held = checker.getTypeAtLocation(unwrapValue(expression))
@@ -5064,7 +5411,7 @@ const closedMemberCallableUses = (
    * `array.push( value )`, `unshift`, `fill`'s value and `splice`'s inserted
    * items through the intrinsic Array protocol: the value is now one element
    * deep in every object the receiver denotes. Null when the call is not that
-   * shape -- a record's own `push`, as three's render list has -- so the arms
+   * shape -- a record's own `push`, as a factory-built list record has -- so the arms
    * after it answer.
    */
   const arrayStoreArgumentUse = (
@@ -5086,9 +5433,9 @@ const closedMemberCallableUses = (
   type CallbackBody = ts.FunctionDeclaration | ts.FunctionExpression | ts.ArrowFunction
   /**
    * Every function a callback argument can be, and whether it can also be
-   * nullish. `customOpaqueSort || painterSortStable` in three's render list is
-   * `painterSortStable` exactly when `customOpaqueSort` holds nothing -- which
-   * is the only value `setOpaqueSort`'s never-called setter leaves in it.
+   * nullish. `customSort || sortStable` is
+   * `sortStable` exactly when `customSort` holds nothing -- which
+   * is the only value a never-called `setSort` setter leaves in it.
    */
   const callableValuesOf = (
     expression: ts.Expression,
@@ -5320,9 +5667,8 @@ const closedMemberCallableUses = (
     if (ts.isMethodDeclaration(frame)) {
       // Enumerating every caller of `frame` (`closedCallerSitesOf`, with no
       // explicit `this` among them) is the very slot-closure question this
-      // proof sits inside when `frame` IS the clone idiom: three's
-      // Object3D/Material/Texture/Camera/BufferGeometry/RenderTarget/Sphere
-      // each declare `clone() { return new this.constructor().copy(this) }`,
+      // proof sits inside when `frame` IS the clone idiom: a class-hierarchy
+      // library where half a dozen unrelated classes each declare `clone() { return new this.constructor().copy(this) }`,
       // so a full caller enumeration for one clone chases the others'.
       //
       // `memberSlotClosed` is the weaker, still SOUND fact that settles it
@@ -5359,13 +5705,89 @@ const closedMemberCallableUses = (
       originsOf: allocationOriginsOf
     })
   }
+  /** A computed own constructor retains its complete original source family.
+   * Member selection must walk every construction alternative, rather than
+   * borrow the override currently being checked by this recursive proof. */
+  const memberReceiverOriginsOf = (receiver: ts.Expression): ExactClassAllocationOrigins | null => {
+    const origins = allocationOriginsOf(receiver)
+    if (origins !== null) return origins
+    const value = unwrapValue(receiver)
+    if (!ts.isNewExpression(value)) return null
+    const owner = ownConstructorClassOf(value)
+    if (owner === null) return null
+    const inventory = ownedClassReceiverInventoryOf(checker, flow, new Set([owner]))
+    const construction = inventory?.constructionFacts.find((fact) => fact.call === value)
+    if (
+      inventory === null ||
+      !construction ||
+      construction.alternatives.length === 0 ||
+      construction.familyProjection.length !== construction.alternatives.length ||
+      construction.alternatives.some((alternative) => !inventory.classes.has(alternative))
+    )
+      return null
+    return {
+      classes: new Set(construction.alternatives),
+      constructions: new Map([[value, construction.alternatives]])
+    }
+  }
+  const ownConstructorMemberReceiverOf = (
+    receiver: ts.NewExpression,
+    declared: ts.Declaration,
+    inFamily: (owner: SourceClass) => boolean
+  ): boolean => {
+    const selected = outermostErasureOf(receiver).parent
+    if (!ts.isPropertyAccessExpression(selected) && !ts.isElementAccessExpression(selected)) return false
+    const call = selected.parent
+    const key = accessKeyOf(selected)
+    if (!ts.isCallExpression(call) || call.expression !== selected || key === null || key !== memberKeyOf(declared)) return false
+    const site = callsOf(flow).sites.get(call)
+    if (
+      !site ||
+      site.explicitThis !== null ||
+      site.operands.dispatch.kind !== 'member' ||
+      site.operands.callee !== selected ||
+      unwrapValue(selected.expression) !== receiver
+    )
+      return false
+    const origins = memberReceiverOriginsOf(receiver)
+    if (origins === null || origins.classes.size === 0) {
+      traceClosedCallee(call, 'ownConstructorMemberReceiverOf', 'original construction origins unavailable')
+      return false
+    }
+    let receives = false
+    for (const owner of origins.classes) {
+      const symbol = owner.name ? checker.getSymbolAtLocation(owner.name) : checker.getTypeAtLocation(owner).getSymbol()
+      const slots = symbol && checker.getPropertyOfType(checker.getDeclaredTypeOfSymbol(symbol), key)?.declarations
+      if (!slots?.length) return false
+      for (const slot of slots) {
+        if (!slotDeclarationsOf(slot).every(slotClosedForTargets)) {
+          traceClosedCallee(call, 'ownConstructorMemberReceiverOf', `target slot remains open for ${owner.name?.text ?? '(anonymous)'}`)
+          return false
+        }
+        const bodies = ownMemberBodiesOf(slot)
+        if (bodies === null || bodies.length === 0 || bodies.some((body) => !flow.callableBodyIsIndexed(body))) return false
+        if (!bodies.includes(declared as ts.SignatureDeclaration)) continue
+        if (!inFamily(owner)) {
+          traceClosedCallee(
+            call,
+            'ownConstructorMemberReceiverOf',
+            `selected body receives a different family: ${owner.name?.text ?? '(anonymous)'}`
+          )
+          return false
+        }
+        receives = true
+      }
+    }
+    if (!receives) traceClosedCallee(call, 'ownConstructorMemberReceiverOf', 'no original construction selects this body')
+    return receives
+  }
   /**
    * `object.constructor` read as a value and not called on `object`.
    *
    * While no write replaces the slot, what it yields is the function that
    * allocated `object` -- never `object`, and nothing `object` holds. Only a
    * CALL through the slot could hand `object` on, as that call's `this`.
-   * Three's `Texture.clone` is `new this.constructor().copy( this )`.
+   * The universal `clone()` idiom is `new this.constructor().copy( this )`.
    */
   const constructorValueRead = (access: ts.PropertyAccessExpression | ts.ElementAccessExpression): boolean => {
     if (!ts.isPropertyAccessExpression(access) || access.name.text !== 'constructor') return false
@@ -5407,7 +5829,7 @@ const closedMemberCallableUses = (
     if (!table) classAnswers.set(path, (table = new Map()))
     return coinduct(table, owner, () => {
       const use = (value: ts.Expression): boolean => onward(value, path)
-      // TEMPORARY diagnostic for root A's real-WebGLRenderer probe -- names
+      // TEMPORARY diagnostic for root A's real-library probe -- names
       // which of `familyReceiversClosed`'s two obligations (an initializer's
       // own `this`, or a construction site) refused, and at which site.
       // Remove once the real-file refusal is found.
@@ -5631,9 +6053,9 @@ const closedMemberCallableUses = (
       // this constructor already owns -- the same body selection `new Base()`
       // makes (source-construction-frames.ts), reached from the heritage
       // clause instead of a spelled callee. Refusing it outright left every
-      // derived constructor's arguments unforwarded: three's
-      // DirectionalLight/AmbientLight/HemisphereLight `super( color,
-      // intensity )` were unauthenticated callees in the host-mutation
+      // derived constructor's arguments unforwarded: several sibling
+      // subclasses' `super( color,
+      // intensity )` calls were unauthenticated callees in the host-mutation
       // census, and one opaque `intensity` there was the `*` wildcard for
       // the whole program. The receiver is lexical (`this` of the home
       // class), which the census attributes from the base body's own
@@ -5657,7 +6079,7 @@ const closedMemberCallableUses = (
     if (ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee)) {
       const receiver = callee.expression
       const key = accessKeyOf(callee)
-      const origins = key === null ? null : allocationOriginsOf(receiver)
+      const origins = key === null ? null : memberReceiverOriginsOf(receiver)
       traceClosedCallee(
         call,
         'invocationTargetsOf/origins',
@@ -5712,7 +6134,7 @@ const closedMemberCallableUses = (
    * `GEA_CLOSED_CALLEE_WATCH=<substring>|'*'` traces `closedCalleeBodiesOf`'s
    * own cascade for ONE call, scoped by its text. `GEA_INVOCATION_REFUSALS`
    * already narrates every refusal in the whole program -- millions of rows
-   * on the three.js app, and its rows rank RE-ASKS of the same question, not roots
+   * on a large library compile, and its rows rank RE-ASKS of the same question, not roots
    * (see the memory note on reading it) -- so isolating one call's own
    * decision path out of that firehose is impractical. This prints only for
    * the matching call, once per stage, so which of `invocationTargetsOf`'s
@@ -5754,7 +6176,7 @@ const closedMemberCallableUses = (
     if (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) return null
     const receiver = callee.expression
     const key = accessKeyOf(callee)
-    const origins = key === null ? null : allocationOriginsOf(receiver)
+    const origins = key === null ? null : memberReceiverOriginsOf(receiver)
     const closedWithOverrides = (declared: ts.Declaration, into: Set<ts.SignatureDeclaration>): boolean => {
       for (const slot of slotDeclarationsOf(declared)) {
         if (slotClosedForTargets(slot)) continue
@@ -5832,7 +6254,8 @@ const closedMemberCallableUses = (
    * `GEA_CLOSED_CALLEE_WATCH` so a single run names which stage (if any)
    * answered a given call -- `invocationTargetsOf` first (its own
    * member-access branches are traced above, including the
-   * `recordMethodCallTargetsOf` route three's factory-record idiom needs),
+   * `recordMethodCallTargetsOf` route the factory-record idiom -- a plain
+   * function returning `{ push: push, ... }` -- needs),
    * then this session's two relaxations.
    */
   const closedCalleeBodiesCascade = (call: ts.CallExpression): readonly ts.SignatureDeclaration[] | null => {
@@ -5840,6 +6263,10 @@ const closedMemberCallableUses = (
     if (fromTargets !== null) {
       traceClosedCallee(call, 'closedCalleeBodiesOf', `invocationTargetsOf -> ${fromTargets.length} bodies`)
       return fromTargets
+    }
+    if (sourceValueSessionOf(checker, flow).ownsInvocation(call)) {
+      traceClosedCallee(call, 'closedCalleeBodiesOf', 'source value session invocation proof refused')
+      return null
     }
     const fromMember = memberAccessCalleeBodiesOf(call)
     if (fromMember !== null) {
@@ -5874,7 +6301,15 @@ const closedMemberCallableUses = (
   const invocationFactOf = (call: ts.CallExpression): SourceInvocationFact | null => {
     const ledger = deferredIntrinsicProtocolLedgerOf(flow)
     const known = invocationFacts.get(call)
-    if (known) return known.requirements.length === 0 || ledger?.include(known.requirements) === true ? known : null
+    if (known) {
+      const sourceValues = sourceValueSessionOf(checker, flow)
+      const candidate = sourceValues.candidateOrdinaryOwnCallableOperandsOf(call)
+      const current = candidate === null ? callsOf(flow).sites.get(call)?.operands : sourceValues.ordinaryOwnCallableOperandsOf(call)
+      // A conditional own-slot proof may become available in a later ledger
+      // capture. A wrapper frame memo cannot stand in for that exact entry.
+      if (known.operands === current) return known.requirements.length === 0 || ledger?.include(known.requirements) === true ? known : null
+      invocationFacts.delete(call)
+    }
     if (activeInvocationFacts.has(call)) {
       // A refusal on the strength of a fact still being computed is a
       // hypothesis, not a result: anything that leaned on it is reusable only
@@ -5884,40 +6319,85 @@ const closedMemberCallableUses = (
     }
     const site = callsOf(flow).sites.get(call)
     if (!site?.operands) return invocationRefusal(call, 'no-operands')
-    const operands = site.operands
     const compute = () => {
       const targets = invocationTargetsOf(call)
       if (targets === null) return invocationRefusal(call, 'no-targets')
       if (targets.length === 0) return invocationRefusal(call, 'empty-targets')
-      const candidates = targets.map((body) => sourceInvocationFrame(flow, call, body, argumentsUsesAt))
+      const sourceValues = sourceValueSessionOf(checker, flow)
+      const candidateOwnOperands = sourceValues.candidateOrdinaryOwnCallableOperandsOf(call)
+      const ordinaryOwnOperands = sourceValues.ordinaryOwnCallableOperandsOf(call)
+      if (candidateOwnOperands !== ordinaryOwnOperands) return invocationRefusal(call, 'unclosed-own-member-entry')
+      const operands = ordinaryOwnOperands ?? site.operands
+      const candidates = targets.map((body) => sourceInvocationFrame(flow, call, body, argumentsUsesAt, ordinaryOwnOperands ?? undefined))
       // An unindexed body contributes missing effects, not an empty frame.
-      if (candidates.every((frame) => frame !== null)) return candidates
+      if (candidates.every((frame) => frame !== null))
+        return { operands, frames: candidates, jointSource: sourceValues.ownsInvocation(call) }
       for (const [index, frame] of candidates.entries())
         if (frame === null) invocationRefusal(targets[index]!, `unmodelled-frame for ${describeCall(call)}`)
       return null
     }
     activeInvocationFacts.add(call)
-    enterHypothesisGuard(call)
+    enterHypothesisGuard(call, true)
+    let refused = false
     try {
       // Only the REFUSAL is shared across proofs. A successful fact stays in
       // this proof's own `invocationFacts` (`shareable` declines to publish
       // it) because a fact carries frames built against this proof's census
       // view; the refusal carries none, and `targets:origin-slot-open` alone
-      // was re-derived 41,190 times for one site in the three.js app.
+      // was re-derived 41,190 times for one site in a large library compile.
       const answer = sharedAnswerOf(`invocation-targets:${nodePathToken(call)}`, compute, (value) => value === null)
-      if (answer.value === null) return null
-      const fact = sourceInvocationFact(call, operands, answer.value, answer.requirements)
-      if (fact.requirements.length > 0 && ledger?.include(fact.requirements) !== true)
+      if (answer.value === null) {
+        refused = true
+        return null
+      }
+      const fact = sourceInvocationFact(
+        call,
+        answer.value.operands,
+        answer.value.frames,
+        answer.requirements,
+        answer.value.jointSource ? 'source-values' : 'legacy'
+      )
+      if (fact.requirements.length > 0 && ledger?.include(fact.requirements) !== true) {
+        refused = true
         return invocationRefusal(call, 'uncapturable-intrinsic-requirements')
+      }
+      if (answer.value.jointSource) {
+        let receipts = jointSourceInvocationReceipts.get(flow)
+        if (!receipts) jointSourceInvocationReceipts.set(flow, (receipts = new WeakMap()))
+        receipts.set(fact, {
+          call,
+          operands: fact.operands,
+          callee: fact.operands.callee,
+          receiver: fact.operands.receiver,
+          args: [...fact.operands.args],
+          kind: fact.operands.kind,
+          explicitThis: fact.operands.explicitThis,
+          dispatch: fact.operands.dispatch,
+          frameArray: fact.frames,
+          frames: fact.frames.map((frame) => ({
+            frame,
+            body: frame.body,
+            layout: frame.layout,
+            forwarding: frame.forwarding,
+            completions: frame.completions,
+            parameters: frame.parameters,
+            receiverUses: frame.receiverUses,
+            completionSummary: frame.completionSummary,
+            receiver: frame.layout.receiver,
+            arguments: frame.layout.arguments
+          })),
+          requirements: fact.requirements
+        })
+      }
       // A successful continuation can still depend on an enclosing recursive
       // hypothesis. Publish its memo only when that hypothesis is discharged.
       computedKeyAuthority.whenSettled(() => invocationFacts.set(call, fact))
       return fact
     } finally {
-      // The re-entry above hands out one thing, a refusal. A refusal here is
-      // therefore the same answer, so the hypothesis it issued has become a
-      // fact and every answer that leaned on it is freed of it.
-      exitHypothesisGuard(call, true)
+      // Re-entry is conservative in either case, but only an actual refusal
+      // settles it as the exact answer. Without settlement, enclosing array
+      // provenance walks keep re-deriving the same intrinsic-call refusals.
+      exitHypothesisGuard(call, true, refused)
       activeInvocationFacts.delete(call)
     }
   }
@@ -6022,7 +6502,7 @@ const closedMemberCallableUses = (
     // A plain call leaves `this` undefined in a module, so only `new` makes an
     // object -- the call's own result -- and every `this` in the body is it.
     // A call through a record slot (`list.push( item )` entering the function
-    // `WebGLRenderList` stored as `push`) binds `this` to the record.
+    // a factory function stored as `push`) binds `this` to the record.
     const module = ts.isExternalModule(owner.getSourceFile())
     const use = (value: ts.Expression): boolean => onward(value, path)
     return (
@@ -6050,7 +6530,7 @@ const closedMemberCallableUses = (
     // controller's private call graph.
     const references = cellMentionsOf(declaration, target.symbol ?? null)
     if (references === null) return false
-    // TEMPORARY diagnostic for root A's real-WebGLRenderer probe -- names
+    // TEMPORARY diagnostic for root A's real-library probe -- names
     // which mention of a forwarded cell (e.g. every `_this.` reference) the
     // caller's `use` refuses on. Remove once the real-file refusal is found.
     const watchedForwardCell = process.env['GEA_FORWARD_CELL_DEBUG']
@@ -6087,8 +6567,8 @@ const closedMemberCallableUses = (
     // array literal, a store through the intrinsic protocol, a numeric index
     // on an array-valued receiver, a rest frame -- and the walk follows that
     // same object. A path whose every head is an element needs no second
-    // proof here, and asking the checker again refused three's `any`-typed
-    // `currentRenderList.opaque` and `listArray`. A summary that may be at a
+    // proof here, and asking the checker again refused `any`-typed
+    // reads like `currentList.opaque` and `listArray`. A summary that may be at a
     // record as well asks the origins.
     const established = headsOf(path).every((id) => id === '[]')
     if (!arrayValued(reference)) {
@@ -6183,21 +6663,21 @@ const closedMemberCallableUses = (
         // same container the sound reading rather than merely the cheap one.
         //
         // Leaving `map` out of this switch fell through to the blanket `return
-        // false` below, and that one missing case is the terminal of the three.js app's
-        // largest carrier group: three's logging shim renders its rest frame
+        // false` below, and that one missing case was the terminal of one large
+        // library compile's largest carrier group: a logging shim that renders its rest frame
         // with `params.map( ( param ) => String( param ) )`, so EVERY object
         // handed to `error( ... )` escaped there -- including `object` at
-        // `Object3D.add`'s self-parenting guard. That refused `add`'s implicit
+        // a tree node's `add` self-parenting guard. That refused `add`'s implicit
         // `arguments` frame `function-escapes:uncounted-member-reference`,
-        // which left `Object3D.children`'s element unbound, which is 1496 of
-        // the three.js app's 3718 nested dynamic carriers.
+        // which left the node's `children` element unbound, which was 1496 of
+        // that compile's 3718 nested dynamic carriers.
         case 'map':
           return written.length === 1 && callbackClosed(written[0]!, [element, null, use]) && use(context)
       }
       // NAME the member. A built-in this switch does not model is the one shape
       // whose fix is a single `case`, and the bare `return false` here gave the
       // walk's report nothing to name: `map` sat unmodelled behind it holding
-      // 1496 of the three.js app's nested carriers open, indistinguishable from a real
+      // 1496 of that compile's nested carriers open, indistinguishable from a real
       // escape.
       return traceReceiver(reference, 'element', false, () => `unmodelled-member=${parent.name.text}`)
     }
@@ -6257,7 +6737,7 @@ const closedMemberCallableUses = (
     // A member published by `this.<key> = ...` inside a constructor function
     // is owned by that function exactly as a `ts.ClassElement` is owned by its
     // class. Asking only for a class-spelled ancestor is what left every
-    // member of three's pre-ES6 renderer factories with no container family at
+    // member of a pre-ES6 constructor-function factory with no container family at
     // all, and a null family refuses every proof that consults it.
     const owner = ts.findAncestor(
       member,
@@ -6277,8 +6757,8 @@ const closedMemberCallableUses = (
    * A read that resolves to no declaration is usually refused because an
    * accessor could hand the receiver's other members out. A key the family does
    * not declare has no accessor to be: the read evaluates to `undefined` and
-   * runs nothing. Three's logging shim probes `stackTrace.isStackTrace` on
-   * whatever it was handed, and every object reaching it there is an `Object3D`
+   * runs nothing. A logging shim that probes `stackTrace.isStackTrace` on
+   * whatever it was handed, where every object reaching it is a `Node`
    * that declares no such member -- which made the probe the terminal of 35
    * escapes.
    */
@@ -6296,7 +6776,7 @@ const closedMemberCallableUses = (
    * source code -- so the conversion cannot reach what this walk carries
    * inside it.
    *
-   * The static type at a conversion site is often `any` (three's logging shim
+   * The static type at a conversion site is often `any` (a logging shim that
    * takes `...params`), which says nothing. The PATH does: it names the member
    * the value sits in, and therefore the closed family of objects that carry
    * it. Every class in that family answering only the host's own `toString`,
@@ -6320,7 +6800,7 @@ const closedMemberCallableUses = (
   /**
    * Whether a call through a mutable binding can execute anything at all.
    *
-   * `_setConsoleFunction( 'warn', message, ...params )` in three's logging shim
+   * `_setConsoleFunction( 'warn', message, ...params )` in a logging shim
    * hands its arguments to whatever that module-level `let` holds -- and it
    * holds `null`, because `setConsoleFunction` is the only thing that writes it
    * and this program never calls it, so reachability prunes that write with the
@@ -6331,11 +6811,11 @@ const closedMemberCallableUses = (
    */
   const callThroughUncallableBinding = (call: ts.CallExpression | ts.NewExpression): boolean => {
     const callee = unwrapNaming(call.expression)
-    // The same fact for a MEMBER slot: three's `Texture` declares `this.onUpdate
-    // = null` and nothing in the three.js app ever stores a function there, so `if (
-    // texture.onUpdate ) texture.onUpdate( texture )` in WebGLTextures runs no
+    // The same fact for a MEMBER slot: a class declares `this.onUpdate
+    // = null` and nothing in the program ever stores a function there, so `if (
+    // item.onUpdate ) item.onUpdate( item )` in another module runs no
     // body -- yet `targets:no-member-implementations` refused it, and with an
-    // opaque `texture` the host-mutation census read the call as an
+    // opaque `item` the host-mutation census read the call as an
     // unauthenticated callee handed an opaque argument: a `*` wildcard. A
     // slot whose declaration and every write hold only `null`/`undefined`
     // has nothing to enter; a computed store the index attributes to the
@@ -6415,11 +6895,11 @@ const closedMemberCallableUses = (
     const declaration = key === accessKeyOf(parent) ? fieldDeclaration(parent) : fieldDeclarationOf(reference, key)
     const read: SlotRead = { element: false, declaration, key }
     // An accessor slot runs user code with the carried object bound as its
-    // receiver: `this.needsUpdate = true` in three's `Texture.copy` is a
+    // receiver: `this.needsUpdate = true` in a class's `copy` is a
     // CALL of the setter, and the read of a getter is a call of the getter.
     // Their bodies are right there to walk the way a method body is walked
     // (`methodReceiverUses`); refusing them as "not a data member" stopped
-    // every family walk that reached `Texture.copy` through the clone.
+    // every family walk that reached that `copy` through the clone.
     // The stored value goes to the setter's parameter, not into the
     // container, so only the bodies' receiver mentions matter. The flow
     // index resolves the access to the special-assignment form it indexed
@@ -6441,15 +6921,15 @@ const closedMemberCallableUses = (
       // that slot; it hands the object to nobody. A store into a slot whose
       // stores are owed may be putting in the very object that holds the
       // followed value, so that value is published there too.
-      // NAME both halves. `object.parent = this` in `Object3D.add` is the
-      // deepest open use in the three.js app's whole member-closure chain, and both
+      // NAME both halves. `object.parent = this` in a tree node's `add` was the
+      // deepest open use in one large library compile's whole member-closure chain, and both
       // refusals here were bare `false`: the walk's report could not say
       // whether the slot failed to be a data member or whether publishing
       // the stored value failed.
       //
-      // `mesh.onBeforeRender = function ( renderer, object ) { ... }`
+      // `node.onRender = function ( renderer, object ) { ... }`
       // installs a CALLABLE, not a data value: it changes which function
-      // answers `mesh.onBeforeRender()`, never what `mesh` itself carries
+      // answers `node.onRender()`, never what `node` itself carries
       // or where it can be reached from. That question is a member-slot
       // publication, already the obligation `escapeReason`'s own
       // `inlineMemberPublication` arm and `memberImplementationsOf` place on
@@ -6494,9 +6974,9 @@ const closedMemberCallableUses = (
     }
     const declarations = siblingDeclarationsOf(reference, key)
     if (declarations === null) {
-      // `this[ key ]` in three's `Texture.setValues` with `wrapR` among the
-      // keys: a plain texture has no such member and the read is
-      // `undefined`, while a `Data3DTexture` holds data there. The
+      // `this[ key ]` in a base class's `setValues` with `depth` among the
+      // keys: the base class has no such member and the read is
+      // `undefined`, while a subclass holds data there. The
       // data-member plan refuses a key absent on any owner; the key-read
       // plan classifies each class, and a code-free family -- data or
       // absent everywhere, `Object.prototype` proven clean for the key --
@@ -6512,8 +6992,8 @@ const closedMemberCallableUses = (
     const use = (expression: ts.Expression): boolean => containerUse(expression, path)
     // A mention the checker has narrowed to a primitive is not a mention of the
     // object being followed: a primitive holds no members, so nothing this walk
-    // carries can be read out of it or stored back into it. Three's logging
-    // shim inspects its first argument under `typeof message === 'string'`, and
+    // carries can be read out of it or stored back into it. A logging
+    // shim that inspects its first argument under `typeof message === 'string'`, and
     // treating that guarded read as a use of whatever else the slot might hold
     // made `message.startsWith` the terminal of 35 escapes.
     if (primitive(checker.getTypeAtLocation(reference))) return true
@@ -6522,7 +7002,7 @@ const closedMemberCallableUses = (
     if (ts.isBinaryExpression(parent) && parent.left === reference && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
       // A plain assignment's left side names the SLOT being written. It is not
       // evaluated as a value, so it hands nothing to anyone -- `this.geometry
-      // = geometry` in three's `Mesh` was read as a use of whatever
+      // = geometry` in a class constructor was read as a use of whatever
       // `this.geometry` held and was the terminal of 35 escapes. (A compound
       // assignment does read the slot first, which is why only `=` is here.)
       if (ts.isPropertyAccessExpression(reference) || ts.isElementAccessExpression(reference)) return true
@@ -6533,7 +7013,7 @@ const closedMemberCallableUses = (
     if (ts.isPropertyAccessExpression(parent) && parent.name === reference) return use(parent)
     if (ts.isBindingElement(parent) && parent.name === reference) return true
     // A member's own declaration name is where the member is written down,
-    // not a mention of the object that carries it. `Mesh` declares `geometry;`
+    // not a mention of the object that carries it. A class may declare `geometry;`
     // as a bare typed field, and reading that name as a receiver use left it
     // unexplained -- the terminal of 35 escapes.
     if (
@@ -6581,7 +7061,7 @@ const closedMemberCallableUses = (
     if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === reference) {
       const key = accessKeyOf(parent)
       if (key !== null) return containerMemberUse(reference, parent, key, path, use)
-      // `this[ key ]` in three's `Texture.setValues`: a computed key whose
+      // `this[ key ]` in a base class's `setValues( values )`: a computed key whose
       // set this program proves finite is every one of those named reads
       // or stores, exactly as the receiver walk's `computed-data-store` arm
       // reads it. A key set that stays open is the refusal below.
@@ -6602,8 +7082,8 @@ const closedMemberCallableUses = (
     // `super( ... )` is dispatch on the object this frame already owns, exactly
     // as the receiver walk reads it (its arm below): it hands the container
     // to nobody. Read as a call ARGUMENT it went to `forwardedInvocationUse`,
-    // matched no parameter and refused -- three's `RenderTarget` constructor
-    // opens with `super()`, and every owed `.textures` head stopped there.
+    // matched no parameter and refused -- a derived constructor that
+    // opens with `super()` stopped every owed `.items` head there.
     if (reference.kind === ts.SyntaxKind.SuperKeyword && ts.isCallExpression(parent) && parent.expression === reference) return true
     if (ts.isCallExpression(parent) || ts.isNewExpression(parent)) {
       if (callThroughUncallableBinding(parent)) return true
@@ -6616,7 +7096,7 @@ const closedMemberCallableUses = (
         ? collectionValueContinuationsOf(checker, flow, parent, reference, nativeProtocolClosed)
         : null
       if (storedReads !== null) return storedReads.every(use)
-      // `updateMap.set( object, frame )` in three's `WebGLObjects.update`: a
+      // `updateMap.set( object, frame )` in an update-tracking module: a
       // closed native map compares its key by identity and never yields it back.
       if (ts.isCallExpression(parent) && collectionKeyArgumentIsInert(checker, flow, parent, reference, nativeProtocolClosed)) return true
       const stored = arrayStoreArgumentUse(parent, reference, path)
@@ -6626,7 +7106,7 @@ const closedMemberCallableUses = (
     // `a && b`, `a || b`, `a ?? b` and `c ? a : b` select one operand and
     // return it. ToBoolean and the nullish test execute no user code, so the
     // only thing that leaves is whatever the expression evaluates to -- follow
-    // that, and nothing else. Three's logging shim guards its optional stack
+    // that, and nothing else. A logging shim that guards its optional stack
     // trace with `stackTrace && stackTrace.isStackTrace`, and refusing the
     // whole shape made that test the terminal of 35 escapes.
     if (
@@ -6647,7 +7127,7 @@ const closedMemberCallableUses = (
    * the store that made the backlink.
    *
    * A member written in a class: every construction and field initializer.
-   * A record slot -- three's `WebGLRenderList` returns `{ push: push, ... }`
+   * A record slot -- a factory function that returns `{ push: push, ... }`
    * -- the literal itself. A slot written through a receiver (`leaf.onDraw =
    * fn`): that receiver's allocations. Coinductive, so an answer that leaned
    * on this one is kept only once this one holds; the tri-state it replaces
@@ -6666,7 +7146,7 @@ const closedMemberCallableUses = (
   const ownerOriginsClosed = (carrier?: ts.Node): boolean => {
     // A proof with no member slot and no field owners is a receiver-family
     // proof (`classInstancesUse`): what it follows is the family's instances
-    // themselves. A data read inside it -- `this.blendColor` in `Material.copy`,
+    // themselves. A data read inside it -- `this.color` in a base class's `copy`,
     // reached from `new this.constructor().copy( this )` -- has no slot to
     // name an owner by, so the CARRIER of the data it selects (the `this.<key>
     // = ...` write or class element) stands in: its own receiver is the family
@@ -6677,9 +7157,9 @@ const closedMemberCallableUses = (
     // directly inside `member`'s own body -- but the walk can cross into a
     // DIFFERENT declaration's body first: an accessor inherited from a base
     // class, its `this` still the same receiver, reached while proving
-    // `member` closed. `RenderTarget`'s `get texture()` -- read through
-    // `WebGLCubeRenderTarget.fromEquirectangularTexture`'s `this.texture` --
-    // asked whether `this.textures` (a `RenderTarget` field the subclass never
+    // `member` closed. A base class's `get item()` -- read through
+    // a subclass method's `this.item` --
+    // asked whether `this.items` (a base-class field the subclass never
     // itself writes) escapes through `member`'s own class alone, which has no
     // writer to walk and so answered "open" for every accessor read reached
     // this way. The carrier -- the accessor `get`/`set` itself -- names the
@@ -6721,7 +7201,7 @@ const closedMemberCallableUses = (
       // Every carrier was a literal or a receiver walked above: no class
       // allocates one, and there is no inventory left to ask. (Asking it of no
       // class answers "unknown", which refused every member only literals
-      // carry -- three's `ColorManagement` methods reading `this.spaces`.)
+      // carry -- a singleton object literal's methods reading `this.spaces`.)
       if (roots.size === 0) return carried !== undefined || (member?.declarations?.length ?? 0) > 0
       // An OUTER proof is already answering for this family: park it. Only the
       // inherited set counts -- parking on this proof's own entry would make
@@ -6733,7 +7213,7 @@ const closedMemberCallableUses = (
       // All owner publications in constructors/field initializers must close,
       // including allocations with no visible call to the method being typed.
       // `openMember` NAMES which of the three failed: `family-origins-open` is
-      // the three.js app's largest member-closure refusal and it used to report only
+      // one large library compile's largest member-closure refusal and it used to report only
       // that the whole conjunction did, when an unbuildable inventory, an
       // initializer's `this` and a construction site are three different
       // defects with three different fixes.
@@ -6751,8 +7231,8 @@ const closedMemberCallableUses = (
     // class and for `super` at the base's, and `emit-class-properties.ts`
     // tells them apart by exactly that.
     //
-    // Without this, `super.copy( source )` -- every three.js `copy`/`clone`
-    // override -- was an unresolvable receiver, and the whole containing
+    // Without this, `super.copy( source )` -- every `copy`/`clone`
+    // override in a class-hierarchy library -- was an unresolvable receiver, and the whole containing
     // family's parameters went unbound behind it.
     if (expression.kind === ts.SyntaxKind.ThisKeyword || expression.kind === ts.SyntaxKind.SuperKeyword) {
       const owner = flow.receiverOwnerOf(expression)
@@ -6782,8 +7262,8 @@ const closedMemberCallableUses = (
     // A FRESH allocation has no cell to walk: nothing else holds the object,
     // so the expression IS the value and its own uses are the whole inventory.
     // Asking `flow.targetOf` for a declaration and refusing when there is none
-    // treated `new this.constructor().copy( this )` -- every three.js `clone`
-    // -- as an unresolvable receiver, when it is the most closed receiver
+    // treated `new this.constructor().copy( this )` -- the universal `clone`
+    // idiom -- as an unresolvable receiver, when it is the most closed receiver
     // there is. An object literal was already read this way at the receiver
     // inventory below; this states the same fact for the constructed case,
     // where the allocation's own uses answer it.
@@ -6805,9 +7285,9 @@ const closedMemberCallableUses = (
    * obligation `closedCallerSitesOf` discharges for an exported function. An
    * import binding is the exported cell seen from the importer, and is answered
    * as that cell. The bindings themselves (`import { x }`, `export { x }`,
-   * `export default x`) evaluate nothing and are not uses. Three's
-   * `ColorManagement` is `export const ColorManagement =
-   * createColorManagement()`, and refusing every export here was where each
+   * `export default x`) evaluate nothing and are not uses. A module whose
+   * singleton is `export const Settings =
+   * createSettings()` is an example, and refusing every export here was where each
    * of its methods' parameters stopped.
    */
   const cellMentionsOf = (declaration: ts.Node, symbol: ts.Symbol | null): readonly ts.Expression[] | null => {
@@ -6946,8 +7426,8 @@ const closedMemberCallableUses = (
     if (terminal !== undefined && terminal !== null) return terminal
     // A mention the checker has narrowed to a primitive is not a mention of the
     // object being followed: a primitive holds no members, so nothing this walk
-    // carries can be read out of it or stored back into it. Three's logging
-    // shim inspects its first argument under `typeof message === 'string'`, and
+    // carries can be read out of it or stored back into it. A logging
+    // shim that inspects its first argument under `typeof message === 'string'`, and
     // treating that guarded read as a use of whatever else the slot might hold
     // made `message.startsWith` the terminal of 35 escapes.
     if (primitive(checker.getTypeAtLocation(reference))) return true
@@ -6956,7 +7436,7 @@ const closedMemberCallableUses = (
     if (ts.isBinaryExpression(parent) && parent.left === reference && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
       // A plain assignment's left side names the SLOT being written. It is not
       // evaluated as a value, so it hands nothing to anyone -- `this.geometry
-      // = geometry` in three's `Mesh` was read as a use of whatever
+      // = geometry` in a class constructor was read as a use of whatever
       // `this.geometry` held and was the terminal of 35 escapes. (A compound
       // assignment does read the slot first, which is why only `=` is here.)
       if (ts.isPropertyAccessExpression(reference) || ts.isElementAccessExpression(reference)) return true
@@ -6968,7 +7448,7 @@ const closedMemberCallableUses = (
     if (ts.isBindingElement(parent) && parent.name === reference) return true
     if (ts.isPropertyAssignment(parent) && parent.name === reference) return true
     // A member's own declaration name is where the member is written down,
-    // not a mention of the object that carries it. `Mesh` declares `geometry;`
+    // not a mention of the object that carries it. A class may declare `geometry;`
     // as a bare typed field, and reading that name as a receiver use left it
     // unexplained -- the terminal of 35 escapes.
     if (
@@ -6995,9 +7475,9 @@ const closedMemberCallableUses = (
       if (parent.initializer === reference && ts.isIdentifier(parent.name)) return receiverCell(parent.name)
     }
     // The declaration-initializer case above misses a cell DECLARED bare and
-    // filled later by a plain assignment -- three's `WebGLRenderer` declares
+    // filled later by a plain assignment -- a `function Renderer()` that declares
     // `let properties, textures;` at its own top level, then a nested
-    // `initGLContext` assigns `properties = new WebGLProperties();` before
+    // `initContext` assigns `properties = new Properties();` before
     // publishing it onward (`_this.properties = properties`). The allocation
     // is the SAME cell an initializer would name; only the edge shape differs.
     if (
@@ -7067,8 +7547,21 @@ const closedMemberCallableUses = (
           'invocation-receiver',
           invocations.every((site) => {
             if (!ts.isCallExpression(site.call)) return false
+            // This receiver walk carries the tracked member through records,
+            // formal parameters and containers. A structurally erased alias
+            // can lose that member's checker symbol, but reading the same key
+            // still invokes the carried slot and must belong to its caller
+            // inventory. Checking only the target body's this-uses omitted
+            // calls such as retained[0].method('text').
             const targets = invocationTargetsOf(site.call)
-            if (targets === null) return false
+            if (targets === null || (targets.length === 0 && !callThroughUncallableBinding(site.call))) return false
+            if (member !== null && (sameMember(parent) || accessKeyOf(parent) === member.getName()) && !countedCalls.has(site.call)) {
+              const held = (member.declarations ?? []).map(ownMemberBodiesOf)
+              // A same-spelled override or lexical super call can select a
+              // different body. Only the complete selected source targets can
+              // distinguish it from an omitted caller of this exact slot.
+              if (held.some((bodies) => bodies === null || targets.some((body) => bodies.includes(body)))) return false
+            }
             // `.call(other)` reads the member here, but binds `other` as this.
             // Its actual receiver occurrence is followed through that frame.
             return (
@@ -7193,8 +7686,8 @@ const closedMemberCallableUses = (
             plan.writeBodies.every((body) => flow.receiverReferencesToDeclaration(body).every(receiverUse))
         )
       }
-      // `mesh.onBeforeRender = function ( renderer, scene, camera ) { ... }`
-      // in three's `WebGLBackground`: a store over a prototype METHOD. The
+      // `node.onRender = function ( renderer, scene, camera ) { ... }`
+      // from outside the class: a store over a prototype METHOD. The
       // [[Set]] finds the method's data property first and creates an own one
       // on the receiver, running no code -- only a setter could hand the
       // receiver on. The descriptor authority names any setters independently
@@ -7236,8 +7729,8 @@ const closedMemberCallableUses = (
       const selectedData =
         dataMember && (declaredDataMemberAccess(target!) || constructionDataMember(parent) || ownLiteralDataMember(parent))
       // A getter under this key on SOME class the receiver's declared type
-      // could be -- three's `InterleavedBufferAttribute.count`, read off a
-      // `BufferAttribute | InterleavedBufferAttribute` parameter -- is not by
+      // could be -- `InterleavedAttribute.count`, read off an
+      // `Attribute | InterleavedAttribute` parameter -- is not by
       // itself proof that the read escapes: only a getter BODY that leaks the
       // receiver is. `sourceClassKeyReadPlanOf` classifies every class the
       // receiver could be (construction origins first, the declared type
@@ -7247,7 +7740,7 @@ const closedMemberCallableUses = (
       // SETTER's write bodies. Walking them with the identical
       // `receiverReferencesToDeclaration(...).every(receiverUse)` rule
       // answers the read the same way: closed unless the getter's own `this`
-      // mentions themselves escape (three's `InterleavedBufferAttribute.count`
+      // mentions themselves escape (`InterleavedAttribute.count`
       // is `return this.data.count`, which recurses into this same arm for
       // `this.data`). `sourceClassKeyReadPlanOf` only sees the checker's
       // STATIC declared members, so a reflective definition that could
@@ -7259,8 +7752,8 @@ const closedMemberCallableUses = (
       // allocation-origins proof for the receiver, and every getter body it
       // hands back is walked through this proof's own `receiverUse`. Asked
       // eagerly at every member read it re-ran that work for the tens of
-      // thousands of reads the selected-data arm already accepted -- the three.js app
-      // went from ~3 min to over 8 min at 23 GB before this ordering.
+      // thousands of reads the selected-data arm already accepted -- one large
+      // library compile went from ~3 min to over 8 min at 23 GB before this ordering.
       const key = accessKeyOf(parent)
       let readerClosedHeld: boolean | null = null
       const readerClosed = (): boolean => {
@@ -7350,7 +7843,7 @@ const closedMemberCallableUses = (
     // `a && b`, `a || b`, `a ?? b` and `c ? a : b` select one operand and
     // return it. ToBoolean and the nullish test execute no user code, so the
     // only thing that leaves is whatever the expression evaluates to -- follow
-    // that, and nothing else. Three's logging shim guards its optional stack
+    // that, and nothing else. A logging shim that guards its optional stack
     // trace with `stackTrace && stackTrace.isStackTrace`, and refusing the
     // whole shape made that test the terminal of 35 escapes.
     if (

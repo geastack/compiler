@@ -21,13 +21,17 @@ import { carriesUnsubstitutedGeneric, emptyParameterBindingCensus, type Paramete
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { classFamilyMemberReadTypeOf } from './flow/class-family-member-read.js'
+import { createCensusComputedKeysOf, type CensusComputedKeysOf } from './host-mutation-computed-keys.js'
+import { closedCallableAuthorityOf } from './flow/callable-reach.js'
+import { argumentsObjectUsesAt } from './arguments-objects.js'
+import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 
 /**
  * The type an unannotated class FIELD holds, when the program never declares
- * it and only ever assigns it -- `this.view = null;` in `OrthographicCamera`'s
- * constructor, reassigned a real object later in `setViewOffset`. TypeScript's
+ * it and only ever assigns it -- `this.view = null;` in a class's
+ * constructor, reassigned a real object later in some `setView` method. TypeScript's
  * own JS-class inference DOES give `view` a symbol from these assignments
  * alone (no `view;` field declaration exists anywhere in the class), but
  * `symbol.declarations` for it is a bare list of the `BinaryExpression`
@@ -83,14 +87,14 @@ import { censusRefusal, type CensusRefusal } from './census-refusal.js'
  *
  * ## The second shape: a BARE `field;` declaration
  *
- * `class Camera { aspect; }` -- a `PropertyDeclaration` with no annotation,
+ * `class Shape { aspect; }` -- a `PropertyDeclaration` with no annotation,
  * no initializer and no JSDoc tag -- states that the storage EXISTS and
  * nothing whatever about what it holds; the checker's own answer for it is
  * `any`. The original rule turned every `PropertyDeclaration` away on the
  * reasoning that "TypeScript already reads an unannotated field
  * declaration's own initializer", which is true of `aspect = 1;` and vacuous
  * for `aspect;`: there is no initializer to read, so nothing reads anything
- * and every `camera.aspect` boxes.
+ * and every `shape.aspect` boxes.
  *
  * That is the SAME question this module already answers one shape over --
  * storage the program declared but never typed, filled by the writes the
@@ -189,12 +193,12 @@ const isUnusableEvidence = (type: ts.Type): boolean => (type.flags & (ts.TypeFla
  * `never` half. `isUnusableEvidence` already refuses a bare `any` because it
  * says nothing about what a slot holds; an array OF `any` says nothing about
  * what its elements hold, and the only difference is one level of nesting.
- * three's `Texture.mipmaps` is the measured case: `@type {Array<Object>}`,
+ * A JSDoc field `@type {Array<Object>}` is the measured case,
  * where the global `Object` INTERFACE is collapsed to `any` by
  * `structural.ts`'s `isGlobalObjectInterface` for the same reason
  * `annotationStatesNothing` refuses it bare -- so the annotation arrives here
  * as `any[]`, read as REAL evidence, and the field's write set (which the
- * program plainly fills with real mip records) was never consulted at all.
+ * program plainly fills with real records) was never consulted at all.
  */
 const isVacuousArrayType = (checker: ts.TypeChecker, type: ts.Type): boolean => {
   if (!checker.isArrayType(type)) return false
@@ -247,6 +251,47 @@ const dictionaryTypeOf = (checker: ts.TypeChecker, valueType: ts.Type): ts.Type 
   }
   cache.set(valueType, dictionary)
   return dictionary
+}
+
+interface SymbolConstructingChecker {
+  createSymbol(flags: ts.SymbolFlags, name: ts.__String): ts.Symbol & { links: { type?: ts.Type } }
+  getUnionType(types: readonly ts.Type[]): ts.Type
+}
+const optionalRecords = new WeakMap<ts.TypeChecker, Map<ts.Type, ts.Type>>()
+/**
+ * `record` with every member optional, or `null` unless `record` is a plain
+ * object record (no signatures, no index, not a class or array). The members
+ * keep their declarations, so the layout still names where each was written.
+ */
+const recordWithOptionalMembersOf = (checker: ts.TypeChecker, record: ts.Type): ts.Type | null => {
+  if (!(record.flags & ts.TypeFlags.Object) || record.isClass() || checker.isArrayType(record) || checker.isTupleType(record)) return null
+  if ((record.getSymbol()?.flags ?? 0) & (ts.SymbolFlags.Class | ts.SymbolFlags.Interface)) return null
+  if (record.getCallSignatures().length || record.getConstructSignatures().length || checker.getIndexInfosOfType(record).length) return null
+  const properties = checker.getPropertiesOfType(record)
+  if (properties.length === 0) return null
+  if (properties.some((property) => property.flags & (ts.SymbolFlags.Method | ts.SymbolFlags.Accessor))) return null
+  const cached = optionalRecords.get(checker)?.get(record)
+  if (cached) return cached
+  const constructing = checker as unknown as Partial<SymbolConstructingChecker & DictionaryConstructingChecker>
+  if (
+    typeof constructing.createSymbol !== 'function' ||
+    typeof constructing.getUnionType !== 'function' ||
+    typeof constructing.createAnonymousType !== 'function'
+  )
+    return null
+  const members = new Map<ts.__String, ts.Symbol>()
+  for (const property of properties) {
+    const optional = constructing.createSymbol(ts.SymbolFlags.Property | ts.SymbolFlags.Optional, property.escapedName)
+    optional.links.type = constructing.getUnionType([checker.getTypeOfSymbol(property), checker.getUndefinedType()])
+    if (property.declarations) optional.declarations = property.declarations
+    if (property.valueDeclaration) optional.valueDeclaration = property.valueDeclaration
+    members.set(property.escapedName, optional)
+  }
+  const answer = constructing.createAnonymousType(undefined, members as ts.SymbolTable, [], [], [])
+  let cache = optionalRecords.get(checker)
+  if (!cache) optionalRecords.set(checker, (cache = new Map()))
+  cache.set(record, answer)
+  return answer
 }
 
 /** The internal checker method backing a union type literal (`ts.Type[] -> ts.Type`); same category as `DictionaryConstructingChecker` above. */
@@ -310,11 +355,12 @@ const isBareFieldDeclaration = (checker: ts.TypeChecker, declaration: ts.Declara
  * `any`/`unknown`/bare-`Function` position somewhere inside it, satisfied at
  * every position it constrains by what the program actually writes there.
  *
- * hono's `HonoRequest` is the measured case, and it is why this exists at all.
- * Its constructor parameter `matchResult: Result<[unknown, RouterRoute]>` is
- * already narrowed to the concrete `Result<[H, RouterRoute]>` its only caller
+ * A class whose constructor stores a partly-unstated parameter into a field
+ * of the same annotation is the measured case, and it is why this exists at
+ * all. A constructor parameter `matchResult: Result<[unknown, Route]>` is
+ * already narrowed to the concrete `Result<[H, Route]>` its only caller
  * passes, by exactly the parameter rule above. The FIELD it is stored into,
- * `#matchResult: Result<[unknown, RouterRoute]>`, kept the annotation -- so
+ * `#matchResult: Result<[unknown, Route]>`, kept the annotation -- so
  * the cell held the stated type while its one writer held the narrowed one,
  * and the store between them asked the backend to reconcile two `Result`
  * carriers. That reconciliation rebuilds two arrays, and an array rebuild is
@@ -347,13 +393,13 @@ const statedUpperBoundOfField = (checker: ts.TypeChecker, declaration: ts.Declar
  * position is its RESULT -- the one shape of `PropertySignature` admitted as
  * an upper bound.
  *
- * bson is the measured case: `OnDemand.parseToElements` is stated
- * `(bytes: Uint8Array, startOffset?: number) => Iterable<BSONElement>` and its
- * one writer, `onDemand.parseToElements = parseToElements`, is a function the
- * return census already narrowed to the `BSONElement[]` it builds. Held to the
+ * The measured case: an interface member `parse` stated
+ * `(bytes: Uint8Array, startOffset?: number) => Iterable<Element>` whose
+ * one writer, `api.parse = parse`, is a function the
+ * return census already narrowed to the `Element[]` it builds. Held to the
  * statement, the member carried a callable returning the `Iterable` protocol
  * record while the value stored into it returned an array: the store needed a
- * callable conversion no backend has, and mongodb's
+ * callable conversion no backend has, and a consumer's
  * `Array.isArray(res) ? res : [...res]` would have seen a protocol view where
  * node sees the array.
  *
@@ -383,7 +429,7 @@ const statedCallableResultBoundOfSignature = (checker: ts.TypeChecker, declarati
  *
  * For a callable member (`statedCallableResultBoundOfSignature`) the value
  * test `narrowsOnlyUnstatedPositions` is the wrong instrument at the
- * PARAMETERS: bson's writer is `(bytes, startOffset: number | null = 0)`
+ * PARAMETERS: a writer `(bytes, startOffset: number | null = 0)`
  * under a member stated `startOffset?: number`, which is not the same type
  * but is exactly what the floor (`isTypeAssignableTo`, asked by the caller)
  * already proves safe -- the writer accepts every argument a caller of the
@@ -411,14 +457,14 @@ const statedFieldAdmits = (checker: ts.TypeChecker, declaration: ts.Declaration,
  * the program writes into it -- and when every write is an instance of one
  * class, that class IS the storage.
  *
- * hono is the measured case and it is not a boxing question, it is a
- * CORRECTNESS one. `HonoBase.router` is annotated `Router<[H, RouterRoute]>`,
- * an interface whose members are `name`, `add` and `match`; the constructor
- * writes `new PatternRouter()` and nothing else ever writes it. Carried as the
+ * The measured case is not a boxing question, it is a CORRECTNESS one: a
+ * field `router` annotated `Router<[H, Route]>`, an interface whose members
+ * are `name`, `add` and `match`, written by the constructor as
+ * `new SimpleRouter()` and by nothing else. Carried as the
  * interface, the field became a struct with two `gea::CallableObject` members
  * that nothing could fill (a class's methods are free functions taking the
  * instance, not storage), the class instance would not assign into it at all,
- * and -- worse than either -- `PatternRouter.add`/`.match` were never reached
+ * and -- worse than either -- the class's `add`/`match` were never reached
  * through the class, so the census never walked them and NO BODY FOR EITHER
  * WAS EMITTED. The program compiled its router away.
  *
@@ -482,8 +528,8 @@ const statedBoundOfSymbol = (
  * above the assignment -- even though `ts.getJSDocType` reads that comment
  * from a `BinaryExpression` exactly as it does from a `PropertyDeclaration`,
  * and the checker's own `getTypeOfSymbolAtLocation` already uses it for the
- * symbol's type: three's `/** @type {Array<Plane>} *\/ this.clippingPlanes =
- * [];` types the SYMBOL `Plane[]`, in full, from the tag alone. A
+ * symbol's type: `/** @type {Array<Shape>} *\/ this.shapes =
+ * [];` types the SYMBOL `Shape[]`, in full, from the tag alone. A
  * `PropertyDeclaration` this fully stated is excluded from candidacy
  * entirely -- this module's own doc below says why ("an annotated ... field
  * ... means the program DID state something ... this module defers") -- but
@@ -494,20 +540,19 @@ const statedBoundOfSymbol = (
  * nothing: `compute`'s `PropertyAccessExpression` case returns whatever
  * `resolveSymbol` answers the instant `isCandidateSymbol` is true, never
  * falling through to `propertyTypeOf`/`memberTypeOf` -- the ordinary
- * checker-backed lookup that would have read the JSDoc-informed `Plane[]`
+ * checker-backed lookup that would have read the JSDoc-informed `Shape[]`
  * directly. So a field the program fully described boxed every read of it,
  * for want of a check a sibling shape (`isBareFieldDeclaration`) already
- * makes for the OTHER declaration kind. Measured on the three.js app:
- * `WebGLRenderer.clippingPlanes` and `UniformsGroup.uniforms`, each written
- * once as an empty literal the evolving-array checker calls `never[]`
+ * makes for the OTHER declaration kind. Measured shape: JavaScript class
+ * fields each written once as an empty literal the evolving-array checker calls `never[]`
  * (correctly silent as evidence -- see `resolveSymbol`'s `write-unresolved`)
- * and annotated `Array<Plane>`/`Array<Uniform>` directly above that one
+ * and annotated `Array<Shape>` directly above that one
  * write: fully concrete container types the program already committed to,
  * refused here for want of ever reading the annotation.
  *
  * Deliberately narrower than "any JSDoc-typed assignment": `Array<Object>`
- * (three's `updateRanges`/`coefficients`, same shape, same single silent
- * write) has an UNSTATED position (`Object` states nothing on its own,
+ * (same shape, same single silent write) has an UNSTATED position (`Object`
+ * states nothing on its own,
  * `containsUnstatedPosition` agrees) and stays a candidate, unaffected by
  * this check -- narrowing that kind of annotation from write evidence is the
  * THIRD shape's job (`statedUpperBoundOfField`), not this one's, and a field
@@ -598,7 +643,22 @@ export const censusFieldBindings = (
   const unionArms = new Map<ts.Symbol, readonly ts.Type[]>()
   /** The subset of `bound` that came from a STATED annotation -- see `statedTypeAt`. */
   const statedBindings = new Map<ts.Symbol, ts.Type>()
+  /**
+   * `statedBindings` again, keyed by each declaration of the bound symbol. A
+   * read through a receiver typed as the class INSTANCE (`source.
+   * groups` off a `@type {Shape}` cast) can resolve to the
+   * instance type's own property symbol rather than the one the writes
+   * declared; both name the same declarations, and the cell and its reads
+   * must not split.
+   */
+  const statedByDeclaration = new Map<ts.Node, ts.Type>()
+  const state = (symbol: ts.Symbol, type: ts.Type): void => {
+    statedBindings.set(symbol, type)
+    for (const declaration of symbol.declarations ?? []) statedByDeclaration.set(declaration, type)
+  }
   const refusalOf = new Map<ts.Symbol, string>()
+  /** A fresh `{}` written into a field bound by `recordWithOptionalMembersOf`, and that field's type. */
+  const freshEmptyHomes = new Map<ts.Node, ts.Type>()
   const resolvingSymbols = new Set<ts.Symbol>()
   /** Whether resolution is in the relaxed retry phase, where a silent write is an absence rather than a veto. See `resolveSymbol`. */
   let lenientPhase = false
@@ -656,11 +716,170 @@ export const censusFieldBindings = (
   }
 
   /**
+   * `this[ key ] = v` where `key` is PROVEN to range over a finite set of
+   * names (`flow/computed-key-set.ts`) writes `v` into the field each of those
+   * names spells -- exactly as `this.settings = v` would. A base-class
+   * `setValues( values )` that copies an options bag onto `this` by key is
+   * the measured shape: without this the field census saw only
+   * `this.settings = {}`, typed the subclass's `settings` as the empty
+   * record, and the store landed in a document view the program's later
+   * `for ( name in this.settings )` could not see --
+   * `0` where Node prints `3.5`, with a clean exit.
+   *
+   * The written value is typed PER NAME where it is the very `values[ key ]`
+   * the key enumerates (directly or through a `const` binding of it): under
+   * key `settings` the value is `values.settings`, not the join of every
+   * option the bag carries -- the same type a static `this.settings =
+   * values.settings` would contribute. Any other value joins whole.
+   *
+   * The key set is an UPPER bound; a name outside it never reaches a field
+   * here. Its intrinsic assumptions (`Object.keys`, the Array iteration
+   * protocol, and for a `for-in` key an `Object.prototype` that carries no
+   * enumerable key) cannot be discharged before the host-mutation census
+   * seals, so a field typed from the store publishes them as ledger
+   * obligations rather than taking them as given.
+   *
+   * A store whose key set is NOT proven, into a receiver that may be an
+   * instance of a class, may write any string-named field of that class's
+   * family: it is a write to each of them (a silent one where its value
+   * cannot be typed), never no write at all. A receiver union names each of
+   * its class arms.
+   */
+  interface KeyedStore {
+    readonly owner: ts.ClassLikeDeclaration
+    readonly key: ts.Expression
+    readonly value: ts.Expression
+    readonly requirements: readonly IntrinsicProtocolRequirement[]
+    /** For an unproven key: whether it can spell only canonical numeric names. */
+    readonly numericOnly?: boolean
+  }
+  const instanceClassesOf = (node: ts.Expression): readonly ts.ClassLikeDeclaration[] => {
+    const typed = checker.getTypeAtLocation(node)
+    const type = isAnyType(typed) ? parameters.typeAt(node) : typed
+    if (!type) return []
+    const classes = new Set<ts.ClassLikeDeclaration>()
+    for (const arm of type.isUnion() ? type.types : [type]) {
+      const symbol = arm.getSymbol() ?? checker.getApparentType(arm).getSymbol()
+      const declaration = symbol?.declarations?.find(ts.isClassLike)
+      if (declaration) classes.add(declaration)
+    }
+    return [...classes]
+  }
+  /** The names an unproven key can spell: none (symbols only), canonical numeric ones only, or any. */
+  const unprovenKeyDomainOf = (key: ts.Expression): 'none' | 'numeric' | 'any' => {
+    const type = checker.getTypeAtLocation(key)
+    const arms = (type.isUnion() ? type.types : [type]).filter(
+      (arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
+    )
+    if (arms.length > 0 && arms.every((arm) => (arm.flags & ts.TypeFlags.ESSymbolLike) !== 0)) return 'none'
+    if (arms.length > 0 && arms.every((arm) => (arm.flags & (ts.TypeFlags.NumberLike | ts.TypeFlags.ESSymbolLike)) !== 0)) return 'numeric'
+    return 'any'
+  }
+  let keyedStores: { readonly named: Map<string, KeyedStore[]>; readonly unproven: KeyedStore[] } | undefined
+  const keyedStoresNamed = (name: string): readonly KeyedStore[] => {
+    if (!keyedStores) {
+      keyedStores = { named: new Map(), unproven: [] }
+      const typeOf = (expression: ts.Expression): ts.Type => {
+        const own = checker.getTypeAtLocation(expression)
+        return isAnyType(own) ? (parameters.typeAt(expression) ?? own) : own
+      }
+      let keysOf: CensusComputedKeysOf | undefined
+      for (const write of flow.allWrites) {
+        const access = write.propertyAccess
+        if (write.edge !== 'index-assignment' || !write.value || !access || !ts.isElementAccessExpression(access)) continue
+        if (literalMemberNameOf(access) !== null) continue
+        const owners = instanceClassesOf(access.expression)
+        if (owners.length === 0) continue
+        keysOf ??= createCensusComputedKeysOf(
+          checker,
+          flow,
+          closedCallableAuthorityOf(checker, flow, typeOf, (callable) => argumentsObjectUsesAt(checker, callable))
+        )
+        const proven = keysOf(access.argumentExpression)
+        if (proven === null) {
+          const domain = unprovenKeyDomainOf(access.argumentExpression)
+          if (domain === 'none') continue
+          for (const owner of owners)
+            keyedStores.unproven.push({
+              owner,
+              key: access.argumentExpression,
+              value: write.value,
+              requirements: [],
+              numericOnly: domain === 'numeric'
+            })
+          continue
+        }
+        const requirements = proven.inheritsObjectPrototypeKeys
+          ? [...proven.requirements, { intrinsic: 'Object' as const, location: access.argumentExpression }]
+          : proven.requirements
+        for (const key of proven.keys) {
+          const stores = keyedStores.named.get(key) ?? []
+          for (const owner of owners) stores.push({ owner, key: access.argumentExpression, value: write.value, requirements })
+          keyedStores.named.set(key, stores)
+        }
+      }
+    }
+    const numericName = /^(?:0|[1-9][0-9]*)$/.test(name)
+    return [...(keyedStores.named.get(name) ?? []), ...keyedStores.unproven.filter((store) => store.numericOnly !== true || numericName)]
+  }
+  /** The intrinsic obligations of the keyed stores each field's binding read, published once the census settles. */
+  const keyedRequirements = new Map<ts.Symbol, readonly IntrinsicProtocolRequirement[]>()
+  const ancestryOf = (declaration: ts.ClassLikeDeclaration): ReadonlySet<ts.ClassLikeDeclaration> => {
+    const seen = new Set<ts.ClassLikeDeclaration>([declaration])
+    const queue = [checker.getTypeAtLocation(declaration)]
+    for (let type = queue.pop(); type; type = queue.pop()) {
+      if (!(type.flags & ts.TypeFlags.Object) || !((type as ts.ObjectType).objectFlags & ts.ObjectFlags.ClassOrInterface)) continue
+      for (const base of checker.getBaseTypes(type as ts.InterfaceType)) {
+        const baseDeclaration = base.getSymbol()?.declarations?.find(ts.isClassLike)
+        if (baseDeclaration && !seen.has(baseDeclaration)) {
+          seen.add(baseDeclaration)
+          queue.push(base)
+        }
+      }
+    }
+    return seen
+  }
+  /** The `values` of a `values[ key ]` the stored value is (directly or through a `const` binding), keyed by the store's own key binding. */
+  const enumeratedSourceOf = (value: ts.Expression, key: ts.Expression): ts.Expression | null => {
+    let read = unwrapParens(value)
+    if (ts.isIdentifier(read)) {
+      const declaration = checker.getSymbolAtLocation(read)?.valueDeclaration
+      if (!declaration || !ts.isVariableDeclaration(declaration) || !declaration.initializer) return null
+      if (!(ts.getCombinedNodeFlags(declaration) & ts.NodeFlags.Const)) return null
+      read = unwrapParens(declaration.initializer)
+    }
+    if (!ts.isElementAccessExpression(read) || !ts.isIdentifier(key) || !ts.isIdentifier(read.argumentExpression)) return null
+    const keySymbol = checker.getSymbolAtLocation(key)
+    return keySymbol && checker.getSymbolAtLocation(read.argumentExpression) === keySymbol ? read.expression : null
+  }
+  /** Each proven-key store into `symbol`: the type it writes, or `null` where nothing types it. */
+  const keyedWriteTypesOf = (symbol: ts.Symbol): readonly (ts.Type | null)[] => {
+    const owners = new Set(
+      (symbol.declarations ?? []).map((declaration) => ts.findAncestor(declaration, ts.isClassLike)).filter((owner) => owner !== undefined)
+    )
+    if (owners.size === 0) return []
+    const answers: (ts.Type | null)[] = []
+    const requirements: IntrinsicProtocolRequirement[] = []
+    for (const store of keyedStoresNamed(symbol.name)) {
+      const related = [...owners].some((owner) => ancestryOf(owner).has(store.owner) || ancestryOf(store.owner).has(owner))
+      if (!related) continue
+      requirements.push(...store.requirements)
+      const source = enumeratedSourceOf(store.value, store.key)
+      if (source) {
+        const holder = knownOrResolve(source)
+        answers.push(holder ? propertyTypeOf(holder, symbol.name, store.value) : null)
+      } else answers.push(parameters.statedTypeAt(store.value) ?? known(store.value) ?? resolveExpr(store.value))
+    }
+    if (requirements.length > 0) keyedRequirements.set(symbol, requirements)
+    return answers
+  }
+
+  /**
    * The checker's own answer at this node, when it says something usable.
    *
    * `annotationStatesNothing` is part of the test, not just
    * `isUnusableEvidence`, and the difference is the single measured root of
-   * the vacuous-receiver family: three.js writes `@type {?Object}` above
+   * the vacuous-receiver family: a JSDoc class writes `@type {?Object}` above
    * `this.view = null;`, the checker dutifully types the SYMBOL
    * `Object | null`, and `Object` -- which states nothing about what the
    * value holds -- is not `any`, so it read as real evidence. Worse than
@@ -698,9 +917,9 @@ export const censusFieldBindings = (
 
   /**
    * A field's shape read from writes made THROUGH it elsewhere in the
-   * program -- `this.morphTargetDictionary[ name ] = m` reached from a
-   * different method than the one that creates `morphTargetDictionary`,
-   * three separate times in three unrelated classes (`Line`/`Mesh`/`Points`)
+   * program -- `this.nameIndex[ name ] = m` reached from a
+   * different method than the one that creates `nameIndex`,
+   * several separate times in unrelated classes
    * -- rather than from an `x.field = expr` write to the field itself.
    * `field-bindings.ts`'s own write-set collection (`writesOf`) only ever
    * looks at writes to the field's OWN whole value; a computed-index write
@@ -776,8 +995,9 @@ export const censusFieldBindings = (
    * With `checkJs` off the checker declares NO member for a descriptor-defined
    * field, so a read of it names no symbol and `memberSymbolOf` answers
    * nothing; the class LAYOUT, which consumes the define-own-property
-   * operation, carries the field natively all the same. Three's `LOD` defines
-   * `levels` exactly this way (`define-property-source-transform.ts` lowers
+   * operation, carries the field natively all the same. A constructor that
+   * defines `levels` through `Object.defineProperties` is the case
+   * (`define-property-source-transform.ts` lowers
    * the `defineProperties` map to one call per key, binding the receiver and
    * each descriptor to a `const` first), and every `this.levels` read fell to
    * the checker's `any`, so `levels[ i ].hysteresis` reached a `*` as a box.
@@ -844,17 +1064,16 @@ export const censusFieldBindings = (
   }
   /**
    * The two arms of a NAMED read through a string index signature --
-   * `uniforms.dfgLUT` on three's `NativeUniforms = Record<string,
-   * NativeUniformSlot>` -- or `null` when the receiver declares the member (or
-   * nothing at all).
+   * `slots.lut` on `Slots = Record<string, Slot>` -- or `null` when the
+   * receiver declares the member (or nothing at all).
    *
    * Such a read names no property symbol, so `memberSymbolOf` and
-   * `propertyTypeOf` both answered nothing and every `uniforms.X.value = v`
-   * store in `WebGLRenderer.setProgram` boxed the slot to write through
-   * `reflectSet`. Answering the index signature's value type ALONE is the
-   * other failure: `m_uniforms.dfgLUT !== undefined` then folded to `true`
-   * and a phong material's uniforms, which have no `dfgLUT`, dereferenced the
-   * null slot. The read is the value OR absence, which is the same
+   * `propertyTypeOf` both answered nothing and every `slots.X.value = v`
+   * store boxed the slot to write through `reflectSet`. Answering the index
+   * signature's value type ALONE is the
+   * other failure: `slots.lut !== undefined` then folded to `true` and a
+   * record that has no `lut` dereferenced the null slot. The read is the
+   * value OR absence, which is the same
    * synthesized-union channel a field's disagreeing write set already
    * publishes through (`unionArmsAt`): a lone dictionary read stays a
    * per-key optional, and the comparison stays a real comparison.
@@ -913,20 +1132,24 @@ export const censusFieldBindings = (
     resolvingSymbols.add(symbol)
     const stated = statedBoundOfSymbol(checker, symbol)
     let result: ts.Type | null = null
+    const keyedTypes = keyedWriteTypesOf(symbol)
     const writes = writesOf(symbol)
-    const types: ts.Type[] = []
-    let silent = 0
+    const types: ts.Type[] = keyedTypes.filter((type) => type !== null)
+    let silent = keyedTypes.length - types.length
+    /** The types of `{}` literals written here: fresh objects with no keys, see `recordWithOptionalMembersOf`. */
+    const freshEmpty = new Set<ts.Type>()
+    const freshEmptyWrites: ts.Expression[] = []
     let refused: string | null = null
     for (const write of writes) {
       // A STATED CELL THE UPSTREAM CENSUS NARROWED OUTRANKS THE CHECKER at
       // this write. `known` asks the checker first everywhere else, which is
       // right when the checker's answer is the last word about the value --
       // and wrong for exactly the value whose own cell was narrowed WITHIN a
-      // statement the checker still reports in full. hono's
+      // statement the checker still reports in full. A constructor's
       // `this.#matchResult = matchResult` is the measured case: the parameter
       // census already bound `matchResult` to the concrete
-      // `Result<[H, RouterRoute]>` its only caller passes, while the checker
-      // keeps answering the annotation's `Result<[unknown, RouterRoute]>`, so
+      // `Result<[H, Route]>` its only caller passes, while the checker
+      // keeps answering the annotation's `Result<[unknown, Route]>`, so
       // reading the checker here typed the FIELD as the upper bound and left
       // the store between two disagreeing carriers -- the same
       // two-authorities split every census here exists to close, one hop
@@ -935,11 +1158,17 @@ export const censusFieldBindings = (
       // An EMPTY literal the program writes is a fresh object with zero
       // members, not the vacuous `{}` annotation `known` rightly discards --
       // the same holder `parameter-bindings.ts`/`local-bindings.ts` already
-      // read it as (`exactEmptyObjectLiteralType`). three's
-      // `/** @type {Object} */ this.userData = {};` is the measured case:
-      // with that write silent, every class's `userData` fell back to the
+      // read it as (`exactEmptyObjectLiteralType`). A JSDoc
+      // `/** @type {Object} */ this.extra = {};` is the measured case:
+      // with that write silent, every class's `extra` fell back to the
       // annotation's `any` and boxed the empty object it only ever holds.
-      const type = parameters.statedTypeAt(write) ?? exactEmptyObjectLiteralType(checker, write) ?? known(write) ?? resolveExpr(write)
+      const stated = parameters.statedTypeAt(write)
+      const empty = stated ? null : exactEmptyObjectLiteralType(checker, write)
+      if (empty) {
+        freshEmpty.add(empty)
+        freshEmptyWrites.push(write)
+      }
+      const type = stated ?? empty ?? known(write) ?? resolveExpr(write)
       if (type) types.push(type)
       // A write typed `void`/`never` is a real fact stating the storage holds
       // nothing a program can use -- a veto in both phases, exactly as
@@ -952,7 +1181,7 @@ export const censusFieldBindings = (
     }
     // A bare `field;` nothing ever writes says nothing about its storage --
     // distinct from a disagreement, and left exactly as the checker has it.
-    if (writes.length === 0) attribute(symbol, 'no-writes')
+    if (writes.length === 0 && keyedTypes.length === 0) attribute(symbol, 'no-writes')
     else if (refused) attribute(symbol, refused)
     // EVIDENCE EXHAUSTED -- the same rule, the same order, as
     // `parameter-bindings.ts`'s `skipSilentSites` phase: a write that states
@@ -961,12 +1190,26 @@ export const censusFieldBindings = (
     // over fields the strict pass could not bind) joins the writes that DO
     // speak. `writes-disagree` still fires over what remains, and a field
     // whose every write is silent refuses exactly as before. Measured shape:
-    // `Vector3`'s `x`/`y`/`z` carry 34 writes each, 33 typed `number` and one
-    // (`this.x = e[ 12 ]`, `e` unannotated) silent -- 759 reads boxed by a
-    // veto that read no fact.
+    // a vector class's `x`/`y`/`z` carry dozens of writes each, all typed
+    // `number` but one (`this.x = e[ 12 ]`, `e` unannotated) silent -- every
+    // read boxed by a veto that read no fact.
     else if (silent > 0 && (!lenientPhase || types.length === 0)) attribute(symbol, 'write-unresolved')
     else {
-      const joined = joinOfWrites(checker, types)
+      // A FRESH `{}` written into the field contributes a value with no keys,
+      // never a layout: joined with record `R` the field holds either that
+      // empty object or an `R`, which is exactly `R` with every member
+      // optional. Letting the `{}` take part in the join instead widened the
+      // field to the empty record (every `R` is assignable to `{}`), and an
+      // `R` stored there survived only as a view of a layout that names none
+      // of its keys.
+      const keyed = types.filter((type) => !freshEmpty.has(type))
+      const joinedKeyed = freshEmpty.size > 0 && keyed.length > 0 ? joinOfWrites(checker, keyed) : null
+      const optional = joinedKeyed ? recordWithOptionalMembersOf(checker, joinedKeyed) : null
+      // The literal's only home is this field, so it is allocated in the
+      // field's own layout -- with every member absent -- rather than as a
+      // keyless record the field would then have to view.
+      if (optional) for (const write of freshEmptyWrites) freshEmptyHomes.set(write, optional)
+      const joined = optional ?? joinOfWrites(checker, types)
       if (joined) result = joined
       else {
         // The join found no single covering type. Before refusing, ask
@@ -1014,7 +1257,7 @@ export const censusFieldBindings = (
         attribute(symbol, 'interface-field-write-is-not-a-satisfying-class')
       }
     }
-    if (classSatisfiesInterface && result) statedBindings.set(symbol, result)
+    if (classSatisfiesInterface && result) state(symbol, result)
     if (stated && !classSatisfiesInterface) {
       if (unionArms.has(symbol)) {
         unionArms.delete(symbol)
@@ -1029,7 +1272,32 @@ export const censusFieldBindings = (
         result = null
         attribute(symbol, 'stated-field-narrows-a-stated-position')
       }
-      if (result) statedBindings.set(symbol, result)
+      if (result) state(symbol, result)
+    }
+    // An assignment-only JavaScript field the CHECKER types with an unstated
+    // leaf -- `this.groups = []` is `any[]` to it, and so is a tag
+    // naming a type the file never imports (`@type {Array<Group>}`)
+    // -- is the stated-field case with the checker
+    // as the statement: a structure whose one open position the writes fill.
+    // The layout resolver keeps a checker answer that is not itself `any`, so
+    // `typeAt` alone left the cell at `any[]` while the census had joined the
+    // writes to `Group[]`; every typed write then asked to convert a
+    // shared array into a boxed one, which no copy can do without breaking
+    // the alias. Published through `statedTypeAt` only where the join differs
+    // from the checker's answer at the unstated positions alone.
+    if (!stated && declaredInterface === null && result && !statedBindings.has(symbol)) {
+      const anchor = symbol.declarations?.[0]
+      const checkerType = anchor ? checker.getTypeOfSymbolAtLocation(symbol, anchor) : null
+      if (
+        anchor &&
+        checkerType &&
+        (checkerType.flags & ts.TypeFlags.Any) === 0 &&
+        !annotationStatesNothing(checker, anchor, checkerType) &&
+        containsUnstatedPosition(checker, anchor, checkerType) &&
+        !carriesUnsubstitutedGeneric(checker, result) &&
+        narrowsOnlyUnstatedPositions(checker, anchor, checkerType, result)
+      )
+        state(symbol, result)
     }
     // A stated field takes no dictionary fallback: the program described the
     // storage, so "the program writes THROUGH it" is not a reading of an
@@ -1108,8 +1376,8 @@ export const censusFieldBindings = (
       // a read the checker could attribute is answered above. Without this
       // hop the read fell to `propertyTypeOf`, which reads the checker's
       // `any` for the field and refuses, so the census had typed the field
-      // AND the receiver and still boxed the read between them: three's
-      // `WebGLShadowMap( renderer, ... )` binds `renderer` from its one call
+      // AND the receiver and still boxed the read between them: a factory
+      // function `Helper( renderer, ... )` binds `renderer` from its one call
       // site, `renderer.state` resolved to the typed struct field in the
       // emitted C++, and `const _state = renderer.state` was laid out
       // `gea::Value` from the checker's `any` -- every `_state.setBlending()`
@@ -1119,15 +1387,15 @@ export const censusFieldBindings = (
       const typed = propertyTypeOf(receiver, node.name.text, node)
       if (typed) return typed
       // An OBJECT-LITERAL member the checker types `any` still has the one
-      // expression that filled it. Three's `WebGLState` returns
-      // `{ buffers: { depth: depthBuffer, ... } }` where `depthBuffer` is
+      // expression that filled it. A factory function that returns
+      // `{ buffers: { depth: depthBuffer, ... } }` is the case, where `depthBuffer` is
       // `new DepthBuffer()` -- `new` on a JS factory with no construct
       // signature, `any` to the checker, a typed record to this census (the
       // parameter census reads the factory's return). The literal's LAYOUT was
       // already derived from that initializer, so the struct carries `depth`
       // natively; a READ answered `null` here instead, and the emitter then
       // boxed the native callable field to call it dynamically -- which threw
-      // on the first frame of the app's shadow pass. Answer the read from the
+      // on the first call. Answer the read from the
       // same initializer the layout came from.
       const filled =
         literalMemberInitializerOf(member ?? memberSymbolOf(receiver, node.name.text)) ??
@@ -1219,6 +1487,10 @@ export const censusFieldBindings = (
     for (const symbol of retry) resolveSymbol(symbol)
     if (bound.size === before) break
   }
+  deferredIntrinsicProtocolLedgerOf(flow)?.replace(
+    'field-bindings-keyed-stores',
+    [...keyedRequirements].flatMap(([symbol, requirements]) => (bound.has(symbol) ? requirements : []))
+  )
 
   /**
    * A refusal's `owner` for a field SYMBOL: its own name and where the
@@ -1264,6 +1536,19 @@ export const censusFieldBindings = (
     return null
   }
 
+  /**
+   * The field a JavaScript assignment DECLARATION (`this.x = []`) declares,
+   * when `node` is one of that symbol's own declarations. The structural
+   * mapper asks a member's storage at its declaration node, and for an
+   * assignment-only field that node is the whole `BinaryExpression`.
+   */
+  const assignmentDeclarationSymbolOf = (node: ts.Node): ts.Symbol | undefined => {
+    if (!ts.isBinaryExpression(node) || node.operatorToken.kind !== ts.SyntaxKind.EqualsToken) return undefined
+    if (!ts.isPropertyAccessExpression(node.left)) return undefined
+    const symbol = memberSymbolAt(node.left)
+    return symbol?.declarations?.includes(node) ? symbol : undefined
+  }
+
   /** The `unionArmsAt` shape asked of `statedBindings` -- the same two symbol-resolving node kinds, a leaf lookup rather than a walk. */
   const statedTypeAt = (node: ts.Node): ts.Type | null => {
     if (statedBindings.size === 0) return null
@@ -1274,12 +1559,20 @@ export const censusFieldBindings = (
           ? memberSymbolAt(node)
           : ts.isElementAccessExpression(node)
             ? checker.getSymbolAtLocation(node)
-            : undefined
-    return symbol ? (statedBindings.get(symbol) ?? null) : null
+            : assignmentDeclarationSymbolOf(node)
+    if (!symbol) return null
+    const own = statedBindings.get(symbol)
+    if (own) return own
+    const declarations = symbol.declarations ?? []
+    const first = declarations[0]
+    const shared = first === undefined ? undefined : statedByDeclaration.get(first)
+    // Only a symbol whose EVERY declaration is the bound one's: a subclass that
+    // also writes the member names a different storage contract.
+    return shared !== undefined && declarations.every((declaration) => statedByDeclaration.get(declaration) === shared) ? shared : null
   }
 
   return {
-    typeAt: (node) => resolveExpr(node),
+    typeAt: (node) => freshEmptyHomes.get(node) ?? resolveExpr(node),
     unionArmsAt,
     statedTypeAt,
     boundCount: bound.size + unionArms.size,
@@ -1342,8 +1635,8 @@ export const withFieldBindings = (
    * Where the return census narrowed that result within its statement, the
    * checker still types the cell -- and every read of it -- as the
    * statement, so the cell asked for a conversion of the returned carrier
-   * into the protocol record the annotation names (bson's
-   * `const res = onDemand.parseToElements(...)` holding a `BSONElement[]`
+   * into the protocol record the annotation names (a
+   * `const res = api.parse(...)` holding an `Element[]`
    * as an `Iterable` record, refused at the binding, then again at the
    * `[...res]` that spreads it). A `const` is never rebound, so the
    * initializer's carrier is the cell's for its whole lifetime, and a

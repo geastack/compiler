@@ -1,4 +1,4 @@
-import type { DeclarationId, FunctionId, OperationId, RegionId, StructuralTypeId } from '../../identity/ids.js'
+import type { DeclarationId, FunctionId, OperationId, RegionId, SemanticResultId, StructuralTypeId } from '../../identity/ids.js'
 import type { SemanticOperationBase } from './operands.js'
 import type { InvocationResultDivergence, SelectedSignature } from './selected-signature.js'
 import type { HostMethodBinding } from '../host-methods.js'
@@ -113,6 +113,20 @@ export interface NamespaceKeyedBinding {
  * their own native carriers.
  */
 export interface PropertyOperation extends SemanticOperationBase {
+  /** An explicit source `any` receiver assertion (or one to a type whose
+   * any/unknown string index is the only declaration of this key) requests
+   * dynamic read observation while its native allocation and slot storage
+   * remain intact. */
+  readonly sourceAnyRead?: true
+  /** Exact source/entry/current descriptor proof of a rejected native Function Set. */
+  readonly nativeCallableReadonlySet?: import('../native-callable-readonly-set.js').NativeCallableReadonlySetSource
+  /** Joint source allocation/writer closure, independently of this use's public field type. */
+  readonly nativeOwnSlot?: import('../native-own-assignment.js').NativeOwnSlot
+  /** Every admitted finite key retains its own complete source slot closure. */
+  readonly nativeOwnSlots?: readonly import('../native-own-assignment.js').NativeOwnSlot[]
+  /** The authenticated ordinary prototype lacks this exact static key. Own
+   * descriptor absence still requires the original native allocation proof. */
+  readonly ordinaryObjectPrototypeKeyAbsent?: true
   /** A host getter produces its declared carrier before use-site flow narrowing. */
   readonly hostReadType?: StructuralTypeId
   /** The checker-resolved ambient member's implementation, independent of the receiver's storage layout. */
@@ -146,6 +160,8 @@ export interface PropertyOperation extends SemanticOperationBase {
    * materializing a second object would lose the live-binding semantics. An
    * authenticated `globalThis.process` likewise names the same host singleton
    * binding as bare `process`, never a boxed copy in the expando dictionary.
+   * A global property whose closed installation proof owns a native cell also
+   * publishes this on its plain store, so its write and read share storage.
    */
   readonly resolvedBinding?: DeclarationId
   /**
@@ -163,6 +179,25 @@ export interface PropertyOperation extends SemanticOperationBase {
   readonly resolvedGlobalBinding?: true
   /** This read produces the authenticated global Function.prototype object. */
   readonly intrinsicValue?: 'function-prototype'
+  /** This constant-key ordinary Function assignment cannot be intercepted by
+   * Function.prototype or Object.prototype, authenticated against the sealed
+   * mutation census. Fresh identity and the own descriptor remain obligations.
+   */
+  readonly ordinaryFunctionDataWrite?: true
+  /** Intact inherited writable Function.prototype data; fresh owner and own installation remain separate obligations. */
+  readonly ordinaryCallableBuiltinDataWrite?: 'call' | 'apply' | 'bind'
+  /** The intact Function/Object chain lacks this key; fresh owner and own descriptor remain separate obligations. */
+  readonly ordinaryCallableDataWriteAbsent?: true
+  /** This actual stock Symbol()/Symbol.for() key is absent on the intact Function/Object chain; owner and own descriptors remain independent. */
+  readonly ordinaryCallableProgramSymbolDataWriteAbsent?: true
+  /** Every key text this Set may name (constant or proven) meets the intact
+   * stock Function/Object chain at a descriptor an own-table [[Set]] answers
+   * exactly. The receiver's own [[Prototype]] and descriptors remain obligations. */
+  readonly ordinaryCallableStockChainWrite?: true
+  /** Object.prototype lacks this exact key after sealed mutation discharge.
+   * The receiver's plain allocation, own descriptor and all writers remain
+   * independent obligations of a native extension slot schema. */
+  readonly ordinaryObjectDataWriteAbsent?: true
   readonly family: 'property'
   readonly internalMethod: 'get' | 'set' | 'delete' | 'has-property' | 'own-property-keys' | 'define-own-property'
   /** `PutValue` throws when this `[[Set]]` answers false in strict code. */
@@ -235,6 +270,8 @@ export interface BindingOperation extends SemanticOperationBase {
 
 /** Evaluated `[[Call]]` and `[[Construct]]`, plus tagged-template application. */
 export interface InvocationOperation extends SemanticOperationBase {
+  /** Actual unmodified standard Object()/new Object(), with no arguments. */
+  readonly freshOrdinaryObject?: true
   readonly family: 'invocation'
   readonly internalMethod: 'call' | 'construct'
   readonly optionalChain: boolean
@@ -264,12 +301,42 @@ export interface InvocationOperation extends SemanticOperationBase {
   readonly builtinModuleLookup?: { readonly target: RegionId; readonly builtinModule: string }
   /** A checker-authenticated intrinsic that mutates its first argument. */
   readonly intrinsicMutation?: 'object-assign' | 'reflect-set' | 'object-define-property' | 'object-define-properties'
+  /** Exact allocation/slot families consumed by the native bulk assignment authority. */
+  readonly nativeOwnAssignment?: import('../native-own-assignment.js').NativeOwnAssignment
   /** A checker-authenticated intrinsic that only queries its first argument's own keys. */
   readonly intrinsicOwnKeys?: true
+  /** An intact standard intrinsic that observes its first argument without
+   * publishing it: `values`/`entries`/`stringify` read every own enumerable
+   * value (the argument itself reaches no source code, though a value's own
+   * `toJSON` may run), and the integrity queries read only its descriptor
+   * attributes. Any further argument is a separate consumer. */
+  readonly intrinsicObservation?: 'values' | 'entries' | 'stringify' | 'isFrozen' | 'isSealed' | 'isExtensible'
   /** Authenticated Reflect operation: a native ABI still observes this property protocol. */
   readonly intrinsicReflection?: 'get' | 'set' | 'has' | 'deleteProperty' | 'getOwnPropertyDescriptor'
+  /** Complete actual keys of this intact descriptor query, discharged against
+   * the final source census. The result is this operation's evaluated key;
+   * a public string/symbol type or another invocation cannot borrow it. */
+  readonly intrinsicDescriptorKeys?: { readonly key: SemanticResultId; readonly names: readonly string[] }
   /** Unmodified standard Object.defineProperty, authenticated by the host mutation census. */
   readonly intrinsicDataDefinition?: true
+  /** Exact source descriptor owns these keys; every omitted ToPropertyDescriptor field is absent on its intact ordinary prototype. */
+  readonly descriptorOwnProtocol?: {
+    readonly descriptor: SemanticResultId
+    readonly ownNames: readonly string[]
+    readonly prototype: 'ordinary-intact-absent'
+  }
+  /** The intact standard call returns its evaluated first argument on normal completion. */
+  readonly intrinsicReturnIdentity?: 'argument0'
+  /** An intact Object integrity operation changes descriptors without publishing stored values. */
+  readonly intrinsicIntegrity?: 'freeze' | 'seal' | 'preventExtensions'
+  /** Exact-key Reflect.set has the stock callable inherited data protocol, conditional on a fresh ordinary Function Receiver. */
+  readonly ordinaryCallableBuiltinDataWrite?: 'call' | 'apply' | 'bind'
+  /** Exact-key Reflect.set (or a data Object.defineProperty) can create this key on a fresh ordinary Function without an inherited interceptor. */
+  readonly ordinaryCallableDataWriteAbsent?: true
+  /** Reflect.set's actual stock Symbol()/Symbol.for() key is absent on the intact Function/Object chain; owner and own descriptors remain independent. */
+  readonly ordinaryCallableProgramSymbolDataWriteAbsent?: true
+  /** Exact-key Reflect.set may create plain-object data without an inherited Object.prototype interceptor. */
+  readonly ordinaryObjectDataWriteAbsent?: true
   /**
    * A checker-authenticated intrinsic whose whole answer is its argument's
    * CARRIER: `Array.isArray(v)`, ECMA-262 23.1.2.2, which asks whether the
@@ -358,6 +425,8 @@ export type SemanticTargetProof =
  */
 export interface AllocationOperation extends SemanticOperationBase {
   readonly family: 'allocation'
+  /** Actual object-literal syntax uses the standard prototype, with no colon __proto__ initializer. */
+  readonly ordinaryObjectPrototype?: true
   readonly allocated:
     | 'object-literal'
     | 'array-literal'
@@ -529,6 +598,13 @@ export interface PropertyDescriptorShape {
 /** Operators and coercions. */
 export interface ComputationOperation extends SemanticOperationBase {
   readonly family: 'computation'
+  /** The exact static `in` key is absent from the authenticated standard
+   * Object.prototype. Own allocation descriptors remain a separate proof. */
+  readonly ordinaryObjectPrototypeKeyAbsent?: true
+  /** Complete actual source roots prove the exact left value is an object; its falsy && contribution is dead. */
+  readonly logicalLeftObjectTruthy?: true
+  /** Complete actual source roots prove this unary ! operand is an object after normal evaluation. */
+  readonly operandObjectTruthy?: true
   readonly form:
     | 'unary'
     | 'binary'
@@ -639,6 +715,8 @@ export interface DeclarationLifecycleOperation extends SemanticOperationBase {
 export interface DestructuringOperation extends SemanticOperationBase {
   readonly family: 'destructuring'
   readonly form: 'object-source' | 'object-pattern' | 'array-pattern' | 'array-pattern-close' | 'rest-element' | 'default-value'
+  /** The intact ordinary prototype lacks the exact extracted key. Own descriptor absence remains a separate allocation proof. */
+  readonly ordinaryObjectPrototypeKeyAbsent?: true
 }
 
 /**

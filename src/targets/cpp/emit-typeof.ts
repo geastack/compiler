@@ -1,4 +1,4 @@
-import { representationKey, type Representation } from '../../representation/model.js'
+import { carriesNativeUndefined, representationKey, type Representation } from '../../representation/model.js'
 import { createCppEmitBlockedError, type UnionMemberTypeofAnswer } from './emit-context.js'
 import { cppConstantLiteral, literalPropertyKeyText } from './types.js'
 
@@ -79,6 +79,7 @@ const functionLike = new Set([
 
 /** The string `typeof` yields for one carrier, or `null` when the table has no answer for it. */
 export const typeofTextFor = (representation: Representation): string | null => {
+  if (carriesNativeUndefined(representation)) return null
   if (representation.kind === 'scalar') {
     if (representation.domain === 'boolean') return 'boolean'
     if (representation.domain === 'bigint') return 'bigint'
@@ -115,6 +116,29 @@ export const typeofTextFor = (representation: Representation): string | null => 
   return null
 }
 
+/** The complete set of possible typeof results, when native storage states each one. */
+export const typeofAnswersFor = (representation: Representation): readonly string[] | null => {
+  if (carriesNativeUndefined(representation)) return ['undefined', 'object']
+  if (representation.kind === 'optional') {
+    const payload = typeofAnswersFor(representation.payload)
+    return payload === null ? null : [...new Set([...payload, representation.absence === 'null' ? 'object' : 'undefined'])]
+  }
+  if (representation.kind === 'tagged-union') {
+    const arms = representation.arms.map((arm) => typeofAnswersFor(arm.value))
+    return arms.some((arm) => arm === null) ? null : [...new Set(arms.flatMap((arm) => arm ?? []))]
+  }
+  if (representation.kind === 'borrowed-ref') return typeofAnswersFor(representation.referent)
+  if (representation.kind === 'proxy-object') return typeofAnswersFor(representation.target)
+  const answer = typeofTextFor(representation)
+  return answer === null ? null : [answer]
+}
+
+/** Installed host paths have no absent runtime cell; their declared present carrier owns the tag. */
+export const typeofPresentTextFor = (representation: Representation): string | null => {
+  const answers = typeofAnswersFor(representation)?.filter((answer) => answer !== 'undefined')
+  return answers?.length === 1 ? answers[0]! : null
+}
+
 /**
  * The expression that yields `typeof operand`.
  *
@@ -138,6 +162,7 @@ export const typeofExpression = (
   quote: (text: string) => string,
   dynamic: (text: string) => string = (text) => `gea::host::detail::typeOf(${text})`
 ): string | null => {
+  if (carriesNativeUndefined(representation)) return `(${operand()}.isUndefined() ? ${quote('undefined')} : ${quote('object')})`
   if (representation.kind === 'optional') {
     // An absent optional answers for its exact absence tag; a present one is whatever the payload
     // answers, which is itself a `typeof` question and is asked as one -- an

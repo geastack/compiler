@@ -16,6 +16,7 @@ import { cppInstanceofLeftKinds } from './emit-instanceof.js'
 import { intrinsicAccessorGetterIsSpellable } from './host/emit-host-value.js'
 import { intrinsicAccessorGetterCapability } from '../../ir/certify/runtime-helper.js'
 import { intrinsicAccessorGetters } from '../../semantics/model/intrinsic-accessor-getters.js'
+import type { IrBody } from '../../ir/model.js'
 
 /**
  * What the C++ backend can actually do, stated as a manifest preflight censuses
@@ -56,6 +57,39 @@ const isSpellable = (representation: Representation): boolean => {
   }
 }
 
+const cppOperandHelperCapabilitiesOf = (
+  typeofOperands: Iterable<Representation>,
+  objectTagOperands: Iterable<Representation>
+): ReadonlySet<string> => {
+  const helpers = new Set<string>()
+  for (const representation of typeofOperands)
+    if (typeofIsAnswerable(representation)) helpers.add(`computation:typeof:${representationKey(representation)}`)
+  for (const representation of objectTagOperands)
+    if (objectTagExpression(representation, 'value') !== null) helpers.add(objectTagCapability(representation))
+  return helpers
+}
+
+/** Lowering can refine a callable result beyond its original semantic carrier.
+ * Claim only helpers the printer can spell for the final operation's operand.
+ */
+export const withCppIrOperandHelpers = (manifest: TargetRuntimeManifest, bodies: Iterable<IrBody>): TargetRuntimeManifest => {
+  const typeofOperands: Representation[] = []
+  const objectTagOperands: Representation[] = []
+  for (const body of bodies)
+    for (const block of body.blocks.values())
+      for (const operation of block.operations) {
+        if (operation.kind !== 'compute') continue
+        const operand = operation.operands[0]
+        if (!operand) continue
+        if (operation.form === 'typeof') typeofOperands.push(operand.representation)
+        else if (operation.form === 'unary' && operation.operator === 'ObjectTag') objectTagOperands.push(operand.representation)
+      }
+  return {
+    ...manifest,
+    runtimeHelpers: new Set([...manifest.runtimeHelpers, ...cppOperandHelperCapabilitiesOf(typeofOperands, objectTagOperands)])
+  }
+}
+
 export const createCppTargetManifest = (
   plan: SealedRepresentationPlan,
   capabilities: CppRuntimeCapabilities = currentCppRuntimeCapabilities,
@@ -91,23 +125,15 @@ export const createCppTargetManifest = (
   // other union in the program, including unions this emitter could render.
   // The representation key is the same complete carrier the emitter receives;
   // an unsupported shape remains absent without vetoing an unrelated one.
-  const typeofRepresentations = new Set<string>()
   // This is deliberately NOT every selected carrier: a target capability
   // claim is evidence that this particular compilation has an emitted
   // `typeof` over that carrier. Results, constants, and null all arrive here
   // through the same operand resolver in `runtime-helper-key.ts`, so the
   // manifest and obligation census have exactly one set to compare.
-  for (const representation of typeofOperandRepresentations) {
-    if (typeofIsAnswerable(representation)) typeofRepresentations.add(representationKey(representation))
-  }
-  const runtimeHelpers = new Set<string>(capabilities.runtimeHelpers)
-  for (const key of typeofRepresentations) runtimeHelpers.add(`computation:typeof:${key}`)
-
-  // Tag lookup support is keyed by the complete carrier, including constants
-  // that publish no result in the selected representation plan.
-  for (const representation of objectTagOperands) {
-    if (objectTagExpression(representation, 'value') !== null) runtimeHelpers.add(objectTagCapability(representation))
-  }
+  const runtimeHelpers = new Set<string>([
+    ...capabilities.runtimeHelpers,
+    ...cppOperandHelperCapabilitiesOf(typeofOperandRepresentations, objectTagOperands)
+  ])
 
   // The nullish test is likewise derived from the actual carrier contents.
   const presenceKinds = new Map<string, boolean>()

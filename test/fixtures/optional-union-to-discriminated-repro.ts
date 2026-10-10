@@ -11,7 +11,8 @@
 // (`dropOneArmUnionsOf`) -- never a subset reached by dropping more than one
 // arm in one step, which is exactly what a `typeof x !== 'object'` guard (or
 // any user-defined multi-arm type predicate) produces against a >=4-arm union.
-// mongodb's `sort.ts` `formatSort` hits this identical shape against `Sort`.
+// A database client's sort-specification formatter hits this identical shape
+// against its own sort union.
 
 interface RecA {
   kind: 'a'

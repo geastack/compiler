@@ -1,5 +1,5 @@
-// The MongoDB driver's `FindOperation` (src/operations/find.ts:93, and
-// `ListCollectionsOperation` in list_collections.ts:45) narrows an options
+// A database client's `FindOperation` (and its
+// `ListCollectionsOperation`) narrows an options
 // field to `never` so TypeScript lets it delete the key but not assign it:
 //
 //   options: FindOptions & { writeConcern?: never }

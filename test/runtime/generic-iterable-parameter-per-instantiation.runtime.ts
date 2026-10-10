@@ -1,9 +1,9 @@
 // ONE GENERIC `Iterable<T>` PARAMETER, CALLED WITH A SET AND WITH ARRAYS.
 //
-// mongodb's `shuffle<T>(sequence: Iterable<T>, limit = 0): Array<T>`
-// (`utils.ts`) copies its input with `Array.from(sequence)`. The SDAM code
-// calls it with a `Set<string>` of host names (`topology_description.ts`), a
-// `HostAddress[]` seed list and a `ServerDescription[]` (`topology.ts`). Each
+// A database client's `shuffle<T>(sequence: Iterable<T>, limit = 0): Array<T>`
+// copies its input with `Array.from(sequence)`. Its server-discovery code
+// calls it with a `Set<string>` of host names, a `HostAddress[]` seed list
+// and a `ServerDescription[]`. Each
 // instantiation reads its own concrete iterable; no single record layout for
 // the `Iterable` protocol describes all three.
 

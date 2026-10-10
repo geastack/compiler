@@ -1,4 +1,4 @@
-// A record with a `Record<string, any>` field, serialized. mongodb's
+// A record with a `Record<string, any>` field, serialized. A database client's
 // command documents carry open `Document` members inside closed option
 // records, and `JSON.stringify` of one renders the record's generated
 // `gea_json_write`/`gea_json_read` overload PAIR: the write half has a native

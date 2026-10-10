@@ -1,3 +1,5 @@
+import { stringMethodShapes, type StringMethodShape } from '../../../representation/prototype-domains.js'
+export { stringPrototypeMethods } from '../../../representation/prototype-domains.js'
 import type { IrOperand, IrResult } from '../../../ir/model.js'
 import { representationKey } from '../../../representation/model.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from '../emit-context.js'
@@ -53,42 +55,6 @@ export type StringCallRenderer = (
  * than being given a synthesized default here. Each shorter overload supplies
  * the spec's own default, stated at its definition.
  */
-interface StringMethodShape {
-  readonly clause: string
-  readonly arities: readonly number[]
-  /** The carrier each positional argument must have, by ordinal. */
-  readonly carriers: readonly ('string' | 'number')[]
-  /** The `gea::runtime::string` function, when it is not the member's own name. */
-  readonly spelling?: string
-}
-
-const stringMethodShapes: ReadonlyMap<string, StringMethodShape> = new Map([
-  ['substring', { clause: '22.1.3.24', arities: [1, 2], carriers: ['number', 'number'] }],
-  ['substr', { clause: 'B.2.3.1', arities: [1, 2], carriers: ['number', 'number'] }],
-  ['slice', { clause: '22.1.3.22', arities: [1, 2], carriers: ['number', 'number'] }],
-  ['trim', { clause: '22.1.3.32', arities: [0], carriers: [] }],
-  ['trimStart', { clause: '22.1.3.34', arities: [0], carriers: [] }],
-  ['trimEnd', { clause: '22.1.3.33', arities: [0], carriers: [] }],
-  ['toLowerCase', { clause: '22.1.3.29', arities: [0], carriers: [] }],
-  ['toUpperCase', { clause: '22.1.3.31', arities: [0], carriers: [] }],
-  ['charCodeAt', { clause: '22.1.3.3', arities: [1], carriers: ['number'] }],
-  ['charAt', { clause: '22.1.3.2', arities: [1], carriers: ['number'] }],
-  ['indexOf', { clause: '22.1.3.9', arities: [1, 2], carriers: ['string', 'number'] }],
-  ['lastIndexOf', { clause: '22.1.3.10', arities: [1, 2], carriers: ['string', 'number'] }],
-  ['includes', { clause: '22.1.3.8', arities: [1, 2], carriers: ['string', 'number'] }],
-  ['startsWith', { clause: '22.1.3.23', arities: [1, 2], carriers: ['string', 'number'] }],
-  ['endsWith', { clause: '22.1.3.7', arities: [1, 2], carriers: ['string', 'number'] }],
-  ['padStart', { clause: '22.1.3.16', arities: [1, 2], carriers: ['number', 'string'] }],
-  ['padEnd', { clause: '22.1.3.15', arities: [1, 2], carriers: ['number', 'string'] }],
-  ['repeat', { clause: '22.1.3.17', arities: [1], carriers: ['number'] }],
-  ['localeCompare', { clause: '22.1.3.12', arities: [1], carriers: ['string'] }],
-  // The three members `lib.es5.d.ts` declares over `string | RegExp`. These
-  // rows are the STRING form only; the pattern form is rendered by
-  // `emit-prototype-regexp.ts` and asked first (see `shapedStringMethodText`).
-  ['split', { clause: '22.1.3.21', arities: [1], carriers: ['string'] }],
-  ['replace', { clause: '22.1.3.18', arities: [2], carriers: ['string', 'string'] }],
-  ['replaceAll', { clause: '22.1.3.20', arities: [2], carriers: ['string', 'string'] }]
-])
 
 const carrierMatches = (operand: IrOperand, wanted: 'string' | 'number'): boolean =>
   wanted === 'string'
@@ -347,8 +313,6 @@ export const stringMethods: ReadonlyMap<string, StringCallRenderer> = new Map<st
   ['codePointAt', optionalResultMethodText('codePointAt', '22.1.3.4', 'number')],
   ...[...stringMethodShapes].map(([member, shape]) => [member, shapedStringMethodText(member, shape)] as const)
 ])
-
-export const stringPrototypeMethods: ReadonlySet<string> = new Set(stringMethods.keys())
 
 /**
  * Members this backend states a REASON for not implementing, rather than

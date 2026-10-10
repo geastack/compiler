@@ -3,6 +3,8 @@ import { censusRefusal, type CensusRefusal } from './census-refusal.js'
 import { disjointUnionTypeOf, isStandardInterfaceType, joinOfWrites, widestOf } from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
+import { closedArrayStoredValuesOf } from './flow/callable-reach.js'
+import { deferredIntrinsicProtocolLedgerOf, type IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
 import { forEachReachableStatement, type ProgramReachability } from './reachability.js'
 
 /**
@@ -20,14 +22,12 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * one line after `const buffers = new WeakMap();` says what K actually is
  * far more precisely than the constructor's own default does.
  *
- * Concretely, this is the mechanism behind three.js's WebGL renderer
- * internals: `WebGLAttributes.js`, `WebGLEnvironments.js`,
- * `WebGLState.js` and others cache host objects (`BufferAttribute`,
- * `Texture`, framebuffers) in module-scope `WeakMap`s built with a bare `new
- * WeakMap()`, keyed by whatever untyped parameter the surrounding function
- * receives -- 56 `conversion:dynamic(declared-any-never-narrowed)->
- * record(type|720,...)` obligations on the three.js app trace to
- * exactly this shape, `type|720` being the bare `object` keyword type
+ * Concretely, this is the common caching idiom of a JavaScript module that
+ * keeps per-object side data (for host objects, buffers, handles) in a
+ * module-scope `WeakMap` built with a bare `new WeakMap()`, keyed by whatever
+ * untyped parameter the surrounding function receives. Without inference
+ * every such use becomes a `conversion:dynamic(declared-any-never-narrowed)->
+ * record(...)` obligation against the bare `object` keyword type
  * `structural.ts` interns for `WeakMap`'s defaulted `K`.
  *
  * ## What licenses inferring at all
@@ -46,7 +46,7 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * - The collection's identity is tracked by the SYMBOL it is assigned to
  *   (a `const`/`let` variable, or a later plain reassignment of one), exactly
  *   the way `local-bindings.ts`'s `assignmentsBySymbol` tracks a cell -- so
- *   `WebGLState.js`'s `currentDrawbuffers`, built once at module scope and
+ *   a module-scope cache built once at module scope and
  *   rebuilt inside a reset function, is one logical collection whose two
  *   `new WeakMap()`s must describe the same K/V, not two independent guesses.
  * - Every key argument observed across every `.get`/`.set`/`.has`/`.delete`/
@@ -197,9 +197,9 @@ export interface CollectionBindingCensus {
    * READ of it carries `array-object(scalar(number))` from
    * `arrayElementForRead` -- two authorities over one storage, which surfaces
    * as an unsatisfiable `binding-read-conversion` obligation per read rather
-   * than as an error anywhere. MEASURED on the three.js app: 133 declarations whose own
-   * type is `never[]`/`any[]` already have an answer here, and the mismatch is
-   * the single largest family of unmet obligations (161 of 756).
+   * than as an error anywhere. In JavaScript sources full of unannotated
+   * `const xs = []` cells this mismatch is the largest family of unmet
+   * obligations, and the census already has the answer for them.
    *
    * Owner-keyed, exactly like `typeArgumentsForOwner`: every literal feeding
    * one owner is already required to agree (see the module header), so this is
@@ -220,7 +220,7 @@ export interface CollectionBindingCensus {
    * the SAME array to a concrete element type. Two carriers for one storage,
    * and the emitter's only way to reconcile them is to copy -- which for a
    * mutable `ArrayObject` silently drops every write the callee makes
-   * (three's `getProgramCacheKey`, measured).
+   * (a key builder that passes its array to helper functions, measured).
    */
   readonly arrayRefusalForOwner: (declaration: ts.Node) => string | null
   /**
@@ -398,8 +398,8 @@ export const censusCollectionBindings = (
 
   /**
    * A bare construction that is the receiver of a receiver-returning call
-   * chain -- bson's probe `new Map().set(key, value)` handed straight to
-   * `serialize` -- is one storage with no declaration of its own. It is its
+   * chain -- `new Map().set(key, value)` handed straight to a
+   * function argument -- is one storage with no declaration of its own. It is its
    * own owner: its evidence is every write the chain's calls make to it, and
    * the cells its value lands in are the ones the chain's END is written to.
    *
@@ -574,8 +574,8 @@ export const censusCollectionBindings = (
   const argumentType = (expr: ts.Expression): ts.Type | null => {
     // A parameter whose cell the census placed as a SYNTHESIZED union holds
     // every one of those arms, whatever the checker's upper bound spells:
-    // mongodb's `ifItFitsItSits(key, value: Record<string, any> | string)`
-    // is handed a caller's `Map` and stores it into `this.document`. Joining
+    // a method `put(key, value: Record<string, any> | string)` that is handed
+    // a caller's `Map` and stores it into `this.document` is the case. Joining
     // the upper bound instead typed the collection one arm short, and the
     // store then "narrowed" the live Map arm away without a check.
     const arms = parameters.unionArmsAt(expr)
@@ -607,9 +607,10 @@ export const censusCollectionBindings = (
    * the collection go: an annotated declaration it is aliased into, or the
    * declared return type of the function that returns it.
    *
-   * mongodb's `getFAASEnv(): Map<string, string | Int32> | null` builds
-   * `const faasEnv = new Map()`, sets strings and `Int32`s into it and
-   * returns it. The writes alone disagree (`string` beside `Int32`), and a
+   * A function `getEnv(): Map<string, string | Wrapped> | null` that builds
+   * `const env = new Map()`, sets strings and `Wrapped`s into it and
+   * returns it is the case. The writes alone disagree (`string` beside
+   * `Wrapped`), and a
    * join of them would be a union nobody wrote -- but the program DID write
    * one, on the function. The statement is adopted only when every
    * statement agrees exactly and every observed write is assignable to it
@@ -690,9 +691,9 @@ export const censusCollectionBindings = (
         into !== undefined &&
         args.every((arg) => {
           const type = argumentType(arg)
-          // An argument the program itself leaves `any` (mongodb's
-          // `writeErrors.set(document.idx + offset, ...)` over a server
-          // document, results_merger.ts:162) states nothing about the
+          // An argument the program itself leaves `any` (an
+          // `errors.set(document.idx + offset, ...)` over an untyped parsed
+          // document) states nothing about the
           // collection -- but the annotation does, and the checker already
           // admitted the argument into it. The stated argument stands, and
           // the call converts the dynamic value into it like any other
@@ -708,10 +709,10 @@ export const censusCollectionBindings = (
       }
     }
     // K and V are INDEPENDENT questions about one storage, and a `continue`
-    // here answered neither because the first had no answer. three's
-    // `WebGLProperties` is the case that costs: `properties.set( object, map )`
+    // here answered neither because the first had no answer. A per-object
+    // property store is the case that costs: `properties.set( object, map )`
     // keys a `WeakMap` by an untyped parameter, so K is `key-unresolved` --
-    // while V is the 47-member bag the whole renderer reads back out of it,
+    // while V is the many-member bag the whole program reads back out of it,
     // fully determined by that very same call. Every refusal below is a
     // statement about K alone, and the checker's own (defaulted, workable) key
     // argument survives each one exactly as it did when the whole collection
@@ -878,7 +879,7 @@ export const censusCollectionBindings = (
   // `PropertyAccessExpression` at every read, never the plain identifier
   // reference evolving-array settling requires, so the checker reports
   // `never[]` at `state.probe.push(...)` forever, even though the property
-  // holds nine real `Vector3` instances by the time any of that code runs.
+  // holds real class instances by the time any of that code runs.
   // That mismatched `never` is not inert: a downstream rule reasoning about
   // reachability from a `never`-typed operand can and did treat code that
   // runs every frame as dead (see the module-level history this fix
@@ -888,7 +889,7 @@ export const censusCollectionBindings = (
   // The tracking problem is harder than the `Map`/`Set` case above: a
   // property is not held by one persistent variable `ownerSymbolOf` can
   // resolve identically at every reference. Empirically (verified against
-  // this exact `WebGLLights.js` shape before writing this), `checker.
+  // this exact `{ probe: [] }` shape before writing this), `checker.
   // getSymbolAtLocation` on a property name returns a DIFFERENT `ts.Symbol`
   // object at the declaration than at each later `.prop` access -- late-bound
   // per lookup, not one persistent identity the way a variable's symbol is.
@@ -929,10 +930,10 @@ export const censusCollectionBindings = (
    *
    * It is not always right. `settleEvolving`'s narrowing is flow-sensitive
    * WITHIN one function; when the only pushes/writes to the array happen
-   * inside a NESTED function that closes over the binding (three.js's
-   * `PolyhedronGeometry` builds `const vertexBuffer = []` in a constructor and
-   * fills it only from a sibling nested `function subdivideFace(...)` it
-   * calls), the checker cannot narrow across that boundary and every outer
+   * inside a NESTED function that closes over the binding (a constructor
+   * that builds `const vertexBuffer = []` and fills it only from a sibling
+   * nested `function subdivide(...)` it calls), the checker cannot narrow
+   * across that boundary and every outer
    * read widens to `any[]` -- worse than `never[]`, because
    * `structural-array-element.ts`'s own read guard used to only fire for a
    * `never` element, so an `any[]`-widened read fell straight through to the
@@ -968,12 +969,11 @@ export const censusCollectionBindings = (
     // for every empty-array candidate inside it -- not because the array is
     // genuinely never written, but because the one place this census reads
     // writes from (`flow`) was never asked to look inside a body it had
-    // already excluded. MEASURED on the three.js app: `AnimationClip.js`'s `parse`,
-    // `toJSON`, `CreateFromMorphTargetSequence` (named by symbol, never
-    // dispatched under that exact name anywhere reachable) and `clone`
-    // (opened by key, but not by this program's own `.clone()` call shapes)
-    // each push into a local array this way -- four false `no-writes`
-    // refusals from one missing exclusion, not four different defects.
+    // already excluded. Pruned static factories and serializers (named by
+    // symbol, never dispatched under that exact name anywhere reachable), or a
+    // `clone` opened by key but not by the program's own call shapes, that
+    // each push into a local array this way give several false `no-writes`
+    // refusals from one missing exclusion, not several different defects.
     if (reachable.memberIsPruned(node)) return
     if (isUnstatedEmptyArrayLiteral(node)) {
       const owner = arrayOwnerDeclOf(node)
@@ -1035,6 +1035,17 @@ export const censusCollectionBindings = (
     arrayComponents.set(root, component)
   }
 
+  const ledger = deferredIntrinsicProtocolLedgerOf(flow)
+  const neverStoredRequirements: IntrinsicProtocolRequirement[] = []
+  const provenNeverStored = (aliases: ReadonlySet<ts.Node>): boolean => {
+    if (!ledger) return false
+    const literals = [...aliases].flatMap((alias) => arraysByOwner.get(alias) ?? [])
+    if (literals.length === 0) return false
+    const proof = ledger.capture(() => literals.every((literal) => closedArrayStoredValuesOf(checker, flow, literal)?.length === 0))
+    if (!proof.value) return false
+    neverStoredRequirements.push(...proof.requirements)
+    return true
+  }
   for (const [owner, aliases] of arrayComponents) {
     const evidence: ts.Expression[] = []
     for (const decl of aliases) {
@@ -1044,6 +1055,17 @@ export const censusCollectionBindings = (
       }
     }
     if (evidence.length === 0) {
+      // No element write is observed. When the closed origin authority also
+      // proves nothing is EVER stored -- every array that reaches these cells
+      // enumerated, none holding a value -- each read is a hole and yields
+      // `undefined`, which is then the element's honest type. A module that
+      // keeps `let effects = []`, refills it only through a `setEffects`
+      // nothing calls, and calls `effects[ i ].render( renderer )` is the case:
+      // as `any` that call handed the renderer to unknown code.
+      if (provenNeverStored(aliases)) {
+        for (const alias of aliases) boundElement.set(alias, checker.getUndefinedType())
+        continue
+      }
       for (const alias of aliases) ownerArrayRefusal.set(alias, 'array:no-writes')
       censusRefusals.push(
         censusRefusal(
@@ -1059,10 +1081,9 @@ export const censusCollectionBindings = (
     // The refusal below names the OFFENDING WRITE, the same way the
     // key-argument refusal above names its argument. A refusal that says only
     // "at least one element" sends the reader back to re-derive which one of
-    // forty-eight `array.push(...)` sites it was -- and three's
-    // `getProgramCacheKey` has exactly that many, spread across three
-    // functions and reached through an alias closure, so the owner line alone
-    // does not locate it.
+    // dozens of `array.push(...)` sites it was -- and a key builder can have
+    // that many, spread across several functions and reached through an
+    // alias closure, so the owner line alone does not locate it.
     let unresolved: ts.Expression | null = null
     for (const expr of evidence) {
       const type = argumentType(expr)
@@ -1087,9 +1108,8 @@ export const censusCollectionBindings = (
       continue
     }
     // `joinOfWrites`, not bare `widestOf`: THE SAME WRITE-SET JOIN a cell's
-    // writes get, and for the same reason. `normals.push( 0, 0, 1 )` in
-    // three's `PlaneGeometry`/`CircleGeometry`/`RingGeometry` states three
-    // LITERAL types, none of which covers another, so `widestOf` alone
+    // writes get, and for the same reason. `normals.push( 0, 0, 1 )` states
+    // three LITERAL types, none of which covers another, so `widestOf` alone
     // refused `array:elements-disagree` -- while the array's READS were
     // typed `number[]` by TypeScript's own evolving-array widening. Two
     // authorities over one storage, surfacing as an unsatisfiable
@@ -1125,6 +1145,8 @@ export const censusCollectionBindings = (
     for (const alias of aliases) boundElement.set(alias, element)
   }
 
+  ledger?.replace('collection-never-stored-arrays', neverStoredRequirements)
+
   for (const [node, owner] of arrayNodeOwner) {
     const reason = ownerArrayRefusal.get(owner)
     if (reason) arrayNodeRefusal.set(node, reason)
@@ -1134,9 +1156,9 @@ export const censusCollectionBindings = (
   //
   // A parameter a bound map is passed into is an alias of it, and its writes
   // are already that map's evidence -- but the parameter's own cell still
-  // carried the checker's `Map<any, any>`, so bson's `serialize(object:
-  // Document)` took mongodb's typed `Map<string, Document | string>` as a box
-  // and unboxed it as a map of boxes. Following the call graph states the
+  // carried the checker's `Map<any, any>`, so a `serialize(object:
+  // OpenRecord)` took a caller's typed `Map<string, OpenRecord | string>` as
+  // a box and unboxed it as a map of boxes. Following the call graph states the
   // parameter's map arm exactly: when EVERY map argument any caller hands it
   // is a collection this census bound, and they all bound the same K and V,
   // the arm is that map and nothing else. One unbound or disagreeing map

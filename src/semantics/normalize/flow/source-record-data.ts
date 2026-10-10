@@ -48,8 +48,8 @@ const describeNode = (node: ts.Node): string => {
  * literal at a call site was being built and thrown away on every refusal.
  * This path refuses on the large majority of asks and runs millions of times
  * in a whole-program compile, so those were millions of discarded strings --
- * a live three.js profile charged `sourceRecordDataWritePlanOf` 28.2% of self
- * time with garbage collection at 16% right behind it.
+ * a profile of a large program charged `sourceRecordDataWritePlanOf` over a
+ * quarter of self time with garbage collection right behind it.
  */
 const recordRefusal = (node: ts.Node, reason: () => string): null => {
   if (recordRefusalDebug) console.error(`[INVOCATION-REFUSAL] ${reason()} :: ${describeNode(node)}`)
@@ -83,8 +83,8 @@ const NATIVE_MAP_INTERFACES = ['Map', 'WeakMap', 'ReadonlyMap']
  * is the FIRST thing every record method-call question asks -- ahead of any
  * cache the walk has. Unmemoized it re-typed the expression and its erasure,
  * took both apparent types, and ran three standard-interface identity checks
- * per union member, once per ask, for questions the three.js app asks millions of
- * times each. */
+ * per union member, once per ask, for questions a large program asks millions
+ * of times each. */
 const nativeMapReceivers = new WeakMap<ts.TypeChecker, WeakMap<ts.Expression, boolean>>()
 
 const mayBeNativeMap = (checker: ts.TypeChecker, receiver: ts.Expression): boolean => {
@@ -134,8 +134,9 @@ const slotCallableOf = (
  *
  * Memoized because it is a pure source fact and both of its callers sit on the
  * hottest record path: it asks the checker for the root's type and materializes
- * the union of two write sets into a fresh array on EVERY ask, and a live
- * three.js profile charged it 27.2% of self time with the collector behind it.
+ * the union of two write sets into a fresh array on EVERY ask, and a profile of
+ * a large program charged it over a quarter of self time with the collector
+ * behind it.
  * `entry` is one of `root`'s own properties, so the entry alone names the root;
  * nothing but the key is left to vary.
  */
@@ -189,8 +190,8 @@ const activeSlotReads = new Set<ts.PropertyAccessExpression | ts.ElementAccessEx
 /**
  * The closed callables `record.key( ... )` can enter, or null.
  *
- * Three's `WebGLRenderLists` is a factory returning `{ get: get, dispose:
- * dispose }`, and `renderLists.get( scene, depth )` looks a list up in a
+ * A pre-ES6 `Lists` factory returns `{ get: get, dispose: dispose }`, and
+ * `lists.get( key, depth )` looks a list up in a
  * `WeakMap` inside that `get`. Read as a native `Map.get`, the call named no
  * storage at all and refused; it is a call of the one function the record's
  * `get` slot was created holding.
@@ -360,17 +361,17 @@ const through = (dependencies: readonly ts.Node[]): SeededOriginNode<ts.Node> =>
  * slots. A structural property signature alone establishes neither fact.
  *
  * Origins are solved by strongly connected components (`seeded-origins.ts`)
- * because record storage is reused. Three's `getNextRenderItem`:
+ * because record storage is reused. A pooled `nextItem()`:
  *
- *   let renderItem = renderItems[ renderItemsIndex ];
- *   if ( renderItem === undefined ) {
- *     renderItem = { id: object.id, object: object, ... };
- *     renderItems[ renderItemsIndex ] = renderItem;
- *   } else { renderItem.object = object; ... }
+ *   let item = items[ itemsIndex ];
+ *   if ( item === undefined ) {
+ *     item = { id: object.id, object: object, ... };
+ *     items[ itemsIndex ] = item;
+ *   } else { item.object = object; ... }
  *
- * `renderItem`'s origins are the element read and the literal; the element
- * read's origins are everything `renderItems` ever stored, which is
- * `renderItem` again. That cycle is seeded by the literal, so the roots are
+ * `item`'s origins are the element read and the literal; the element
+ * read's origins are everything `items` ever stored, which is
+ * `item` again. That cycle is seeded by the literal, so the roots are
  * exactly `[ literal ]`. A cycle no allocation feeds stays refused, and a
  * `null`/`undefined` origin (`let currentRenderList = null`) adds no root
  * while refusing nothing -- nothing can be written through it.
@@ -476,9 +477,9 @@ const sourceRecordDataWritePlanUncached = (
     needsDefaultPrototype ||= !ownData && !nullPrototype
     return SEED
   }
-  // A factory's result IS its allocation. Three writes nearly every one of
-  // its records that way -- `new ColorBuffer()`, `WebGLState( gl, extensions
-  // )`, `WebGLRenderList()` all return an object literal written in place --
+  // A factory's result IS its allocation. Pre-ES6 libraries write nearly
+  // every record that way -- `new Buffer()`, `State( context, options )`,
+  // `List()` all return an object literal written in place --
   // and reading only the identifier chain stopped at the call, leaving the
   // record with no source allocation at all.
   //
@@ -522,7 +523,7 @@ const sourceRecordDataWritePlanUncached = (
     if (isVacuousOrigin(flow, value)) return VACUOUS
     if (ts.isConditionalExpression(value)) return through([original(value.whenTrue), original(value.whenFalse)])
     if (ts.isObjectLiteralExpression(value)) return literal(value)
-    // `renderItems[ renderItemsIndex ]`: whatever that array ever stored.
+    // `items[ itemsIndex ]`: whatever that array ever stored.
     if (ts.isElementAccessExpression(value)) {
       const index = value.argumentExpression
       if (!numericType(checker, index) && !frames.numericKey(index)) return refuse(value, 'element-access:non-numeric-key')
@@ -539,11 +540,11 @@ const sourceRecordDataWritePlanUncached = (
         if (methods) return through(methods.map(completionKeyOf))
         if (!ts.isPropertyAccessExpression(callee)) return refuse(value, 'call:record-method-targets-refused')
         // An array's own removing READ -- `pop`/`shift` -- yields a value that
-        // array once stored, exactly as `renderItems[ i ]` does a few lines
-        // above. Three keeps its render states on an explicit stack
-        // (`renderStateStack.push( currentRenderState )` then
-        // `currentRenderState = renderStateStack.pop()`), so refusing this one
-        // shape left every `currentRenderState.*` call open even though the
+        // array once stored, exactly as `items[ i ]` does a few lines
+        // above. A program that keeps its states on an explicit stack
+        // (`stateStack.push( currentState )` then
+        // `currentState = stateStack.pop()`) relies on it; refusing this one
+        // shape left every `currentState.*` call open even though the
         // record's allocation is right here. `arrayStoredValuesOf` is the same
         // authority the element-access branch already trusts: it returns null
         // unless the array's whole stored set is closed AND every plan it
@@ -587,15 +588,15 @@ const sourceRecordDataWritePlanUncached = (
   }
   // An import binding is the exported cell read from another module: its
   // writes are the declaring module's, which the flow index files against
-  // that declaration. Three imports `ColorManagement` into every renderer
-  // module.
+  // that declaration. A library commonly imports one shared configuration
+  // record into many modules.
   const importedCellOf = (declaration: ts.Node | null): ts.Node | null => {
     if (!declaration || !checker || (!ts.isImportSpecifier(declaration) && !ts.isImportClause(declaration)) || !declaration.name)
       return declaration
     const resolved = resolveFlowSymbolAlias(checker, checker.getSymbolAtLocation(declaration.name))?.valueDeclaration
     return resolved && ts.isVariableDeclaration(resolved) && !resolved.getSourceFile().isDeclarationFile ? resolved : null
   }
-  // `state.buffers` in three's `WebGLRenderer`: whatever the holder's slot
+  // `state.buffers`: whatever the holder's slot
   // holds. The holder's own plan names its allocations; each carries the key
   // as one data entry, whose initializer is the slot's first value. Any other
   // value needs a store, so no write the flow index files against the entry
@@ -636,7 +637,7 @@ export const sourceRecordSlotValuesOf = (
   if (key === null || key === '__proto__' || key === 'constructor') return null
   const holder = access.expression
   activeSlotReads.add(access)
-  enterHypothesisGuard(access)
+  enterHypothesisGuard(access, true)
   let answered: readonly ts.Expression[] | null = null
   try {
     answered = ((): readonly ts.Expression[] | null => {

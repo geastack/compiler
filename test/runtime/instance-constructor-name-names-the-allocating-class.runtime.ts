@@ -1,5 +1,5 @@
 // `x.constructor.name` answers the class that allocated `x`, whatever class
-// the receiver is typed as (mongodb's errorStrictEqual compares
+// the receiver is typed as (a database client's test helper `errorStrictEqual` compares
 // `lhs.constructor.name !== rhs.constructor.name`).
 class Base {}
 class Derived extends Base {}

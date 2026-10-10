@@ -90,10 +90,10 @@ const isHole = (type: ts.Type): boolean => (type.flags & ts.TypeFlags.TypeParame
  * ABSENCE is the exception, and it is not an exception to that argument: it is
  * outside it. `status?: U` has type `U | undefined`, but that `undefined` is
  * the OPTIONAL MODIFIER, not a declared alternative -- the program wrote one
- * type and a `?`. So `status?: U` against `status?: ContentfulStatusCode` is
- * `U | undefined` against `ContentfulStatusCode | undefined`, and refusing it
+ * type and a `?`. So `status?: U` against `status?: StatusCode` is
+ * `U | undefined` against `StatusCode | undefined`, and refusing it
  * as an ambiguous union bound nothing for `U` at all, which is what left
- * hono's `c.json` generic uninstantiated. `withoutAbsence` strips exactly that
+ * a generic `ctx.reply(...)` method uninstantiated. `withoutAbsence` strips exactly that
  * modifier and requires ONE type to remain on each side, so nothing is
  * aligned by position and no set is guessed; a union with two real arms still
  * declines. It is also the rule the checker itself used: TypeScript infers an
@@ -320,8 +320,8 @@ export const censusInstantiations = (
    * because which overload a call selected is not recoverable from the
    * callee's declared type alone.
    *
-   * `c.json(...)` (hono's `context.ts`) is exactly this: `json` is annotated
-   * `JSONRespond`, an interface with two overloaded generic call signatures,
+   * A `ctx.reply(...)` method is exactly this when `reply` is annotated
+   * `Responder`, an interface with two overloaded generic call signatures,
    * so the callee's type never carries one signature. But the type parameter
    * that actually needs a binding belongs to neither overload -- it belongs
    * to the one arrow function literal `json` was initialized with.
@@ -331,7 +331,7 @@ export const censusInstantiations = (
    *
    * The checker's resolved signature for the call is still one of the
    * interface's two overloads (`resolved.getDeclaration()` names a
-   * `CallSignatureDeclaration` inside `JSONRespond`, not the arrow), so the
+   * `CallSignatureDeclaration` inside `JsonResponder`, not the arrow), so the
    * fillings are read off THAT overload's own uninstantiated form --
    * `checker.getSignatureFromDeclaration` recovers it -- and then re-keyed
    * onto the arrow's OWN type parameters by position. Sound because the

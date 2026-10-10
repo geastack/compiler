@@ -7,7 +7,7 @@ import type { SemanticOperation } from '../semantics/model/operations.js'
  *
  * Lowering asked "which operation is this class's heritage evaluation" by
  * copying every operation of the program into an array and scanning it, once
- * per class allocation. On the mongodb driver that is a copy of the whole graph
+ * per class allocation. On a large program that is a copy of the whole graph
  * per class, seconds of pure copying and the garbage that goes with it. The
  * index keeps the first match per key, which is exactly what `find` returned.
  */

@@ -60,10 +60,10 @@ export const declaredValueTypeOf = (checker: ts.TypeChecker, node: ts.Declaratio
  * The type of the FUNCTION LITERAL a declaration is initialized with, when the
  * declaration's own annotation is an overload set and the literal is not.
  *
- * `class Context { json: JSONRespond = (object, arg?, headers?) => {...} }`
- * (hono's `context.ts`) is the shape. `JSONRespond` declares two call
+ * `class Context { json: Respond = (object, arg?, headers?) => {...} }` is
+ * the shape, where the annotation `Respond` declares two call
  * signatures differing at a shared parameter -- `status?: U` in one,
- * `init?: ResponseOrInit<U>` in the other -- so `sharedAbiOf` (derive.ts)
+ * `init?: Init<U>` in the other -- so `sharedAbiOf` (derive.ts)
  * rightly finds no single convention and `widestSubsumingAbi` (host-abi.ts)
  * rightly declines to widen, since that only forgives a TRAILING-optional
  * difference and not a differing type at a shared position. The member then
@@ -73,7 +73,7 @@ export const declaredValueTypeOf = (checker: ts.TypeChecker, node: ts.Declaratio
  * But nothing with two conventions is ever allocated here. A function or arrow
  * LITERAL cannot itself be overloaded -- only a `function` declaration merges
  * that way -- so the checker types this initializer as exactly one signature,
- * whose second parameter is the union `U | ResponseOrInit<U>` the body already
+ * whose second parameter is the union `U | Init<U>` the body already
  * discriminates on at runtime (`typeof arg === 'number' ? ...`). One physical
  * convention, which this backend does model.
  *
@@ -99,8 +99,8 @@ export const declaredValueTypeOf = (checker: ts.TypeChecker, node: ts.Declaratio
  * in hand; this is the same question asked of a bare node, which is what
  * `structural.ts`'s `typeAt` has -- the BINDING's own type, as opposed to the
  * ALLOCATION's, which `valueTypeAt` answers from the initializer directly. Both
- * have to agree: hono's `export const parseBody: ParseBody = async (...)`
- * allocated one async arrow and bound it under `ParseBody`'s two overloads, so
+ * have to agree: `export const parse: Parse = async (...)` allocates one
+ * async arrow and binds it under `Parse`'s two overloads, so
  * the value had one convention and the name it is read through had none.
  */
 export const physicalOverloadTypeAt = (
@@ -159,9 +159,9 @@ const aliasTargetDeclaration = (checker: ts.TypeChecker, node: ts.Node): ts.Decl
  * member's literal and its annotation can disagree about arity, one level
  * over the overload case this function already handles.
  *
- * hono's own `Hono.fetch`: `fetch: (request, Env?, executionCtx?) => ... =
+ * A class member `fetch: (request, env?, ctx?) => ... =
  * (request, ...rest) => { return this.#dispatch(request, rest[1], rest[0],
- * request.method) }`. `declared` has ONE signature (never overloaded -- the
+ * request.method) }` is the shape. `declared` has ONE signature (never overloaded -- the
  * overload branch below does not apply), so the existing gate
  * (`getCallSignatures().length < 2`) correctly stayed out of this case, and
  * the member's published type kept the declared 3-named-parameter signature
@@ -184,9 +184,9 @@ const aliasTargetDeclaration = (checker: ts.TypeChecker, node: ts.Node): ts.Decl
  * member's own type publishes.
  *
  * This used to require the declared tail to be entirely OPTIONAL, which is
- * what told `fetch` (`Env?`, `executionCtx?`) apart from hono's own
- * `render: Renderer = (...args) => {...}` (`Renderer` resolves to
- * `DefaultRenderer`'s ONE REQUIRED parameter). That distinction never traced
+ * what told `fetch` (`env?`, `ctx?`) apart from a sibling member
+ * `render: Renderer = (...args) => {...}` (`Renderer` resolves to a
+ * signature with ONE REQUIRED parameter). That distinction never traced
  * to a soundness difference -- both shapes have the physical rest parameter
  * absorbing exactly the positions the declared signature's tail names, and
  * `render`'s own inner `this.#renderer(...args)` already resolves through
@@ -233,9 +233,9 @@ const withoutParens = (node: ts.Expression): ts.Expression => (ts.isParenthesize
  * Whether an assignment target can name `member`: `yes` when it provably
  * does, `no` when it provably does not, `open` when nothing here can tell.
  *
- * A COMPUTED target is decided by the checker's own type for the key. hono
- * writes its seven route registrars as `allMethods.forEach((method) => {
- * this[method] = (args1, ...args) => {...} })` (`hono-base.ts`), and
+ * A COMPUTED target is decided by the checker's own type for the key. A class
+ * that writes several methods as `allMethods.forEach((method) => {
+ * this[method] = (args1, ...args) => {...} })` is the shape, and
  * `method` is typed by the `as const` array it iterates -- a union of string
  * literals. That union is a guarantee of the same kind every other decision
  * in this compiler rests on: the value at run time IS one of those names.
@@ -261,14 +261,14 @@ const assignmentNamesMember = (checker: ts.TypeChecker, target: ts.Expression, m
  * overload set and no initializer -- `physicalInitializerTypeOf`'s premise
  * for the other spelling of the same allocation.
  *
- * hono's `HonoBase` is the shape: `get!: HandlerInterface<E, 'get', ...>`
+ * A class member `get!: Overloads<E, 'get', ...>` is the shape: it
  * declares roughly a dozen overloads that join into no single convention, and
  * the cell is filled by the constructor's `allMethods.forEach((method) => {
  * this[method] = (args1: string | H, ...args: H[]) => {...} })`. One arrow is
- * allocated; every route registrar holds it. Read off the annotation instead,
+ * allocated; every such member holds it. Read off the annotation instead,
  * the member carried `callable-identity` -- a function the plan knows only by
- * identity -- so `app.get('/', handler)`, the first statement of every hono
- * program, had no invoke path at all
+ * identity -- so `app.get('/', handler)`, an ordinary call through the member,
+ * had no invoke path at all
  * (`call-abi:no-invoke-path:callable-identity`).
  *
  * The premise is `physicalInitializerTypeOf`'s verbatim: a function or arrow
@@ -332,11 +332,11 @@ export const physicalInitializerTypeOf = (
   // An IMPORT of such a binding asks the same question one module over. The
   // specifier is an alias, so the symbol at the import site is the alias's --
   // and its type is the exported name's DECLARED type, every overload of it,
-  // never the one function the exporting module actually allocated. hono's
-  // `export const parseBody: ParseBody = async (...)` is the case:
-  // `utils/body.ts` resolves to the single async arrow (below), and
-  // `request.ts`'s `import { parseBody }` resolved to `ParseBody`'s two
-  // overloads, so one value had two conventions depending on which module
+  // never the one function the exporting module actually allocated.
+  // `export const parse: Parse = async (...)` is the case: the exporting
+  // module resolves to the single async arrow (below), and an importing
+  // module's `import { parse }` resolved to `Parse`'s two overloads, so one
+  // value had two conventions depending on which module
   // asked -- the two-authorities shape, with the import site refusing.
   const alias = aliasTargetDeclaration(checker, declaration)
   if (alias) return physicalInitializerTypeOf(checker, alias, declared, parameters)
@@ -415,9 +415,9 @@ const physicalStringObjectTypeOfDeclaringNode = (
  * The type a `new String(x)` allocation actually has, when a declaration or a
  * same-module reference to it is annotated with something else.
  *
- * hono's `utils/html.ts`: `const escapedString = new String(value) as
- * HtmlEscapedString`. The declared/annotated type is `HtmlEscapedString =
- * string & HtmlEscaped`, which `deriveIntersection` (representation/derive.ts)
+ * `const escaped = new String(value) as BrandedString` is the shape. The
+ * declared/annotated type is `BrandedString = string & Brand`, which
+ * `deriveIntersection` (representation/derive.ts)
  * deliberately collapses to plain `string` -- correct for the alias in
  * general, and wrong for the one value this expression actually allocates: a
  * String WRAPPER OBJECT with identity, not a primitive. `as` changes only the
@@ -505,7 +505,7 @@ const passthroughAccessOf = (node: ts.Expression): { readonly receiverField: str
  * The field a get/set accessor PAIR does nothing but forward to, when both
  * halves are exactly one statement long and agree on the identical access --
  * `get image() { return this.source.data }` / `set image(value) {
- * this.source.data = value }` (three's `Texture`) is the motivating shape.
+ * this.source.data = value }` is the motivating shape.
  * `null` for anything that is not provably this exact shape.
  *
  * This states only the SYNTACTIC fact: which access both bodies name, and
@@ -558,14 +558,15 @@ export const accessorPassthroughAliasOf = (
  * The MEMBER a passthrough accessor pair forwards to -- the storage half of
  * the syntactic fact `accessorPassthroughAliasOf` states.
  *
- * three's `Texture` writes `get image() { return this.source.data }` and the
- * matching setter, and annotates the GETTER `@type {?Object}`. That annotation
+ * A JSDoc-typed class that writes `get image() { return this.source.data }`
+ * and the matching setter, and annotates the GETTER `@type {?Object}`, is the
+ * shape. That annotation
  * is an upper bound on what may be read back, never a statement about what the
- * slot holds -- the slot IS `Source.data`, and nothing else can be. But
+ * slot holds -- the slot IS `this.source.data`, and nothing else can be. But
  * `Object | null` is not `any`/`void`/`never`, so every authority gated on
  * `isUnusableEvidence` treats it as a final answer and never asks the census
- * that knows better. `Texture.image` is read dozens of times across
- * `WebGLTextures.js` alone, and each read boxed.
+ * that knows better. Such an accessor read across a program boxed at every
+ * read.
  *
  * The receiver type is taken from the getter's OWN access node rather than
  * rebuilt from the owning class's symbol: the node is what the program
@@ -612,8 +613,8 @@ const isUninformativeReceiver = (type: ts.Type): boolean =>
  * The one signature an OVERLOADED function or method's implementation
  * declares, or `null` when the node is not an overload set's implementation.
  *
- * `class HonoRequest { param(key: string): string; param(): Record<...>;
- * param(key?: string): unknown { ... } }` (hono's `request.ts`) is the shape,
+ * `class Request { param(key: string): string; param(): Record<...>;
+ * param(key?: string): unknown { ... } }` is the shape,
  * and it is `physicalInitializerTypeOf`'s twin at TypeScript's other spelling
  * of the same thing. Asked through the symbol, the type is every OVERLOAD
  * signature and never the implementation's -- that is the checker's rule, and
@@ -727,12 +728,12 @@ export const literalAccessorOf = (
  * `null` when the class does not overload its constructor.
  *
  * `implementationSignatureOf` above states the rule; this is the same fact at
- * TypeScript's other spelling of it. `class Long { constructor(low: number,
+ * TypeScript's other spelling of it. `class Int64 { constructor(low: number,
  * high?: number, unsigned?: boolean); constructor(value: bigint, unsigned?:
  * boolean); constructor(value: string, unsigned?: boolean); constructor(
  * lowOrValue: number | bigint | string = 0, highOrUnsigned?: number | boolean,
- * unsigned?: boolean) { ... } }` (bson's `long.ts`) declares three ways to
- * CALL `new Long`, and exactly one frame the body runs with. `sharedAbiOf`
+ * unsigned?: boolean) { ... } }` declares three ways to
+ * CALL `new Int64`, and exactly one frame the body runs with. `sharedAbiOf`
  * (derive.ts), asked for a convention the three share, correctly finds none
  * and refuses -- and refusing is wrong here for the same reason it was wrong
  * for a method: the three are views of one physical constructor, and the
@@ -770,7 +771,7 @@ export const constructorImplementationSignatureOf = (checker: ts.TypeChecker, de
  * `iterable?: Iterable<readonly [K, V]> | null`), which no single calling
  * convention joins. The overload every other one's parameters are assignable
  * to accepts every argument list the others do, so it is that one frame
- * (mongodb-connection-string-url's `CaseInsensitiveMap extends Map`).
+ * (`class CaseInsensitiveMap extends Map` with no constructor of its own).
  * `null` when the class writes a constructor, the list is one signature, or
  * no overload subsumes the rest.
  */
@@ -928,11 +929,11 @@ export interface DeclaredMemberCensus {
  * fresh transient symbol for a generic type's member, EXCEPT when that member's
  * type is already resolved and provably free of type variables, where it hands
  * the original back untouched -- so which of the two objects a caller receives
- * for `interface WSContextInit<T> { readyState: WSReadyState }` depends on
+ * for `interface SocketInit<T> { readyState: ReadyState }` depends on
  * nothing the program states: only on whether anything had resolved
  * `readyState`'s type before that instantiation's members were asked for.
- * hono's `WSContext` is the case that proved it. This walk recorded the
- * getter `@hono/node-server`'s `new WSContext<WebSocketLike>({ ...,
+ * A generic class built from an object-literal init is the case that proved
+ * it. This walk recorded the getter `new SocketContext<SocketLike>({ ...,
  * get readyState() { return ws.readyState }, ... })` supplies under the
  * DECLARATION's own symbol, and `structural-parts.ts` asked with the
  * INSTANTIATED one (its `target` is literally the symbol this walk recorded
@@ -1089,10 +1090,9 @@ export const censusDeclaredMembers = (
   // implement the same declared member (`existing.getter !== getter`), even
   // when both bodies are textually identical -- two AST nodes are never one
   // id. An unreached platform adapter counts as a second implementer just as
-  // readily as a reached one: hono's `WSContext.readyState` getter is
-  // implemented by the Node adapter's `websocket.ts` AND, unreached in a
-  // Node program, by `adapter/deno/websocket.ts` and
-  // `adapter/cloudflare-workers/websocket.ts` -- three distinct getter
+  // readily as a reached one: a library that implements one declared getter
+  // in one adapter module per platform has, in a program that reaches only
+  // one platform, the other adapters' getters unreached -- several distinct getter
   // declarations for one declared member, which conflicts the symbol and
   // sends every implementer's `accessorBodiesOf` to `null`, even the one
   // program that actually runs. Restricting the walk to what `reachable`

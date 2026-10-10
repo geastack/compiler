@@ -2,6 +2,8 @@ import type { DeclarationId, FunctionId, StructuralTypeId } from '../identity/id
 import type { RepresentationDeriver } from '../representation/derive.js'
 import type { CallableAbi, RecordAccessor, RecordField, RecordIndexSidecar, Representation } from '../representation/model.js'
 import { walkRepresentation } from '../representation/model.js'
+import { classMethodValueArmsOf, methodCopyHeldBy } from './dispatch.js'
+import { abiOfCallee } from './callee.js'
 import type { RecordLayoutPolicy } from '../representation/policies.js'
 import { dynamicFieldAbsencePolicy } from '../representation/field-descriptor-policy.js'
 import type { ClassAccessor, ClassField, ClassFieldOwnership, ClassLayout, ClassMethod } from './classes.js'
@@ -36,16 +38,29 @@ export const recordIndexesOfShape = (deriver: RepresentationDeriver, shapeId: st
   recordLayoutOfShapeId(deriver, shapeId)?.indexes ?? []
 
 /**
- * The one layout policy every reader of record shapes shares: the conversion
- * registry (`targets/cpp/conversions.ts`, through `compiler.ts`) and the
- * printer's own context. Two constructions of this were two chances to
- * answer "what does this shape hold" differently.
+ * The questions about a record shape or class that the shape and the class
+ * table alone answer. A reader holding no symbol table and no projected ABIs
+ * gets exactly these, and nothing it could mistake for an answer to the
+ * symbol- or ABI-dependent questions (`recordLayoutPolicyOf`).
  */
-export const recordLayoutPolicyOf = (
+export type RecordShapeLayouts = Required<
+  Pick<
+    RecordLayoutPolicy,
+    | 'forShape'
+    | 'indexesForShape'
+    | 'accessorsForShape'
+    | 'plainFieldsForShape'
+    | 'classUninstantiable'
+    | 'classSubtreeOf'
+    | 'classMethodFor'
+    | 'classDirectMethodFor'
+  >
+>
+
+export const recordShapeLayoutsOf = (
   deriver: RepresentationDeriver,
-  classes: ReadonlyMap<DeclarationId, ClassLayout>,
-  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map()
-): RecordLayoutPolicy => {
+  classes: ReadonlyMap<DeclarationId, ClassLayout>
+): RecordShapeLayouts => {
   const nativeFields = new Map(
     [...classes.values()].flatMap((layout) =>
       layout.instance?.kind === 'class-ref' && layout.nativeStorage !== undefined
@@ -83,19 +98,9 @@ export const recordLayoutPolicyOf = (
         .filter((layout) => layout.layoutOnly !== true && layout.uninstantiable !== true && extendsIt(layout.declaration))
         .map((layout) => ({ declaration: layout.declaration, construct: layout.construct }))
     },
-    wellKnownSymbolOfKey: (key) => {
-      for (const [declaration, member] of wellKnownSymbols) if (key === `sym(${declaration})`) return member
-      return null
-    },
     classMethodFor: (declaration, key) => {
       const member = classMemberOf(classes, declaration, key)
       return member?.kind === 'method' && member.method.callable !== null
-    },
-    classMethodAbiFor: (declaration, key) => {
-      const member = classMemberOf(classes, declaration, key)
-      if (member?.kind !== 'method' || member.method.callable === null) return null
-      const carrier = member.method.representation
-      return carrier !== undefined && 'abi' in carrier && carrier.abi !== null ? (carrier.abi as CallableAbi) : null
     },
     // Whether a direct body call is SOUND, which is a different question from
     // whether the member exists: a key some subclass overrides dispatches
@@ -125,24 +130,59 @@ export const recordLayoutPolicyOf = (
         }
       }
       return { callable: member.method.callable, result: abi.result, absentParameters: abi.parameters.map((parameter) => parameter.value) }
-    },
-    // The getter's published result, taken from the accessor the class layout
-    // carries -- NOT from the instance shape. That shape enumerates storage,
-    // and an accessor has none, so `record.accessors` is empty for every class
-    // body and a shape lookup answers `null` for exactly the members this
-    // exists to find.
-    classAccessorFor: (declaration, key) => {
-      const member = classMemberOf(classes, declaration, key)
-      if (member?.kind !== 'accessor' || member.accessor.getter === null) return null
-      const carrier = member.accessor.representation
-      if (carrier === undefined || !('abi' in carrier) || carrier.abi === null) return null
-      // A getter takes no argument and yields a value; anything else under
-      // this key is not a member a record field can be built from.
-      const abi = carrier.abi as CallableAbi
-      return abi.parameters.length === 0 && abi.restFrom === null && abi.result.kind !== 'void' ? abi.result : null
     }
   }
 }
+
+/**
+ * The one layout policy every reader of record shapes shares: the conversion
+ * registry (`targets/cpp/conversions.ts`, through `compiler.ts`) and the
+ * printer's own context. Two constructions of this were two chances to
+ * answer "what does this shape hold" differently. Both inputs are required:
+ * an empty symbol table or an absent ABI projection answered "no such
+ * symbol" and "no setter" for members that exist.
+ */
+export const recordLayoutPolicyOf = (
+  deriver: RepresentationDeriver,
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  wellKnownSymbols: ReadonlyMap<DeclarationId, string>,
+  abiOfCallable: (callable: FunctionId) => CallableAbi | null
+): RecordLayoutPolicy => ({
+  ...recordShapeLayoutsOf(deriver, classes),
+  accessorAbiFor: abiOfCallable,
+  wellKnownSymbolOfKey: (key) => {
+    for (const [declaration, member] of wellKnownSymbols) if (key === `sym(${declaration})`) return member
+    return null
+  },
+  classMethodAbiFor: (declaration, key) => {
+    const member = classMemberOf(classes, declaration, key)
+    if (member?.kind !== 'method' || member.method.callable === null) return null
+    return abiOfCallable(member.method.callable)
+  },
+  classMethodValueSourcesFor: (declaration, key, carrier) =>
+    nativeClassMethodValueSourcesOf(classes, declaration, key, abiOfCallable, carrier),
+  // The getter's published result, taken from the accessor the class layout
+  // carries -- NOT from the instance shape. That shape enumerates storage,
+  // and an accessor has none, so `record.accessors` is empty for every class
+  // body and a shape lookup answers `null` for exactly the members this
+  // exists to find.
+  classAccessorSetterFor: (declaration, key) => {
+    const member = classMemberOf(classes, declaration, key)
+    const setter = member?.kind === 'accessor' ? member.accessor.setter : null
+    if (setter === null || setter === undefined) return null
+    const abi = abiOfCallable(setter)
+    return abi !== null && abi.parameters.length === 1 && abi.restFrom === null ? abi.parameters[0]!.value : null
+  },
+  classAccessorFor: (declaration, key) => {
+    const member = classMemberOf(classes, declaration, key)
+    if (member?.kind !== 'accessor' || member.accessor.getter === null) return null
+    const abi = abiOfCallable(member.accessor.getter)
+    if (abi === null) return null
+    // A getter takes no argument and yields a value; anything else under
+    // this key is not a member a record field can be built from.
+    return abi.parameters.length === 0 && abi.restFrom === null && abi.result.kind !== 'void' ? abi.result : null
+  }
+})
 
 /** A shape's own field list, or `null` when it carries no record layout. */
 export const recordFieldsOfShape = (deriver: RepresentationDeriver, shapeId: string): readonly RecordField[] | null =>
@@ -212,7 +252,7 @@ export const declaredRecordFieldOf = (
     const override = classMethodOverrideOf(classes, representation.declaration, fieldName)
     if (override) return override
     // A member the NATIVE base declares is stored there whatever the class
-    // redeclares it as: mongodb's `class MongoError extends Error { override
+    // redeclares it as: `class AppError extends Error { override
     // cause?: Error }` holds its cause in `gea::runtime::Error`'s one dynamic
     // `cause`, and the struct links that base (`records.ts`) and prints no
     // second slot. The class's storage census still lists the redeclaration,
@@ -455,6 +495,52 @@ export const classMethodOverrideOf = (
     current = layout.base
   }
   return resolve(selected)
+}
+
+/** Every read-time native function carrier selected by a class family's method lookup. */
+export const nativeClassMethodValueSourcesOf = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  declaration: DeclarationId,
+  key: string,
+  projectedAbi?: (callable: FunctionId) => CallableAbi | null,
+  carrier?: Representation
+): readonly Representation[] | null => {
+  const readAbi = (callable: FunctionId): CallableAbi | null => {
+    if (projectedAbi !== undefined) return projectedAbi(callable)
+    for (const layout of classes.values()) {
+      const method = layout.methods.find((entry) => entry.callable === callable)
+      if (method?.representation !== undefined && 'abi' in method.representation) return method.representation.abi
+    }
+    return null
+  }
+  const site = classMemberOf(classes, declaration, key)
+  if (site?.kind !== 'method') return null
+  const held =
+    carrier !== undefined
+      ? abiOfCallee(carrier)
+      : site.method.callable !== null
+        ? readAbi(site.method.callable)
+        : site.method.representation === undefined
+          ? null
+          : abiOfCallee(site.method.representation)
+  const arms = classMethodValueArmsOf(classes, declaration, key)
+  if (held === null || arms === null) return null
+  const sources: Representation[] = []
+  for (const arm of arms) {
+    const owner = [...classes.values()].find((layout) => layout.methods.some((method) => method.callable === arm.method.callable))
+    if (owner === undefined) return null
+    const copies = owner.methods.filter((method) => method.key === key)
+    const method = copies.length < 2 ? arm.method : methodCopyHeldBy(copies, held, readAbi)
+    if (method?.callable === null || method?.callable === undefined) return null
+    const abi = readAbi(method.callable)
+    if (abi === null) return null
+    sources.push({ kind: 'function-value-dispatch', abi })
+    const own = classMethodOverrideOf(classes, arm.allocation, key)
+    if (own !== null) sources.push(own.value)
+    const prototype = classMethodOverrideOf(classes, owner.declaration, key)
+    if (prototype !== null) sources.push(prototype.value)
+  }
+  return sources
 }
 
 /** A super lookup still observes replacement of the selected prototype method. */

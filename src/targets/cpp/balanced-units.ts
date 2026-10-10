@@ -58,7 +58,7 @@ export const balanceCppUnits = (units: readonly CppRenderedUnit[], stem: string)
 /**
  * The most C++ one emitted unit may hold before the per-file layout splits it.
  *
- * Measured on the MongoDB driver's per-file emission (clang 17, `-Os -flto -c`,
+ * Measured on a large program's per-file emission (clang 17, `-Os -flto -c`,
  * 2026-09-24): a unit costs ~7 s and ~700 MB to parse the shared header, then
  * ~12 s per MB of its own text -- 0.5 MB in 19 s, 0.9 MB in 22 s, 2.8 MB in
  * 40 s. A unit per source file put 19 MB of record field tables in the

@@ -6,7 +6,7 @@ import { censusParameterBindings } from './parameter-bindings.js'
 import { wholeProgram } from './reachability.js'
 
 /**
- * three's `ColorBuffer.setClear`, reduced: the declaration overlay states
+ * A library factory record's `setClear`, reduced: the declaration overlay states
  * `@param {boolean} premultipliedAlpha`, and `colorBuffer.setClear( 0, 0, 0,
  * 1 )` leaves it out.
  */

@@ -97,7 +97,7 @@ int main() {
   stores.setProperty(PropertyKey::string("host"), hostStore);
   matcherReceiver.setProperty(PropertyKey::string("constrainedHandlerStores"), stores);
   auto derived = Value::object();
-  derived.setProperty(PropertyKey::string("host"), gea::eval_detail::string("fastify.io"));
+  derived.setProperty(PropertyKey::string("host"), gea::eval_detail::string("example.io"));
   assert(text(matcher.callWithReceiver(matcherReceiver, {derived})) == "matched");
   evaluator.globals().setProperty(PropertyKey::string("count"), number(0));
   throws("EvalUnsupportedError", [&] { evaluator.function({}, "count++; if(false) { class C {} }"); });

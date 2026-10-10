@@ -1,4 +1,4 @@
-// mongodb's `authMechanismProperties` transform: `mechanismProperties` starts
+// A database client's `authMechanismProperties` transform: `mechanismProperties` starts
 // as `Object.create(null)`, takes `getBoolean`-or-string writes from a URI
 // option, or is replaced by `{ ...optionValue }` of a client option declared
 // `unknown` and bounded only by `isRecord`. The spread source stays dynamic
@@ -36,12 +36,12 @@ const propertiesOf = (values: unknown[]) => {
 }
 
 const uriValues: unknown[] = []
-uriValues.push('CANONICALIZE:true,SERVICE_NAME:mongo')
+uriValues.push('CANONICALIZE:true,SERVICE_NAME:store')
 const clientValues: unknown[] = []
 clientValues.push({ SERVICE_REALM: 'EXAMPLE', CANONICALIZE: false })
 const fromUri = propertiesOf(uriValues)
 const fromClient = propertiesOf(clientValues)
-//! expect: CANONICALIZE=true SERVICE_NAME=mongo
+//! expect: CANONICALIZE=true SERVICE_NAME=store
 console.log(
   Object.keys(fromUri)
     .map((key) => key + '=' + String(fromUri[key]))

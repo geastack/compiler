@@ -9,8 +9,8 @@ import { attachDeferredIntrinsicProtocolLedger, createDeferredIntrinsicProtocolL
 import { censusParameterBindings, emptyParameterBindingCensus, type ParameterBindingCensus } from '../parameter-bindings.js'
 
 /**
- * Reproduces `targets:origin-slot-open` for `WebGLEnvironments.js`'s
- * `getCube`: an exact `new C(n)` origin whose constructor calls a sibling
+ * Reproduces `targets:origin-slot-open` for a cache-or-create lookup
+ * function inside a plain factory: an exact `new C(n)` origin whose constructor calls a sibling
  * method on `this` (`this._setup(...)`) and stores a nested allocation
  * (`this.texture = new Other()`), then a caller that calls a plain method on
  * the origin (`r.m(renderer, t)`), stores the instance in a Map, and reads a
@@ -152,7 +152,7 @@ test('the same shape with a super chain and a dispose-listener readback', () => 
   const source = `
     class Other {}
     class Renderer { touch(t: object) {} }
-    class EventDispatcher {
+    class Emitter {
       _listeners: Record<string, ((event: { type: string }) => void)[]> = {}
       addEventListener(type: string, listener: (event: { type: string }) => void) {
         const listeners = this._listeners
@@ -160,7 +160,7 @@ test('the same shape with a super chain and a dispose-listener readback', () => 
         listeners[type]!.push(listener)
       }
     }
-    class Base extends EventDispatcher {
+    class Base extends Emitter {
       x: number
       constructor(n: number) {
         super()
@@ -191,12 +191,12 @@ test('the same shape with a super chain and a dispose-listener readback', () => 
   assert.equal(invocationTargets(source, named('_setup'))?.length, 1, 'this._setup(n) in the constructor')
 })
 
-// The fully faithful shape (real `EventDispatcher`, a WeakMap-backed
-// `cubeMaps` store+retrieve+dispose readback, and an accessor-backed
-// `texture` field). Its origin's write census only closes once EVERY call
-// reachable from the `WebGLCubeRenderTarget` origin resolves -- including the
-// inherited `dispose()` -> `dispatchEvent` -> `array[i].call(this, event)`
-// listener-forwarding call.
+// The fully faithful shape (a real listener-registry base class, a
+// WeakMap-backed cache store+retrieve+dispose readback, and an
+// accessor-backed `texture` field). Its origin's write census only closes
+// once EVERY call reachable from the `CubeTarget` origin resolves --
+// including the inherited `dispose()` -> `dispatchEvent` ->
+// `array[i].call(this, event)` listener-forwarding call.
 //
 // `invocationTargetsAfterRounds` (unlike the single-round `invocationTargets`
 // used everywhere else in this file) threads a real
@@ -227,17 +227,18 @@ test('the same shape with a super chain and a dispose-listener readback', () => 
 // (`listeners[ event.type ]`'s `event.type` is not one), so it refuses too.
 //
 // Closing this needs a genuinely new proof: combine `computedKeySetOf`
-// (`computed-key-set.ts`, already proven for three's `Material.setValues`'s
-// `this[ key ] = value` -- exactly this "a parameter's closed caller set
+// (`computed-key-set.ts`, already proven for a `setValues(values)` method
+// whose `for (const key in values) this[ key ] = values[ key ]` loop is fed
+// only by object literals -- exactly this "a parameter's closed caller set
 // makes an apparently-open computed key a closed finite set" shape) with a
 // per-key array-content trace, or a key-agnostic "every value this program
 // ever writes into ANY slot of this object is a function" walk over
 // `flow.allWrites`. Neither exists yet. Asserting `null` here pins that gap
 // precisely, rather than re-widening the ORIGINAL (now-fixed) static-gate
 // diagnosis this test used to carry.
-test('the faithful WebGLEnvironments/WebGLCubeRenderTarget shape is blocked by the EventDispatcher .call() record-of-arrays shape', () => {
+test('the faithful Environments/CubeTarget shape is blocked by the Emitter .call() record-of-arrays shape', () => {
   const source = `
-    class EventDispatcher {
+    class Emitter {
       addEventListener(type, listener) {
         if (this._listeners === undefined) this._listeners = {};
         const listeners = this._listeners;
@@ -265,28 +266,28 @@ test('the faithful WebGLEnvironments/WebGLCubeRenderTarget shape is blocked by t
         }
       }
     }
-    class Texture {
+    class Surface {
       constructor(image) { this.image = image; this.mapping = 0; }
       clone() { return new this.constructor().copy(this); }
       copy(source) { this.image = source.image; return this; }
       setValues(values) { for (const key in values) this[key] = values[key]; }
     }
-    class CubeTexture extends Texture {
+    class CubeSurface extends Surface {
       constructor(images) { super(images); }
     }
-    class RenderTarget extends EventDispatcher {
+    class Target extends Emitter {
       constructor(width, height, options) {
         super();
         this.width = width;
         this.height = height;
         this.textures = [];
         const image = { width: width, height: height };
-        const texture = new Texture(image);
+        const texture = new Surface(image);
         this.textures[0] = texture.clone();
-        this._setTextureOptions(options);
+        this._applyOptions(options);
       }
-      _setTextureOptions(options) {
-        const values = { minFilter: 0, generateMipmaps: false };
+      _applyOptions(options) {
+        const values = { filter: 0, mipmaps: false };
         if (options && options.mapping !== undefined) values.mapping = options.mapping;
         for (let i = 0; i < this.textures.length; i++) this.textures[i].setValues(values);
       }
@@ -294,38 +295,38 @@ test('the faithful WebGLEnvironments/WebGLCubeRenderTarget shape is blocked by t
       set texture(value) { this.textures[0] = value; }
       dispose() { this.dispatchEvent({ type: 'dispose' }); }
     }
-    class WebGLRenderTarget extends RenderTarget {
+    class DeviceTarget extends Target {
       constructor(width, height, options) {
         super(width, height, options);
-        this.isWebGLRenderTarget = true;
+        this.isDeviceTarget = true;
       }
     }
-    class WebGLCubeRenderTarget extends WebGLRenderTarget {
+    class CubeTarget extends DeviceTarget {
       constructor(size, options) {
         super(size, size, options);
-        this.isWebGLCubeRenderTarget = true;
+        this.isCubeTarget = true;
         const image = { width: size, height: size };
         const images = [image, image, image, image, image, image];
-        this.texture = new CubeTexture(images);
-        this._setTextureOptions(options);
-        this.texture.isRenderTargetTexture = true;
+        this.texture = new CubeSurface(images);
+        this._applyOptions(options);
+        this.texture.isTargetSurface = true;
       }
-      fromEquirectangularTexture(renderer, texture) {
+      fromSource(renderer, texture) {
         this.texture.type = texture.type;
         this.texture.colorSpace = texture.colorSpace;
         renderer.doSomething(this);
         return this;
       }
     }
-    function mapTextureMapping(texture, mapping) {
+    function remapSurface(texture, mapping) {
       if (mapping === 1) texture.mapping = 2;
       return texture;
     }
-    function WebGLEnvironments(renderer) {
+    function Environments(renderer) {
       let cubeMaps = new WeakMap();
-      function onCubemapDispose(event) {
+      function onSurfaceDispose(event) {
         const texture = event.target;
-        texture.removeEventListener('dispose', onCubemapDispose);
+        texture.removeEventListener('dispose', onSurfaceDispose);
         const cubemap = cubeMaps.get(texture);
         if (cubemap !== undefined) {
           cubeMaps.delete(texture);
@@ -333,20 +334,20 @@ test('the faithful WebGLEnvironments/WebGLCubeRenderTarget shape is blocked by t
         }
       }
       function getCube(texture) {
-        if (texture && texture.isTexture) {
+        if (texture && texture.isSurface) {
           const mapping = texture.mapping;
           if (mapping === 1 || mapping === 2) {
             if (cubeMaps.has(texture)) {
               const cubemap = cubeMaps.get(texture).texture;
-              return mapTextureMapping(cubemap, texture.mapping);
+              return remapSurface(cubemap, texture.mapping);
             } else {
               const image = texture.image;
               if (image && image.height > 0) {
-                const renderTarget = new WebGLCubeRenderTarget(image.height);
-                renderTarget.fromEquirectangularTexture(renderer, texture);
-                cubeMaps.set(texture, renderTarget);
-                texture.addEventListener('dispose', onCubemapDispose);
-                return mapTextureMapping(renderTarget.texture, texture.mapping);
+                const cubeTarget = new CubeTarget(image.height);
+                cubeTarget.fromSource(renderer, texture);
+                cubeMaps.set(texture, cubeTarget);
+                texture.addEventListener('dispose', onSurfaceDispose);
+                return remapSurface(cubeTarget.texture, texture.mapping);
               }
               return null;
             }
@@ -360,162 +361,161 @@ test('the faithful WebGLEnvironments/WebGLCubeRenderTarget shape is blocked by t
       return { get: getCube, dispose: dispose };
     }
     class Renderer {
-      constructor() { this.environments = WebGLEnvironments(this); }
+      constructor() { this.environments = Environments(this); }
       doSomething(target) {}
     }
     const renderer = new Renderer();
-    const texture = new Texture({ width: 4, height: 4 });
-    texture.isTexture = true;
+    const texture = new Surface({ width: 4, height: 4 });
+    texture.isSurface = true;
     texture.mapping = 1;
     renderer.environments.get(texture);
   `
-  const targets = invocationTargetsAfterRounds(source, named('fromEquirectangularTexture'), true)
-  assert.equal(targets, null, 'blocked by the EventDispatcher .call() record-of-arrays shape, not root B')
+  const targets = invocationTargetsAfterRounds(source, named('fromSource'), true)
+  assert.equal(targets, null, 'blocked by the Emitter .call() record-of-arrays shape, not the Map/WeakMap-carried origin shape')
 })
 
 test('variant: no dispose listener / no WeakMap readback closes', () => {
   const source = `
-    class Texture {
+    class Surface {
       constructor(image) { this.image = image; this.mapping = 0; }
       clone() { return new this.constructor().copy(this); }
       copy(source) { this.image = source.image; return this; }
       setValues(values) { for (const key in values) this[key] = values[key]; }
     }
-    class CubeTexture extends Texture {
+    class CubeSurface extends Surface {
       constructor(images) { super(images); }
     }
-    class RenderTarget {
+    class Target {
       constructor(width, height, options) {
         this.width = width;
         this.height = height;
         this.textures = [];
         const image = { width: width, height: height };
-        const texture = new Texture(image);
+        const texture = new Surface(image);
         this.textures[0] = texture.clone();
-        this._setTextureOptions(options);
+        this._applyOptions(options);
       }
-      _setTextureOptions(options) {
-        const values = { minFilter: 0, generateMipmaps: false };
+      _applyOptions(options) {
+        const values = { filter: 0, mipmaps: false };
         if (options && options.mapping !== undefined) values.mapping = options.mapping;
         for (let i = 0; i < this.textures.length; i++) this.textures[i].setValues(values);
       }
       get texture() { return this.textures[0]; }
       set texture(value) { this.textures[0] = value; }
     }
-    class WebGLRenderTarget extends RenderTarget {
+    class DeviceTarget extends Target {
       constructor(width, height, options) {
         super(width, height, options);
-        this.isWebGLRenderTarget = true;
+        this.isDeviceTarget = true;
       }
     }
-    class WebGLCubeRenderTarget extends WebGLRenderTarget {
+    class CubeTarget extends DeviceTarget {
       constructor(size, options) {
         super(size, size, options);
-        this.isWebGLCubeRenderTarget = true;
+        this.isCubeTarget = true;
         const image = { width: size, height: size };
         const images = [image, image, image, image, image, image];
-        this.texture = new CubeTexture(images);
-        this._setTextureOptions(options);
-        this.texture.isRenderTargetTexture = true;
+        this.texture = new CubeSurface(images);
+        this._applyOptions(options);
+        this.texture.isTargetSurface = true;
       }
-      fromEquirectangularTexture(renderer, texture) {
+      fromSource(renderer, texture) {
         this.texture.type = texture.type;
         renderer.doSomething(this);
         return this;
       }
     }
-    function WebGLEnvironments(renderer) {
+    function Environments(renderer) {
       function getCube(texture) {
-        const renderTarget = new WebGLCubeRenderTarget(texture.image.height);
-        renderTarget.fromEquirectangularTexture(renderer, texture);
-        return renderTarget.texture;
+        const cubeTarget = new CubeTarget(texture.image.height);
+        cubeTarget.fromSource(renderer, texture);
+        return cubeTarget.texture;
       }
       return { get: getCube };
     }
     class Renderer {
-      constructor() { this.environments = WebGLEnvironments(this); }
+      constructor() { this.environments = Environments(this); }
       doSomething(target) {}
     }
     const renderer = new Renderer();
-    const texture = new Texture({ width: 4, height: 4 });
+    const texture = new Surface({ width: 4, height: 4 });
     renderer.environments.get(texture);
   `
-  assert.equal(invocationTargets(source, named('fromEquirectangularTexture'), true)?.length, 1)
+  assert.equal(invocationTargets(source, named('fromSource'), true)?.length, 1)
 })
 
 test('variant: a plain texture field with no accessor closes', () => {
   const source = `
-    class Texture {
+    class Surface {
       constructor(image) { this.image = image; this.mapping = 0; }
       clone() { return new this.constructor().copy(this); }
       copy(source) { this.image = source.image; return this; }
       setValues(values) { for (const key in values) this[key] = values[key]; }
     }
-    class CubeTexture extends Texture {
+    class CubeSurface extends Surface {
       constructor(images) { super(images); }
     }
-    class RenderTarget {
+    class Target {
       constructor(width, height, options) {
         this.width = width;
         this.height = height;
-        this.texture = new Texture({ width, height });
-        this._setTextureOptions(options);
+        this.texture = new Surface({ width, height });
+        this._applyOptions(options);
       }
-      _setTextureOptions(options) {
-        const values = { minFilter: 0 };
+      _applyOptions(options) {
+        const values = { filter: 0 };
         if (options && options.mapping !== undefined) values.mapping = options.mapping;
         this.texture.setValues(values);
       }
     }
-    class WebGLRenderTarget extends RenderTarget {
+    class DeviceTarget extends Target {
       constructor(width, height, options) {
         super(width, height, options);
-        this.isWebGLRenderTarget = true;
+        this.isDeviceTarget = true;
       }
     }
-    class WebGLCubeRenderTarget extends WebGLRenderTarget {
+    class CubeTarget extends DeviceTarget {
       constructor(size, options) {
         super(size, size, options);
-        this.isWebGLCubeRenderTarget = true;
+        this.isCubeTarget = true;
         const images = [{ width: size, height: size }];
-        this.texture = new CubeTexture(images);
-        this._setTextureOptions(options);
-        this.texture.isRenderTargetTexture = true;
+        this.texture = new CubeSurface(images);
+        this._applyOptions(options);
+        this.texture.isTargetSurface = true;
       }
-      fromEquirectangularTexture(renderer, texture) {
+      fromSource(renderer, texture) {
         this.texture.type = texture.type;
         renderer.doSomething(this);
         return this;
       }
     }
-    function WebGLEnvironments(renderer) {
+    function Environments(renderer) {
       function getCube(texture) {
-        const renderTarget = new WebGLCubeRenderTarget(texture.image.height);
-        renderTarget.fromEquirectangularTexture(renderer, texture);
-        return renderTarget.texture;
+        const cubeTarget = new CubeTarget(texture.image.height);
+        cubeTarget.fromSource(renderer, texture);
+        return cubeTarget.texture;
       }
       return { get: getCube };
     }
     class Renderer {
-      constructor() { this.environments = WebGLEnvironments(this); }
+      constructor() { this.environments = Environments(this); }
       doSomething(target) {}
     }
     const renderer = new Renderer();
-    const texture = new Texture({ width: 4, height: 4 });
+    const texture = new Surface({ width: 4, height: 4 });
     renderer.environments.get(texture);
   `
-  assert.equal(invocationTargets(source, named('fromEquirectangularTexture'), true)?.length, 1)
+  assert.equal(invocationTargets(source, named('fromSource'), true)?.length, 1)
 })
 
-// The named shape from the task: `this._setTextureOptions( options )` called
-// as a sibling from inside a CONSTRUCTOR (`member-closure:family-initializer-
-// this-open` when it refuses) -- isolated from the WebGLCubeRenderTarget/
-// EventDispatcher chain so a future regression that reopens just the
+// `this._applyOptions( options )` called as a sibling from inside a
+// CONSTRUCTOR (`member-closure:family-initializer-this-open` when it
+// refuses) -- isolated from the CubeTarget/Emitter chain so a future regression that reopens just the
 // constructor-sibling-call shape shows up here directly, not only buried in
 // the larger fixtures above.
 test('a constructor-sibling call to an options-setup method closes (family-initializer-this-open shape)', () => {
   const source = `
-    class Texture {
+    class Surface {
       constructor(image: { width: number; height: number }) {
         this.image = image
         this.mapping = 0
@@ -526,50 +526,49 @@ test('a constructor-sibling call to an options-setup method closes (family-initi
         for (const key in values) (this as Record<string, unknown>)[key] = values[key]
       }
     }
-    class RenderTarget {
+    class Target {
       width: number
       height: number
-      texture: Texture
+      texture: Surface
       constructor(width: number, height: number, options?: { mapping?: number }) {
         this.width = width
         this.height = height
-        this.texture = new Texture({ width, height })
-        this._setTextureOptions(options)
+        this.texture = new Surface({ width, height })
+        this._applyOptions(options)
       }
-      _setTextureOptions(options?: { mapping?: number }) {
-        const values: Record<string, unknown> = { minFilter: 0 }
+      _applyOptions(options?: { mapping?: number }) {
+        const values: Record<string, unknown> = { filter: 0 }
         if (options && options.mapping !== undefined) values.mapping = options.mapping
         this.texture.setValues(values)
       }
     }
     function run(width: number, height: number) {
-      const target = new RenderTarget(width, height, { mapping: 1 })
+      const target = new Target(width, height, { mapping: 1 })
       return target.texture
     }
   `
-  assert.equal(invocationTargets(source, named('_setTextureOptions'))?.length, 1)
+  assert.equal(invocationTargets(source, named('_applyOptions'))?.length, 1)
 })
 
-// The named shape from the task: `this.uniform2f( location, x, y )` called as
-// a sibling from `uniform2i` inside `NativeWebGL2RenderingContext`
-// (@geastack/native-webgl-angle, `src/nativeWebGL.ts:1071`), reached only through the
-// canvas's own private `context` field -- `createNativeWebGLCanvas` allocates
-// the canvas, stores `new NativeWebGL2RenderingContext(...)` into it via
-// `setContext`, and every later `canvas.getContext(...).uniform2i(...)` reads
-// the same field back out. This is root B's shape with a plain field (not a
-// Map/WeakMap) as the carrier: `setContext`/`getContext` are ordinary
-// same-class field write/read, so this tests that path stays closed too.
-test('a private-field-carried allocation origin closes across setContext/getContext (uniform2i shape)', () => {
+// `this.setFloat2( location, x, y )` called as a sibling from `setInt2`
+// inside a host-binding context class, reached only through a canvas-like
+// object's own private `context` field -- a factory allocates the canvas,
+// stores `new Context(...)` into it via `setContext`, and every later
+// `canvas.getContext(...).setInt2(...)` reads the same field back out. This
+// is the Map/WeakMap-carried origin shape with a plain field as the carrier:
+// `setContext`/`getContext` are ordinary same-class field write/read, so this
+// tests that path stays closed too.
+test('a private-field-carried allocation origin closes across setContext/getContext', () => {
   const source = `
     class Context {
-      uniform2f(location: number, x: number, y: number): void { void location; void x; void y }
-      uniform2i(location: number, x: number, y: number): void { this.uniform2f(location, x, y) }
+      setFloat2(location: number, x: number, y: number): void { void location; void x; void y }
+      setInt2(location: number, x: number, y: number): void { this.setFloat2(location, x, y) }
     }
     class Canvas {
       private context: Context | null = null
       setContext(context: Context): void { this.context = context }
       getContext(name: string): Context | null {
-        if (name === 'webgl2') return this.context
+        if (name === 'primary') return this.context
         return null
       }
     }
@@ -580,45 +579,45 @@ test('a private-field-carried allocation origin closes across setContext/getCont
     }
     function run() {
       const canvas = createCanvas()
-      const context = canvas.getContext('webgl2')
-      if (context) context.uniform2i(0, 1, 2)
+      const context = canvas.getContext('primary')
+      if (context) context.setInt2(0, 1, 2)
     }
   `
-  assert.equal(invocationTargets(source, named('uniform2i'))?.length, 1, 'context.uniform2i(0, 1, 2)')
-  assert.equal(invocationTargets(source, named('uniform2f'))?.length, 1, 'this.uniform2f(location, x, y) inside uniform2i')
+  assert.equal(invocationTargets(source, named('setInt2'))?.length, 1, 'context.setInt2(0, 1, 2)')
+  assert.equal(invocationTargets(source, named('setFloat2'))?.length, 1, 'this.setFloat2(location, x, y) inside setInt2')
 })
 
 // Same WeakMap store+retrieve+dispose readback as the faithful shape above,
 // but `dispose()` sets a flag instead of calling `this.dispatchEvent(...)` --
-// isolating root B's own shape from the unrelated EventDispatcher `.call()`
-// listener-forwarding mechanism. This closing (targets:1) while the faithful
-// version above still refuses is the proof that both `callable-reach.ts`
-// fixes are sufficient and necessary for root B's shape, and that the
+// isolating the Map/WeakMap-carried origin shape from the unrelated Emitter
+// `.call()` listener-forwarding mechanism. This closing (targets:1) while the
+// faithful version above still refuses is the proof that both
+// `callable-reach.ts` fixes are sufficient and necessary for that shape, and that the
 // faithful version's remaining refusal is that separate, unrelated shape.
-test('variant: WeakMap dispose readback with no EventDispatcher listener fan-out closes', () => {
+test('variant: WeakMap dispose readback with no Emitter listener fan-out closes', () => {
   const source = `
-    class Texture {
+    class Surface {
       constructor(image) { this.image = image; this.mapping = 0; }
       clone() { return new this.constructor().copy(this); }
       copy(source) { this.image = source.image; return this; }
       setValues(values) { for (const key in values) this[key] = values[key]; }
     }
-    class CubeTexture extends Texture {
+    class CubeSurface extends Surface {
       constructor(images) { super(images); }
     }
-    class RenderTarget {
+    class Target {
       constructor(width, height, options) {
         this.width = width;
         this.height = height;
         this.textures = [];
         const image = { width: width, height: height };
-        const texture = new Texture(image);
+        const texture = new Surface(image);
         this.textures[0] = texture.clone();
-        this._setTextureOptions(options);
+        this._applyOptions(options);
         this._disposed = false;
       }
-      _setTextureOptions(options) {
-        const values = { minFilter: 0, generateMipmaps: false };
+      _applyOptions(options) {
+        const values = { filter: 0, mipmaps: false };
         if (options && options.mapping !== undefined) values.mapping = options.mapping;
         for (let i = 0; i < this.textures.length; i++) this.textures[i].setValues(values);
       }
@@ -626,36 +625,36 @@ test('variant: WeakMap dispose readback with no EventDispatcher listener fan-out
       set texture(value) { this.textures[0] = value; }
       dispose() { this._disposed = true; }
     }
-    class WebGLRenderTarget extends RenderTarget {
+    class DeviceTarget extends Target {
       constructor(width, height, options) {
         super(width, height, options);
-        this.isWebGLRenderTarget = true;
+        this.isDeviceTarget = true;
       }
     }
-    class WebGLCubeRenderTarget extends WebGLRenderTarget {
+    class CubeTarget extends DeviceTarget {
       constructor(size, options) {
         super(size, size, options);
-        this.isWebGLCubeRenderTarget = true;
+        this.isCubeTarget = true;
         const image = { width: size, height: size };
         const images = [image, image, image, image, image, image];
-        this.texture = new CubeTexture(images);
-        this._setTextureOptions(options);
-        this.texture.isRenderTargetTexture = true;
+        this.texture = new CubeSurface(images);
+        this._applyOptions(options);
+        this.texture.isTargetSurface = true;
       }
-      fromEquirectangularTexture(renderer, texture) {
+      fromSource(renderer, texture) {
         this.texture.type = texture.type;
         this.texture.colorSpace = texture.colorSpace;
         renderer.doSomething(this);
         return this;
       }
     }
-    function mapTextureMapping(texture, mapping) {
+    function remapSurface(texture, mapping) {
       if (mapping === 1) texture.mapping = 2;
       return texture;
     }
-    function WebGLEnvironments(renderer) {
+    function Environments(renderer) {
       let cubeMaps = new WeakMap();
-      function onCubemapDispose(texture) {
+      function onSurfaceDispose(texture) {
         const cubemap = cubeMaps.get(texture);
         if (cubemap !== undefined) {
           cubeMaps.delete(texture);
@@ -663,19 +662,19 @@ test('variant: WeakMap dispose readback with no EventDispatcher listener fan-out
         }
       }
       function getCube(texture) {
-        if (texture && texture.isTexture) {
+        if (texture && texture.isSurface) {
           const mapping = texture.mapping;
           if (mapping === 1 || mapping === 2) {
             if (cubeMaps.has(texture)) {
               const cubemap = cubeMaps.get(texture).texture;
-              return mapTextureMapping(cubemap, texture.mapping);
+              return remapSurface(cubemap, texture.mapping);
             } else {
               const image = texture.image;
               if (image && image.height > 0) {
-                const renderTarget = new WebGLCubeRenderTarget(image.height);
-                renderTarget.fromEquirectangularTexture(renderer, texture);
-                cubeMaps.set(texture, renderTarget);
-                return mapTextureMapping(renderTarget.texture, texture.mapping);
+                const cubeTarget = new CubeTarget(image.height);
+                cubeTarget.fromSource(renderer, texture);
+                cubeMaps.set(texture, cubeTarget);
+                return remapSurface(cubeTarget.texture, texture.mapping);
               }
               return null;
             }
@@ -683,23 +682,23 @@ test('variant: WeakMap dispose readback with no EventDispatcher listener fan-out
         }
         return texture;
       }
-      return { get: getCube, dispose: onCubemapDispose };
+      return { get: getCube, dispose: onSurfaceDispose };
     }
     class Renderer {
-      constructor() { this.environments = WebGLEnvironments(this); }
+      constructor() { this.environments = Environments(this); }
       doSomething(target) {}
     }
     const renderer = new Renderer();
-    const texture = new Texture({ width: 4, height: 4 });
-    texture.isTexture = true;
+    const texture = new Surface({ width: 4, height: 4 });
+    texture.isSurface = true;
     texture.mapping = 1;
     renderer.environments.get(texture);
   `
-  assert.equal(invocationTargets(source, named('fromEquirectangularTexture'), true)?.length, 1)
+  assert.equal(invocationTargets(source, named('fromSource'), true)?.length, 1)
 })
 
-// The named shape from the task, isolated to its own minimal fixture:
-// `EventDispatcher.dispatchEvent`'s `array[i].call(this, event)`, where
+// The listener-forwarding shape, isolated to its own minimal fixture:
+// `Emitter.dispatchEvent`'s `array[i].call(this, event)`, where
 // `array` comes from an untyped `_listeners[type]` field pushed to only by
 // `addEventListener`'s `listener` parameter. `unwrapExplicitThisCall`
 // (`derived-expression-type.ts`) cannot unwrap this call statically -- the
@@ -712,7 +711,7 @@ test('variant: WeakMap dispose readback with no EventDispatcher listener fan-out
 // miscompile once this closes, not just a missed proof.
 //
 // It still refuses today (see the long comment on the "faithful
-// WebGLEnvironments/WebGLCubeRenderTarget" test above for the full
+// Environments/CubeTarget" test above for the full
 // diagnosis): `_listeners` is a plain object read by a COMPUTED, non-literal
 // key (`listeners[ event.type ]`), and neither `callableArrayTargetsOf` nor
 // its `arrayStoredValuesOf` fallback can trace an array through that shape.
@@ -720,9 +719,9 @@ test('variant: WeakMap dispose readback with no EventDispatcher listener fan-out
 // ThisAt` machinery reaches this call (`site.operands` gets a real chance at
 // the explicit-this reading), so this test stays a live regression pin on
 // the multi-round infrastructure even while asserting the honest `null`.
-test('EventDispatcher.dispatchEvent forwards array[i].call(this, event) to its registered listener', () => {
+test('Emitter.dispatchEvent forwards array[i].call(this, event) to its registered listener', () => {
   const source = `
-    class EventDispatcher {
+    class Emitter {
       addEventListener(type, listener) {
         if (this._listeners === undefined) this._listeners = {};
         const listeners = this._listeners;
@@ -750,14 +749,14 @@ test('EventDispatcher.dispatchEvent forwards array[i].call(this, event) to its r
         }
       }
     }
-    class RenderTarget extends EventDispatcher {
+    class Target extends Emitter {
       dispose() { this.dispatchEvent({ type: 'dispose' }); }
     }
     function registerLogger(target, sink) {
       target.addEventListener('dispose', (event) => { sink.last = event.target; });
     }
     function run(sink) {
-      const target = new RenderTarget();
+      const target = new Target();
       registerLogger(target, sink);
       target.dispose();
       return sink;

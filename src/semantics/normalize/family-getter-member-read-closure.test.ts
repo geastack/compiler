@@ -5,11 +5,11 @@ import { compile } from '../../compiler.js'
 import { walkRepresentation } from '../../representation/model.js'
 
 /**
- * three's `BufferAttribute.count` (a plain field) and
- * `InterleavedBufferAttribute.count` (`get count() { return this.data.count }`)
+ * A library's `Attribute.count` (a plain field) and
+ * `InterleavedAttribute.count` (`get count() { return this.data.count }`)
  * declare the same key differently on sibling classes. A read of `count`
- * through a receiver typed as their union -- `positionAttribute.count` in
- * `BufferGeometry.setFromPoints` -- is not proof the receiver escapes: only a
+ * through a receiver typed as their union -- `attribute.count` in a method
+ * that accepts either -- is not proof the receiver escapes: only a
  * getter BODY that itself leaks the receiver is
  * (`callable-reach.ts`'s `member-read` arm, via `sourceClassKeyReadPlanOf`'s
  * `readBodies`). Certification (zero boxing) is the compiler's own definition
@@ -23,24 +23,24 @@ const compileFixture = (getterBody: string, extra = '') => {
       /** @param {number} count */
       constructor(count) { this.count = count; }
     }
-    class BufferAttribute {
+    class Attribute {
       /** @param {number} count */
       constructor(count) { this.count = count; }
     }
-    class InterleavedBufferAttribute {
+    class InterleavedAttribute {
       /** @param {Data} data */
       constructor(data) { this.data = data; }
       get count() { ${getterBody} }
     }
-    /** @param {BufferAttribute|InterleavedBufferAttribute} attribute */
+    /** @param {Attribute|InterleavedAttribute} attribute */
     function readCount(attribute) { return attribute.count; }
     ${extra}
     // Avoid \`console.log\` -- its \`any\` parameters box regardless of this
     // fixture, exactly as \`stored-listener-member-closure.test.ts\`'s own
     // full-frontend test avoids it. Accumulate into a typed local instead.
     let total = 0;
-    total += readCount(new BufferAttribute(3));
-    total += readCount(new InterleavedBufferAttribute(new Data(3)));
+    total += readCount(new Attribute(3));
+    total += readCount(new InterleavedAttribute(new Data(3)));
     if (total < 0) throw new Error('unreachable');
   `
   return compile({
@@ -76,7 +76,7 @@ test('a getter that leaks its own receiver may not certify with zero boxing', ()
 test('a reflective defineProperty that could install an accessor under the key may not certify a plain data class with zero boxing', () => {
   const result = compileFixture(
     'return this.data.count;',
-    "Object.defineProperty(new BufferAttribute(1), 'count', { get() { return globalThis; } });"
+    "Object.defineProperty(new Attribute(1), 'count', { get() { return globalThis; } });"
   )
   if (result.certificate)
     assert.notDeepEqual(boxedCarriers(result), [], 'a reflective defineProperty under the same key must refuse the static plan')

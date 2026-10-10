@@ -159,8 +159,8 @@ const iterationElementType = (
   // genuinely disagree, since the checker's own per-expression walk has no
   // memory of that inference and answers `any` for the receiver where the
   // structural census already resolved a concrete `Set`. A `Set` JSDoc-typed
-  // with no explicit type argument (three.js's own `new Set()` idiom, this
-  // module's `subclass-member-overlay-transform.ts`) instantiates its one
+  // with no explicit type argument (the common JavaScript `new Set()` idiom, and
+  // the compiler's own `subclass-member-overlay-transform.ts`) instantiates its one
   // parameter at `any`, which is exactly the honest answer -- an untyped
   // Set's elements are `any`, not a refusal.
   if (shape.kind === 'declared' && isNativeIterableSetType(context, effectiveType)) {
@@ -319,8 +319,8 @@ const generatorRecordTypeOf = (
  * instantiated at layout-distinct types is several physical classes, and the
  * for-of over `List<Connection>` calls the method on that copy, whose body's
  * convention names the copy: the published convention's root receiver then
- * had no conversion from it (mongodb's `utils.ts` List iterated in
- * `connection_pool.ts`). GetMethod hands the method the object it was read
+ * had no conversion from it (a hand-written linked `List<T>` iterated by
+ * another module). GetMethod hands the method the object it was read
  * off, so that object's type is the receiver. Only the declaring class's own
  * instances are rebased: a subclass instance keeps the declared receiver its
  * inherited body was written against.

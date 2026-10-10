@@ -2,7 +2,7 @@ import type { Representation } from '../../representation/model.js'
 import { representationKey } from '../../representation/model.js'
 import { absenceComparisonText } from './emit-presence.js'
 import { emptyArraySentinelText } from './emit-narrowing.js'
-import { typeofTextFor } from './emit-typeof.js'
+import { typeofAnswersFor, typeofTextFor } from './emit-typeof.js'
 import { nativeRecordBaseTransportKind } from './class-ref-transport.js'
 
 export type EqualityConversionRenderer = (source: Representation, target: Representation, text: string) => string | null
@@ -66,6 +66,11 @@ const armComparesByValue = (representation: Representation): boolean => {
 /** An arm that IS an absent value: two operands both holding it are equal without reading anything. */
 const isAbsentArm = (representation: Representation): boolean => representation.kind === 'null' || representation.kind === 'undefined'
 
+/** These certified native carriers use Ref's allocation/origin identity protocol across layouts. */
+const nativeRecordIdentityCarrier = (value: Representation): boolean =>
+  (value.kind === 'class-ref' || value.kind === 'record' || value.kind === 'record-with-index' || value.kind === 'native-record-ref') &&
+  value.ownership === 'shared-refcount'
+
 const callableIdentityCarrier = (representation: Representation): boolean =>
   representation.kind === 'function-value-dispatch' || representation.kind === 'function-and-constructor'
 
@@ -96,24 +101,19 @@ const negate = (operator: string, text: string): string =>
  * comparison was refused in the shape that had no answer and answered wrongly
  * in the shape that had two carriers for one function object.
  *
- * `typeofTextFor` is the one authority for "what type does the language say
+ * `typeofAnswersFor` is the one authority for "what types can the language say
  * this carrier holds", already keyed by complete representation for the
  * `typeof` operator itself; asking it here rather than restating a second
  * table is what keeps the two from ever disagreeing.
  */
 const foldedCarrierMismatchText = (left: Representation, right: Representation): string | null => {
-  const leftType = typeofTextFor(left)
-  const rightType = typeofTextFor(right)
-  if (leftType === null || rightType === null) return null
-  return leftType === rightType ? null : 'false'
+  const leftTypes = typeofAnswersFor(left)
+  const rightTypes = typeofAnswersFor(right)
+  if (leftTypes === null || rightTypes === null) return null
+  return leftTypes.some((answer) => rightTypes.includes(answer)) ? null : 'false'
 }
 
-const armEqualityText = (
-  arm: Representation,
-  leftText: string,
-  rightText: string,
-  convert?: EqualityConversionRenderer
-): string | null => {
+const armEqualityText = (arm: Representation, leftText: string, rightText: string, convert?: EqualityConversionRenderer): string | null => {
   if (isAbsentArm(arm)) return 'true'
   const callable = callableIdentityEqualityText('===', { text: leftText, representation: arm }, { text: rightText, representation: arm })
   if (callable !== null) return callable
@@ -282,10 +282,10 @@ export const callableIdentityEqualityText = (
   // the anchor is the one slot a block's identity is ever minted into
   // (`functionObjectIdentity()`), so equal anchors are one function object
   // and distinct anchors are two, whether or not the mint has happened yet.
-  // Without this, node-compat's `removeListener` scan (`fns[i] === fn`)
+  // Without this, an event emitter's `removeListener` scan (`fns[i] === fn`)
   // minted a `FunctionObjectIdentity` for EVERY registered listener it
   // walked past -- one heap object and one cycle candidate per listener per
-  // removal, on the mongodb driver's two `once`/`off` pairs per command.
+  // removal, on a client that registers two `once`/`off` pairs per request.
   //
   // Written as one generic lambda so each side's text is mentioned once: the
   // operand this reaches through an optional payload is a whole nested
@@ -332,9 +332,9 @@ const armPairEqualityText = (
 ): string | null => {
   if (representationKey(left.representation) === representationKey(right.representation))
     return armEqualityText(left.representation, left.text, right.text, convert)
-  // `null` is only ever equal to `null`, and `undefined` to `undefined`; the
-  // same kind always shares one key, so any other pairing is Type(x) != Type(y).
-  if (isAbsentArm(left.representation) || isAbsentArm(right.representation)) return 'false'
+  // Native reference storage also carries absence; ask its exact state test
+  // rather than assuming an absent value requires a dedicated union arm.
+  if (isAbsentArm(left.representation) || isAbsentArm(right.representation)) return absenceComparisonText('===', left, right)
   if (sameNumericType(left.representation, right.representation)) return `${left.text} == ${right.text}`
   const nested = strictEqualityText('===', left, right, convert)
   if (nested !== null) return nested
@@ -377,6 +377,8 @@ export const strictEqualityText = (
   convert?: EqualityConversionRenderer
 ): string | null => {
   if (operator !== '===' && operator !== '!==') return null
+  const absent = absenceComparisonText(operator, left, right)
+  if (absent !== null) return absent
 
   // The box on either side. Answered before the sums below because a
   // `dynamic` operand settles the comparison whatever the other side is: the
@@ -472,8 +474,26 @@ export const strictEqualityText = (
         ? armEqualityText(leftOptional.payload, leftPayload.text, rightPayload.text, convert)
         : null)
     if (compared === null) return null
-    const absent = leftOptional.absence === rightOptional.absence ? `!(${right.text}).has_value()` : 'false'
-    return negate(operator, `((${left.text}).has_value() ? ((${right.text}).has_value() && (${compared})) : (${absent}))`)
+    const leftAbsenceInRight = absenceComparisonText('===', rightPayload, {
+      text: leftOptional.absence,
+      representation: { kind: leftOptional.absence }
+    })
+    const rightAbsenceInLeft = absenceComparisonText('===', leftPayload, {
+      text: rightOptional.absence,
+      representation: { kind: rightOptional.absence }
+    })
+    const sameAbsence = leftOptional.absence === rightOptional.absence
+    const absent =
+      leftAbsenceInRight === null || leftAbsenceInRight === 'false'
+        ? sameAbsence
+          ? `!(${right.text}).has_value()`
+          : 'false'
+        : `((${right.text}).has_value() ? (${leftAbsenceInRight}) : ${sameAbsence ? 'true' : 'false'})`
+    const present =
+      rightAbsenceInLeft === null || rightAbsenceInLeft === 'false'
+        ? `((${right.text}).has_value() && (${compared}))`
+        : `((${right.text}).has_value() ? (${compared}) : (${rightAbsenceInLeft}))`
+    return negate(operator, `((${left.text}).has_value() ? (${present}) : (${absent}))`)
   }
   if ((leftOptional === null) !== (rightOptional === null)) {
     const optional = leftOptional ?? rightOptional
@@ -508,14 +528,10 @@ export const strictEqualityText = (
     // neither operand needs a discriminant. Leave primitive literal folding
     // to the existing binary path (C++ string literals compare addresses).
     const value = left.representation
-    // An upcast changes the layout carrier, not the object's identity. Ref's
-    // cross-type equality already compares the held native object addresses.
-    if (
-      value.kind === 'class-ref' &&
-      value.ownership === 'shared-refcount' &&
-      right.representation.kind === 'class-ref' &&
-      right.representation.ownership === 'shared-refcount'
-    ) {
+    // Ref's cross-type equality asks each allocation's authenticated native
+    // identity hook. A structural view therefore compares its original owner,
+    // rather than converting either operand into the other's record layout.
+    if (nativeRecordIdentityCarrier(value) && nativeRecordIdentityCarrier(right.representation)) {
       return negate(operator, `${left.text} == ${right.text}`)
     }
     // A class deriving in place from a native record (an `Error` subclass over
@@ -551,13 +567,13 @@ export const strictEqualityText = (
       const compared = armEqualityText(arm.value, `${left.text}.get<${index}>()`, `${right.text}.get<${index}>()`, convert)
       if (compared === null) return null
       arms.push(`${left.text}.is<${index}>() && ${right.text}.is<${index}>() ? (${compared}) : `)
-      if (arm.value.kind !== 'class-ref' && !callableIdentityCarrier(arm.value)) continue
+      if (!nativeRecordIdentityCarrier(arm.value) && !callableIdentityCarrier(arm.value)) continue
       // Upcasting before storage can put the same object in a different
       // class arm of the same sum. Discriminant inequality is not identity.
       for (const [otherIndex, otherArm] of rightUnion.arms.entries()) {
         if (
           otherIndex === index ||
-          (!(arm.value.kind === 'class-ref' && otherArm.value.kind === 'class-ref') &&
+          (!(nativeRecordIdentityCarrier(arm.value) && nativeRecordIdentityCarrier(otherArm.value)) &&
             !(callableIdentityCarrier(arm.value) && callableIdentityCarrier(otherArm.value)))
         )
           continue

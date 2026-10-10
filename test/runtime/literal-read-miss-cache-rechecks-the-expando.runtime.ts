@@ -1,5 +1,5 @@
 // A literal-keyed read of a dynamic receiver remembers the types it found the
-// key absent on (bson's `value.toBSON` probe). The memory is per type, so an
+// key absent on (a binary-document serializer's `value.toWire` probe). The memory is per type, so an
 // instance that later gains the key as an expando must still answer it, a
 // and a string's miss is the key's alone.
 //! expect: undefined undefined

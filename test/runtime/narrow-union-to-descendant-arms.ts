@@ -5,7 +5,7 @@
 // arm subset whose arms are descendants of the source's own arm, which
 // `conversion/build.ts` never proposed because `narrowingTargetsOf` answers
 // from the carrier alone and a `class-ref(Base)` states nothing about which
-// classes descend from it. three's `WebGLShadowMap.getDepthMaterial` is the
+// classes descend from it. A 3D scene-graph library's shadow-map depth-material lookup is the
 // shape, twice on one cell.
 class Surface {
   kind: string

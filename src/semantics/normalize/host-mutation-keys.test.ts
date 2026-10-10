@@ -14,7 +14,14 @@ import {
   intrinsicProtocolRequirementKind,
   type IntrinsicProtocolRequirement
 } from './deferred-intrinsic-protocols.js'
-import { isArrayIndexKey, isCanonicalNumericKey, keySetTouches } from './host-mutation-keys.js'
+import {
+  HostMutationTaint,
+  isArrayIndexKey,
+  isCanonicalNumericKey,
+  keySetTouches,
+  programSymbolKeys,
+  prototypeKeyQuerySignature
+} from './host-mutation-keys.js'
 import { createCensusComputedKeysOf, type CensusComputedKeys, type CensusComputedKeysOf } from './host-mutation-computed-keys.js'
 import type { DeclarationId } from '../../identity/ids.js'
 
@@ -140,6 +147,46 @@ test('numeric prototype obligations cover every Number spelling without claiming
   assert.equal(census('(Object.prototype as any).label = 1').holds(obligation), true)
   assert.equal(census('(Object.prototype as any).Infinity = 1').holds(obligation), false)
   assert.equal(census('declare function mutate(value: unknown): void; class Item {} mutate(new Item())').holds(obligation), false)
+})
+
+test('program-created symbol writes remain separate from named and well-known keys through census absorption', () => {
+  const original = new HostMutationTaint()
+  original.taintSurface(programSymbolKeys)
+  original.taintObject('symbol-owner' as DeclarationId, programSymbolKeys)
+  const copy = new HostMutationTaint()
+  copy.absorb(original)
+  for (const keys of [copy.surfaceKeys, copy.keysOf('symbol-owner' as DeclarationId)]) {
+    assert.equal(keySetTouches(keys, { programSymbols: true }), true)
+    assert.equal(keySetTouches(keys, 'all'), true)
+    assert.equal(keySetTouches(keys, { names: ['label', '@@iterator', '@@hasInstance'] }), false)
+    assert.equal(keySetTouches(keys, { numeric: true, arrayIndices: true }), false)
+    assert.equal(keys?.every, false)
+  }
+  assert.equal(copy.has('*'), false)
+  assert.notEqual(prototypeKeyQuerySignature({ programSymbols: true }), prototypeKeyQuerySignature({}))
+})
+
+test('the final shared census revokes only relevant prototype obligations for stock program-symbol writes', () => {
+  const source = 'const key = Symbol(); (Function.prototype as any)[key] = 1;'
+  const result = census(source)
+  assert.equal(result.holds({ intrinsic: 'Function', prototypeKeys: { programSymbols: true } }), false)
+  assert.equal(result.holds({ intrinsic: 'Function', prototypeKeys: { names: ['call', '@@hasInstance'] } }), true)
+  assert.equal(result.holds({ intrinsic: 'Object', prototypeKeys: { programSymbols: true } }), true)
+  const opaque = census('declare function opaque(): any; const key = Symbol.for("field"); opaque()[key] = 1;')
+  assert.equal(opaque.taint.has('*'), false)
+  assert.equal(opaque.holds({ intrinsic: 'Object', prototypeKeys: { programSymbols: true } }), false)
+  assert.equal(opaque.holds(lacks('label')), true)
+})
+
+test('checker unique-symbol declarations cannot hide a well-known key or a replaced Symbol factory', () => {
+  for (const source of [
+    'const key: unique symbol = Symbol.iterator as any; (Object.prototype as any)[key] = 1;',
+    'const key = Symbol(); (Symbol as any) = () => "label"; (Object.prototype as any)[key] = 1;',
+    'const key = Symbol.for("field"); Symbol.for = () => Symbol.iterator; (Object.prototype as any)[key] = 1;'
+  ]) {
+    const result = census(source)
+    assert.equal(result.holds({ intrinsic: 'Object', prototypeKeys: { names: ['label', '@@iterator'] } }), false, source)
+  }
 })
 
 test('an exact key through an opaque receiver is that key on every surface, never the wildcard', () => {

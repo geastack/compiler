@@ -1,7 +1,7 @@
-// ECMA-262 27.2.4.1: `Promise.all` takes any iterable. mongodb's state machine
-// awaits `Promise.all(this.requests(context))`, a generator yielding one
-// promise per KMS request; a generator that throws while being iterated makes
-// the call answer a rejected promise instead of throwing synchronously.
+// ECMA-262 27.2.4.1: `Promise.all` takes any iterable. A database client's
+// encryption state machine awaits `Promise.all(this.requests(context))`, a
+// generator yielding one promise per KMS request; a generator that throws
+// while being iterated makes the call answer a rejected promise instead of throwing synchronously.
 
 const log: string[] = []
 

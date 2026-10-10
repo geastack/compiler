@@ -7,11 +7,11 @@ import { holdsAbsence, type PairConvertible } from './record-view.js'
  * A program object that implements the iterator protocol by hand, read as the
  * cursor carrier (`iterator`) its declared type names.
  *
- * mongodb's `onData` builds `{ next() {...}, return() {...}, throw(err)
+ * A stream adapter building `{ next() {...}, return() {...}, throw(err)
  * {...}, [Symbol.asyncIterator]() { return this } }` typed `AsyncGenerator<
  * Buffer> & AsyncDisposable`: the intersection derives to a record, while
  * `AsyncGenerator<Buffer>` alone -- `[Symbol.asyncIterator]`'s own result, and
- * the field `Connection.dataEvents` it is stored into -- derives to the
+ * the field it is stored into -- derives to the
  * `async-generator` carrier. The two are one object, so the conversion is a
  * VIEW: the carrier's steps call the same object's own members
  * (`gea_runtime.h`'s `AsyncGenerator::ProtocolSteps`, or
@@ -51,7 +51,7 @@ export interface ProtocolIteratorPlan {
   /**
    * The cursor the object is read as: the synchronous `iterator` (a
    * `Generator`/`IterableIterator`-typed object), or an `async-generator`
-   * (mongodb's `onData`, typed `AsyncGenerator<Buffer>`), whose steps hand the
+   * (a hand-written stream adapter typed `AsyncGenerator<Buffer>`), whose steps hand the
    * member's promise back instead of reading it -- `gea::AsyncGenerator`'s
    * `ProtocolSteps`.
    */

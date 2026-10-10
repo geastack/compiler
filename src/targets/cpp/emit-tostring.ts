@@ -1,4 +1,11 @@
-import { representationKey, type CallableAbi, type Ownership, type RecordField, type Representation } from '../../representation/model.js'
+import {
+  carriesNativeUndefined,
+  representationKey,
+  type CallableAbi,
+  type Ownership,
+  type RecordField,
+  type Representation
+} from '../../representation/model.js'
 import { isNativeError } from './error-types.js'
 import { movedValueText } from './emit-narrowing.js'
 import { isIntegerStorageValue, operandText, type EmitContext } from './emit-context.js'
@@ -6,7 +13,7 @@ import type { ComputeOperation, IrOperand } from '../../ir/model.js'
 import type { DeclarationId } from '../../identity/ids.js'
 import type { ClassLayout } from '../../projection/classes.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
-import { recordLayoutPolicyOf } from '../../projection/fields.js'
+import { recordShapeLayoutsOf } from '../../projection/fields.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
 import { cppBodyName, cppConstantLiteral, cppRecordFieldName, cppTypeOf } from './types.js'
 import { memberAccessOperator } from './emit-carrier-members.js'
@@ -51,7 +58,7 @@ export const toStringText = (
   /** See `toStringTextOver`'s `inspectsNumbers`. */
   inspectsNumbers = false
 ): string | null =>
-  toStringTextOver(text, carrier, recordLayoutPolicyOf(deriver, classes), explicit, nullishJoinsEmpty, symbolThrows, inspectsNumbers)
+  toStringTextOver(text, carrier, recordShapeLayoutsOf(deriver, classes), explicit, nullishJoinsEmpty, symbolThrows, inspectsNumbers)
 
 /**
  * The `[[Call]]` convention a stored member holds, for the four carriers whose
@@ -172,6 +179,14 @@ export const toStringTextOver = (
    */
   inspectsNumbers = false
 ): string | null => {
+  if (carriesNativeUndefined(carrier) && text !== nullableClassReceiver) {
+    const present = toStringTextOver(nullableClassReceiver, carrier, layouts, explicit, nullishJoinsEmpty, symbolThrows, inspectsNumbers)
+    if (present === null) return null
+    const absent = nullishJoinsEmpty
+      ? cppConstantLiteral('', 'string', { kind: 'string' })
+      : `${nullableClassReceiver}.isUndefined() ? gea::host::detail::toStringUndefined() : gea::host::detail::toStringNull()`
+    return `([&]() -> std::string { const auto& ${nullableClassReceiver} = ${text}; return static_cast<bool>(${nullableClassReceiver}) ? std::string(${present}) : std::string(${absent}); })()`
+  }
   if (carrier.kind === 'string') return text
   if (carrier.kind === 'symbol')
     return explicit
@@ -196,8 +211,8 @@ export const toStringTextOver = (
   // CAVEAT, and it is this backend's only ToString divergence from node: the
   // string carries no " (Zone Name)" suffix -- 21.4.4.41.7 step 8 makes that
   // suffix implementation-defined and permits an empty one, node prints it,
-  // and this does not. It is the same divergence `d.toString()` already has
-  // (probe `.scratch/probes/date-zonename`), applied to a second spelling of
+  // and this does not. It is the same divergence `d.toString()` already has,
+  // applied to a second spelling of
   // the same operation, not a new one.
   // The Date test lives inside the `native-record-ref` branch below, because
   // that is what a Date IS in this backend and `isDateCarrier`'s type guard
@@ -228,8 +243,7 @@ export const toStringTextOver = (
   }
   // A caught exception is the one place a `dynamic` carrier's own runtime tag
   // is read back rather than assumed: `catch (e) { String(e) }` is real,
-  // ordinary TypeScript (both `spread.ts` and the Dialer example use exactly
-  // this), and `e`'s checker type -- `unknown` -- is one of the four
+  // ordinary TypeScript (plenty of ordinary programs use exactly this), and `e`'s checker type -- `unknown` -- is one of the four
   // legitimate dynamic boundaries, not a value this emitter boxed on its own
   // initiative. `gea::host::detail::toString(const gea::Value&)`
   // tag-switches, mirroring `toBoolean(const gea::Value&)`.
@@ -316,12 +330,6 @@ export const toStringTextOver = (
     // reference, so its null state is JavaScript's `null` and prints as one;
     // answering the class's own text for it printed `[object Object]` for a
     // null `Job | null`. The receiver is bound once because `text` may be a call.
-    if (carrier.ownership === 'shared-refcount' && text !== nullableClassReceiver) {
-      const present = toStringTextOver(nullableClassReceiver, carrier, layouts, explicit, nullishJoinsEmpty, symbolThrows)
-      if (present === null) return null
-      const absent = nullishJoinsEmpty ? cppConstantLiteral('', 'string', { kind: 'string' }) : 'gea::host::detail::toStringNull()'
-      return `([&]() -> std::string { const auto& ${nullableClassReceiver} = ${text}; return static_cast<bool>(${nullableClassReceiver}) ? std::string(${present}) : std::string(${absent}); })()`
-    }
     // The exception to the tag above: a class extending `Error` inherits
     // 20.5.3.4 `Error.prototype.toString`, and its struct derives in place
     // from the intrinsic layout that implements it over the stored `name` and
@@ -362,8 +370,8 @@ export const toStringTextOver = (
   // `Object.prototype.toString`, whose own algorithm (19.1.3.6 step 16) reads
   // that tag back -- giving a fixed, class-INDEPENDENT answer with no method
   // call needed, the same shape the `class-ref` case above resolves at
-  // compile time for a class with no own `toString`. `hono`'s `BodyInit`
-  // union (`request.ts`'s cached-body arm) is a real caller: `${body}` where
+  // compile time for a class with no own `toString`. A `BodyInit` union (a
+  // cached request body) is a real caller: `${body}` where
   // `body` narrows to a bare `ArrayBuffer` reaches exactly this.
   if (carrier.kind === 'array-buffer') return cppConstantLiteral('[object ArrayBuffer]', 'string', { kind: 'string' })
   if (carrier.kind === 'shared-array-buffer') return cppConstantLiteral('[object SharedArrayBuffer]', 'string', { kind: 'string' })
@@ -391,9 +399,9 @@ export const toStringTextOver = (
   // a class's prototype chain: a shape that declares `toString` needs that
   // method invoked, which this leaf cannot build a call for, so it refuses.
   //
-  // hono reaches this constantly: `${c.req.raw}` and `console.error(err)` over
+  // Server code reaches this constantly: `${c.req.raw}` and `console.error(err)` over
   // an interface-typed value are both a ToString of a record.
-  // An open table (`{ [key: string]: any }`, mongodb's `Document`): its
+  // An open table (`{ [key: string]: any }`, a `Document` type): its
   // `toString` and `valueOf` are keys it may or may not hold, so which one
   // answers is a question about the value, asked by the runtime of the table
   // itself (`gea::dictionaryToString`, OrdinaryToPrimitive over

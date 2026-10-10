@@ -29,6 +29,7 @@ const ops: Op<{ name: string }>[] = [
   { deleteOne: { filter: { id: 7 } } },
   { replaceOne: { filter: { id: 1 }, replacement: { name: 'b' } } }
 ]
+//! expect: insert:a|delete:7|replace:b
 try {
   console.log(run(ops).join('|'))
 } catch (error) {

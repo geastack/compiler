@@ -1,5 +1,5 @@
 // A final spread of a plain array into a callee with no rest formal
-// (mongodb's `CancellationToken`: `constructor(...args: any[]) { super(...args) }`
+// (a database client's `CancellationToken`: `constructor(...args: any[]) { super(...args) }`
 // into `EventEmitter`'s `(options?)`). Each named formal reads `xs[i]`, and
 // `undefined` past the array's length is what an omitted argument binds.
 class Base {

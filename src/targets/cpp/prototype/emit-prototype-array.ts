@@ -1,4 +1,7 @@
-import type { IrOperand, IrResult } from '../../../ir/model.js'
+import { arrayBulkAppendMethodName } from '../../../representation/prototype-domains.js'
+export { arrayBulkAppendMethodName, arrayPrototypeMethods } from '../../../representation/prototype-domains.js'
+import type { CallOperation, IrOperand, IrResult } from '../../../ir/model.js'
+import { operationConversionText } from '../emit-certified-conversion.js'
 import type { Representation } from '../../../representation/model.js'
 import { representationKey } from '../../../representation/model.js'
 import { createCppEmitBlockedError, cppThunkName, operandText, type EmitContext } from '../emit-context.js'
@@ -57,7 +60,8 @@ export type ArrayCallRenderer = (
   receiverText: string,
   element: Representation,
   args: readonly IrOperand[],
-  result: IrResult | null
+  result: IrResult | null,
+  operation?: CallOperation
 ) => string
 
 const elementKey = (element: Representation): string => representationKey(element)
@@ -133,7 +137,6 @@ const call = (ctx: EmitContext, member: string, receiverText: string, args: read
  * range append -- a counted `unshift` would have to run its bound in reverse,
  * which nothing here builds.
  */
-export const arrayBulkAppendMethodName = 'push'
 
 const bulkInsertText =
   (member: 'push' | 'unshift', clause: string, spelling: 'appendRange' | 'prependRange'): ArrayCallRenderer =>
@@ -168,8 +171,8 @@ const bulkInsertText =
     }
     // Two element carriers that disagree are usually a real miscompile risk --
     // the header's own rule, and the reason this stayed a bare refusal. But
-    // one disagreement is a spelling of the SAME shape: hono's pattern router
-    // pushes `[pattern, method, handlerTuple]` into a `Route<T>[]` whose
+    // one disagreement is a spelling of the SAME shape: pushing a nested tuple
+    // literal `[a, b, innerTuple]` into an array of a declared tuple type whose
     // innermost tuple interned under a second shape id with a byte-identical
     // field list, and `recastedRecordText`'s own recast is exactly what
     // reconciles that pair everywhere else. It is applied per element rather
@@ -227,8 +230,8 @@ const callbackMethodText =
  * element AS the element's own C++ type, at whichever arity the callable takes.
  * That is exact while the callback's first parameter IS the element carrier. A
  * callback declared WIDER than the element -- `nums.map(label)` with `label:
- * (x: number | string) => string`, or hono's `matchResult[0].map(([[, route]])
- * => route)`, whose parameter is the union of the two arms' tuple elements
+ * (x: number | string) => string`, or `pairs.map(([[, value]]) => value)` over
+ * a union of two tuple-array arms, whose parameter is the union of the two arms' tuple elements
  * while each arm's array holds exactly one of them -- is a call whose argument
  * needs the conversion any direct call renders at its call site, except that
  * this call site is inside the runtime template. C++ does not perform it:
@@ -308,7 +311,7 @@ const elementAdaptedCallbackText = (
   if (!adaptsResult) return `[__gea_fn = ${text}](${formals.join(', ')}) { return ${call}; }`
   // A predicate member's step "If ToBoolean(testResult) is true" (23.1.3.8
   // step 5.c.iii and its siblings): the callback may return anything --
-  // mongodb's `mechanisms.filter(m => m.match(re))` returns a match or `null`
+  // `names.filter(m => m.match(re))` returns a match or `null`
   // -- and the runtime's `if (mapCall(...))` has no ToBoolean for a C++ value
   // of an arbitrary carrier. The one ToBoolean authority spells it here,
   // over the result held once so a test that reads it twice evaluates the
@@ -465,7 +468,7 @@ const joinText: ArrayCallRenderer = (ctx, receiverText, element, args) => {
   // `nullishJoinsEmpty`: step 3.d's own rule, not the general ToString every
   // other caller of this table needs -- see `toStringText`'s own header.
   // `symbolThrows`: step 3.d ToStrings a symbol element, which is a TypeError.
-  const converted = toStringText('__gea_join_src->at(__gea_join_i)', element, ctx.classes, ctx.deriver, false, true, true)
+  const converted = toStringText('__gea_join_src->readElement(__gea_join_i)', element, ctx.classes, ctx.deriver, false, true, true)
   if (converted === null) {
     throw createCppEmitBlockedError(
       `runtime-helper:element:join:${elementKey(element)}`,
@@ -496,8 +499,8 @@ const joinText: ArrayCallRenderer = (ctx, receiverText, element, args) => {
  * would mean reading a runtime tag and the two arms produce different lengths.
  */
 /**
- * A pack of the `(T | ConcatArray<T>)[]` overload's own union -- the mongodb
- * driver's `pipeline.concat({ $out })` over `Document[]`. IsConcatSpreadable
+ * A pack of the `(T | ConcatArray<T>)[]` overload's own union -- a
+ * `list.concat({ key })` over an array of an object type. IsConcatSpreadable
  * (23.1.3.2.1) is then a per-item answer, and the union's tag IS that answer:
  * an arm carried as an array of the receiver's element spreads, an arm
  * carried as the element itself is appended whole. A union with any other arm
@@ -588,7 +591,7 @@ const arrayIteratorText =
     }
     const yielded = target.element
     const elementType = cppTypeOf(element)
-    const value = `(gea_array->present(gea_position) ? gea_array->at(gea_position) : ${elementType}{})`
+    const value = `(gea_array->present(gea_position) ? gea_array->readElement(gea_position) : ${elementType}{})`
     const index = 'static_cast<double>(gea_position)'
     const produced = ((): string | null => {
       if (member === 'keys')
@@ -656,7 +659,7 @@ const flatTupleText = (ctx: EmitContext, receiverText: string, element: Represen
   }
   return (
     `([&]() { auto gea_flat = gea::makeRef<${cppTypeOf(target)}::element_type>(); const auto& gea_source = ${receiverText}; ` +
-    `if (gea_source) for (const auto& gea_slot : gea_source->slots()) { if (!gea_slot.present) continue; ` +
+    `if (gea_source) for (const auto& gea_slot : gea_source->readSlots()) { if (!gea_slot.present) continue; ` +
     `const auto& gea_tuple = gea_slot.value; ${pushes.join(' ')} } return gea_flat; }())`
   )
 }
@@ -702,7 +705,7 @@ const flatText: ArrayCallRenderer = (ctx, receiverText, element, args, result) =
     return `gea::runtime::array::flat(${receiverText})`
   }
   // A closed TUPLE element -- `Array.from(map).flat()` over a Map's `[K, V]`
-  // entries, mongodb's default index name. A tuple IS an Array exotic object
+  // entries, e.g. to build a name from key/value pairs. A tuple IS an Array exotic object
   // (`IsArray` answers true), so FlattenIntoArray spreads its positions in
   // order; its carrier is a positional record, so each position is read as
   // its own field and converted into the result's element carrier, which the
@@ -739,14 +742,14 @@ const rangedMethodText =
  * - a DYNAMIC search value over a primitive element. 7.2.12 step 1 compares
  *   Types first, so the value can only match when its tag is the element's;
  *   the tag test decides that, and only then is it unboxed and compared
- *   natively. mongodb's `Object.values(Enum).includes(value as any)` is the
+ *   natively. `Object.values(Enum).includes(value as any)` is the
  *   shape.
  * - a search value that is the PRESENT arm of an optional element
  *   (`(string | undefined)[]`'s `.includes(name)`): an absent element never
  *   equals a string, so only present payloads are compared
  *   (`gea::runtime::array::includesPresent`).
  */
-const includesText: ArrayCallRenderer = (ctx, receiverText, element, args, result): string => {
+const includesText: ArrayCallRenderer = (ctx, receiverText, element, args, result, operation): string => {
   const search = args[0]
   if (search === undefined || elementKey(search.representation) === elementKey(element)) {
     return rangedMethodText('includes', '23.1.3.16', [1, 2], 0)(ctx, receiverText, element, args, result)
@@ -815,18 +818,19 @@ const includesText: ArrayCallRenderer = (ctx, receiverText, element, args, resul
   // its own identity would answer false for the registered handler, so any
   // other recipe stays refused.
   if (element.kind === 'function-value-dispatch' && search.representation.kind === 'function-value-dispatch') {
-    const capability = ctx.conversions.nodeFor(search.representation, element).capability
+    const recipe = operation?.conversionRecipes?.find(
+      (input) =>
+        input.role === 'prototype-argument' &&
+        representationKey(input.source) === representationKey(search.representation) &&
+        representationKey(input.target) === representationKey(element)
+    )
+    const capability = recipe ? ctx.conversions.nodeById(recipe.conversion)?.capability : undefined
     const sharesIdentity =
-      (capability.kind === 'atom' || capability.kind === 'static') && capability.materializer.callableIdentityTransport === 'preserved'
-    const adapted = sharesIdentity
-      ? alignedValueText(
-          ctx,
-          'prototype/emit-prototype-array.ts:includes-callable',
-          search.representation,
-          element,
-          operandText(ctx, search)
-        )
-      : null
+      (capability?.kind === 'atom' || capability?.kind === 'static') && capability.materializer.callableIdentityTransport === 'preserved'
+    const adapted =
+      sharesIdentity && operation
+        ? operationConversionText(ctx, operation, 'prototype-argument', search.representation, element, operandText(ctx, search))
+        : null
     if (adapted !== null) {
       requireArity('includes', '23.1.3.16', [1, 2], args)
       if (args[1] !== undefined) requireNumber('includes', 1, args)
@@ -842,6 +846,12 @@ const reduceText =
   (member: 'reduce' | 'reduceRight', clause: string): ArrayCallRenderer =>
   (ctx, receiverText, _element, args): string => {
     requireArity(member, clause, [1, 2], args)
+    // An integer-spelled Number literal must not let C++ deduce an integer
+    // accumulator: JavaScript Number reducers retain fractional results.
+    const initial = args[1]
+    if (initial?.representation.kind === 'scalar' && initial.representation.domain === 'number') {
+      return `gea::runtime::array::${member}(${receiverText}, ${operandText(ctx, args[0]!)}, static_cast<${cppTypeOf(initial.representation)}>(${operandText(ctx, initial)}))`
+    }
     return call(ctx, member, receiverText, args)
   }
 
@@ -859,8 +869,8 @@ const optionalNullaryText =
  *
  * `Array.prototype.filter` has two declarations in `lib.es5.d.ts`: the ordinary
  * one keeps the element, and `filter<S extends T>(predicate: (v: T) => v is S):
- * S[]` states that every value the guard kept is an `S`. hono's
- * `utils/html.ts` selects the second -- `res.filter<string>(Boolean as any)`
+ * S[]` states that every value the guard kept is an `S`. A call such as
+ * `res.filter<string>(Boolean as any)` selects the second
  * over a `(string | undefined)[]` -- and the checker publishes the call's
  * result as `string[]`.
  *
@@ -956,8 +966,6 @@ export const arrayMethods: ReadonlyMap<string, ArrayCallRenderer> = new Map<stri
   ['fill', rangedMethodText('fill', '23.1.3.7', [1, 2, 3], 0)],
   ['reverse', rangedMethodText('reverse', '23.1.3.26', [0], null)]
 ])
-
-export const arrayPrototypeMethods: ReadonlySet<string> = new Set(arrayMethods.keys())
 
 /**
  * Members this backend states a REASON for not implementing, rather than

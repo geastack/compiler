@@ -1,4 +1,4 @@
-// A cursor advanced by int32 lengths read out of a buffer (bson's
+// A cursor advanced by int32 lengths read out of a buffer (a binary-document parser's
 // `index += size`) grows by up to 2^32 a turn: too fast for the exact integer cap,
 // slow enough for the 64-bit carrier. It is narrowed, and once its integer
 // answer leaves +-2^53 each step rounds exactly as the Number does. A

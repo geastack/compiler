@@ -1,9 +1,9 @@
 // A generic narrowed by `instanceof` to a class its own copy cannot be.
 //
 // `tryOperation<T extends AbstractOperation>(operation: T)` testing `operation
-// instanceof AggregateOperation` is mongodb's `execute_operation.ts:198`, and
+// instanceof PipelineOperation` is a database client's operation executor, and
 // monomorphization mints one copy per concrete `T`. In the copy where `T` is
-// some OTHER operation class the narrowed type is `Find & Aggregate` -- two
+// some OTHER operation class the narrowed type is `Find & Pipeline` -- two
 // unrelated nominal classes, an intersection with no inhabitant -- and every
 // read inside the branch derives a carrier for a value that cannot exist.
 class Base {

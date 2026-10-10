@@ -3,7 +3,13 @@ import type { StructuralTypeId } from '../../identity/ids.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'
 import type { StructuralShape } from '../model/structural-types.js'
 import { censusRefusal, type CensusRefusal } from './census-refusal.js'
-import { disjointUnionTypeOf, isGlobalObjectConstructor, literalMemberNameOf, widestOf } from './derived-expression-type.js'
+import {
+  disjointUnionTypeOf,
+  isGlobalObjectAssign,
+  jsDocTypeStatesNothing,
+  literalMemberNameOf,
+  widestOf
+} from './derived-expression-type.js'
 import { emptyParameterBindingCensus, type ParameterBindingCensus } from './parameter-bindings.js'
 import type { ValueFlowIndex } from './flow/model.js'
 import { definitelyReturns } from './return-paths.js'
@@ -16,7 +22,7 @@ import { isObjectLiteralPrototypeSetter } from './assignment-patterns.js'
  * program actually writes on it.
  *
  * `{}` is the empty object type: zero members, no index signature. So every
- * later `bag.program = p`, `bag.uniforms = u` or `bag[ key ] = value` writes a
+ * later `bag.handle = h`, `bag.table = t` or `bag[ key ] = value` writes a
  * member the type does not have, the census answers `dynamic`, and a value
  * whose members the program states perfectly well is boxed at every touch.
  * That is the no-boxing rule's own defect: the members are stated, just not in
@@ -48,11 +54,11 @@ import { isObjectLiteralPrototypeSetter } from './assignment-patterns.js'
  *   the literal (an annotation, a JSDoc `@type`, a typed parameter or return
  *   position), a type node on the owning declaration, and -- the one that is
  *   easy to miss -- TypeScript's OWN expando inference, which in a JavaScript
- *   file types `let output = {}` with the members that `output.geometries =
+ *   file types `let output = {}` with the members that `output.items =
  *   []` assigns two lines later. That last answer is flow-sensitive within the
  *   function and better than this census can derive; overriding it made two
  *   authorities for one storage whose conversions cannot be satisfied
- *   (MEASURED: 52 unmet obligations on the three.js app, for zero carriers).
+ *   (MEASURED: dozens of unmet obligations, for zero carriers).
  * - The literal is not the operand of an `as`/`satisfies` cast.
  * - Every write to the cell is proved to be the same bag. A cell claimed
  *   from one write and reassigned an untracked value at
@@ -109,7 +115,8 @@ import { isObjectLiteralPrototypeSetter } from './assignment-patterns.js'
  *   `preflight/property-access.ts` deliberately refuses to certify today (see
  *   `recordWithIndexFieldText`'s own comment).
  * - More decisively: of that bag's 46 members, about half have a written value
- *   whose OWN type states nothing -- `_gl.createTexture()` and everything
+ *   whose OWN type states nothing -- `ctx.createHandle()` on an untyped host
+ *   context and everything
  *   downstream of it. Even with every alias edge and `delete` handled, those
  *   members would derive as `dynamic`, so the boxes would MOVE from the bag
  *   into its own fields rather than disappear. The boxing rooted at that bag
@@ -171,15 +178,14 @@ export interface ObjectBagCensus {
    * whose bag arrives by a later ASSIGNMENT rather than its initializer.
    *
    * `bagShapeTypeAt` asks a `VariableDeclaration` through its initializer,
-   * which is the right question when there is one -- but three's
-   * `WebGLProperties.get` writes `let map = properties.get( object ); if ( map
-   * === undefined ) { map = {}; ... }`, so the initializer is a CALL (which
-   * `shapeAt` deliberately refuses) and the bag is the assignment. This census
-   * already claimed that declaration for the bag -- `[BAG] BOUND
-   * WebGLProperties.js members=47` -- and nothing could ask for it, so the cell
-   * stayed `any`, `get`'s own return stayed `any`, and every
-   * `properties.get( material ).uniforms` in `WebGLRenderer.js` and
-   * `WebGLMaterials.js` was dynamic behind it.
+   * which is the right question when there is one -- but a per-object
+   * property cache's `get` writes `let map = properties.get( object ); if (
+   * map === undefined ) { map = {}; ... }`, so the initializer is a CALL
+   * (which `shapeAt` deliberately refuses) and the bag is the assignment. This
+   * census had already claimed that declaration for the bag and nothing could
+   * ask for it, so the cell stayed `any`, `get`'s own return stayed `any`, and
+   * every `properties.get( node ).field` read across the program was dynamic
+   * behind it.
    *
    * The same owner-keyed shape `collection-bindings.ts` grew for exactly this
    * reason (`arrayElementForOwner`, `typeArgumentsForOwner`): not a second
@@ -197,8 +203,8 @@ export interface ObjectBagCensus {
    * because a call's result has TWO authorities -- the node's own type and the
    * callee's resolved signature -- and moving only one made
    * `producers/invocations.ts` find them disagreeing and WITHHOLD, taking its
-   * consumers with it: measured at withheld 8 -> 20, 22 operations silently
-   * gone on the three.js app.
+   * consumers with it: measured as more than twice as many withheld
+   * operations, silently gone.
    *
    * Withholding is what a producer does when a disagreement has no stated
    * reason. `InvocationResultDivergence` is where a reason is stated, so this
@@ -221,8 +227,8 @@ export interface ObjectBagCensus {
    * `return-bindings.ts` and `local-bindings.ts` CAN consume them, and until
    * this accessor existed they had no way to ask.
    *
-   * That gap was load-bearing. Three's `WebGLExtensions` caches every
-   * extension in a `{}` and reads it straight back --
+   * That gap was load-bearing. A lazy cache that stores every entry in a
+   * `{}` and reads it straight back --
    * `if ( extensions[ name ] !== undefined ) return extensions[ name ]` --
    * so the return census refused the function (`return-index-signature-absent`)
    * even though this census had already typed the index from the very next
@@ -251,8 +257,8 @@ export interface ObjectBagCensus {
    * FLATTENS: a slot already holding `T | null` comes back `T | null |
    * undefined` with three arms side by side, never `(T | null) | undefined`
    * with two absence tags stacked -- which `representation/optional.ts`
-   * refuses, correctly, and which cost 708 violations on the three.js app when this
-   * was spelled by hand.
+   * refuses, correctly, and which cost hundreds of violations when this was
+   * spelled by hand.
    */
   readonly slotTypeOf: (type: ts.Type) => ts.Type
   /** How many DISTINCT bags (by owning declaration) this census bound. */
@@ -350,11 +356,10 @@ export const censusObjectBagBindings = (
    * `checker.getSymbolAtLocation` on a property name returns nothing when the
    * RECEIVER is `any` -- there is no type to look the member up in. That is
    * precisely the state this whole campaign is unwinding, so relying on the
-   * checker alone makes the census blind exactly where the bags are: in
-   * three's renderer, `properties.get( renderTarget )` resolves inside
-   * `WebGLTextures.js` (whose `properties` parameter the parameter census has
-   * bound) and NOT inside `WebGLRenderer.js` (whose `properties` local the
-   * checker still calls `any`), so the same bag's reads were attributed and
+   * checker alone makes the census blind exactly where the bags are: the same
+   * `properties.get( target )` call resolves inside one module (whose
+   * `properties` parameter the parameter census has bound) and NOT inside
+   * another (whose `properties` local the checker still calls `any`), so the same bag's reads were attributed and
    * its writes were not -- and the bag then refused for a member that is
    * written four lines from where it is read.
    *
@@ -374,17 +379,17 @@ export const censusObjectBagBindings = (
    * An EXPANDO member slot's identity: `x.k` where nothing in the program
    * declares `k`.
    *
-   * Three's `InterleavedBuffer.clone( data )` takes `@param {Object} [data]`
-   * and fills `data.arrayBuffers = {}` two lines before writing keys into it.
-   * `{Object}` resolves to the REAL `lib.es5` `Object` interface, which passes
-   * every vacuity test and declares no `arrayBuffers` -- so `memberSymbolOf`
+   * A JSDoc method `clone( data )` that takes `@param {Object} [data]` and
+   * fills `data.buffers = {}` two lines before writing keys into it is the
+   * shape. `{Object}` resolves to the REAL `lib.es5` `Object` interface, which
+   * passes every vacuity test and declares no `buffers` -- so `memberSymbolOf`
    * answers undefined, `ownerDeclOfExpr` answers null, and the bag census
-   * never sees a slot that is manifestly a bag. That one slot is the receiver
-   * of the keyed write blocking BOTH the `isFogExp2` class-family absence
-   * proof and the numeric-absence proof for the WebGL context: ~2042 of
-   * the three.js app's carriers, and the program's ONE `typedPropertyBoxes` row
-   * (`receiverCarrier: dynamic`, `valueCarrier: record` -- the value was
-   * always typed, only the receiver was not).
+   * never sees a slot that is manifestly a bag. One such slot can be the
+   * receiver of a keyed write that blocks a class-family absence proof and the
+   * numeric-absence proof for a host context, holding thousands of carriers
+   * dynamic, and appear as a `typedPropertyBoxes` row (`receiverCarrier:
+   * dynamic`, `valueCarrier: record` -- the value was always typed, only the
+   * receiver was not).
    *
    * Identity is the member NAME, program-wide, because that is the only
    * over-approximation available: a receiver with no symbol for `k` has no
@@ -408,11 +413,11 @@ export const censusObjectBagBindings = (
   let expandoScanned = false
   /**
    * ⚠ Cost, not style: this scan runs over EVERY property access in the
-   * program -- ~50k of them once three.js is in the graph -- so it may ask
+   * program -- tens of thousands of them in a large library graph -- so it may ask
    * only the cheapest question per node. An earlier version called
    * `memberSymbolOf`, whose fallback reaches `parameters.typeAt` and thus the
-   * whole composed parameter census, once per access; the three.js app then produced no
-   * output in 200 s. The checker's own `getSymbolAtLocation` is the cheap
+   * whole composed parameter census, once per access; a large program then
+   * produced no output in 200 s. The checker's own `getSymbolAtLocation` is the cheap
    * question and it is asked first for all of them; the expensive one is asked
    * only of the handful of names that survive it.
    */
@@ -469,7 +474,7 @@ export const censusObjectBagBindings = (
    * `checker.getSymbolAtLocation` + first-declaration computation this
    * function used to make privately, sourced from the one walk every census
    * now reads (see `flow/targets.ts`'s `flowTargetOf`). Measured
-   * byte-identical on the three.js app (see `NOTES.md`), which is the expected
+   * byte-identical (see `NOTES.md`), which is the expected
    * signature of a faithful edge-source swap, not a coincidence: an
    * identifier's target is a pure symbol lookup with no receiver-type
    * fallback to diverge over.
@@ -479,7 +484,7 @@ export const censusObjectBagBindings = (
    * no receiver-type fallback (it answers `null` the instant
    * `checker.getSymbolAtLocation` fails at both the access and its `.name`),
    * while `memberSymbolOf`'s whole reason to exist is answering exactly that
-   * case from the composed parameter census -- `properties.get(renderTarget)`
+   * case from the composed parameter census -- `properties.get(target)`
    * resolving where the checker alone cannot, because the receiver is `any`.
    * Preferring the shared resolver's OWN whole-access fallback ahead of that
    * one would silently pick a different (checker-only) answer over this
@@ -491,8 +496,40 @@ export const censusObjectBagBindings = (
     // The expando slot is consulted only AFTER both the checker and the
     // composed census decline: a slot that has a declaration keeps it, so
     // this adds an identity where there was none rather than replacing one.
-    if (ts.isPropertyAccessExpression(expression)) return declNodeOf(memberSymbolOf(expression)) ?? expandoOwnerOf(expression)
+    if (ts.isPropertyAccessExpression(expression))
+      return (
+        declNodeOf(memberSymbolOf(expression)) ?? expandoOwnerOf(expression) ?? (memberSlotsReady ? memberSlotOf(expression, false) : null)
+      )
     return null
+  }
+
+  /** Set once root identity has converged; see the member-slot stage below. */
+  let memberSlotsReady = false
+  const memberSlots = new Map<ts.Node, Map<string, ts.Node>>()
+  /** Slots minted from a write: no initializer holds them, so a read before that write observes `undefined`. */
+  const mintedSlots = new Set<ts.Node>()
+  /** The slot `x.k` names when `x` is a proved bag root and nothing else declares `k`. */
+  const memberSlotOf = (access: ts.PropertyAccessExpression, mint: boolean): ts.Node | null => {
+    const root = bagRootOf(access.expression)
+    if (!root) return null
+    const key = access.name.text
+    const literals = literalsByOwner.get(root) ?? []
+    const initializers = literals.flatMap((literal) =>
+      literal.properties.filter(
+        (property): property is ts.PropertyAssignment =>
+          ts.isPropertyAssignment(property) &&
+          (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name) || ts.isNumericLiteral(property.name)) &&
+          property.name.text === key
+      )
+    )
+    if (initializers.length > 0) return literals.length === 1 && initializers.length === 1 ? initializers[0]! : null
+    const slots = memberSlots.get(root) ?? new Map<string, ts.Node>()
+    memberSlots.set(root, slots)
+    const held = slots.get(key)
+    if (held || !mint) return held ?? null
+    slots.set(key, access)
+    mintedSlots.add(access)
+    return access
   }
 
   /** The checker's own answer, falling back to the composed parameter census -- the same `known ?? resolve` rule every census here applies. */
@@ -526,15 +563,14 @@ export const censusObjectBagBindings = (
    * non-statement, and `derived-expression-type.ts` already exports
    * `annotationStatesNothing` for exactly this reading elsewhere in the
    * compiler. OR-ing it into this check DOES widen candidacy exactly as
-   * expected -- three's `this.morphAttributes = {}` (`BufferGeometry`,
-   * annotated `@type {Object}`) and two `ShaderMaterial.js` uniform bags
-   * newly BIND -- but MEASURED on the three.js app this is a pure regression: boxed
-   * and ops stay byte-identical (725->773 `missing`, +48, 0 removed,
-   * confirmed via a before/after preflight-obligation-id diff) with zero
-   * compensating reduction anywhere. Root cause traced past this file: the
-   * newly-bound `morphAttributes` shape selects `record-with-index` (it has
-   * both named members AND a computed-key write,
-   * `geometry2.morphAttributes[ name ] = morphArray` in `.copy()`) where the
+   * expected -- a constructor's `this.extras = {}` annotated `@type
+   * {Object}`, and similar table fields, newly BIND -- but MEASURED this is a
+   * pure regression: boxed and ops stay byte-identical while `missing`
+   * obligations rise (confirmed via a before/after preflight-obligation-id
+   * diff) with zero compensating reduction anywhere. Root cause traced past
+   * this file: the newly-bound `extras` shape selects `record-with-index` (it
+   * has both named members AND a computed-key write,
+   * `other.extras[ name ] = array` in `.copy()`) where the
    * SAME literal, unbound, was already resolving to a plain `record` via a
    * different, existing authority -- and the C++ backend has no
    * `value:allocation:object-literal:record-with-index` runtime helper for
@@ -543,7 +579,7 @@ export const censusObjectBagBindings = (
    * That is a real, separate emitter gap (`targets/cpp/`), not something
    * this file's identity tracking can fix, and out of this module's own
    * scope -- landing the wider candidacy check without it trades a working
-   * plain-record path for a preflight failure, for zero app-visible
+   * plain-record path for a preflight failure, for zero program-visible
    * gain. Left OUT. Whoever wires that runtime helper should revisit this.
    */
   const statesNothing = (type: ts.Type): boolean => {
@@ -589,11 +625,19 @@ export const censusObjectBagBindings = (
     return !statesNothing(checker.getTypeOfSymbolAtLocation(symbol, declaration))
   }
 
+  // Whether a JSDoc return tag states anything is the one question every
+  // census asks of a tag (`jsDocTypeStatesNothing`); `return-bindings.ts`
+  // asks it of the same tag, and the two must agree or one call's result has
+  // two authorities.
+  const statesReturnType = (owner: ts.SignatureDeclaration): boolean => {
+    const tag = ts.getJSDocReturnType(owner)
+    return tag !== undefined && !jsDocTypeStatesNothing(checker, tag)
+  }
   const declaresWrittenType = (owner: ts.Node): boolean =>
     ((ts.isVariableDeclaration(owner) || ts.isPropertyDeclaration(owner) || ts.isParameter(owner) || ts.isFunctionLike(owner)) &&
       owner.type !== undefined) ||
     ts.getJSDocType(owner) !== undefined ||
-    (ts.isFunctionLike(owner) && ts.getJSDocReturnType(owner) !== undefined) ||
+    (ts.isFunctionLike(owner) && statesReturnType(owner)) ||
     (ts.isParameter(owner) && ts.getJSDocParameterTags(owner).some((tag) => tag.typeExpression !== undefined))
 
   /**
@@ -603,14 +647,14 @@ export const censusObjectBagBindings = (
    * Both halves of "already typed" are tested, and the second is the one that
    * is easy to miss: in a JavaScript file the checker performs its OWN expando
    * inference, synthesizing members onto `let output = {}` from the
-   * `output.geometries = []` assignments that follow it in the same scope. That
+   * `output.items = []` assignments that follow it in the same scope. That
    * answer is flow-sensitive within the function and is BETTER than anything
    * this census could derive -- exactly the relationship
    * `collection-bindings.ts` has with `settleEvolving` for an empty array
    * literal, and it is left alone for the same reason. Overriding it does not
    * merely duplicate work: it makes two authorities for one storage, and the
-   * conversions between them are unsatisfiable. MEASURED on the three.js app: admitting
-   * the expando-typed literals costs 52 unmet `native-record-ref(...) ->
+   * conversions between them are unsatisfiable. MEASURED: admitting
+   * the expando-typed literals costs dozens of unmet `native-record-ref(...) ->
    * record(...)` obligations -- the checker's answer on one side of the arrow
    * and this census's on the other -- for zero additional carriers.
    */
@@ -626,10 +670,11 @@ export const censusObjectBagBindings = (
   // Seed an inferred record with its actual allocation writes. A populated
   // literal is only published below when later writes add a missing member;
   // otherwise its existing checker shape remains the authority.
-  const initialMembersOf = (node: ts.Node): ReadonlyMap<string, ts.Expression> | null => {
+  const initialMembersOf = (node: ts.Node, vacuousContext = false): ReadonlyMap<string, ts.Expression> | null => {
     if (!ts.isObjectLiteralExpression(node) || node.properties.length === 0) return null
     if (ts.isAsExpression(node.parent) || ts.isSatisfiesExpression(node.parent) || ts.isTypeAssertionExpression(node.parent)) return null
-    if (checker.getContextualType(node) !== undefined) return null
+    const contextual = checker.getContextualType(node)
+    if (contextual !== undefined && !(vacuousContext && statesNothing(contextual))) return null
     const fields = new Map<string, ts.Expression>()
     for (const property of node.properties) {
       if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) return null
@@ -639,6 +684,10 @@ export const censusObjectBagBindings = (
     }
     return fields
   }
+
+  // A member slot's literal is contextually typed by the slot itself, which the
+  // checker could not resolve -- `any` -- and so states nothing.
+  const slotInitialMembersOf = (node: ts.Node): ReadonlyMap<string, ts.Expression> | null => initialMembersOf(node, true)
 
   // Allocation ownership and replacement checks consume the same whole-cell
   // inventory. A field initializer is an ordinary bind here, so it cannot be
@@ -669,8 +718,8 @@ export const censusObjectBagBindings = (
     // CommonJS module record -- typed by the checker from the file's exports
     // and carried by the module-record boundary, not a storage declaration
     // this census may retype -- and a SourceFile has no type at location
-    // (the cell-facts table crashed asking for one once `kerberos`'s
-    // `lib/util.js` became reachable). Not admitting it leaves the checker's
+    // (the cell-facts table crashed asking for one once such a CommonJS
+    // module became reachable). Not admitting it leaves the checker's
     // shape the authority, the same "no override" as any failed candidate.
     if (owner && ts.isSourceFile(owner)) return null
     return owner && !(populated ? declaresWrittenType : declaresOwnType)(owner) ? owner : null
@@ -726,7 +775,7 @@ export const censusObjectBagBindings = (
    * write when its current type was `any`/`unknown`/empty and revoked that
    * admission once an outer census learned a concrete type. That made absence
    * of evidence positive alias evidence, so the composed census was
-   * anti-monotone: Fastify's `let constraints = {}; constraints =
+   * anti-monotone: a router's `let constraints = {}; constraints =
    * opts.constraints` alternated forever between publishing the empty bag and
    * withdrawing it as `opts.constraints` became known.
    *
@@ -748,11 +797,11 @@ export const censusObjectBagBindings = (
    * The function a callee expression names, unwrapping one `k: fn`
    * property-assignment alias -- OR, the same unwrap one syntax shape over,
    * a `k: function( ... ) { ... }` property whose value IS the callable
-   * directly rather than a reference to one declared elsewhere. Three's
-   * `ColorManagement.define: function( colorSpaces ) {...}` is exactly this
-   * shape: nothing ever names `define` as an identifier, so the existing
+   * directly rather than a reference to one declared elsewhere. A module
+   * object `const Registry = { define: function( entries ) {...} }` is exactly
+   * this shape: nothing ever names `define` as an identifier, so the existing
    * `ts.isIdentifier(declaration.initializer)` arm never fires, and every
-   * call `ColorManagement.define( x )` used to resolve no further than the
+   * call `Registry.define( x )` used to resolve no further than the
    * `PropertyAssignment` itself -- not a `FunctionDeclaration`/
    * `FunctionExpression`/`ArrowFunction`/`MethodDeclaration`, so neither the
    * `returnsBag` edge nor the call-argument-to-parameter edge below ever
@@ -760,7 +809,7 @@ export const censusObjectBagBindings = (
    * ONLY reads are inside `define`'s own body. Reusing the initializer
    * itself as the callee is not a new alias rule -- it is what
    * `ownerDeclOfExpr` would have named directly had the call spelled the
-   * function out where it is written (`(function( colorSpaces ){...})( x )`)
+   * function out where it is written (`(function( entries ){...})( x )`)
    * instead of through the one property that owns it.
    */
   const calleeDeclarationOf = (callee: ts.Expression): ts.Node | null => {
@@ -825,7 +874,10 @@ export const censusObjectBagBindings = (
     if (write.value === null) unknownWrites.add(owner)
     else noteWrite(owner, write.value)
   }
+  const memberAssignments: { readonly target: ts.PropertyAccessExpression; readonly value: ts.Expression }[] = []
   const collectEdges = (node: ts.Node): void => {
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isPropertyAccessExpression(node.left))
+      memberAssignments.push({ target: node.left, value: node.right })
     if (ts.isReturnStatement(node)) {
       const owner = ts.findAncestor(
         node,
@@ -875,41 +927,89 @@ export const censusObjectBagBindings = (
   // Finite ascending worklist: `bagOf` and `returnsBag` only gain entries, so
   // this terminates after at most one successful claim per declaration/return
   // cell. A numeric round cap would merely hide an incomplete identity graph.
-  while (true) {
-    let grew = false
-    for (const { target, value } of assignments) {
-      const root = bagRootOf(value)
-      if (root && admissibleWrites(target, root) && claim(target, root)) grew = true
-    }
-    for (const [owner, expressions] of returnsOf) {
-      if (!(
-        ts.isFunctionDeclaration(owner) ||
-        ts.isFunctionExpression(owner) ||
-        ts.isArrowFunction(owner) ||
-        ts.isMethodDeclaration(owner)
-      ))
-        continue
-      // A returned bag is not a promise/iterator or an optional result. Reuse
-      // the return census's exit proof and keep every bare return in the join.
-      if (!owner.body || !ts.isBlock(owner.body) || !definitelyReturns(owner.body.statements)) continue
-      if ((ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Async) !== 0 || ('asteriskToken' in owner && owner.asteriskToken)) continue
-      const roots = expressions.map((expression) => (expression ? bagRootOf(expression) : null))
-      const [first] = roots
-      // Every `return` must be the same bag: a function returning a bag on one
-      // path and something else on another has no single storage to name.
-      if (!first || roots.some((root) => root !== first)) continue
-      const existing = returnsBag.get(owner)
-      if (existing === first) continue
-      if (existing) {
-        conflicted.add(existing)
-        conflicted.add(first)
-        continue
+  const propagate = (): void => {
+    while (true) {
+      let grew = false
+      for (const { target, value } of assignments) {
+        const root = bagRootOf(value)
+        if (root && admissibleWrites(target, root) && claim(target, root)) grew = true
       }
-      returnsBag.set(owner, first)
+      for (const [owner, expressions] of returnsOf) {
+        if (!(
+          ts.isFunctionDeclaration(owner) ||
+          ts.isFunctionExpression(owner) ||
+          ts.isArrowFunction(owner) ||
+          ts.isMethodDeclaration(owner)
+        ))
+          continue
+        // A returned bag is not a promise/iterator or an optional result. Reuse
+        // the return census's exit proof and keep every bare return in the join.
+        if (!owner.body || !ts.isBlock(owner.body) || !definitelyReturns(owner.body.statements)) continue
+        if ((ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Async) !== 0 || ('asteriskToken' in owner && owner.asteriskToken))
+          continue
+        const roots = expressions.map((expression) => (expression ? bagRootOf(expression) : null))
+        const [first] = roots
+        // Every `return` must be the same bag: a function returning a bag on one
+        // path and something else on another has no single storage to name.
+        if (!first || roots.some((root) => root !== first)) continue
+        const existing = returnsBag.get(owner)
+        if (existing === first) continue
+        if (existing) {
+          conflicted.add(existing)
+          conflicted.add(first)
+          continue
+        }
+        returnsBag.set(owner, first)
+        grew = true
+      }
+      if (!grew) break
+    }
+  }
+  propagate()
+
+  const adoptMemberSlotWrites = (): boolean => {
+    let grew = false
+    for (const { target, value } of memberAssignments) {
+      if (declNodeOf(memberSymbolOf(target)) || expandoOwnerOf(target)) continue
+      const candidate =
+        ts.isObjectLiteralExpression(value) &&
+        !literalOwner.has(value) &&
+        (isBareEmptyLiteral(value) || slotInitialMembersOf(value) !== null)
+      const slot = memberSlotOf(target, candidate || bagRootOf(value) !== null)
+      if (!slot) continue
+      if (!writesTo.get(slot)?.includes(value)) {
+        noteWrite(slot, value)
+        grew = true
+      }
+      if (!candidate || !ts.isObjectLiteralExpression(value)) continue
+      const initial = slotInitialMembersOf(value)
+      if (initial !== null) initialMembers.set(value, initial)
+      literalOwner.set(value, slot)
+      literalsByOwner.set(slot, [...(literalsByOwner.get(slot) ?? []), value])
+      if (!bagOf.has(slot)) bagOf.set(slot, slot)
       grew = true
     }
-    if (!grew) break
+    return grew
   }
+
+  // A member slot of a bag is storage too. `data.data = { attributes: {} }`
+  // fills a member the checker cannot name -- the receiver is the bag, whose
+  // checker type is the bare literal -- so the census used to see the inner
+  // literal with no owner, and every later `data.data.index = ...` with no
+  // root. The outer bag then published the inner literal's checker shape,
+  // which lacks every member added afterwards, while the
+  // `toJSON( data.data )` callees viewed the same storage with those members:
+  // two authorities, joined only by a live view no slot receipt could cover.
+  //
+  // Identity is (proved root, member name): every receiver that resolves to
+  // the same root names the same slot, so an alias cannot split it. A member
+  // the root's single allocation already initializes is that initializer's
+  // own declaration -- the one the checker would name had it typed the
+  // receiver -- and a member spelled by more than one allocation names
+  // nothing. Slots are minted only by a write and only after root identity
+  // has converged; each round can expose one more level of nesting.
+  memberSlotsReady = true
+  for (let grew = adoptMemberSlotWrites(); grew; grew = adoptMemberSlotWrites()) propagate()
 
   // Root owners are cells too. Seeding their allocation site above is needed
   // to ground alias cycles, but it is not permission to ignore a competing
@@ -943,18 +1043,18 @@ export const censusObjectBagBindings = (
   /**
    * `Object.assign( bag, source )` -- the one BULK write this census
    * recognises, alongside the per-property `bag.x = v` / `bag[ k ] = v`
-   * writes `collectUses` already reads. Three's `ColorManagement.spaces` is
-   * the motivating case: every touch of it is `this.spaces[ colorSpace ]`
+   * writes `collectUses` already reads. A module object's `spaces: {}` table
+   * is the motivating case: every touch of it is `this.spaces[ key ]`
    * (a computed read), and the ONLY write anywhere is
-   * `Object.assign( this.spaces, colorSpaces )` inside `define()` -- so
+   * `Object.assign( this.spaces, entries )` inside `define()` -- so
    * without this, the bag's identity resolves (it is BOUND-able) but it
    * refuses `bag:no-writes` for a write the program plainly makes, just not
    * spelled as an assignment.
    *
    * The source is usually not the literal itself but a PARAMETER that
-   * merely forwards one -- three's actual call is
-   * `ColorManagement.define({ [ LinearSRGBColorSpace ]: {...}, ... })`,
-   * where `define`'s body reads `Object.assign( this.spaces, colorSpaces )`
+   * merely forwards one -- the actual call is
+   * `Registry.define({ [ KEY_A ]: {...}, ... })`,
+   * where `define`'s body reads `Object.assign( this.spaces, entries )`
    * one frame removed from the literal. So this reads two shapes, in order:
    * an INLINE literal's own syntax first, and otherwise the TYPE the
    * checker (or, when that states nothing, the settled parameter census --
@@ -974,20 +1074,9 @@ export const censusObjectBagBindings = (
    * because that answer needs a KNOWN key; a whole unknown key set has no
    * slot to degrade.
    *
-   * The callee is checked on its own TYPE's declaration IDENTITY --
-   * `isGlobalObjectConstructor` (`derived-expression-type.ts`), the shared
-   * authority that idiom now goes through, so a local binding that merely
-   * happens to be named `Object` is never mistaken for the global. This used
-   * to be a second, independently written copy of `flow/value-flow.ts`'s own
-   * `isGlobalObjectAssign` -- byte-for-byte identical logic asking the same
-   * question twice; both now call the one shared function.
+   * The callee is `isGlobalObjectAssign` (`derived-expression-type.ts`), the
+   * one test every reader of the call shares.
    */
-  const isGlobalObjectAssignCall = (node: ts.CallExpression): boolean => {
-    const callee = node.expression
-    if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'assign') return false
-    if (!ts.isIdentifier(callee.expression)) return false
-    return isGlobalObjectConstructor(checker, callee.expression, checker.getTypeAtLocation(callee.expression))
-  }
 
   interface MergedProperties {
     readonly named: ReadonlyMap<string, ts.Expression>
@@ -1037,8 +1126,8 @@ export const censusObjectBagBindings = (
    * The merge source's shape, tried three ways in order: its own syntax
    * when it IS the literal; failing that, the ONE literal expression this
    * module's own write-set already recorded for it (`writesTo`, the same
-   * table the call-argument edge above fills for `define( colorSpaces )` --
-   * `colorSpaces` is not itself a bag, so `bagRootOf` never claims it, but
+   * table the call-argument edge above fills for `define( entries )` --
+   * `entries` is not itself a bag, so `bagRootOf` never claims it, but
    * it is still exactly one parameter written from exactly one place, and
    * that place IS the literal -- reading it back out is not a second
    * alias rule, it is the SAME edge `admissibleWrites` already reads for a
@@ -1056,11 +1145,72 @@ export const censusObjectBagBindings = (
     return mergedPropertiesFromType(source)
   }
 
+  // `Object.assign( { k: initial }, ...sources )` stores, over each key the
+  // fresh target spells, whatever value a source states for that key -- the
+  // same slot `{ ...{ k: initial }, ...sources }` would fill. The checker types
+  // the literal from its initializers alone, so a key spelled `null` as a
+  // default is a `null` field that the copy then writes an object into. Every
+  // spelled key's storage is the join of the literal's own field type with
+  // each source's declared type for that key.
+  //
+  // A source the join cannot read whole publishes nothing for the target: a
+  // spread, an untyped source, or an arm that is `any`/`unknown`, a type
+  // parameter, a primitive or an indexed type (whose own keys are not its
+  // declared members). Nullish arms copy nothing. A member typed `any` states no storage either.
+  const propertyTypeOf = (type: ts.Type, key: string): ts.Type | null => {
+    const symbol = checker.getPropertyOfType(type, key)
+    return symbol ? checker.getTypeOfSymbol(symbol) : null
+  }
+  const assignedTargetShapes = new Map<ts.ObjectLiteralExpression, ObjectBagShape>()
+  const assignedTargetShapeOf = (literal: ts.ObjectLiteralExpression, sources: readonly ts.Expression[]): ObjectBagShape | null => {
+    if (literal.properties.length === 0) return null
+    const arms: ts.Type[] = []
+    for (const source of sources) {
+      if (ts.isSpreadElement(source)) return null
+      const stated = observedType(source)
+      if (!stated) return null
+      for (const arm of stated.isUnion() ? stated.types : [stated]) {
+        if ((arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) !== 0) continue
+        if ((arm.flags & ts.TypeFlags.Object) === 0 || checker.getIndexInfosOfType(arm).length !== 0) return null
+        arms.push(arm)
+      }
+    }
+    const own = checker.getTypeAtLocation(literal)
+    const members = new Map<string, ts.Type>()
+    let widened = false
+    for (const property of literal.properties) {
+      if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) return null
+      if (!ts.isIdentifier(property.name) && !ts.isStringLiteral(property.name) && !ts.isNumericLiteral(property.name)) return null
+      if (isObjectLiteralPrototypeSetter(property)) return null
+      const key = property.name.text
+      const initial = propertyTypeOf(own, key)
+      if (!initial || isUnusableEvidence(initial)) return null
+      const types = [initial]
+      for (const arm of arms) {
+        const member = propertyTypeOf(arm, key)
+        if (member === null) continue
+        if (isUnusableEvidence(member)) return null
+        types.push(member)
+      }
+      const joinedType = types.length === 1 ? initial : (widestOf(checker, types) ?? disjointUnionTypeOf(checker, types))
+      if (!joinedType) return null
+      if (joinedType !== initial) widened = true
+      members.set(key, joinedType)
+    }
+    return widened ? { members, index: null, required: new Set(members.keys()) } : null
+  }
+
   const collectObjectAssign = (node: ts.CallExpression): void => {
     const target = node.arguments[0]
-    if (target === undefined || node.arguments.length < 2 || !isGlobalObjectAssignCall(node)) return
+    if (target === undefined || node.arguments.length < 2 || !isGlobalObjectAssign(checker, node)) return
     const root = bagRootOf(target)
-    if (!root) return
+    if (!root) {
+      if (ts.isObjectLiteralExpression(target) && !literalOwner.has(target)) {
+        const shape = assignedTargetShapeOf(target, node.arguments.slice(1))
+        if (shape) assignedTargetShapes.set(target, shape)
+      }
+      return
+    }
     const evidence = evidenceFor(root)
     for (const source of node.arguments.slice(1)) {
       const merged = ts.isSpreadElement(source) ? null : mergedPropertiesOf(source)
@@ -1153,16 +1303,66 @@ export const censusObjectBagBindings = (
    * DISAGREEMENT between typed writes still refuses -- `any` never absorbs a
    * conflict this census can see, only a statement the program never made.
    */
+  /** Whether a root publishes a shape -- every condition the binding loop below tests that does not depend on a member's type. */
+  const bindable = (root: ts.Node): boolean => {
+    if (conflicted.has(root) || ungrounded.has(root)) return false
+    const evidence = evidenceOf.get(root)
+    if (!evidence || evidence.opaqueUse) return false
+    const literals = literalsByOwner.get(root) ?? []
+    const initialKeys = new Set(literals.flatMap((literal) => [...(initialMembers.get(literal)?.keys() ?? [])]))
+    if (literals.some((literal) => initialMembers.has(literal)) && ![...evidence.namedWrites.keys()].some((key) => !initialKeys.has(key)))
+      return false
+    return evidence.namedWrites.size > 0 || evidence.indexWrites.length > 0
+  }
+  /** The one type object standing for each bag stored in another bag's slot. */
+  const storedBagTypes = new Map<ts.Node, ts.Type>()
+
+  /**
+   * What one write stores in its slot. A fresh `{}`/`[]` states nothing of
+   * its own, but where it is written into a member the program DECLARES
+   * (`data.arrayBuffers = {}` through a `{ arrayBuffers?: Record<string,
+   * ArrayBuffer> }` parameter) that declaration is the allocation's storage
+   * type: every later read and keyed write reaches it through that member.
+   * Degrading the bag's slot to `any` instead made two authorities for one
+   * storage -- the parameter's typed dictionary and the bag's `dynamic` field
+   * -- and the live view between them could only box the dictionary.
+   */
+  const storedType = (expression: ts.Expression): ts.Type | null => {
+    // A bag stored in another bag's slot is that bag. The checker mints a
+    // fresh type for an assigned literal on every query, so the census keeps
+    // ONE type object per stored bag and publishes its shape under exactly
+    // that object (`shapesByType`); the slot then carries the inner bag's
+    // members rather than the literal's seed fields or `any`.
+    const type = observedType(expression)
+    const root = bagRootOf(expression)
+    if (root && bindable(root) && (ts.isObjectLiteralExpression(expression) || !type || statesNothing(type))) {
+      const held = storedBagTypes.get(root) ?? checker.getTypeAtLocation(literalsByOwner.get(root)![0]!)
+      storedBagTypes.set(root, held)
+      return held
+    }
+    if (type && !statesNothing(type)) return type
+    const literal = expression
+    if (!ts.isObjectLiteralExpression(literal) && !ts.isArrayLiteralExpression(literal)) return null
+    const parent = literal.parent
+    const target =
+      ts.isBinaryExpression(parent) && parent.right === literal && parent.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        ? parent.left
+        : null
+    if (target === null || (!ts.isPropertyAccessExpression(target) && !ts.isElementAccessExpression(target))) return null
+    const declared = checker.getContextualType(literal)
+    return declared && !statesNothing(declared) ? declared : null
+  }
+
   const joined = (expressions: readonly ts.Expression[]): ts.Type | 'disagree' | 'states-nothing' => {
     const types: ts.Type[] = []
     for (const expression of expressions) {
-      const type = observedType(expression)
-      if (!type || statesNothing(type)) return 'states-nothing'
+      const type = storedType(expression)
+      if (!type) return 'states-nothing'
       types.push(type)
     }
     // When no one write covers the others, the disagreement can still be the
-    // answer: three's renderer writes `materialProperties.lightProbeGrid` as a
-    // boolean at program acquisition and as a grid-or-null per object, and the
+    // answer: a slot written `state.probe` as a boolean at one site and as
+    // an object-or-null at another, and the
     // slot holds exactly that union. Degrading it to `any` sent every read of
     // it -- and the narrowing that follows -- to the box for a value whose
     // every write was typed. The same second question the array census asks
@@ -1293,10 +1493,16 @@ export const censusObjectBagBindings = (
   // `ReturnType<typeof factory>` the old literal fields while the factory
   // returns the augmented storage. This index publishes that same census
   // answer; unrelated structural annotations never match by field spelling.
+  //
+  // An EMPTY literal is published too. Its checker type is its own (one
+  // anonymous type per literal, never a shared `{}`; a type two bags share
+  // publishes nothing), and a call-site parameter census that joins argument
+  // TYPES sees only that `{}`: a table -- a `{}` filled by
+  // name -- passed beside a class instance made the parameter's arm an empty
+  // record the filled table has no conversion into.
   const shapesByType = new Map<ts.Type, ObjectBagShape | null>()
   for (const [root, shape] of bound) {
     for (const literal of literalsByOwner.get(root) ?? []) {
-      if (!initialMembers.has(literal)) continue
       for (const node of [literal, root]) {
         const own = checker.getTypeAtLocation(node)
         for (const type of [own, checker.getWidenedType(own)]) {
@@ -1305,6 +1511,21 @@ export const censusObjectBagBindings = (
           shapesByType.set(type, existing === undefined || existing === shape ? shape : null)
         }
       }
+    }
+  }
+
+  for (const [root, type] of storedBagTypes) {
+    const shape = bound.get(root)
+    if (!shape) continue
+    const existing = shapesByType.get(type)
+    shapesByType.set(type, existing === undefined || existing === shape ? shape : null)
+  }
+
+  for (const [literal, shape] of assignedTargetShapes) {
+    const own = checker.getTypeAtLocation(literal)
+    for (const type of [own, checker.getWidenedType(own)]) {
+      if ((type.flags & ts.TypeFlags.Object) === 0 || shapesByType.has(type)) continue
+      shapesByType.set(type, shape)
     }
   }
 
@@ -1330,11 +1551,19 @@ export const censusObjectBagBindings = (
       // states both from the same census on purpose. Answering here would move
       // only one of them, so the invocation producer would find the two
       // disagreeing and withhold, taking its consumers with it: MEASURED at
-      // withheld 8 -> 20 and 22 operations silently gone on the three.js app, for a
-      // gain of 19 carriers. The variable a call's result is bound to is
+      // more than twice as many withheld operations, silently gone, for a
+      // gain of a handful of carriers. The variable a call's result is bound to is
       // claimed by the propagation above and answers normally, which is where
       // the bag's uses actually are.
       if (ts.isCallExpression(expression) || ts.isNewExpression(expression)) return null
+      // A minted member slot names the bag only for its writes. Its read is
+      // the outer bag's optional member (`data.buffers === undefined`
+      // before the first `data.buffers = {}`), which the outer
+      // shape types; answering the inner bag here made that test constant.
+      if (ts.isPropertyAccessExpression(expression)) {
+        const owner = ownerDeclOfExpr(expression)
+        if (owner !== null && mintedSlots.has(owner)) return null
+      }
       const root = bagRootOf(expression)
       return valueShape(root, expression)
     },
@@ -1515,7 +1744,7 @@ export const bagShapeTypeAt = (
   // is asked with the `PropertyAssignment`, every `state.targets[ k ]` with an
   // expression. Answering only the reads left the field at the checker's `{}`,
   // so each access recast it into the bag's layout -- a fresh COPY -- and
-  // three's `transmissionRenderTarget[ camera.id ] = target` wrote into a
+  // `state.targets[ key.id ] = target` wrote into a
   // temporary the next read never saw.
   const asked = ts.isExpression(node)
     ? node

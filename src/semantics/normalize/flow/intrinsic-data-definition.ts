@@ -13,10 +13,10 @@ export interface IntrinsicDataDefinitionPlan {
    * ToPropertyDescriptor reads through `Object.prototype`: a `{ value }`
    * descriptor turns into an accessor the moment someone defines
    * `Object.prototype.get`. Empty exactly when every descriptor carries
-   * `__proto__: null`. Asked per key, not as the whole prototype: the three.js app's
+   * `__proto__: null`. Asked per key, not as the whole prototype: a large program's
    * final census records single keys written through receivers it cannot
    * attribute, which fails the whole-object question for every `Object
-   * .defineProperty( this, 'id', { value } )` in three while leaving
+   * .defineProperty( this, 'id', { value } )` in it while leaving
    * `writable`, `enumerable`, `configurable`, `get` and `set` untouched.
    */
   readonly descriptorPrototypeKeys: readonly string[]
@@ -84,9 +84,9 @@ export const intrinsicDataDefinitionTargetOf = (
    * descriptor into its own `const` first so that `defineProperties`' two
    * phases -- evaluate every descriptor, THEN define -- are preserved. That
    * hoist hands this proof an IDENTIFIER where the pre-transform call handed
-   * it a literal, and the plan was refused for it: three's `Object3D`
-   * constructor defines `position`, `rotation`, `quaternion`, `scale`,
-   * `modelViewMatrix` and `normalMatrix` that way, and the receiver `this`
+   * it a literal, and the plan was refused for it: a scene-graph node
+   * constructor that defines its transform fields (`position`, `rotation`,
+   * `scale`, ...) that way is the measured case, and the receiver `this`
    * was reported escaping through its own lowering.
    *
    * Followed only to a `const` whose single declaration initializes it

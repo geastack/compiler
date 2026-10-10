@@ -8,19 +8,19 @@ import { wholeProgram } from './reachability.js'
 const infer = (extra = '') => {
   const entry = resolve('test/fixtures/late-local-member.js')
   const source = `export {};
-    class Layers { enabled = 0; enableAll() { this.enabled = 1; } }
-    class Base { constructor() { this.layers = new Layers(); } hook() {} }
-    class Mesh extends Base {}
-    /** @param {Mesh} instance */
+    class Mask { enabled = 0; enableAll() { this.enabled = 1; } }
+    class Base { constructor() { this.layers = new Mask(); } hook() {} }
+    class Item extends Base {}
+    /** @param {Item} instance */
     function invoke(instance) { instance.hook({amount:3}); }
     function run() {
       let held;
       function render() {
         if (held === undefined) {
-          const mesh = new Mesh();
-          held = mesh;
-          mesh.hook = function(input) { return input.amount; };
-          invoke(mesh);
+          const item = new Item();
+          held = item;
+          item.hook = function(input) { return input.amount; };
+          invoke(item);
         }
         held.layers.enableAll();
         ${extra}

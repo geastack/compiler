@@ -3,7 +3,7 @@
 // `detail::expandoFor` keys each table on the object's address in a registry
 // that holds the table strongly. Until `expandoTagged`, nothing dropped an
 // entry when its object died: the table -- and every object its values held --
-// lived until the address happened to be reused. `@hono/node-server` stores
+// lived until the address happened to be reused. An HTTP server adapter stores
 // each request's IncomingMessage as a symbol-keyed expando on a per-request
 // Request wrapper, which made that about 6 KB of leak per request.
 #include "gea_runtime.h"

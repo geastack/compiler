@@ -3,8 +3,8 @@ import ts from 'typescript'
 /**
  * TypeScript keeps a narrowing of a mutable property -- or of a `let` another
  * function writes -- across calls, awaits and yields. That is deliberate
- * unsoundness on the checker's part (TypeScript #9998), and mongodb's
- * `autoConnect` is the shape it breaks:
+ * unsoundness on the checker's part (TypeScript #9998), and a lazy-connect
+ * helper is the shape it breaks:
  *
  *     if (client.topology == null) {
  *       await client.connect()

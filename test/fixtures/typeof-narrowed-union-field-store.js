@@ -1,9 +1,9 @@
 // The JS twin of `typeof-narrowed-union-field-store.ts`, compiled the way
-// three is (`--dynamic-fallback`): the parameter is STATED `Array<number|string>`
+// a 3D library is (`--dynamic-fallback`): the parameter is STATED `Array<number|string>`
 // by JSDoc and its one caller passes a mixed array. The call-site census
 // may narrow a stated parameter only within its statement; it must not narrow
 // `array` to `number[]` here and then store the `typeof`-narrowed `string`
-// arm as a number. Three's `Euler.fromArray` is the measured case.
+// arm as a number. A 3D library's `Euler.fromArray` is the measured case.
 class Euler {
   constructor() {
     this._x = 0

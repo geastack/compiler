@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
@@ -11,7 +12,7 @@ const include = `-I${resolve(root, 'src/targets/cpp/runtime')}`
 const runtimeBinary = resolve(output, 'native-field-descriptor-runtime')
 execFileSync('clang++', [
   '-std=c++20',
-  '-O0',
+  ...nativeOptimization('correctness'),
   '-fsanitize=address,undefined',
   '-fno-sanitize-recover=all',
   include,
@@ -26,7 +27,7 @@ const result = compile({ rootFileNames: [entry], projectFileName: null, dynamicF
 assert.ok(result.certificate, JSON.stringify(result.diagnostics.diagnostics))
 assert.deepEqual(result.loweringBlockers, [])
 assert.deepEqual(result.emissionRefusals, [])
-assert.ok(result.source?.includes('gea::applyNativeFieldDescriptor('))
+assert.match(result.source ?? '', /gea::applyNativeFieldDescriptor<double, gea::NativeFieldLeafPolicy>\(/)
 assert.ok(result.source?.includes('gea::detail::applyNativeDynamicFieldDescriptor('))
 assert.equal(
   result.source?.includes('gea_current = gea::PropertyDescriptor::assignment(gea::detail::readDynamicField'),
@@ -39,7 +40,7 @@ assert.equal(
   'A fixed-field descriptor update must not box its current native value'
 )
 const executable = resolve(output, 'native-field-descriptor')
-execFileSync('clang++', ['-std=c++20', '-O1', include, '-x', 'c++', '-', '-o', executable], {
+execFileSync('clang++', ['-std=c++20', ...nativeOptimization('correctness'), include, '-x', 'c++', '-', '-o', executable], {
   input: `${result.source}\nint main() { __gea_top_level(); }\n`,
   env: { ...process.env, TMPDIR: output }
 })

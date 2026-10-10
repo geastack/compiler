@@ -6,7 +6,7 @@
 // read through an `any` receiver fell to `memberTypeOf`, read the checker's
 // `any` for the field, and refused -- so the census had typed the receiver
 // AND the field and still laid the local out as a dynamic box between them.
-// Three's `WebGLShadowMap( renderer, objects, capabilities )` is the shape:
+// A 3D library's `ShadowMap( renderer, objects, capabilities )` is the shape:
 // `const _state = renderer.state;` was `gea::Value`, and every
 // `_state.setBlending()` went through dynamic lookup and threw on frame one.
 // After the fix the member is looked up on the census-resolved receiver and

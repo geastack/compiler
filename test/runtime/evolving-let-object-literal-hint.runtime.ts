@@ -1,6 +1,6 @@
 // AN EVOLVING `let` THAT STARTS `undefined` AND IS GIVEN OBJECT LITERALS.
 //
-// mongodb's `normalizeHintField` (`utils.ts`) declares `let finalHint =
+// A database client's `normalizeHintField` declares `let finalHint =
 // undefined`, then stores a string, an empty `{}` it fills by key, or a
 // `{} as Document` copied key by key, and returns it as `Hint | undefined`.
 // A string hint comes back as itself, an object is copied, and no hint stays

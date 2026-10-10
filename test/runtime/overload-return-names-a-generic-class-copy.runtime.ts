@@ -1,6 +1,6 @@
 // An overload whose declared result names a generic class at a filling the
-// implementation never writes: the MongoDB driver's `Db.listCollections(filter,
-// {nameOnly: false})` resolves to the overload returning
+// implementation never writes: a database client's
+// `Db.listCollections(filter, {nameOnly: false})` resolves to the overload returning
 // `ListCollectionsCursor<CollectionInfo>`, while the implementation body
 // constructs `new ListCollectionsCursor<T>(...)` at its own `T`. The cursor
 // stores `T` through its base, so its fillings are separate layouts.

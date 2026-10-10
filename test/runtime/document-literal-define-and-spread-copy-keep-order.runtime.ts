@@ -1,7 +1,7 @@
-// The mongodb driver builds every command as an object literal typed
+// A database client builds every command as an object literal typed
 // `Document` (`{ [key: string]: any }`, a native `gea::Dictionary<gea::Value>`),
 // copies it with `{ ...command }`, and adds keys afterwards
-// (`cmd.lsid = ...`, `cmd.$db = ...`). The BSON it serializes is the key
+// (`cmd.lsid = ...`, `cmd.$db = ...`). The wire document it serializes is the key
 // sequence, so the literal's `CreateDataProperty`, the spread's copy into a
 // fresh table and the later stores must all keep creation order -- including
 // the cases that must NOT take the append-only copy: a destination that

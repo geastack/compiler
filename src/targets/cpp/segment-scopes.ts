@@ -143,7 +143,7 @@ const labelDefinitionsOf = (text: string): readonly string[] => {
  * so each one is live across every statement. Under `-fexceptions` every call
  * that may throw needs a cleanup for every live local with a destructor, and
  * GCC's work grows with statements times live locals: a module body building a
- * few hundred static arrays (skytail's generated kit geometry, its font atlas:
+ * few hundred static arrays (generated geometry tables and a font atlas:
  * 844 `gea::Ref` locals, ~3900 statements) did not finish compiling in 90
  * minutes at -O2, -O1 or -Os. Measured on that unit: 1656 statements, >170 s;
  * the same text with -fno-exceptions, 12 s. Scoping a temporary to the segment
@@ -198,7 +198,7 @@ export const segmentScopedBodyOf = (
   // A local several segments share lives in ONE frame object rather than as
   // its own variable: a nested literal (`kerning: [[88, 51, -2.27], ...]`)
   // builds every inner array before the outer one, so all of them cross
-  // segments -- 1177 of skytail's font atlas. As separate locals each is a
+  // segments -- 1177 of them in one generated font atlas. As separate locals each is a
   // cleanup on every call and a variable for var-tracking (measured: 172 s, and
   // 69 s as references into a frame, 32 of them var-tracking); as members of
   // one object they are one cleanup and no variables at all.

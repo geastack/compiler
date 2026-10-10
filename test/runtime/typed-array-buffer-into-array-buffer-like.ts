@@ -7,8 +7,8 @@
 // constructor (arm injection is the emitter's `ofArm<i>`), so the store needed
 // the alignment the union-arm reading of the same member already performed and
 // the direct receiver did not: the read handed its text over unaligned and
-// clang refused the assignment. @hono/node-server's `handleMessage`
-// (`websocket.ts`) reads `data.buffer` off a `Uint8Array` into such a cell.
+// clang refused the assignment. A Node HTTP adapter's websocket
+// `handleMessage` reads `data.buffer` off a `Uint8Array` into such a cell.
 //
 // Two things make the cell a real union rather than one arm the census can
 // collapse onto. `SharedArrayBuffer` is NAMED, so the second arm has an

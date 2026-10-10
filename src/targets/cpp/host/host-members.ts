@@ -42,6 +42,8 @@ export type HostMember =
       readonly store: string | null
       /** Fixed carrier returned by the host template, when it differs from a site's checker result. */
       readonly resultRepresentation?: Representation
+      /** A readonly first-class native Function whose implementation ignores its logical this value. */
+      readonly logicalReceiver?: 'ignored'
       /** Direct numeric operands can use this borrowed sequence spelling; reads and spreads retain the callable ABI. */
       readonly numericRestCall?: string
       /** A fixed numeric call can bypass callable materialization; first-class reads still use emit. */
@@ -278,6 +280,13 @@ export type HostCallSpelling = ({ readonly kind: 'path'; readonly text: string }
    * by the host rather than guessed from the spelling's name.
    */
   readonly result?: 'dynamic'
+  /**
+   * The host builds its `dynamic` result afresh on every call and keeps no
+   * reference to it, so a shared record carrier for that result may be a
+   * rebuild rather than an alias the program could observe. Stated by the row
+   * because only the host knows whether its answer is shared.
+   */
+  readonly freshResult?: true
 }
 
 /** The one string that identifies a call spelling -- for a diagnostic, and as the key its preamble is stated under. */
@@ -533,6 +542,7 @@ const nativeHandleProperty = (protocol: string, emit: string): HostMember => ({
 const mathDirect = (name: string, arity: 1 | 2): HostMember => ({
   kind: 'property',
   store: null,
+  logicalReceiver: 'ignored',
   emit: `gea::host::Math::${name}`,
   numericDirectCall: { arity, emit: `gea::host::Math::detail::${name}_invoke(nullptr, ${arity === 1 ? '{arg0}' : '{arg0}, {arg1}'})` }
 })
@@ -581,7 +591,7 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   ['Console.error', { kind: 'method', emit: 'gea::host::console::error({args})', arity: 'variadic' }],
   // `console.info` is Node's own alias of `console.log` (see the runtime's own
   // `info` overloads for the citation), so this row buys a real member rather
-  // than a second severity: `@hono/node-server` writes one on the recoverable
+  // than a second severity: a server adapter writes one on the recoverable
   // client-abort path and refused by name until it existed.
   ['Console.info', { kind: 'method', emit: 'gea::host::console::info({args})', arity: 'variadic' }],
   // `localStorage`. `gea::host::storage` is a singleton table rather than a
@@ -644,6 +654,7 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
       kind: 'property',
       store: null,
       emit: 'gea::host::Math::round',
+      logicalReceiver: 'ignored',
       numericDirectCall: { arity: 1, emit: 'gea::host::Math::detail::round_invoke(nullptr, {arg0})' }
     }
   ],
@@ -654,7 +665,7 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   ['Math.ceil', mathDirect('ceil', 1)],
   ['Math.pow', mathDirect('pow', 2)],
   ['Math.atan2', mathDirect('atan2', 2)],
-  ['Math.random', { kind: 'property', store: null, emit: 'gea::host::Math::random' }],
+  ['Math.random', { kind: 'property', store: null, emit: 'gea::host::Math::random', logicalReceiver: 'ignored' }],
   ['Math.tan', mathDirect('tan', 1)],
   ['Math.asin', mathDirect('asin', 1)],
   ['Math.acos', mathDirect('acos', 1)],
@@ -664,8 +675,26 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // All three retain their array-parameter callable values. Direct numeric
   // max/min calls can additionally borrow a stack sequence without allocating
   // the rest array; aliases and spreads keep the ordinary value spelling.
-  ['Math.max', { kind: 'property', store: null, emit: 'gea::host::Math::max', numericRestCall: 'gea::host::Math::maxDirect({args})' }],
-  ['Math.min', { kind: 'property', store: null, emit: 'gea::host::Math::min', numericRestCall: 'gea::host::Math::minDirect({args})' }],
+  [
+    'Math.max',
+    {
+      kind: 'property',
+      store: null,
+      emit: 'gea::host::Math::max',
+      numericRestCall: 'gea::host::Math::maxDirect({args})',
+      logicalReceiver: 'ignored'
+    }
+  ],
+  [
+    'Math.min',
+    {
+      kind: 'property',
+      store: null,
+      emit: 'gea::host::Math::min',
+      numericRestCall: 'gea::host::Math::minDirect({args})',
+      logicalReceiver: 'ignored'
+    }
+  ],
   ['Math.hypot', { kind: 'property', store: null, emit: 'gea::host::Math::hypot' }],
   // The sixteen `Math` members `gea_runtime.h` did not have. `cbrt` is v1's
   // (`gea::runtime::math::cbrt`, stdlib.cpp); the other fifteen are written
@@ -702,7 +731,7 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   ['Math.LOG10E', { kind: 'property', store: null, emit: 'gea::host::Math::LOG10E' }],
   ['Math.SQRT1_2', { kind: 'property', store: null, emit: 'gea::host::Math::SQRT1_2' }],
   ['Math.SQRT2', { kind: 'property', store: null, emit: 'gea::host::Math::SQRT2' }],
-  ['DateConstructor.now', { kind: 'property', store: null, emit: 'gea::host::DateConstructor::now' }],
+  ['DateConstructor.now', { kind: 'property', store: null, emit: 'gea::host::DateConstructor::now', logicalReceiver: 'ignored' }],
   // The prototype slot is a handle of its own protocol (`Date.prototype@1`,
   // registered by `bindHostObjectClosure` beside the constructor): reading it
   // hands the program a namespace-shaped intrinsic, not a Date instance.
@@ -845,6 +874,7 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
       kind: 'property',
       store: null,
       emit: 'gea::host::StringConstructor::fromCharCode',
+      logicalReceiver: 'ignored',
       numericRestCall: 'gea::host::StringConstructor::fromCharCodeDirect({args})'
     }
   ],
@@ -854,6 +884,7 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
       kind: 'property',
       store: null,
       emit: 'gea::host::StringConstructor::fromCodePoint',
+      logicalReceiver: 'ignored',
       numericRestCall: 'gea::host::StringConstructor::fromCodePointDirect({args})'
     }
   ],

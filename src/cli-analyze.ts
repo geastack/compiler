@@ -11,9 +11,9 @@ import { pathToFileURL } from 'node:url'
  * and which binding drags a network stack in, is the plugin package's
  * knowledge, shipped as its `analyzeHostBindings` hook; this command is only
  * the dispatch to it. It exists so a board's CMake and the capability resolver
- * keep one contract instead of each learning to load a plugin module -- the
- * eight esp32 boards, their resident-app loops, and
- * `scripts/esp32-app-capabilities.mjs` all speak this one.
+ * keep one contract instead of each learning to load a plugin module -- every
+ * board build, its resident-app loop, and the capability resolver all speak
+ * this one.
  *
  * This scan runs before a program exists (CMake configure, ahead of the
  * vite/geatsc bundle), so it invokes the package's analysis hook directly.

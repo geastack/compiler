@@ -2,7 +2,7 @@
 // with no toJSON writes the instance's own enumerable string-keyed
 // properties in creation order -- field definitions, base class first -- and
 // skips members whose value is undefined or a function. Accessors and
-// methods live on the prototype and are not own. The mongodb driver prints a
+// methods live on the prototype and are not own. A database client prints a
 // HostAddress this way (`Unexpected HostAddress ${JSON.stringify(hostAddress)}`).
 
 class HostAddress {
@@ -28,8 +28,8 @@ class HostAddress {
 
 //! expect: {"host":"localhost","port":27017,"isIPv6":false}
 console.log(JSON.stringify(new HostAddress('localhost')))
-//! expect: {"socketPath":"/tmp/mongo.sock","isIPv6":false}
-console.log(JSON.stringify(new HostAddress('/tmp/mongo.sock')))
+//! expect: {"socketPath":"/tmp/db.sock","isIPv6":false}
+console.log(JSON.stringify(new HostAddress('/tmp/db.sock')))
 //! expect: Unexpected HostAddress {"host":"db","port":1,"isIPv6":false}
 console.log(`Unexpected HostAddress ${JSON.stringify(new HostAddress('db', 1))}`)
 

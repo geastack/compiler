@@ -17,8 +17,9 @@ import { mergeFalsyAbsence, mergeMaterialization, mergeTaggedAbsence } from '../
 import { operandOf, type SemanticOperand } from '../semantics/model/operands.js'
 import type { SemanticOperation } from '../semantics/model/operations.js'
 import { IrLoweringBlockedError } from './lower-graph.js'
-import { convertOrDrift, convertTo, resolveRequiredOperand, type LoweringContext } from './lower-operands.js'
+import { convertOrDrift, convertTo, perArmUnionEntry, resolveRequiredOperand, type LoweringContext } from './lower-operands.js'
 import type { IrBlockId, IrOperand } from './model.js'
+import { nativeCallableSourceOf } from './native-callable-argument.js'
 
 /**
  * A merge arm the census cannot bring into the merge's carrier blocks the
@@ -109,9 +110,8 @@ const requireLiveArmsConvertible = (
 /**
  * Whether every non-absent value of a type is truthy, read off its literal
  * members: the carrier cannot say so -- `optional(string)` holds `''` -- but
- * `mode?: 'primary' | 'nearest'` never does. mongodb's
- * `ReadPreference.fromOptions` tests `mode && typeof mode === 'string'` over
- * exactly that, so the `&&` keeps `mode` only when it is `undefined`.
+ * `mode?: 'primary' | 'nearest'` never does. A
+ * `mode && typeof mode === 'string'` test over exactly that, so the `&&` keeps `mode` only when it is `undefined`.
  */
 const presentValuesAreTruthy = (types: ReadonlyMap<StructuralTypeId, StructuralType>, id: StructuralTypeId): boolean => {
   const shape = types.get(id)?.shape
@@ -187,8 +187,7 @@ export const mergeIncoming = (
     return { value: ctx.builder.allocateArrayObject(block, lineage, [], representation), representation }
   }
   // The same construction where the merge's carrier is a stated-native array
-  // instead of an `ArrayObject`: `path.match(/\/:/g) || []` (hono's
-  // `reg-exp-router/trie.ts:10` and `router.ts:132`) publishes
+  // instead of an `ArrayObject`: `path.match(/\/:/g) || []` publishes
   // `gea::runtime::regex::MatchResult`, which IS an `ArrayObject<std::string>`
   // carrying 22.1.3.13's named members beside it. `mergeMaterialization` is
   // what proved the empty one is a complete value of that carrier; the
@@ -210,8 +209,8 @@ export const mergeIncoming = (
   }
   // The evaluated side of `a && b` runs only when `a` is truthy, and of
   // `a || b` only when it is falsy. A guard whose carrier has no such state
-  // makes this arm dead, exactly as the kept-side cases below: memory-pager's
-  // `this.deduplicate && buf.equals && buf.equals(this.deduplicate)`, over a
+  // makes this arm dead, exactly as the kept-side cases below:
+  // `this.flag && buf.equals && buf.equals(this.flag)`, over a
   // field that only ever holds `null`, publishes `null` and never the call's
   // boolean.
   if (role === 'taken' && operation.family === 'computation' && operation.form === 'logical') {
@@ -237,6 +236,38 @@ export const mergeIncoming = (
   const from = representationKey(incoming.representation)
   const to = representationKey(representation)
   if (from === to) return incoming
+  // `this.begin = function ( renderer, target ) { ... this.setSize() ... }`
+  // (a function-valued property assigned in a constructor): an assignment's value IS the Function it stored,
+  // and a source body that reads `this` keeps its physical receiver frame
+  // while the expression publishes the public receiverless one. The store
+  // itself enters that frame through the native unbound-method recipe; the
+  // expression's value is the same Function at the same boundary.
+  if (operation.family === 'computation' && operation.form === 'assignment') {
+    const nativeSource = nativeCallableSourceOf(
+      operation,
+      operand,
+      incoming.representation,
+      representation,
+      ctx.program.callableOrigins,
+      ctx.program.abis,
+      { graph: ctx.graph, classes: ctx.program.classes, representations: ctx.plan.selected, abis: ctx.program.abis }
+    )
+    const node = nativeSource === null ? null : ctx.program.conversions.nativeMethodFor(incoming.representation, representation)
+    if (node !== null)
+      return {
+        value: ctx.builder.convert(block, lineage, node.id, incoming, representation, undefined, nativeSource ?? undefined),
+        representation
+      }
+  }
+  if (
+    role === 'kept' &&
+    operation.family === 'computation' &&
+    operation.form === 'logical' &&
+    operation.operator === '&&' &&
+    operation.logicalLeftObjectTruthy === true
+  ) {
+    return { value: ctx.builder.deadLogicalMergeValue(block, lineage, incoming, representation), representation }
+  }
   const falsyAbsence = mergeFalsyAbsence(incoming.representation, representation)
   if (
     role === 'kept' &&
@@ -373,7 +404,7 @@ export const mergeIncoming = (
 
   // A `&&` whose merged type is a plain `boolean`: the kept operand is here
   // only as its own truthiness, which is the very question `&&` asked of it.
-  // `object && object.isObject3D` over three's `Object3D` is the shape -- the
+  // `object && object.isShape` over a class with a boolean brand field is the shape -- the
   // checker collapsed the whole expression to `boolean`, so no VALUE of the
   // kept operand survives to be converted, only its `ToBoolean`.
   // `mergesAsTruthiness` is the identical fact
@@ -406,14 +437,16 @@ export const mergeIncoming = (
       (operation.operator === '||' || operation.operator === '??') &&
       role === 'kept') ||
     (operation.family === 'destructuring' && operation.form === 'default-value' && role === 'extracted')
-  const converted = convertTo(ctx, block, lineage, incoming, representation, guarded ? 'guard' : 'merge-arm')
+  const converted =
+    (guarded ? null : perArmUnionEntry(ctx, block, lineage, incoming, representation, 'merge-arm')) ??
+    convertTo(ctx, block, lineage, incoming, representation, guarded ? 'guard' : 'merge-arm')
   if (converted !== null) return converted
   // The general form of the `optional(tagged-union)` rebuild above, and the
   // last thing asked rather than the first: a guarded arm whose payload -- not
   // the optional around it -- is what the merge's carrier accepts.
   //
-  // `(options?.onError ?? console.error)(e)` (node-server's `websocket.ts`) is
-  // the standing shape. TypeScript reduces the merged type to `console.error`'s
+  // `(options?.onError ?? console.error)(e)` (an optional error-handler option
+  // falling back to a host function) is the standing shape. TypeScript reduces the merged type to `console.error`'s
   // own `(...data: any[]) => void`, because the positional handler really is
   // assignable to it, so the merge publishes that one frame; the kept operand
   // still carries `optional((any) => void)` because that is what the FIELD
@@ -441,7 +474,7 @@ export const mergeIncoming = (
   // operand whose carrier has no absent state at all was never nullish, so this
   // arm never runs.
   //
-  // node-server's `websocket.ts` module body is the shape:
+  // A module body that polyfills a host class is the shape:
   // `globalThis.CloseEvent ?? class extends Event {...}`, where the program's
   // own global read carries a bare `constructor-family`. The fallback class is
   // a SECOND, unrelated program class, and the conversion asked for between the

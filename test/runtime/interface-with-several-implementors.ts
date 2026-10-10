@@ -1,5 +1,5 @@
 // An interface three classes implement, one of which holds an array of the
-// other two behind the interface -- hono's `Router<T>` with `RegExpRouter`,
+// other two behind the interface -- an HTTP framework's `Router<T>` with `RegExpRouter`,
 // `TrieRouter` and the `SmartRouter` that tries them in order. The slot typed
 // by the interface is the tagged sum of the implementing classes.
 interface Router<T> {

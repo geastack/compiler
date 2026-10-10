@@ -1,7 +1,7 @@
 // `new Array(n)` is declared `any[]` by the standard library, so its allocation
 // carries `array-object(dynamic)` while the slot it initializes is a lazily
-// filled `number[] | null`. hono's trie router writes exactly this shape
-// (router/trie-router/node.ts's `partOffsets`), and the certificate refused the
+// filled `number[] | null`. an HTTP framework's trie router writes exactly this shape
+// (its trie node's `partOffsets`), and the certificate refused the
 // store because no conversion rebuilds a dynamic-element array into a numeric one.
 
 function totalOffsets(parts: string[]): number {

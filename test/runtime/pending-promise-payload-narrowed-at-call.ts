@@ -1,4 +1,4 @@
-// hono's `HonoRequest.#cachedBody`: ONE generic reader stored in a field,
+// An HTTP framework's `AppRequest.#cachedBody`: ONE generic reader stored in a field,
 // `<Key extends keyof Readers>(key: Key) => Promise<Readers[Key]>`, whose
 // callable carries the union of every payload; each caller (`text()`,
 // `json()`) adapts the promise it gets back to its own `Promise<T>` at the

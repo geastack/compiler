@@ -29,7 +29,7 @@ const typedArrayConstructors: ReadonlySet<string> = new Set([
  * abstract constructor every typed-array prototype inherits from, is one. A
  * program reaches its accessors only reflectively --
  * `Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype),
- * Symbol.toStringTag).get` is Node's and bson's brand check for a typed array
+ * Symbol.toStringTag).get` is Node's (and libraries') brand check for a typed array
  * (23.2.3.38) -- and nothing in that chain is an object this backend has: the
  * abstract prototype has no carrier, and a descriptor of it has no layout.
  *

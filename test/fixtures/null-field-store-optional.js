@@ -1,4 +1,4 @@
-// The JS/JSDoc mirror of three.js's `renderers/webgl/WebGLLights.js` shape:
+// The JS/JSDoc mirror of a 3D renderer's lights-module shape:
 // a module-level object literal record (`state`) whose field is initialized
 // with a bare `null` and no annotation, later written in a function from an
 // OPTIONAL class-ref read (`lib.table`, a `?Texture` JSDoc field), and read

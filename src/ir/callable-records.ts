@@ -206,6 +206,7 @@ export const closedRecordCallablesOf = (
           construct !== null &&
           constructMatchesAbi(operation, construct, conversions) &&
           construct.restFrom === abi.restFrom &&
+          construct.argumentsFrame === abi.argumentsFrame &&
           construct.parameters.length === abi.parameters.length &&
           construct.parameters.every(
             (parameter, index) => representationKey(parameter.value) === representationKey(abi.parameters[index]!.value)

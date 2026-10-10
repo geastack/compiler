@@ -1,6 +1,6 @@
 // AN OBJECT LITERAL WHOSE ONE COMPUTED KEY IS A CHOICE OF TWO LITERALS.
 //
-// mongodb's monitor `checkServer` (`sdam/monitor.ts`) builds its heartbeat
+// A database client's monitor `checkServer` builds its heartbeat
 // command as `{ [serverApi?.version || helloOk ? 'hello' : LEGACY_HELLO_COMMAND]:
 // 1, ...(awaitable ? { maxAwaitTimeMS, topologyVersion } : {}) }` and hands it
 // to `connection.command(ns, cmd: Document, ...)`, which serializes it by

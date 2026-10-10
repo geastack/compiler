@@ -26,8 +26,8 @@ import { staticMembersOf, type StaticMembers } from './static-field-cells.js'
  * The flow followed is the one the program writes: a local or module cell
  * written by a proxy, a function every return of which may yield one, a call
  * of such a function, and the value an assignment expression evaluates to. A
- * slot that holds a proxy and something else (mongodb's `Kerberos`, written by
- * `require('kerberos')` on one path and `makeErrorModule(...)` on the other)
+ * slot that holds a proxy and something else (an optional dependency, written
+ * by `require('mod')` on one path and `makeErrorModule(...)` on the other)
  * keeps its declared carrier with a `proxy-object` arm beside the others. A
  * proxy reaching any position this does not follow -- a record field, an
  * array element, an argument -- keeps that position's own carrier, and the
@@ -286,8 +286,7 @@ export const proxyConstructionCarrierOf = (
   // A construction whose own result is already the box (`--dynamic-fallback`
   // marks every Proxy result so) keeps the dynamic proxy runtime it asked for.
   // Without the opt-in a dynamic result says only that the checker inferred
-  // `T = any` -- a trap parameter annotated `any` does that (mongodb's
-  // `makeErrorModule`) -- and `any` that no single use narrows derives to the
+  // `T = any` -- a trap parameter annotated `any` does that -- and `any` that no single use narrows derives to the
   // box. That is a fact about the checker's `T`, not about the object: the
   // target and handler still have their own carriers, and the proxy is minted
   // from those. Where it then reaches a position this walk does not follow,
@@ -339,7 +338,7 @@ const withResult = (carrier: Representation, abi: CallableAbi): Representation =
  * by the checker, so no checker narrowing can rule one out -- narrowed
  * reads keep it (`conversion/operand-view.ts`) -- and a pair that drops one is
  * a value of the checker's type flowing into a slot that never heard of the
- * proxy: a `ZStandard` module passed to a `(zstd: ZStandard)` parameter. The
+ * proxy: an optional module passed to a `(codec: Codec)` parameter. The
  * unchecked load would read another arm's payload while the proxy is live.
  */
 export const proxyArmWithoutHome = (source: Representation, target: Representation): boolean => {

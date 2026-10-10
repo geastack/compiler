@@ -1,5 +1,5 @@
 // A class copy's member whose type is an intersection over a CONDITIONAL on
-// the class's own parameter (mongodb's `WithId<TSchema>` =
+// the class's own parameter (a database client's `WithId<TSchema>` =
 // `EnhancedOmit<TSchema, '_id'> & { _id: InferIdType<TSchema> }`), reached
 // through another generic class's method result.
 type Doc = { [key: string]: any }

@@ -1,11 +1,12 @@
-//! expect: zstd compress: zstd is not installed
-//! expect: zstd decompress: zstd is not installed
-//! expect: gcp instance: gcp-metadata is not installed
-//! expect: gcp absent: gcp-metadata is not installed
+//! expect: compressor compress: compressor is not installed
+//! expect: compressor decompress: compressor is not installed
+//! expect: cloud instance: cloud-metadata is not installed
+//! expect: cloud absent: cloud-metadata is not installed
 
-// mongodb's `deps.ts` error module read the way `compression.ts` and
-// `providers/gcp.ts` read it: a METHOD off the module, called with typed
-// arguments (`zstd.compress(buffer, level)`, `gcpMetadata.instance<T>({...})`).
+// A library's optional-dependency error module read the way its compression
+// and cloud-credential providers read it: a METHOD off the module, called with
+// typed arguments (`compressor.compress(buffer, level)`,
+// `cloudMetadata.instance<T>({...})`).
 // The Proxy `get` trap answers `any` -- the missing-dependency error, or it
 // throws -- so the method the site calls is recovered from that box by the
 // checked dynamic-callable bridge, which verifies it is a Function and adapts
@@ -31,59 +32,59 @@ function makeErrorModule(error: any) {
   })
 }
 
-type ZStandardLib = {
+type CompressorLib = {
   compress(buf: Uint8Array, level?: number): Promise<Uint8Array>
   decompress(buf: Uint8Array): Promise<Uint8Array>
 }
-type ZStandard = ZStandardLib | { kModuleError: MissingDependencyError }
+type Compressor = CompressorLib | { kModuleError: MissingDependencyError }
 
-type GcpMetadata = { instance<T>(options?: string | { property: string }): Promise<T> } | { kModuleError: MissingDependencyError }
+type CloudMetadata = { instance<T>(options?: string | { property: string }): Promise<T> } | { kModuleError: MissingDependencyError }
 
 function loadModule(name: string): never {
   throw new Error('Cannot find module ' + name)
 }
 
-function getZstdLibrary(): ZStandard {
-  let zstd: ZStandard
+function getCompressorLibrary(): Compressor {
+  let compressor: Compressor
   try {
-    zstd = loadModule('@mongodb-js/zstd')
+    compressor = loadModule('@scope/compressor')
   } catch {
-    zstd = makeErrorModule(new MissingDependencyError('zstd is not installed'))
+    compressor = makeErrorModule(new MissingDependencyError('compressor is not installed'))
   }
-  return zstd
+  return compressor
 }
 
-function getGcpMetadata(): GcpMetadata {
+function getCloudMetadata(): CloudMetadata {
   try {
-    return loadModule('gcp-metadata')
+    return loadModule('cloud-metadata')
   } catch {
-    return makeErrorModule(new MissingDependencyError('gcp-metadata is not installed'))
+    return makeErrorModule(new MissingDependencyError('cloud-metadata is not installed'))
   }
 }
 
-let zstdModule: ZStandard | undefined
+let compressorModule: Compressor | undefined
 
-function loadZstd(): ZStandard {
-  zstdModule ??= getZstdLibrary()
-  return zstdModule
+function loadCompressor(): Compressor {
+  compressorModule ??= getCompressorLibrary()
+  return compressorModule
 }
 
 async function compress(data: Uint8Array): Promise<Uint8Array> {
-  const zstd = loadZstd()
-  if ('kModuleError' in zstd) throw zstd['kModuleError']
-  return await zstd.compress(data, 3)
+  const compressor = loadCompressor()
+  if ('kModuleError' in compressor) throw compressor['kModuleError']
+  return await compressor.compress(data, 3)
 }
 
 async function decompress(data: Uint8Array): Promise<Uint8Array> {
-  const zstd = loadZstd()
-  if ('kModuleError' in zstd) throw zstd['kModuleError']
-  return await zstd.decompress(data)
+  const compressor = loadCompressor()
+  if ('kModuleError' in compressor) throw compressor['kModuleError']
+  return await compressor.decompress(data)
 }
 
-async function loadGcpCredentials(): Promise<string> {
-  const gcpMetadata = getGcpMetadata()
-  if ('kModuleError' in gcpMetadata) return 'gcp absent: ' + gcpMetadata.kModuleError.message
-  const { access_token: accessToken } = await gcpMetadata.instance<{ access_token: string }>({
+async function loadCloudCredentials(): Promise<string> {
+  const cloudMetadata = getCloudMetadata()
+  if ('kModuleError' in cloudMetadata) return 'cloud absent: ' + cloudMetadata.kModuleError.message
+  const { access_token: accessToken } = await cloudMetadata.instance<{ access_token: string }>({
     property: 'service-accounts/default/token'
   })
   return accessToken
@@ -92,13 +93,13 @@ async function loadGcpCredentials(): Promise<string> {
 // The error module answers `in` through its target, which does hold
 // `kModuleError`; a module that did not would reach the method read, and the
 // trap throws there. Read once more without the guard to take that path.
-async function loadGcpUnguarded(): Promise<string> {
-  const gcpMetadata = getGcpMetadata()
-  if ('instance' in gcpMetadata) {
-    const { access_token: accessToken } = await gcpMetadata.instance<{ access_token: string }>({ property: 'token' })
+async function loadCloudUnguarded(): Promise<string> {
+  const cloudMetadata = getCloudMetadata()
+  if ('instance' in cloudMetadata) {
+    const { access_token: accessToken } = await cloudMetadata.instance<{ access_token: string }>({ property: 'token' })
     return accessToken
   }
-  return (gcpMetadata.kModuleError as MissingDependencyError).message
+  return (cloudMetadata.kModuleError as MissingDependencyError).message
 }
 
 async function main(): Promise<void> {
@@ -106,15 +107,15 @@ async function main(): Promise<void> {
   try {
     console.log('unexpected ' + (await compress(data)).length)
   } catch (error) {
-    console.log('zstd compress: ' + (error as MissingDependencyError).message)
+    console.log('compressor compress: ' + (error as MissingDependencyError).message)
   }
   try {
     console.log('unexpected ' + (await decompress(data)).length)
   } catch (error) {
-    console.log('zstd decompress: ' + (error as MissingDependencyError).message)
+    console.log('compressor decompress: ' + (error as MissingDependencyError).message)
   }
-  console.log('gcp instance: ' + (await loadGcpUnguarded()))
-  console.log(await loadGcpCredentials())
+  console.log('cloud instance: ' + (await loadCloudUnguarded()))
+  console.log(await loadCloudCredentials())
 }
 
 void main()

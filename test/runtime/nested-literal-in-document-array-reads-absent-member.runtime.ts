@@ -1,12 +1,12 @@
-// mongodb's `insertMany([...])` hands document literals whose nested objects
+// A database client's `insertMany([...])` hands document literals whose nested objects
 // (`meta: { owner, dims: { w, h } }`) are typed `any` by the Document index;
-// bson's `calculateObjectSize` then reads `value.toBSON` off every nested
+// its binary-document serializer's size calculation then reads `value.toWire` off every nested
 // value. Reading a member a nested literal does not have is `undefined`.
 type Doc = { [key: string]: any }
 
 function visit(value: any): string {
   if (value !== null && typeof value === 'object') {
-    if (typeof value.toBSON === 'function') return 'bson'
+    if (typeof value.toWire === 'function') return 'wire'
     if (Array.isArray(value)) return `[${value.map(visit).join(',')}]`
     return `{${Object.keys(value)
       .map((key) => `${key}:${visit(value[key])}`)

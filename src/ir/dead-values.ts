@@ -1,4 +1,4 @@
-import type { IrValueId } from '../identity/ids.js'
+import type { IrValueId, PhysicalBodyId } from '../identity/ids.js'
 import type { ConstructOperation, GetOperation, IrBody, IrNonTerminatorOperation, IrOperand } from './model.js'
 import { arrayAllocationDrainsDynamicIterator, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 
@@ -11,11 +11,11 @@ import { arrayAllocationDrainsDynamicIterator, operandsOfIrOperation, resultOfIr
  * field the plugin then re-reads through a reactive thunk; a key literal is
  * spelled inline by the member access it keys; a callee that is only ever
  * called by name never needs the function object built for it. Each of those
- * left a statement behind -- `v20 = gea_this->cities;` with no reader,
+ * left a statement behind -- `v20 = gea_this->items;` with no reader,
  * `v13 = "length";`, `v7 = gea::CallableObject<...>{&body, nullptr};` --
  * which the C++ compiler may or may not remove (a `Ref` copy is an atomic
  * increment it may not) and which a reader of the output has to prove dead
- * by hand. `examples/apps/weather` carried 142 unread literal temporaries and
+ * by hand. One UI program carried 142 unread literal temporaries and
  * 18 unread field reads in one unit.
  *
  * Deletion is a fixed point: an operation whose only reader was itself dead
@@ -43,8 +43,8 @@ import { arrayAllocationDrainsDynamicIterator, operandsOfIrOperation, resultOfIr
  * (`emit.ts`'s `emitBody`), independent of whether this producer ends up
  * dead -- what `emit.ts` still has to do where it skips the dead operation is
  * only the handful of side effects genuinely tied to the skipped RENDER
- * itself (a reactive thunk's stashed value, a method read's stashed
- * receiver), never the direct-callee name.
+ * itself (a reactive thunk's stashed value), never the direct-callee name or
+ * an implicitly captured method receiver.
  */
 export interface DeadValueRules {
   /** Whether this member read is a plain load rather than a call into the program. `key` is the IR's own text for a string-literal key, or `null`. */
@@ -163,6 +163,36 @@ export const unreadValuesOf = (body: IrBody): ReadonlySet<IrValueId> => {
   return new Set([...produced].filter((value) => !read.has(value)))
 }
 
+/** Keep every effectful call and its evaluated operands, but discard a return value no IR consumer observes. */
+export const discardUnreadCallResults = (bodies: ReadonlyMap<PhysicalBodyId, IrBody>): ReadonlyMap<PhysicalBodyId, IrBody> => {
+  let changed = false
+  const rewritten = new Map<PhysicalBodyId, IrBody>()
+  for (const [id, body] of bodies) {
+    const unread = unreadValuesOf(body)
+    const discarded = new Set<IrValueId>()
+    const blocks = new Map(body.blocks)
+    for (const [blockId, block] of body.blocks) {
+      let blockChanged = false
+      const operations = block.operations.map((operation) => {
+        if (operation.kind !== 'call' || operation.result === null || !unread.has(operation.result.id)) return operation
+        discarded.add(operation.result.id)
+        blockChanged = true
+        // Recipes are republished against the final operation before
+        // certification. None of its old result conversions execute now.
+        const { conversionRecipes: _recipes, closedFrame, ...call } = operation
+        return { ...call, result: null, ...(closedFrame ? { closedFrame: { ...closedFrame, result: 'ignored' as const } } : {}) }
+      })
+      if (blockChanged) blocks.set(blockId, { ...block, operations })
+    }
+    if (discarded.size === 0) rewritten.set(id, body)
+    else {
+      changed = true
+      rewritten.set(id, { ...body, blocks, values: new Map([...body.values].filter(([value]) => !discarded.has(value))) })
+    }
+  }
+  return changed ? rewritten : bodies
+}
+
 export const deadValuesOf = (body: IrBody, rules: DeadValueRules): ReadonlySet<IrValueId> => {
   const producers = new Map<IrValueId, IrNonTerminatorOperation>()
   const readers = new Map<IrValueId, number>()
@@ -235,11 +265,8 @@ export const deadValuesOf = (body: IrBody, rules: DeadValueRules): ReadonlySet<I
     const producer = producers.get(value)
     if (producer === undefined) continue
     for (const operand of readsOf(producer)) {
-      // A direct class-method read is deleted as a materialized callable, but
-      // its receiver is retained beside the result for the later direct call.
-      // The call therefore still reads this operand even though it does not
-      // read the method carrier. Decrementing it here can delete the receiver
-      // and leave the direct call naming an SSA value with no definition.
+      // A direct method invocation still needs the property-read receiver.
+      // Keep that operand live when deleting only its Function materialization.
       if (producer.kind === 'get' && rules.directCallee(producer) && operand === producer.receiver) continue
       count(operand.value, -1)
       if (readers.get(operand.value) === 0 && pure(operand.value)) pending.push(operand.value)

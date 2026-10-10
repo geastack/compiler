@@ -1,4 +1,5 @@
 import ts from 'typescript'
+import { unwrapErasedExpression } from '../producers/erasure.js'
 import { literalMemberNameOf } from '../derived-expression-type.js'
 import type { FlowTarget, ValueFlowIndex } from './model.js'
 import type { ProgramReachability } from '../reachability.js'
@@ -40,9 +41,9 @@ const isSourceModuleSymbol = (symbol: ts.Symbol | undefined): symbol is ts.Symbo
  *
  * A namespace import (`import * as dns`) is the direct spelling, but the same
  * immutable object reaches a program through ANY alias chain ending at the
- * module: `import { BSON } from 'bson'` where bson's index does `import * as
- * BSON from './bson'; export { BSON }`, and `dns.promises` where node-compat's
- * `dns.ts` re-exports `import * as promises from './dns/promises'`. The
+ * module: `import { NS } from 'lib'` where the package index does `import * as
+ * NS from './ns'; export { NS }`, and `dns.promises` where a `dns` module
+ * re-exports `import * as promises from './dns/promises'`. The
  * checker resolves every such chain to the module symbol, so the module
  * symbol -- not the spelling of the last hop -- is the authority. A module
  * namespace is a path: a member read off it is that export's own binding
@@ -116,12 +117,8 @@ export const namespaceMemberDeclarationOf = (checker: ts.TypeChecker, expression
   return target.valueDeclaration ?? target.declarations?.[0] ?? null
 }
 
-/** Parentheses and `!` name the same storage the expression inside them does. */
-export const unwrapNaming = (expression: ts.Expression): ts.Expression => {
-  let current: ts.Expression = expression
-  while (ts.isParenthesizedExpression(current) || ts.isNonNullExpression(current)) current = current.expression
-  return current
-}
+/** Erased wrappers name the same storage as their evaluated expression. */
+export const unwrapNaming = (expression: ts.Expression): ts.Expression => unwrapErasedExpression(expression)
 
 /**
  * The cell `expression` names, or `null` when it names none this layer can
@@ -213,7 +210,7 @@ export const callableDeclarationOfExpression = (checker: ts.TypeChecker, callee:
   // (`@param {function(string): void}`) and a `JSDocSignature`, whose
   // "parameters" are `ParameterDeclaration` nodes with NO `name` at all --
   // a shape `ts.isIdentifier` crashes on rather than rejecting, and a slot
-  // with no name is no slot. Measured: three's `FileLoader.js` carries one.
+  // with no name is no slot. Real library JSDoc carries such annotations.
   if (!callable) return null
   return callable.getSourceFile().isDeclarationFile ? null : callable
 }
@@ -226,8 +223,8 @@ export const callableDeclarationOfExpression = (checker: ts.TypeChecker, callee:
  * Without this, `checker.getSymbolAtLocation` at a cross-module call site
  * answers with the local ALIAS symbol, whose only declaration is the
  * `ImportSpecifier` -- not a callable, so the callee resolved to nothing and
- * every argument written at that call reached no slot. Measured on the three.js app:
- * 32 unannotated parameters were refused for want of exactly these edges,
+ * every argument written at that call reached no slot. Measured on a large JS
+ * library: dozens of unannotated parameters were refused for want of exactly these edges,
  * with the argument types sitting right there at the call. `getAliasedSymbol`
  * THROWS for a non-alias rather than answering, so the flag is tested first.
  */
@@ -251,8 +248,8 @@ export { resolveAlias as resolveFlowSymbolAlias }
  * ...`, `{ f: function ( x ) { ... } }` and `class C { f = ( x ) => ... }`
  * declare a CELL whose initializer is the callable -- and the cell's own
  * declaration node is not a signature, so a resolution stopping there reports
- * no callee at all. Measured on the three.js app: 14 unannotated parameters refused
- * purely because their callback was passed to a function spelled the second
+ * no callee at all. Measured on a large JS library: a dozen unannotated
+ * parameters refused purely because their callback was passed to a function spelled the second
  * way. `nameOfCallable` (`derived-expression-type.ts`) already draws the same
  * equivalence from the other direction -- it names a function expression by
  * the variable or property that holds it -- so this is that fact asked
@@ -296,11 +293,11 @@ export const isRealCallableDeclaration = (node: ts.Node): node is ts.SignatureDe
  * A class is named by its constructor's own name, so every `x: Foo`
  * annotation is a reference to the same symbol `new Foo(...)` reaches --
  * and the escape test, which asks "does anything hold this function as a
- * VALUE", counted those annotations as holders. hono's `HonoRequest` is the
- * case: `#req: HonoRequest<P, I['out']> | undefined` made its constructor's
- * parameters unbindable, which left `matchResult: Result<[unknown,
- * RouterRoute]>` at its annotation while the only caller passes a
- * `Result<[H, RouterRoute]>` -- two carriers for one cell, reconcilable
+ * VALUE", counted those annotations as holders. A generic class referenced by its
+ * own field annotation is the case: `#req: Request<P, I['out']> | undefined`
+ * made its constructor's parameters unbindable, which left `matchResult:
+ * Result<[unknown, Route]>` at its annotation while the only caller passes a
+ * `Result<[H, Route]>` -- two carriers for one cell, reconcilable
  * only by rebuilding the arrays inside it.
  *
  * A type annotation constructs nothing. Anything that does needs a VALUE
@@ -311,6 +308,7 @@ export const isTypePositionReference = (reference: ts.Node): boolean => {
   const parent = reference.parent
   if (!parent) return false
   if (ts.isTypeReferenceNode(parent)) return parent.typeName === reference
+  if (ts.isTypeQueryNode(parent)) return parent.exprName === reference
   if (ts.isQualifiedName(parent)) return isTypePositionReference(parent)
   return false
 }
@@ -440,9 +438,8 @@ const moduleExposureOf = (checker: ts.TypeChecker, modules: StatedModuleSet): Mo
 /**
  * Whether NOTHING in the program imports this export.
  *
- * `export { WebGLRenderLists, WebGLRenderList }` closes three's
- * `WebGLRenderLists.js`, but only `WebGLRenderer.js` imports anything from
- * it, and only `WebGLRenderLists`. An export list is not an expression, so
+ * `export { Lists, List }` closes a library's `Lists.js`, but only one other
+ * module imports anything from it, and only `Lists`. An export list is not an expression, so
  * value flow records no use for it, and `isModuleExportedDeclaration` has to
  * treat every exported declaration as published to unknown code. Inside a
  * stated module set that is too coarse: an export no import, re-export,

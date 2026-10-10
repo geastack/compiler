@@ -1,12 +1,12 @@
 //! expect: dispatch 5 1
-// hono's `HonoBase.fetch` is a field whose DECLARED signature is
+// An HTTP framework's `AppBase.fetch` is a field whose DECLARED signature is
 // `(request, Env?: E['Bindings'] | {}, executionCtx?: ExecutionContext) => ...`
 // and whose implementation is `(request, ...rest) => ...`, so the checker
 // types `rest` as the contextual tuple
 // `[(E['Bindings'] | {})?, ExecutionContext?]`.
 //
 // Both of position 0's members are vacuous -- `{}` outright, and
-// `E['Bindings']` through its constraint, since hono declares
+// `E['Bindings']` through its constraint, since the framework declares
 // `type Bindings = object` -- so every object type is assignable to it and a
 // `widestOf` join over the tuple's elements handed back position 0 alone.
 // The rest array's element then named no `Execution` at all

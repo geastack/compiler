@@ -1,7 +1,7 @@
-// mongodb's `performInitialHandshake` (cmap/connect.ts) copies its whole
+// A database client's `performInitialHandshake` copies its whole
 // ConnectionOptions into a CommandOptions under `@ts-expect-error`:
 //
-//   // @ts-expect-error: TODO(NODE-5141)
+//   // @ts-expect-error: TODO
 //   const handshakeOptions: CommandOptions = { ...options, raw: false }
 //
 // ConnectionOptions carries TLS's `session?: Buffer` and CommandOptions

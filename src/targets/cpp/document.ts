@@ -190,7 +190,7 @@ export const render = (document: CppDocument): RenderedCppSource => {
  * that carry none.
  */
 // A replacer function, never a replacement string: spliced text carries
-// program source (a function's `source` literal), and bson's
+// program source (a function's `source` literal), and a
 // `k.startsWith('$')` spells `$'`, which a string replacement expands.
 export const spliceRendered = (source: RenderedCppSource, marker: string, replacement: string): RenderedCppSource =>
   source.replace(marker, () => replacement) as RenderedCppSource

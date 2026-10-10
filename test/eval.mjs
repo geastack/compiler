@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -11,7 +12,7 @@ execFileSync(
   'clang++',
   [
     '-std=c++20',
-    '-O0',
+    ...nativeOptimization('correctness'),
     '-g',
     '-fsanitize=address,undefined',
     '-I',
@@ -167,10 +168,24 @@ for (const form of ['new Function', 'Function'])
     assert.match(result.source, /Eval::functionArgument\(/)
     assert.doesNotMatch(result.source, /Eval::constructFunction\(\{gea::Value::box/)
     const executable = resolve(root, `measurements/eval-source${executableSuffix}`)
-    execFileSync('clang++', ['-std=c++20', '-O0', '-I', resolve(root, 'src/targets/cpp/runtime'), '-x', 'c++', '-', '-o', executable], {
-      input: result.source + '\nint main(){__gea_top_level();}\n',
-      stdio: ['pipe', 'pipe', 'inherit']
-    })
+    execFileSync(
+      'clang++',
+      [
+        '-std=c++20',
+        ...nativeOptimization('correctness'),
+        '-I',
+        resolve(root, 'src/targets/cpp/runtime'),
+        '-x',
+        'c++',
+        '-',
+        '-o',
+        executable
+      ],
+      {
+        input: result.source + '\nint main(){__gea_top_level();}\n',
+        stdio: ['pipe', 'pipe', 'inherit']
+      }
+    )
     assert.equal(execFileSync(executable, { encoding: 'utf8' }), '5 9 2 anonymous\n')
   })
 
@@ -180,7 +195,7 @@ test('Eval runtime boundaries, early errors, coercion hints, and closure lifetim
     'clang++',
     [
       '-std=c++20',
-      '-O0',
+      ...nativeOptimization('correctness'),
       '-g',
       '-fsanitize=address,undefined',
       '-I',
@@ -200,9 +215,23 @@ test('opt-in variadic tuple carrier preserves indexed values and array length', 
   const result = compile({ rootFileNames: [file], sourceOverlay: new Map([[file, source]]), dynamicFallback: true })
   assert.ok(result.source, JSON.stringify(result.diagnostics))
   const executable = resolve(root, `measurements/eval-variadic${executableSuffix}`)
-  execFileSync('clang++', ['-std=c++20', '-O0', '-I', resolve(root, 'src/targets/cpp/runtime'), '-x', 'c++', '-', '-o', executable], {
-    input: result.source + '\nint main(){__gea_top_level();}\n',
-    stdio: ['pipe', 'pipe', 'inherit']
-  })
+  execFileSync(
+    'clang++',
+    [
+      '-std=c++20',
+      ...nativeOptimization('correctness'),
+      '-I',
+      resolve(root, 'src/targets/cpp/runtime'),
+      '-x',
+      'c++',
+      '-',
+      '-o',
+      executable
+    ],
+    {
+      input: result.source + '\nint main(){__gea_top_level();}\n',
+      stdio: ['pipe', 'pipe', 'inherit']
+    }
+  )
   assert.equal(execFileSync(executable, { encoding: 'utf8' }), '7 2\n')
 })

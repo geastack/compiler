@@ -1,5 +1,5 @@
 // A generic body calling a member on a receiver whose type is its own type
-// parameter (mongodb's `tryOperation<T extends AbstractOperation>` calling
+// parameter (a database client's `tryOperation<T extends AbstractOperation>` calling
 // `operation.handleOk(result)`). The checker resolves the member on the
 // CONSTRAINT, `Operation<TResult = any>`, so the call's result is `any`; a copy
 // that binds `T` to `CountOperation` calls `CountOperation.handleOk`, which

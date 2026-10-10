@@ -1,4 +1,4 @@
-// The minimal form of mongodb's `executeOperation`/`tryOperation` result
+// The minimal form of a database client's `executeOperation`/`tryOperation` result
 // path: a generic function over `T extends AbstractOperation` (the base's own
 // `TResult` defaults to `any`) returns `op.handleOk(r)`, declared as
 // `ReturnType<T['handleOk']>`. Each copy of `f`/`g` is instantiated at one

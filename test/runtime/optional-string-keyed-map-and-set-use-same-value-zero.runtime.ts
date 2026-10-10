@@ -1,4 +1,4 @@
-// A `Map`/`Set` keyed by `string | undefined` -- mongodb's
+// A `Map`/`Set` keyed by `string | undefined` -- a database client's
 // `Map<string | undefined, ...>` of per-service connection pools. The key
 // carrier is `gea::Optional<std::string>`, and keyed-collection lookup is
 // SameValueZero (ECMA-262 7.2.12): `undefined` is one key, equal only to

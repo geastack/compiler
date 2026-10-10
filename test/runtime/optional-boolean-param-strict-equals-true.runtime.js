@@ -1,6 +1,6 @@
-// three's `ColorBuffer.setClear( r, g, b, a, premultipliedAlpha )`, with the
-// `@param {boolean} premultipliedAlpha` statement the `@types/three` overlay
-// carries into three's own source: required in the statement, yet WebGLState
+// A 3D library's `ColorBuffer.setClear( r, g, b, a, premultipliedAlpha )`, with
+// the `@param {boolean} premultipliedAlpha` statement its type-declaration
+// overlay carries into its own source: required in the statement, yet GpuState
 // itself calls `colorBuffer.setClear( 0, 0, 0, 1 )` without it. The binding is
 // `boolean | undefined` (`omitted-stated-parameter.ts`); a read must keep that
 // absence, because the checker's `boolean` at the read is the statement, not a
@@ -31,16 +31,16 @@ function ColorBuffer() {
   }
 }
 
-function WebGLState() {
-  // @ts-ignore -- three constructs its factory functions with `new`
+function GpuState() {
+  // @ts-ignore -- the library constructs its factory functions with `new`
   const colorBuffer = new ColorBuffer()
-  // @ts-ignore -- three omits the statement's required argument here
+  // @ts-ignore -- the library omits the statement's required argument here
   colorBuffer.setClear(0, 0, 0, 1)
   return { buffers: { color: colorBuffer } }
 }
 
 /** @param {{ buffers: { color: ReturnType<typeof ColorBuffer> } }} state @param {boolean} premultipliedAlpha */
-function WebGLBackground(state, premultipliedAlpha) {
+function SceneBackground(state, premultipliedAlpha) {
   return {
     render: function () {
       state.buffers.color.setClear(1, 1, 1, 0.5, premultipliedAlpha)
@@ -48,9 +48,9 @@ function WebGLBackground(state, premultipliedAlpha) {
   }
 }
 
-// @ts-ignore -- three constructs its factory functions with `new`
-const state = new WebGLState()
+// @ts-ignore -- the library constructs its factory functions with `new`
+const state = new GpuState()
 // @ts-ignore
-new WebGLBackground(state, true).render()
+new SceneBackground(state, true).render()
 //! expect: 0,0,0,1 0.5,0.5,0.5,0.5
 console.log(state.buffers.color.seen.join(' '))

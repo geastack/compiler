@@ -9,9 +9,9 @@ import { censusParameterBindings } from './parameter-bindings.js'
 import { wholeProgram } from './reachability.js'
 
 /**
- * three's `materialProperties.needsLights = materialNeedsLights( material )`:
- * a `MeshBasicMaterial` declares none of the flags the chain reads, so the
- * call returns `undefined`. Typing it `boolean` laid the field out as a bare
+ * A JS library's `properties.needsLights = materialNeedsLights( material )`:
+ * a subclass that declares none of the flags the chain reads makes the
+ * call return `undefined`. Typing it `boolean` laid the field out as a bare
  * `bool`, and the first frame threw storing `undefined` into it.
  */
 const directory = resolve('test/fixtures/subclass-flag-logical')

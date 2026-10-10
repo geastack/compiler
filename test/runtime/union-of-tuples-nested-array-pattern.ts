@@ -1,6 +1,6 @@
 //! expect: /x
 // The same union-of-tuples source, read through a NESTED pattern in a `.map`
-// callback's parameter -- hono's `HonoRequest.routePath`, whose
+// callback's parameter -- an HTTP framework's `AppRequest.routePath`, whose
 // `Result<T> = [[T, ParamIndexMap][], ParamStash] | [[T, Params][]]` makes
 // `matchResult[0]`'s element the union `[T, ParamIndexMap] | [T, Params]`.
 type ParamIndexMap = Record<string, number>

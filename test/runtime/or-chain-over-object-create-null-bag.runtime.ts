@@ -1,9 +1,9 @@
 // `||` OVER FIELDS OF AN `Object.create(null)` BAG TYPED BY ITS RETURN.
 //
-// mongodb's `parseOptions(...): MongoOptions` (`connection_string.ts`) builds
-// `const mongoOptions = Object.create(null)`, fills it, and refuses
-// `!mongoOptions.proxyHost && (mongoOptions.proxyPort ||
-// mongoOptions.proxyUsername || mongoOptions.proxyPassword)`. The checker
+// A database client's `parseOptions(...): ClientOptions` builds
+// `const clientOptions = Object.create(null)`, fills it, and refuses
+// `!clientOptions.proxyHost && (clientOptions.proxyPort ||
+// clientOptions.proxyUsername || clientOptions.proxyPassword)`. The checker
 // types every read of the bag `any`; the values really held are a number and
 // strings, and `||` yields the first truthy one (or the last operand).
 

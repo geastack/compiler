@@ -30,7 +30,7 @@ const bodyNeverCompletes = (checker: ts.TypeChecker, body: ts.Block): boolean =>
  * `never` -- or a class it extends is such a class, since every derived
  * construction runs its base's.
  *
- * A host target states capabilities it does not have this way: node-compat's
+ * A host target states capabilities it does not have this way: a host's
  * `Http2ServerRequest` extends the HTTP/1 `IncomingMessage` so the library's
  * `IncomingMessage | Http2ServerRequest` unions resolve, and its constructor
  * calls `nodeNotImplemented`, declared `never`. `x instanceof

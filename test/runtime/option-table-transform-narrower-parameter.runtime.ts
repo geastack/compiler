@@ -1,5 +1,5 @@
-// mongodb's connection_string.ts OPTIONS table, `{ ... } as Record<keyof
-// MongoClientOptions, OptionDescriptor>`: the slot types every `transform` as
+// A database client's connection-string OPTIONS table, `{ ... } as
+// Record<keyof ClientOptions, OptionDescriptor>`: the slot types every `transform` as
 // `(args: { name; options; values: unknown[] }) => unknown`, and an entry
 // STATES a narrower destructured parameter (method parameter bivariance) and
 // returns a concrete class. Every call reaches the method through the slot, so

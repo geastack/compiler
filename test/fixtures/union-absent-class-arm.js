@@ -1,9 +1,9 @@
-// @ts-nocheck -- three is compiled from `node_modules`, where the checker
-// reports nothing; this file stands in for it. The reads below of members the
-// `Color` arm lacks are exactly what three's JS does unchecked.
+// @ts-nocheck -- a 3D library is compiled from `node_modules`, where the
+// checker reports nothing; this file stands in for it. The reads below of
+// members the `Color` arm lacks are exactly what the library's JS does unchecked.
 
-// three's `WebGLBackground`: `scene.background` is declared `(Color | Texture)
-// | null` (`@types/three`), and the renderer asks it `isCubeTexture` and
+// A 3D renderer's background pass: `scene.background` is declared `(Color |
+// Texture) | null` (in the library's type declarations), and the renderer asks it `isCubeTexture` and
 // `mapping` -- members only the texture family declares. On the `Color` arm
 // both reads are simply `undefined`; nothing here can give a `Color` those
 // properties, so neither class needs a dynamic field protocol for the reads to

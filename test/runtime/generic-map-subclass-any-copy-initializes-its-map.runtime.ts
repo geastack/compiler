@@ -1,7 +1,7 @@
 // A generic class extending `Map` whose type parameter defaults to `any`,
-// instantiated both at `any` and at a concrete type -- mongodb's
-// `class CaseInsensitiveMap<Value = any> extends Map<string, Value>` in
-// connection_string.ts. The `any` copy is read as the family of its copies,
+// instantiated both at `any` and at a concrete type -- a database
+// client's `class CaseInsensitiveMap<Value = any> extends Map<string, Value>`
+// for connection-string options. The `any` copy is read as the family of its copies,
 // and its own arm still carries the Map it extends, so its constructor's
 // `super(entries)` initializes that Map.
 class CaseInsensitiveMap<Value = any> extends Map<string, Value> {

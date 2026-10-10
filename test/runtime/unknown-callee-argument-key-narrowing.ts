@@ -29,8 +29,8 @@ console.log(total)
 
 // Both obligations the stamp above used to hold: `Object.keys` must be the
 // real one, and the array it returns must carry the intrinsic Array prototype
-// for `forEach` to be borrowed from it. This is hono's `RegExpRouter.add`
-// shape, reduced.
+// for `forEach` to be borrowed from it. This is an HTTP framework's
+// regular-expression router `add` shape, reduced.
 const routes: Record<string, number> = { '/a': 1, '/b': 2 }
 let joined = ''
 Object.keys(routes).forEach((path) => {

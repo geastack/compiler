@@ -169,3 +169,17 @@ export const coreGlobalClasses: ReadonlySet<string> = new Set<string>([
   'RegExp',
   'Date'
 ])
+
+// These objects use the backend's member templates and have no external C++
+// cell. The standard-library identity gate keeps an application's ambient
+// declaration of the same name from borrowing the native lookup contract.
+export const coreGlobalSingletons: ReadonlyMap<
+  string,
+  { readonly protocol: string; readonly version: number; readonly identity: number } | null
+> = new Map([
+  ['console', null],
+  ['localStorage', null],
+  // HostIntrinsicSidecar is the native store of this one protocol identity.
+  ['Math', { protocol: 'Math', version: 1, identity: 0 }],
+  ['JSON', null]
+])

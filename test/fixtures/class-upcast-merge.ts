@@ -6,8 +6,8 @@
 // `class-ref(Dog)`. Nothing proposed the pair before `ClassHeritagePolicy`
 // existed: `wideningSourcesOf` (conversion/build.ts) reads valid sources off
 // the TARGET's shape, and a base class-ref states nothing about which classes
-// descend from it, so the registry was never even asked. mongodb's
-// `execute_operation.ts` throws exactly this expression 29 monomorphized ways.
+// descend from it, so the registry was never even asked. A database
+// client's operation executor throws exactly this expression 29 monomorphized ways.
 //
 // The C++ side needed nothing new: `records.ts` already emits `struct Dog :
 // Animal`, and `gea::Ref<T>`'s converting constructor is gated on precisely

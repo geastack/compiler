@@ -4,7 +4,7 @@ import type { ClassLayout } from '../../../projection/classes.js'
 import { classPrototypeReadOf } from '../../../projection/class-prototype.js'
 import { classMethodOverrideOf, classPrototypeMethodMutableOf, classPrototypeMethodFamilyMutableOf } from '../../../projection/fields.js'
 import { createCppEmitBlockedError, type EmitContext } from '../emit-context.js'
-import { alignedValueText } from '../emit-narrowing.js'
+import { alignedValueText, programConversionText, type ConversionSite } from '../emit-narrowing.js'
 import {
   cppClassName,
   cppRecordFieldAttributesName,
@@ -62,7 +62,15 @@ export const nativePrototypeObjectText = (
     const slot = classMethodOverrideOf(ctx.classes, declaration, method.key)
     if (slot === null || method.callable === null) continue
     const original = originalMethod(layout, method, 'gea_prototype->gea_method_state')
-    const value = alignedValueText(ctx, 'native-prototype:initial-method', original.representation, slot.value, original.text)
+    const value = programConversionText(
+      ctx,
+      'prototype-method',
+      String(declaration),
+      method.key,
+      original.representation,
+      slot.value,
+      original.text
+    )
     if (value === null)
       throw createCppEmitBlockedError(
         'property-access:class-prototype:method-slot',
@@ -84,7 +92,7 @@ export const nativePrototypeObjectText = (
 
 /**
  * `C.prototype` where `C` may hold more than one class -- `global.Response`,
- * which `@hono/node-server` replaces with its own subclass. The class
+ * which a library may replace with its own subclass. The class
  * evaluation the value carries names which one it is, and each member's
  * prototype is built as a lone class's would be and stored as the published
  * carrier.
@@ -118,15 +126,18 @@ const familyPrototypeObjectText = (
 }
 
 /** Add live prototype lookup beneath the instance's own-method shadow. */
+export type NativeMethodReadConversion = (site: string, source: Representation, target: Representation, text: string) => string | null
+
 export const nativePrototypeMethodFallbackText = (
-  ctx: EmitContext,
+  ctx: ConversionSite,
   receiver: Representation,
   key: string,
   owner: ClassLayout,
   valueRepresentation: Representation,
   receiverText: string,
   original: string,
-  superAccess: boolean
+  superAccess: boolean,
+  convert: NativeMethodReadConversion = (site, source, target, text) => alignedValueText(ctx, site, source, target, text)
 ): string => {
   if (receiver.kind !== 'class-ref') return original
   const mutable = superAccess
@@ -136,13 +147,7 @@ export const nativePrototypeMethodFallbackText = (
   const slot = classMethodOverrideOf(ctx.classes, owner.declaration, key)
   if (slot === null) return original
   const type = cppTypeOf(valueRepresentation)
-  const held = alignedValueText(
-    ctx,
-    'native-prototype:live-method',
-    slot.value,
-    valueRepresentation,
-    `gea_prototype.${cppRecordFieldName(key)}`
-  )
+  const held = convert('native-prototype:live-method', slot.value, valueRepresentation, `gea_prototype.${cppRecordFieldName(key)}`)
   if (held === null)
     throw createCppEmitBlockedError(
       'property-access:class-prototype:live-method',

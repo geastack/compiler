@@ -1,5 +1,5 @@
 //! expect-abort
-//! emitted-has: callableDynamicSet
+//! emitted-has: callableNativeDataSetWithReceiver
 
 /** @type {(() => void) & { name: string }} */
 const entry = /** @type {any} */ (function entry() {})

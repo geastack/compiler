@@ -1,8 +1,8 @@
 /**
  * Allocation provenance solved one strongly connected component at a time.
  *
- * An origin graph is cyclic wherever storage is reused. Three's
- * `WebGLRenderList.getNextRenderItem` reads `renderItems[ renderItemsIndex ]`
+ * An origin graph is cyclic wherever storage is reused. An object pool's
+ * `getNextItem` reads `renderItems[ renderItemsIndex ]`
  * into `renderItem`, and on a miss stores a fresh literal back into
  * `renderItems` through that same `renderItem` -- so the element read's
  * origins include the very cell being proven. A depth-first proof that treats
@@ -27,8 +27,8 @@ export type SeededOriginVerdict = 'refused' | 'vacuous' | 'allocated'
 
 /**
  * `null`, the global `undefined`, or `void x`: an origin that holds no object.
- * Three's renderer starts `let currentRenderList = null` and `let _opaqueSort
- * = null`; neither empty slot can be a receiver or a callee, so it widens no
+ * A module that starts `let currentRenderList = null` and `let _opaqueSort
+ * = null`: neither empty slot can be a receiver or a callee, so it widens no
  * value set -- but it must not count as the allocation a set needs either. A
  * local binding that shadows `undefined` has a declaration and is an ordinary
  * cell instead.

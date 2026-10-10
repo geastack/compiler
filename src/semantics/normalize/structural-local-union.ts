@@ -18,11 +18,19 @@ export const createLocalUnionResolver = (
   census: ParameterBindingCensus,
   flow: ValueFlowIndex | undefined,
   read: (node: ts.Node) => StructuralTypeId,
-  refinedSourceAt: (node: ts.Node) => StructuralTypeId | null = () => null
+  refinedSourceAt: (node: ts.Node) => StructuralTypeId | null = () => null,
+  sourceCallResultAt: (node: ts.Node) => StructuralTypeId | null = () => null
 ): ((node: ts.Node) => StructuralTypeId | null) => {
   const memo = new Map<ts.VariableDeclaration, StructuralTypeId | null>()
   const pending = new Set<ts.VariableDeclaration>()
   const sourceRefined = new Set<ts.VariableDeclaration>()
+  const sourceCallRefined = new Set<ts.VariableDeclaration>()
+  const localOf = (node: ts.Node): ts.VariableDeclaration | null => {
+    if (!ts.isIdentifier(node)) return null
+    const declarations = checker.getSymbolAtLocation(node)?.declarations
+    const declaration = declarations?.length === 1 ? declarations[0] : undefined
+    return declaration && ts.isVariableDeclaration(declaration) ? declaration : null
+  }
   const concreteRefinement = (id: StructuralTypeId, visited = new Set<StructuralTypeId>()): boolean => {
     if (visited.has(id)) return true
     visited.add(id)
@@ -42,14 +50,25 @@ export const createLocalUnionResolver = (
       writes.some((write) => !write.value || (write.edge !== 'declaration-initializer' && write.edge !== 'identifier-assignment'))
     )
       return null
-    // Some authenticated intrinsic calls publish a more precise structural
-    // result than their non-generic ambient signature. Its unannotated local
-    // must retain that same carrier. Reuse the complete write set, requiring
-    // every incoming source to establish the identical concrete refinement;
-    // one unknown or incompatible writer prevents partial narrowing.
     pending.add(declaration)
+    // A proved own Function replacement can have a different result from the
+    // checker's inherited .call signature. It owns this writer's value; every
+    // other writer still contributes its actual structural type. An inferred
+    // value alias carries that same result domain, not the old checker answer.
+    const sourceCalls = writes.map((write) => {
+      const value = write.value as ts.Expression
+      const direct = sourceCallResultAt(value)
+      if (direct !== null) return direct
+      const alias = localOf(value)
+      const result = alias ? resolve(alias) : null
+      return alias && sourceCallRefined.has(alias) ? result : null
+    })
+    const hasSourceCall = sourceCalls.some((result) => result !== null)
     const unionArms = census.unionArmsAt(declaration)
-    if (!unionArms) {
+    if (!unionArms && !hasSourceCall) {
+      // Descriptor queries refine an ambient return only when every writer
+      // establishes the same concrete descriptor. The own-call result proof
+      // above is separate and does not broaden this descriptor authority.
       const refinements = writes.map((write) => refinedSourceAt(write.value as ts.Expression))
       const first = refinements[0]
       if (!first || refinements.some((id) => id !== first) || !concreteRefinement(first)) {
@@ -58,7 +77,8 @@ export const createLocalUnionResolver = (
       }
       sourceRefined.add(declaration)
     }
-    const members = writes.map((write) => read(write.value as ts.Expression))
+    if (hasSourceCall) sourceCallRefined.add(declaration)
+    const members = writes.map((write, ordinal) => sourceCalls[ordinal] ?? read(write.value as ts.Expression))
     pending.delete(declaration)
     // An uninitialized lexical binding holds undefined until its first write.
     if (!declaration.initializer) members.push(table.intern({ kind: 'primitive', primitive: 'undefined' }))
@@ -69,15 +89,18 @@ export const createLocalUnionResolver = (
   return (node) => {
     if (ts.isVariableDeclaration(node)) return resolve(node)
     if (!ts.isIdentifier(node)) return null
-    const declarations = checker.getSymbolAtLocation(node)?.declarations
-    const declaration = declarations?.length === 1 ? declarations[0] : undefined
-    if (!declaration || !ts.isVariableDeclaration(declaration)) return null
+    const declaration = localOf(node)
+    if (!declaration) return null
     // Resolve the narrow candidate before asking the checker for this read's
     // potentially enormous instantiated type. Almost every identifier is not
     // such a candidate; querying all of them overflowed TypeScript's own
-    // conditional-type instantiation stack on Hono's route types.
+    // conditional-type instantiation stack on a library's deeply conditional types.
     const result = resolve(declaration)
     if (!result || node === declaration.name) return result
+    // The checker inferred these locals from a different executable source.
+    // Even its nullish exclusions may be stale. Preserve the complete actual
+    // writer domain; later control-flow proofs may narrow that native value.
+    if (sourceCallRefined.has(declaration)) return result
     // Calling a union-held local does not first convert the cell into the
     // checker's common signature. The callable value remains whichever arm
     // was stored, and [[Call]] dispatches through that arm's own convention.

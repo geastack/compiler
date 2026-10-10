@@ -57,7 +57,7 @@ const sourceFilesIn = (dir) => {
  *
  * The manifest's own `gea.entry` first, for the same reason `appPlatform` below
  * reads the manifest: it is what the shipping build opens, and a convention
- * kept only here is a second rule that can disagree with it. It did -- `maps`
+ * kept only here is a second rule that can disagree with it. It did -- one app
  * starts from `index.device.tsx`, matched none of the four conventional names,
  * and was dropped from every measurement without a word, so a shipping app sat
  * outside the corpus while the corpus reported itself complete.
@@ -273,14 +273,14 @@ const ambientAssets = join(here, 'test', 'fixtures', 'ambient', 'assets.d.ts')
  * in its program. That is not a smaller difference than it sounds: `@types/node`
  * declares `fetch`, `console`, `setTimeout` and `Buffer` as globals, and they
  * MERGE with the framework's own declarations of the same names -- so `await
- * fetch(url)` in `maps` resolved to Node's overload and produced a `Response`,
+ * fetch(url)` in one app resolved to Node's overload and produced a `Response`,
  * a host type gea has never had, instead of the framework's `FetchResponse`.
  *
  * Pointing the roots at the app's own chain instead was tried and is worse:
  * the examples workspace-root `node_modules/@types` install, so every app
  * inherits every package any sibling hoisted there -- `@types/react`, whose
  * global `JSX` namespace replaces the framework's and turned every `<canvas>`
- * touch handler in `bubble-grid` into React's `TouchEvent<HTMLCanvasElement>`.
+ * touch handler in another app into React's `TouchEvent<HTMLCanvasElement>`.
  * An app that really needs an ambient package can `/// <reference types>` it or
  * import it; nothing in this corpus does.
  */
@@ -511,11 +511,11 @@ const iosSdkArguments = () => {
 // C++ into one directory overwrite each other's files.
 const cxxDir = process.env.GEA_CORPUS_PROJECTS ? join(resolve(process.env.GEA_CORPUS_PROJECTS), 'cxx') : join(here, 'measurements', 'cxx')
 mkdirSync(cxxDir, { recursive: true })
-copyFileSync(join(here, 'src/targets/cpp/runtime/gea_runtime.h'), join(cxxDir, 'gea_runtime.h'))
-copyFileSync(join(here, 'src/targets/cpp/runtime/gea_pcm.h'), join(cxxDir, 'gea_pcm.h'))
-copyFileSync(join(here, 'src/targets/cpp/runtime/gea_dynamic_proxy.h'), join(cxxDir, 'gea_dynamic_proxy.h'))
-copyFileSync(join(here, 'src/targets/cpp/runtime/gea_eval.h'), join(cxxDir, 'gea_eval.h'))
-copyFileSync(join(here, 'src/targets/cpp/runtime/gea_native_class_prototype.h'), join(cxxDir, 'gea_native_class_prototype.h'))
+const runtimeDirectory = join(here, 'src/targets/cpp/runtime')
+for (const header of readdirSync(runtimeDirectory)
+  .filter((name) => name.endsWith('.h'))
+  .sort())
+  copyFileSync(join(runtimeDirectory, header), join(cxxDir, header))
 
 /**
  * Apple's `gea/apple/native_bridge.h`, written by the generator the shipping

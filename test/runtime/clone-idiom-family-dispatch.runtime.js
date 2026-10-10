@@ -1,6 +1,6 @@
-// Root E: three's universal `clone() { return new this.constructor().copy(
-// this ) }` idiom (Object3D/Material/Texture/Camera/BufferGeometry/
-// RenderTarget), where every subclass overrides `copy` and calls
+// Root E: a 3D scene-graph library's universal `clone() { return new
+// this.constructor().copy( this ) }` idiom (SceneNode/Material/Texture/Camera/
+// Geometry/RenderTarget), where every subclass overrides `copy` and calls
 // `super.copy( source )` first. Proves the whole family dispatches correctly
 // end to end -- `new this.constructor()` picking the RUNTIME subclass, and
 // `super.copy` reaching the base body -- not just that the reach proof stops

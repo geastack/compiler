@@ -1,7 +1,7 @@
 /**
  * A cell holding `undefined | null | T`, guarded on ONE of its two absences.
  *
- * three's `@type {?Array<Plane>}` field is exactly this: a JS field is
+ * A 3D library's `@type {?Array<Plane>}` field is exactly this: a JS field is
  * readable before its constructor writes it, so the census tags both
  * absences, and `Material.copy`'s `if ( srcPlanes !== null )` rules out
  * exactly one. What is left is one absence beside one value -- which IS an

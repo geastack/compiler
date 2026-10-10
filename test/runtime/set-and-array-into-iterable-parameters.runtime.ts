@@ -1,7 +1,7 @@
 // A `Set` AND AN ARRAY PASSED WHERE `Iterable<T>` IS DECLARED.
 //
-// mongodb's `setDifference<T>(setA: Iterable<T>, setB: Iterable<T>)`
-// (`utils.ts`) is called by `parseOptions` (`connection_string.ts`) with a
+// A database client's `setDifference<T>(setA: Iterable<T>, setB: Iterable<T>)`
+// is called by its `parseOptions` with a
 // `Set<string>` of the provided option keys and a `string[]` of the known
 // ones: it copies the first iterable into a new Set and deletes every element
 // the second yields. Both arguments are iterated through their own

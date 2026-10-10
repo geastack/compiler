@@ -1,4 +1,4 @@
-// bson's `isMap(v)` guard and `value instanceof Map || isMap(value)` over an
+// A binary-document serializer's `isMap(v)` guard and `value instanceof Map || isMap(value)` over an
 // `unknown`/`any` value: the Map is recovered from the dynamic carrier by a
 // runtime brand check, whatever its key and value types were, and iterated
 // as the entries it holds. A non-Map passes through untouched.
@@ -30,7 +30,7 @@ const labels = new Map<string, string>()
 labels.set('x', 'y')
 const numbered = new Map<number, string>()
 numbered.set(1, 'one')
-// Handed over as `unknown`, the way bson receives a document's values.
+// Handed over as `unknown`, the way a serializer receives a document's values.
 const a: unknown = counts
 const b: unknown = labels
 const c: unknown = 7

@@ -1,9 +1,16 @@
+import { nativePrototypeMethodOf } from '../../../ir/native-prototype-calls.js'
 import type { IrOperand, IrResult, SetOperation, DefineOwnPropertyOperation } from '../../../ir/model.js'
 import type { IrValueId } from '../../../identity/ids.js'
 import type { Ownership, RecordAccessor, RecordField, RecordIndexSidecar, Representation } from '../../../representation/model.js'
 import { representationKey } from '../../../representation/model.js'
 import type { RegExpDeclarationKind } from '../../../representation/policies.js'
-import { recordLayoutPolicyOf } from '../../../projection/fields.js'
+import {
+  regexpDataMemberStorage,
+  regexpDynamicSetValueOf,
+  regexpPatternMethodKeys,
+  regexpRoleOf
+} from '../../../projection/regexp-fields.js'
+export { regexpRoleOf } from '../../../projection/regexp-fields.js'
 import {
   createCppEmitBlockedError,
   defineValue,
@@ -19,7 +26,6 @@ import { toStringRefusal, toStringText } from '../emit-tostring.js'
 import { cppRecordFieldKeyIsSymbol, cppRecordFieldName } from '../types.js'
 import { cppRecordIndexSidecarNameFor } from '../records.js'
 import { cppConstructPatternEntry, cppRegExpNativeTypes, cppStringObjectNativeType } from '../regexp-types.js'
-import { arrayPrototypeMethods } from './emit-prototype-array.js'
 
 /**
  * `RegExp.prototype`, `RegExpExecArray` and `RegExpMatchArray`, as this
@@ -41,15 +47,6 @@ import { arrayPrototypeMethods } from './emit-prototype-array.js'
  * would reach clang as an unknown-member error instead of a refusal naming the
  * member -- which is the exact bug this lane exists to fix on the String side.
  */
-
-/** Which of the three regular-expression carriers an operand holds, or `null` for anything else. */
-export const regexpRoleOf = (representation: Representation): RegExpDeclarationKind | null => {
-  if (representation.kind !== 'native-record-ref' || representation.native === null) return null
-  if (representation.native === cppRegExpNativeTypes.pattern) return 'pattern'
-  if (representation.native === cppRegExpNativeTypes['exec-result']) return 'exec-result'
-  if (representation.native === cppRegExpNativeTypes['match-result']) return 'match-result'
-  return null
-}
 
 /** The record layout an object-shaped pattern argument exposes, or `null` for a carrier whose members this cannot read. */
 const objectPatternLayoutOf = (
@@ -74,7 +71,7 @@ const objectPatternLayoutOf = (
   // wrapper) or a host struct, none of which is the ordinary object 22.2.4.1
   // step 6 reads `source`/`flags` off.
   if (carrier.kind !== 'native-record-ref' || carrier.native !== null) return null
-  const layouts = recordLayoutPolicyOf(ctx.deriver, ctx.classes)
+  const layouts = ctx.layouts
   const fields = layouts.forShape(carrier.shapeId)
   if (fields === null) return null
   return { fields, accessors: layouts.accessorsForShape?.(carrier.shapeId) ?? [], ownership: carrier.ownership, indexes: [] }
@@ -220,7 +217,7 @@ const patternDataMembers: ReadonlySet<string> = new Set([
  *   `emit-prototype-string.ts`: the indirection through a well-known symbol is
  *   an extension point this backend does not install, not the operation.
  */
-const patternMethods: ReadonlySet<string> = new Set(['test', 'exec', 'toString'])
+const patternMethods = regexpPatternMethodKeys
 
 /**
  * The NAMED members of the two match-result interfaces.
@@ -235,55 +232,6 @@ const patternMethods: ReadonlySet<string> = new Set(['test', 'exec', 'toString']
  * report group positions for non-participating groups at all.
  */
 const resultDataMembers: ReadonlySet<string> = new Set(['index', 'input', 'length', 'groups'])
-
-/**
- * What each of those members PHYSICALLY holds, per role.
- *
- * Stated here because nothing else can state it. These two structs are
- * compiler-owned native layouts: `representation/derive.ts` deliberately does
- * NOT seal a record layout for `RegExpExecArray`/`RegExpMatchArray` -- see its
- * own comment on why sealing "a plausible-looking struct" for them would emit
- * a program that compiles and is not a regular expression -- so
- * `recordFieldsOfShape` answers nothing for their shape id and the generic
- * `narrowedFieldReadText` has no declared carrier to reconcile against. It
- * therefore returned the bare member load for every read, which is right only
- * while the read is NOT narrowed.
- *
- * It is wrong the moment it is. `if (m.groups !== undefined) m.groups['id']`
- * publishes the payload while the field stores the optional, and the bare load
- * emitted `Optional<Ref<Dictionary<std::string>>>` where a
- * `Ref<Dictionary<std::string>>` was wanted -- `->has` then resolved on
- * `gea::Ref`, which has no such member, and every program that read a named
- * capture group by key failed to compile (node-compat's `apps/http-parity`
- * router was the first). The narrowing obligation the `narrow` parameter
- * documents was being honoured at the call and dropped inside it, for want of
- * this table.
- *
- * The three optionals are the two interfaces' own `?`, and they differ by
- * role on purpose: `RegExpExecArray` declares `index`/`input` REQUIRED and
- * `RegExpMatchArray` declares them optional, because a global pattern's match
- * really does answer an array with neither. `length` is `double` on an exec
- * result and the inherited `ArrayObject::length()` on a match result; neither
- * is optional. Keep this in step with `ExecResult`/`MatchResult` in
- * `runtime/gea_runtime.h` -- they are the same two facts, and clang checks
- * only one of them.
- */
-const namedGroupsStorage: Representation = {
-  kind: 'optional',
-  payload: { kind: 'dictionary', key: 'string', value: { kind: 'string' }, ownership: 'shared-refcount' },
-  absence: 'undefined'
-}
-const numberStorage: Representation = { kind: 'scalar', domain: 'number' }
-const stringStorage: Representation = { kind: 'string' }
-const optionalOf = (payload: Representation): Representation => ({ kind: 'optional', payload, absence: 'undefined' })
-
-const resultDataMemberStorage = (role: RegExpDeclarationKind, key: string): Representation | null => {
-  if (key === 'groups') return namedGroupsStorage
-  if (key === 'length') return numberStorage
-  if (key === 'index') return role === 'match-result' ? optionalOf(numberStorage) : numberStorage
-  if (key === 'input') return role === 'match-result' ? optionalOf(stringStorage) : stringStorage
-  return null
-}
 
 /** Whether `text` is a canonical array index -- a run of digits with no sign, point, or leading zero. */
 const canonicalCaptureSlot = (text: string): boolean => {
@@ -366,11 +314,10 @@ export const deferredRegexpMethodClaim = (
   const staticKey = staticKeyTexts.get(key.value)
   if (staticKey === undefined) return null
   if (role === 'pattern') {
-    if (staticKey === 'lastIndex' || patternDataMembers.has(staticKey) || !patternMethods.has(staticKey)) return null
+    if (nativePrototypeMethodOf(receiver.representation, staticKey) !== 'regexp') return null
     return { receiverKind: 'regexp', member: staticKey, receiver: { kind: 'operand', operand: receiver }, receiverElement: null }
   }
-  if (resultDataMembers.has(staticKey) || canonicalCaptureSlot(staticKey)) return null
-  if (!arrayPrototypeMethods.has(staticKey)) return null
+  if (nativePrototypeMethodOf(receiver.representation, staticKey) !== 'array-object') return null
   const element: Representation = { kind: 'string' }
   return {
     receiverKind: 'array-object',
@@ -399,8 +346,7 @@ export const regexpMemberText = (
   //
   // `declared` is what the member physically holds. The caller cannot look it
   // up for these two receivers -- their layout is never sealed -- so this
-  // supplies it from `resultDataMemberStorage`, and passing `null` (a RegExp
-  // pattern member) leaves the caller on its own lookup exactly as before.
+  // supplies it from the shared `regexpDataMemberStorage` projection.
   narrow: (fieldName: string, storage: string, declared: Representation | null) => string
 ): string | null => {
   const role = regexpRoleOf(receiver.representation)
@@ -442,7 +388,8 @@ export const regexpMemberText = (
         site
       )
     }
-    if (patternDataMembers.has(staticKey)) return narrow(staticKey, `${receiverText}->${staticKey}`, null)
+    if (patternDataMembers.has(staticKey))
+      return narrow(staticKey, `${receiverText}->${staticKey}`, regexpDataMemberStorage(role, staticKey))
     if (deferredRegexpMethodClaim(ctx.staticKeyTexts, receiver, key) !== null) {
       if (result === null) {
         throw createCppEmitBlockedError(
@@ -472,7 +419,7 @@ export const regexpMemberText = (
     // `MatchResult`; one spelling for both compiled the exec result's read as
     // a call on a `double`.
     const member = staticKey === 'length' && role === 'match-result' ? 'length()' : staticKey
-    return narrow(staticKey, `${receiverText}->${member}`, resultDataMemberStorage(role, staticKey))
+    return narrow(staticKey, `${receiverText}->${member}`, regexpDataMemberStorage(role, staticKey))
   }
   if (canonicalCaptureSlot(staticKey)) return captureReadText(role, receiverText, staticKey, resultRepresentation)
   // An `Array.prototype` member reached through `extends Array<string>`.
@@ -481,7 +428,7 @@ export const regexpMemberText = (
   // `RegExpMatchArray` says so in the type. The runtime carrier inherits
   // `ArrayObject<string>` and adds `index`, `input` and `groups`, so this
   // upcast preserves the object while reusing the existing Array prototype
-  // implementation. Hono's pattern router is the first case that needed it:
+  // implementation. A URL-pattern router is the shape that needs it:
   // `(path.match(/.../g) || []).map(...)` over every route it registers.
   if (deferredRegexpMethodClaim(ctx.staticKeyTexts, receiver, key) !== null) {
     if (result === null) {
@@ -625,7 +572,7 @@ export const regexpStoreRefusal = (ctx: EmitContext, receiver: IrOperand, key: I
  * in the other direction, admitted on the same two key shapes, so the pair
  * cannot disagree about which keys name a slot.
  *
- * hono's `Trie.insert` is the program that named it: `tokens[j] =
+ * A path-pattern trie insert is the shape: `tokens[j] =
  * tokens[j].replace(mark, groups[i][1])` over `path.match(re) || []`, whose
  * union collapses to the match result alone (`normalize/structural.ts` drops
  * the empty-array arm).
@@ -666,13 +613,13 @@ export const regexpDynamicSetClaim = (
   ctx: EmitContext,
   operation: SetOperation | DefineOwnPropertyOperation
 ): RegExpDynamicSetClaim | null => {
-  if (operation.kind !== 'set' || regexpRoleOf(operation.receiver.representation) !== 'pattern') return null
+  if (operation.kind !== 'set') return null
   // A claim deciding whether this write targets a method name (and so is
   // refused elsewhere) -- must not admit a render-time-minted key text.
   const staticKey = ctx.staticKeyTexts.get(operation.key.value)
   // Method replacement still needs RegExpExec dispatch support; preserve the
   // existing explicit refusal instead of accepting an ignored override.
-  if (staticKey !== undefined && (patternMethods.has(staticKey) || staticKey === 'compile')) return null
+  if (regexpDynamicSetValueOf(operation.receiver.representation, staticKey ?? null) === null) return null
   return { staticKey }
 }
 
@@ -952,8 +899,8 @@ export function matchAllRefusal(): string {
  * `emit-prototype-string.ts`, which is `String.prototype` over this
  * backend's PRIMITIVE `string` carrier, not this rarer OBJECT
  * `new String(x)` allocates -- one with identity that can carry own
- * properties no primitive can (`escapedString.isEscaped = true`, hono's
- * `utils/html.ts`, the case this carrier exists for).
+ * properties no primitive can (`escapedString.isEscaped = true`, the case
+ * this carrier exists for).
  *
  * `gea::runtime::StringObject`'s ambient body (`interface String` in
  * `lib.es5.d.ts`) survives `declaredBodyOf`'s method stripping with a real

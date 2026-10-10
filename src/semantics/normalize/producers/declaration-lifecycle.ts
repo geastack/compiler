@@ -75,10 +75,10 @@ const denotesValue = (checker: ts.TypeChecker, symbol: ts.Symbol): boolean => {
  * do with that argument, and the check used to require it -- `.length === 0`.
  * A specifier supplies no argument either way; a template is not a value in
  * the target language either way; and the copies a call site names are reached
- * through the call, never through this binding. mongodb imports
- * `executeOperation<T extends AbstractOperation<TResult>, TResult>` into
- * twelve modules and instantiates it 38 times, and every one of those imports
- * was minting a binding carried by the open `T`: 96 of the probe's mandatory
+ * through the call, never through this binding. A library that imports
+ * `execute<T extends Operation<TResult>, TResult>` into a dozen modules
+ * and instantiates it dozens of times, and every one of those imports
+ * was minting a binding carried by the open `T`: about a hundred mandatory
  * obligations, all of them at an `ImportSpecifier`.
  */
 const namesUninstantiatedGeneric = (specializations: SpecializationCensus, declaration: ts.Declaration | null): boolean =>

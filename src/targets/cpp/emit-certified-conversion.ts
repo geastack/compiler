@@ -5,7 +5,13 @@ import { representationKey, type Representation } from '../../representation/mod
 import { createCppEmitBlockedError } from './emit-context.js'
 import { recipeText, type ConversionSite } from './emit-narrowing.js'
 
-const rendersCertifiedNode = (ctx: ConversionSite, nodeId: string, source: Representation, target: Representation, text: string): string | null => {
+const rendersCertifiedNode = (
+  ctx: ConversionSite,
+  nodeId: string,
+  source: Representation,
+  target: Representation,
+  text: string
+): string | null => {
   const node = ctx.conversions.nodeById(nodeId)
   if (
     node === null ||
@@ -13,10 +19,7 @@ const rendersCertifiedNode = (ctx: ConversionSite, nodeId: string, source: Repre
     representationKey(node.target) !== representationKey(target) ||
     (ctx.conversionIsCertified !== undefined && !ctx.conversionIsCertified(nodeId))
   )
-    throw createCppEmitBlockedError(
-      `conversion:${nodeId}`,
-      'the internal value conversion has no matching citation in the certified IR'
-    )
+    throw createCppEmitBlockedError(`conversion:${nodeId}`, 'the internal value conversion has no matching citation in the certified IR')
   return recipeText(ctx, node, text)
 }
 

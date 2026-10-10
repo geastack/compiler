@@ -1,4 +1,4 @@
-// bson's `ByteUtils.toLocalBufferType` slot is typed
+// A binary-document library's `ByteUtils.toLocalBufferType` slot is typed
 // `(buffer: Uint8Array | ArrayBufferView | ArrayBuffer) => Uint8Array`, and the
 // web implementation stored there declares its parameter as
 // `Uint8Array | (ArrayBufferView & { [Symbol.toStringTag]?: string }) | ArrayBuffer`.

@@ -1,4 +1,4 @@
-// bson's `DBRef.toJSON`: `Object.assign({ $ref, $id }, this.fields)` returns
+// A binary-document library's reference type `toJSON`: `Object.assign({ $ref, $id }, this.fields)` returns
 // `DBRefLike & Document`, then a named optional key is added after the
 // spread-in fields. The assigned object keeps its own insertion order --
 // `$ref,$id,<fields...>,$db` -- because it is one object, not a copy.

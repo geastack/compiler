@@ -2,57 +2,8 @@ import type { IrValueId } from '../../identity/ids.js'
 import { allOperationsOf, type GetOperation, type IrBody } from '../../ir/model.js'
 import type { Representation } from '../../representation/model.js'
 import { dispatchedLeafExpression, unionPropertyLeaves } from './emit-union-properties.js'
-
-/**
- * Which deferred `Function.prototype.toString` shape a GET is.
- *
- * `'direct'` is a single callable receiver reading its own source
- * (`emit-properties.ts`); `'union'` is a tagged union with a
- * `function-value-dispatch` arm dispatching across itself and the union's
- * other, string-typed arms (`emit-union-properties.ts`, the `string |
- * Function` shape `request.ts`'s own `Result<T>` produces). A closed
- * two-member union rather than a boolean because the two SPELLINGS differ --
- * one snapshot of the receiver's own callable type versus one of the whole
- * union's type, feeding a per-arm dispatch -- even though the FACT question,
- * "does this GET need a snapshot before the call that follows can read a
- * source string out of it", is one question both renderers ask.
- */
-export type FunctionSourceReadClaim = 'direct' | 'union'
-
-const directCallableKinds: ReadonlySet<Representation['kind']> = new Set([
-  'function',
-  'function-family',
-  'function-value-dispatch',
-  'function-and-constructor'
-])
-
-/**
- * Whether every arm of a tagged union can spell a source string: a `string`
- * arm returns itself, a `dynamic(untyped-callable)` arm asks the call table
- * it retained for the source text it captured when the callable was boxed.
- * Any other arm (a number, a record, ...) has no such spelling, and the
- * whole union is refused by whichever caller finds no claim here -- exactly
- * as an arm this file's `taggedUnionGetText` cannot reconcile refuses the
- * WHOLE union rather than silently dropping one arm's read.
- *
- * Pure in the representation alone: `unionPropertyLeaves` is asked with the
- * placeholder text `''`, because only each leaf's REPRESENTATION KIND
- * decides viability here. The real, receiver-derived text is a render-time
- * detail neither caller of `functionSourceReadClaimOf` needs in order to
- * answer this question, and threading a real name through just to throw it
- * away would make this predicate depend on something it does not need.
- */
-const everyArmHasFunctionSourceText = (receiver: Representation): boolean => {
-  const leaves = unionPropertyLeaves(receiver, '')
-  return (
-    leaves.length > 0 &&
-    leaves.every(
-      (leaf) =>
-        leaf.representation.kind === 'string' ||
-        (leaf.representation.kind === 'dynamic' && leaf.representation.reason === 'untyped-callable')
-    )
-  )
-}
+import { functionSourceReadProtocolOf, type FunctionSourceReadClaim } from '../../projection/function-source.js'
+export type { FunctionSourceReadClaim } from '../../projection/function-source.js'
 
 /**
  * The claim: is this GET a deferred function-source read, and of which
@@ -74,16 +25,7 @@ export const functionSourceReadClaimOf = (
   operation: GetOperation
 ): FunctionSourceReadClaim | null => {
   if (staticKeyTexts.get(operation.key.value) !== 'toString') return null
-  const receiver = operation.receiver.representation
-  if (directCallableKinds.has(receiver.kind)) return 'direct'
-  if (
-    receiver.kind === 'tagged-union' &&
-    operation.result.representation.kind === 'function-value-dispatch' &&
-    everyArmHasFunctionSourceText(receiver)
-  ) {
-    return 'union'
-  }
-  return null
+  return functionSourceReadProtocolOf(operation.receiver.representation, operation.result.representation)
 }
 
 /**
@@ -111,7 +53,7 @@ const functionSourceReadTextOf = (claim: FunctionSourceReadClaim, receiver: Repr
     return null
   })
   // `functionSourceReadClaimOf` already proved every leaf has one of the two
-  // shapes above (`everyArmHasFunctionSourceText`) before minting this
+  // shapes above (the shared source protocol) before minting this
   // claim, and a non-empty leaf list, so this cannot actually be `null`. The
   // check stays as a fail-closed guard rather than a cast: a future leaf
   // kind added to one side of that proof and not this one must refuse

@@ -2,7 +2,7 @@
 //! expect: false false
 //! expect: none 2
 
-// mongodb's `MongoClient.db`: `Object.assign({}, this.options, options)`
+// A database client's `Client.db`: `Object.assign({}, this.options, options)`
 // where `this.options` is an `any`-built options object (`parseOptions`
 // starts from `Object.create(null)`) typed as an interface whose members are
 // all required. The copy holds exactly the keys the sources hold -- a
@@ -16,7 +16,7 @@ class ReadConcern {
   }
 }
 
-interface MongoOptions {
+interface ClientOptions {
   readConcern: ReadConcern
   b: number
 }
@@ -26,10 +26,10 @@ interface DbOptions {
   c?: number
 }
 
-function parseOptions(): MongoOptions {
-  const mongoOptions = Object.create(null)
-  mongoOptions.b = 1
-  return mongoOptions
+function parseOptions(): ClientOptions {
+  const clientOptions = Object.create(null)
+  clientOptions.b = 1
+  return clientOptions
 }
 
 function filterOptions(options: Record<string, any>, names: readonly string[]): Record<string, any> {

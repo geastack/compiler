@@ -9,7 +9,7 @@ import { censusUnresolvableNames } from './unresolvable-names.js'
  *
  * `__gea_http_serve` stands for node-compat's reactor hook: declared
  * module-locally by the host's own source, declared by no global, defined by
- * the host by linkage. `Deno` stands for mongodb's feature probe: declared
+ * the host by linkage. `Deno` stands for a library's runtime feature probe: declared
  * module-locally for a global nothing on this host defines.
  */
 const namesWithoutCell = (hostProvided: ReadonlySet<string>): readonly string[] => {

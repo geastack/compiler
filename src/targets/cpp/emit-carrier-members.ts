@@ -1,3 +1,5 @@
+import { nativePrototypeMethodOf } from '../../ir/native-prototype-calls.js'
+import { declaredStringPrototypeMemberNames } from '../../representation/prototype-domains.js'
 import { canonicalIndexLiteral } from '../../representation/array-index.js'
 import { disjointNativeRecordIndexOf, nativeRecordIndexReadCarrierOf } from '../../ir/native-record-index.js'
 import type { DefineOwnPropertyOperation, GetOperation, IrOperand, IrResult, SetOperation } from '../../ir/model.js'
@@ -22,14 +24,9 @@ import {
 } from '../../representation/model.js'
 import { alignedValueText, type ConversionSite } from './emit-narrowing.js'
 import { operationConversionText } from './emit-certified-conversion.js'
-import {
-  dictionaryPrototypeMethods,
-  keyedCollectionPrototypeMethods,
-  numberPrototypeMethods,
-  promisePrototypeMethods
-} from './prototype/emit-prototype-invoke.js'
+import { keyedCollectionPrototypeMethods, numberPrototypeMethods, promisePrototypeMethods } from './prototype/emit-prototype-invoke.js'
 import { iteratorPrototypeMethods } from './prototype/emit-prototype-iterator.js'
-import { arrayInheritedMemberRefusals, arrayMemberRefusals, arrayPrototypeMethods } from './prototype/emit-prototype-array.js'
+import { arrayInheritedMemberRefusals, arrayMemberRefusals } from './prototype/emit-prototype-array.js'
 import { stringMemberRefusals, stringPrototypeMethods } from './prototype/emit-prototype-string.js'
 import {
   cppReactiveRevisionFieldName,
@@ -131,7 +128,12 @@ const absentCapableElementText = (
   element: Representation,
   result: IrResult | null
 ): string | null => {
-  const present = presentElementText(ctx, element, result, `${receiverText}->${reader}(${keyText})`)
+  const present = presentElementText(
+    ctx,
+    element,
+    result,
+    `${receiverText}->${reader === 'elementAtIndex' ? 'readElementAtIndex' : 'readElementAt'}(${keyText})`
+  )
   if (present === null) return null
   // `hasElementValue`, never `hasElement`: this arm publishes the language's
   // `undefined` for the absent case, and an index whose stored element is
@@ -155,8 +157,8 @@ const absentCapableElementText = (
  * `absentCapableElementText` answers the absence question and nothing else, so
  * every other disagreement between the element and the published carrier fell
  * through to the bare reader, whose C++ type is the ELEMENT's. Two authorities
- * on one read again: hono's `newResponse: NewResponse = (...args) =>
- * this.#newResponse(...args)` reads `args[0]` out of an array of boxes and
+ * on one read again: a field `make: Make = (...args) => this.#make(...args)`
+ * reads `args[0]` out of an array of boxes and
  * publishes `Data | null` -- the tuple element the checker states for that
  * position -- and the bare `elementAt(0)` handed a `gea::Value` to a
  * `gea::Optional<gea::TaggedUnion<...>>` parameter with nothing between them.
@@ -236,7 +238,7 @@ export const deferredArrayMethodClaim = (
   if (staticKey === undefined || staticKey === 'length') return null
   if (carrier.extension?.some((field) => field.key === staticKey) === true) return null
   if (canonicalIndexLiteral(staticKey) !== null) return null
-  if (!arrayPrototypeMethods.has(staticKey)) return null
+  if (nativePrototypeMethodOf(carrier, staticKey) !== 'array-object') return null
   return {
     receiverKind: 'array-object',
     member: staticKey,
@@ -283,7 +285,7 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
     if (index !== null) {
       return (
         absentCapableElementText(ctx, receiverText, 'elementAtIndex', index, receiver.representation.element, result) ??
-        reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->elementAtIndex(${index})`)
+        reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->readElementAtIndex(${index})`)
       )
     }
     if (deferredArrayMethodClaim(ctx.staticKeyTexts, receiver, key) !== null) {
@@ -332,8 +334,8 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
     return null
   }
   // A STRING key is what `for (const i in array)` binds -- `arrayOwnEnumerableKeys`
-  // publishes `std::to_string(index)` for every present element -- and hono's
-  // RegExp router indexes straight back with it (`handlerMap[i] =
+  // publishes `std::to_string(index)` for every present element -- and a
+  // router indexes straight back with it (`handlerMap[i] =
   // handlerData[indexReplacementMap[i]]`, the `in` loop over a sparse
   // replacement map). CanonicalNumericIndexString is the whole conversion the
   // language performs there, and `gea::detail::arrayIndexFromKeyText` is it; every
@@ -345,7 +347,7 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
     const indexText = `gea::detail::arrayIndexFromKeyText(${operandText(ctx, key)})`
     return (
       absentCapableElementText(ctx, receiverText, 'elementAt', indexText, receiver.representation.element, result) ??
-      reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->elementAt(${indexText})`)
+      reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->readElementAt(${indexText})`)
     )
   }
   // A DYNAMIC key is the same number-keyed read once its tag is known:
@@ -355,7 +357,7 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
     const indexText = `gea::detail::arrayIndexFromDynamicKey(${operandText(ctx, key)})`
     return (
       absentCapableElementText(ctx, receiverText, 'elementAt', indexText, receiver.representation.element, result) ??
-      reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->elementAt(${indexText})`)
+      reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->readElementAt(${indexText})`)
     )
   }
   if (key.representation.kind !== 'scalar') {
@@ -371,7 +373,12 @@ export const arrayAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOp
   const keyText = operandText(ctx, key)
   return (
     absentCapableElementText(ctx, receiverText, reader, keyText, receiver.representation.element, result) ??
-    reconciledElementText(ctx, receiver.representation.element, result, `${receiverText}->${reader}(${keyText})`)
+    reconciledElementText(
+      ctx,
+      receiver.representation.element,
+      result,
+      `${receiverText}->${reader === 'elementAtIndex' ? 'readElementAtIndex' : 'readElementAt'}(${keyText})`
+    )
   )
 }
 
@@ -403,7 +410,7 @@ export const deferredTypedArrayMethodClaim = (
   const staticKey = staticKeyTexts.get(key.value)
   if (staticKey === undefined || staticKey === 'length') return null
   if (canonicalIndexLiteral(staticKey) !== null || typedArrayBufferMembers.has(staticKey)) return null
-  if (!typedArrayPrototypeMethods.has(staticKey)) return null
+  if (nativePrototypeMethodOf(carrier, staticKey) !== 'typed-array') return null
   return {
     receiverKind: 'typed-array',
     member: staticKey,
@@ -446,8 +453,8 @@ export const typedArrayAccessText = (ctx: EmitContext, receiver: IrOperand, key:
       // of `ArrayBuffer` and `SharedArrayBuffer` -- while a view over a plain
       // buffer hands back exactly one of them, so the store needs the arm
       // injection that `gea::TaggedUnion` has no converting constructor for.
-      // @hono/node-server's `handleMessage` reads `data.buffer` off a
-      // `Uint8Array` into such a cell and clang refused the assignment.
+      // A message handler that reads `data.buffer` off a `Uint8Array` into
+      // such a cell and clang refused the assignment.
       //
       // The union-arm reading of the same three members already aligns this
       // way (`emit-union-properties.ts`), with the same source spelling; only
@@ -571,15 +578,15 @@ export const absentCapableNumericElementText = (
  * `s[i]`, ECMA-262 10.4.3's String exotic `[[Get]]`, which answers a
  * single-code-unit string. See `stringIndexText`.
  */
-export const isDeclaredStringPrototypeKey = (key: string): boolean => stringPrototypeMethods.has(key) || stringMemberRefusals.has(key)
+export const isDeclaredStringPrototypeKey = (key: string): boolean => declaredStringPrototypeMemberNames.has(key)
 
 /**
  * A symbol's own `description` -- `Symbol.prototype.description`, ECMA-262
  * 20.4.3.2, an accessor whose value is `undefined` for `Symbol()` and the
  * string given otherwise, which is exactly the `gea::Optional<std::string>`
  * `gea::symbolDescription` answers and the `optional(string)` carrier the
- * checker's `string | undefined` derives to. test262's `propertyHelper.js`
- * reads it for every symbol-keyed `verifyProperty`. The other
+ * checker's `string | undefined` derives to. A property-descriptor check
+ * reads it for every symbol-keyed property it verifies. The other
  * `Symbol.prototype` members (`toString`, `valueOf`, `[@@toPrimitive]`) are
  * methods and refuse by name until an invocation asks for them.
  */
@@ -618,7 +625,7 @@ export const deferredStringMethodClaim = (
   if (receiver.representation.kind !== 'string') return null
   const staticKey = staticKeyTexts.get(key.value)
   if (staticKey === undefined || staticKey === 'length') return null
-  if (!stringPrototypeMethods.has(staticKey)) return null
+  if (nativePrototypeMethodOf(receiver.representation, staticKey) !== 'string') return null
   return { receiverKind: 'string', member: staticKey, receiver: { kind: 'operand', operand: receiver }, receiverElement: null }
 }
 
@@ -785,7 +792,7 @@ export const deferredPromiseMethodClaim = (
   const carrier = receiver.representation
   if (carrier.kind !== 'promise') return null
   const staticKey = staticKeyTexts.get(key.value)
-  if (staticKey === undefined || !promisePrototypeMethods.has(staticKey)) return null
+  if (staticKey === undefined || nativePrototypeMethodOf(carrier, staticKey) !== 'promise') return null
   return {
     receiverKind: 'promise',
     member: staticKey,
@@ -849,7 +856,7 @@ export const deferredIteratorMethodClaim = (
   // way; `iteratorCallText` renders them over `gea::AsyncGenerator`.
   if (carrier.kind !== 'iterator' && carrier.kind !== 'async-generator') return null
   const staticKey = staticKeyTexts.get(key.value)
-  if (staticKey === undefined || !iteratorPrototypeMethods.has(staticKey)) return null
+  if (staticKey === undefined || nativePrototypeMethodOf(carrier, staticKey) !== 'iterator') return null
   return {
     receiverKind: 'iterator',
     member: staticKey,
@@ -932,7 +939,7 @@ export const deferredKeyedCollectionMethodClaim = (
   const staticKey = staticKeyTexts.get(key.value)
   if (staticKey === undefined) return null
   if (keyedCollectionSizeIsDataProperty(carrier, staticKey)) return null
-  if (!keyedCollectionPrototypeMethods(carrier.family).has(staticKey)) return null
+  if (nativePrototypeMethodOf(carrier, staticKey) !== 'keyed-collection') return null
   return {
     receiverKind: 'keyed-collection',
     member: staticKey,
@@ -1061,7 +1068,7 @@ export const deferredDictionaryMethodClaim = (
   const carrier = receiver.representation
   if (carrier.kind !== 'dictionary') return null
   const staticKey = staticKeyTexts.get(key.value)
-  if (staticKey === undefined || !dictionaryPrototypeMethods.has(staticKey)) return null
+  if (staticKey === undefined || nativePrototypeMethodOf(carrier, staticKey) !== 'dictionary') return null
   return {
     receiverKind: 'dictionary',
     member: staticKey,
@@ -1149,8 +1156,8 @@ export const keyedTableKeyText = (ctx: EmitContext, key: IrOperand, domain: 'str
   // (its static-key arm below hands it the literal), so a key the program
   // declared `any` reaches the same entry through ToPropertyKey, which is
   // ToString for everything but a Symbol -- and `toStringText` aborts by name
-  // for a boxed Symbol or Object rather than inventing a key. mongodb's
-  // `idMap[doc.index] = doc._id` over a `Document`.
+  // for a boxed Symbol or Object rather than inventing a key: an
+  // `idMap[doc.index] = doc._id` over an open document type.
   if (domain === 'number' && carrier.kind === 'dynamic') {
     const converted = toStringText(text, carrier, ctx.classes, ctx.deriver)
     if (converted !== null) return converted
@@ -1478,9 +1485,9 @@ export const deferredScalarMethodClaim = (
   const staticKey = staticKeyTexts.get(key.value)
   if (staticKey === undefined) return null
   const operand = { kind: 'operand', operand: receiver } as const
-  if (carrier.domain === 'number' && numberPrototypeMethods.has(staticKey))
+  if (nativePrototypeMethodOf(carrier, staticKey) === 'number')
     return { receiverKind: 'number', member: staticKey, receiver: operand, receiverElement: null }
-  if (carrier.domain === 'bigint' && (staticKey === 'toString' || staticKey === 'valueOf'))
+  if (nativePrototypeMethodOf(carrier, staticKey) === 'bigint')
     return { receiverKind: 'bigint', member: staticKey, receiver: operand, receiverElement: null }
   return null
 }

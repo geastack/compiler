@@ -1,13 +1,14 @@
 import type { CallOperation } from '../../../ir/model.js'
 import { nativeReflectFieldTransportOf } from '../../../ir/native-reflect-field.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from '../emit-context.js'
-import { boxedValueText, propertyKeyText, unboxedReadText } from '../emit-dynamic-properties.js'
+import { boxedValueText, nativeHandleSidecarDeleteText, propertyKeyText, unboxedReadText } from '../emit-dynamic-properties.js'
 import { regexpRoleOf } from '../prototype/emit-prototype-regexp.js'
-import { declaredRecordFieldOf } from '../records.js'
+import { declaredRecordFieldOf, nativeFieldPolicyType } from '../records.js'
 import { cppTypeOf } from '../types.js'
 import { alignedValueText } from '../emit-narrowing.js'
 import { getOwnPropertyDescriptorText } from './emit-host-object.js'
 import { unaddressableNativeSymbolKeyOf } from '../native-symbol-keys.js'
+import { nativeCallableDataMaterializerText, nativeCallableDataWriteText } from '../emit-native-callable-data.js'
 
 /**
  * `Reflect.ownKeys` (28.1.10) and `Object.getOwnPropertySymbols` (20.1.2.11)
@@ -107,7 +108,16 @@ export const nativeReflectCallText = (ctx: EmitContext, operation: CallOperation
   const method = methods.get(spelling)
   if (!method) return null
   const target = operation.arguments[0]
-  if (!target || target.representation.kind === 'dynamic') return null
+  if (!target) return null
+  if (target.representation.kind === 'dynamic') {
+    if (method !== 'get' || !operation.nativeCallableDataSlot) return null
+    const key = operation.arguments[1]!
+    return unboxedReadText(
+      operation.nativeCallableDataSlot.storage,
+      `${operandText(ctx, target)}.getProperty(${propertyKeyText(ctx, key, 'native Function data on a dynamic owner')})`,
+      'native Function data on a dynamic owner'
+    )
+  }
   const refuse = (reason: string): never => {
     // Same shape as Atomics' own call-support rule (`atomics.ts`): whether
     // this particular target/argument shape has a native recipe is a target
@@ -133,7 +143,19 @@ export const nativeReflectCallText = (ctx: EmitContext, operation: CallOperation
   // this boundary is the property payload, never a conversion of the target
   // that would erase its call/construct ABI intersection.
   if (callable) {
+    if (method === 'set' && operation.nativeCallableDataWrite)
+      return nativeCallableDataWriteText(ctx, operation.nativeCallableDataWrite, propertyKeyText(ctx, key, site))
     const property = propertyKeyText(ctx, key, site)
+    if (operation.nativeCallableDataSlot) {
+      const storage = cppTypeOf(operation.nativeCallableDataSlot.storage)
+      if (method === 'get') return `gea::callableNativeDataGet<${storage}>(${receiver}, ${property})`
+      if (method === 'set')
+        return `gea::callableNativeDataSet<${nativeFieldPolicyType(operation.nativeCallableDataSlot.storage)}>(${receiver}, ${property}, ${storage}(${operandText(ctx, operation.arguments[2]!)} )${nativeCallableDataMaterializerText(ctx, operation.nativeCallableDataSlot)})`
+      throw createCppEmitBlockedError(
+        'call-abi:object-value-conversions',
+        'a native Function data receipt names a different reflection operation'
+      )
+    }
     const constructorSetup =
       representation.kind === 'function-and-constructor'
         ? `if (!__gea_key.isSymbol() && __gea_key.text() == "prototype") gea::installCallableConstructorPrototype(__gea_callable); `
@@ -152,8 +174,8 @@ export const nativeReflectCallText = (ctx: EmitContext, operation: CallOperation
       return `([&]() -> bool { ${prepare} return __gea_callable.functionObjectIdentity()->properties->deleteOwnProperty(__gea_key); })()`
     }
     return (
-      `([&]() -> bool { ${prepare} return __gea_callable.functionObjectIdentity()->properties->set(__gea_key, ` +
-      `${boxedValueText(ctx, operation.arguments[2]!, site)}, gea::Value::box(gea::Value::Tag::Function, __gea_callable)); })()`
+      `([&]() -> bool { ${prepare} return __gea_callable.functionObjectIdentity()->properties->setWithReceiver(__gea_key, ` +
+      `${boxedValueText(ctx, operation.arguments[2]!, site)}, [&] { return gea::Value::box(gea::Value::Tag::Function, __gea_callable); }); })()`
     )
   }
   // Pattern is native, not a generated record, but its `lastIndex` hook is
@@ -168,6 +190,12 @@ export const nativeReflectCallText = (ctx: EmitContext, operation: CallOperation
     if (method === 'has') return `gea::runtime::regex::dynamicHas(${receiver}, ${property})`
     if (method === 'deleteProperty') return `gea::nativeDynamicDelete(${receiver}, ${property})`
     return `gea::runtime::regex::dynamicSet(${receiver}, ${property}, ${boxedValueText(ctx, operation.arguments[2]!, site)})`
+  }
+  // `Reflect.deleteProperty(Math, k)` is the `delete Math[k]` the operator
+  // renders, over the same per-protocol sidecar.
+  if (representation.kind === 'native-handle' && method === 'deleteProperty') {
+    const answer = nativeHandleSidecarDeleteText(ctx, representation, key)
+    if (answer !== null) return answer
   }
   const generated =
     representation.kind === 'record' ||

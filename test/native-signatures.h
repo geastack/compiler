@@ -27,6 +27,11 @@ void dataPointerCallback(std::function<void(int *)> callback);
 void referenceCallback(std::function<void(int &)> callback);
 void unsupportedCallback(std::function<void(unsigned __int128)> callback);
 void variadicCallback(void (*callback)(int, ...));
+namespace foreign {
+template <class Signature> struct function {};
+}
+void foreignTemplateCallback(foreign::function<void(int)> callback);
+void constReferenceCallback(const std::function<void(int)> &callback);
 void overloaded(int argument);
 void overloaded(double argument);
 }

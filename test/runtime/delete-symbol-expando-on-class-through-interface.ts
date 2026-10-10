@@ -1,4 +1,4 @@
-// @hono/node-server's `Response.[getResponseCache]()`: a class instance is
+// An HTTP server adapter's `Response.[getResponseCache]()`: a class instance is
 // viewed through an interface declaring two OPTIONAL symbol-keyed fields the
 // class itself never declares, one is deleted and the other `||=`-installed.
 // Both are expandos on the instance (9.1.10 OrdinaryDelete / 10.1.9 OrdinarySet

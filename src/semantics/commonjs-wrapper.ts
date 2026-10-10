@@ -184,7 +184,10 @@ export const createCommonJsWrapperIdentity = (
   const authenticatedSymbols = new Map<ts.Symbol, CommonJsGlobal>()
   const failedSymbols = new Set<ts.Symbol>()
   const formats = new Map<ts.SourceFile, ts.ResolutionMode>()
+  // Resolved once: asked of every file in the program, the standard library's included.
+  const configuredFiles = new Set([...configuredByName.values()].map((configured) => resolve(configured.declarationFileName)))
   for (const file of files) {
+    if (configuredFiles.size === 0 || !configuredFiles.has(resolve(file.fileName))) continue
     const visit = (node: ts.Node): void => {
       if (ts.isIdentifier(node) && ts.isVariableDeclaration(node.parent) && node.parent.name === node) {
         const configured = configuredByName.get(node.text)
@@ -207,7 +210,7 @@ export const createCommonJsWrapperIdentity = (
       }
       ts.forEachChild(node, visit)
     }
-    if ([...configuredByName.values()].some((configured) => resolve(configured.declarationFileName) === resolve(file.fileName))) visit(file)
+    visit(file)
   }
 
   const authenticatedGlobals = new Set(authenticatedSymbols.values())

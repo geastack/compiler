@@ -1,6 +1,6 @@
 // `Object.entries` of a value whose union still carries a `ReadonlyArray`
 // arm: `Array.isArray`'s false branch does not remove a readonly array from
-// the checker's type (mongodb's `constructIndexDescriptionMap`), so the
+// the checker's type (a database client's index-description builder), so the
 // dispatch spells the array arm too -- as an Array's own entries.
 
 type Direction = 1 | -1 | 'text' | number

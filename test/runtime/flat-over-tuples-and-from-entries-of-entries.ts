@@ -1,5 +1,5 @@
 // `Array.prototype.flat` spreads each element that IsArray -- a tuple is one
-// -- so mongodb's default index name `Array.from(key).flat().join('_')` over a
+// -- so a database client's default index name `Array.from(key).flat().join('_')` over a
 // `Map<string, IndexDirection>` interleaves every key with its direction. Its
 // `indexes({ full: false })` builds `Object.fromEntries(indexes.map(({ name,
 // key }) => [name, Object.entries(key)]))`.

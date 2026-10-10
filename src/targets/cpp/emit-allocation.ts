@@ -29,14 +29,7 @@ import {
   spreadIndexedRecordReceiverOf,
   spreadSourceCarrierKeyOf
 } from '../../ir/certify/carrier-keys.js'
-import {
-  createCppEmitBlockedError,
-  defineValue,
-  internTemplateObject,
-  isCppEmitBlockedError,
-  operandText,
-  type EmitContext
-} from './emit-context.js'
+import { createCppEmitBlockedError, defineValue, internTemplateObject, operandText, type EmitContext } from './emit-context.js'
 import { memberAccessOperator } from './emit-carrier-members.js'
 import {
   cppArrayExtensionStructName,
@@ -57,10 +50,13 @@ import {
   recordFieldsOfShape,
   tailAwareFieldWriteText,
   tailAwareFieldReadText,
-  staticKeyOrderText
+  staticKeyOrderText,
+  nativeFieldPolicyType
 } from './records.js'
 import { keyOrderUnobservedIn, tracksKeyOrder } from './key-order-tracking.js'
-import { alignedValueText } from './emit-narrowing.js'
+import { alignedValueText, namedConversionText } from './emit-narrowing.js'
+import type { SpreadCopyConversionPlan } from '../../ir/spread-conversions.js'
+import { structuralConversionKey } from '../../conversion/structural-plan.js'
 import { cppRegExpNativeTypes } from './regexp-types.js'
 import { armAt, armIs } from './emit-union-properties.js'
 import { packedEnvironmentText } from './emit-callable.js'
@@ -618,11 +614,10 @@ export { emitToNumericCoercion } from './emit-tonumber.js'
  *
  * The SOURCE may be a plain `dictionary`, a `tagged-union` whose arms are
  * each a `dictionary` or a `record`, or an `optional` wrapping either of
- * those -- `HeaderRecord`'s own three arms (`Record<'Content-Type',
- * BaseMime> | Record<ResponseHeader, string | string[]> | Record<string,
- * string | string[]>`) are exactly one `record`, one `record` and one
- * `dictionary`, and `setDefaultContentType`'s `headers?: HeaderRecord`
- * parameter wraps that same union `optional`. A `dictionary` arm's copy is a
+ * those -- a union type such as `Record<'Content-Type', Mime> |
+ * Record<KnownHeader, string | string[]> | Record<string, string | string[]>`
+ * is exactly one `record`, one `record` and one `dictionary`, and an optional
+ * `headers?: ...` parameter of that type wraps the same union `optional`. A `dictionary` arm's copy is a
  * runtime walk (`gea::Dictionary::copyInto`, gea_runtime.h); a `record` arm's
  * copy is a static per-FIELD unroll, since its keys are known at compile
  * time; an `optional` source is `CopyDataProperties(obj, source)` itself --
@@ -636,7 +631,29 @@ export { emitToNumericCoercion } from './emit-tonumber.js'
  * on the static-copy path -- an accessor must be CALLED, which is not
  * modelled here.
  */
+interface SpreadContext extends EmitContext {
+  readonly spreadPlan: SpreadCopyConversionPlan
+}
+
+const spreadConversionText = (
+  ctx: EmitContext,
+  site: string,
+  source: Representation,
+  target: Representation,
+  text: string
+): string | null => {
+  const key = structuralConversionKey(source, target)
+  const node = (ctx as SpreadContext).spreadPlan.leaves.get(key)
+  if (node === undefined) throw new Error(`spread copy has no certified conversion for ${key}`)
+  return namedConversionText(ctx, site, node, text)
+}
+
+const spreadWalkEnabled = (ctx: EmitContext, source: Representation): boolean =>
+  (ctx as SpreadContext).spreadPlan.walks.has(representationKey(source))
+
 export const emitSpreadCopy = (ctx: EmitContext, lines: string[], operation: SpreadCopyOperation): void => {
+  if (operation.spreadConversionPlan === undefined) throw new Error('spread copy has no certified conversion plan')
+  ctx = { ...ctx, spreadPlan: operation.spreadConversionPlan } as SpreadContext
   const receiver = operation.receiver.representation
   const source = operation.source.representation
   if (
@@ -715,8 +732,8 @@ export const emitSpreadCopy = (ctx: EmitContext, lines: string[], operation: Spr
 }
 
 /**
- * `{ ...value }` of a dynamic source into a string-keyed dictionary: mongodb's
- * `mechanismProperties = { ...optionValue }`, where `optionValue` is declared
+ * `{ ...value }` of a dynamic source into a string-keyed dictionary:
+ * `props = { ...optionValue }`, where `optionValue` is declared
  * `unknown` and only bounded by an `isRecord` guard
  * (`producers/shared.ts`'s `dynamicSpreadSourceTypeOf`). The keys exist only at
  * runtime, so each own enumerable string key is read as a `gea::Value` and
@@ -732,7 +749,13 @@ const emitDynamicSpreadIntoDictionary = (
   receiver: Extract<Representation, { kind: 'dictionary' }>,
   receiverRef: string
 ): void => {
-  const converted = alignedValueText(ctx, 'emit-allocation.ts:dynamic-spread-into-dictionary', source, receiver.value, '__gea_spread_value')
+  const converted = spreadConversionText(
+    ctx,
+    'emit-allocation.ts:dynamic-spread-into-dictionary',
+    source,
+    receiver.value,
+    '__gea_spread_value'
+  )
   if (converted === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(source)}->${representationKey(receiver.value)}`,
@@ -833,8 +856,8 @@ const emitSpreadArmCopy = (
   const indexed = isCopyableIndexedRecordIntoDictionary(ctx.deriver, arm, receiver) ? indexedRecordViewOf(ctx.deriver, arm) : null
   if (indexed !== null) {
     const member = `${armText}${memberAccessOperator(indexed.ownership)}`
-    const ordered = creationOrderedCopyOpening(indexed.ownership, armText, null, (key, value) => {
-      const converted = alignedValueText(ctx, 'emit-allocation.ts:indexed-record-spread', dynamicSpreadValue, receiver.value, value)
+    const ordered = creationOrderedCopyOpening(spreadWalkEnabled(ctx, arm), armText, null, (key, value) => {
+      const converted = spreadConversionText(ctx, 'emit-allocation.ts:indexed-record-spread', dynamicSpreadValue, receiver.value, value)
       return converted === null ? null : `${receiverRef}[${key}] = ${converted};`
     })
     if (ordered !== null) lines.push(ordered)
@@ -847,7 +870,7 @@ const emitSpreadArmCopy = (
       const value =
         representationKey(index.value) === representationKey(receiver.value)
           ? `${entry}.second`
-          : alignedValueText(ctx, 'emit-allocation.ts:indexed-record-spread', index.value, receiver.value, `${entry}.second`)
+          : spreadConversionText(ctx, 'emit-allocation.ts:indexed-record-spread', index.value, receiver.value, `${entry}.second`)
       if (value === null) {
         throw createCppEmitBlockedError(
           `conversion:${representationKey(index.value)}->${representationKey(receiver.value)}`,
@@ -869,19 +892,16 @@ const emitSpreadArmCopy = (
     // A key outside the layout (an expando) is an own property too; the
     // runtime walk copies it, in creation order, where the layout is the
     // whole key set the static copy would take.
-    const ordered =
-      receiver.key === 'string' && copied.length === fields.length
-        ? creationOrderedCopyOpening(ownershipOfSpreadArm(arm), armText, null, (key, value) => {
-            const converted = alignedValueText(
-              ctx,
-              'emit-allocation.ts:record-spread-in-creation-order',
-              dynamicSpreadValue,
-              receiver.value,
-              value
-            )
-            return converted === null ? null : `${receiverRef}[${key}] = ${converted};`
-          })
-        : null
+    const ordered = creationOrderedCopyOpening(spreadWalkEnabled(ctx, arm), armText, null, (key, value) => {
+      const converted = spreadConversionText(
+        ctx,
+        'emit-allocation.ts:record-spread-in-creation-order',
+        dynamicSpreadValue,
+        receiver.value,
+        value
+      )
+      return converted === null ? null : `${receiverRef}[${key}] = ${converted};`
+    })
     // A literal's own accessor has no struct member for the static copy to
     // read; only the runtime walk reaches it, through [[Get]].
     if (ordered === null && arm.kind === 'record' && arm.accessors.length > 0) {
@@ -909,7 +929,7 @@ const ownershipOfSpreadArm = (arm: Representation): Ownership =>
 
 /** A converting lambda for a value type this emitter cannot express as a bare identity -- `emit-narrowing.ts`'s own conversion text, wrapped as a callable `gea::Dictionary::copyInto` invokes per entry. */
 const spreadConvertingLambda = (ctx: EmitContext, source: Representation, target: Representation): string => {
-  const converted = alignedValueText(ctx, 'emit-allocation.ts:640', source, target, '__v')
+  const converted = spreadConversionText(ctx, 'emit-allocation.ts:640', source, target, '__v')
   if (converted === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(source)}->${representationKey(target)}`,
@@ -974,7 +994,7 @@ const emitSpreadFieldCopy = (
       )
     }
     const readText = tailAwareFieldReadText(fields, field.key, armMember)
-    const converted = alignedValueText(ctx, 'emit-allocation.ts:704', field.value, receiver.value, readText)
+    const converted = spreadConversionText(ctx, 'emit-allocation.ts:704', field.value, receiver.value, readText)
     if (converted === null) {
       throw createCppEmitBlockedError(
         `conversion:${representationKey(field.value)}->${representationKey(receiver.value)}`,
@@ -989,7 +1009,7 @@ const emitSpreadFieldCopy = (
 
 /**
  * `CopyDataProperties` into an object literal whose own type carries a string
- * index signature (mongodb's `{ ...result.writeConcernError, ...result }`).
+ * index signature (`{ ...result.error, ...result }`).
  * The literal is a `record-with-index`: each copied key lands in the declared
  * field of that name when the receiver has one and in the string sidecar
  * otherwise -- the same split `recordIndexSidecarTableOf` draws for a single
@@ -1029,9 +1049,8 @@ const emitSpreadIntoIndexedRecord = (ctx: EmitContext, lines: string[], operatio
 
 /**
  * `CopyDataProperties` into an object literal whose own type names its keys
- * and has no index signature (`spreadFieldRecordReceiverOf`): the MongoDB
- * driver's `buildOptions` returns `{ ...this.options, ...this.bsonOptions,
- * timeoutContext }`, whose sources carry optional members and an optional
+ * and has no index signature (`spreadFieldRecordReceiverOf`): a method
+ * returning `{ ...this.options, ...this.extraOptions, context }`, whose sources carry optional members and an optional
  * whole. Each key the source HAS lands in the receiver's field of that name,
  * with its presence bit; a key the literal's type does not name lands on the
  * receiver's expando, since it is still an own property of the copy.
@@ -1086,7 +1105,7 @@ const emitSpreadIntoFields = (
   const accessor = memberAccessOperator(receiver.ownership)
   const converted = (from: Representation, to: Representation, text: string, what: string): string => {
     if (representationKey(from) === representationKey(to)) return text
-    const aligned = alignedValueText(ctx, 'emit-allocation.ts:spread-indexed-record', from, to, text)
+    const aligned = spreadConversionText(ctx, 'emit-allocation.ts:spread-indexed-record', from, to, text)
     if (aligned === null) {
       throw createCppEmitBlockedError(
         `conversion:${representationKey(from)}->${representationKey(to)}`,
@@ -1106,11 +1125,30 @@ const emitSpreadIntoFields = (
   // property of the copy: it lands on the receiver's expando, the sidecar
   // every shared record has, rather than nowhere.
   const expando = receiver.ownership === 'shared-refcount'
+  // A typed value keeps its own carrier in the expando; the plan's certified
+  // leaf to Value becomes the descriptor's materializer, run only when a
+  // dynamic observer reads the key (`spread-conversions.ts`'s `expandoData`).
+  const expandoWrite = (target: string, key: string, value: Representation, text: string): string => {
+    const native = (ctx as SpreadContext).spreadPlan.expandoData.get(representationKey(value))
+    if (native === undefined)
+      return `gea::nativeSpreadExpandoSet(${target}, ${key}, ${converted(value, dynamicSpreadValue, text, 'a key the receiver does not declare')});`
+    const stored = cppTypeOf(value)
+    const materialized = namedConversionText(ctx, 'emit-allocation.ts:spread-expando-materializer', native.materializer, 'gea_data')
+    if (materialized === null)
+      throw createCppEmitBlockedError(
+        `conversion:${representationKey(value)}->${representationKey(dynamicSpreadValue)}`,
+        'a spread copy lost the certified Value materializer of a natively stored expando key'
+      )
+    return (
+      `gea::nativeSpreadObjectDataSet<${nativeFieldPolicyType(value)}>(${target}, ${key}, static_cast<const ${stored}&>(${text}), ` +
+      `+[](const ${stored}& gea_data) -> gea::Value { return ${materialized}; });`
+    )
+  }
   const sidecarWrite = (target: string, key: string, value: Representation, text: string): string | null =>
     sidecar !== null
       ? `${target}${accessor}${sidecar.member}[${key}] = ${converted(value, sidecar.value, text, 'an index-signature entry')};`
       : expando
-        ? `gea::nativeSpreadExpandoSet(${target}, ${key}, ${converted(value, dynamicSpreadValue, text, 'a key the receiver does not declare')});`
+        ? expandoWrite(target, key, value, text)
         : null
   // Keys the static copy decided NOT to store, because a later member of the
   // literal overwrites them: the creation-order walk, which routes run-time
@@ -1144,8 +1182,8 @@ const emitSpreadIntoFields = (
     const rest = sidecarWrite(target, key, value, text)
     return [...branches, ...(rest === null ? [] : [`{ ${rest} }`])].join(' else ')
   }
-  // The routing above is a branch per declared field -- 131 of them into
-  // mongodb's options family -- and depends on nothing at the site but the
+  // The routing above is a branch per declared field -- over a hundred into
+  // a wide options record -- and depends on nothing at the site but the
   // receiver, the key and the value. Into a shared receiver it is defined once
   // per receiver carrier and value carrier, and each walk calls it
   // (`unitFunctionName`); the struct it stores into is the site's. The keys a
@@ -1236,8 +1274,8 @@ const emitSpreadIntoFields = (
     }
     // A shared class reference also carries `null` -- `T | null` folds onto
     // the bare `Ref` (`representation/optional.ts`) -- and CopyDataProperties
-    // copies nothing from it. mongodb's `{ ...options.readPreference, ...value }`
-    // reads a field `parseOptions` has not filled yet, and every member read
+    // copies nothing from it. `{ ...options.preference, ...value }`
+    // reads a field an initializer may not have filled yet, and every member read
     // below dereferenced the empty handle.
     const nullable = from.kind === 'class-ref' && from.ownership === 'shared-refcount'
     if (nullable) lines.push(`if (${text}) {`)
@@ -1246,7 +1284,6 @@ const emitSpreadIntoFields = (
     // The walk copies every own key the source has; it stands in for the
     // static copy only where that copy's key set is the source's whole layout
     // -- a layout wider than the type's keys holds fields the value lacks.
-    const walkable = fields !== null && (keys === null || fields.every((field) => keys.has(field.key)))
     // The static copy is decided first: its routing is what the walk follows.
     // It is also spelled over a unit function's formals (`outlinedLines`), for
     // the out-of-line copy below.
@@ -1270,8 +1307,8 @@ const emitSpreadIntoFields = (
       if (keys !== null && !keys.has(field.key)) continue
       // A later member of the literal writes this key unconditionally, so the
       // copied value is dead -- and a source carrying it in a shape the
-      // literal's slot does not take (mongodb's `{ ...pluckBSONSerializeOptions(
-      // options), validation: parseUtf8ValidationOption(options) }`) must not
+      // literal's slot does not take (`{ ...pickOptions(options),
+      // validation: parseValidation(options) }`) must not
       // refuse a store nothing can observe. A struct read has no getter to
       // run; the walk still [[Get]]s it, and only drops the store.
       if (overwritten.has(field.key)) {
@@ -1299,8 +1336,8 @@ const emitSpreadIntoFields = (
         outlinedByPosition[outlinedByPosition.length - 1] = line
       }
     }
-    // A wide layout's copy is a guarded store per field -- 134 into mongodb's
-    // options family, at 55 spread sites -- and depends on nothing at the site
+    // A wide layout's copy is a guarded store per field -- over a hundred for
+    // a wide options record spread at dozens of sites -- and depends on nothing at the site
     // but the two records. Between shared records it is defined once per
     // source and receiver carrier and each site calls it (`unitFunctionName`),
     // as the walk's key routing already is: the same stores, one copy of the
@@ -1327,17 +1364,15 @@ const emitSpreadIntoFields = (
     // runs it for a source whose keys merely left layout order and walks only
     // what the static copy cannot see (`copyOwnPropertiesInCreationOrderWith`).
     const staticCopy = receiver.ownership === 'shared-refcount' ? `__gea_static_copy_${serial}` : null
-    const ordered = !walkable
-      ? null
-      : creationOrderedCopyOpening(
-          view !== null ? view.ownership : ownershipOfSpreadSource(from),
-          text,
-          receiver.ownership === 'shared-refcount' ? receiverText : null,
-          (key, value) => keyedWriteText(key, dynamicSpreadValue, value),
-          later,
-          staticCopy,
-          orderless
-        )
+    const ordered = creationOrderedCopyOpening(
+      spreadWalkEnabled(ctx, from),
+      text,
+      receiver.ownership === 'shared-refcount' ? receiverText : null,
+      (key, value) => keyedWriteText(key, dynamicSpreadValue, value),
+      later,
+      staticCopy,
+      orderless
+    )
     // A literal's own accessor has no struct member for the static copy below
     // to read; only the runtime walk reaches it, through [[Get]].
     if (ordered === null && from.kind === 'record' && from.accessors.length > 0) {
@@ -1378,8 +1413,8 @@ const layoutOrderAgrees = (layout: readonly RecordField[] | null, fields: readon
  * fields that sit side by side in the layout skipped by ONE word test of their
  * presence bits. `records.ts` declares a bit per field in layout order and
  * gives an optional field a real, never-static one, so eight consecutive
- * optional fields own eight consecutive bytes; mongodb's options record holds
- * a handful of its 134 fields, and a flag-by-flag walk tested every one on
+ * optional fields own eight consecutive bytes; a wide options record holds
+ * a handful of its hundred-plus fields, and a flag-by-flag walk tested every one on
  * every copy (`NativeLayoutInfo::presenceContiguous` is the runtime's twin of
  * the same fact). A layout position without a store (a key the literal skips)
  * stays inside its run: its bit may be set, which only enters the run.
@@ -1426,11 +1461,12 @@ const outlinedCopyMinimumFields = 16
  * copy -- which walks the layout, declared fields before index entries, and
  * is the source's order only until the source has a key outside its layout
  * (`gea::copyOwnPropertiesInCreationOrder`). `write` stores one key and its
- * property value; null when it cannot, and then only the static copy runs.
+ * property value. The sealed operation plan has already admitted that frame;
+ * a refused optional walk uses only the static copy.
  * With `receiver`, the record being built learns the copied keys' order too.
  */
 const creationOrderedCopyOpening = (
-  sourceOwnership: Ownership,
+  admitted: boolean,
   sourceText: string,
   receiver: string | null,
   write: (key: string, value: string) => string | null,
@@ -1438,15 +1474,9 @@ const creationOrderedCopyOpening = (
   staticCopy: string | null = null,
   orderless = false
 ): string | null => {
-  if (sourceOwnership !== 'shared-refcount') return null
-  let body: string | null
-  try {
-    body = write('__gea_ordered_key', '__gea_ordered_value')
-  } catch (error) {
-    if (isCppEmitBlockedError(error)) return null
-    throw error
-  }
-  if (body === null) return null
+  if (!admitted) return null
+  const body = write('__gea_ordered_key', '__gea_ordered_value')
+  if (body === null) throw new Error('an admitted spread creation-order frame has no renderable certified conversion')
   const receiverArgument = receiver === null || orderless ? '' : `${receiver}, `
   // With the static copy named, the call is the whole statement: it runs that
   // copy itself when it can, and the caller's fallback is the same copy.

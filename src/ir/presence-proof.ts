@@ -9,7 +9,7 @@ import { allOperationsOf, type IrBlock, type IrBlockId, type IrBody, type IrOper
  * A `convert` from `optional(T, absence)` to `T` is a load: `has_value`
  * classifies and `operator*` reads the payload without testing it. The
  * checker's type at the consumer is what asked for `T`, and the checker's type
- * is not evidence -- `@type {number}` on a field three.js also writes
+ * is not evidence -- `@type {number}` on a field a JS library also writes
  * `undefined` into says nothing about what the cell holds. Presence is a fact
  * about the program's own control flow, and this module reads it off the
  * lowered IR, where the test and the load are both instructions:
@@ -88,6 +88,7 @@ const inertKinds = new Set<IrOperation['kind']>([
   'allocate-template-object',
   'allocate-regexp',
   'merge-live-arm-rebuild',
+  'dead-logical-merge-value',
   'iterator-done',
   'jump',
   'branch',

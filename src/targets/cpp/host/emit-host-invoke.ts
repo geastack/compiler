@@ -35,7 +35,7 @@ import { isStringObjectCarrier } from '../prototype/emit-prototype-regexp.js'
 import { cppStringObjectNativeType } from '../regexp-types.js'
 import { errorConstructorNames, isNativeError } from '../error-types.js'
 import { objectMemberText } from './emit-host-object.js'
-import { armAt, armIs, toStringLayoutsOf } from '../emit-union-properties.js'
+import { armAt, armIs, toStringLayoutsOf, unionPropertyLeaves } from '../emit-union-properties.js'
 import { memberAccessOperator } from '../emit-carrier-members.js'
 import { recordFieldsOfShape } from '../records.js'
 import { typedArrayElementSpelling, typedArrayTargetSpelling } from '../emit-buffers.js'
@@ -371,7 +371,7 @@ const renderBigInt = ({ ctx, args, role }: HostInvocationRequest): string => {
  * A program class converts through its own `valueOf` when ToPrimitive is
  * decided statically (`classToPrimitiveOf`); a `null`/`undefined` primitive
  * is ToBigInt's TypeError. A tagged union dispatches on the arm it holds, so
- * mongodb's `BigInt(id)` over `number | bigint | Double` needs no box. `depth`
+ * `BigInt(id)` over `number | bigint | SomeClass` needs no box. `depth`
  * only names the per-arm lambda locals apart.
  */
 const bigIntText = (ctx: EmitContext, text: string, carrier: Representation, depth: number): string | null => {
@@ -537,7 +537,7 @@ const promiseAllIntoTupleText = (
       'host/emit-host-invoke.ts:promiseAllIntoTupleText',
       settled,
       field.value,
-      `gea_values->elementAt(${position})`
+      `gea_values->readElementAt(${position})`
     )
     if (converted === null) return refused(`no conversion from "${representationKey(settled)}" to "${representationKey(field.value)}"`)
     return `gea_tuple${access}${cppRecordFieldName(field.key)} = ${converted};`
@@ -548,8 +548,9 @@ const promiseAllIntoTupleText = (
 
 /**
  * `Promise.all` over a TUPLE one of whose elements never fulfills -- a
- * `Promise<never>`, or an instance of a class extending one: mongodb's
- * `Promise.all([willResolveKmsRequest, Timeout.expires(ms)])`.
+ * `Promise<never>`, or an instance of a class extending one:
+ * `Promise.all([work, Timeout.expires(ms)])` with
+ * `class Timeout extends Promise<never>`.
  *
  * 27.2.4.1.2 fulfills the result only once EVERY element has fulfilled, so
  * with one element that never does the result can only reject, with the first
@@ -640,8 +641,8 @@ const promiseAllResolverText = (ctx: EmitContext, site: string, element: Represe
 }
 
 /**
- * `Promise.all` over an iterator -- mongodb's `Promise.all(this.requests(...))`
- * over a generator of request promises. PerformPromiseAll (27.2.4.1.2) steps
+ * `Promise.all` over an iterator -- `Promise.all(this.requests(...))` over a
+ * generator of promises. PerformPromiseAll (27.2.4.1.2) steps
  * the iterator and registers each element's `then` in one synchronous loop;
  * with native promise elements that registration observes nothing, so
  * draining the iterator first and running the Array form over the result is
@@ -681,8 +682,8 @@ const promiseAllOverIteratorText = (
  * The difference from `all` just above is the whole reason this is a separate
  * renderer rather than another `awaitedText` caller: `all` READS each element's
  * settled value, and a race must not read an element at all -- reading an
- * unsettled promise waits for it, which is exactly the block
- * `@hono/node-server`'s `readWithoutBlocking` uses a race to avoid. So a
+ * unsettled promise waits for it, which is exactly the block a non-blocking
+ * read uses a race to avoid. So a
  * promise element is ADOPTED and a non-thenable element resolves the result
  * outright.
  *
@@ -696,7 +697,7 @@ const promiseAllOverIteratorText = (
 const promiseRaceElementText = (ctx: EmitContext, element: Representation, value: Representation): string | null => {
   const valueType = cppResultTypeOf(value)
   // An instance of a class extending `Promise` is registered as the promise it
-  // IS (`nativePromiseBaseOf`): mongodb races real work against its
+  // IS (`nativePromiseBaseOf`): a program races real work against a
   // `class Timeout extends Promise<never>`.
   const nativePromise = nativePromiseBaseOf(element)
   if (nativePromise !== null) {
@@ -709,7 +710,7 @@ const promiseRaceElementText = (ctx: EmitContext, element: Representation, value
     if (neverFulfills(element)) return promiseRejectionOnlyText
     if (cppResultTypeOf(element.value) === valueType) return 'gea_result.adopt(gea_element);'
     // A `Promise<void>` fulfills with `undefined` and its observer takes no
-    // argument: mongodb races `once<void>(socket, 'drain')` against a timeout.
+    // argument: `once<void>(emitter, 'event')` raced against a timeout.
     if (element.value.kind === 'void') {
       const undefinedValue: Representation = { kind: 'undefined' }
       const converted = alignedValueText(ctx, 'host/emit-host-invoke.ts:promiseRaceElementText', undefinedValue, value, 'gea::Undefined{}')
@@ -757,7 +758,7 @@ const nativePromiseElementText = (promise: Extract<Representation, { kind: 'prom
 /**
  * The same race over a TUPLE argument, which is what `Promise.race([a, b])`
  * carries whenever the two elements do not share one carrier -- and they
- * routinely do not: `@hono/node-server` races a `Promise<Buffer>` against a
+ * routinely do not: racing a `Promise<Buffer>` against a
  * `Promise<undefined>`, so the literal is a two-field struct, not an Array.
  *
  * No runtime loop, because there is nothing to loop over: a tuple's arity is a
@@ -934,7 +935,7 @@ const promiseConstructorText = (ctx: EmitContext, member: string, operation: Cal
   // spec gives IT -- the thenable arm adopted by identity, the value arm
   // wrapped -- instead of one of the two answers standing in for both.
   //
-  // hono's `resolveCallback` is the shape: two `instanceof` tests above the
+  // The shape: two `instanceof` tests above the
   // `return Promise.resolve(str)` leave `str` carried as `string |
   // Promise<string>` while TypeScript types the result `Promise<string>`.
   if (carrier.kind === 'tagged-union') {
@@ -1180,8 +1181,8 @@ export const hostInvocations: ReadonlyMap<string, HostInvocationRenderer> = new 
  * Value&)` reads the box's own tag, and `isArray(const Ref<ArrayObject<E>>&)`
  * returns `true` without reading anything. What was missing is everything
  * between -- and in particular a TAGGED UNION, where the answer is exactly the
- * discriminant: hono asks `Array.isArray( init.headers )` with
- * `HeadersInit`-shaped carrier `Dictionary | ArrayObject`, and the union has
+ * discriminant: `Array.isArray( init.headers )` with a `HeadersInit`-shaped
+ * carrier `Dictionary | ArrayObject`, and the union has
  * no `isArray` overload, so the call reached C++ as a hard error.
  *
  * `false` is stated by KIND rather than as a default, so a carrier nobody has
@@ -1207,7 +1208,7 @@ const isArrayText = (ctx: EmitContext, operation: CallOperation): string => {
     // See `RepresentationDeriver.isTupleShape`.
     if (representation.kind === 'record' && ctx.deriver.isTupleShape(representation.shapeId as StructuralTypeId)) return 'true'
     // An open `Document` may view an Array (`gea::dictionary::aliasOf`) --
-    // bson's frames hold every nested value in one -- and is one exactly then.
+    // a document walk holds every nested value in one -- and is one exactly then.
     if (isOpenDocument(representation)) return `gea::host::ArrayConstructor::isArray(gea::dictionary::aliasedObject(${text}))`
     // Answered by kind wherever the kind alone answers -- the one table the
     // IR's frame for this call reads too (`representation/host-templates.ts`).
@@ -1304,8 +1305,8 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
       return `gea::runtime::array::fromTypedArray(${args})`
     }
     if (carrier.kind === 'string') return `gea::runtime::array::fromString(${args})`
-    // A sum of typed-array views -- three's `image.data` is any of the nine
-    // element kinds -- is copied by the arm it holds: each arm is the same
+    // A sum of typed-array views -- a field typed as any of the nine element
+    // kinds -- is copied by the arm it holds: each arm is the same
     // `fromTypedArray` the single-view source takes, and every one builds
     // `ArrayObject<double>`. A mapper would have to instantiate once per arm
     // with a different element type, so only the mapper-free copy renders.
@@ -1342,8 +1343,8 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
   // A Map's `@@iterator` is `%MapIteratorPrototype%` over its entries
   // (ECMA-262 24.1.3.12), so `Array.from(map)` is `[...map]`: one fresh
   // `[K, V]` pair per entry, through the same `appendMapRange` a spread
-  // renders and on the same pair-shape check. mongodb's `mapToMap` reads its
-  // `ReadonlyMap` sort exactly this way.
+  // renders and on the same pair-shape check; a `ReadonlyMap` copied this way
+  // reads it.
   if (carrier.kind === 'keyed-collection' && carrier.family === 'map' && carrier.value !== null && !callback) {
     const pair = result.element.kind === 'record' ? result.element : null
     const [first, second] = pair?.fields ?? []
@@ -1367,9 +1368,9 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
   }
   // A Set's `@@iterator` is `%SetIteratorPrototype%` over its values in
   // insertion order (ECMA-262 24.2.3.10), so `Array.from(set)` is `[...set]`,
-  // through the same `appendSetRange` a spread renders. mongodb's
-  // `shuffle(sequence: Iterable<T>)` reads a `Set<string>` of host names this
-  // way once its copy is bound to the Set its callers pass.
+  // through the same `appendSetRange` a spread renders. A generic
+  // `f(sequence: Iterable<T>)` reads a `Set<string>` this way once its copy is
+  // bound to the Set its callers pass.
   if (carrier.kind === 'keyed-collection' && carrier.family === 'set' && callback) return `gea::runtime::array::fromSet(${args})`
   if (carrier.kind === 'keyed-collection' && carrier.family === 'set' && !callback) {
     if (representationKey(carrier.key) !== representationKey(result.element)) {
@@ -1383,10 +1384,61 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
       `if (${operandText(ctx, source)}) gea::appendSetRange(*gea_from, *${operandText(ctx, source)}); return gea_from; }())`
     )
   }
+  const sum = callback ? null : arrayFromSumText(operandText(ctx, source), carrier, result)
+  if (sum !== null) return sum
   throw createCppEmitBlockedError(
     'host-member-call:ArrayConstructor.from',
     `"Array.from" of a "${representationKey(carrier)}" source needs an iterable protocol this backend does not lower`
   )
+}
+
+/**
+ * The copy one leaf of a sum source builds into `result`, or `null` when that
+ * leaf's helper would build a different carrier than the call's -- every arm
+ * of the dispatch must hand back the same C++ type.
+ */
+const arrayFromLeafText = (
+  text: string,
+  carrier: Representation,
+  result: Extract<Representation, { kind: 'array-object' }>
+): string | null => {
+  const element = result.element
+  const numeric = element.kind === 'scalar' && (element.domain === 'number' || element.domain === 'float64')
+  if (carrier.kind === 'typed-array') return numeric ? `gea::runtime::array::fromTypedArray(${text})` : null
+  if (carrier.kind === 'array-object' && carrier.ownership === result.ownership) {
+    return representationKey(carrier.element) === representationKey(element) ? `gea::runtime::array::fromArray(${text})` : null
+  }
+  if (carrier.kind === 'string') return element.kind === 'string' ? `gea::runtime::array::fromString(${text})` : null
+  return null
+}
+
+/**
+ * `Array.from` over an optional or a sum of array-likes -- `Array.from( data )`
+ * where `data` is any of the typed arrays or absent -- dispatched to the arm the value holds, each arm copied
+ * the way its single-carrier source is. An absent arm is the TypeError
+ * ECMA-262 23.1.2.1 step 5 raises from `GetMethod(undefined, @@iterator)`, in
+ * V8's wording; it is reached only when the value really is absent, so the
+ * typed arms stay native rather than collapsing the sum to a box.
+ */
+const arrayFromSumText = (sourceText: string, carrier: Representation, result: Representation | undefined): string | null => {
+  if ((carrier.kind !== 'optional' && carrier.kind !== 'tagged-union') || result?.kind !== 'array-object') return null
+  const subject = 'gea_from_sum'
+  const leaves = unionPropertyLeaves(carrier, subject)
+  if (leaves.length === 0) return null
+  const statements: string[] = []
+  for (const [index, leaf] of leaves.entries()) {
+    const last = index === leaves.length - 1
+    const absent = leaf.representation.kind === 'undefined' || leaf.representation.kind === 'null'
+    const body = absent
+      ? `gea::host::throwRuntimeError("TypeError", ${JSON.stringify(
+          `${leaf.representation.kind} is not iterable (cannot read property Symbol(Symbol.iterator))`
+        )});`
+      : arrayFromLeafText(leaf.text, leaf.representation, result)
+    if (body === null) return null
+    const statement = absent ? body : `return ${body};`
+    statements.push(last || leaf.test === 'true' ? statement : `if (${leaf.test}) ${statement}`)
+  }
+  return `([&]() -> ${cppTypeOf(result)} { const auto& ${subject} = ${sourceText}; ${statements.join(' ')} }())`
 }
 
 /** `%TypedArray%.from(source[, mapfn])`, retaining the concrete result element type from the call's own carrier. */

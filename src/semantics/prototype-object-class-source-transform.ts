@@ -6,11 +6,11 @@ import ts from 'typescript'
  *
  * ## The shape
  *
- * `@hono/node-server`'s lightweight `Request` is a plain object of methods and
+ * A lightweight `Request` written as a plain object of methods and
  * accessors, grown with `Object.defineProperty`, re-parented onto the global
  * `Request` and instantiated with `Object.create`:
  *
- *     const requestPrototype: Record<string | symbol, any> = { get method() {...}, [getRequestCache]() {...} }
+ *     const requestPrototype: Record<string | symbol, any> = { get method() {...}, [getCache]() {...} }
  *     Object.defineProperty(requestPrototype, 'signal', { get() {...} })
  *     Object.setPrototypeOf(requestPrototype, Request.prototype)
  *     const req = Object.create(requestPrototype)

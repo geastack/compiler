@@ -1,8 +1,8 @@
-// bson's `ObjectId` (src/objectid.ts:226 and :268) normalizes a byte view it
+// A binary-document serializer's object-id class normalizes a byte view it
 // has already narrowed to `Uint8Array`:
 //
 //   } else if (ArrayBuffer.isView(workingId) && workingId.byteLength === 12) {
-//     this.setFromBytes(workingId instanceof Uint8Array ? workingId : ByteUtils.toLocalBufferType(workingId))
+//     this.setFromBytes(workingId instanceof Uint8Array ? workingId : bytes.toLocalBufferType(workingId))
 //
 // The parameter admits no other view, so the conditional's else arm reads a
 // `never`: no value of the program's own types reaches it, and nothing has to

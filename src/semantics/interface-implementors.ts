@@ -20,13 +20,11 @@ import type { IdentityTable } from './normalize/identities.js'
  * the interface's struct has `gea::CallableObject` members nothing can fill,
  * the class instance does not assign into it, and -- worst -- a call written
  * `slot.method(...)` never reaches the class's method at all, so the census
- * never walks it and NO BODY IS EMITTED. hono is the measured case:
- * `HonoBase.router` is a `Router<[H, RouterRoute]>` and `PatternRouter` is the
- * only implementation `hono/tiny` contains; carried as the interface, the
- * emitted program had no `add` and no `match` anywhere in it. The full `hono`
- * entry holds a `SmartRouter` over a `RegExpRouter` and a `TrieRouter` -- three
- * implementations of the one interface -- and the same slot is then a real
- * sum with real dispatch. A union of class carriers already dispatches a
+ * never walks it and NO BODY IS EMITTED. The measured shape:
+ * a field `router: Router<T>` whose only implementation in the program is one
+ * class; carried as the interface, the emitted program had no `add` and no
+ * `match` anywhere in it. A program that composes several implementations of
+ * the one interface makes the same slot a real sum with real dispatch. A union of class carriers already dispatches a
  * member call per arm (`test/runtime/class-union-slot-method-dispatch.ts`),
  * so the sum is the honest carrier rather than a refusal.
  *
@@ -127,14 +125,13 @@ export const interfaceImplementorsOf = (
 
 /**
  * Classes the program STORES into a slot typed by an interface, for an
- * interface nothing but class instances ever enters. mongodb's internal
- * `ObjectWithState { s: { state: string }; emit(...) }` is no class's
- * declared contract -- `Topology`, `Server`, `Monitor` and `ConnectionPool`
- * each pass `this` to one shared `stateTransition(target, newState)` that
- * writes `target.s.state`. Carried as the interface's own struct, every call
- * rebuilt a fresh `{ s: { state } }` out of the instance and the write landed
- * in the copy: the topology never left `closed`, and the first server
- * selection answered "Topology is closed".
+ * interface nothing but class instances ever enters. An internal
+ * `interface WithState { s: { state: string }; emit(...) }` is no class's
+ * declared contract -- several classes each pass `this` to one shared
+ * `transition(target, next)` that writes `target.s.state`. Carried as the
+ * interface's own struct, every call rebuilt a fresh `{ s: { state } }` out of
+ * the instance and the write landed in the copy: the object never left its
+ * initial state, and the next operation that checked it failed.
  *
  * This is the whole-program form of the `implements` rule above, so it keeps
  * that rule's premise honest: EVERY value the program writes into such a

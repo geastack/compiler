@@ -5,6 +5,7 @@
 //! expect: null-self=null
 //! expect: effect before read
 //! expect: read throws
+//! expect: effect before read
 //! expect: other-read=other
 //! expect: identity=true
 interface ReceiverProbe {
@@ -49,14 +50,14 @@ function choose(index: number): ReceiverProbe {
 
 const original = choose(0)
 const kind = original.kind
-const self = original.self
+const detachedSelf = original.self
 const read = original.read
 console.log('detached-type=' + kind())
 console.log('null-type=' + kind.call(null))
-const returned = self()
+const returned = detachedSelf()
 console.log('detached-self=' + String(returned))
 console.log('detached-is-null=' + (returned === null))
-console.log('null-self=' + String(self.call(null)))
+console.log('null-self=' + String(detachedSelf.call(null)))
 try {
   read()
   console.log('read unexpectedly succeeded')

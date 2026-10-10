@@ -1,5 +1,5 @@
-// A literal that spreads the element of a generic rest parameter: the MongoDB
-// driver's `emitAndLogHeartbeat<EventKey>(..., ...args: Parameters<Events[EventKey]>)`
+// A literal that spreads the element of a generic rest parameter: a database
+// client's `emitAndLogHeartbeat<EventKey>(..., ...args: Parameters<Events[EventKey]>)`
 // logs `{ topologyId, serverConnectionId, ...args[0] }`. In the generic body
 // the checker types `args[0]` -- and so the whole literal -- `any`, but every
 // copy closes it to one event class, so the literal is that copy's record:
@@ -46,7 +46,7 @@ class Logger {
 }
 class Emitter<E extends Record<string, (...args: any[]) => void>> {
   logged: string[] = []
-  mongoLogger?: Logger = new Logger()
+  clientLogger?: Logger = new Logger()
   emitAndLogHeartbeat<K extends keyof E>(
     event: K | symbol,
     topologyId: number,
@@ -59,11 +59,11 @@ class Emitter<E extends Record<string, (...args: any[]) => void>> {
       ...args[0]
     }
     this.logged.push(`${loggable.topologyId}:${loggable.connectionId}:${loggable.name}:${loggable.awaited}`)
-    this.mongoLogger?.debug('topology', loggable)
+    this.clientLogger?.debug('topology', loggable)
   }
 }
 const emitter = new Emitter<Events>()
 emitter.emitAndLogHeartbeat('started', 1, 3, new ServerHeartbeatStartedEvent('c1', true))
 emitter.emitAndLogHeartbeat('failed', 1, undefined, new ServerHeartbeatFailedEvent('c2', 5, new Error('x'), false))
-console.log(emitter.logged.join(' '), emitter.mongoLogger?.lines.join(' '))
+console.log(emitter.logged.join(' '), emitter.clientLogger?.lines.join(' '))
 //! expect: 1:c1:serverHeartbeatStarted:true 1:c2:serverHeartbeatFailed:false topology:false:false topology:true:true

@@ -4,7 +4,7 @@
 //! expect: single:undefined
 //! expect: order:close,all,single
 
-// mongodb's encrypter/auto-encrypter `await this._mongocryptdClient?.close()`
+// A database client's encrypter `await this._cryptClient?.close()`
 // and topology's `await (many ? Promise.all(closes) : close())`: the operand
 // is an optional `Promise<void>`, or a union whose one arm is a
 // `Promise<void>`. That arm's `awaited()` yields no value, while the result

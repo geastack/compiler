@@ -1,5 +1,6 @@
 import { operandOf, resultOf, type SemanticOperand } from '../semantics/model/operands.js'
 import type { InvocationOperation } from '../semantics/model/operations.js'
+import { nativeObjectDataSlotSchemasOf } from '../semantics/native-object-data-slots.js'
 import type { Representation } from '../representation/model.js'
 import { classMemberOf, classMethodOverrideOf, classPrototypeMethodMutableOf } from '../projection/fields.js'
 import type { ConversionNode } from '../conversion/algebra.js'
@@ -12,8 +13,7 @@ import { pendingShortCircuitOf } from './lower-short-circuit.js'
 import { IrLoweringBlockedError } from './lower-graph.js'
 import { lowerProxyConstruct } from './lower-proxy.js'
 import { publishObjectAssignFieldConversions } from './call-entry.js'
-import { narrowedOperandView } from '../conversion/operand-view.js'
-import { hostTemplateOfRead } from '../representation/host-templates.js'
+import { plannedHostTemplateOf } from '../projection/callee.js'
 import {
   abiOfCallee,
   constructAbiOfCallee,
@@ -44,6 +44,7 @@ import {
 import { calleeRenderingOf, deferredCalleeOf, numericRestHostCallOf, type DeferredCallee } from '../projection/callee.js'
 import { fixedApplyArgumentFieldsOf } from '../projection/apply-arguments.js'
 import { callArgumentSlotOf } from '../projection/slots.js'
+import { nativeMethodReceiverAdmitted } from '../conversion/native-method.js'
 
 /** A void call still evaluates to undefined when its optional expression is consumed. */
 const registerCallShortCircuit = (
@@ -93,7 +94,7 @@ const lowerDeferredFunctionBind = (
   if (deferred.abi.receiver !== null && receiver === null) {
     throw new IrLoweringBlockedError('Function.prototype.bind omits the this-argument required by the source callable convention')
   }
-  if (deferred.abi.restFrom !== null || result.abi.restFrom !== null) {
+  if (deferred.abi.restFrom !== null) {
     throw new IrLoweringBlockedError(
       'Function.prototype.bind between rest-taking native callable conventions is not yet a stated runtime protocol'
     )
@@ -102,32 +103,38 @@ const lowerDeferredFunctionBind = (
     throw new IrLoweringBlockedError('Function.prototype.bind captures more leading arguments than the source callable convention declares')
   }
   const remaining = deferred.abi.parameters.slice(values.length)
-  const exactFrame =
-    result.abi.receiver === null &&
-    remaining.length === result.abi.parameters.length &&
-    representationKey(deferred.abi.result) === representationKey(result.abi.result) &&
-    remaining.every((parameter, index) => representationKey(parameter.value) === representationKey(result.abi.parameters[index]!.value))
-  if (!exactFrame) {
-    throw new IrLoweringBlockedError('Function.prototype.bind result does not state the source callable suffix convention exactly')
+  const boundRepresentation: Representation = {
+    kind: 'function-value-dispatch',
+    abi: { receiver: null, parameters: remaining, restFrom: null, result: deferred.abi.result }
   }
-  registerResult(
-    ctx,
-    operation,
-    ctx.builder.bindCallable(
-      block,
-      lineage,
-      source,
-      deferred.functionId,
-      deferred.abi,
-      thisArgument,
-      receiver,
-      values,
-      result,
-      false,
-      deferred.unboxedMethod,
-      deferred.bindShadowGuard
+  // The builtin creates the source's finite suffix frame. TypeScript can
+  // publish that value under a rest signature even when the body receives no
+  // arguments. Its checked callable view forwards only the source's actual
+  // formals; the bind factory must not invent a rest argument for the body.
+  const conversion = ctx.program.conversions.nodeFor(boundRepresentation, result)
+  if (conversion.capability.kind === 'never') {
+    throw new IrLoweringBlockedError(
+      'Function.prototype.bind result has no certified conversion from the source callable suffix convention'
     )
+  }
+  const bound = ctx.builder.bindCallable(
+    block,
+    lineage,
+    source,
+    deferred.functionId,
+    deferred.abi,
+    thisArgument,
+    receiver,
+    values,
+    boundRepresentation,
+    deferred.unboxedMethod,
+    deferred.bindShadowGuard
   )
+  const published = convertTo(ctx, block, lineage, { value: bound, representation: boundRepresentation }, result, 'bound-callable-result')
+  if (published === null) {
+    throw new IrLoweringBlockedError('Function.prototype.bind result lost its certified source suffix conversion')
+  }
+  registerResult(ctx, operation, published.value)
 }
 
 /**
@@ -287,6 +294,7 @@ const lowerDeferredFunctionApply = (
             if (slot.kind === 'slot')
               return {
                 kind: 'value',
+                actualValue: read,
                 value: convertOrDrift(ctx, block, lineage, operation.id, 'apply-argument', index, read, slot.representation)
               }
             if (slot.kind === 'raw') return { kind: 'value', value: read }
@@ -341,29 +349,12 @@ const lowerDeferredFunctionApply = (
 const hostTemplateOf = (ctx: LoweringContext, operation: InvocationOperation, callee: IrOperand): CallOperation['hostTemplate'] => {
   const input = ctx.program.slots.input
   if (calleeRenderingOf(input, operation) !== 'template') return undefined
-  const calleeOperand = operandOf(operation, 'callee')
-  if (calleeOperand?.source.kind !== 'result') return undefined
-  const producerId = input.graph.results.get(calleeOperand.source.result)
-  const producer = producerId === undefined ? undefined : input.graph.operations.get(producerId)
-  if (producer?.family !== 'property' || producer.internalMethod !== 'get') return undefined
-  if (producer.hostMethod !== undefined || producer.resolvedBinding !== undefined) return undefined
-  const key = operandOf(producer, 'key')
-  const receiver = operandOf(producer, 'receiver')
-  if (key?.source.kind !== 'constant' || receiver === undefined) return undefined
-  const held =
-    receiver.source.kind === 'result'
-      ? (input.plan.selected.get(receiver.source.result) ?? null)
-      : receiver.source.kind === 'constant'
-        ? input.deriver.derive(receiver.type)
-        : null
-  if (held === null) return undefined
-  const view = narrowedOperandView(held, receiver, input.deriver)
-  return hostTemplateOfRead(view, key.source.text, callee.representation) ?? undefined
+  return plannedHostTemplateOf(input, operation, callee.representation) ?? undefined
 }
 
 /**
- * The rebuild an `await` of a fresh-array call owes its result: mongodb's
- * `const indexes: IndexDescriptionInfo[] = await this.listIndexes(options).toArray()`,
+ * The rebuild an `await` of a fresh-array call owes its result:
+ * `const indexes: IndexInfo[] = await this.listIndexes(options).toArray()`,
  * whose cursor is folded onto its `any` copy, so the call settles with `any[]`
  * while the plan publishes the awaited value typed. An `await` reads its
  * operand's payload and nothing more, so the payload is exactly the array the
@@ -393,9 +384,9 @@ export const awaitedUnsharedArrayRebuildOf = (
  * The rebuild a call's array result needs when the body the call runs
  * returns it at another element carrier -- see
  * `InvocationOperation.unsharedArrayResult` for why a copy is sound only for a
- * result no other reference holds. mongodb's cursor family is folded onto its
- * `any` copy, so `toArray()` runs a body returning `Promise<any[]>` while the
- * read, and the call, carry the view's `Promise<CollectionInfo[]>`.
+ * result no other reference holds. A cursor family folded onto its `any` copy
+ * runs a `toArray()` body returning `Promise<any[]>` while the read, and the
+ * call, carry the view's `Promise<Info[]>`.
  *
  * The semantic proof read ONE declaration. The receiver's class must reach
  * exactly one body of it (any copy of that declaration -- the proof is
@@ -502,7 +493,8 @@ const argumentSlotsOf = (
   return merged.map((entry) => {
     const resolved = resolveRequiredOperand(ctx, block, lineage, entry.operand)
     const value = entry.kind === 'value' ? enter(ctx, block, lineage, operation, entry.operand, resolved) : resolved
-    return entry.operand.from === undefined ? { kind: entry.kind, value } : { kind: entry.kind, value, from: entry.operand.from }
+    const slot = { kind: entry.kind, value, ...(entry.kind === 'value' ? { actualValue: resolved } : {}) }
+    return entry.operand.from === undefined ? slot : { ...slot, from: entry.operand.from }
   })
 }
 
@@ -568,6 +560,18 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
     return
   }
   const evaluated = argumentSlotsOf(ctx, block, lineage, operation)
+  if (operation.freshOrdinaryObject === true && evaluated.length === 0) {
+    const representation = requireResultRepresentation(ctx, operation, 'value', 'a fresh ordinary Object result')
+    if (
+      representation.kind === 'record' ||
+      representation.kind === 'record-with-index' ||
+      representation.kind === 'dictionary' ||
+      (representation.kind === 'native-record-ref' && representation.native === null)
+    ) {
+      registerResult(ctx, operation, ctx.builder.allocateRecord(block, lineage, [], representation, true))
+      return
+    }
+  }
   // A call through a CHOICE of generic functions: the callee is the set's tag
   // and the `closed-family` target names the copy each member runs at this
   // call. Packed against no convention -- each member's own is padded at
@@ -625,7 +629,7 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
   // presence-checks it and calls what it holds (`unwrapPresentValue`), so the
   // payload's convention is the frame these arguments fill. Packing against
   // the optional itself states no convention and hands a rest function its
-  // loose arguments -- three's `...arguments` shims read off a dynamic key.
+  // loose arguments -- `...arguments` forwarding shims read off a dynamic key.
   const invoked = callee.representation.kind === 'optional' ? callee.representation.payload : callee.representation
   const calleeAbi = abiOfCallee(invoked)
   const restElement = calleeAbi?.restFrom === null || calleeAbi === null ? null : (calleeAbi.parameters[calleeAbi.restFrom]?.value ?? null)
@@ -749,18 +753,18 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
     // decision belongs here, once, rather than as a second answer downstream.
     const receiverOperand = operandOf(operation, 'receiver', 0)
     const resolvedReceiver = resolveOptionalOperand(ctx, block, lineage, receiverOperand)
+    const declared = abiOfCallee(callee.representation)?.receiver ?? null
     const supplied =
-      resolvedReceiver !== null && receiverOperand !== undefined
+      declared !== null && resolvedReceiver !== null && receiverOperand !== undefined
         ? enter(ctx, block, lineage, operation, receiverOperand, resolvedReceiver)
         : resolvedReceiver
-    const declared = abiOfCallee(callee.representation)?.receiver ?? null
     // ECMA-262 13.3.6.1 EvaluateCall: a callee that is not a property
-    // reference is called with `undefined` as its this value. mongodb's
-    // `const { initializeClient } = krb; initializeClient(spn, opts)` calls a
+    // reference is called with `undefined` as its this value.
+    // `const { initialize } = mod; initialize(name, opts)` calls a
     // function whose JS body reads `this` (`this: any`), so its convention
     // states a receiver the bare call fills with exactly that value.
     const unbound =
-      receiverOperand === undefined && declared?.kind === 'dynamic'
+      receiverOperand === undefined && declared !== null && (declared.kind === 'dynamic' || nativeMethodReceiverAdmitted(declared))
         ? convertTo(
             ctx,
             block,
@@ -772,7 +776,23 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
             declared
           )
         : null
-    const receiver = unbound ?? (declared || callee.representation.kind === 'dynamic' ? supplied : null)
+    // A method read off a sum some of whose arms lack it is a callee that may
+    // be absent: `value.toJSON(meta)` over `number | Texture | Float32Array`
+    // reads Texture's method on the Texture arm and `undefined` on every other.
+    // The method still binds `value` as its this-value, and the convention of
+    // the method it may hold declares that receiver. The receiver travels as
+    // the object the member was read from; the emitter converts it to the
+    // method's receiver only after the callee is proven present -- an absent
+    // callee throws its TypeError first (13.3.6.2 EvaluateCall step 4), and a
+    // present one was read from exactly the arm that conversion selects.
+    const absentableMethod =
+      declared === null &&
+      receiverOperand !== undefined &&
+      resolvedReceiver !== null &&
+      callee.representation.kind === 'optional' &&
+      (abiOfCallee(callee.representation.payload)?.receiver ?? null) !== null
+    const receiver =
+      unbound ?? (declared || callee.representation.kind === 'dynamic' ? supplied : absentableMethod ? resolvedReceiver : null)
     const representation = optionalResultRepresentation(ctx, operation, 'value')
     // The call yields what the convention returns; the plan may have selected
     // a narrowing of it for the result (`f()` read as `T` where `f` returns
@@ -797,22 +817,39 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
         : unsharedArrayRebuildOf(ctx, operation, supplied?.representation ?? null, representation)
     const produced = narrows ? physical : (rebuild?.body ?? representation)
     const definitionKey = operandOf(operation, 'argument', 1)
-    const fixedDataDefinition =
+    // An authenticated `Object.defineProperty` template returns its actual
+    // target (`intrinsicReturnIdentity`), not the declared `any` result: the
+    // call yields the target's carrier, and only a consumer of the result
+    // converts it to the selected representation.
+    const identityTarget =
+      calleeRenderingOf(ctx.program.slots.input, operation) === 'template' &&
+      operation.intrinsicReturnIdentity === 'argument0' &&
+      wholeSpreadArgument === null &&
+      !narrows &&
+      rebuild === null
+        ? (args[0]?.representation ?? null)
+        : null
+    const fixedDataDefinitionAt = (result: Representation | null) =>
       operation.intrinsicMutation === 'object-define-property' &&
       calleeRenderingOf(ctx.program.slots.input, operation) === 'template' &&
       definitionKey?.source.kind === 'constant' &&
       definitionKey.source.literal === 'string' &&
-      produced !== null
+      result !== null
         ? fixedDataDefinitionRecipeOf(
             args,
             definitionKey.source.text,
-            produced,
+            result,
             ctx.constantDeriver,
             ctx.program.classes,
             ctx.program.conversions,
             operation.intrinsicDataDefinition === true
           )
         : null
+    const declaredDefinition = fixedDataDefinitionAt(produced)
+    const identityDefinition =
+      declaredDefinition === null && identityTarget !== null && representation !== null ? fixedDataDefinitionAt(identityTarget) : null
+    const fixedDataDefinition = declaredDefinition ?? identityDefinition
+    const yielded = identityDefinition !== null ? identityTarget : produced
     // The host template that prints this call, when this IR states that
     // template's frame; the struct copies it prints are published before the
     // reflection census reads them.
@@ -825,7 +862,7 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
       callee,
       receiver,
       args,
-      produced,
+      yielded,
       undefined,
       operation.builtinModuleLookup,
       wholeSpreadArgument !== null,
@@ -843,21 +880,35 @@ export const lowerInvocation = (ctx: LoweringContext, block: IrBlockId, operatio
       calleeRenderingOf(ctx.program.slots.input, operation) === 'template' ? operation.intrinsicReflection : undefined,
       hostTemplate,
       undefined,
-      supplied ?? undefined
+      // Logical this names the object evaluated by the source expression.
+      // Entering the physical receiver slot may upcast or wrap that object;
+      // that ABI conversion must not replace its logical provenance.
+      resolvedReceiver ?? undefined,
+      calleeRenderingOf(ctx.program.slots.input, operation) === 'template' ? operation.intrinsicReturnIdentity : undefined,
+      calleeRenderingOf(ctx.program.slots.input, operation) === 'template' ? operation.intrinsicIntegrity : undefined,
+      calleeRenderingOf(ctx.program.slots.input, operation) === 'template' && wholeSpreadArgument === null
+        ? operation.intrinsicDataDefinition
+        : undefined,
+      calleeRenderingOf(ctx.program.slots.input, operation) === 'template' && wholeSpreadArgument === null
+        ? nativeObjectDataSlotSchemasOf(ctx.graph).namedDataDefinitions.get(operation.id)
+        : undefined
     )
     const returned =
-      narrows && called !== null && physical !== null && representation !== null
-        ? (convertTo(ctx, block, lineage, { value: called, representation: physical }, representation)?.value ?? called)
-        : rebuild !== null && called !== null && representation !== null
-          ? ctx.builder.convert(
-              block,
-              lineage,
-              rebuild.element.id,
-              { value: called, representation: rebuild.body },
-              representation,
-              'unshared-array'
-            )
-          : called
+      identityDefinition !== null && called !== null && identityTarget !== null && representation !== null
+        ? (convertTo(ctx, block, lineage, { value: called, representation: identityTarget }, representation, 'intrinsic-return-identity')
+            ?.value ?? called)
+        : narrows && called !== null && physical !== null && representation !== null
+          ? (convertTo(ctx, block, lineage, { value: called, representation: physical }, representation)?.value ?? called)
+          : rebuild !== null && called !== null && representation !== null
+            ? ctx.builder.convert(
+                block,
+                lineage,
+                rebuild.element.id,
+                { value: called, representation: rebuild.body },
+                representation,
+                'unshared-array'
+              )
+            : called
     registerResult(ctx, operation, returned)
     // `a?.b()` publishes a second value -- what the *expression* evaluates to --
     // which is a merge this arm cannot close, exactly as `a?.b`'s is. It is

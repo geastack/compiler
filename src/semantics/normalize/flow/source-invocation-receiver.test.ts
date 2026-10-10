@@ -5,6 +5,8 @@ import ts from 'typescript'
 import { wholeProgram } from '../reachability.js'
 import { indexValueFlow } from './value-flow.js'
 import { sourceInvocationReceiverOf } from './source-invocation-receiver.js'
+import { sourceInvocationFrameLayoutOf } from './source-invocation-frame-layout.js'
+import type { FlowInvocationOperands } from './model.js'
 
 const inspect = (source: string, buildIsStrict = false) => {
   const entry = resolve('test/fixtures/source-invocation-receiver.ts')
@@ -108,6 +110,94 @@ class Owner {
     expression: (call('this.method()').expression as ts.PropertyAccessExpression).expression,
     conversion: 'identity'
   })
+})
+
+test('an admitted own member entry preserves its raw arguments and owner without borrowing a wrapper cache', () => {
+  const { flow, call, body } = inspect(`
+    export {};
+    function target(value: string) { return value; }
+    function replacement(this: unknown, first: string, second: string) { void this; return first + second; }
+    target.call('first', 'second');
+  `)
+  const site = call("target.call('first', 'second')")
+  const callee = site.expression
+  assert.ok(ts.isPropertyAccessExpression(callee))
+  const target = body('replacement')
+  const inherited = sourceInvocationFrameLayoutOf(flow, site, target)
+  assert.ok(inherited)
+  assert.equal(inherited.operands.explicitThis, true)
+  assert.deepEqual(
+    inherited.operands.args.map((argument) => argument.getText()),
+    ["'second'"]
+  )
+  const ownOperands: FlowInvocationOperands = {
+    kind: 'call',
+    dispatch: { kind: 'member', lookup: callee.expression, key: 'call' },
+    explicitThis: false,
+    callee,
+    receiver: callee.expression,
+    args: site.arguments
+  }
+  // This helper projects positions after the caller has proved installation;
+  // constructing a frame by itself does not admit the target or descriptor.
+  const own = sourceInvocationFrameLayoutOf(flow, site, target, ownOperands)
+  assert.ok(own)
+  assert.ok(own !== inherited)
+  assert.equal(own.operands, ownOperands)
+  assert.equal(sourceInvocationFrameLayoutOf(flow, site, target, ownOperands), own)
+  assert.equal(sourceInvocationFrameLayoutOf(flow, site, target), inherited)
+  assert.deepEqual(
+    own.operands.args.map((argument) => argument.getText()),
+    ["'first'", "'second'"]
+  )
+  assert.equal(own.receiver.kind, 'expression')
+  if (own.receiver.kind === 'expression') assert.equal(own.receiver.expression, callee.expression)
+  assert.equal(own.arguments.kind, 'positional')
+  if (own.arguments.kind === 'positional')
+    assert.deepEqual(
+      own.arguments.slots.map((slot, ordinal) => [slot.kind === 'single' ? slot.actual?.getText() : slot.kind, ordinal]),
+      [
+        ["'first'", 0],
+        ["'second'", 1]
+      ]
+    )
+})
+
+test('an ordinary own frame cannot substitute a different receiver, key, callee or argument identity', () => {
+  const { flow, call, body } = inspect(`
+    export {};
+    function target(value: string) { return value; }
+    function replacement(this: unknown, first: string, second: string) { return first + second; }
+    target.call('first', 'second');
+    target.call('first', 'other');
+  `)
+  const site = call("target.call('first', 'second')")
+  const unrelated = call("target.call('first', 'other')")
+  const callee = site.expression
+  assert.ok(ts.isPropertyAccessExpression(callee))
+  const ordinary: FlowInvocationOperands = {
+    kind: 'call',
+    dispatch: { kind: 'member', lookup: callee.expression, key: 'call' },
+    explicitThis: false,
+    callee,
+    receiver: callee.expression,
+    args: site.arguments
+  }
+  const changed: readonly FlowInvocationOperands[] = [
+    { ...ordinary, receiver: site.arguments[0]! },
+    { ...ordinary, dispatch: { kind: 'member', lookup: callee.expression, key: 'apply' } },
+    { ...ordinary, callee: unrelated.expression },
+    { ...ordinary, args: unrelated.arguments },
+    { ...ordinary, args: site.arguments.slice(1) },
+    { ...ordinary, explicitThis: true }
+  ]
+  for (const operands of changed) {
+    assert.equal(sourceInvocationFrameLayoutOf(flow, site, body('replacement'), operands), null)
+    assert.deepEqual(sourceInvocationReceiverOf(flow, site, body('replacement'), operands), {
+      kind: 'unsupported',
+      reason: 'inconsistent-own-member-frame'
+    })
+  }
 })
 
 test('lexical super, constructor super and arrows retain their actual receiver owner', () => {

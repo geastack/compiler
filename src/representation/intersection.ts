@@ -24,9 +24,9 @@ import { representationKey } from './model.js'
  * `intersection` shape rather than expanding it -- has no object shape of
  * its own, so `intersectionMemberShape` answered `null` and the whole
  * intersection refused for having a member that "is not a record shape".
- * mongodb's `WithId<TSchema> = EnhancedOmit<TSchema, '_id'> & { _id:
- * InferIdType<TSchema> }` is the case, and it is a member of nearly every
- * collection type the driver declares.
+ * `WithId<TSchema> = EnhancedOmit<TSchema, '_id'> & { _id:
+ * InferIdType<TSchema> }` is the case, and a library can make such a type a
+ * member of nearly every type it declares.
  *
  * A member whose declaration a plugin binds to a NATIVE carrier is never
  * spliced: `deriveIntersection`'s own first rule says a host's name outranks

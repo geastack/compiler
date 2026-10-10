@@ -47,9 +47,9 @@ export class DyingArgumentSet extends Set<IrValueId> {
  * The copy is not free. A `gea::Ref` argument passed by value increments on the
  * way in and releases on the way out, and the release is a decrement, a branch,
  * and -- on the taken side -- an out-of-line destructor call clang cannot prove
- * unreachable. `binary_trees`' `build` pays that pair twice per node, for the
- * two subtrees it has just built and will never look at again. Measured on
- * `binary_trees` at 1M nodes: 41.9ms as emitted, 40.8ms with the two subtree
+ * unreachable. A recursive binary-tree `build` pays that pair twice per node,
+ * for the two subtrees it has just built and will never look at again.
+ * Measured on such a build at 1M nodes: 41.9ms as emitted, 40.8ms with the two subtree
  * arguments moved.
  *
  * Each condition is a way the move would be OBSERVED, so none of them can be
@@ -77,13 +77,18 @@ export const buildDyingArgumentIndex = (
   const passed = new Set<IrValueId>()
   const definedIn = new Map<IrValueId, IrBlockId>()
   const usedIn = new Map<IrValueId, IrBlockId>()
+  // Set/DefineOwnProperty results name their receiver's existing storage.
+  // A single use of that result is not a last use when a later receipt still
+  // reads the original allocation SSA (native extension reads do exactly that).
+  const renames = new Map(bodies.flatMap((body) => [...receiverRenamesOf(body)]))
+  const rootOf = (value: IrValueId): IrValueId => renames.get(value) ?? value
   // A `receiver` or `parameter` operation does not copy its formal: the
   // emitter names the frame's own `gea_this`/`gea_arg_N` for it
   // (`targets/cpp/emit.ts`'s `emitReceiver`). Two such operations over one
   // formal are two names for one storage, so a move through either empties
   // what the other reads -- `this.m(new E(this))` in an arrow reads the
   // receiver twice, moved the argument's read into `E`, and called `m` on a
-  // null handle (mongodb's `ConnectionPool` constructor).
+  // null handle (seen in a pool class's constructor).
   const formalOf = new Map<IrValueId, string>()
   const formalReads = new Map<string, number>()
   for (const [bodyIndex, body] of bodies.entries()) {
@@ -100,10 +105,11 @@ export const buildDyingArgumentIndex = (
     for (const [blockId, block] of body.blocks) {
       for (const operation of [...block.operations, block.terminator]) {
         const produced = resultOfIrOperation(operation)
-        if (produced !== null) definedIn.set(produced.id, blockId)
+        if (produced !== null && !renames.has(produced.id)) definedIn.set(produced.id, blockId)
         for (const operand of operandsOfIrOperation(operation)) {
-          uses.set(operand.value, (uses.get(operand.value) ?? 0) + 1)
-          usedIn.set(operand.value, blockId)
+          const root = rootOf(operand.value)
+          uses.set(root, (uses.get(root) ?? 0) + 1)
+          usedIn.set(root, blockId)
         }
         if (operation.kind === 'binding-read') {
           reads.set(operation.result.id, { declaration: operation.declaration, body, block: blockId })
@@ -115,13 +121,13 @@ export const buildDyingArgumentIndex = (
           writeBodies.set(operation.declaration, bodiesOfCell)
         }
         if (operation.kind === 'call' || operation.kind === 'construct') {
-          for (const argument of operation.arguments) passed.add(argument.value)
+          for (const argument of operation.arguments) passed.add(rootOf(argument.value))
         }
         // A field store hands the value over exactly as an argument does, and so
         // does a write into a cell -- the cell keeps what the value held, and a
         // value with one use has nothing left to keep.
-        if (operation.kind === 'set' || operation.kind === 'define-own-property') passed.add(operation.value.value)
-        if (operation.kind === 'binding-write') passed.add(operation.value.value)
+        if (operation.kind === 'set' || operation.kind === 'define-own-property') passed.add(rootOf(operation.value.value))
+        if (operation.kind === 'binding-write') passed.add(rootOf(operation.value.value))
       }
     }
   }
@@ -140,8 +146,8 @@ export const buildDyingArgumentIndex = (
   // A value the SAME BLOCK defines and then passes is the simplest dying shape
   // there is, and needs no cell reasoning at all: straight-line code redefines
   // it before every use, so a loop cannot carry an emptied one into the next
-  // iteration and no other block can name it. `binary_trees`' `build` is
-  // exactly this -- the two subtrees it has just recursed for.
+  // iteration and no other block can name it. A recursive binary-tree `build`
+  // is exactly this -- the two subtrees it has just recursed for.
   const sharesFormal = (value: IrValueId): boolean => {
     const formal = formalOf.get(value)
     return formal !== undefined && (formalReads.get(formal) ?? 0) > 1
@@ -163,6 +169,7 @@ export const buildDyingArgumentIndex = (
   }
   for (const value of constructorFormalLastReadsOf(bodies, isConstructorBody, storeSinkAllowed, readCounts, writeBodies, dying.sunkStores))
     dying.add(value)
+  for (const [alias, root] of renames) if (dying.has(root)) dying.add(alias)
   return dying
 }
 
@@ -175,8 +182,8 @@ export const buildDyingArgumentIndex = (
  * and then stores the handle reads the formal's cell many times, so the store
  * copied the handle and the parameter died with the call: one count dip per
  * stored argument, of an object that is alive again a moment later -- which the
- * cycle collector buffered, probed and forgot (the mongodb driver's request
- * objects: dozens of spilled dips per operation). A class constructor is entered
+ * cycle collector buffered, probed and forgot (request objects: dozens of
+ * spilled dips per operation). A class constructor is entered
  * only from its construct function, which hands it OWNED arguments, so the
  * store may take the formal's own reference whenever nothing can read the cell
  * afterwards.
@@ -240,6 +247,8 @@ const constructorFormalLastReadsOf = (
     if (formalCells.size === 0) continue
     type Use = { readonly block: IrBlockId; readonly index: number; readonly transferring: boolean; readonly value: IrValueId }
     const uses = new Map<DeclarationId, Use[]>()
+    const renames = receiverRenamesOf(body)
+    const rootOf = (value: IrValueId): IrValueId => renames.get(value) ?? value
     for (const [blockId, block] of body.blocks) {
       for (const [index, operation] of [...block.operations, block.terminator].entries()) {
         const transferring = new Set(
@@ -251,7 +260,7 @@ const constructorFormalLastReadsOf = (
             : []
         )
         for (const operand of operandsOfIrOperation(operation)) {
-          const declaration = cellOf.get(operand.value)
+          const declaration = cellOf.get(rootOf(operand.value))
           if (declaration === undefined || !formalCells.has(declaration)) continue
           const sites = uses.get(declaration) ?? []
           sites.push({ block: blockId, index, transferring: transferring.has(operand), value: operand.value })
@@ -311,9 +320,9 @@ const constructorFormalLastReadsOf = (
       for (const block of body.blocks.values()) {
         for (const operation of [...block.operations, block.terminator]) {
           for (const operand of operandsOfIrOperation(operation)) {
-            if (!receiverIds.has(operand.value)) continue
-            const asReceiver = (operation.kind === 'set' || operation.kind === 'get') && receiverIds.has(operation.receiver.value)
-            const asPayload = operation.kind === 'set' && receiverIds.has(operation.value.value)
+            if (!receiverIds.has(rootOf(operand.value))) continue
+            const asReceiver = (operation.kind === 'set' || operation.kind === 'get') && receiverIds.has(rootOf(operation.receiver.value))
+            const asPayload = operation.kind === 'set' && receiverIds.has(rootOf(operation.value.value))
             if (!asReceiver || asPayload) thisStaysPrivate = false
           }
         }
@@ -335,7 +344,7 @@ const constructorFormalLastReadsOf = (
       const block = body.blocks.get(blockId)
       const store = block?.operations[storeIndex]
       if (block === undefined || store === undefined || store.kind !== 'set' || receiverIds.size === 0) return null
-      if (!receiverIds.has(store.receiver.value) || !receiverIsPrivate()) return null
+      if (!receiverIds.has(rootOf(store.receiver.value)) || !receiverIsPrivate()) return null
       const storeKey = constantTexts.get(store.key.value)
       if (storeKey === undefined || (store.result !== null && (consumers.get(store.result.id)?.length ?? 0) > 0)) return null
       let anchor = storeIndex
@@ -350,11 +359,11 @@ const constructorFormalLastReadsOf = (
           case 'compute':
             break
           case 'get':
-            if (receiverIds.has(operation.receiver.value)) return null
+            if (receiverIds.has(rootOf(operation.receiver.value))) return null
             break
           case 'set': {
             const key = constantTexts.get(operation.key.value)
-            if (!receiverIds.has(operation.receiver.value) || key === undefined || key === storeKey) return null
+            if (!receiverIds.has(rootOf(operation.receiver.value)) || key === undefined || key === storeKey) return null
             break
           }
           default:
@@ -409,14 +418,17 @@ const constructorFormalLastReadsOf = (
 export const ownedDyingValuesOf = (body: IrBody): ReadonlySet<IrValueId> => {
   const definitions = new Map<IrValueId, IrBlockId>()
   const uses = new Map<IrValueId, IrBlockId[]>()
+  const renames = receiverRenamesOf(body)
+  const rootOf = (value: IrValueId): IrValueId => renames.get(value) ?? value
   for (const [blockId, block] of body.blocks) {
     for (const operation of [...block.operations, block.terminator]) {
       const result = resultOfIrOperation(operation)
-      if (result) definitions.set(result.id, blockId)
+      if (result && !renames.has(result.id)) definitions.set(result.id, blockId)
       for (const operand of operandsOfIrOperation(operation)) {
-        const readers = uses.get(operand.value) ?? []
+        const root = rootOf(operand.value)
+        const readers = uses.get(root) ?? []
         readers.push(blockId)
-        uses.set(operand.value, readers)
+        uses.set(root, readers)
       }
     }
   }
@@ -465,6 +477,7 @@ export const ownedDyingValuesOf = (body: IrBody): ReadonlySet<IrValueId> => {
     }
     if (!reentered) dying.add(value)
   }
+  for (const [alias, root] of renames) if (dying.has(root)) dying.add(alias)
   return dying
 }
 
@@ -487,11 +500,16 @@ export const ownedDyingValuesOf = (body: IrBody): ReadonlySet<IrValueId> => {
 export const ownedDyingMergeInputsOf = (body: IrBody): ReadonlySet<IrValueId> => {
   const definedIn = new Map<IrValueId, IrBlockId>()
   const uses = new Map<IrValueId, number>()
+  const renames = receiverRenamesOf(body)
+  const rootOf = (value: IrValueId): IrValueId => renames.get(value) ?? value
   for (const [blockId, block] of body.blocks) {
     for (const operation of [...block.operations, block.terminator]) {
       const result = resultOfIrOperation(operation)
-      if (result) definedIn.set(result.id, blockId)
-      for (const operand of operandsOfIrOperation(operation)) uses.set(operand.value, (uses.get(operand.value) ?? 0) + 1)
+      if (result && !renames.has(result.id)) definedIn.set(result.id, blockId)
+      for (const operand of operandsOfIrOperation(operation)) {
+        const root = rootOf(operand.value)
+        uses.set(root, (uses.get(root) ?? 0) + 1)
+      }
     }
   }
   const dying = new Set<IrValueId>()
@@ -499,7 +517,8 @@ export const ownedDyingMergeInputsOf = (body: IrBody): ReadonlySet<IrValueId> =>
     for (const operation of block.operations) {
       if (operation.kind !== 'phi') continue
       for (const incoming of operation.incoming) {
-        if (uses.get(incoming.value.value) === 1 && definedIn.get(incoming.value.value) === incoming.block) dying.add(incoming.value.value)
+        if (uses.get(rootOf(incoming.value.value)) === 1 && definedIn.get(rootOf(incoming.value.value)) === incoming.block)
+          dying.add(incoming.value.value)
       }
     }
   }
@@ -517,6 +536,7 @@ export const ownedFormalInputsOf = (
   const conversions = new Set<IrValueId>()
   if (body.tryRegions.length > 0 || (body.iteratorCloseRegions?.length ?? 0) > 0) return { arguments: arguments_, conversions }
   const parameters = new Map<IrValueId, number>()
+  const renames = receiverRenamesOf(body)
   for (const block of body.blocks.values()) {
     for (const operation of block.operations) {
       if (operation.kind === 'parameter' && body.abi?.parameters[operation.ordinal]?.ownership !== 'borrowed')
@@ -528,7 +548,7 @@ export const ownedFormalInputsOf = (
   for (const [blockId, block] of body.blocks) {
     for (const [index, operation] of [...block.operations, block.terminator].entries()) {
       for (const operand of operandsOfIrOperation(operation)) {
-        const ordinal = parameters.get(operand.value)
+        const ordinal = parameters.get(renames.get(operand.value) ?? operand.value)
         if (ordinal === undefined) continue
         const readers = uses.get(ordinal) ?? []
         readers.push({ block: blockId, index, operation, value: operand.value })
@@ -644,8 +664,8 @@ const transferringOperandsOf = (operation: IrOperation): readonly IrOperand[] =>
  * into a union or stores into a cell: the allocation's result is the
  * receiver of each field store and then the source of the widening, so it
  * has several uses and the widening copied it -- one retain, one release and
- * one cycle-candidate buffering per record, in `WriteConcern.fromOptions`
- * and every other options-record constructor of the mongodb driver. A
+ * one cycle-candidate buffering per record, in a static `fromOptions`
+ * and every other options-record constructor of a library. A
  * receiver use is a read in place, and once every such read is behind the
  * transferring use on every path the storage is free to go.
  *

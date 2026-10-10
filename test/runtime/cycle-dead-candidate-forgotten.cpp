@@ -1,7 +1,7 @@
 // An object buffered by a dip and then released for the last time gives its
 // entry back (`forgetDeadCandidate`): nothing is left in the buffer for the
 // filter to find dead, and the block is not held by the buffered bit. The
-// shape is the one the mongodb driver repeats ~1M times per run -- a handle
+// shape is the one a database client repeats ~1M times per run -- a handle
 // copied into a container, the local dropped (the dip), then the container
 // dropped (the death).
 #include "gea_runtime.h"

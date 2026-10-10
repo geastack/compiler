@@ -9,44 +9,44 @@ import { closedCallableAuthorityOf, closedValueOriginAuthorityOf } from './calla
 import { sourceClassDataMemberPlanOf, sourceClassKeyReadPlanOf, type SourceClassFamilyQuery } from './source-class-data.js'
 import { attachDeferredIntrinsicProtocolLedger, createDeferredIntrinsicProtocolLedger } from '../deferred-intrinsic-protocols.js'
 
-// WebGLRenderer's own shape (`WebGLRenderer.js`): a plain JS constructor
+// A pre-ES6 library constructor's shape: a plain JS constructor
 // function `R` keeps a `const _this = this` alias, installs its callable
-// slots (`render`, `setClearColor`) through the LITERAL keyword, but installs
-// most of its DATA slots (`shadowMap`, and in the real file `capabilities`,
-// `extensions`, `properties`, `renderLists`, `state`, `info`) through the
+// slots (`render`, `setColor`) through the LITERAL keyword, but installs
+// most of its DATA slots (`pass`, and in a full-size version many more
+// such as `properties`, `state`, `info`) through the
 // alias instead -- often from inside a nested helper the checker never scans
-// either. `renderer.render()` calls `shadowMap.render()`, `shadowMap` is
+// either. `renderer.render()` calls `pass.render()`, `pass` is
 // itself a constructor function taking the SAME `_this` alias as a
-// parameter, and two other helpers (`Shadow`'s own receiver and `Env`'s
+// parameter, and two other helpers (`Pass`'s own receiver and `Env`'s
 // parameter) round out the shape `member-closure:receiver-open -.render` and
-// `-.setClearColor` refused in the three.js app's WebGLShadowMap.js/WebGLRenderer.js.
+// `-.setColor` used to refuse.
 const source = `
 export {}
 function R( p ) {
   const _this = this
-  let shadowMap
+  let pass
   this.info = { calls: 0 }
   this.render = function ( s ) {
     _this.info.calls++
-    shadowMap.render( s )
+    pass.render( s )
   }
-  this.setClearColor = function ( c ) {
+  this.setColor = function ( c ) {
     _this.info.calls += c
   }
-  function initGLContext() {
-    shadowMap = new Shadow( _this )
-    _this.shadowMap = shadowMap
+  function initContext() {
+    pass = new Pass( _this )
+    _this.pass = pass
   }
-  initGLContext()
+  initContext()
 }
-function Shadow( renderer ) {
+function Pass( renderer ) {
   this.render = function ( s ) {
-    renderer.setClearColor( 0 )
+    renderer.setColor( 0 )
   }
 }
 function Env( renderer ) {
   function get( t ) {
-    renderer.setClearColor( 1 )
+    renderer.setColor( 1 )
     return renderer.info
   }
   return { get }
@@ -57,7 +57,7 @@ renderer.render( 1 )
 env.get( 1 )
 `
 
-// The REAL WebGLRenderer.js is not the plain-function shape above -- it is an
+// The same library shape is often spelled not as the plain function above but as an
 // ES6 class whose constructor keeps the same `const _this = this` alias and
 // installs its data slots through it from a nested helper. `isConstructorFunction`
 // only admits FunctionDeclaration/FunctionExpression, so
@@ -70,30 +70,30 @@ export {}
 class R {
   constructor( p ) {
     const _this = this
-    let shadowMap
+    let pass
     this.info = { calls: 0 }
     this.render = function ( s ) {
       _this.info.calls++
-      shadowMap.render( s )
+      pass.render( s )
     }
-    this.setClearColor = function ( c ) {
+    this.setColor = function ( c ) {
       _this.info.calls += c
     }
-    function initGLContext() {
-      shadowMap = new Shadow( _this )
-      _this.shadowMap = shadowMap
+    function initContext() {
+      pass = new Pass( _this )
+      _this.pass = pass
     }
-    initGLContext()
+    initContext()
   }
 }
-function Shadow( renderer ) {
+function Pass( renderer ) {
   this.render = function ( s ) {
-    renderer.setClearColor( 0 )
+    renderer.setColor( 0 )
   }
 }
 function Env( renderer ) {
   function get( t ) {
-    renderer.setClearColor( 1 )
+    renderer.setColor( 1 )
     return renderer.info
   }
   return { get }
@@ -150,11 +150,11 @@ const setup = (fixtureSource: string = source) => {
     assert.ok(found, `no call found for ${text}`)
     return found!
   }
-  // Scoped to `R`'s own declaration, not the whole file: `Shadow` also
+  // Scoped to `R`'s own declaration, not the whole file: `Pass` also
   // installs a `this.render = function (...) {...}` (a second, unrelated
   // FunctionExpression with the same key), so an unscoped file-wide walk
   // silently picks up whichever occurrence comes LAST in source order --
-  // Shadow's, not R's -- and an assertion comparing it against the real
+  // Pass's, not R's -- and an assertion comparing it against the real
   // `fact.frames[0]?.body` then compares two large, unequal, cyclic AST
   // nodes. Node's `assert.equal` builds a diff for the failure message by
   // inspecting both operands, and inspecting two such graphs is what was
@@ -184,9 +184,9 @@ const setup = (fixtureSource: string = source) => {
 }
 
 test('a data slot installed only through a `const _this = this` alias is a plan the checker itself never sees a member for', () => {
-  // Find the receiver of `_this.shadowMap = shadowMap` and ask the same
+  // Find the receiver of `_this.pass = pass` and ask the same
   // question `publishedValue`'s `constructionDataMember` guard asks: is
-  // `shadowMap` a data member of whatever `_this` denotes. Before the fix
+  // `pass` a data member of whatever `_this` denotes. Before the fix
   // this returned null (`member-absent-on-owner`) because
   // `checker.getPropertyOfType` never learns a member written through an
   // alias; the flow-index fallback must find it anyway.
@@ -196,7 +196,7 @@ test('a data slot installed only through a `const _this = this` alias is a plan 
     if (
       ts.isBinaryExpression(node) &&
       ts.isPropertyAccessExpression(node.left) &&
-      node.left.name.text === 'shadowMap' &&
+      node.left.name.text === 'pass' &&
       node.left.expression.getText(file) === '_this'
     )
       receiver = node.left.expression
@@ -210,17 +210,17 @@ test('a data slot installed only through a `const _this = this` alias is a plan 
     expression: receiver!,
     originsOf: closedValueOriginAuthorityOf(checker, flow, receiver!).classAllocationsOf
   }
-  const dataPlan = sourceClassDataMemberPlanOf(checker, flow, query, 'shadowMap')
-  assert.ok(dataPlan, 'shadowMap must resolve as a data member through the _this alias')
+  const dataPlan = sourceClassDataMemberPlanOf(checker, flow, query, 'pass')
+  assert.ok(dataPlan, 'pass must resolve as a data member through the _this alias')
   assert.equal(dataPlan!.declarations.length, 1)
 
-  const readPlan = sourceClassKeyReadPlanOf(checker, flow, query, 'shadowMap')
-  assert.ok(readPlan, 'the key-read plan must not report shadowMap absent')
+  const readPlan = sourceClassKeyReadPlanOf(checker, flow, query, 'pass')
+  assert.ok(readPlan, 'the key-read plan must not report pass absent')
   assert.equal(readPlan!.needsDefaultPrototype, false, 'an alias-installed key is not an absent one')
   assert.deepEqual([...readPlan!.classes.values()], ['data'])
 })
 
-test('invocationFactOf closes renderer.render() through the shadowMap alias chain', () => {
+test('invocationFactOf closes renderer.render() through the pass alias chain', () => {
   const { ledger, authority, callNamed, functionExpressionAssignedTo } = setup()
   const call = callNamed('renderer.render')
   const fact = ledger.capture(() => authority.invocationFactOf(call)).value
@@ -236,34 +236,34 @@ test('invocationFactOf closes renderer.render() through the shadowMap alias chai
   assert.equal(fact!.frames[0]?.body, functionExpressionAssignedTo('render'))
 })
 
-test('invocationFactOf closes renderer.setClearColor() called through a constructor-function parameter alias', () => {
+test('invocationFactOf closes renderer.setColor() called through a constructor-function parameter alias', () => {
   const { ledger, authority, callNamed, functionExpressionAssignedTo } = setup()
-  // `env.get(1)` calls `renderer.setClearColor(1)` where `renderer` is the
+  // `env.get(1)` calls `renderer.setColor(1)` where `renderer` is the
   // NAME of `Env`'s own parameter -- a second alias hop beyond `_this`.
-  const call = callNamed('renderer.setClearColor', '1')
+  const call = callNamed('renderer.setColor', '1')
   const fact = ledger.capture(() => authority.invocationFactOf(call)).value
-  assert.ok(fact, 'renderer.setClearColor() must be a closed invocation through the Env(renderer) parameter')
+  assert.ok(fact, 'renderer.setColor() must be a closed invocation through the Env(renderer) parameter')
   // See the sibling `renderer.render()` test above for why this is a
   // reference check rather than `assert.deepEqual` on raw AST nodes.
   assert.equal(fact!.frames.length, 1)
-  assert.equal(fact!.frames[0]?.body, functionExpressionAssignedTo('setClearColor'))
+  assert.equal(fact!.frames[0]?.body, functionExpressionAssignedTo('setColor'))
 })
 
-test('invocationFactOf closes shadowMap.render() -- the receiver-open leaf the fix removes', () => {
+test('invocationFactOf closes pass.render() -- the receiver-open leaf the fix removes', () => {
   const { ledger, authority, callNamed } = setup()
-  const call = callNamed('shadowMap.render')
+  const call = callNamed('pass.render')
   const fact = ledger.capture(() => authority.invocationFactOf(call)).value
-  assert.ok(fact, 'shadowMap.render() must be closed once _this.shadowMap = shadowMap is a recognised data member')
+  assert.ok(fact, 'pass.render() must be closed once _this.pass = pass is a recognised data member')
 })
 
 test('invocationFactOf closes env.get(1), reading renderer.info through the Env(renderer) parameter', () => {
   const { ledger, authority, callNamed } = setup()
   const call = callNamed('env.get')
   const fact = ledger.capture(() => authority.invocationFactOf(call)).value
-  assert.ok(fact, 'env.get(1) must be closed: it only reads renderer.info and calls renderer.setClearColor')
+  assert.ok(fact, 'env.get(1) must be closed: it only reads renderer.info and calls renderer.setColor')
 })
 
-// The real WebGLRenderer.js case: same alias-install shape, but `R` is an ES6
+// The class-spelled case: same alias-install shape, but `R` is an ES6
 // class and the alias lives inside its `constructor(...)` method rather than
 // a bare function body -- exercising the `isClassSpelledSourceClass` arm of
 // `constructorInstalledMemberWritesOf`.
@@ -275,7 +275,7 @@ test('a data slot installed through a `const _this = this` alias inside a class 
     if (
       ts.isBinaryExpression(node) &&
       ts.isPropertyAccessExpression(node.left) &&
-      node.left.name.text === 'shadowMap' &&
+      node.left.name.text === 'pass' &&
       node.left.expression.getText(file) === '_this'
     )
       receiver = node.left.expression
@@ -289,17 +289,17 @@ test('a data slot installed through a `const _this = this` alias inside a class 
     expression: receiver!,
     originsOf: closedValueOriginAuthorityOf(checker, flow, receiver!).classAllocationsOf
   }
-  const dataPlan = sourceClassDataMemberPlanOf(checker, flow, query, 'shadowMap')
-  assert.ok(dataPlan, 'shadowMap must resolve as a data member through the _this alias inside a class constructor')
+  const dataPlan = sourceClassDataMemberPlanOf(checker, flow, query, 'pass')
+  assert.ok(dataPlan, 'pass must resolve as a data member through the _this alias inside a class constructor')
   assert.equal(dataPlan!.declarations.length, 1)
 
-  const readPlan = sourceClassKeyReadPlanOf(checker, flow, query, 'shadowMap')
-  assert.ok(readPlan, 'the key-read plan must not report shadowMap absent')
+  const readPlan = sourceClassKeyReadPlanOf(checker, flow, query, 'pass')
+  assert.ok(readPlan, 'the key-read plan must not report pass absent')
   assert.equal(readPlan!.needsDefaultPrototype, false, 'an alias-installed key is not an absent one')
   assert.deepEqual([...readPlan!.classes.values()], ['data'])
 })
 
-test('invocationFactOf closes renderer.render() through the shadowMap alias chain when R is a class', () => {
+test('invocationFactOf closes renderer.render() through the pass alias chain when R is a class', () => {
   const { ledger, authority, callNamed, functionExpressionAssignedTo } = setup(classSource)
   const call = callNamed('renderer.render')
   const fact = ledger.capture(() => authority.invocationFactOf(call)).value
@@ -310,9 +310,9 @@ test('invocationFactOf closes renderer.render() through the shadowMap alias chai
   assert.equal(fact!.frames[0]?.body, functionExpressionAssignedTo('render'))
 })
 
-test('invocationFactOf closes shadowMap.render() when R is a class -- the receiver-open leaf the fix removes for the real WebGLRenderer shape', () => {
+test('invocationFactOf closes pass.render() when R is a class -- the receiver-open leaf the fix removes for the class-spelled shape', () => {
   const { ledger, authority, callNamed } = setup(classSource)
-  const call = callNamed('shadowMap.render')
+  const call = callNamed('pass.render')
   const fact = ledger.capture(() => authority.invocationFactOf(call)).value
-  assert.ok(fact, 'shadowMap.render() must be closed once _this.shadowMap = shadowMap is a recognised data member of the class')
+  assert.ok(fact, 'pass.render() must be closed once _this.pass = pass is a recognised data member of the class')
 })

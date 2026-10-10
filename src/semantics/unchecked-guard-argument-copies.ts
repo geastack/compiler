@@ -13,10 +13,10 @@ import ts from 'typescript'
  * into the parameter's native carrier and a value outside the type stops the
  * program -- because the program claimed the type. A type PREDICATE's tested
  * parameter is the one place that claim is not being made: `isMeta(t:
- * SortDirection): t is { $meta: string }` exists to TEST its argument, and a
+ * Direction): t is { $meta: string }` exists to TEST its argument, and a
  * caller holding `direction: any` calls it precisely because it does not know
- * what `direction` is. mongodb's `sort.ts` does exactly this, and its
- * `pairToMap` passes an ARRAY through that `any`; JavaScript answers `false`,
+ * what `direction` is. A sort-specification parser does exactly this, and
+ * passes an ARRAY through that `any`; JavaScript answers `false`,
  * while the native parameter carrier (a tagged union of `number | string |
  * { $meta }`) has no arm for an array and aborts.
  *

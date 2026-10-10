@@ -16,9 +16,9 @@ import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
  * A fresh Set built from an array literal whose only use is `.has()` is a
  * membership test over the literal's elements, and is rewritten into one.
  *
- * mongodb's `ReadPreference.isValid` runs
+ * A validator running
  * `const VALID_MODES = new Set([PRIMARY, ..., null]); return VALID_MODES.has(mode)`
- * on every command it sends. Built for real that is an array, its element
+ * on every call is the case. Built for real that is an array, its element
  * vector, a Set, its item vector and a heap copy of every element string that
  * does not fit the small-string buffer -- a dozen allocations per operation to
  * answer one comparison chain. Nothing about the Set is observable when nothing

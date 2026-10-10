@@ -1,6 +1,6 @@
 // A CLASS INSTANCE PASSED WHERE A RECORD OF ONE OVERLOADED METHOD IS DECLARED.
 //
-// mongodb's `mongo_logger.ts` builds its default log sink with
+// A database client's logger builds its default log sink with
 // `createStdioLogger(process.stderr)`, whose parameter is
 // `{ write: NodeJS.WriteStream['write'] }` -- a record holding the stream
 // class's overloaded `write` method type (node-compat declares

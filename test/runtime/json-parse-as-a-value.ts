@@ -1,6 +1,6 @@
 // `JSON.parse` PASSED AS A CALLBACK, NEVER CALLED BY NAME.
 //
-// `@hono/node-server`'s `LightRequest.json` is `this.text().then(JSON.parse)`.
+// An HTTP server adapter's lightweight request `json` is `this.text().then(JSON.parse)`.
 // `JSON.parse` is an ordinary function object in ECMAScript; what this backend
 // has instead is a per-call-site rendering, generated from the type the call
 // site asserts -- so the two JSON rows in `host-members.ts` carry a

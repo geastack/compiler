@@ -13,6 +13,11 @@ import { isOpenDocument, representationKey } from '../representation/model.js'
 import type { ConstantOperation, IrBody, IrOperand, IrOperation } from './model.js'
 import { observesNativeCarrierOnly, operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { conversionNodeIdOf, type ConversionCensus } from '../conversion/nodes.js'
+import { transfersNativeStorage, type ConversionNode } from '../conversion/algebra.js'
+import { nativeViewOriginsOf } from '../conversion/native-view-origins.js'
+import { hostObjectWalkedSourcesOf } from './host-template-conversions.js'
+import { nativeFieldViewIdentityTransportOf } from '../conversion/native-field-view.js'
+import { recipeClosureOf } from '../conversion/recipe-closure.js'
 import { nativePayloadTransportMatches } from '../conversion/native-payload-transport.js'
 import { hostTemplateFrameOf, nativeCallFrameOf, nativeIteratorMethodFrameOf, receivedCallArguments } from './call-entry.js'
 import { censusClassStaticFieldSlots, staticFieldSlotOf } from './class-static-fields.js'
@@ -27,12 +32,14 @@ import { nativeKeyQueryOf } from './native-key-query.js'
 import { nativeCarrierPredicateOf } from './native-carrier-predicate.js'
 import { nativeMergeTransportMatches } from './native-merge-transport.js'
 import { nativeCallableFlowOf } from './callable-class-flow.js'
+import { nativeGenericCallEntriesOf } from './generic-call-entry.js'
 import { nativeSuperInitializationOf } from './native-class-initialization.js'
 import { nativeClassAccessorEntryOf } from './native-class-accessor.js'
 import { nativeClassConstructionOf } from './native-class-construction.js'
 import { nativeHostConstructionOf } from './native-host-construction.js'
 import { closePhysicalClassReflection } from './physical-class-reflection.js'
-import { absentClassArmRead } from './absent-class-arm.js'
+import { absentClassArmRead, classFamilyLacksKey } from './absent-class-arm.js'
+import type { ProgramConversionRecipe } from './program-conversions.js'
 import { nativeAbsentPropertyReadOf } from './native-absent-property.js'
 
 /** A constructor carrier's own construct convention, seen through presence and borrowing; see its use in `closedConstructOperations`. */
@@ -76,6 +83,7 @@ export interface ReflectionExposure {
 }
 
 export interface ReflectionExposureOptions {
+  readonly programConversions?: readonly ProgramConversionRecipe[]
   readonly wellKnownSymbols?: ReadonlyMap<DeclarationId, string>
   readonly physicalClasses?: ReadonlyMap<DeclarationId, PhysicalClassLayout>
   readonly representations: readonly Representation[]
@@ -139,10 +147,10 @@ export const finalizeTypedComputedReads = (
           // access.ts`'s `receiverBoundedPropertyKeyOf` fallback), whose arms
           // are exactly `peeledReceiver.fields` and so is sound only when
           // nothing else can make this receiver answer a field outside that
-          // list -- what `keys-only` certifies. `BSONElement`'s own
-          // `nameLength`/`type`/... reads (`bson`'s on-demand parser) are the
-          // first variant: the key is `BSONElementOffset.nameLength`, a
-          // literal `2` on the KEY's type, not a receiver-field enumeration,
+          // list -- what `keys-only` certifies. A tuple's
+          // `element[Offset.nameLength]` reads (an on-demand binary parser)
+          // are the first variant: the key is an enum member, a literal `2`
+          // on the KEY's type, not a receiver-field enumeration,
           // so demand elsewhere on the SAME by-value tuple shape (measured:
           // 'full', from an unrelated dynamic use of the parsed array) must
           // not strip a read that never depended on that certification.
@@ -383,6 +391,7 @@ const isDeferredCarrier = (representation: Representation): boolean => {
 
 const abiMatches = (left: CallableAbi, right: CallableAbi): boolean =>
   left.restFrom === right.restFrom &&
+  left.argumentsFrame === right.argumentsFrame &&
   representationKey(left.result) === representationKey(right.result) &&
   (left.receiver === null
     ? right.receiver === null
@@ -461,11 +470,10 @@ const valueRepresentationOf = (operation: IrOperation): Representation | null =>
  * the value through the census node for exactly `value -> field` -- the
  * mirror of the read side's payload-transport allowance.
  *
- * three's uniform stores are the shape: `uniforms.tEquirect.value = texture`
- * (`WebGLCubeRenderTarget`), `uniforms.map.value = material.map`
- * (`WebGLMaterials`), the shadow-map and background uniforms. The uniform
- * record's `value` is a native sum of every carrier the program writes into
- * it, and the stored `Texture` enters it through
+ * Shader-uniform stores are the shape: `uniforms.map.value = texture`,
+ * `uniforms.color.value = material.color`, and so on. The uniform record's
+ * `value` is a native sum of every carrier the program writes into it, and
+ * the stored class instance enters it through
  * `gea::native-sum::inject-alternative` -- `Sum::ofArm<k>(ref)`, which neither
  * allocates, nor touches a field protocol, nor changes the payload it wraps.
  * Treated as an unproven slot, each such store published the written value's
@@ -590,8 +598,27 @@ const promote = (
       const children = publishedChildrenCache.get(identity) ?? publishedChildrenOf(surface, classes, deriver)
       publishedChildrenCache.set(identity, children)
       for (const child of children) enqueueNativeChildren(child, `${item.reason}:nested`, key)
+      if (surface.kind === 'record' || surface.kind === 'record-with-index' || surface.kind === 'native-record-ref')
+        for (const child of children)
+          for (const input of writableCallableFieldInputsOf(child)) enqueueNativeChildren(input, `${item.reason}:callable-field-input`, key)
     }
   }
+}
+
+/**
+ * A fully reflected record's fields are writable by code the program cannot
+ * see, and a function it stores into a callable field is one the typed code
+ * then calls through the checked adapter over it (`DynamicCarrier<
+ * CallableObject>`), which boxes every argument OUT to that function. Unlike a
+ * callable this program publishes (`publishedChildrenOf`: its result only),
+ * such a field publishes its inputs: `owner.state = { update(object, key,
+ * value) {} }` hands the replacement every object `update` is called with,
+ * and it reads their fields.
+ */
+const writableCallableFieldInputsOf = (field: Representation): readonly Representation[] => {
+  const value = field.kind === 'optional' ? field.payload : field
+  const abi = callableAbiOf(value)
+  return abi === null ? [] : [...(abi.receiver ? [abi.receiver] : []), ...abi.parameters.map((parameter) => parameter.value)]
 }
 
 const declaredFieldOf = (
@@ -703,7 +730,8 @@ const holdsNoObject = (representation: Representation): boolean => {
  * What this cost: `Object.defineProperty` read off `ObjectConstructor` returns
  * a callable whose signature the checker instantiated with `Material`, and
  * promoting that callable walks its ABI -- so reading the member promoted the
- * class in its signature. The three.js app had ~1,350 such reads.
+ * class in its signature. A large program can have over a thousand such
+ * reads.
  */
 const knownNativeMemberReadOf = (surface: Representation, key: string, value: Representation): boolean =>
   !hasDeclaredFieldAuthority(surface) &&
@@ -790,8 +818,8 @@ export const reflectionExposureOf = (
    * base-less class. The runtime moves every declared field through the site's
    * static copy and learns the order from presence bits; neither reads a field
    * as a `gea::Value`, so the source needs no property protocol for them.
-   * mongodb spreads its ~140-field options record into itself and its
-   * narrower views at every operation (`{ ...options, ...cursorOptions }`), and
+   * An options-heavy library may spread a ~140-field options record into
+   * itself and its narrower views at every operation (`{ ...options, ...cursorOptions }`), and
    * reading those as dynamic copies published the options record, and every
    * session, client and cursor class it reaches, to full reflection.
    */
@@ -916,7 +944,7 @@ export const reflectionExposureOf = (
    * `declaredFieldOf` has no answer for a `constructor-family`: a class layout
    * records the static fields a class BODY declares, and the dominant static
    * idiom in ordinary JavaScript writes them from module scope instead
-   * (`Color.NAMES = _colorKeywords`, `Object3D.DEFAULT_UP = ...`). Reading that
+   * (`Color.NAMES = _colorKeywords`, `Node.DEFAULT_UP = ...`). Reading that
    * silence as "this key names no slot" promoted the assigned VALUE to a full
    * dynamic field protocol -- 296 boxes for the colour-keyword table alone,
    * from one assignment -- while the target was already storing it in a typed
@@ -929,6 +957,50 @@ export const reflectionExposureOf = (
    * writes whose carriers disagree -- so a slot it answers for is one carrier,
    * fixed, and the equality below is the whole proof.
    */
+  /**
+   * `Object.defineProperty(target, 'key', { value, ... })` over a key that no
+   * declared field, method or accessor of the target's carrier names: the
+   * printer spells it as `gea::record::defineLiveField` on the native object
+   * (`emit-host-object.ts`), which creates that one own property in the
+   * object's dynamic-property sidecar. That is a named definition, not an
+   * open boundary, so the target demands exactly that key and only the
+   * descriptor's value crosses into a `Value`.
+   *
+   * Counted as an unknown call it published the whole target: a class running
+   * `Object.defineProperty(this, 'id', { value: _nextId ++ })` in its
+   * constructor took every record it reaches to the unrestricted protocol,
+   * and with it a `dynamic-field-write` conversion for every structural field.
+   * A declared key belongs to the fixed/native data-definition recipes, an
+   * accessor or a live view to their own protocols, and a returned target the
+   * call result does not hold in its own carrier is still a boxing; each of
+   * those keeps the open boundary.
+   */
+  const undeclaredDataDefinitionOf = (operation: Extract<IrOperation, { kind: 'call' }>): string | null => {
+    if (operation.intrinsicDataDefinition !== true || operation.argumentsAreSpread || operation.arguments.length !== 3) return null
+    const [target, property, descriptor] = operation.arguments
+    const key = operation.namedDataDefinitionKey
+    if (!target || !property || !descriptor || property.representation.kind !== 'string' || key === undefined) return null
+    const carrier = target.representation
+    if (operation.result !== null && representationKey(operation.result.representation) !== representationKey(carrier)) return null
+    if (descriptor.representation.kind !== 'record' || descriptor.representation.accessors.length !== 0) return null
+    if (!descriptor.representation.fields.every((field) => ['value', 'writable', 'enumerable', 'configurable'].includes(field.key)))
+      return null
+    if (!('ownership' in carrier) || carrier.ownership !== 'shared-refcount') return null
+    if (carrier.kind === 'class-ref') {
+      if (!classFamilyLacksKey(classes, carrier.declaration, key)) return null
+    } else if (
+      carrier.kind === 'record' ||
+      carrier.kind === 'record-with-index' ||
+      (carrier.kind === 'native-record-ref' && carrier.native === null)
+    ) {
+      if (carrier.kind === 'record' && carrier.accessors.length !== 0) return null
+      if (declaredFieldOf(carrier, key, classes, deriver) !== null) return null
+    } else return null
+    if (viewSources.has(carrier.shapeId)) return null
+    promoteNamedField(carrier, key, operation, 'define')
+    for (const field of descriptor.representation.fields) if (field.key === 'value') promoteFull(field.value, 'data-definition-value')
+    return key
+  }
   const staticFieldSlots = censusClassStaticFieldSlots(bodies, classes)
   const nativeStaticSlotHolds = (receiver: Representation, key: string, value: Representation | null): boolean => {
     if (value === null) return false
@@ -938,7 +1010,13 @@ export const reflectionExposureOf = (
     const slot = staticFieldSlotOf(staticFieldSlots, classes, receiver.members, key)
     return slot !== null && representationKey(slot) === representationKey(value)
   }
-  const promoteNamedField = (receiver: Representation, key: string, operation: IrOperation): void => {
+  const promoteNamedField = (
+    receiver: Representation,
+    key: string,
+    operation: IrOperation | null,
+    nativeOperation?: ReflectionFieldOperation
+  ): void => {
+    if (operation === null && nativeOperation === undefined) return
     const origin = origins.length
     if (options.trace) origins.push({ reason: 'named-field-operation', carrier: receiver, operation })
     const surfaces = new Map(objectSurfacesOf(receiver).map((surface) => [representationKey(surface), surface]))
@@ -960,19 +1038,20 @@ export const reflectionExposureOf = (
       const fields = fieldOperations.get(identity) ?? new Map<string, Set<ReflectionFieldOperation>>()
       const uses = fields.get(key) ?? new Set<ReflectionFieldOperation>()
       const nativeReflect =
-        operation.kind === 'call'
+        operation?.kind === 'call'
           ? nativeReflectFieldTransportOf(operation, declaredFieldOf(surface, key, classes, deriver), deriver)
           : null
-      if (nativeReflect) uses.add(nativeReflect)
+      if (nativeOperation) uses.add(nativeOperation)
+      else if (nativeReflect) uses.add(nativeReflect)
       else if (
-        operation.kind === 'get' ||
-        (operation.kind === 'compute' && operation.operator === 'ObjectTag') ||
-        (operation.kind === 'call' &&
+        operation?.kind === 'get' ||
+        (operation?.kind === 'compute' && operation.operator === 'ObjectTag') ||
+        (operation?.kind === 'call' &&
           (operation.intrinsicReflection === 'get' || operation.intrinsicReflection === 'getOwnPropertyDescriptor'))
       )
         uses.add('read')
-      else if (operation.kind === 'set' || (operation.kind === 'call' && operation.intrinsicReflection === 'set')) uses.add('write')
-      else if (operation.kind === 'define-own-property') uses.add('define')
+      else if (operation?.kind === 'set' || (operation?.kind === 'call' && operation.intrinsicReflection === 'set')) uses.add('write')
+      else if (operation?.kind === 'define-own-property') uses.add('define')
       fields.set(key, uses)
       fieldOperations.set(identity, fields)
       if (options.trace) {
@@ -982,10 +1061,11 @@ export const reflectionExposureOf = (
       }
       // A named read can publish that field's object, never every sibling's.
       if (
-        operation.kind === 'get' ||
-        (operation.kind === 'call' &&
-          (operation.intrinsicReflection === 'get' || operation.intrinsicReflection === 'getOwnPropertyDescriptor') &&
-          nativeReflect === null)
+        nativeOperation === undefined &&
+        (operation?.kind === 'get' ||
+          (operation?.kind === 'call' &&
+            (operation.intrinsicReflection === 'get' || operation.intrinsicReflection === 'getOwnPropertyDescriptor') &&
+            nativeReflect === null))
       ) {
         const field = declaredFieldOf(surface, key, classes, deriver)
         if (field) promoteFull(field.value, 'named-field-result')
@@ -1022,16 +1102,24 @@ export const reflectionExposureOf = (
   // below still retain every body; only impossible execution contributes no
   // dynamic-operation demand.
   const callableReads: { operation: Extract<IrOperation, { kind: 'get' }>; reason: string }[] = []
-  const enteredBodies = options.shakeComplete
+  const callableFlow = options.shakeComplete
     ? nativeCallableFlowOf(
         bodies,
         options.placements ?? new Map(),
         classes,
         options.conversions,
         options.trace ? (operation, reason) => callableReads.push({ operation, reason }) : undefined,
-        deriver
-      ).enteredBodies
+        deriver,
+        options.programConversions
+      )
     : null
+  const enteredBodies = callableFlow?.enteredBodies ?? null
+  const retainedOperations = bodies.flatMap((body) =>
+    body.blockOrder.flatMap((blockId) => {
+      const block = body.blocks.get(blockId)
+      return block ? [...block.operations, block.terminator] : []
+    })
+  )
   const operations = bodies
     .filter((body) => enteredBodies === null || enteredBodies.has(body.owner))
     .flatMap((body) =>
@@ -1040,6 +1128,267 @@ export const reflectionExposureOf = (
         return block ? [...block.operations, block.terminator] : []
       })
     )
+  const enteredOperations = new Set(operations)
+  // A native view's unknown-call receiver is lazily published as its original
+  // object. Follow only the view recipes cited by reachable operations; a
+  // compatible shape or an unrequested census node creates no origin edge.
+  const viewNodes = new Set<ConversionNode>()
+  for (const recipe of options.programConversions ?? [])
+    if (options.conversions?.nodeById(recipe.conversion.id) === recipe.conversion) viewNodes.add(recipe.conversion)
+  const viewNodeOperations = new Map<ConversionNode, IrOperation | null>()
+  for (const recipe of options.programConversions ?? [])
+    if (options.conversions?.nodeById(recipe.conversion.id) === recipe.conversion) viewNodeOperations.set(recipe.conversion, null)
+  const citeViewNode = (id: string, source: Representation, target: Representation, operation: IrOperation): void => {
+    const node = options.conversions?.nodeById(id)
+    if (
+      node &&
+      representationKey(node.source) === representationKey(source) &&
+      representationKey(node.target) === representationKey(target)
+    ) {
+      if (enteredOperations.has(operation)) viewNodes.add(node)
+      viewNodeOperations.set(node, operation)
+    }
+  }
+  // Retained functions are emitted even when no source call enters them.
+  // Their exact native callback code must compile; boxed exposure below
+  // remains restricted to bodies that can actually execute.
+  for (const operation of retainedOperations) {
+    if (operation.kind === 'call' && operation.nativeCallablePrototypeDescriptor?.materialization)
+      citeViewNode(
+        operation.nativeCallablePrototypeDescriptor.materialization,
+        operation.nativeCallablePrototypeDescriptor.receiver.representation,
+        { kind: 'dynamic', reason: 'declared-any-never-narrowed' },
+        operation
+      )
+    if (operation.kind === 'convert' && operation.nativeCallablePrototypeObservation?.materialization)
+      citeViewNode(
+        operation.nativeCallablePrototypeObservation.materialization,
+        operation.source.representation,
+        operation.result.representation,
+        operation
+      )
+    if (operation.kind === 'get' && operation.nativeCallablePrototype?.materialization)
+      citeViewNode(
+        operation.nativeCallablePrototype.materialization,
+        operation.nativeCallablePrototype.receiver.representation,
+        { kind: 'dynamic', reason: 'declared-any-never-narrowed' },
+        operation
+      )
+    if (operation.kind === 'set' && operation.nativeCallableReadonlySet)
+      for (const id of operation.nativeCallableReadonlySet.conversions) {
+        const node = options.conversions?.nodeById(id)
+        if (node) citeViewNode(id, node.source, node.target, operation)
+      }
+    if (operation.kind === 'get' && operation.nativeCallableDataSlot?.optionalRead) {
+      const receipt = operation.nativeCallableDataSlot
+      citeViewNode(receipt.optionalRead!.present, receipt.storage, operation.result.representation, operation)
+      citeViewNode(receipt.optionalRead!.absent, { kind: 'undefined' }, operation.result.representation, operation)
+    }
+    if (operation.kind === 'get' && operation.nativeCallableDataSlot?.presentRead) {
+      const receipt = operation.nativeCallableDataSlot
+      citeViewNode(receipt.presentRead!.conversion, receipt.value.representation, operation.result.representation, operation)
+    }
+    if ((operation.kind === 'get' || operation.kind === 'set') && operation.nativeObjectDataSlot) {
+      for (const entry of operation.nativeObjectDataSlot.read)
+        if (operation.kind === 'get') citeViewNode(entry.conversion, entry.source, operation.result.representation, operation)
+      const write = operation.nativeObjectDataSlot.write
+      if (write) citeViewNode(write.conversion, write.value.representation, operation.nativeObjectDataSlot.storage, operation)
+      const materialization = operation.nativeObjectDataSlot.materialization
+      if (materialization !== undefined)
+        citeViewNode(
+          materialization,
+          operation.nativeObjectDataSlot.storage,
+          { kind: 'dynamic', reason: 'declared-any-never-narrowed' },
+          operation
+        )
+    }
+    if ((operation.kind === 'get' || operation.kind === 'set') && operation.nativeDocumentEntry) {
+      const entry = operation.nativeDocumentEntry
+      citeViewNode(
+        entry.conversion,
+        operation.kind === 'get' ? entry.entry : operation.value.representation,
+        operation.kind === 'get' ? operation.result.representation : entry.entry,
+        operation
+      )
+      for (const id of [...entry.views, ...(entry.arrayEntry?.readers.map((reader) => reader.array) ?? [])]) {
+        const node = options.conversions?.nodeById(id)
+        if (node) citeViewNode(id, node.source, node.target, operation)
+      }
+    }
+    if (
+      (operation.kind === 'get' || operation.kind === 'set' || operation.kind === 'call') &&
+      operation.nativeCallableDataSlot?.materialization
+    ) {
+      citeViewNode(
+        operation.nativeCallableDataSlot.materialization,
+        operation.nativeCallableDataSlot.storage,
+        { kind: 'dynamic', reason: 'declared-any-never-narrowed' },
+        operation
+      )
+    }
+    if (operation.kind === 'convert')
+      citeViewNode(operation.conversionUse, operation.source.representation, operation.result.representation, operation)
+    if (operation.kind === 'call' && operation.nativeArrayDescriptorSnapshot) {
+      const node = options.conversions?.nodeById(operation.nativeArrayDescriptorSnapshot.conversion)
+      if (node) citeViewNode(node.id, node.source, node.target, operation)
+    }
+    if ((operation.kind === 'set' || operation.kind === 'call') && operation.nativeCallableDataWrite) {
+      const write = operation.nativeCallableDataWrite
+      const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+      citeViewNode(write.storageConversion, write.storedValue.representation, write.storage, operation)
+      for (const fit of write.storageFits) citeViewNode(fit.conversion, fit.source, write.storage, operation)
+      if (write.materialization !== null) citeViewNode(write.materialization, write.storage, dynamic, operation)
+      if (write.receiverMaterialization !== null)
+        citeViewNode(write.receiverMaterialization, write.receiver.representation, dynamic, operation)
+    }
+    for (const recipe of operation.conversionRecipes ?? []) citeViewNode(recipe.conversion, recipe.source, recipe.target, operation)
+    if (operation.kind === 'get')
+      for (const recipe of operation.methodValueRecipes ?? []) citeViewNode(recipe.conversion, recipe.source, recipe.target, operation)
+    if (operation.kind === 'call')
+      for (const recipe of operation.objectValueConversions ?? []) citeViewNode(recipe.conversion, recipe.source, recipe.target, operation)
+    if (operation.kind === 'call') {
+      for (const half of operation.nativeAccessorDefinition?.halves ?? []) {
+        citeViewNode(half.conversion, half.source, half.call, operation)
+        if (half.observe !== null) {
+          const typed = (half.half === 'get' ? half.read : half.write)!
+          const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+          if (half.half === 'get') citeViewNode(half.observe, typed, dynamic, operation)
+          else citeViewNode(half.observe, dynamic, typed, operation)
+        }
+      }
+      for (const half of operation.nativeAccessorObservation?.halves ?? [])
+        citeViewNode(half.conversion, half.source, half.target, operation)
+    }
+    if (operation.kind === 'get')
+      for (const recipe of operation.nativeFieldViewRead?.sources ?? [])
+        citeViewNode(recipe.conversion, recipe.source, operation.result.representation, operation)
+    if (operation.kind === 'set')
+      for (const recipe of operation.nativeFieldViewWrite?.targets ?? [])
+        if (recipe.target !== null && recipe.conversion !== null)
+          citeViewNode(recipe.conversion, operation.value.representation, recipe.target, operation)
+    const methodRead =
+      operation.kind === 'get-iterator'
+        ? operation.nativeNextMethodRead
+        : operation.kind === 'iterator-next' || operation.kind === 'iterator-close'
+          ? operation.nativeMethodRead
+          : undefined
+    if (methodRead)
+      for (const recipe of methodRead.read.sources) citeViewNode(recipe.conversion, recipe.source, methodRead.value, operation)
+  }
+  const closeReadSites: {
+    readonly receiver: Representation
+    readonly method: import('./native-iterator-field-views.js').NativeIteratorFieldRead
+    readonly operation: IrOperation
+  }[] = []
+  for (const body of bodies)
+    for (const region of body.iteratorCloseRegions ?? []) {
+      if (!region.nativeMethodRead) continue
+      const operation = body.blockOrder
+        .flatMap((id) => {
+          const block = body.blocks.get(id)
+          return block ? [...block.operations, block.terminator] : []
+        })
+        .find(
+          (operation) =>
+            resultOfIrOperation(operation)?.id === region.iterator.value ||
+            (operation.kind === 'iterator-next' && operation.iterator.value === region.iterator.value)
+        )
+      if (!operation) continue
+      if (enteredBodies === null || enteredBodies.has(body.owner))
+        closeReadSites.push({ receiver: region.iterator.representation, method: region.nativeMethodRead, operation })
+      for (const recipe of region.nativeMethodRead.read.sources)
+        citeViewNode(recipe.conversion, recipe.source, region.nativeMethodRead.value, operation)
+    }
+  for (const [root, operation] of viewNodeOperations)
+    for (const node of recipeClosureOf([root], options.conversions?.nodeById).values()) {
+      if (!nativeFieldViewIdentityTransportOf(node) || !('materializer' in node.capability)) continue
+      for (const [plan, routes] of node.capability.materializer.recordView?.fieldViews ?? []) {
+        if (plan.kind !== 'fields') continue
+        for (const field of plan.fields)
+          if (field.read.kind === 'held' || field.read.kind === 'view' || field.read.kind === 'record-accessor') {
+            promoteNamedField(routes.source, field.field.key, operation, 'native-read')
+            if (routes.fields.some((route) => route.key === field.field.key && route.write !== null))
+              promoteNamedField(routes.source, field.field.key, operation, 'native-write')
+          }
+      }
+    }
+  for (const operation of retainedOperations) {
+    if (enteredOperations.has(operation)) continue
+    if ((operation.kind === 'get' && operation.nativeFieldViewRead) || (operation.kind === 'set' && operation.nativeFieldViewWrite)) {
+      const receipt = operation.kind === 'get' ? operation.nativeFieldViewRead! : operation.nativeFieldViewWrite!
+      for (const key of receipt.keyDomain ?? [receipt.key])
+        promoteNamedField(operation.receiver.representation, key, operation, operation.kind === 'get' ? 'native-read' : 'native-write')
+    }
+  }
+  const viewSources = new Map<string, Map<string, Representation>>()
+  for (const origin of nativeViewOriginsOf(viewNodes, options.conversions?.nodeById)) {
+    const sources = viewSources.get(origin.target.shapeId) ?? new Map<string, Representation>()
+    sources.set(representationKey(origin.source), origin.source)
+    viewSources.set(origin.target.shapeId, sources)
+  }
+  const promoteLogicalReceiver = (representation: Representation, reason: string): void => {
+    const pending = [representation]
+    const seen = new Set<string>()
+    while (pending.length > 0) {
+      const value = pending.pop()!
+      const key = representationKey(value)
+      if (seen.has(key)) continue
+      seen.add(key)
+      promoteFull(value, value === representation ? reason : `${reason}-origin`, representation)
+      for (const surface of objectSurfacesOf(value))
+        if (
+          (surface.kind === 'record' || surface.kind === 'record-with-index' || surface.kind === 'native-record-ref') &&
+          surface.ownership === 'shared-refcount'
+        )
+          pending.push(...(viewSources.get(surface.shapeId)?.values() ?? []))
+    }
+  }
+  // A live view's own keys ARE its original's, filtered for enumerability by
+  // the ORIGINAL's own-descriptor route (`ownNativeViewKeys`); the view's own
+  // slots are never consulted. So enumerating a carrier that the published
+  // view origins name as a view target demands the descriptor of every field
+  // of each original -- through views of views -- and nothing more: the
+  // view's own row and the originals' read/write protocols are untouched.
+  const demandEnumeratedViewOrigins = (receiver: Representation, operation: IrOperation): void => {
+    const pending = [receiver]
+    const seen = new Set<string>()
+    while (pending.length > 0) {
+      const value = pending.pop()!
+      for (const surface of objectSurfacesOf(value)) {
+        if (
+          !(surface.kind === 'record' || surface.kind === 'record-with-index' || surface.kind === 'native-record-ref') ||
+          surface.ownership !== 'shared-refcount'
+        )
+          continue
+        for (const source of viewSources.get(surface.shapeId)?.values() ?? []) {
+          const identity = representationKey(source)
+          if (seen.has(identity)) continue
+          seen.add(identity)
+          const fields = source.kind === 'record' ? source.fields : deriver === null ? null : staticOwnFieldsOf(deriver, source)
+          if (fields === null) promoteFull(source, 'enumerated-view-origin')
+          else for (const field of fields) promoteNamedField(source, field.key, operation, 'descriptor')
+          pending.push(source)
+        }
+      }
+    }
+  }
+  const promoteCitedConversion = (id: string, source: Representation, target: Representation, reason: string): void => {
+    const node = options.conversions?.nodeById(id)
+    if (
+      node !== null &&
+      node !== undefined &&
+      representationKey(node.source) === representationKey(source) &&
+      representationKey(node.target) === representationKey(target)
+    ) {
+      if (transfersNativeStorage(node.capability)) return
+      if ('materializer' in node.capability && node.capability.materializer.residualReflection !== undefined) {
+        for (const value of node.capability.materializer.residualReflection) promoteFull(value, reason)
+        return
+      }
+    }
+    promoteFull(source, reason)
+    promoteFull(target, reason)
+  }
   // `GEA_REFLECTION_DEBUG=<representation-key substring>` names, on stderr,
   // every body the callable flow left un-entered (so its operations count for
   // no demand at all) and the final row of every surface whose key contains
@@ -1061,7 +1410,9 @@ export const reflectionExposureOf = (
   // function-value ABI cannot expose the descriptor that template constructs.
   const nativeTemplateCallee = (operation: IrOperation): boolean =>
     operation.kind === 'call' &&
-    (operation.fixedDataDefinition?.nativeFieldProtocol === 'unused' || operation.intrinsicReflection !== undefined)
+    (operation.fixedDataDefinition?.nativeFieldProtocol === 'unused' ||
+      operation.intrinsicReflection !== undefined ||
+      operation.nativeOwnAssignment !== undefined)
   const nativeDefinitionCallees = new Set<IrValueId>()
   for (const operation of operations)
     if (operation.kind === 'call' && nativeTemplateCallee(operation)) nativeDefinitionCallees.add(operation.callee.value)
@@ -1110,8 +1461,8 @@ export const reflectionExposureOf = (
   // its body with the arm itself as `this`. No single frame states that --
   // every arm's receiver is a different class -- so it is proved per arm: the
   // receiver's arm at `path` IS the body's receiver, every argument IS its
-  // formal, and the body's result reaches the call's natively. mongodb's
-  // `command.toBin()` over `OpQueryRequest | OpMsgRequest` read as an open
+  // formal, and the body's result reaches the call's natively. A
+  // `command.toBin()` over `QueryRequest | MessageRequest` read as an open
   // boundary and published both request classes, and the ~140-field options
   // record they hold, to full reflection.
   const unionArmAt = (representation: Representation, path: readonly number[]): Representation | null => {
@@ -1151,6 +1502,15 @@ export const reflectionExposureOf = (
   const closedCallOperations = new Set<IrOperation>()
   for (const operation of operations) {
     if (operation.kind !== 'call') continue
+    const selectorOrigins = callableFlow?.callableIdentityOrigins.get(operation.callee.value)
+    if (
+      operation.callee.representation.kind === 'generic-function-set' &&
+      selectorOrigins !== undefined &&
+      nativeGenericCallEntriesOf(operation, new Set(selectorOrigins), (id) => bodyByFunction.get(String(id)), options.conversions) !== null
+    ) {
+      closedCallOperations.add(operation)
+      continue
+    }
     const functionIds = knownCallFunctionIds(operation)
     const closed =
       functionIds !== null &&
@@ -1175,8 +1535,8 @@ export const reflectionExposureOf = (
     }
     // A host constructor has no compiler-owned body for the loop below to
     // walk, so its frame is the whole proof, exactly as for a sealed native
-    // call: `new WeakMap()` in three's `WebGLProperties` publishes a fresh
-    // empty collection, not the texture/material bags it will later hold.
+    // call: `new WeakMap()` in a property-cache class publishes a fresh
+    // empty collection, not the per-object bags it will later hold.
     // See `nativeHostConstructionOf` for what stays open.
     if (nativeHostConstructionOf(operation, options.conversions) !== null) {
       closedConstructOperations.add(operation)
@@ -1277,6 +1637,57 @@ export const reflectionExposureOf = (
     if (representation.kind === 'borrowed-ref') return unwrappedCallableAbi(representation.referent)
     return callableAbiOf(representation)
   }
+  // A public nil method frame may wrap an explicitly dynamic source receiver.
+  // Internal next/return calls have no ordinary callee SSA operand, so follow
+  // their declared storage and the certified native view origins directly.
+  const iteratorMemberHasDynamicReceiver = (receiver: Representation, member: string, seen = new Set<string>()): boolean => {
+    const key = representationKey(receiver)
+    if (seen.has(key)) return false
+    seen.add(key)
+    if (receiver.kind === 'optional') return iteratorMemberHasDynamicReceiver(receiver.payload, member, seen)
+    if (receiver.kind === 'tagged-union') return receiver.arms.some((arm) => iteratorMemberHasDynamicReceiver(arm.value, member, seen))
+    const field = deriver
+      ? (declaredRecordFieldOf(deriver, receiver, member, classes)?.value ?? null)
+      : receiver.kind === 'record'
+        ? (receiver.fields.find((field) => field.key === member)?.value ?? null)
+        : null
+    if (field !== null && unwrappedCallableAbi(field)?.receiver?.kind === 'dynamic') return true
+    return (
+      (receiver.kind === 'record' || receiver.kind === 'native-record-ref') &&
+      [...(viewSources.get(receiver.shapeId)?.values() ?? [])].some((source) => iteratorMemberHasDynamicReceiver(source, member, seen))
+    )
+  }
+  const promoteIteratorRead = (
+    receiver: Representation,
+    method: import('./native-iterator-field-views.js').NativeIteratorFieldRead,
+    operation: IrOperation
+  ): void => {
+    const pending = [receiver]
+    const seen = new Set<string>()
+    while (pending.length) {
+      const source = pending.pop()!
+      const identity = representationKey(source)
+      if (seen.has(identity)) continue
+      seen.add(identity)
+      promoteNamedField(source, method.read.key, operation, 'native-read')
+      for (const surface of objectSurfacesOf(source))
+        if ('shapeId' in surface) pending.push(...(viewSources.get(surface.shapeId)?.values() ?? []))
+    }
+    const dynamic = method.read.sources.some(({ source, conversion }) => {
+      if (source.kind === 'dynamic' || unwrappedCallableAbi(source)?.receiver?.kind === 'dynamic') return true
+      const root = options.conversions?.nodeById(conversion)
+      return (
+        root !== null &&
+        root !== undefined &&
+        [...recipeClosureOf([root], options.conversions?.nodeById).values()].some(
+          (node) => 'materializer' in node.capability && node.capability.materializer.nativeMethod?.receiver.kind === 'dynamic'
+        )
+      )
+    })
+    if (dynamic || iteratorMemberHasDynamicReceiver(receiver, method.read.key))
+      promoteLogicalReceiver(receiver, 'dynamic-iterator-logical-receiver')
+  }
+  for (const site of closeReadSites) promoteIteratorRead(site.receiver, site.method, site.operation)
   // An adapter invokes a compiler-owned source body through its own sealed
   // convention. Its FunctionId alone cannot certify the adapted call frame;
   // follow the conversion's transport proof and check the held entry instead.
@@ -1292,8 +1703,8 @@ export const reflectionExposureOf = (
   // body identity only" -- so `[].push(n)`, `map.get(k)`, `str.split(s)`,
   // `Math.min(a, b)` and `pattern.exec(s)` each read as an open boundary and
   // promoted their receiver and every argument to an unrestricted field
-  // protocol. That was 2,480 of the three.js app's 4,193 `unknown-call-boundary`
-  // origins, every one of them with a frame that already matched exactly.
+  // protocol. That was well over half of one large program's
+  // `unknown-call-boundary` origins, every one of them with a frame that already matched exactly.
   //
   // A callee stating no native convention still fails `abi !== null` -- a
   // `dynamic` callee has no ABI to match -- an inexact frame still fails, and
@@ -1438,6 +1849,15 @@ export const reflectionExposureOf = (
   }
   for (const operation of operations) {
     currentOperation = operation
+    if (operation.kind === 'get-iterator' && operation.nativeNextMethodRead)
+      promoteIteratorRead(operation.result.representation, operation.nativeNextMethodRead, operation)
+    if ((operation.kind === 'iterator-next' || operation.kind === 'iterator-close') && operation.nativeMethodRead)
+      promoteIteratorRead(operation.iterator.representation, operation.nativeMethodRead, operation)
+    if (
+      (operation.kind === 'iterator-next' || operation.kind === 'iterator-close') &&
+      iteratorMemberHasDynamicReceiver(operation.iterator.representation, operation.kind === 'iterator-next' ? 'next' : 'return')
+    )
+      promoteLogicalReceiver(operation.iterator.representation, 'dynamic-iterator-logical-receiver')
     if (operation.kind === 'compute' && operation.form === 'unary' && operation.operator === 'ObjectTag') {
       // The authenticated algorithm reads one well-known symbol. It neither
       // reads ordinary toString nor publishes unrelated fields or tag objects.
@@ -1451,13 +1871,115 @@ export const reflectionExposureOf = (
       // Without the symbol census, retain the ordinary unknown-operation
       // demand below: an absent authority is not proof of an absent property.
     }
+    if (operation.kind === 'set' && operation.nativeCallableReadonlySet) {
+      collectCandidate(operation.receiver.representation)
+      continue
+    }
     if (operation.kind === 'get' && nativeDefinitionCallees.has(operation.result.id)) continue
+    if ((operation.kind === 'get' || operation.kind === 'set') && operation.nativeObjectDataSlot) {
+      // Native extension payloads stay in their source-owned descriptor table.
+      // A public alias's fixed field is not that storage and needs no dynamic
+      // field protocol merely to observe the certified native slot.
+      collectCandidate(operation.nativeObjectDataSlot.owner.representation)
+      continue
+    }
+    if ((operation.kind === 'get' || operation.kind === 'set') && operation.nativeDocumentEntry) {
+      if (operation.nativeDocumentEntry.arrayEntry !== undefined) promoteFull(operation.receiver.representation, 'declared-any-array-entry')
+      collectCandidate(operation.receiver.representation)
+      continue
+    }
+    if (operation.kind === 'call' && operation.nativeOwnAssignment) {
+      const recipe = operation.nativeOwnAssignment
+      collectCandidate(recipe.owner.representation)
+      for (const source of recipe.sources) {
+        // A described source's run-time keys outside its typed fields cross
+        // both objects' dynamic [[Get]]/[[Set]] dispatch.
+        if (source.described === true) {
+          promoteFull(recipe.owner.representation, 'native-own-assignment-described-target')
+          for (const key of source.dynamicKeys ?? []) promoteNamedField(source.receiver.representation, key, operation, 'read')
+        }
+        for (const field of source.fields) promoteNamedField(source.receiver.representation, field.key, operation, 'native-read')
+        for (const root of source.roots) {
+          collectCandidate(root.carrier)
+          for (const field of source.fields) promoteNamedField(root.carrier, field.key, operation, 'native-read')
+        }
+        for (const field of source.fields) {
+          if (field.destination === 'held') promoteNamedField(recipe.owner.representation, field.key, operation, 'native-write')
+          promoteCitedConversion(field.conversion, field.storage, field.held, 'native-own-assignment-field-conversion')
+        }
+      }
+      continue
+    }
+    if (operation.kind === 'call' && operation.nativeArrayDescriptorSnapshot) {
+      const node = options.conversions?.nodeById(operation.nativeArrayDescriptorSnapshot.conversion)
+      if (node && 'materializer' in node.capability && node.capability.materializer.nativeDescriptorSnapshot) {
+        collectCandidate(operation.nativeArrayDescriptorSnapshot.receiver.representation)
+        for (const child of node.capability.materializer.nativeDescriptorSnapshot.dependencies)
+          promoteCitedConversion(child.id, child.source, child.target, 'native-descriptor-snapshot-reader')
+        continue
+      }
+    }
+    if (operation.kind === 'call' && operation.nativeArrayDescriptorReinstallation) {
+      collectCandidate(operation.nativeArrayDescriptorReinstallation.receiver.representation)
+      continue
+    }
+    if (operation.kind === 'call' && operation.nativeDataDefinition?.delegatesView) {
+      const recipe = operation.nativeDataDefinition
+      const pending = operation.arguments[0] ? [operation.arguments[0].representation] : []
+      const destinations = new Set(recipe.destinations.map((destination) => destination.carrier))
+      const seen = new Set<string>()
+      while (pending.length > 0) {
+        const receiver = pending.pop()!
+        for (const surface of objectSurfacesOf(receiver)) {
+          const identity = representationKey(surface)
+          if (seen.has(identity)) continue
+          seen.add(identity)
+          if (destinations.has(identity)) promoteNamedField(surface, recipe.keyText, operation, 'define')
+          if ('shapeId' in surface) pending.push(...(viewSources.get(surface.shapeId)?.values() ?? []))
+        }
+      }
+      continue
+    }
     if (nativeAbsentPropertyReadOf(operation) !== null) continue
+    if ((operation.kind === 'get' && operation.nativeFieldViewRead) || (operation.kind === 'set' && operation.nativeFieldViewWrite)) {
+      const receiver = operation.receiver.representation
+      const receipt = operation.kind === 'get' ? operation.nativeFieldViewRead! : operation.nativeFieldViewWrite!
+      const keys = receipt.keyDomain ?? [receipt.key]
+      const pending: Representation[] = [receiver]
+      const seen = new Set<string>()
+      while (pending.length) {
+        const source = pending.pop()!
+        const identity = representationKey(source)
+        if (seen.has(identity)) continue
+        seen.add(identity)
+        for (const key of keys) promoteNamedField(source, key, operation, operation.kind === 'get' ? 'native-read' : 'native-write')
+        if ('shapeId' in source) pending.push(...(viewSources.get(source.shapeId)?.values() ?? []))
+      }
+      if (operation.kind === 'get' && operation.result.representation.kind === 'dynamic')
+        for (const source of operation.nativeFieldViewRead!.sources) promoteLogicalReceiver(source.source, 'native-view-dynamic-result')
+      continue
+    }
+    if (operation.kind === 'own-property-keys' || (operation.kind === 'get-iterator' && operation.protocol === 'enumerate'))
+      demandEnumeratedViewOrigins(operation.receiver.representation, operation)
+    else if (operation.kind === 'call' && operation.intrinsicOwnKeys && !operation.argumentsAreSpread && operation.arguments[0])
+      demandEnumeratedViewOrigins(operation.arguments[0].representation, operation)
+    else if (operation.kind === 'call' && operation.hostObjectWalkPlan && !operation.argumentsAreSpread)
+      // A walked source's values are read through the same original
+      // descriptors its keys come from (`readNativeViewValue`), so the walk
+      // demands exactly what an enumeration does.
+      for (const walked of hostObjectWalkedSourcesOf(operation)) demandEnumeratedViewOrigins(walked.representation, operation)
     if (nativeKeyQueryOf(operation, nativePropertyLayoutOf)) continue
     if (nativeArrayTransportOf(operation, keyOf(keyOperandOf(operation), constants))) continue
     if (nativeDictionaryTransportOf(operation)) continue
     if (nativeRecordIndexTransportOf(operation, deriver, options.conversions, keyOf(keyOperandOf(operation), constants))) continue
     if (nativeSequenceTransportOf(operation)) continue
+    if (
+      operation.kind === 'bind-callable' &&
+      (operation.source.representation.kind === 'dynamic' || callableFlow?.dynamicReceiverValues.has(operation.source.value))
+    ) {
+      const receiver = operation.thisArgument ?? operation.receiver
+      if (receiver) promoteLogicalReceiver(receiver.representation, 'dynamic-logical-bind-receiver')
+    }
     if (nativeCallableBindTransportOf(operation)) continue
     if (
       nativeClassAccessorEntryOf(
@@ -1495,7 +2017,7 @@ export const reflectionExposureOf = (
     const receiver = receiverOf(operation)
     if (receiver) {
       const key = keyOf(keyOperandOf(operation), constants)
-      // A computed key three's `Material.setValues`/`Texture.setValues` shape
+      // A computed key a generic `setValues( values )` loop shape
       // hands the census a finite, closed-forward name set for
       // (`PropertyOperation.provenKeyTexts`'s own comment has the full
       // contract) is an UPPER bound on the key, proven from every closed
@@ -1538,10 +2060,18 @@ export const reflectionExposureOf = (
           // `promoteNamedField` already fans a `class-ref` receiver out across
           // its whole family (bases and subclasses) -- exactly what a key
           // that can name a member declared on ANY of them needs: `this` is
-          // typed `Material` but `color`/`shininess` are declared only on
-          // `MeshPhongMaterial`.
+          // typed as the base class but `color`/`shininess` are declared only
+          // on a subclass.
           for (const name of provenKeyTexts) promoteNamedField(receiver.representation, name, operation)
         } else promoteFull(receiver.representation, 'runtime-computed-property-key')
+        // A computed store boxes its value into the receiver's dynamic
+        // protocol (`nativeDynamicSet`), which lands it in whichever member
+        // the key names -- through a Document view when that member's layout
+        // is not the value's own. The view answers `for-in`/reads from the
+        // value's property protocol, so the value is published exactly as an
+        // object converted to `dynamic` is.
+        if (operation.kind === 'set' || operation.kind === 'define-own-property')
+          promoteLogicalReceiver(operation.value.representation, 'computed-store-value')
       } else if (key !== null && operation.kind !== 'get' && operation.kind !== 'set' && operation.kind !== 'define-own-property')
         promoteNamedField(receiver.representation, key, operation)
       else if (key !== null) {
@@ -1579,7 +2109,19 @@ export const reflectionExposureOf = (
                           options.conversions?.nodeById(conversionNodeIdOf(value, field.value))
                         )))) ||
                   (operation.kind === 'get' &&
-                    (knownClassMemberReadOf(surface, key, classes) ||
+                    // An index read of one arm that is an Array -- a tuple
+                    // carried as an Array beside a sibling tuple carried as
+                    // a record -- is that Array's own element storage, as
+                    // closed as a declared field.
+                    ((surface.kind === 'array-object' &&
+                      canonicalIndexLiteral(key) !== null &&
+                      (representationKey(surface.element) === representationKey(value) ||
+                        nativePayloadTransportMatches(
+                          surface.element,
+                          value,
+                          options.conversions?.nodeById(conversionNodeIdOf(surface.element, value))
+                        ))) ||
+                      knownClassMemberReadOf(surface, key, classes) ||
                       knownNativeMemberReadOf(surface, key, value) ||
                       absentClassArmRead(receiver.representation, surface, key, value, classes) ||
                       objectPrototypeMemberReadOf(surface, key, value)))
@@ -1593,7 +2135,7 @@ export const reflectionExposureOf = (
       continue
     }
     if (operation.kind === 'convert' && operation.result.representation.kind === 'dynamic') {
-      promoteFull(operation.source.representation, 'object-to-dynamic-conversion')
+      promoteLogicalReceiver(operation.source.representation, 'object-to-dynamic-conversion')
       continue
     }
     if (operation.kind === 'convert' && isOpenDocument(operation.source.representation)) {
@@ -1615,6 +2157,22 @@ export const reflectionExposureOf = (
     }
     if (operation.kind === 'convert') {
       const node = options.conversions?.nodeById(operation.conversionUse)
+      if (
+        node?.capability.kind === 'static' &&
+        node.capability.materializer.nativeObjectSample !== undefined &&
+        representationKey(node.source) === representationKey(operation.source.representation) &&
+        representationKey(node.target) === representationKey(operation.result.representation)
+      ) {
+        // The allocation receipt authenticates typed descriptor storage.
+        // Reflection is needed for each native field route and each child
+        // conversion, rather than an unrestricted publication of the object.
+        for (const entry of node.capability.materializer.nativeObjectSample.fields) {
+          if (entry.from === 'extension') promoteNamedField(node.source, entry.field.key, operation, 'native-read')
+          for (const child of [entry.present, ...(entry.absent === null ? [] : [entry.absent])])
+            promoteCitedConversion(child.id, child.source, child.target, 'native-object-sample-field-conversion')
+        }
+        continue
+      }
       if (
         node !== null &&
         node !== undefined &&
@@ -1655,10 +2213,10 @@ export const reflectionExposureOf = (
         // A source whose own convention declares no receiver is never handed
         // the target's: the adapter ignores it (`emit-narrowing.ts`'s
         // `resultAdapterOf`, `ignoresReceiver`), which is how an arrow keeps
-        // its lexical `this` in a method slot. node-compat's `EventIterator`
-        // stores exactly such arrows as `this: EventEmitter` listeners, and
+        // its lexical `this` in a method slot. An event library's async
+        // iterator class stores exactly such arrows as `this: EventEmitter` listeners, and
         // promoting that receiver published every emitter subclass and all
-        // their fields reach -- mongodb's logger and connections -- to full
+        // their fields reach -- loggers and connections -- to full
         // reflection, refusing their `this.method.bind(this)` calls.
         const sourceAbi = unwrappedCallableAbi(operation.source.representation)
         // An input the source convention states in the target's own carrier
@@ -1672,7 +2230,10 @@ export const reflectionExposureOf = (
         )
           promoteFull(targetAbi.receiver, 'callable-adapter-input')
         targetAbi.parameters.forEach((parameter, index) => {
-          const source = sourceAbi !== null && sourceAbi.restFrom === targetAbi.restFrom ? sourceAbi.parameters[index]?.value : undefined
+          const source =
+            sourceAbi !== null && sourceAbi.restFrom === targetAbi.restFrom && sourceAbi.argumentsFrame === targetAbi.argumentsFrame
+              ? sourceAbi.parameters[index]?.value
+              : undefined
           if (!forwarded(parameter.value, source)) promoteFull(parameter.value, 'callable-adapter-input')
         })
       }
@@ -1714,10 +2275,16 @@ export const reflectionExposureOf = (
         continue
       }
       promoteFull(operation.source.representation, 'dynamic-spread-source')
+      demandEnumeratedViewOrigins(operation.source.representation, operation)
       promoteFull(operation.receiver.representation, 'dynamic-spread-target')
       continue
     }
     if (operation.kind === 'call') {
+      // A nil public frame can still be an adapter to an explicitly unknown
+      // source. Its separately transported logical receiver crosses that
+      // boundary even though all positional arguments match natively.
+      if (operation.thisArgument && callableFlow?.dynamicReceiverValues.has(operation.callee.value))
+        promoteLogicalReceiver(operation.thisArgument.representation, 'dynamic-logical-call-receiver')
       if (operation.intrinsicReflection && !operation.argumentsAreSpread) {
         const target = operation.arguments[0]
         const property = operation.arguments[1]
@@ -1748,6 +2315,7 @@ export const reflectionExposureOf = (
         if (operation.result) promoteFull(operation.result.representation, 'unproven-fixed-data-definition-result')
         continue
       }
+      if (undeclaredDataDefinitionOf(operation) !== null) continue
       // A call that reads only its argument's carrier exposes nothing inside
       // it. `Array.isArray` is the whole family so far; its ambient parameter
       // is `any`, which is why it otherwise reads here as the most open
@@ -1757,6 +2325,8 @@ export const reflectionExposureOf = (
       // inspect or mutate every native receiver/argument they receive.
       // A matching call elsewhere cannot certify this operation's ABI.
       if (closedCallOperations.has(operation)) continue
+      const logicalReceiver = operation.thisArgument ?? operation.receiver
+      if (logicalReceiver) promoteLogicalReceiver(logicalReceiver.representation, 'unknown-logical-call-receiver')
       // A native fixed frame cannot inspect trailing arguments it does not
       // receive. Their evaluation is already represented by preceding IR;
       // retaining its effects does not publish the resulting values here.

@@ -1,10 +1,10 @@
-// mongodb hands `operation.SERVER_COMMAND_RESPONSE_TYPE` -- one of several
+// A database client hands `operation.SERVER_COMMAND_RESPONSE_TYPE` -- one of several
 // response classes -- to `conn.command(..., responseType?:
-// MongoDBReplyConstructor)`, a structural type stating `new (bson,
+// ServerReplyConstructor)`, a structural type stating `new (bytes,
 // offset?, isArray?)` and a static `make`. The classes' own constructor takes
 // a FOURTH optional parameter (`elements?`), which a caller of the declared
 // type simply never passes. The command then builds its result with
-// `(responseType ?? MongoDBResponse).make(bson)`.
+// `(responseType ?? ServerResponse).make(bytes)`.
 class Reply {
   readonly size: number
   constructor(

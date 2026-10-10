@@ -1,7 +1,7 @@
 // READING A METHOD THROUGH AN `as` DOWNCAST OFF A UNION WHOSE LIVE ARM DOES
 // NOT HAVE IT, AND ONLY TESTING WHAT CAME BACK.
 //
-// `@hono/node-server`'s `Request` constructor duck-types a stream body with
+// An HTTP server adapter's `Request` constructor duck-types a stream body with
 // `typeof (options?.body as ReadableStream)?.getReader !== 'undefined'`, where
 // `body` is a `string | Buffer | ReadableStream | ...` union. The `as` is an
 // unchecked assertion: it changes the checker's type, never the value, so on

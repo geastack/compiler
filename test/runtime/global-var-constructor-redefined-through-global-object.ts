@@ -1,6 +1,6 @@
 // A SCRIPT'S GLOBAL `var` HOLDING A CLASS, REPLACED THROUGH THE GLOBAL OBJECT.
 //
-// `@hono/node-server`'s `getRequestListener` swaps the platform's `Request`
+// An HTTP server adapter's `getRequestListener` swaps the platform's `Request`
 // for its own subclass with `Object.defineProperty(global, 'Request', {
 // value: LightweightRequest })`, and every later `new Request(...)` anywhere
 // in the program constructs the subclass. A script-level `var` is an own,

@@ -31,7 +31,7 @@ const keeps = (statics: string, js = false, members = ''): boolean => {
 }
 
 test('a static is data by the values written to it, not by its declared type', () => {
-  // three's `Texture.DEFAULT_IMAGE`: declared as an image constructor, only ever written `null`.
+  // A JSDoc-typed static declared as a constructor type, only ever written `null`.
   assert.equal(keeps('/** @type {?(new () => object)} */ Subject.DEFAULT_IMAGE = null;', true), true)
   assert.equal(keeps('', false, 'static DEFAULT_IMAGE: (new () => object) | null = null'), true)
   assert.equal(keeps('', false, 'static DEFAULT_IMAGE: (() => void) | null = () => {}'), false)

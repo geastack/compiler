@@ -222,8 +222,9 @@ export const intrinsicArrayCallbackFrameOf = (
   // the species-creating methods (`map`/`filter`/`flatMap`/`toSorted`),
   // `constructor` and `@@species`; `length` and the present elements are own.
   // Demanding the whole prototype instead fails under ANY unattributed
-  // prototype-key write -- on hono-hello that was the one obligation the sealed
-  // census could not discharge (reg-exp-router `[middleware, routes].forEach`)
+  // prototype-key write -- in one HTTP-router program that was the one
+  // obligation the sealed census could not discharge (`[middleware,
+  // routes].forEach`)
   // while none of the keys the call reads was ever written. An `any` receiver
   // proves nothing about the receiver's own shape, so the runtime lookup keeps
   // the whole-prototype obligation.

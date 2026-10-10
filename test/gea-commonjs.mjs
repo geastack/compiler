@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
@@ -29,9 +30,13 @@ for (const line of result.source.split('\n').filter((line) => line.includes('gea
   assert.match(line, /^GEA_THROW\(.*gea::runtime::Error/)
 }
 const binary = resolve(root, 'dist/test_gea_commonjs')
-execFileSync('clang++', ['-std=c++20', '-O0', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary], {
-  input: result.source + '\nint main() { __gea_top_level(); }\n',
-  stdio: ['pipe', 'inherit', 'inherit']
-})
+execFileSync(
+  'clang++',
+  ['-std=c++20', ...nativeOptimization('correctness'), `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
+  {
+    input: result.source + '\nint main() { __gea_top_level(); }\n',
+    stdio: ['pipe', 'inherit', 'inherit']
+  }
+)
 execFileSync(binary, { stdio: 'inherit' })
 console.log('Gea CommonJS: host-owned wrappers, native module identity and state passed')

@@ -4,7 +4,7 @@
 
 // A hoisted FUNCTION DECLARATION inside a function body, called before its own
 // declaration is reached, capturing a `let` cell of the enclosing frame -- the
-// shape hono's `compose` returns (`return dispatch(0)` above `async function
+// shape an HTTP framework's middleware `compose` returns (`return dispatch(0)` above `async function
 // dispatch(i)`, both closing over `index`). The binding is a cell the nested
 // function and the enclosing body BOTH read, so a body that never allocates it
 // leaves the call site naming a declaration nothing wrote.

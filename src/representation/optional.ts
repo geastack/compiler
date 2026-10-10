@@ -54,8 +54,8 @@ export const optionalOf = (payload: Representation, absence: 'null' | 'undefined
   // The second flag was not free: `Optional<Ref<T>>` is two words where one
   // would do, so every nullable field doubled, every parameter carrying one
   // was passed in two registers, and every read of it branched on a tag beside
-  // a pointer that already held the answer. Measured on
-  // `bench/comparison/fixtures/binary_trees.ts`, whose `left`/`right` are both
+  // a pointer that already held the answer. Measured on a binary-tree build
+  // and walk whose `left`/`right` are both
   // `TreeNode | null`: 84.5ms to 63.0ms.
   //
   // `shared-refcount` only, and `null` only. An `owned` or `borrowed` instance

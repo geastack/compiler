@@ -1,7 +1,7 @@
-// The MongoDB driver writes plain object literals where a data-only CLASS is
+// A database client writes plain object literals where a data-only CLASS is
 // the declared type: `override writeConcern: WriteConcern = { w: 0 }`
-// (operations/end_sessions.ts) and `WriteConcern.apply(command, { wtimeoutMS:
-// 10000, w: 'majority', ...wc })` (sessions.ts). `structural-layout-type.ts`
+// (its end-sessions operation) and `WriteConcern.apply(command, { wtimeoutMS:
+// 10000, w: 'majority', ...wc })` (its session module). `structural-layout-type.ts`
 // lays such a literal out as its contextual type, so it reaches allocation as
 // a `class-ref`.
 //

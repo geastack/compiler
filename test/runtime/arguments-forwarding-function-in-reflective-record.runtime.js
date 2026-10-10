@@ -1,4 +1,4 @@
-// three.js's `WebGLState` wraps each GL call as a function that forwards its
+// A 3D renderer's GPU-state module wraps each GL call as a function that forwards its
 // `arguments` (`function compressedTexImage2D() { gl.compressedTexImage2D(
 // ...arguments ) }`) and returns them in one state object. When that object
 // is reached dynamically, each wrapper is boxed, and its argument list --
@@ -14,7 +14,7 @@ const gl = {
 }
 
 function texImage() {
-  // @ts-ignore -- JS forwards `arguments` to a fixed-arity call, as three.js does
+  // @ts-ignore -- JS forwards `arguments` to a fixed-arity call, as such a renderer does
   gl.texImage(...arguments)
 }
 

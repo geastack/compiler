@@ -65,8 +65,8 @@ interface Completion {
  * The census analyzes every function body at least three times (two fact
  * passes, then the summary fixpoint) and every file's top level again until
  * its entries settle, and `getSymbolAtLocation` on an identifier re-runs name
- * resolution each time it is asked: on the mongodb driver that re-resolution
- * was 14 of the census's 35 seconds. The checker's answer for a node never
+ * resolution each time it is asked: on a large package that re-resolution
+ * was about 40% of the census's time. The checker's answer for a node never
  * changes, so asking it once is the same answer.
  */
 interface CensusMemo {

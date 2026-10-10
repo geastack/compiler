@@ -31,6 +31,12 @@ import { resultOf } from '../semantics/model/operands.js'
  * and refuses by name (`bindingReference`, targets/cpp/emit-context.ts).
  */
 
+export interface NativeSingletonIdentity {
+  readonly protocol: string
+  readonly version: number
+  readonly identity: number
+}
+
 export type BindingStorage =
   /**
    * A cell owned by one frame: a callable's, or a run-once region's for a
@@ -97,7 +103,7 @@ export type BindingStorage =
    * `new`, and a singleton is one the host states members for and no program
    * ever constructs.
    */
-  | { readonly kind: 'host-singleton'; readonly linkageName: string }
+  | { readonly kind: 'host-singleton'; readonly linkageName: string; readonly nativeIdentity?: NativeSingletonIdentity }
   /**
    * A host's constant: named by this program, and the host states the text.
    *
@@ -182,6 +188,8 @@ export interface BindingPlacementInput {
    * `standardLibraryExternals` gate as its two siblings.
    */
   readonly coreGlobalClasses?: ReadonlySet<string>
+  /** Backend-owned singleton objects, admitted only through their standard-library declarations. */
+  readonly coreGlobalSingletons?: ReadonlyMap<string, NativeSingletonIdentity | null>
   /**
    * The declarations the standard library declares
    * (`FrontendResult.standardLibraryBindings`).
@@ -293,6 +301,45 @@ const hostStorageOf = (
   if (input.standardLibraryExternals?.has(declaration) && input.coreGlobalClasses?.has(linkageName)) {
     return { kind: 'host-class', linkageName }
   }
+  // An installed host's namespace root or singleton outranks the backend's own
+  // singleton of the same name, exactly as an installed host's function
+  // outranks `coreGlobalFunctions` above: a host that states members under
+  // `localStorage` is describing its own platform, and the backend's table is
+  // the answer only for a target that states nothing. Asked first and applied
+  // second because the exact-declaration gate's `null` speaks only for the
+  // host's name-keyed tables, never for the standard library's own object.
+  const installed = installedHostPathStorageOf(input, declaration, linkageName, file)
+  if (installed) return installed
+  if (input.standardLibraryExternals?.has(declaration) && input.coreGlobalSingletons?.has(linkageName)) {
+    const identity = input.coreGlobalSingletons.get(linkageName)
+    const nativeIdentity =
+      identity &&
+      representation?.kind === 'native-handle' &&
+      representation.native === null &&
+      representation.protocol === identity.protocol &&
+      representation.version === identity.version
+        ? identity
+        : null
+    return { kind: 'host-singleton', linkageName, ...(nativeIdentity ? { nativeIdentity } : {}) }
+  }
+  if (installed === null) return null
+  // A host handle that declares a construct convention is the host's class
+  // object rather than a cell the host defines -- see `host-class` above.
+  if (representation?.kind === 'native-handle' && representation.construct !== null) return { kind: 'host-class', linkageName }
+  return null
+}
+
+/**
+ * The namespace root or singleton an installed host claims for this binding:
+ * the storage, `null` where the host's exact-declaration gate rules its
+ * name-keyed tables out for this declaration, or `undefined` for no claim.
+ */
+const installedHostPathStorageOf = (
+  input: BindingPlacementInput,
+  declaration: DeclarationId,
+  linkageName: string,
+  file: string | undefined
+): BindingStorage | null | undefined => {
   if (input.hostNamespaceBindings?.has(declaration)) return { kind: 'host-namespace', linkageName }
   if (input.exactHostNamespaceNames?.has(linkageName)) return null
   if (file !== undefined && input.hostNamespaceRootsByDeclaration?.get(file)?.has(linkageName)) {
@@ -304,10 +351,7 @@ const hostStorageOf = (
     return { kind: 'host-singleton', linkageName }
   }
   if (input.hostSingletons?.has(linkageName)) return { kind: 'host-singleton', linkageName }
-  // A host handle that declares a construct convention is the host's class
-  // object rather than a cell the host defines -- see `host-class` above.
-  if (representation?.kind === 'native-handle' && representation.construct !== null) return { kind: 'host-class', linkageName }
-  return null
+  return undefined
 }
 
 /**

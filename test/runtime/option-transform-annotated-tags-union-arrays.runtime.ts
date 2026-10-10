@@ -1,4 +1,4 @@
-// mongodb's `readPreferenceTags` option: the descriptor table types every
+// A database client's `readPreferenceTags` option: the descriptor table types every
 // `transform` as `(args: { name; options; values: unknown[] }) => unknown`,
 // and this one annotates its own parameter more narrowly -- `values:
 // Array<string | Record<string, string>[]>` -- then picks `values[0]` when it

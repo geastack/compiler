@@ -1,14 +1,14 @@
 //! expect: plain: 2 deletes, first limit 1
-//! expect: hinted: hint for the delete command is only supported on MongoDB 4.4+
-//! expect: batch: hint for the delete command is only supported on MongoDB 4.4+
+//! expect: hinted: hint for the delete command is only supported on server 4.4+
+//! expect: batch: hint for the delete command is only supported on server 4.4+
 //! expect: found: {"q":{"b":2},"limit":0,"hint":"b_1"}
 
-// mongodb's operations/delete.ts: `this.statements.find((o: Document) =>
+// A database client's delete operation: `this.statements.find((o: Document) =>
 // o.hint)`, where `statements` is `DeleteStatement[]` and the callback names
 // its parameter `Document`. The element is read as the open document, so
 // `find` answers `Document | undefined`, and the call's result is the typed
 // `DeleteStatement | undefined` again: a checked adoption of the document as
-// the named record, lifted through the optional. bulk/common.ts also builds
+// the named record, lifted through the optional. Its bulk writer also builds
 // the operation from a `Batch<T = Document>` narrowed by a `batch is
 // Batch<DeleteStatement>` guard, so the field is carried as an Array of
 // documents.
@@ -32,7 +32,7 @@ class DeleteOperation {
   buildCommandDocument(): Document {
     const command: Document = { delete: 'todos', deletes: this.statements, ordered: true }
     if (this.statements.find((o: Document) => o.hint)) {
-      throw new Error('hint for the delete command is only supported on MongoDB 4.4+')
+      throw new Error('hint for the delete command is only supported on server 4.4+')
     }
     return command
   }

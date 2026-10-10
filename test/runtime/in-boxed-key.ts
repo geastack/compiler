@@ -4,7 +4,7 @@
 // and with it the whole operator. But the box's TAG says what it holds, and
 // ToPrimitive is the identity for every primitive: only an Object or Function
 // payload needs the dispatch that does not exist, and that one aborts by name
-// rather than fabricating a key. three's `uuid in _materialCache` and
+// rather than fabricating a key. A 3D library's `uuid in materialCache` and
 // `u.id in values` are both a string or a number key through an untyped cell.
 const table: any = { alpha: 1, seven: 7 }
 

@@ -1,4 +1,4 @@
-// mongodb's operations (src/operations/create_collection.ts):
+// A database client's operation classes:
 //
 //   class AbstractOperation<TResult = unknown> { options: OperationOptions & Abortable }
 //   class CommandOperation<T> extends AbstractOperation<T> { override options: CommandOperationOptions }
@@ -10,7 +10,7 @@
 // Three declarations, one property. JavaScript stores the object the program
 // hands over, whichever class's declaration the write names: the field holds
 // THAT object, every member of it, and a read through any class returns it.
-// Generic, as mongodb's are: a class copy's members are laid out per copy.
+// Generic, as that client's are: a class copy's members are laid out per copy.
 interface Abortable {
   signal?: string
 }

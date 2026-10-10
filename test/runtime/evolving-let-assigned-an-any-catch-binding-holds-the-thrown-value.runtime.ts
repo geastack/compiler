@@ -1,9 +1,9 @@
-// mongodb's `executeCommands` (src/bulk/common.ts:549, compiled with
+// A database client's bulk `executeCommands` (compiled with
 // `useUnknownInCatchVariables: false`, so the catch binding is `any`):
 //
 //   let thrownError = null
 //   try { result = await executeOperation(...) } catch (error) { thrownError = error }
-//   if (thrownError != null) { if (thrownError instanceof MongoWriteConcernError) ... }
+//   if (thrownError != null) { if (thrownError instanceof WriteConcernError) ... }
 //
 // The cell starts `null` and then holds whatever was thrown. The thrown value
 // is a genuine dynamic boundary, so the cell carries the thrown error rather

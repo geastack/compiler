@@ -1,9 +1,11 @@
 import { asyncResultConventionsOf } from '../../ir/async-result-conventions.js'
+import { prototypePropertyDeclarationsOf, type ProgramConversionRecipe } from '../../ir/program-conversions.js'
 import { createNativeDebugSource, type NativeDebugInfo } from './native-debug-source.js'
 import type { DiagnosticLocation } from '../../diagnostics/model.js'
 import type { SemanticResultId } from '../../identity/ids.js'
 import { publishRealmStorage } from './realm-storage.js'
 import { nativeSelectionHelpers } from './native-selection-helpers.js'
+import { nativeViewTargetsOf } from './native-view-targets.js'
 import { asyncPromiseViewOf, isAsyncCoroutineBody } from './coroutine-bodies.js'
 import { createCppEmitBlockedError } from './emit-context.js'
 import { instanceReparentTargetsOf } from '../../ir/instance-reparenting.js'
@@ -36,7 +38,6 @@ import type { StructuralType } from '../../semantics/model/structural-types.js'
 import type { CallableAbi, Representation } from '../../representation/model.js'
 import { allOperationsOf, type IrBody, type IrCaptureGroup } from '../../ir/model.js'
 import { capturesNothing } from '../../ir/captures.js'
-import type { IrValueId } from '../../identity/ids.js'
 import { representationKey, walkRepresentation } from '../../representation/model.js'
 import type { RuntimeDefinition } from '../../plugins/model.js'
 import type { HostSpellings } from './host/host-members.js'
@@ -99,14 +100,21 @@ import {
   withUnreadParametersUnnamed
 } from './records.js'
 import { prototypeReadHooks, virtualMethodEmission, virtualMethodFamiliesOf } from './virtual-methods.js'
+import { nativePrototypePresenceDemandOf } from '../../ir/native-prototype-presence-demand.js'
 import { virtualDispatchVerdictOf } from '../../projection/dispatch.js'
-import { stringConstantsOf } from '../../ir/dead-values.js'
-import { integerParameterSlot, integerResultSlot, integerStorageCensusOf, integerStorageSlot } from '../../ir/integer-storage.js'
+import { functionReflectionDemandOf } from '../../ir/function-reflection-demand.js'
+import {
+  integerParameterSlot,
+  integerResultSlot,
+  integerStorageCensusOf,
+  integerStorageSlot,
+  reflectedFieldStorageNeedsPublishedCarrier
+} from '../../ir/integer-storage.js'
 import type { DeclaredIntegerWidth } from '../../ir/integers.js'
-import type { ReflectionDemand, ReflectionExposure } from '../../ir/reflection-demand.js'
+import type { ReflectionExposure } from '../../ir/reflection-demand.js'
 import { classesConstructedUnobservably, functionsIgnoringTheirReceiver, type InstantiationFacts } from '../../ir/instantiation.js'
 import { renderJsonStructDeclarations } from './emit-json.js'
-import { alignedValueText, type ConversionSite, type PrinterDrift } from './emit-narrowing.js'
+import { programConversionText, type ConversionSite, type PrinterDrift } from './emit-narrowing.js'
 import { recordLayoutPolicyOf } from '../../projection/fields.js'
 import type { ConversionCensus } from '../../conversion/nodes.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
@@ -279,8 +287,9 @@ const hostPreamblesOf = (
  * but it is still the right answer, because internal linkage is what lets the
  * C++ compiler see that a function is never called from anywhere else. Measured
  * on the comparison suite (2026-09-02, clang 18, 16 core fixtures): geomean vs
- * native 0.699 without it and 0.729 with, from `binary_trees` 0.207 -> 0.247,
- * `fibonacci` 0.660 -> 0.789 and `method_calls` 1.232 -> 1.579 -- the thunk and
+ * native 0.699 without it and 0.729 with, from a binary-tree build 0.207 ->
+ * 0.247, recursive Fibonacci 0.660 -> 0.789 and a method-call loop 1.232 ->
+ * 1.579 -- the thunk and
  * the `CallableObject` global take a function's address, and an externally
  * visible address is what stops the inliner cloning it.
  *
@@ -290,6 +299,7 @@ const hostPreamblesOf = (
 export type CppSymbolIsolation = 'required' | 'preferred' | 'off'
 
 export interface CppTranslationUnitInput {
+  readonly programConversionRecipes?: readonly ProgramConversionRecipe[]
   readonly debugLocations?: ReadonlyMap<SemanticResultId, DiagnosticLocation>
   readonly plan: SealedRepresentationPlan
   /** Reachable carrier closure published before certification; absent facts retain the full plan. */
@@ -651,7 +661,7 @@ const asyncPromiseViewEntryOf = (
     ...abi.parameters.map((_, ordinal) => `std::move(${cppFormalName(ordinal)})`)
   ]
   const call = `${asyncPromiseViewName(body.sourceOwner)}(${actuals.join(', ')})`
-  const viewed = alignedValueText(site, 'translation-unit.ts:asyncPromiseViewEntryOf', promise, abi.result, call)
+  const viewed = programConversionText(site, 'async-entry', String(body.sourceOwner), '', promise, abi.result, call)
   if (viewed === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(promise)}->${representationKey(abi.result)}`,
@@ -671,7 +681,7 @@ const asyncPromiseViewEntryOf = (
  * while the carrier that owns it is held -- and not even that long for an
  * inline environment, which the thunk unpacks into its own stack slot -- so
  * the generator split's outer half, which allocates the inner coroutine's
- * carrier and drops it on return (mongodb's `makeCounter`), left every resume
+ * carrier and drops it on return (a generator factory), left every resume
  * writing through freed memory. C++ copies a coroutine's by-value parameters
  * into the coroutine frame, so taking the environment by value gives the
  * frame its own reference to every captured cell for as long as it lives.
@@ -888,7 +898,7 @@ const initializationStatements = (
       const target = bodyAbi.parameters[index]?.value
       const actual = actuals[index]
       if (!source || !target || actual === undefined) return `its constructor parameter ${index} has no complete ABI mapping`
-      const text = alignedValueText(site, 'translation-unit.ts:722', source, target, actual)
+      const text = programConversionText(site, 'construct-argument', String(layout.declaration), String(index), source, target, actual)
       if (text === null) {
         return (
           `its construct parameter ${index} carries ${representationKey(source)}, while constructor body ${layout.constructor} carries ` +
@@ -1097,7 +1107,7 @@ const constructionsOf = (
     // A raw pointer, not a `Ref`: the caller reads it off a class cell it
     // holds for the whole call (the cell's `environmentOwner` owns the
     // state), and a `Ref` argument was a retain and a release of the SAME
-    // shared count around every construction -- in `binary_trees`' `build`
+    // shared count around every construction -- in a recursive tree builder
     // the two read-modify-writes and the release's branches were the hottest
     // lines after the construct itself.
     const stateFormal = 'gea::NativeClassMethodState* gea_method_state'
@@ -1308,7 +1318,7 @@ const thunkOf = (
  *
  * ECMA-262 10.2.2 in three steps, and the reason a construction cannot reuse
  * the invoke pointer: `[[Call]]` is HANDED a receiver and returns whatever the
- * body returns (`void`, for nine of the ten in three.js's renderer), while
+ * body returns (`void`, for most constructors in practice), while
  * `[[Construct]]` manufactures the receiver and evaluates to it. The two
  * conventions differ in both ends, which is why `gea::CallableConstructorObject`
  * holds two pointers rather than one.
@@ -1345,8 +1355,8 @@ const constructThunkOf = (
   // receiver.ts` gates the JS-constructor receiver on `bodyReadsThis`), and
   // `[[Construct]]` of it is still a construction: allocate the instance, run
   // the body with the convention it has, return the instance. `function F()
-  // {}` constructed with `new F()` is exactly that -- test262 builds most of
-  // its throwaway constructors this way -- and rendering it as a fault made
+  // {}` constructed with `new F()` is exactly that -- conformance tests build most
+  // of their throwaway constructors this way -- and rendering it as a fault made
   // a certified program abort at runtime.
   const actuals = [
     ...(hasEnvironment ? [cppEnvironmentParamName] : ['nullptr']),
@@ -1631,6 +1641,8 @@ const commonJsDefinitionsOf = (bodies: readonly IrBody[], realm = false): Common
       for (const operation of allOperationsOf(block)) {
         if (operation.kind !== 'commonjs-require' || operation.result.representation.kind === 'dynamic') continue
         if (operation.target === null) {
+          // Its never-produced value (`publish.ts`'s `commonJsBoundaryOf`).
+          if (operation.result.representation.kind === 'undefined') continue
           refused.push({
             owner: operation.owner,
             reason: `a require of the absent package "${operation.absentPackage}" selected a native carrier; it evaluates no module and has no exports`,
@@ -1753,6 +1765,11 @@ const commonJsOwnerOf = (body: IrBody): CommonJsOwner | CppEmissionRefusal | nul
   let needsDynamicScope = false
   for (const block of body.blocks.values()) {
     for (const operation of allOperationsOf(block)) {
+      // A require answered by a native module record calls that record's
+      // initializer directly and reads no lexical wrapper state, so it needs
+      // no scope: `function load() { return require('./cache') }` in a module
+      // whose own record is native has no dynamic `ModuleRecord` to enter.
+      if (operation.kind === 'commonjs-require' && operation.result.representation.kind !== 'dynamic') continue
       if (operation.kind === 'commonjs-require' || operation.kind === 'commonjs-binding' || operation.kind === 'commonjs-binding-set')
         owners.add(operation.owner)
       if (operation.kind === 'commonjs-binding' && operation.result.representation.kind !== 'dynamic') nativeRecord = true
@@ -1989,7 +2006,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // the body into an owning wrapper over the borrowing body: every stored handle
   // argument was copied into its field and the wrapper's parameter then died,
   // a count dip per stored handle that bought the cycle collector a candidate
-  // (the mongodb driver's request and command objects: ~35 spilled dips per
+  // (a client's request and command objects: ~35 spilled dips per
   // operation). The owning body moves a parameter into its field at the last use.
   const constructorBodies = new Set<string>()
   for (const layout of input.classes.values()) if (layout.constructor !== null) constructorBodies.add(String(layout.constructor))
@@ -2102,14 +2119,40 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // The conversion site of everything rendered outside a body: construct
   // thunks, field initializers, virtual dispatch adapters. Same census, same
   // drift list, one owner name.
+  const certifiedConversions = new Set(input.certificate.conversionNodeIds)
+  const nativeViewTargets = nativeViewTargetsOf(
+    input.certificate.conversionNodeIds.flatMap((id) => {
+      const node = input.conversions.nodeById(id)
+      return node === null ? [] : [node]
+    })
+  )
+  const { facts: preserveFunctionFacts, sources: preserveFunctionSources } = functionReflectionDemandOf(input.bodies)
+  // The facts every mint site of a function registers (`cppThunkEntryText`),
+  // spelled once per body here rather than looked up through the thunk. Empty
+  // when the census above found no reader, so `&thunk` alone is stored.
+  const functionFacts = new Map<FunctionId, CallableFactsSpelling>()
+  if (preserveFunctionFacts || preserveFunctionSources)
+    for (const body of input.bodies) {
+      if (isRegionId(body.sourceOwner) || body.abi === null || body.functionSource === undefined) continue
+      functionFacts.set(body.sourceOwner, {
+        abiType: cppAbiType(body.abi),
+        name: body.functionName ?? '',
+        length: body.functionLength ?? 0,
+        source: preserveFunctionSources ? body.functionSource : ''
+      })
+    }
   const programSite: ConversionSite = {
+    conversionIsCertified: (id) => certifiedConversions.has(id),
+    ...(input.programConversionRecipes ? { programConversionRecipes: input.programConversionRecipes } : {}),
+    abiOfCallable: (callable) => abiByBody.get(String(callable)) ?? null,
     conversions: input.conversions,
     ...(selectionHelpers === undefined ? {} : { nativeSelectionHelpers: selectionHelpers }),
     printerDrift,
     owner: 'program',
-    layouts: recordLayoutPolicyOf(deriver, input.classes, input.wellKnownSymbols),
+    layouts: recordLayoutPolicyOf(deriver, input.classes, input.wellKnownSymbols, (callable) => abiByBody.get(String(callable)) ?? null),
     classes: input.classes,
-    captures
+    captures,
+    functionFacts
   }
   // The dispatchability VERDICT itself -- `projection/dispatch.ts`'s
   // `virtualDispatchVerdictOf` -- moved out of this file's `virtual-methods.ts`
@@ -2142,25 +2185,17 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // `records.ts` keeps the struct's protocol; a base keeps it whenever any
   // descendant needs it, because the descendant reaches its hooks through
   // the base's `virtual` members.
-  const dynamicallyReadClasses = ((): ReadonlySet<DeclarationId> | null => {
-    const reflection = input.reflection
-    if (reflection === undefined || !reflection.complete) return null
-    const held = new Set<DeclarationId>()
-    for (const declaration of input.classes.keys()) {
-      const demand = reflection.classes.get(declaration)
-      if (demand !== undefined && (demand.level !== 'full' || demand.fieldOperations !== undefined)) continue
-      for (let base: DeclarationId | null = declaration; base !== null && !held.has(base); base = input.classes.get(base)?.base ?? null)
-        held.add(base)
-    }
-    return held
-  })()
+  const dynamicallyReadClasses = prototypePropertyDeclarationsOf(input.classes, input.reflection)
   publishBoxableClasses(input.classes, dynamicallyReadClasses)
+  const nativePrototypePresence = nativePrototypePresenceDemandOf(input.bodies, input.classes, input.conversions)
   const prototypeHooks = prototypeReadHooks(
     input.classes,
     (callable) => abiByBody.get(String(callable)) ?? null,
     capturesNothingOf,
     (declaration) => classBoxable(input.classes, declaration),
-    input.wellKnownSymbols
+    input.wellKnownSymbols,
+    (declaration) => nativePrototypePresence.has(declaration),
+    programSite
   )
   const structMembers = new Map<string, readonly string[]>(virtuals.membersByStruct)
   for (const [struct, members] of prototypeHooks.membersByStruct)
@@ -2178,10 +2213,8 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // spells a celled member from this same answer -- `Signal<long long>` where
   // the slot narrowed, `Signal<double>` where it did not -- so the cell and the
   // census are one authority by construction rather than two that agree. Every
-  // integer flag of `examples/apps/weather`'s store (`active`, `managing`,
-  // `synced`, `fetchInFlight`, `refreshPending`, `wifiRequested`,
-  // `wifiRetryTicks`, `searchResultVisible`, `searchRequestId`,
-  // `searchTimerId`, `toastTimerId`) was a `Signal<double>` compared and
+  // integer flag of an app store (booleans-as-numbers, request ids, timer
+  // ids) was a `Signal<double>` compared and
   // stepped in software floating point on a core with no double FPU.
   const excludedStructs = new Set<string>([...jsonStructs.structNames, ...boundRecordFields.keys()])
   // Reflected field protocols exchange the published carrier, even when an
@@ -2190,24 +2223,10 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // must likewise retain their declared carrier. The reflection census has
   // already closed inherited physical protocols, so this includes a base's
   // storage reached through a derived-class Reflect call.
-  const hasPayloadProtocol = (demand: ReflectionDemand): boolean =>
-    demand.level === 'full' &&
-    (demand.fieldOperations === undefined ||
-      [...demand.fieldOperations.values()].some((operations) =>
-        [...operations].some(
-          (operation) =>
-            operation === 'read' ||
-            operation === 'write' ||
-            operation === 'native-read' ||
-            operation === 'native-write' ||
-            operation === 'descriptor' ||
-            operation === 'define'
-        )
-      ))
   for (const [declaration, demand] of input.reflection?.classes ?? [])
-    if (hasPayloadProtocol(demand)) excludedStructs.add(cppClassName(declaration))
+    if (reflectedFieldStorageNeedsPublishedCarrier(demand)) excludedStructs.add(cppClassName(declaration))
   for (const [shape, demand] of input.reflection?.records ?? [])
-    if (hasPayloadProtocol(demand)) excludedStructs.add(cppRecordStructName(shape))
+    if (reflectedFieldStorageNeedsPublishedCarrier(demand)) excludedStructs.add(cppRecordStructName(shape))
   const fieldStructNameOf = (representation: Representation, key: string): string | null => {
     if (representation.kind !== 'class-ref') return cppStructNameOf(representation)
     const owner = classFieldStorageOwnerOf(deriver, representation, key, input.classes)
@@ -2387,12 +2406,15 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     // per-instance reference to its constructor's realm-owned method state.
     input.realmStorage ? new Set() : singleEvaluationClasses,
     (shapeId, hasSymbolField) => nativeIntegrityRestricted.restrictsRecordShape(shapeId, hasSymbolField),
-    (declaration, key) => constructionOnlyFields.holdsOlder(declaration, key)
+    (declaration, key) => constructionOnlyFields.holdsOlder(declaration, key),
+    new Set(nativeViewTargets.map(cppRecordStructName)),
+    (callable) => abiByBody.get(String(callable)) ?? null,
+    programSite
   )
   const recursiveContainers = cppRecursiveContainerDeclarations(input.plan, emissionRepresentations)
 
   // Real storage for every `ClassName.KEY = value` site the whole program
-  // contains -- three.js's own idiom for a class static, spelled as a bare
+  // contains -- plain JS's idiom for a class static, spelled as a bare
   // assignment rather than a `static` member (`class-layout.ts`'s own doc
   // comment on `ClassStaticFieldStorage`). Published as a whole-compile
   // sidecar (keyed off `input.classes`'s own identity) BEFORE any body
@@ -2448,7 +2470,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     runtimeInclude,
     ...hostIncludesOf(emissionRepresentations, input.hosts)
   ].join('\n')
-  const reactiveCensus = reactiveDependenciesOfBodies(input.bodies, input.classes, reactive)
+  const reactiveCensus = reactiveDependenciesOfBodies(input.bodies, input.classes, reactive, input.placements)
   const hosts: HostSpellings = {
     ...input.hosts,
     reactive: {
@@ -2678,119 +2700,6 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     const entry = stableBorrowEntries.get(cppBodyName(body.sourceOwner))
     return entry === undefined ? [original] : [original, `${signatureOf(body, captures, new Set(), false, entry.formals, entry.name)};`]
   })
-  // Source/name/length reflection keeps its facts program-wide, including
-  // functions arriving through fields and ABI adapters -- one registration
-  // table backs all three (`gea::CallableObject::facts()`), so a program that
-  // reads any of `.toString()`, `.name` or `.length` off a callable needs
-  // every body's registration, not just the one the read happens to reach.
-  // Programs with none of these three reads need neither the strings nor the
-  // static registrations at all.
-  //
-  // `Object.getOwnPropertyDescriptor(fn, "name")` and its reflective siblings
-  // read the same facts a direct `fn.name` does, one call later: the `get`
-  // fetching the `Object.*` member is noted, and a call through that value
-  // handing over a callable is the read. A callable read through a RUNTIME
-  // key (`fn[k]`) may name any of the three, so it counts as well.
-  const reflectiveObjectMembers = new Set([
-    'getOwnPropertyDescriptor',
-    'getOwnPropertyNames',
-    'hasOwn',
-    'defineProperty',
-    'keys',
-    'entries',
-    'values'
-  ])
-  // Names and arity do not observe the source text. Keep source demand
-  // separate so an ordinary fn.name read cannot retain every function body.
-  const traceFunctionFacts = (body: IrBody, why: string): void => {
-    if (process.env['GEA_FUNCTION_FACTS_DEBUG']) console.log(`[FACTS] ${String(body.sourceOwner)}: ${why}`)
-  }
-  let preserveFunctionFacts = false
-  const preserveFunctionSources = input.bodies.some((body) => {
-    const keys = stringConstantsOf(body)
-    const callable = (representation: Representation): boolean =>
-      representation.kind === 'function-value-dispatch' || representation.kind === 'function-and-constructor'
-    const holdsCallable = (representation: Representation): boolean =>
-      callable(representation) ||
-      (representation.kind === 'optional' && holdsCallable(representation.payload)) ||
-      (representation.kind === 'tagged-union' && representation.arms.some((arm) => holdsCallable(arm.value)))
-    const reflectors = new Set<IrValueId>()
-    for (const block of body.blocks.values())
-      for (const operation of block.operations) {
-        // A callable BOXED into a dynamic carrier (`const named: any =
-        // function named() {...}`) can reach `Function.prototype.toString`
-        // through any later `String(x)`/template-literal/`+` coercion of that
-        // dynamic value -- `gea::host::detail::toString` dispatches on the
-        // boxed VALUE's own runtime tag, not on which read site the census
-        // happened to see, so the box itself is the read that matters, not a
-        // later member access this census could name. Missing this left
-        // every boxed callable answering `Function.prototype.toString` with
-        // the registry's generic "function () { [native code] }" fallback,
-        // silently dropping the function's own name and source text.
-        if (
-          operation.kind === 'convert' &&
-          callable(operation.source.representation) &&
-          operation.result.representation.kind === 'dynamic'
-        ) {
-          traceFunctionFacts(body, 'a callable boxed into a dynamic carrier')
-          return true
-        }
-        // A coercion of a callable operand -- `fn + ''`, a template, the arm
-        // of a union holding one -- spells its source text (`emit-tostring.ts`).
-        if (
-          operation.kind === 'compute' &&
-          operation.form !== 'typeof' &&
-          operation.operator !== '===' &&
-          operation.operator !== '!==' &&
-          operation.operands.some((operand) => holdsCallable(operand.representation))
-        ) {
-          traceFunctionFacts(body, 'a computation over a callable operand')
-          return true
-        }
-        if (operation.kind === 'get') {
-          if (callable(operation.receiver.representation)) {
-            const key = keys.get(operation.key.value)
-            if (key === 'name' || key === 'length') {
-              preserveFunctionFacts = true
-            } else if (key === undefined || key === 'toString') {
-              traceFunctionFacts(body, `a read of "${key ?? '<runtime key>'}" off a callable`)
-              return true
-            }
-          }
-          const receiver = operation.receiver.representation
-          const member =
-            operation.hostMethod?.protocol === 'ObjectConstructor'
-              ? operation.hostMethod.member
-              : receiver.kind === 'native-handle' && (receiver.native ?? receiver.protocol) === 'ObjectConstructor'
-                ? keys.get(operation.key.value)
-                : undefined
-          if (member !== undefined && reflectiveObjectMembers.has(member)) reflectors.add(operation.result.id)
-        }
-        if (
-          operation.kind === 'call' &&
-          reflectors.has(operation.callee.value) &&
-          operation.arguments.some((argument) => callable(argument.representation))
-        ) {
-          traceFunctionFacts(body, 'a reflective Object.* call handed a callable')
-          return true
-        }
-      }
-    return false
-  })
-  // The facts every mint site of a function registers (`cppThunkEntryText`),
-  // spelled once per body here rather than looked up through the thunk. Empty
-  // when the census above found no reader, so `&thunk` alone is stored.
-  const functionFacts = new Map<FunctionId, CallableFactsSpelling>()
-  if (preserveFunctionFacts || preserveFunctionSources)
-    for (const body of input.bodies) {
-      if (isRegionId(body.sourceOwner) || body.abi === null || body.functionSource === undefined) continue
-      functionFacts.set(body.sourceOwner, {
-        abiType: cppAbiType(body.abi),
-        name: body.functionName ?? '',
-        length: body.functionLength ?? 0,
-        source: preserveFunctionSources ? body.functionSource : ''
-      })
-    }
   const thunks = new Map<IrBody, RenderedThunk>()
   for (const body of input.bodies) {
     const thunk = thunkOf(
@@ -2930,7 +2839,10 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
         keyOrderUnobserved,
         debugSource,
         borrowed,
-        asyncResults.taskResults
+        asyncResults.taskResults,
+        programSite.conversionIsCertified,
+        input.programConversionRecipes,
+        structs.classIndexProtocols
       )
       const commonJsScope = [
         ...coroutineEnvironmentPrologueOf(promiseView ?? body, captures),
@@ -3056,9 +2968,15 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     // The specializations' class halves go before any program struct, which
     // may ask `TraceEdges<wrapper>::supported` in its own definition; their
     // `visit` bodies stay below with the class-base specializations.
-    if (recursiveTraceEdges.declarations.length > 0) {
+    if (recursiveTraceEdges.declarations.length > 0 || nativeViewTargets.length > 0) {
       if (isolate) builder.append(plain(namespaceClose))
       for (const declaration of recursiveTraceEdges.declarations) builder.append(plain(declaration))
+      if (nativeViewTargets.length > 0) {
+        builder.append(plain('namespace gea::detail {'))
+        for (const shape of nativeViewTargets)
+          builder.append(plain(`template <> struct NativeViewTarget<${qualifier}${cppRecordStructName(shape)}> : std::true_type {};`))
+        builder.append(plain('}  // namespace gea::detail'))
+      }
       if (isolate) builder.append(plain(namespaceOpen))
     }
     for (const declaration of structs.declarations) builder.append(plain(declaration))
@@ -3077,8 +2995,12 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     for (const declaration of recursiveContainerTraceEdges) builder.append(plain(declaration))
     if (structs.runtimeClassBases.length > 0) {
       builder.append(plain('namespace gea::detail {'))
-      for (const { derived, base } of structs.runtimeClassBases) {
-        builder.append(plain(`template <> struct ClassRefBase<${qualifier}${derived}> { using type = ${qualifier}${base}; };`))
+      for (const { derived, base, nativeBase } of structs.runtimeClassBases) {
+        builder.append(
+          plain(
+            `template <> struct ClassRefBase<${qualifier}${derived}> { using type = ${nativeBase ? `::${base}` : `${qualifier}${base}`}; };`
+          )
+        )
       }
       builder.append(plain('}  // namespace gea::detail'))
     }
@@ -3227,7 +3149,7 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     return render(program.seal())
   }
   // Record field tables belong to no source file, so a program with many
-  // records put every table in this one unit: 19 MB of the MongoDB driver's
+  // records put every table in this one unit: 19 MB of one program's
   // 60, which no compiler finished inside the build's command cap. Over the
   // budget they move to units of their own; their members are out-of-line
   // definitions of structs the header declares, so any unit may hold them.

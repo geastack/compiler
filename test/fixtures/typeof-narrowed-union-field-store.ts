@@ -1,5 +1,5 @@
 // A `string | number` local narrowed by `typeof` and stored into a field of
-// the narrowed arm's type. Three's `Euler.fromArray` is the shape:
+// the narrowed arm's type. A 3D library's `Euler.fromArray` is the shape:
 // `const order = array[ 3 ]; if ( typeof order === 'string' ) this._order = order;`
 // where `array` is `Array<number|string>`. The checker types the stored
 // `order` as `string`; the emitter must store the string arm, not the other.

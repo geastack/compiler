@@ -1,4 +1,6 @@
+import type { ConversionNodeId } from '../../conversion/algebra.js'
 import type { NativeDebugSource } from './native-debug-source.js'
+import type { ProgramConversionRecipe } from '../../ir/program-conversions.js'
 import type { NativeSelectionHelper } from './native-selection-helpers.js'
 import { restrictsEveryCarrier, type IntegrityRestrictions } from '../../ir/integrity-restrictions.js'
 import type { BorrowedArmProjection } from './borrowed-arm-projections.js'
@@ -12,7 +14,9 @@ import type { DeclaredIntegerWidth } from '../../ir/integers.js'
 import { nodeOfOperation, operationOfResult, withoutSpecialization } from '../../identity/ids.js'
 import type { BindingPlacement } from '../../projection/bindings.js'
 import type { ClassLayout } from '../../projection/classes.js'
-import { recordLayoutPolicyOf } from '../../projection/fields.js'
+import { recordLayoutOfShapeId, recordLayoutPolicyOf } from '../../projection/fields.js'
+import { classIndexProtocolsOf } from '../../projection/index-protocols.js'
+import { methodEnvironmentText } from './class-properties/emit-class-properties.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
 import type {
   CallOperation,
@@ -27,7 +31,7 @@ import type {
   IrResult
 } from '../../ir/model.js'
 import type { NumericIntrinsic } from '../../ir/numeric-intrinsics.js'
-import type { DenseAccess, DenseArray, DenseGroup } from '../../ir/dense-loops.js'
+import type { DenseAccess, DenseArray, DenseGroup, DenseRegion } from '../../ir/dense-loops.js'
 import type { TypeQueryComparison } from '../../ir/type-query-results.js'
 import type { ForwardedBinding } from '../../ir/deferral.js'
 import { noInstantiationFacts, type InstantiationFacts } from '../../ir/instantiation.js'
@@ -36,8 +40,12 @@ import type { HostCallSpelling, HostSpellings } from './host/host-members.js'
 import { hostCallName, hostMemberOf, statedHostIntrinsicLength } from './host/host-members.js'
 import type { CallableAbi, RecordField, Representation } from '../../representation/model.js'
 import { representationKey } from '../../representation/model.js'
+import { wellKnownSymbolMemberOfKey } from '../../representation/well-known-symbols.js'
+export { wellKnownSymbolMemberOfKey } from '../../representation/well-known-symbols.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import {
+  cppAbiType,
+  cppCallableFrameArguments,
   cppBodyName,
   cppConstructName,
   cppNarrowedFloatType,
@@ -107,24 +115,6 @@ export const createCppEmitBlockedError = (kind: CapabilityKey, reason: string): 
 
 export const isCppEmitBlockedError = (error: unknown): error is CppEmitBlockedError =>
   error instanceof Error && (error as { readonly cppEmitBlocked?: unknown }).cppEmitBlocked === true
-
-/**
- * The standard `Symbol.<name>` identity encoded by a `sym(declaration)`
- * property key, read straight off the key TEXT.
- *
- * A record field's key arrives as text and never as an operand
- * (`derive.ts`'s `recordFieldKeyOf` mints it), so a reader that only has a
- * layout cannot go through `wellKnownSymbolMemberOf` below. Both spellings of
- * the question resolve against the one census the frontend published
- * (`host-protocols.ts`'s `wellKnownSymbolDeclarationsOf`), which is what keeps
- * "which declaration is `Symbol.match`" a single answer.
- */
-export const wellKnownSymbolMemberOfKey = (wellKnownSymbols: ReadonlyMap<DeclarationId, string>, key: string): string | null => {
-  for (const [declaration, member] of wellKnownSymbols) {
-    if (key === `sym(${declaration})`) return member
-  }
-  return null
-}
 
 /** The standard `Symbol.<name>` identity encoded by a static `sym(declaration)` property key. */
 export const wellKnownSymbolMemberOf = (ctx: EmitContext, operand: IrOperand): string | null => {
@@ -455,14 +445,15 @@ export interface UnionMethodArm {
   /**
    * The body this arm calls, or `null` for a primitive arm's own
    * `%Number%/%String%/%Boolean%.prototype.valueOf`, which answers the
-   * primitive itself -- `Int32 | number`'s `valueOf()` (bson's serializer).
+   * primitive itself -- `Int32 | number`'s `valueOf()` (a numeric wrapper
+   * class beside a plain number).
    */
   readonly callable: FunctionId | null
   /**
    * A class arm whose chain declares no such member and whose native base's
    * intrinsic prototype does: the call goes to that native member on the arm
-   * viewed as its base. mongodb's `DEFAULT_OPTIONS.entries()` over the union
-   * of `CaseInsensitiveMap<T> extends Map<string, T>`'s layout copies.
+   * viewed as its base: an `entries()` call over the union of a
+   * `class M<T> extends Map<string, T>`'s layout copies.
    */
   readonly nativeBase?: { readonly carrier: Representation; readonly member: string }
   /**
@@ -752,7 +743,7 @@ export type FillLoop = AppendFillLoop | PcmFillLoop
  * sites outside that prologue), but moving THEM into this same
  * caller-computes-first shape would also require narrowing the several
  * `ctx: EmitContext`-typed helper functions their policy hooks call
- * (`isPlainMemberRead`, `directClassMethodBody`, `denseCellName`, ...) to a
+ * (`isPlainMemberRead`, `denseCellName`, ...) to a
  * type that does not presuppose a fully-built context -- real, but separable,
  * follow-up work recorded outside this file rather than
  * smuggled into this change.
@@ -796,6 +787,8 @@ export interface EmitBodyFacts {
   readonly bindingReadDeclarations: ReadonlyMap<IrValueId, DeclarationId>
   /** See `EmitContext.conversionSources`. */
   readonly conversionSources: ReadonlyMap<IrValueId, IrOperand>
+  /** See `EmitContext.conversionUses`. */
+  readonly conversionUses: ReadonlyMap<IrValueId, ConversionNodeId>
   /** See `EmitContext.callCallees`. */
   /**
    * Settled before anything renders, from `ir/facts.ts`'s `bodyValueOriginsOf`
@@ -845,6 +838,7 @@ export interface EmitBodyFacts {
   readonly hostNamespaceReads: ReadonlyMap<IrValueId, string>
   /** See `EmitContext.hostNamespaceValues`. */
   readonly hostNamespaceValues: ReadonlyMap<IrValueId, string>
+  readonly hostNamespaceDefinitelyPresent: ReadonlySet<IrValueId>
   /** See `EmitContext.hostFunctionReads`. */
   readonly hostFunctionReads: ReadonlyMap<IrValueId, HostCallSpelling>
   /**
@@ -928,6 +922,7 @@ export interface EmitContext {
   readonly returnsUnderFinallyGuard: boolean
   /** The conventions of emitted bodies, shared with their signature renderer. */
   readonly abiOfCallable: (callable: FunctionId) => CallableAbi | null
+  readonly methodEnvironment: (callable: FunctionId, what: string) => string
   /**
    * The `name`/`length`/source text each function object must be able to
    * answer, keyed by the body -- empty when the program never reads any of
@@ -946,11 +941,15 @@ export interface EmitContext {
    * (`emit-narrowing.ts`'s `alignedValueText`) asks it first.
    */
   readonly conversions: ConversionCensus
+  readonly conversionIsCertified?: (id: string) => boolean
+  readonly programConversionRecipes?: readonly ProgramConversionRecipe[]
   readonly nativeSelectionHelpers?: ReadonlyMap<string, NativeSelectionHelper>
   /** Where each binding cell lives, projected once for the whole program. */
   readonly placements: ReadonlyMap<DeclarationId, BindingPlacement>
   /** What each class is made of, so a key on a class receiver resolves to storage or to a method. */
   readonly classes: ReadonlyMap<DeclarationId, ClassLayout>
+  /** The same physical-family index-hook capability used when declaring generated structs. */
+  readonly classIndexProtocols: ReadonlyMap<DeclarationId, boolean>
   /** Every capturing function's environment, so a binding owned by another frame can resolve through this owner's own slot instead of refusing outright. */
   readonly captures: CaptureIndex
   /**
@@ -1174,32 +1173,6 @@ export interface EmitContext {
    */
   readonly directCalleeAbis: ReadonlyMap<IrValueId, CallableAbi>
   /**
-   * The RECEIVER a direct callee needs, for a method value whose own carrier
-   * declares none.
-   *
-   * A class's method body takes the instance as its leading formal, and
-   * `boundMethodValueRepresentation` (`class-properties/emit-class-properties.
-   * ts`) puts that back into the carrier of a materialized method value. The
-   * CALL, though, reads the plan's carrier -- and a member reached through a
-   * slot the program declared with an INTERFACE type carries the interface's
-   * own method signature, which states no receiver. The call then renders as a
-   * property read plus a receiver-less invocation (the semantic graph is
-   * right: an interface member IS storage), and the direct bind named a body
-   * one formal wider than the arguments it was given.
-   *
-   * hono's `this.router.add(method, path, ...)` is that shape once
-   * `InterfaceImplementorPolicy` resolves `Router` to `PatternRouter`: the
-   * slot holds the class, the member read finds a real method, and the call
-   * still declares no receiver. Recorded here so the direct call can pass the
-   * one the read already had, rather than binding it into an environment --
-   * which would heap-allocate per call on a request path. The map also retains
-   * the receiver for an immediate class-method call whose materialized
-   * callable already publishes a receiver-bearing convention but is not
-   * eligible for body-by-name binding. It is keyed by the property read's SSA
-   * result, so a detached method read cannot acquire a receiver from it.
-   */
-  readonly directCallReceivers: ReadonlyMap<IrValueId, IrOperand>
-  /**
    * The DISPATCHED counterpart of `directCallees`: a method the program
    * overrides, by the C++ member its family dispatches through.
    *
@@ -1233,7 +1206,7 @@ export interface EmitContext {
    * member exists, and which nothing but `typeof` consumes.
    *
    * `typeof (res as Promise<Response>).then === 'function'` is the shape, and
-   * it is the whole of `@hono/node-server`'s `isPromise`. The read has no
+   * it is the whole of a typical `isPromise` helper. The read has no
    * value to produce -- one arm's member is a `Promise.prototype` method,
    * which is not a function object this backend can materialize, and the other
    * arm has no such member at all -- but the QUESTION the program asks has an
@@ -1272,6 +1245,8 @@ export interface EmitContext {
       readonly doneText: string
     }
   >
+  /** C++ name of the next method captured once by GetIterator; no semantic facts are stored here. */
+  readonly protocolNextMethods: Map<IrValueId, string>
   /**
    * The one `runtime::iterator::step` result shared by a dynamic iterator's
    * value and done reads.  Calling `next()` separately for each would advance
@@ -1383,7 +1358,7 @@ export interface EmitContext {
    * question is about, is one step behind it. This map is that step. Without
    * it every converted style member fell through to the once-only
    * `styleProperty` and a program that used to animate rendered one frame
-   * and never moved again (button-tetris on the AMOLED board, 2026-09-06).
+   * and never moved again (a small game on a device board, 2026-09-06).
    *
    * Settled before anything renders, from `ir/facts.ts`'s `bodyValueOriginsOf`
    * -- the same move `valueCellReads` made, and for the same reason. It used
@@ -1396,6 +1371,8 @@ export interface EmitContext {
    * write.
    */
   readonly conversionSources: ReadonlyMap<IrValueId, IrOperand>
+  /** The certified recipe of each `convert` in `conversionSources`, from the same `ir/facts.ts` census. */
+  readonly conversionUses: ReadonlyMap<IrValueId, ConversionNodeId>
   /**
    * Every record allocation's members to the values they were initialized FROM.
    *
@@ -1486,6 +1463,7 @@ export interface EmitContext {
    * and must refuse, and this has one and must not.
    */
   readonly hostNamespaceValues: ReadonlyMap<IrValueId, string>
+  readonly hostNamespaceDefinitelyPresent: ReadonlySet<IrValueId>
   /**
    * String/Array.prototype method reads reached but not yet rendered --
    * `hostMemberReads`'s own mechanism, applied to a different receiver family
@@ -1669,7 +1647,7 @@ export interface EmitContext {
    *
    * Growing a `std::vector` from empty by ten million `push_back`s reallocates
    * about two dozen times and copies, in total, roughly twice the final
-   * buffer -- for `array_read`'s ten million elements that is 160 MB of
+   * buffer -- for an array-read loop's ten million elements that is 160 MB of
    * memcpy the program never asked for, and it is the whole of the gap
    * against a hand-written baseline that opens with `reserve`. The count is a
    * HINT and nothing depends on it: the loop may push fewer times, more times,
@@ -1774,6 +1752,12 @@ export interface EmitContext {
   readonly denseArrays: readonly DenseArray[]
   readonly denseAccesses: ReadonlyMap<IrNonTerminatorOperation, DenseAccess>
   readonly denseGroups: ReadonlyMap<number, DenseGroup>
+  /**
+   * The admitted regions whose loop `emitBody` outlines behind `__restrict`
+   * pointers, by group: their flags also test that the restricted arrays are
+   * distinct objects. Decided once the scope plan exists, before rendering.
+   */
+  readonly denseOutlined: ReadonlyMap<number, DenseRegion>
   /** Reads of a wrapped window's `length` that the preheader already took, by the window's ordinal. */
   readonly denseLengths: ReadonlyMap<IrValueId, number>
   /** Subscripts a wrapped window may take in the integers -- see `denseRemainderCompanion`. */
@@ -1929,7 +1913,7 @@ export const effectiveAbiOf = (abi: CallableAbi | null, admission: CaptureAdmiss
  * `EmitBodyFacts`'s own doc explains why these thirty-three could not join it:
  * `emitBody`'s census (`irBodyCensusOf`) needs a real, already-built `ctx` to
  * run at all, because several of its hooks call claims that read OTHER
- * settled fields off `ctx` (`isPlainMemberRead`, `directClassMethodBody`,
+ * settled fields off `ctx` (`isPlainMemberRead`,
  * `spellConstants`). So `ctx` has to exist before these thirty-three can be
  * filled, which rules out computing them up front the way `EmitBodyFacts`
  * does -- but every one of them is still settled strictly before
@@ -1986,7 +1970,6 @@ export interface EmitBodyPrepassFacts {
   readonly callArgumentOnly: Set<IrValueId>
   readonly prototypeMethodReads: Map<IrValueId, PrototypeMethodRead>
   readonly lazyCalleeReads: Set<IrValueId>
-  readonly directCallReceivers: Map<IrValueId, IrOperand>
   readonly virtualCallees: Map<IrValueId, VirtualCallee>
   readonly unionMethodReads: Map<IrValueId, UnionMethodRead>
   readonly unionMemberTypeofReads: Map<IrValueId, UnionMemberTypeofRead>
@@ -2003,6 +1986,8 @@ export interface EmitBodyPrepassFacts {
   readonly denseArrays: DenseArray[]
   readonly denseAccesses: Map<IrNonTerminatorOperation, DenseAccess>
   readonly denseGroups: Map<number, DenseGroup>
+  readonly denseRegions: DenseRegion[]
+  readonly denseOutlined: Map<number, DenseRegion>
   readonly denseLengths: Map<IrValueId, number>
   readonly deferrable: Set<IrValueId>
 }
@@ -2092,10 +2077,13 @@ export const createEmitContext = (
   nativeIntegrityRestricted: IntegrityRestrictions = restrictsEveryCarrier,
   fixedFieldStateConstant = false,
   definitionCells: ReadonlySet<DeclarationId> = new Set(),
-  keyOrderUnobserved: ReadonlySet<string> = new Set()
+  keyOrderUnobserved: ReadonlySet<string> = new Set(),
+  conversionIsCertified?: (id: string) => boolean,
+  programConversionRecipes?: readonly ProgramConversionRecipe[],
+  physicalIndexProtocols?: ReadonlyMap<DeclarationId, boolean>
 ): { readonly ctx: EmitContext; readonly prepass: EmitBodyPrepassFacts } => {
   const admission = captures.of(owner)
-  const layouts = recordLayoutPolicyOf(deriver, classes, wellKnownSymbols)
+  const layouts = recordLayoutPolicyOf(deriver, classes, wellKnownSymbols, abiOfCallable)
   // The thirty-three `EmitBodyPrepassFacts` collections: minted once, here, and
   // handed to `ctx` (read-only) and to the caller's `prepass` (mutable) as
   // the SAME instances -- see that type's own doc for why a fact this late
@@ -2126,7 +2114,6 @@ export const createEmitContext = (
   const callArgumentOnly = new Set<IrValueId>()
   const prototypeMethodReads = new Map<IrValueId, PrototypeMethodRead>()
   const lazyCalleeReads = new Set<IrValueId>()
-  const directCallReceivers = new Map<IrValueId, IrOperand>()
   const virtualCallees = new Map<IrValueId, VirtualCallee>()
   const unionMethodReads = new Map<IrValueId, UnionMethodRead>()
   const unionMemberTypeofReads = new Map<IrValueId, UnionMemberTypeofRead>()
@@ -2144,21 +2131,27 @@ export const createEmitContext = (
   const denseArrays: DenseArray[] = []
   const denseAccesses = new Map<IrNonTerminatorOperation, DenseAccess>()
   const denseGroups = new Map<number, DenseGroup>()
+  const denseRegions: DenseRegion[] = []
+  const denseOutlined = new Map<number, DenseRegion>()
   const denseLengths = new Map<IrValueId, number>()
   const deferrable = new Set<IrValueId>()
   const ctx: EmitContext = {
     abi: effectiveAbiOf(abi, admission),
     abiOfCallable,
+    methodEnvironment: (callable, what) => methodEnvironmentText(ctx, callable, what),
     functionFacts,
     owner,
     placements,
     classes,
+    classIndexProtocols: physicalIndexProtocols ?? classIndexProtocolsOf(classes, (shapeId) => recordLayoutOfShapeId(deriver, shapeId)),
     captures,
     deriver,
     layouts,
     keyOrderUnobserved,
     ...(nativeSelections === undefined ? {} : { nativeSelectionHelpers: nativeSelections }),
     conversions: conversions ?? createConversionNodes({ registry: createCppConversionRegistry(layouts), nodes: new Map() }),
+    ...(conversionIsCertified ? { conversionIsCertified } : {}),
+    ...(programConversionRecipes ? { programConversionRecipes } : {}),
     valueNames: new Map(),
     ownedValues: new Set(),
     deliveredReturnValues: new Set(),
@@ -2180,13 +2173,13 @@ export const createEmitContext = (
     directCallableValues: bodyFacts.directCallableValues,
     integerWidenings: bodyFacts.integerWidenings,
     lazySplits: bodyFacts.lazySplits,
-    directCallReceivers,
     virtualCallees,
     virtualCalleesUsed: new Set(),
     unionMethodReads,
     unionMethodReadsUsed: new Set(),
     unionMemberTypeofReads,
     protocolNextResults: new Map(),
+    protocolNextMethods: new Map(),
     dynamicIteratorSteps: new Map(),
     dynamicIteratorDoneStates: new Map(),
     stringMetadataNames: new Map(),
@@ -2216,6 +2209,7 @@ export const createEmitContext = (
     callCallees: bodyFacts.callCallees,
     calleeOnlyValues: bodyFacts.calleeOnlyValues,
     conversionSources: bodyFacts.conversionSources,
+    conversionUses: bodyFacts.conversionUses,
     recordFieldSources: bodyFacts.recordFieldSources,
     reactiveOrigins,
     reactiveBindingOrigins,
@@ -2226,6 +2220,7 @@ export const createEmitContext = (
     hostFunctionReads: bodyFacts.hostFunctionReads,
     hostNamespaceReads: bodyFacts.hostNamespaceReads,
     hostNamespaceValues: bodyFacts.hostNamespaceValues,
+    hostNamespaceDefinitelyPresent: bodyFacts.hostNamespaceDefinitelyPresent,
     hoistedResults,
     sharedStringLayouts,
     prototypeMethodReads,
@@ -2275,6 +2270,7 @@ export const createEmitContext = (
     denseLengths,
     denseIndices: new Map(),
     denseGroups,
+    denseOutlined,
     computeOrigins: bodyFacts.computeOrigins,
     freshReceiverStores: bodyFacts.freshReceiverStores,
     outOfOrderFreshStores: bodyFacts.outOfOrderFreshStores,
@@ -2321,7 +2317,6 @@ export const createEmitContext = (
       callArgumentOnly,
       prototypeMethodReads,
       lazyCalleeReads,
-      directCallReceivers,
       virtualCallees,
       unionMethodReads,
       unionMemberTypeofReads,
@@ -2338,6 +2333,8 @@ export const createEmitContext = (
       denseArrays,
       denseAccesses,
       denseGroups,
+      denseRegions,
+      denseOutlined,
       denseLengths,
       deferrable
     }
@@ -2391,7 +2388,7 @@ export const isFloatStorageValue = (ctx: EmitContext, value: IrValueId): boolean
  * formal a parameter reads. `storageTypeOf` answers only the first, which is
  * right for a value's OWN declaration -- a read of an integer cell is spelled
  * as the cell's name and declares nothing -- and wrong for a consumer choosing
- * an overload by the text's type: `examples/apps/weather` indexed its arrays
+ * an overload by the text's type: a program that indexed its arrays
  * with `long long` loop counters through `elementAt(double)`, converting the
  * index to a double and back on every read, 47 times.
  */
@@ -2594,7 +2591,7 @@ export const operandText = (ctx: EmitContext, operand: IrOperand): string => {
     }
     const row = hostMemberOf(ctx.hosts.members, host.protocol, host.member)
     if (row) {
-      const thunk = hostMemberValueText(operand.representation, row, recordLayoutPolicyOf(ctx.deriver, ctx.classes))
+      const thunk = hostMemberValueText(operand.representation, row, ctx.layouts)
       if (thunk !== null) return thunk
     }
     throw createCppEmitBlockedError(
@@ -2606,6 +2603,17 @@ export const operandText = (ctx: EmitContext, operand: IrOperand): string => {
   }
   const hostClass = ctx.hostClassReads.get(operand.value)
   if (hostClass !== undefined) {
+    const storage = ctx.placements.get(hostClass.declaration)?.storage
+    if (hostClass.kind === 'singleton' && storage?.kind === 'host-singleton' && storage.nativeIdentity) {
+      const identity = storage.nativeIdentity
+      if (
+        operand.representation.kind === 'native-handle' &&
+        operand.representation.native === null &&
+        operand.representation.protocol === identity.protocol &&
+        operand.representation.version === identity.version
+      )
+        return `${cppTypeOf(operand.representation)}(${identity.identity})`
+    }
     const called = hostClassValueText(operand.representation, hostClass.linkageName)
     if (called !== null) return called
     throw createCppEmitBlockedError(
@@ -2668,6 +2676,9 @@ export const cppDensePointerName = (ordinal: number): string => `gea_dense_${ord
 
 /** The row a dense window indexes, when the array is itself an element of another: `grid[i]`, taken once at the preheader. */
 export const cppDenseRowName = (ordinal: number): string => `gea_dense_row_${ordinal}`
+
+/** The cells of the holder a folded row window walks, taken once where its rows were checked. */
+export const cppDenseRowsName = (ordinal: number): string => `gea_dense_rows_${ordinal}`
 
 /** One loop's dense-window condition. Loop-invariant by construction, which is what lets the backend version the loop on it. */
 export const cppDenseFlagName = (group: number): string => `gea_dense_ok_${group}`
@@ -2741,19 +2752,24 @@ export const cppStaticPrefixCallableText = (
   )
 }
 
-export const cppThunkEntryText = (ctx: Pick<EmitContext, 'functionFacts'>, functionId: FunctionId): string => {
+export const cppThunkEntryText = (ctx: Pick<EmitContext, 'functionFacts' | 'abiOfCallable'>, functionId: FunctionId): string => {
   const thunk = `&${cppThunkName(functionId)}`
+  const abi = ctx.abiOfCallable(functionId)
+  const frame = (entry: string): string =>
+    abi !== null && (abi.restFrom !== null || abi.receiver !== null)
+      ? `gea::CallableObject<${cppAbiType(abi)}>::entryWithArgumentFrame<${thunk}, ${cppCallableFrameArguments(abi)}>(${entry})`
+      : entry
   const facts = ctx.functionFacts.get(functionId)
-  if (facts === undefined) return thunk
+  if (facts === undefined) return frame(thunk)
   // The source text is the function's whole declaration, and a function is
-  // minted at every site that makes a value of it -- mongodb's methods at up
-  // to 40 each. The text is spelled once, in a unit function that returns it
+  // minted at every site that makes a value of it -- some methods at up to
+  // 40 each. The text is spelled once, in a unit function that returns it
   // (`unitFunctionName`); outside a unit rendering it stays inline.
   const literal = cppStringViewLiteral(facts.source)
   const source = unitFunctionName(`${cppThunkName(functionId)}_source`, (name) => `std::string_view ${name}()`, `return ${literal};`)
-  return (
+  return frame(
     `gea::CallableObject<${facts.abiType}>::entryWithFacts<${thunk}>(` +
-    `${cppStringViewLiteral(facts.name)}, ${facts.length}, ${source === null ? literal : `${source}()`})`
+      `${cppStringViewLiteral(facts.name)}, ${facts.length}, ${source === null ? literal : `${source}()`})`
   )
 }
 
@@ -2839,7 +2855,13 @@ export const storedEnvironmentText = (body: string, member: string): string =>
  * `a!.b` and `(a?.b)!.c` throw on absence instead of dereferencing a default
  * payload. Name the payload once even when a recipe uses it twice.
  */
-export const unwrapPresentValue = (ctx: EmitContext, lines: string[], operand: IrOperand): IrOperand => {
+/**
+ * `use` says what the absent value would have been asked for: a member read
+ * off it (`Cannot read properties of undefined`) or a call of it -- an absent
+ * callee is a TypeError naming it not callable (13.3.6.2 EvaluateCall step 4,
+ * `value.toJSON(meta)` on an arm with no `toJSON`).
+ */
+export const unwrapPresentValue = (ctx: EmitContext, lines: string[], operand: IrOperand, use: 'read' | 'call' = 'read'): IrOperand => {
   if (operand.representation.kind !== 'optional') return operand
   const value = `${operand.value}:present` as IrValueId
   // The narrowed view's own deferral is already stated by `hostMemberReadsOf`,
@@ -2856,7 +2878,11 @@ export const unwrapPresentValue = (ctx: EmitContext, lines: string[], operand: I
     ctx.nextValueOrdinal += 1
     ctx.valueNames.set(value, name)
     ctx.declarations.push({ name, type: cppTypeOf(operand.representation.payload) })
-    lines.push(`if (!(${operandText(ctx, operand)}).has_value()) gea::host::throwGetPropertyOfNullish<void>();`)
+    const absent =
+      use === 'call'
+        ? `gea::host::throwNullishInvocation<void>("${operand.representation.absence}", "function")`
+        : 'gea::host::throwGetPropertyOfNullish<void>()'
+    lines.push(`if (!(${operandText(ctx, operand)}).has_value()) ${absent};`)
     lines.push(`${name} = *${operandText(ctx, operand)};`)
   }
   return { value, representation: operand.representation.payload }
@@ -3135,6 +3161,9 @@ const renderMutableEmitContextFields: ReadonlySet<string> = new Set([
   // reads the same local instead of calling `next()` again -- which is a
   // caching decision about the text, not about the body.
   'protocolNextResults',
+  // The local that GetIterator names for its once-only Get(next). IteratorNext
+  // reads that name; method identity and frame remain the certified IR's facts.
+  'protocolNextMethods',
   // A wrapped dense window's subscript companion, minted and declared beside
   // the read that needed it (`denseRemainderCompanion`). WHICH accesses a
   // window admits is `admitDenseWindows`' prepass answer; this is only what

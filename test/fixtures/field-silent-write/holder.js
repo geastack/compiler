@@ -1,4 +1,4 @@
-// three's `WebGLRenderer.clippingPlanes` / `UniformsGroup.uniforms` shape: an
+// a 3D renderer's `Renderer.clippingPlanes` / `UniformsGroup.uniforms` shape: an
 // assignment-only field's own JSDoc `@type` tag names a CONCRETE element
 // type, the field's one write is an empty array literal the evolving-array
 // checker calls `never[]` (correctly silent as evidence -- nothing about the

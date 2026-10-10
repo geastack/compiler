@@ -1,7 +1,9 @@
 import type { Representation } from '../../representation/model.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
+import type { CertifiedIteratorObjectViewPlan } from '../../conversion/certified-iterator-object-view.js'
 import { iteratorObjectViewPlan, type IteratorObjectViewPlan, type IteratorResultArm } from '../../conversion/iterator-object-view.js'
-import { alignedValueText, chainConverts, type ConversionSite } from './emit-narrowing.js'
+import { chainConverts, namedConversionText, type ConversionSite } from './emit-narrowing.js'
+import { structuralConversionKey } from '../../conversion/structural-plan.js'
 import { viewPlanFor } from './emit-record-view.js'
 import { memberAccessOperator } from './emit-carrier-members.js'
 import {
@@ -29,9 +31,23 @@ export const iteratorObjectViewPlanFor = (
 
 const cursorName = 'gea_view_cursor'
 
+const leafText = (
+  ctx: ConversionSite,
+  plan: CertifiedIteratorObjectViewPlan,
+  source: Representation,
+  target: Representation,
+  text: string
+): string | null => {
+  const key = structuralConversionKey(source, target)
+  const node = plan.leaves.get(key)
+  if (node === undefined) throw new Error(`iterator object view has no certified leaf for ${key}`)
+  return namedConversionText(ctx, 'emit-iterator-object-view.ts:certified-leaf', node, text)
+}
+
 /** One `IteratorResult` arm built fresh, its `done` and `value` written from the step. */
 const resultArmText = (
   ctx: ConversionSite,
+  plan: CertifiedIteratorObjectViewPlan,
   result: Representation,
   arm: IteratorResultArm,
   done: boolean,
@@ -41,14 +57,8 @@ const resultArmText = (
   if (record.kind !== 'record' && record.kind !== 'native-record-ref') return null
   if (record.ownership === 'borrowed') return null
   const accessor = memberAccessOperator(record.ownership)
-  const doneText = alignedValueText(
-    ctx,
-    'emit-iterator-object-view.ts:done',
-    { kind: 'scalar', domain: 'boolean' },
-    arm.record.done.value,
-    done ? 'true' : 'false'
-  )
-  const valueText = alignedValueText(ctx, 'emit-iterator-object-view.ts:value', value.source, arm.record.value.value, value.text)
+  const doneText = leafText(ctx, plan, { kind: 'scalar', domain: 'boolean' }, arm.record.done.value, done ? 'true' : 'false')
+  const valueText = leafText(ctx, plan, value.source, arm.record.value.value, value.text)
   if (doneText === null || valueText === null) return null
   const store = (key: string, required: boolean, text: string): string =>
     `gea_result${accessor}${cppRecordFieldName(key)} = ${text}; ` +
@@ -71,12 +81,17 @@ export const iteratorObjectViewText = (
   target: Representation,
   text: string
 ): string | null => {
-  if (target.kind === 'optional') {
-    const present = iteratorObjectViewText(ctx, source, target.payload, text)
-    return present === null ? null : `${cppTypeOf(target)}(${present})`
-  }
-  const plan = iteratorObjectViewPlanFor(ctx.layouts, source, target)
-  if (plan === null) return null
+  const node = ctx.conversions.nodeById(structuralConversionKey(source, target))
+  const materializer = node?.capability.kind === 'atom' || node?.capability.kind === 'static' ? node.capability.materializer : null
+  return materializer?.iteratorObjectView === undefined ? null : certifiedIteratorObjectViewText(ctx, materializer.iteratorObjectView, text)
+}
+
+export const certifiedIteratorObjectViewText = (
+  ctx: ConversionSite,
+  certified: CertifiedIteratorObjectViewPlan,
+  text: string
+): string | null => {
+  const plan = certified.view
   const cursorType = cppTypeOf(plan.source)
   const holderType = `gea::Ref<${cursorType}>`
   const structName = cppRecordStructName(plan.target.shapeId)
@@ -99,7 +114,7 @@ export const iteratorObjectViewText = (
       // through the environment block, which the collector traces
       // (`HeapEnvironmentBlock`'s `geaTraceRefs`).
       const held = abi.receiver !== null ? null : `*gea::unpackEnvironment<${recordType}>(gea_view_env, gea_view_slot)`
-      const self = alignedValueText(ctx, 'emit-iterator-object-view.ts:self', plan.target, abi.result, held ?? 'gea_view_this')
+      const self = leafText(ctx, certified, plan.target, abi.result, held ?? 'gea_view_this')
       if (self === null) return null
       const ignored = abi.parameters.map((_, ordinal) => `(void)gea_view_arg_${ordinal}; `).join('')
       callable =
@@ -116,12 +131,13 @@ export const iteratorObjectViewText = (
       const generator = plan.source.kind === 'async-generator'
       const returned = resultArmText(
         ctx,
+        certified,
         planned.settled,
         planned.returnArm,
         true,
         generator && !valueless ? { source: plan.source.completion, text: 'gea_step.completion' } : completion
       )
-      const yielded = resultArmText(ctx, planned.settled, planned.yieldArm, false, {
+      const yielded = resultArmText(ctx, certified, planned.settled, planned.yieldArm, false, {
         source: plan.source.element,
         text: generator ? 'gea_step.value' : 'gea_next'
       })
@@ -155,8 +171,8 @@ export const iteratorObjectViewText = (
     stores.push(`gea_view->${cppRecordFieldName(field.key)} = ${callable};`)
     if (!field.required) stores.push(`gea_view->${cppRecordFieldPresenceName(field.key)} = true;`)
   }
-  return (
+  const built =
     `([&]() -> ${cppTypeOf(plan.target)} { ${holderType} gea_view_holder = gea::makeRef<${cursorType}>(${text}); ` +
     `auto gea_view = gea::makeRef<${structName}>(); ${stores.join(' ')} return gea_view; }())`
-  )
+  return certified.target.kind === 'optional' ? `${cppTypeOf(certified.target)}(${built})` : built
 }

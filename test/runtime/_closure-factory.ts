@@ -1,5 +1,6 @@
 // Helper for `closure-factory-export-never-read.ts`: a factory whose call only
-// returns a closure over its argument, like hono's `defineWebSocketHelper`.
+// returns a closure over its argument, like an HTTP framework's WebSocket-helper
+// factory.
 export class Session {
   #init: { readonly name: string }
   constructor(init: { readonly name: string }) {

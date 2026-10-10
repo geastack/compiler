@@ -4,12 +4,12 @@ import { dirname, join, relative, resolve, sep } from 'path'
 
 /**
  * A member read through a BASE-typed reference, where only SUBCLASSES of
- * that base declare the member -- three.js's whole duck-typing idiom.
- * `Material.js` never declares `isMeshStandardMaterial`; `MeshStandardMaterial.js`
- * sets it in its own constructor. `Light.js` never declares `shadow`;
- * `DirectionalLight.js`/`SpotLight.js`/`PointLight.js` each assign one of
- * their own. To `checkJs`, `material.isMeshStandardMaterial` and
- * `light.shadow` are therefore unknown members of a JS class and resolve to
+ * that base declare the member -- the duck-typing idiom of JavaScript class
+ * libraries. `Shape.js` never declares `isRoundShape`; `RoundShape.js`
+ * sets it in its own constructor. `Node.js` never declares `outline`;
+ * `Box.js`/`Circle.js`/`Line.js` each assign one of
+ * their own. To `checkJs`, `shape.isRoundShape` and
+ * `node.outline` are therefore unknown members of a JS class and resolve to
  * `any` -- every one of them a `dynamic` (`gea_cpp_value`) carrier downstream,
  * though the value the source reads is never actually dynamic at all.
  *
@@ -32,10 +32,10 @@ import { dirname, join, relative, resolve, sep } from 'path'
  * `primitiveCarrier`) and every hit already arrives typed `any` -- there is
  * no representation-layer lever for this (`.scratch/fleet/BRIEF.md`'s closed
  * lever list). The fix has to make the CHECKER itself answer
- * `material.isMeshStandardMaterial` with something other than `any`, before
+ * `shape.isRoundShape` with something other than `any`, before
  * any of the four per-kind censuses (`parameter-bindings.ts` etc.) or their
  * shared `derived-expression-type.ts#memberTypeOf` ever ask. So this rewrites
- * `Material.js`'s own text, ahead of parsing, to state the fact above as an
+ * `Shape.js`'s own text, ahead of parsing, to state the fact above as an
  * ordinary JSDoc-annotated field -- `checker.getPropertyOfType` then just
  * finds it, unmodified, the same way it finds any other declared field.
  *
@@ -50,28 +50,26 @@ import { dirname, join, relative, resolve, sep } from 'path'
  * ## Why the type text is read from the SOURCE, not the checker
  *
  * The first version of this module spelled each declarer's contribution as
- * `InstanceType<typeof MeshStandardMaterial>['isMeshStandardMaterial']`,
+ * `InstanceType<typeof RoundShape>['isRoundShape']`,
  * asking the checker to answer for a subclass what it already answers fine
  * when that subclass is the receiver directly. That is UNSOUNDLY circular:
- * computing `MeshStandardMaterial`'s instance type first requires resolving
- * its base (`Material`)'s FULL type, which -- once `Material` carries this
+ * computing `RoundShape`'s instance type first requires resolving
+ * its base (`Shape`)'s FULL type, which -- once `Shape` carries this
  * very overlay field -- includes the field whose type is being asked for.
  * TypeScript resolves that cycle to `any`, which is not a refusal a `dynamic`
  * carrier can see: it is indistinguishable from the ORIGINAL unresolved
  * member, so every overlay field this module added came back `any` anyway,
  * while ALSO adding a new declared-but-unread `any` field to `Base` itself.
- * Measured on the three.js app: boxed carriers ROSE 17429 -> 22882 rather than
- * falling. `InstanceType<typeof Y>[...]` is therefore never used here.
+ * Measured: boxed carriers ROSE by about a third rather than falling. `InstanceType<typeof Y>[...]` is therefore never used here.
  *
  * Instead, each declaring subclass's own assignment is read for its type as
  * TEXT, exactly the way `declaration-overlay-transform.ts` takes a `.d.ts`
  * field's type as text rather than as a `ts.Type` (see that file's own "Why
  * no second `ts.Program`" for the identical reasoning, one boundary over):
  * a JSDoc `@type` tag on the assignment when the subclass wrote one --
- * three.js almost always does (`DirectionalLight.js`: `@type
- * {DirectionalLightShadow}` directly above `this.shadow = new
- * DirectionalLightShadow();`) -- or, failing that, the literal shape of the
- * assigned expression (`true`/`false`, `null`, a number/string literal, or
+ * JSDoc-typed libraries almost always do (`Box.js`: `@type
+ * {BoxOutline}` directly above `this.outline = new BoxOutline();`) -- or,
+ * failing that, the literal shape of the assigned expression (`true`/`false`, `null`, a number/string literal, or
  * `new SomeClass(...)`). Every identifier the captured text names is checked
  * against this package's own class index (or a small ambient-keyword list)
  * before it is used; an unresolvable one refuses that ONE candidate rather
@@ -85,8 +83,8 @@ import { dirname, join, relative, resolve, sep } from 'path'
  * already have, because a primitive value has no member of its own for a
  * wider declared type to shadow.
  *
- * A reference-typed candidate (`Light.shadow: DirectionalLightShadow |
- * PointLightShadow | ...`) is sound to STATE (see "The fact this states",
+ * A reference-typed candidate (`Node.outline: BoxOutline |
+ * CircleOutline | ...`) is sound to STATE (see "The fact this states",
  * above) but is only sound to ADD when it cannot also corrupt what its own
  * declarers read: TypeScript gives a subclass's un-annotated `this.x = ...`
  * the type its base now declares, not the narrower type that assignment's
@@ -94,14 +92,14 @@ import { dirname, join, relative, resolve, sep } from 'path'
  * this sound -- every declaring class must be drawn from ONE inheritance
  * lineage, so a caller reaching the member through any union arm still
  * resolves the SAME inherited method. Two declaring classes with no common
- * ancestor (three.js's own `Object3D.matrix: Matrix4` and
- * `Texture.matrix: Matrix3`, both root classes that happen to reuse a field
- * NAME across unrelated branches of a near-universal base) each contribute
+ * ancestor (`Item.transform: Transform3` and
+ * `Image.transform: Transform2`, both root classes that happen to reuse a
+ * field NAME across unrelated branches of a near-universal base) each contribute
  * their own same-named method with a different signature, and the union
  * this module would add corrupts the narrower classes that already had a
- * precise answer -- measured on the three.js app before this check existed: viol
- * 0->13, unres 0->3, every one of them a `.matrix.copy`/`.matrix.premultiply`
- * call reached through the widened type, not through anything this module's
+ * precise answer -- measured before this check existed: new violations and
+ * unresolved carriers, every one of them a `.transform.copy`/
+ * `.transform.multiply` call reached through the widened type, not through anything this module's
  * own fields touch directly. `modulesReachableFrom` is the second, unrelated
  * guard: an `@import` this module adds for a reference-typed candidate's
  * value type must not close a cycle back to the file it is added to (see
@@ -124,9 +122,8 @@ import { dirname, join, relative, resolve, sep } from 'path'
  *   bare `extends Identifier` (a mixin factory) refuses the whole base whose
  *   name it mentions; `Object.assign( X.prototype, ... )` / `X.prototype.name
  *   = ...` refuses `X` specifically as a declarer, without refusing an
- *   unrelated hierarchy elsewhere in the same package (three.js's own
- *   `KeyframeTrack.js` uses this idiom; it has nothing to do with `Material`
- *   or `Light`).
+ *   unrelated hierarchy elsewhere in the same package (one module using this
+ *   idiom says nothing about `Shape` or `Node`).
  * - A candidate name already bound in `Base`'s own file (an existing import,
  *   local class, or variable of that name): reusing it risks a second
  *   identity for the class the overlay means, so that declarer is dropped
@@ -148,8 +145,8 @@ import { dirname, join, relative, resolve, sep } from 'path'
  *   business overlaying a callable.
  */
 
-// `examples`/`test(s)` are skipped as a general convention, not a three.js
-// special case: a library package's demos and test harnesses routinely carry
+// `examples`/`test(s)` are skipped as a general convention, not a
+// per-library special case: a library package's demos and test harnesses routinely carry
 // vendored, minified, or mock code (`Object.assign(X.prototype, ...)` mixins,
 // dynamic base classes) that is never part of the package's own shipped
 // class hierarchy and is not reachable from an application's import graph
@@ -170,13 +167,13 @@ const SKIP_DIRS: ReadonlySet<string> = new Set([
  * Type texts this module will actually emit a field for -- primitive
  * literal/keyword shapes only (`true`, `false`, `boolean`, `number`,
  * `string`), never a class reference. Reference-typed members
- * (`Light.shadow: DirectionalLightShadow | PointLightShadow | ...`) resolve
+ * (`Node.outline: BoxOutline | CircleOutline | ...`) resolve
  * correctly through the checker in isolation, but importing their classes
  * into `Base`'s file reaches into subsystems this scan's own hierarchy walk
- * never intended (three.js's WebGPU Node-material graph, `AttributeNode` and
- * unrelated siblings) and traded boxed carriers for
- * `unresolved-reaches-materialization` violations elsewhere in the program --
- * a real regression, not a win (measured on the three.js app: viol 3->16, unres 2->5).
+ * never intended (an unrelated subsystem's class graph and its siblings) and
+ * traded boxed carriers for `unresolved-reaches-materialization` violations
+ * elsewhere in the program -- a real regression, not a win (measured: several
+ * times as many violations and unresolved carriers).
  * Primitive-only keeps every emitted field free of any `@import`, so this
  * module can never widen what a file resolves beyond the field itself.
  */
@@ -366,8 +363,8 @@ interface ClassInfo {
  * analogue this transform needs, since it runs before any checker does).
  * `{object}` (lowercase) resolves to a real but EMPTY structural type --
  * carrying exactly as little as `any` does about what the value holds (see
- * that same file's own comment distinguishing the two spellings). Three.js
- * spells almost every `this.parameters = {...}` assignment with exactly
+ * that same file's own comment distinguishing the two spellings). JSDoc-typed
+ * libraries often spell a `this.parameters = {...}` assignment with exactly
  * `@type {Object}` directly above it; trusting that tag verbatim would
  * overlay `Base` with a field whose declared type answers nothing, when the
  * assignment's own literal shape states the real answer just below it. Only
@@ -383,7 +380,7 @@ const isVagueObjectTag = (text: string): boolean => text === 'Object' || text ==
  * `objectLiteralShapeOf` below: `this.parameters = { width: width, height:
  * height }` is an object literal whose property VALUES are references to
  * the constructor's own parameters, not literals in their own right --
- * three.js's universal geometry-constructor idiom. The same text-not-checker
+ * a common constructor idiom. The same text-not-checker
  * reasoning as the rest of this file applies (see the file header's "Why the
  * type text is read from the SOURCE"): there is no checker yet at this stage
  * to ask what `width`'s inferred type is.
@@ -421,7 +418,7 @@ const constructorParamTypesOf = (ctor: ts.ConstructorDeclaration, file: ts.Sourc
  * a plain (non-computed, non-spread, non-method) property whose value is
  * either a recognized literal shape (`literalShapeText`) or a reference to
  * one of the enclosing constructor's own parameters (`paramTypes`, from
- * `constructorParamTypesOf`) -- three.js's `this.parameters = { width:
+ * `constructorParamTypesOf`) -- the `this.parameters = { width:
  * width, height: height }` idiom, this module's whole motivating case for
  * the object-literal extension (see the file header's "Scope" section). A
  * single property this scan cannot read poisons the WHOLE shape, exactly
@@ -619,8 +616,8 @@ const memberTypeTextsOf = (klass: ts.ClassLikeDeclaration, file: ts.SourceFile):
     state.set(name, shape ? { kind: 'object', shape } : { kind: 'poisoned' })
   }
 
-  // A JSDoc `@type` tag wins when it states something real; three.js's own
-  // `@type {Object}` above almost every `this.parameters = {...}` states
+  // A JSDoc `@type` tag wins when it states something real; a bare
+  // `@type {Object}` above a `this.parameters = {...}` states
   // nothing (`isVagueObjectTag`), so an object-literal RHS is read for its
   // own shape instead of trusting that tag verbatim.
   const resolveAssignment = (name: string, node: ts.Node, rhsExpr: ts.Expression | undefined): void => {
@@ -665,10 +662,10 @@ const memberTypeTextsOf = (klass: ts.ClassLikeDeclaration, file: ts.SourceFile):
     }
     ts.forEachChild(node, walkBody)
   }
-  // A later method reassigning the field (three.js's own `copy()`/`clone()`
-  // idiom: `this.shadow = source.shadow.clone();`) is almost always
+  // A later method reassigning the field (the common `copy()`/`clone()`
+  // idiom: `this.outline = source.outline.clone();`) is almost always
   // type-preserving but syntactically opaque to this scan -- treating it as
-  // poisoning evidence dropped `Light.shadow` (and most other real targets)
+  // poisoning evidence dropped `Node.outline` (and most other real targets)
   // entirely, because every real field this pattern applies to also has a
   // `copy()` method that reassigns it this way. So only the constructor body
   // is walked.
@@ -691,8 +688,8 @@ interface PackageIndex {
    * Class names whose OWN members this scan cannot trust: the target of an
    * `Object.assign( X.prototype, ... )` or `X.prototype.name = ...` mutation
    * found anywhere in the package. Scoped to the mutated class itself, NOT
-   * the whole package -- three.js's own `KeyframeTrack.js` uses this idiom,
-   * and that says nothing about `Material`/`Light` elsewhere in the package.
+   * the whole package -- one module using this idiom says nothing about
+   * `Shape`/`Node` elsewhere in the package.
    */
   readonly untrustedClassNames: ReadonlySet<string>
   /**
@@ -706,15 +703,15 @@ interface PackageIndex {
   /**
    * Every member name read via `<expr>.name` SOMEWHERE in the package where
    * `expr` is not `this` -- an external read, exactly the shape the duck-
-   * typing idiom this module exists for uses (`material.isMeshStandardMaterial`,
-   * `light.shadow`). Restricting to these is what keeps this module from
+   * typing idiom this module exists for uses (`shape.isRoundShape`,
+   * `node.outline`). Restricting to these is what keeps this module from
    * declaring a subclass's purely-internal bookkeeping fields on `Base`.
    */
   readonly externallyReadNames: ReadonlySet<string>
   /**
    * Every `export const NAME = <primitive literal>` in the package, as the
-   * primitive DOMAIN its initializer states -- `number` for three's
-   * `export const MultiplyOperation = 0;`. A name two files export, or that a
+   * primitive DOMAIN its initializer states -- `number` for
+   * `export const MultiplyBlend = 0;`. A name two files export, or that a
    * class also carries, is left out: which one a text means is then unknown.
    */
   readonly constantDomainsByName: ReadonlyMap<string, string>
@@ -728,8 +725,8 @@ interface PackageIndex {
  * assigns and with what stated type. It used to read those files with
  * `readFileSync`, while the program itself reads them through the transform
  * chain -- and a plugin's `transformSource` runs in that chain AFTER this
- * overlay. So a type a package's plugin states for a subclass field (three's
- * `ShaderMaterial.defaultAttributeValues`, restated from `@type {Object}` to
+ * overlay. So a type a package's plugin states for a subclass field (a
+ * `CustomShape.defaults`, restated from `@type {Object}` to
  * a `Record<string, number[]|undefined>`) reached the checker for that
  * subclass and never reached this index, which still read `{Object}` off the
  * disk and refused the declarer. The base-typed read then stayed `any`: a
@@ -910,7 +907,7 @@ const scanPackageFile = (filePath: string, text: string): PackageFileScan => {
  * The package index is rebuilt per compile (its own caches are per reader, and
  * two readers can see two texts for one path), yet a package's files do not
  * change between the compiles of one process -- the gate compiles hundreds of
- * programs against the same three.js tree. Re-parsing and re-walking all of
+ * programs against the same library tree. Re-parsing and re-walking all of
  * them each time was a visible share of a JavaScript compile. The key is the
  * path and the text the reader returned for it, so a plugin transform or an
  * edited file is a miss rather than a stale hit; the reader is still called for
@@ -1022,12 +1019,11 @@ const ancestorChainOf = (index: PackageIndex, className: string): ReadonlySet<st
  * that is an ancestor of every one of them.
  *
  * This is the general test behind restricting a reference-typed candidate:
- * `Light.shadow`'s three declarers (`DirectionalLightShadow`,
- * `PointLightShadow`, `SpotLightShadow`, this file's own motivating example)
- * all extend one `LightShadow`, so every method a caller reaches through the
+ * `Node.outline`'s declarers (`BoxOutline`, `CircleOutline`, `LineOutline`,
+ * this file's own motivating example) all extend one `Outline`, so every method a caller reaches through the
  * union is the SAME inherited method -- TypeScript resolves a union member
  * access against a shared base member exactly once, no synthesis involved.
- * Two classes with NO common ancestor (three.js's own `Matrix3`/`Matrix4`:
+ * Two classes with NO common ancestor (`Transform2`/`Transform3`:
  * both plain root classes, unrelated beyond sharing a field NAME by
  * coincidence across two distant branches of a near-universal base) each
  * contribute their OWN same-named method with a DIFFERENT signature; calling
@@ -1087,10 +1083,11 @@ const runtimeImportsOf = (fileName: string, read: DeclarerReader): readonly stri
  * ⛔ THE guard on every `@import` this module writes, same as in
  * `declaration-overlay-transform.ts` (see that file's own comment on its
  * `modulesReachableFrom`, word for word the same hazard here): an `@import`
- * is a real module edge, and three's runtime graph is carefully acyclic.
+ * is a real module edge, and a library's runtime graph is often carefully
+ * acyclic.
  * Every candidate this module overlays names the field's VALUE type, not the
- * declaring subclass (`Light.shadow`'s import is `DirectionalLightShadow`,
- * never `DirectionalLight`), so this rarely closes a cycle in practice -- but
+ * declaring subclass (`Node.outline`'s import is `BoxOutline`,
+ * never `Box`), so this rarely closes a cycle in practice -- but
  * "rarely" is not "never", and an overlay field whose value type happens to
  * import back toward `Base` (directly, or through a chain) would close one
  * silently. Fail-closed: an unreadable file contributes no edges, so a
@@ -1119,14 +1116,14 @@ const modulesReachableFrom = (start: string, read: DeclarerReader): ReadonlySet<
  * `text` with each name that is one of the package's exported primitive
  * constants spelled as that constant's primitive domain.
  *
- * A JSDoc type naming a value means the value's type, and three states its
- * enum-valued members that way: `MeshBasicMaterial.combine` is
- * `@type {(MultiplyOperation|MixOperation|AddOperation)}`, three `number`
- * constants from `constants.js` -- two of which that file never imports. Read
- * as class names they refused the only declarers `Material.combine` has, and
+ * A JSDoc type naming a value means the value's type, and libraries state
+ * enum-valued members that way: `BasicShape.blend` is
+ * `@type {(MultiplyBlend|MixBlend|AddBlend)}`, three `number`
+ * constants from `constants.js` -- some of which that file never imports. Read
+ * as class names they refused the only declarers `Shape.blend` has, and
  * every base-typed read of it stayed `any`. The domain, not the literal, is
  * spelled, for the reason `literalShapeText` gives: the field is mutable
- * storage. A quoted literal or a qualified name (`THREE.X`) is left alone.
+ * storage. A quoted literal or a qualified name (`NS.X`) is left alone.
  */
 const withConstantDomains = (index: PackageIndex, text: string): string =>
   text.replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1|[A-Za-z_$][A-Za-z0-9_$]*/g, (token, quote: string | undefined, offset: number) =>
@@ -1147,12 +1144,12 @@ const foreignNamesIn = (text: string): readonly string[] => {
 /**
  * The joined record TYPE TEXT for a top-level member whose EVERY
  * contributing descendant assigns it as a plain object literal --
- * `this.parameters = { width: width, height: height }`, three.js's geometry
+ * `this.parameters = { width: width, height: height }`, the constructor
  * idiom this extension exists for (see the file header's "Scope" section,
  * object-literal case). Not a raw union of the declaring shapes
  * (`{width...} | {radius...} | undefined`, which corrupts a named-property
  * read that expects ONE shape -- `data[key] = parameters[key]` in
- * `BufferGeometry.toJSON` has no arm to narrow against) but a single JOIN:
+ * a `Geometry.toJSON` has no arm to narrow against) but a single JOIN:
  *
  * - Every property NAME across every shape is included.
  * - When EVERY shape carries the exact same name set (license (a)), each
@@ -1174,8 +1171,8 @@ const foreignNamesIn = (text: string): readonly string[] => {
  * - A property whose joined type needs an import this scan cannot resolve,
  *   or that would close a module cycle back to `here`, is DROPPED --
  *   narrower granularity than the type-disagreement case above, because
- *   this is an infrastructure limit (three.js's own `@param
- *   {ExtrudeGeometry~Options} options` names a JSDoc namepath this scan has
+ *   this is an infrastructure limit (a `@param
+ *   {Extrusion~Options} options` names a JSDoc namepath this scan has
  *   no class for), not evidence of two unrelated facts sharing a name; the
  *   record is simply missing that one field, still sound as an
  *   over-approximation, and the member's other properties are unaffected.
@@ -1267,10 +1264,13 @@ export const createSubclassMemberOverlayTransform =
     if (!/\.m?js$/.test(input.fileName)) return null
     const root = packageRootFor(input.fileName)
     if (!root) return null
-    const index = buildPackageIndex(root, read, ancestryBetween(root, input.fileName))
-
     const here = resolve(input.fileName)
     const file = ts.createSourceFile(input.fileName, input.text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+    // Every edit below is made at a top-level named class, and the index is
+    // read nowhere else. Building it reads and transforms every source file of
+    // the package, so a file declaring no class does not pay for it.
+    if (!file.statements.some((statement) => ts.isClassDeclaration(statement) && statement.name !== undefined)) return null
+    const index = buildPackageIndex(root, read, ancestryBetween(root, input.fileName))
 
     const boundHere = new Set<string>()
     let leadingImportEnd = 0
@@ -1305,10 +1305,10 @@ export const createSubclassMemberOverlayTransform =
      * The overlay above writes a member onto an ANCESTOR, and TypeScript treats
      * a JS `this.x = ...` whose base declares `x` as an ASSIGNMENT rather than
      * a declaration -- so the ancestor's field silently replaces the declarer's
-     * own `@type` as the answer for the declarer's own reads. On three, with
-     * the near-universal `EventDispatcher` as that ancestor, `Object3D.uuid`
-     * (`@type {string}`) read back `string | undefined` and `Object3D.pivot`
-     * (`@type {?Vector3}`) read back `Vector3 | null | undefined` -- the
+     * own `@type` as the answer for the declarer's own reads. With a
+     * near-universal `Emitter` as that ancestor, `Item.id`
+     * (`@type {string}`) read back `string | undefined` and `Item.origin`
+     * (`@type {?Point}`) read back `Point | null | undefined` -- the
      * `| undefined` this module adds for soundness at a BASE-typed read,
      * charged to a class where the constructor assigns the member
      * unconditionally and it can never be absent.
@@ -1377,10 +1377,10 @@ export const createSubclassMemberOverlayTransform =
       // A member an ancestor already declares is already readable through this
       // class. Re-declaring it here from a descendant's writes does more than
       // make that evidence visible: it shadows the inherited declaration with
-      // the descendant union. Three's `Mesh` was given
-      // `matrixAutoUpdate: false | undefined` from one specialized descendant,
-      // replacing `Object3D.matrixAutoUpdate: boolean` and making every Mesh
-      // structurally incompatible with Object3D. Walk the real heritage chain
+      // the descendant union. A `Sprite` was given
+      // `autoUpdate: false | undefined` from one specialized descendant,
+      // replacing `Item.autoUpdate: boolean` and making every Sprite
+      // structurally incompatible with Item. Walk the real heritage chain
       // and keep those inherited declarations authoritative at every
       // intermediate class.
       let ancestorName = baseInfo.baseName
@@ -1443,15 +1443,15 @@ export const createSubclassMemberOverlayTransform =
         // declarer's own precise declaration with a type that does not contain
         // what that declarer actually assigns.
         //
-        // Measured on three: `Object3D.parent` is `@type {?Object3D}`, and that
-        // candidate is refused by `modulesReachableFrom` (importing `Object3D`
-        // into `EventDispatcher.js` closes a cycle) -- while an unrelated
+        // Measured: `Item.parent` is `@type {?Item}`, and that
+        // candidate is refused by `modulesReachableFrom` (importing `Item`
+        // into `Emitter.js` closes a cycle) -- while an unrelated
         // class's boolean `parent` survives. The overlay wrote `/** @type
-        // {boolean | undefined} */ parent;` onto `EventDispatcher`, and because
+        // {boolean | undefined} */ parent;` onto `Emitter`, and because
         // TypeScript treats a JS `this.x = ...` whose base declares `x` as an
-        // ASSIGNMENT rather than a declaration, `Object3D`'s own
-        // `@type {?Object3D}` stopped meaning anything: `this.parent` in
-        // `Object3D.js` typed `boolean | undefined`. Not a widening -- a wrong
+        // ASSIGNMENT rather than a declaration, `Item`'s own
+        // `@type {?Item}` stopped meaning anything: `this.parent` in
+        // `Item.js` typed `boolean | undefined`. Not a widening -- a wrong
         // answer, and one no downstream census can see is wrong.
         //
         // The header already stated the intended rule for the whole-member case
@@ -1527,19 +1527,18 @@ export const createSubclassMemberOverlayTransform =
         // (`shareCommonAncestor`), a caller reaching the member through any
         // union member still resolves the SAME inherited method -- no
         // precision lost, no signature ambiguity. When two declarers are
-        // UNRELATED classes that merely reuse a member NAME (three.js's own
-        // `Object3D.matrix: Matrix4` vs `Texture.matrix: Matrix3` -- both root
-        // classes, both direct descendants of the near-universal
-        // `EventDispatcher`, sharing a name by coincidence, not a relationship),
+        // UNRELATED classes that merely reuse a member NAME
+        // (`Item.transform: Transform3` vs `Image.transform: Transform2` --
+        // both root classes, both direct descendants of a near-universal
+        // `Emitter`, sharing a name by coincidence, not a relationship),
         // each contributes its own same-named method with a different
-        // signature; overlaying the union onto `EventDispatcher` silently
-        // widens `Object3D`'s own `this.matrix` from a precise `Matrix4` to
-        // `Matrix3 | Matrix4 | undefined`, and calling a matrix-only method
+        // signature; overlaying the union onto `Emitter` silently
+        // widens `Item`'s own `this.transform` from a precise `Transform3` to
+        // `Transform2 | Transform3 | undefined`, and calling a method
         // through that union asks `derive.ts` for a carrier no nominal class
         // reduction covers -- `unresolved-reaches-materialization` fires,
-        // correctly (measured on the three.js app before this check existed: viol
-        // 0->13, unres 0->3, all four `.matrix.copy`/`.matrix.premultiply`
-        // call sites in `Object3D.js`/`Texture.js`/`WebXRManager.js`). This is
+        // correctly (measured before this check existed: new violations at every
+        // `.transform.copy`/`.transform.multiply` call site). This is
         // a purely structural class-hierarchy test -- see
         // `shareCommonAncestor`'s own comment -- never a name or library check.
         if (

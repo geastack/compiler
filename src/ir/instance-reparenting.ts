@@ -10,10 +10,9 @@ import { resultOfIrOperation } from './queries.js'
  * class `S` is a proper base of `M`, where every class from `M` up to (not
  * including) `S` declares no instance field of its own.
  *
- * `mongodb-connection-string-url` is the measured case: the constructor of
- * `ConnectionString` re-classes its own `URLSearchParams` onto a
- * case-insensitive subclass a mixin factory builds
- * (`caseInsenstiveURLSearchParams(this.searchParams.constructor).prototype`),
+ * The measured case: a constructor re-classes its own `URLSearchParams` onto
+ * a case-insensitive subclass a mixin factory builds
+ * (`Object.setPrototypeOf(this.searchParams, mixin(this.searchParams.constructor).prototype)`),
  * and every later `this.searchParams.get(...)` must reach the override.
  *
  * A field-less subclass has exactly its base's storage, so the object the

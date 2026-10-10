@@ -1,6 +1,7 @@
 import type { CallableAbi, RecordField, RecordIndexSidecar, Representation } from '../representation/model.js'
 import { representationKey, standInRefuses } from '../representation/model.js'
 import type { RecordLayoutPolicy } from '../representation/policies.js'
+import type { FunctionId } from '../identity/ids.js'
 
 /**
  * One record viewed as another whose declared shape it satisfies -- the
@@ -11,8 +12,8 @@ import type { RecordLayoutPolicy } from '../representation/policies.js'
  * shape ids; a class instance handed to a parameter typed by an interface it
  * implements is the same pair one level up. The C++ backend spells each as a
  * struct, and a value of one is not a value of the other, so the view REBUILDS
- * the target from the source's members: field by field, a class method bound
- * into the callable member the interface record stores, an optional peeled on
+ * the target from the source's members: field by field, a class method viewed
+ * through the callable member's native convention, an optional peeled on
  * both sides, a sum entered at the one arm the source can become.
  *
  * This used to be decided where it was spelled (`targets/cpp/emit-callable.ts`'s
@@ -91,14 +92,15 @@ type TaggedUnion = Extract<Representation, { kind: 'tagged-union' }>
 
 /** Where one target field's value comes from. */
 export type RecordFieldRead =
-  /** A class method the target stores as a callable member: bound to the instance being viewed. */
+  /** A class method stored in a receiverless member frame; each call supplies its logical receiver. */
   | {
       readonly kind: 'bound-method'
       /**
        * The member's frame IS the method's own -- the same parameter
        * carriers, and a result that is either the method's own or dropped
-       * (`void`) -- so the bound closure hands the view's arguments straight
-       * to the body and converts nothing (`boundMethodFrameIsNative`).
+       * (`void`) -- so the finite adapter forwards the arguments in that
+       * native frame (`boundMethodFrameIsNative`). The function retains its
+       * evaluated identity rather than capturing the source instance.
        */
       readonly nativeFrame?: true
     }
@@ -106,9 +108,10 @@ export type RecordFieldRead =
    * A class method the target stores with its receiver still a formal: the
    * prototype's own function object, unbound. `{ write: Stream['write'] }`
    * declares the member by the METHOD's type, whose convention leads with the
-   * class receiver; a call through the view supplies that receiver from the
-   * view's origin instance (`gea::record::viewOrigin`), exactly as JavaScript
-   * calls `view.write(...)` with the object the method was read from.
+   * class receiver. Each invocation supplies its logical receiver; the native
+   * receiver protocol authenticates that handle or its view origin for the
+   * physical frame. An extracted function still receives the later call's
+   * receiver, including `undefined` on an ordinary unbound call.
    */
   | { readonly kind: 'method-value' }
   /**
@@ -117,8 +120,21 @@ export type RecordFieldRead =
    * built from.
    */
   | { readonly kind: 'class-accessor'; readonly value: Representation }
+  /** A native record getter produces its physical result at Get time. */
+  | {
+      readonly kind: 'record-accessor'
+      readonly getter: FunctionId
+      readonly setter: FunctionId | null
+      readonly value: Representation
+      readonly write: Representation | null
+    }
   /** An optional field the source does not carry: default-constructed, presence false. */
   | { readonly kind: 'absent' }
+  /** A shared alias forwards an undeclared key's native descriptor. Its
+   * actual source allocation/writer receipt selects storage at Get/Set time;
+   * allocating this view neither samples a value nor licenses a dynamic box.
+   */
+  | { readonly kind: 'native-descriptor' }
   /**
    * A field the source's layout does not declare, read from the
    * source's identity-keyed dynamic-property sidecar and converted checked
@@ -139,8 +155,8 @@ export type RecordFieldRead =
   /**
    * The source's own field, built as the target field's shape by a nested
    * view -- a field the registry has no pair answer for, but which is itself
-   * a record the target's field shape views (mongodb's `Collection.s`, a
-   * `CollectionPrivate`, read as `OperationParent`'s `s: { namespace }`).
+   * a record the target's field shape views (a class's private-state field
+   * `s: Private`, read through an interface declaring `s: { namespace }`).
    */
   | { readonly kind: 'view'; readonly held: RecordField; readonly plan: RecordViewPlan }
 
@@ -178,6 +194,13 @@ export type RecordViewPlan =
       readonly target: TaggedUnion
       readonly index: number
       readonly payload: RecordViewPlan | null
+      /**
+       * The operand is `optional(source)` and the target sum names its
+       * absence as arm `absentIndex`: an empty operand enters that arm, a
+       * present one enters arm `index` through `payload`. `source` is the
+       * optional's payload, so every walker reads the present pair as is.
+       */
+      readonly absentIndex?: number
     }
   | {
       readonly kind: 'optional'
@@ -226,7 +249,7 @@ export type RecordViewPlan =
    * no carrier does. The checker admits `{ value, done: false }` by its
    * literal, and structural normalization keeps no boolean literal, so both
    * arms of an `IteratorResult<any>` -- whose `value`s are both `any` -- take
-   * the record equally well by layout (mongodb's `onData`, `next()`).
+   * the record equally well by layout (a hand-written iterator's `next()`).
    */
   | {
       readonly kind: 'iterator-result'
@@ -265,7 +288,7 @@ export interface IteratorResultHome {
   readonly payload: RecordViewPlan | null
 }
 
-export type PairConvertible = (source: Representation, target: Representation) => boolean
+export type PairConvertible = (source: Representation, target: Representation, role?: 'sum-home' | 'field-read') => boolean
 
 /**
  * The keys the family members a conversion SITE named declare, per family
@@ -276,9 +299,9 @@ export type PairConvertible = (source: Representation, target: Representation) =
  *
  * The layout is the union of every member's fields, so a target read by its
  * layout alone may demand a field the named member never declares, from a
- * source whose same-named field is unrelated: mongodb's `MongoOptions`
- * carries `metadata: Promise<ClientMetadata>`, and `WriteConcernOptions`'
- * layout holds its family-mate's `metadata?: Document`. Where the site says
+ * source whose same-named field is unrelated: one options type carries
+ * `metadata: Promise<Metadata>`, while another member's layout holds its
+ * family-mate's `metadata?: Document`. Where the site says
  * which member it named, a field that member does not declare and the source
  * cannot fill is ABSENT -- the answer a lone layout of that member gives,
  * since it has no such field at all -- and every field the member does
@@ -295,53 +318,24 @@ export type FamilyMemberKeys = ReadonlyMap<string, ReadonlySet<string>>
  * transport contract before this view can dispense with dynamic field hooks.
  */
 /**
- * Whether a bound class method fills a view member without converting
+ * Whether a native class method fills a view member without converting
  * anything: every parameter carrier is the method's own, and the result is the
- * method's own or discarded by a `void` member. The closure then passes the
- * view's arguments straight to the body and hands back its result
- * (`emit-record-view.ts`'s `boundClassMethodText`), so nothing is boxed on
- * either side; its receiver lives in the closure's environment, which no
- * dynamic code can read. A member declaring `unknown` where the method
- * returns `this` boxes the instance, which is a real publication.
+ * method's own or discarded by a `void` member. The finite callable view
+ * passes the arguments through their native frame and retains the original
+ * Function object. Its logical receiver is supplied by each invocation. A
+ * member declaring `unknown` where the method returns `this` publishes that
+ * result through the dynamic boundary.
  */
 const boundMethodFrameIsNative = (member: CallableAbi, own: CallableAbi | null): boolean =>
   own !== null &&
   member.restFrom === own.restFrom &&
+  member.argumentsFrame === own.argumentsFrame &&
   member.parameters.length === own.parameters.length &&
   member.parameters.every((parameter, index) => {
     const held = own.parameters[index]
     return held !== undefined && representationKey(held.value) === representationKey(parameter.value)
   }) &&
   (member.result.kind === 'void' || representationKey(member.result) === representationKey(own.result))
-
-/**
- * A sidecar read (`kind: 'sidecar'`) takes a key the SOURCE does not declare
- * out of its identity-keyed expando or its own index sidecar; neither consults
- * the source's declared-field table, and whoever wrote that key was promoted at
- * the write. So the read is native exactly when unboxing it into the view's
- * field is a tag read or a class-handle identity. A record, dictionary or array
- * target is ADOPTED through its own property protocol, which keeps the view
- * indirect.
- */
-const sidecarUnboxIsNative = (value: Representation): boolean => {
-  switch (value.kind) {
-    case 'optional':
-      return sidecarUnboxIsNative(value.payload)
-    case 'tagged-union':
-      return value.arms.every((arm) => sidecarUnboxIsNative(arm.value))
-    case 'scalar':
-    case 'string':
-    case 'symbol':
-    case 'null':
-    case 'undefined':
-    case 'dynamic':
-      return true
-    case 'class-ref':
-      return value.ownership === 'shared-refcount'
-    default:
-      return false
-  }
-}
 
 /**
  * `heldPairUnused(from, to)`: the conversion registry's claim that converting a
@@ -355,11 +349,13 @@ const fieldReadIsDirect = (
   heldPairUnused: PairConvertible | undefined
 ): boolean =>
   read.kind === 'absent' ||
+  // Installing a descriptor forwarder performs no Get. Actual observations
+  // need their own source/all-writer receipt and conversion citations.
+  read.kind === 'native-descriptor' ||
   (read.kind === 'held' &&
     (representationKey(read.held.value) === representationKey(field.value) ||
       (heldPairUnused !== undefined && heldPairUnused(read.held.value, field.value)))) ||
   (read.kind === 'view' && direct(read.plan)) ||
-  (read.kind === 'sidecar' && sidecarUnboxIsNative(field.value)) ||
   (read.kind === 'bound-method' && read.nativeFrame === true)
 
 export const recordViewUsesOnlyDirectFields = (plan: RecordViewPlan, heldPairUnused?: PairConvertible): boolean => {
@@ -404,11 +400,11 @@ export const recordViewUsesOnlyDirectFields = (plan: RecordViewPlan, heldPairUnu
  * read that is not direct costs only its own per-field conversion: a sidecar
  * read adopts the dynamic value into the view's field (`field.value`), a held
  * read converts `held.value` into `field.value`. Those carriers are the
- * residual; the source record itself stays out of it. mongodb's
- * `conn.command(ns, cmd, options)` views a bson options record into the
- * shared `CommandOptions` record, and treating that view as an unknown
- * boundary published the options' `session` -- ClientSession, MongoClient and
- * every cursor behind it -- to full reflection.
+ * residual; the source record itself stays out of it. A
+ * `conn.command(ns, cmd, options)` call views an options record into a shared
+ * options record, and treating that view as an unknown boundary published the
+ * options' `session` -- and every object graph behind it -- to full
+ * reflection.
  *
  * `null` where a read's cost is not a per-field conversion this function
  * knows (an expando or index sidecar copy, a bound method, a class accessor,
@@ -444,8 +440,12 @@ export const recordViewResidualReflection = (plan: RecordViewPlan, heldPairUnuse
           if (fieldReadIsDirect(field, read, () => false, heldPairUnused)) continue
           if (read.kind === 'view') {
             if (!walk(read.plan)) return false
-          } else if (read.kind === 'sidecar') out.push(field.value)
-          else if (read.kind === 'held') out.push(read.held.value, field.value)
+          } else if (read.kind === 'sidecar') {
+            // The existing dynamic entry may be an accessor. Its declared
+            // dynamic receiver observes the original native object's fields,
+            // even when the accessor returns only a primitive.
+            out.push(inner.source, field.value)
+          } else if (read.kind === 'held') out.push(read.held.value, field.value)
           else return false
         }
         return true
@@ -480,7 +480,7 @@ export const recordViewIndirectReads = (plan: RecordViewPlan, heldPairUnused?: P
 }
 
 /**
- * Whether a bound class method can be handed an interface member's arguments
+ * Whether a native class method can receive an interface member's arguments
  * as they arrive: always without a rest parameter, and with one only where the
  * method packs the SAME rest at the same position -- `EventEmitter.emit(name,
  * ...args)` behind a `{ emit(name: string, ...args: unknown[]): boolean }`
@@ -488,6 +488,7 @@ export const recordViewIndirectReads = (plan: RecordViewPlan, heldPairUnused?: P
  * be the method's own.
  */
 export const restForwards = (member: CallableAbi, own: CallableAbi | null, convertible?: PairConvertible): boolean => {
+  if (own !== null && member.argumentsFrame !== own.argumentsFrame) return false
   if (member.restFrom === null) return own === null || own.restFrom === null || restPacks(member, own, convertible)
   if (own === null || own.restFrom !== member.restFrom || own.parameters.length !== member.parameters.length) return false
   const rest = member.parameters[member.restFrom]
@@ -496,15 +497,16 @@ export const restForwards = (member: CallableAbi, own: CallableAbi | null, conve
 }
 
 /**
- * A member of FIXED parameters bound to a method whose frame ends in a rest
- * Array: mongodb's `ObjectWithState.emit(event, state, newState)` backed by
+ * A member of FIXED parameters viewed as a method whose frame ends in a rest
+ * Array: a subclass's `emit(event, state, newState)` backed by
  * `EventEmitter.emit(event, ...args)`. The member's arguments from the rest
- * position on are exactly what the method's Array binds, so the bound
- * adapter packs them (`emit-record-view.ts`'s `boundClassMethodText`);
+ * position on are exactly what the method's Array binds, so the finite
+ * callable adapter must pack them;
  * forwarding them one by one would call a body whose frame has no such
  * formals. Each packed argument must enter the Array's element carrier.
  */
 export const restPacks = (member: CallableAbi, own: CallableAbi, convertible?: PairConvertible): boolean => {
+  if (member.argumentsFrame === 'actual' || own.argumentsFrame === 'actual') return false
   if (member.restFrom !== null || own.restFrom === null || own.parameters.length !== own.restFrom + 1) return false
   if (member.parameters.length < own.restFrom) return false
   const rest = own.parameters[own.restFrom]?.value
@@ -520,7 +522,7 @@ export const restPacks = (member: CallableAbi, own: CallableAbi, convertible?: P
   )
 }
 
-/** An optional member's callable payload, or the member itself: the carrier a present method is bound into. */
+/** An optional member's callable payload, or the member itself: the frame that holds a present method. */
 export const optionalMethodPayloadOf = (member: Representation): Representation =>
   member.kind === 'optional' && member.absence === 'undefined' && abiOf(member.payload) !== null ? member.payload : member
 
@@ -630,12 +632,12 @@ export const structuralRecordViewPlan = (
       // home. The chain still answers record -> `undefined`: its
       // `unreachable-value` step DISCARDS a value flow analysis proved a read
       // yields as `undefined`. Counted as a home, that discard tied with the
-      // record's real arm in every `Options | null = null` formal (mongodb's
-      // `new TopologyDescription(..., options)`), and the tie refused the pair;
-      // where it was the ONLY home it certified a discard, and node-compat's
+      // record's real arm in every `Options | null = null` formal (`new
+      // Description(..., options)`), and the tie refused the pair;
+      // where it was the ONLY home it certified a discard, and a library's
       // `callback(error)` into `(err?: Error | null)` passed `undefined`.
       if (arm.value.kind === 'undefined' || arm.value.kind === 'null' || arm.value.kind === 'void') continue
-      if (convertible(source, arm.value)) {
+      if (convertible(source, arm.value, 'sum-home')) {
         homes.push({ index, payload: null })
         continue
       }
@@ -661,9 +663,32 @@ export const structuralRecordViewPlan = (
     if (byDone !== null) return { kind: 'iterator-result', source, target, ...byDone }
     const exact =
       homes.length > 1 ? homes.filter((candidate) => !widensFieldIntoDynamic(layouts, source, target.arms[candidate.index]!.value)) : homes
-    const home = exact.length === 1 ? exact[0] : widestHome(layouts, target, exact)
+    const home =
+      exact.length === 1 ? exact[0] : (widestHome(layouts, target, exact) ?? heldRequiredKeysHome(layouts, source, target, exact))
     if (home !== undefined) return { kind: 'arm', source, target, index: home.index, payload: home.payload }
     return null
+  }
+  // `requireImageRecord(image)` passes `optional(A | B)` into `undefined
+  // | null | (B | B[])`: the target sum carries the optional's absence as its
+  // own arm, so the optional is not peeled into one arm -- its empty state is
+  // the absence arm and only its payload looks for a present home. The sum
+  // widener cannot answer it: `ofArm` takes a payload equal to the arm.
+  if (source.kind === 'optional' && target.kind === 'tagged-union') {
+    const absentIndex = target.arms.findIndex((arm) => arm.value.kind === source.absence)
+    if (absentIndex >= 0) {
+      const homes: { readonly index: number; readonly payload: RecordViewPlan | null }[] = []
+      for (const [index, arm] of target.arms.entries()) {
+        if (arm.value.kind === 'undefined' || arm.value.kind === 'null' || arm.value.kind === 'void') continue
+        if (convertible(source.payload, arm.value, 'sum-home')) {
+          homes.push({ index, payload: null })
+          continue
+        }
+        const payload = structuralRecordViewPlan(layouts, source.payload, arm.value, convertible, members)
+        if (payload !== null) homes.push({ index, payload })
+      }
+      const home = homes.length === 1 ? homes[0] : undefined
+      if (home !== undefined) return { kind: 'arm', source: source.payload, target, index: home.index, payload: home.payload, absentIndex }
+    }
   }
   // A bare sum carrying the target optional's absence as an ARM: the absent
   // arm is the optional's empty state and every other arm dispatches into
@@ -709,7 +734,7 @@ export const structuralRecordViewPlan = (
   if (source.kind === 'native-record-ref' && source.native !== null) return null
   if (target.kind !== 'native-record-ref' && target.kind !== 'record') return null
   if (target.kind === 'native-record-ref' && target.native !== null) return null
-  const targetIndexes = target.kind === 'record' ? [] : (layouts.indexesForShape?.(target.shapeId) ?? [])
+  const targetIndexes = target.kind === 'record' ? [] : layouts.indexesForShape(target.shapeId)
   if (targetIndexes.length > 0) {
     if (
       source.kind !== 'record-with-index' ||
@@ -725,15 +750,15 @@ export const structuralRecordViewPlan = (
     )
       return null
   } else if (source.kind === 'record-with-index' && !(openDocumentSource(source) && target.ownership === 'shared-refcount')) return null
-  // An open document entering a CLOSED shape: mongodb's `makeUpdateStatement(
-  // selector, doc, { ...currentOp, multi: true })` hands the spread of a
-  // `Document` to `UpdateOptions & { multi?: boolean }`. The target's members
+  // An open document entering a CLOSED shape: `build(key, doc, { ...options,
+  // multi: true })` hands the spread of a
+  // `Document` to `Options & { multi?: boolean }`. The target's members
   // the source does not name live in the source's string index, so each is
   // read from there, checked; every other own key re-attaches to the view's
   // identity-keyed expando rather than being dropped. An owned target is a
   // value with no identity to hold those keys, so it keeps refusing.
   const closedFromOpen = source.kind === 'record-with-index' && targetIndexes.length === 0
-  if (target.kind === 'native-record-ref' && (layouts.accessorsForShape?.(target.shapeId) ?? []).length > 0) return null
+  if (target.kind === 'native-record-ref' && (layouts.accessorsForShape(target.shapeId) ?? []).length > 0) return null
   const targetFields = target.kind === 'record' ? target.fields : layouts.forShape(target.shapeId)
   const sourceFields = source.kind === 'record' || source.kind === 'record-with-index' ? source.fields : layouts.forShape(source.shapeId)
   if (targetFields === null || sourceFields === null) return null
@@ -754,11 +779,12 @@ export const structuralRecordViewPlan = (
     const undeclaredByMember = memberKeys !== undefined && !memberKeys.has(field.key) && !field.required
     // A class method appears in the checker's structural field list, but it
     // is not physical storage in the emitted class: the projected class
-    // member is the authority, and its receiver is bound into the callable
-    // member the interface record stores. An OPTIONAL method member (`end?():
+    // member is the authority. Its physical receiver enters the native
+    // receiver protocol of the callable member the interface stores; the
+    // source instance is never captured by that function. An OPTIONAL method (`end?():
     // unknown`) is the same member, present: the class has the method, so
     // `typeof view.end === 'function'` must answer yes -- taking it as absent
-    // made node-compat's `pipe` skip every destination's `end()`.
+    // made a stream library's `pipe` skip every destination's `end()`.
     const abi = abiOf(optionalMethodPayloadOf(field.value))
     if (
       source.kind === 'class-ref' &&
@@ -781,6 +807,17 @@ export const structuralRecordViewPlan = (
       fields.push({ field, read: { kind: 'method-value' } })
       continue
     }
+    // A member the target declares `unknown`/`any` (`Buffer.prototype?.describe`) still reads the class's method: the Function object itself,
+    // crossing into the declared dynamic slot. Without this the method fell to
+    // the "no such field" arm below and the view read `undefined`.
+    if (
+      source.kind === 'class-ref' &&
+      optionalMethodPayloadOf(field.value).kind === 'dynamic' &&
+      layouts.classMethodFor?.(source.declaration, field.key) === true
+    ) {
+      fields.push({ field, read: { kind: 'method-value' } })
+      continue
+    }
     // Same fact one member kind over: `layouts.forShape` names a class's
     // PHYSICAL storage, so a member backed by a getter is absent from it
     // although every read of the class answers. Calling the getter is the
@@ -789,8 +826,36 @@ export const structuralRecordViewPlan = (
     if (source.kind === 'class-ref') {
       const accessor = layouts.classAccessorFor?.(source.declaration, field.key) ?? null
       if (accessor !== null) {
-        if (!convertible(accessor, field.value)) return null
+        if (!convertible(accessor, field.value, 'field-read')) return null
         fields.push({ field, read: { kind: 'class-accessor', value: accessor } })
+        continue
+      }
+    }
+    if (source.kind === 'record' || (source.kind === 'native-record-ref' && source.native === null)) {
+      const accessor = (source.kind === 'record' ? source.accessors : layouts.accessorsForShape(source.shapeId))?.find(
+        (entry) => entry.key === field.key
+      )
+      if (accessor) {
+        const getter = accessor.getter === null ? null : layouts.accessorAbiFor?.(accessor.getter)
+        const setter = accessor.setter === null ? null : layouts.accessorAbiFor?.(accessor.setter)
+        if (
+          !getter ||
+          getter.parameters.length !== 0 ||
+          getter.restFrom !== null ||
+          (accessor.setter !== null && (!setter || setter.parameters.length !== 1 || setter.restFrom !== null))
+        )
+          return null
+        if (!convertible(getter.result, field.value, 'field-read')) return null
+        fields.push({
+          field,
+          read: {
+            kind: 'record-accessor',
+            getter: accessor.getter!,
+            setter: accessor.setter,
+            value: getter.result,
+            write: setter?.parameters[0]?.value ?? null
+          }
+        })
         continue
       }
     }
@@ -802,21 +867,28 @@ export const structuralRecordViewPlan = (
     }
     if (!held) {
       if (field.required && !onlyAdds) return null
+      if (
+        !undeclaredByMember &&
+        carriesDynamicSidecar(source) &&
+        source.ownership === 'shared-refcount' &&
+        target.ownership === 'shared-refcount'
+      ) {
+        fields.push({ field, read: { kind: 'native-descriptor' } })
+        continue
+      }
       // A shared record keeps every key its layout lacks in its identity-keyed
       // sidecar: `Object.assign({ first: 1 }, options)` leaves `options.limit`
       // there, and a view that starts `limit` absent drops it. An optional
-      // member is read from that sidecar. So is a REQUIRED one: bson's
+      // member is read from that sidecar. So is a REQUIRED one:
       // `Object.assign({ relaxed, legacy }, options, { seenObjects })` hands
       // `seenObjects` on only through the sidecar, and a view that started it
       // value-initialized passed a null array on. A key the sidecar lacks
       // still reads back value-initialized (`onlyAdds`: the program writes it
       // next), and a carrier no dynamic value converts into keeps that start.
       if (!undeclaredByMember && carriesDynamicSidecar(source)) {
-        if (convertible(SIDECAR_VALUE, field.value)) {
-          fields.push({ field, read: { kind: 'sidecar' } })
-          continue
-        }
-        if (!field.required) return null
+        // An owned copy needs a contextual sampling/presence proof. A public
+        // typed field does not declare the source's unknown entries as any.
+        return null
       }
       fields.push({ field, read: { kind: 'absent' } })
       continue
@@ -827,18 +899,18 @@ export const structuralRecordViewPlan = (
     // answer would build the arm over a throw: `{ value: undefined, done: true
     // }` fits `IteratorYieldResult<string>`'s `value: string` that way, and
     // chosen over the return arm it aborted every `closeHandler()` in
-    // mongodb's `onData`.
+    // a hand-written async iterator.
     if (held.value.kind === 'undefined' && !holdsAbsence(field.value)) {
       if (!undeclaredByMember) return null
       fields.push({ field, read: { kind: 'absent' } })
       continue
     }
-    if (convertible(held.value, field.value)) {
+    if (convertible(held.value, field.value, 'field-read')) {
       fields.push({ field, read: { kind: 'held', held } })
       continue
     }
     // A fresh literal's `null` placeholder asserted into a record-reference
-    // field. mongodb's `List` builds its circular head as
+    // field. A linked list builds its circular head as
     // `{ next: null, prev: null, value: null } as unknown as EmptyNode` and
     // links `next`/`prev` to itself on the next two lines; strict TypeScript
     // admits that literal only through the assertion. The reference starts
@@ -873,9 +945,8 @@ export const structuralRecordViewPlan = (
       expandoSpilled.push(held)
     }
   }
-  // An indexed source names fields an indexed target may not: mongodb's
-  // speculative handshake `{ ...handshakeDoc, speculativeAuthenticate }`
-  // returned as `HandshakeDocument`. The target keeps such a key in its
+  // An indexed source names fields an indexed target may not: `{ ...doc,
+  // extra }` returned as an indexed document type. The target keeps such a key in its
   // string index, so the view writes it there rather than dropping an own
   // property. A symbol key has no string index to land in, and a value the
   // index cannot hold has no store: both refuse.
@@ -921,14 +992,40 @@ const carriesDynamicSidecar = (source: RecordViewSource): boolean =>
  * candidate's, or `undefined` when none does.
  *
  * The record keeps all its keys at runtime, and whichever arm holds it drops
- * the ones that arm does not declare. mongodb's failed-heartbeat log record
- * fits `LoggableServerHeartbeatStartedEvent` and
- * `LoggableServerHeartbeatFailedEvent` both; the started arm would drop
+ * the ones that arm does not declare. A "failed" event record may fit both a
+ * `StartedEvent` and a `FailedEvent` arm; the started arm would drop
  * `duration` and `failure`, so a later `'duration' in event` answers wrongly.
  * The arm that declares the most of them is the least lossy, and it is only
  * well defined when one arm's keys contain the rest -- two arms that each
  * keep a key the other drops are a genuine tie, still refused.
  */
+/**
+ * Among arms that tie on width, the one arm whose every REQUIRED key the
+ * source record itself holds. TypeScript normalizes a union of object
+ * literals by giving each the others' keys as optional `undefined` -- a
+ * serializer that returns `{ data, width, height, type }` or `{}`, and the
+ * `{}` arm becomes `{ data?: undefined, ... }` -- so both arms spell the same
+ * key set and width cannot tell them apart. A plain record with no index
+ * signature holds exactly its own fields; an arm demanding a key it lacks is
+ * a view of data the value never carried.
+ */
+const heldRequiredKeysHome = <Home extends { readonly index: number }>(
+  layouts: RecordLayoutPolicy,
+  source: Representation,
+  target: TaggedUnion,
+  homes: readonly Home[]
+): Home | undefined => {
+  if (homes.length < 2 || source.kind !== 'record') return undefined
+  const held = new Set(source.fields.filter((field) => field.required).map((field) => field.key))
+  const satisfied = homes.filter((home) => {
+    const arm = target.arms[home.index]?.value
+    const fields =
+      arm?.kind === 'record' ? arm.fields : arm?.kind === 'native-record-ref' && arm.native === null ? layouts.forShape(arm.shapeId) : null
+    return fields !== null && fields !== undefined && fields.every((field) => !field.required || held.has(field.key))
+  })
+  return satisfied.length === 1 ? satisfied[0] : undefined
+}
+
 const widestHome = <Home extends { readonly index: number }>(
   layouts: RecordLayoutPolicy,
   target: TaggedUnion,
@@ -951,14 +1048,14 @@ const widestHome = <Home extends { readonly index: number }>(
  * A held field viewed as the target's field shape, one record level down.
  *
  * Only a DATA record is viewed here. A field that holds a class instance
- * keeps its identity, and a snapshot of it is not the object: skytail's
- * `NativeAudioContext.param` is an `AudioParam` whose `value` setter drives
- * the audio graph, so a `ParamLike` copy would swallow every write
+ * keeps its identity, and a snapshot of it is not the object: a field holding
+ * an `AudioParam` whose `value` setter drives the audio graph, viewed as a
+ * `ParamLike` copy, would swallow every write
  * (`class-arm-without-view-into-interface-slot-refused.ts` states the
  * refusal that case keeps).
  *
  * A pair already under construction answers `null`: a record that reaches
- * itself through its fields (mongodb's `OperationParent` is one) would
+ * itself through its fields would
  * otherwise recurse without end.
  */
 const holdsClassInstance = (representation: Representation): boolean =>
@@ -974,10 +1071,10 @@ const nestedFieldViewPlan = (
   convertible: PairConvertible
 ): RecordViewPlan | null => {
   const inner = target.kind === 'optional' ? target.payload : target
-  // A sum field is a record target too when one of its arms is: mongodb's
-  // `ReadPreferenceLikeOptions.readPreference` is `ReadPreference |
-  // ReadPreferenceMode | { mode?, preference?, tags?, ... }`, and the option
-  // table stores a fresh `{ ...options.readPreference, ...value }` there.
+  // A sum field is a record target too when one of its arms is: a
+  // `preference` option typed `Preference | PreferenceMode | { mode?, tags?,
+  // ... }`, where the option table stores a fresh
+  // `{ ...options.preference, ...value }` there.
   // `structuralRecordViewPlan` enters the one arm the record can become, and
   // refuses a tie, exactly as it does for a top-level sum target.
   const reachesRecord =
@@ -1025,7 +1122,7 @@ const dispatchUnionPlan = (
       arms.push({ via: 'absent' })
       continue
     }
-    if (convertible(arm.value, payload)) {
+    if (convertible(arm.value, payload, 'sum-home')) {
       arms.push({ via: 'convert' })
       continue
     }
@@ -1034,14 +1131,12 @@ const dispatchUnionPlan = (
     viewed = true
     arms.push({ via: view })
   }
-  // Every arm converting on its own is still a dispatch: the chain answers a
-  // sum only by SELECTING the arm that already carries the target, and here
-  // none does -- `Writable | Duplex` viewed as node-compat's
-  // `PipeDestination`, each class through its own record view. Left to the
-  // chain, the pair certified as a narrowed load no printer can spell. A sum
-  // with an exact or an absent arm keeps the chain's answer unchanged.
-  const everyArmConverts = arms.length > 1 && arms.every((arm) => arm.via === 'convert')
-  return viewed || everyArmConverts ? { kind: 'dispatch', source, target, arms } : null
+  // A non-exact arm that converts is still a live value, even when another
+  // arm already has the target's carrier. Selecting that exact arm would
+  // discard the converted record. Every arm above has its own accepted
+  // transport, so dispatch through those transports rather than selecting.
+  const convertsAnArm = arms.some((arm) => arm.via === 'convert')
+  return viewed || convertsAnArm ? { kind: 'dispatch', source, target, arms } : null
 }
 
 const recastUnionPlan = (
@@ -1061,7 +1156,7 @@ const recastUnionPlan = (
     }
     let home: RecastArmPlan | null = null
     for (const [index, candidate] of target.arms.entries()) {
-      if (convertible(arm.value, candidate.value)) {
+      if (convertible(arm.value, candidate.value, 'sum-home')) {
         home = { index, via: 'convert' }
         break
       }

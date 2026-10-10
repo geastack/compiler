@@ -9,8 +9,8 @@ import type { IdentityTable } from './identities.js'
  * lets a caller omit.
  *
  * TypeScript checks an overload against its implementation leniently on
- * optionality: mongodb's `getNumber<Req>(name, required?: Req)` is implemented
- * as `getNumber(name, required: boolean)`, and every `this.getNumber('ok')`
+ * optionality: an overload `getNumber<Req>(name, required?: Req)` may be
+ * implemented as `getNumber(name, required: boolean)`, and every `this.getNumber('ok')`
  * resolves to the overload while running the implementation's body with
  * `required` bound to `undefined` (ECMA-262 10.2.11). The implementation's own
  * annotation is the one statement that is wrong about that value, so the
@@ -88,7 +88,7 @@ export interface ParameterSlotFlags {
  * like at first read.
  *
  * `fetch: (request, Env?, executionCtx?) => ... = (request, ...rest) => {...}`
- * -- hono's own `Hono.fetch` -- is the concrete case this exists for: the
+ * -- a class's `fetch` field -- is the concrete case this exists for: the
  * arrow function's declared type comes from the field it initializes, whose
  * signature has THREE named parameters and no rest at all. TypeScript's
  * contextual typing still has to give `rest` SOME type, and does so by
@@ -144,9 +144,8 @@ export interface ParameterSlotFlags {
  * or `null` for anything else.
  *
  * `/** @param {[number, number, number, number, number]} args *\/ function
- * texStorage2D( ...args ) { gl.texStorage2D( ...args ) }`: three's
- * `WebGLState.js` as the native-webgl-angle plugin rewrites its `...arguments`
- * forwarders. The parameter's cell is an array (the rest slot materializes
+ * forward( ...args ) { ctx.forward( ...args ) }`: the shape a source transform
+ * produces when it rewrites a JavaScript `...arguments` forwarder. The parameter's cell is an array (the rest slot materializes
  * one), but its declaration states its LENGTH and the type at each position,
  * and the checker refuses any call that passes a different count. Two
  * consumers read this one fact: `producers/tuple-spread.ts` expands a spread
@@ -203,8 +202,8 @@ export const restParameterArrayTypeOf = (checker: ts.TypeChecker, declaration: t
  * native array instead of a tagged union nobody wrote.
  *
  * Its REFUSAL is the part that needed an answer here. Before its own vacuous-
- * coverage veto existed (`derived-expression-type.ts`), hono's
- * `HonoBase.fetch` -- declared `(request, Env?: E['Bindings'] | {},
+ * coverage veto existed (`derived-expression-type.ts`), a class's
+ * `fetch` -- declared `(request, Env?: E['Bindings'] | {},
  * executionCtx?: ExecutionContext) => ...` and implemented `(request,
  * ...rest) => ...` -- joined the contextual tuple
  * `[(E['Bindings'] | {})?, ExecutionContext?]` down to position 0 alone,
@@ -226,8 +225,8 @@ export const restParameterArrayTypeOf = (checker: ts.TypeChecker, declaration: t
  * sibling. There the positions come from different ARMS and the read past a
  * shorter arm's end is what supplies absence; here they are the checker's own
  * OPTIONAL elements of one tuple, whose `undefined` is a value the caller may
- * actually pass (`request(path, init, undefined, ctx)` is how hono's own
- * `request` forwards a missing `Env`), so dropping it would publish an
+ * actually pass (`request(path, init, undefined, ctx)` is how a sibling
+ * `request` method forwards a missing `Env`), so dropping it would publish an
  * element narrower than the calls the signature admits.
  */
 const restTupleElementTypeOf = (checker: ts.TypeChecker, elements: readonly ts.Type[]): ts.Type | null => {
@@ -273,7 +272,7 @@ const restTupleElementTypeOf = (checker: ts.TypeChecker, elements: readonly ts.T
  * carrier.
  *
  * `widestOf` REFUSING is not a reason to hand the union back untouched. The
- * arms of a real overload-shaped rest -- hono's `defineWebSocketHelper`,
+ * arms of a real overload-shaped rest -- a helper factory's
  * `...args: [createEvents, options?] | [c, events, options?]` -- state
  * unrelated types at the same ordinal, so no one element covers the rest, and
  * before this the whole union fell through to `parameterOf`'s
@@ -322,7 +321,7 @@ export const restParameterUnionOfTuplesElementTypeOf = (checker: ts.TypeChecker,
  * flag layered over an already-derived carrier. Those two are not the same
  * answer: a flag can only say "absent or not", so a parameter whose declared
  * type already spends absence on `null` -- `f(x: T | null = null)`, and the
- * JSDoc spelling `@param {?T} [x=null]` that three.js writes throughout -- had
+ * JSDoc spelling `@param {?T} [x=null]` common in JavaScript libraries -- had
  * no state left to say WHICH absent value it holds, and was refused outright.
  * As a type it is just a three-armed union, which `representation/union.ts`
  * has always carried as a tagged union with a `null` arm, an `undefined` arm
@@ -352,8 +351,8 @@ export const parameterSlotTypeOf = (
  * physically is, regardless of how the checker typed the binding. When an
  * unannotated `...args` is contextually typed against a target with more
  * than one possible tail shape -- an overloaded call type
- * (`hono/src/context.ts`'s `NewResponse` has two signatures, `(data,
- * status?, headers?)` and `(data, init?)`), or a single signature with its
+ * (a `NewResponse` type with two signatures, `(data, status?, headers?)` and
+ * `(data, init?)`), or a single signature with its
  * own optional trailing parameters -- the checker states that as a TUPLE
  * with optional/rest/variadic elements, one arity per possible call shape
  * joined into one type. That tuple is real and correct for checking a call
@@ -412,8 +411,8 @@ export const restParameterArrayElementAt = (checker: ts.TypeChecker, identities:
  * parameter annotated as a union of tuples while the binding kept the
  * checker's raw union, which `derive.ts` lays out as a tagged-union of
  * positional records once any arm has a non-uniform or optional position.
- * `projection/abi.ts` then refused the function -- hono's
- * `defineWebSocketHelper` (`...args: [createEvents, options?] | [c, events,
+ * `projection/abi.ts` then refused the function -- a helper factory
+ * (`...args: [createEvents, options?] | [c, events,
  * options?]`) with 'parameter 0 is bound as "tagged-union(...)" but the ABI
  * declares "array-object(...)"'. `[] | [T]` never showed it only because both
  * arms happen to derive to the array carrier anyway. The ABI is the right
@@ -425,7 +424,7 @@ export const restParameterUnionOfTuplesElementAt = (checker: ts.TypeChecker, ide
   const declaration = restParameterDeclarationAt(checker, identities, node)
   // A REST parameter only, as `parameterOf` gates its own call on `flags.rest`:
   // a destructured ordinary parameter can also be typed as a union of tuples
-  // (hono's `([[, route]]) => route` over `[[H, Route], ParamIndexMap] |
+  // (`([[, route]]) => route` over `[[H, Route], ParamIndexMap] |
   // [[H, Route], Params]` elements) and holds ONE tuple value, not an array
   // of arms -- collapsing it here made the binding an array while the ABI
   // kept the union, the same disagreement in the other direction.

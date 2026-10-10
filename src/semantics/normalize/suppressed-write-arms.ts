@@ -6,27 +6,26 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * A value a SUPPRESSED type error stores into a typed member slot, kept as
  * one more native arm of that slot instead of being converted or refused.
  *
- * mongodb's `performInitialHandshake` (cmap/connect.ts) writes
+ * A function that writes
  *
- *   // @ts-expect-error: TODO(NODE-5141)
- *   const handshakeOptions: CommandOptions = { ...options, raw: false }
+ *   // @ts-expect-error
+ *   const commandOptions: CommandOptions = { ...options, raw: false }
  *
- * and the spread copies TLS's `session?: Buffer` from `ConnectionOptions` into
- * `CommandOptions.session?: ClientSession`. The checker was told to look away,
+ * where the spread copies `session?: Buffer` from `ConnectionOptions` into
+ * `CommandOptions.session?: Session`. The checker was told to look away,
  * so nothing it says about that slot covers the Buffer. What node does with it
- * is precise: `Connection.command` hands `options.session` to
- * `updateSessionFromResponse(session: ClientSession, ...)`, which ignores it
- * on a standalone server and throws a TypeError at
- * `session.supports.causalConsistency` on one answering `operationTime`. A
+ * is precise: a later call hands `options.session` to
+ * `update(session: Session, ...)`, which ignores it on one path and throws a
+ * TypeError at `session.supports.feature` on another. A
  * checked copy throwing at the spread would diverge on the first; a box would
  * be a dynamic carrier for a statically typed value.
  *
  * The slot's carrier is therefore the tagged union of what its writers store
- * -- `ClientSession | Buffer | undefined` -- and every place the value
+ * -- `Session | Buffer | undefined` -- and every place the value
  * provably flows carries the extra arm: the member slot itself, every read of
  * it, each `??`/`||`/`&&`/`?:` merge that keeps it, and the locals and
  * parameters it is handed to, with their reads. Keyed by member and by node,
- * NEVER by the union type: `ClientSession | undefined` is one checker type
+ * NEVER by the union type: `Session | undefined` is one checker type
  * for every such slot in the program, and widening all of them sent the arm
  * into merges (`operation.session ??= session`) it never reaches. A member
  * read off the union answers `undefined` on the arm that lacks it, so the

@@ -15,7 +15,7 @@ import { representationKey, type Representation } from '../representation/model.
  * identically for exactly this reason. Refusing the capability kind here
  * while accepting it two lines up (for `atom`) meant a class field read back
  * through a narrowing/widening class-family conversion -- a base field typed
- * `Object3D` resolved at one call site to a closed union of its own
+ * `Shape` resolved at one call site to a closed union of its own
  * descendants, or the reverse -- could never be `exact` even when the cited
  * materializer proved the identical non-allocating, field-protocol-free,
  * payload-preserving transfer an `atom` pair proves for the same shape of

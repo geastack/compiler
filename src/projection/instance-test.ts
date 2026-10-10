@@ -32,6 +32,11 @@ export type ClassInstanceTest =
   | { readonly kind: 'throws-non-object'; readonly target: NonObjectInstanceTarget }
   | { readonly kind: 'present' }
   | { readonly kind: 'boxed-typed-array'; readonly domain: TypedArrayElementDomain }
+  /**
+   * An open `any` Document is a typed array exactly when the object it views
+   * is one (`gea::dictionary::aliasOf`); one holding its own entries is not.
+   */
+  | { readonly kind: 'viewed-typed-array'; readonly domain: TypedArrayElementDomain }
   | { readonly kind: 'class-family'; readonly members: readonly DeclarationId[]; readonly boxed: boolean }
   /**
    * A shared structural view tested through the class instance it was built
@@ -234,7 +239,7 @@ export const classInstanceTestOf = (
   // instance reaches a boxed or viewed operand only through a conversion that
   // publishes it where it happens. Withholding the claim for those operands
   // published the tested family, through the right-hand constructor, to full
-  // reflection (mongodb's `value instanceof ReadConcern`).
+  // reflection (`value instanceof Concern`).
   return { test, nativeFieldProtocol: 'unused' }
 }
 
@@ -243,6 +248,7 @@ const typedArrayInstanceTestOf = (left: Representation, domain: TypedArrayElemen
   let native = true
   const plan = (value: Representation): ClassInstanceTest => {
     if (value.kind === 'typed-array') return value.element === domain ? { kind: 'present' } : { kind: 'constant', value: false }
+    if (isOpenDocument(value)) return { kind: 'viewed-typed-array', domain }
     if (value.kind === 'dynamic') {
       native = false
       return { kind: 'boxed-typed-array', domain }

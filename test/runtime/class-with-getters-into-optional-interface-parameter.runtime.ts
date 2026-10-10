@@ -1,7 +1,7 @@
 // Classes passed where a parameter is typed by an interface they satisfy
-// only structurally -- and through GETTERS: the MongoDB driver's
+// only structurally -- and through GETTERS: a database client's
 // `resolveOptions(parent: OperationParent | undefined, options)` is called
-// with `this` from `Collection`, `Db` and `MongoClient`, each of which
+// with `this` from `Collection`, `Db` and `Client`, each of which
 // answers `readConcern`, `timeoutMS`, ... with an accessor over its own
 // private state, and `s` with a field.
 interface Namespace {

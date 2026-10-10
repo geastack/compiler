@@ -1,6 +1,6 @@
 // `for await` over a value typed by the AsyncIterable interface: its
 // iterator's `next()` answers a promise of `{ value, done }` (ECMA-262
-// 27.1.1.3), awaited before each step. The mongodb driver walks a
+// 27.1.1.3), awaited before each step. A database client walks a
 // listCollections cursor this way in its client-side encryption state machine.
 
 const countdown = (from: number): AsyncIterable<number> => ({

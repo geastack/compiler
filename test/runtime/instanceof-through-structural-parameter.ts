@@ -8,12 +8,12 @@
 // pinned instead. The history below is kept because it names the two
 // refusals that must NOT come back.
 //
-// `@hono/node-server` response.ts declares `constructor(body, init?:
-// ResponseInit)` and tests `init instanceof GlobalResponse` (four refusals at
-// response.ts:50/57/57/58); headers.ts declares `newHeadersFromIncoming(incoming:
+// An HTTP server adapter's response shim declares `constructor(body, init?:
+// ResponseInit)` and tests `init instanceof GlobalResponse` (four refusals in
+// that constructor); its header helper declares `newHeadersFromIncoming(incoming:
 // Pick<IncomingMessage | Http2ServerRequest, 'rawHeaders'> & { headers?: ... })`
-// and tests `incoming instanceof Http2ServerRequest` (headers.ts:91, plus the
-// manifest rows at :87 and :120). Both parameters are STRUCTURAL and both
+// and tests `incoming instanceof Http2ServerRequest` (plus two
+// neighbouring manifest rows). Both parameters are STRUCTURAL and both
 // receive class instances, so the class identity has to survive the boundary
 // for the test to have an answer.
 //
@@ -28,7 +28,7 @@
 //
 // There is no half-fix. Proving the test false and pruning the branch would be
 // a silent miscompile; installing the downcast would have to invent an identity
-// the copy never had; and response.ts:57 reads `init.#init`, a PRIVATE field no
+// the copy never had; and the shim's constructor reads `init.#init`, a PRIVATE field no
 // structural copy can carry. The repair is a whole-program policy that derives
 // a structural type the program `instanceof`-tests into a carrier that keeps
 // the class -- a `tagged-union` of the record with the class-refs the tests

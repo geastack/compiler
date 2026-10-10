@@ -1,5 +1,5 @@
 // A wide options bag (three extending interfaces, ~135 optional fields of mixed
-// types, like mongodb's) spread behind 1-4 leading keys. The result's key order
+// types, like a database client's) spread behind 1-4 leading keys. The result's key order
 // is observable (Object.keys, JSON.stringify) and must match node: prefix keys
 // first in literal order (a prefix key the source also holds keeps its prefix
 // place with the source's value), then the source's own keys in its order; an

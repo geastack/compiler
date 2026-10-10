@@ -93,8 +93,8 @@ export const requireRepresentation = (plan: SealedRepresentationPlan, result: Se
  * operations are *contiguous*. Blocks are how a branch exists, and a block that
  * has been left cannot be appended to -- so an order that runs an arm, then
  * something outside the guard, then that same arm again describes control flow
- * no basic-block graph can express. That is not hypothetical: the module body
- * of `sky-hop-jsx`'s `Controls.tsx` computes one `?:` while a dozen unrelated
+ * no basic-block graph can express. That is not hypothetical: a module body
+ * that computes one `?:` while a dozen unrelated
  * import bindings sit at the same evaluation ordinal, and ordering by ordinal
  * alone interleaved them -- the arm was re-entered after it had jumped to its
  * join, the lowering opened an unreachable block to hold the rest of the arm,
@@ -129,8 +129,8 @@ export interface RegionPartMembers {
    * part's members. Settled once for the whole program: the opener and its
    * prologue are functions of the global group alone (see above), so working
    * them out again for every owner made each owner pay for every catch clause
-   * in the program -- owners x region members, the mongodb driver's second
-   * largest lowering cost.
+   * in the program -- owners x region members, the second largest
+   * lowering cost on a large program.
    */
   readonly catchPrologues: readonly CatchPartPrologue[]
   /** For each operation, the indices into `catchPrologues` of the parts it is a member of, ascending. */
@@ -197,7 +197,7 @@ export const collectRegionParts = (graph: SemanticGraph): RegionPartMembers => {
     // region's join block: the handler read an uninitialized cell, and the
     // write itself was emitted outside the `catch` scope where the C++ catch
     // parameter it copies from does not exist. Both halves of that were
-    // clang-visible in `test/fixtures/try-catch-bound.ts` ("use of undeclared
+    // clang-visible in a handler that binds its caught value ("use of undeclared
     // identifier", plus the bare `return;` the stray block left behind in a
     // `std::string` function) -- and a `typeof` of the caught value certified
     // clean while reading the cell before anything wrote it.
@@ -663,7 +663,7 @@ const orderChainsByEnclosure = (
    * with the loop frame, so `i++`'s chain `[loop, test-truthy, latch]` sorted to
    * `[loop, latch, test-truthy]` and the lowering closed the body arm to enter
    * the latch and then re-entered the arm it had just ended. That is every
-   * head-tested `for` and `while` with an update -- `array_read`'s two loops
+   * head-tested `for` and `while` with an update -- a plain array-read loop
    * included -- so the whole ordering pass refused ordinary programs.
    *
    * The containment is not a guess: a head-tested loop reaches its latch only

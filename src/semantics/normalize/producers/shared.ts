@@ -206,19 +206,20 @@ const isFabricatedAnySignature = (checker: ts.TypeChecker, node: ts.Expression, 
  * Where the callee VALUE is declared -- which is what says whose frame binds
  * the type parameters its type mentions.
  *
- * Not the same question as where the signature's SYNTAX lives, and hono is
- * where the two come apart: `type GetPath<E> = (request: Request, options?:
- * { env?: E['Bindings'] }) => string` puts the signature node at hono-base's
- * MODULE scope, while the value it types -- `readonly getPath: GetPath<E>` --
+ * Not the same question as where the signature's SYNTAX lives, and a
+ * module-level function type alias is where the two come apart: `type Lookup<E> =
+ * (request: Request, options?: { env?: E['Config'] }) => string` puts the
+ * signature node at the declaring module's MODULE scope, while the value it types -- `readonly lookup: Lookup<E>` --
  * is a member of the class whose `E` it names. Scoping the callee's view by
  * the signature node truncated the specialization path to nothing, so `E` was
- * answered by its own DEFAULT (`Env`) instead of by the copy's binding
- * (`BlankEnv`), and the call published a record the class's own field layout
+ * answered by its own DEFAULT (`DefaultEnv`) instead of by the copy's binding
+ * (`EmptyEnv`), and the call published a record the class's own field layout
  * -- built in that copy -- does not have.
  *
  * A plain identifier callee answers the same declaration either way, so the
- * case `signature.declaration` was introduced for (`parseBody(this, options)`
- * resolved under the caller's frame, minting a second `HonoRequest`) keeps its
+ * case `signature.declaration` was introduced for (`parse(this, options)`
+ * resolved under the caller's frame, minting a second copy of the request
+ * class) keeps its
  * answer: an imported binding's value declaration is at module scope, and the
  * prefix truncates there exactly as before.
  */
@@ -262,8 +263,8 @@ const physicalMemberOverloadTypeAt = (context: ProducerContext, node: ts.Express
   const physical = physicalOverloadTypeAt(context.checker, declaration)
   if (physical !== null) return physical
   // The same member, with NO initializer to name the one physical function.
-  // hono's `get!: HandlerInterface<...>` is filled in the constructor by
-  // `allMethods.forEach((method) => { this[method] = (args1, ...args) => ... })`,
+  // A field `get!: RouteHandler<...>` filled in the constructor by
+  // `methods.forEach((method) => { this[method] = (args1, ...args) => ... })`,
   // so the declaration carries only the overload set -- and that overload set
   // is exactly what the class layout spelled for the cell (one `gea::Value`,
   // since no single convention derives from an overloaded type).
@@ -343,9 +344,9 @@ const isGenericCallableValue = (checker: ts.TypeChecker, callee: ts.Expression):
   // signature has no type parameters left to see.
   //
   // And the value's PHYSICAL type wherever the declaration names one, not the
-  // annotation the checker answers with. hono's `Context.text: TextRespond =
-  // (text, arg, headers) => {...}` and `Context.json: JSONRespond = <T, U>
-  // (object, arg, headers) => {...}` (`context.ts`) are the shape: the
+  // annotation the checker answers with. Class fields like `text: TextWriter =
+  // (text, arg, headers) => {...}` and `json: JsonWriter = <T, U>
+  // (object, arg, headers) => {...}` are the shape: the
   // annotation is an interface of GENERIC call signatures, so the test below
   // saw a non-ambient `CallSignatureDeclaration` and said "generic callable
   // value" -- which publishes the ANNOTATION as the callee carrier. Those
@@ -396,9 +397,9 @@ const isGenericCallableValue = (checker: ts.TypeChecker, callee: ts.Expression):
  * census's own answer for the member, and for a library method that is the
  * whole declared overload set. Publishing the set leaves the carrier to pick
  * a frame by joining the overloads, and the joined `Array.prototype.splice`
- * frame is the two-parameter one: `levels.splice( l, 0, level )` in three's
- * `LOD.addLevel` (`levels` read through a descriptor-defined field the
- * checker cannot see) then reached the emitter with its item UNPACKED, since
+ * frame is the two-parameter one: `levels.splice( l, 0, level )` inside a
+ * method whose `levels` is read through a descriptor-defined field the
+ * checker cannot see then reached the emitter with its item UNPACKED, since
  * the joined convention declared no rest slot to pack it into. Overload
  * resolution by arity is the checker's own first step (ECMA-262 has no
  * overloads; TypeScript's `chooseOverload` discards candidates the argument
@@ -482,7 +483,7 @@ const instanceCopyOfMethodReceiver = (
   // An OVERLOADED method is read in its receiver's copy whatever the class's
   // layouts: its one physical frame is the implementation's, which the
   // checker never instantiates, so the caller's view leaves every class
-  // parameter in it open -- mongodb's `Collection<DataKey>.find(filter)`
+  // parameter in it open -- an overloaded `Collection<Key>.find(filter)`
   // published `Filter<TSchema>` over conditionals nothing could fill.
   const overloaded = implementationSignatureOf(context.checker, declaration) !== null
   if (!owner || !ts.isClassLike(owner) || !(overloaded || context.specializations.copiesMayDifferInLayout(owner))) return null
@@ -490,9 +491,9 @@ const instanceCopyOfMethodReceiver = (
     return null
   if (ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Static) return null
   // A method is only ever read off a receiver that is present, so an optional
-  // chain's `undefined` arm names no copy: mongodb's GridFS stream calls
-  // `this.s.cursor?.close()` with `cursor?: FindCursor<GridFSChunk>`, and the
-  // union ran `close` in `AbstractCursor`'s root instead of that cursor's copy.
+  // chain's `undefined` arm names no copy: a stream calling
+  // `this.s.cursor?.close()` with `cursor?: QueryCursor<Chunk>` had the
+  // union run `close` in `BaseCursor`'s root instead of that cursor's copy.
   const receiver = context.checker.getNonNullableType(context.types.rawTypeAt(callee.expression))
   const copy = context.specializations.specializationOfInstance(receiver, context.types.substituteTypeParameter)
   if (!copy) return baseCopyOfNonGenericReceiver(context, receiver, owner)
@@ -505,9 +506,8 @@ const instanceCopyOfMethodReceiver = (
  *
  * A non-generic class has no copy of its own, so `specializationOfInstance`
  * answers nothing for it -- and the call then read the base's frame at its
- * root, which owns no layout once the base's copies split. mongodb's
- * `ListSearchIndexesCursor extends AggregationCursor<{ name: string }>` is
- * the shape: `cursor.match(...)` on it is `AggregationCursor`'s method in the
+ * root, which owns no layout once the base's copies split. A non-generic
+ * `ListCursor extends PipelineCursor<{ name: string }>` is the shape: `cursor.match(...)` on it is `PipelineCursor`'s method in the
  * copy that `extends` clause names. Walked the way `classCopyHeritageOf`
  * walks a chain: a non-generic base continues at its own root, and the first
  * clause naming a copy hands over to `inheritedCopyOf`.
@@ -696,13 +696,13 @@ export const resolvedCalleeSignatureType = (context: ProducerContext, node: ts.E
   // `node`'s own declared type is a property of ITS declaration, not of the
   // caller's specialization frame -- the same leak `buildSelectedSignature`
   // (`producers/invocations.ts`) fixes for a signature's parameters/return,
-  // here for the callee VALUE itself. Resolving `parseBody`'s type through
-  // `context.types` unfiltered mints `HonoRequest` (nested in `parseBody`'s
-  // own declared parameter type, `utils/body.ts`) under the CALLER's frame
-  // whenever the call site happens to sit inside a same-named class's own
-  // copy -- `HonoRequest.parseBody`'s body calling `parseBody(this,
-  // options)` is exactly that, and it is what left `request.ts:217`'s
-  // binding-read-conversion stuck even after the guard below (comment
+  // here for the callee VALUE itself. Resolving a module function
+  // `parse`'s type through `context.types` unfiltered mints the generic
+  // `Request` class (nested in `parse`'s own declared parameter type)
+  // under the CALLER's frame whenever the call site happens to sit inside a
+  // same-named class's own copy -- `Request.parse`'s body calling
+  // `parse(this, options)` is exactly that, and it is what left the call
+  // site's binding-read-conversion stuck even after the guard below (comment
   // above `physicalOverloadTypeAt`) fixed the overloaded-signature gap: the
   // guard changed WHICH shape `plain` resolves as, not WHICH VIEW resolves
   // it. `signature.declaration` is absent only for a fabricated signature
@@ -719,7 +719,7 @@ export const resolvedCalleeSignatureType = (context: ProducerContext, node: ts.E
   // carrier published `function-value-dispatch((unresolved(type parameter T))
   // -> number)` in every copy, identically, which is the naked hole
   // monomorphization exists to remove reappearing at the callee. Scoping it
-  // wholly to the caller instead is what the `HonoRequest` comment above
+  // wholly to the caller instead is what the request-class comment above
   // rules out. Neither path answers both halves, so each half is taken from
   // the frame that owns it.
   const declaration = calleeValueDeclarationAt(context, node) ?? signature.declaration
@@ -832,27 +832,27 @@ export const resolvedCalleeSignatureType = (context: ProducerContext, node: ts.E
   // `Function`'s carrier as the callee of that `new`.
   if (plainShape.kind === 'declared' && context.hostProtocols.has(plainShape.declaration) && !calleeIsAsserted(node)) return plain
   // A callee bound to ONE physical function but DECLARED with an overloaded
-  // type -- `structural-declarations.ts`'s `physicalOverloadTypeAt`, hono's
-  // `export const parseBody: ParseBody = async (request, options = ...) =>
-  // {...}` being the exact case that showed it apart. `typeAt` (above, as
+  // type -- `structural-declarations.ts`'s `physicalOverloadTypeAt`, e.g.
+  // `export const parse: Parse = async (request, options = ...) =>
+  // {...}` with `Parse` an overloaded call-signature interface. `typeAt` (above, as
   // `plain`) already collapses a REFERENCE to such a binding onto the one
   // physical signature the value actually has at runtime -- the same
-  // collapse the binding's own CELL uses, so every plain read of `parseBody`
+  // collapse the binding's own CELL uses, so every plain read of `parse`
   // agrees. `getResolvedSignature` does not know about that collapse: TS
   // never resolves an external call to an overloaded declaration's
   // implementation signature, only to one of its declared OVERLOAD
-  // signatures (`ParseBody`'s `options?: Partial<ParseBodyOptions>` member,
+  // signatures (`Parse`'s `options?: Partial<ParseOptions>` member,
   // here) -- a real, different ABI from the physical function that actually
   // runs. Reading that resolved overload back below would build a callee
   // carrier the binding's own cell disagrees with: two authorities citing
   // the same one-function value, and the checker's is the one with no
-  // runtime referent to back it (`request.ts:217`'s stuck
-  // binding-read-conversion obligation was exactly this gap). `plain` is
+  // runtime referent to back it (a stuck binding-read-conversion
+  // obligation at the call site was exactly this gap). `plain` is
   // already the answer that matches, so prefer it whenever it exists.
   if (plainShape.kind === 'signature' && physicalOverloadTypeAt(context.checker, node) !== null) return plain
   // The same fact one level out, reached through a MEMBER instead of a
-  // binding. `Context.text: TextRespond = (text, arg, headers) => {...}`
-  // (hono's `context.ts`) annotates the property with an overload set and
+  // binding. A class field `text: TextWriter = (text, arg, headers) => {...}`
+  // annotates the property with an overload set and
   // initializes it with ONE arrow function -- so the class layout stores one
   // physical convention while `getResolvedSignature` hands back whichever
   // declared overload this call site matched. That is not a narrowing of the
@@ -875,9 +875,9 @@ export const resolvedCalleeSignatureType = (context: ProducerContext, node: ts.E
   const physicalMember = physicalMemberOverloadTypeAt(context, node)
   if (physicalMember !== null) return calleeTypes.typeOf(physicalMember)
   // ...and a member whose STATED callable type the field census narrowed to
-  // the one function the program writes into it (bson's
-  // `onDemand.parseToElements`, stated as returning `Iterable<T>` and written
-  // with a function returning `T[]`). The layout stores the writer's
+  // the one function the program writes into it (a member
+  // stated as returning `Iterable<T>` and written with a function returning
+  // `T[]`). The layout stores the writer's
   // convention and `typeAt` already reads it back; the resolved signature is
   // the statement's, which no stored value has, so believing it is the same
   // `field ... is stored as ... and this read publishes ...` split.
@@ -921,8 +921,8 @@ export const resolvedCalleeSignatureType = (context: ProducerContext, node: ts.E
   // it. That one asks whether the PLAIN type is `any` -- but the plain type is
   // `context.types.typeAt`, which consults the call-site parameter census, and
   // the census exists precisely to answer where the checker did not. So for a
-  // callee whose receiver is an unannotated JS parameter -- three.js's ES5
-  // factory modules throughout -- the census hands back the real signature
+  // callee whose receiver is an unannotated JS parameter -- ES5-style
+  // factory functions throughout -- the census hands back the real signature
   // while `getResolvedSignature` still hands back TypeScript's fabricated
   // `anySignature`, the guard above misses, and the fabricated one is interned
   // over the top of the real answer. Two authorities, and the wrong one won.
@@ -934,16 +934,17 @@ export const resolvedCalleeSignatureType = (context: ProducerContext, node: ts.E
   // parameters, `any` return -- rather than by parameter count alone, because
   // a genuinely nullary function has all of those but a declaration.
   //
-  // Measured: the three.js app 950 -> 714 mandatory missing obligations, of which the
-  // unclassified `conversion-role:invocation:call:argument` bucket 538 -> 237.
+  // On a large ES5-style JS program this cleared roughly a quarter of the
+  // mandatory missing obligations, most of them unclassified
+  // `conversion-role:invocation:call:argument` ones.
   if (isFabricatedAnySignature(context.checker, node, signature) && plainShape.kind === 'signature' && plainShape.call.length > 0) {
     return plain
   }
   // The same fabrication over a callee the program did not declare `any`.
   // TypeScript also declines to check a call whose callee is the global
   // `Function` -- ECMAScript's "some callable, arguments and result unknown"
-  // -- and answers with the identical fabricated signature. hono's `compose`
-  // is built on exactly that: `middleware: [[Function, unknown], unknown][]`,
+  // -- and answers with the identical fabricated signature. A middleware
+  // `compose` helper is commonly built on exactly that: `middleware: [[Function, unknown], unknown][]`,
   // and `handler(context, () => dispatch(i + 1))` is a two-argument call
   // whose resolved callee declares no parameters at all.
   //
@@ -1111,8 +1112,8 @@ export const staticSpreadMembersOf = (
     }
     return { members }
   }
-  // `{ ...options }` with `options: A & B` (mongodb's `resolveTimeoutOptions`
-  // spreads a `T` that its copies fill with option intersections): one object
+  // `{ ...options }` with `options: A & B` (a generic helper that
+  // spreads a `T` its copies fill with option intersections): one object
   // carries every constituent's members, so its own-property set is their
   // union. A key two constituents both state is ONE own property, present
   // unless every constituent marks it optional. Each constituent is held to the lone-source conditions.
@@ -1336,7 +1337,7 @@ export const isNativeIterableStringType = (context: ProducerContext, type: Struc
  * `Array.prototype[Symbol.iterator]`. This compiler carries a tuple as "a
  * record whose keys are its indices" (`derive.ts`'s `deriveTuple`), which has
  * no `@@iterator` FIELD, so the general dynamic protocol correctly refused
- * every such loop -- nine of them in the mongodb driver alone, each over a
+ * every such loop -- a common shape in real programs, typically over a
  * `const [...] as const` option list.
  *
  * A fixed arity is what makes the walk settled: the elements are the record's
@@ -1459,15 +1460,15 @@ export const hasNativeIterationCursor = (context: ProducerContext, type: Structu
   const arms = presentUnionArms(context, type)
   if (arms === null) return false
   if (arms.every((arm) => isPlainArrayType(context, arm))) return true
-  // Arrays and Sets together: mongodb's `isSuperset(set: Set<any> | any[], ...)`
-  // rebinds a `string[]` argument to `new Set(set)`, so the cell walked is
+  // Arrays and Sets together: a function `isSuperset(set: Set<any> | any[], ...)`
+  // that rebinds a `string[]` argument to `new Set(set)`, so the cell walked is
   // `string[] | Set<string>`. Each arm's walk is a storage walk settled
   // before the program runs, and `emit-iterator.ts`'s `emitSequenceSumIterator`
   // walks whichever is live.
   if (arms.every((arm) => isPlainArrayType(context, arm) || isNativeIterableSetType(context, arm))) return true
-  // Every present arm a FIXED-ARITY TUPLE -- hono's `Result<T> = [[T,
-  // ParamIndexMap][], ParamStash] | [[T, Params][]]`, whose `.map` callback
-  // binds `[T, ParamIndexMap] | [T, Params]`. Each arm's shape is closed and
+  // Every present arm a FIXED-ARITY TUPLE -- a router's `Result<T> = [[T,
+  // IndexMap][], Stash] | [[T, Params][]]`, whose `.map` callback
+  // binds `[T, IndexMap] | [T, Params]`. Each arm's shape is closed and
   // known at compile time, which is the whole of what "settled before the
   // program runs" asks, so the union is as settled as the lone tuple two
   // lines up: `ir/lower-destructuring.ts`'s `isTupleUnionCarrier` already
@@ -1475,7 +1476,7 @@ export const hasNativeIterationCursor = (context: ProducerContext, type: Structu
   // between. Answering "no cursor" here sent the pattern through the general
   // protocol instead, and its element steps then read position 0 of the
   // ITERATOR RECORD the protocol published -- a `record` whose layout has no
-  // field keyed "0", which is how `request.ts`'s `routePath` refused.
+  // field keyed "0", which is how such a destructuring refused.
   // A union mixing arms of different KINDS stays false: the carrier is a
   // tagged union the native path refuses by name, exactly as above.
   return arms.every((arm) => isFixedArityTupleType(context, arm))

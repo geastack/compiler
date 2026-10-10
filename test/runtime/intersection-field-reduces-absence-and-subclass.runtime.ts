@@ -1,8 +1,8 @@
 // A property two intersection members both constrain reduces the way the
 // language reduces it:
 //  - `undefined & (number | undefined)` is `undefined` (one member says the
-//    key holds nothing, as mongodb's `resolveTimeoutOptions` result does);
-//  - `Derived & Base` for a class and its ancestor is `Derived` (mongodb's
+//    key holds nothing, as a database client's `resolveTimeoutOptions` result does);
+//  - `Derived & Base` for a class and its ancestor is `Derived` (a database client's
 //    `CursorTimeoutContext & TimeoutContext`).
 // Both used to refuse the whole intersection carrier.
 class Base {

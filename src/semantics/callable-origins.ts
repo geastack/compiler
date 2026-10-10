@@ -1,7 +1,7 @@
-import type { DeclarationId, FunctionId, SemanticResultId } from '../identity/ids.js'
+import type { DeclarationId, FunctionId, SemanticResultId, StructuralTypeId } from '../identity/ids.js'
 import type { SealedRepresentationPlan } from '../representation/plan.js'
 import type { SemanticGraph } from './model/graph.js'
-import { operandOf, resultOf } from './model/operands.js'
+import { identityOperandOf, operandOf, resultOf, type SemanticOperand, type SemanticResult } from './model/operands.js'
 import type { BindingOperation, SemanticOperation } from './model/operations.js'
 
 /**
@@ -59,15 +59,12 @@ export const callableOriginsOf = (graph: SemanticGraph): ReadonlyMap<SemanticRes
     }
 
     for (const operation of graph.operations.values()) {
-      // A `[[Set]]` publishes the RECEIVER it wrote into, not the stored value
-      // (`producers/properties.ts` says so where it mints the result), so the
-      // Function object the store threads onward is the one it was handed.
-      // Writing an expando onto a callable was the second view of a boxed
-      // callable that kept a native carrier while the object it restates was
-      // `dynamic`.
-      if (operation.family === 'property' && operation.internalMethod === 'set') {
-        const receiver = operandOf(operation, 'receiver')
-        const stored = receiver?.source.kind === 'result' ? origins.get(receiver.source.result) : undefined
+      // Identity operations preserve the exact Function object. In particular,
+      // the assignment computation preserves its RHS while a property store
+      // preserves its receiver; those are different semantic results.
+      if (operation.family !== 'binding') {
+        const source = identityOperandOf(operation)?.source
+        const stored = source?.kind === 'result' ? origins.get(source.result) : undefined
         const value = resultOf(operation, 'value')
         if (stored !== undefined && value && !origins.has(value.id)) {
           origins.set(value.id, stored)
@@ -128,6 +125,10 @@ const ownPrototypeFactsOf = (graph: SemanticGraph): ReadonlyMap<FunctionId, bool
   return facts
 }
 
+/** The declaration's actual MakeConstructor fact, independent of its call ABI. */
+export const callableOwnPrototypeOf = (graph: SemanticGraph, source: FunctionId): boolean | null =>
+  ownPrototypeFactsOf(graph).get(source) ?? null
+
 /**
  * Whether the callable this operation reads through owns a `prototype`
  * object -- `null` where the graph cannot prove either answer.
@@ -151,7 +152,7 @@ export const callableOwnPrototypeAt = (graph: SemanticGraph, operation: Semantic
   if (receiver?.source.kind !== 'result') return null
   const origin = callableOriginsOf(graph).get(receiver.source.result)
   if (origin === undefined) return null
-  return ownPrototypeFactsOf(graph).get(origin) ?? null
+  return callableOwnPrototypeOf(graph, origin)
 }
 
 /** A computed key can overwrite either explicit-this builtin. */
@@ -180,7 +181,7 @@ const propertyNameOf = (operation: SemanticOperation, role: string, ordinal = 0)
 /** Semantic results proven to carry the one global Function.prototype object. */
 const functionPrototypeOriginsByGraph = new WeakMap<SemanticGraph, ReadonlySet<SemanticResultId>>()
 
-const functionPrototypeOriginsOf = (graph: SemanticGraph): ReadonlySet<SemanticResultId> => {
+export const functionPrototypeOriginsOf = (graph: SemanticGraph): ReadonlySet<SemanticResultId> => {
   const known = functionPrototypeOriginsByGraph.get(graph)
   if (known) return known
   const origins = new Set<SemanticResultId>()
@@ -220,8 +221,8 @@ const functionPrototypeOriginsOf = (graph: SemanticGraph): ReadonlySet<SemanticR
           changed = true
         }
       }
-      if (operation.family === 'invocation' && operation.intrinsicMutation !== undefined && operation.intrinsicMutation !== 'reflect-set') {
-        const target = operandOf(operation, 'argument', 0)
+      if (operation.family !== 'binding') {
+        const target = identityOperandOf(operation)
         const value = resultOf(operation, 'value')
         if (target?.source.kind === 'result' && origins.has(target.source.result) && value && !origins.has(value.id)) {
           origins.add(value.id)
@@ -246,14 +247,42 @@ const functionPrototypeOriginsOf = (graph: SemanticGraph): ReadonlySet<SemanticR
  * sealed plan). Both read this one list rather than walking the graph again,
  * so a mutation form admitted here is admitted for both.
  */
-interface CallableWriteTarget {
-  readonly result: SemanticResultId
+/** Exact semantic mutation inventory shared by builtin resolution and native own storage.
+ * @semanticCategory generic-primitive
+ */
+export interface CallableWriteTarget {
+  readonly result: SemanticResultId | null
   readonly name: string
+  /** Null is an unknown property domain; the literal key '*' remains an ordinary exact key. */
+  readonly key: string | null
+  readonly operation: SemanticOperation
+  /** Reflect.set consults this target's property protocol before writing its Receiver. */
+  readonly lookupTarget: SemanticOperand | null
+  readonly target: SemanticOperand
+  readonly value: SemanticOperand | null
+  readonly produced: SemanticResult | null
+  readonly kind:
+    | 'set'
+    | 'delete'
+    | 'reflect-delete'
+    | 'define-own-property'
+    | NonNullable<Extract<SemanticOperation, { family: 'invocation' }>['intrinsicMutation']>
+  readonly resultContract: 'receiver' | 'boolean' | 'none'
+  /** A bulk store reads the current source slot; it does not evaluate an
+   * initializer again or use the public intersection as its RHS carrier. */
+  readonly copiedSlot?: {
+    readonly ordinal: number
+    readonly source: SemanticOperand
+    readonly roots: readonly import('./native-own-assignment.js').NativeOwnAssignment['sources'][number]['roots'][number][]
+    readonly values: readonly import('./native-own-assignment.js').NativeOwnAssignmentValue[]
+    /** The slot is the described source carrier's own field of this key, not a closed value family. */
+    readonly described?: true
+  }
 }
 
 const callableWriteTargetsByGraph = new WeakMap<SemanticGraph, readonly CallableWriteTarget[]>()
 
-const callableWriteTargetsOf = (graph: SemanticGraph): readonly CallableWriteTarget[] => {
+export const callableWriteTargetsOf = (graph: SemanticGraph): readonly CallableWriteTarget[] => {
   const known = callableWriteTargetsByGraph.get(graph)
   if (known) return known
   const targets: CallableWriteTarget[] = []
@@ -262,18 +291,104 @@ const callableWriteTargetsOf = (graph: SemanticGraph): readonly CallableWriteTar
       if (operation.internalMethod !== 'set' && operation.internalMethod !== 'delete' && operation.internalMethod !== 'define-own-property')
         continue
       const receiver = operandOf(operation, 'receiver')
-      if (receiver?.source.kind !== 'result') continue
-      targets.push({ result: receiver.source.result, name: propertyNameOf(operation, 'key') })
+      if (receiver === undefined) continue
+      const key = operandOf(operation, 'key')
+      const text = key?.source.kind === 'constant' && key.source.literal === 'string' ? key.source.text : null
+      const names = text === null && operation.provenKeyTexts?.length ? operation.provenKeyTexts : [text]
+      for (const name of names)
+        targets.push({
+          result: receiver.source.kind === 'result' ? receiver.source.result : null,
+          name: name ?? propertyNameOf(operation, 'key'),
+          key: name,
+          operation,
+          lookupTarget: null,
+          target: receiver,
+          value: operandOf(operation, 'value') ?? null,
+          produced: resultOf(operation, 'value') ?? null,
+          kind: operation.internalMethod,
+          resultContract: operation.internalMethod === 'delete' ? 'boolean' : 'receiver'
+        })
       continue
     }
-    if (operation.family !== 'invocation' || operation.intrinsicMutation === undefined) continue
-    const target = operandOf(operation, 'argument', 0)
-    if (target?.source.kind !== 'result') continue
+    if (
+      operation.family !== 'invocation' ||
+      (operation.intrinsicMutation === undefined && operation.intrinsicReflection !== 'deleteProperty')
+    )
+      continue
+    const lookupTarget = operandOf(operation, 'argument', 0)
+    if (lookupTarget === undefined) continue
+    if (operation.intrinsicMutation === 'object-assign' && operation.nativeOwnAssignment !== undefined) {
+      for (const source of operation.nativeOwnAssignment.sources) {
+        const operand = operandOf(operation, 'argument', source.ordinal)
+        if (operand === undefined) continue
+        const keys = new Set([...source.roots.flatMap((root) => root.slots.map((slot) => slot.key)), ...(source.described?.keys ?? [])])
+        for (const key of keys) {
+          const values = source.roots.flatMap((root) => root.slots.filter((slot) => slot.key === key).flatMap((slot) => slot.values))
+          targets.push({
+            result: lookupTarget.source.kind === 'result' ? lookupTarget.source.result : null,
+            name: key,
+            key,
+            operation,
+            lookupTarget: null,
+            target: lookupTarget,
+            value: null,
+            produced: resultOf(operation, 'value') ?? null,
+            kind: 'object-assign',
+            resultContract: 'receiver',
+            copiedSlot: {
+              ordinal: source.ordinal,
+              source: operand,
+              roots: source.roots,
+              values,
+              ...(source.described === undefined ? {} : { described: true as const })
+            }
+          })
+        }
+        // A described source also carries whatever keys its carrier holds at
+        // run time beyond its declared members: the open, unknown-key write.
+        if (source.described !== undefined)
+          targets.push({
+            result: lookupTarget.source.kind === 'result' ? lookupTarget.source.result : null,
+            name: unknownCallableOwnProperty,
+            key: null,
+            operation,
+            lookupTarget: null,
+            target: lookupTarget,
+            value: null,
+            produced: resultOf(operation, 'value') ?? null,
+            kind: 'object-assign',
+            resultContract: 'receiver'
+          })
+      }
+      continue
+    }
+    // Reflect.set dispatches target.[[Set]](key, value, Receiver). A distinct
+    // Receiver receives the own data property; the lookup target does not.
+    const target = operation.intrinsicMutation === 'reflect-set' ? (operandOf(operation, 'argument', 3) ?? lookupTarget) : lookupTarget
     const name =
       operation.intrinsicMutation === 'object-assign' || operation.intrinsicMutation === 'object-define-properties'
         ? unknownCallableOwnProperty
         : propertyNameOf(operation, 'argument', 1)
-    targets.push({ result: target.source.result, name })
+    const key = operandOf(operation, 'argument', 1)
+    const text =
+      operation.intrinsicMutation === 'object-assign' || operation.intrinsicMutation === 'object-define-properties'
+        ? null
+        : key?.source.kind === 'constant' && key.source.literal === 'string'
+          ? key.source.text
+          : null
+    targets.push({
+      result: target.source.kind === 'result' ? target.source.result : null,
+      name,
+      key: text,
+      operation,
+      lookupTarget: operation.intrinsicMutation === 'reflect-set' ? lookupTarget : null,
+      target,
+      value: operation.intrinsicMutation === 'reflect-set' ? (operandOf(operation, 'argument', 2) ?? null) : null,
+      produced: resultOf(operation, 'value') ?? null,
+      kind: operation.intrinsicMutation ?? 'reflect-delete',
+      resultContract:
+        operation.intrinsicMutation === 'reflect-set' || operation.intrinsicReflection === 'deleteProperty' ? 'boolean' : 'receiver'
+    })
   }
   callableWriteTargetsByGraph.set(graph, targets)
   return targets
@@ -303,8 +418,8 @@ export const callableOwnPropertyWritesOf = (
   const writes = new Map<FunctionId, Set<string>>()
   const prototypeOrigins = functionPrototypeOriginsOf(graph)
   for (const target of callableWriteTargetsOf(graph)) {
-    if (prototypeOrigins.has(target.result)) continue
-    const origin = origins.get(target.result)
+    if (target.result !== null && prototypeOrigins.has(target.result)) continue
+    const origin = target.result === null ? undefined : origins.get(target.result)
     if (origin === undefined) continue
     const bucket = writes.get(origin)
     if (bucket) bucket.add(target.name)
@@ -333,6 +448,39 @@ const canCarryCallableObject = (plan: SealedRepresentationPlan, result: Semantic
   }
 }
 
+/** Direct formals have no result-plan entry. Their structural source domain still cannot be omitted. */
+export const callableWriteTargetCanCarryFunction = (
+  graph: SemanticGraph,
+  plan: SealedRepresentationPlan,
+  target: CallableWriteTarget
+): boolean => {
+  if (target.result !== null) return canCarryCallableObject(plan, target.result)
+  if (target.target.asserted) return true
+  const seen = new Set<StructuralTypeId>()
+  const possible = (id: StructuralTypeId): boolean => {
+    if (seen.has(id)) return true
+    seen.add(id)
+    const shape = graph.structuralTypes.get(id)?.shape
+    if (shape === undefined) return true
+    if (shape.kind === 'primitive') return shape.primitive === 'any' || shape.primitive === 'unknown'
+    if (
+      shape.kind === 'literal' ||
+      shape.kind === 'unique-symbol' ||
+      shape.kind === 'array' ||
+      shape.kind === 'tuple' ||
+      shape.kind === 'class-instance'
+    )
+      return false
+    if (shape.kind === 'declared') return shape.body === null || possible(shape.body)
+    if (shape.kind === 'object-anchor') return possible(shape.body)
+    if (shape.kind === 'union' || shape.kind === 'intersection') return shape.members.some(possible)
+    // Functions can satisfy structural object views; signatures, erased type
+    // parameters and unresolved inputs are not a proof of disjoint identity.
+    return true
+  }
+  return possible(target.target.type)
+}
+
 /**
  * Own-property mutations grouped by the exact Function object they target.
  *
@@ -354,14 +502,14 @@ export const callableMutationFactsOf = (
   const prototypeWrites = new Set<string>()
   const prototypeOrigins = functionPrototypeOriginsOf(graph)
   for (const target of callableWriteTargetsOf(graph)) {
-    if (prototypeOrigins.has(target.result)) {
+    if (target.result !== null && prototypeOrigins.has(target.result)) {
       prototypeWrites.add(target.name)
       continue
     }
-    if (origins.get(target.result) !== undefined) continue
-    if (!canCarryCallableObject(plan, target.result)) continue
+    if (target.result !== null && origins.get(target.result) !== undefined) continue
+    if (!callableWriteTargetCanCarryFunction(graph, plan, target)) continue
     anonymousWrites.add(target.name)
-    if (plan.selected.get(target.result)?.kind !== 'dynamic') callableCarriedWrites.add(target.name)
+    if (target.result === null || plan.selected.get(target.result)?.kind !== 'dynamic') callableCarriedWrites.add(target.name)
   }
   const facts: CallableMutationFacts = {
     ownProperties: callableOwnPropertyWritesOf(graph, origins),
@@ -376,13 +524,14 @@ export const callableMutationFactsOf = (
   // program into an ordinary property read, and nothing else names it.
   if (process.env.GEA_CALLABLE_FACTS_DEBUG) {
     const describe = (target: CallableWriteTarget): string => {
-      const producer = graph.results.get(target.result)
+      const producer = target.result === null ? undefined : graph.results.get(target.result)
       const operation = producer === undefined ? undefined : graph.operations.get(producer)
-      return `${target.name} <- ${operation?.family ?? '?'}:${producer ?? '?'} carried ${plan.selected.get(target.result)?.kind ?? '?'}`
+      return `${target.name} <- ${operation?.family ?? '?'}:${producer ?? '?'} carried ${target.result === null ? target.target.source.kind : (plan.selected.get(target.result)?.kind ?? '?')}`
     }
     const anonymous = callableWriteTargetsOf(graph).filter(
       (target) =>
-        origins.get(target.result) === undefined && !prototypeOrigins.has(target.result) && canCarryCallableObject(plan, target.result)
+        (target.result === null || (origins.get(target.result) === undefined && !prototypeOrigins.has(target.result))) &&
+        callableWriteTargetCanCarryFunction(graph, plan, target)
     )
     console.error(
       `[callable-facts] anonymous=${JSON.stringify([...anonymousWrites])} boxedOnly=${JSON.stringify([...facts.boxedOnlyProperties])} ` +
@@ -429,7 +578,7 @@ export const callableBindResolution = (
 ): ReturnType<typeof callableBuiltinResolution> | 'builtin-unless-boxed' => {
   const resolution = callableBuiltinResolution(facts, functionId, 'bind')
   if (resolution !== 'ordinary-property') return resolution
-  // An unknown origin (a read through an interface union: hono's
+  // An unknown origin (a read through an interface union:
   // `router.match.bind(router)`) could be any function, so a statically named
   // own `bind` anywhere stays decisive for it.
   const owns = functionId === null ? [...facts.ownProperties.values()] : [facts.ownProperties.get(functionId)]
@@ -449,7 +598,7 @@ export const callableBindResolution = (
  * object the call reaches (`emit-callable.ts`'s shadow guard reads its
  * own-property table, the way `callableBindIsIntrinsic` does), so a callable
  * of unknown origin -- a host accessor read out of a property descriptor,
- * the bson `TypedArrayPrototypeGetSymbolToStringTag.call(value)` shape --
+ * a cached `toStringTagGetter.call(value)` brand check --
  * still gets its direct call. A write through a callable carrier, or through
  * the function's own name, stays decisive.
  */

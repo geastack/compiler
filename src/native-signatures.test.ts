@@ -137,6 +137,17 @@ test('canonical function types resolve aliases and retain semantic exception spe
   assert.equal(noexcept.canonicalFunctionType, 'std::add_pointer_t<void(std::function<void(int)>) noexcept>')
 })
 
+test('std::function is identified by Clang, not by a template spelled function', () => {
+  const foreign = inspectNativeFunctionSignature({ ...fixture, cppFunction: 'gea::signature_test::foreignTemplateCallback' })
+  assert.equal(foreign.parameters[0]!.kind, 'unsupported')
+  assert.equal(foreign.canonicalFunctionType, null)
+  const qualified = inspectNativeFunctionSignature({ ...fixture, cppFunction: 'gea::signature_test::constReferenceCallback' })
+  assert.equal(
+    qualified.canonicalFunctionType,
+    'std::add_pointer_t<void(std::add_lvalue_reference_t<std::add_const_t<std::function<void(int)>>>)>'
+  )
+})
+
 test('target compilation rejects a macro-selected fractional callback despite unchanged integer width', () => {
   const signature = inspectNativeFunctionSignature({ ...fixture, cppFunction: 'gea::signature_test::configuredCallback' })
   assert.ok(signature.canonicalFunctionType)

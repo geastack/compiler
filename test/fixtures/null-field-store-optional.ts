@@ -1,4 +1,4 @@
-// three.js's `WebGLLights.js` shape: a module-level object literal record whose
+// A 3D renderer's lights-module shape: a module-level object literal record whose
 // field is initialized with a bare `null` (no annotation), later written from
 // an OPTIONAL class-ref read (`UniformsLib.LTC_FLOAT_1?: Texture`), and read
 // back elsewhere.

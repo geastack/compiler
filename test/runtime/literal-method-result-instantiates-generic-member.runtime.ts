@@ -3,7 +3,7 @@
 // the member's generic declaration states it. `Chain<T>.self(): Chain<T>`
 // read off the declaration names an unbound `T`, which derived to `any`; the
 // literal's `return this` then published `Chain<any>` into a field that holds
-// `Chain<number>`, a store with no conversion. mongodb's `onData` is the
+// `Chain<number>`, a store with no conversion. A database client's `onData` is the
 // library case: `AsyncGenerator<T, TReturn, TNext>[Symbol.asyncIterator]()`
 // under an `AsyncGenerator<Buffer> & AsyncDisposable` literal.
 interface Chain<T> {

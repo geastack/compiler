@@ -914,7 +914,7 @@ export const geaProtocolCarriers = (): ReadonlyMap<string, string> => {
     // `AudioConstructor`, ...) once it has no real declared name of its own,
     // the same way `lib.es5.d.ts`'s named `ErrorConstructor`/`DateConstructor`
     // already read here through the flat `nativeTypes` lookup. Measured
-    // directly (`node scripts/corpus.mjs --only=voice-notes`): without this
+    // directly on a corpus program that records audio: without this
     // row, `new MediaStream()`/`new MediaRecorder(...)`/`new Audio(...)`
     // refuse on `native-boundary:MediaStreamConstructor@1` even though the
     // INSTANCE carrier (`MediaStream` above) is already claimed -- the

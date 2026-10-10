@@ -12,15 +12,14 @@ import { sourceClassFamilyOf } from './owned-class-receivers.js'
 /**
  * Which property keys a computed key can take, proven from closed callers.
  *
- * Three's `Material.setValues( values )` and `Texture.setValues( values )`
- * store `this[ key ] = newValue` for every `key` of `for ( const key in
+ * A base class's `setValues( values )` options-bag copier stores `this[ key ] = newValue` for every `key` of `for ( const key in
  * values )`. Read as "a store under any key", that one write tells every
- * class-family, array-cell, host-mutation and reflection census that each
- * material and texture may have grown an arbitrary property. But `values`
+ * class-family, array-cell, host-mutation and reflection census that every
+ * instance of the family may have grown an arbitrary property. But `values`
  * only ever holds the options literals the program itself writes --
- * `new MeshPhongMaterial( { color, flatShading: true } )` through the
- * subclass's `this.setValues( parameters )`, and RenderTarget's local
- * `values` literal plus its named writes -- so the key is one of a finite,
+ * `new Derived( { color, flatShading: true } )` through the subclass's
+ * `this.setValues( parameters )`, or another class's local `values` literal
+ * plus its named writes -- so the key is one of a finite,
  * enumerable set of names.
  *
  * The answer is an UPPER bound: every key the expression can evaluate to at
@@ -203,12 +202,17 @@ const isWriteTarget = (positioned: ts.Node): boolean => {
 const checkerKeysOf = (type: ts.Type): ReadonlySet<string> | 'open' | 'symbol' => {
   const names = new Set<string>()
   let open = false
+  let symbol = false
   for (const part of type.isUnion() ? type.types : [type]) {
     if (part.isStringLiteral()) names.add(part.value)
     else if (part.isNumberLiteral()) names.add(String(part.value))
-    else if ((part.flags & ts.TypeFlags.ESSymbolLike) !== 0) return 'symbol'
+    else if ((part.flags & ts.TypeFlags.ESSymbolLike) !== 0) symbol = true
     else open = true
   }
+  // A public symbol alternative does not exclude the strings another arm
+  // permits. The source walk still must account for every actual value;
+  // actual symbol leaves never enter this string-key inventory.
+  if (symbol && !open && names.size === 0) return 'symbol'
   return open ? 'open' : names
 }
 
@@ -521,6 +525,18 @@ export const computedKeySetVerdictOf = (
   const loopKeys = (loop: Loop): void => {
     if (ts.isForInStatement(loop)) return objectKeys(loop.expression, true)
     const source = unwrapErasedExpression(loop.expression)
+    // This allocation is evaluated immediately as the loop's iterable. It
+    // has no alias through which an own iterator/element could be replaced;
+    // the shared Array iteration protocol still owns inherited lookup and
+    // must survive the final intrinsic census. Holes and spreads introduce
+    // values outside the explicit element source family.
+    if (ts.isArrayLiteralExpression(source)) {
+      if (source.elements.some((element) => ts.isOmittedExpression(element) || ts.isSpreadElement(element)))
+        return refuse('key-iteration-source-unsupported', source)
+      requireIntrinsic('Array', undefined, source)
+      for (const element of source.elements) keyValues(element)
+      return
+    }
     const object = ts.isCallExpression(source) && isObjectStatic(source, ['keys']) ? soleArgumentOf(source) : null
     if (!object) return refuse('key-iteration-source-unsupported', loop.expression)
     requireIntrinsic('Object', 'keys', source)

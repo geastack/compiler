@@ -2,7 +2,7 @@ import ts from 'typescript'
 import { isAmbientDeclaration } from '../ambient.js'
 import { unwrapErasedExpression } from './producers/erasure.js'
 import { declarationStatesHostInert } from './host-effect-contracts.js'
-import { everyKey, namedKey, numericKeys, numericLiteralKey, type MutationKey } from './host-mutation-keys.js'
+import { everyKey, namedKey, numericKeys, numericLiteralKey, programSymbolKeys, type MutationKey } from './host-mutation-keys.js'
 
 /** `__proto__` is never an ordinary key: a [[Set]] of it runs the accessor that replaces a prototype. */
 export const keyOfName = (name: string): MutationKey => (name === '__proto__' ? everyKey : namedKey(name))
@@ -12,22 +12,15 @@ export const keyOfName = (name: string): MutationKey => (name === '__proto__' ? 
  * program made with `Symbol()`, not one the standard library declares on
  * `SymbolConstructor`.
  *
- * Such a key names NOTHING this census models. A symbol is not a string and
- * never converts to one implicitly, so it can touch no string-named
- * obligation; and symbol-keyed obligations are spelled `@@iterator` after the
- * WELL-KNOWN symbols, which a program-declared one can never be. So the write
- * is invisible to every question the census asks -- which is why
- * `keysOfKeyExpression` answers it with no keys at all rather than `every`.
+ * This describes a checker type, not a runtime origin proof. Casts can assign
+ * a well-known symbol to a program's unique-symbol declaration. Consumers
+ * proving absence must authenticate the actual initializer and stock factory.
  *
  * ⛔ Standard-library-declared is the whole guard, in both directions.
  * `X.prototype[Symbol.iterator] = f` genuinely redefines intrinsic behavior
  * under a non-string key, so it must stay `every`. A bare `symbol`-typed key
  * (not `unique`) names an unknown symbol and fails closed the same way.
  *
- * The unique-symbol TYPE is sound to trust here in a way a string-literal type
- * is not (see `createMutationKeyReader`'s own note): a `unique symbol` type is
- * inhabited by exactly one value by construction, and there is no widening
- * conversion into it the way an `any` widens into a `'a' | 'b'` slot.
  */
 export const isProgramDeclaredSymbolKey = (type: ts.Type): boolean => {
   const members = type.isUnion() ? type.types : [type]
@@ -68,7 +61,9 @@ export const isProgramDeclaredSymbolKey = (type: ts.Type): boolean => {
 export const createMutationKeyReader = (
   checker: ts.TypeChecker,
   computedKeysOf: (key: ts.Expression) => readonly MutationKey[] | null,
-  publishedTypeAt: (key: ts.Expression) => ts.Type = (key) => checker.getTypeAtLocation(key)
+  publishedTypeAt: (key: ts.Expression) => ts.Type = (key) => checker.getTypeAtLocation(key),
+  /** Authenticates the actual stock Symbol initializer and records factory-integrity requirements. */
+  programSymbolAt: (key: ts.Expression) => boolean = () => false
 ): {
   readonly keysOfKeyExpression: (expression: ts.Expression | undefined) => readonly MutationKey[]
   readonly keysOfAccess: (access: ts.PropertyAccessExpression | ts.ElementAccessExpression) => readonly MutationKey[]
@@ -140,21 +135,9 @@ export const createMutationKeyReader = (
     }
     const type = publishedTypeAt(current)
     if (numericType(type)) return [numericKeys]
-    // NO KEYS, not `every`. A program-declared symbol key names nothing this
-    // census models, so the honest answer is the empty set -- see
-    // `isProgramDeclaredSymbolKey` for why that is sound rather than merely
-    // convenient. `[]` reaches every consumer as "taint nothing", which is the
-    // behaviour: `taintSurfaceKey` is never called, so no wildcard is stamped.
-    //
-    // Measured on hono. `@hono/node-server`'s `request.ts` attaches its private
-    // state with module-level `Symbol()` keys through a `Record<string |
-    // symbol, any>` parameter (`request[bodyConsumedDirectlyKey] = true`), and
-    // hono's routers do the same ~36 times. Each one stamped `*` on the whole
-    // host surface, which poisoned every read of every authenticated host
-    // global -- including all 39 `Buffer.*` reads in node-compat's own
-    // `globals.ts`, whose `Buffer.from(...)` calls then cited results no
-    // producer published. None of that has anything to do with `request.ts`.
-    if (isProgramDeclaredSymbolKey(type)) return []
+    // Keep program-created symbol writes visible to inherited-symbol queries,
+    // while preserving the distinct string and well-known-symbol domains.
+    if (programSymbolAt(current)) return [programSymbolKeys]
     const literalKeys = namedKeysOfLiteralType(type)
     if (literalKeys) return literalKeys
     const computed = computedKeysOf(current)

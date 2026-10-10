@@ -1,6 +1,6 @@
 // `mode && typeof mode === 'string'` AS AN `if` CONDITION OVER `string | undefined`.
 //
-// mongodb's `ReadPreference.fromOptions` (`read_preference.ts`) computes
+// A database client's read-preference `fromOptions` computes
 // `const mode = readPreference.mode || readPreference.preference` (both
 // optional mode literals, none of them `''`) and tests
 // `if (mode && typeof mode === 'string')`. The `&&` keeps its left operand

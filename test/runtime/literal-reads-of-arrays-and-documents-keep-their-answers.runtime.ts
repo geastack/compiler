@@ -1,4 +1,4 @@
-// `value.toBSON`, `value._bsontype` and `Object.prototype.toString.call(value)` are asked of EVERY value bson serializes. An Array and an
+// `value.toWire`, `value._wiretype`, `Object.prototype.toString.call(value)` are asked of EVERY value a serializer writes. An Array and an
 // open Document answer them without the full [[Get]]: the Array from a remembered "nothing under this key" fact, the Document from its own
 // table. The remembered fact is about the Array prototype, never about one array, so an own property added to a later array must still win.
 
@@ -7,7 +7,7 @@ interface Doc {
 }
 
 function probe(value: any): string {
-  return typeof value?.toBSON + ',' + typeof value?._bsontype
+  return typeof value?.toWire + ',' + typeof value?._wiretype
 }
 
 function tag(value: any): string {
@@ -16,8 +16,8 @@ function tag(value: any): string {
 
 const plain: number[] = [1, 2]
 const marked: any = [3]
-marked.toBSON = () => 7
-const doc: Doc = JSON.parse('{"_bsontype":"Thing","n":1}')
+marked.toWire = () => 7
+const doc: Doc = JSON.parse('{"_wiretype":"Thing","n":1}')
 const empty: Doc = JSON.parse('{}')
 
 //! expect: undefined,undefined undefined,undefined

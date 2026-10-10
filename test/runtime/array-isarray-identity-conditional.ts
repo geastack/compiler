@@ -1,6 +1,6 @@
 //! expect: 3
 //! expect: 5
-// hono's node-server websocket bridge normalizes one-or-many with the
+// an HTTP framework's websocket bridge normalizes one-or-many with the
 // identifier form of the `Array.isArray` idiom:
 //
 //   const datas = Array.isArray(data) ? data : [data]

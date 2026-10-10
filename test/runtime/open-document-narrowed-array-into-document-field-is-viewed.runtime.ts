@@ -1,6 +1,6 @@
 // AN OPEN-DOCUMENT PARAMETER'S ARRAY ARM STORED INTO A `Document` FIELD.
 //
-// bson's `makeFrame(sourceObject: Document, ...)` (`parser/serializer.ts`)
+// A binary-document serializer's `makeFrame(sourceObject: Document, ...)`
 // answers `{ sourceObject: sourceObject, isArray: true, ... }` under
 // `Array.isArray(sourceObject)`. The parameter census carries the cell as the
 // arms callers and guards put there: the dictionary, the caller's `number[]`,

@@ -38,7 +38,7 @@ const mirroredComparisons: ReadonlyMap<string, string> = new Map([
  * the integer that answers the same question moves the conversion to a pure
  * function of the bound alone, which leaves the loop by ordinary licm without
  * this emitter proving anything is invariant. Measured on
- * `bench/comparison/fixtures/modulo.ts`: 56.0ms with the conversion in the
+ * a modulo loop: 56.0ms with the conversion in the
  * loop, 37.4ms with the bound restated, against 36.7ms for the hand-written
  * baseline that takes its bound as `long long` to begin with.
  *
@@ -49,10 +49,19 @@ const mirroredComparisons: ReadonlyMap<string, string> = new Map([
  *
  * Sound because a narrowed value is one the integer census proved holds
  * |i| <= 2^53, far inside the sentinels the helpers clamp to.
+ *
+ * Not when the narrowed side is a literal: its double is a compile-time
+ * constant, so there is no conversion to move, and restating the double side
+ * instead puts a truncate, a convert back and a compare on the path of the
+ * value being tested. A method's `if (this.value >= C) this.value -= C` is
+ * loop-free, so its double field reads as invariant; inlined into its caller's
+ * loop, that chain sat on the field's own recurrence: a method-call counter loop
+ * measured 84 ms with the helper and 16 ms with the plain double compare.
  */
 export const integerBoundedComparison = (
   integerValues: ReadonlySet<IrValueId>,
   invariant: ReadonlySet<IrValueId>,
+  isConstant: (operand: IrOperand) => boolean,
   declaredWidths: ReadonlyMap<IrValueId, DeclaredIntegerWidth>,
   operation: ComputeOperation,
   first: IrOperand,
@@ -64,6 +73,7 @@ export const integerBoundedComparison = (
   const leftNarrowed = integerValues.has(first.value)
   const rightNarrowed = integerValues.has(second.value)
   if (leftNarrowed === rightNarrowed) return null
+  if (isConstant(leftNarrowed ? first : second)) return null
   // Explicit int64 values can exceed the helpers' bounded sentinels.
   if (declaredWidths.get(leftNarrowed ? first.value : second.value) === 'int64') return null
   // The side that stays a double is the one being restated, so it is the one
@@ -81,7 +91,7 @@ const constantComparisons: ReadonlySet<string> = new Set(['==', '===', '!=', '!=
  * An integer compared against an integer-valued constant, asked of the integer.
  *
  * `while (value !== 1)` over an `int` read the integer, widened it to a double
- * and compared doubles, once per turn of collatz's inner loop. Against a
+ * and compared doubles, once per turn of a hot inner loop. Against a
  * constant `c` that is an integer below 2^53 in magnitude the integer compare
  * is the same answer for EVERY integer, not only the safe ones: widening is
  * monotone and `c` is exact, and an integer that widens to `c` must lie within
@@ -121,7 +131,7 @@ export const integerConstantComparison = (
  *
  * `divisor * divisor <= value` over `int`s widened `value` to a double to meet
  * the product's Number type and compared doubles, a conversion and a float
- * compare on every turn of primes' trial-division loop. A declared integer is
+ * compare on every turn of a trial-division loop. A declared integer is
  * the annotation's contract -- its arithmetic already wraps at the machine
  * width rather than rounding -- so its comparisons are the integer ones too.
  * `declaredText` answers an operand's integer spelling when it is a declared
@@ -158,7 +168,7 @@ const restatableDividend = 80
  *
  * The two spellings compute the same thing, and the difference between them is
  * entirely what clang can prove afterwards. Measured on
- * `bench/comparison/fixtures/factorial.ts` (10M iterations, best of five):
+ * an iterative factorial loop (10M iterations, best of five):
  *
  *   gea::remainder (plain fmod)                87.9ms
  *   gea::integralRemainder(expr, k)            83.2ms
@@ -231,7 +241,7 @@ export const roundingIntegerHelpers: ReadonlyMap<string, string> = new Map([
  * be zero and the integer answer is exact. The double form stays for the
  * general arm; this one is emitted beside it and used only inside the guard.
  *
- * Measured on `bench/comparison/fixtures/object_create.ts`, two subscripts of
+ * Measured on an object-creation loop, two subscripts of
  * this shape per iteration: 10.8ms converting through a `double`, 7.7ms not --
  * against 6.5ms for a literal `% 256`, so the round trip was three quarters of
  * what a constant length would have been worth.
@@ -250,7 +260,7 @@ export const denseRemainderCompanion = (
   // and `NaN` where it has none -- because the divisor here IS that length, so
   // a zero length is `x % 0`, which is NaN for every dividend there is. Naming
   // the general `gea::remainderBy` in that arm instead cost 12% of
-  // `object_create`: the arm never runs, but a CALL in the loop body pins the
+  // an object-creation loop: the arm never runs, but a CALL in the loop body pins the
   // dividend and the receiver live across it, and clang stops sinking either.
   const zero = `${cppDenseLengthName(ordinal)} > 0`
   return { index: name, value: `(${zero} ? static_cast<double>(${name}) : std::numeric_limits<double>::quiet_NaN())` }

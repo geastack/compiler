@@ -1,6 +1,6 @@
 // A method of a generic base called through `this` from two generic levels
 // down, where the base STORES its type parameter and so really is one layout
-// per filling: the MongoDB driver's `FindCursor<TSchema> extends
+// per filling: a database client's `FindCursor<TSchema> extends
 // ExplainableCursor<TSchema> extends AbstractCursor<TSchema>`, whose
 // `maxTimeMS` calls `this.throwIfInitialized()`. Each copy of the leaf must
 // call the copy of the base it actually derives from.

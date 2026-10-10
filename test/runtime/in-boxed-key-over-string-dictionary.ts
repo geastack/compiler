@@ -2,7 +2,7 @@
 //! expect: absent
 //! expect: symbol absent
 
-// hono's trie router writes `key in curNode.#children` where `key` is
+// An HTTP framework's trie router writes `key in curNode.#children` where `key` is
 // `Array.isArray(pattern) ? pattern[0] : p`. `Array.isArray`'s `arg is any[]`
 // filters nothing out of a union whose array member is a READONLY tuple, so
 // TypeScript widens the true arm to `any` and the key reaches the string-keyed

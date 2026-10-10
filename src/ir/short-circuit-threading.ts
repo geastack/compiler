@@ -14,7 +14,7 @@ import { verifyIrBody } from './verify.js'
  * is decided, and the edge can go straight to the branch's false arm. Without
  * this the C++ is a materialized `bool` written on both arms and tested again
  * -- the same instructions, but laid out so clang 18 and 22 schedule the loop
- * 1.5% slower than the `&&` it came from (mandelbrot's escape loop), and
+ * 1.5% slower than the `&&` it came from (an escape-time loop), and
  * neither unrolls it when the bound is a constant.
  *
  * Only the exact shape: a join holding one phi (and at most a `to-boolean`

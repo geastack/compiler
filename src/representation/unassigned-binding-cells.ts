@@ -14,9 +14,9 @@ import { resultOf } from '../semantics/model/operands.js'
  * declaring body is proven assigned or rejected, but a read from any other
  * function -- a module helper, a closure -- is simply assumed assigned. So
  * such a cell's declared type is a claim the language does not enforce there.
- * mongodb's `compression.ts` (`let zstd: ZStandard`, then
- * `if (!zstd) zstd = loadZstd()` in a function) relies on reading that
- * `undefined` back; carried as its declared `T`, `!zstd` has no absence to
+ * A lazily loaded optional module (`let codec: Codec`, then
+ * `if (!codec) codec = loadCodec()` in a function) relies on reading that
+ * `undefined` back; carried as its declared `T`, `!codec` has no absence to
  * see and the loader never runs.
  *
  * A cell with such a read therefore carries the absence, and so does every

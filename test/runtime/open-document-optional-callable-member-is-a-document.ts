@@ -4,7 +4,7 @@
 //! expect: where $where
 //! emitted-lacks: gea_record_type_
 
-// mongodb's `Filter<TSchema>` is `{ [key: string]: any }` plus optional named
+// A database client's `Filter<TSchema>` is `{ [key: string]: any }` plus optional named
 // operators, one of which is `$where?: string | ((this: T) => boolean)`. A
 // member that MAY be a function does not need a call convention until a program
 // narrows it, so it is an `any` slot's value like every other key and the

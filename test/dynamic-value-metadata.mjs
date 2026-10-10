@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import { sanitizerArguments, sanitizerEnvironment } from './sanitizer.mjs'
 import assert from 'node:assert/strict'
@@ -10,7 +11,7 @@ const binary = resolve(root, `measurements/dynamic-value-metadata-runtime${execu
 
 execFileSync('clang++', [
   '-std=c++20',
-  '-O0',
+  ...nativeOptimization('correctness'),
   '-fsanitize=address,undefined',
   '-fno-sanitize-recover=all',
   ...sanitizerArguments,
@@ -30,5 +31,9 @@ assert.notEqual(nullable.status, 0, 'a callable Optional<T> boundary must not co
 
 const functionUnion = spawnSync(binary, ['function-union-string'], { encoding: 'utf8', env: sanitized })
 assert.notEqual(functionUnion.status, 0, 'a Function | number callable boundary must reject a string')
+
+const missingFactory = spawnSync(binary, ['method-rest-without-factory'], { encoding: 'utf8', env: sanitized })
+assert.notEqual(missingFactory.status, 0, 'a mismatched physical method frame requires an authenticated receiver factory')
+assert.match(missingFactory.stderr, /requires its published receiver factory/)
 
 console.log('DYNAMIC_VALUE_METADATA_RUNTIME_OK')

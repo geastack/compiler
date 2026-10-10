@@ -1,6 +1,6 @@
 // `new` THROUGH A CLASS HELD IN AN `any` SLOT CONSTRUCTS THAT CLASS.
 //
-// mongodb's `ConnectionOptions` declares `connectionType?: any`, the pool
+// A database client's `ConnectionOptions` declares `connectionType?: any`, the pool
 // stores `Connection` there, and `makeConnection` does
 // `let ConnectionType = options.connectionType ?? Connection;
 // return new ConnectionType(socket, options)`. The class crossed into a box

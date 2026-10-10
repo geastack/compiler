@@ -1,5 +1,5 @@
 // `x instanceof C` over a union of the class, a record type the class does
-// not satisfy, and a string -- mongodb's `ReadConcernLike` in
+// not satisfy, and a string -- a database client's `ReadConcernLike` in
 // `ReadConcern.fromOptions`. A record arm can only hold an instance of C if
 // some C is converted into that record; nothing here does, so the arm answers
 // false and the class arm answers true.
@@ -41,7 +41,7 @@ console.log(fromOptions({ readConcern: { level: 'majority' } })?.level)
 //! expect: undefined
 console.log(fromOptions({}))
 
-// A Concern viewed as a plain document elsewhere -- mongodb hands its read
+// A Concern viewed as a plain document elsewhere -- a database client hands its read
 // concern to command builders typed by shape. The view is a different
 // carrier from the union's record arm, so that arm still cannot hold one.
 function describe(document: { level: string }): string {

@@ -1,5 +1,5 @@
-// mongodb's executeOperation: `catch (error) { return operation.handleError(error) }`
-// where `handleError(error: MongoError)` only rethrows (or rethrows anything
+// A database client's executeOperation: `catch (error) { return operation.handleError(error) }`
+// where `handleError(error: ServiceError)` only rethrows (or rethrows anything
 // that is not its own subclass). The caught value is whatever was thrown -- a
 // TypeError here -- and it must reach the handler and propagate out of the
 // async function as a rejection, as in JS, not abort on the parameter's type.

@@ -1,11 +1,23 @@
 import ts from 'typescript'
 import type { DeclarationId } from '../../identity/ids.js'
+import { objectPrototypeMemberNames } from '../../representation/record-fields.js'
 import type { ProducerContext } from './producer-context.js'
 import { intrinsicObjectKeysIntact, keySetTouches, prototypeKeyQuerySignature, type PrototypeKeyQuery } from './host-mutation-keys.js'
 
 type IntrinsicContext = Pick<ProducerContext, 'checker' | 'identities' | 'globalHostMutationTaint' | 'isStandardLibraryDeclaration'>
 
 export type { PrototypeKeyQuery } from './host-mutation-keys.js'
+
+/** Declared property absence also excludes the language's inherited keys,
+ * including Annex B members omitted by some standard-library declarations.
+ * The caller separately authenticates this prototype's identity and mutation
+ * state. An indexed declaration cannot prove a named property absent.
+ * @semanticCategory generic-primitive
+ */
+export const intrinsicPrototypeKeyIsAbsent = (checker: ts.TypeChecker, intrinsic: string, prototype: ts.Type, name: string): boolean =>
+  !(intrinsic === 'Object' && objectPrototypeMemberNames.has(name)) &&
+  checker.getIndexInfosOfType(prototype).length === 0 &&
+  checker.getPropertyOfType(prototype, name) === undefined
 
 const prototypeTypeOf = (
   context: IntrinsicContext,

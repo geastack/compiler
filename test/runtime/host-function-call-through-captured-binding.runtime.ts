@@ -1,4 +1,4 @@
-// bson's `isUint8Array`: a host accessor read off a property descriptor
+// A binary-document serializer's `isUint8Array`: a host accessor read off a property descriptor
 // (`TypedArray.prototype[Symbol.toStringTag]`'s getter) captured into a
 // binding and invoked through `Function.prototype.call`. The receiver's own
 // physical convention is known at the call, so `g.call(value)` is a direct

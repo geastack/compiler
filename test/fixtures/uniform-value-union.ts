@@ -1,7 +1,7 @@
-// three's uniform value model, stated natively: one disjoint union of every
+// A 3D library's uniform value model, stated natively: one disjoint union of every
 // value a shader uniform can hold, a `{ value, needsUpdate? }` slot around it,
 // and a string-keyed table of slots. `cloneUniforms` is the generic `for`-`in`
-// copy three writes, and every consumer narrows the union with `instanceof`,
+// copy the library writes, and every consumer narrows the union with `instanceof`,
 // `typeof`, `Array.isArray` or a type-guard function -- never a box.
 class Vector3 {
   constructor(public x = 0) {}

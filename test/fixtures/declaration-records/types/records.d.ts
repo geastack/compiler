@@ -1,6 +1,6 @@
 import { Group, Range, Tint } from './group.js'
 
-// The shape of `@types/three`'s `WebGLState.d.ts`: the records a factory's
+// The shape of a 3D library's GPU-state declaration: the records a factory's
 // nested factories return are declared as classes no JS module exports, with
 // the same member names and different parameter lists.
 declare class ColorChannel {
@@ -14,7 +14,7 @@ declare class DepthChannel {
   setClear(depth: number): number
 }
 
-// The shape of `@types/three`'s `WebGLLightsState`: plain data whose array
+// The shape of a 3D library's declared lights state: plain data whose array
 // members the package leaves as `unknown[]`.
 interface LightsState {
   version: number

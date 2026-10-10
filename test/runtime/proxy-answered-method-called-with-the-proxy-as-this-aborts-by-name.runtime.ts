@@ -1,11 +1,9 @@
-//! expect-abort
-//! expect: a method read off a Proxy is called with the Proxy as `this`, which no native frame can hold
+//! expect: compressed 3
 
-// A Proxy whose `get` trap really answers a function: the language calls it
-// with the proxy itself as `this`. A native Proxy has no box of its own, so no
-// native receiver slot can hold it, and the call aborts by name -- never a
-// load of the union's other arm, and never a catchable TypeError the program
-// does not have.
+// The Proxy's get trap answers an async arrow. A member call supplies the
+// Proxy as its logical receiver, but the arrow ignores that dynamic `this`.
+// Its receiverless native frame must therefore run, just as JavaScript does,
+// without projecting the Proxy into the union's ordinary module layout.
 
 type ZStandardLib = {
   compress(buf: Uint8Array, level?: number): Promise<Uint8Array>

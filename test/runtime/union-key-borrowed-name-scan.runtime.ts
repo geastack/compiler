@@ -1,6 +1,6 @@
 // A `string | number` NAME SCANNED AGAINST A LIST, AND LOOKED UP IN A CACHE.
 //
-// mongodb's `OnDemandDocument.getElement(name: string | number)` reads the
+// A database client's on-demand document `getElement(name: string | number)` reads the
 // cache with `this.cache[name]`, then compares the string arm against every
 // element's bytes through `isElementName(name, element)`. The key lookup must
 // not copy the string arm just to view it, and the per-element call must bind

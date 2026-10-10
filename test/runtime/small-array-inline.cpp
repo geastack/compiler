@@ -27,13 +27,16 @@ static void smallArraysAreOneAllocation() {
   const auto pageBefore = pages();
   const auto objectBefore = objects();
   auto strings = gea::makeRef<Strings>();
+  // The budget is bytes, so the inline count follows the standard library's
+  // string size: three for libstdc++ (32 bytes), four for libc++ (24 bytes).
+  constexpr std::size_t inlineStrings = gea::detail::arrayInlineBytes<std::string> / sizeof(std::string);
+  static_assert(inlineStrings >= 3);
   strings->push(std::string("alpha"));
-  strings->push(std::string("beta"));
-  strings->push(std::string("gamma"));
+  for (std::size_t i = 1; i < inlineStrings; ++i) strings->push(std::string("beta"));
   assert(objects() == objectBefore + 1 && pages() == pageBefore);
   strings->push(std::string("delta"));
   assert(pages() == pageBefore + 1);
-  assert(strings->size() == 4 && strings->at(0) == "alpha" && strings->at(3) == "delta");
+  assert(strings->size() == inlineStrings + 1 && strings->at(0) == "alpha" && strings->at(inlineStrings) == "delta");
 
   const auto pageDoubles = pages();
   auto doubles = gea::makeRef<Doubles>();

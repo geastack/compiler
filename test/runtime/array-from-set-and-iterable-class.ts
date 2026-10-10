@@ -1,5 +1,5 @@
 // ECMA-262 23.1.2.1 Array.from: a source with an @@iterator is walked through
-// it, and a mapfn is called with (value, index) per step. The mongodb driver
+// it, and a mapfn is called with (value, index) per step. A database client
 // maps a Set<Cursor> through `Array.from(set, c => c.close())` and copies its
 // own linked `List<T>` (a class whose `[Symbol.iterator]` is a generator) with
 // `Array.from(this)`.

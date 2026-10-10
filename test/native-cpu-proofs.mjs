@@ -1,5 +1,10 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
+import { mkdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { resolve } from 'node:path'
+
+// Its own build directory, so the suite can run it beside the other native scripts.
+mkdirSync(new URL('../measurements/cxx-native-cpu-proofs', import.meta.url), { recursive: true })
 
 const root = resolve(import.meta.dirname, '..')
 const run = (command, args) => {
@@ -24,7 +29,7 @@ for (const name of [
   'string-invariant-char-code.ts',
   'string-shared-layout.ts'
 ])
-  run(process.execPath, ['scripts/run-runtime-tests.mjs', '--only', name, '--out-dir', 'measurements/cxx'])
+  run(process.execPath, ['scripts/run-runtime-tests.mjs', '--only', name, '--out-dir', 'measurements/cxx-native-cpu-proofs'])
 
 for (const name of [
   'dense-index-window-runtime',
@@ -38,10 +43,10 @@ for (const name of [
   'dynamic-iterator-runtime',
   'native-record-enumeration-runtime'
 ]) {
-  const binary = resolve(root, 'measurements/cxx', name)
+  const binary = resolve(root, 'measurements/cxx-native-cpu-proofs', name)
   run(process.env.CXX ?? 'clang++', [
     '-std=c++20',
-    '-O3',
+    ...nativeOptimization('aggressive'),
     '-fstrict-aliasing',
     '-fsanitize=address,undefined',
     '-I',

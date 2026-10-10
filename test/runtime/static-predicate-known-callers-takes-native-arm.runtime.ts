@@ -1,12 +1,12 @@
 // A private static type predicate whose only callers are in the class is a
 // plain native call: the argument keeps its static union (no gea::Value box)
-// and no callable object is built per call. bson's `ObjectId.is(inputId)`.
+// and no callable object is built per call. An id class's `is(inputId)` brand check.
 interface IdLike {
   id: string | Uint8Array
 }
 class Ident {
   tag = 'Ident'
-  _bsontype = 'ObjectId'
+  _wiretype = 'ObjectKey'
   get id(): string {
     return 'x'
   }
@@ -22,7 +22,7 @@ class Ident {
     this.tag = typeof input === 'string' ? 'string' : 'none'
   }
   private static is(variable: unknown): variable is Ident {
-    return variable != null && typeof variable === 'object' && '_bsontype' in variable && variable._bsontype === 'ObjectId'
+    return variable != null && typeof variable === 'object' && '_wiretype' in variable && variable._wiretype === 'ObjectKey'
   }
 }
 const same = new Ident()

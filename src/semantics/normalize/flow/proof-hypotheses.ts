@@ -83,7 +83,60 @@ const settledAsTruth = new WeakSet<object>()
 
 export const hypothesisSettledAsTruth = (key: object): boolean => settledAsTruth.has(key)
 
-export const enterHypothesisGuard = (key: object): void => {
+/**
+ * Keys whose hypothesis is PESSIMISTIC: a re-entry guard (`enterHypothesisGuard`). Re-entering one hands out
+ * "unknown" -- a refusal, a null, an empty set -- never "closed".
+ *
+ * That decides what an answer that leaned on one owes. A REFUSAL computed under
+ * the hypothesis is weaker than the question deserves and may only be replayed
+ * where the same question is still open. A POSITIVE answer computed under it lost
+ * nothing by leaning: the real answer to the guarded question can only be more
+ * permissive, so the proof that succeeded without it succeeds with it. Recording
+ * the key on a positive answer made that answer reusable only inside the one
+ * dynamic extent that happened to park it, and a strongly connected component of
+ * mutually-calling members re-proved each member once per path through it.
+ */
+const pessimisticKeys = new WeakSet<object>()
+/**
+ * Keys some OPTIMISTIC guard has ever entered. Guard keys are AST nodes, and
+ * one declaration keys both an optimistic guard (inherited caller sites) and a
+ * pessimistic one (member implementations); a trail cannot say which of the
+ * two an answer leaned on, so such a key is never treated as pessimistic.
+ */
+const optimisticKeys = new WeakSet<object>()
+
+export const hypothesisIsPessimistic = (key: object): boolean => pessimisticKeys.has(key) && !optimisticKeys.has(key)
+
+/**
+ * Whether an answer of this polarity depends on `key`. The proof is monotone:
+ * every park hands out a bound, and an answer computed from bounds holds for
+ * the truth on the side the bound is on.
+ *
+ * - A POSITIVE answer (closed, values found) owes a PESSIMISTIC guard nothing:
+ *   the guarded question's real answer is at least as permissive as the refusal
+ *   it was handed.
+ * - A REFUSAL owes an OPTIMISTIC park nothing -- a member or family park, an
+ *   active record or value proof, an optimistic guard: those hand out "closed"
+ *   (or a partial, permissive set), and the real answer is at most that
+ *   permissive, so what refused under them refuses under the truth.
+ *
+ * A key some optimistic guard has also entered is kept on both sides.
+ */
+export const answerDependsOn = (key: object, positive: boolean): boolean =>
+  positive ? !hypothesisIsPessimistic(key) : pessimisticKeys.has(key)
+
+/**
+ * `pessimistic` is the guard's own declaration that its re-entries are handed a
+ * refusal (`null`, a refusal record). Not every guard is: the record-method
+ * guard (`source-record-data.ts`) hands out the targets decided so far, and the
+ * inherited-caller guard (`callable-reach.ts`) hands out "no inherited caller
+ * sites" -- both optimistic, and a positive answer that leaned on either is
+ * only as good as the claim. Only a guard that says so is skipped on a positive
+ * answer (`hypothesisIsPessimistic`).
+ */
+export const enterHypothesisGuard = (key: object, pessimistic = false): void => {
+  if (pessimistic) pessimisticKeys.add(key)
+  else optimisticKeys.add(key)
   settledAsTruth.delete(key)
   openGuards.set(key, (openGuards.get(key) ?? 0) + 1)
 }
@@ -118,8 +171,8 @@ const guardDependents = new Map<object, GuardLean[]>()
 /**
  * Hold `answer` for every open guard it leaned on, so closing that guard can
  * settle it. Without this a guard-leaning answer was simply discarded, and
- * measurement says that is nearly all of them: in 200,000 three.js proof
- * entries the member-closure memo computed 156,070 answers and KEPT 119 --
+ * measurement says that is nearly all of them: in 200,000 proof
+ * entries of one large program the member-closure memo computed 156,070 answers and KEPT 119 --
  * 155,951 were thrown away for naming an open guard. Every later ask of those
  * same questions then had to prove them again, which is where millions of
  * proof entries over 64 distinct questions come from.
@@ -150,7 +203,7 @@ export const registerGuardedAnswer = (answer: GuardedAnswer, discard?: () => voi
  *
  * Getting this backwards is expensive and silent. Every guard enrolled here
  * is pessimistic, and every site reported "cannot tell": of 787,705 answers
- * registered in one three.js run, 0 were ever confirmed and 668,256 were struck
+ * registered in one large-program run, 0 were ever confirmed and 668,256 were struck
  * AND spliced out of their buckets. The memo then held almost nothing, which
  * is why the buckets never reached their cap (`droppedByLimit=0`) while the
  * same questions kept missing and re-proving.
@@ -179,7 +232,7 @@ export const exitHypothesisGuard = (key: object, confirmed?: boolean, settled?: 
     if (discard !== undefined) hypothesisStats.discarded++
     // The answer rested on something the real answer contradicted. Striking it
     // is not enough: a memo bucket is BOUNDED, and a dead answer sitting in it
-    // keeps a live one out. The three.js app filled every bucket to the cap within the
+    // keeps a live one out. A large program filled every bucket to the cap within the
     // first 200,000 proof entries and then refused 148,185 further answers.
     answer.assumed.add(REFUTED_HYPOTHESIS)
     discard?.()

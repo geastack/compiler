@@ -103,8 +103,8 @@ export const callableCompletionValuesOf = (
  * another construction (which `new` always makes an object and whose own
  * origin is proven the same way). And `this` must not be mentioned at all: a
  * constructor writing `this.x` is building a second object beside the one it
- * returns. Three's `new WebGLRenderLists()` returns one literal and never
- * mentions `this`.
+ * returns. A factory function called with `new` that returns one literal
+ * and never mentions `this` is the shape admitted.
  */
 export const constructionYieldsCompletionOf = (flow: ValueFlowIndex, target: ts.FunctionDeclaration): boolean => {
   if (flow.receiverReferencesToDeclaration(target).length > 0) return false

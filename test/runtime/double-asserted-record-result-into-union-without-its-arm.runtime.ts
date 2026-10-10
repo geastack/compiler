@@ -1,6 +1,6 @@
-// bson's `BSONRegExp.fromExtendedJSON` returns `doc as unknown as BSONRegExp`
-// for one input form, so the method really returns either a BSONRegExp or the
-// plain doc record; EJSON's `deserializeValue` result, a union of BSON classes
+// A binary-document serializer's `WireRegExp.fromExtendedJSON` returns `doc as unknown as WireRegExp`
+// for one input form, so the method really returns either a WireRegExp or the
+// plain doc record; its extended-JSON `deserializeValue` result, a union of wire classes
 // and numbers, has no arm for the record. The homed arm converts; the record
 // arm is a checked TypeError when it is actually held, never read as a class
 // (node would hand the record on; the native slot cannot hold it).

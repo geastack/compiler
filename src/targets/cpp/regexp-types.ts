@@ -1,34 +1,7 @@
-import type { RegExpDeclarationKind } from '../../representation/policies.js'
-
-/**
- * This backend's spelling for each of the three standard regular-expression
- * shapes, and the only place those three C++ names appear outside the runtime
- * header itself.
- *
- * The carrier is selected in `representation/derive.ts` from a policy, and that
- * policy carries the spelling rather than the deriver naming one, because
- * nothing under `src/representation/` may name a C++ type -- it selects
- * carriers for any backend. `compiler.ts` composes the two: the frontend says
- * WHICH declaration is `RegExp`, this table says what this target calls it.
- *
- * All three are ported from v1 geatsc's `targets/cpp/runtime/regex.h`:
- *
- * - `Pattern` is v1's `gea::runtime::regex::Pattern`, name for name.
- * - `ExecResult` is v1's `ExecResult` (regex.h line 32) -- the TYPED result,
- *   deliberately not v1's `gea_cpp_value exec(...)`, which is the boxed one.
- * - `MatchResult` has no v1 counterpart and is stated as new work in the
- *   report: v1's `match` answers `std::vector<std::string>` with no null case
- *   and no `index`/`input`, so there was nothing typed to port. It implements
- *   ES2024 22.1.3.14 `String.prototype.match`, whose two answers
- *   (`RegExpExec` for a non-global pattern, the list of matched substrings for
- *   a global one) are exactly why `lib.es5.d.ts` declares `RegExpMatchArray`'s
- *   `index` and `input` OPTIONAL where `RegExpExecArray`'s are required.
- */
-export const cppRegExpNativeTypes: Readonly<Record<RegExpDeclarationKind, string>> = {
-  pattern: 'gea::runtime::regex::Pattern',
-  'exec-result': 'gea::runtime::regex::ExecResult',
-  'match-result': 'gea::runtime::regex::MatchResult'
-}
+// The three native layout names are a published fact of the regular-expression
+// projection (`projection/regexp-fields.ts`), which identifies a carrier's role
+// by them; this target spells the same table rather than a second copy.
+export { cppRegExpNativeTypes } from '../../projection/regexp-fields.js'
 
 /**
  * This backend's entry point for `RegExpAlloc` + `RegExpInitialize` (ECMA-262

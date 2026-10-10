@@ -40,8 +40,9 @@ const packageRootOf = (file: string, host: ts.ModuleResolutionHost): string | un
 
 /**
  * A declaration may describe an implementation only when the same package
- * ships both. In particular, `@types/three` is a third party package and must
- * not replace Three's real JavaScript source, including for type-only imports.
+ * ships both. In particular, a DefinitelyTyped `@types/<pkg>` is a third party package
+ * and must not replace `<pkg>`'s real JavaScript source, including for
+ * type-only imports.
  */
 const ownedDeclaration = (
   declaration: ts.ResolvedModuleFull | undefined,

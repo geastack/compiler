@@ -12,12 +12,9 @@ import { censusLocalBindings } from './local-bindings.js'
  * returned zero `whole` writes for it -- and its own comment calls that "an
  * index defect, never a property of the program".
  *
- * Measured on the three.js app: all 127 occurrences of this
+ * Measured on a large JS library: every occurrence of this
  * reason sat inside a class member `reachable.memberIsPruned` correctly marks
- * dead (`Quaternion.prototype.setFromUnitVectors`,
- * `PMREMGenerator.prototype._sceneToCubeUV`/`_halfBlur`, the whole `Node`/
- * `ContextNode`/`LightsNode`/`NodeMaterial` TSL base classes and others) --
- * code `flow/value-flow.ts`'s indexer correctly records zero writes for,
+ * dead (unused methods and whole unused base-class hierarchies) -- code `flow/value-flow.ts`'s indexer correctly records zero writes for,
  * because it never runs. The defect was that THIS module's own
  * candidate-gathering walk never asked `reachable.memberIsPruned`, unlike
  * `indexValueFlow`'s identical walk, so a pruned method's untouched locals
@@ -37,7 +34,7 @@ const programFor = (entry: string, source: string) => {
 
 test('a pruned member is no longer censused as a write-index failure', () => {
   const entry = resolve('test/fixtures/initializer-write-attribution-repro.js')
-  // The same shape the three.js app's 127 refused instances all share: a class method
+  // The same shape every refused instance shared: a class method
   // nothing calls, whose local carries an initializer the checker cannot type
   // on its own (`builder` is unannotated) -- `isCandidate` only attempts a
   // cell like this, so it is the one shape that can ever reach

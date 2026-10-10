@@ -7,7 +7,8 @@ import { IrLoweringBlockedError } from './lower-graph.js'
 import { pendingShortCircuitOf } from './lower-short-circuit.js'
 import { methodValueOriginOf } from '../projection/callee.js'
 import { propertyReadResultRepresentationOf } from '../projection/fields.js'
-import { typedComputedReadRecipeOf, typedComputedWriteRecipeOf } from './typed-property-access.js'
+import { computedPropertyKeyTextsOf, typedComputedReadRecipeOf, typedComputedWriteRecipeOf } from './typed-property-access.js'
+import { nativePropertyReadNeedsCoercibility } from './native-property-coercibility.js'
 import { holdsProxyArm, lowerProxyAccess, lowerProxyUnionAccess } from './lower-proxy.js'
 import type { FlowController } from './lower-flow.js'
 import type { IrOperand } from './model.js'
@@ -27,7 +28,6 @@ import {
   nativeBaseReceiverView,
   enterRequiredOperand,
   enter,
-  bindInstalledMethod,
   narrowedBindingRead,
   reactiveFieldReadOf
 } from './lower-operands.js'
@@ -51,6 +51,14 @@ import {
  */
 export const lowerProperty = (ctx: LoweringContext, flow: FlowController, block: IrBlockId, operation: PropertyOperation): void => {
   const lineage = requireLineage(operation)
+  if (operation.internalMethod === 'set' && operation.resolvedBinding !== undefined) {
+    const value = enterRequiredOperand(ctx, block, lineage, operation, namedOperand(operation, 'value'))
+    ctx.builder.bindingWrite(block, lineage, operation.resolvedBinding, value)
+    const receiver = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'receiver'))
+    const result = requireResultRepresentation(ctx, operation, 'value', 'a resolved binding property write')
+    registerResult(ctx, operation, convertOrDrift(ctx, block, lineage, operation.id, 'receiver-result', 0, receiver, result).value)
+    return
+  }
   if (operation.internalMethod === 'get' && operation.resolvedBinding !== undefined) {
     const representation = requireResultRepresentation(ctx, operation, 'value', 'a resolved binding property read')
     const value = narrowedBindingRead(ctx, block, lineage, operation, operation.resolvedBinding, representation)
@@ -76,7 +84,12 @@ export const lowerProperty = (ctx: LoweringContext, flow: FlowController, block:
   }
   const receiverOperand = namedOperand(operation, 'receiver')
   const incoming = resolveRequiredOperand(ctx, block, lineage, receiverOperand)
-  const view = narrowedOperandView(incoming.representation, receiverOperand, ctx.constantDeriver)
+  const nativeData = ctx.program.slots.input.nativeCallableData.routeAt(operation.id)
+  const view =
+    nativeData !== null &&
+    (incoming.representation.kind === 'function-value-dispatch' || incoming.representation.kind === 'function-and-constructor')
+      ? incoming.representation
+      : narrowedOperandView(incoming.representation, receiverOperand, ctx.constantDeriver)
   const viewed =
     nativeBaseReceiverView(ctx, block, lineage, receiverOperand, incoming) ??
     assertedCensusUnionReceiver(ctx, block, lineage, receiverOperand, incoming, ctx.constantDeriver.derive(receiverOperand.type)) ??
@@ -197,6 +210,11 @@ const lowerPropertyOn = (
       const keyOperand = namedOperand(operation, 'key')
       const key = resolveRequiredOperand(ctx, block, lineage, keyOperand)
       const representation = requireResultRepresentation(ctx, operation, 'value', 'a property get operation')
+      if (nativePropertyReadNeedsCoercibility(receiver.representation, representation, operation.methodPresenceTest === true))
+        // Preserve the original receiver identity used by call dispatch. This
+        // throwing check is an effect at Get, even if the Function value is
+        // later deferred or the method-presence result folds to a constant.
+        ctx.builder.compute(block, lineage, 'require-object-coercible', 'RequireObjectCoercible', [receiver], receiver.representation)
       // See `PropertyOperation.methodPresenceTest`: the receiver and key are
       // still evaluated above, and the always-present method reads `true`.
       if (operation.methodPresenceTest) return ctx.builder.constant(block, lineage, 'true', 'boolean', representation)
@@ -248,7 +266,8 @@ const lowerPropertyOn = (
         callableOwnPrototype,
         operation.normalResult,
         typedComputedRead ?? undefined,
-        operation.provenKeyTexts
+        computedPropertyKeyTextsOf(ctx.graph, operation),
+        operation.ordinaryObjectPrototypeKeyAbsent
       )
       const value =
         held === null
@@ -273,7 +292,13 @@ const lowerPropertyOn = (
     }
     case 'set': {
       const key = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'key'))
-      const value = enterRequiredOperand(ctx, block, lineage, operation, namedOperand(operation, 'value'))
+      // A source-proven rejected Set evaluates the RHS but enters no storage
+      // carrier. Its finalized readonly receipt independently authenticates
+      // these operands before the printer can omit installation.
+      const value =
+        operation.nativeCallableReadonlySet === undefined
+          ? enterRequiredOperand(ctx, block, lineage, operation, namedOperand(operation, 'value'))
+          : resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'value'))
       return ctx.builder.set(
         block,
         lineage,
@@ -283,16 +308,16 @@ const lowerPropertyOn = (
         operation.strict,
         optionalResultRepresentation(ctx, operation, 'value'),
         typedComputedWriteRecipeOf(ctx.graph, operation, receiver.representation, ctx.constantDeriver, ctx.program.classes) ?? undefined,
-        operation.provenKeyTexts
+        computedPropertyKeyTextsOf(ctx.graph, operation),
+        operation.ordinaryFunctionDataWrite,
+        operation.ordinaryObjectDataWriteAbsent
       )
     }
     case 'define-own-property': {
       const key = resolveRequiredOperand(ctx, block, lineage, namedOperand(operation, 'key'))
       const valueOperand = namedOperand(operation, 'value')
       const resolved = resolveRequiredOperand(ctx, block, lineage, valueOperand)
-      const value =
-        bindInstalledMethod(ctx, block, lineage, operation, valueOperand, resolved, receiver) ??
-        enter(ctx, block, lineage, operation, valueOperand, resolved)
+      const value = enter(ctx, block, lineage, operation, valueOperand, resolved)
       // The attributes are the operation's own, never defaults chosen here: a
       // definition with no stated descriptor is an unanswerable question, not
       // a permissive one, and guessing would install a property the source

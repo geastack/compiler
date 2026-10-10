@@ -1,4 +1,4 @@
-// A three.js app's entry shape: a factory returns the app object, a module-level
+// A 3D app's entry shape: a factory returns the app object, a module-level
 // const holds it, and a host callback (requestAnimationFrame's frame function)
 // drives it every frame. Every class method under the root is reached only
 // through that const, so if its allocation origin is lost at the factory or at

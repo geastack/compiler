@@ -1,4 +1,4 @@
-// mongodb-connection-string-url's ConnectionString, reduced: a live instance
+// A connection-string URL library's ConnectionString, reduced: a live instance
 // re-classed onto a subclass a mixin factory builds from its own
 // `.constructor`, whose methods borrow another class's method with `.call`.
 //

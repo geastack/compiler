@@ -1,6 +1,6 @@
 // An interface tree whose root extends a lib key-remapping alias over another
-// interface (`extends Omit<SerializeOptions, 'index'>`, mongodb's
-// `BSONSerializeOptions`) is still ONE object family: handing an options
+// interface (`extends Omit<SerializeOptions, 'index'>`, a database
+// client's `WireSerializeOptions`) is still ONE object family: handing an options
 // object to a function naming a different member of the tree passes the same
 // object, so a write through either name is seen through the other and `===`
 // holds. Each member used to be its own struct, and every hand-off a

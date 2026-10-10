@@ -1,6 +1,6 @@
 // The same forwarding as `absent-argument-forwarded-to-unread-parameter`, with
-// the callee's parameter STATED by JSDoc -- the `@types/three` overlay writes
-// `@param {WebGLRenderTarget} transmissionRenderTarget` into three's own
+// the callee's parameter STATED by JSDoc -- a 3D library's type overlay writes
+// `@param {RenderTarget} transmissionRenderTarget` into the library's own
 // `refreshUniformsPhysical`, where the unstated repro had the census infer the
 // slot. A stated parameter is outside inference, so its slot stayed the bare
 // statement and the call threw on the absent target. The forwarded value

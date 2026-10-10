@@ -11,6 +11,8 @@ import type { TypedComputedReadRecipe, TypedComputedWriteRecipe } from './typed-
 import type { OperationConversion } from './operation-conversions.js'
 import type { NativeMethodValueRecipe } from '../conversion/native-method.js'
 import type { DenseLoopPlan } from './dense-loops.js'
+import type { SpreadCopyConversionPlan } from './spread-conversions.js'
+import type { NativeCallablePrivateSlot } from './native-callable-own-property.js'
 
 /**
  * The typed IR: verified SSA values and a closed operation union.
@@ -109,9 +111,25 @@ export interface IrOperationBase {
 // ---------------------------------------------------------------------------
 
 export interface GetOperation extends IrOperationBase {
+  /** Exact deferred native method lookup, including its authenticated invocation frame. */
+  readonly nativeHostMethodRead?: import('./intrinsic-call-facts.js').NativeHostMethodRead
+  /** Exact original plain-object allocation, native extension storage and read recipes. */
+  readonly nativeObjectDataSlot?: import('./native-object-data-slots.js').NativeObjectDataSlot
+  /** Actual native Function own-data storage and dominating installation. */
+  readonly nativeCallableDataSlot?: import('./native-callable-data-slots.js').NativeCallableDataSlot
+  /** No program operation can install this constant key as own data on a
+   * native Function, so the read observes only absence or a value written
+   * through a declared-any boundary; certification recomputes the census. */
+  readonly nativeCallableUninstalledKey?: string
+  /** Exact confined native own-data slot; the original read remains for independent certification. */
+  readonly privateNativeCallableSlot?: NativeCallablePrivateSlot
+  /** A published invocation-protocol fact of the exact method value this read returns. */
+  readonly logicalReceiver?: 'ignored' | 'native' | 'dynamic'
   readonly methodValueRecipes?: readonly NativeMethodValueRecipe[]
   readonly hostMethod?: HostMethodBinding
   readonly kind: 'get'
+  /** Source prototype absence for this exact key; only closed ordinary allocation descriptors may consume it. */
+  readonly ordinaryObjectPrototypeKeyAbsent?: true
   /** Semantic proof that normal completion is the undefined value. */
   readonly normalResult?: 'undefined'
   readonly receiver: IrOperand
@@ -162,6 +180,7 @@ export interface GetOperation extends IrOperationBase {
    * layer that could ask hands it to the one layer that spells it.
    */
   readonly callableOwnPrototype?: boolean
+  readonly nativeCallablePrototype?: import('./native-callable-prototype.js').NativeCallablePrototype
   /** A sealed finite-key fixed-field read, when lowering published one. */
   readonly typedComputedRead?: TypedComputedReadRecipe
   /**
@@ -176,6 +195,9 @@ export interface GetOperation extends IrOperationBase {
   readonly absentClassArms?: readonly DeclarationId[]
   /** A field read whose synthetic ancestor slot was relocated to its real owners. */
   readonly nativeFieldOwnerRead?: import('./native-field-owner.js').NativeFieldOwnerRead
+  /** Exact native source-slot reads behind a shared structural view. */
+  readonly nativeFieldViewRead?: import('./native-field-view-facts.js').NativeFieldViewRead
+  readonly nativeDocumentEntry?: import('./native-document-entries.js').NativeDocumentEntry
   /** Callable identity proved from an unmodified compiler-owned record allocation. */
   readonly closedCallable?: CallCalleeIdentity
   /**
@@ -205,12 +227,32 @@ export interface GetOperation extends IrOperationBase {
 }
 
 /**
- * `[[Set]]` returns a success boolean that ordinary (non-strict) assignment
- * discards. `result` is therefore optional: a producer that has nowhere to
- * route the boolean is not forced to invent an SSA value nobody reads.
+ * This normalized property operation threads its receiver after [[Set]].
+ * The enclosing assignment computation separately publishes its RHS. The
+ * internal success boolean is consumed by strict-assignment handling, rather
+ * than being exposed as this operation's SSA result.
  */
 export interface SetOperation extends IrOperationBase {
+  /** Rejected PutValue to an authenticated current readonly native Function own descriptor. */
+  readonly nativeCallableReadonlySet?: import('./native-callable-readonly-set.js').NativeCallableReadonlySet
+  /** Conditional exact-key standard Object prototype absence, independently authenticated against the source operation. */
+  readonly ordinaryObjectDataWriteAbsent?: true
+  /** Ordinary native descriptor write; it does not prove a later typed read. */
+  readonly nativeCallableDataWrite?: import('./native-callable-data-write.js').NativeCallableDataWrite
+  /** Complete source-owned native extension storage; retains ordinary [[Set]] effects. */
+  readonly nativeObjectDataSlot?: import('./native-object-data-slots.js').NativeObjectDataSlot
+  /** Exact native Function data installation, retaining ordinary descriptor effects. */
+  readonly nativeCallableDataSlot?: import('./native-callable-data-slots.js').NativeCallableDataSlot
+  /** Confined ordinary native data installation; no dynamic property table is required. */
+  readonly privateNativeCallableSlot?: NativeCallablePrivateSlot
   readonly kind: 'set'
+  /** Exact actual storage/setter carriers behind a shared structural view. */
+  readonly nativeFieldViewWrite?: import('./native-field-view-facts.js').NativeFieldViewWrite
+  readonly nativeDocumentEntry?: import('./native-document-entries.js').NativeDocumentEntry
+  /** Canonical source proof that the inherited ordinary Function prototypes
+   * cannot intercept this constant-key assignment; not an own-slot proof.
+   */
+  readonly ordinaryFunctionDataWrite?: true
   /** Preserved from the source Reference Record; false `[[Set]]` throws only in strict code. */
   readonly strict: boolean
   readonly receiver: IrOperand
@@ -239,6 +281,9 @@ export interface DeleteOperation extends IrOperationBase {
 
 export interface HasPropertyOperation extends IrOperationBase {
   readonly kind: 'has-property'
+  /** Source-authenticated absence of this static key on Object.prototype;
+   * it neither proves own absence nor covers a class/Proxy prototype chain. */
+  readonly ordinaryObjectPrototypeKeyAbsent?: true
   readonly receiver: IrOperand
   readonly key: IrOperand
   readonly result: IrResult
@@ -284,6 +329,7 @@ export interface DefineOwnPropertyOperation extends IrOperationBase {
  */
 export interface SpreadCopyOperation extends IrOperationBase {
   readonly kind: 'spread-copy'
+  readonly spreadConversionPlan?: SpreadCopyConversionPlan
   readonly receiver: IrOperand
   readonly source: IrOperand
   /** The source's statically known own keys (`ProtocolOperation.spreadKeys`); absent, its carrier's own field list is the key set. */
@@ -308,6 +354,21 @@ export interface SpreadCopyOperation extends IrOperationBase {
  * mint an SSA id for.
  */
 export interface CallOperation extends IrOperationBase {
+  /** Getter-blind original Array descriptor capture with lazy native snapshot fields. */
+  readonly nativeArrayDescriptorSnapshot?: import('./native-array-descriptor-snapshot.js').NativeArrayDescriptorSnapshot
+  readonly nativeArrayDescriptorReinstallation?: import('./native-array-descriptor-snapshot.js').NativeArrayDescriptorReinstallation
+  /** Original native prototype/backpointer observed through a descriptor's actual value field. */
+  readonly nativeCallablePrototypeDescriptor?: import('./native-callable-prototype.js').NativeCallablePrototype
+  /** Exact source Function family with complete native own descriptors. */
+  readonly nativeCallableIntegrity?: import('./native-callable-integrity.js').NativeCallableIntegrity
+  /** Exact Reflect.set native payload and evaluated target/key/source. */
+  readonly nativeCallableDataWrite?: import('./native-callable-data-write.js').NativeCallableDataWrite
+  /** Closed current native source slots and their original target allocation. */
+  readonly nativeOwnAssignment?: import('./native-own-assignment.js').NativeOwnAssignmentRecipe
+  /** Exact Reflect.get/set native Function data protocol, separately authenticated. */
+  readonly nativeCallableDataSlot?: import('./native-callable-data-slots.js').NativeCallableDataSlot
+  /** Exact unsupported receiver arms whose own Proxy Get has no normal callable completion. */
+  readonly nonNormalReceiverProof?: import('./non-normal-receiver.js').NonNormalReceiverProof
   /** The language receiver, independent of the native frame's receiver slot. */
   readonly thisArgument?: IrOperand
   readonly kind: 'call'
@@ -402,6 +463,18 @@ export interface CallOperation extends IrOperationBase {
   readonly intrinsicOwnKeys?: true
   /** Authenticated Reflect operation: a native ABI still observes this property protocol. */
   readonly intrinsicReflection?: 'get' | 'set' | 'has' | 'deleteProperty' | 'getOwnPropertyDescriptor'
+  readonly intrinsicReturnIdentity?: 'argument0'
+  readonly intrinsicIntegrity?: 'freeze' | 'seal' | 'preventExtensions'
+  /**
+   * Authenticated `Object.defineProperty` template call. Its whole effect on
+   * the target is the one own property its key names, so the reflection
+   * census can demand that key alone rather than the target's entire protocol.
+   */
+  readonly intrinsicDataDefinition?: true
+  /** The named own slot the semantic census publishes for this definition
+   * (`NativeObjectDataSlotCensus.namedDataDefinitions`); absent when the
+   * definition names no single such slot. */
+  readonly namedDataDefinitionKey?: string
   /**
    * Authenticated `Array.isArray` -- ECMA-262 23.1.2.2, whose whole answer is
    * the argument's own carrier. Read by `ir/native-carrier-predicate.ts`; the
@@ -422,6 +495,12 @@ export interface CallOperation extends IrOperationBase {
   /** A native fixed-slot descriptor update; no unknown callable boundary. */
   readonly fixedDataDefinition?: FixedDataDefinitionRecipe
   readonly objectValueConversions?: readonly import('./object-value-conversions.js').ObjectValueConversion[]
+  readonly nativeDataDefinition?: import('./native-data-definition.js').NativeDataDefinitionRecipe
+  readonly nativeAccessorDefinition?: import('./native-accessor-definition.js').NativeAccessorDefinitionRecipe
+  readonly nativeAccessorObservation?: import('./native-accessor-definition.js').NativeAccessorObservationRecipe
+  readonly nativeAccessorReinstallation?: import('./native-accessor-definition.js').NativeAccessorReinstallationRecipe
+  /** Complete admitted callbacks for optional Object own-key creation-order routes. */
+  readonly hostObjectWalkPlan?: import('./host-template-conversions.js').HostObjectWalkPlan
 }
 
 /**
@@ -471,6 +550,8 @@ export interface CallUnionArmTarget {
   readonly path: readonly number[]
   readonly declaration: DeclarationId
   readonly functionId: FunctionId
+  /** A static method of the arm's class constructor: the body takes no receiver, and the call supplies none. */
+  readonly static?: true
 }
 
 /** A statically resolved CommonJS module-record lookup. */
@@ -568,6 +649,13 @@ export interface ConstructOperation extends IrOperationBase {
    * emission reads the same operands and result carrier it was derived from.
    */
   readonly hostFrame?: CallableAbi
+  /**
+   * `new Map(entries)` reads each entry's "0"/"1" (24.1.1.1). An entry carrier
+   * some live view installs into never holds those values in its own slots, so
+   * the walk reads through the view's routes -- published by
+   * `native-entry-field-views.ts`, matched by certify.
+   */
+  readonly nativeEntryFieldReads?: import('./native-entry-field-views.js').NativeEntryFieldReads
   readonly arguments: readonly IrOperand[]
   readonly result: IrResult
 }
@@ -629,6 +717,8 @@ export interface ParameterOperation extends IrOperationBase {
  */
 export interface ReceiverOperation extends IrOperationBase {
   readonly kind: 'receiver'
+  /** Normalization authenticated this as the enclosing scope's receiver, not incoming logical this. */
+  readonly origin?: 'lexical'
   readonly result: IrResult
 }
 
@@ -887,6 +977,7 @@ export interface SwitchOperation extends IrOperationBase {
  */
 export interface AllocateOrdinaryObjectOperation extends IrOperationBase {
   readonly kind: 'allocate-ordinary-object'
+  readonly ordinaryObjectPrototype?: true
   readonly result: IrResult
 }
 
@@ -931,6 +1022,7 @@ export interface AllocateArrayObjectOperation extends IrOperationBase {
 export interface AllocateCallableOperation extends IrOperationBase {
   readonly kind: 'allocate-callable'
   readonly functionId: FunctionId
+  readonly callableOwnPrototype?: boolean
   /**
    * Captured environment slots, in capture order.
    *
@@ -970,23 +1062,6 @@ export interface BindCallableOperation extends IrOperationBase {
   /** The source frame's receiver, when its convention declares one. */
   readonly receiver: IrOperand | null
   readonly bound: readonly IrOperand[]
-  /**
-   * A method read as a VALUE and handed to a receiver-less slot (`map(this.f)`,
-   * `const g = obj.m`), bound to the object it was read from only because the
-   * C++ member needs a receiver to be invoked at all. The language calls a
-   * detached method with no `this`, so the printer refuses a body that reads
-   * it rather than answer where the program would have thrown; a real
-   * `Function.prototype.bind` (`false`) binds whatever its body does.
-   *
-   * `'holder'` is a method INSTALLED on an object whose member slot declares
-   * no receiver -- an object literal's `[Symbol.asyncIterator]() { return
-   * this }` satisfying `AsyncGenerator`'s standard-library member. Every call
-   * through that slot is `holder.m()`, whose `this` IS the holder, so the
-   * value is bound to it the way a detached method is -- `bindReceiver`, the
-   * source's own identity -- but a body that reads `this` is exactly what
-   * the binding answers, not a refusal.
-   */
-  readonly detached: boolean | 'holder'
   /**
    * The builtin `bind` was chosen on the ASSUMPTION that this method's
    * Function object is never boxed (`projection/method-value-escapes.ts`),
@@ -1073,6 +1148,8 @@ export interface IrRecordFieldInit {
  * operations allocates with none.
  */
 export interface AllocateRecordOperation extends IrOperationBase {
+  /** Source allocation has the standard Object prototype; a tuple's record carrier cannot claim it. */
+  readonly ordinaryObjectPrototype?: true
   readonly kind: 'allocate-record'
   readonly fields: readonly IrRecordFieldInit[]
   readonly result: IrResult
@@ -1146,10 +1223,17 @@ export interface AllocateRegExpOperation extends IrOperationBase {
  * (architecture.md, "Canonical semantic provenance graph").
  */
 export interface ConvertOperation extends IrOperationBase {
+  readonly nativeCallablePrototypeObservation?: import('./native-callable-prototype.js').NativeCallablePrototype
   readonly kind: 'convert'
   readonly conversionUse: ConversionUseId
   readonly source: IrOperand
   readonly result: IrResult
+  /** Source-owned fields installed by this exact dominating native assignment. */
+  readonly nativeObjectSample?: import('./native-object-sample.js').NativeObjectSampleReceipt
+  /** A future native-this frame authenticated against its exact source Function and semantic value operand. */
+  readonly nativeCallableSource?: import('./native-callable-argument.js').NativeCallableSourceProof
+  /** A contextual dictionary reader is executable only while every resulting alias remains inside this closed read frame. */
+  readonly readOnlyDictionaryProof?: import('./read-only-dictionary.js').ReadOnlyDictionaryProof
   /**
    * `'checked'` on a load out of an `optional` that no program fact proves
    * present (`ir/presence-proof.ts`): the printer tests presence and raises a
@@ -1170,6 +1254,15 @@ export interface ConvertOperation extends IrOperationBase {
    * pair.
    */
   readonly rebuild?: 'unshared-array'
+}
+
+/** A value demanded only on the impossible falsy edge of an exact source-proven object && left.
+ * @semanticCategory generic-primitive
+ */
+export interface DeadLogicalMergeValueOperation extends IrOperationBase {
+  readonly kind: 'dead-logical-merge-value'
+  readonly source: IrOperand
+  readonly result: IrResult
 }
 
 /**
@@ -1201,16 +1294,15 @@ export interface ConvertOperation extends IrOperationBase {
  * Rendering tests only these indices, in source-arm order, against `source`
  * (unwrapped of one optional layer first, exactly as `isDeadMergeContribution`
  * unwraps it), converts each live arm's own payload into `result`'s carrier
- * through the ordinary, unmodified `convertedValueText` (a live arm's payload
- * really can convert to the merge's carrier everywhere that pair recurs --
- * only the DEAD arms are the merge-site-specific fact), and falls back to
- * `result`'s own absent value when `source` itself is optional and that
- * absence remains live. A `??` kept branch proves precisely that top-level
+ * through the exact published conversion plan. A contextual truthiness arm
+ * additionally requires an authenticated && split; optional absence has its
+ * own cited recipe. A `??` kept branch proves precisely that top-level
  * absence dead while leaving every payload arm live; `sourceAbsenceLive`
  * carries that distinct proof without pretending any payload arm disappeared.
  */
 export interface MergeLiveArmRebuildOperation extends IrOperationBase {
   readonly kind: 'merge-live-arm-rebuild'
+  readonly mergeConversionPlan?: import('./merge-conversions.js').MergeConversionPlan
   readonly nativeTransport?: import('./native-merge-transport.js').NativeMergeTransport
   readonly source: IrOperand
   readonly result: IrResult
@@ -1244,6 +1336,8 @@ export interface MergeLiveArmRebuildOperation extends IrOperationBase {
  */
 export interface GetIteratorOperation extends IrOperationBase {
   readonly kind: 'get-iterator'
+  /** GetIterator captures next once on the returned iterator, before the first step. */
+  readonly nativeNextMethodRead?: import('./native-iterator-field-views.js').NativeIteratorFieldRead
   /**
    * Which walk this is. Two protocols reach this one operation over the same
    * receiver carrier and mean opposite things: `for`-`in` over a struct yields
@@ -1266,6 +1360,8 @@ export interface GetIteratorOperation extends IrOperationBase {
 export interface IteratorNextOperation extends IrOperationBase {
   readonly kind: 'iterator-next'
   readonly iterator: IrOperand
+  /** The protocol's Get(next), authenticated against the original native allocation. */
+  readonly nativeMethodRead?: import('./native-iterator-field-views.js').NativeIteratorFieldRead
   /** The optional argument to `.next(value)`; absent for ordinary `for-of` consumption. */
   readonly value: IrOperand | null
   readonly result: IrResult
@@ -1299,6 +1395,8 @@ export interface IteratorDoneOperation extends IrOperationBase {
 export interface IteratorCloseOperation extends IrOperationBase {
   readonly kind: 'iterator-close'
   readonly iterator: IrOperand
+  /** IteratorClose reads return at close time, including its original getter and receiver. */
+  readonly nativeMethodRead?: import('./native-iterator-field-views.js').NativeIteratorFieldRead
   readonly result: IrResult | null
   /** Finite destructuring closes only while no step has observed exhaustion. */
   readonly onlyIfOpen: boolean
@@ -1477,6 +1575,7 @@ export type IrOperation =
   | AllocateRegExpOperation
   | ConvertOperation
   | MergeLiveArmRebuildOperation
+  | DeadLogicalMergeValueOperation
   | GetIteratorOperation
   | IteratorNextOperation
   | IteratorDoneOperation
@@ -1512,6 +1611,8 @@ export interface IrBlock {
 export const allOperationsOf = (block: IrBlock): readonly IrOperation[] => [...block.operations, block.terminator]
 
 export interface IrBody {
+  /** Host binding/path resolution published before conversion certification. */
+  readonly hostNamespaceCensus?: import('./host-namespace-reads.js').HostNamespaceCensus
   /** Certified adaptations used by the published dense storage windows. */
   readonly denseLoopPlan?: DenseLoopPlan
   readonly owner: PhysicalBodyId
@@ -1716,8 +1817,8 @@ export interface IrBodyFacts {
  * `a`, so one of them is captured before it exists and lives in a shared heap
  * cell, and that cell then holds a closure whose environment holds the cell.
  * Every such frame left its closures, their environments, their cells and
- * everything they captured for the cycle collector -- the mongodb driver's
- * `onData` (`eventHandler`, `errorHandler`, `closeHandler`) once per command.
+ * everything they captured for the cycle collector -- a stream adapter's
+ * mutually referencing event/error/close handlers, once per call.
  *
  * A group's members are entered with ONE environment: the union of what they
  * capture, minus the members themselves. A member reads a sibling -- or
@@ -1748,6 +1849,7 @@ export interface IrIteratorCloseRegion {
   readonly loop: OperationId
   readonly lineage: SemanticResultId
   readonly iterator: IrOperand
+  readonly nativeMethodRead?: import('./native-iterator-field-views.js').NativeIteratorFieldRead
   readonly entry: IrBlockId
   readonly blocks: readonly IrBlockId[]
   /** Jumps representing same-loop continuation or normal exhaustion dismiss cleanup; empty for finite patterns. */

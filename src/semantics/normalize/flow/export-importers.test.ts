@@ -68,8 +68,8 @@ test('named, renamed and default-free imports are enumerated at their importer',
 })
 
 test('a module the program never evaluates contributes no references', () => {
-  // three's `ColorSpaceNode.js`: loaded beside the node materials, reached by
-  // nothing, and still importing `ColorManagement` to call it.
+  // A library module loaded beside its siblings, reached by nothing, and
+  // still importing a shared helper to call it.
   assert.deepEqual(
     importers(
       {

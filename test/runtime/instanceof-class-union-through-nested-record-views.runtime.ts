@@ -1,7 +1,7 @@
-// mongodb's `ReadConcern.fromOptions` again (`instanceof-class-record-string-
-// union.ts`), with the rest of the driver around it. The `{ level }` arm of
+// A database client's `ReadConcern.fromOptions` again (`instanceof-class-record-string-
+// union.ts`), with the rest of the client around it. The `{ level }` arm of
 // `ReadConcernLike` can hold a view of a ReadConcern only if some conversion
-// puts one there; the ones the driver performs put nothing there:
+// puts one there; the ones the client performs put nothing there:
 // - an operation class upcast to its base, whose fields carry the union
 //   (an upcast converts no field),
 // - an options record converted into another options record type, whose

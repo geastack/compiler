@@ -45,6 +45,18 @@ static void integrity() {
   assert(!gea::nativeOwnFieldsWritable(alias) && !gea::nativeIsExtensible(alias));
   assert(update(alias, 1) == 0);
 
+  // Force the anchor-header path while another live owner has restricted
+  // integrity, including the array-view owner used by document adapters.
+  assert(!gea::nativeIsExtensible(gea::Ref<Point>{}));
+  assert(!gea::nativeIsExtensible(gea::Ref<Point>::undefined()));
+  auto source = gea::makeRef<gea::ArrayObject<double>>();
+  auto view = gea::makeNativeArrayView<long long>(source,
+      [](const double& value) { return static_cast<long long>(value); },
+      [](const long long& value) { return static_cast<double>(value); });
+  assert(gea::nativeIsExtensible(source) && gea::nativeIsExtensible(view));
+  gea::nativeFreeze(source);
+  assert(!gea::nativeIsExtensible(source) && !gea::nativeIsExtensible(view));
+
   // Growth must preserve the identity and integrity of existing entries.
   std::vector<gea::Ref<Point>> owners;
   for (int i = 0; i < 4096; ++i) {

@@ -1,7 +1,7 @@
 //! expect: open:/ws 2
 //! expect: open:/direct 5
-// A rest parameter annotated as a union of tuples -- hono's
-// `defineWebSocketHelper` shape (`...args: [createEvents, options?] | [c,
+// A rest parameter annotated as a union of tuples -- an HTTP
+// framework's WebSocket-helper factory shape (`...args: [createEvents, options?] | [c,
 // events, options?]`) -- binds one Array at run time whatever the arms say.
 // The ABI published `array-object`, the body binding kept the checker's union
 // and derived a tagged-union of positional records, and `projection/abi.ts`

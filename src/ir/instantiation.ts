@@ -36,7 +36,7 @@ export const noInstantiationFacts: InstantiationFacts = { receiverIgnoringFuncti
  * A gea component is a class whose render method is the whole of it, and the
  * render of a component with no state reads `this` nowhere -- yet the call site
  * still has to hand it one, so a `construct` runs to manufacture a receiver the
- * callee ignores. `examples/apps/weather` builds 12 of them, all at mount, each
+ * callee ignores. One UI program builds 12 of them, all at mount, each
  * a `makeRef` plus a walk of its field initializers, for an argument no body
  * reads.
  *

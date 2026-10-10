@@ -1,6 +1,6 @@
 // A CALLABLE MEMBER GUARDED ON ONE LITERAL, CALLED THROUGH A VIEW OF ANOTHER.
 //
-// bson's `ByteUtils = hasGlobalBuffer ? nodeJsByteUtils : webByteUtils` binds a
+// A binary-document serializer's `ByteUtils = hasGlobalBuffer ? nodeJsByteUtils : webByteUtils` binds a
 // declared shape to one of two object literals. Only the literal whose shape IS
 // the declared one allocates at it; the other is stored through a structural
 // view that copies its callable members as they are. The call's identity guard

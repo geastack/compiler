@@ -1,7 +1,10 @@
 //! expect: direct:42
 //! expect: dynamic:42
-//! emitted-has: gea::callableDynamicSet
-//! emitted-has: gea::callableDynamicGet
+//! emitted-has: gea::callableNativeDataSet<
+// The store lands in the function identity's native data slot at its own
+// `double` storage (`callableNativeDataSet`) -- the boxed `callableDynamicSet`
+// / `callableDynamicGet` pair this asserted before stored a `gea::Value` for a
+// statically typed member. The `any` read below still reaches the same slot.
 
 interface AugmentedFunction {
   (): void

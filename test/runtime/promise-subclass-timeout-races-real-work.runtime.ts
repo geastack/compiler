@@ -1,4 +1,4 @@
-// mongodb's `Timeout` (src/timeout.ts) is `class Timeout extends Promise<never>`:
+// A database client's `Timeout` is `class Timeout extends Promise<never>`:
 // its constructor calls `super(executor)` and captures the executor's
 // `reject`, it carries timer state as own fields, and callers race it against
 // real work with `Promise.race([work, timeout])` / `Promise.all`. The instance
@@ -32,7 +32,7 @@ class Timeout extends Promise<never> {
     this.cleared = true
   }
 
-  // mongodb's `throwIfExpired`: `this.then(...)` reads `then` off the promise
+  // The client's `throwIfExpired`: `this.then(...)` reads `then` off the promise
   // the receiver IS, from inside one of the class's own methods.
   throwIfExpired(): void {
     if (this.timedOut) {
@@ -46,7 +46,7 @@ class Timeout extends Promise<never> {
   }
 }
 
-// mongodb's `throwIfExpired` squashes the rejection it is about to throw itself.
+// The client's `throwIfExpired` squashes the rejection it is about to throw itself.
 function squash(error: unknown): void {
   console.log('then', error instanceof Error ? error.message : '?')
 }

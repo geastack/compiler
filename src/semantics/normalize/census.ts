@@ -192,8 +192,8 @@ export const isValueReference = (node: ts.Identifier | ts.PrivateIdentifier, pat
   // silently absorb it: the identifier gets no family, `citeExpressionResult`
   // reports the expression as unmodelled, and the whole module is blocked with
   // "expression of syntax kind Identifier has no normalized family". Every
-  // node-compat builtin ends in `export default <namespace object>`, so both
-  // `node:http` and `node:events` failed on exactly this line.
+  // host builtin module that ends in `export default <namespace object>`
+  // failed on exactly this line.
   if (ts.isExportAssignment(parent) && parent.expression === node) return true
   // In `const { a: b } = o`, `a` is the key read from `o` and `b` is the binding.
   // Only `b` is what `getNameOfDeclaration` reports, so `a` is excluded here.
@@ -556,8 +556,8 @@ const callerOf = (
     // `class-lifecycle.ts` correctly allocates no function object -- an
     // operation owned by a function that has no allocation, and ABI
     // projection refused the whole program ("no function-object allocation
-    // published a callable carrier"). `@hono/node-server`'s adapted
-    // `LightRequest` declares exactly such a field. The key's owner is
+    // published a callable carrier"). A class that declares an
+    // uninitialized function-typed field is exactly such a case. The key's owner is
     // whatever owns the class body, found by continuing the walk.
     if (ts.isPropertyDeclaration(current)) {
       if (current.initializer !== undefined && isWithin(node, current.initializer)) {
@@ -647,7 +647,7 @@ export const censusProgram = (
       // caller was the signature's own function id -- a function no
       // allocation ever publishes a carrier for -- and `projection/abi.ts`
       // refused the program at the signature with "no function-object
-      // allocation published a callable carrier" (node-compat's
+      // allocation published a callable carrier" (a host's
       // URLSearchParams `*[Symbol.iterator]` overload pair;
       // `test/runtime/class-symbol-iterator-generator-overload.ts`). A
       // named overload had no child that evaluates, which is why it never

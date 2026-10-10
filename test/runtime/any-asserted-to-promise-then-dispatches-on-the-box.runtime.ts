@@ -1,5 +1,5 @@
 // A value read out of an `any` cache and asserted to a promise, then chained:
-// hono's `HonoRequest#cachedBody` does
+// an HTTP framework's `AppRequest#cachedBody` does
 // `(bodyCache[anyCachedKey] as Promise<BodyInit>).then(...)`. The box holds a
 // `Promise<string>`, which is not the carrier the assertion names, so the
 // receiver is the boxed promise ADOPTED into that carrier -- the recipe an
@@ -13,7 +13,7 @@ type BodyCache = Record<string, any>
 const cache: BodyCache = {}
 cache['text'] = Promise.resolve('hello')
 
-// Unannotated, like hono's: one arm returns the cache's own `any`.
+// Unannotated, like the framework's: one arm returns the cache's own `any`.
 const reread = (key: string, fresh: boolean) => {
   if (fresh) return cache[key]
   return (cache[key] as Promise<string>).then((body) => body.toUpperCase())

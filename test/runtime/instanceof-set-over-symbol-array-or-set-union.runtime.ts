@@ -1,4 +1,4 @@
-// mongodb's `defineAspects` (src/operations/operation.ts:166) normalizes a
+// A database client's `defineAspects` normalizes a
 // `symbol | symbol[] | Set<symbol>` with `aspects instanceof Set`. A Set has
 // one physical carrier, so each union arm answers from its discriminant.
 const READ = Symbol('read')

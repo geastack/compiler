@@ -1,10 +1,10 @@
 // A SPREAD WHOSE SOURCE IS A CLASS REFERENCE THAT HOLDS `null`.
 //
 // `T | null` folds onto the bare class reference, whose empty handle is the
-// `null`, and CopyDataProperties copies nothing from it. mongodb's
-// `readPreference` option transform builds `{ ...options.readPreference,
+// `null`, and CopyDataProperties copies nothing from it. A database
+// client's `readPreference` option transform builds `{ ...options.readPreference,
 // ...value }` while `parseOptions` has not filled `readPreference` yet; the
-// copy read every member through the empty handle and crashed the MongoClient
+// copy read every member through the empty handle and crashed the client
 // constructor with a segmentation fault.
 
 class Preference {

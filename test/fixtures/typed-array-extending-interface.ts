@@ -1,7 +1,8 @@
 // An interface that EXTENDS a typed array must carry as that typed array.
 //
 // node declares `interface Buffer extends Uint8Array<ArrayBuffer>` and every
-// library built on it -- bson, the mongodb driver -- relies on both halves of
+// library built on it -- a binary-document serializer, a database client --
+// relies on both halves of
 // what TypeScript then says: a `Buffer` reaches `Uint8Array`'s own members, and
 // a `Buffer` is accepted wherever a `Uint8Array` is declared. A carrier that
 // answers only the second (or, as before, neither) makes `set`/`subarray`/

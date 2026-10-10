@@ -5,6 +5,7 @@ import { boxedValueText } from './emit-dynamic-properties.js'
 import type { DeclarationId, IrValueId } from '../../identity/ids.js'
 import type { AllocateArrayObjectOperation, CallOperation, ComputeOperation, IrBlockId, IrBody, IrOperand } from '../../ir/model.js'
 import {
+  atBlockExit,
   collectDefinitionSites,
   controlFlowGraphOf,
   dominatorTreeOf,
@@ -14,6 +15,7 @@ import {
   type NaturalLoop
 } from '../../ir/dominance.js'
 import { operandsOfIrOperation, resultOfIrOperation } from '../../ir/queries.js'
+import type { HoistPlan } from '../../ir/hoist.js'
 import { representationKey, type Representation } from '../../representation/model.js'
 import type { RecordToArrayPlan } from '../../conversion/structural-plan.js'
 import { admittedDenseLoopPlanOf, type DenseArray, type DenseReference } from '../../ir/dense-loops.js'
@@ -27,6 +29,7 @@ import {
   cppDenseLengthName,
   cppDensePointerName,
   cppDenseRowName,
+  cppDenseRowsName,
   createCppEmitBlockedError,
   defineValue,
   operandText,
@@ -50,7 +53,7 @@ import { arrayBulkAppendMethodName } from './prototype/emit-prototype-array.js'
  *
  * Every element of a literal renders as its own `push` statement, so a mesh
  * table of 87,210 doubles is 87,210 statements in one function body. Clang's
- * per-function passes are superlinear in statement count: `ios-metal-world-game`
+ * per-function passes are superlinear in statement count: one 3D game
  * carries four such tables -- 252,342 elements between them -- in a single
  * module body, which unrolled was 98% of a 256,880 line translation unit and
  * did not finish compiling in 105 minutes at 35.7 GB resident.
@@ -59,7 +62,7 @@ import { arrayBulkAppendMethodName } from './prototype/emit-prototype-array.js'
  * inline, and three of them read as what the source says. Past that nothing
  * folds and the statements are pure cost -- a twelve-entry month table
  * rebuilt on every call was twelve capacity checks and up to four
- * reallocations (`examples/apps/weather`), where the table is one `reserve`
+ * reallocations, where the table is one `reserve`
  * and one copy out of `.rodata`. So the table starts where a literal stops
  * being a handful, not at the size where the statement form stops compiling.
  */
@@ -114,7 +117,7 @@ export const isConstantExpression = (ctx: EmitContext, value: IrValueId, depth: 
  *
  * A source `-0.00981` is NOT a constant operation: it is unary minus over one,
  * and it renders `(-(0.00981))`. Two of every five elements of
- * `ios-metal-world-game`'s vertex tables are that shape, and reading only
+ * that game's vertex tables are that shape, and reading only
  * `constantTexts` refused all four tables on their account. So a folded unary
  * `-`/`+` over a constant expression is itself one, which `computeOrigins`
  * answers without any new bookkeeping.
@@ -168,7 +171,7 @@ const constantTableOf = (
  * only between two arithmetic scalars: `static_cast` is the explicit spelling
  * of the identical conversion, which is exactly what [dcl.init.list] accepts.
  *
- * Measured on `examples/bouncing-balls`: `Math.max(BALL_R * 2 + 1,
+ * The worked case: `Math.max(RADIUS * 2 + 1,
  * Math.floor(window.innerWidth()))` packs an integer-carrier `long long`
  * beside a `double`, and clang rejected both sites with
  * `-Wc++11-narrowing` on a program that certified, lowered and emitted
@@ -188,8 +191,8 @@ const packElementText = (ctx: EmitContext, element: Representation, elementType:
   // in a `long long` while its carrier still says `scalar(number)`, so asking
   // the carrier answers `double` for a variable that is not one -- and the
   // cast this rule exists to add is exactly the one that gets skipped.
-  // `examples/bouncing-balls` and `examples/gea3d-cube` both emitted a
-  // `long long` into a `{...}` of `double` and were rejected for it.
+  // A narrowed integer counter written into an array literal of `double`
+  // emitted a `long long` into a `{...}` of `double` and was rejected for it.
   if (storageTypeOf(ctx, value.value, held) === elementType) return text
   return `static_cast<${elementType}>(${text})`
 }
@@ -471,10 +474,10 @@ const capacityText = (ctx: EmitContext, capacity: CapacitySource): string => {
  * data.push(i)` grows the vector from empty: about `log2(n)` reallocations,
  * each copying everything written so far, so filling N elements moves ~2N of
  * them. The hand-written baselines this is measured against all open with
- * `reserve(n)` -- `array_read.cpp` is literally `data.reserve(it)` -- and the
+ * `reserve(n)` -- the array-read baseline is literally `data.reserve(it)` -- and the
  * previous implementation measured the same fill loop at 97 ms without the
  * hint and 38.7 ms with it, against a native 36.7 ms. It was the single
- * largest gap on the array fixtures and it is not a code-generation
+ * largest gap on array-heavy loops and it is not a code-generation
  * difference; it is a capacity the program states and the emitter was
  * throwing away.
  *
@@ -495,10 +498,20 @@ const capacityText = (ctx: EmitContext, capacity: CapacitySource): string => {
  * to be visible where the allocation renders -- an allocation that precedes
  * its own bound cannot name it.
  */
-export const collectCapacityHints = (ctx: EmitContext, prepass: EmitBodyPrepassFacts, body: IrBody): void => {
+export const collectCapacityHints = (ctx: EmitContext, prepass: EmitBodyPrepassFacts, body: IrBody, hoists: HoistPlan): void => {
   const graph = controlFlowGraphOf(body)
   const dominance = dominatorTreeOf(body)
-  const sites = collectDefinitionSites(body)
+  // A relocated operation renders at the END of its hoist destination (after
+  // that block's own statements), not where the IR placed it: a bound the
+  // hoister moved out of its loop is defined, and nameable, before that loop.
+  const hoistedInto = new Map<IrValueId, IrBlockId>()
+  for (const [block, operations] of hoists.into)
+    for (const operation of operations) {
+      const result = resultOfIrOperation(operation)
+      if (result !== null && hoists.relocated.has(result.id)) hoistedInto.set(result.id, block)
+    }
+  const sites = new Map(collectDefinitionSites(body))
+  for (const [value, block] of hoistedInto) sites.set(value, [{ block, position: atBlockExit }])
 
   const constants = new Map<IrValueId, string>()
   const numericConstants = new Map<IrValueId, string>()
@@ -533,7 +546,7 @@ export const collectCapacityHints = (ctx: EmitContext, prepass: EmitBodyPrepassF
         useBlocks.set(operand.value, where)
       }
       const produced = resultOfIrOperation(operation)
-      if (produced !== null) definitionBlocks.set(produced.id, blockId)
+      if (produced !== null) definitionBlocks.set(produced.id, hoistedInto.get(produced.id) ?? blockId)
     }
     block.operations.forEach((operation, index) => {
       if (operation.kind === 'constant') {
@@ -616,8 +629,8 @@ export const collectCapacityHints = (ctx: EmitContext, prepass: EmitBodyPrepassF
     // statement in the frame. Its seeding write is a formality that may render
     // anywhere, and requiring the ALLOCATION to follow it refused the bound of
     // every fill loop whose count is a parameter -- which is every one of them
-    // in `array_read.ts`, `array_write.ts` and `prime_sieve.ts`, the fixtures
-    // the hint exists for.
+    // in the array-read, array-write and prime-sieve loops the hint exists
+    // for.
     if (ctx.formalCells.has(declaration)) return { kind: 'binding', declaration }
     const written = bindingWrites.get(declaration) ?? []
     if (written.length === 0) return null
@@ -637,8 +650,8 @@ export const collectCapacityHints = (ctx: EmitContext, prepass: EmitBodyPrepassF
 
     /**
      * How many turns the loop runs, as far as a hint needs to know. A counter
-     * that starts anywhere but zero runs for `bound - start` turns: bson's
-     * `tryReadBasicLatin` loops `for (i = start; i < end; i++)` over a key at
+     * that starts anywhere but zero runs for `bound - start` turns: a decoder
+     * loop `for (i = start; i < end; i++)` over a key at
      * offset 120, and a hint of `end` reserved 960 bytes for the dozen it pushed
      * -- a heap allocation per key, freed again at once.
      */
@@ -757,9 +770,9 @@ interface FillFacts {
  * "an array of LIMIT+1 trues", and it gets what it asked for: ten million
  * calls, each a capacity test, a store and a size bump. C++ spells it
  * `std::vector<char>(LIMIT + 1, 1)` and gets a memset. Measured on
- * `bench/comparison/fixtures/prime_sieve.ts`, whose sieve is exactly this:
+ * a prime-sieve loop, whose sieve is exactly this:
  * 45.5ms as the loop, 36.9ms as one append -- against 36.4ms for the
- * hand-written C++, so the loop was the whole of that fixture's gap.
+ * hand-written C++, so the loop was the whole of that program's gap.
  *
  * Every condition is a way the rewrite could be OBSERVED:
  *  - the counter must advance by exactly one, exactly once, or the turn count
@@ -814,8 +827,11 @@ const collectFillLoop = (ctx: EmitContext, body: IrBody, loop: NaturalLoop, fact
   // A constant is the only value a fill may name that the loop itself defines:
   // its text is the whole of it, so the header can restate it. Anything else
   // has to be a name the header can already read.
+  // An invariant cell read the loop itself performs is not such a name: it is
+  // withheld to its use inside the body, which renders after the header.
   const literal = facts.literals.get(value.value) ?? null
-  if (literal === null && !invariantInLoop(value, loop, facts)) return null
+  const definedAt = facts.definitionBlocks.get(value.value)
+  if (literal === null && (definedAt === undefined || loop.blocks.has(definedAt))) return null
   const cell = facts.bindingReads.get(receiver.value)
   const array = cell === undefined ? null : denseCellName(ctx, cell)
   const counter = denseCellName(ctx, facts.counter)
@@ -983,7 +999,12 @@ export const admitDenseWindows = (ctx: EmitContext, prepass: EmitBodyPrepassFact
   const plan = body.denseLoopPlan
   if (plan === undefined) throw new Error(`body ${body.owner} has no certified dense-loop plan`)
   if (plan.arrays.length === 0) return
-  const admitted = admittedDenseLoopPlanOf(plan, ctx.integerValues, (declaration) => denseCellName(ctx, declaration) !== null)
+  const admitted = admittedDenseLoopPlanOf(
+    plan,
+    ctx.integerValues,
+    (declaration) => denseCellName(ctx, declaration) !== null,
+    ctx.hoistedResults
+  )
   for (const [operation, access] of admitted.accesses) prepass.denseAccesses.set(operation, access)
   for (const array of admitted.arrays) {
     prepass.denseArrays.push(array)
@@ -991,6 +1012,7 @@ export const admitDenseWindows = (ctx: EmitContext, prepass: EmitBodyPrepassFact
   }
   for (const [value, ordinal] of admitted.lengths) prepass.denseLengths.set(value, ordinal)
   for (const [ordinal, group] of admitted.groups) prepass.denseGroups.set(ordinal, group)
+  prepass.denseRegions.push(...admitted.regions)
 }
 
 /** An array named at the preheader has to be a value that materialized, not one whose text is substituted at each use. */
@@ -1035,6 +1057,7 @@ const denseHolderOf = (ctx: EmitContext, lines: string[], reference: DenseRefere
   ctx.declarations.push({ name: row, type: `gea::ArrayObject<${cppTypeOf(array.element)}>*` })
   const reachable = [
     ...holder.guard,
+    `${holder.text}->hasOrdinaryDenseStorage()`,
     `${holder.text}->holes.empty()`,
     `(${key}) >= 0`,
     `(${key}) < static_cast<${cppNarrowedIntegerType}>(${holder.text}->cells.size())`
@@ -1056,28 +1079,37 @@ const denseHolderOf = (ctx: EmitContext, lines: string[], reference: DenseRefere
  */
 export const emitDenseSetup = (ctx: EmitContext, lines: string[], blockId: IrBlockId): void => {
   const groups = [...ctx.denseGroups.values()].filter((group) => group.preheader === blockId)
-  if (groups.length === 0) return
+  const rows = ctx.denseArrays.filter((array) => array.rows !== undefined && array.preheader === blockId)
+  if (groups.length === 0 && rows.length === 0) return
   // Which arrays the windows STORE into. A store's integrity guard -- is the
   // array frozen -- is asked here, once, and folded into the flag, rather than
   // at every store: `ir/dense-loops.ts` admits a window only when nothing in
   // the loop can reach the array except the indexed accesses themselves, so
   // nothing in the loop can freeze it either. Asked per store, the guard's
   // cold half was a call the backend had to assume could write anything, which
-  // kept the counter load and the null test inside `matrix_multiply`'s inner
+  // kept the counter load and the null test inside a matrix multiply's inner
   // loop and the loop itself scalar: 27.4 ms against 4.7 for the same loop
   // hand-written.
   const stored = new Set<number>()
   for (const [operation, access] of ctx.denseAccesses) if (operation.kind !== 'get') stored.add(access.array)
   for (const group of groups) {
     const said: string[] = group.parent === null ? [] : [cppDenseFlagName(group.parent)]
+    const outlined = ctx.denseOutlined.get(group.ordinal)
+    const walked: DenseArray[] = []
     for (const array of ctx.denseArrays.filter((candidate) => candidate.group === group.ordinal)) {
+      // A row keyed by this loop's own counter is checked once per row, below,
+      // and taken at its own loop's preheader, behind this flag.
+      if (array.rows !== undefined) {
+        walked.push(array)
+        continue
+      }
       const holder = denseHolderOf(ctx, lines, array.reference, array)
       if (holder === null) continue
       const pointer = cppDensePointerName(array.ordinal)
       const cells = `${holder.text}->cells`
       const data = array.typed === null ? `${cells}.data()` : `${holder.text}->data()`
       const size = array.typed === null ? `${cells}.size()` : `${holder.text}->size()`
-      const shape = array.typed === null ? [`${holder.text}->holes.empty()`] : []
+      const shape = array.typed === null ? [`${holder.text}->hasOrdinaryDenseStorage()`, `${holder.text}->holes.empty()`] : []
       const writable =
         array.typed === null && stored.has(array.ordinal) && ctx.nativeIntegrityRestricted.arrays
           ? [`gea::nativeOwnFieldsWritable(${holder.text})`]
@@ -1111,28 +1143,120 @@ export const emitDenseSetup = (ctx: EmitContext, lines: string[], blockId: IrBlo
         }
         continue
       }
-      const seed = denseCellName(ctx, array.counter) ?? ''
-      const step = array.step === null ? '1' : operandText(ctx, array.step)
       // The holder's own guard comes FIRST, and the chain is short-circuiting:
       // a row that could not be reached is a null pointer, and nothing after
       // this may dereference it.
-      said.push(...holder.guard, ...shape, ...writable)
-      for (const offset of array.bases) {
-        const base =
-          offset === null
-            ? '0'
-            : offset.terms.length === 1 && !offset.terms[0]!.negated
-              ? operandText(ctx, offset.terms[0]!.operand)
-              : `(${offset.terms.map((term, at) => `${term.negated ? '-' : at === 0 ? '' : '+'} (${operandText(ctx, term.operand)})`).join(' ')})`
-        said.push(
-          `gea::denseIndexWindow(${size}, ${seed}, ${base}, ${operandText(ctx, array.bound)}, ${step}, ${array.inclusive}, ${array.widened})`
-        )
-      }
+      said.push(...holder.guard, ...shape, ...writable, ...denseWindowChecks(ctx, array, size))
+    }
+    for (const array of walked) said.push(denseRowsCheckText(ctx, lines, array, stored, outlined?.distinct ?? []))
+    // A restricted pointer is sound only while nothing else reaches its
+    // storage: every other window of its carrier must be another object.
+    for (const pair of outlined?.distinct ?? []) {
+      const other = ctx.denseArrays.find((candidate) => candidate.ordinal === pair.other)
+      const own = denseIdentityText(ctx, pair.restricted)
+      if (other?.rows !== undefined) continue
+      const theirs = denseIdentityText(ctx, pair.other)
+      const restrictedArray = ctx.denseArrays.find((candidate) => candidate.ordinal === pair.restricted)
+      const typed = restrictedArray !== undefined && restrictedArray.typed !== null
+      said.push(
+        own === null || theirs === null
+          ? 'false'
+          : typed
+            ? `gea::denseBytesDisjoint(${own}->data(), ${own}->size(), ${theirs}->data(), ${theirs}->size())`
+            : `gea::denseIdentity(${own}) != gea::denseIdentity(${theirs})`
+      )
     }
     const flag = cppDenseFlagName(group.ordinal)
     ctx.declarations.push({ name: flag, type: 'bool' })
     lines.push(`${flag} = ${said.length === 0 ? 'true' : said.join(' && ')};`)
+    // The holder's cells, once for the whole enclosing loop. Re-read at every
+    // inner preheader, that load sat between the stores of one turn and the
+    // next, and the backend kept every stored element in memory rather than
+    // in registers across the enclosing loop -- 60 ms against 50 for a matrix
+    // multiply over rows. Nothing in the loop can move them: folding admitted
+    // the window only where the holder is never written there.
+    for (const array of walked) {
+      if (array.reference.kind !== 'element') continue
+      const holder = denseHolderOf(ctx, lines, array.reference.holder, array)
+      const table = cppDenseRowsName(array.ordinal)
+      ctx.declarations.push({ name: table, type: `gea::ArrayObject<gea::Ref<gea::ArrayObject<${cppTypeOf(array.element)}>>>::Cell*` })
+      lines.push(`${table} = ${holder === null ? 'nullptr' : `${flag} ? gea::denseObject(${holder.text})->cells.data() : nullptr`};`)
+    }
   }
+  // A folded row's pointer, for this turn of the enclosing loop: its flag
+  // already walked every row the turn can name, so the row is read straight
+  // from the holder's cells -- no range test, no slow path, nothing the
+  // backend has to assume could write.
+  for (const array of rows) {
+    if (array.reference.kind !== 'element' || array.rows === undefined) continue
+    const row = cppDenseRowName(array.ordinal)
+    const pointer = cppDensePointerName(array.ordinal)
+    ctx.declarations.push(
+      { name: row, type: `gea::ArrayObject<${cppTypeOf(array.element)}>*` },
+      { name: pointer, type: `gea::ArrayObject<${cppTypeOf(array.element)}>::Cell*` }
+    )
+    // The key is a read of the enclosing counter, which the inner loop never
+    // writes; its cell is what the row check walked, so it is named directly.
+    const counter = denseCellName(ctx, array.rows.counter)
+    const key = counter === null ? null : `static_cast<${cppNarrowedIntegerType}>(${counter})`
+    lines.push(
+      `${row} = ${key === null ? 'nullptr' : `${cppDenseFlagName(array.group)} ? gea::denseRowAt(${cppDenseRowsName(array.ordinal)}, ${key}) : nullptr`};`,
+      `${pointer} = (${row} != nullptr) ? ${row}->cells.data() : nullptr;`
+    )
+  }
+}
+
+/** One window's index ranges, as the conditions its flag ands: every base the window's accesses add to its counter. */
+const denseWindowChecks = (ctx: EmitContext, array: DenseArray, size: string): readonly string[] => {
+  // A window folded into an enclosing loop's flag names its counter's entry
+  // value; the counter cell is not written yet where that flag is computed.
+  const seed = array.seed !== undefined ? operandText(ctx, array.seed) : (denseCellName(ctx, array.counter) ?? '')
+  const step = array.step === null ? '1' : operandText(ctx, array.step)
+  return array.bases.map((offset) => {
+    const base =
+      offset === null
+        ? '0'
+        : offset.terms.length === 1 && !offset.terms[0]!.negated
+          ? operandText(ctx, offset.terms[0]!.operand)
+          : `(${offset.terms.map((term, at) => `${term.negated ? '-' : at === 0 ? '' : '+'} (${operandText(ctx, term.operand)})`).join(' ')})`
+    return `gea::denseIndexWindow(${size}, ${seed}, ${base}, ${operandText(ctx, array.bound)}, ${step}, ${array.inclusive}, ${array.widened})`
+  })
+}
+
+/**
+ * A folded row window's check: every row the enclosing loop's counter can
+ * reach is present, ordinary, hole-free and long enough for the inner loop's
+ * indices -- and, inside an outlined region, not the restricted array itself.
+ */
+const denseRowsCheckText = (
+  ctx: EmitContext,
+  lines: string[],
+  array: DenseArray,
+  stored: ReadonlySet<number>,
+  distinct: readonly { readonly restricted: number; readonly other: number }[]
+): string => {
+  const range = array.rows
+  if (range === undefined || array.reference.kind !== 'element') return 'false'
+  const holder = denseHolderOf(ctx, lines, array.reference.holder, array)
+  const seed = denseCellName(ctx, range.counter)
+  if (holder === null || seed === null) return 'false'
+  const fits = [...denseWindowChecks(ctx, array, 'gea_row->cells.size()')]
+  if (stored.has(array.ordinal) && ctx.nativeIntegrityRestricted.arrays) fits.push('gea::nativeOwnFieldsWritable(gea_row)')
+  for (const pair of distinct) {
+    if (pair.other !== array.ordinal) continue
+    const own = denseIdentityText(ctx, pair.restricted)
+    fits.push(own === null ? 'false' : `gea_row != gea::denseIdentity(${own})`)
+  }
+  const step = range.step === null ? '1' : operandText(ctx, range.step)
+  return `gea::denseRowsWindow(${holder.text}, ${seed}, ${operandText(ctx, range.bound)}, ${step}, ${range.inclusive}, ${range.widened}, [&](gea::ArrayObject<${cppTypeOf(array.element)}>* gea_row) __attribute__((always_inline)) { return ${fits.length === 0 ? 'true' : fits.join(' && ')}; })`
+}
+
+/** The object a window's pointer was taken from, for an identity test: a cell or value as named, a row as the pointer its preheader took. */
+const denseIdentityText = (ctx: EmitContext, ordinal: number): string | null => {
+  const array = ctx.denseArrays.find((candidate) => candidate.ordinal === ordinal)
+  if (array === undefined) return null
+  if (array.reference.kind === 'element') return cppDenseRowName(array.ordinal)
+  return denseHolderOf(ctx, [], array.reference, array)?.text ?? null
 }
 
 /** The tuple conversion authority already chose every leaf; this only reads native fields and spells their recipes. */

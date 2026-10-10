@@ -1,5 +1,5 @@
 // An object literal passed to a split generic class's method whose parameter
-// is a mapped-and-intersected filter over the class's filling -- MongoDB's
+// is a mapped-and-intersected filter over the class's filling -- a database client's
 // `collection.deleteOne({ _id: id })` with `filter: Filter<TSchema> = {}`.
 // The literal takes the parameter's layout (a record with a string index),
 // not a record of its own that no conversion reaches.

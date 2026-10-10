@@ -9,11 +9,12 @@ import type {
   IrIteratorCloseRegion,
   IrOperand
 } from '../../ir/model.js'
-import { representationKey, type CallableAbi, type RecordField, type Representation } from '../../representation/model.js'
+import { representationKey, type CallableAbi, type RecordField, type Representation, type Ownership } from '../../representation/model.js'
 import { nativeEnumerationPlanOf, type NativeEnumerationPlan } from '../../ir/native-enumeration.js'
 import type { LazySplit } from '../../ir/lazy-splits.js'
 import { createCppEmitBlockedError, defineValue, operandText, paddedArguments, suspendsInPlace, type EmitContext } from './emit-context.js'
 import { receiverArgumentText } from './emit-callable.js'
+import { nativeCallReceiverText } from './emit-native-method.js'
 import { memberAccessOperator } from './emit-carrier-members.js'
 import {
   cppRecordFieldName,
@@ -30,6 +31,8 @@ import { recordAccessorsOfShape, recordFieldsOfShape } from './records.js'
 import { renderTryRegion, type RegionRendering } from './emit-exceptions.js'
 import { awaitTickText, awaitedText, coroutineAwaitStatements } from './prototype/emit-prototype-promise.js'
 import { accessorEnvironmentArguments } from './emit-properties.js'
+import type { NativeIteratorFieldRead } from '../../ir/native-iterator-field-views.js'
+import { nativeFieldViewReadForText } from './emit-native-field-view.js'
 
 /**
  * What `renderIteratorCloseRegion` needs from `emit.ts`, beyond ordinary
@@ -51,9 +54,8 @@ export type IteratorCloseRegionRendering = RegionRendering
  * suspension (`co_await`) inside a coroutine frame, and the blocking read only
  * in a module body's top level -- the one frame `gea::detail::waitForPromise`
  * admits (`suspendsInPlace`). Every `for await` step in a function body is the
- * former: a nested pump there is the mongodb driver's deadlock, where a timer
- * fired inside `readMany`'s pump started a loop the pump beneath it never
- * returned from.
+ * former: a nested pump there deadlocks, where a timer fired inside one pump
+ * started a loop the pump beneath it never returned from.
  */
 const settledPromiseText = (ctx: EmitContext, promise: string): string =>
   suspendsInPlace(ctx) ? `(co_await ${promise})` : `(${promise}).awaited()`
@@ -299,10 +301,9 @@ const emitCallableEnumerateIterator = (ctx: EmitContext, lines: string[], operat
  * cursor that path builds walks the array's ELEMENTS. For `number[]` both
  * cursors compile, so picking the wrong one is not a compile error -- it is a
  * program that yields `1, 2, 3` where the language yields `"0", "1", "2"`.
- * hono's regexp router is the call site (`for (const i in
- * indexReplacementMap)`, with its own comment saying it uses `in` precisely
- * because the array is SPARSE), and a values walk would have visited the holes
- * it is written to skip.
+ * A router that walks a replacement table with `for (const i in map)`
+ * precisely because the array is SPARSE is the call site, and a values walk
+ * would have visited the holes it is written to skip.
  *
  * The snapshot-plus-recheck shape is the one every other `for`-`in` source
  * here uses, and `gea::arrayOwnEnumerableKeys` was already written for
@@ -416,9 +417,8 @@ const emitDynamicGetIterator = (ctx: EmitContext, lines: string[], operation: Ge
 }
 
 /**
- * `for`-`of` over a sum of Arrays -- mongodb's `seeds: string[] |
- * HostAddress[]` once the Topology constructor has normalized a lone seed --
- * or of Arrays and Sets (`isSuperset`'s rebound `string[] | Set<string>`).
+ * `for`-`of` over a sum of Arrays -- a `string[] | Address[]` field once a
+ * constructor has normalized a lone element into an array -- or of Arrays and Sets (`isSuperset`'s rebound `string[] | Set<string>`).
  *
  * Whichever arm is live is an ordinary Array, so its walk is ECMA-262
  * 23.1.5's index/length cursor over exactly that array, re-reading the length
@@ -450,7 +450,7 @@ const emitSequenceSumIterator = (
     const carrier = arm.value
     const signature = `std::function<bool(std::size_t, ${elementType}&)>`
     if (carrier.kind === 'array-object' && carrier.ownership === 'shared-refcount') {
-      const read = `(gea_array->present(gea_position) ? gea_array->at(gea_position) : ${cppTypeOf(carrier.element)}{})`
+      const read = `(gea_array->present(gea_position) ? gea_array->readElement(gea_position) : ${cppTypeOf(carrier.element)}{})`
       return (
         `${cursorType}(${signature}([gea_array = gea_sum.template get<${index}>()]` +
         `(std::size_t gea_position, ${elementType}& gea_out) -> bool { ` +
@@ -820,7 +820,9 @@ export const emitGetIterator = (ctx: EmitContext, lines: string[], operation: Ge
 /** Invoke a protocol method with the iterator as its real ECMAScript receiver. */
 const iteratorMethodCallText = (ctx: EmitContext, callable: string, abi: CallableAbi, iterator: IrOperand, what: string): string => {
   const supplied = abi.receiver === null ? [] : [receiverArgumentText(ctx, abi, iterator)]
-  return `${callable}.call(${paddedArguments(abi, supplied, what).join(', ')})`
+  const argumentsText = paddedArguments(abi, supplied, what)
+  const logical = nativeCallReceiverText(iterator.representation, operandText(ctx, iterator))
+  return `${callable}.callWithReceiver(${logical}${argumentsText.length === 0 ? '' : `, ${argumentsText.join(', ')}`})`
 }
 
 /**
@@ -835,6 +837,72 @@ const iteratorGetterText = (ctx: EmitContext, key: string, getter: FunctionId, i
   const supplied = abi.receiver === null ? [] : [receiverArgumentText(ctx, abi, iterator)]
   const environment = accessorEnvironmentArguments(ctx, iterator.representation, key, getter, 'getter', operandText(ctx, iterator))
   return `${cppBodyName(getter)}(${[...environment, ...paddedArguments(abi, supplied, `${what} getter`)].join(', ')})`
+}
+
+const iteratorPlainFieldRead = (
+  ctx: EmitContext,
+  iterator: IrOperand,
+  carrier: Representation,
+  key: string,
+  receiverText: string
+): { readonly source: Representation; readonly text: string } | null => {
+  const field = iteratorRecordFieldsOf(ctx, carrier)?.find((entry) => entry.key === key)
+  if (field) {
+    const access = memberAccessOperator(ownershipOfIteratorRecord(carrier))
+    const stored = `${receiverText}${access}${cppRecordFieldName(field.key)}`
+    const absent = cppUndefinedIn(field.value)
+    return {
+      source: field.value,
+      text: field.required
+        ? stored
+        : absent === null
+          ? `([&]() -> ${cppTypeOf(field.value)} { if (!${receiverText}${access}${cppRecordFieldPresenceName(field.key)}) gea::host::throwRuntimeError("TypeError", "an absent protocol slot has no admitted undefined carrier"); return ${stored}; })()`
+          : `(${receiverText}${access}${cppRecordFieldPresenceName(field.key)} ? ${stored} : ${absent})`
+    }
+  }
+  const getter = iteratorRecordAccessorsOf(ctx, carrier)?.find((entry) => entry.key === key)?.getter
+  const abi = getter ? ctx.abiOfCallable(getter) : null
+  if (!getter || !abi) return null
+  const names = new Map(ctx.valueNames).set(iterator.value, receiverText)
+  const deferred = new Map(ctx.deferredTexts)
+  deferred.delete(iterator.value)
+  const pendingPacks = new Map(ctx.pendingPacks)
+  pendingPacks.delete(iterator.value)
+  return {
+    source: abi.result,
+    text: iteratorGetterText(
+      { ...ctx, valueNames: names, deferredTexts: deferred, pendingPacks },
+      key,
+      getter,
+      { ...iterator, representation: carrier },
+      'iterator native field'
+    )
+  }
+}
+
+/** Consume the certified internal Get; a live view never reads its inert public fields. */
+const iteratorFieldReadText = (ctx: EmitContext, iterator: IrOperand, receipt: NativeIteratorFieldRead): string =>
+  nativeFieldViewReadForText(ctx, iterator, receipt.value, receipt.read, (carrier) =>
+    iteratorPlainFieldRead(ctx, iterator, carrier, receipt.read.key, 'gea_field_receiver')
+  )
+
+const ownershipOfIteratorRecord = (carrier: Representation): Ownership => ('ownership' in carrier ? carrier.ownership : 'owned')
+
+/** IteratorRecord captures next once; later mutations affect return but cannot replace this saved method. */
+export const emitIteratorNextMethodCapture = (ctx: EmitContext, lines: string[], operation: GetIteratorOperation): void => {
+  const carrier = operation.result.representation
+  if (operation.protocol === 'enumerate' || (carrier.kind !== 'record' && carrier.kind !== 'native-record-ref')) return
+  const iterator = { value: operation.result.id, representation: carrier }
+  const plain = iteratorPlainFieldRead(ctx, iterator, carrier, 'next', operandText(ctx, iterator))
+  const receipt = operation.nativeNextMethodRead
+  if (!receipt && !plain)
+    throw createCppEmitBlockedError(`runtime-helper:protocol:iterator:next:${carrier.kind}`, 'GetIterator cannot capture its next method')
+  const target = receipt?.value ?? plain!.source
+  const text = receipt ? iteratorFieldReadText(ctx, iterator, receipt) : plain!.text
+  const name = `v${ctx.nextValueOrdinal++}`
+  ctx.declarations.push({ name, type: cppTypeOf(target) })
+  lines.push(`${name} = ${text};`)
+  ctx.protocolNextMethods.set(iterator.value, name)
 }
 
 /**
@@ -852,18 +920,10 @@ const emitUnionResultIteratorNext = (
   operation: IteratorNextOperation,
   iteratorRecord: Extract<Representation, { kind: 'record' | 'native-record-ref' }>,
   nextAbi: CallableAbi,
-  nextField: RecordField | undefined,
-  nextAccessor: { readonly key: string; readonly getter: FunctionId | null } | undefined,
   result: Extract<Representation, { kind: 'tagged-union' }>,
   awaits: boolean
 ): void => {
-  const receiverText = operandText(ctx, operation.iterator)
-  const receiverAccessor = memberAccessOperator(iteratorRecord.ownership)
-  const nextText = nextField
-    ? `${receiverText}${receiverAccessor}${cppRecordFieldName('next')}`
-    : nextAccessor?.getter
-      ? iteratorGetterText(ctx, nextAccessor.key, nextAccessor.getter, operation.iterator, 'iterator-next')
-      : null
+  const nextText = ctx.protocolNextMethods.get(operation.iterator.value) ?? null
   if (nextText === null)
     throw createCppEmitBlockedError(
       `runtime-helper:protocol:iterator:next:${iteratorRecord.kind}`,
@@ -948,17 +1008,7 @@ const emitDynamicIteratorNext = (
   // arm is live is the tag, and the read dispatches on it exactly as any
   // other union member read does.
   if (resultRepresentation.kind === 'tagged-union') {
-    emitUnionResultIteratorNext(
-      ctx,
-      lines,
-      operation,
-      iteratorRecord,
-      nextCallable.abi,
-      nextField,
-      nextAccessor,
-      resultRepresentation,
-      awaits
-    )
+    emitUnionResultIteratorNext(ctx, lines, operation, iteratorRecord, nextCallable.abi, resultRepresentation, awaits)
     return
   }
   if (
@@ -979,13 +1029,7 @@ const emitDynamicIteratorNext = (
       'calls a "next()" whose result record has no "value"/"done" field pair to read the iteration result out of'
     )
   }
-  const receiverText = operandText(ctx, operation.iterator)
-  const receiverAccessor = memberAccessOperator(iteratorRecord.ownership)
-  const nextText = nextField
-    ? `${receiverText}${receiverAccessor}${cppRecordFieldName('next')}`
-    : nextAccessor?.getter
-      ? iteratorGetterText(ctx, nextAccessor.key, nextAccessor.getter, operation.iterator, 'iterator-next')
-      : null
+  const nextText = ctx.protocolNextMethods.get(operation.iterator.value) ?? null
   if (nextText === null)
     throw createCppEmitBlockedError(
       `runtime-helper:protocol:iterator:next:${iteratorRecord.kind}`,
@@ -1271,7 +1315,11 @@ const staticallyObjectCloseResult = (representation: Representation): boolean =>
 }
 
 /** Statements implementing IteratorClose for either an admitted dynamic value or a concrete typed iterator record. */
-const iteratorCloseStatements = (ctx: EmitContext, iterator: IteratorCloseOperation['iterator']): readonly string[] => {
+const iteratorCloseStatements = (
+  ctx: EmitContext,
+  iterator: IteratorCloseOperation['iterator'],
+  nativeMethodRead?: NativeIteratorFieldRead
+): readonly string[] => {
   const representation = iterator.representation
   const receiver = operandText(ctx, iterator)
   if (representation.kind === 'dynamic') return [`gea::runtime::iterator::close(${receiver});`]
@@ -1315,13 +1363,14 @@ const iteratorCloseStatements = (ctx: EmitContext, iterator: IteratorCloseOperat
   const fields = iteratorRecordFieldsOf(ctx, representation)
   const returnField = fields?.find((field) => field.key === 'return')
   const returnAccessor = iteratorRecordAccessorsOf(ctx, representation)?.find((accessor) => accessor.key === 'return')
-  if (!returnField && !returnAccessor) return []
+  if (!returnField && !returnAccessor && !nativeMethodRead) return []
   // `Iterator<T>`'s own `return?(...)` is an OPTIONAL method, so the field's
   // carrier is `optional(function-value-dispatch)` for every hand-written
   // iterator object that omits it. The payload is the convention to call; the
   // optional is a second presence question, answered beside the field's own
   // presence bit below rather than refused.
-  const declared = returnField?.value ?? (returnAccessor?.getter ? ctx.abiOfCallable(returnAccessor.getter)?.result : null)
+  const declared =
+    nativeMethodRead?.value ?? returnField?.value ?? (returnAccessor?.getter ? ctx.abiOfCallable(returnAccessor.getter)?.result : null)
   const optionalReturn = declared?.kind === 'optional'
   const callable = declared?.kind === 'optional' ? declared.payload : declared
   if (!callable || callable.kind !== 'function-value-dispatch') {
@@ -1331,11 +1380,15 @@ const iteratorCloseStatements = (ctx: EmitContext, iterator: IteratorCloseOperat
     )
   }
   const access = memberAccessOperator(representation.ownership)
-  const method = returnField
-    ? `${optionalReturn ? `(*${receiver}${access}${cppRecordFieldName('return')})` : `${receiver}${access}${cppRecordFieldName('return')}`}`
-    : returnAccessor?.getter
-      ? iteratorGetterText(ctx, returnAccessor.key, returnAccessor.getter, iterator, 'iterator-close')
-      : null
+  const method = nativeMethodRead
+    ? optionalReturn
+      ? '(*gea_return_method)'
+      : 'gea_return_method'
+    : returnField
+      ? `${optionalReturn ? `(*${receiver}${access}${cppRecordFieldName('return')})` : `${receiver}${access}${cppRecordFieldName('return')}`}`
+      : returnAccessor?.getter
+        ? iteratorGetterText(ctx, returnAccessor.key, returnAccessor.getter, iterator, 'iterator-close')
+        : null
   if (method === null)
     throw createCppEmitBlockedError(
       `runtime-helper:protocol:iterator:close:${representation.kind}`,
@@ -1344,7 +1397,8 @@ const iteratorCloseStatements = (ctx: EmitContext, iterator: IteratorCloseOperat
   const called = iteratorMethodCallText(ctx, method, callable.abi, iterator, 'iterator return()')
   // An async iterator's `return()` answers a promise of the record, and
   // AsyncIteratorClose awaits it (7.4.13 step 5) before checking the record:
-  // mongodb's `onData.return()` resolves only once its listeners are gone.
+  // an event-stream iterator's `return()` resolves only once its listeners
+  // are gone.
   // Only async iteration reaches a promise here, for the reason
   // `emitDynamicIteratorNext` gives about `next`.
   const awaitsClose = callable.abi.result.kind === 'promise'
@@ -1356,6 +1410,10 @@ const iteratorCloseStatements = (ctx: EmitContext, iterator: IteratorCloseOperat
       : staticallyObjectCloseResult(result)
         ? `(void)(${call});`
         : `{ (void)(${call}); gea::runtime::iterator::throwNotIterable("iterator return method returned a non-object value"); }`
+  if (nativeMethodRead) {
+    const read = iteratorFieldReadText(ctx, iterator, nativeMethodRead)
+    return [`{ const auto gea_return_method = ${read}; ${optionalReturn ? `if (gea_return_method.has_value()) { ${invoke} }` : invoke} }`]
+  }
   if (!returnField) return [invoke]
   const guards = [
     ...(returnField.required ? [] : [`${receiver}${access}${cppRecordFieldPresenceName('return')}`]),
@@ -1368,9 +1426,10 @@ const iteratorCloseStatements = (ctx: EmitContext, iterator: IteratorCloseOperat
 const iteratorCloseWhileOpenStatements = (
   ctx: EmitContext,
   iterator: IteratorCloseOperation['iterator'],
-  onlyIfOpen: boolean
+  onlyIfOpen: boolean,
+  nativeMethodRead?: NativeIteratorFieldRead
 ): readonly string[] => {
-  const close = iteratorCloseStatements(ctx, iterator)
+  const close = iteratorCloseStatements(ctx, iterator, nativeMethodRead)
   if (!onlyIfOpen || close.length === 0) return close
   const representation = iterator.representation
   const condition =
@@ -1398,7 +1457,7 @@ const iteratorCloseWhileOpenStatements = (
 
 /** Direct IteratorClose; a close failure propagates when no throw completion is already pending. */
 export const emitIteratorClose = (ctx: EmitContext, lines: string[], operation: IteratorCloseOperation): void => {
-  lines.push(...iteratorCloseWhileOpenStatements(ctx, operation.iterator, operation.onlyIfOpen))
+  lines.push(...iteratorCloseWhileOpenStatements(ctx, operation.iterator, operation.onlyIfOpen, operation.nativeMethodRead))
 }
 
 /**
@@ -1466,7 +1525,7 @@ const renderSuspendingIteratorCloseRegion = (
   const nestedConsumed = new Set<IrBlockId>()
   const armed = `${guard}_armed`
   const thrown = `${guard}_thrown`
-  const close = iteratorCloseStatements(ctx, region.iterator).join(' ')
+  const close = iteratorCloseStatements(ctx, region.iterator, region.nativeMethodRead).join(' ')
   const closeNow = `if (${armed}) { ${armed} = false; ${close} }`
   const splitEntry =
     region.bodyEntry !== null &&
@@ -1593,7 +1652,7 @@ export const renderIteratorCloseRegion = (
   if (closeSuspends(ctx, region.iterator)) return renderSuspendingIteratorCloseRegion(ctx, lines, body, region, rendering, order, guard)
   lines.push(`${rendering.labelOf(rendering.labels, region.entry)}:`)
   lines.push('{')
-  const close = iteratorCloseWhileOpenStatements(ctx, region.iterator, region.onlyIfOpen)
+  const close = iteratorCloseWhileOpenStatements(ctx, region.iterator, region.onlyIfOpen, region.nativeMethodRead)
   lines.push(`gea::runtime::iterator::CompletionGuard ${guard}{[&]() { ${close.join(' ')} }};`)
   // Which half of the region a throw came from. 14.7.5.7 closes for a throw
   // out of the BODY and not for one out of the step -- see

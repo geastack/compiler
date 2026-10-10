@@ -2,7 +2,7 @@
 //! expect: done
 //! expect: wrote:b
 //! expect: done
-// `@hono/node-server` listener.ts: `responseViaCache` is declared
+// An HTTP server adapter's listener: `responseViaCache` is declared
 // `Promise<undefined | void>` and both its callers `return` its promise from
 // an async function whose own inferred result is `Promise<void>`. The two
 // payloads are the same run-time value -- ECMAScript fulfils a `void` promise

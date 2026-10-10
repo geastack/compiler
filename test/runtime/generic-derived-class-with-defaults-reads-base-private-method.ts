@@ -1,5 +1,5 @@
-// hono's `class Hono<E = BlankEnv, S = BlankSchema, P = '/'> extends
-// HonoBase<E, S, P>` constructed bare (`new Hono()`): a GENERIC derived class
+// An HTTP framework's `class App<E = BlankEnv, S = BlankSchema, P = '/'> extends
+// AppBase<E, S, P>` constructed bare (`new App()`): a GENERIC derived class
 // whose parameters all default. The `evaluate-heritage` event the census
 // records for it must be the one the class's allocation lowering finds, or
 // the derived evaluation allocates a method-state owner with no parent and

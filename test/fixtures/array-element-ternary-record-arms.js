@@ -1,4 +1,4 @@
-// The exact shape of three.js's `WebGLTextures.uploadCubeTexture` as the
+// The exact shape of a 3D library's cube-texture upload as the
 // native-webgl-angle plugin rewrites it: an empty array literal is filled by
 // index assignment inside a fixed loop from two different writes -- a typed
 // helper call, and a ternary whose two arms are two record shapes (a

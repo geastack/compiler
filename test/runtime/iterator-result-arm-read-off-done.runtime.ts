@@ -7,7 +7,7 @@
 // before its first element; picking the yield arm reported a finished
 // iterator as still running.
 //
-// The async half is mongodb's `onData` shape stored where `Connection`
+// The async half is a database client's `onData` shape stored where `Connection`
 // keeps it: `dataEvents: AsyncGenerator<Buffer, void, void> | null`.
 function onData(chunks: Uint8Array[]) {
   let finished = false

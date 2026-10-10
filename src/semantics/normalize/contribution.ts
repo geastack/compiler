@@ -83,10 +83,10 @@ const danglingCitation = (entry: PreparedCandidate, published: ReadonlySet<Seman
  * rather than as a derived consequence. A withheld value is a value the citing
  * operation then does without; a withheld call is a call the source performs and
  * the program does not, while still emitting -- the operands stay materialised
- * and the emitter renders them as `(void)` discards. Three's
- * `materials.refreshFogUniforms( m_uniforms, fog )` was dropped exactly this way
- * for want of a `dictionary -> native-record-ref` argument conversion, so
- * The three.js app rendered with no fog at all and nothing in the report said so:
+ * and the emitter renders them as `(void)` discards. A call like
+ * `materials.refreshUniforms( uniforms, settings )` was dropped exactly this way
+ * for want of a `dictionary -> native-record-ref` argument conversion, so the
+ * program silently skipped that effect and nothing in the report said so:
  * `diagnostics/sweep.ts` grades every `withheld:` reason `derived`, and the
  * coverage report filters those out by default. Naming the dropped call keeps
  * the guard fail-closed -- a missing conversion stays a compile-time answer

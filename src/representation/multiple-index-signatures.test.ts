@@ -3,10 +3,12 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, readdirSync, unlinkSync } from 'node:fs'
 import { delimiter, join, resolve } from 'node:path'
 import test from 'node:test'
+import { createConversionNodes } from '../conversion/nodes.js'
 import type { SemanticResultId, StructuralTypeId } from '../identity/ids.js'
 import type { CallOperation, IrOperand } from '../ir/model.js'
 import { createStructuralTypeTable } from '../semantics/model/structural-type-table.js'
 import type { EmitContext } from '../targets/cpp/emit-context.js'
+import { createCppConversionRegistry } from '../targets/cpp/conversions.js'
 import { cppRecordDeclarations } from '../targets/cpp/records.js'
 import { cppRecordStructName, cppTypeOf } from '../targets/cpp/types.js'
 import { createRepresentationDeriver } from './derive.js'
@@ -35,7 +37,7 @@ const emptyReactivePlan = {
   revisions: new Map(),
   celled: new Map(),
   boundRecordFields: new Map(),
-      revisionBoundRecordFields: new Map()
+  revisionBoundRecordFields: new Map()
 }
 
 const multiIndexShape = (value: StructuralTypeId, symbolValue: StructuralTypeId = value) => ({
@@ -113,7 +115,27 @@ test('compatible string+number indexes canonicalize while symbols retain identit
   assert.ok(carrier.indexes.every((index) => index.value.kind === 'string'))
   assert.deepEqual(verifyRepresentationPlan(planOf(carrier)), [])
 
-  const rendered = cppRecordDeclarations(planOf(carrier), deriver, new Map(), emptyReactivePlan, new Map())
+  const rendered = cppRecordDeclarations(
+    planOf(carrier),
+    deriver,
+    new Map(),
+    emptyReactivePlan,
+    new Map(),
+    undefined,
+    undefined,
+    new Map(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => null
+  )
   assert.deepEqual(rendered.refused, [])
   const declarations = rendered.declarations.join('\n')
   assert.match(declarations, /gea::Dictionary<std::string> gea_dynamic;/)
@@ -293,7 +315,27 @@ test('number indexes use canonical PropertyKey text without NaN ordering', () =>
   const recordDeriver = createRepresentationDeriver(recordTable.seal())
   const recordCarrier = recordDeriver.derive(recordShape)
   assert.equal(recordCarrier.kind, 'record-with-index')
-  const rendered = cppRecordDeclarations(planOf(recordCarrier), recordDeriver, new Map(), emptyReactivePlan, new Map())
+  const rendered = cppRecordDeclarations(
+    planOf(recordCarrier),
+    recordDeriver,
+    new Map(),
+    emptyReactivePlan,
+    new Map(),
+    undefined,
+    undefined,
+    new Map(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => null
+  )
   assert.deepEqual(rendered.refused, [])
   const declarations = rendered.declarations.join('\n')
   assert.match(declarations, /gea::NumericDictionary<std::string>/)
@@ -375,7 +417,27 @@ test('symbol storage may use a different native value carrier from the text doma
       ['symbol', 'number']
     ]
   )
-  const rendered = cppRecordDeclarations(planOf(carrier), deriver, new Map(), emptyReactivePlan, new Map())
+  const rendered = cppRecordDeclarations(
+    planOf(carrier),
+    deriver,
+    new Map(),
+    emptyReactivePlan,
+    new Map(),
+    undefined,
+    undefined,
+    new Map(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => null
+  )
   assert.deepEqual(rendered.refused, [])
   const checked = spawnSync(
     process.env.CXX ?? 'clang++',
@@ -473,7 +535,14 @@ test('Reflect emitter accepts runtime string, number, and symbol keys through un
     symbol: { value: 'symbol-key', representation: { kind: 'symbol' } } as unknown as IrOperand
   }
   const written = { value: 'written', representation: string } as unknown as IrOperand
+  const conversions = createConversionNodes({ registry: createCppConversionRegistry(), nodes: new Map() })
+  const payload = conversions.nodeFor(string, { kind: 'dynamic', reason: 'declared-any-never-narrowed' })
+  assert.notEqual(payload.capability.kind, 'never')
   const ctx = {
+    conversions,
+    conversionIsCertified: (id: string) => id === payload.id,
+    printerDrift: [],
+    owner: 'native-reflect-test',
     constantTexts: new Map(),
     staticKeyTexts: new Map(),
     valueNames: new Map([
@@ -540,7 +609,27 @@ test('native indexed writes convert optional union payloads into fixed slots wit
   const numericArm = input.payload.arms.findIndex((arm) => arm.value.kind === 'scalar')
   const textArm = input.payload.arms.findIndex((arm) => arm.value.kind === 'string')
   assert.ok(numericArm >= 0 && textArm >= 0)
-  const rendered = cppRecordDeclarations(planOf(carrier), deriver, new Map(), emptyReactivePlan, new Map())
+  const rendered = cppRecordDeclarations(
+    planOf(carrier),
+    deriver,
+    new Map(),
+    emptyReactivePlan,
+    new Map(),
+    undefined,
+    undefined,
+    new Map(),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => null
+  )
   assert.deepEqual(rendered.refused, [])
   const generated = rendered.declarations.join('\n')
   assert.match(

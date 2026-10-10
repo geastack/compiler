@@ -1,6 +1,6 @@
 // Copying only the PRESENT options through a `const` tuple of literal keys,
 // `if (options[name] != null) result[name] = options[name]`, must leave every
-// absent key absent. mongodb's `parseConnectOptions` does exactly this over
+// absent key absent. A database client's `parseConnectOptions` does exactly this over
 // `LEGAL_TCP_SOCKET_OPTIONS`; a `lookup` that came out present made node's
 // socket connect take the custom-lookup path.
 type Lookup = (host: string, cb: (err: Error | null, address: string) => void) => void

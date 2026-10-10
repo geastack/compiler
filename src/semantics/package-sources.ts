@@ -61,9 +61,8 @@ export const createPackageSourceHost = (host: ts.ModuleResolutionHost = ts.sys, 
   /**
    * The host a package's tsconfig is parsed through. A monorepo package
    * commonly `extends` a SIBLING workspace package by name --
-   * `@mongodb-js/saslprep`'s tsconfig is one line, `extends:
-   * "@mongodb-js/tsconfig-devtools/tsconfig.common.json"`, and that shared
-   * config is where `outDir` and `include` live. An installed workspace links
+   * a tsconfig of one line, `extends: "@scope/tsconfig/tsconfig.common.json"`,
+   * where that shared config is where `outDir` and `include` live. An installed workspace links
    * the sibling into `node_modules`; a source checkout is never installed, so
    * the extends failed, the parse returned no outDir/rootDir, and nothing
    * mapped `dist/` back to `src/`. The workspace root's own `workspaces` field

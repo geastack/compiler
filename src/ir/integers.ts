@@ -13,12 +13,11 @@ import { operandsOfIrOperation } from './queries.js'
  * observationally neutral while the two agree -- which they do exactly while
  * the value is an integer whose magnitude stays under 2^53. Above that a
  * double starts rounding and an integer does not, so the two computations
- * diverge, and the program's own answer changes. The benchmark fixtures are
- * built around precisely that: `loop_overhead` accumulates `total += i` past
- * 2^53 on purpose and its hand-written baseline keeps `total` a double to
- * reproduce node's rounded sum, and `factorial`'s `acc * i` leaves the exact
- * range within nine million iterations, which is why ITS baseline carries a
- * `p < 2^53` guard. A narrowing that reads only "is this an integer" turns
+ * diverge, and the program's own answer changes. Ordinary numeric loops hit
+ * precisely that: a counting loop that accumulates `total += i` past 2^53
+ * must keep `total` a double to reproduce node's rounded sum, and a running
+ * product's `acc * i` leaves the exact range within nine million iterations,
+ * which is why a hand-written equivalent carries a `p < 2^53` guard. A narrowing that reads only "is this an integer" turns
  * both of those into silently different programs.
  *
  * So each value carries how big it can get:
@@ -75,7 +74,7 @@ export interface IntegerNarrowing {
    * Narrower than `values`, and deliberately: a remainder is bounded by its
    * divisor, so a `%` in `values` is one this body can hold in a `long long`
    * outright. This is the case one step short of that -- `acc = (acc * i) % MOD`
-   * in `factorial.ts`, whose dividend runs past 2^53 and must stay a `double` --
+   * in a modular running product, whose dividend runs past 2^53 and must stay a `double` --
    * where the DIVISION is still an integer one. What it buys is skipping the
    * round trip `gea::remainder` pays to discover at run time what this already
    * knows: two conversions, two equality checks and a range test, on the
@@ -296,8 +295,8 @@ const exactIntegerLimit = 9007199254740992
  * that answers in finite time runs. At 2^23 that is exactly 2^30 turns; at
  * 2^33 it would be 2^20, which a loop really can run, so the cap is not a
  * formality. It admits `checksum += data[i]` over elements bounded by a
- * million (`bench/comparison/fixtures/array_write.ts`) and still refuses
- * `factorial`'s `acc * i`, which grows by a billion a turn.
+ * million (an array-write-then-sum loop) and still refuses a running
+ * product's `acc * i`, which grows by a billion a turn.
  */
 const linearCoefficientCap = 1 << 23
 
@@ -312,7 +311,7 @@ const linearCoefficientCap = 1 << 23
  * can take the rounded double answer ECMA-262 gives and go on being carried --
  * the carrier diverges from the Number only past 2^63, where the helper stops
  * the program by name. What this admits is the byte offset: a cursor advanced
- * by int32 lengths read out of the buffer (`index += size` in bson's
+ * by int32 lengths read out of the buffer (`index += size` in a binary
  * deserializer) grows by 2^32 a turn, far over the exact cap and well under
  * this one.
  */

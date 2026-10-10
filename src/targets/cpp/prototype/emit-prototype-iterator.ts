@@ -1,3 +1,5 @@
+import { iteratorPrototypeMethods } from '../../../representation/prototype-domains.js'
+export { iteratorPrototypeMethods } from '../../../representation/prototype-domains.js'
 import type { CallOperation, IrOperand } from '../../../ir/model.js'
 import { thrownValueCarrier } from '../../../ir/lower-exceptions.js'
 import type { RecordField, Representation } from '../../../representation/model.js'
@@ -48,7 +50,6 @@ import { cppRecordFieldName, cppRecordFieldPresenceName, cppRecordStructName, cp
  * has no storage to read or fill, and the read/call that needs one refuses
  * here instead.
  */
-export const iteratorPrototypeMethods: ReadonlySet<string> = new Set(['next', 'return', 'throw'])
 
 type RecordArm = Extract<Representation, { kind: 'record' | 'native-record-ref' }>
 
@@ -126,7 +127,7 @@ const iteratorResultText = (
   // record (ECMA-262 27.6.1): the same record, settled, and a step that throws
   // -- `throw(e)` the body does not catch, or a hand-written iterator's own
   // rejected `next()` -- is that promise's rejection rather than a synchronous
-  // throw. `Connection.dataEvents?.throw(error).then(undefined, squashError)`.
+  // throw. `this.events?.throw(error).then(undefined, ignoreError)`.
   if (result.representation.kind === 'promise' && result.representation.value.kind === 'tagged-union') {
     const promiseType = cppTypeOf(result.representation)
     const settled = iteratorResultText(ctx, receiverText, carrier, { ...result, representation: result.representation.value }, stepText)
@@ -427,7 +428,7 @@ const abruptCallText = (
  * same two records `iteratorResultArmsText` builds for the synchronous
  * cursor, read off the settled `AsyncIteratorResult`'s fields. A rejected
  * step stays a rejection: `then` forwards it untouched, so
- * `Connection.dataEvents?.throw(error).then(undefined, squashError)` sees it.
+ * `this.events?.throw(error).then(undefined, ignoreError)` sees it.
  */
 const asyncGeneratorCallText = (
   ctx: EmitContext,

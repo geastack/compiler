@@ -1,7 +1,7 @@
 // `for await` closes its iterator on an abrupt exit (ECMA-262 14.7.5.7
 // AsyncIteratorClose), exactly as `for`-`of` does: a `break` or `return` out
 // of the loop calls the generator's `return()`, which runs its `finally`.
-// mongodb's `readMany` returns out of `for await (... of this.dataEvents)`
+// A database client's `readMany` returns out of `for await (... of this.dataEvents)`
 // and relies on that call to remove `onData`'s socket listeners.
 async function* numbers(): AsyncGenerator<number> {
   try {

@@ -1,5 +1,5 @@
 // `Set<Doc>.has(value)` for a value held as `any` is an identity
-// question: bson's serializer asks `path.has(value)` of every nested value. A
+// question: a binary-document serializer asks `path.has(value)` of every nested value. A
 // member is a native record / class instance / array registered under its own
 // identity; a non-member must answer false without minting a view, and an
 // object whose membership ended must answer false again.

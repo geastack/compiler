@@ -1,9 +1,12 @@
 //! expect: picked=30
 //! expect: summed=60
-//! emitted-has: elementAtIndex(
+//! emitted-has: readElementAtIndex(
 //! emitted-lacks: ->elementAt(
+//! emitted-lacks: ->readElementAt(
 // An array indexed by a `long long` -- a narrowed loop counter, a narrowed
-// formal, a cell stepped from one -- reads through `elementAtIndex`, never
+// formal, a cell stepped from one -- reads through `readElementAtIndex` (the
+// by-value read that also answers a live or descriptor-backed array, with
+// `elementAtIndex`'s dense fast path inline), never
 // through `elementAt(double)` and a round trip through floating point
 // (`emit-context.ts`'s `isIntegerStorageValue`).
 const pick = (values: number[], at: number): number => {

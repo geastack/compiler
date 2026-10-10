@@ -8,11 +8,10 @@ import { mentionsTypeParameter } from './return-bindings.js'
 /**
  * ONE ARRAY, ONE CARRIER, WHATEVER NAME READS IT.
  *
- * mongodb's bulk writer allocates every batch as `Batch<Document>` and pushes
- * update statements into it as documents; a type predicate then re-reads a
- * batch as `Batch<UpdateStatement>`, and `new UpdateOperation(ns,
- * batch.operations, options)` stores that array in `statements:
- * UpdateStatement[]`. JavaScript has one array here: a later push through the
+ * A batching writer that allocates every batch as `Batch<Document>` and
+ * pushes update statements into it as documents; a type predicate then
+ * re-reads a batch as `Batch<Update>`, and `new UpdateOperation(ns,
+ * batch.operations, options)` stores that array in `statements: Update[]`. JavaScript has one array here: a later push through the
  * batch is visible through the operation. The checker has two element types for
  * it, so the layout had two C++ arrays -- `Batch.operations` holds Documents,
  * `UpdateOperation.statements` holds records -- and the only bridge between
@@ -114,8 +113,8 @@ export const withSharedArrayStorage = (
    *
    * This asks which values can reach a constructor's parameters, which is a
    * question about construction sites, not about where the class value goes:
-   * mongodb hands every operation class to `defineAspects`, which stamps it and
-   * never constructs it, and an escape proof has to refuse that. The whole
+   * a library that hands every class to a decorator-like `defineAspects(C)`,
+   * which stamps it and never constructs it, is the case, and an escape proof has to refuse that. The whole
    * reachable program is walked, so the one way to construct a class that went
    * elsewhere is a `new` through another name (or `Reflect.construct`).
    *
@@ -186,7 +185,7 @@ export const withSharedArrayStorage = (
     if (types.size !== 1 || !allocated) return null
     // A construction inside a generic body names an open instantiation, which
     // is no one storage type -- also when the parameter sits inside a filling:
-    // mongodb's `new FindCursor<WithId<TSchema>>()` in `Collection<TSchema>`.
+    // `new Cursor<WithId<T>>()` inside a `Collection<T>` method.
     const open = checker.getTypeArguments(allocated as ts.TypeReference).some((argument) => mentionsTypeParameter(argument))
     return open ? null : allocated
   }

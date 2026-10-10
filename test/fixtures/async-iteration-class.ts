@@ -1,5 +1,5 @@
 // `for await (const x of source)` over a class whose `[Symbol.asyncIterator]`
-// is an `async function*`. mongodb's `AbstractCursor` is exactly this shape,
+// is an `async function*`. a database client's abstract cursor is exactly this shape,
 // and every `for await` over one refused: the async generator's `yield` was
 // refused by name, `iteration-yield.ts` looked up only `__@iterator` so the
 // element type came back unresolved, `mintIteratorSteps` left the async

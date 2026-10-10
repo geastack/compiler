@@ -41,16 +41,7 @@ export const nativeRecordBaseTransportKind = (source: Representation, target: Re
   return null
 }
 
-/**
- * The promise an instance of a class extending the intrinsic `Promise` IS
- * (`class-ref.nativeBase`), or `null`. The struct derives from the runtime
- * promise in place, so viewing it as that promise shares the one state its
- * resolving functions settle. A family redeclaring `then`/`catch`/`finally`
- * (`nativeBaseOverridden`) is not viewable: every native settlement would skip
- * the override.
- */
-export const nativePromiseBaseOf = (source: Representation): Extract<Representation, { kind: 'promise' }> | null =>
-  source.kind === 'class-ref' && source.nativeBase?.kind === 'promise' && source.nativeBaseOverridden !== true ? source.nativeBase : null
+export { nativePromiseBaseOf } from '../../representation/promise-resolution.js'
 
 /**
  * A single-class constructor family stored into a family that also names that

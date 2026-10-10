@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -62,7 +63,7 @@ for (const [name, input] of [
       'clang++',
       [
         '-std=c++20',
-        '-O1',
+        ...nativeOptimization('correctness'),
         '-fsanitize=address,undefined',
         `-I${resolve(root, 'src/targets/cpp/runtime')}`,
         '-x',

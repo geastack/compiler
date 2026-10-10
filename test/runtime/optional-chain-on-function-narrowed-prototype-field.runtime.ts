@@ -1,6 +1,6 @@
 //! expect: hasGlobalBuffer:false
 
-// bson's byte_utils:
+// A binary-document serializer's byte utilities:
 //   declare const Buffer: { new (): unknown; prototype?: { _isBuffer?: boolean } } | undefined
 //   const hasGlobalBuffer = typeof Buffer === 'function' && Buffer.prototype?._isBuffer !== true
 // `typeof x === 'function'` narrows to `X & Function`, and lib.es5.d.ts types

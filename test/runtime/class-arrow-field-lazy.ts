@@ -282,7 +282,7 @@ void runAsyncDirectCall()
 
 // A DIRECT CALL whose ARGUMENT is built by its own effectful operation
 // BETWEEN the field's read and the call -- an object literal, exactly
-// `c.json({ hello: 'world' })`'s shape in node-compat's hono-hello -- forces
+// `c.json({ hello: 'world' })`'s shape in an HTTP framework's hello server -- forces
 // the GET to render as its OWN statement rather than deferred/withheld into
 // the call (`ir/deferral.ts` never defers a read across an `allocate-record`).
 // `class-layout.ts`'s `lazyCalleeReadsOf` still proves this GET's one reader
@@ -295,12 +295,12 @@ void runAsyncDirectCall()
 // materializing render would alias and assign through) never appears in the
 // emitted program at all.
 //! emitted-lacks: gea_lazy_receiver->respond
-class HonoShapeContext {
+class AppShapeContext {
   respond = (payload: { message: string }): string => `sent:${payload.message}`
 }
-const honoShapeContext = new HonoShapeContext()
-//! expect: sent:hello-hono
-console.log(honoShapeContext.respond({ message: 'hello-hono' }))
+const appShapeContext = new AppShapeContext()
+//! expect: sent:hello-app
+console.log(appShapeContext.respond({ message: 'hello-app' }))
 
 // ECMA-262 evaluates a call's callee reference BEFORE its arguments (12.3.4.1,
 // 13.3.7.2): `obj.f(obj.f = other, ...)` must still invoke the ORIGINAL
@@ -330,12 +330,12 @@ console.log(reassignDuringArgumentWidget.greetWith('after'))
 // `describeRef` far above. The snapshot then copies THAT materialized value,
 // and the fusion's `else` branch calls through the copy -- proving the
 // snapshot is not "only correct while unmaterialized".
-class AlreadyMaterializedHonoShapeContext {
+class AlreadyMaterializedAppShapeContext {
   reply = (payload: { message: string }): string => `sent:${payload.message}`
 }
-const alreadyMaterializedHonoShapeContext = new AlreadyMaterializedHonoShapeContext()
-const alreadyMaterializedReplyRef = alreadyMaterializedHonoShapeContext.reply
+const alreadyMaterializedAppShapeContext = new AlreadyMaterializedAppShapeContext()
+const alreadyMaterializedReplyRef = alreadyMaterializedAppShapeContext.reply
 //! expect: sent:already-materialized
-console.log(alreadyMaterializedHonoShapeContext.reply({ message: 'already-materialized' }))
+console.log(alreadyMaterializedAppShapeContext.reply({ message: 'already-materialized' }))
 //! expect: sent:via-ref
 console.log(alreadyMaterializedReplyRef({ message: 'via-ref' }))

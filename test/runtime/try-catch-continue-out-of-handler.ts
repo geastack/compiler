@@ -1,5 +1,5 @@
-// A `continue` written INSIDE a catch handler, which hono's
-// `SmartRouter.match` uses to skip a router that rejected the route set.
+// A `continue` written INSIDE a catch handler, which an HTTP
+// framework's composite router `match` uses to skip a router that rejected the route set.
 //
 // The jump leaves the handler for the enclosing loop's latch, and that latch
 // used to be swept into the handler's own block set by a plain reachability

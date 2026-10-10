@@ -1,7 +1,7 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import { execFile } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -29,7 +29,12 @@ const units = [
 ]
 
 const root = resolve(import.meta.dirname, '..')
-const output = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'native-runtime-units-'))
+const nativeJobs = Number(process.env.GEA_TEST_NATIVE_JOBS ?? '2')
+if (!Number.isInteger(nativeJobs) || nativeJobs < 1) {
+  throw new Error('GEA_TEST_NATIVE_JOBS must be a positive integer')
+}
+const output = resolve(root, 'measurements/cxx-native-runtime-units')
+mkdirSync(output, { recursive: true })
 const run = promisify(execFile)
 const failures = []
 
@@ -40,7 +45,7 @@ const check = async (name) => {
       process.env.CXX || 'clang++',
       [
         '-std=c++20',
-        '-O1',
+        ...nativeOptimization('correctness'),
         '-g',
         '-fsanitize=address,undefined',
         `-I${resolve(root, 'src/targets/cpp/runtime')}`,
@@ -61,11 +66,10 @@ const check = async (name) => {
 // A few at a time: each is one translation unit over the 37k-line runtime header.
 const queue = [...units]
 await Promise.all(
-  Array.from({ length: 4 }, async () => {
+  Array.from({ length: nativeJobs }, async () => {
     for (let name = queue.shift(); name !== undefined; name = queue.shift()) await check(name)
   })
 )
-rmSync(output, { recursive: true, force: true })
 if (failures.length > 0) {
   console.error(`${failures.length} native runtime unit(s) failed: ${failures.join(', ')}`)
   process.exit(1)

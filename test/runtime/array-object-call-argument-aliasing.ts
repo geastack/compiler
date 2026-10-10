@@ -1,19 +1,19 @@
 // @ts-nocheck
-// Minimal reproduction of the three.js `WebGLPrograms.getProgramCacheKey`
-// aliasing miscompile (`src/targets/cpp/emit-narrowing.ts`'s
+// Minimal reproduction of a 3D scene-graph library's shader-program
+// cache-key builder's aliasing miscompile (`src/targets/cpp/emit-narrowing.ts`'s
 // `arrayObjectElementRecastText`, ~line 2803).
 //
-// `getProgramCacheKey` builds a LOCAL array with `var array = []`, pushes a
+// The cache-key builder makes a LOCAL array with `var array = []`, pushes a
 // few elements directly, then hands `array` BY REFERENCE into helper
-// functions (`getProgramCacheKeyParameters`, `getProgramCacheKeyBooleans`)
+// functions (one for the parameters, one for the booleans)
 // that push more elements onto it, and finally reads back `array.join()`.
 // On the real app, the census resolves the two sides of that call
 // differently:
 //   - the CALLER's `array` cell (`local-bindings.ts:1194`'s
 //     `collections.arrayElementForRead`, backed by `collection-bindings.ts`'s
 //     alias-closure array-element census) refuses `array-element-unresolved`
-//     because ONE pushed element -- `parameters.fogExp2 = (!!fog &&
-//     fog.isFogExp2)`, off an untyped `fog` -- cannot be typed, so the WHOLE
+//     because ONE pushed element -- `parameters.denseFog = (!!fog &&
+//     fog.isDense)`, off an untyped `fog` -- cannot be typed, so the WHOLE
 //     cell defaults to `array-object(dynamic)`.
 //   - each callee's `array` PARAMETER is bound independently by
 //     `parameter-bindings.ts` (which has no `collections.*` reference
@@ -37,7 +37,7 @@
 // shape `arrayObjectElementRecastText` matches on, reached the short way.
 // `array`'s OWN cell still gets to `dynamic` exactly the way the real
 // program's does: one push (`JSON.parse(bad)`, standing in for
-// `!!fog && fog.isFogExp2`) that `argumentType`
+// `!!fog && fog.isDense`) that `argumentType`
 // (`collection-bindings.ts:479`) cannot type, so the WHOLE owner refuses
 // `array-element-unresolved` (confirmed via `result.refusals` on this file).
 //
@@ -53,7 +53,7 @@
 //     `parameterOverrideAt`, so the ABI and the body's binding read one
 //     carrier), so a parameter the collection census put in a REFUSED alias
 //     component carries the same box the caller's cell does. That is what the
-//     live three.js site needed: `getProgramCacheKeyParameters`/`Booleans`
+//     live library site needed: its two helpers
 //     state nothing about their `array` parameter.
 //  2. `fill`'s parameter here DOES state its element, so part 1 deliberately
 //     leaves it alone -- the caller's box is not permission to overrule a
@@ -76,5 +76,10 @@ function make(bad: string) {
   return array.join()
 }
 
+// The refusal was correct until a non-allocating answer existed: the
+// argument is now a live native entry view (`makeNativeEntryArrayView`) over
+// the caller's own `ArrayObject<Value>`, so every push lands in the caller's
+// array -- what node prints, and what the copy got wrong.
 console.log(make('1'))
-//! expect-refusal: no runtime conversion is installed from array-object(dynamic
+//! expect: 1,x,1,true
+//! emitted-has: makeNativeEntryArrayView

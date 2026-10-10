@@ -1,6 +1,6 @@
-// The MongoDB driver's `Encrypter.getInternalClient` (`encrypter.ts:77`):
+// A database client's encryption wrapper re-registering listeners on its internal client:
 //
-//   for (const eventName of MONGO_CLIENT_EVENTS)
+//   for (const eventName of CLIENT_EVENTS)
 //     for (const listener of client.listeners(eventName)) internalClient.on(eventName, listener)
 //
 // `eventName` is the union of every event key, so `listeners(eventName)` is
@@ -91,12 +91,12 @@ for (const eventName of CLIENT_EVENTS) {
   }
 }
 
-inner.emit('opened', 27017)
-inner.emit('named', 'mongo')
+inner.emit('opened', 8080)
+inner.emit('named', 'server')
 inner.emit('closed')
 inner.removeListener('opened', onOpened)
 console.log(inner.count('opened'), inner.count('named'))
-//! expect: opened 27017
-//! expect: named mongo
+//! expect: opened 8080
+//! expect: named server
 //! expect: closed
 //! expect: 0 1

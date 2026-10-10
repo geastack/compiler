@@ -3,8 +3,8 @@
 // ECMAScript has one calling convention: a call binds arguments to positions
 // and packs whatever is left into the rest. So `(base?: string, sub?: string,
 // ...rest: string[]) => string` and `(...paths: string[]) => string` are the
-// same function, and TypeScript accepts the first as the second -- hono's
-// `utils/url.ts` declares exactly that pair on one `const`. C++ sees two
+// same function, and TypeScript accepts the first as the second -- an HTTP
+// framework's URL utilities declare exactly that pair on one `const`. C++ sees two
 // unrelated function types, one taking a single array and one taking two
 // optionals and an array, so the store needs a thunk.
 //

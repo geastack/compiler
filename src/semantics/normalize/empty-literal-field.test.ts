@@ -12,7 +12,7 @@ import { censusParameterBindings } from './parameter-bindings.js'
 import { wholeProgram } from './reachability.js'
 
 /**
- * three's `/** @type {Object} *\/ this.userData = {};`: a JS checker reads the
+ * A JS library's `/** @type {Object} *\/ this.userData = {};`: a JS checker reads the
  * `Object` annotation as `any`, and the empty literal's own type `{}` is the
  * vacuous annotation shape, so the field census heard silence from the only
  * write the field ever gets and left every class's `userData` boxed.

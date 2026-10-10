@@ -3,23 +3,27 @@
 //! expect: /value
 //! expect: 7 true true
 //! expect: true 8 true true
-//! emitted-has: gea::callableDynamicGet
-//! emitted-has: __gea_sidecar_value
+//! emitted-has: gea::callableNativeDataSetWithReceiver
+//! emitted-lacks: gea::callableDynamicGet
+// The typed own properties are native data on the function identity at their
+// declared storage (`callableNativeDataSetWithReceiver`); the boxed
+// `callableDynamicGet` / `__gea_sidecar_value` sidecar this asserted before
+// held them as `gea::Value`.
 
 // This is a compatible callable/object intersection: the callable's native
 // ABI remains intact while its ordinary own properties use its identity-owned
 // sidecar. Incompatible overload sets are intentionally exercised as a
 // fail-closed source test in test/strict-overloads.mjs, not here as a
 // successful runtime program.
-interface AjvError {
+interface SchemaError {
   readonly instancePath: string
 }
 
-type AjvValidator = ((value: unknown) => boolean) & {
-  errors?: readonly AjvError[] | null
+type SchemaValidator = ((value: unknown) => boolean) & {
+  errors?: readonly SchemaError[] | null
 }
 
-const validate = ((value: unknown) => typeof value === 'string') as AjvValidator
+const validate = ((value: unknown) => typeof value === 'string') as SchemaValidator
 console.log(validate('value'), validate.errors === undefined)
 validate.errors = null
 console.log(validate.errors === null)

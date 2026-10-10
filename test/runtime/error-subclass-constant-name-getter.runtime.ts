@@ -1,32 +1,32 @@
-// The MongoDB driver names its errors with constant getters rather than by
-// assigning `this.name`: `override get name(): string { return 'MongoError' }`
+// A database client names its errors with constant getters rather than by
+// assigning `this.name`: `override get name(): string { return 'ServiceError' }`
 // on the root and again on every subclass. Held where the slot is typed
 // `Error`, the instance is read through the intrinsic Error layout, so the
 // name that layout stores must be the most-derived getter's answer.
-class MongoError extends Error {
+class ServiceError extends Error {
   constructor(message: string) {
     super(message)
   }
   override get name(): string {
-    return 'MongoError'
+    return 'ServiceError'
   }
 }
 
-class MongoNetworkError extends MongoError {
+class NetworkError extends ServiceError {
   override get name(): string {
-    return 'MongoNetworkError'
+    return 'NetworkError'
   }
 }
 
-class MongoNetworkTimeoutError extends MongoNetworkError {}
+class NetworkTimeoutError extends NetworkError {}
 
 function describe(error: Error): string {
   return `${error.name}:${error.message}`
 }
 
-const errors: Error[] = [new MongoError('a'), new MongoNetworkError('b'), new MongoNetworkTimeoutError('c'), new Error('d')]
+const errors: Error[] = [new ServiceError('a'), new NetworkError('b'), new NetworkTimeoutError('c'), new Error('d')]
 console.log(errors.map(describe).join(' '))
-const timeout = new MongoNetworkTimeoutError('e')
-console.log(timeout.name, String(timeout), timeout instanceof MongoNetworkError)
-//! expect: MongoError:a MongoNetworkError:b MongoNetworkError:c Error:d
-//! expect: MongoNetworkError MongoNetworkError: e true
+const timeout = new NetworkTimeoutError('e')
+console.log(timeout.name, String(timeout), timeout instanceof NetworkError)
+//! expect: ServiceError:a NetworkError:b NetworkError:c Error:d
+//! expect: NetworkError NetworkError: e true

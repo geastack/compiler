@@ -1,5 +1,5 @@
-// ECMA-262 20.1.2.7 Object.fromEntries drains any iterable of entries. The
-// mongodb driver builds `Object.fromEntries(indexes.map(({ name, key }) =>
+// ECMA-262 20.1.2.7 Object.fromEntries drains any iterable of entries. A
+// database client builds `Object.fromEntries(indexes.map(({ name, key }) =>
 // [name, ...]))` from an Array of pairs and `Object.fromEntries(map.entries())`
 // from a Map iterator.
 

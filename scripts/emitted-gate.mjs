@@ -296,5 +296,5 @@ if (failed) {
       '  2. a regression -- you have just found it, before the suite did\n' +
       'Once (1) is established, re-take the baselines with `npm run gate -- --write` IN THE SAME COMMIT.\n'
   )
-  process.exit(1)
+  process.exitCode = 1
 }

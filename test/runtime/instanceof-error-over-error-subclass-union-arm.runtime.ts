@@ -1,8 +1,8 @@
 // `x instanceof Error` WHERE ONE ARM OF `x` IS A CLASS EXTENDING Error.
 //
-// mongodb's `MongoBulkWriteError` constructor takes
-// `{ message; code } | WriteConcernError | AnyError` (`AnyError = MongoError |
-// Error`) and asks `!(error instanceof Error)`. The `MongoError` arm is a
+// A database client's `BulkWriteError` constructor takes
+// `{ message; code } | WriteConcernError | AnyError` (`AnyError = ServiceError |
+// Error`) and asks `!(error instanceof Error)`. The `ServiceError` arm is a
 // class whose chain links the native Error, so its instance IS an Error
 // allocation: the answer is read from that native base, not settled `false`.
 

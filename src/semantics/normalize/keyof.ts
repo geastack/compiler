@@ -91,9 +91,9 @@ export const createKeyofResolver = (table: StructuralTypeTable): ((id: Structura
         //
         // This used to be refused outright. The refusal was honest about the
         // risk (a silently narrow key domain) but it is not narrow to state the
-        // domain the language states, and mongodb's `Document` -- an index
-        // signature with no declared members -- put it behind 78 of the probe's
-        // mandatory obligations.
+        // domain the language states, and a `Document` type -- an index
+        // signature with no declared members -- put it behind dozens of a
+        // program's mandatory obligations.
         const indexed = (key: 'string' | 'number' | 'symbol'): boolean => shape.index.some((one) => one.key === key && !one.finite)
         const primitive = (name: 'string' | 'number' | 'symbol'): StructuralTypeId => table.intern({ kind: 'primitive', primitive: name })
         const domain: StructuralTypeId[] = []

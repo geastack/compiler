@@ -109,7 +109,7 @@ test('a method slot cannot be replaced through a sibling or entered through a lo
     `A.prototype.m = ${sink};`,
     `Object.getPrototypeOf(a).m = ${sink};`,
     'Object.assign(A.prototype, { m(x) { globalThis.unknownConsumer(x); } });',
-    // A function-constructor family (three's old `EventDispatcher` mixins):
+    // A function-constructor family (the older prototype-mixin pattern):
     // nothing here can name its overrides, so it refuses outright.
     `function E() {} Object.assign(E.prototype, { m(x) { console.log(x === null); } });
       function G() {} Object.assign(G.prototype, E.prototype, { m: ${sink} });
@@ -202,7 +202,7 @@ test('a native class-typed slot refuses an unrelated instance or a look-alike re
 })
 
 test('a value used only as a closed native map key stays closed; a map that yields keys does not', () => {
-  // Three's `WebGLObjects.update`: `updateMap.get( object ) !== frame`, then
+  // A per-frame cache: `updateMap.get( object ) !== frame`, then
   // `updateMap.set( object, frame )` -- the drawable is only ever a key.
   const setup = 'const seen = new WeakMap(); if (seen.get(held) !== 1) seen.set(held, 1); console.log(seen.has(held));'
   const control = infer(setup)
@@ -216,8 +216,8 @@ test('a value used only as a closed native map key stays closed; a map that yiel
 })
 
 test('an argument to a member call on a receiver that is only ever nullish is never handed over', () => {
-  // Three's `let _nodesHandler = null`, assigned only by a `setNodesHandler`
-  // nothing calls, then `_nodesHandler.renderStart( scene, camera )`.
+  // A `let _handler = null`, assigned only by a `setHandler`
+  // nothing calls, then `_handler.renderStart( a, b )`.
   const setters = 'let handler = null; function setHandler(h) { handler = h; }'
   const cases: readonly (readonly [string, string])[] = [
     [`${setters} if (handler !== null) handler.consume(held);`, 'setHandler({ consume: (x) => globalThis.unknownConsumer(x) });'],
@@ -238,13 +238,36 @@ test('an argument to a member call on a receiver that is only ever nullish is ne
     assert.ok(refused(infer(open).type), open)
 })
 
-// Three's `EventDispatcher.dispatchEvent`: `array[ i ].call( this, event )`.
+test('an argument to a member call on an element of an array that never holds anything is never handed over', () => {
+  // A factory with `let _effects = []`, filled only through
+  // `setEffects( effects )`, which the renderer forwards as
+  // `output.setEffects( effects || [] )` and nothing calls; then
+  // `_effects[ i ].render( renderer, ... )`. Arrows keep `infer`'s observed
+  // callback the renderer's own `draw`.
+  const output =
+    'function Output() { let effects = []; this.setEffects = (list) => { effects = list; }; ' +
+    'this.end = (renderer) => { for (let i = 0; i < effects.length; i++) { const effect = effects[i]; effect.render(renderer); } }; } ' +
+    'const output = new Output(); function setEffects(list) { output.setEffects(list || []); } output.end(held);'
+  const control = infer(output)
+  assert.ok(!refused(control.type), `control: ${output}\n${control.debug}`)
+  for (const escape of [
+    'setEffects([{ render: (x) => globalThis.unknownConsumer(x) }]);',
+    'output.setEffects([{ render: (x) => globalThis.unknownConsumer(x) }]);',
+    'setEffects(globalThis.effects);'
+  ])
+    assert.ok(refused(infer(`${output} ${escape}`).type), escape)
+  const pushed = 'const list = []; for (let i = 0; i < list.length; i++) list[i].render(held);'
+  assert.ok(!refused(infer(pushed).type), pushed)
+  assert.ok(refused(infer(`${pushed} list.push({ render: (x) => globalThis.unknownConsumer(x) });`).type), 'push')
+})
+
+// An event dispatcher's `dispatchEvent`: `array[ i ].call( this, event )`.
 const listenerSetup =
   'function listener(event) { console.log(this === null, event); } const listeners = [listener]; for (let i = 0; i < listeners.length; i++) listeners[i].call(held, i);'
 // `callableArrayTargetsOf` closes an element read of the listener array as a
 // direct callee (`listeners[ i ]( event )`), a delete, a store -- and as the
-// receiver of the intrinsic `.call`, which is the spelling three actually
-// uses. So the frame resolves here rather than refusing.
+// receiver of the intrinsic `.call`, which is the spelling such dispatchers actually
+// use. So the frame resolves here rather than refusing.
 test('a receiver handed to array-held listeners as this is followed into each listener', () => {
   const control = infer(listenerSetup)
   assert.ok(!refused(control.type), control.debug)

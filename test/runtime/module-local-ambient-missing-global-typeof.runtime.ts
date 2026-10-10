@@ -5,7 +5,7 @@
 //! expect: function:undefined
 //! emitted-lacks: Deno;
 
-// mongodb's `client_metadata.ts` declares `Deno` module-local, for a global
+// A database client's metadata module declares `Deno` module-local, for a global
 // that exists only on Deno. The declaration emits nothing in JavaScript, so on
 // any other host the name is an unresolvable reference: `typeof` answers
 // 'undefined' (ECMA-262 13.5.1.2) and a bare read throws ReferenceError. Never

@@ -38,6 +38,7 @@ import { atomicsCallSupport } from '../../targets/cpp/host/atomics.js'
 import { regexpRoleOf } from '../../targets/cpp/prototype/emit-prototype-regexp.js'
 import { isNativeError } from '../../targets/cpp/error-types.js'
 import { nativeRecordIndexHasPropertyOf } from '../native-record-index-transport.js'
+import { constantPropertyKeyTextOf } from '../native-property-key-texts.js'
 import { instanceReparentVerdictOf, isObjectSetPrototypeOfCall, reparentReadsOfDefinitions } from '../instance-reparenting.js'
 import type { CapabilityDemand, CertifyContext } from '../certify.js'
 import type {
@@ -91,11 +92,8 @@ import type {
 // Shared IR-level key helpers
 // ---------------------------------------------------------------------------
 
-/** The constant text a property-access key operand states, or `null` for a genuinely computed one. A key is a raw role: its representation is never converted, so this is the whole of what the old builders' `keyIsComputed`/`source.kind === 'constant'` pair asked. */
-const constantKeyTextOf = (ctx: CertifyContext, key: IrOperand): string | null => {
-  const definition = ctx.definitionOf(key.value)
-  return definition?.kind === 'constant' ? definition.text : null
-}
+/** The canonical property key a key operand's constant states, or `null` for a genuinely computed one. */
+const constantKeyTextOf = (ctx: CertifyContext, key: IrOperand): string | null => constantPropertyKeyTextOf(ctx.definitionOf(key.value))
 
 /** Property-access keys are always constant-folded to a `literal: 'string'` text at normalize time (`producers/properties.ts`'s `keyOf`), so "computed" is exactly "not a constant". */
 const isComputedKey = (ctx: CertifyContext, key: IrOperand): boolean => ctx.definitionOf(key.value)?.kind !== 'constant'
@@ -162,9 +160,9 @@ const deleteNamesRecordExpandoKey = (representation: Representation, keyText: st
   // A generated native record (`native-record-ref` with no host layout) keeps
   // the same identity-keyed expando table a plain record does
   // (`nativeSidecarReceiver`), and its layout is equally closed: a key none of
-  // its fields names can only live there. mongodb's `FindOperation` narrows an
-  // inherited option to `writeConcern?: never`, which leaves no field, and
-  // then `delete this.options.writeConcern`.
+  // its fields names can only live there. A subclass narrowing an inherited
+  // option to `concern?: never`, which leaves no field, and then running
+  // `delete this.options.concern` is the case.
   if (representation.kind !== 'record' && (representation.kind !== 'native-record-ref' || representation.native !== null)) return false
   if (representation.kind === 'native-record-ref' && representation.ownership !== 'shared-refcount') return false
   const fields = generatedFieldsOf(representation, deriver)
@@ -557,7 +555,7 @@ const hasPropertyRuntimeHelperKey = (operation: HasPropertyOperation, ctx: Certi
   // kind, and for a symbol it answers COMPLETELY whenever the layout declares
   // no symbol-keyed slot of its own -- see `symbolKeyedMemberIsDeclared` for
   // why the two key spaces make that a proof rather than a guess. Without this
-  // row `@hono/node-server`'s three symbol `in` tests fell through to
+  // row a library's symbol-keyed `in` tests fell through to
   // `record(unproven)`, whose whole meaning is "absence is not provable", even
   // though presence AND absence are both provable here.
   if (key === null && keyForm === 'symbol' && generatedSharedObjectCarrier(payload)) {

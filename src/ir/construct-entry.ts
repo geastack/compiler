@@ -29,6 +29,7 @@ export const classConstructorBodyMatches = (layout: ClassLayout, body: IrBody): 
     construct !== null &&
     construct.receiver === null &&
     abi.restFrom === construct.restFrom &&
+    abi.argumentsFrame === construct.argumentsFrame &&
     abi.parameters.length === construct.parameters.length &&
     abi.parameters.every((parameter, index) => representationKey(parameter.value) === representationKey(construct.parameters[index]!.value))
   )

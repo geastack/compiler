@@ -13,17 +13,25 @@ export const classPrototypeMethodValueArmsOf = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   receiver: DeclarationId,
   key: string
-): readonly { readonly allocation: DeclarationId; readonly method: (ClassMethod & { readonly callable: FunctionId }) | null }[] | null => {
-  const arms: { allocation: DeclarationId; method: (ClassMethod & { callable: FunctionId }) | null }[] = []
+):
+  | readonly {
+      readonly allocation: DeclarationId
+      readonly method: (ClassMethod & { readonly callable: FunctionId }) | null
+      /** The class that declares `method`; `null` exactly when `method` is. */
+      readonly owner: DeclarationId | null
+    }[]
+  | null => {
+  const arms: { allocation: DeclarationId; method: (ClassMethod & { callable: FunctionId }) | null; owner: DeclarationId | null }[] = []
   for (const [allocation, layout] of classes) {
     if (allocation !== receiver && !extendsClass(classes, allocation, receiver)) continue
+    if (layout.uninstantiable === true || layout.allocationAbsent === true) continue
     if (layout.nativeBase !== null) return null
     const site = classMemberOf(classes, allocation, key)
     // Absence belongs to the language's undefined result. An accessor is an
     // invocation, not a method value, and must keep its separate proof path.
-    if (site === null) arms.push({ allocation, method: null })
+    if (site === null) arms.push({ allocation, method: null, owner: null })
     else if (site.kind === 'method' && site.method.callable !== null)
-      arms.push({ allocation, method: { ...site.method, callable: site.method.callable } })
+      arms.push({ allocation, method: { ...site.method, callable: site.method.callable }, owner: site.owner })
     else return null
   }
   return arms.length === 0 ? null : arms
@@ -56,10 +64,32 @@ export const classMethodValueArmsOf = (
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   receiver: DeclarationId,
   key: string
-): readonly { readonly allocation: DeclarationId; readonly method: ClassMethod & { readonly callable: FunctionId } }[] | null => {
+):
+  | readonly {
+      readonly allocation: DeclarationId
+      readonly method: ClassMethod & { readonly callable: FunctionId }
+      /** The class that declares `method`, whose struct holds its method state. */
+      readonly owner: DeclarationId
+    }[]
+  | null => {
   const arms = classPrototypeMethodValueArmsOf(classes, receiver, key)
-  if (arms === null || arms.some((arm) => arm.method === null)) return null
-  return arms.map((arm) => ({ allocation: arm.allocation, method: arm.method! }))
+  if (arms === null || arms.some((arm) => arm.method === null || arm.owner === null)) return null
+  return arms.map((arm) => ({ allocation: arm.allocation, method: arm.method!, owner: arm.owner! }))
+}
+
+/** A declared method frame does not supply an executable body. A bodyless
+ * method read needs the existing complete allocation/prototype selection,
+ * including a callable on every normal allocation. One unused override does
+ * not provide a method for an instance of its base.
+ */
+export const classMethodFamilyHasNativeBody = (
+  classes: ReadonlyMap<DeclarationId, ClassLayout>,
+  receiver: DeclarationId,
+  key: string
+): boolean => {
+  const site = classMemberOf(classes, receiver, key)
+  if (site?.kind !== 'method' || site.method.callable !== null) return true
+  return classMethodValueArmsOf(classes, receiver, key) !== null
 }
 
 /**
@@ -110,6 +140,20 @@ export const extendsClass = (
   }
   return false
 }
+
+/** Whether any class in `receiver`'s family can have an instance: the
+ * allocation census (`allocationAbsent`) and the uninstantiable-class proof
+ * both say no for every member, a read through the family's class-ref has no
+ * normal execution. Certification and the emitter's trap for a bodyless
+ * method read ask this one question so they cannot disagree.
+ */
+export const classFamilyMayAllocate = (classes: ReadonlyMap<DeclarationId, ClassLayout>, receiver: DeclarationId): boolean =>
+  [...classes].some(
+    ([allocation, layout]) =>
+      (allocation === receiver || extendsClass(classes, allocation, receiver)) &&
+      layout.uninstantiable !== true &&
+      layout.allocationAbsent !== true
+  )
 
 /**
  * Every class BELOW `declaration` that redeclares `key`, nearest first.
@@ -214,9 +258,8 @@ export interface VirtualMethodFamily {
   readonly copyAbsentFrom?: readonly DeclarationId[]
   /**
    * The derived classes whose own DATA FIELD implements an accessor family:
-   * `abstract get clearServerSelectionTimeout(): boolean` on mongodb's
-   * `TimeoutContext`, answered by `clearServerSelectionTimeout: boolean` in
-   * `LegacyTimeoutContext`/`CSOTTimeoutContext`. The field is an own property
+   * `abstract get clearTimeout(): boolean` on a base context class, answered
+   * by a `clearTimeout: boolean` data field in each concrete subclass. The field is an own property
    * of every such instance and shadows the prototype accessor, so a read (or
    * write) through the root must reach it -- without an override here the
    * slot fell through to the abstract root's stub and aborted.
@@ -382,6 +425,7 @@ export const methodCopyHeldBy = <M extends { readonly callable: FunctionId | nul
 
 const conventionFits = (body: CallableAbi, held: CallableAbi): boolean =>
   body.restFrom === held.restFrom &&
+  body.argumentsFrame === held.argumentsFrame &&
   body.parameters.length === held.parameters.length &&
   body.parameters.every((parameter, index) => representationKey(parameter.value) === representationKey(held.parameters[index]!.value)) &&
   resultArmsFit(body.result, held.result)
@@ -409,8 +453,8 @@ const resultArmsFit = (body: Representation, held: Representation): boolean => {
  *
  * `specialization.ts` compiles `get<const T>(name, as: T): JSTypeOf[T]` once
  * per instantiation, and every class in the family publishes its copies under
- * the one key -- mongodb's `OnDemandDocument.get<T>` overridden by
- * `MongoDBResponse.get<T>`, read at `'object'` and at `'timestamp'`. Treated as
+ * the one key -- a document class's `get<T>` overridden by a subclass's
+ * `get<T>`, read at `'object'` and at `'timestamp'`. Treated as
  * one family, the `timestamp` copy's `Timestamp | null` result had to convert
  * into the `object` copy's slot, and the whole key was refused. Each copy is
  * its own overridable member: the base's `T = 'object'` body is overridden by
@@ -461,11 +505,10 @@ const virtualCopyFamiliesOf = (
  *
  * `Operation<TResult>.handleOk` is one body per class copy, and `Count extends
  * Command<number>` overrides the `number` copy only: it states `(reply) =>
- * number`, and a `RunCursorCommand` under `RunCommand<Document>` states
+ * number`, and a `CursorCommand` under `Command<Document>` states
  * `(reply) => CursorReply` for the `Document` copy. Taken as one family, every
  * override had to convert into ONE root convention -- a number into a document
- * -- and the whole key was refused (mongodb's `AbstractOperation.handleOk`,
- * `CommandOperation.buildCommandDocument`). An override's convention need not
+ * -- and the whole key was refused. An override's convention need not
  * equal its copy's, only convert to it, which the verdict checks as for any
  * family. A copy of the root whose body is dead (`dead-method-copies.ts`) is
  * the family's bodyless root, exactly as an abstract one is; copies whose
@@ -531,10 +574,10 @@ const classCopyFamiliesOf = (
     statedBy.set(convention, { abi, borrowed: own === undefined && (previous?.borrowed ?? true) })
   }
   // A bodyless root copy whose every override leaves out trailing parameters
-  // (mongodb's `FindOperation.buildCommandDocument()` against the abstract
+  // (a `buildCommand()` override against the abstract
   // `(connection, session?)`) borrowed a convention NO call site holds: a
   // read's held convention is the checker's signature of the DECLARATION, so
-  // `this.buildCommandDocument(connection, session)` looks up the wider one --
+  // `this.buildCommand(connection, session)` looks up the wider one --
   // the sibling copy's, with the same result -- and dispatched every override
   // of the narrow copy to that copy's abstract stub. Such a borrowed
   // convention is folded into the one wider convention it is a parameter
@@ -544,6 +587,7 @@ const classCopyFamiliesOf = (
   // `narrow` is a parameter prefix of `wide`, with the same rest and result.
   const extendsConvention = (narrow: CallableAbi, wide: CallableAbi): boolean =>
     wide.restFrom === narrow.restFrom &&
+    wide.argumentsFrame === narrow.argumentsFrame &&
     wide.parameters.length > narrow.parameters.length &&
     narrow.parameters.every(
       (parameter, index) => representationKey(parameter.value) === representationKey(wide.parameters[index]!.value)
@@ -757,8 +801,8 @@ export const virtualDispatchVerdictOf = (
     // other implementor converts to it rather than assuming they agree.
     //
     // The WIDEST implementor, though: an override may leave out trailing
-    // parameters it does not read (mongodb's `AggregateOperation`
-    // `buildCommandDocument()` against the abstract `(connection, session?)`),
+    // parameters it does not read (a `buildCommand()` override against the
+    // abstract `(connection, session?)`),
     // and borrowing that one's empty list made every sibling that does read
     // `connection` look like it was called without it. An implementor with
     // fewer parameters simply ignores the rest, as the language does.
@@ -776,8 +820,8 @@ export const virtualDispatchVerdictOf = (
     // receiver is the root's.
     const rootInstance = classes.get(family.root)?.instance ?? null
     // Nor its result, when that is a class the borrowed implementor narrowed to
-    // itself: `abstract addToOperationsList(...): this` (mongodb's bulk writers)
-    // and `abstract refreshed(): TimeoutContext` both come back from each
+    // itself: `abstract addOperation(...): this` and
+    // `abstract refreshed(): Context` both come back from each
     // override as the override's OWN class, so borrowing one sibling's result
     // made every other sibling's "convert" to it a cast between unrelated
     // classes, and the whole family was refused. The slot answers the classes'
@@ -829,7 +873,7 @@ export const virtualDispatchVerdictOf = (
         incompatible = `implementation ${implementor.declaration} declares no receiver`
         break
       }
-      if (rootAbi.restFrom !== actualAbi.restFrom) {
+      if (rootAbi.restFrom !== actualAbi.restFrom || rootAbi.argumentsFrame !== actualAbi.argumentsFrame) {
         incompatible =
           `implementation ${implementor.declaration} uses rest slot ${String(actualAbi.restFrom)}, while the family root uses ` +
           `${String(rootAbi.restFrom)}; repartitioning an already-packed rest array is not installed`

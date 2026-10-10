@@ -3,6 +3,7 @@ import { abiKey, type Representation } from '../representation/model.js'
 import { stringConstantsOf } from './dead-values.js'
 import { unobservedCallableAllocationsOf } from './callable-site-escape.js'
 import { allOperationsOf, type IrBody, type IrOperand } from './model.js'
+import { nativeLogicalReceiverCallablePayloadsOf } from '../representation/native-logical-receiver.js'
 
 /**
  * Which callable allocations must carry a `FunctionObjectIdentity` from the
@@ -14,8 +15,8 @@ import { allOperationsOf, type IrBody, type IrOperand } from './model.js'
  * (`FunctionObjectIdentity`, which itself owns a property table) that the
  * runtime mints lazily on first demand. Minting it at every allocation, which
  * `emit-callable.ts`'s `identifyCallable<&tag>(...)` does, is two heap
- * allocations per closure; `bench/comparison/fixtures/closure.ts` spends 97%
- * of its time there. Minting it lazily on a COPY instead (an earlier
+ * allocations per closure; a closure-building loop spends 97% of its time
+ * there. Minting it lazily on a COPY instead (an earlier
  * runtime's answer) moved the same cost to every `fns[i]` read.
  *
  * The census answers the question the lazy path cannot: does anything in this
@@ -381,6 +382,20 @@ class KeyClasses {
 
 export const callableIdentityDemandOf = (bodies: readonly IrBody[], policy: CallableIdentityDemandPolicy): CallableIdentityDemand => {
   const classes = new KeyClasses()
+  const prototypeOwners = new Set<IrValueId>()
+  for (const body of bodies)
+    for (const block of body.blocks.values())
+      for (const operation of block.operations) {
+        const prototype =
+          operation.kind === 'call'
+            ? (operation.nativeCallableIntegrity?.prototype ?? operation.nativeCallablePrototypeDescriptor)
+            : operation.kind === 'get'
+              ? operation.nativeCallablePrototype
+              : operation.kind === 'convert'
+                ? operation.nativeCallablePrototypeObservation
+                : undefined
+        if (prototype) prototypeOwners.add(prototype.allocation)
+      }
   let all = false
   const leavesOf = (representation: Representation): LeafWalk => {
     const walk: LeafWalk = { keys: new Set(), opaque: false }
@@ -477,6 +492,19 @@ export const callableIdentityDemandOf = (bodies: readonly IrBody[], policy: Call
     }
     for (const block of body.blocks.values()) {
       for (const operation of allOperationsOf(block)) {
+        // A recursion group's identity slots are reserved by convention. The
+        // exact prototype receipt forces its allocation to use that same
+        // reservation before a native backpointer captures the Function.
+        if (operation.kind === 'allocate-callable' && prototypeOwners.has(operation.result.id)) observe(operation.result.representation)
+        // The native receiver factory runs after physical argument copies.
+        // Identify observable source allocations before an Optional/ABI copy,
+        // using the same exact callable leaves that own lazy materializers.
+        if (operation.kind === 'call' || operation.kind === 'bind-callable') {
+          const logical = operation.thisArgument ?? operation.receiver
+          if (logical) for (const callable of nativeLogicalReceiverCallablePayloadsOf(logical.representation)) observe(callable)
+        }
+        for (const recipe of operation.conversionRecipes ?? [])
+          if (recipe.role === 'logical-receiver' && recipe.target.kind === 'dynamic') observe(recipe.source)
         switch (operation.kind) {
           case 'compute':
             // `typeof f`, `!f`, `f + ''` read no identity; `f === g`, `'x' in f`
@@ -645,6 +673,6 @@ export const callableIdentityDemandOf = (bodies: readonly IrBody[], policy: Call
   )
   return {
     observes,
-    observesAllocation: (result, carrier) => observes(carrier) && !unobservedAllocations.has(result)
+    observesAllocation: (result, carrier) => prototypeOwners.has(result) || (observes(carrier) && !unobservedAllocations.has(result))
   }
 }

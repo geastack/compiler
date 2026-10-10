@@ -16,6 +16,7 @@ export {
   recordAccessorsOfShape,
   recordFieldsOfShape
 }
+import { isNativeError } from './error-types.js'
 import type { ClassStaticFieldStorage, LazyArrowFieldPlan } from './class-layout.js'
 import { lazyArrowFieldPlansForClass } from './class-layout.js'
 import type { ReactiveCellPlan } from './host/host-members.js'
@@ -44,11 +45,20 @@ import {
   cppTypeOf,
   withoutUnitFunctions
 } from './types.js'
-import { storedEnvironmentText } from './emit-context.js'
-import { boxedText, dynamicCarrierBoxText, dynamicTagFor, dynamicValueLoadText } from './emit-narrowing.js'
+import { createCppEmitBlockedError, storedEnvironmentText } from './emit-context.js'
+import {
+  boxedText,
+  dynamicCarrierBoxText,
+  dynamicTagFor,
+  dynamicValueLoadText,
+  programConversionText,
+  type ConversionSite
+} from './emit-narrowing.js'
+import { dynamicFieldConversionOwnerOf, programConversionKey, prototypeSetterValue } from '../../ir/program-conversions.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
 import { recordLayoutPolicyOf, recordLayoutOfShapeId } from '../../projection/fields.js'
 import { classIndexProtocolsOf } from '../../projection/index-protocols.js'
+import { nativeAccessorAccessOf } from '../../projection/native-accessor-access.js'
 
 /**
  * The value carrier of a struct's dynamic-property sidecar, plus its key
@@ -62,7 +72,7 @@ export type { RecordIndexSidecar } from '../../representation/model.js'
  * JavaScript null or undefined. NativeFieldWrite therefore carries the
  * representation's absence policy at every optional and union node.
  */
-const nativeFieldPolicyType = (representation: Representation): string => {
+export const nativeFieldPolicyType = (representation: Representation): string => {
   switch (representation.kind) {
     case 'optional':
       return `gea::NativeFieldOptionalPolicy<${representation.absence === 'null' ? 'true' : 'false'}, ${nativeFieldPolicyType(representation.payload)}>`
@@ -117,7 +127,7 @@ interface RecordLayout {
  * own shape to subtract, `D` would redeclare each inherited field and the two
  * copies would then disagree the moment a base body wrote through the base's.
  */
-interface ClassBaseLink {
+export interface ClassBaseLink {
   readonly structName: string
   /** `null` for a native collection base: its members are the runtime object's, and the derived shape already leaves them out. */
   readonly shapeId: string | null
@@ -129,6 +139,12 @@ interface ClassBaseLink {
    * struct's own table then answers as a root's does.
    */
   readonly hookless?: true
+  /**
+   * The base is the runtime's one error record (`isNativeError` over the base's
+   * instance carrier) -- the only native base with an authenticated runtime
+   * ancestry the class-base table may publish.
+   */
+  readonly nativeError?: true
 }
 
 /** One struct whose layout could not be rendered, named by the struct rather than by a semantic owner it has none of. */
@@ -148,7 +164,7 @@ export interface CppRecordRefusal {
  * reason is recorded rather than dropped, so the struct refuses by name instead
  * of silently emitting flat and colliding with a base body later.
  */
-const classBaseLinks = (
+export const classBaseLinks = (
   classes: ReadonlyMap<DeclarationId, Pick<ClassLayout, 'declaration' | 'base' | 'nativeBase' | 'instance'>>
 ): { readonly links: ReadonlyMap<string, ClassBaseLink>; readonly unlinkable: ReadonlyMap<string, string> } => {
   const links = new Map<string, ClassBaseLink>()
@@ -187,7 +203,8 @@ const classBaseLinks = (
       links.set(structName, {
         structName: nativeRecord.native,
         shapeId: nativeRecord.shapeId,
-        native: true
+        native: true,
+        ...(isNativeError(nativeRecord) ? { nativeError: true as const } : {})
       })
       continue
     }
@@ -215,8 +232,8 @@ const classBaseLinks = (
  *
  * `collectRequiredStructs`'s cycle guard then rendered the struct from
  * whichever of them the plan happened to walk first, and every operation typed
- * against the other one compiled against members that were not there: hono's
- * `Context.env` was declared `gea::Value` from the unbound root while its own
+ * against the other one compiled against members that were not there: a
+ * generic class's field was declared `gea::Value` from the unbound root while its own
  * constructor stored an `Optional<Ref<...>>` into it, and clang rejected the
  * assignment. Silently, from the compiler's side -- both halves certified.
  *
@@ -506,12 +523,12 @@ const collectRequiredStructs = (
  *
  * This used to refuse when the two carriers DIFFERED, on the theory that a
  * difference meant a real override. It does not. The common cause is one
- * INHERITED member interned twice: `class Hono<E, S, P> extends HonoBase<E, S,
- * P>` gives the two classes distinct type-parameter symbols, so `HonoBase`'s
- * own `readonly getPath: GetPath<E>` derives one record for `E`-as-declared-in-
- * `HonoBase` and another for `E`-as-declared-in-`Hono`, and the structural view
- * of the derived class lists the inherited member under the second. Neither
- * class declared anything twice -- `Hono` declares no fields at all -- so
+ * INHERITED member interned twice: `class Derived<E> extends Base<E>` gives the
+ * two classes distinct type-parameter symbols, so `Base`'s own
+ * `readonly field: Shape<E>` derives one record for `E`-as-declared-in-`Base`
+ * and another for `E`-as-declared-in-`Derived`, and the structural view of the
+ * derived class lists the inherited member under the second. Neither class
+ * declared anything twice -- `Derived` may declare no fields at all -- so
  * refusing here reported a conflict that does not exist in the program.
  *
  * A genuine TypeScript override that narrows a field's declared type is not a
@@ -651,7 +668,7 @@ const structValueDependencies = (layout: RecordLayout): ReadonlySet<string> => {
  * never a traced edge of any type, so dynamic-property capability does not
  * decide leafness.
  */
-const traceLeafStructsOf = (
+export const traceLeafStructsOf = (
   layouts: ReadonlyMap<string, RecordLayout>,
   excluded: ReadonlySet<string>,
   celled: ReadonlyMap<string, ReadonlySet<string>>,
@@ -718,7 +735,9 @@ const traceLeafStructsOf = (
       case 'array-object':
         return value.ownership !== 'borrowed' && value.recursive === undefined && value.extension === null && carrierIsLeaf(value.element)
       case 'dictionary':
-        return value.ownership !== 'borrowed' && value.recursive === undefined && value.key !== 'symbol' && carrierIsLeaf(value.value)
+        // A shared entry view may retain a traced source table even when its
+        // own entry carrier is primitive. Owned tables have no admitted view.
+        return value.ownership === 'owned' && value.recursive === undefined && value.key !== 'symbol' && carrierIsLeaf(value.value)
       case 'promise':
         // The state's value is traced only when the payload is; its reactions are
         // opaque closures the collector never follows, whatever holds the promise.
@@ -895,8 +914,8 @@ const immortalMethodStateRoots = (
  * `A`'s. The second one used to be left to a sort by NAME, which is not an
  * order at all: `gea_record_type_1173` sorts before `gea_record_type_695`
  * because `'1' < '6'`, so an app whose struct numbering fell that way emitted a
- * struct with an incomplete member and failed to compile (`sky-hop`,
- * `sky-hop-jsx`) while every other app happened to be numbered the lucky way.
+ * struct with an incomplete member and failed to compile (two builds of one
+ * game) while every other app happened to be numbered the lucky way.
  *
  * The walk is depth-first and emits each name once. A name reached twice within
  * one chain is a cycle -- a class extending itself, or two structs embedding
@@ -1038,6 +1057,7 @@ interface DynamicFieldAccess {
    * would otherwise route through `RecordTail::ensure()`.
    */
   readonly readMember: string
+  readonly cellPayloadType?: string
   readonly tag: string
   readonly type: string
   readonly readable: boolean
@@ -1119,7 +1139,12 @@ const accessorUnboxText = (accessor: RecordAccessor, structName: string, text: s
   return `gea::detail::unboxField<${type}>(${text}, gea::Value::Tag::${tag}, ${cppStringLiteral(structName)}, ${cppStringLiteral(accessor.key)})`
 }
 
-const dynamicFieldAccessOf = (field: RecordField, storageType: string, isTailField = false): DynamicFieldAccess | null => {
+const dynamicFieldAccessOf = (
+  field: RecordField,
+  storageType: string,
+  isTailField = false,
+  cellPayloadType?: string
+): DynamicFieldAccess | null => {
   // A tail field's WRITE is spelled through the lazily-allocating
   // `RecordTail::ensure()` -- sound because `renderFieldDispatcher` reaches
   // `member` only from a `[[Set]]`/`[[DefineOwnProperty]]` body that is about
@@ -1143,7 +1168,7 @@ const dynamicFieldAccessOf = (field: RecordField, storageType: string, isTailFie
     isTailField
       ? `([&]() { const auto* gea_tail_ptr = ${cppRecordTailMemberName}.peek(); ` +
         `return gea_tail_ptr != nullptr ? gea_tail_ptr->${cppRecordFieldName(key)} : decltype(gea_tail_ptr->${cppRecordFieldName(key)})(); })()`
-      : cppRecordFieldName(key)
+      : cppRecordFieldName(key) + (cellPayloadType === undefined ? '' : '.get()')
   // Whether this field can be reached dynamically is a question about its
   // VALUE's carrier, not about whether the key that names it is a string or a
   // symbol -- a `[Symbol.iterator]() {}` method boxes exactly the way a
@@ -1160,9 +1185,9 @@ const dynamicFieldAccessOf = (field: RecordField, storageType: string, isTailFie
   // all: `dynamicTagFor` answers `null` for `dynamic` because no STATIC tag
   // describes it, and reading that as "unaddressable" refused a member the
   // dynamic path can reach more directly than any other -- by copying the
-  // `gea::Value` it already is. hono's `HonoBase` is the case: `this[method] =
-  // handler` over `allMethods` writes nine such fields, and every one of them
-  // aborted the program on the first route registration.
+  // `gea::Value` it already is. `this[name] = handler` in a loop over a list
+  // of method names writes such fields, and every one of them aborted the
+  // program on its first write.
   if (field.value.kind === 'dynamic' && storageType === 'gea::Value') {
     return {
       key: field.key,
@@ -1223,7 +1248,8 @@ const dynamicFieldAccessOf = (field: RecordField, storageType: string, isTailFie
     type,
     readable,
     writable: readable && canonical !== undefined,
-    boxed: false
+    boxed: false,
+    ...(cellPayloadType === undefined ? {} : { cellPayloadType })
   }
 }
 
@@ -1235,12 +1261,12 @@ const dynamicFieldAccessOf = (field: RecordField, storageType: string, isTailFie
  * That tag is boxed WITH its payload type, so the reverse is the same
  * `any -> T` conversion every other dynamic read into that carrier takes
  * (`unboxedLoadText`): a class reference is a checked projection of the
- * allocation the box retained, a record is its exact payload or a checked
- * product rebuilt from the object's fields, an array of records rebuilds each
- * element the same way. The value is stored in the native member, never as a
- * box. This arm used to refuse every such write at run time, which is what
- * aborted mongodb's `setOption(mongoOptions: any, ...)` on
- * `driverInfo: DriverInfo` (`default: {}`) in the MongoClient constructor.
+ * allocation the box retained. A shared structural record instead consumes
+ * the exact published live Document recipe, including every future checked
+ * field reader. The value is stored in the native member, never as a box.
+ * This arm used to refuse every such write at run time, which aborted a
+ * `setOption(options: any, ...)` storing a `{}` default into a record-typed
+ * field.
  *
  * The three canonical primitive tags keep their exact `unboxField` arm, and a
  * member whose declared C++ type is not the representation's own spelling has
@@ -1250,12 +1276,24 @@ const dynamicFieldAccessOf = (field: RecordField, storageType: string, isTailFie
  * result, an iterator parameter or a recursive alias has none), and that is a
  * C++ `static_assert`, not a fact this renderer can ask.
  */
+/**
+ * The IR's planned `dynamic-field-write` load for one slot, or `null` when the
+ * IR published no plan for it. Whether a slot is planned is the IR's decision
+ * (`program-conversions.ts`); a published plan is rendered through
+ * `programConversionText`, which refuses rather than falling back when the
+ * certified recipe does not match the slot's carrier.
+ */
+type DynamicFieldLoad = (key: string, target: Representation) => ((text: string) => string) | null
+
 const objectFieldWriteLoadText = (
   layouts: RecordLayoutPolicy | undefined,
   value: Representation,
-  access: DynamicFieldAccess
+  access: DynamicFieldAccess,
+  selected?: DynamicFieldLoad
 ): ((text: string) => string) | null => {
   if (layouts === undefined || access.tag !== 'Object' || cppTypeOf(value) !== access.type) return null
+  const planned = selected?.(access.key, value) ?? null
+  if (planned !== null) return planned
   if (withoutUnitFunctions(() => dynamicValueLoadText(layouts, value, 'gea_value')) === null) return null
   return (text) => dynamicValueLoadText(layouts, value, text)!
 }
@@ -1265,21 +1303,31 @@ const objectFieldWriteLoadText = (
  * `objectFieldWriteLoadText` builds for a required one, under the optional's
  * absence. The optional carrier's generic runtime adapter only accepts the
  * exact payload type, so a plain object written into an optional record field
- * (mongodb's `mongoOptions[name] = values[0]` for `driverInfo`, a member laid
- * out optional because `Object.create(null)` creates it absent) found no
+ * (`options[name] = values[0]` for a member laid out optional because
+ * `Object.create(null)` creates it absent) found no
  * conversion and the write reported a read-only property.
  */
 const optionalObjectFieldLoadText = (
   layouts: RecordLayoutPolicy | undefined,
-  value: Representation
+  value: Representation,
+  selected?: DynamicFieldLoad,
+  key = ''
 ): { readonly load: (text: string) => string; readonly absentTag: string; readonly type: string } | null => {
   if (value.kind !== 'optional') return null
   const payload = value.payload
   const access = dynamicFieldAccessOf({ key: '', value: payload, required: true }, cppTypeOf(payload))
   if (access === null || !access.readable || access.writable || access.boxed || access.dynamicCarrier === true) return null
+  const absentTag = value.absence === 'null' ? 'Null' : 'Undefined'
+  const type = cppTypeOf(value)
+  const planned = selected?.(key, value) ?? null
+  if (planned !== null) return { load: planned, absentTag, type }
   const load = objectFieldWriteLoadText(layouts, payload, access)
   if (load === null) return null
-  return { load, absentTag: value.absence === 'null' ? 'Null' : 'Undefined', type: cppTypeOf(value) }
+  return {
+    load: (text) => `(${text}).tag() == gea::Value::Tag::${absentTag} ? ${type}{} : ${type}{${load(text)}}`,
+    absentTag,
+    type
+  }
 }
 
 /**
@@ -1291,21 +1339,39 @@ const optionalObjectFieldLoadText = (
  * accessor's does, rather than reordering: two records naming each other have
  * no order that completes both.
  */
+/**
+ * The planned load into a typed string table field (`program-conversions.ts`'s
+ * `dynamicTableLoadNeedsPlan`): the stored object viewed through the table's
+ * entry carrier. The carrier's generic adapter admits only the exact table
+ * payload, so a plain object stored by a computed key was refused.
+ */
+const plannedTableLoadText = (
+  key: string,
+  value: Representation,
+  selected: DynamicFieldLoad | undefined
+): ((text: string) => string) | null => {
+  const table = value.kind === 'optional' ? value.payload : value
+  if (selected === undefined || table.kind !== 'dictionary') return null
+  return selected(key, value)
+}
+
 const writesConvertIntoLaterStruct = (
   layouts: RecordLayoutPolicy,
   layout: RecordLayout,
   position: number,
-  orderOf: ReadonlyMap<string, number>
+  orderOf: ReadonlyMap<string, number>,
+  selected?: DynamicFieldLoad
 ): boolean =>
   layout.fields.some((field) => {
     const access = dynamicFieldAccessOf(field, cppTypeOf(field.value))
     if (access === null || !access.readable || access.boxed) return false
     const load =
       access.dynamicCarrier === true
-        ? (optionalObjectFieldLoadText(layouts, field.value)?.load ?? null)
+        ? (optionalObjectFieldLoadText(layouts, field.value, selected, field.key)?.load ??
+          plannedTableLoadText(field.key, field.value, selected))
         : access.writable
           ? null
-          : objectFieldWriteLoadText(layouts, field.value, access)
+          : objectFieldWriteLoadText(layouts, field.value, access, selected)
     if (load === null) return false
     return withoutUnitFunctions(() => identifiersIn(load('gea_value')).some((name) => (orderOf.get(name) ?? -1) > position))
   })
@@ -1549,10 +1615,10 @@ const keyByteLengthOfBranch = (line: string): number | null => {
  * key and returning or falling through to the next, dispatched by the name's
  * length first.
  *
- * Every field dispatcher is such a chain, and a chain over mongodb's
- * 134-field options family compared the name against 134 literals on every
- * dynamic read that reached it -- `string_view` folds the length test, but a
- * miss still walked all 134 branches and a hit walked to its own. Grouped
+ * Every field dispatcher is such a chain, and a chain over a 100+-field
+ * options family compared the name against every literal on every dynamic
+ * read that reached it -- `string_view` folds the length test, but a miss
+ * still walked every branch and a hit walked to its own. Grouped
  * under `switch (gea_name.size())` a lookup compares only against the keys of
  * its own length. The branches keep their relative order inside a case, and
  * no two keys of different lengths can both match, so the chain's answer is
@@ -1638,7 +1704,9 @@ const renderFieldDispatcher = (
   layouts: RecordLayoutPolicy | undefined = undefined,
   /** Filled with every field operation a sealed demand names whose arm can only refuse -- see `record` below. */
   unaddressableDemands: string[] | undefined = undefined,
-  indexProtocol = true
+  indexProtocol = true,
+  dynamicFieldLoad?: DynamicFieldLoad,
+  cellPayloadTypeOf: (field: RecordField) => string | undefined = () => undefined
 ): readonly string[] => {
   // A write through the property protocol that creates a declared field of a
   // record creates its key now, after every key already present, the same
@@ -1650,7 +1718,7 @@ const renderFieldDispatcher = (
       : `if (!${presence}) { gea::detail::noteNativeDeclaredKeyCreated(this, ${cppStringLiteral(key)}); ${attributes} = gea::NativeIndexAttributes{}; }`
   const accesses = layout.fields.map((field) => ({
     field,
-    access: dynamicFieldAccessOf(field, storageTypeOf(field), tailFields.has(field.key))
+    access: dynamicFieldAccessOf(field, storageTypeOf(field), tailFields.has(field.key), cellPayloadTypeOf(field))
   }))
   const symbolKeys = layout.fields.filter((field) => cppRecordFieldKeyIsSymbol(field.key))
   const baseRead = base ? [`    if (this->${base.structName}::gea_readOwnField(gea_key, gea_out)) return true;`] : []
@@ -1996,8 +2064,8 @@ const renderFieldDispatcher = (
     // `access.member` just as directly, so it gets the same guard.
     const nativeRead =
       lazyPlan !== undefined
-        ? `    if (gea_name == ${literal}) { if (!${presence}) return false; ${materializeText(lazyPlan, access.member)}; return gea_out.assign(${access.readMember}); }`
-        : `    if (gea_name == ${literal}) return ${presence} && gea_out.assign(${access.readMember});`
+        ? `    if (gea_name == ${literal}) { if (!${presence}) return false; ${materializeText(lazyPlan, access.member)}; return gea_out.assign${nativeFieldPolicyTemplate(field.value)}(${access.readMember}); }`
+        : `    if (gea_name == ${literal}) return ${presence} && gea_out.assign${nativeFieldPolicyTemplate(field.value)}(${access.readMember});`
     if (
       fieldOperations === undefined ||
       fieldOperations.get(field.key)?.has('read') ||
@@ -2014,7 +2082,10 @@ const renderFieldDispatcher = (
     ) {
       const nativeWrite =
         `    if (gea_name == ${literal}) { if (${presence} ? !${attributes}.writable : !gea_extensible) return false; ` +
-        `if (!gea_value.assign${nativeFieldPolicyTemplate(field.value)}(${access.member})) return false; ${firstFieldStore(presence, attributes, field.key)} ${presence} = true; return true; }`
+        (access.cellPayloadType === undefined
+          ? `if (!gea_value.assign${nativeFieldPolicyTemplate(field.value)}(${access.member})) return false; `
+          : `${access.cellPayloadType} gea_cell_value = ${access.readMember}; if (!gea_value.assign${nativeFieldPolicyTemplate(field.value)}(gea_cell_value)) return false; ${access.member} = std::move(gea_cell_value); `) +
+        `${firstFieldStore(presence, attributes, field.key)} ${presence} = true; return true; }`
       nativeFieldWrites.push(nativeWrite)
       nativeFieldWritesByKey.set(field.key, nativeWrite)
     }
@@ -2088,17 +2159,51 @@ const renderFieldDispatcher = (
       record(descriptors, descriptorsByKey, descriptorText(boxed))
       if (fieldOperations !== undefined && !fieldOperations.get(field.key)?.has('write') && !fieldOperations.get(field.key)?.has('define'))
         continue
-      const optionalLoad = optionalObjectFieldLoadText(layouts, field.value)
+      const optionalLoad = optionalObjectFieldLoadText(layouts, field.value, dynamicFieldLoad, field.key)
       if (optionalLoad !== null) {
-        const store = (text: string): string =>
-          `${access.member} = (${text}).tag() == gea::Value::Tag::${optionalLoad.absentTag} ? ${optionalLoad.type}{} : ${optionalLoad.type}{${optionalLoad.load(text)}}`
+        const loaded = optionalLoad.load
+        const store = (text: string): string => `${access.member} = ${loaded(text)}`
         record(
           writes,
           writesByKey,
           `    if (gea_name == ${literal}) { if (${presence} ? !${attributes}.writable : !gea_extensible) return false; ` +
             `${store('gea_value')}; ${firstFieldStore(presence, attributes, field.key)} ${presence} = true; return true; }`
         )
-        record(defines, definesByKey, defineText(boxed, 'true', store('gea_applied.value')))
+        const defaults =
+          optionalLoad.absentTag === 'Undefined'
+            ? `if (!gea_descriptor.hasValue && !${presence}) { ` +
+              `if (gea_descriptor.isAccessor() || !gea_extensible) return false; ` +
+              `const ${optionalLoad.type} gea_undefined{}; if (!gea::applyNativeFixedDataDescriptor(` +
+              `${access.member}, ${attributes}, gea_undefined, false, gea_descriptor.hasWritable, gea_descriptor.writable, ` +
+              `gea_descriptor.hasEnumerable, gea_descriptor.enumerable, gea_descriptor.hasConfigurable, gea_descriptor.configurable)) return false; ` +
+              `${presence} = true; return true; } `
+            : ''
+        record(
+          defines,
+          definesByKey,
+          `    if (gea_name == ${literal}) { ${defaults}return gea::applyNativeFieldDescriptorLoaded<${cppTypeOf(field.value)}, ${nativeFieldPolicyType(field.value)}>(` +
+            `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, ` +
+            `[&](const gea::Value& gea_written) { return ${loaded('gea_written')}; }); }`
+        )
+        continue
+      }
+      // A planned load (a typed table viewing the stored object) replaces the
+      // carrier's generic adapter, which admits only the exact payload.
+      const plannedLoad = plannedTableLoadText(field.key, field.value, dynamicFieldLoad)
+      if (plannedLoad !== null) {
+        record(
+          writes,
+          writesByKey,
+          `    if (gea_name == ${literal}) { if (${presence} ? !${attributes}.writable : !gea_extensible) return false; ` +
+            `${access.member} = ${plannedLoad('gea_value')}; ${firstFieldStore(presence, attributes, field.key)} ${presence} = true; return true; }`
+        )
+        record(
+          defines,
+          definesByKey,
+          `    if (gea_name == ${literal}) return gea::applyNativeFieldDescriptorLoaded<${cppTypeOf(field.value)}, ${nativeFieldPolicyType(field.value)}>(` +
+            `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, ` +
+            `[&](const gea::Value& gea_written) { return ${plannedLoad('gea_written')}; });`
+        )
         continue
       }
       record(
@@ -2199,13 +2304,13 @@ const renderFieldDispatcher = (
         defines,
         definesByKey,
         lazyPlan !== undefined
-          ? `    if (gea_name == ${literal}) { ${materializeText(lazyPlan, access.member)}; return gea::applyNativeFieldDescriptor(` +
+          ? `    if (gea_name == ${literal}) { ${materializeText(lazyPlan, access.member)}; return gea::applyNativeFieldDescriptor<${cppTypeOf(field.value)}, ${nativeFieldPolicyType(field.value)}>(` +
               `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, gea::Value::Tag::${access.tag}); }`
-          : `    if (gea_name == ${literal}) return gea::applyNativeFieldDescriptor(` +
+          : `    if (gea_name == ${literal}) return gea::applyNativeFieldDescriptor<${cppTypeOf(field.value)}, ${nativeFieldPolicyType(field.value)}>(` +
               `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, gea::Value::Tag::${access.tag});`
       )
     } else {
-      const load = objectFieldWriteLoadText(layouts, field.value, access)
+      const load = objectFieldWriteLoadText(layouts, field.value, access, dynamicFieldLoad)
       if (load === null) {
         record(writes, writesByKey, `    if (gea_name == ${literal}) ${refuseFieldText(structName, access.key)}`)
         record(defines, definesByKey, `    if (gea_name == ${literal}) ${refuseFieldText(structName, access.key)}`)
@@ -2219,7 +2324,7 @@ const renderFieldDispatcher = (
         record(
           defines,
           definesByKey,
-          `    if (gea_name == ${literal}) return gea::applyNativeFieldDescriptorLoaded(` +
+          `    if (gea_name == ${literal}) return gea::applyNativeFieldDescriptorLoaded<${cppTypeOf(field.value)}, ${nativeFieldPolicyType(field.value)}>(` +
             `${access.member}, ${attributes}, ${presence}, gea_descriptor, gea_extensible, [&](const gea::Value& gea_value) { return ${load('gea_value')}; });`
         )
       }
@@ -2278,6 +2383,28 @@ const renderFieldDispatcher = (
         ? `    if (gea_name == ${literal}) ${refuseFieldText(structName, accessor.key)}`
         : `    if (gea_name == ${literal}) { if (!${presence}) return false; gea_out = ${read}; return true; }`
     )
+    const native = nativeAccessorAccessOf(accessor, layouts?.accessorAbiFor)
+    const getterCall = accessor.getter === null ? '' : `${cppBodyName(accessor.getter)}(${getEnvironment}${selfText})`
+    const nativeRead =
+      native.read !== null
+        ? `    if (gea_name == ${literal}) { if (!${presence} || ` +
+          `!gea_out.accepts<${cppTypeOf(native.read.value)}, ${nativeFieldPolicyType(native.read.value)}>()) return false; ` +
+          `return gea_out.assign${nativeFieldPolicyTemplate(native.read.value)}(${native.read.voidResult ? `((void)(${getterCall}), gea::Undefined{})` : getterCall}); }`
+        : `    if (gea_name == ${literal}) return false;`
+    if (fieldOperations === undefined || fieldOperations.get(accessor.key)?.has('native-read')) {
+      nativeReads.push(nativeRead)
+      nativeReadsByKey.set(accessor.key, nativeRead)
+    }
+    const nativeWrite =
+      native.write !== null && accessor.setter !== null
+        ? `    if (gea_name == ${literal}) { if (!${presence}) return false; std::optional<${cppTypeOf(native.write.value)}> gea_native_value; ` +
+          `if (!gea_value.read${nativeFieldPolicyTemplate(native.write.value)}(gea_native_value)) return false; ` +
+          `${cppBodyName(accessor.setter)}(${setEnvironment}${selfText}, *gea_native_value); return true; }`
+        : `    if (gea_name == ${literal}) return false;`
+    if (fieldOperations === undefined || fieldOperations.get(accessor.key)?.has('native-write')) {
+      nativeFieldWrites.push(nativeWrite)
+      nativeFieldWritesByKey.set(accessor.key, nativeWrite)
+    }
     // A `[[Set]]` on a getter-only accessor FAILS -- `false` here, never a
     // fallthrough, which would let the box grow an expando that shadows the
     // getter from then on.
@@ -2434,8 +2561,8 @@ const renderFieldDispatcher = (
   // deletion and the integrity levels are the same statement for every field,
   // so the runtime states each once over `gea_eachOwnField` (gea_runtime.h's
   // `nativeOwnFieldPresent` and siblings) where each hook spelled one line per
-  // field -- eight lines per field of every struct, 7 MB of the MongoDB
-  // driver's unit.
+  // field -- eight lines per field of every struct, megabytes of a large
+  // program's unit.
   // Stated for a struct with NO declared field too: the runtime's
   // `noteNativeIndexKeyCreated` walks the table of any record whose index
   // sidecar takes a key, and a `{ [key: string]: T }` record has a sidecar
@@ -2600,8 +2727,8 @@ const renderFieldDispatcher = (
       ...symbolBranchFor('gea_readOwnFieldNative(gea_key, gea_out)', true),
       ...nameOf([...nativeReads, ...accessors.map((accessor) => accessor.key)]),
       ...nativeReads,
-      // Accessors must run exactly once through the existing getter path.
-      // A derived accessor also shadows a base data field of the same name.
+      // A demand without an actual getter ABI cannot name a native leaf.
+      // An accessor still shadows a base data field of the same name.
       ...accessors.map((accessor) => `    if (gea_name == ${cppStringLiteral(accessor.key)}) return false;`),
       ...(base && !base.native ? [`    return this->${base.structName}::gea_readOwnFieldNative(gea_key, gea_out);`] : ['    return false;'])
     ]),
@@ -2786,8 +2913,8 @@ const renderFieldDispatcher = (
       ...keys,
       ...sidecarKeys,
       // The runtime's one 10.1.11.1 ordering, which every other own-key list
-      // takes; spelled out here it was the same fourteen lines in each of the
-      // mongodb driver's 1126 structs.
+      // takes; spelled out here it was the same fourteen lines in every
+      // struct of the program.
       '    gea::detail::orderOwnPropertyKeysFrom(gea_out, gea_start);'
     ]),
     // `EnumerableOwnPropertyNames` (7.3.23) in ONE pass, for a struct whose
@@ -2796,7 +2923,7 @@ const renderFieldDispatcher = (
     // `Object.keys` of a boxed struct otherwise built the full key list, sorted
     // it twice (once here, once in `nativeOwnKeysInCreationOrder`) and asked
     // for a descriptor per key -- thirteen allocations and a quadratic scan per
-    // command document the mongodb driver serialized. `false` hands the caller
+    // object a serializing program walked. `false` hands the caller
     // back to that path: a key 10.1.11.1 orders ahead of the fields, or a base
     // this emitter did not generate.
     ...classMember('bool gea_ownEnumerableStringKeys(std::vector<std::string>& gea_out) const', enumerableStringKeysBody)
@@ -2873,11 +3000,22 @@ export const cppReactiveRevisionFieldName = (key: string): string => `${cppRecor
  * and paid for it with N per-field heap allocations where the whole struct
  * needed at most one -- see `RecordTail`'s own comment in the runtime header).
  */
+// Native field protocols carry the cell's value, while writes must still notify
+// through the physical cell. Share the storage decision with every protocol.
+const fieldCellPayloadType = (
+  field: RecordField,
+  reactive: ReactiveCellPlan,
+  celled: ReadonlySet<string>,
+  narrowed: boolean
+): string | undefined => {
+  if (reactive.cell === null || !celled.has(field.key) || !representationCanCell(field.value)) return undefined
+  return narrowed ? cppNarrowedIntegerType : cppTypeOf(field.value)
+}
+
 const fieldStorageType = (field: RecordField, reactive: ReactiveCellPlan, celled: ReadonlySet<string>, narrowed: boolean): string => {
   const inner = narrowed ? cppNarrowedIntegerType : cppTypeOf(field.value)
-  if (reactive.cell === null || !celled.has(field.key)) return inner
-  if (!representationCanCell(field.value)) return inner
-  return `${reactive.cell}<${inner}>`
+  const payload = fieldCellPayloadType(field, reactive, celled, narrowed)
+  return payload === undefined ? inner : `${reactive.cell}<${payload}>`
 }
 
 /**
@@ -2896,8 +3034,8 @@ const emptyStringSet: ReadonlySet<string> = new Set()
 /**
  * `GEA_SPARSE_RECORD_LAYOUT=0` turns the whole tail-field split off: every
  * struct emits exactly the fields it would have before this layout existed,
- * byte-identical. The A/B this exists for is a CPU measurement on the real
- * mongodb driver, not a correctness question -- both arms are sound -- so a
+ * byte-identical. The A/B this exists for is a CPU measurement on a large
+ * real program, not a correctness question -- both arms are sound -- so a
  * single env read at emission time, asked everywhere `tailFieldsOf` is (never
  * cached, since one process only ever emits with one answer), is the whole
  * mechanism.
@@ -2910,10 +3048,10 @@ const sparseLayoutDisabled = (): boolean => process.env.GEA_SPARSE_RECORD_LAYOUT
  * them optional, reserves every field's bytes in the block `makeRef` takes
  * on every allocation of it, copies every one of those bytes on every
  * `{...spread}`, and touches every one of them tracing and destroying it --
- * whether or not the field was ever set. Measured against mongodb's
- * `extends`-connected options family (134 fields, ~90% optional, 18
- * instances per driver operation, 2584-byte block, 55% of all bytes the
- * driver allocates).
+ * whether or not the field was ever set. Measured against an
+ * `extends`-connected options family of 100+ fields, ~90% optional, allocated
+ * many times per operation -- where those blocks were most of all bytes the
+ * program allocated.
  */
 const sparseLayoutFieldThreshold = 32
 
@@ -3161,7 +3299,7 @@ const reactiveFieldsByStruct = (
       // Only the members a JSX slot actually BINDS, never every cellable one.
       // `Signal<T>` is not the field's declared carrier, so celling a member
       // nothing renders can stop the struct compiling for its other readers:
-      // `gea-bench` holds `rows` (rendered) beside `items` (parsed out of
+      // one program held `rows` (rendered) beside `items` (parsed out of
       // JSON), and celling `Item.id` made `gea_json_read(reader, out.id)` an
       // error. `reactiveBoundRecordFields` answers which members are bound.
       const elementStruct = cppRecordStructName(element.shapeId)
@@ -3415,7 +3553,8 @@ const renderStructDefinition = (
    * handle is then not an edge the collector follows -- see there.
    */
   methodStateUntraced = false,
-  indexProtocol = true
+  indexProtocol = true,
+  dynamicFieldLoad?: DynamicFieldLoad
 ): string | CppRecordRefusal => {
   const isNarrowed = (field: FieldLike): boolean => narrowedSlots.has(integerStorageSlot(structName, field.key))
   // A class keeps every field inline. Its fields are stored by the
@@ -3423,8 +3562,8 @@ const renderStructDefinition = (
   // all address a class member by name; only the record paths spell a tail
   // block (`tailAwareFieldWriteText`). A tailed class therefore rendered
   // `gea_this->precision = ...` against a struct whose `precision` lived in
-  // its tail -- three.js's `Material` crossed the sparse-layout threshold and
-  // its own constructor no longer compiled.
+  // its tail -- a class that crossed the sparse-layout threshold had a
+  // constructor that no longer compiled.
   const tailFields = classDispatch ? emptyStringSet : tailFieldsOf(layout, celled, reactive.cell, isNarrowed)
   const tailStructName = cppRecordTailStructName(structName)
   const tailLines: string[] = []
@@ -3657,7 +3796,9 @@ const renderStructDefinition = (
     virtualDeclarations,
     layouts,
     unaddressableDemands,
-    indexProtocol
+    indexProtocol,
+    dynamicFieldLoad,
+    (field) => fieldCellPayloadType(field, reactive, celled, isNarrowed(field))
   ))
     lines.push(line)
   if (unaddressableDemands.length > 0)
@@ -3667,8 +3808,8 @@ const renderStructDefinition = (
     }
   // `gea::makeRef<T>()` with no arguments value-initializes, and for an
   // aggregate that is a memset of the whole object before any member's own
-  // constructor runs -- 2.4 KB per 134-field options record in the mongodb
-  // driver, 18 of them per operation, all of it overwritten a byte at a time
+  // constructor runs -- kilobytes per record for a 100+-field options family
+  // allocated many times per operation, all of it overwritten a byte at a time
   // by the members' constructors. The marker tells `makeRef` (gea_runtime.h)
   // to default-initialize instead. It is written only when every member
   // provably initializes itself: an `Optional` writes its state, a `Ref` its
@@ -3773,11 +3914,12 @@ export const cppRecordDeclarations = (
    * lets a symbol-keyed field's dispatcher tell `Symbol.iterator` and its
    * fourteen siblings, whose runtime identity is fixed at a known low id,
    * apart from a genuinely unique symbol whose id only exists once the
-   * program runs. See `wellKnownSymbolEnumNameOf`.
+   * program runs. See `wellKnownSymbolEnumNameOf`. Required: an absent census
+   * would silently read every well-known symbol key as a unique one.
    */
-  wellKnownSymbols: ReadonlyMap<DeclarationId, string> = new Map(),
+  wellKnownSymbols: ReadonlyMap<DeclarationId, string>,
   splitFieldDefinitions = false,
-  reflection?: ReflectionExposure,
+  reflection: ReflectionExposure | undefined,
   representations: readonly Representation[] = [...plan.selected.values()],
   physicalClasses: ReadonlyMap<
     DeclarationId,
@@ -3796,7 +3938,13 @@ export const cppRecordDeclarations = (
   /** `integrity-restrictions.ts`'s `restrictsRecordShape` -- see `renderStructDefinition`'s `attributesConstant`. */
   recordShapeRestricted: (shapeId: string, hasSymbolField: boolean) => boolean = () => true,
   /** `construction-only-fields.ts`'s `holdsOlder`: the class fields that can only ever point at an older object. */
-  holdsOlder: (declaration: DeclarationId, key: string) => boolean = () => false
+  holdsOlder: (declaration: DeclarationId, key: string) => boolean = () => false,
+  /** Certified structural targets may own a traced native origin beyond their declared fields. */
+  nativeViewTargets: ReadonlySet<string> = new Set(),
+  /** Getter/setter body ABIs authenticate erased native descriptor leaves. Required: no frame is not an answer. */
+  accessorAbiOf: (body: FunctionId) => CallableAbi | null,
+  /** Generated dynamic writes consume the selected artifact's certified pair. */
+  conversionSite?: ConversionSite
 ): {
   readonly declarations: readonly string[]
   readonly fieldDefinitionsByStruct: ReadonlyMap<string, readonly string[]>
@@ -3807,7 +3955,10 @@ export const cppRecordDeclarations = (
    */
   readonly staticMethodStateClasses: ReadonlySet<DeclarationId>
   /** Authenticated program-class ancestry; the translation unit owns namespace placement. */
-  readonly runtimeClassBases: readonly { readonly derived: string; readonly base: string }[]
+  /** `nativeBase` marks a runtime-owned base spelled fully qualified, outside the program's namespace. */
+  readonly runtimeClassBases: readonly { readonly derived: string; readonly base: string; readonly nativeBase?: true }[]
+  /** The physical-family index hooks this declaration pass publishes, including retained type-only layouts. */
+  readonly classIndexProtocols: ReadonlyMap<DeclarationId, boolean>
   readonly refused: readonly CppRecordRefusal[]
   /**
    * Which reactive fields got the COMPANION revision cell rather than a cell of
@@ -3824,6 +3975,7 @@ export const cppRecordDeclarations = (
   /** Which struct members this renderer actually put in a `Signal<T>`, by struct name. */
   readonly celledFields: ReadonlyMap<string, ReadonlySet<string>>
 } => {
+  const classIndexProtocols = classIndexProtocolsOf(physicalClasses, (shapeId) => recordLayoutOfShapeId(deriver, shapeId))
   const { links, unlinkable } = classBaseLinks(physicalClasses)
   const { requiredStructs, fieldsByStruct, unlayoutable, shapesByStruct } = collectRequiredStructs(
     representations,
@@ -3868,6 +4020,7 @@ export const cppRecordDeclarations = (
       declarations: [],
       fieldDefinitionsByStruct: new Map(),
       runtimeClassBases: [],
+      classIndexProtocols,
       refused: missing.map((structName) => ({
         structName,
         reason: `no record layout: ${unlayoutable.get(structName) ?? 'named by no reachable shape'}`
@@ -3950,7 +4103,7 @@ export const cppRecordDeclarations = (
     staticMethodStateStructs.add(structName)
   }
   const virtualDeclarations = new Map<string, ReadonlySet<string>>()
-  const layouts = recordLayoutPolicyOf(deriver, classes, wellKnownSymbols)
+  const layouts = recordLayoutPolicyOf(deriver, classes, wellKnownSymbols, accessorAbiOf)
   const ordered = definitionOrder(structNames, links, valueDependencies)
   const evaluatedOnce = (structName: string): boolean => {
     const declaration = declarationByStruct.get(structName)
@@ -3970,7 +4123,10 @@ export const cppRecordDeclarations = (
   )
   const { leaves: traceLeafStructs, olderOnly: untracedStructs } = traceLeafStructsOf(
     fieldsByStruct,
-    new Set([...classStructNames, ...baseStructNames, ...links.keys()].filter((structName) => !leafClasses.has(structName))),
+    new Set([
+      ...[...classStructNames, ...baseStructNames, ...links.keys()].filter((structName) => !leafClasses.has(structName)),
+      ...nativeViewTargets
+    ]),
     celledByStruct,
     leafClasses,
     (structName, key) => {
@@ -3979,7 +4135,6 @@ export const cppRecordDeclarations = (
     }
   )
   const orderOf = new Map(ordered.map((structName, index) => [structName, index]))
-  const classIndexProtocols = classIndexProtocolsOf(physicalClasses, (shapeId) => recordLayoutOfShapeId(deriver, shapeId))
   const rendered = ordered.map((structName) => {
     const layout = fieldsByStruct.get(structName)
     // Unreachable given the check above, and stated rather than assumed: an
@@ -3987,6 +4142,33 @@ export const cppRecordDeclarations = (
     // no body, which compiles and is wrong.
     if (!layout) return { structName, reason: 'has no layout recorded despite passing the missing-struct check' }
     const declaration = declarationByStruct.get(structName)
+    const owners =
+      declaration === undefined
+        ? [...(shapesByStruct.get(structName) ?? [])].map((shapeId) => dynamicFieldConversionOwnerOf({ kind: 'record', shapeId })!)
+        : [dynamicFieldConversionOwnerOf({ kind: 'class-ref', declaration })!]
+    const dynamicFieldLoad: DynamicFieldLoad = (key, target) => {
+      if (conversionSite === undefined) return null
+      const published = new Set(conversionSite.programConversionRecipes?.map(programConversionKey))
+      const planned = owners.filter((owner) => published.has(programConversionKey({ role: 'dynamic-field-write', owner, slot: key })))
+      if (planned.length === 0) return null
+      // One struct is one C++ type: two owners each holding a plan for one
+      // member would be two answers for one dispatcher arm.
+      if (planned.length > 1)
+        throw createCppEmitBlockedError(
+          'runtime-helper:program-conversion-recipes',
+          `struct ${structName} field ${key} holds ${planned.length} dynamic-field-write plans`
+        )
+      const owner = planned[0]!
+      return (text) => {
+        const loaded = programConversionText(conversionSite, 'dynamic-field-write', owner, key, prototypeSetterValue, target, text)
+        if (loaded === null)
+          throw createCppEmitBlockedError(
+            'runtime-helper:program-conversion-recipes',
+            `struct ${structName} field ${key} names a dynamic-field-write plan with no rendering`
+          )
+        return loaded
+      }
+    }
     const lazyArrowFields = declaration !== undefined ? lazyArrowFieldPlansForClass(classes, declaration) : undefined
     // An accessor arm calls a body function, and a struct is defined long
     // before any body is even forward-declared. So a struct that answers for
@@ -4005,7 +4187,7 @@ export const cppRecordDeclarations = (
     const needsOutOfLineFields =
       (renderableAccessors(layout).length > 0 && !classStructNames.has(structName)) ||
       (lazyArrowFields !== undefined && lazyArrowFields.size > 0) ||
-      writesConvertIntoLaterStruct(layouts, layout, orderOf.get(structName) ?? 0, orderOf)
+      writesConvertIntoLaterStruct(layouts, layout, orderOf.get(structName) ?? 0, orderOf, dynamicFieldLoad)
     const definitions = splitFieldDefinitions || needsOutOfLineFields ? [] : undefined
     if (definitions) fieldDefinitionsByStruct.set(structName, definitions)
     return renderStructDefinition(
@@ -4043,7 +4225,8 @@ export const cppRecordDeclarations = (
         ) &&
         (shapesByStruct.get(structName)?.size ?? 0) > 0,
       immortalStateRoots.has(structName),
-      declaration === undefined ? layout.indexes.length > 0 : classIndexProtocols.get(declaration) !== false
+      declaration === undefined ? layout.indexes.length > 0 : classIndexProtocols.get(declaration) !== false,
+      dynamicFieldLoad
     )
   })
   const refused = rendered.filter((entry): entry is CppRecordRefusal => typeof entry !== 'string')
@@ -4052,6 +4235,7 @@ export const cppRecordDeclarations = (
       declarations: [],
       fieldDefinitionsByStruct: new Map(),
       runtimeClassBases: [],
+      classIndexProtocols,
       refused,
       revisionFields: new Map(),
       celledFields: new Map(),
@@ -4064,12 +4248,22 @@ export const cppRecordDeclarations = (
   // available fallback on embedded targets.  Publish exactly the checker
   // proven, emitted-program links to the runtime table; native bases are
   // intentionally absent because this compiler has no authenticated native
-  // ancestry contract for them.
-  const runtimeClassBases = definitionOrder(structNames, links, valueDependencies).flatMap((structName) => {
-    const link = links.get(structName)
-    if (!classStructNames.has(structName) || !link || link.native || !classStructNames.has(link.structName)) return []
-    return [{ derived: structName, base: link.structName }]
-  })
+  // ancestry contract for them -- except the runtime's one error record. Every
+  // class extending `Error` (or a NativeError) is emitted as a struct whose
+  // single, first base IS `gea::runtime::Error` (`classBaseLinks`), and the
+  // runtime boxes that record as an ordinary counted object; its table is the
+  // nominal target a caught value asserted `as Error` projects to
+  // (`unboxValue<Ref<gea::runtime::Error>>`), so the link is as authenticated
+  // as a program base's.
+  const runtimeClassBases = definitionOrder(structNames, links, valueDependencies).flatMap(
+    (structName): { readonly derived: string; readonly base: string; readonly nativeBase?: true }[] => {
+      const link = links.get(structName)
+      if (!classStructNames.has(structName) || !link) return []
+      if (link.native) return link.nativeError === true ? [{ derived: structName, base: link.structName, nativeBase: true }] : []
+      if (!classStructNames.has(link.structName)) return []
+      return [{ derived: structName, base: link.structName }]
+    }
+  )
 
   // The same predicate `renderStructDefinition` just applied, split and read
   // back per struct for the emitter -- see `revisionFields` on the return type
@@ -4102,6 +4296,7 @@ export const cppRecordDeclarations = (
     ],
     fieldDefinitionsByStruct,
     runtimeClassBases,
+    classIndexProtocols,
     refused: [],
     revisionFields,
     celledFields,
@@ -4153,7 +4348,7 @@ const arrayExtensionDeclarations = (representations: readonly Representation[]):
  * translation-unit-scope definitions -- zero-initialized, exactly the way
  * `translation-unit.ts`'s own `globalDefinitions` declares a module-scope
  * cell's storage. A bare definition rather than one with an inline
- * initializer on purpose: the ACTUAL value (`new Vector3(0, 1, 0)`, a
+ * initializer on purpose: the ACTUAL value (`new Point(0, 1, 0)`, a
  * `WeakMap`-closed-over reference, ...) is whatever expression the source
  * assignment itself computed, and that expression already runs -- once, at
  * the point the enclosing module body reaches that statement -- through the
@@ -4164,8 +4359,8 @@ const arrayExtensionDeclarations = (representations: readonly Representation[]):
  *
  * Emitted after every struct declaration and before any body, mirroring
  * `translation-unit.ts`'s own ordering for `globalDefinitions`: a static
- * whose declared carrier is itself a struct (`Object3D.DEFAULT_UP`'s
- * `Vector3`) needs that struct to already be a complete type.
+ * whose declared carrier is itself a struct (`Node.DEFAULT: Point`) needs
+ * that struct to already be a complete type.
  *
  * Sorted by name for the same reason every other whole-program list in this
  * file is: byte-identical output from one compile to the next, so a diff

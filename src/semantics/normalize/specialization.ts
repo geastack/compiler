@@ -43,8 +43,8 @@ export interface Specialization {
   /** The type filling each of the declaration's type parameters, in declaration order. */
   readonly arguments: readonly ts.Type[]
   /**
-   * This instantiation as the CHECKER spells it -- `Collection<Document>`, not
-   * `Collection` plus a filling to apply.
+   * This instantiation as the CHECKER spells it -- `Store<Item>`, not
+   * `Store` plus a filling to apply.
    *
    * The public checker API cannot instantiate a type (this module's
    * `induceFromHeritage` records the same gap), so the only instantiated
@@ -55,7 +55,7 @@ export interface Specialization {
    *
    * It is what makes a MEMBER of a generic answerable. Substituting a parameter
    * only ever rewrites a bare `T`, so a member type that merely mentions one --
-   * `filter: Filter<TSchema>`, `Awaited<WithId<TSchema>>` -- keeps the hole and
+   * `query: Query<TItem>`, `Awaited<Keyed<TItem>>` -- keeps the hole and
    * every deferred conditional inside it stays deferred. Read the member off
    * this type instead (`getPropertyOfType`, then the member's own signature)
    * and the checker hands back the instantiated type with those conditionals
@@ -160,8 +160,8 @@ export interface SpecializationCensus {
    * Copies are deduped by the identity of their fillings (the checker interns
    * types), so this is answered without translating a single type -- which
    * is the point: structural ids are spelled into struct names, and a class
-   * every one of whose copies agrees on its relevant fillings (hono's
-   * `Hono<E,S,BasePath>` across every route registration) must be typed
+   * every one of whose copies agrees on its relevant fillings (an
+   * `App<E,S,BasePath>` across every route registration) must be typed
    * exactly as it was before any class had two layouts. Two different
    * objects can still be one physical layout (`Carrier<'a' | 'b'>` beside
    * `Carrier<string>`); the deriver's `physicalClassDeclarationOf` decides
@@ -208,11 +208,11 @@ export interface SpecializationCensus {
    *
    * Copies are censused per declaration, and every walk nests them as a
    * cross product: each method copy inside each class copy. A method copy
-   * minted by one class copy's call can be meaningless in another: mongodb's
-   * `emitAndLog<EventKey extends keyof Events>` is called as
-   * `emitAndLog('connectionCreated', ...)` on the pool, and the same copy
-   * inside the cursor's copy (`Events = CursorEvents`) names an event the
-   * cursor does not have -- its `Parameters<Events[EventKey]>` indexes a key
+   * minted by one class copy's call can be meaningless in another: a generic
+   * emitter base's `emitAndLog<EventKey extends keyof Events>` is called as
+   * `emitAndLog('created', ...)` on one subclass, and the same copy inside a
+   * sibling subclass's copy (`Events = OtherEvents`) names an event that
+   * sibling does not have -- its `Parameters<Events[EventKey]>` indexes a key
    * that does not exist, and the body could not be laid out. No call reaches
    * that pairing, because the checker refuses the one call that would.
    *
@@ -298,18 +298,18 @@ const isHole = (type: ts.Type): boolean => (type.flags & ts.TypeFlags.TypeParame
 /**
  * Whether a filling still has a hole ANYWHERE inside it.
  *
- * `isHole` alone asks only about the top: `AbstractCursor<WithId<TSchema>>`
- * passes it, because `WithId<TSchema>` is an object type and not a parameter.
- * The instantiation it describes is not one the program makes, though -- it is
- * one copy of `Collection<TSchema>`'s own body writing down a reference whose
+ * `isHole` alone asks only about the top: `Cursor<Keyed<TItem>>` passes it,
+ * because `Keyed<TItem>` is an object type and not a parameter. The
+ * instantiation it describes is not one the program makes, though -- it is
+ * one copy of `Store<TItem>`'s own body writing down a reference whose
  * argument is still open -- and minting a copy for it puts back exactly the
  * state monomorphization exists to remove: a body walked with a parameter
- * nothing in that copy binds. mongodb's `AbstractCursor` had seven copies and
- * one of them was `WithId<TSchema>`; every `TSchema` inside it reached
+ * nothing in that copy binds. A generic base class with several copies, one
+ * of them `Keyed<TItem>`, had every `TItem` inside that copy reach
  * representation with no carrier.
  *
  * The check is the deep one because the shallow one cannot tell the two apart,
- * and the copy a program really does make -- `AbstractCursor<WithId<Document>>`,
+ * and the copy a program really does make -- `Cursor<Keyed<Item>>`,
  * from a call the checker itself already resolved -- is recorded from that
  * call, not from this reference.
  */
@@ -418,13 +418,13 @@ const sameOpenLiteral = (checker: ts.TypeChecker, left: ts.Type, right: ts.Type,
  *
  * `containsHole` walks type ARGUMENTS, so it sees `Box<T>` but not `I["out"]`
  * -- an indexed access keeps its parameter in `objectType`, and a conditional
- * keeps one in each branch. hono records `HonoRequest<any, I["out"]>` as a
+ * keeps one in each branch. A `Request<any, I["out"]>` gets recorded as a
  * copy through exactly that gap: `P` was substituted and `I` was not.
  *
  * Such a copy states no layout, so it cannot be EVIDENCE of one either -- it
  * must neither force copies apart nor be the shape they are folded onto. It is
  * deliberately not routed through `containsHole` itself, which decides whether
- * a copy is recorded at all: `Context.req` is declared `HonoRequest<P, I['out']>`
+ * a copy is recorded at all: a `req` field declared `Request<P, I['out']>`
  * and dropping that copy leaves the field with no censused carrier.
  */
 const openFilling = (type: ts.Type | undefined, depth = 0): boolean => {
@@ -488,8 +488,8 @@ const carriesAbsence = (type: ts.Type): boolean =>
  * recognise -- so `maybe<T>(value: T | undefined): T | undefined` bound `T`
  * nowhere, minted no copy, and every direct call of it was refused at lowering
  * as a generic set with no closed family. A constrained `U extends string`
- * survives `getNonNullableType` as itself, which is the only reason hono's
- * `c.json` shape ever bound. One present arm is that arm; several fall back to
+ * survives `getNonNullableType` as itself, which is the only reason a
+ * `json<T, U extends string>(object: T, status?: U)` shape ever bound. One present arm is that arm; several fall back to
  * the checker's spelling, which for a closed type is the union of them.
  */
 const presentOf = (checker: ts.TypeChecker, type: ts.Type): ts.Type => {
@@ -516,14 +516,14 @@ const unify = (
   // for it: the pair a copy answers `fillingOf` from.
   if (recordPair && containsHoleIn(checker, generic)) recordPair(generic, concrete)
   // An OPTIONALITY MARKER is not content. `status?: U` is read as `U |
-  // undefined` and its instantiation as `ContentfulStatusCode | undefined`:
+  // undefined` and its instantiation as `StatusCode | undefined`:
   // one arm on the left, many on the right, so the positional union walk
   // below declines and `U` binds nothing. TypeScript contributes that
   // `undefined` on BOTH sides for the `?`, so it belongs to neither union's
   // content -- dropping it from both restores the congruence the walk needs.
-  // hono's `c.json({ hello: 'world' })` is exactly this shape, and `U`
+  // A `ctx.reply({ hello: 'world' })` call is exactly this shape, and `U`
   // failing to bind discarded the ENTIRE instantiation, `T` included, which
-  // is what left `Context.json` an uninitialized field.
+  // is what left the `reply` class-property arrow an uninitialized field.
   //
   // Only when both sides carry it. A lone `undefined` on the concrete side is
   // a hole's filling, not a marker.
@@ -585,9 +585,9 @@ const unify = (
     // generic interface do, but an alias's arguments live in the mapper the
     // checker instantiated it with, not in `typeArguments` -- so this branch
     // matched, found an empty argument list, and returned having unified
-    // nothing. hono's `ErrorHandler<E>` against `ErrorHandler<any>` is that
-    // shape, and stopping there is why `compose<E>` was recorded with `E`
-    // bound by nothing. Falling through to the signature walk below reaches
+    // nothing. A type alias `ErrorHandler<E>` against `ErrorHandler<any>` is
+    // that shape, and stopping there is why a generic `compose<E>` was
+    // recorded with `E` bound by nothing. Falling through to the signature walk below reaches
     // the same hole the long way, through `Context<E>` in the parameter list.
     genericArguments !== undefined &&
     concreteArguments !== undefined
@@ -602,10 +602,10 @@ const unify = (
   // A UNION on both sides, member for member. `onError?: ErrorHandler<E>` is
   // read as `ErrorHandler<E> | undefined`, and a union carries no call
   // signature of its own -- so without this the hole inside it was never
-  // reached, and hono's `compose<E>` was called twice with `E` bound by
+  // reached, and a generic `compose<E>` was called twice with `E` bound by
   // nothing at all: no instantiation was recorded, `compose` was registered
   // as a generic with no copies, and `census.ts` walks one of those NOT AT
-  // ALL. The whole of `compose.ts` published a single `module-evaluate`, and
+  // ALL. Its whole module published a single `module-evaluate`, and
   // emission refused the read as a declaration this program never introduces.
   //
   // Paired POSITIONALLY, and only when the counts match. The concrete union
@@ -646,7 +646,7 @@ const unifySignatures = (
   if (generics.length !== 1 || concretes.length !== 1 || !generic || !concrete) return
   unify(checker, generic.getReturnType(), concrete.getReturnType(), depth + 1, record, recordPair)
   // A type guard's predicate is part of its return: `getReturnType` answers
-  // `boolean` and drops `value is readonly T[]`. mongodb's
+  // `boolean` and drops `value is readonly T[]`. A guard
   // `isReadonlyArray<T>(value: any): value is readonly T[]` mentions `T`
   // nowhere else, so the call bound nothing, minted no copy, and the callee
   // stayed the generic's uninstantiated set.
@@ -656,10 +656,10 @@ const unifySignatures = (
   // `this` IS a parameter -- ECMA-262 gives it a binding in the function
   // environment like any other -- and it is the only one `Signature.parameters`
   // leaves out. A generic whose type parameter appears ONLY there was therefore
-  // never bound by this walk. hono's `export function match<R extends
+  // never bound by this walk. `export function match<R extends
   // Router<T>, T>(this: R, method: string, path: string)` is the case: `T` is
   // bound from the return type and `R` stayed open, so `fromValueUse` saw one
-  // of two parameters filled, minted no copy, and `RegExpRouter`'s field
+  // of two parameters filled, minted no copy, and a router class's field
   // initializer `match: typeof match<Router<T>, T> = match` then read the ROOT
   // declaration -- which the program never introduces, because a generic this
   // program defines is recorded per copy and never at the root, and emission
@@ -740,20 +740,20 @@ export const censusSpecializations = (
    * A spelling for a copy that MAY NOT EXIST, held against its tuple.
    *
    * A call's resolved return type is a spelling the checker has already
-   * computed for an instantiation the program makes -- `db.collection<DataKey>(
-   * ...)` really does produce `Collection<DataKey>` -- and that spelling is the
+   * computed for an instantiation the program makes -- `db.store<Key>(
+   * ...)` really does produce `Store<Key>` -- and that spelling is the
    * one thing `structural-instantiated-member.ts` needs to read a copy's
    * members with the hole closed. What it is NOT is evidence that a copy should
    * EXIST. A method on a generic class names its own class in its return type
-   * (`Hono.get` returns `Hono<E, S, MergePath<...>, ...>`), so minting from one
+   * (`App.get` returns `App<E, S, MergePath<...>, ...>`), so minting from one
    * manufactures a copy per call site that nothing in the program instantiates:
-   * three of hono's own class-property arrows lost their carriers to copies
+   * a library's own class-property arrows lost their carriers to copies
    * minted exactly that way, and a program that certified stopped certifying.
    *
    * So the spelling waits here, keyed by the tuple rather than by an ordinal,
    * and `tupleOrdinal` claims it if and when a site that really does
    * instantiate mints that copy. Order-independent by construction, which
-   * matters: the copy `db.collection<DataKey>` returns is minted by the
+   * matters: the copy `db.store<Key>` returns is minted by the
    * fixpoint round AFTER this census sees the call, so a back-fill that only
    * wrote to existing ordinals would answer nothing at all.
    */
@@ -801,12 +801,12 @@ export const censusSpecializations = (
     // `deferredSpellings`.
     const spelling = instantiated ?? deferredSpellingFor(declaration, tuple)
     // A copy's SPELLING carries the member images too, however the copy was
-    // minted. A copy minted by substitution -- `new Collection<TSchema>(...)`
-    // inside `Db.collection<TSchema>`, closed per copy of the method -- gets
+    // minted. A copy minted by substitution -- `new Store<TItem>(...)`
+    // inside `Registry.store<TItem>`, closed per copy of the method -- gets
     // its spelling from `deferredSpellings` (the call's resolved return type)
     // and nothing else, so reading the member images only where a written
-    // reference passed them in left every such copy without `WithId<DataKey>`
-    // for the `new FindCursor<WithId<TSchema>>(...)` its `find` builds.
+    // reference passed them in left every such copy without `Keyed<Key>`
+    // for the `new Cursor<Keyed<TItem>>(...)` its `find` builds.
     const spellingImages = spelling ? fillingsOfSpelling(declaration, spelling) : null
     if (spellingImages && spellingImages !== fillings) {
       const merged = new Map(fillings ?? [])
@@ -1005,7 +1005,7 @@ export const censusSpecializations = (
     // Inference does not report a filling for a defaulted type parameter when
     // the caller omits every value argument that mentions it. That absence is
     // not an open hole: the declaration itself says what the language fills
-    // there. `Context.json<T, U = ContentfulStatusCode>(object: T, status?: U)`
+    // there. A method `json<T, U = StatusCode>(object: T, status?: U)`
     // is the measured case -- the call binds T from `object`, omits `status`,
     // and therefore reaches the declared default for U. Requiring inference
     // evidence for both discarded the entire specialization, so census walked
@@ -1059,8 +1059,8 @@ export const censusSpecializations = (
     induceFromHeritage(declaration, resolved, depth)
   }
 
-  // Keyed by the instantiation itself: every mention of `RegExpRouter<[H,
-  // RouterRoute]>` resolves to the one type object, and resolving a
+  // Keyed by the instantiation itself: every mention of `Router<[H,
+  // Route]>` resolves to the one type object, and resolving a
   // reference's members is not free.
   const memberFillings = new Map<ts.Type, ReadonlyMap<ts.Type, ts.Type> | null>()
 
@@ -1077,9 +1077,9 @@ export const censusSpecializations = (
    * whose instantiation mentions one stayed open, and `specializationAt`
    * answered nothing for it. The callee then read as the generic function's
    * OPEN type: a `generic-function-set` with no closed family for
-   * `ir/lower-invocation.ts` to dispatch over. hono's
-   * `findMiddleware(middleware[m], path)` inside `RegExpRouter<T>.add`, whose
-   * `T` binds to `HandlerWithMetadata<T>` rather than to `T`, is that shape.
+   * `ir/lower-invocation.ts` to dispatch over. A generic call
+   * `find(entries[m], path)` inside a generic router's `Router<T>.add`, whose
+   * `T` binds to `WithMetadata<T>` rather than to `T`, is that shape.
    *
    * The reference's own members ARE the images the checker already built for
    * this exact instantiation, so pairing each against the target's is the same
@@ -1088,8 +1088,8 @@ export const censusSpecializations = (
    * The open side comes from the TARGET, never from the member's declaration:
    * an inherited member's declaration spells the BASE's parameter, while the
    * body that reads it spells the derived class's, and those are different
-   * type objects. `Hono<E, S, BasePath>.router` is `HonoBase`'s field seen
-   * through `Hono`'s own parameters, and that is what the constructor writes.
+   * type objects. `App<E, S, BasePath>.router` is `AppBase`'s field seen
+   * through `App`'s own parameters, and that is what the constructor writes.
    *
    * Only a source-declared CLASS is walked. Interfaces and aliases hold no
    * bodies, so no site inside one can need a filling, and a lib class
@@ -1105,7 +1105,7 @@ export const censusSpecializations = (
    * arguments of its own, so it read as closed and `memberFillingsOf` skipped
    * it. The composite pairs those members are the only source of are then
    * missing from the copy, and `filledBy` answers `null` for exactly the hole
-   * the fixpoint needed: hono's `RegExpRouter<T>` never minted the copy of
+   * the fixpoint needed: a generic `Router<T>` never minted the copy of
    * `match` its own field initializer names, and emission refused the read as a
    * declaration the program never introduces.
    *
@@ -1159,11 +1159,11 @@ export const censusSpecializations = (
       // sides are one member symbol, read off the generic and off its
       // instantiation, so signature `i` is the image of signature `i` (the
       // pairing `structural-instantiated-member.ts` relies on for the same
-      // reason). mongodb's `Collection.find` is the case: its three overloads
-      // were the only place `FindCursor<WithId<TSchema>>` was spelled, so no
-      // copy of `Collection` ever had the image `WithId<DataKey>` that the
-      // `new FindCursor<WithId<TSchema>>(...)` in its body needs, and
-      // `FindCursor` was minted no copy at all.
+      // reason). A generic class's overloaded `find` is the case: its
+      // overloads were the only place `Cursor<Keyed<TItem>>` was spelled, so
+      // no copy of `Store` ever had the image `Keyed<Key>` that the
+      // `new Cursor<Keyed<TItem>>(...)` in its body needs, and `Cursor` was
+      // minted no copy at all.
       for (const [openList, closedList] of [
         [openType.getCallSignatures(), closedType.getCallSignatures()],
         [openType.getConstructSignatures(), closedType.getConstructSignatures()]
@@ -1267,9 +1267,9 @@ export const censusSpecializations = (
    * it came from, so the overload the checker selected is the one member of
    * the set that was declared at the same node -- a fact the checker states,
    * not a guess from argument position. Skipping the whole set instead is what
-   * left hono's `c.json({ hello: 'world' })` recording no instantiation at
-   * all: `JSONRespond` declares two generic call signatures, so the call that
-   * every hono program makes bound nothing.
+   * left a `ctx.reply({ hello: 'world' })` call recording no instantiation at
+   * all: the field's declared type has two generic call signatures, so the
+   * call bound nothing.
    */
   const genericSignatureOf = (node: ts.CallLikeExpression, resolved: ts.Signature | undefined): ts.Signature | null => {
     const callee = calleeExpressionOf(node)
@@ -1288,14 +1288,14 @@ export const censusSpecializations = (
    * The generic FUNCTION that implements the declared generic signature a call
    * resolved to, when the two are different declarations.
    *
-   * `json: JSONRespond = <T, U>(object: T, ...) => ...` (hono's `Context`)
+   * A class property `json: Respond = <T, U>(object: T, ...) => ...`
    * writes the signature twice: once as the field's declared type, which is
    * what every call site resolves against, and once as the arrow that provides
    * the body. Only the first is reachable from the call, so the arrow was
    * `isGeneric` with zero copies -- and `census.ts` walks such a declaration
    * NOT AT ALL. The field initializer then had no operations, and its body
    * emitted `return;` from a function whose convention returns a callable:
-   * every hono program's `c.json` was an uninitialized field, invisible until
+   * every program calling `ctx.reply` had an uninitialized field, invisible until
    * clang rejected the return.
    *
    * The mapping is POSITIONAL, which is what "this function implements that
@@ -1346,9 +1346,9 @@ export const censusSpecializations = (
    * copy minted on that node is a copy of nothing: `census.ts` walks only
    * declarations with bodies, so the implementation stayed "generic with no
    * copies", walked not at all, while every call named an ordinal the body
-   * never had. TypeScript's own `core.ts` writes `some`, `find`, `every`,
-   * `filter`, `map` and `findIndex` this way, and together they were the
-   * largest families still reaching representation with a naked type
+   * never had. A utility module that writes `some`, `find`, `every`,
+   * `filter`, `map` and `findIndex` as overload sets this way had, together,
+   * the largest families still reaching representation with a naked type
    * parameter after namespaces became paths.
    *
    * The implementation is the one runtime function
@@ -1392,8 +1392,8 @@ export const censusSpecializations = (
    * that binds them was erased with `as any`, refilled with the type of the
    * value the assertion wraps.
    *
-   * mongodb's `Collection.insertOne` is `executeOperation(this.client, new
-   * InsertOneOperation(...) as TODO_NODE_3286)` (`TODO_NODE_3286 = any`). The
+   * A method written `executeOperation(this.client, new
+   * InsertOperation(...) as Todo)` (`type Todo = any`) is the case. The
    * checker infers `T = any` from the erased argument, so the copy that call
    * mints takes `operation: any` and every read of the operation in the copy
    * -- and in the `tryOperation` copy it calls -- is a box of a value whose
@@ -1517,10 +1517,9 @@ export const censusSpecializations = (
     }
     const generic = genericSignatureOf(node, resolved)
     // A NON-generic overload of a generic implementation still runs that
-    // implementation at some filling: mongodb's `Db.listCollections(filter,
-    // {nameOnly: false})` resolves to the overload returning
-    // `ListCollectionsCursor<CollectionInfo>`, and the body builds `new
-    // ListCollectionsCursor<T>(...)`. Unifying the implementation against the
+    // implementation at some filling: `db.list(query, {namesOnly: false})`
+    // resolves to the overload returning `ListCursor<Info>`, and the body
+    // builds `new ListCursor<T>(...)`. Unifying the implementation against the
     // overload binds `T` from the overload's stated result, so the copy the
     // body constructs is the copy the caller holds.
     const overload = !generic && resolved ? resolved.getDeclaration() : undefined
@@ -1596,23 +1595,21 @@ export const censusSpecializations = (
     //
     // Without this, a generic returned by a generic FUNCTION gets its copy
     // minted by the fixpoint round below, which substitutes the fillings into
-    // the site and records them with no image at all: `Collection@4`
-    // (`tuple=[DataKey]`, from `db.collection<DataKey>(...)` in
-    // `client_encryption.ts`) was the only one of the mongodb probe's five
-    // `Collection` copies without one, and every `AlternativeType` still
-    // deferred on that probe -- 43 of 452 mandatory obligations, the largest
-    // single root -- was in that copy. The four minted from a written
-    // `Collection<X>` annotation carried an image and resolved.
+    // the site and records them with no image at all: a copy minted from a
+    // `db.store<Key>(...)` call was the only one of a generic class's copies
+    // without one, and the largest single root of still-deferred
+    // `AlternativeType` obligations was in that copy. The copies minted from
+    // a written `Store<X>` annotation carried an image and resolved.
     //
     // SPELLING ONLY, and that distinction is the whole of it. A return type is
     // the checker naming an instantiation, not the program stating one, and a
-    // method on a generic class names its own class back (`Hono.get` returns
-    // `Hono<E, S, MergePath<...>, ...>`) -- so minting from it manufactures a
-    // copy per call site that nothing instantiates. That regressed hono from
-    // certified to six unmet obligations: three class-property arrows whose
-    // carriers only exist in the copies the program really makes. The spelling
-    // waits in `deferredSpellings` for a site that mints, which is what the
-    // mongodb case needs anyway: `Collection@4` is minted by the fixpoint round
+    // method on a generic class names its own class back (`App.get` returns
+    // `App<E, S, MergePath<...>, ...>`) -- so minting from it manufactures a
+    // copy per call site that nothing instantiates. That regressed a certified
+    // program to unmet obligations: class-property arrows whose carriers only
+    // exist in the copies the program really makes. The spelling waits in
+    // `deferredSpellings` for a site that mints, which is what the
+    // `db.store<Key>` case needs anyway: that copy is minted by the fixpoint round
     // BELOW this, so a back-fill that only wrote to existing ordinals would
     // have answered nothing there either.
     fromTypeReference(null, resolved.getReturnType(), true)
@@ -1973,13 +1970,13 @@ export const censusSpecializations = (
   /**
    * The generic classes the program REINTERPRETS: casts one of their
    * instances, through `unknown` or `any`, to another instantiation of the
-   * same class hierarchy -- mongodb's `AbstractCursor.map` composing a
-   * transform and returning `this as unknown as AbstractCursor<T>`.
+   * same class hierarchy -- a generic cursor's `map` composing a transform
+   * and returning `this as unknown as Cursor<T>`.
    *
    * That is one object viewed at two instantiations, and the program has
    * declared the relationship UNCHECKED: the `transform` field typed
-   * `(doc: TSchema) => any` keeps receiving the raw documents whatever
-   * `TSchema` the current view claims, and a closure composed in one view
+   * `(doc: TItem) => any` keeps receiving the raw items whatever
+   * `TItem` the current view claims, and a closure composed in one view
    * forwards a value of another view's type. No per-copy layout is honest
    * for such a class -- the object cannot be converted between copies
    * without losing identity, and any concrete filling is a claim the program
@@ -2030,16 +2027,16 @@ export const censusSpecializations = (
     // statement-level reachability cannot say so: a dead method lives inside a
     // live class declaration, so `forEachChild` walks straight into it.
     //
-    // `mongodb-connection-string-url`'s `typedSearchParams<T extends
-    // Record<string, any>>()` is the case, and it is the shape to expect:
+    // A method `typedSearchParams<T extends Record<string, any>>()` is the
+    // case, and it is the shape to expect:
     // its body is the type-only trick `(false as true) && new
     // (caseInsenstiveURLSearchParams<keyof T & string>(URLSearchParams))()`,
     // written to name a type and never to run. Nothing spells the method, so
     // reachability prunes it -- and this walk minted copies of a LIVE generic
     // from it anyway, filled with `keyof T & string` for a `T` that, having no
     // call site, no copy and no default, can never be closed. Every method of
-    // those copies then carried an unresolved intersection: 56 of the mongodb
-    // probe's 516 mandatory obligations, all from one method nothing calls.
+    // those copies then carried an unresolved intersection: dozens of
+    // mandatory obligations, all from one method nothing calls.
     if (reachable.memberIsPruned(node)) return
     if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) noteReinterpretation(node)
     if (ts.isCallOrNewExpression(node) || ts.isTaggedTemplateExpression(node) || ts.isJsxOpeningLikeElement(node)) fromCall(node)
@@ -2056,9 +2053,9 @@ export const censusSpecializations = (
 
   // A reinterpreted object is a whole object, so the fold reaches its whole
   // hierarchy: the ancestors whose storage it carries, and the descendants
-  // it may really be -- `FindCursor.map` returns `super.map(t) as
-  // FindCursor<T>`, a checked downcast that holds only if the `FindCursor`
-  // being viewed is the one physical class the `FindCursor<T>` view names.
+  // it may really be -- a derived cursor's `map` returns `super.map(t) as
+  // DerivedCursor<T>`, a checked downcast that holds only if the object
+  // being viewed is the one physical class the `DerivedCursor<T>` view names.
   const reinterpretationFamily = new Set<ts.Declaration>()
   for (const declaration of reinterpretedClasses) for (const one of ancestryOf(declaration)) reinterpretationFamily.add(one)
   if (reinterpretationFamily.size > 0)
@@ -2111,8 +2108,8 @@ export const censusSpecializations = (
    *
    * A receiver typed as the base runs whichever class allocated it, so every
    * copy a call through the base mints is a copy each override must have too:
-   * mongodb's `OnDemandDocument.getNumber` calls `this.get(name, 'bool')`,
-   * and a `MongoDBResponse` -- which overrides `get<T>` and is only ever
+   * a base class's `getNumber` calls `this.get(name, 'bool')`, and a
+   * subclass -- which overrides `get<T>` and is only ever
    * called at `'object'` itself -- must answer that call with its own body.
    * Minting only where a call is WRITTEN left the subclass with no copy at
    * that convention, and the whole dispatch family refused
@@ -2438,8 +2435,9 @@ export const censusSpecializations = (
     //
     // The copies are REWRITTEN, not dropped. A copy is also what induces the
     // instantiations its body reaches, so deleting one deletes those: folding
-    // `Context`'s `[any, any, {}]` away took `new HonoRequest(...)` with it,
-    // and `HonoRequest` -- never instantiated anywhere else with closed
+    // a context class's `[any, any, {}]` copy away took the `new Request(...)`
+    // in its constructor with it, and that request class -- never
+    // instantiated anywhere else with closed
     // fillings -- stopped being censused at all, leaving a class the program
     // constructs with no constructor object.
     specializationsOf: (declaration) => {
@@ -2458,7 +2456,7 @@ export const censusSpecializations = (
       // Each copy keeps its own ORDINAL. Collapsing those onto the canonical
       // one lowered the same body twice and the IR builder threw ("block ...
       // is already terminated by a branch operation"); dropping the entries
-      // instead left `HonoRequest` never censused and so with no constructor
+      // instead left such a class never censused and so with no constructor
       // object to build. One entry per instantiation, all naming one layout.
       return copies.map((copy) => (copy === chosen ? copy : { ...chosen, ordinal: copy.ordinal }))
     },
@@ -2490,12 +2488,11 @@ export const censusSpecializations = (
     specializationOfInstance: (receiverType, substitute) => {
       // A polymorphic `this` is a type PARAMETER whose symbol is the class
       // itself: it has no type arguments of its own, and its constraint is the
-      // class at its own parameters (`FindCursor<TSchema>`), which `substitute`
+      // class at its own parameters (`Cursor<TItem>`), which `substitute`
       // fills with the enclosing copy's fillings. Read as it was, every
       // `this.method()` in a copy answered "no copy" and ran the base at its
-      // root -- the MongoDB driver's `FindCursor.maxTimeMS` calling
-      // `this.throwIfInitialized()` against an `AbstractCursor` it does not
-      // derive from.
+      // root -- a derived cursor's method calling `this.throwIfInitialized()`
+      // against a base cursor copy it does not derive from.
       const thisClass =
         (receiverType.flags & ts.TypeFlags.TypeParameter) !== 0 &&
         receiverType.getSymbol()?.declarations?.some((one) => ts.isClassLike(one) || ts.isInterfaceDeclaration(one)) === true
@@ -2529,13 +2526,12 @@ export const censusSpecializations = (
         // is one layout; `canonicalLayoutFillings` names it.
         if (reinterpretationTupleOf(declaration) !== null) return false
         // A base class that splits splits its derived classes with it: one
-        // derived struct can extend only one base struct. mongodb's
-        // `ListCollectionsCursor<T> extends AbstractCursor<T>` is held at
-        // `CollectionInfo` and at its default union, which are assignable to
-        // each other and would fold below -- while `AbstractCursor` keeps
-        // `TSchema` in mutable storage and splits on the very same fillings,
-        // so `cursor.toArray()` resolved against an `AbstractCursor` copy the
-        // one folded struct did not extend.
+        // derived struct can extend only one base struct. A
+        // `ListCursor<T> extends BaseCursor<T>` held at `Info` and at its
+        // default union, which are assignable to each other and would fold
+        // below -- while `BaseCursor` keeps `T` in mutable storage and splits
+        // on the very same fillings -- had `cursor.toArray()` resolve against
+        // a `BaseCursor` copy the one folded struct did not extend.
         if (baseCopiesDiffer(declaration, copies)) return true
         // Two copies may be separate STRUCTS only if the program can never put
         // one where the other is declared. TypeScript's own assignability is
@@ -2563,8 +2559,8 @@ export const censusSpecializations = (
         // already filtered down to the relevant positions.
         // A difference involving `any` does NOT force the split. `any` is
         // TypeScript's UNCHECKED top: a program that writes it has already
-        // opted out of the guarantee, and hono's `Context` -- held at
-        // `[any, any, {}]` and `[BlankEnv, any, {}]` -- is passed between
+        // opted out of the guarantee, and a context class held at
+        // `[any, any, {}]` and `[BlankEnv, any, {}]` is passed between
         // those copies on exactly that licence. `unknown` is the CHECKED top
         // and carries no such licence, so `ReadableStream<unknown>` beside
         // `ReadableStream<Uint8Array>` still splits, which is the pair whose
@@ -2579,10 +2575,10 @@ export const censusSpecializations = (
         // The `any` licence covers a copy that is only ever SPELLED, never one
         // that is minted too. Two constructed copies, one at `any` and one
         // concrete, each write their own values into the stored position, and
-        // one struct cannot hold both: `class CaseInsensitiveMap<V = any>
+        // one struct cannot hold both: `class KeyedMap<V = any>
         // extends Map<string, V>`, constructed at its `any` default and at
         // `unknown[]`, folded onto the `unknown[]` copy, and
-        // `new CaseInsensitiveMap([['ReplicaSet', 'rs0']])` stored `'rs0'` into
+        // `new KeyedMap([['key', 'value']])` stored `'value'` into
         // a map of arrays -- an abort at run time. A bare `any` filling is
         // therefore a real difference here; a filling that is merely OPEN (a
         // type parameter, or a type built over one) is not yet a filling.
@@ -2591,8 +2587,8 @@ export const censusSpecializations = (
         //
         // A bare `any` beside a concrete filling splits only where the two
         // copies would really write different data (`storedDataDiffers`):
-        // hono's `Context<E>` keeps `E` only in dynamic, callable and
-        // self-referencing members, and splitting it made the `Context` the
+        // a `Context<E>` class that keeps `E` only in dynamic, callable and
+        // self-referencing members, once split, made the context the
         // dispatcher builds a different type from the one every handler takes.
         const bareAny = (type: ts.Type | undefined): boolean => type !== undefined && (type.flags & ts.TypeFlags.Any) !== 0
         const written = copies.filter((copy) => isConstructed(declaration, copy.ordinal))
@@ -2668,12 +2664,11 @@ export const censusSpecializations = (
         // other difference is a real layout question and is left to the
         // deriver, which groups copies on their fillings' representations.
         //
-        // Measured on hono, whose entire build has six classes with more than
-        // one copy:
+        // Measured on a server program whose multi-copy classes include:
         //   ReadableStream  0:[unknown]        1,2:[Uint8Array]
         //   Context         0:[any, any, {}]   1:[BlankEnv, any, {}]
-        //   HonoRequest     0:["/", {}]        1:[any, I["out"]]
-        // The first two fold onto their concrete copy. `HonoRequest` has no
+        //   Request         0:["/", {}]        1:[any, I["out"]]
+        // The first two fold onto their concrete copy. `Request` has no
         // candidate -- copy 1 differs at a position where copy 0 is NOT top --
         // so it keeps what it had. Restricting this to `any` alone left
         // `ReadableStream` broken; widening it to plain assignability folded
@@ -2682,8 +2677,8 @@ export const censusSpecializations = (
         // `generic-method-under-a-later-class-copy.ts` its emission.
         const topType = (type: ts.Type | undefined): boolean =>
           type !== undefined && ((type.flags & ts.TypeFlags.Unknown) !== 0 || openFilling(type))
-        // Two copies can spell one type as two checker objects -- hono holds
-        // `ReadableStream<Uint8Array>` twice, through two `ArrayBufferLike`
+        // Two copies can spell one type as two checker objects -- a program
+        // can hold `ReadableStream<Uint8Array>` twice, through two `ArrayBufferLike`
         // instantiations -- so identity alone found no candidate that
         // absorbed all three copies. Mutual assignability between two
         // NON-top types is the same type for layout; it is not the loose

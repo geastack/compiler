@@ -1,6 +1,6 @@
 //! expect: fallback
 //! expect: given
-// hono's `Context.notFound`: a private field typed `NotFoundHandler<E>` -- a
+// An HTTP framework's `Context.notFound`: a private field typed `NotFoundHandler<E>` -- a
 // callable over `Context<E>`, which is `Context<E, any, BlankInput>` once the
 // class's later parameters take their defaults -- defaulted with `??=` and
 // then called with `this`, whose type is `Context<E, P, I>`. Two

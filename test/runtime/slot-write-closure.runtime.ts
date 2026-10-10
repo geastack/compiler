@@ -1,7 +1,7 @@
 // A method slot's TARGET set is a question about writes, not about every
 // caller: `stir` calls `.copy` through an `any` it cannot resolve, which used
-// to open `V.copy` for every typed caller in the program (three's math
-// classes, 1,179 refused sites in the three.js app), and the host-mutation census then
+// to open `V.copy` for every typed caller in the program (a 3D library's
+// math classes, 1,179 refused sites in one app), and the host-mutation census then
 // read each of those calls as an unauthenticated callee. Nothing writes the
 // slot, so the typed call dispatches to the one declared body.
 class V {

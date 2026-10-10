@@ -2,13 +2,14 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { ConversionNode } from '../conversion/algebra.js'
 import type { ConversionCensus } from '../conversion/nodes.js'
-import type { DeclarationId, IrValueId, StructuralTypeId } from '../identity/ids.js'
+import type { DeclarationId, IrValueId, OperationId, StructuralTypeId } from '../identity/ids.js'
 import type { ClassLayout } from '../projection/classes.js'
 import type { BindingPlacement } from '../projection/bindings.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
-import type { Representation } from '../representation/model.js'
+import { representationKey, type Representation } from '../representation/model.js'
 import type { IrBody, IrOperation } from './model.js'
 import { publishEmissionRepresentationsOf } from './emission-representations.js'
+import type { NativeIteratorFieldRead } from './native-iterator-field-views.js'
 
 const number = { kind: 'scalar', domain: 'number' } as const
 const string = { kind: 'string' } as const
@@ -43,6 +44,22 @@ const emptyConversions = (nodes = new Map<string, ConversionNode>()): Conversion
   nodeFor: () => {
     throw new Error('nodeFor is not used by emission reachability')
   },
+  fieldReadFor: () => {
+    throw new Error('fieldReadFor is not used by emission reachability')
+  },
+  callArgumentFor: () => {
+    throw new Error('callArgumentFor is not used by emission reachability')
+  },
+  absentIndexReadFor: () => {
+    throw new Error('absentIndexReadFor is not used by emission reachability')
+  },
+  nativeMethodFor: () => null,
+  nativeBufferMethodFor: () => null,
+  checkedFieldReadFor: () => null,
+  nativeObjectSampleFor: () => null,
+  nativeDescriptorSnapshotFor: () => null,
+  dictionaryReadFor: () => null,
+  readOnlyDictionaryFor: () => null,
   coercionFor: () => {
     throw new Error('coercionFor is not used by emission reachability')
   },
@@ -50,6 +67,7 @@ const emptyConversions = (nodes = new Map<string, ConversionNode>()): Conversion
   nativeBaseViewFor: () => null,
   armViewFor: () => null,
   assertedUnionFor: () => null,
+  assertedViewFor: () => null,
   familyMemberViewFor: () => null,
   caughtHandoffFor: () => null,
   assertedClassDowncastFor: () => null,
@@ -180,6 +198,74 @@ test('missing retained conversion fails closed and restores fallback roots', () 
     [...publication.representations].some((representation) => representation.kind === 'record' && representation.shapeId === 'fallback'),
     true
   )
+})
+
+test('retains physical method carriers cited only by iterator acquisition, steps, and cleanup', () => {
+  const iterator = { value: 'cursor' as IrValueId, representation: number }
+  for (const site of ['acquire', 'next', 'close', 'cleanup'] as const) {
+    const source = record(`physical-${site}`, [{ key: 'payload', value: string }])
+    const conversion: ConversionNode = { id: `method-${site}`, source, target: number, capability: { kind: 'identity' } }
+    const methodRead: NativeIteratorFieldRead = {
+      value: number,
+      read: {
+        receiver: iterator.value,
+        carrier: representationKey(iterator.representation),
+        key: site === 'close' || site === 'cleanup' ? 'return' : 'next',
+        result: representationKey(number),
+        sources: [{ conversion: conversion.id, source }]
+      }
+    }
+    const operation =
+      site === 'acquire'
+        ? {
+            kind: 'get-iterator',
+            lineage,
+            protocol: 'iterator',
+            receiver: iterator,
+            method: null,
+            result: { id: iterator.value, representation: number },
+            nativeNextMethodRead: methodRead
+          }
+        : site === 'next'
+          ? {
+              kind: 'iterator-next',
+              lineage,
+              iterator,
+              value: null,
+              result: { id: 'step', representation: number },
+              nativeMethodRead: methodRead
+            }
+          : { kind: 'iterator-close', lineage, iterator, result: null, onlyIfOpen: false, nativeMethodRead: methodRead }
+    const body = bodyOf(site === 'cleanup' ? [] : [operation as IrOperation])
+    const retained =
+      site === 'cleanup'
+        ? ({
+            ...body,
+            iteratorCloseRegions: [
+              {
+                loop: 'loop' as OperationId,
+                lineage,
+                iterator,
+                entry: body.entry,
+                blocks: [],
+                dismissTargets: [],
+                onlyIfOpen: false,
+                bodyEntry: null,
+                nativeMethodRead: methodRead
+              }
+            ]
+          } as IrBody)
+        : body
+    const publication = publishEmissionRepresentationsOf(
+      inputOf(retained, { conversions: emptyConversions(new Map([[conversion.id, conversion]])) })
+    )
+    assert.equal(publication.complete, true, site)
+    assert.equal(publication.conversions.get(conversion.id), conversion, site)
+    assert.ok(publication.representations.includes(source), site)
+    const missing = publishEmissionRepresentationsOf(inputOf(retained))
+    assert.equal(missing.complete, false, site)
+    assert.deepEqual(missing.missingConversions, [conversion.id], site)
+  }
 })
 
 test('class roots expand only retained class layouts and their base layouts', () => {

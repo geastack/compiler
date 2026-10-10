@@ -36,7 +36,7 @@ export interface RepresentationViolation {
  * The guards below ask per-node questions, and a node shared between
  * selections -- the derive memo hands every reader of one structural type the
  * same object -- has one answer. Walking each selection's own tree in full
- * asked it once per path instead: on the tsc self-compile, union carriers
+ * asked it once per path instead: on a large program, union carriers
  * whose arms embed records whose fields embed unions made that walk 80% of
  * a representations stage that was still running after twenty minutes
  * (preflight15, profiled in place), for a plan whose distinct carriers number

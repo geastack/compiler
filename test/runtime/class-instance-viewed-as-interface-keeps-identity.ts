@@ -1,11 +1,11 @@
 // A CLASS INSTANCE PASSED WHERE AN INTERFACE IS DECLARED STAYS ITS CLASS.
 //
-// Hono builds `new Response(null, response)` -- a Response where `ResponseInit`
-// is declared -- and `@hono/node-server`'s constructor asks `init instanceof
-// GlobalResponse`, then reads the init as a Response. The interface value is a
-// structural view of the instance; `instanceof` and the narrowing must still
-// answer from the instance it was built from, and a view of a plain record
-// must not pass.
+// An HTTP framework builds `new Response(null, response)` -- a Response where
+// `ResponseInit` is declared -- and its server adapter's constructor asks
+// `init instanceof GlobalResponse`, then reads the init as a Response. The
+// interface value is a structural view of the instance; `instanceof` and the
+// narrowing must still answer from the instance it was built from, and a view
+// of a plain record must not pass.
 
 interface Init {
   status?: number

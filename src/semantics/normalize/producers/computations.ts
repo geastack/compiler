@@ -28,6 +28,7 @@ import {
 import type { BindingOperation, ComputationOperation } from '../../model/operations.js'
 import { propertyExpressionValueTypeAt } from './properties.js'
 import { objectCreateResultOverride } from './invocations.js'
+import { ordinaryObjectDataWriteIsAbsent } from '../callable-data-write.js'
 
 type ComputationNode =
   | ts.BinaryExpression
@@ -159,7 +160,7 @@ const finishComputation = (
       // operands this operation already cites, including any contextual
       // layout each literal acquired. Asking the checker for the enclosing
       // expression independently can describe a different, pre-contextual
-      // pair: BSON's `const root: Document = flag ? [] : {}` reports
+      // pair: `const root: Document = flag ? [] : {}` reports
       // `never[] | {}` for the expression while each branch is contextually
       // `Document`, and the array branch's value-flow census further proves
       // an array of dynamic elements. Building the merge from the stale
@@ -188,7 +189,7 @@ const finishComputation = (
       // which TypeScript admitted the operator, and `bindingWriteFor` uses the
       // same type for the store.  The checker's type for the enclosing JS
       // expression can remain `any` even when parameter census proved the
-      // target numeric (Three's `hue2rgb`: `t += 1`); publishing that stale
+      // target numeric (an untyped JS helper's `t += 1`); publishing that stale
       // outer answer makes the binding write unbox an expression the numeric
       // emitter has already produced as `double`.
       const target = operands[0]
@@ -212,6 +213,18 @@ const finishComputation = (
     return value.type
   })()
   const operation: ComputationOperation = {
+    ...(form === 'unary' &&
+    operatorText === '!' &&
+    ts.isPrefixUnaryExpression(node) &&
+    context.logicalLeftObjectTruthyAt?.(node.operand) === true
+      ? { operandObjectTruthy: true as const }
+      : {}),
+    ...(form === 'logical' &&
+    operatorText === '&&' &&
+    ts.isBinaryExpression(node) &&
+    context.logicalLeftObjectTruthyAt?.(node.left) === true
+      ? { logicalLeftObjectTruthy: true as const }
+      : {}),
     id: operationIdentity,
     family: 'computation',
     caller: candidate.caller,
@@ -653,7 +666,31 @@ const contributeBinary = (context: ProducerContext, candidate: CensusCandidate, 
   if (kind === ts.SyntaxKind.InKeyword) {
     // Throws if the right-hand side is not an object; a Proxy `has` trap can
     // run arbitrary code.
-    return finishComputation(context, candidate, node, 'in', tokenText(kind), [left, right], throwingCompletion, coercingEffects)
+    const contribution = finishComputation(
+      context,
+      candidate,
+      node,
+      'in',
+      tokenText(kind),
+      [left, right],
+      throwingCompletion,
+      coercingEffects
+    )
+    if (
+      contribution.kind !== 'operations' ||
+      left.source.kind !== 'constant' ||
+      left.source.literal !== 'string' ||
+      !ordinaryObjectDataWriteIsAbsent(left.source.text, node, context)
+    )
+      return contribution
+    return {
+      ...contribution,
+      operations: contribution.operations.map((operation) =>
+        operation.family === 'computation' && operation.form === 'in'
+          ? { ...operation, ordinaryObjectPrototypeKeyAbsent: true as const }
+          : operation
+      )
+    }
   }
 
   // Arithmetic, bitwise, shift, and relational operators: `ToNumeric`/

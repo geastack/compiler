@@ -1,7 +1,7 @@
-// `@hono/node-server`'s websocket upgrade (websocket.ts) hands its own bindings
+// A Node HTTP adapter's websocket upgrade hands its own bindings
 // record to a callback typed for two OTHER records, through `unknown`:
 //
-//   const env: UpgradeBindings = { incoming: request, outgoing: undefined, wss, [WAIT_FOR_WEBSOCKET_SYMBOL]: waitForWebSocket }
+//   const env: UpgradeBindings = { incoming: request, outgoing: undefined, wss, [WAIT_SYMBOL]: waitForWebSocket }
 //   await fetchCallback(createUpgradeRequest(request), env as unknown as Parameters<FetchCallback>[1])
 //
 // The assertion emits nothing: the callee receives `env` itself, so the

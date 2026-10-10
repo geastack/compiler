@@ -16,8 +16,8 @@ import { webglPlugin } from './webgl/plugin.js'
  * names neither is unaffected by both.
  *
  * native-webgl-angle is the third, and the one that shows how little a host has
- * to state when the compiler can read the library itself: it names 127 free
- * functions and no types at all, because the WebGL context a three.js program
+ * to state when the compiler can read the library itself: it names its free
+ * functions and no types at all, because the WebGL context a program
  * holds is a TypeScript class this compiler compiles. See `webgl/plugin.ts`.
  */
 export const installedPlugins: readonly CompilerPlugin[] = [geaPlugin, applePlugin, webglPlugin]

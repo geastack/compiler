@@ -1,6 +1,6 @@
 // THREE NODE ALIASES THAT ARE VIEWS OF ONE OBJECT, ACROSS SEVERAL GENERIC COPIES.
 //
-// mongodb's `List<T>` (`utils.ts`) is a circular doubly linked list whose head
+// A database client's `List<T>` is a circular doubly linked list whose head
 // is `{ next: null, prev: null, value: null } as unknown as EmptyNode`, typed
 // `HeadNode<T> | EmptyNode`, and whose nodes are `ListNode<T>` literals. The
 // head's links point at nodes and the nodes' links point back at the head, so

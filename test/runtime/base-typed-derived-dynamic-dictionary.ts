@@ -22,4 +22,8 @@ replaceThroughBase(material, replacement)
 console.log('direct=' + material.uniforms.label + '/' + material.uniforms.extra)
 //! expect: identity=true
 console.log('identity=' + (material.uniforms === replacement))
-//! emitted-has: gea::detail::writeDynamicField
+//! emitted-has: ->uniforms = std::move(gea_arg_1);
+//! emitted-lacks: gea::detail::writeDynamicField
+// The `as any` store names a field the census resolves on the instance's own
+// layout, so it is the typed member store itself; the boxed
+// `writeDynamicField` hook this asserted before unboxed the replacement first.

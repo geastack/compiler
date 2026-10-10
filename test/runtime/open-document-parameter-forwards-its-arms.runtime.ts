@@ -1,6 +1,6 @@
 // AN OPEN-DOCUMENT PARAMETER HANDED ON, WHOLE, TO ANOTHER ONE.
 //
-// mongodb and bson pass `Document`s from function to function; the first
+// A database client and its serializer pass `Document`s from function to function; the first
 // function's parameter census learns the arms its callers and guards put in
 // the cell (here the caller's `number[]` and the guard's `any[]` beside the
 // dictionary). `keysOf(d: Doc)` is called only with `source`, so its own

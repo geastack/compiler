@@ -1,7 +1,7 @@
 //! expect: keys:0,1,2
 //! expect: size:12
 
-// bson's calculate_size.ts: `for (let i = 0; i < object.length; i++)
+// A binary-document serializer's size calculation: `for (let i = 0; i < object.length; i++)
 // totalLength += calculateElement(i.toString(), object[i], ...)`. The counter
 // is proven integral and carried as the backend's narrowed integer, and
 // `Number.prototype.toString` must answer for that carrier exactly as it does

@@ -1,12 +1,15 @@
 import { proxyArmWithoutHome } from '../../representation/proxy-carriers.js'
-import { nativeCallReceiverText } from './emit-native-method.js'
-import { hostConstructFrameOf, receivableArguments } from '../../ir/call-entry.js'
+import { operationNativeCallReceiverText } from './emit-native-method.js'
+import { genericNativeLogicalReceiverOf, hostConstructFrameOf, receivableArguments } from '../../ir/call-entry.js'
 import { stableBorrowEntryAccepts } from './borrowed-call-entry.js'
 import { callableMemberAlternateSlot, callableMemberSlot } from '../../ir/callable-member-candidates.js'
 import { transferOf } from '../../ir/transfer.js'
 import { boxedValueText } from './emit-dynamic-properties.js'
+import { operationConversionText } from './emit-certified-conversion.js'
 import { functionConstructorArgumentKindOf } from '../../representation/function-constructor.js'
 import { nativeSumWidenable } from './emit-sum-widening.js'
+import { nativeHeldFieldViewReadText } from './emit-native-field-view.js'
+import type { NativeEntryFieldReads } from '../../ir/native-entry-field-views.js'
 import type {
   AllocateCallableOperation,
   AllocateConstructorOperation,
@@ -23,9 +26,9 @@ import { classFamilyOverridesOf, virtualDispatchKey } from '../../projection/dis
 import { cppVirtualMemberName } from './virtual-methods.js'
 import type { StructuralTypeId } from '../../identity/ids.js'
 import { abiKey, representationKey } from '../../representation/model.js'
-import { alignedValueText, bindsReceiver, callableObjectAbi, movedValueText, recipeText, unboxedLoadText } from './emit-narrowing.js'
+import { alignedValueText, callableObjectAbi, movedValueText, namedConversionText, recipeText, unboxedLoadText } from './emit-narrowing.js'
+import { SIBLING_CLASS_ARGUMENT } from '../../conversion/sibling-class.js'
 import { memberAccessOperator, reactiveRevisionText } from './emit-carrier-members.js'
-import { structuralRecordViewText } from './emit-record-view.js'
 import { frameHandleText, sharedGroupMemberText } from './emit-binding-reference.js'
 import { restPacks } from '../../conversion/record-view.js'
 import { abiOfCallee } from '../../projection/callee.js'
@@ -57,7 +60,7 @@ import {
   type UnionMethodArm,
   captureFieldText
 } from './emit-context.js'
-import { classMemberOf, classStaticMemberOf, cppFieldInitializerStatements, lazyArrowFieldPlanOf } from './class-layout.js'
+import { classMemberOf, cppFieldInitializerStatements, lazyArrowFieldPlanOf } from './class-layout.js'
 import { cellValueText } from './emit-bindings.js'
 import { declaredRecordFieldOf } from './records.js'
 import { hostArityCallLines, hostResultText } from './host/emit-host-arity.js'
@@ -109,47 +112,6 @@ export const emitBindCallable = (ctx: EmitContext, lines: string[], operation: B
   }
   const guarded =
     (operation.unboxedMethod !== undefined && operation.unboxedMethodConfirmed !== true) || operation.builtinShadowGuard === 'bind'
-  if (guarded && operation.detached !== false) {
-    throw createCppEmitBlockedError(
-      'call-abi:bind-shadowable',
-      `"${operation.unboxedMethod?.key ?? 'method'}" was bound as the builtin Function.prototype.bind on the assumption that no boxed ` +
-        `value holds its Function object, and the reflection census did not confirm it: an instance, prototype or ` +
-        `constructor of ${String(operation.unboxedMethod?.owner ?? 'its class')} or a related class reaches dynamic code, where a ` +
-        `computed write can shadow "bind"`
-    )
-  }
-  if (operation.detached) {
-    // See `BindCallableOperation.detached`: the language calls a detached
-    // method with no receiver, so a body that reads `this` would be answered
-    // where the program would have thrown.
-    if (operation.detached !== 'holder' && operation.sourceFunctionId !== null && ctx.captures.readsReceiver(operation.sourceFunctionId)) {
-      throw createCppEmitBlockedError(
-        'call-abi:bind-callable',
-        `passes method ${operation.sourceFunctionId} on as a value, and its body reads \`this\`: the language calls a detached method ` +
-          'with no receiver, so binding the object it was read from would answer where the program would have thrown'
-      )
-    }
-    if (operation.receiver === null)
-      throw createCppEmitBlockedError('call-abi:bind-callable', 'a detached method bind names no receiver to bind')
-    const bound = alignedText(ctx, operation.sourceAbi.receiver ?? undefined, operation.receiver, 'detached method receiver')
-    const type = cppTypeOf(operation.result.representation)
-    // A holder's own member is bound to the holder WEAKLY: the bound value is
-    // stored into that very object, and a strong binding makes every such
-    // object a cycle only the collector can free (`CallableObject::bindHolder`).
-    // A source that is one capture-free function needs no block to hold it: the
-    // holder itself is the bound callable's environment (`bindHolderInPlace`).
-    const sourceRepresentation = operation.source.representation
-    const sourceText = operandText(ctx, operation.source)
-    const knownSource = sourceRepresentation.kind === 'function' ? sourceRepresentation.functionId : ctx.knownCallableEntry(sourceText)
-    const inPlace = operation.detached === 'holder' && knownSource !== null && ctx.captures.of(knownSource).kind === 'none'
-    const binder = inPlace
-      ? `bindHolderInPlace<&${cppThunkName(knownSource)}>`
-      : operation.detached === 'holder'
-        ? 'bindHolder'
-        : 'bindReceiver'
-    lines.push(`${defineValue(ctx, operation.result)} = ${type}::${binder}(${sourceText}, ${bound});`)
-    return
-  }
   const receiver = operation.receiver
     ? [alignedText(ctx, operation.sourceAbi.receiver ?? undefined, operation.receiver, 'Function.prototype.bind receiver')]
     : []
@@ -182,8 +144,9 @@ export const emitBindCallable = (ctx: EmitContext, lines: string[], operation: B
     throw createCppEmitBlockedError('call-abi:bind-callable', 'a dynamic Function source has no authenticated native ABI adapter')
   }
   const prefix = [...receiver, ...bound]
-  const logicalReceiver = operation.thisArgument
-    ? nativeCallReceiverText(operation.thisArgument.representation, operandText(ctx, operation.thisArgument))
+  const logical = genericNativeLogicalReceiverOf(operation)
+  const logicalReceiver = logical
+    ? operationNativeCallReceiverText(ctx, operation, logical.representation, operandText(ctx, logical))
     : 'gea::NativeCallReceiver::undefined()'
   const native =
     operation.sourceAbi.receiver === null
@@ -207,9 +170,9 @@ export const emitBindCallable = (ctx: EmitContext, lines: string[], operation: B
  * the Function object's own-property table -- where every dynamic write to it
  * lands -- and the native bound callable is built exactly as the confirmed
  * case builds it when nothing is there. Otherwise the program's own `bind` is
- * read off the boxed Function and called with the boxed `thisArg` and
- * arguments, and its answer is loaded back through the checked callable
- * adapter.
+ * read through the native Function identity table and invoked with its retained
+ * logical receiver. Only an actual declared dynamic receiver body invokes the
+ * operation's certified materializer; the answer uses its certified adapter.
  *
  * `Function.prototype.bind` itself needs no run-time half: the bind was lowered
  * as the builtin only because the program writes no `bind` onto
@@ -224,9 +187,33 @@ const guardedBindLines = (ctx: EmitContext, operation: BindCallableOperation, so
     thisArgument === null ? 'gea::Value()' : boxedValueText(ctx, thisArgument, `${described} thisArg`),
     ...operation.bound.map((value) => boxedValueText(ctx, value, `${described} argument`))
   ]
-  const boxedSource = boxedValueText(ctx, operation.source, `${described} Function object`)
-  const dynamic = `[&]() -> gea::Value { const gea::Value gea_bind_target = ${boxedSource}; return gea_bind_target.getProperty(gea::PropertyKey::string("bind")).callWithReceiver(gea_bind_target, {${boxedArguments.join(', ')}}); }()`
-  const loaded = unboxedLoadText(operation.result.representation, dynamic)
+  const dynamicCarrier: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+  let receiver: string
+  if (operation.source.representation.kind === 'dynamic')
+    receiver = `gea::NativeCallReceiver::fromValue(${operandText(ctx, operation.source)})`
+  else {
+    const materialized = operationConversionText(
+      ctx,
+      operation,
+      'dynamic-write',
+      operation.source.representation,
+      dynamicCarrier,
+      '__gea_bind_owner'
+    )
+    if (materialized === null)
+      throw createCppEmitBlockedError(
+        'call-abi:bind-shadowable',
+        'the native Function owner has no certified dynamic receiver materializer'
+      )
+    receiver =
+      `gea::NativeCallReceiver::primitive(${source}, +[](const ${cppTypeOf(operation.source.representation)}& __gea_bind_owner) -> gea::Value { ` +
+      `return ${materialized}; })`
+  }
+  const dynamic =
+    `[&]() -> gea::Value { const gea::NativeCallReceiver __gea_bind_receiver = ${receiver}; ` +
+    `return gea::callableDynamicGet(${source}, gea::PropertyKey::string("bind"), __gea_bind_receiver)` +
+    `.callWithReceiver(__gea_bind_receiver, {${boxedArguments.join(', ')}}); }()`
+  const loaded = operationConversionText(ctx, operation, 'call-result', dynamicCarrier, operation.result.representation, dynamic)
   if (loaded === null) {
     throw createCppEmitBlockedError(
       'call-abi:bind-shadowable',
@@ -235,9 +222,9 @@ const guardedBindLines = (ctx: EmitContext, operation: BindCallableOperation, so
     )
   }
   const name = defineValue(ctx, operation.result)
-  // The program's own `bind` is the case no run has taken yet; out of line and
-  // cold, its boxing and property call stop sitting inline in every body
-  // that binds a method (mongodb binds one per socket listener).
+  // The program's own `bind` is cold; keep its lookup and checked call out of
+  // line rather than expanding the dynamic entry in every binding body
+  // that binds a method (a program may bind one per socket listener).
   return [
     `if (gea::callableBindIsIntrinsic(${source})) ${name} = ${native};`,
     `else ${name} = [&]() __attribute__((noinline, cold)) { return ${loaded}; }();`
@@ -318,7 +305,7 @@ const derivesFrom = (ctx: EmitContext, source: Representation, target: Represent
  * the slot -- the interface view TypeScript's own assignability already
  * granted, materialized.
  *
- * hono's `createResponseInstance(_res.body, _res)` (context.ts) hands a
+ * A call like `new Response(res.body, res)` hands a
  * `Response` INSTANCE to a parameter declared `ResponseInit`. The checker
  * accepts it structurally: `ResponseInit`'s three optional members --
  * `status`, `statusText`, `headers` -- are all present on the class. C++ has
@@ -352,22 +339,6 @@ const derivesFrom = (ctx: EmitContext, source: Representation, target: Represent
  * that absence is a value it accepts.
  */
 /** The lambda's own names, kept out of every body-local namespace a view can be spliced into. */
-/** The generic class a physical copy belongs to: `decl|f1|2@1` and `decl|f1|2@0` share the root `decl|f1|2`. */
-const copyRootOf = (declaration: DeclarationId): string => {
-  const text = String(declaration)
-  const at = text.lastIndexOf('@')
-  return at < 0 ? text : text.slice(0, at)
-}
-
-/** Whether `argument` is an instance of one copy of the class (or of a subclass of it) whose parameter slot names a different copy of it. */
-const isSiblingClassCopy = (argument: Representation, slot: Representation): boolean => {
-  if (argument.kind !== 'class-ref' || slot.kind !== 'class-ref' || argument.declaration === slot.declaration) return false
-  const root = copyRootOf(slot.declaration)
-  return [argument.declaration, ...argument.ancestors].some(
-    (declaration) => declaration !== slot.declaration && copyRootOf(declaration) === root
-  )
-}
-
 /** The carriers `cppTypeOf` spells `gea::CallableObject<abi>`: a value with an `invoke` a guard can compare. */
 const isCallableObject = (representation: Representation): boolean =>
   representation.kind === 'function' ||
@@ -452,115 +423,22 @@ export const alignedText = (ctx: EmitContext, slot: Representation | undefined, 
   // value category through that conversion, rather than copying before the
   // outer argument move gets a chance to see the different carrier.
   const sourceText = nativeSumWidenable(argument.representation, slot) ? movedValueText(ctx, argument, argument.representation, text) : text
+  const contextual = ctx.conversions.callArgumentFor(argument.representation, slot)
+  if (
+    contextual.capability.kind === 'static' &&
+    contextual.capability.materializer.id === SIBLING_CLASS_ARGUMENT &&
+    ctx.conversionIsCertified?.(contextual.id) === true
+  ) {
+    const rendered = namedConversionText(ctx, `emit-callable.ts:503:${what}`, contextual, sourceText)
+    if (rendered !== null) return rendered
+  }
   const converted = alignedValueText(ctx, `emit-callable.ts:503:${what}`, argument.representation, slot, sourceText)
   if (converted !== null) return converted
-  // Last, and only here: the structural interface view above needs both
-  // layouts, which is a fact of this emitter's context rather than of the two
-  // carriers, so `convertedValueText` cannot be asked it. Tried after that
-  // function has refused so a pair with a real conversion never reaches a
-  // rebuild it does not need.
-  const view = structuralRecordViewText(ctx, argument.representation, slot, text)
-  if (view !== null) return view
-  // A storage-free argument in a slot that declares a real carrier is not a
-  // missing conversion: `undefined`/`void` is also `never`'s carrier
-  // (`representation/primitives.ts`), so this call sits on a branch flow
-  // analysis proved unreachable and there is nothing to convert. Rendered as
-  // the throw rather than refused -- mongodb's `execute_operation.ts:198`
-  // narrows a generic by `instanceof` to a class its own monomorphized copy
-  // cannot be, 28 copies over, and every one of them blocked emission for code
-  // that cannot run.
-  if (argument.representation.kind === 'undefined' || argument.representation.kind === 'void') {
-    return `gea::host::unreachableValue<${cppTypeOf(slot)}>()`
-  }
-  const bound = receiverBoundCallableText(ctx, argument, slot, text)
-  if (bound !== null) return bound
-  // An exact instance of one physical copy of a generic class handed to a
-  // parameter of ANOTHER copy of the same class. A `this` is exactly one copy,
-  // so the pairing can never hold at run time -- it exists only because a
-  // receiver spelled at `any` is the union of every copy (`anyCopyFamilyOf`),
-  // and dispatch over that union types each arm's call for all the others.
-  // The dead arm is the TypeError a mismatched copy would have been, not a
-  // refusal of the live arms beside it.
-  if (isSiblingClassCopy(argument.representation, slot)) {
-    return `[&]() -> ${cppTypeOf(slot)} { gea::host::throwRuntimeError("TypeError", "a value of another instantiation of this generic class was passed"); }()`
-  }
   throw createCppEmitBlockedError(
     `conversion:${representationKey(argument.representation)}->${representationKey(slot)}`,
     `passes a ${representationKey(argument.representation)} argument into a parameter slot carrying ` +
       `${representationKey(slot)}, and no installed load performs that conversion`
   )
-}
-
-/**
- * A method read as a value, handed on into a slot that declares no receiver
- * -- tsc's `formatGeneratedName(..., IdentifierNameMap.toKey)`, or
- * `apply(fmt.upper, s)`.
- *
- * `classMethodValueText` materializes a method value in the method's own
- * physical convention, receiver first, and leaves the receiver to be filled
- * by the call (`emitCall`'s `directCallReceivers`), which is right for the
- * one call a property read feeds directly and wrong for a value that
- * escapes: the slot it lands in states the language's own view of the
- * value, `(name: string) => string`, and nothing at THAT site knows which
- * object the read went through. The read does: `propertyReadOrigins` keeps
- * every property read by its result, so the receiver is recovered here from
- * the read itself and packed in with the value (`gea_runtime.h`'s
- * `CallableObject::bindReceiver`).
- *
- * ECMAScript calls a detached method with `this` undefined. Packing the
- * receiver in is the same call exactly when the body never reads it, and
- * that is checked -- directly, and through every closure the body allocates
- * (`captures.ts`'s `readsReceiver`) -- before anything is rendered; a body
- * that does read `this` is refused by name, since the language would have
- * thrown (or, in sloppy code, read the global) where this would have handed
- * it the object. Measured on tsc's `transformers/utilities.ts`: every method
- * passed as a value there is receiver-free.
- *
- * `null` for a pair this is not about, or a read this cannot see: the caller
- * refuses in its own words, exactly as before.
- */
-/**
- * The body a `receiver.key` read names, for a class instance or for the class
- * object itself -- the same two member sets `emit-class-properties.ts`
- * materializes a method value out of, asked through the same two functions so
- * a value this binds a receiver into is the one that read published.
- */
-const methodBodyRead = (ctx: EmitContext, receiver: Representation, key: string): FunctionId | null => {
-  const isStatic = receiver.kind === 'constructor-family'
-  const declarations = receiver.kind === 'class-ref' ? [receiver.declaration] : isStatic ? receiver.members : []
-  for (const declaration of declarations) {
-    const site = isStatic ? classStaticMemberOf(ctx.classes, declaration, key) : classMemberOf(ctx.classes, declaration, key)
-    if (site?.kind === 'method' && site.method.callable) return site.method.callable
-  }
-  return null
-}
-
-export const receiverBoundCallableText = (ctx: EmitContext, operand: IrOperand, target: Representation, text: string): string | null => {
-  const source = operand.representation
-  if (!bindsReceiver(source, target)) return null
-  const origin = ctx.propertyReadOrigins.get(operand.value)
-  if (origin === undefined) return null
-  const abi = callableObjectAbi(source)
-  if (abi === null || abi.receiver === null) return null
-  const key = ctx.staticKeyTexts.get(origin.key.value)
-  const method = key === undefined ? null : methodBodyRead(ctx, origin.receiver.representation, key)
-  if (method === null) return null
-  if (ctx.captures.readsReceiver(method)) {
-    throw createCppEmitBlockedError(
-      'call-abi:bind-callable',
-      `passes method "${key}" on as a value, and its body reads \`this\`: the language calls a detached method with no receiver, ` +
-        'so binding the object it was read from would answer where the program would have thrown'
-    )
-  }
-  const receiver = alignedValueText(
-    ctx,
-    'emit-callable.ts:593',
-    origin.receiver.representation,
-    abi.receiver,
-    operandText(ctx, origin.receiver)
-  )
-  if (receiver === null) return null
-  return `${cppTypeOf(target)}::bindReceiver(${text}, ${receiver})`
 }
 
 const argumentText = (ctx: EmitContext, abi: CallableAbi, position: number, argument: IrOperand, what = 'call'): string => {
@@ -600,9 +478,9 @@ const argumentText = (ctx: EmitContext, abi: CallableAbi, position: number, argu
  * receiver slot can hold and which this runtime cannot box. That aborts at the
  * call, by name (`gea::host::refuseProxyReceiver`), rather than loading the
  * other arm's payload as the plain narrowing would -- and rather than a
- * TypeError the program does not have and a `catch` could swallow. mongodb's
- * `zstd.compress(...)` off its error module is the shape; there the trap
- * throws before the call is reached.
+ * TypeError the program does not have and a `catch` could swallow. A method
+ * called off an optional dependency's error-module Proxy is the shape; there
+ * the trap throws before the call is reached.
  */
 const proxyUnionReceiverText = (ctx: EmitContext, abi: CallableAbi, receiver: IrOperand): string | null => {
   // The same union behind an absence (a module `let` read before any write
@@ -688,7 +566,9 @@ const nativeBaseArmCallBody = (
   const node = ctx.conversions.nativeBaseViewFor(arm, native.carrier)
   const viewed = node === null ? null : recipeText(ctx, node, armText)
   const call =
-    viewed === null ? null : nativeBaseMethodCallText(ctx, native.carrier, native.member, viewed, operation.arguments, operation.result)
+    viewed === null
+      ? null
+      : nativeBaseMethodCallText(ctx, native.carrier, native.member, viewed, operation.arguments, operation.result, operation)
   if (call === null) {
     throw createCppEmitBlockedError(
       'call-abi:tagged-union-method',
@@ -877,7 +757,7 @@ const emitLazyArrowFieldCall = (ctx: EmitContext, lines: string[], operation: Ca
   if (callee.kind !== 'function' && callee.kind !== 'function-value-dispatch' && callee.kind !== 'function-family') return false
   // A `function`-kind read names a SPECIFIC function identity, which is not
   // always the census's own arrow: a generic field instantiates a fresh,
-  // per-call-site copy of its body (hono's `LightRequest#cached` --
+  // per-call-site copy of its body (a generic caching field --
   // `test/runtime/pending-promise-payload-narrowed-at-call.ts` -- reads back
   // `promise(string)` at one call and `promise(scalar(number))` at another,
   // from the SAME field), and a flow fact narrowing the field to a specific
@@ -943,10 +823,7 @@ const emitLazyArrowFieldCall = (ctx: EmitContext, lines: string[], operation: Ca
     const bodyReceiver = bodyAbi.receiver ?? plan.bodyReceiverRepresentation
     // `physicalFrame` states whether the receiver occupies the frame's first
     // formal for `paddedArguments`'/`receivableArguments`' own arithmetic --
-    // the identical adjustment the ordinary direct-callee path makes for a
-    // method value whose semantic ABI declares no receiver of its own (this
-    // file's own `physicalFrame`, further below, and `EmitContext.
-    // directCallReceivers`'s doc).
+    // including the arrow's separately published lexical receiver.
     const physicalFrame: CallableAbi = { ...bodyAbi, receiver: bodyReceiver }
 
     const result = operation.result
@@ -1285,7 +1162,7 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   // rather than at the top of this function so a host or prototype call, which
   // returns above without ever loading a callable, does not emit a dereference
   // nothing reads.
-  const calleeOperand = unwrapPresentValue(ctx, lines, operation.callee)
+  const calleeOperand = unwrapPresentValue(ctx, lines, operation.callee, 'call')
   const callee = calleeOperand.representation
   // A CHOICE of generic functions: the callee is the index of the member the
   // cell holds, and `operation.family` names the copy each member runs at
@@ -1357,13 +1234,16 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
       const selected = `gea_union_callee.get<${index}>()`
       // A bare `Function` arm genuinely has no static frame. Keep that arm's
       // dynamic invocation local to the union branch while fixed native arms
-      // retain their direct convention. Hono's middleware selection is the
+      // retain their direct convention. Middleware selection is the
       // representative shape: `Function | Next`, narrowed present before the
       // call. Boxing the whole sum would erase Next's known ABI; refusing the
       // dynamic arm would reject a call the runtime already knows how to make.
       if (arm.value.kind === 'dynamic') {
         const boxed = operation.arguments.map((argument) => alignedText(ctx, arm.value, argument, 'boxed-arm'))
-        const invocation = `${selected}.callAsFunction({${boxed.join(', ')}})`
+        const logical = genericNativeLogicalReceiverOf(operation)
+        const invocation = logical
+          ? `${selected}.callWithReceiver(${operationNativeCallReceiverText(ctx, operation, logical.representation, operandText(ctx, logical))}, {${boxed.join(', ')}})`
+          : `${selected}.callAsFunction({${boxed.join(', ')}})`
         let body = `${invocation}; return;`
         if (operation.result && !voidResult) {
           const held = operation.result.representation
@@ -1387,7 +1267,11 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
         )
       }
       const args = receivableArguments(abi, operation.arguments).map((argument, position) => argumentText(ctx, abi, position, argument))
-      const invocation = `${selected}.call(${paddedArguments(abi, args, 'union call').join(', ')})`
+      const logical = genericNativeLogicalReceiverOf(operation)
+      const padded = paddedArguments(abi, args, 'union call')
+      const invocation = logical
+        ? `${selected}.callWithReceiver(${[operationNativeCallReceiverText(ctx, operation, logical.representation, operandText(ctx, logical)), ...padded].join(', ')})`
+        : `${selected}.call(${padded.join(', ')})`
       let body = `${invocation}; return;`
       if (operation.result && !voidResult) {
         const source = abi.result.kind === 'void' ? { kind: 'undefined' as const } : abi.result
@@ -1423,7 +1307,9 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     // The dynamic call adapter transports this separately from positional
     // arguments; the actual callable decides whether its ABI consumes it.
     const boxed = operation.arguments.map((argument) => alignedText(ctx, callee, argument, 'boxed-callee'))
-    const receiver = operation.receiver ? boxedValueText(ctx, operation.receiver, 'dynamic call receiver') : 'gea::Value()'
+    const receiver = operation.receiver
+      ? operationNativeCallReceiverText(ctx, operation, operation.receiver.representation, operandText(ctx, operation.receiver))
+      : 'gea::NativeCallReceiver::undefined()'
     const text = `${operandText(ctx, calleeOperand)}.callWithReceiver(${receiver}, {${boxed.join(', ')}})`
     if (!operation.result) {
       lines.push(`${text};`)
@@ -1462,13 +1348,6 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   // The convention a *call* site selects, which for a value that is also a
   // constructor is its `[[Call]]` half and never its `[[Construct]]` one.
   const abi = callee.kind === 'function-and-constructor' ? callee.call : callee.abi
-  // A directly-bound class method records the receiver at the property read.
-  // Usually IR carries that same receiver on the call. A materialized method
-  // value can instead publish the receiver-bearing physical convention while
-  // the semantic call still has the receiver-less method-value convention;
-  // in that case the authenticated property-read receiver fills the ABI slot.
-  // Keep this tied to the exact callee value and direct body: a detached
-  // function value has no receiver to recover, and must still refuse below.
   const direct = calleeOperand.value === operation.callee.value ? ctx.directCallees.get(operation.callee.value) : undefined
   // A direct call's C++ target IS the concrete body, whose declared parameter
   // carriers can be narrower than the semantic ABI at the read that reached
@@ -1498,8 +1377,8 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   // built the base's three-argument list -- padded with `undefined`, with the
   // argument boxed into the base's `unknown` slot -- around the override's
   // one-parameter body, and passed it a `Ref<Writable>` for a
-  // `const Ref<ServerResponse>&`. `@hono/node-server`'s `listener.ts` writes
-  // exactly that (`test/runtime/virtual-call-through-a-base-whose-override-narrows-unknown.ts`).
+  // `const Ref<ServerResponse>&`. An HTTP adapter writing a response body
+  // does exactly that (`test/runtime/virtual-call-through-a-base-whose-override-narrows-unknown.ts`).
   // The surplus arguments are not lost: 10.2.1 binds only the parameters the
   // body declares and discards the rest, which is what dropping them here
   // spells.
@@ -1508,14 +1387,15 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   // call's own answer to whether a receiver occupies the first formal.
   const physicalFrame: CallableAbi =
     directAbi === abi ? abi : { ...directAbi, receiver: abi.receiver === null ? null : (directAbi.receiver ?? abi.receiver) }
-  const boundReceiverOperand = operation.receiver === null ? ctx.directCallReceivers.get(operation.callee.value) : undefined
-  const declaredReceiverOperand = operation.receiver ?? (abi.receiver !== null ? (boundReceiverOperand ?? null) : null)
+  // A physical receiver is supplied by this call, never recovered from the
+  // object used for an earlier property read. Receiverless method values use
+  // the logical-this entry below, including undefined on a detached call.
+  const declaredReceiverOperand = operation.receiver
   // The receiver is the first physical argument when the convention declares
   // one, and it must be present exactly when it does: a call that passes a
   // receiver to a convention with none, or omits one where the convention
   // expects it, is a frame mismatch and not something to paper over. A direct
-  // class method's recorded receiver above is part of that convention, not a
-  // manufactured value.
+  // class method's receiver is part of that convention.
   if ((abi.receiver === null) !== (declaredReceiverOperand === null)) {
     const propertyOrigin = ctx.propertyReadOrigins.get(operation.callee.value)
     const originText =
@@ -1526,8 +1406,7 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
       'call-abi:receiver-mismatch',
       declaredReceiverOperand
         ? 'passes a receiver to a callee whose convention declares none'
-        : `omits the receiver its callee's convention declares (callee ${operation.callee.value} is ${representationKey(callee)}; ${originText}; ` +
-            `${boundReceiverOperand === undefined ? 'no recorded method receiver' : 'recorded method receiver present'})`
+        : `omits the receiver its callee's convention declares (callee ${operation.callee.value} is ${representationKey(callee)}; ${originText})`
     )
   }
   // A host's own free function is called as a function, not through a
@@ -1635,24 +1514,12 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   // subclass, which compiles and links and is silently wrong.
   const dispatched = calleeOperand.value === operation.callee.value ? ctx.virtualCallees.get(operation.callee.value) : undefined
   if (dispatched !== undefined) ctx.virtualCalleesUsed.add(operation.callee.value)
-  // The receiver a direct bind needs and this call's own convention does not
-  // declare -- see `EmitContext.directCallReceivers`. Prepended to the
-  // PHYSICAL argument list only, so the convention, the plan and every arity
-  // check above stay exactly as they are: this is the one place the emitted
-  // frame and the declared one legitimately differ, because the body being
-  // named is a method and the value being called is its receiver-less view.
-  const boundReceiver = abi.receiver === null && boundReceiverOperand !== undefined ? operandText(ctx, boundReceiverOperand) : undefined
-  const padded = [...(boundReceiver === undefined ? [] : [boundReceiver]), ...paddedArguments(physicalFrame, args, 'call')]
+  const padded = paddedArguments(physicalFrame, args, 'call')
   // The callable value is typed at the access site, but the C++ virtual member
   // is declared with the family root's reconciled ABI. Convert the receiver
   // and arguments into that ABI before invoking the member; using `args`
   // directly is only valid when every override repeats the root signature.
-  // `this.execute(a, b)` reaches a virtual member with no receiver operand on
-  // the call: the read recorded it (`directCallReceivers`), exactly as it does
-  // for a direct bind. Leaving it out handed the FIRST ARGUMENT the receiver's
-  // place (`a->execute(b)`), and the arity check below then read the call as
-  // omitting its last argument.
-  const virtualReceiver = operation.receiver ?? boundReceiverOperand
+  const virtualReceiver = operation.receiver
   if (dispatched !== undefined && !virtualReceiver) {
     throw createCppEmitBlockedError('call-abi:receiver-mismatch', 'a virtual member call has no receiver to dispatch on')
   }
@@ -1700,7 +1567,7 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   const twoCandidates = candidate !== undefined && alternate !== undefined && direct === undefined
   const firstEntry = twoCandidates ? borrowedEntryOf(candidate) : undefined
   const alternateEntry = twoCandidates ? borrowedEntryOf(alternate) : undefined
-  // Only the alternate can be entered borrowed (bson's web `encodeUTF8Into` owns its `source`, the node one reads it): guarding the
+  // Only the alternate can be entered borrowed (one platform implementation owns its `source`, the other reads it): guarding the
   // first-stored one alone missed on every call under Node and sent each key string through the owning thunk.
   const alternateOnly = twoCandidates && firstEntry === undefined && alternateEntry !== undefined
   // A callee that is the caller's own parameter, constant or private cell sits in a slot no callee can
@@ -1746,14 +1613,14 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
         `gea::host::throwRuntimeError("TypeError", ${cppStringLiteral(`an own "${operation.builtinShadowGuard}" written onto a natively carried callable is not rendered by this backend`)});`
     )
   }
-  const logicalThis = operation.thisArgument
+  const logicalThis = genericNativeLogicalReceiverOf(operation)
   const invocation =
     dispatched !== undefined
       ? `${virtualPadded[0]}->${dispatched.member}(${virtualPadded.slice(1).join(', ')})`
       : direct !== undefined
         ? `${stableEntry?.name ?? direct}(${padded.join(', ')})`
-        : abi.receiver === null && logicalThis !== undefined
-          ? `${operandText(ctx, calleeOperand)}.callWithReceiver(${[nativeCallReceiverText(logicalThis.representation, operandText(ctx, logicalThis)), ...padded].join(', ')})`
+        : abi.receiver === null && logicalThis !== null
+          ? `${operandText(ctx, calleeOperand)}.callWithReceiver(${[operationNativeCallReceiverText(ctx, operation, logicalThis.representation, operandText(ctx, logicalThis)), ...padded].join(', ')})`
           : `${operandText(ctx, calleeOperand)}.${callMember}(${padded.join(', ')})`
   // A result the integer census narrowed from the candidate body's returns is
   // checked where it lands, on every path the call can take: the guard above
@@ -1810,7 +1677,7 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
   }
   // The CONVENTION states what the call produces; the plan states what the
   // cell holds, and the two are not always the same carrier. A callable read
-  // out of a union arm carries the arm's own convention -- hono's handler
+  // out of a union arm carries the arm's own convention -- a handler
   // slot declares `gea::Value(Context, Next)` because that arm's return type
   // is unstated -- while the call's published result is the type the checker
   // gave the call expression, `Response | Promise<Response>`. Assigning the
@@ -1873,7 +1740,7 @@ const trailingOptionalCount = (args: readonly { readonly representation: Represe
 
 /**
  * A class extending `Error` that answers `name`/`message` with a getter
- * (`override get name() { return 'MongoError' }`) still has the intrinsic
+ * (`override get name() { return 'CustomError' }`) still has the intrinsic
  * layout's own field under that key, and every read through an `Error`
  * carrier -- an upcast store, `toString`, a boxed read -- sees the field. The
  * family may only travel as that carrier when each such getter is a constant
@@ -2191,7 +2058,15 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
   // do exactly that, and reduce to the un-wrapped case unchanged when there is
   // no `optional` to begin with.
   const payloadCarrier = carrier.kind === 'optional' ? carrier.payload : carrier
-  const wrap = (payloadText: string): string => (carrier.kind === 'optional' ? `${cppTypeOf(carrier)}{${payloadText}}` : payloadText)
+  const wrap = (payloadText: string): string => {
+    const native =
+      operation.callableOwnPrototype === true &&
+      payloadCarrier.kind !== 'dynamic' &&
+      ctx.callableIdentityDemand.observesAllocation(operation.result.id, payloadCarrier)
+        ? `gea::withNativeCallablePrototype(${payloadText})`
+        : payloadText
+    return carrier.kind === 'optional' ? `${cppTypeOf(carrier)}{${native}}` : native
+  }
   // A plain callable carrier's entry IS this function's thunk, whatever the
   // environment: a conversion that adapts the value can call that entry directly.
   if (
@@ -2222,7 +2097,7 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
   // "create the object, then enter the body with it", which no `[[Call]]`
   // pointer can serve because it neither allocates nor returns the instance.
   // Brace-initializing this carrier with two values is what used to leave every
-  // pre-`class` constructor function in three.js's renderer unclaimed.
+  // pre-`class` constructor function in a program unclaimed.
   const pointers =
     payloadCarrier.kind === 'function-and-constructor'
       ? `${cppThunkEntryText(ctx, operation.functionId)}, &${cppConstructedThunkName(operation.functionId)}`
@@ -2272,9 +2147,10 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
     const callableType = `gea::CallableObject<${cppAbiType(abi)}>`
     const boxText = (payloadText: string): string => {
       const callable = identified(payloadText)
-      if (abi.receiver !== null) return `gea::Value::boxMethod<${abi.restFrom === null ? -1 : abi.restFrom + 1}>(${callable})`
+      if (abi.receiver !== null)
+        return `gea::Value::boxMethod<${abi.restFrom === null ? -1 : abi.restFrom + 1}, ${abi.argumentsFrame === 'actual'}>(${callable})`
       if (abi.restFrom === null) return `gea::Value::box(gea::Value::Tag::Function, ${callable})`
-      return `gea::Value::boxCallable<${abi.restFrom}>(${callable})`
+      return `gea::Value::boxCallable<${abi.restFrom}, ${abi.argumentsFrame === 'actual'}>(${callable})`
     }
     if (admission.kind === 'none') {
       lines.push(
@@ -2319,7 +2195,7 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
       ctx.declarations.push({ name: shared, type: `gea::SharedEnvironment<${struct}>` })
       lines.push(`${shared} = gea::shareEnvironment(${environmentValueText(ctx, lines, operation.functionId, admission, struct)});`)
     }
-    lines.push(`${name} = ${sharedGroupMemberText(ctx, group, operation.functionId, payloadCarrier, shared)};`)
+    lines.push(`${name} = ${wrap(sharedGroupMemberText(ctx, group, operation.functionId, payloadCarrier, shared))};`)
     return
   }
   // The allocation's value is used exactly once, synchronously, and retained
@@ -2383,8 +2259,8 @@ export const emitAllocateCallable = (ctx: EmitContext, lines: string[], operatio
  */
 /**
  * A buffer block, or a native sum of the two: `view.buffer` is typed
- * `ArrayBufferLike`, so `view.buffer.slice(...)` (bson's
- * `webByteUtils.toLocalBufferType`) hands `new Uint8Array(...)` an
+ * `ArrayBufferLike`, so `view.buffer.slice(...)` (a byte utility normalizing
+ * a view to a local buffer) hands `new Uint8Array(...)` an
  * `ArrayBuffer | SharedArrayBuffer`, and either arm is the buffer overload.
  */
 const isBufferBlockCarrier = (carrier: Representation): boolean =>
@@ -2463,9 +2339,8 @@ const emitTypedArrayConstruct = (
   // reason `preflight/invocation-arguments.ts` can state `scalar(number)` as
   // this argument's target without over-claiming.
   //
-  // three's `new Int32Array( n )` (`WebGLUniforms.allocTexUnits`) and
-  // `new Float32Array( flatSize )` (`WebGLClipping.projectPlanes`) are both a
-  // length through a JS parameter the source never typed.
+  // `new Int32Array( n )` and `new Float32Array( flatSize )` in untyped
+  // JavaScript are both a length through a parameter the source never typed.
   if (carrier.kind === 'dynamic') {
     const length = unboxedLoadText({ kind: 'scalar', domain: 'number' }, operandText(ctx, argument))
     if (length !== null) {
@@ -2493,22 +2368,50 @@ const emitTypedArrayConstruct = (
   // native sum. Each alternative is still one of the two copying forms above;
   // dispatching on the sum's existing tag preserves that decision without
   // boxing the source or collapsing typed-array element domains.
-  if (
-    carrier.kind === 'tagged-union' &&
-    carrier.arms.length > 0 &&
-    carrier.arms.every((arm) => isNumericArrayCarrier(arm.value) || isSharedTypedArrayCarrier(arm.value))
-  ) {
-    const branches = carrier.arms.map((arm, index) => {
+  const unionBody = (source: Representation): string | null => {
+    if (
+      source.kind !== 'tagged-union' ||
+      source.arms.length === 0 ||
+      !source.arms.every((arm) => isNumericArrayCarrier(arm.value) || isSharedTypedArrayCarrier(arm.value))
+    )
+      return null
+    const branches = source.arms.map((arm, index) => {
       const selected = `gea_typed_source.get<${index}>()`
       const body = isNumericArrayCarrier(arm.value)
         ? `return gea::makeRef<${target}>(${target}::fromValues(${selected}));`
         : `{ const auto& gea_typed_input = ${selected}; auto gea_typed_result = gea::makeRef<${target}>(gea_typed_input->size()); gea_typed_result->setFrom(*gea_typed_input, 0.0); return gea_typed_result; }`
-      return index === carrier.arms.length - 1 ? body : `if (gea_typed_source.is<${index}>()) { ${body} }`
+      return index === source.arms.length - 1 ? body : `if (gea_typed_source.is<${index}>()) { ${body} }`
     })
-    lines.push(
-      `${name} = ([&]() -> ${cppTypeOf(result)} { const auto& gea_typed_source = ${operandText(ctx, argument)}; ${branches.join(' ')} }());`
-    )
+    return branches.join(' ')
+  }
+  const union = unionBody(carrier)
+  if (union !== null) {
+    lines.push(`${name} = ([&]() -> ${cppTypeOf(result)} { const auto& gea_typed_source = ${operandText(ctx, argument)}; ${union} }());`)
     return
+  }
+  // An absent array-like is ToIndex(undefined) (or ToIndex(null)): an empty
+  // block. A `clone( data )` that views its source block through
+  // `data.arrayBuffers[ uuid ]` is an entry read that may miss; present,
+  // it is the buffer overload over the whole block.
+  if (carrier.kind === 'optional') {
+    const payload = carrier.payload
+    const present = isNumericArrayCarrier(payload)
+      ? `return gea::makeRef<${target}>(${target}::fromValues(gea_typed_source));`
+      : isSharedTypedArrayCarrier(payload)
+        ? `auto gea_typed_result = gea::makeRef<${target}>(static_cast<std::size_t>(gea_typed_source->length())); ` +
+          'gea_typed_result->setFrom(*gea_typed_source, 0.0); return gea_typed_result;'
+        : payload.kind === 'array-buffer' || payload.kind === 'shared-array-buffer'
+          ? `return gea::makeRef<${target}>(${target}::${payload.kind === 'shared-array-buffer' ? 'fromSharedBuffer' : 'fromBuffer'}` +
+            `(gea_typed_source, 0, gea_typed_source->size() / sizeof(${target}::value_type)));`
+          : unionBody(payload)
+    if (present !== null) {
+      lines.push(
+        `${name} = ([&]() -> ${cppTypeOf(result)} { const auto& gea_typed_optional = ${operandText(ctx, argument)}; ` +
+          `if (!gea_typed_optional.has_value()) return gea::makeRef<${target}>(); ` +
+          `const auto& gea_typed_source = *gea_typed_optional; ${present} }());`
+      )
+      return
+    }
   }
   throw createCppEmitBlockedError(
     'call-abi:construct:typed-array',
@@ -2663,8 +2566,8 @@ const emitKeyedCollectionConstruct = (
     return void lines.push(`${name} = gea::setFromArray<${cppTypeOf(result.key)}>(${operandText(ctx, argument)});`)
   }
   // A Set of the Set's own element carrier: its iterator is the built-in
-  // insertion-order walk, as native as the Array one -- mongodb's
-  // `setDifference` copies `new Set<T>(setA)` from a `Set<string>`.
+  // insertion-order walk, as native as the Array one -- a set-difference
+  // helper copies `new Set<T>(setA)` from a `Set<string>`.
   if (
     result.family === 'set' &&
     carrier.kind === 'keyed-collection' &&
@@ -2674,7 +2577,7 @@ const emitKeyedCollectionConstruct = (
     return void lines.push(`${name} = gea::setFromSet<${cppTypeOf(result.key)}>(${operandText(ctx, argument)});`)
   }
   // An Array or Set whose element WIDENS into the Set's own (a `string[]`
-  // into a `Set<any>`), or a sum of those -- mongodb's `isSuperset` rebinds
+  // into a `Set<any>`), or a sum of those -- a superset helper rebinds
   // `set = Array.isArray(set) ? new Set(set) : set` over `string[] |
   // Set<any>`. The walk is the source's own iteration (23.1.5.1 / 24.2.5.1),
   // each element through the one conversion authority.
@@ -2699,7 +2602,7 @@ const emitKeyedCollectionConstruct = (
     return void lines.push(`${name} = gea::setFromString(${operandText(ctx, argument)});`)
   }
   if (result.family === 'map' && result.value !== null) {
-    const seeded = mapSeedText(ctx, result, result.value, carrier, 'gea_seed_source')
+    const seeded = mapSeedText(ctx, result, result.value, carrier, 'gea_seed_source', operation.nativeEntryFieldReads)
     if (seeded !== null) {
       return void lines.push(
         `${name} = ([&](const ${cppTypeOf(carrier)}& gea_seed_source) -> ${cppTypeOf(result)} { ${seeded} })(${operandText(ctx, argument)});`
@@ -2735,12 +2638,13 @@ const mapSeedText = (
   result: Extract<Representation, { kind: 'keyed-collection' }>,
   value: Representation,
   source: Representation,
-  text: string
+  text: string,
+  reads?: NativeEntryFieldReads
 ): string | null => {
   // A Map seeded from another Map: 24.1.1.1 walks the source's own
   // `@@iterator`, which for a Map is its entries in insertion order
-  // (24.1.3.12) -- `new Map(this.servers)`, mongodb's copy-on-write of a
-  // topology. Walked by insertion serial (`Map::entryAfter`), the cursor the
+  // (24.1.3.12) -- `new Map(this.entries)`, a copy-on-write of a
+  // keyed table. Walked by insertion serial (`Map::entryAfter`), the cursor the
   // Map Iterator itself uses, each half through the one conversion authority.
   if (source.kind === 'keyed-collection' && source.family === 'map' && source.value !== null && source.ownership === 'shared-refcount') {
     const site = 'emit-callable.ts:mapSeedText:map'
@@ -2760,12 +2664,15 @@ const mapSeedText = (
   if (first?.key !== '0' || second?.key !== '1' || !first.required || !second.required) return null
   const site = 'emit-callable.ts:mapSeedText'
   const access = pair.ownership === 'shared-refcount' ? '->' : '.'
-  const keyText = alignedValueText(ctx, site, first.value, result.key, `gea_pair${access}${cppRecordFieldName('0')}`)
-  const valueText = alignedValueText(ctx, site, second.value, value, `gea_pair${access}${cppRecordFieldName('1')}`)
-  if (keyText === null || valueText === null) return null
+  const plainKey = alignedValueText(ctx, site, first.value, result.key, `gea_pair${access}${cppRecordFieldName('0')}`)
+  const plainValue = alignedValueText(ctx, site, second.value, value, `gea_pair${access}${cppRecordFieldName('1')}`)
+  if (plainKey === null || plainValue === null) return null
+  // A live view's own slots are never filled: certify proved its routes.
+  const keyText = reads ? nativeHeldFieldViewReadText(ctx, reads.key, result.key, 'gea_pair', plainKey) : plainKey
+  const valueText = reads ? nativeHeldFieldViewReadText(ctx, reads.value, value, 'gea_pair', plainValue) : plainValue
   const mapType = cppTypeOf({ ...result, ownership: 'owned' })
   return (
-    `auto gea_seeded = gea::makeRef<${mapType}>(); if (${text}) for (const auto& gea_slot : ${text}->slots()) { ` +
+    `auto gea_seeded = gea::makeRef<${mapType}>(); if (${text}) for (const auto& gea_slot : ${text}->readSlots()) { ` +
     `if (!gea_slot.present) gea::host::throwRuntimeError("TypeError", "Iterator value undefined is not an entry object"); ` +
     `const auto& gea_pair = gea_slot.value; gea_seeded->set(${keyText}, ${valueText}); } return gea_seeded;`
   )
@@ -2784,7 +2691,7 @@ const setSeedText = (
     const converted = alignedValueText(ctx, site, source.element, result.key, element)
     if (converted === null) return null
     return (
-      `auto gea_seeded = gea::makeRef<${setType}>(); if (${text}) for (const auto& gea_slot : ${text}->slots()) gea_seeded->add(${converted}); ` +
+      `auto gea_seeded = gea::makeRef<${setType}>(); if (${text}) for (const auto& gea_slot : ${text}->readSlots()) gea_seeded->add(${converted}); ` +
       'return gea_seeded;'
     )
   }
@@ -3128,9 +3035,9 @@ export const emitConstruct = (ctx: EmitContext, lines: string[], operation: Cons
   // distinction an earlier attempt at this lacked: naming the construct
   // function lets clang inline the whole construction -- `gea::makeRef`, its
   // pool refill, its `try`/`catch` -- into whatever body constructs, and that
-  // is worth 46.1ms to 41.9ms in `binary_trees`, which constructs a million
-  // times inside a recursive body, and 38.1ms to 49.0ms the wrong way in
-  // `method_calls`, which constructs once before a hot loop whose own callee
+  // is worth 46.1ms to 41.9ms in a binary-tree build, which constructs a
+  // million times inside a recursive body, and 38.1ms to 49.0ms the wrong way
+  // in a method-call loop, which constructs once before a hot loop whose own callee
   // then stops being inlined. `buildRepeatedConstructorIndex` answers which,
   // and its doc carries the rest of the measurements -- including `noinline`
   // on the construct function, the obvious way to have the direct call without

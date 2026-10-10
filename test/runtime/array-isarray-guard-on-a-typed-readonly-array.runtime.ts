@@ -1,5 +1,5 @@
 // `Array.isArray` guarding a value that is already statically an array: the
-// MongoDB driver's `Collection.bulkWrite(operations: ReadonlyArray<...>)`
+// a database client's `Collection.bulkWrite(operations: ReadonlyArray<...>)`
 // opens with `if (!Array.isArray(operations)) throw ...`. TypeScript narrows
 // the parameter to `readonly Op[] & any[]`, whose elements read as `any` -- but
 // the value is the same typed array, and its elements are still `Op`s. The

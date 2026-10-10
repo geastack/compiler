@@ -1,7 +1,7 @@
 // The negative half of `@gea-host-typed-array-element-writes`: a host method
 // that states NO effect contract, handed a typed array, may put any key on any
 // intrinsic that array's prototype chain reaches, so the global host-mutation
-// census distrusts them and bson's `%TypedArray%.prototype[@@toStringTag]`
+// census distrusts them and a binary-document library's `%TypedArray%.prototype[@@toStringTag]`
 // getter proof must stay refused. The same program with the method tagged is
 // `host-mutation-keys.test.ts`'s positive case; this pins that the contract,
 // not the shape of the call, is what clears it.

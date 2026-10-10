@@ -1,11 +1,11 @@
 import type { Representation } from '../representation/model.js'
-import { representationKey } from '../representation/model.js'
-import { nativeSumPlan, type NativeSumPlan } from './native-sum.js'
+import { abiKey, representationKey } from '../representation/model.js'
+import { nativeRecordBaseUpcastPlan, nativeSumPlan, nativeSumPreservesPayload, type NativeSumPlan } from './native-sum.js'
 
 export type NativeSelectionStep =
   | { readonly kind: 'identity' }
   | { readonly kind: 'null' }
-  | { readonly kind: 'reference-null'; readonly absent: NativeSelectionStep }
+  | { readonly kind: 'reference-null'; readonly absent: NativeSelectionStep | null; readonly undefined?: NativeSelectionStep }
   | { readonly kind: 'transfer'; readonly plan: NativeSumPlan }
   | { readonly kind: 'class-cast'; readonly target: Extract<Representation, { kind: 'class-ref' }>; readonly down: boolean }
   | {
@@ -100,7 +100,14 @@ const select = (source: Representation, target: Representation): Selection => {
   if (source.kind === 'class-ref' && source.ownership === 'shared-refcount') {
     if (target.kind === 'null') return { kind: 'reference-null', absent: { kind: 'null' } }
     const absent = nativeSumPlan({ kind: 'null' }, target)
-    if (absent && disjoint(source, target, true)) return { kind: 'reference-null', absent: { kind: 'transfer', plan: absent } }
+    const undefinedHome = nativeSumPlan({ kind: 'undefined' }, target)
+    if ((absent || undefinedHome) && disjoint(source, target, true)) {
+      return {
+        kind: 'reference-null',
+        absent: absent === null ? null : { kind: 'transfer', plan: absent },
+        ...(undefinedHome === null ? {} : { undefined: { kind: 'transfer' as const, plan: undefinedHome } })
+      }
+    }
   }
   return disjoint(source, target) ? 'disjoint' : 'unknown'
 }
@@ -117,6 +124,67 @@ export const nativeSelectionRecipeOf = (source: Representation, target: Represen
   return typeof step === 'string' ? null : { source: representationKey(source), target: representationKey(target), step }
 }
 
+const sameConstructorCarrier = (value: Representation, destination: Representation): boolean =>
+  (value.kind === 'constructor-value-dispatch' || value.kind === 'constructor-family') &&
+  (destination.kind === 'constructor-value-dispatch' || destination.kind === 'constructor-family') &&
+  abiKey(value.abi) === abiKey(destination.abi)
+
+/**
+ * A subset already admitted by the union narrowing table can retain opaque
+ * native arms by their exact tags. Unlike category selection, this does not
+ * claim that an omitted record or Proxy is structurally disjoint from a live
+ * arm. The installed classifier checks its tag and the materializer rejects
+ * it. Every destination arm must have an exact source home: reconstruction
+ * and nominal downcasts still use their own conversion contracts.
+ */
+export const nativeSubsetSelectionRecipeOf = (source: Representation, target: Representation): NativeSelectionRecipe | null => {
+  const union = source.kind === 'optional' ? source.payload : source
+  const selected = target.kind === 'optional' ? target.payload : target
+  if (union.kind !== 'tagged-union') return null
+  const sourceKeys = new Set(union.arms.map((arm) => representationKey(arm.value)))
+  const targets = selected.kind === 'tagged-union' ? selected.arms.map((arm) => arm.value) : [selected]
+  if (!targets.every((arm) => sourceKeys.has(representationKey(arm)))) return null
+  // A box is a home for every alternative: an omitted arm is boxed into it,
+  // never rejected by tag (`double | any` returned as `any`).
+  if (targets.some((arm) => arm.kind === 'dynamic')) return null
+
+  const hasExactHome = (value: Representation, destination: Representation): boolean => {
+    if (representationKey(value) === representationKey(destination)) return true
+    if (destination.kind === 'optional') return value.kind === destination.absence || hasExactHome(value, destination.payload)
+    return destination.kind === 'tagged-union' && destination.arms.some((arm) => hasExactHome(value, arm.value))
+  }
+  const exact = (value: Representation): NativeSelectionStep | null => {
+    if (representationKey(value) === representationKey(target)) return { kind: 'identity' }
+    if (hasExactHome(value, target)) {
+      const transfer = nativeSumPlan(value, target)
+      if (transfer && nativeSumPreservesPayload(transfer)) return { kind: 'transfer', plan: transfer }
+    }
+    // A structural constructor value and a class constructor family under ONE
+    // construct convention are one native carrier (the construct pointer):
+    // `factory.make(bytes)` over `ResponseConstructor | typeof WireResponse`
+    // hands either arm to a static body whose `this` names the other. Which
+    // class it evaluates is still decided where a family dispatches on it.
+    if (sameConstructorCarrier(value, selected)) return { kind: 'identity' }
+    // An arm whose class derives in place from the selected native record is
+    // already that record: the upcast is total and keeps the allocation.
+    const upcast = nativeRecordBaseUpcastPlan(value, selected)
+    if (upcast)
+      return { kind: 'transfer', plan: target.kind === 'optional' ? { kind: 'wrap', target, payload: upcast, index: null } : upcast }
+    if (value.kind === 'optional') {
+      const present = exact(value.payload)
+      const absent = exact({ kind: value.absence })
+      return present || absent ? { kind: 'optional', absence: value.absence, present, absent } : null
+    }
+    if (value.kind === 'tagged-union') {
+      const arms = value.arms.map((arm) => exact(arm.value))
+      return arms.some((arm) => arm !== null) ? { kind: 'dispatch', arms } : null
+    }
+    return null
+  }
+  const step = exact(source)
+  return step ? { source: representationKey(source), target: representationKey(target), step } : null
+}
+
 const total = (step: NativeSelectionStep | null): boolean => {
   if (step === null) return false
   switch (step.kind) {
@@ -131,6 +199,49 @@ const total = (step: NativeSelectionStep | null): boolean => {
     default:
       return true
   }
+}
+
+/** Discarded tags read no payload; every retained transfer must preserve its native carrier. */
+export const nativeSelectionPreservesPayload = (recipe: NativeSelectionRecipe): boolean => {
+  const preserves = (step: NativeSelectionStep | null): boolean => {
+    if (step === null) return true
+    switch (step.kind) {
+      case 'transfer':
+        return nativeSumPreservesPayload(step.plan)
+      case 'dispatch':
+        return step.arms.every(preserves)
+      case 'optional':
+        return preserves(step.present) && preserves(step.absent)
+      case 'reference-null':
+        return preserves(step.absent) && preserves(step.undefined ?? null)
+      default:
+        return true
+    }
+  }
+  return preserves(recipe.step)
+}
+
+/** Tag/presence selection checks its own domain; a nominal downcast still needs the surrounding class-layout proof. */
+export const nativeSelectionGuardContractOf = (
+  recipe: NativeSelectionRecipe
+): { readonly requiresSourceGuard?: true; readonly executesSourceGuard?: true } => {
+  if (total(recipe.step)) return {}
+  const uncheckedClassCast = (step: NativeSelectionStep | null): boolean => {
+    if (step === null) return false
+    switch (step.kind) {
+      case 'class-cast':
+        return step.down
+      case 'dispatch':
+        return step.arms.some(uncheckedClassCast)
+      case 'optional':
+        return uncheckedClassCast(step.present) || uncheckedClassCast(step.absent)
+      case 'reference-null':
+        return uncheckedClassCast(step.absent) || uncheckedClassCast(step.undefined ?? null)
+      default:
+        return false
+    }
+  }
+  return { requiresSourceGuard: true, ...(uncheckedClassCast(recipe.step) ? {} : { executesSourceGuard: true as const }) }
 }
 
 /** Widening may not discard an alternative or require a successful downcast. */

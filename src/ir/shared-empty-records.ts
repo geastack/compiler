@@ -20,8 +20,8 @@ import { operandsOfIrOperation } from './queries.js'
  * `inherit ?? {}` is the shape: an options default that exists so the reads
  * after it do not have to test for absence. The program then asks it for a
  * field or two, hands it to a callee that does the same, and drops it. Built
- * for real that is a pooled block the size of the whole options record (the
- * mongodb driver's is 1.5 KB, 134 optional fields), its initialization, its
+ * for real that is a pooled block the size of the whole options record (one
+ * large library's is 1.5 KB, 134 optional fields), its initialization, its
  * destruction and a cycle-collector dip, per call -- to answer reads whose
  * answer is "absent" every time.
  *
@@ -206,7 +206,7 @@ export const shareReadOnlyEmptyRecords = (
       else if (target?.kind === 'union-arm') for (const arm of target.arms) entries.push(arm.functionId)
       else if (operation.family !== undefined && operation.family.length > 0)
         for (const member of operation.family) entries.push(member.functionId)
-      // A call through a callable value (`WriteConcern.fromOptions(options)`
+      // A call through a callable value (`Concern.fromOptions(options)`
       // reads the method off its class object) has no physical target, but the
       // call-identity census may still have named every body it can enter.
       else if (operation.closedCallee?.kind === 'exact') entries.push(operation.closedCallee.functionId)

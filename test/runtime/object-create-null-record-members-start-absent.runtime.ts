@@ -1,10 +1,10 @@
 // A RECORD MINTED BY `Object.create(null)` HAS NO OWN PROPERTIES.
 //
-// mongodb's `parseOptions(...): MongoOptions` (`connection_string.ts`) builds
-// `const mongoOptions = Object.create(null)`, writes only the options it was
-// given, and then tests `if (mongoClient && mongoOptions.autoEncryption)`.
-// `autoEncryption` is a REQUIRED member of `MongoOptions`, but nothing wrote
-// it, so node reads `undefined` and skips `Encrypter.checkForMongoCrypt()`.
+// A database client's `parseOptions(...): ClientOptions` builds
+// `const clientOptions = Object.create(null)`, writes only the options it was
+// given, and then tests `if (client && clientOptions.autoEncryption)`.
+// `autoEncryption` is a REQUIRED member of `ClientOptions`, but nothing wrote
+// it, so node reads `undefined` and skips `Encrypter.checkForCipher()`.
 // The native record started every required member present (an empty `Ref`
 // behind a presence bit initialised `true`) and the truthiness of an object
 // reference folded to `has_value() && true`, so the check ran and threw the

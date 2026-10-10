@@ -1,4 +1,4 @@
-// A getter override declared `never` still completes: mongodb-connection-string-url's
+// A getter override declared `never` still completes: a connection-string parser's
 // ConnectionString answers `get host(): never { return DUMMY as never }` over URL's
 // string getter, and a read through the base type must reach that override.
 const DUMMY = '__this_is_not_a_hostname__'

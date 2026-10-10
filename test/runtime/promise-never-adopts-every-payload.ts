@@ -1,6 +1,6 @@
 // A `Promise<never>` RETURNED WHERE A `Promise<T>` IS DECLARED.
 //
-// `@hono/node-server`'s `readBodyWithFastPath<T>` opens with
+// An HTTP framework's Node server adapter's `readBodyWithFastPath<T>` opens with
 // `if (request[bodyConsumedDirectlyKey]) return rejectBodyUnusable()`, where
 // `rejectBodyUnusable(): Promise<never>` is `Promise.reject(...)`. TypeScript
 // admits that at every instantiation because `never` is assignable to every

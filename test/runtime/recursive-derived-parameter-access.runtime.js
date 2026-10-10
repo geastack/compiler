@@ -1,10 +1,10 @@
 //! expect: recursive-derived=42
-//! emitted-has: double gea_body_fn_decl_f169_22(gea::Ref<gea_class_decl_f169_1> gea_arg_0, long long gea_arg_1) {\ndouble v0;\nlong long b0;\ngea::Ref<gea_class_decl_f169_1> b1;\nb0 = gea_arg_1;\nb1 = ((gea_arg_0->children)->elementAtIndex(0));\nif (!(((b0)) == 0LL)) goto block2;\nv0 = (gea_arg_0->value);\ngoto block3;\nblock2:\n{\ndouble v8;\nv8 = gea_body_fn_decl_f169_22(std::move(b1), ((b0) - (1)));\nv0 = v8;\n}\nblock3:\nreturn v0;\n}
+//! emitted-has: double gea_body_fn_decl_f169_22(gea::Ref<gea_class_decl_f169_1> gea_arg_0, long long gea_arg_1) {\ndouble v0;\nlong long b0;\ngea::Ref<gea_class_decl_f169_1> b1;\nb0 = gea_arg_1;\nb1 = ((gea_arg_0->children)->readElementAtIndex(0));\nif (!(((b0)) == 0LL)) goto block2;\nv0 = (gea_arg_0->value);\ngoto block3;\nblock2:\n{\ndouble v8;\nv8 = gea_body_fn_decl_f169_22(std::move(b1), ((b0) - (1)));\nv0 = v8;\n}\nblock3:\nreturn v0;\n}
 // @ts-nocheck
 
 // THE PIN IS THE DIRECT READ, NOT THE CARRIER.
 //
-// `children[0]` on `/** @type {[Object3D]} */` is a literal index into a
+// `children[0]` on `/** @type {[TreeNode]} */` is a literal index into a
 // CLOSED tuple at a non-optional position: it cannot be out of range and it
 // cannot hold a hole, so the recursive call reads the child with one
 // `elementAt(0)` and nothing else. It used to emit a presence test and an
@@ -17,12 +17,16 @@
 // array, and aliasing and `Array.prototype` dispatch are questions about the
 // PHYSICAL element. The arity that proves this read present lives in the
 // semantic tuple shape either way, which is exactly what the census asks.
+//
+// The read is `readElementAtIndex`, the by-value twin of `elementAtIndex` that
+// also answers a live or descriptor-backed array; its dense case is the same
+// inline compare, and the `Ref` it returns is moved into the cell.
 
-class Object3D {
+class TreeNode {
   /** @param {number} value */
   constructor(value) {
     this.value = value
-    /** @type {[Object3D]} */
+    /** @type {[TreeNode]} */
     this.children = [this]
   }
 }
@@ -35,4 +39,4 @@ function readRecursive(node, depth) {
   return depth === 0 ? node.value : readRecursive(child, depth - 1)
 }
 
-console.log('recursive-derived=' + readRecursive(new Object3D(42), 3))
+console.log('recursive-derived=' + readRecursive(new TreeNode(42), 3))

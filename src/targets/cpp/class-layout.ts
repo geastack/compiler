@@ -11,7 +11,7 @@ import { classMemberOf, classStaticMemberOf, type ClassMemberSite } from '../../
 export { classMemberOf, classStaticMemberOf, type ClassMemberSite }
 import type { ConstantLiteral } from '../../semantics/model/operands.js'
 import { representationKey, type RecordField, type Representation } from '../../representation/model.js'
-import { alignedValueText, callableObjectAbi, type ConversionSite } from './emit-narrowing.js'
+import { programConversionText, callableObjectAbi, type ConversionSite } from './emit-narrowing.js'
 import { cppBodyName, cppClassName, cppRecordFieldName, cppRecordFieldPresenceName, cppRecordStructName } from './types.js'
 
 /**
@@ -105,7 +105,15 @@ export const cppFieldInitializerStatements = (
     // result before converting it rather than substituting the call expression
     // into that renderer. The scope lets every field reuse the same local name.
     const local = 'gea_field_initializer_value'
-    const converted = alignedValueText(site, 'class-layout.ts:59', field.representation, stored, local)
+    const converted = programConversionText(
+      site,
+      'field-initializer',
+      String(classDeclaration),
+      field.key,
+      field.representation,
+      stored,
+      local
+    )
     if (converted === null) {
       return (
         `field "${field.key}" initializer carries ${representationKey(field.representation)}, while its physical storage carries ` +
@@ -167,9 +175,7 @@ export interface LazyArrowFieldPlan {
    * `translation-unit.ts`'s `thunkOf` reads to populate the captured-receiver
    * environment field it forwards as the thunk's own `gea_this` argument.
    * Kept apart from `body`'s own ABI so a direct call can tell "no receiver
-   * travels" from "the receiver travels, just not as part of the semantic
-   * ABI" -- the same distinction `EmitContext.directCallReceivers` exists to
-   * answer for an interface-typed method value.
+   * travels" from "the receiver travels in its lexical environment".
    */
   readonly bodyReceiverRepresentation: Representation | null
 }
@@ -594,13 +600,8 @@ export const fieldDeclaringStructOf = (
  * `super` access, so a receiver-defined value carrying any class other than
  * this frame's own receiver's class is a super access and nothing else.
  *
- * One authority for what was four independent spellings of the same
- * predicate: the virtual-setter dispatch in `emit-properties.ts`,
- * `directClassMethodBody`, `classMemberText`'s own `isSuperAccess`, and
- * `virtualCalleeClaim`'s exclusion of `super.m()` from virtual dispatch.
- * Three of the four relied on an enclosing guard having already established
- * the receiver's kind; this one is total, so a fifth caller cannot get it
- * subtly wrong by being reached from somewhere the others never were.
+ * The property setter, method value lookup, and virtual-callee claim consume
+ * this total query rather than relying on an enclosing receiver-kind guard.
  */
 export const dispatchesStatically = (ctx: EmitContext, receiver: IrOperand): boolean => {
   const frameReceiver = ctx.abi?.receiver
@@ -626,10 +627,8 @@ export const dispatchesStatically = (ctx: EmitContext, receiver: IrOperand): boo
  * dropped here -- and answering the second as though it were the first
  * compiled a correct `dog[k]()` into a guaranteed abort.
  *
- * `classMethodValueReceiverClaim` and `computedClassPrototypeMethodText` ask
- * two different questions of this one family -- "does ANY member convert to
- * this callable type" and "which members DO" -- over an identical walk that
- * each spelled out for itself.
+ * `computedClassPrototypeMethodText` asks which members convert to the
+ * published callable type through this same family walk.
  */
 export function* reachableClassMethodsOf(
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
@@ -658,9 +657,8 @@ export function* reachableClassMethodsOf(
 /**
  * Real C++ storage for one "constructor expando" static field: `ClassName.
  * FIELD = value;` written at module scope, after the class declaration --
- * the idiom three.js's own JS source spells throughout (`Object3D.
- * DEFAULT_UP = new Vector3(0, 1, 0);` right after `class Object3D {...}`,
- * never a `static` member inside the body). No `class-lifecycle` event and no
+ * the idiom plain-JS class libraries spell throughout (`Shape.DEFAULT_ORIGIN =
+ * new Point(0, 0);` right after `class Shape {...}`, never a `static` member inside the body). No `class-lifecycle` event and no
  * entry in `ClassLayout.staticFields` ever names one of these: the assignment
  * IS the only declaration a JS-checked program has, so `classStaticMemberOf`
  * genuinely has nothing to walk to for it. `name` is this compilation's own

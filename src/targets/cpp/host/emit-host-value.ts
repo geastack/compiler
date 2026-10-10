@@ -176,7 +176,7 @@ const jsonRuntimeDeclaredCarrier = (representation: Representation): boolean =>
 
 /**
  * `JSON.parse` / `JSON.stringify` read as a VALUE -- `this.text().then(JSON.parse)`
- * in `@hono/node-server`'s `LightRequest.json`.
+ * in a request's `json()` method.
  *
  * The two JSON members are the one pair in `host-members.ts` whose `emit` is a
  * PLACEHOLDER rather than a template: their C++ is generated per call site

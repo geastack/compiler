@@ -33,7 +33,7 @@ export const emptyRecordLinkFamilyCensus: RecordLinkFamilyCensus = {
 /**
  * Object-literal type aliases that are VIEWS of one linked object.
  *
- * mongodb's `List<T>` (`utils.ts`) is a circular doubly linked list:
+ * A `List<T>` written as a circular doubly linked list is the shape:
  *
  *     type ListNode<T> = { value: T; next: ListNode<T> | HeadNode<T>; prev: ListNode<T> | HeadNode<T> }
  *     type HeadNode<T> = { value: null; next: ListNode<T>; prev: ListNode<T> }

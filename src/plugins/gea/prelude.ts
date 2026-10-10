@@ -98,7 +98,7 @@ const isPipelineBuild = (options: PluginOptions): boolean => {
  * nothing else -- `gea/embedded.h` and `ui/internal.h` are absent, because the
  * views really are `NSView`s -- so C++ naming `gea::embedded::ui::StyleSheet`
  * does not compile there ("no member named 'StyleSheet' in namespace
- * 'gea::embedded::ui'", six times, on `notes-native`). There are also no `<p>`
+ * 'gea::embedded::ui'"). There are also no `<p>`
  * or `<h1>` nodes in such a program for a user-agent rule to match, so the
  * sheet has nothing to say about it either way.
  *

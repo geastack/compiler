@@ -1,6 +1,6 @@
 // An object-literal computed key typed as a union of literals is checked only
 // against the index signature, never against the member the key lands on, so
-// the value may lie outside that member's declared type (mongodb's handshake
+// the value may lie outside that member's declared type (a database client's handshake
 // document: `{ [api ? 'hello' : 'ismaster']: 1 }` into `hello?: boolean`).
 interface Doc {
   [key: string]: any

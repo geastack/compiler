@@ -3,8 +3,8 @@
 //! expect: replicaset rs0
 //! expect: maxpoolsize 100
 //! expect: poolsize 0 true
-// `Object.fromEntries(DEFAULT_OPTIONS.entries())` -- mongodb's Topology
-// constructor. `CaseInsensitiveMap` is instantiated at `unknown`, `unknown[]`
+// `Object.fromEntries(DEFAULT_OPTIONS.entries())` -- a database client's
+// topology constructor. `CaseInsensitiveMap` is instantiated at `unknown`, `unknown[]`
 // and its `any` default, so `DEFAULTS` is read as the union of the class's
 // layout copies. `entries` is inherited from the native `Map` base: it is no
 // declared member of the class, and the own-property sidecar the union read

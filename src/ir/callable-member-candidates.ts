@@ -9,7 +9,7 @@ export const callableMemberSlot = (receiver: Representation, key: string): strin
 /**
  * The slot's second distinct candidate, kept in the same map so every consumer
  * of the candidates (the borrowable-body proof walks its values) sees it too.
- * bson's `ByteUtils = hasGlobalBuffer ? nodeJsByteUtils : webByteUtils` gives
+ * `const ByteUtils = hasGlobalBuffer ? nodeByteUtils : webByteUtils` gives
  * every member two implementations behind one carrier; guarding only the
  * first-stored one (the web variant) missed on every call under Node and fell
  * to the owning `invoke`, copying each key string and buffer handle.
@@ -52,7 +52,7 @@ export const callableMemberCandidatesOf = (
     }
   }
   // A record handed where another record shape is declared is a view: its callable members are the source's own callables, copied
-  // (`emit-record-view.ts`). bson's `ByteUtils = hasGlobalBuffer ? nodeJsByteUtils : webByteUtils` only ever allocates the web
+  // (`emit-record-view.ts`). `ByteUtils = hasGlobalBuffer ? nodeByteUtils : webByteUtils` only ever allocates the web
   // literal at the declared shape, so under Node every member the program calls was a guard that always missed. The source's
   // candidates are the target's too: whichever literal a view came from, the callable it holds is one of the two. Shapes, not
   // representation keys, relate the two sides: the cell that holds the view and the literal that was allocated need not spell

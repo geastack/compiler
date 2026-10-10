@@ -6,7 +6,7 @@
 // class, and under the native host a plugin realization respells the browser
 // name to the native class -- so the cast is `T as unknown as T`. That cast
 // is an identity, not a trip through the dynamic carrier: a class instance
-// cast to its own type keeps its representation (skytail's audio engine).
+// cast to its own type keeps its representation (an app's audio engine).
 class NativeParam {
   code = 1
   get value(): number {

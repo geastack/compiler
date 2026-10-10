@@ -12,7 +12,7 @@ import type { IdentityTable } from './identities.js'
  * for a name. `@gea-event-listener-state` marks any other answer that depends
  * on what is registered (a count, the registered names), and
  * `@gea-event-registration-hook` a method each registration calls, which a
- * subclass may override to observe it. node-compat's `EventEmitter` carries the tags; nothing here
+ * subclass may override to observe it. A host's `EventEmitter` carries the tags; nothing here
  * knows a method by its spelling.
  *
  * An emit call is dead when no reachable registration on an aliasing receiver
@@ -20,8 +20,8 @@ import type { IdentityTable } from './identities.js'
  * whole body re-emits to a dead emit has no effect, so the answer is a
  * greatest fixpoint: every candidate starts dead and is revived by a live
  * registration, until nothing changes. That is what collapses a relay chain
- * -- the mongodb driver forwards each connection-pool event through pool,
- * server, topology and client, and only the client, with no listener, ends it.
+ * -- a layered client that forwards each low-level event through several
+ * owning objects, where only the outermost, with no listener, ends it.
  *
  * A dead emit lowers to `false`. That is what the call returns when no
  * listener is registered, but a dead RELAY listener is still registered, so

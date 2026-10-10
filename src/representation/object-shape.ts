@@ -60,7 +60,7 @@ export const carriableIndexesOf = (shape: Extract<StructuralShape, { kind: 'obje
  * The index signatures a shape physically has, which is not always the number
  * TypeScript reports.
  *
- * `[x: string | number]: unknown` (mongodb's `WriteConcernErrorResult`) is ONE
+ * `[x: string | number]: unknown` is ONE
  * index signature the program wrote, and the checker models it as TWO index
  * infos -- one per key domain -- carrying the identical value type. Reading
  * that as "more than one index signature" refuses a shape that declares a

@@ -1,4 +1,4 @@
-// mongodb's `ReadPreference.isValid` as written: the literal's elements are
+// A database client's `ReadPreference.isValid` as written: the literal's elements are
 // MUTABLE static fields holding a frozen enum object's string-literal members,
 // the key type is that literal union plus `null`, and the subject is a plain
 // `string` asserted into it. The Set is still only asked `.has()`, so it is

@@ -1,6 +1,6 @@
 // A generic method a subclass overrides is read at several instantiations:
 // each copy is its own virtual family, and a read dispatches through the copy
-// whose convention it holds (mongodb's OnDemandDocument.get / MongoDBResponse.get).
+// whose convention it holds (a lazy wire-document reader's `get` / `ServerResponse.get`).
 const Kind = Object.freeze({ long: 18, bool: 8, object: 3 } as const)
 
 type TypeOf = {

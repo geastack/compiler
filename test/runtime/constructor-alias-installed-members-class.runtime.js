@@ -5,7 +5,7 @@
 //! emitted-has: static inline bool gea_present_shadowMap = true;
 //! emitted-lacks: gea_writeOwnField(
 //! emitted-lacks: gea::nativeDynamicSet
-// The real WebGLRenderer.js is not a bare constructor function (see the
+// The library's real renderer is not a bare constructor function (see the
 // sibling constructor-alias-installed-members.runtime.js) -- it is an ES6
 // class whose `constructor(...)` keeps the same `const _this = this` alias
 // and installs its data slots (`shadowMap`, `capabilities`, `extensions`,

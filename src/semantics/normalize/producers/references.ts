@@ -184,16 +184,16 @@ export interface CitationFacts {
  * publication that drift apart produce no error at all, only an operation
  * quietly withheld and, with it, every operation of the enclosing function.
  *
- * The shape depends on the phantom rest parameter's ordinal because
- * `argumentsObjectValueAt` publishes two shapes: at ordinal 0 the phantom's
- * own rest array IS the whole `arguments` object, and a single
- * `reference`/`parameter-value` operation carries it; at ordinal P > 0 the
- * object is P declared parameters concatenated with that tail, which takes an
- * array allocation the reference feeds, and the allocation is what a consumer
- * means by `arguments`.
+ * A closed actual frame is the phantom parameter's own value at any ordinal.
+ * The unproved legacy suffix frame still concatenates its named prefix when
+ * the phantom ordinal is nonzero. Both sides consume the final caller fact.
  */
-const argumentsObjectResultAt = (nodeId: ReturnType<IdentityTable['nodeIdOf']>, phantomOrdinal: number): SemanticResultId =>
-  phantomOrdinal === 0
+const argumentsObjectResultAt = (
+  nodeId: ReturnType<IdentityTable['nodeIdOf']>,
+  phantomOrdinal: number,
+  actualFrame: boolean
+): SemanticResultId =>
+  phantomOrdinal === 0 || actualFrame
     ? semanticResultId(operationId(nodeId, 'reference', 0), 'value')
     : semanticResultId(operationId(nodeId, 'allocation', 0), 'value')
 
@@ -248,12 +248,18 @@ export const citeExpressionResult = (
   // predicted one regardless -- it reads syntax, and the syntax is an
   // identifier like any other -- so every consumer of an `arguments` read
   // cited a result nothing publishes, and was withheld along with the rest of
-  // the enclosing function. That is what made `Object3D.add`'s
-  // `arguments.length` guard, and the eleven other `arguments` bodies in
-  // three.js, compile to nothing at all.
+  // the enclosing function. That is what made a variadic `add()`'s
+  // `arguments.length` guard, and every other `arguments` body in a
+  // pre-ES6 library, compile to nothing at all.
   const argumentsOrdinal = facts.argumentsObjects.phantomOrdinalOf(real)
   if (argumentsOrdinal !== null) {
-    return { kind: 'source', source: { kind: 'result', result: argumentsObjectResultAt(identities.nodeIdOf(real), argumentsOrdinal) } }
+    return {
+      kind: 'source',
+      source: {
+        kind: 'result',
+        result: argumentsObjectResultAt(identities.nodeIdOf(real), argumentsOrdinal, facts.argumentsObjects.actualFrameOf?.(real) ?? false)
+      }
+    }
   }
 
   if (ts.isIdentifier(real) && facts.unresolvableNames.isIntrinsicGlobalThis(real)) {
@@ -262,10 +268,10 @@ export const citeExpressionResult = (
 
   // A name that resolves to no binding at all publishes its value directly,
   // for the same reason `arguments` does: there is no cell, so there is no
-  // `GetValue` to mint a `binding` operation for. Three's feature detection is
+  // `GetValue` to mint a `binding` operation for. Library feature detection is
   // full of these -- `typeof Float16Array !== 'undefined' && array instanceof
-  // Float16Array`, and the same shape for `XRWebGLBinding`, `XRWebGLLayer` and
-  // `__THREE_DEVTOOLS__` -- and every one of them cited a read nothing
+  // Float16Array`, and the same shape for optional platform classes and
+  // devtools hook globals -- and every one of them cited a read nothing
   // published, withholding the guard and the operations around it.
   //
   // Reading such a name usually throws (`unresolvableThrows`), so nothing
@@ -468,7 +474,7 @@ const isPlainAssignmentTarget = (node: ts.Node): boolean => {
  * `GetValue` really does throw for them -- `typeof x` is the one shape the
  * spec defines a non-throwing answer for. `censusUnresolvableNames`'s own doc
  * comment is written about exactly this idiom (`typeof Float16Array !==
- * 'undefined'`, three.js), which is what makes skipping this carve-out a
+ * 'undefined'` feature detection), which is what makes skipping this carve-out a
  * silent miscompile rather than a missed optimization: `typeof Deno !==
  * 'undefined'` would abort where the language returns `false`.
  */
@@ -798,8 +804,8 @@ const buildReference = (
  * function. Nothing in the graph says that on its own: a binding read cites
  * the *reference*, never the write (the same gap `orderOwnerOperations`'s
  * catch-clause prologue needed an explicit edge for), and the census's
- * source-order ordinal then schedules the initialize AFTER the read. hono's
- * `compose` is the shape -- `return dispatch(0)` above `async function
+ * source-order ordinal then schedules the initialize AFTER the read. A middleware
+ * composer is the shape -- `return dispatch(0)` above `async function
  * dispatch(i)`, both closing over the same `let index` -- and it emitted a
  * call on a cell no operation had written, which clang caught as "use of
  * undeclared identifier".
@@ -1096,7 +1102,7 @@ const buildArgumentsObjectReference = (
   // and a disagreement between them is invisible -- a withheld operation, no
   // error. So the publisher checks the citer's own rule against what it
   // actually minted, and refuses out loud instead.
-  const predicted = argumentsObjectResultAt(candidate.id, phantomOrdinal)
+  const predicted = argumentsObjectResultAt(candidate.id, phantomOrdinal, context.argumentsObjects.actualFrameOf?.(node) ?? false)
   if (built.value !== predicted) {
     return {
       kind: 'blocked',

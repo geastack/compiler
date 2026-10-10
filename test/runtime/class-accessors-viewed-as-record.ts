@@ -1,7 +1,7 @@
 // A CLASS WHOSE MEMBERS ARE GETTERS, HANDED TO A PARAMETER TYPED AS A
 // STRUCTURAL RECORD OF THOSE MEMBERS.
 //
-// `@hono/node-server` reaches this through
+// An HTTP server adapter reaches this through
 // `Pick<IncomingMessage, 'rawHeaders'> & { headers?: IncomingMessage['headers'] }`:
 // the argument is the connection object, and every member the parameter names
 // is an ACCESSOR on it. A record view rebuilds the target shape field by

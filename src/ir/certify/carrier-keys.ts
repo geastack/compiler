@@ -300,14 +300,14 @@ export const spreadFieldRecordReceiverOf = (
  * static-field record, a string-keyed dictionary -- each run-time key the
  * receiver's type names lands in that field through its checked conversion,
  * the rest is outside the literal's type -- or an optional or tagged union of
- * those. mongodb's `{ ...currentOp, limit: 1 }` spreads a `Document`.
+ * those. `{ ...currentOp, limit: 1 }` over a `Document` is the case.
  */
 const isCopyableIntoFieldRecord = (deriver: RepresentationDeriver, representation: Representation): boolean => {
   if (representation.kind === 'optional') return isCopyableIntoFieldRecord(deriver, representation.payload)
   if (representation.kind === 'tagged-union')
     return representation.arms.length > 0 && representation.arms.every((arm) => isCopyableIntoFieldRecord(deriver, arm.value))
   // A number, boolean, bigint, `null` or `undefined` has no own enumerable
-  // properties, so spreading it copies nothing: mongodb's
+  // properties, so spreading it copies nothing:
   // `...(cond && { timeoutMode })` spreads `false` or a record.
   if (representation.kind === 'scalar' || representation.kind === 'null' || representation.kind === 'undefined') return true
   if (representation.kind === 'dictionary') return representation.key === 'string'
@@ -329,8 +329,8 @@ const isStringKeyedIndexedRecord = (deriver: RepresentationDeriver, representati
 
 /**
  * Whether `emitSpreadCopy` copies a genuinely dynamic source into this
- * field-record receiver: mongodb's option table spreads a `values: unknown[]`
- * element, narrowed by a guard, into `{ ...options.readConcern, ...value }`.
+ * field-record receiver: an option table spreads a `values: unknown[]`
+ * element, narrowed by a guard, into `{ ...options.concern, ...value }`.
  * The source's own enumerable string keys are walked at run time and each one
  * the literal's type names lands in that field through its checked
  * conversion -- the dictionary source's rule. A receiver with a symbol-named

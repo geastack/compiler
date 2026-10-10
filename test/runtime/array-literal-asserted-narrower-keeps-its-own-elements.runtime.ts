@@ -1,4 +1,4 @@
-// mongodb's Encrypter.getInternalClient:
+// a database client's encrypter, building its internal client:
 // `[...Object.getOwnPropertyNames(o), ...Object.getOwnPropertySymbols(o)] as string[]`.
 // The assertion narrows the literal's `(string | symbol)[]`; the literal itself
 // is still built from both spreads.

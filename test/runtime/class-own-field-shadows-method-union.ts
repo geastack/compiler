@@ -1,4 +1,4 @@
-// hono's `SmartRouter.match` memoises its choice by OVERWRITING its own method
+// An HTTP framework's `SmartRouter.match` memoises its choice by OVERWRITING its own method
 // slot: `this.match = router.match.bind(router)`. That makes `match` both a
 // prototype method and an own field, so a read of it off the `Router<T>` union
 // reaches the own-shadow branch -- whose slot carries the method's storage

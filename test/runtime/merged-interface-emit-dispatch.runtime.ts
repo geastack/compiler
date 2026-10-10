@@ -1,5 +1,5 @@
 // A class merged with an interface of the same name that re-declares an
-// inherited method with a narrower, generic signature -- the MongoDB driver's
+// inherited method with a narrower, generic signature -- a database client's
 // `TypedEventEmitter`. The interface member has no body: every call runs the
 // base class's implementation, whatever the merged signature says.
 type Description = Record<string, (...args: any[]) => void>

@@ -1,7 +1,8 @@
 import ts from 'typescript'
 import { isStrictContext } from '../producers/shared.js'
 import { unwrapErasedExpression } from '../producers/erasure.js'
-import type { ValueFlowIndex } from './model.js'
+import type { FlowInvocationOperands, ValueFlowIndex } from './model.js'
+import { literalSourcePropertyKeyOf } from './source-property-key.js'
 
 export type SourceInvocationReceiverFact =
   | { readonly kind: 'expression'; readonly expression: ts.Expression; readonly conversion: 'identity' | 'sloppy-this' }
@@ -15,7 +16,10 @@ export type SourceInvocationReceiverFact =
   | { readonly kind: 'lexical'; readonly source: 'super-member'; readonly owner: ts.Node; readonly static: boolean }
   | { readonly kind: 'lexical'; readonly source: 'super-constructor'; readonly owner: ts.Node }
   | { readonly kind: 'constructed'; readonly call: ts.NewExpression }
-  | { readonly kind: 'unsupported'; readonly reason: 'unindexed-call' | 'unresolved-super-home' | 'nullish-member-base' }
+  | {
+      readonly kind: 'unsupported'
+      readonly reason: 'unindexed-call' | 'unresolved-super-home' | 'nullish-member-base' | 'inconsistent-own-member-frame'
+    }
 
 const unwrapped = (expression: ts.Expression): ts.Expression => {
   let current = unwrapErasedExpression(expression)
@@ -62,17 +66,49 @@ const lexicalOwnerOf = (flow: ValueFlowIndex, body: ts.ArrowFunction): ts.Node |
   return null
 }
 
+/** Frame construction does not admit a target. An own-slot source proof may
+ * replace a checker wrapper only with this call's exact ordinary operands.
+ */
+export const ordinaryOwnInvocationOperandsMatch = (
+  call: ts.CallExpression | ts.NewExpression,
+  operands: FlowInvocationOperands
+): boolean => {
+  if (!ts.isCallExpression(call)) return false
+  const callee = unwrapped(call.expression)
+  if (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) return false
+  const key = ts.isPropertyAccessExpression(callee)
+    ? ts.isPrivateIdentifier(callee.name)
+      ? null
+      : callee.name.text
+    : literalSourcePropertyKeyOf(callee.argumentExpression)
+  return (
+    key !== null &&
+    operands.kind === 'call' &&
+    !operands.explicitThis &&
+    operands.callee === callee &&
+    operands.receiver === callee.expression &&
+    operands.dispatch.kind === 'member' &&
+    operands.dispatch.lookup === callee.expression &&
+    operands.dispatch.key === key &&
+    operands.args.length === call.arguments.length &&
+    operands.args.every((argument, ordinal) => argument === call.arguments[ordinal])
+  )
+}
+
 /** Project only JavaScript's receiver binding rules for one already-admitted
  * invocation/body pair. It deliberately states coercion; proving the source
  * value is a native object belongs to the consumer's existing graph proof. */
 export const sourceInvocationReceiverOf = (
   flow: ValueFlowIndex,
   call: ts.CallExpression | ts.NewExpression,
-  body: ts.SignatureDeclaration
+  body: ts.SignatureDeclaration,
+  ordinaryOwnOperands?: FlowInvocationOperands
 ): SourceInvocationReceiverFact => {
   const site = flow.callSiteOf(call)
   if (!site) return { kind: 'unsupported', reason: 'unindexed-call' }
-  const operands = site.operands
+  if (ordinaryOwnOperands !== undefined && !ordinaryOwnInvocationOperandsMatch(call, ordinaryOwnOperands))
+    return { kind: 'unsupported', reason: 'inconsistent-own-member-frame' }
+  const operands = ordinaryOwnOperands ?? site.operands
   if (ts.isNewExpression(call)) return { kind: 'constructed', call }
 
   if (operands.dispatch.kind === 'super-constructor') {

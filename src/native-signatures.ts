@@ -81,6 +81,83 @@ const wrappers = new Set([
   'AutoType'
 ])
 
+/**
+ * Which class-template specializations in the signature ARE `std::function`,
+ * as Clang itself decided it.
+ *
+ * Neither spelling Clang dumps is an identity: a `templateName` is written as
+ * the source wrote it (Clang 21 qualifies it, Clang 18 does not), a RecordType's
+ * `qualType` is a printing policy that hides inline namespaces, and the
+ * filtered dump omits the declaration the RecordType's `decl` id names. So each
+ * candidate is located by its structural PATH from the probed function type,
+ * and a second probe asks Clang whether the canonical type at that path is a
+ * specialization of the one `std::function` template -- a partial
+ * specialization match, which is decided on declarations, not on text.
+ */
+type StdFunctionIdentity = ReadonlyMap<ClangNode, boolean>
+
+// Path steps, mirrored by `GeaAt` in the identity probe: an indirection to its
+// pointee, a std::function to its signature, a cv-qualified type to its
+// unqualified type, or a function to its result (0) or one of its parameters
+// (1 + index).
+const indirectionStep = -1
+const stdFunctionStep = -2
+const qualifierStep = -3
+
+// Only a class-template specialization has a canonical record to identify; an
+// alias template's specialization is its aliased type, not a record.
+const isClassSpecialization = (node: ClangNode): boolean =>
+  node.kind === 'TemplateSpecializationType' && (node.inner ?? []).some((child) => child.kind === 'RecordType')
+
+function stdFunctionCandidates(node: ClangNode, path: readonly number[], out: Map<ClangNode, readonly number[]>): void {
+  node = unwrap(node)
+  if (node.kind === 'PointerType' || node.kind === 'LValueReferenceType' || node.kind === 'RValueReferenceType') {
+    const children = typeChildren(node)
+    if (children.length === 1) stdFunctionCandidates(children[0]!, [...path, indirectionStep], out)
+    return
+  }
+  if (node.kind === 'QualType') {
+    const children = typeChildren(node)
+    if (children.length === 1) stdFunctionCandidates(children[0]!, [...path, qualifierStep], out)
+    return
+  }
+  if (node.kind === 'FunctionProtoType') {
+    if (node.variadic) return
+    for (const [index, child] of typeChildren(node).entries()) stdFunctionCandidates(child, [...path, index], out)
+    return
+  }
+  if (!isClassSpecialization(node)) return
+  out.set(node, path)
+  const arguments_ = (node.inner ?? []).filter((child) => child.kind === 'TemplateArgument')
+  const children = arguments_.length === 1 ? typeChildren(arguments_[0]!) : []
+  if (children.length === 1) stdFunctionCandidates(children[0]!, [...path, stdFunctionStep], out)
+}
+
+// A path that does not match the type it walks names no specialization of
+// `GeaAt` and fails to compile, rather than answering for some other node.
+const identityProbeTemplates = `template <class T, int... P> struct GeaAt;
+template <class T> struct GeaAt<T> { using type = T; };
+template <class T, int... P> struct GeaAt<T *, ${indirectionStep}, P...> : GeaAt<T, P...> {};
+template <class T, int... P> struct GeaAt<T &, ${indirectionStep}, P...> : GeaAt<T, P...> {};
+template <class T, int... P> struct GeaAt<T &&, ${indirectionStep}, P...> : GeaAt<T, P...> {};
+template <class T, int... P> struct GeaAt<T, ${qualifierStep}, P...> : GeaAt<std::remove_cv_t<T>, P...> {};
+template <class T, int... P> struct GeaAt<T, ${stdFunctionStep}, P...> { using type = void; };
+template <class S, int... P> struct GeaAt<std::function<S>, ${stdFunctionStep}, P...> : GeaAt<S, P...> {};
+template <class R, class... A, int N, int... P> struct GeaAt<R(A...), N, P...>
+    : GeaAt<std::tuple_element_t<static_cast<std::size_t>(N), std::tuple<R, A...>>, P...> {};
+template <class R, class... A, int N, int... P> struct GeaAt<R(A...) noexcept, N, P...>
+    : GeaAt<std::tuple_element_t<static_cast<std::size_t>(N), std::tuple<R, A...>>, P...> {};
+template <class T> struct GeaIsStdFunction { enum { value = 0 }; };
+template <class S> struct GeaIsStdFunction<std::function<S>> { enum { value = 1 }; };
+`
+
+function isStdFunction(node: ClangNode, identity: StdFunctionIdentity): boolean {
+  if (!isClassSpecialization(node)) return false
+  const verdict = identity.get(node)
+  if (verdict === undefined) throw new Error('Clang native template specialization has no authenticated identity')
+  return verdict
+}
+
 function typeChildren(node: ClangNode): ClangNode[] {
   return (node.inner ?? []).filter((child) => child.kind?.endsWith('Type'))
 }
@@ -116,7 +193,7 @@ function constant(node: ClangNode, name: string): number | null {
   return null
 }
 
-function inspectType(node: ClangNode, ast: ClangNode): NativeSignatureType {
+function inspectType(node: ClangNode, ast: ClangNode, identity: StdFunctionIdentity): NativeSignatureType {
   node = unwrap(node)
   const cppType = node.type?.qualType ?? '<unknown>'
   if (node.kind === 'PointerType' || node.kind === 'LValueReferenceType' || node.kind === 'RValueReferenceType') {
@@ -126,7 +203,7 @@ function inspectType(node: ClangNode, ast: ClangNode): NativeSignatureType {
     // A callable object pointer and a pointer to a function pointer are data
     // indirections, not callable values that a TypeScript function can bind to.
     if (node.kind === 'PointerType' && pointee.kind !== 'FunctionProtoType') return { kind: 'unsupported', cppType }
-    const type = inspectType(pointee, ast)
+    const type = inspectType(pointee, ast, identity)
     return type.kind === 'callback' ? { ...type, cppType } : { kind: 'unsupported', cppType }
   }
   if (node.kind === 'BuiltinType') {
@@ -158,37 +235,37 @@ function inspectType(node: ClangNode, ast: ClangNode): NativeSignatureType {
     return {
       kind: 'callback',
       cppType,
-      result: inspectType(children[0]!, ast),
-      parameters: children.slice(1).map((child) => inspectType(child, ast))
+      result: inspectType(children[0]!, ast, identity),
+      parameters: children.slice(1).map((child) => inspectType(child, ast, identity))
     }
   }
-  if (node.kind === 'TemplateSpecializationType' && node.templateName === 'std::function') {
+  if (isStdFunction(node, identity)) {
     const arguments_ = (node.inner ?? []).filter((child) => child.kind === 'TemplateArgument')
     if (arguments_.length !== 1) throw new Error('Clang std::function has ambiguous template arguments')
     const children = typeChildren(arguments_[0]!)
     if (children.length !== 1) throw new Error('Clang std::function callback signature is absent')
-    const signature = inspectType(children[0]!, ast)
+    const signature = inspectType(children[0]!, ast, identity)
     if (signature.kind !== 'callback') throw new Error('Clang std::function template argument is not a function')
     return { ...signature, cppType }
   }
   return { kind: 'unsupported', cppType }
 }
 
-function canonicalType(node: ClangNode): string | null {
+function canonicalType(node: ClangNode, identity: StdFunctionIdentity): string | null {
   node = unwrap(node)
   if (node.kind === 'BuiltinType') return node.type?.qualType ?? null
   if (node.kind === 'FunctionProtoType') {
     if (node.variadic || (node.cc !== undefined && node.cc !== 'cdecl')) return null
     if (node.exceptionSpec !== undefined && node.exceptionSpec !== 'noexcept') return null
-    const children = typeChildren(node).map(canonicalType)
+    const children = typeChildren(node).map((child) => canonicalType(child, identity))
     if (!children.length || children.some((child) => child === null)) return null
     return `${children[0]}(${children.slice(1).join(', ')})${node.exceptionSpec === 'noexcept' ? ' noexcept' : ''}`
   }
-  if (node.kind === 'TemplateSpecializationType' && node.templateName === 'std::function') {
+  if (isStdFunction(node, identity)) {
     const arguments_ = (node.inner ?? []).filter((child) => child.kind === 'TemplateArgument')
     if (arguments_.length !== 1) return null
     const children = typeChildren(arguments_[0]!)
-    const argument = children.length === 1 ? canonicalType(children[0]!) : null
+    const argument = children.length === 1 ? canonicalType(children[0]!, identity) : null
     return argument === null ? null : `std::function<${argument}>`
   }
   const indirections: Readonly<Record<string, string>> = {
@@ -199,12 +276,12 @@ function canonicalType(node: ClangNode): string | null {
   const indirection = indirections[node.kind ?? '']
   if (indirection !== undefined) {
     const children = typeChildren(node)
-    const child = children.length === 1 ? canonicalType(children[0]!) : null
+    const child = children.length === 1 ? canonicalType(children[0]!, identity) : null
     return child === null ? null : `std::${indirection}<${child}>`
   }
   if (node.kind === 'QualType') {
     const children = typeChildren(node)
-    let child = children.length === 1 ? canonicalType(children[0]!) : null
+    let child = children.length === 1 ? canonicalType(children[0]!, identity) : null
     if (child === null) return null
     for (const qualifier of node.qualifiers?.split(' ') ?? []) {
       if (qualifier !== 'const' && qualifier !== 'volatile') return null
@@ -213,6 +290,56 @@ function canonicalType(node: ClangNode): string | null {
     return child
   }
   return null
+}
+
+/** The second probe: Clang's own verdict on every candidate specialization, by path. */
+function stdFunctionIdentityOf(
+  input: NativeFunctionInspection,
+  args: readonly string[],
+  compiler: string,
+  signature: ClangNode
+): { readonly verdicts: StdFunctionIdentity; readonly probe: string; readonly ast: string } {
+  const candidates = new Map<ClangNode, readonly number[]>()
+  stdFunctionCandidates(signature, [], candidates)
+  if (candidates.size === 0) return { verdicts: new Map(), probe: '', ast: '' }
+  const marks = [...candidates.values()].map(
+    (path, index) => `Identity${index} = GeaIsStdFunction<typename GeaAt<Function${path.map((step) => `, ${step}`).join('')}>::type>::value`
+  )
+  const identityProbe = `${input.headers.map((header) => `#include "${header}"`).join('\n')}
+#include <cstddef>
+#include <functional>
+#include <tuple>
+#include <type_traits>
+namespace GeaNativeSignatureProbe {
+using Function = decltype(&${input.cppFunction});
+${identityProbeTemplates}enum Identities { ${marks.join(',\n')} };
+}
+`
+  const inspected = spawnSync(compiler, args, {
+    input: identityProbe,
+    encoding: 'utf8',
+    ...(input.workingDirectory ? { cwd: input.workingDirectory } : {}),
+    timeout: 60_000,
+    maxBuffer: 16 * 1024 * 1024
+  })
+  if (inspected.error || inspected.status !== 0) {
+    throw new Error(
+      `Clang native template identity inspection failed for ${input.cppFunction}: ${inspected.error?.message ?? inspected.stderr}`
+    )
+  }
+  let ast: ClangNode
+  try {
+    ast = JSON.parse(inspected.stdout) as ClangNode
+  } catch {
+    throw new Error('Clang native template identity inspection did not return one authenticated AST namespace')
+  }
+  const verdicts = new Map<ClangNode, boolean>()
+  for (const [index, node] of [...candidates.keys()].entries()) {
+    const value = constant(ast, `Identity${index}`)
+    if (value !== 0 && value !== 1) throw new Error('Clang did not authenticate a native template identity')
+    verdicts.set(node, value === 1)
+  }
+  return { verdicts, probe: identityProbe, ast: inspected.stdout }
 }
 
 /** Native facts come from Clang's resolved type graph; callers authenticate their declaration-to-host binding separately. */
@@ -267,7 +394,8 @@ enum Bounds { ${widths.join(',\n')} };
   if (aliases.length !== 1) throw new Error('Clang native function signature is absent or ambiguous')
   const types = typeChildren(aliases[0]!)
   if (types.length !== 1) throw new Error('Clang native function alias has ambiguous type nodes')
-  const signature = inspectType(types[0]!, ast)
+  const identity = stdFunctionIdentityOf(input, args, compiler, types[0]!)
+  const signature = inspectType(types[0]!, ast, identity.verdicts)
   if (signature.kind !== 'callback') throw new Error('Clang native binding is not a function')
   if (input.expectedParameterCount !== undefined && signature.parameters.length !== input.expectedParameterCount) {
     throw new Error('Native function parameter count does not match its declared binding')
@@ -280,15 +408,15 @@ enum Bounds { ${widths.join(',\n')} };
   }
   return {
     cppFunction: input.cppFunction,
-    canonicalFunctionType: canonicalType(types[0]!),
+    canonicalFunctionType: canonicalType(types[0]!, identity.verdicts),
     result: signature.result,
     parameters: signature.parameters,
     evidence: {
       compiler,
       arguments: args,
       headers: [...input.headers],
-      probeSha256: createHash('sha256').update(probe).digest('hex'),
-      astSha256: createHash('sha256').update(inspected.stdout).digest('hex')
+      probeSha256: createHash('sha256').update(probe).update(identity.probe).digest('hex'),
+      astSha256: createHash('sha256').update(inspected.stdout).update(identity.ast).digest('hex')
     }
   }
 }

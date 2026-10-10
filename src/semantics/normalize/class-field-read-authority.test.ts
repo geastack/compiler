@@ -8,23 +8,23 @@ import { emptyParameterBindingCensus, type ParameterBindingCensus } from './para
 /**
  * `memberThroughBoundReceiver` used to ask the checker for a member's type
  * ONLY at the READ SITE (`checker.getTypeOfSymbolAtLocation(property,
- * node)`), and measured on the three.js app the checker gives two different answers
+ * node)`), and on a large JS program the checker gives two different answers
  * for the same field off the identical receiver carrier depending on which
- * file asks -- `native-record-ref` from the app's entry module, `dynamic` from
- * `WebGLPrograms.js:439` -- see `structural-layout-type.ts`'s
+ * file asks -- `native-record-ref` from the entry module, `dynamic` from a
+ * library module -- see `structural-layout-type.ts`'s
  * `declaredMemberTypeOf`, which now falls back first to the class FIELD
  * CENSUS composed into `parameters` (the same authority
  * `structural-parts.ts`'s `memberOf` already trusts for the field's STORAGE
  * side) and then, for a field that census does not cover, to the checker
  * again at the member's own declaration.
  *
- * Reproducing the checker's exact per-location divergence needs three.js's
+ * Reproducing the checker's exact per-location divergence needs a JS library's
  * own shape (a `this`-property, CFA-derived, read across a module boundary
  * from an unannotated call-site-bound parameter); these tests instead proxy
  * the checker (or mock the census) to force that same divergence directly
  * on a plain TypeScript program with no such shape, so the fix's LOGIC is
  * exercised without depending on a specific TypeScript-internals trigger
- * this file cannot rebuild `dist/` to observe on the real app.
+ * this file cannot rebuild `dist/` to observe on a real program.
  *
  * Three cases: the checker-declaration fallback agreeing with an
  * already-correct read site (below), the field-census fallback answering a
@@ -66,9 +66,9 @@ test('a member read that comes back any AT THE READ SITE is answered from the pr
   const declaration = property.valueDeclaration
   assert.ok(declaration)
 
-  // Simulates the measured three.js split: the checker's answer for the SAME
+  // Simulates the measured split: the checker's answer for the SAME
   // field, off the SAME receiver, disagrees by which node asks --
-  // `firstRead` reads like `WebGLPrograms.js`'s site (both the whole
+  // `firstRead` reads like the library module's site (both the whole
   // expression's own type AND the property's type at that node come back
   // `any`); `secondRead` is untouched and behaves like the entry module's site,
   // where the checker already answers correctly and the fallback in

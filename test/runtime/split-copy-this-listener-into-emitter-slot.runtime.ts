@@ -1,11 +1,11 @@
 // A function declaring `this: Box` -- the `any` filling of a split generic
 // class -- registered with an emitter whose listener slot carries the emitter
-// as its receiver. The MongoDB driver's `removeActiveCursor(this:
+// as its receiver. A database client's `removeActiveCursor(this:
 // AbstractCursor)` is the measured case: `AbstractCursor.trackCursor` does
 // `this.once('close', removeActiveCursor)` and node's EventEmitter calls it with
 // `fn.apply(this, args)`, so the function runs with the cursor that emitted.
 //
-// The public overload types the listener `() => void`, as mongodb's
+// The public overload types the listener `() => void`, as the client's
 // `TypedEventEmitter` types it `Events['close']`; the implementation's slot
 // carries the receiver. The slot's receiver is the base class. The function accepts only Box copies,
 // so the adapter narrows the receiver to the copy that is live, checked, and

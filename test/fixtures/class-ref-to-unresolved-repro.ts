@@ -1,7 +1,7 @@
 // Repro for binding-read-conversion:class-ref->unresolved(no primitive for an
 // intersection whose member type|N (class-instance) is not a record shape)
-// (mongodb execute_operation.ts:198 `operation instanceof AggregateOperation`
-// inside `tryOperation<T extends AbstractOperation>`).
+// (a database client's operation executor: `operation instanceof
+// PipelineOperation` inside `tryOperation<T extends AbstractOperation>`).
 //
 // `pet` is declared `Animal` (a plain class-ref cell). `Cat` is an unrelated
 // class. TypeScript still narrows `pet instanceof Cat` to the intersection

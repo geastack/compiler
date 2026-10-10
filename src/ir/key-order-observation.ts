@@ -18,7 +18,7 @@ import type { ReflectionExposure } from './reflection-demand.js'
  * A shape is UNOBSERVED when
  *  - the reflection census holds it at `keys-only`: it never reaches a dynamic
  *    or unknown boundary, so no dynamic walk (`Object.keys` on a boxed value,
- *    `JSON.stringify`, a console, a bson serializer) can list its keys;
+ *    `JSON.stringify`, a console, a binary serializer) can list its keys;
  *  - no operation lists its keys: `own-property-keys`, a `for`-`in`, the
  *    `Object.keys`/`values`/`entries` intrinsics, or any host template other
  *    than `Object.assign`;

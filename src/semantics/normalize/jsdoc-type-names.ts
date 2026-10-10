@@ -7,15 +7,15 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  * The type a JSDoc tag NAMES, when the file it is written in cannot bind that
  * name but the program declares exactly one type by it.
  *
- * three.js documents its renderer comprehensively --
- * `WebGLRenderer.js`'s `this.render = function ( scene, camera )` carries
- * `@param {Object3D} scene` and `@param {Camera} camera` directly above it --
- * and TypeScript honours a JSDoc `@param` in a JavaScript file exactly as it
- * honours a TS annotation. It does so only when the NAME resolves, and in
- * three's sources it usually does not: `WebGLRenderer.js` imports neither
- * `Object3D` nor `Camera`, because JSDoc is prose to the module system.
- * `getTypeFromTypeNode` then degrades the tag to `any`, and 4687 unannotated
- * parameters inherit that `any` through the renderer's entire call graph.
+ * A thoroughly documented JavaScript library commonly writes
+ * `this.draw = function ( node, view )` with `@param {Node} node` and
+ * `@param {View} view` directly above it -- and TypeScript honours a JSDoc
+ * `@param` in a JavaScript file exactly as it honours a TS annotation. It does
+ * so only when the NAME resolves, and in such sources it usually does not: the
+ * file imports neither `Node` nor `View`, because JSDoc is prose to the module
+ * system. `getTypeFromTypeNode` then degrades the tag to `any`, and every
+ * unannotated parameter downstream inherits that `any` through the whole call
+ * graph.
  *
  * This asks the same question one scope wider. It is emphatically not this
  * compiler inventing a type: the type is one the PROGRAM declares and the tag
@@ -29,13 +29,13 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  *   with the file's real scope, and nothing here improves on it. The whole
  *   module only ever speaks where `getTypeFromTypeNode` produced `any` or
  *   `unknown`.
- * - A name the program declares more than once. Measured on the three.js app: 253 of
- *   the 329 unreadable tags name a type that is unique program-wide and 4 are
- *   genuinely ambiguous. Those 4 stay `any`, because "one of these two" is not
- *   an answer and picking either is a guess.
- * - A name that is not an exported TYPE anywhere (72 on the three.js app, mostly
- *   callback aliases three declares only in its own documentation).
- * - Anything but a bare type REFERENCE. `{Object3D}` and `{Object3D|null}`
+ * - A name the program declares more than once. Most unreadable tags name a
+ *   type that is unique program-wide; the few genuinely ambiguous ones stay
+ *   `any`, because "one of these two" is not an answer and picking either is a
+ *   guess.
+ * - A name that is not an exported TYPE anywhere -- typically a callback alias
+ *   a library declares only in its own documentation.
+ * - Anything but a bare type REFERENCE. `{Node}` and `{Node|null}`
  *   are names this can resolve; a generic instantiation, a function type, or
  *   an object literal type written inside a tag is a shape whose PARTS would
  *   each need the same treatment, and resolving only the head would answer
@@ -43,18 +43,17 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
  *
  * ## MEASURED AND REVERTED: `@returns` and `@type`
  *
- * Only `@param` is read, and that is a measurement, not an oversight. The three.js app
- * carries 93 unreadable `@returns` tags (67 uniquely resolvable) and 611
- * unreadable `@type` tags (368 uniquely resolvable), so both looked like larger
- * seams than the parameters. Both were built, wired and measured: `boundCount`
- * went 215 -> 260 and the boxed carrier count moved by EXACTLY ZERO on both
- * the three.js apps in the examples gallery.
+ * Only `@param` is read, and that is a measurement, not an oversight.
+ * Unreadable `@returns` and `@type` tags are common in JSDoc-annotated
+ * libraries, so both looked like larger seams than the parameters. Both were
+ * built, wired and measured: `boundCount` rose and the boxed carrier count
+ * moved by EXACTLY ZERO.
  *
- * The reason is in the refusals. Of 176 `@type`-tagged `this.x = y` assignments
- * in three's sources, nearly all spell something this cannot resolve --
- * `{TypedArray}` (a typedef three declares only in its own documentation),
- * `{Array<number>}`, `{Vector3[]}` -- so `tag-is-not-a-bare-reference` went
- * 69 -> 235 while the tags that DID resolve landed on fields
+ * The reason is in the refusals. Nearly every `@type`-tagged `this.x = y`
+ * assignment spells something this cannot resolve -- `{TypedArray}` (a
+ * typedef declared only in documentation), `{Array<number>}`, `{Point[]}` --
+ * so `tag-is-not-a-bare-reference` grew several-fold while the tags that DID
+ * resolve landed on fields
  * `field-bindings.ts` already answered. Extending `referencedNameOf` to arrays
  * and generic instantiations would need a `T[]` `ts.Type` built from parts, and
  * `checker.createArrayType` is checker-internal.
@@ -72,13 +71,12 @@ import { forEachReachableStatement, type ProgramReachability } from './reachabil
 /**
  * How many leading path segments two files share.
  *
- * A homonym across packages is the ordinary case in this corpus, not a
- * pathology: three's own `Vector3`, the app's `threeGeometryRuntime.ts`
- * `Vector3` and its `threeNativeShim.ts` `Vector3` are three unrelated classes
- * with one name, and a program-wide index by name alone can only call that
- * ambiguous. A reader does not: a tag written inside `three/src/math/
- * Vector3.js` is talking about three's types, because that is the code it was
- * written next to.
+ * A homonym across packages is the ordinary case, not a pathology: a
+ * library's own `Point`, and an application's two unrelated `Point` helper
+ * classes, are three unrelated classes with one name, and a program-wide index
+ * by name alone can only call that ambiguous. A reader does not: a tag written
+ * inside the library's `src/math/Point.js` is talking about the library's
+ * types, because that is the code it was written next to.
  *
  * Directory distance is the closest thing to that reading which needs no
  * module graph: the candidate sharing the longest path prefix with the tag's
@@ -163,12 +161,12 @@ const absenceKeywordOf = (member: ts.TypeNode): 'null' | 'undefined' | null => {
  * beside it -- or `null` when the tag is not that shape.
  *
  * A union is read through only when exactly one arm is a reference and every
- * other arm is `null`/`undefined`: `{Object3D|null}` is `Object3D` plus an
+ * other arm is `null`/`undefined`: `{Node|null}` is `Node` plus an
  * absence this compiler already models, and the reference is the only part
  * whose name needs resolving. Any other union is refused -- see the header.
  *
  * The absences are CARRIED OUT rather than dropped. Returning the bare name
- * and resolving it left `{Object3D|null}` bound to `Object3D`, a type
+ * and resolving it left `{Node|null}` bound to `Node`, a type
  * NARROWER than the one the program stated -- the one direction a census may
  * never move, and the direction that puts a `null` into a cell whose carrier
  * cannot hold one. `tagIsOptional`'s own comment already states the rule this
@@ -176,11 +174,11 @@ const absenceKeywordOf = (member: ts.TypeNode): 'null' | 'undefined' | null => {
  *
  * A non-null LITERAL arm is not an absence and never was. Admitting every
  * `ts.isLiteralTypeNode` member silently dropped the string arm of a
- * `{Vector3|'auto'}`; only the literal spelling of `null` is one.
+ * `{Point|'auto'}`; only the literal spelling of `null` is one.
  *
  * `?T` is JSDoc's own nullable spelling and means exactly `T | null`, so it
  * reads as the reference plus that absence. A parenthesized type is the same
- * type with parentheses around it -- three writes `{(NodeFrame|NodeBuilder)}`
+ * type with parentheses around it -- JSDoc corpora write `{(Frame|Builder)}`
  * and `{(number)}` freely -- so it is unwrapped rather than refused; the
  * parentheses are how the source was written, not a different shape.
  */
@@ -255,7 +253,7 @@ const tagIsOptional = (declaration: ts.ParameterDeclaration): boolean =>
  *
  * A `typeof`-union tag whose parameter the body then compares, with `===` or
  * `!==`, against one of the very values the tag names. Reduced to two files
- * and eight functions (`.scratch/fleet/f7/repro`), against the checker with
+ * and eight functions, against the checker with
  * no compiler in the picture:
  *
  *     export const A = 0, B = 1, C = 2;                      // k.js
@@ -293,12 +291,11 @@ const tagIsOptional = (declaration: ts.ParameterDeclaration): boolean =>
  *   `typeAt` defers to a narrowed read below;
  * - an optional (`[name]`) tag -- see `tagIsOptional`.
  *
- * Measured on the three.js app: 2 parameters program-wide (`WebGLState.setBlending`'s
- * `blending`, `setCullFace`'s `cullFace`), 2902 tagged parameters agreeing
- * with their tag, and no third case anywhere in 307 files. Small, and a
- * silent miscompile of a fully stated type: the constants those two switch on
- * are `number`, and boxing them made every `currentBlending = blending` in
- * the renderer's state machine a dynamic store.
+ * Rare -- a handful of parameters in a large program, against thousands of
+ * tagged parameters agreeing with their tag -- and a silent miscompile of a
+ * fully stated type: the constants such a parameter is compared against are
+ * `number`, and boxing it made every `currentMode = mode` in the surrounding
+ * state machine a dynamic store.
  */
 const droppedTagTypeOf = (checker: ts.TypeChecker, declaration: ts.ParameterDeclaration): ts.Type | null => {
   if (declaration.type) return null
@@ -328,11 +325,11 @@ export const censusJsDocTypeNames = (
     const moduleSymbol = checker.getSymbolAtLocation(file)
     if (!moduleSymbol) continue
     for (const exported of checker.getExportsOfModule(moduleSymbol)) {
-      // A re-export is the SAME declaration reached by a second path --
-      // `three/src/Three.js` re-exports nearly everything, so counting export
-      // symbols rather than the declarations behind them reports almost every
-      // name as ambiguous. Measured: 232 names looked ambiguous before this
-      // alias hop and 4 actually are.
+      // A re-export is the SAME declaration reached by a second path -- a
+      // package entry point commonly re-exports nearly everything, so counting
+      // export symbols rather than the declarations behind them reports almost
+      // every name as ambiguous. Measured: hundreds of names looked ambiguous
+      // before this alias hop and only a handful actually are.
       const target = (exported.flags & ts.SymbolFlags.Alias) !== 0 ? checker.getAliasedSymbol(exported) : exported
       const declared = checker.getDeclaredTypeOfSymbol(target)
       if (!declared || isUninformative(declared)) continue
@@ -345,10 +342,9 @@ export const censusJsDocTypeNames = (
   // it as one is what made that rule wrong here. JavaScript has no syntax to
   // export a typedef, so the convention every JSDoc corpus relies on is that a
   // named typedef is referable program-wide from the prose of any file:
-  // `@param {RenderTarget~Options} [options]` is written in five of three's
-  // render-target subclasses, none of which import anything from
-  // `RenderTarget.js` to make the name visible, because there is nothing to
-  // import. `getExportsOfModule` cannot see such a declaration at all, so every
+  // `@param {Base~Options} [options]` is written in several subclasses of
+  // `Base`, none of which import anything from `Base.js` to make the name
+  // visible, because there is nothing to import. `getExportsOfModule` cannot see such a declaration at all, so every
   // one of those references refused `name-is-not-an-exported-type` -- not
   // because the name is private, but because the language offers no way to
   // make it public.
@@ -391,7 +387,7 @@ export const censusJsDocTypeNames = (
     // carry no per-instance fact beyond `owner` (ambiguity, an unreadable
     // resolved type), but for `tag-is-not-a-bare-reference` and
     // `name-is-not-an-exported-type` the missing fact IS the point -- a reader
-    // hitting either one had to go grep three's own source to learn what name
+    // hitting either one had to go grep the library's source to learn what name
     // the tag spelled and why it did not resolve. `detail`, when given, is
     // exactly that: the tag's own text for the shape refusal, the looked-up
     // name(s) for the exported-type refusal. Nothing here changes `root` (the
@@ -421,17 +417,17 @@ export const censusJsDocTypeNames = (
     // (a qualified name; the head `AudioContext` would resolve to THIS FILE's
     // own class, which is exactly the wrong answer the qualifier exists to
     // avoid), `Curve<TVector>` (a generic instantiation the declaration
-    // overlay carried over from `@types/three`; see the header's "Anything
+    // overlay carried over from a `@types` package; see the header's "Anything
     // but a bare type REFERENCE"). Printing it is strictly prose: it does not
     // change which shapes refuse, only whether a reader can tell which one
     // fired without re-deriving it from the source.
     if (reference === null) return refuse('tag-is-not-a-bare-reference', typeNode.getText())
     // A union arm naming a type this program declares NOWHERE is uninhabited:
     // no value of it can reach this parameter, so the tag means the arms that
-    // remain. three's `CubeCamera.update( renderer, scene )` is tagged
-    // `{(Renderer|WebGLRenderer)}`, and `Renderer` is exported only from the
-    // WebGPU entry point that this program never imports -- so the checker
-    // resolves that arm to `any`, `any | WebGLRenderer` absorbs to `any`, and
+    // remain. A method tagged `@param {(RendererA|RendererB)} renderer`, where
+    // `RendererA` is exported only from a package entry point this program
+    // never imports, has the checker resolve that arm to `any`;
+    // `any | RendererB` absorbs to `any`, and
     // the renderer every caller really passes crosses into a dynamic carrier.
     // Dropping the empty arm states what the reachable program already proves.
     // Two arms that BOTH name real types are a genuine union and still refuse:
@@ -441,9 +437,9 @@ export const censusJsDocTypeNames = (
     // `NodeBuilder`, ...) -- not declared, by any file this program compiles,
     // under any of those exact spellings. Naming them is the fix
     // `docs/SEMANTIC-AUTHORITY.md`'s correctness bar asks for when the answer
-    // is "keep refusing": three's own documentation convention, not a fact
-    // this compiler could derive, so print what was looked up rather than
-    // making the next reader grep three's source to find out.
+    // is "keep refusing": the library's own documentation convention, not a
+    // fact this compiler could derive, so print what was looked up rather than
+    // making the next reader grep the library's source to find out.
     if (named.length === 0) return refuse('name-is-not-an-exported-type', reference.names.join(' | '))
     if (named.length > 1) return refuse('union-names-more-than-one-program-type')
     const candidates = byName.get(named[0] as string)

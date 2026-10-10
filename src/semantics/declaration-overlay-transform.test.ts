@@ -233,14 +233,14 @@ test('inherited descriptor accessors preserve aliases across narrower tuple decl
         this.data = null;
       }
     }
-    class Texture {
+    class Surface {
       constructor() { this.source = new Source(); }
       /** @type {DescriptorData | DescriptorData[] | null} */
       get image() { return this.source.data; }
       /** @param {DescriptorData | DescriptorData[] | null} value */
       set image(value) { this.source.data = value; }
     }
-    class Cube extends Texture {
+    class Cube extends Surface {
       constructor() {
         super();
         const descriptor = {width: 8, height: 8, depth: 1};
@@ -394,9 +394,9 @@ test('numeric dictionary reads retain native argument storage through an unannot
   assert.equal(compileAndRun(source), '5')
 })
 
-// Records: three's renderer modules are factories returning object literals,
-// and `@types/three` declares each record as a class. The fixture trees mirror
-// each other the way `three/src` and `@types/three/src` do.
+// Records: a JS library whose modules are factories returning object literals,
+// with a separate declaration package that declares each record as a class. The
+// fixture trees mirror each other the way a JS source tree and its `.d.ts` tree do.
 const recordsRoot = resolve('test/fixtures/declaration-records')
 const recordsJs = (name: string): string => resolve(recordsRoot, 'js', `${name}.js`)
 const overlayRecord = (name: string, text: string): string =>
@@ -480,7 +480,7 @@ test('a factory record, and the records nested in it, take the member types thei
   const text = overlayRecord('records', pipeline)
   const { types, diagnostics } = parameterTypes('records', text)
   // `new ColorChannel()` on a function that returns a record is a checker
-  // complaint about the program as three writes it; the overlay must add none.
+  // complaint about the program as the library writes it; the overlay must add none.
   assert.deepEqual(diagnostics, parameterTypes('records', pipeline).diagnostics)
   // `setMask` and `setClear` are each declared on two owners, so the by-name
   // lookup has no answer; the record's owner -- reached through the declared
@@ -524,8 +524,8 @@ export { Pipeline };
 `
 
 test('a parameter whose declared type leaves an element or member unstated gets nothing', () => {
-  // `@types/three`'s `getParameters( ..., lights: WebGLLightsState, ...,
-  // lightProbeGrids: unknown[] )`: stated, each parameter outranks the census,
+  // A declaration like `getParameters( ..., lights: LightsState, ...,
+  // probeGrids: unknown[] )`: stated, each parameter outranks the census,
   // so a caller's typed array meets an array of dynamic elements and no
   // conversion exists. Unstated, the census derives what callers pass.
   const text = overlayRecord('records', lighting)
@@ -547,7 +547,7 @@ test('only data positions of a declared parameter type count as unstated', () =>
   assert.equal(statesNothingWithin('unknown[]'), true)
   assert.equal(statesNothingWithin('{ version: number, probe: unknown[] }'), true)
   assert.equal(statesNothingWithin('Map<string, any>'), true)
-  assert.equal(statesNothingWithin('(object: Object3D) => any'), false)
+  assert.equal(statesNothingWithin('(object: Node) => any'), false)
   assert.equal(statesNothingWithin('(value: unknown) => void'), false)
   assert.equal(statesNothingWithin('{ name: string; run(): any }'), false)
   assert.equal(statesNothingWithin('{ onEvent: (event: unknown) => void }'), false)
@@ -597,7 +597,7 @@ export const Palette = createPalette();
   assert.equal(types.get('factor'), 'number')
   // A record at the top of a parameter keeps its statement; a dictionary OF
   // records does not -- every caller's literal would need an element-wise
-  // conversion the runtime does not install (`ColorManagement.define`).
+  // conversion the runtime does not install (`Palette.define`).
   assert.match(text, /@param \{\{ toXYZ: number, name\?: string \}\} fallback/)
   assert.equal(types.get('spaces'), 'any')
   assert.doesNotMatch(text, /@param \{Record</)

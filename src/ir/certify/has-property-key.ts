@@ -38,9 +38,9 @@ import { staticKeyPresenceOf } from '../../representation/record-fields.js'
  *   `'toString' in o` is `true` for every ordinary object, and a `class-ref`'s
  *   prototype carries the class's own methods. Even a plain struct is not
  *   enough, because getting a value into one can SLICE a class instance down
- *   to the declared fields -- see `staticKeyPresenceOf`'s own note and
- *   `test/fixtures/in-operator-class-through-interface.ts`, which is what a version
- *   of this that DID answer absence compiled to a wrong answer. Presence is
+ *   to the declared fields -- see `staticKeyPresenceOf`'s own note; a class
+ *   instance tested with `in` through an interface-typed binding is what a
+ *   version of this that DID answer absence compiled to a wrong answer. Presence is
  *   proven; absence is not.
  */
 

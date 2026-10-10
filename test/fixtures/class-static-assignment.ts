@@ -1,10 +1,10 @@
 /**
- * A class static spelled as a bare assignment on the class value -- three.js's
- * own idiom (`Object3D.DEFAULT_UP = new Vector3(0, 1, 0)`), which the language
+ * A class static spelled as a bare assignment on the class value -- a 3D
+ * library's own idiom (`SceneNode.DEFAULT_UP = new Vector3(0, 1, 0)`), which the language
  * admits as an ordinary `[[Set]]` on the constructor and no `static` member
  * declares. Both directions are exercised: the store that fills the storage
  * and a later read of it, so a compile that emits one without the other fails
- * here rather than in a three.js-sized program.
+ * here rather than in a library-sized program.
  */
 class Axis {
   x: number

@@ -16,9 +16,8 @@ const memberResultOf = (checker: ts.TypeChecker, member: ts.Symbol, method: bool
  *
  * `never` is assignable to every slot, so TypeScript admits an override that
  * narrows an inherited `string` getter to `never` -- and admits the body
- * returning a value through `as never`. mongodb-connection-string-url's
- * `ConnectionString` does exactly that over `URL`: `get host(): never {
- * return DUMMY_HOSTNAME as never }`. The value still reaches every reader that
+ * returning a value through `as never`. A `URL` subclass that does exactly
+ * that: `get host(): never { return PLACEHOLDER as never }`. The value still reaches every reader that
  * holds the instance as a `URL`, so the override's convention is the family's
  * (`string`), not the `void` its own annotation lowers to. A family whose
  * members disagreed there had no dispatch member, and every `url.host` read

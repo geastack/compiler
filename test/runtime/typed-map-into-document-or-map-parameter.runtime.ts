@@ -1,8 +1,8 @@
 // A `Map<string, any>` HANDED TO A `Document` PARAMETER THAT BRANCHES ON `instanceof Map`.
 //
-// mongodb's `LimitedSizeDocument.toObject()` (cmap/handshake/client_metadata.ts)
-// is `BSON.deserialize(BSON.serialize(this.document))` with `document` a
-// `Map<string, any>`; bson's `serialize(object: Document)` walks a Map by its
+// A database client's size-limited handshake document's `toObject()` is
+// `Wire.deserialize(Wire.serialize(this.document))` with `document` a
+// `Map<string, any>`; the binary-document serializer's `serialize(object: Document)` walks a Map by its
 // entries under `object instanceof Map`. Other callers pass plain documents
 // and `Map<unknown, unknown>`s to the same parameter, so the Map has to reach
 // it as the same object -- entries set after the call included.

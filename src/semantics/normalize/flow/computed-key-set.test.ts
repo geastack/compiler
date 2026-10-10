@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import ts from 'typescript'
 import { indexValueFlow } from './value-flow.js'
@@ -28,8 +27,8 @@ const originAuthorityOf = (checker: ts.TypeChecker, flow: ValueFlowIndex): Compu
 }
 
 const programOf = (entry: string, source: string, js: boolean) => {
-  // Three is imported by absolute path under `node_modules`, which TypeScript
-  // treats as an external library: its JavaScript loads only within
+  // The probed library is imported by absolute path under `node_modules`,
+  // which TypeScript treats as an external library: its JavaScript loads only within
   // `maxNodeModuleJsDepth`.
   const options: ts.CompilerOptions = {
     target: ts.ScriptTarget.ES2022,
@@ -51,8 +50,8 @@ const programOf = (entry: string, source: string, js: boolean) => {
   const flow = indexValueFlow(checker, files, wholeProgram)
   // The frontend states the module set of every compiled module graph
   // (`frontend.ts`), which is what lets an export's importers be enumerated.
-  // Without it every exported binding is open -- three's `ColorManagement`
-  // record among them -- and the real-app-shaped probe below would refuse
+  // Without it every exported binding is open -- a library's exported
+  // configuration record among them -- and the real-app-shaped probe below would refuse
   // for a reason the real program never has.
   attachStatedModuleSet(flow, { files, entries: [program.getSourceFile(entry)!], reachable: wholeProgram })
   return { program, checker, flow, file: program.getSourceFile(entry)! }
@@ -125,6 +124,18 @@ test('a key the checker and the flow disagree on, or one the flow cannot bound, 
   assert.equal(keySet(`target[String(1)] = 1;`), 'refused:key-origin-unsupported')
 })
 
+test('a public symbol alternative retains the restrictions on complete actual string keys', () => {
+  assert.deepEqual(keySet(`const key = 'kept' as string | symbol; target[key] = 1;`), ['kept'])
+  assert.deepEqual(keySet(`const key = 'kept' as 'kept' | symbol; target[key] = 1;`), ['kept'])
+  assert.equal(keySet(`const key = 'kept' as symbol; target[key] = 1;`), 'refused:key-type-symbol')
+  assert.equal(keySet(`const key = 'kept' as 'other' | symbol; target[key] = 1;`), 'refused:key-checker-flow-disagree')
+  assert.equal(keySet(`const key = Symbol(); target[key] = 1;`), 'refused:key-origin-unsupported')
+  assert.equal(
+    keySet(`declare const flag: boolean; const key = flag ? 'kept' : Symbol(); target[key] = 1;`),
+    'refused:key-origin-unsupported'
+  )
+})
+
 test('for-in over a local literal: its static keys plus every named write through it', () => {
   assert.deepEqual(
     keySet(`const values: Record<string, number> = { a: 1, 'b': 2, 3: 3, ['e']: 5 }; values.c = 4; values['d'] = 5; ${FOR_IN}`),
@@ -134,7 +145,7 @@ test('for-in over a local literal: its static keys plus every named write throug
   assert.deepEqual(keySet(`declare const flag: boolean; const values = flag ? { a: 1 } : null; ${FOR_IN}`), ['a'])
 })
 
-test("three's setValues, reduced: subclass constructors forward literal options through this.setValues", () => {
+test('an options-bag setValues, reduced: subclass constructors forward literal options through this.setValues', () => {
   const source = `class Material {
       setValues( values ) {
         if ( values === undefined ) return;
@@ -162,7 +173,7 @@ test("three's setValues, reduced: subclass constructors forward literal options 
   )
 })
 
-test("three's RenderTarget, reduced: a local options literal grown by named writes and handed to texture.setValues", () => {
+test('a target class, reduced: a local options literal grown by named writes and handed to texture.setValues', () => {
   const source = `class Texture { setValues( values ) { for ( const key in values ) this[ key ] = values[ key ]; } }
     class Target {
       constructor( options = {} ) { this.textures = [ new Texture() ]; this.apply( options ); }
@@ -188,6 +199,21 @@ test('Object.keys iteration walks own keys only and needs no Object.prototype pr
     keySet(`const o = { a: 1 }; for (const key of Object.keys(o)) target[key] = 1;`, { intrinsics: () => false }),
     'refused:intrinsic-Object.keys-unproven'
   )
+})
+
+test('direct literal key iteration cites every actual element and the Array iterator protocol', () => {
+  assert.deepEqual(keySet(`for (const key of ['error', 'debug'] as string[]) target[key] = 1;`), ['debug', 'error'])
+  assert.deepEqual(keySet(`for (const key of ['error', 2]) target[key] = 1;`), ['2', 'error'])
+  assert.equal(
+    keySet(`for (const key of ['error']) target[key] = 1;`, { intrinsics: () => false }),
+    'refused:intrinsic-Array-prototype-unproven'
+  )
+  for (const iterable of [`['error', , 'debug']`, `['error', ...['debug']]`, `['error', dynamicKey]`, `keys`]) {
+    const answer = keySet(`const keys = ['error']; for (const key of ${iterable}) target[key] = 1;`)
+    assert.equal(typeof answer, 'string', iterable)
+    assert.match(answer as string, /^refused:/, iterable)
+  }
+  assert.equal(keySet(`for (let key of ['error']) { key = dynamicKey; target[key] = 1; }`), 'refused:key-binding-uninitialized')
 })
 
 test('without an intrinsic authority the Object.prototype obligation goes to the deferred ledger, or refuses', () => {
@@ -244,104 +270,4 @@ test('every way an origin can gain an unenumerated key refuses', () => {
       declare const receiver: Base; const values = { a: 1 }; receiver.take(values); ${FOR_IN}`),
     'refused:origin-computed-write'
   )
-})
-
-/**
- * The probe on three's own sources: `this[ key ]` in `Material.setValues` and
- * `Texture.setValues`, under a program that constructs materials the way
- * a real app does and a render target with literal options. The same complete
- * callable frame authority as production is used; the Object.prototype
- * obligation goes to a deferred ledger exactly as in production.
- */
-// three's own sources, from the examples workspace install -- a checkout this
-// repo does not own. Supplied through GEA_APPS_ROOT (the app project root the
-// gea CLI sets), never guessed; the probes skip without it.
-const appsRoot = process.env.GEA_APPS_ROOT ?? ''
-const threeSource = appsRoot ? resolve(appsRoot, 'node_modules/three/src') : ''
-const skipWithoutThree = existsSync(threeSource) ? false : 'set GEA_APPS_ROOT to an app project root with three installed'
-const probeThree = (entrySource: string) => {
-  const { checker, flow, program } = programOf(resolve('test/fixtures/computed-key-set-three.js'), entrySource, true)
-  const setValuesKey = (relative: string): ts.Expression => {
-    const file = program.getSourceFile(resolve(threeSource, relative))
-    assert.ok(file, relative)
-    let found: ts.Expression | undefined
-    const visit = (node: ts.Node): void => {
-      if (ts.isMethodDeclaration(node) && node.name.getText(file) === 'setValues') {
-        const inner = (child: ts.Node): void => {
-          if (
-            ts.isBinaryExpression(child) &&
-            child.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
-            ts.isElementAccessExpression(child.left) &&
-            child.left.expression.kind === ts.SyntaxKind.ThisKeyword
-          )
-            found = child.left.argumentExpression
-          ts.forEachChild(child, inner)
-        }
-        inner(node)
-      }
-      ts.forEachChild(node, visit)
-    }
-    visit(file)
-    assert.ok(found, `${relative} setValues this[ key ]`)
-    return found
-  }
-  const ledger = createDeferredIntrinsicProtocolLedger()
-  attachDeferredIntrinsicProtocolLedger(flow, ledger)
-  const verdictOf = (relative: string) => {
-    const captured = ledger.capture(() => computedKeySetVerdictOf(checker, flow, setValuesKey(relative), originAuthorityOf(checker, flow)))
-    // One requirement per origin literal; the protocols named are what matter.
-    return { verdict: captured.value, requirements: [...new Set(captured.requirements.map((requirement) => requirement.intrinsic))] }
-  }
-  return { material: verdictOf('materials/Material.js'), texture: verdictOf('textures/Texture.js') }
-}
-
-const describe = (verdict: ComputedKeySetVerdict): string =>
-  verdict.kind === 'keys'
-    ? `{ ${[...verdict.keys].sort().join(', ')} }`
-    : `refused ${verdict.reason} at ${verdict.at.getSourceFile().fileName.split('/three/src/').pop()}:${
-        verdict.at.getSourceFile().getLineAndCharacterOfPosition(verdict.at.getStart()).line + 1
-      } ${verdict.at.getText().replace(/\s+/g, ' ').slice(0, 80)}`
-
-test('three probe: Material.setValues and Texture.setValues under real-app-shaped construction', { skip: skipWithoutThree }, (t) => {
-  const { material, texture } = probeThree(`import { MeshPhongMaterial } from '${threeSource}/materials/MeshPhongMaterial.js';
-    import { MeshLambertMaterial } from '${threeSource}/materials/MeshLambertMaterial.js';
-    import { MeshBasicMaterial } from '${threeSource}/materials/MeshBasicMaterial.js';
-    import { WebGLRenderTarget } from '${threeSource}/renderers/WebGLRenderTarget.js';
-    import { DoubleSide, HalfFloatType } from '${threeSource}/constants.js';
-    const color = 0xf25346;
-    new MeshPhongMaterial( { color, flatShading: true } );
-    new MeshPhongMaterial( { color: 0x68c3c0, transparent: true, opacity: 0.8, flatShading: true } );
-    new MeshPhongMaterial( { color, shininess: 0, specular: 0xffffff, flatShading: true } );
-    new MeshBasicMaterial( { color, side: DoubleSide } );
-    new MeshLambertMaterial( { color } );
-    new WebGLRenderTarget( 1, 1, { type: HalfFloatType } );`)
-  t.diagnostic(`Material.setValues key: ${describe(material.verdict)} requirements [${material.requirements.join(', ')}]`)
-  t.diagnostic(`Texture.setValues key: ${describe(texture.verdict)} requirements [${texture.requirements.join(', ')}]`)
-  assert.deepEqual(shown(material.verdict), ['color', 'flatShading', 'opacity', 'shininess', 'side', 'specular', 'transparent'])
-  assert.deepEqual(material.requirements, ['Object'])
-  assert.deepEqual(shown(texture.verdict), [
-    'anisotropy',
-    'colorSpace',
-    'flipY',
-    'format',
-    'generateMipmaps',
-    'internalFormat',
-    'magFilter',
-    'mapping',
-    'minFilter',
-    'type',
-    'wrapR',
-    'wrapS',
-    'wrapT'
-  ])
-})
-
-test('three probe: the same keys with the whole WebGLRenderer reachable', { skip: skipWithoutThree }, (t) => {
-  const { material, texture } = probeThree(`import { WebGLRenderer } from '${threeSource}/renderers/WebGLRenderer.js';
-    import { MeshPhongMaterial } from '${threeSource}/materials/MeshPhongMaterial.js';
-    new WebGLRenderer();
-    new MeshPhongMaterial( { color: 1, flatShading: true } );`)
-  t.diagnostic(`Material.setValues key: ${describe(material.verdict)} requirements [${material.requirements.join(', ')}]`)
-  t.diagnostic(`Texture.setValues key: ${describe(texture.verdict)} requirements [${texture.requirements.join(', ')}]`)
-  assert.ok(material.verdict.kind === 'keys' || material.verdict.reason.length > 0)
 })

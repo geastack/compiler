@@ -31,9 +31,8 @@ const identityArmOf = (step: NativeSelectionStep): number | null => {
  *
  * A native selection of `string | number` into `string` renders as a call that
  * COPIES the arm out (`std::string gea_native_selection_N(const Union&)`), so
- * a loop that names the string arm per iteration -- mongodb's
- * `OnDemandDocument.getElement` scans every element with `isElementName(name,
- * element)` -- paid one heap-or-SSO string copy, a move into the callee's
+ * a loop that names the string arm per iteration -- a document lookup that
+ * scans every element with `isElementName(name, element)` -- paid one heap-or-SSO string copy, a move into the callee's
  * by-value entry and two destructions per element, for a value that never
  * changes. When the formal is a `const&` of this body's stable borrowed entry
  * (`borrowed-call-entry.ts`), the arm is a reference into storage no callee can

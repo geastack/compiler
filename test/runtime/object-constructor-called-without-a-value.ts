@@ -1,5 +1,5 @@
 // ECMA-262 20.1.1.1: `Object()` with no value is a fresh ordinary object.
-// The mongodb logger builds its severity table from `const severities =
+// A database client's logger builds its severity table from `const severities =
 // Object()` and returns it as a typed record of records.
 
 type Level = 'error' | 'debug'

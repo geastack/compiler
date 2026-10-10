@@ -220,6 +220,32 @@ test('field origins join complete source reassignments', () => {
   )
 })
 
+test('recursive field and allocation queries replay their exact origins and still refuse prototype or body replacement', () => {
+  for (const effect of ['', 'Holder.prototype.read = opaqueRead;', 'Object.setPrototypeOf(holder, {read: opaqueRead});']) {
+    const checked = inspect(`
+      declare function opaqueRead(): void
+      class Item {}
+      class Holder {
+        field = new Item()
+        read(again = false) { if (again) this.forward(); probe(this.field) }
+        forward() { this.read(false) }
+      }
+      const holder = new Holder()
+      ${effect}
+      holder.read()
+    `)
+    const ledger = createDeferredIntrinsicProtocolLedger()
+    attachDeferredIntrinsicProtocolLedger(checked.flow, ledger)
+    const query = () => closedClassAllocationOriginsOf(checked.checker, checked.flow, checked.expression)
+    const first = ledger.capture(query)
+    const replay = ledger.capture(query)
+    if (effect === '') assert.deepEqual(first.value && [...first.value.classes].map((owner) => owner.name?.text), ['Item'])
+    else assert.equal(first.value, null, effect)
+    assert.deepEqual(replay.value, first.value)
+    assert.deepEqual(replay.requirements, first.requirements)
+  }
+})
+
 test('field origins refuse opaque and descriptor overwrites', () => {
   assert.equal(
     fieldClassesOf(`
@@ -498,7 +524,7 @@ test('a constructor function parameter reaches an allocation stored and returned
 })
 
 test('allocation origins follow a class allocated once and read through a module-pattern host factory', () => {
-  // The shape `WebGLAttributes`/`WebGLExtensions`/`WebGLState` use: a plain
+  // The revealing-module factory shape: a plain
   // function that captures its `gl` parameter in nested closures and RETURNS
   // an object literal of them, rather than writing `this.<key> = ...`
   // (`isConstructorFunction` is false for it). `gl` is a bare captured
@@ -530,9 +556,9 @@ test('allocation origins follow a class allocated once and read through a module
 })
 
 test('allocation origins follow a let binding reassigned through a nested helper inside a conditional try', () => {
-  // Mirrors `WebGLRenderer`'s own `let _gl = context; ... if (_gl === null) {
+  // Mirrors a renderer constructor's `let _gl = context; ... if (_gl === null) {
   // _gl = getContext(...) }`, read later by a DIFFERENT closure
-  // (`initGLContext`) than the one that assigned it.
+  // (`init`) than the one that assigned it.
   assert.deepEqual(
     classesOf(`
       class Ctx {
@@ -570,15 +596,13 @@ test('a destructured binding element with a default resolves through an object l
   // `source-value-session.ts`'s 'binding-element' query used to refuse EVERY
   // defaulted destructuring element unconditionally (`fail('defaulted-binding
   // -element', ...)`), regardless of whether the default could ever fire.
-  // three's `WebGLRenderer` destructures its whole options bag this way --
+  // A constructor that destructures its whole options bag this way --
   // `const { canvas = createCanvasElement(), context = null, ... } =
-  // parameters` -- and every call site states every field as a literal
-  // property (`new WebGLRenderer({ canvas, context, depth: true, ... })`), so
-  // the default is dead code there. Refusing it anyway made `_gl`, and every
-  // WebGL host call reached through it, permanently unenumerable no matter
-  // what the program wrote -- the `family:allocations-not-enumerable` leaves
-  // ranked at WebGLAttributes.js, WebGLExtensions.js, WebGLUniforms.js and
-  // WebGLState.js in the leaf-refusal log.
+  // parameters` -- where every call site states every field as a literal
+  // property (`new Renderer({ canvas, context, depth: true, ... })`) has a
+  // dead default. Refusing it anyway made `_gl`, and every host call reached
+  // through it, permanently unenumerable no matter what the program wrote --
+  // a `family:allocations-not-enumerable` leaf at every factory it reached.
   for (const withDefault of ['{ context = null }', '{ context = opaqueDefault() }']) {
     assert.deepEqual(
       classesOf(`

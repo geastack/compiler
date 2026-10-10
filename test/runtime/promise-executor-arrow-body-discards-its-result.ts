@@ -5,7 +5,7 @@
 // braced spelling that returns nothing -- the arrow just happens to hand back
 // whatever `schedule` returned.
 //
-// `@hono/node-server`'s `listener.ts` writes exactly this, over node's
+// An HTTP framework's Node server adapter writes exactly this, over node's
 // `setTimeout`, whose handle is an object: `new Promise((resolve) =>
 // setTimeout(resolve, ms))`. The executor lowered to
 // `CallableObject<Ref<Timeout>(CallableObject<void(Value)>)>` and the runtime's

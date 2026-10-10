@@ -1,4 +1,4 @@
-// mongodb's `Connection.writeCommand` (cmap/connection.ts:724) races
+// A database client's `Connection.writeCommand` races
 // `once<void>(socket, 'drain')` against a socket-write timeout. A
 // `Promise<void>` fulfills with `undefined` and its native observer takes no
 // argument, so the race's element step cannot name a settled carrier for it:

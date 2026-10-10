@@ -1,5 +1,6 @@
 import type { DeclarationId, FunctionId, IrValueId, RegionId } from '../../identity/ids.js'
 import type { ClassLayout } from '../../projection/classes.js'
+import type { BindingPlacement } from '../../projection/bindings.js'
 import type { IrBody, IrOperand, IrOperation } from '../../ir/model.js'
 import { classMemberOf } from '../../projection/fields.js'
 import { operandsOfIrOperation } from '../../ir/queries.js'
@@ -33,11 +34,11 @@ import type { ReactiveCellPlan } from './host/host-members.js'
  *
  * TRANSITIVE through a call whose callee this IR closed (`CallOperation.
  * closedCallee`), and it has to be. A GETTER is spelled exactly like a field --
- * `{reader.pageNumberLabel}` beside `{reader.openLabel}` -- but lowers to a
+ * `{view.pageLabel}` beside `{view.titleLabel}` -- but lowers to a
  * call, so a body-only reading found no dependency, `emit-jsx.ts` fell through
  * to the once-only `leafText`, and the slot froze at whatever it read on the
- * first render. The e-reader's page counter said "1 / 1" for a fourteen-hundred
- * page book, for the life of the program.
+ * first render: a page counter read "1 / 1" for a fourteen-hundred page
+ * document, for the life of the program.
  *
  * What made the old reading "honest" was NAMEABILITY, not locality, and that is
  * preserved: a callee dependency on a module-scope store is kept as it stands
@@ -188,12 +189,13 @@ const tokenOf = (dependency: ReactiveDependency): string =>
 const throughReceiver = (
   dependency: ReactiveDependency,
   receiver: IrOperand | null,
-  byResult: ReadonlyMap<IrValueId, IrOperation>
+  byResult: ReadonlyMap<IrValueId, IrOperation>,
+  nameable: (declaration: DeclarationId) => boolean
 ): ReactiveDependency | null => {
-  if (dependency.source.kind === 'binding') return dependency
+  if (dependency.source.kind === 'binding') return nameable(dependency.source.declaration) ? dependency : null
   if (!receiver) return null
   const receiverOperation = byResult.get(receiver.value)
-  if (receiverOperation?.kind === 'binding-read') {
+  if (receiverOperation?.kind === 'binding-read' && nameable(receiverOperation.declaration)) {
     return { ...dependency, source: { kind: 'binding', declaration: receiverOperation.declaration } }
   }
   if (receiverOperation?.kind === 'receiver') return { ...dependency, source: { kind: 'receiver' } }
@@ -377,7 +379,8 @@ const closeOverCalls = (
   calls: ReadonlyMap<FunctionId | RegionId, readonly CallEdge[]>,
   results: ReadonlyMap<FunctionId | RegionId, ReadonlyMap<IrValueId, IrOperation>>,
   callers: ReadonlyMap<FunctionId, ReadonlySet<FunctionId | RegionId>>,
-  admits: (edge: CallEdge) => boolean
+  admits: (edge: CallEdge) => boolean,
+  nameable: (owner: FunctionId | RegionId, declaration: DeclarationId) => boolean
 ): ReadonlyMap<FunctionId | RegionId, readonly ReactiveDependency[]> => {
   const grown = new Map<FunctionId | RegionId, ReactiveDependency[]>()
   const tokens = new Map<FunctionId | RegionId, Set<string>>()
@@ -400,7 +403,7 @@ const closeOverCalls = (
       for (const call of calls.get(caller) ?? []) {
         if (call.callee !== callee || !admits(call)) continue
         for (const dependency of calleeDependencies) {
-          const carried = throughReceiver(dependency, call.receiver, byResult)
+          const carried = throughReceiver(dependency, call.receiver, byResult, (declaration) => nameable(caller, declaration))
           if (!carried) continue
           const token = tokenOf(carried)
           if (seen.has(token)) continue
@@ -418,12 +421,26 @@ const closeOverCalls = (
 export const reactiveDependenciesOfBodies = (
   bodies: readonly IrBody[],
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
-  reactive: ReactiveCellPlan
+  reactive: ReactiveCellPlan,
+  placements: ReadonlyMap<DeclarationId, BindingPlacement>
 ): ReactiveDependencyCensus => {
   const empty = new Map<FunctionId | RegionId, readonly ReactiveDependency[]>()
   if (reactive.cell === null || (reactive.celled.size === 0 && reactive.revisions.size === 0))
     return { all: empty, node: empty, projections: new Map() }
 
+  const captures = new Map<FunctionId | RegionId, Set<DeclarationId>>()
+  for (const body of bodies) {
+    let declarations = captures.get(body.sourceOwner)
+    if (!declarations) captures.set(body.sourceOwner, (declarations = new Set()))
+    for (const declaration of body.facts?.capturedDeclarations ?? []) declarations.add(declaration)
+  }
+  // A getter's temporary is a binding read too, but its frame has ended when
+  // the caller subscribes. Use the physical placement and published capture
+  // facts rather than treating every declaration as a globally nameable cell.
+  const nameable = (owner: FunctionId | RegionId, declaration: DeclarationId): boolean => {
+    const storage = placements.get(declaration)?.storage
+    return storage !== undefined && (storage.kind !== 'local' || storage.owner === owner || captures.get(owner)?.has(declaration) === true)
+  }
   const direct = new Map<FunctionId | RegionId, readonly ReactiveDependency[]>()
   const projections = new Map<FunctionId | RegionId, ReactiveDependency>()
   const directStructural = new Map<FunctionId | RegionId, readonly ReactiveDependency[]>()
@@ -454,7 +471,7 @@ export const reactiveDependenciesOfBodies = (
   }
 
   const bound = (edge: CallEdge): boolean => !edge.lifted
-  const all = closeOverCalls(direct, calls, results, callers, () => true)
+  const all = closeOverCalls(direct, calls, results, callers, () => true, nameable)
   // `get speaking() { return this.phase === 'speaking' }` has no branch of
   // its own. When its result selects a subtree here, its reads are structural
   // in THIS body. Seed them before closing over calls so outer components
@@ -466,7 +483,7 @@ export const reactiveDependenciesOfBodies = (
     for (const edge of edges) {
       if (!edge.selectsBranch) continue
       for (const dependency of all.get(edge.callee) ?? []) {
-        const carried = throughReceiver(dependency, edge.receiver, byResult)
+        const carried = throughReceiver(dependency, edge.receiver, byResult, (declaration) => nameable(owner, declaration))
         if (!carried || seen.has(tokenOf(carried))) continue
         seen.add(tokenOf(carried))
         merged.push(carried)
@@ -474,7 +491,7 @@ export const reactiveDependenciesOfBodies = (
     }
     directStructural.set(owner, merged)
   }
-  const structural = closeOverCalls(directStructural, calls, results, callers, bound)
+  const structural = closeOverCalls(directStructural, calls, results, callers, bound, nameable)
 
   // The node census: this body's own reads, plus only what its callees BRANCH
   // on. Assembled here rather than by a third closure because it is not a
@@ -493,7 +510,7 @@ export const reactiveDependenciesOfBodies = (
     for (const call of calls.get(owner) ?? []) {
       if (!bound(call)) continue
       for (const dependency of structural.get(call.callee) ?? []) {
-        const carried = throughReceiver(dependency, call.receiver, byResult)
+        const carried = throughReceiver(dependency, call.receiver, byResult, (declaration) => nameable(owner, declaration))
         if (!carried) continue
         const token = tokenOf(carried)
         if (seen.has(token)) continue
@@ -518,7 +535,7 @@ export const reactiveDependenciesOfBodies = (
  * reads them -- `records.ts` cells exactly this set. Celling every element
  * record of every array field instead is not merely wasteful, it is wrong:
  * `Signal<T>` is not the field's declared carrier, so a struct that is also
- * read by something carrier-sensitive stops compiling. `gea-bench` holds both
+ * read by something carrier-sensitive stops compiling. One program held both
  * `rows` (rendered) and `items` (parsed out of JSON), and celling `Item.id`
  * made `gea_json_read(reader, out.id)` an error -- a real defect found by the
  * corpus, not a hypothetical.
@@ -654,7 +671,7 @@ export const reactiveRecordBindingsOfBodies = (bodies: readonly IrBody[]): React
       // `Optional<double>` is a `convert` between the call and the store, and
       // stopping here left the call unseen: the thunk was never swept, the
       // fields it reads were never bound, and so never celled -- every row of
-      // button-tetris's settled stack rendered once and a locked piece
+      // a falling-block game's settled stack rendered once and a locked piece
       // vanished, while the `key={cell.id}` read beside it, which needs no
       // conversion, was celled as before.
       if (operation.kind === 'convert') queue.push(operation.source.value)

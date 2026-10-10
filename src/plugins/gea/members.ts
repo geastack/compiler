@@ -174,7 +174,7 @@ export const geaHostMembers = (): HostMemberTable => {
     // and a program calling one is refused for a member the package plainly
     // ships. `await fetch(url).text()` is the case that found it: `text`,
     // `bytes`, `arrayBuffer`, `getTracks` and `getAudioTracks` are the five
-    // members stated this way, and `examples/weather` refuses on the first.
+    // members stated this way, and a program fetching text refuses on the first.
     //
     // Methods ONLY. A property getter with no template has no such default: a
     // native data member is read as `({receiver}).name` and a native accessor

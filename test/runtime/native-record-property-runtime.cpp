@@ -3,7 +3,7 @@
 #include <cassert>
 
 struct Record {
-  gea::Value name = gea::Value::box(gea::Value::Tag::String, std::string("fastify"));
+  gea::Value name = gea::Value::box(gea::Value::Tag::String, std::string("server"));
 
   bool gea_readOwnField(const gea::PropertyKey& key, gea::Value& out) const {
     if (key.isSymbol() || key.text() != "name") return false;

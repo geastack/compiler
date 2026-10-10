@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 import ts from 'typescript'
 import { functionIntersectionMemberTypeOf } from './derived-expression-type.js'
 
-// bson's byte_utils: `typeof Buffer === 'function'` narrows to `X & Function`,
+// A byte-utility module's feature probe: `typeof Buffer === 'function'` narrows to `X & Function`,
 // whose `prototype` is `Function.prototype`'s `any`.
 const entry = resolve('test/runtime/optional-chain-on-function-narrowed-prototype-field.runtime.ts')
 const source = `

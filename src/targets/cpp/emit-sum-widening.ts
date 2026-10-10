@@ -7,8 +7,8 @@ import { numberStorageText } from './emit-number-storage.js'
 /**
  * The alias the widening lambda binds its TARGET spelling to. A nine-arm
  * typed-array union is ~400 bytes to spell; `render` wrote it at every
- * `wrap` of a nine-arm `dispatch`, and the three.js app's `BufferAttribute.array`
- * store emitted one 773KB line of nothing but that spelling. Bound once in
+ * `wrap` of a nine-arm `dispatch`, and one store into a typed-array-union field
+ * emitted one 773KB line of nothing but that spelling. Bound once in
  * the lambda body, every wrap names the alias instead. Only the top-level
  * target is aliased: an inner `class-upcast`/`wrap` target is a single arm's
  * type, short, and spelled once per arm either way.
@@ -33,8 +33,13 @@ export const renderNativeSumPlan = (
       return `${spell(step.target)}{}`
     case 'empty':
       return `${spell(step.target)}{}`
-    case 'nullable-reference':
-      return `(${text} ? ${renderNativeSumPlan(step.present, text, spell, dependent)} : ${renderNativeSumPlan(step.absent, 'nullptr', spell, dependent)})`
+    case 'nullable-reference': {
+      const undefinedValue = step.undefined.value === 'source' ? text : cppUndefinedValue
+      const undefinedHome = renderNativeSumPlan(step.undefined.plan, undefinedValue, spell, dependent)
+      const present = renderNativeSumPlan(step.present, text, spell, dependent)
+      const absent = renderNativeSumPlan(step.absent, 'nullptr', spell, dependent)
+      return `((${text}).isUndefined() ? ${undefinedHome} : (${text} ? ${present} : ${absent}))`
+    }
     case 'wrap': {
       const payload = renderNativeSumPlan(step.payload, text, spell, dependent)
       return step.index === null ? `${spell(step.target)}{${payload}}` : `${spell(step.target)}::ofArm<${step.index}>(${payload})`
@@ -70,7 +75,7 @@ export const widenedNativeSumText = (source: Representation, target: Representat
   // parameter did, and spells the target ONCE instead of twice (return type
   // plus alias). This is the shape a union's arm-by-arm dispatch reaches for
   // at every arm (`emit-bindings.ts`'s `structuralUnionLoadText`), and it was
-  // 882 lambdas on one three.js line.
+  // 882 lambdas on one emitted line.
   if (conversion.kind === 'wrap' && conversion.payload.kind === 'identity') {
     return conversion.index === null ? `${targetText}{${text}}` : `${targetText}::ofArm<${conversion.index}>(${text})`
   }

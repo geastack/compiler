@@ -3,6 +3,7 @@ import type { ConversionCensus } from '../conversion/nodes.js'
 import type { DeclarationId, FunctionId, PhysicalBodyId, StructuralTypeId } from '../identity/ids.js'
 import { allOperationsOf, type IrBody, type IrOperation, type IrOperand } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
+import { nativeFieldViewCitationsOf } from './native-field-view-facts.js'
 import type { ClassLayout, PhysicalClassRefResolver } from '../projection/classes.js'
 import type { BindingPlacement } from '../projection/bindings.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
@@ -208,6 +209,7 @@ export const publishEmissionRepresentationsOf = (input: EmissionRepresentationIn
         const result = resultOfIrOperation(operation)
         if (result) citeOperand(body, operation, { value: result.id, representation: result.representation }, 'operation-result')
         if (operation.kind === 'convert') citeConversion(operation.conversionUse, operationOwnerOf(body, operation))
+        for (const conversion of nativeFieldViewCitationsOf(operation)) citeConversion(conversion, operationOwnerOf(body, operation))
         if (operation.kind === 'get' && operation.nativeFieldOwnerRead) {
           const recipe = operation.nativeFieldOwnerRead
           citeConversion(recipe.missing, operationOwnerOf(body, operation))
@@ -223,10 +225,46 @@ export const publishEmissionRepresentationsOf = (input: EmissionRepresentationIn
           for (const arm of operation.nativeTransport.arms) citeConversion(arm.conversion, operationOwnerOf(body, operation))
           if (operation.nativeTransport.absence) citeConversion(operation.nativeTransport.absence, operationOwnerOf(body, operation))
         }
-        if (operation.kind === 'call' && operation.fixedDataDefinition)
-          citeConversion(operation.fixedDataDefinition.conversion, operationOwnerOf(body, operation))
+        if (operation.kind === 'merge-live-arm-rebuild' && operation.mergeConversionPlan) {
+          for (const arm of operation.mergeConversionPlan.arms) citeConversion(arm.conversion, operationOwnerOf(body, operation))
+          if (operation.mergeConversionPlan.absence)
+            citeConversion(operation.mergeConversionPlan.absence, operationOwnerOf(body, operation))
+        }
+        if (operation.kind === 'call' && operation.fixedDataDefinition) {
+          if (operation.fixedDataDefinition.conversion !== null)
+            citeConversion(operation.fixedDataDefinition.conversion, operationOwnerOf(body, operation))
+          if (operation.fixedDataDefinition.attributesOnly?.absence)
+            citeConversion(operation.fixedDataDefinition.attributesOnly.absence, operationOwnerOf(body, operation))
+        }
         if (operation.kind === 'call')
           for (const value of operation.objectValueConversions ?? []) citeConversion(value.conversion, operationOwnerOf(body, operation))
+        if (operation.kind === 'call') {
+          for (const source of operation.nativeOwnAssignment?.sources ?? []) {
+            for (const root of source.roots) {
+              enqueue(
+                root.carrier,
+                {
+                  kind: 'operation-operand',
+                  owner: operationOwnerOf(body, operation),
+                  detail: 'native assignment physical source storage'
+                },
+                true
+              )
+              for (const reader of root.readers)
+                if (reader.conversion !== null) citeConversion(reader.conversion, operationOwnerOf(body, operation))
+            }
+            for (const field of source.fields) {
+              citeConversion(field.conversion, operationOwnerOf(body, operation))
+              if (field.documentRead !== undefined) citeConversion(field.documentRead, operationOwnerOf(body, operation))
+            }
+          }
+          for (const half of operation.nativeAccessorDefinition?.halves ?? []) {
+            citeConversion(half.conversion, operationOwnerOf(body, operation))
+            if (half.observe !== null) citeConversion(half.observe, operationOwnerOf(body, operation))
+          }
+          for (const half of operation.nativeAccessorObservation?.halves ?? [])
+            citeConversion(half.conversion, operationOwnerOf(body, operation))
+        }
         if (operation.kind === 'get' && operation.typedComputedRead) {
           for (const arm of operation.typedComputedRead.arms) {
             citeConversion(arm.conversion, operationOwnerOf(body, operation))
@@ -239,6 +277,9 @@ export const publishEmissionRepresentationsOf = (input: EmissionRepresentationIn
           retainedPlacementDeclarations.add(operation.declaration)
       }
     }
+    for (const region of body.iteratorCloseRegions ?? [])
+      for (const entry of region.nativeMethodRead?.read.sources ?? [])
+        citeConversion(entry.conversion, `${String(body.owner)}:iterator-close-region`)
   }
 
   // The target emits every non-local placement (region/global and host

@@ -1,6 +1,6 @@
 // A `Map` stored into a union slot whose `ReadonlyMap` arm holds a WIDER value
-// type: the MongoDB driver's `FindCursor` does
-// `this.findOptions.sort = formatSort(sort)` (find_cursor.ts:55 and :422),
+// type: a database client's query cursor does
+// `this.findOptions.sort = formatSort(sort)` (twice in its cursor source),
 // storing a `Map<string, SortDirectionForCmd>` (`1 | -1 | { $meta }`) into
 // `Sort`, whose arm is `ReadonlyMap<string, SortDirection>` (which also admits
 // 'asc', 'desc', ...). TypeScript allows it by covariance.

@@ -1,17 +1,29 @@
 import { callableCompletionSummaryOf } from './flow/callable-completions.js'
+import { relative } from 'node:path'
 import ts from 'typescript'
 import type { DeclarationId } from '../../identity/ids.js'
 import { globalSymbolBehindModuleAmbientConst, isAmbientDeclaration, moduleAmbientGlobalSatisfiesDeclaration } from '../ambient.js'
 import type { IdentityTable } from './identities.js'
 import type { UnresolvableNameCensus } from './unresolvable-names.js'
-import { unwrapErasedExpression } from './producers/erasure.js'
+import { outermostErasureOf, unwrapErasedExpression } from './producers/erasure.js'
 import { scriptGlobalValueRedefinitionOf } from './script-global-redefinition.js'
 import type { ExplicitThisCallFrame, ReceiverReference, ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { reflectiveDefinitionMayInstallGetterOf, sourceClassDataMemberPlanOf } from './flow/source-class-data.js'
 import { sourceRecordSlotValuesOf } from './flow/source-record-data.js'
 import { isRealCallableDeclaration, runtimeParametersOf } from './flow/targets.js'
 import { isVacuousOrigin, seededOriginSolver, type SeededOriginNode } from './flow/seeded-origins.js'
-import { closedCallableAuthorityOf, closedValueOriginAuthorityOf } from './flow/callable-reach.js'
+import {
+  closedCallableAuthorityOf,
+  closedValueOriginAuthorityOf,
+  hasClosedValueUses,
+  sourceInvocationFactHasJointTargets
+} from './flow/callable-reach.js'
+import { sourceValueSessionOf } from './flow/source-value-session.js'
+import { sourceBindingValuesOf } from './flow/value-provenance.js'
+import { sourceExecutingParameterValuesOf } from './flow/source-executing-parameter-values.js'
+import { standardPrototypeMethodSourceOf } from './flow/standard-prototype-method-source.js'
+import { sourceCallableObjectOf, sourceCallableOwnDataWriteOf } from './flow/source-callable-own-data.js'
+import { sourceIntrinsicMemberInvocationOf } from './flow/source-intrinsic-member-data.js'
 import type { SourceInvocationFact, SourceInvocationFrame } from './flow/invocation-facts.js'
 import { sourceConstructorSelectionsOf, sourceConstructorReturnValuesOf } from './flow/member-call-forwarding.js'
 import { wholeProgram, type ProgramReachability } from './reachability.js'
@@ -22,6 +34,7 @@ import {
   keySetTouches,
   namedKey,
   numericKeys,
+  programSymbolKeys,
   type MutationKey,
   type MutationKeySet
 } from './host-mutation-keys.js'
@@ -35,14 +48,29 @@ import {
   type IntrinsicProtocolRequirement
 } from './deferred-intrinsic-protocols.js'
 import { symbolIsStandardLibraryMutator, symbolStatesHostInert, symbolWritesNoIntrinsicProperty } from './host-effect-contracts.js'
-import { createMutationKeyReader, hostAccessorNamesOf, isProgramDeclaredSymbolKey, keyOfName } from './host-mutation-key-reader.js'
+import { createMutationKeyReader, hostAccessorNamesOf, keyOfName } from './host-mutation-key-reader.js'
+import { programSymbolOriginOf } from './callable-data-write.js'
+import { intrinsicAccessorGetterChainOf } from './intrinsic-accessor-getter.js'
 
 export type { GlobalHostMutationTaint } from './host-mutation-keys.js'
+
+// A source file named the way a reader finds it: from the directory the compiler runs in.
+const displayPath = (fileName: string): string => relative(process.cwd(), fileName)
 
 const staticKeyOf = (node: ts.PropertyAccessExpression | ts.ElementAccessExpression): string | null => {
   if (ts.isPropertyAccessExpression(node)) return node.name.text
   const argument = node.argumentExpression
   return ts.isStringLiteralLike(argument) || ts.isNumericLiteral(argument) ? argument.text : null
+}
+
+/** A function declaration with no body in an ambient context: a declaration file, or under `declare` (`declare global { ... }`). */
+const isBodilessAmbientFunction = (declaration: ts.Declaration): boolean => {
+  if (!ts.isFunctionDeclaration(declaration) || declaration.body !== undefined) return false
+  if (declaration.getSourceFile().isDeclarationFile) return true
+  for (let current: ts.Node | undefined = declaration; current !== undefined; current = current.parent)
+    if (ts.canHaveModifiers(current) && (ts.getCombinedModifierFlags(current as ts.Declaration) & ts.ModifierFlags.Ambient) !== 0)
+      return true
+  return false
 }
 
 const staticKeyExpression = (expression: ts.Expression): string | null => {
@@ -68,39 +96,6 @@ const staticPropertyName = (name: ts.PropertyName): string | null => {
 const isIntrinsicGlobalThis = (node: ts.Expression, names: UnresolvableNameCensus): boolean => {
   const expression = unwrapErasedExpression(node)
   return ts.isIdentifier(expression) && names.isIntrinsicGlobalThis(expression)
-}
-
-const isDirectAssignmentTarget = (node: ts.Node): boolean => {
-  let current = node
-  let parent = current.parent
-  while (true) {
-    const nested =
-      (ts.isParenthesizedExpression(parent) && parent.expression === current) ||
-      (ts.isPropertyAssignment(parent) && parent.initializer === current) ||
-      (ts.isShorthandPropertyAssignment(parent) && parent.name === current) ||
-      (ts.isSpreadAssignment(parent) && parent.expression === current) ||
-      (ts.isSpreadElement(parent) && parent.expression === current) ||
-      (ts.isObjectLiteralExpression(parent) && parent.properties.includes(current as ts.ObjectLiteralElementLike)) ||
-      (ts.isArrayLiteralExpression(parent) && parent.elements.includes(current as ts.Expression))
-    if (!nested) break
-    current = parent
-    parent = current.parent
-  }
-  if (ts.isDeleteExpression(parent) && parent.expression === current) return true
-  if (
-    (ts.isPrefixUnaryExpression(parent) || ts.isPostfixUnaryExpression(parent)) &&
-    parent.operand === current &&
-    (parent.operator === ts.SyntaxKind.PlusPlusToken || parent.operator === ts.SyntaxKind.MinusMinusToken)
-  ) {
-    return true
-  }
-  return (
-    (ts.isBinaryExpression(parent) &&
-      parent.left === current &&
-      parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
-      parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
-    ((ts.isForOfStatement(parent) || ts.isForInStatement(parent)) && parent.initializer === current)
-  )
 }
 
 /**
@@ -178,6 +173,13 @@ export const censusGlobalHostMutations = (
   trustSeed: CensusSeed = initialCensusSeed
 ): HostMutationTaint => {
   const tainted = new HostMutationTaint()
+  const invocationRequirements = new Map<ts.Node, readonly IntrinsicProtocolRequirement[]>()
+  const invocationLedger = deferredIntrinsicProtocolLedgerOf(flow) ?? createDeferredIntrinsicProtocolLedger()
+  if (!deferredIntrinsicProtocolLedgerOf(flow)) attachDeferredIntrinsicProtocolLedger(flow, invocationLedger)
+  const retainRequirements = (node: ts.Node, requirements: readonly IntrinsicProtocolRequirement[]): void => {
+    const previous = invocationRequirements.get(node) ?? []
+    invocationRequirements.set(node, [...previous, ...requirements.filter((requirement) => !previous.includes(requirement))])
+  }
   // Every intrinsic member name this run trusted, and every key its visit
   // wrote on a surface, a global binding or an intrinsic object: see
   // `IntrinsicTrustSeed`.
@@ -191,11 +193,12 @@ export const censusGlobalHostMutations = (
     const object = anchor ? checker.resolveName('Object', anchor, ts.SymbolFlags.Value, false) : undefined
     const prototype = object && anchor ? checker.getTypeOfSymbolAtLocation(object, anchor).getProperty('prototype') : undefined
     const id = prototype ? identities.symbolDeclarationId(prototype) : null
-    const own = id === null ? { names: new Set<string>(), numeric: false, every: true } : taint.keysOf(id)
+    const own: MutationKeySet | undefined = id === null ? { names: new Set<string>(), numeric: false, every: true } : taint.keysOf(id)
     const surface = taint.surfaceKeys
     return {
       names: new Set([...surface.names, ...(own?.names ?? [])]),
       numeric: surface.numeric || (own?.numeric ?? false),
+      programSymbols: surface.programSymbols === true || own?.programSymbols === true,
       every: surface.every || (own?.every ?? false)
     }
   }
@@ -219,8 +222,17 @@ export const censusGlobalHostMutations = (
 
   /** `GEA_PROGRAM_BODY_CALLS=0` files the wildcard for every unnamed callee again, so one build can be measured with and without the rule. */
   const programBodyCallsEnabled = process.env['GEA_PROGRAM_BODY_CALLS'] !== '0'
+  // These entries authenticate a real own-data installation and its exact
+  // source frame, independently of the intentionally replaced library
+  // member. Their captured obligations still owe final census discharge.
+  const sourceIntrinsicReplacementCalls = new Set<ts.CallExpression>()
+  const sourceJointInvocationCalls = new Set<ts.CallExpression>()
+  const sourceIntrinsicInstallations = new Set<ts.PropertyAccessExpression | ts.ElementAccessExpression>()
   const callRunsOnlyProgramBodies = (call: ts.CallExpression): boolean =>
-    programBodyCallsEnabled && programBodyOnlyCalls.has(call) && intrinsicReflectionIsIntact()
+    programBodyCallsEnabled &&
+    ((programBodyOnlyCalls.has(call) && intrinsicReflectionIsIntact()) ||
+      sourceIntrinsicReplacementCalls.has(call) ||
+      sourceJointInvocationIsClosed(call))
 
   const wildcardReasonCounts = new Map<string, number>()
   /** `GEA_PROGRAM_BODY_DEBUG=1`: every wildcard site, so the residue can be ranked by shape without the full mutation log. */
@@ -235,7 +247,7 @@ export const censusGlobalHostMutations = (
       wildcardReasonCounts.set(reason, (wildcardReasonCounts.get(reason) ?? 0) + 1)
       const file = node.getSourceFile()
       const position = file.getLineAndCharacterOfPosition(node.getStart(file))
-      const where = `${file.fileName.replace(/^.*\/(examples|compiler)\//, '$1/')}:${position.line + 1}`
+      const where = `${displayPath(file.fileName)}:${position.line + 1}`
       wildcardSites.push(`${reason} :: ${where} ${node.getText(file).slice(0, 90).replace(/\s+/g, ' ')}`)
     }
     tainted.taintSurface(everyKey)
@@ -267,6 +279,45 @@ export const censusGlobalHostMutations = (
   }
   const reachableFlowCalls = flow.calls.filter((site) => flowSiteIsReachable(site.call))
   const reachableWrites = flow.allWrites.filter((write) => flowSiteIsReachable(write.site))
+  // Write positions come from the shared edge inventory, including erased
+  // wrappers and destructuring. Reclassifying parent syntax here missed
+  // `(Symbol as any) = replacement` and preserved a false stock-factory proof.
+  const directWriteTargets = new Set<ts.Node>()
+  for (const write of reachableWrites) {
+    if (write.propertyAccess !== null) {
+      directWriteTargets.add(write.propertyAccess)
+      continue
+    }
+    if (write.slot !== 'whole' || write.naming === null) continue
+    if (
+      write.edge === 'identifier-assignment' ||
+      write.edge === 'compound-assignment' ||
+      write.edge === 'logical-assignment' ||
+      write.edge === 'destructuring' ||
+      write.edge === 'destructuring-default' ||
+      write.edge === 'iteration-binding'
+    )
+      directWriteTargets.add(write.naming)
+  }
+  const isDirectAssignmentTarget = (node: ts.Node): boolean => directWriteTargets.has(node)
+  // The JS binder adds expando-owner identifiers to a library symbol's
+  // declarations. They describe these runtime writes, not a new value binding.
+  // Keep only names on the shared write-address spine; a source declaration
+  // that really shadows the binding remains outside the standard identity.
+  const writtenAddressNames = new Set<ts.Identifier>()
+  for (const write of reachableWrites) {
+    let address = write.propertyAccess ?? write.naming
+    while (address !== null) {
+      const current = unwrapErasedExpression(address)
+      if (ts.isIdentifier(current)) {
+        writtenAddressNames.add(current)
+        break
+      }
+      if (ts.isPropertyAccessExpression(current) && ts.isIdentifier(current.name)) writtenAddressNames.add(current.name)
+      if (!ts.isPropertyAccessExpression(current) && !ts.isElementAccessExpression(current)) break
+      address = current.expression
+    }
+  }
   const nodes: ts.Node[] = []
   for (const file of files) {
     if (file.isDeclarationFile) continue
@@ -280,8 +331,8 @@ export const censusGlobalHostMutations = (
   // `ts.isExpression` is a pure SYNTAX-KIND test: `Identifier` is one shared
   // node kind between value and type positions, so it answers `true` for the
   // `globalThis` naming a dotted TYPE too -- the qualifier of a
-  // `ts.QualifiedName` (`globalThis.ResponseInit`'s type annotation, spelled
-  // by `@hono/node-server`'s own `context.ts`). A `QualifiedName` navigates a
+  // `ts.QualifiedName` (a `globalThis.ResponseInit` type annotation, as a
+  // library may spell it). A `QualifiedName` navigates a
   // NAMESPACE to look up a type member; it never asks what `globalThis` is AS
   // A VALUE, so `checker.getTypeAtLocation` on the qualifier answers `any` --
   // and an `any` `intrinsicGlobalType` makes `isTypeAssignableTo(x,
@@ -289,12 +340,12 @@ export const censusGlobalHostMutations = (
   // authenticating every one of them (`isAuthenticatedEquivalentGlobal`) as
   // the global object itself. That was the whole of a false
   // `Buffer.from`/`Buffer.isBuffer`/`Buffer.alloc` "opaque or global method
-  // receiver" wildcard on `hono-bridge`: nothing in the reachable program
-  // reads `globalThis` as a value, but hono's `context.ts` spells `init?:
+  // receiver" wildcard on a program where nothing reachable reads
+  // `globalThis` as a value, but one library file spells `init?:
   // globalThis.ResponseInit`, and this loop took that type-only occurrence as
   // its evidence of the real thing.
   //
-  // A bare `typeof globalThis` type QUERY (`node-globals.ts`'s `var global:
+  // A bare `typeof globalThis` type QUERY (a host global script's `var global:
   // typeof globalThis`) is not the same hazard and must NOT be excluded the
   // same way: `typeof X` has to resolve `X` as a value to build its type, so
   // `getTypeAtLocation` on a `TypeQueryNode`'s `exprName` answers with
@@ -379,8 +430,8 @@ export const censusGlobalHostMutations = (
    * own "does this file have a top-level `import`/`export`" answer, so it is
    * the same fact the runtime uses to decide the file's own module-ness.
    * A file with neither is a SCRIPT and is sloppy unless it opens with its
-   * own `'use strict'` directive prologue -- `node-compat/runtime/node/globals.ts`
-   * and `whatwg-streams.ts` are exactly this: deliberately-authored scripts,
+   * own `'use strict'` directive prologue -- runtime polyfill files that
+   * install globals are often exactly this: deliberately-authored scripts,
    * not modules, so they must NOT be read as strict just because the rest of
    * the program is ESM.
    *
@@ -510,7 +561,12 @@ export const censusGlobalHostMutations = (
     // whether `Object.getOwnPropertyDescriptor` is intact answered no.
     return (
       declarations.some((declaration) => declaration.getSourceFile().hasNoDefaultLib) &&
-      declarations.every((declaration) => declaration.getSourceFile().hasNoDefaultLib || ts.isInterfaceDeclaration(declaration))
+      declarations.every(
+        (declaration) =>
+          declaration.getSourceFile().hasNoDefaultLib ||
+          ts.isInterfaceDeclaration(declaration) ||
+          (ts.isIdentifier(declaration) && writtenAddressNames.has(declaration))
+      )
     )
   }
   const hasStandardLibraryDeclaration = (symbol: ts.Symbol): boolean =>
@@ -529,7 +585,9 @@ export const censusGlobalHostMutations = (
   const admitIntrinsicConstructor = (symbol: ts.Symbol | null, location: ts.Node): void => {
     if (!symbol || !isStandardLibrarySymbol(symbol)) return
     const type = checker.getTypeOfSymbolAtLocation(symbol, location)
-    if (type.getConstructSignatures().length > 0 || symbol.name === 'Reflect') {
+    // Call-only factories and namespace objects own replaceable members too;
+    // their aliases must participate in the same mutation authority as constructors.
+    if (type.getConstructSignatures().length > 0 || symbol.name === 'Reflect' || symbol.name === 'Symbol' || symbol.name === 'JSON') {
       canonicalConstructors.set(symbol, symbol)
       const declaration = identities.symbolValueDeclarationId(symbol, location)
       if (declaration !== null) canonicalConstructorIds.add(declaration)
@@ -741,11 +799,11 @@ export const censusGlobalHostMutations = (
     // `null`/`undefined` in the union is not the global object -- it is not
     // ANY object, native or otherwise -- so it must not force the whole union
     // to answer "not proven native" the way an unauthenticated member
-    // correctly does. Before this, `NativeWebGL2RenderingContext | null` (the
-    // checker's own type for `_gl` at every call the compiler had not already
+    // correctly does. Before this, `NativeHostContext | null` (the
+    // checker's own type for a host-context field at every call the compiler had not already
     // null-narrowed) answered `false` here on the strength of the `null`
     // member alone, even though the SAME symbol, read at a narrowed site with
-    // type `NativeWebGL2RenderingContext`, already authenticates. Allowing a
+    // type `NativeHostContext`, already authenticates. Allowing a
     // primitive member (which is what `null`/`undefined` are, per
     // `primitiveResult`'s mask) to satisfy its own slot mirrors the identical
     // allowance `objectResult`/`representedObjectResult` already make below --
@@ -827,37 +885,12 @@ export const censusGlobalHostMutations = (
       .keysOfKeyExpression(expression.argumentExpression)
       .every((key) => key.kind === 'numeric' || (key.kind === 'name' && String(Number(key.name)) === key.name))
   }
-  /**
-   * A key that is a PROGRAM-DECLARED unique symbol names no string member,
-   * ever -- the same argument `isDefinitelyNumericElementKey` makes one step
-   * above, and a stronger one: a symbol is not a string and never converts to
-   * one implicitly, so `o[sym] = v` cannot be the write that replaces
-   * `__proto__`, `prototype`, or any named intrinsic member, whatever `o`
-   * turns out to be at run time. `invalidateAllIntrinsicTrust` exists for
-   * exactly those names and has nothing to fire on here.
-   *
-   * ⛔ Program-declared is the whole guard. A WELL-KNOWN symbol -- the
-   * `unique symbol`s the standard library declares on `SymbolConstructor` --
-   * is the opposite case: `X.prototype[Symbol.iterator] = f` genuinely
-   * redefines intrinsic behavior under a key whose name is not a string, so
-   * it stays on the invalidating path. `hasStandardLibraryDeclaration` is the
-   * same test `intrinsicPrototypeDeclarationOf` uses to decide whether a
-   * member belongs to the standard library at all. A bare `symbol`-typed key
-   * (not unique) names an unknown symbol, so it fails closed too.
-   *
-   * Measured on hono. `@hono/node-server`'s `request.ts` attaches its private
-   * state with module-level `Symbol()` keys through a `Record<string | symbol,
-   * any>` parameter -- `request[bodyConsumedDirectlyKey] = true` at line 279.
-   * That one write set `allIntrinsicTrustInvalidated` for the WHOLE program,
-   * so `intrinsicReflectionIsIntact()` was false everywhere after it, so
-   * `callRunsOnlyProgramBodies` refused at every call site, and 697 sites took
-   * a wildcard for it -- 329 `opaque or global method receiver`, 368 `global
-   * contained in unknown call argument`. All 39 `Buffer.*` reads were in that
-   * set, and none of them has anything to do with `request.ts`.
+  /** Stock factory provenance, rather than a unique-symbol checker spelling,
+   * keeps private symbol writes separate from named intrinsic replacement.
+   * Factory integrity is discharged by the shared final census fixed point.
    */
   const isDefinitelyProgramSymbolElementKey = (expression: ts.PropertyAccessExpression | ts.ElementAccessExpression): boolean =>
-    ts.isElementAccessExpression(expression) &&
-    isProgramDeclaredSymbolKey(publishedTypeAt(unwrapErasedExpression(expression.argumentExpression)))
+    ts.isElementAccessExpression(expression) && isProgramSymbolKeyExpression(expression.argumentExpression)
   const overwrittenIntrinsicSymbols = new Set<ts.Symbol>()
   const propertyKeyDomains = createPropertyKeyDomains(checker, flow, flowSiteIsReachable, publishedTypeAt)
   // A computed key set, with Object.prototype's possible enumerable keys
@@ -878,11 +911,69 @@ export const censusGlobalHostMutations = (
         if (inherited.every) return null
         for (const name of inherited.names) keys.push(keyOfName(name))
         if (inherited.numeric) keys.push(numericKeys)
+        if (inherited.programSymbols) keys.push(programSymbolKeys)
       }
       return keys
     },
-    publishedTypeAt
+    publishedTypeAt,
+    (key) => {
+      if (trustSeed.noComputedKeys) return false
+      const origin = programSymbolOriginOf(key, {
+        checker,
+        isStandardLibraryDeclaration: (declaration) => declaration.getSourceFile().hasNoDefaultLib
+      })
+      if (origin === null) return false
+      computedKeyRequirements.push(...origin.requirements)
+      return true
+    }
   )
+  /** The names a computed read of the intrinsic global object can select, when the key set is closed and holds only names. */
+  const globalReadKeysOf = (access: ts.PropertyAccessExpression | ts.ElementAccessExpression, owner: ts.Expression): string[] | null => {
+    if (!ts.isElementAccessExpression(access) || staticKeyOf(access) !== null || !isIntrinsicGlobalThis(owner, names)) return null
+    const keyNames: string[] = []
+    for (const key of keyReader.keysOfKeyExpression(access.argumentExpression)) {
+      if (key.kind !== 'name') return null
+      keyNames.push(key.name)
+    }
+    return keyNames.length > 0 ? keyNames : null
+  }
+  /**
+   * `globalField('navigator')`, where `globalField(name)` returns
+   * `globalThis[name]`: the call's result is the global's `navigator` slot,
+   * not every slot every other call of the helper reads. One shared return
+   * node merges `globalField('window')` -- the global object itself -- into
+   * every caller's result, so a context-free link made each `nav.method()` a
+   * possibly-global receiver. Only the exact shape: the returned read is keyed
+   * by the callee's own never-reassigned parameter, in a module body (strict,
+   * so `arguments` cannot alias it), and this call passes a string literal.
+   */
+  const callSiteGlobalReadKeysOf = (call: ts.CallExpression, returned: ts.Expression): readonly string[] | null => {
+    const access = unwrapErasedExpression(returned)
+    if (!ts.isElementAccessExpression(access) || staticKeyOf(access) !== null) return null
+    if (!isIntrinsicGlobalThis(unwrapErasedExpression(access.expression), names)) return null
+    const key = unwrapErasedExpression(access.argumentExpression)
+    if (!ts.isIdentifier(key)) return null
+    const parameter = bindingOf(key)
+    if (!parameter || !ts.isParameter(parameter) || parameter.dotDotDotToken || parameter.initializer || !ts.isIdentifier(parameter.name))
+      return null
+    const owner = parameter.parent
+    let enclosing: ts.Node | undefined = access.parent
+    while (enclosing && !ts.isFunctionLike(enclosing)) enclosing = enclosing.parent
+    if (!ts.isFunctionLike(owner) || enclosing !== owner) return null
+    if (!ts.isExternalModule(owner.getSourceFile())) return null
+    if (flow.writesToDeclaration(parameter).some((write) => write.slot === 'whole' && write.edge !== 'call-argument')) return null
+    const index = owner.parameters.indexOf(parameter)
+    if (call.arguments.slice(0, index + 1).some(ts.isSpreadElement)) return null
+    const actual = call.arguments[index]
+    const literal = actual === undefined ? undefined : unwrapErasedExpression(actual)
+    return literal !== undefined && ts.isStringLiteralLike(literal) ? [literal.text] : null
+  }
+  const linkReturnedValue = (call: ts.Expression, returned: ts.Expression, node: ValueNode): void => {
+    const keys = ts.isCallExpression(call) ? callSiteGlobalReadKeysOf(call, returned) : null
+    if (keys === null) return link(valueNodeOf(returned), node)
+    const read = unwrapErasedExpression(returned) as ts.ElementAccessExpression
+    for (const key of keys) select(valueNodeOf(read.expression), key, node)
+  }
   /** The keys an intrinsic mutator call writes on its target, from syntax alone. */
   const staticMutatorKeys = (call: ts.CallExpression, mutator: MutatorPath): readonly MutationKey[] => {
     if (
@@ -929,9 +1020,9 @@ export const censusGlobalHostMutations = (
    * replacement" states it as exactly `Object.keys = replacement`.
    *
    * `isIntrinsicSurface` is the wrong instrument for it: that predicate is
-   * true of every NATIVE host object as well, so three's `_gl.<slot> = v` on
-   * the realized `NativeWebGL2RenderingContext` set this for the three.js app on the
-   * first frame it drew. Replacing a slot on a host object says nothing about
+   * true of every NATIVE host object as well, so a library's `_ctx.<slot> = v`
+   * on a realized native host context object set this on the first frame
+   * that program drew. Replacing a slot on a host object says nothing about
    * whether `Object.keys` still answers own keys.
    */
   let intrinsicSurfaceMemberReplaced = false
@@ -1034,7 +1125,7 @@ export const censusGlobalHostMutations = (
       const current = unwrapErasedExpression(pending[index]!)
       if (visited.has(current)) continue
       visited.add(current)
-      const direct = intrinsicPrototypeDeclarationOf(current)
+      const direct = intrinsicPrototypeDeclarationOf(current) ?? intrinsicCallableDeclarationOf(current)
       if (direct !== null) {
         identities.add(direct)
         continue
@@ -1065,6 +1156,23 @@ export const censusGlobalHostMutations = (
       checker.getPropertyOfType(checker.getTypeAtLocation(unwrapErasedExpression(current.expression)), 'prototype')
     return symbol && hasStandardLibraryDeclaration(symbol) ? identities.symbolDeclarationId(symbol) : null
   }
+  // A primordial method is itself a mutable Function object. Its own slots
+  // participate in the same alias graph as the prototype/namespace that
+  // initially owns it; Function.prototype integrity alone cannot guard them.
+  const intrinsicCallableDeclarationOf = (expression: ts.Expression): DeclarationId | null => {
+    const current = unwrapErasedExpression(expression)
+    if (!ts.isPropertyAccessExpression(current) && !ts.isElementAccessExpression(current)) return null
+    const holder = unwrapErasedExpression(current.expression)
+    if (intrinsicPrototypeDeclarationOf(holder) === null && constructorFactsOf(holder).size === 0) return null
+    const symbol = memberSymbolOf(current)
+    if (
+      symbol === null ||
+      !isStandardLibrarySymbol(symbol) ||
+      checker.getTypeOfSymbolAtLocation(symbol, current).getCallSignatures().length === 0
+    )
+      return null
+    return identities.symbolDeclarationId(symbol)
+  }
   const markIntrinsicPrototypeMutation = (target: ts.Expression): void => {
     for (const id of intrinsicPrototypesOf(target)) tainted.add(id)
   }
@@ -1073,9 +1181,9 @@ export const censusGlobalHostMutations = (
   }
   /**
    * A write of an unknown key through a receiver only the STRUCTURAL fallback
-   * places on an intrinsic surface -- bson's `obj: Record<string, unknown> =
-   * Object.create(null)`, the driver's `dest: Document` -- is decided after
-   * the alias graph, not here. `Document`'s `[key: string]: any` accepts every
+   * places on an intrinsic surface -- `obj: Record<string, unknown> =
+   * Object.create(null)`, or a `dest: Bag` parameter -- is decided after
+   * the alias graph, not here. `Bag`'s `[key: string]: any` accepts every
    * object type, so the type test says yes for every such receiver; only the
    * value's provenance can say no, and the provenance proof
    * (`isFreshProgramObject` below) needs the closed caller frames and source
@@ -1089,21 +1197,34 @@ export const censusGlobalHostMutations = (
    * clear it, and a re-run would only cost the time.
    */
   const deferredSurfaceWrites: ts.Expression[] = []
+  const deferredDescriptorTargets = new Set<ts.Expression>()
+  const isIntrinsicAccessorGetterDescriptorCall = (call: ts.CallExpression): boolean => {
+    let current: ts.Node = call
+    for (let depth = 0; depth < 4 && current.parent !== undefined; depth++) {
+      current = current.parent
+      if (ts.isPropertyAccessExpression(current) && current.name.text === 'get')
+        return intrinsicAccessorGetterChainOf(checker, current)?.parts.includes(call) === true
+    }
+    return false
+  }
   const invalidateForSurfaceWrite = (receiver: ts.Expression, site: ts.Node): void => {
     if (allIntrinsicTrustInvalidated) return
     if (isIntrinsicSurface(receiver, new Set(), false)) invalidateAllIntrinsicTrust(site)
     else deferredSurfaceWrites.push(receiver)
   }
-  /**
-   * `Object.defineProperty(o, kDecorated, ...)` with a program-declared unique
-   * symbol: the same argument `isDefinitelyProgramSymbolElementKey` makes for
-   * `o[sym] = v`. The key names no string member and is not `__proto__`, so
-   * whatever `o` is, it replaces no intrinsic member a static call resolves to.
+  /** A proven stock program symbol names no string-resolved member. Its
+   * inherited symbol interception remains visible in the program-symbol domain.
    */
-  const isProgramSymbolKeyExpression = (expression: ts.Expression | undefined): boolean =>
-    expression !== undefined && isProgramDeclaredSymbolKey(publishedTypeAt(unwrapErasedExpression(expression)))
+  const isProgramSymbolKeyExpression = (expression: ts.Expression | undefined): boolean => {
+    if (expression === undefined) return false
+    const keys = keyReader.keysOfKeyExpression(expression)
+    return keys.length > 0 && keys.every((key) => key.kind === 'program-symbol')
+  }
   const markOverwrittenMember = (target: ts.Expression, key: string | null, keyExpression?: ts.Expression): void => {
-    markIntrinsicPrototypeKeys(target, key === null ? [everyKey] : [key === '__proto__' ? everyKey : namedKey(key)])
+    markIntrinsicPrototypeKeys(
+      target,
+      key === null ? keyReader.keysOfKeyExpression(keyExpression) : [key === '__proto__' ? everyKey : namedKey(key)]
+    )
     if (key === null) {
       if (!isProgramSymbolKeyExpression(keyExpression) && isIntrinsicSurface(target)) invalidateForSurfaceWrite(target, target)
       return
@@ -1149,6 +1270,15 @@ export const censusGlobalHostMutations = (
         !isDefinitelyProgramSymbolElementKey(node) &&
         isIntrinsicSurface(node.expression)
       ) {
+        const actualKeys = keyReader.keysOfAccess(node)
+        if (actualKeys.length > 0 && actualKeys.every((key) => key.kind !== 'every')) {
+          for (const key of actualKeys) {
+            if (key.kind !== 'name') continue
+            const member = actualSymbol(checker.getPropertyOfType(checker.getTypeAtLocation(node.expression), key.name))
+            if (member) overwrittenIntrinsicSymbols.add(member)
+          }
+          continue
+        }
         const domain = ts.isElementAccessExpression(node) ? propertyKeyDomains.of(node.argumentExpression) : null
         // A prototype replacement can affect every method, regardless of its
         // name. Other computed writes invalidate only the names they can reach.
@@ -1193,10 +1323,22 @@ export const censusGlobalHostMutations = (
   const immutableAliasInitializer = (expression: ts.Identifier): ts.Expression | null => {
     const declaration = bindingOf(expression)
     if (!declaration || !ts.isVariableDeclaration(declaration) || !declaration.initializer) return null
-    const declarationList = declaration.parent
-    if (!ts.isVariableDeclarationList(declarationList) || (declarationList.flags & ts.NodeFlags.Const) === 0) return null
-    const writes = flow.writesToDeclaration(declaration).filter((write) => flowSiteIsReachable(write.site))
-    return writes.every((write) => write.edge === 'declaration-initializer') ? declaration.initializer : null
+    if (trustSeed.rejectedCallableProofs.has(declaration)) return null
+    const proof = invocationLedger.capture(() => sourceBindingValuesOf(checker, flow, declaration))
+    if (proof.value?.length !== 1 || proof.value[0] !== declaration.initializer) return null
+    retainRequirements(declaration, proof.requirements)
+    return declaration.initializer
+  }
+  const standardPrototypeMethodIsDistinct = (expression: ts.Expression): boolean => {
+    const current = unwrapErasedExpression(expression)
+    if (allIntrinsicTrustInvalidated || trustSeed.rejectedCallableProofs.has(current)) return false
+    const method = standardPrototypeMethodSourceOf(checker, current, isStandardLibraryDeclaration)
+    if (method === null) return false
+    const proof = invocationLedger.capture(() => invocationLedger.requirePrototypeKeys(method.intrinsic, { names: [method.key] }, current))
+    if (!proof.value) return false
+    retainRequirements(current, proof.requirements)
+    invocationLedger.include(proof.requirements)
+    return true
   }
   const authenticatedNativeConstructor = (expression: ts.Expression, seen: Set<ts.Node> = new Set()): boolean => {
     const current = unwrapErasedExpression(expression)
@@ -1300,8 +1442,8 @@ export const censusGlobalHostMutations = (
    * graph records (`AliasTerm` `proxy`). Anything else keeps the ordinary
    * `new` rule: a library constructor with no body is opaque.
    *
-   * mongodb's optional-dependency stub (`makeErrorModule` in `deps.ts`) is
-   * one: a proxy over `{ kModuleError }` whose `get` trap throws.
+   * An optional-dependency stub is the typical case: a proxy over
+   * `{ kModuleError }` whose `get` trap throws.
    */
   const proxyConstructorSymbol = (() => {
     const anchor = files[0]
@@ -1479,7 +1621,7 @@ export const censusGlobalHostMutations = (
     // does there -- home-object lookup changes which body runs, never which
     // object it runs on -- so every fact this walk proves from the ancestor
     // chain (a real class, not a declaration file) holds for `super` exactly
-    // as it does for `this`. Three's `copy(s) { super.copy(s); ... }` reads
+    // as it does for `this`. A `copy(s) { super.copy(s); ... }` override reads
     // `super` as a method call's receiver; refusing it here (the ThisKeyword
     // only gate this used to be) left it "opaque", which is what widened the
     // final host-mutation census to `*` for the whole clone-idiom family.
@@ -1640,7 +1782,7 @@ export const censusGlobalHostMutations = (
       // patch has replaced it -- the same two facts `authenticatedCallable`
       // asks of an intrinsic. Without this every `fetch(url).text()` was an
       // opaque method receiver, and one of them wildcarded every host global
-      // in the program (examples/apps/weather, 2026-09-06).
+      // in the program.
       return (
         ts.isFunctionDeclaration(binding) &&
         !binding.body &&
@@ -1706,7 +1848,9 @@ export const censusGlobalHostMutations = (
     if (publishingRepresentations.has(current)) return publishingRepresentations.get(current) ?? null
     publishingRepresentations.set(current, expected)
     let result: PublishedRepresentation | null = null
-    if (authenticatedIntrinsicPrototype(current)) {
+    if (standardPrototypeMethodIsDistinct(current)) {
+      result = 'object'
+    } else if (authenticatedIntrinsicPrototype(current)) {
       result = 'object'
     } else if (standardGlobalValue(current) && !isProvenGlobalObject(current)) {
       // An intact host binding supplies value identity, including structural
@@ -1747,8 +1891,8 @@ export const censusGlobalHostMutations = (
           result = expected
         }
         // MEASURED DEAD END (2026-09-15): a parameter with real callers whose
-        // argument values do not all resolve -- `WebGLMaterials.js`'s
-        // `material`, forwarded many levels deep through other parameters of
+        // argument values do not all resolve -- a `material`-style parameter
+        // forwarded many levels deep through other parameters of
         // the identical shape -- cannot be trusted from `expected` alone by
         // relaxing the branch above to "no resolved value disagreed". Tried
         // exactly that; it broke `new NativeView()` off a REASSIGNED
@@ -1773,15 +1917,14 @@ export const censusGlobalHostMutations = (
       //
       // The TYPE could not answer this: `representedObjectResult` asks whether
       // the type's symbol is declared by a class, and an object literal's
-      // anonymous type is declared by the literal itself. That gap made three's
-      // whole renderer unprovable, because every one of its modules is a
-      // REVEALING MODULE factory -- `function WebGLProperties() { ... return {
-      // get, remove, update, dispose } }` -- so the `new Properties()` above
-      // reaches `localResultIsPublished` with `localReturns = [ <the literal> ]`
-      // and asked this function what that literal publishes. Answering `null`
-      // left `properties`, `textures`, `state`, `objects`, `info` and the rest
-      // of `WebGLRenderer`'s slots opaque, and every method call on them owed a
-      // wildcard.
+      // anonymous type is declared by the literal itself. That gap made a whole
+      // library written as REVEALING MODULE factories unprovable --
+      // `function Properties() { ... return { get, remove, update, dispose } }`
+      // -- because the `new Properties()` above reaches
+      // `localResultIsPublished` with `localReturns = [ <the literal> ]` and
+      // asked this function what that literal publishes. Answering `null` left
+      // every slot holding such a record opaque, and every method call on them
+      // owed a wildcard.
       //
       // Asking the EXPRESSION rather than its type is what keeps this from
       // laundering an identity: a cast (`globalThis as unknown as typeof lit`)
@@ -1883,12 +2026,11 @@ export const censusGlobalHostMutations = (
       // not only at `primitive`.
       //
       // Restricting this arm to primitives was not a rule about evidence, it
-      // was the shape the arm happened to be written in. It cost the three.js app 153
-      // of its 364 `opaque or global method receiver` wildcards: every
-      // `this.position.copy( v )`, `geometry.attributes.position.set(...)`
-      // and `material.color.setHex(...)` -- receivers typed `Vector3`,
-      // `BufferAttribute`, `Color` -- read as "this might be the global
-      // object", and one such read taints EVERY intrinsic member query in the
+      // was the shape the arm happened to be written in. It cost a large share
+      // of a program's `opaque or global method receiver` wildcards: every
+      // `this.position.copy( v )` or `shape.points.set(...)` -- receivers
+      // typed by a program class stored in a field -- read as "this might be
+      // the global object", and one such read taints EVERY intrinsic member query in the
       // program, which is what makes `Object.keys` fail authentication in a
       // program that never touches `Object.prototype`.
       result = expected
@@ -2108,6 +2250,12 @@ export const censusGlobalHostMutations = (
   const invalidateIntrinsicMember = (target: ts.Expression, key: string | null, keyExpression?: ts.Expression): void => {
     if (!isIntrinsicSurface(target) && !standardGlobalValue(target)) return
     if (key === null) {
+      const actualKeys = keyExpression === undefined ? [] : keyReader.keysOfKeyExpression(keyExpression)
+      if (actualKeys.length > 0 && actualKeys.every((one) => one.kind !== 'every')) {
+        markIntrinsicPrototypeKeys(target, actualKeys)
+        for (const actual of actualKeys) if (actual.kind === 'name') markOverwrittenMember(target, actual.name)
+        return
+      }
       if (standardGlobalValue(target)) invalidateAllIntrinsicTrust(target)
       else if (!isProgramSymbolKeyExpression(keyExpression)) invalidateForSurfaceWrite(target, target)
       return
@@ -2302,9 +2450,6 @@ export const censusGlobalHostMutations = (
     overwrittenCalls.has(call) ? undefined : (reachableCallOfNode.get(call)?.declaration ?? checker.getResolvedSignature(call)?.declaration)
   // Receiver, parameter and stored-call closure must consume the same proof
   // context. A private named-function-only enumeration loses stored methods.
-  const invocationRequirements = new Map<ts.Node, readonly IntrinsicProtocolRequirement[]>()
-  const invocationLedger = deferredIntrinsicProtocolLedgerOf(flow) ?? createDeferredIntrinsicProtocolLedger()
-  if (!deferredIntrinsicProtocolLedgerOf(flow)) attachDeferredIntrinsicProtocolLedger(flow, invocationLedger)
   const callableFrames = closedCallableAuthorityOf(
     checker,
     flow,
@@ -2321,6 +2466,17 @@ export const censusGlobalHostMutations = (
   const sourceInvocationFacts = new Map<ts.CallExpression, SourceInvocationFact>()
   const sourceFrameOwnedCalls = new Set<ts.CallExpression>()
   const refusedSourceInvocationCalls = new Set<ts.CallExpression>()
+  const sourceJointInvocationIsClosed = (call: ts.CallExpression): boolean => {
+    const fact = sourceInvocationFacts.get(call)
+    return (
+      sourceJointInvocationCalls.has(call) &&
+      fact !== undefined &&
+      !trustSeed.rejectedCallableProofs.has(call) &&
+      !incompleteSourceInvocationCalls.has(call) &&
+      !refusedSourceInvocationCalls.has(call) &&
+      sourceInvocationFactHasJointTargets(flow, fact)
+    )
+  }
   /**
    * Source-owned calls whose EVERY candidate callee is a body compiled here.
    *
@@ -2331,10 +2487,10 @@ export const censusGlobalHostMutations = (
    * wildcard is owed only where the callee may be EXTERNAL (an ambient host
    * function, a replaced intrinsic, a value this program never allocated),
    * because external code is not walked and could write any key on anything
-   * it is handed. Refusing to tell those two apart is what made 354 refused
-   * source invocations in three's renderer -- `properties.remove( texture )`
-   * and its kin -- file `*` for the whole program, which in turn refused all
-   * 27 `Object.prototype` key obligations and blocked the three.js app's certificate.
+   * it is handed. Refusing to tell those two apart is what made hundreds of
+   * refused source invocations -- `properties.remove( item )` and its kin --
+   * file `*` for the whole program, which in turn refused every
+   * `Object.prototype` key obligation and blocked the certificate.
    *
    * `every`, not `some`: one ambient candidate is a possible external callee
    * and the wildcard is owed again. Candidates are the checker's and the
@@ -2405,21 +2561,21 @@ export const censusGlobalHostMutations = (
         (declaration as ts.FunctionLikeDeclarationBase).body !== undefined
       // A body is only what this call reaches while nothing can put a
       // different callable in its place: the member slot that holds it, and
-      // the class binding the slot belongs to, must be unwritten. Three's
+      // the class binding the slot belongs to, must be unwritten. The
       // `Writer.prototype.write = external` and `Light = opaque()` are
       // exactly these two replacements, and both make the callee external
       // again (`global-this-host-bindings.test.ts` states both).
       const selectionIsIntact = (declaration: ts.SignatureDeclaration): boolean => {
         // Only a WHOLE-cell write replaces what a cell holds. A write to a
-        // member of it does not: `Object3D.DEFAULT_UP = new Vector3()` is a
+        // member of it does not: `Node.DEFAULT_AXIS = new Point()` is a
         // static field on the class, and counting it made every
-        // `this.scene.add( ... )`, `pilot.add( ... )` and `super.copy( ... )`
-        // in three read as a call through a replaceable callable.
+        // `this.root.add( ... )` and `super.copy( ... )` on that class
+        // read as a call through a replaceable callable.
         // `isIntrinsicSurface` above already filters writes the same way.
         //
         // A slot's OWN defining write does not replace what it holds either.
-        // `Foo.prototype.bar = function () { ... }` -- three's whole pre-class
-        // renderer -- writes the slot exactly once, with this very callable;
+        // `Foo.prototype.bar = function () { ... }` -- the whole pre-class
+        // library idiom -- writes the slot exactly once, with this very callable;
         // counting that write refused the call for being replaceable by
         // itself. A second write, with anything else, still refuses.
         const replaced = (node: ts.Node): boolean =>
@@ -2468,14 +2624,14 @@ export const censusGlobalHostMutations = (
       const selected = site.checkerDeclaration
       const candidates = [selected, ...site.targets]
       // The checker cannot always NAME a declaration, and its silence is not a
-      // statement that the callee is open. Three's factory-record idiom --
-      // `function WebGLProperties() { function get( o ) { ... }; return { has,
-      // get, ... } }`, then `properties.get( material )` -- types
-      // `new WebGLProperties()` as `any`, because TS only infers a constructed
+      // statement that the callee is open. The factory-record idiom --
+      // `function Properties() { function get( o ) { ... }; return { has,
+      // get, ... } }`, then `properties.get( item )` -- types
+      // `new Properties()` as `any`, because TS only infers a constructed
       // type from a `this.x = ...` body. `getResolvedSignature` names no
-      // declaration for ANY call on that record, so this whole family (~182 of
-      // the three.js app's 198 wildcard sites) reached the census as
-      // `no-checker-declaration`.
+      // declaration for ANY call on that record, so this whole family (most
+      // of a program's wildcard sites, where the idiom is pervasive) reached
+      // the census as `no-checker-declaration`.
       //
       // `callable-reach.ts` already proves these closed from the ALLOCATION
       // rather than from the checker's type: the record literal is reached from
@@ -2484,8 +2640,8 @@ export const censusGlobalHostMutations = (
       // selection -- it refuses when the slot is replaced or the allocation
       // merges with anything opaque -- so it admits the call on its own.
       // `selectionIsIntact` is also a reason to ASK the allocation proof, not only
-      // a missing body: `scene.onBeforeRender( ... )` names a compiled
-      // `Object3D.prototype.onBeforeRender`, but its slot is written elsewhere, so
+      // a missing body: `node.onBeforeDraw( ... )` names a compiled
+      // `Node.prototype.onBeforeDraw`, but its slot is written elsewhere, so
       // the checker's pick alone is not what this call reaches. The allocation
       // proof answers the stronger question -- every value the slot can hold is a
       // body compiled here -- so a replaced-but-closed slot still admits.
@@ -2521,8 +2677,8 @@ export const censusGlobalHostMutations = (
         // `[PB-REJECT]` line even though the authority had refused it and it
         // never entered `programBodyOnlyCalls`. That is the whole of the
         // `admitted=842 set=281` gap, and it is why every ranking taken off
-        // this channel pointed at ambient builtins: on `hono-hello` 500 of
-        // the 885 asking sites are in this bucket and NONE of them appeared
+        // this channel pointed at ambient builtins: on one server program most
+        // of the asking sites were in this bucket and NONE of them appeared
         // in the rejection list -- `this.emit( 'error', e )` 39,
         // `outgoing.writeHead` 9, `incoming.on`/`off`, `super.on`/`once`/
         // `emit`, `this.push`. Ranked wrong, they sent two sessions after the
@@ -2546,7 +2702,7 @@ export const censusGlobalHostMutations = (
         if (why !== 'admitted') {
           const file = site.call.getSourceFile()
           const position = file.getLineAndCharacterOfPosition(site.call.getStart(file))
-          const where = `${file.fileName.replace(/^.*\/(examples|compiler)\//, '$1/')}:${position.line + 1}`
+          const where = `${displayPath(file.fileName)}:${position.line + 1}`
           programBodyRejections.push(`${why} :: ${where} ${site.call.getText(file).slice(0, 80).replace(/\s+/g, ' ')}`)
         }
       }
@@ -2586,7 +2742,24 @@ export const censusGlobalHostMutations = (
         continue
       }
     }
-    const frameFact = ts.isCallExpression(site.call) && !site.operands.explicitThis ? invocationFact : null
+    const frameFact =
+      ts.isCallExpression(site.call) && invocationFact !== null && !invocationFact.operands.explicitThis ? invocationFact : null
+    if (frameFact !== null && frameFact.frames.every(frameForwardingIsModelled)) {
+      if (sourceInvocationFactHasJointTargets(flow, frameFact)) sourceJointInvocationCalls.add(frameFact.call)
+      const proof = invocationLedger.capture(() => sourceIntrinsicMemberInvocationOf(checker, flow, frameFact))
+      if (proof.value !== null) {
+        sourceIntrinsicReplacementCalls.add(frameFact.call)
+        sourceIntrinsicInstallations.add(proof.value.installation)
+        invocationRequirements.set(frameFact.call, [...(invocationRequirements.get(frameFact.call) ?? []), ...proof.requirements])
+      }
+    }
+    if (
+      frameFact !== null &&
+      frameFact.operands !== site.operands &&
+      frameFact.frames.length > 0 &&
+      frameFact.frames.every(frameForwardingIsModelled)
+    )
+      programBodyOnlyCalls.add(site.call as ts.CallExpression)
     if (frameFact !== null) {
       sourceFrameOwnedCalls.add(site.call as ts.CallExpression)
       if (frameFact.frames.some((frame) => !frameForwardingIsModelled(frame)))
@@ -2620,16 +2793,17 @@ export const censusGlobalHostMutations = (
         overwrittenCalls.add(site.call)
         continue
       }
-      const argumentsArray = site.operands.args
-      const callable = site.operands.callee
-      const thisArgument = site.operands.receiver
+      const actualOperands = frameFact?.operands ?? site.operands
+      const argumentsArray = actualOperands.args
+      const callable = actualOperands.callee
+      const thisArgument = actualOperands.receiver
       const reachableCall = {
         call: site.call,
         declaration,
         callable,
         arguments: argumentsArray,
         thisArgument,
-        explicitThis: site.explicitThis,
+        explicitThis: actualOperands.explicitThis ? site.explicitThis : null,
         frame
       }
       reachableCalls.push(reachableCall)
@@ -2702,8 +2876,8 @@ export const censusGlobalHostMutations = (
    * sites -- `enumeratedThisReceiversOf`'s own question, asked of an argument
    * instead of a receiver. A parameter nobody reassigns is not "no
    * information": `writesOf` only sees body-local writes, and an unannotated
-   * module-private helper (three's `renderObject( object, scene, camera,
-   * geometry, material, group )`) is never reassigned yet is called from
+   * module-private helper (`drawItem( item, view, style, group )`) is never
+   * reassigned yet is called from
    * every one of its own call sites with a real, known value. Filing that as
    * "no evidence" and sealing to `OPAQUE_UNKNOWN` is the fail-open half of
    * `containsGlobal` this proof closes: `callableFrames.parameterValuesOf`
@@ -2717,11 +2891,16 @@ export const censusGlobalHostMutations = (
     const owner = parameter.parent
     if (!isRealCallableDeclaration(owner) || trustSeed.rejectedCallableProofs.has(owner)) return null
     try {
+      const executing = invocationLedger.capture(() => sourceExecutingParameterValuesOf(checker, flow, parameter))
+      if (executing.value !== null) {
+        retainRequirements(owner, executing.requirements)
+        return executing.value
+      }
       // `callableFrames.parameterValuesOf` is a live, actively-edited proof
       // (`flow/callable-reach.ts`'s `closedCallerSitesUncached` /
       // `baseMemberOf`); measured against a bare `new`-invoked JS constructor
-      // function with nested function-declaration helpers -- three.js's own
-      // `WebGLRenderer` shape -- it can throw rather than return `null`
+      // function with nested function-declaration helpers -- the pre-class
+      // library constructor shape -- it can throw rather than return `null`
       // (`checker.getBaseTypes` on a non-class constructor type). A caller
       // proof this file cannot evaluate is exactly the "cannot be closed"
       // case the soundness rule already names: catch it and fail CLOSED,
@@ -2729,7 +2908,7 @@ export const censusGlobalHostMutations = (
       // taking the whole compiler down over a question nothing asked before
       // this fix existed.
       const proof = invocationLedger.capture(() => callableFrames.parameterValuesOf(parameter))
-      if (proof.value !== null) invocationRequirements.set(owner, proof.requirements)
+      if (proof.value !== null) retainRequirements(owner, proof.requirements)
       return proof.value
     } catch {
       return null
@@ -3416,8 +3595,8 @@ export const censusGlobalHostMutations = (
       if (visited.has(declaration)) return true
       visited.add(declaration)
       if (declaration.getSourceFile().isDeclarationFile) return false
-      // A pre-class constructor FUNCTION -- three's `function WebGLRenderer()`,
-      // `function WebGLTextures()` -- has no implicit base call at all: any
+      // A pre-class constructor FUNCTION -- `function Renderer()`,
+      // `function Textures()` -- has no implicit base call at all: any
       // `Base.call( this )` in its body is an ordinary call, not a completion
       // this construction takes its value from. So there is no chain to walk,
       // and the only escape is the function's own `return someObject`, which
@@ -3462,14 +3641,15 @@ export const censusGlobalHostMutations = (
       const sourceFact = ts.isCallExpression(current) && sourceFrameOwnedCalls.has(current) ? sourceInvocationFacts.get(current) : undefined
       if (sourceFact) {
         for (const frame of sourceFact.frames) {
-          for (const returned of [...frame.completionSummary.values, ...frame.completionSummary.yields]) link(valueNodeOf(returned), node)
+          for (const returned of frame.completionSummary.values) linkReturnedValue(current, returned, node)
+          for (const yielded of frame.completionSummary.yields) link(valueNodeOf(yielded), node)
         }
       } else {
         for (const target of reachableTargetsOfNode.get(current) ?? []) {
           const declaration = executableDeclarationOf(target.declaration)
           if (!declaration || declaration.getSourceFile().isDeclarationFile) continue
           if (!flow.callableBodyIsIndexed(declaration)) node.seeds.add(opaqueTerm)
-          for (const returned of observableCompletionValuesOf(declaration)) link(valueNodeOf(returned), node)
+          for (const returned of observableCompletionValuesOf(declaration)) linkReturnedValue(current, returned, node)
         }
       }
     }
@@ -3512,7 +3692,12 @@ export const censusGlobalHostMutations = (
       const owner = unwrapErasedExpression(current.expression)
       const argumentsStorage = ts.isIdentifier(owner) ? argumentsStorageOfExpression.get(owner) : undefined
       const declaration = isIntrinsicGlobalThis(owner, names) || !ts.isIdentifier(owner) ? null : (argumentsStorage ?? bindingOf(owner))
-      if (declaration === null) select(valueNodeOf(current.expression), staticKeyOf(current), node)
+      // `globalThis[name]` under a closed key set reads exactly those keys --
+      // a `globalField('navigator')`-style helper. An unknown key set still
+      // selects every key, the global object itself among them.
+      const keys = declaration === null ? globalReadKeysOf(current, owner) : null
+      if (keys !== null) for (const key of keys) select(valueNodeOf(current.expression), key, node)
+      else if (declaration === null) select(valueNodeOf(current.expression), staticKeyOf(current), node)
       else link(storageSelectionNodeOf(declaration, staticKeyOf(current)), node)
       return
     }
@@ -3536,7 +3721,8 @@ export const censusGlobalHostMutations = (
       // completes normally: the backend throws `MODULE_NOT_FOUND` in its place
       // (`gea::commonjs::absentPackage`). It hands its binding no value at all,
       // so it contributes no origin -- the `catch` arm's value is the only one
-      // mongodb's `getGcpMetadata()` can return.
+      // a `try { return require( 'optional-peer' ) } catch { ... }` loader
+      // can return.
       if (staticCommonJsRequireOutcomeOf(current) === 'absent-package') return
       const call = reachableCallOfNode.get(current)
       const declaration = executableDeclarationOf(callDeclarationAt(current))
@@ -3558,12 +3744,12 @@ export const censusGlobalHostMutations = (
           representation === 'object' && sourceFrameOwnedCalls.has(current) ? sourceInvocationFacts.get(current)?.frames : undefined
         if (frames && frames.length > 0 && frames.every((frame) => frame.completions.kind === 'values')) {
           for (const frame of frames)
-            if (frame.completions.kind === 'values') for (const value of frame.completions.values) link(valueNodeOf(value), node)
+            if (frame.completions.kind === 'values') for (const value of frame.completions.values) linkReturnedValue(current, value, node)
           return
         }
         node.seeds.add(representedNonGlobalTerm)
         if (representation === 'object' && declaration && !declaration.getSourceFile().isDeclarationFile && body) {
-          for (const returned of observableCompletionValuesOf(declaration)) link(valueNodeOf(returned), node)
+          for (const returned of observableCompletionValuesOf(declaration)) linkReturnedValue(current, returned, node)
         }
       } else if (!declaration || declaration.getSourceFile().isDeclarationFile || !body || !flow.callableBodyIsIndexed(declaration)) {
         if (process.env['GEA_DEBUG_GLOBAL_MUTATION']) {
@@ -3580,7 +3766,7 @@ export const censusGlobalHostMutations = (
         if (call?.thisArgument) {
           for (const thisExpression of receiverReferencesOf(declaration)) link(valueNodeOf(call.thisArgument), valueNodeOf(thisExpression))
         }
-        for (const returned of observableCompletionValuesOf(declaration)) link(valueNodeOf(returned), node)
+        for (const returned of observableCompletionValuesOf(declaration)) linkReturnedValue(current, returned, node)
       }
       return
     }
@@ -3608,7 +3794,7 @@ export const censusGlobalHostMutations = (
       // body, which `observableCompletionValuesOf` enumerates and links, and
       // a base whose construction returns, which `sourceConstructionReturnsOf`
       // handled above. Seeding `opaque` here instead made every unrepresented
-      // three.js instance -- every `new Vector3()`, every `new Scene()` --
+      // library instance -- every `new Point()`, every `new Node()` --
       // a value that might be `globalThis`, so every method call on one and
       // every key written through one taints the intrinsic surface.
       else for (const returned of observableCompletionValuesOf(declaration)) link(valueNodeOf(returned), node)
@@ -3651,7 +3837,7 @@ export const censusGlobalHostMutations = (
       const receivers = enumeratedThisReceiversOf(current)
       if (receivers === null) {
         // No enumerated caller means this `this` reaches here through a
-        // dispatch the census cannot trace -- exactly `@hono/node-server`'s
+        // dispatch the census cannot trace -- exactly the
         // `Object.defineProperty(requestPrototype, 'body', { get() { return
         // this[...] } })` shape, where the getter is installed dynamically
         // and never appears as a resolvable call target. The checker types
@@ -3823,7 +4009,7 @@ export const censusGlobalHostMutations = (
       const file = declaration.getSourceFile()
       const { line, character } = file.getLineAndCharacterOfPosition(declaration.getStart(file))
       process.stderr.write(
-        `  storage decl :: ${file.fileName.replace(/^.*\/(examples|compiler|node-compat)\//, '$1/')}:${line + 1}:${character + 1} ${ts.SyntaxKind[declaration.kind]} ${declaration.getText(file).slice(0, 70).replace(/\s+/g, ' ')}\n`
+        `  storage decl :: ${displayPath(file.fileName)}:${line + 1}:${character + 1} ${ts.SyntaxKind[declaration.kind]} ${declaration.getText(file).slice(0, 70).replace(/\s+/g, ' ')}\n`
       )
     }
     process.stderr.write(`  total storage declarations mapping to biggest component: ${total} of ${storageValueNodes.size}\n`)
@@ -3849,7 +4035,7 @@ export const censusGlobalHostMutations = (
       if (node.expression) {
         const file = node.expression.getSourceFile()
         const { line, character } = file.getLineAndCharacterOfPosition(node.expression.getStart(file))
-        return `${file.fileName.replace(/^.*\/(examples|compiler|node-compat)\//, '$1/')}:${line + 1}:${character + 1} ${node.expression.getText(file).slice(0, 80)}`
+        return `${displayPath(file.fileName)}:${line + 1}:${character + 1} ${node.expression.getText(file).slice(0, 80)}`
       }
     }
     return `<synthetic component ${component.id}>`
@@ -3882,7 +4068,7 @@ export const censusGlobalHostMutations = (
       const file = declaration.getSourceFile()
       const { line, character } = file.getLineAndCharacterOfPosition(declaration.getStart(file))
       process.stderr.write(
-        `  fn-walk count=${count} :: ${file.fileName.replace(/^.*\/(examples|compiler|node-compat)\//, '$1/')}:${line + 1}:${character + 1} ${declaration.getText(file).slice(0, 60).replace(/\s+/g, ' ')}\n`
+        `  fn-walk count=${count} :: ${displayPath(file.fileName)}:${line + 1}:${character + 1} ${declaration.getText(file).slice(0, 60).replace(/\s+/g, ' ')}\n`
       )
     }
   }
@@ -4176,7 +4362,7 @@ export const censusGlobalHostMutations = (
           // A rest whose own source component carries this same term re-enters
           // this rule with a strictly larger key every round: `k -> k + offset`
           // never repeats, so `addSelector`'s (source, key, mode) dedup can
-          // never fire and the key space grows without bound -- one Hono
+          // never fire and the key space grows without bound -- one library
           // component minted millions of selectors this way, all naming the
           // same target, until the V8 Map hit its 2^24 cap. The unknown-key
           // selector is the terminating answer: it matches EVERY key, so it
@@ -4288,11 +4474,11 @@ export const censusGlobalHostMutations = (
    * the value came from. It says nothing about what the value is, so on its
    * own it reads `header.slice(...)` -- `header: string` -- as a call that
    * might be running host code off the global object, and files a wildcard
-   * over every authenticated global for it. On `hono-hello` that is most of
-   * the wildcard: of the receivers reaching here, 23 are typed `string`, and
-   * the rest are `string[]`, `RegExp`, `Buffer`, `Promise<void>`,
-   * `Record<string, string>` and hono's own `Router<T>` -- none of which the
-   * global object inhabits.
+   * over every authenticated global for it. On a typical server program that
+   * is most of the wildcard: the receivers reaching here are typed `string`,
+   * `string[]`, `RegExp`, `Buffer`, `Promise<void>`, `Record<string, string>`
+   * and the library's own generic classes -- none of which the global object
+   * inhabits.
    *
    * So ask the checker its own question: is the intrinsic global type
    * assignable to this expression's type? Where it is not, the value is not
@@ -4347,11 +4533,10 @@ export const censusGlobalHostMutations = (
    * those, the global object is never a value anything holds -- and then an
    * unplaced value has nothing global to have come from.
    *
-   * This is exactly what `hono` does at all three of its `globalThis` sites:
-   * `const global = globalThis as any` in `helper/adapter/index.ts` and
-   * `jsx/context.ts`, read only as `global?.process?.env`, and
-   * `const { process, Deno } = globalThis as any` in `utils/color.ts`, which
-   * binds the members and not the object. The assertion to `any` is why the
+   * This is the common library pattern for runtime detection:
+   * `const global = globalThis as any`, read only as `global?.process?.env`,
+   * and `const { process, Deno } = globalThis as any`, which binds the
+   * members and not the object. The assertion to `any` is why the
    * type question cannot settle these: `globalObjectMayInhabit` has to keep
    * answering yes for a top type. The escape question settles them instead.
    *
@@ -4376,8 +4561,8 @@ export const censusGlobalHostMutations = (
     // A value in statement position is evaluated and dropped; nothing holds it.
     if (ts.isExpressionStatement(parent)) return true
     // The TARGET of a direct reflection mutator -- `Object.defineProperty(
-    // globalThis, 'Request', { value })`, which is how @hono/node-server
-    // installs its lightweight Request/Response -- does not hand the object
+    // globalThis, 'Request', { value })`, which is how a server adapter
+    // installs a lightweight Request/Response -- does not hand the object
     // to code this census cannot see: the mutator branch in `visit` reads
     // exactly that call, stamps its keys on the target and files them through
     // `taintMutationKeys`, so its effect is modelled where it is spelled. What
@@ -4385,7 +4570,7 @@ export const censusGlobalHostMutations = (
     // expression is the global object in whatever position IT occupies, and
     // the answer is that position's. Counting the argument as an escape made
     // every unplaced argument in the program a possible global (`error`,
-    // `chunk`, `name`) and stamped 110 wildcards over hono-hello.
+    // `chunk`, `name`) and stamped a wildcard at each one.
     if (ts.isCallExpression(parent) && parent.arguments[0] === node && directMutator(parent.expression) !== null) {
       return benignGlobalPosition(parent, seen)
     }
@@ -4491,8 +4676,8 @@ export const censusGlobalHostMutations = (
         // Buffer` name -- names a binding without reading or evaluating it:
         // no value flows, so nothing escapes. `isProvenGlobalObject` resolves
         // the same symbol and type here as it would at a real reference, and
-        // without this guard it answered every one of `node-globals.ts` and
-        // `buffer-types.ts`'s ambient declarations for `Buffer`/`process` as a
+        // without this guard it answered every one of a host's global and
+        // buffer declaration files' ambient declarations for `Buffer`/`process` as a
         // "may be globalThis" ESCAPE -- not because any code ever handed the
         // global object anywhere, but because declaring the binding's name
         // was mistaken for reading it. That false escape made this
@@ -4518,8 +4703,8 @@ export const censusGlobalHostMutations = (
       }
       // A mention inside a TYPE never runs: `typeof globalThis.Response` and
       // `globalThis.Buffer` in a type query name the global object to spell a
-      // type, and no value flows. `node-globals.ts` is written almost entirely
-      // in those, and hono's `Response`/`WebSocket` declarations are too.
+      // type, and no value flows. A host's global script may be written almost entirely
+      // in those, and library `Response`/`WebSocket` declarations often are too.
       if (insideTypeContext(node)) continue
       if (isProvenGlobalObject(node) && !benignGlobalPosition(node, new Set())) {
         if (process.env['GEA_GLOBAL_ESCAPE_DEBUG']) {
@@ -4671,18 +4856,14 @@ export const censusGlobalHostMutations = (
   const sourceInvocationIsClosed = (call: ts.CallExpression): boolean => {
     if (trustSeed.rejectedCallableProofs.has(call)) return false
     if (incompleteSourceInvocationCalls.has(call) || refusedSourceInvocationCalls.has(call)) return false
-    // The frame proof this closure relies on is itself a checker-selected
-    // body, the same kind of static selection `intrinsicReflectionIsIntact`'s
-    // own doc comment says a replaced `Object.keys`/`getOwnPropertyNames`
-    // revokes whole-program and all-or-nothing -- "which intrinsic was
-    // replaced does not bound which slot the replacement can reach." That was
-    // already wired into `callRunsOnlyProgramBodies` but not here: a source
-    // call closed by this proof kept its authenticated effect even after
-    // reflection broke, so `owner.run(globalThis)` stayed trusted after
-    // `Object.keys = replacement` (`global-this-host-bindings.test.ts`:
-    // "own-key reflection dependencies revoke source slot closure after
-    // method replacement").
-    return sourceInvocationFacts.has(call) && intrinsicReflectionIsIntact()
+    // Legacy checker selection depends on intact reflection. Exact joint
+    // source targets have their own allocation, writer and frame closure;
+    // their registered receipt and final ledger discharge survive an unrelated
+    // intrinsic member replacement without licensing a stale checker body.
+    return (
+      sourceInvocationFacts.has(call) &&
+      (intrinsicReflectionIsIntact() || sourceIntrinsicReplacementCalls.has(call) || sourceJointInvocationIsClosed(call))
+    )
   }
   const callHasAuthenticatedExternalEffect = (call: ts.CallExpression | ts.NewExpression): boolean => {
     if (ts.isCallExpression(call) && (refusedSourceInvocationCalls.has(call) || incompleteSourceInvocationCalls.has(call))) return false
@@ -4833,6 +5014,7 @@ export const censusGlobalHostMutations = (
       markWildcard(site, unknownReason)
       return
     }
+    if (key.kind === 'program-symbol') return
     for (const name of key.kind === 'numeric' ? ['NaN', 'Infinity'] : [key.name]) {
       noteWritten(namedKey(name))
       for (const id of globalBindingsNamed(name, site)) tainted.taintObject(id, everyKey)
@@ -4855,18 +5037,18 @@ export const censusGlobalHostMutations = (
       return
     }
     if (process.env['GEA_DEBUG_GLOBAL_MUTATION'] === 'keys') {
-      debugSite(site, `${reason} [key ${key.kind === 'name' ? key.name : '<numeric>'}]`)
+      debugSite(site, `${reason} [key ${key.kind === 'name' ? key.name : key.kind === 'numeric' ? '<numeric>' : '<program-symbol>'}]`)
     }
     if (process.env['GEA_PROGRAM_BODY_DEBUG']) {
       // A numeric key is a failure clause of its own (`surface:|numeric`), so it
       // needs an origin row too; it is spelled the way the clause names it.
-      const name = key.kind === 'name' ? key.name : '|numeric'
+      const name = key.kind === 'name' ? key.name : key.kind === 'numeric' ? '|numeric' : '|program-symbols'
       const seen = surfaceKeyOrigins.get(name)
       if (seen) seen.count++
       else {
         const file = site.getSourceFile()
         const position = file.getLineAndCharacterOfPosition(site.getStart(file))
-        const where = `${file.fileName.replace(/^.*\/(examples|compiler)\//, '$1/')}:${position.line + 1}`
+        const where = `${displayPath(file.fileName)}:${position.line + 1}`
         surfaceKeyOrigins.set(name, { count: 1, site: `${where} ${site.getText(file).slice(0, 70).replace(/\s+/g, ' ')}` })
       }
     }
@@ -4938,7 +5120,7 @@ export const censusGlobalHostMutations = (
     // A checker-selected body is a possible target, not a closed target set.
     // Source invocations use the shared proof, including its revocations.
     // A call whose callee cell only ever holds `null`/`undefined` throws
-    // before any body runs (three's `texture.onUpdate( texture )`): nothing
+    // before any body runs (an unset `item.onUpdate( item )` hook): nothing
     // receives the arguments, so there is no callee to authenticate.
     const asks =
       directMutator(node.expression) === null &&
@@ -4969,10 +5151,10 @@ export const censusGlobalHostMutations = (
    * `Array.prototype` to a callee this census cannot name is itself a possible
    * mutation of that prototype. What it stamped was `every`: any key at all.
    * That is the right answer for ONE kind of callee and far too strong for the
-   * other, and on `hono-hello` the difference was the whole certificate --
-   * `GEA_NO_WILDCARD=1` cleared both remaining roots and left ZERO named key
-   * blocking anything, so every obligation that program failed, failed on this
-   * `every` and on nothing else.
+   * other, and on a real server program the difference was the whole
+   * certificate -- `GEA_NO_WILDCARD=1` cleared both remaining roots and left
+   * ZERO named key blocking anything, so every obligation that program failed,
+   * failed on this `every` and on nothing else.
    *
    * The argument. Every callee is either a body this compiler compiled or a
    * host native behind a bodiless declaration. A COMPILED body's writes are
@@ -5024,8 +5206,9 @@ export const censusGlobalHostMutations = (
   /**
    * A reflection mutator with an unplaceable target was a THIRD whole-program
    * veto on the narrowing, and it was wrong: it double-counted an event the
-   * census already models exactly, and on `hono-hello` it alone refused all
-   * 1,135 asking calls -- the entire narrowing, on a syntactic property.
+   * census already models exactly, and on a real server program it alone
+   * refused every asking call -- the entire narrowing, on a syntactic
+   * property.
    *
    * `Object.defineProperty( t, 'x', … )`, `Reflect.set( t, 'x', v )` and
    * `Object.assign( t, { x } )` are unplaceable-receiver writes with a
@@ -5089,6 +5272,7 @@ export const censusGlobalHostMutations = (
    * declaration hands nothing to anybody.
    */
   interface HostCallableEscape {
+    readonly source: ts.Node
     readonly where: string
     readonly name: string
     readonly kind: string
@@ -5204,8 +5388,54 @@ export const censusGlobalHostMutations = (
     })
     return callable ? symbol : null
   }
-  const untaggedAmbientCallableSymbolOf = (node: ts.Identifier): ts.Symbol | null =>
-    untaggedAmbientCallableSymbol(actualSymbol(checker.getSymbolAtLocation(node)), node)
+  const ownCallableReadAnswers = new Map<ts.PropertyAccessExpression | ts.ElementAccessExpression, boolean>()
+  const sourceOwnCallableReadIsClosed = (read: ts.PropertyAccessExpression | ts.ElementAccessExpression): boolean => {
+    if (trustSeed.rejectedCallableProofs.has(read)) return false
+    const known = ownCallableReadAnswers.get(read)
+    if (known !== undefined) return known
+    const proof = invocationLedger.capture(() => {
+      const owner = sourceCallableObjectOf(checker, flow, read.expression)
+      const key = staticKeyOf(read)
+      if (owner === null || key === null || sourceCallableOwnDataWriteOf(checker, flow, owner, key, read) === null) return false
+      const values = sourceValueSessionOf(checker, flow).valuesOf(read)
+      return (
+        values !== null &&
+        values.length > 0 &&
+        values.every(
+          (value) =>
+            isRealCallableDeclaration(value) &&
+            !value.getSourceFile().isDeclarationFile &&
+            (value as ts.FunctionLikeDeclarationBase).body !== undefined &&
+            flow.callableBodyIsIndexed(value)
+        )
+      )
+    })
+    if (proof.value) invocationRequirements.set(read, proof.requirements)
+    ownCallableReadAnswers.set(read, proof.value)
+    return proof.value
+  }
+  const untaggedAmbientCallableSymbolOf = (node: ts.Identifier): ts.Symbol | null => {
+    const read = node.parent
+    if (ts.isPropertyAccessExpression(read) && read.name === node && sourceOwnCallableReadIsClosed(read)) return null
+    const symbol = actualSymbol(checker.getSymbolAtLocation(node))
+    const element = constDestructuredElementOf(symbol)
+    if (element !== null) return element.name === node ? null : destructuredCallableOf(element)
+    return untaggedAmbientCallableSymbol(symbol, node)
+  }
+  /**
+   * `const { initialize } = peer` binds the member once and never again,
+   * so every mention of the local IS the member: a bare call of it is a
+   * direct call of the ambient callable (stamped as one), and only a mention
+   * in a value position hands the callable out. Judged per mention, like a
+   * spelled `peer.initialize`, rather than as one escape at the pattern.
+   */
+  const constDestructuredElementOf = (symbol: ts.Symbol | null): ts.BindingElement | null => {
+    const declaration = symbol?.valueDeclaration
+    if (!declaration || !ts.isBindingElement(declaration) || !ts.isIdentifier(declaration.name) || declaration.dotDotDotToken) return null
+    if (!ts.isObjectBindingPattern(declaration.parent) || !ts.isVariableDeclaration(declaration.parent.parent)) return null
+    const list = declaration.parent.parent.parent
+    return ts.isVariableDeclarationList(list) && (list.flags & ts.NodeFlags.Const) !== 0 ? declaration : null
+  }
   /**
    * `resp[ 'text' ]` names the same member as `resp.text` and resolves to no
    * symbol at the literal, and `const { text } = resp` extracts the member as
@@ -5219,8 +5449,8 @@ export const censusGlobalHostMutations = (
    *
    * "Is the receiver declared in ambient text" was the wrong question:
    * `Record< string, HandlerSet >` is an ambient ALIAS over a program value
-   * type, so it answered yes for every one of hono's trie-router node reads
-   * and nothing else. The question the position actually asks is what the read
+   * type, so it answered yes for every read of a router's trie nodes and
+   * nothing else. The question the position actually asks is what the read
    * can HAND BACK -- the index-signature value types, or, when the type
    * declares none, its properties -- and only an ambient callable there is a
    * host function. `Record< string, ProgramType >` answers no.
@@ -5236,6 +5466,7 @@ export const censusGlobalHostMutations = (
   const literalElementAccessCallableOf = (node: ts.StringLiteralLike): ts.Symbol | null => {
     const access = node.parent
     if (!ts.isElementAccessExpression(access) || access.argumentExpression !== node) return null
+    if (sourceOwnCallableReadIsClosed(access)) return null
     const outer = access.parent
     if ((ts.isCallExpression(outer) || ts.isNewExpression(outer)) && outer.expression === access) return null
     const receiver = checker.getTypeAtLocation(access.expression)
@@ -5249,13 +5480,21 @@ export const censusGlobalHostMutations = (
     const owner = pattern.parent
     const source = ts.isVariableDeclaration(owner) ? owner.initializer : undefined
     if (!source) return null
+    // The receiver rule `unknownCalleeStampIsNarrowed` applies to a spelled
+    // `source.member`: a member taken off a value whose provenance is only
+    // program allocations is a program value, whatever the declarations say.
+    // `const { initialize } = optional`, where `optional` only ever holds the
+    // program's own `{ kModuleError }` stub for a types-only peer package.
+    // A source the alias graph never modelled proves nothing either way.
+    const receiver = valueNodes.has(unwrapErasedExpression(source)) ? aliasFacts(source) : null
+    if (receiver && !receiver.opaque && !receiver.global && !receiver.represented && receiver.prototypes.size === 0) return null
     const name = element.propertyName ?? element.name
     if (!ts.isIdentifier(name) && !ts.isStringLiteralLike(name)) return null
     const property = checker.getTypeAtLocation(source).getProperty(name.text)
     // A destructured member is always extracted as a value; there is no
     // callee position to exempt.
-    const receiver = checker.getTypeAtLocation(source)
-    if (!property) return unresolvedKeyYieldsAmbientCallable(receiver) ? (receiver.getSymbol() ?? null) : null
+    const sourceType = checker.getTypeAtLocation(source)
+    if (!property) return unresolvedKeyYieldsAmbientCallable(sourceType) ? (sourceType.getSymbol() ?? null) : null
     return untaggedAmbientCallableSymbol(actualSymbol(property), name)
   }
   /**
@@ -5270,8 +5509,8 @@ export const censusGlobalHostMutations = (
    * a value handed to code that could call it against a program object --
    * `extends` runs it through `super( ... )`, which is a direct callee.
    *
-   * Measured: without these three, `hono-hello` reported 141 escapes, every
-   * one of them a `Symbol.iterator` / `Number.isInteger` / `Array.isArray` /
+   * Measured: without these three, a real server program reported over a
+   * hundred escapes, every one of them a `Symbol.iterator` / `Number.isInteger` / `Array.isArray` /
    * `Object.keys` receiver or an `x instanceof Error`, and not one of them a
    * callable escaping as a value.
    */
@@ -5289,6 +5528,11 @@ export const censusGlobalHostMutations = (
     if ((ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === node) return true
     if (ts.isBinaryExpression(parent) && parent.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && parent.right === node) return true
     if (ts.isExpressionWithTypeArguments(parent) && ts.isHeritageClause(parent.parent)) return true
+    // `import { CGRectMake } from '...'` and `export { CGRectMake }` bind a
+    // name; they read nothing. Every mention of the bound name is a node of
+    // its own, judged where it is written.
+    if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent) || ts.isExportSpecifier(parent))
+      return true
     // `encrypted.sort = sort`: a plain store to (or `delete` of) a member
     // never performs [[Get]] on it, so the library callable that member names
     // on the receiver's type is not read, let alone handed out. A compound or
@@ -5303,7 +5547,7 @@ export const censusGlobalHostMutations = (
   /**
    * An ambient declaration whose VALUE is program code.
    *
-   * `node-globals.ts` spells the global timers as `const setTimeout: typeof
+   * A host's global script may spell the timers as `const setTimeout: typeof
    * import( './timers.js' ).setTimeout` -- an ambient declaration over a
    * PROGRAM function that has a body in a source file. Reading the declaration
    * alone calls that a host native and stamps `every` on every intrinsic its
@@ -5334,7 +5578,7 @@ export const censusGlobalHostMutations = (
     )
   }
   /**
-   * mongodb's `export declare interface TypedEventEmitter<E> extends
+   * A library's `export declare interface TypedEventEmitter<E> extends
    * EventEmitter { listeners(...): E[K][] }` merged into `export class
    * TypedEventEmitter<E> extends EventEmitter {}`. A method signature on an
    * interface puts no value anywhere: at run time `emitter.listeners` is
@@ -5387,14 +5631,15 @@ export const censusGlobalHostMutations = (
    * denylist answers "this library callable escaped as a VALUE and can install
    * a key", and a `ReturnsCallable` row is not a value position at all -- it is
    * recorded at a DIRECT CALLEE, whose receiver and result are program code.
-   * `programFn.bind( this )` was classified `lib-mutator` and flipped
-   * `hono-hello`'s whole verdict on that category error.
+   * `programFn.bind( this )` was classified `lib-mutator` and flipped a
+   * whole program's verdict on that category error.
    */
   const noteHostCallableEscape = (node: ts.Node, symbol: ts.Symbol, kind: string): void => {
     const file = node.getSourceFile()
     const at = file.getLineAndCharacterOfPosition(node.getStart(file))
     hostCallableEscapes.push({
-      where: `${file.fileName.replace(/^.*\/(node_modules|examples|compiler|node-compat)\//, '$1/')}:${at.line + 1}`,
+      source: node,
+      where: `${displayPath(file.fileName)}:${at.line + 1}`,
       name: symbol.getName(),
       kind,
       library: (symbol.declarations ?? []).some((declaration) => isStandardLibraryDeclaration(declaration)),
@@ -5410,6 +5655,110 @@ export const censusGlobalHostMutations = (
    * here. Never set it for a kept build.
    */
   const ignoresLibraryEscapes = process.env['GEA_HOST_ESCAPE_IGNORE_LIB'] === '1'
+  const retainedLibraryCallableAnswers = new Map<
+    ts.Expression,
+    { readonly closed: boolean; readonly requirements: readonly IntrinsicProtocolRequirement[] }
+  >()
+  const retainedLibraryCallablePending = new Set<ts.Expression>()
+  const retainLibrarySourceProtocol = (root: ts.Expression): boolean => {
+    const method = standardPrototypeMethodSourceOf(checker, root, isStandardLibraryDeclaration)
+    if (method !== null) return invocationLedger.requirePrototypeKeys(method.intrinsic, { names: [method.key] }, root)
+    if (ts.isCallExpression(root)) {
+      const bound = boundCallableTarget(root)
+      return (
+        bound !== null &&
+        root.arguments.length === 1 &&
+        !root.arguments.some(ts.isSpreadElement) &&
+        retainLibrarySourceProtocol(unwrapErasedExpression(bound.target)) &&
+        retainLibrarySourceProtocol(unwrapErasedExpression(bound.receiver)) &&
+        invocationLedger.requirePrototypeKeys('Function', { names: ['bind'] }, root)
+      )
+    }
+    if (!ts.isPropertyAccessExpression(root)) return false
+    const owner = intrinsicConstructorSeedOf(root.expression)
+    const symbol = memberSymbolOf(root)
+    const intrinsic = owner?.getName()
+    if (intrinsic !== 'Object' && intrinsic !== 'Reflect' && intrinsic !== 'JSON') return false
+    return (
+      owner !== null &&
+      symbol !== null &&
+      isStandardLibrarySymbol(symbol) &&
+      authenticatedCalleeIdentity(root) &&
+      invocationLedger.requireMember(intrinsic, root.name.text, root)
+    )
+  }
+  const retainedLibraryCallableIsClosed = (expression: ts.Expression): boolean => {
+    const root = unwrapErasedExpression(expression)
+    if (trustSeed.rejectedCallableProofs.has(root) || retainedLibraryCallablePending.has(root)) return false
+    const previous = retainedLibraryCallableAnswers.get(root)
+    if (previous !== undefined) {
+      if (previous.closed) invocationLedger.include(previous.requirements)
+      return previous.closed
+    }
+    retainedLibraryCallablePending.add(root)
+    let closed = false
+    let requirements: readonly IntrinsicProtocolRequirement[] = []
+    try {
+      const proof = invocationLedger.capture(() => {
+        if (!retainLibrarySourceProtocol(root)) return false
+        const terminal = (reference: ts.Expression): boolean | null => {
+          const current = outermostErasureOf(reference) as ts.Expression
+          const value = unwrapErasedExpression(current)
+          const parent = current.parent
+          if (ts.isVariableDeclaration(parent) && parent.initializer === current) {
+            const values = sourceBindingValuesOf(checker, flow, parent)
+            return values?.length === 1 && values[0] === parent.initializer ? null : false
+          }
+          if (ts.isCallExpression(parent) && parent.expression === current)
+            return flow.calls.some((site) => site.call === parent) && authenticatedCalleeIdentity(current)
+          // This family is an actual retained Function. A primitive assertion
+          // or checker Never cannot turn its opaque publication into an inert
+          // use before the shared receiver walk sees that transport edge.
+          if (!insideTypeContext(current) && primitiveResult(checker.getTypeAtLocation(current))) return false
+          const factory =
+            (ts.isPropertyAccessExpression(parent) || ts.isElementAccessExpression(parent)) && parent.expression === current
+              ? parent.parent
+              : parent
+          if (!ts.isCallExpression(factory)) return null
+          const bound = boundCallableTarget(factory)
+          if (
+            bound === null ||
+            factory.arguments.length !== 1 ||
+            factory.arguments.some(ts.isSpreadElement) ||
+            (unwrapErasedExpression(bound.target) !== value && unwrapErasedExpression(bound.receiver) !== value)
+          )
+            return null
+          if (
+            !authenticatedCalleeIdentity(bound.target) ||
+            !receiverHasPublishedRepresentation(bound.receiver) ||
+            !invocationLedger.requirePrototypeKeys('Function', { names: ['bind'] }, factory)
+          )
+            return false
+          return retainedLibraryCallableIsClosed(factory)
+        }
+        return hasClosedValueUses(checker, flow, [root], terminal, publishedTypeAt, (owner) => argumentsUsesByOwner.get(owner))
+      })
+      closed = proof.value
+      if (closed) {
+        requirements = proof.requirements
+        retainRequirements(root, proof.requirements)
+        invocationLedger.include(proof.requirements)
+      }
+      return closed
+    } finally {
+      retainedLibraryCallablePending.delete(root)
+      retainedLibraryCallableAnswers.set(root, { closed, requirements })
+    }
+  }
+  const retainedLibraryEscapeIsClosed = (escape: HostCallableEscape): boolean => {
+    if (!escape.library || !escape.mutator || escape.kind === 'ReturnsCallable') return false
+    const node = escape.source
+    if (ts.isIdentifier(node)) {
+      const parent = node.parent
+      return retainedLibraryCallableIsClosed(ts.isPropertyAccessExpression(parent) && parent.name === node ? parent : node)
+    }
+    return ts.isStringLiteralLike(node) && ts.isElementAccessExpression(node.parent) ? retainedLibraryCallableIsClosed(node.parent) : false
+  }
   let hostCallableEscapeAnswer: boolean | null = null
   const untaggedHostCallableEscapesAsValue = (): boolean => {
     if (hostCallableEscapeAnswer !== null) return hostCallableEscapeAnswer
@@ -5422,6 +5771,8 @@ export const censusGlobalHostMutations = (
         continue
       }
       if (ts.isBindingElement(node)) {
+        // A const local's mentions are judged one by one below.
+        if (constDestructuredElementOf(actualSymbol(checker.getSymbolAtLocation(node.name))) === node) continue
         const destructured = destructuredCallableOf(node)
         if (destructured) noteHostCallableEscape(node, destructured, 'Destructured')
         continue
@@ -5451,7 +5802,8 @@ export const censusGlobalHostMutations = (
       // return `( ...args: A ) => R` -- a concrete function type built from
       // type parameters, which no type-parameter or top-type rule can retire
       // -- so `.some( ... )` matched an overload the printed `lib.es5.d.ts:357`
-      // row did not even name, and `bind` alone refused every call on hono.
+      // row did not even name, and `bind` alone refused every call in a
+      // program that binds its handlers.
       if (forwardingLibraryMember(node, symbol)) continue
       if (symbol.declarations?.some(returnHandsBackCallable)) noteHostCallableEscape(declaration, symbol, 'ReturnsCallable')
     }
@@ -5463,7 +5815,8 @@ export const censusGlobalHostMutations = (
     // spec-defined functions whose most dangerous power is running program
     // code -- censused where that code is written -- not installing a key.
     const counted = hostCallableEscapes.filter(
-      (escape) => (!escape.library || escape.mutator) && !(ignoresLibraryEscapes && escape.library)
+      (escape) =>
+        (!escape.library || escape.mutator) && !(ignoresLibraryEscapes && escape.library) && !retainedLibraryEscapeIsClosed(escape)
     )
     hostCallableEscapeAnswer = counted.length > 0
     return hostCallableEscapeAnswer
@@ -5471,8 +5824,8 @@ export const censusGlobalHostMutations = (
   /**
    * Which clause refused the narrowing, counted per call. `objects=0` with no
    * per-clause row is unreadable: three whole-program facts and one per-call
-   * one can each veto, and on `hono-hello` the first landing of this gate
-   * admitted ZERO calls with no way to say which of the four did it.
+   * one can each veto, and on a real server program the first landing of
+   * this gate admitted ZERO calls with no way to say which of the four did it.
    */
   const argumentStampRefusals = new Map<string, number>()
   const hostNativeCallees = new Map<string, number>()
@@ -5507,9 +5860,9 @@ export const censusGlobalHostMutations = (
     // it off a host object -- and every host object enters this graph opaque
     // (a bodiless call or construction, a declaration-file value, a class
     // chain that is not source-owned). A receiver whose provenance is only
-    // program allocations reads program values or library members. mongodb's
-    // `gcpMetadata.instance( ... )` is typed by the types-only `gcp-metadata`
-    // declarations, but the value is `getGcpMetadata()`'s: the absent
+    // program allocations reads program values or library members. A
+    // `peer.instance( ... )` call is typed by a types-only peer package's
+    // declarations, but the value is the program's loader's: the absent
     // package's `require` throws, and the `catch` hands back a program proxy.
     // Represented and intrinsic receivers keep the declaration's answer.
     const calleeRead = unwrapErasedExpression(call.expression)
@@ -5555,8 +5908,8 @@ export const censusGlobalHostMutations = (
     // `visit`'s own mutator branch is the one authority, filing their keys (or
     // `every`, for an open key or an unreadable source) into
     // `visitWrittenKeys`, which is exactly what the narrowed stamp then reads.
-    // So nothing is lost by narrowing here, and 141 of `hono-hello`'s asking
-    // calls stop stamping `every` on every intrinsic their arguments reach.
+    // So nothing is lost by narrowing here, and most of a server program's
+    // asking calls stop stamping `every` on every intrinsic their arguments reach.
     //
     // An untagged HOST native keeps `every`: its writes are in no source file,
     // so `visitWrittenKeys` bounds nothing about it. That is the whole of the
@@ -5700,16 +6053,12 @@ export const censusGlobalHostMutations = (
    * `programBodyOnlyCalls` requires of a program body -- guarded the same
    * way that authority is, against a selection the program merely ASSERTED
    * rather than one the checker derived from a real declaration.
-   * `updateRanges.sort(...)` (an unannotated JS parameter's field, typed
-   * `{start,count}[]` by the checker) and `materialShaders.has/add(...)`
-   * (typed `Set<WebGLShaderStage>`) resolve this way without ever getting a
+   * `ranges.sort(...)` (an unannotated JS parameter's field, typed
+   * `{start,count}[]` by the checker) and `stages.has/add(...)`
+   * (typed `Set<Stage>`) resolve this way without ever getting a
    * `publishedRepresentationOf` proof, which is why they reached this
    * wildcard at all -- and neither passes through an assertion to get there.
    */
-  // TEMPORARY BISECT SWITCH -- not for landing. Three rules landed together and
-  // one of them clears `entries.has('key')` in the spec suite, which must stay
-  // wildcarded. `GEA_NO_KEYSET_INERT=1` turns this one off so ONE build can
-  // test both arms instead of two.
   // DISABLED. This rule cleared the receiver wildcard whenever the CHECKER resolved a
   // key-set-inert standard-library method (`sort`/`has`/`add`/`slice`/`subarray`) off the
   // receiver's static type. That type can be fabricated: `new (construct as new () =>
@@ -5717,8 +6066,8 @@ export const censusGlobalHostMutations = (
   // receiver that is genuinely unknown at runtime, and the spec test `erased generic
   // constructor assertions retain the intrinsic callable identity` requires that call to
   // stay wildcarded. Guarding it with `receiverTypeIsAssertionSeeded` did not close the
-  // hole. Kept here, inert, because the shapes it targeted (`updateRanges.sort`,
-  // `materialShaders.has/add`) are real.
+  // hole. Kept here, inert, because the shapes it targeted (`ranges.sort`,
+  // `cache.has/add`) are real.
   //
   // MEASURED DEAD END (2026-09-15): the obvious repair -- authenticate this leg on a
   // representation proof instead of a checker type -- is not merely hard, it is
@@ -5735,7 +6084,7 @@ export const censusGlobalHostMutations = (
   // establishing the receiver's own representation assumes the declared shape matches
   // THIS runtime value, which is the same class of error as trusting the fabricated `Map`
   // type in the counter-example above. The real fix is to close the opacity upstream --
-  // trace `updateRanges`/`attribute` to real allocations across all call sites in the
+  // trace `ranges`/`attribute` to real allocations across all call sites in the
   // parameter-carrier census -- so that `facts.opaque` stops being true here at all.
   const keySetInertEnabled = false
   const calleeHasNoKeySetEffect = (callee: ts.PropertyAccessExpression | ts.ElementAccessExpression): boolean => {
@@ -5752,15 +6101,71 @@ export const censusGlobalHostMutations = (
     )
   }
 
+  /**
+   * `g.fetch(url)` with `g` the global object, where every global binding the
+   * key names is a bodiless ambient function declaration: unless the program
+   * writes that key, the read yields the host or library function itself, and
+   * calling it through the global object is the bare call `fetch(url)`. A
+   * global operation receives the global object as `this` either way, and a
+   * native host function takes no receiver at all. The arguments were
+   * censused above exactly as for the bare call, so the receiver leg adds
+   * nothing. Whether the program writes the key is known only once the visit
+   * ends (`flushAmbientGlobalFunctionCalls`).
+   *
+   * Only a PROVEN global receiver: for an opaque one the callee itself is
+   * unknown whatever the key names. A key naming anything else -- a `var`, a
+   * program binding, no binding at all -- keeps the unconditional wildcard,
+   * and so does an `Object.prototype` key: lib.dom declares a global
+   * `function toString()`, but the global object inherits that member, and
+   * nothing here proves which object along its chain answers the read. A key
+   * a host accessor owns may run host code on the read itself.
+   */
+  let objectPrototypeType: ts.Type | null | undefined
+  const ambientGlobalFunctionKeyOf = (callee: ts.PropertyAccessExpression | ts.ElementAccessExpression): string | null => {
+    const key = staticKeyOf(callee)
+    if (key === null || hostAccessorNames.has(key)) return null
+    if (objectPrototypeType === undefined) {
+      const object = checker.resolveName('Object', undefined, ts.SymbolFlags.Value, false)
+      const prototype = object ? checker.getTypeOfSymbol(object).getProperty('prototype') : undefined
+      objectPrototypeType = prototype ? checker.getTypeOfSymbol(prototype) : null
+    }
+    if (objectPrototypeType === null || checker.getPropertyOfType(objectPrototypeType, key) !== undefined) return null
+    const bound = globalBindingsNamed(key, callee)
+    const symbols = [
+      checker.resolveName(key, undefined, ts.SymbolFlags.Value, false),
+      intrinsicGlobalType ? checker.getPropertyOfType(intrinsicGlobalType, key) : undefined
+    ].filter((symbol): symbol is ts.Symbol => symbol !== undefined)
+    if (symbols.length === 0) return null
+    const ids = new Set<DeclarationId>()
+    for (const symbol of symbols) {
+      const declarations = symbol.declarations ?? []
+      if (declarations.length === 0 || !declarations.every(isBodilessAmbientFunction)) return null
+      const id = identities.symbolValueDeclarationId(symbol, callee)
+      if (id !== null) ids.add(id)
+    }
+    return bound.every((id) => ids.has(id)) ? key : null
+  }
+  const ambientGlobalFunctionCalls: { readonly call: ts.CallExpression; readonly key: string }[] = []
+  const flushAmbientGlobalFunctionCalls = (): void => {
+    const written = visitWrittenKeys.surfaceKeys
+    for (const { call, key } of ambientGlobalFunctionCalls)
+      if (written.every || written.names.has(key)) markWildcard(call, 'global method receiver whose key the program writes')
+  }
+
   const visit = (node: ts.Node): void => {
     if (reachable.memberIsPruned(node)) return
     if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && isDirectAssignmentTarget(node)) {
       const keys = keyReader.keysOfAccess(node)
-      for (const declaration of aliasFacts(node.expression).prototypes)
-        for (const key of keys) {
-          noteWritten(key)
-          tainted.taintObject(declaration, key)
-        }
+      // An authenticated standard own writable data descriptor intercepts
+      // this exact store. It changes the namespace's own member, not a key on
+      // every prototype reachable from the constructor's public type. All
+      // other stores retain the conservative inherited/opaque effect path.
+      if (!sourceIntrinsicInstallations.has(node))
+        for (const declaration of aliasFacts(node.expression).prototypes)
+          for (const key of keys) {
+            noteWritten(key)
+            tainted.taintObject(declaration, key)
+          }
       taintIntrinsicMember(node.expression, keys)
     }
     if ((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) && mayAliasGlobal(node.expression)) {
@@ -5774,6 +6179,30 @@ export const censusGlobalHostMutations = (
     }
 
     if (ts.isCallExpression(node)) {
+      const declaration = callDeclarationAt(node)
+      if (
+        declaration !== undefined &&
+        ts.isMethodSignature(declaration) &&
+        ts.isInterfaceDeclaration(declaration.parent) &&
+        declaration.parent.name.text === 'ObjectConstructor' &&
+        isStandardLibraryDeclaration(declaration) &&
+        ts.isIdentifier(declaration.name) &&
+        declaration.name.text === 'getOwnPropertyDescriptor' &&
+        authenticatedCalleeIdentity(reachableCallOfNode.get(node)?.callable ?? node.expression)
+      ) {
+        // This intrinsic reads the target's own descriptor without invoking
+        // its getter, but an unknown target may itself be a Proxy. Callee
+        // integrity does not authenticate the target's operation protocol.
+        //
+        // The first link of an intrinsic accessor-getter chain is exempt: its
+        // target is `Object.getPrototypeOf(<TypedArray>.prototype)`, and the
+        // chain's own authentication (`authenticatedIntrinsicAccessorGetterOf`)
+        // already refuses unless that prototype's [[Prototype]] was never
+        // replaced (`setPrototypeOf` records every key) -- the only way it
+        // could become a Proxy.
+        const target = node.arguments[0]
+        if (target && aliasFacts(target).opaque && !isIntrinsicAccessorGetterDescriptorCall(node)) deferredDescriptorTargets.add(target)
+      }
       const mutator = directMutator(node.expression)
       if (mutator) {
         // Reflect.set may define the property on its explicit receiver even
@@ -5855,10 +6284,10 @@ export const censusGlobalHostMutations = (
           // interface, `Array.prototype.push`, `String.prototype.split` and
           // their neighbours, with the receiver authenticated by
           // `!mayAliasGlobal` -- works on a fixture and clears NOTHING on
-          // `hono-hello`. The rule's whole population there refuses as
+          // a real server program. The rule's whole population there refuses as
           // `not-standard-library`: the calls that actually reach this loop
           // are `this.emit( 'error', e )`, `stream.on( 'data', cb )`,
-          // `socket.destroy()` -- node-compat's OWN class methods, whose
+          // `socket.destroy()` -- the program's OWN class methods, whose
           // bodies are program bodies. The fix for those is
           // `callRunsOnlyProgramBodies` authenticating a closed dispatch
           // family, not a wider builtin table here.
@@ -5871,8 +6300,9 @@ export const censusGlobalHostMutations = (
               // names the RULE and `[KEY-BLOCK]` names the blocked object, but
               // between them sits the only question left once the rule is known
               // -- which of this loop's refused callees reached that object --
-              // and nothing answered it. On `hono-hello` two objects are
-              // stamped at all, and 42 refused calls could have done it.
+              // and nothing answered it. On a real program a couple of objects
+              // are stamped at all, and dozens of refused calls could have
+              // done it.
               if (process.env['GEA_DEBUG_GLOBAL_MUTATION']) {
                 let callees = everyStampOrigins.get(declaration)
                 if (!callees) everyStampOrigins.set(declaration, (callees = new Set()))
@@ -5890,7 +6320,7 @@ export const censusGlobalHostMutations = (
           if (process.env['GEA_ARGUMENT_WILDCARD_DEBUG'] && facts) {
             const file = argument.getSourceFile()
             const position = file.getLineAndCharacterOfPosition(argument.getStart(file))
-            const where = `${file.fileName.replace(/^.*\/(examples|compiler)\//, '$1/')}:${position.line + 1}:${position.character + 1}`
+            const where = `${displayPath(file.fileName)}:${position.line + 1}:${position.character + 1}`
             process.stderr.write(
               `[ARGUMENT] ${where} trips=${containsGlobal(current)} global=${facts.global} opaque=${facts.opaque} ` +
                 `represented=${facts.represented} published=${publishedRepresentationOf(current)} ` +
@@ -5950,10 +6380,10 @@ export const censusGlobalHostMutations = (
           // global object, the key would name a host member -- an ambient
           // declaration, which disqualifies the call from
           // `programBodyOnlyCalls` -- or nothing at all, and the call throws
-          // before any body runs. Three's renderer reaches 167 methods
-          // through receivers this census cannot place (`Color`, `Vector3`,
-          // `WebGLProgram` values returned by a refused call), and each one
-          // was filing `*` for the whole program.
+          // before any body runs. A large library reaches hundreds of methods
+          // through receivers this census cannot place (class instances
+          // returned by a refused call), and each one was filing `*` for the
+          // whole program.
           //
           // A callee the checker resolved to a key-set-inert standard-library
           // method (`calleeHasNoKeySetEffect`) clears this leg the same way:
@@ -6000,10 +6430,12 @@ export const censusGlobalHostMutations = (
                   : 'bodiless-or-unclosed'
           const file = node.getSourceFile()
           const position = file.getLineAndCharacterOfPosition(node.getStart(file))
-          const where = `${file.fileName.replace(/^.*\/(examples|compiler)\//, '$1/')}:${position.line + 1}`
+          const where = `${displayPath(file.fileName)}:${position.line + 1}`
           process.stderr.write(`[RECEIVER-WILDCARD] ${bucket} :: ${where} ${node.getText(file).slice(0, 90).replace(/\s+/g, ' ')}\n`)
         }
-        markWildcard(node, 'opaque or global method receiver')
+        const ambientKey = aliasFacts(callee.expression).global ? ambientGlobalFunctionKeyOf(callee) : null
+        if (ambientKey !== null) ambientGlobalFunctionCalls.push({ call: node, key: ambientKey })
+        else markWildcard(node, 'opaque or global method receiver')
       }
     }
 
@@ -6055,6 +6487,32 @@ export const censusGlobalHostMutations = (
     const expected = actualSymbol(checker.getTypeOfSymbol(objectConstructorSymbol).getProperty(member))
     const symbol = actualSymbol(checker.getSymbolAtLocation(current.name))
     return !!symbol && symbol === expected && !allIntrinsicTrustInvalidated && !intrinsicSymbolIsOverwritten(symbol)
+  }
+  const jsonSymbol = (() => {
+    const anchor = files[0]
+    const symbol = anchor ? checker.resolveName('JSON', anchor, ts.SymbolFlags.Value, false) : undefined
+    return symbol && hasStandardLibraryDeclaration(symbol) ? symbol : null
+  })()
+  /**
+   * `JSON.parse(text)` with no reviver: every object it answers is a fresh
+   * ordinary object or array built by the parser -- never a Proxy, never an
+   * intrinsic, never a value the program held before. A reviver could return
+   * anything, so its form is not a seed.
+   */
+  const trustedJsonParseWithoutReviver = (call: ts.CallExpression): boolean => {
+    if (call.arguments.length !== 1 || ts.isSpreadElement(call.arguments[0]!)) return false
+    const current = unwrapErasedExpression(call.expression)
+    if (!jsonSymbol || !ts.isPropertyAccessExpression(current)) return false
+    if (actualSymbol(checker.getSymbolAtLocation(unwrapErasedExpression(current.expression))) !== jsonSymbol) return false
+    const expected = actualSymbol(checker.getTypeOfSymbol(jsonSymbol).getProperty('parse'))
+    const symbol = actualSymbol(checker.getSymbolAtLocation(current.name))
+    return (
+      !!symbol &&
+      symbol === expected &&
+      !allIntrinsicTrustInvalidated &&
+      !intrinsicSymbolIsOverwritten(jsonSymbol) &&
+      !intrinsicSymbolIsOverwritten(symbol)
+    )
   }
   const neverReassigned = (declaration: ts.Node): boolean =>
     writesOf(declaration).every(
@@ -6142,7 +6600,7 @@ export const censusGlobalHostMutations = (
           owner != null &&
           hasStandardLibraryDeclaration(owner) &&
           (checker.getTypeAtLocation(expression).flags & ts.TypeFlags.UniqueESSymbol) !== 0
-        if (!wellKnown && !isProgramDeclaredSymbolKey(publishedTypeAt(expression))) every = true
+        if (!wellKnown && !isProgramSymbolKeyExpression(expression)) every = true
       } else every = true
     }
     const answer = every ? 'every' : names
@@ -6340,7 +6798,8 @@ export const censusGlobalHostMutations = (
         return refused
       }
       if (ts.isCallExpression(current)) {
-        if (trustedObjectStatic(current.expression, 'create')) return { seed: true, admitted: true, dependencies: [] }
+        if (trustedObjectStatic(current.expression, 'create') || trustedJsonParseWithoutReviver(current))
+          return { seed: true, admitted: true, dependencies: [] }
         const target = current.arguments[0]
         if (trustedObjectStatic(current.expression, 'assign') && target && !ts.isSpreadElement(target)) return through([target])
         const fact = sourceFrameOwnedCalls.has(current) ? sourceInvocationFacts.get(current) : undefined
@@ -6352,12 +6811,17 @@ export const censusGlobalHostMutations = (
         }
         return through(values)
       }
+      if (ts.isNewExpression(current) && sourceClassConstructionIsFresh(current)) return { seed: true, admitted: true, dependencies: [] }
       if (ts.isIdentifier(current)) {
         const declaration = bindingOf(current)
         if (!declaration || (!ts.isParameter(declaration) && !ts.isVariableDeclaration(declaration))) return refused
         if (isRuntimePrimitiveGuarded(current) && neverReassigned(declaration)) return through([])
         return through([declaration])
       }
+      // A stock prototype data method is a distinct Function object, not the
+      // intrinsic constructor or prototype it was read from. This is the same
+      // conditional identity used by authenticated receiver continuations.
+      if (standardPrototypeMethodIsDistinct(current)) return { seed: true, admitted: true, dependencies: [] }
       const stored = storedReads && ts.isPropertyAccessExpression(current) ? valueStoredJustBefore(current) : null
       if (stored) return through([stored])
       if (
@@ -6386,6 +6850,7 @@ export const censusGlobalHostMutations = (
     for (const statement of reachableStatementsOf(file)) visit(statement)
   }
   flushNarrowedArgumentStamps()
+  flushAmbientGlobalFunctionCalls()
   // With '*' every consumer refuses already. Otherwise: no name this run
   // trusted may have been written by its own visit; a `for-in` key set holds
   // every key Object.prototype may carry; and a key set's intrinsic
@@ -6395,15 +6860,16 @@ export const censusGlobalHostMutations = (
     // file their intrinsic requirements with `invocationRequirements`.
     const unprovenSurfaceWrite = allIntrinsicTrustInvalidated
       ? undefined
-      : deferredSurfaceWrites.find((receiver) => freshProgramObjectOrigin(receiver) === 'refused')
+      : [...deferredSurfaceWrites, ...deferredDescriptorTargets].find((receiver) => freshProgramObjectOrigin(receiver) === 'refused')
     if (unprovenSurfaceWrite && process.env['GEA_DEBUG_GLOBAL_MUTATION'])
-      debugSite(unprovenSurfaceWrite, 'surface write receiver is not a fresh program object; invalidates all intrinsic trust')
+      debugSite(unprovenSurfaceWrite, 'intrinsic effect receiver has no complete ordinary origin; invalidates all intrinsic trust')
     const written = visitWrittenKeys.surfaceKeys
     const distrusted = [...trustedIntrinsicNames].filter((name) => !trustSeed.names.has(name) && keySetTouches(written, { names: [name] }))
     const objectPrototypeKeys = inheritedObjectPrototypeKeys ? objectPrototypeKeysOf(tainted) : trustSeed.objectPrototypeKeys
     const inheritedGrew =
       (objectPrototypeKeys.every && !trustSeed.objectPrototypeKeys.every) ||
       (objectPrototypeKeys.numeric && !trustSeed.objectPrototypeKeys.numeric) ||
+      (objectPrototypeKeys.programSymbols === true && trustSeed.objectPrototypeKeys.programSymbols !== true) ||
       [...objectPrototypeKeys.names].some((name) => !trustSeed.objectPrototypeKeys.names.has(name))
     const assumptionFailed =
       computedKeyRequirements.length > 0 &&
@@ -6417,14 +6883,30 @@ export const censusGlobalHostMutations = (
         computedKeyRequirements
       ).length > 0
     const rejectedCallableProofs = new Set(trustSeed.rejectedCallableProofs)
-    for (const [call, requirements] of invocationRequirements)
+    for (const [call, requirements] of invocationRequirements) {
+      const fact = ts.isCallExpression(call) ? sourceInvocationFacts.get(call) : undefined
+      // A Script Function is also a property of the actual global object.
+      // Binding integrity does not close its callers once that object enters
+      // argument storage: the source reference inventory does not count
+      // calls obtained from those implicit properties. Reject the conditional
+      // frame using the same finalized identity graph that follows arguments
+      // actual arguments, including aliases forwarded through source parameters.
+      // A logical receiver has its own complete receiverUses continuation above;
+      // binding it to a known body is not an argument-storage publication. Its
+      // writes, returns and opaque escapes remain in the receiver alias census.
+      const publishesGlobalCallable =
+        fact !== undefined &&
+        requirements.some((requirement) => requirement.sourceGlobalBinding !== undefined) &&
+        fact.operands.args.some((operand) => aliasFacts(unwrapErasedExpression(operand)).global)
       if (
+        publishesGlobalCallable ||
         failedIntrinsicProtocolRequirements(
           { checker, identities, globalHostMutationTaint: tainted, isStandardLibraryDeclaration },
           requirements
         ).length > 0
       )
         rejectedCallableProofs.add(call)
+    }
     const invocationFailed = rejectedCallableProofs.size > trustSeed.rejectedCallableProofs.size
     const distrustAll = written.every || unprovenSurfaceWrite !== undefined
     if (distrusted.length > 0 || (distrustAll && !trustSeed.all) || inheritedGrew || assumptionFailed || invocationFailed) {
@@ -6454,6 +6936,7 @@ export const censusGlobalHostMutations = (
           objectPrototypeKeys: {
             names: new Set([...trustSeed.objectPrototypeKeys.names, ...objectPrototypeKeys.names]),
             numeric: trustSeed.objectPrototypeKeys.numeric || objectPrototypeKeys.numeric,
+            programSymbols: trustSeed.objectPrototypeKeys.programSymbols === true || objectPrototypeKeys.programSymbols === true,
             every: trustSeed.objectPrototypeKeys.every || objectPrototypeKeys.every
           },
           noComputedKeys: trustSeed.noComputedKeys || assumptionFailed,

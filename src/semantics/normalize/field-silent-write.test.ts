@@ -13,9 +13,9 @@ import { wholeProgram } from './reachability.js'
  * `field-bindings.ts:828`'s `write-unresolved`: a class field whose one
  * whole-value write is a vacuous empty array literal (`never[]` to the
  * checker, correctly unusable as evidence) reads as SILENCE, not as a
- * disagreement -- and three's `WebGLRenderer.clippingPlanes` /
- * `UniformsGroup.uniforms` carry a JSDoc `@type` tag directly above that one
- * write naming a concrete element (`Array<Plane>`, `Array<Uniform>`).
+ * disagreement -- and a JS library's `this.clippingPlanes = []` /
+ * `this.entries = []` fields carry a JSDoc `@type` tag directly above that one
+ * write naming a concrete element (`Array<Plane>`, `Array<Entry>`).
  * `isCandidateSymbol`'s own doc already says an annotated field means "the
  * program DID state something ... this module defers" -- true for a
  * `PropertyDeclaration`, never checked for the OTHER declaration shape this

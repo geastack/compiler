@@ -1,5 +1,5 @@
-// A plain object inside `any` -- a `JSON.parse` result here, a BSON-deserialized
-// document in mongodb -- received where the program declares an Array of
+// A plain object inside `any` -- a `JSON.parse` result here, a deserialized
+// document in a database client -- received where the program declares an Array of
 // typed records. Each element is read into the record through a checked
 // conversion: present keys are converted per field, an absent optional field
 // stays absent, and a missing required field or a mistyped value is a
@@ -53,7 +53,7 @@ function identity(value: any): string {
 }
 console.log(identity(JSON.parse('[{"a":1,"extra":true}]')))
 
-// mongodb's shape: an interface over an open Document, with a nested record.
+// A database client's shape: an interface over an open Document, with a nested record.
 interface Doc {
   [key: string]: any
 }

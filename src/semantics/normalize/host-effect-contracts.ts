@@ -53,7 +53,7 @@ export const symbolStatesHostInert = (symbol: ts.Symbol | undefined): boolean =>
  * The SECOND, narrower host effect contract: `@gea-host-no-property-writes`.
  *
  * `@gea-host-inert` states three things at once, and a native that breaks any
- * one of them can carry none of it. Measured on `hono-hello`: of the natives
+ * one of them can carry none of it. Measured on an HTTP server program: of the natives
  * whose calls hold the global host-mutation census open, every single one
  * breaks a clause the census was not asking about --
  * `__gea_node_timer_start_timeout` and `__gea_http_serve` retain a callback

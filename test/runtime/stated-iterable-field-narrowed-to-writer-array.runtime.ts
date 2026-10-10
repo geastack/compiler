@@ -1,26 +1,26 @@
 // A record field stated as returning the `Iterable<T>` protocol whose one
-// writer is a function that really returns `T[]` (bson's
-// `onDemand.parseToElements`). The caller probes `Array.isArray` on the
+// writer is a function that really returns `T[]` (a binary-document
+// parser's `onDemand.parseToElements`). The caller probes `Array.isArray` on the
 // result, so the array must arrive as an array, not wrapped in an iterable.
 
-type BsonElement = [type: number, offset: number, length: number]
+type WireElement = [type: number, offset: number, length: number]
 
-function parseToElements(bytes: Uint8Array, startOffset: number | null = 0): Iterable<BsonElement> {
+function parseToElements(bytes: Uint8Array, startOffset: number | null = 0): Iterable<WireElement> {
   startOffset ??= 0
-  const elements: BsonElement[] = []
+  const elements: WireElement[] = []
   for (let i = startOffset; i < bytes.length; i++) elements.push([bytes[i]!, i, 1])
   return elements
 }
 
 type OnDemand = {
-  parseToElements: (this: void, bytes: Uint8Array, startOffset?: number) => Iterable<BsonElement>
+  parseToElements: (this: void, bytes: Uint8Array, startOffset?: number) => Iterable<WireElement>
 }
 
 const onDemand: OnDemand = Object.create(null)
 onDemand.parseToElements = parseToElements
 Object.freeze(onDemand)
 
-function parseToElementsToArray(bytes: Uint8Array, offset?: number): BsonElement[] {
+function parseToElementsToArray(bytes: Uint8Array, offset?: number): WireElement[] {
   const res = onDemand.parseToElements(bytes, offset)
   return Array.isArray(res) ? res : [...res]
 }

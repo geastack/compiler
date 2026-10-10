@@ -1,4 +1,4 @@
-// The shape of mongodb's `onData`: two circular `List`s (sentinel head whose
+// The shape of a database client's `onData`: two circular `List`s (sentinel head whose
 // next and prev are itself) and an object-literal iterator, all captured by
 // handlers that are registered on an emitter through a dynamically typed `on`
 // and removed again by `off`, plus an abort listener that is a `this`-taking

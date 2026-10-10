@@ -179,8 +179,8 @@ const valuePropertyOf = (descriptor: ts.ObjectLiteralExpression): ts.PropertyAss
  * The descriptor literal's own text, with the entry's JSDoc `@type` moved onto
  * its `value` initializer.
  *
- * In a `defineProperties` map the comment sits on the map ENTRY -- three's
- * `LOD` writes `/** @type {Array<{object:Object3D,...}>} *\/ levels: { enumerable:
+ * In a `defineProperties` map the comment sits on the map ENTRY -- a
+ * constructor writing `/** @type {Array<{node:Node,...}>} *\/ levels: { enumerable:
  * true, value: [] }` -- and names the type of the property being defined,
  * which is the type of `value`. Hoisting the descriptor into its own binding
  * leaves that comment behind on nothing, so the checker typed `value: []` as an
@@ -224,7 +224,7 @@ const definePropertyKindOf = (call: ts.CallExpression): 'single' | 'plural' | nu
  * ahead of a fixed descriptor.
  * stays safe to prepend.
  */
-const singleReplacement = (call: ts.CallExpression, file: ts.SourceFile): string | null => {
+const singleReplacement = (call: ts.CallExpression, file: ts.SourceFile, script: boolean): string | null => {
   if (call.arguments.length !== 3) return null
   const receiver = call.arguments[0]
   const keyArgument = call.arguments[1]
@@ -233,7 +233,7 @@ const singleReplacement = (call: ts.CallExpression, file: ts.SourceFile): string
   if (!ts.isStringLiteralLike(keyArgument)) return null
   if (!ts.isObjectLiteralExpression(descriptorArgument)) return null
   const valueText = valueExpressionTextOf(descriptorArgument, file)
-  if (valueText !== null) return assignmentText(receiver.getText(file), keyArgument.text, valueText, call.parent, file)
+  if (valueText !== null && script) return assignmentText(receiver.getText(file), keyArgument.text, valueText, call.parent, file)
   if (!isClosedDataDescriptor(descriptorArgument)) return null
   // A non-assignment-equivalent descriptor is left exactly as written.
   //
@@ -352,7 +352,7 @@ const thisFieldDeclarations = (
  * qualifies (see the module comment for why a partial rewrite is refused).
  * When it does not, the call is kept real (see below), exactly as written.
  */
-const pluralReplacement = (call: ts.CallExpression, file: ts.SourceFile): string | null => {
+const pluralReplacement = (call: ts.CallExpression, file: ts.SourceFile, script: boolean): string | null => {
   if (call.arguments.length !== 2) return null
   const receiver = call.arguments[0]
   const mapArgument = call.arguments[1]
@@ -387,7 +387,7 @@ const pluralReplacement = (call: ts.CallExpression, file: ts.SourceFile): string
   // omitted/false/runtime attributes must remain a real definition.  Split
   // the plural intrinsic into its already-supported singular primitive while
   // retaining the complete descriptor object and its exact defaults.
-  if (assignments.length === entries.length && assignments.length > 0) return assignments.join('\n')
+  if (script && assignments.length === entries.length && assignments.length > 0) return assignments.join('\n')
 
   const receiverName = freshIdentifier(`__gea_define_properties_receiver_${call.getStart(file)}`, file)
   // OrdinaryOwnPropertyKeys visits array-index strings numerically before
@@ -428,18 +428,31 @@ const pluralReplacement = (call: ts.CallExpression, file: ts.SourceFile): string
     `const ${receiverName} = ${receiverText};`,
     ...evaluatedEntries.map(({ entry, binding }) => `const ${binding} = ${entry.descriptorText};`),
     ...definitions,
-    ...thisFieldDeclarations(call, receiver, evaluatedEntries),
+    ...(script ? thisFieldDeclarations(call, receiver, evaluatedEntries) : []),
     '}'
   ].join('\n')
 }
 
+/**
+ * Only a JavaScript file needs the checker taught a member: TypeScript states
+ * its members, and an assignment or a bare `this.key;` naming one the type
+ * does not declare is a type error the original call never was
+ * (`Object.defineProperty(child, 'extra', ...)` on a `Child` with no `extra`).
+ * A TypeScript definition therefore stays a real definition.
+ */
 const candidatesIn = (file: ts.SourceFile): readonly DefinePropertyCandidate[] => {
+  const fileKind = scriptKindOf(file.fileName)
+  const script = fileKind === ts.ScriptKind.JS || fileKind === ts.ScriptKind.JSX
   const found: DefinePropertyCandidate[] = []
   const visit = (node: ts.Node): void => {
     if (ts.isExpressionStatement(node) && ts.isCallExpression(node.expression)) {
       const kind = definePropertyKindOf(node.expression)
       const replacement =
-        kind === 'single' ? singleReplacement(node.expression, file) : kind === 'plural' ? pluralReplacement(node.expression, file) : null
+        kind === 'single'
+          ? singleReplacement(node.expression, file, script)
+          : kind === 'plural'
+            ? pluralReplacement(node.expression, file, script)
+            : null
       if (replacement !== null) {
         found.push({ statement: node, replacement })
         return

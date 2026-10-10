@@ -29,10 +29,10 @@
 // `gea::BigInt` runtime type (registered as `BigIntConstructor@1`, with real
 // arithmetic), not a dynamic box -- and building one is out of this patch's scope.
 //
-// The two call shapes the mongodb/bson vendored sources hit nine times between
-// them: a bare `BigInt(x)` construction, and the static `BigInt.asIntN(64, x)`
-// used to normalize a 64-bit two's-complement value (`bson/src/extended_json.ts`,
-// `bson/src/long.ts`, `bson/src/utils/number_utils.ts`).
+// The two call shapes a database client's vendored sources hit nine times: a
+// bare `BigInt(x)` construction, and the static `BigInt.asIntN(64, x)` used to
+// normalize a 64-bit two's-complement value (its binary-document serializer's
+// extended-JSON, 64-bit-integer and number utilities).
 const encodeLowHigh = (low: number, high: number): bigint => {
   const lo = BigInt(low >>> 0)
   const hi = BigInt(high >>> 0)

@@ -1,6 +1,6 @@
 // `view.buffer` is typed `ArrayBufferLike` (`ArrayBuffer | SharedArrayBuffer`),
-// so `new Uint8Array(view.buffer.slice(a, b))` -- bson's
-// `webByteUtils.toLocalBufferType` -- constructs over a native SUM of the two
+// so `new Uint8Array(view.buffer.slice(a, b))` -- a binary-document
+// library's `toLocalBufferType` -- constructs over a native SUM of the two
 // block kinds. Either arm is ECMA-262 23.2.5.1's buffer overload over that
 // block: a view of the sliced copy, not a second copy of it. The result's
 // `.buffer.byteLength` is read off that same sum's arm natively.

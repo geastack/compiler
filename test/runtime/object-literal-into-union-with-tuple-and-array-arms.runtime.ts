@@ -1,5 +1,5 @@
 // An object literal handed to a union that also has array, tuple and Map
-// arms (mongodb's `Sort` and `IndexSpecification`) is the index-signature
+// arms (a database client's `Sort` and `IndexSpecification`) is the index-signature
 // arm: the literal is a plain object, never an array.
 
 type Direction = 1 | -1 | 'asc' | 'desc'

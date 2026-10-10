@@ -3,7 +3,7 @@
 //! expect: response:from-expando
 //! expect: message:true stack-less-cause:false
 
-// hono's default error handler: `err: Error | HTTPResponseError`, where
+// An HTTP framework's default error handler: `err: Error | HTTPResponseError`, where
 // `interface HTTPResponseError extends Error { getResponse: () => ... }`, and
 // `'getResponse' in err` picks the arm. Both arms are carried as the native
 // `Error`, so `in` asks the allocation: its own fields (a compiled subclass's

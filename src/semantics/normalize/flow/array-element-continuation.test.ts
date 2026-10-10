@@ -145,7 +145,7 @@ test('aliases, copies and private fields share one stored-value family', () => {
   )
 })
 
-/** Three's `Texture.mipmaps`, reduced: filled through a method, copied by `copy`, read by an unrelated function. */
+/** A class family's array field, reduced: filled through a method, copied by `copy`, read by an unrelated function. */
 const TEXTURE = `class Texture {
     mipmaps: object[] = [];
     addMipmap(mipmap: object) { this.mipmaps.push(mipmap) }
@@ -193,7 +193,7 @@ test('the protocol obligation of a field family is re-asked on every query', () 
   }
 })
 
-test('three spells the field in JavaScript: a constructor store, a JSDoc-typed copy and alias', () => {
+test('a JavaScript class spells the field as a constructor store, a JSDoc-typed copy and alias', () => {
   const source = (reader: string) => `class Texture {
       constructor() {
         /** @type {Array<Object>} */
@@ -222,7 +222,7 @@ test('three spells the field in JavaScript: a constructor store, a JSDoc-typed c
      */
     function read( texture, level ) { const mipmaps = texture.mipmaps; return mipmaps[ level ]; }`
   assert.deepEqual(stored(source(typed), { receiver: 'mipmaps', js: true }), ['mipmap'])
-  // `WebGLTextures.uploadTexture`'s spelling: no authority types `texture`,
+  // An untyped JavaScript helper's spelling: no authority types `texture`,
   // but its closed callers only ever pass a Texture, so the alias is the field.
   const untyped = 'function upload( texture, level ) { const local = texture.mipmaps; return local[ level ]; }'
   // (`level` is untyped too, so its index needs the caller's numeric authority.)
@@ -234,7 +234,7 @@ test('three spells the field in JavaScript: a constructor store, a JSDoc-typed c
   assert.equal(stored(source(`${typed} ${untyped} upload( globalThis.opaqueHook, 0 );`), indexed), null)
 })
 
-/** Three's `Texture.setValues`, in three's own JavaScript spelling. */
+/** A `setValues( values )` method that copies an options bag by key, in plain JavaScript. */
 const SET_VALUES = (calls: string) => `class Texture {
       constructor() {
         /** @type {Array<Object>} */
@@ -295,7 +295,7 @@ test('a keyed store whose proven key set omits the field leaves it alone, its in
   assert.ok(asked > first)
 })
 
-/** Three's `CompressedTexture`: the field is initialised from a constructor parameter, forwarded by a subclass's `super`. */
+/** A subclass whose field is initialised from a constructor parameter, forwarded by a subclass's `super`. */
 const COMPRESSED = `class Texture {
     mipmaps: object[] = [];
     copy(source: Texture) { this.mipmaps = source.mipmaps.slice(0); return this }
@@ -324,7 +324,7 @@ test('a field initialised from a constructor parameter holds its arguments over 
 })
 
 test('provenance decides what an untyped or loosely typed receiver may hold', () => {
-  // EventDispatcher's `listeners[ type ] = []`: the receiver is typed loosely,
+  // An event-listener table's `listeners[ type ] = []`: the receiver is typed loosely,
   // but the only value ever reaching it is a literal, which no family instance is.
   const registry = (table: string) =>
     `${TEXTURE} class Registry { table = ${table}; add(type: string) { const listeners: any = this.table; listeners[type] = [second] } }
@@ -396,7 +396,7 @@ test('index keys the checker cannot type need the caller numeric authority', () 
 })
 
 test('a native map slot continues the family through every read of that map', () => {
-  // Three's `WebGLRenderLists.get`: the array is stored by `set` and read back
+  // A per-key list cache's `get`: the array is stored by `set` and read back
   // by `get`, and the reuse arm pushes into whatever came back.
   const source = `const lists = new WeakMap<object, object[]>();
     function get(scene: object, depth: number) {
@@ -464,6 +464,31 @@ test('unknown or unseeded origins never become a partial stored-value set', () =
     'const items = null;'
   ])
     assert.equal(stored(`${prefix} ${origin} items[0];`), null, origin)
+})
+
+test('an ungrounded field cycle has no normal store and seeded opaque cycles keep their possible writer', () => {
+  for (const seed of ['this.second', 'this.second ?? globalThis.opaqueOwner', 'globalThis.opaqueOwner']) {
+    const source = `
+      const original = {};
+      const injected = {};
+      class Holder {
+        constructor() {
+          this.items = [original];
+          this.first = ${seed};
+          this.second = this.first;
+        }
+        store() { this.first.items = [injected]; }
+      }
+      const holder = new Holder();
+      holder.store();
+      holder.items[0];
+    `
+    const values = stored(source, { receiver: 'holder.items', js: true })
+    if (seed === 'this.second') {
+      assert.deepEqual(values, ['original'], 'both forward-read fields are undefined before store throws')
+      assert.throws(() => new Function(source)(), /Cannot set properties of undefined/)
+    } else assert.equal(values, null, seed)
+  }
 })
 
 test('intrinsic Array protocol integrity is re-asked on every query', () => {

@@ -1,6 +1,6 @@
 // ECMA-262 23.1.3.2 concat: each item is spread when it is an array
 // (IsConcatSpreadable) and appended whole otherwise. `(T | ConcatArray<T>)[]`
-// mixes the two in one pack; the mongodb driver appends an `$out` stage to an
+// mixes the two in one pack; a database client appends an `$out` stage to an
 // aggregation pipeline with `pipeline.concat({ $out: target })`.
 
 interface Doc {

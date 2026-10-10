@@ -1,14 +1,14 @@
 // A DOCUMENT DECORATED WITH A NON-ENUMERABLE SYMBOL-KEYED ARRAY, RECURSIVELY.
 //
-// mongodb's `decorateDecryptionResult(decrypted: Document & { [kDecoratedKeys]?:
+// A database client's `decorateDecryptionResult(decrypted: Document & { [kDecoratedKeys]?:
 // Array<string> }, original: Document, isTopLevelDecorateCall = true)`
-// (`utils.ts`) walks `Object.keys(decrypted)`. Where the ORIGINAL held an
-// encrypted Binary (`_bsontype === 'Binary'`, `sub_type === 6`) it defines a
+// walks `Object.keys(decrypted)`. Where the ORIGINAL held an
+// encrypted Binary (`_wiretype === 'Binary'`, `sub_type === 6`) it defines a
 // non-enumerable `kDecoratedKeys` array on `decrypted` (once) and pushes the
 // key; otherwise it recurses into `decrypted[k]` with the original's value.
 // A `Buffer` original is deserialized first; a non-object `decrypted` stops.
 
-const kDecoratedKeys = Symbol.for('@@mdb.decryptedKeys')
+const kDecoratedKeys = Symbol.for('@@client.decryptedKeys')
 
 interface Doc {
   [key: string]: any
@@ -21,7 +21,7 @@ function decorate(decrypted: Doc & { [kDecoratedKeys]?: Array<string> }, origina
   if (!decrypted || typeof decrypted !== 'object') return
   for (const k of Object.keys(decrypted)) {
     const originalValue = original[k]
-    if (originalValue && originalValue._bsontype === 'Binary' && originalValue.sub_type === 6) {
+    if (originalValue && originalValue._wiretype === 'Binary' && originalValue.sub_type === 6) {
       if (!decrypted[kDecoratedKeys]) {
         Object.defineProperty(decrypted, kDecoratedKeys, {
           value: [],
@@ -39,8 +39,8 @@ function decorate(decrypted: Doc & { [kDecoratedKeys]?: Array<string> }, origina
 
 const decrypted: Doc = { ssn: '123', nested: { card: '4111', plain: 1 }, n: 2 }
 const original: Doc = {
-  ssn: { _bsontype: 'Binary', sub_type: 6 },
-  nested: { card: { _bsontype: 'Binary', sub_type: 6 }, plain: 1 },
+  ssn: { _wiretype: 'Binary', sub_type: 6 },
+  nested: { card: { _wiretype: 'Binary', sub_type: 6 }, plain: 1 },
   n: 2
 }
 decorate(decrypted, original)

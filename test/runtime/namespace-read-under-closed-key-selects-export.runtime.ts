@@ -2,8 +2,8 @@
 //! expect: srv:x txt:y mx:z
 //! expect: txt:again
 
-// `crypto[method](...)` (mongodb-client-encryption's crypto_callbacks.ts) and
-// `dns.promises[api](...)` (mongodb's connection_string.ts): a module
+// `crypto[method](...)` (an encryption plugin's crypto callbacks) and
+// `dns.promises[api](...)` (a database client's connection-string parser): a module
 // namespace indexed by a key the checker closed to a union of string
 // literals. Each literal names an export, so the read selects that export's
 // binding by the run-time key -- the namespace object is never materialized.

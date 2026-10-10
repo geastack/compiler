@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { resolve } from 'node:path'
+import { compile } from '../compiler.js'
 import type { FunctionId, OperationId, PhysicalBodyId, SemanticResultId, StructuralTypeId } from '../identity/ids.js'
 import type { Representation } from '../representation/model.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
@@ -67,6 +69,73 @@ test('normal-result facts propagate through nested guards without assuming an un
   assert.equal(facts.get(inner.results[0]!.id), false)
   assert.equal(facts.has(unknown.results[0]!.id), false)
   assert.equal(facts.get(truth.results[0]!.id), true)
+})
+
+const objectNegation = (ordinal = 0, proof = true): SemanticOperation => ({
+  ...base('object-negation' as SemanticResultId),
+  family: 'computation',
+  form: 'unary',
+  operator: '!',
+  ...(proof ? { operandObjectTruthy: true as const } : {}),
+  operands: [{ source: { kind: 'parameter', ordinal }, role: 'operand', ordinal: 0, type, evaluation: { kind: 'runtime' } }]
+})
+
+test('a source object negation prunes only its exact entered operand and retains evaluation', () => {
+  const builder = createIrBodyBuilder(physical, owner, null)
+  const entry = builder.openBlock(),
+    taken = builder.openBlock(),
+    skipped = builder.openBlock()
+  const record: Representation = { kind: 'record', shapeId: type, fields: [], accessors: [], ownership: 'shared-refcount' }
+  const value = builder.parameter(entry, unrelated, 0, record)
+  const negated = builder.compute(entry, 'object-negation' as SemanticResultId, 'unary', '!', [{ value, representation: record }], boolean)
+  const condition = builder.test(entry, 'object-negation' as SemanticResultId, { value: negated, representation: boolean }, 'to-boolean')
+  builder.branch(entry, 'object-negation' as SemanticResultId, { value: condition, representation: boolean }, taken, skipped)
+  builder.return(taken, null, null)
+  builder.return(skipped, null, null)
+  const body = builder.seal(),
+    bodies = new Map([[physical, body]])
+  const result = pruneProvenBranches(bodies, graphOf(objectNegation())).bodies.get(physical)!
+  assert.equal(result.blocks.has(taken), false)
+  assert.deepEqual(result.blocks.get(entry)!.operations, body.blocks.get(entry)!.operations)
+  assert.equal(result.blocks.get(entry)!.terminator.kind, 'jump')
+  for (const semantic of [objectNegation(1), objectNegation(0, false), { ...objectNegation(), operator: '~' }])
+    assert.equal(pruneProvenBranches(bodies, graphOf(semantic)).bodies, bodies)
+})
+
+test('closed object-only constructor options do not demand a conversion from an unreachable fallback', () => {
+  const result = compile({
+    rootFileNames: [resolve('test/runtime/arithmetic-over-two-dynamic-operands.runtime.js')],
+    projectFileName: resolve('test/runtime/tsconfig.json'),
+    closedScriptScope: true,
+    includeIr: true
+  })
+  assert.equal(result.diagnostics.clean, true, JSON.stringify(result.diagnostics.diagnostics))
+  assert.notEqual(result.certificate, null, JSON.stringify(result.refusals))
+  assert.notEqual(result.source, null, JSON.stringify(result.emissionRefusals))
+  const proof = [...result.graph.operations.values()].find(
+    (operation) => operation.family === 'computation' && operation.operandObjectTruthy === true
+  )
+  assert.ok(proof)
+  assert.ok(proof.results[0])
+  assert.equal(provenResultTruthiness(result.graph).get(proof.results[0].id), false)
+  // The pruning pass retains condition evaluation. Once the branch is gone,
+  // ordinary dead-value elimination may remove this pure negation itself.
+  assert.ok(
+    !(result.irBodies ?? []).some((body) =>
+      [...body.blocks.values()].some((block) =>
+        block.operations.some(
+          (operation) =>
+            operation.kind === 'convert' &&
+            operation.source.representation.kind === 'record' &&
+            operation.source.representation.fields.length === 0 &&
+            operation.result.representation.kind === 'record' &&
+            operation.result.representation.ownership === 'owned' &&
+            operation.result.representation.fields.length > 0
+        )
+      )
+    )
+  )
+  assert.ok(!result.refusals.some((row) => row.key.includes('shared-refcount,;)->record(')))
 })
 
 const guardedBody = (
@@ -141,6 +210,44 @@ test('missing proof and generator control flow keep the original body', () => {
   assert.equal(pruneProvenBranches(generatorBodies, graphOf(absenceOperation)).bodies, generatorBodies)
 })
 
+test('strict comparisons retain a native reference undefined lane while disjoint primitive branches still prune', () => {
+  const reference: Representation = {
+    kind: 'class-ref',
+    declaration: 'strict-receiver' as never,
+    shapeId: 'strict-receiver-shape' as never,
+    ownership: 'shared-refcount',
+    ancestors: []
+  }
+  for (const representation of [reference, number]) {
+    const builder = createIrBodyBuilder(physical, owner, null)
+    const entry = builder.openBlock()
+    const taken = builder.openBlock()
+    const skipped = builder.openBlock()
+    const receiver = builder.receiver(entry, unrelated, representation)
+    const missing: Representation = { kind: 'undefined' }
+    const undefinedValue = builder.constant(entry, absent, 'undefined', 'undefined', missing)
+    const condition = builder.compute(
+      entry,
+      unrelated,
+      'equality',
+      '===',
+      [
+        { value: receiver, representation },
+        { value: undefinedValue, representation: missing }
+      ],
+      boolean
+    )
+    builder.branch(entry, unrelated, { value: condition, representation: boolean }, taken, skipped)
+    builder.return(taken, null, null)
+    builder.return(skipped, null, null)
+    const body = builder.seal()
+    const pruned = pruneProvenBranches(new Map([[physical, body]]), graphOf()).bodies.get(physical)!
+    assert.equal(pruned.blocks.get(entry)!.terminator.kind, representation === reference ? 'branch' : 'jump')
+    assert.equal(pruned.blocks.has(taken), representation === reference)
+    assert.deepEqual(verifyIrBody(pruned), [])
+  }
+})
+
 test('conversion refusals disappear only with the block that would execute them', () => {
   const { body, entry, taken } = guardedBody()
   const drift = (block: typeof entry): SlotDrift => ({
@@ -175,6 +282,31 @@ test('a known undefined read keeps a native nullish check when receiver presence
     assert.deepEqual(operations.slice(0, 2), body.blocks.get(entry)!.operations.slice(0, 2), 'base and key still evaluate')
     assert.deepEqual(verifyIrBody(pruned), [])
   }
+})
+
+test('a read on a receiver that can only be nullish throws there, and nothing after it in the block survives', () => {
+  for (const kind of ['undefined', 'null'] as const) {
+    const receiver: Representation = { kind }
+    const { body, entry } = guardedBody('to-boolean', receiver, dynamic)
+    const pruned: IrBody = pruneProvenBranches(new Map([[physical, body]]), graphOf()).bodies.get(physical)!
+    const block = pruned.blocks.get(entry)!
+    const last = block.operations.at(-1)
+    assert.equal(last?.kind === 'compute' && last.form, 'require-object-coercible')
+    assert.equal(
+      block.operations.some((operation) => operation.kind === 'get' || operation.kind === 'test'),
+      false
+    )
+    assert.equal(block.terminator.kind, 'throw')
+    assert.deepEqual(block.operations.slice(0, 2), body.blocks.get(entry)!.operations.slice(0, 2), 'base and key still evaluate')
+    assert.equal(pruned.blocks.size, 1, 'every successor is unreachable')
+    assert.deepEqual(verifyIrBody(pruned), [])
+  }
+  const { body } = guardedBody('to-boolean', { kind: 'optional', payload: number, absence: 'undefined' }, dynamic)
+  assert.equal(
+    pruneProvenBranches(new Map([[physical, body]]), graphOf()).bodies.get(physical),
+    body,
+    'a maybe-present receiver keeps its read'
+  )
 })
 
 const undefinedType = 'proven-undefined-type' as StructuralTypeId

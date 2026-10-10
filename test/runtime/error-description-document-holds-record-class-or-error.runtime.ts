@@ -1,6 +1,6 @@
-// mongodb's `MongoServerError(message: ErrorDescription)` where
+// A database client's `ServerError(message: ErrorDescription)` where
 // `interface ErrorDescription extends Document` adds only OPTIONAL keys.
-// `MongoBulkWriteError` hands it `{ message; code; writeErrors? } |
+// `BulkWriteError` hands it `{ message; code; writeErrors? } |
 // WriteConcernError | AnyError`: a plain record, a class instance or an Error.
 // The constructor keeps the very object (`this.errorResponse = message`) and
 // copies its enumerable keys onto itself with `for (const name in message)`.
@@ -8,26 +8,26 @@
 // So the slot is the open document itself, holding whichever object it was
 // given by identity: a write through the kept reference is seen by the
 // caller, and the typed reads of the named keys are checked reads.
-interface BsonDocument {
+interface WireDocument {
   [key: string]: any
 }
 
-interface ErrorDescription extends BsonDocument {
+interface ErrorDescription extends WireDocument {
   message?: string
   errmsg?: string
   errorLabels?: string[]
-  errInfo?: BsonDocument
+  errInfo?: WireDocument
 }
 
 class WriteConcernError {
   code = 64
   errmsg = 'waiting for replication timed out'
-  errInfo: BsonDocument = { wtimeout: true }
+  errInfo: WireDocument = { wtimeout: true }
 }
 
 class ServerError {
   errorResponse: ErrorDescription
-  copied: BsonDocument = {}
+  copied: WireDocument = {}
   constructor(message: ErrorDescription) {
     this.errorResponse = message
     for (const name in message) {
@@ -48,7 +48,7 @@ const plain = { message: 'bulk failed', code: 65, writeErrors: [1, 2] }
 const fromPlain = raise(plain)
 console.log(fromPlain.describe(), fromPlain.errorResponse === plain)
 fromPlain.errorResponse.errmsg = 'rewritten'
-console.log((plain as BsonDocument).errmsg)
+console.log((plain as WireDocument).errmsg)
 
 const concern = new WriteConcernError()
 const fromConcern = raise(concern)

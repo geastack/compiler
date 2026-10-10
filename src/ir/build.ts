@@ -53,6 +53,32 @@ import type { ConversionCensus } from '../conversion/nodes.js'
  * caller responsible for remembering to verify, which is exactly the kind of
  * optional safety step this architecture rejects.
  */
+
+/**
+ * Whether a receiver carrier can hold an ordinary object allocation -- the only
+ * receiver an `Object.prototype` absence fact is about. The source producer
+ * states that fact from the key alone (`ordinaryObjectDataWriteIsAbsent`), so a
+ * Map, Promise, Proxy, array or host receiver arrives carrying it too; nothing
+ * can consume it there (`callable-class-flow.ts` requires an ordinary heap), and
+ * keeping it would only demand a certify receipt no provenance can supply.
+ */
+const mayCarryOrdinaryObject = (representation: Representation): boolean => {
+  switch (representation.kind) {
+    case 'record':
+    case 'record-with-index':
+    case 'native-record-ref':
+    case 'dictionary':
+      return true
+    case 'optional':
+      return mayCarryOrdinaryObject(representation.payload)
+    case 'borrowed-ref':
+      return mayCarryOrdinaryObject(representation.referent)
+    case 'tagged-union':
+      return representation.arms.some((arm) => mayCarryOrdinaryObject(arm.value))
+    default:
+      return false
+  }
+}
 export interface IrBodyBuilder {
   readonly openBlock: () => IrBlockId
 
@@ -72,7 +98,9 @@ export interface IrBodyBuilder {
     /** See `GetOperation.typedComputedRead`. */
     typedComputedRead?: TypedComputedReadRecipe,
     /** See `GetOperation.provenKeyTexts`. */
-    provenKeyTexts?: readonly string[]
+    provenKeyTexts?: readonly string[],
+    /** See GetOperation.ordinaryObjectPrototypeKeyAbsent. */
+    ordinaryObjectPrototypeKeyAbsent?: true
   ) => IrValueId
   readonly set: (
     block: IrBlockId,
@@ -85,7 +113,10 @@ export interface IrBodyBuilder {
     /** See `SetOperation.typedComputedWrite`. */
     typedComputedWrite?: TypedComputedWriteRecipe,
     /** See `SetOperation.provenKeyTexts`. */
-    provenKeyTexts?: readonly string[]
+    provenKeyTexts?: readonly string[],
+    /** See SetOperation.ordinaryFunctionDataWrite. */
+    ordinaryFunctionDataWrite?: true,
+    ordinaryObjectDataWriteAbsent?: true
   ) => IrValueId | null
   readonly delete: (
     block: IrBlockId,
@@ -100,7 +131,8 @@ export interface IrBodyBuilder {
     lineage: SemanticResultId,
     receiver: IrOperand,
     key: IrOperand,
-    representation: Representation
+    representation: Representation,
+    ordinaryObjectPrototypeKeyAbsent?: true
   ) => IrValueId
   readonly ownPropertyKeys: (block: IrBlockId, lineage: SemanticResultId, receiver: IrOperand, representation: Representation) => IrValueId
   readonly defineOwnProperty: (
@@ -147,7 +179,11 @@ export interface IrBodyBuilder {
     intrinsicReflection?: CallOperation['intrinsicReflection'],
     hostTemplate?: CallOperation['hostTemplate'],
     builtinShadowGuard?: CallOperation['builtinShadowGuard'],
-    thisArgument?: IrOperand
+    thisArgument?: IrOperand,
+    intrinsicReturnIdentity?: CallOperation['intrinsicReturnIdentity'],
+    intrinsicIntegrity?: CallOperation['intrinsicIntegrity'],
+    intrinsicDataDefinition?: true,
+    namedDataDefinitionKey?: string
   ) => IrValueId | null
   readonly commonJsRequire: (
     block: IrBlockId,
@@ -210,7 +246,7 @@ export interface IrBodyBuilder {
   readonly bindingWrite: (block: IrBlockId, lineage: SemanticResultId, declaration: DeclarationId, value: IrOperand) => void
   readonly bindingRenew: (block: IrBlockId, lineage: SemanticResultId, declaration: DeclarationId) => void
   readonly parameter: (block: IrBlockId, lineage: SemanticResultId, ordinal: number, representation: Representation) => IrValueId
-  readonly receiver: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
+  readonly receiver: (block: IrBlockId, lineage: SemanticResultId, representation: Representation, origin?: 'lexical') => IrValueId
   readonly globalThis: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
   readonly unresolvableReference: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
   /**
@@ -287,7 +323,12 @@ export interface IrBodyBuilder {
     defaultTarget: IrBlockId
   ) => void
 
-  readonly allocateOrdinaryObject: (block: IrBlockId, lineage: SemanticResultId, representation: Representation) => IrValueId
+  readonly allocateOrdinaryObject: (
+    block: IrBlockId,
+    lineage: SemanticResultId,
+    representation: Representation,
+    ordinaryObjectPrototype?: true
+  ) => IrValueId
   readonly allocateArrayObject: (
     block: IrBlockId,
     lineage: SemanticResultId,
@@ -299,7 +340,8 @@ export interface IrBodyBuilder {
     lineage: SemanticResultId,
     functionId: FunctionId,
     captures: readonly IrOperand[],
-    representation: Representation
+    representation: Representation,
+    callableOwnPrototype?: boolean
   ) => IrValueId
   readonly bindCallable: (
     block: IrBlockId,
@@ -311,7 +353,6 @@ export interface IrBodyBuilder {
     receiver: IrOperand | null,
     bound: readonly IrOperand[],
     representation: Representation,
-    detached?: boolean | 'holder',
     unboxedMethod?: UnboxedMethodAssumption,
     shadowGuarded?: true
   ) => IrValueId
@@ -343,7 +384,8 @@ export interface IrBodyBuilder {
     block: IrBlockId,
     lineage: SemanticResultId,
     fields: readonly IrRecordFieldInit[],
-    representation: Representation
+    representation: Representation,
+    ordinaryObjectPrototype?: true
   ) => IrValueId
   readonly allocateTemplateObject: (
     block: IrBlockId,
@@ -387,7 +429,9 @@ export interface IrBodyBuilder {
     conversionUse: ConversionUseId,
     source: IrOperand,
     representation: Representation,
-    rebuild?: 'unshared-array'
+    rebuild?: 'unshared-array',
+    nativeCallableSource?: import('./native-callable-argument.js').NativeCallableSourceProof,
+    nativeObjectSample?: import('./native-object-sample.js').NativeObjectSampleReceipt
   ) => IrValueId
   /** See `MergeLiveArmRebuildOperation` -- the control-flow-proven live-arm sibling of representation-global `convert`. */
   readonly mergeLiveArmRebuild: (
@@ -398,6 +442,12 @@ export interface IrBodyBuilder {
     liveArms: readonly number[],
     sourceAbsenceLive: boolean,
     conversions: ConversionCensus
+  ) => IrValueId
+  readonly deadLogicalMergeValue: (
+    block: IrBlockId,
+    lineage: SemanticResultId,
+    source: IrOperand,
+    representation: Representation
   ) => IrValueId
 
   readonly getIterator: (
@@ -427,6 +477,10 @@ export interface IrBodyBuilder {
   ) => IrValueId | null
   /** Current creation order, used to seal source-level cleanup regions without re-deriving block ordinals. */
   readonly blockOrder: () => readonly IrBlockId[]
+  /** Read-only finalized instructions already appended to this block. A
+   * contextual entry proof may cite them without maintaining another SSA
+   * inventory alongside the builder. */
+  readonly operationsOf: (block: IrBlockId) => readonly IrNonTerminatorOperation[]
 
   /**
    * A block's current successors, so a caller sealing a SINGLE-ENTRY cleanup
@@ -555,7 +609,8 @@ export const createIrBodyBuilder = (
     callableOwnPrototype,
     normalResult,
     typedComputedRead,
-    provenKeyTexts
+    provenKeyTexts,
+    ordinaryObjectPrototypeKeyAbsent
   ) => {
     const result = mintResult(representation)
     append(block, {
@@ -569,12 +624,27 @@ export const createIrBodyBuilder = (
       ...(callableOwnPrototype === undefined ? {} : { callableOwnPrototype }),
       ...(normalResult === undefined ? {} : { normalResult }),
       ...(typedComputedRead === undefined ? {} : { typedComputedRead }),
-      ...(provenKeyTexts === undefined ? {} : { provenKeyTexts })
+      ...(provenKeyTexts === undefined ? {} : { provenKeyTexts }),
+      ...(ordinaryObjectPrototypeKeyAbsent === undefined || !mayCarryOrdinaryObject(receiver.representation)
+        ? {}
+        : { ordinaryObjectPrototypeKeyAbsent })
     })
     return result.id
   }
 
-  const set: IrBodyBuilder['set'] = (block, lineage, receiver, key, value, strict, representation, typedComputedWrite, provenKeyTexts) => {
+  const set: IrBodyBuilder['set'] = (
+    block,
+    lineage,
+    receiver,
+    key,
+    value,
+    strict,
+    representation,
+    typedComputedWrite,
+    provenKeyTexts,
+    ordinaryFunctionDataWrite,
+    ordinaryObjectDataWriteAbsent
+  ) => {
     const result = mintOptionalResult(representation)
     append(block, {
       kind: 'set',
@@ -585,7 +655,11 @@ export const createIrBodyBuilder = (
       strict,
       result,
       ...(typedComputedWrite === undefined ? {} : { typedComputedWrite }),
-      ...(provenKeyTexts === undefined ? {} : { provenKeyTexts })
+      ...(provenKeyTexts === undefined ? {} : { provenKeyTexts }),
+      ...(ordinaryFunctionDataWrite === undefined ? {} : { ordinaryFunctionDataWrite }),
+      ...(ordinaryObjectDataWriteAbsent === undefined || !mayCarryOrdinaryObject(receiver.representation)
+        ? {}
+        : { ordinaryObjectDataWriteAbsent })
     })
     return result?.id ?? null
   }
@@ -596,9 +670,18 @@ export const createIrBodyBuilder = (
     return result?.id ?? null
   }
 
-  const hasProperty: IrBodyBuilder['hasProperty'] = (block, lineage, receiver, key, representation) => {
+  const hasProperty: IrBodyBuilder['hasProperty'] = (block, lineage, receiver, key, representation, ordinaryObjectPrototypeKeyAbsent) => {
     const result = mintResult(representation)
-    append(block, { kind: 'has-property', lineage, receiver, key, result })
+    append(block, {
+      kind: 'has-property',
+      lineage,
+      receiver,
+      key,
+      result,
+      ...(ordinaryObjectPrototypeKeyAbsent === true && mayCarryOrdinaryObject(receiver.representation)
+        ? { ordinaryObjectPrototypeKeyAbsent }
+        : {})
+    })
     return result.id
   }
 
@@ -662,7 +745,11 @@ export const createIrBodyBuilder = (
     intrinsicReflection,
     hostTemplate,
     builtinShadowGuard,
-    thisArgument
+    thisArgument,
+    intrinsicReturnIdentity,
+    intrinsicIntegrity,
+    intrinsicDataDefinition,
+    namedDataDefinitionKey
   ) => {
     const result = mintOptionalResult(representation)
     append(block, {
@@ -681,6 +768,10 @@ export const createIrBodyBuilder = (
       ...(intrinsicOwnKeys ? { intrinsicOwnKeys } : {}),
       ...(intrinsicCarrierPredicate ? { intrinsicCarrierPredicate } : {}),
       ...(intrinsicReflection ? { intrinsicReflection } : {}),
+      ...(intrinsicReturnIdentity ? { intrinsicReturnIdentity } : {}),
+      ...(intrinsicIntegrity ? { intrinsicIntegrity } : {}),
+      ...(intrinsicDataDefinition ? { intrinsicDataDefinition } : {}),
+      ...(intrinsicDataDefinition && namedDataDefinitionKey !== undefined ? { namedDataDefinitionKey } : {}),
       ...(hostTemplate ? { hostTemplate } : {}),
       ...(fixedDataDefinition ? { fixedDataDefinition } : {}),
       ...(builtinShadowGuard ? { builtinShadowGuard } : {})
@@ -750,9 +841,9 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
-  const receiver: IrBodyBuilder['receiver'] = (block, lineage, representation) => {
+  const receiver: IrBodyBuilder['receiver'] = (block, lineage, representation, origin) => {
     const result = mintResult(representation)
-    append(block, { kind: 'receiver', lineage, result })
+    append(block, { kind: 'receiver', lineage, result, ...(origin ? { origin } : {}) })
     return result.id
   }
 
@@ -819,9 +910,14 @@ export const createIrBodyBuilder = (
     terminate(block, { kind: 'switch', lineage, discriminant, cases, defaultTarget })
   }
 
-  const allocateOrdinaryObject: IrBodyBuilder['allocateOrdinaryObject'] = (block, lineage, representation) => {
+  const allocateOrdinaryObject: IrBodyBuilder['allocateOrdinaryObject'] = (block, lineage, representation, ordinaryObjectPrototype) => {
     const result = mintResult(representation)
-    append(block, { kind: 'allocate-ordinary-object', lineage, result })
+    append(block, {
+      kind: 'allocate-ordinary-object',
+      lineage,
+      result,
+      ...(ordinaryObjectPrototype === true ? { ordinaryObjectPrototype } : {})
+    })
     return result.id
   }
 
@@ -831,9 +927,23 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
-  const allocateCallable: IrBodyBuilder['allocateCallable'] = (block, lineage, functionId, captures, representation) => {
+  const allocateCallable: IrBodyBuilder['allocateCallable'] = (
+    block,
+    lineage,
+    functionId,
+    captures,
+    representation,
+    callableOwnPrototype
+  ) => {
     const result = mintResult(representation)
-    append(block, { kind: 'allocate-callable', lineage, functionId, captures, result })
+    append(block, {
+      kind: 'allocate-callable',
+      lineage,
+      functionId,
+      captures,
+      result,
+      ...(callableOwnPrototype === undefined ? {} : { callableOwnPrototype })
+    })
     return result.id
   }
 
@@ -847,7 +957,6 @@ export const createIrBodyBuilder = (
     receiver,
     bound,
     representation,
-    detached = false,
     unboxedMethod,
     shadowGuarded
   ) => {
@@ -861,7 +970,6 @@ export const createIrBodyBuilder = (
       thisArgument,
       receiver,
       bound,
-      detached,
       ...(unboxedMethod === undefined ? {} : { unboxedMethod }),
       ...(shadowGuarded === undefined ? {} : { builtinShadowGuard: 'bind' as const }),
       result
@@ -897,9 +1005,15 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
-  const allocateRecord: IrBodyBuilder['allocateRecord'] = (block, lineage, fields, representation) => {
+  const allocateRecord: IrBodyBuilder['allocateRecord'] = (block, lineage, fields, representation, ordinaryObjectPrototype) => {
     const result = mintResult(representation)
-    append(block, { kind: 'allocate-record', lineage, fields, result })
+    append(block, {
+      kind: 'allocate-record',
+      lineage,
+      fields,
+      result,
+      ...(ordinaryObjectPrototype === true ? { ordinaryObjectPrototype } : {})
+    })
     return result.id
   }
 
@@ -935,9 +1049,27 @@ export const createIrBodyBuilder = (
     return result.id
   }
 
-  const convert: IrBodyBuilder['convert'] = (block, lineage, conversionUse, source, representation, rebuild) => {
+  const convert: IrBodyBuilder['convert'] = (
+    block,
+    lineage,
+    conversionUse,
+    source,
+    representation,
+    rebuild,
+    nativeCallableSource,
+    nativeObjectSample
+  ) => {
     const result = mintResult(representation)
-    append(block, { kind: 'convert', lineage, conversionUse, source, result, ...(rebuild ? { rebuild } : {}) })
+    append(block, {
+      kind: 'convert',
+      lineage,
+      conversionUse,
+      source,
+      result,
+      ...(rebuild ? { rebuild } : {}),
+      ...(nativeCallableSource ? { nativeCallableSource } : {}),
+      ...(nativeObjectSample ? { nativeObjectSample } : {})
+    })
     return result.id
   }
 
@@ -961,6 +1093,12 @@ export const createIrBodyBuilder = (
       sourceAbsenceLive,
       ...(nativeTransport ? { nativeTransport } : {})
     })
+    return result.id
+  }
+
+  const deadLogicalMergeValue: IrBodyBuilder['deadLogicalMergeValue'] = (block, lineage, source, representation) => {
+    const result = mintResult(representation)
+    append(block, { kind: 'dead-logical-merge-value', lineage, source, result })
     return result.id
   }
 
@@ -1092,11 +1230,13 @@ export const createIrBodyBuilder = (
     allocateRegExp,
     convert,
     mergeLiveArmRebuild,
+    deadLogicalMergeValue,
     getIterator,
     iteratorNext,
     iteratorDone,
     iteratorClose,
     blockOrder: () => [...order],
+    operationsOf: (block) => [...(blocks.get(block)?.operations ?? [])],
     successorsOfBlock,
     seal
   }

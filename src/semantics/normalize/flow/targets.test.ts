@@ -4,7 +4,49 @@ import { dirname, resolve } from 'node:path'
 import ts from 'typescript'
 import { wholeProgram } from '../reachability.js'
 import { indexValueFlow } from './value-flow.js'
-import { attachStatedModuleSet, exportIsUnimported } from './targets.js'
+import { attachStatedModuleSet, exportIsUnimported, isTypePositionReference } from './targets.js'
+
+test('a type query names no runtime use, while a typeof expression still reads its operand', () => {
+  const file = ts.createSourceFile(
+    'type-queries.ts',
+    'type A = typeof owner; type B = typeof ns.owner; void typeof owner;',
+    ts.ScriptTarget.ES2022,
+    true
+  )
+  const references: ts.Identifier[] = []
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && (node.text === 'owner' || node.text === 'ns')) references.push(node)
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  assert.deepEqual(references.map(isTypePositionReference), [true, true, true, false])
+})
+
+test('erased assignment wrappers retain the actual named storage in the shared write inventory', () => {
+  const entry = resolve('test/fixtures/erased-write-targets.ts')
+  const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022, types: [], noLib: true }
+  const host = ts.createCompilerHost(options)
+  host.getSourceFile = (name, version) =>
+    resolve(name) === entry
+      ? ts.createSourceFile(
+          name,
+          'let owner: any; (owner as any) = 1; (<any>owner) = 2; (owner satisfies any) = 3; (owner!) = 4; ((owner)) = 5;',
+          version,
+          true
+        )
+      : undefined
+  const program = ts.createProgram([entry], options, host)
+  const file = program.getSourceFile(entry)!
+  const checker = program.getTypeChecker()
+  const declaration = (file.statements[0] as ts.VariableStatement).declarationList.declarations[0]!
+  const flow = indexValueFlow(checker, [file], wholeProgram)
+  const writes = flow.allWrites.filter((write) => write.edge === 'identifier-assignment')
+  assert.equal(writes.length, 5)
+  for (const write of writes) {
+    assert.equal(write.target.declaration, declaration)
+    assert.ok(write.naming && ts.isIdentifier(write.naming) && write.naming.text === 'owner')
+  }
+})
 
 const libraryPath = resolve('test/fixtures/export-imports-library.ts')
 const entryPath = resolve('test/fixtures/export-imports-entry.ts')

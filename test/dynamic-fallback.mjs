@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -24,7 +25,17 @@ test('negative-array source retains Proxy behavior and target identity in the C+
   const binary = resolve(root, `measurements/dynamic-fallback${executableSuffix}`)
   execFileSync(
     'clang++',
-    ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
+    [
+      '-std=c++20',
+      ...nativeOptimization('correctness'),
+      '-fsanitize=address,undefined',
+      `-I${resolve(root, 'src/targets/cpp/runtime')}`,
+      '-x',
+      'c++',
+      '-',
+      '-o',
+      binary
+    ],
     {
       input: `${result.source}\nint main() { try { __gea_top_level(); } catch (const gea::Value& error) { std::fprintf(stderr, "%s", gea::host::runtimeErrorString(error).c_str()); return 1; } }\n`,
       stdio: ['pipe', 'pipe', 'inherit']
@@ -44,7 +55,17 @@ test('prototype reassignment and prototype-method definition on a plain JS const
   const binary = resolve(root, `measurements/dynamic-fallback-prototype${executableSuffix}`)
   execFileSync(
     'clang++',
-    ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
+    [
+      '-std=c++20',
+      ...nativeOptimization('correctness'),
+      '-fsanitize=address,undefined',
+      `-I${resolve(root, 'src/targets/cpp/runtime')}`,
+      '-x',
+      'c++',
+      '-',
+      '-o',
+      binary
+    ],
     {
       input: `${result.source}\nint main() { try { __gea_top_level(); } catch (const gea::Value& error) { std::fprintf(stderr, "%s", gea::host::runtimeErrorString(error).c_str()); return 1; } }\n`,
       stdio: ['pipe', 'pipe', 'inherit']
@@ -113,7 +134,7 @@ for (const [name, source] of cases) {
       'clang++',
       [
         '-std=c++20',
-        '-O0',
+        ...nativeOptimization('correctness'),
         '-fsanitize=address,undefined',
         `-I${resolve(root, 'src/targets/cpp/runtime')}`,
         '-x',
@@ -151,7 +172,7 @@ test('C++ proxy runtime preserves invariants, live handlers, receivers and revoc
     'clang++',
     [
       '-std=c++20',
-      '-O0',
+      ...nativeOptimization('correctness'),
       '-fsanitize=address,undefined',
       `-I${resolve(root, 'src/targets/cpp/runtime')}`,
       resolve(root, 'test/runtime/dynamic-proxy-runtime.cpp'),
@@ -184,7 +205,18 @@ test('CLI ships the fallback runtime and links both C++ layouts', () => {
     const binary = resolve(root, `measurements/dynamic-fallback-cli${executableSuffix}`)
     execFileSync(
       'clang++',
-      ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${resolve(root, 'measurements')}`, ...files, '-x', 'c++', '-', '-o', binary],
+      [
+        '-std=c++20',
+        ...nativeOptimization('correctness'),
+        '-fsanitize=address,undefined',
+        `-I${resolve(root, 'measurements')}`,
+        ...files,
+        '-x',
+        'c++',
+        '-',
+        '-o',
+        binary
+      ],
       {
         input: 'extern void __gea_top_level(); int main() { __gea_top_level(); }\n',
         stdio: ['pipe', 'pipe', 'inherit']

@@ -7,8 +7,8 @@
 // arm -- a stored position -- cannot read them differently.
 //
 // It did. `T | undefined` collapsed to `optional(T, undefined)` while
-// `T | void` became `tagged-union(undefined | T)`, and hono's
-// `defineWebSocketHelper` met both at once: the handler slot is
+// `T | void` became `tagged-union(undefined | T)`, and an HTTP
+// framework's websocket-helper factory met both at once: the handler slot is
 // `Response | void | Promise<Response | void>`, whose promise arm derived
 // `promise(tagged-union(undefined | class-ref(Response)))`, while the async
 // arrow the program passes returns `Promise<Response | undefined>` and

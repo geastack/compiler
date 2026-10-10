@@ -91,6 +91,31 @@ test('prototype reads preserve subclass-only methods and absence without weakeni
   assert.equal(classPrototypeMethodValueArmsOf(family, base, 'read'), null, 'a getter must not be mistaken for a method')
 })
 
+test('native method selection excludes proven impossible allocations and still requires every live override', () => {
+  const family = new Map(classes)
+  family.set(base, { ...layout(base, baseMethod), uninstantiable: true, methods: [{ key: 'read', callable: null }] })
+  assert.deepEqual(
+    classMethodValueArmsOf(family, base, 'read')?.map((arm) => [arm.allocation, arm.method.callable]),
+    [[derived, derivedMethod]]
+  )
+  family.set(derived, { ...family.get(derived)!, methods: [] })
+  assert.equal(classMethodValueArmsOf(family, base, 'read'), null, 'an instantiable subclass with a missing implementation still refuses')
+  const { uninstantiable, ...possibleBase } = family.get(base)!
+  family.set(base, possibleBase)
+  assert.equal(classMethodValueArmsOf(family, base, 'read'), null, 'bodylessness alone does not prove allocation impossibility')
+})
+
+test('an exact allocation-domain exclusion removes only the absent allocation from method selection', () => {
+  const family = new Map(classes)
+  family.set(base, { ...layout(base, baseMethod), allocationAbsent: true, methods: [{ key: 'read', callable: null }] })
+  assert.deepEqual(
+    classMethodValueArmsOf(family, base, 'read')?.map((arm) => arm.allocation),
+    [derived]
+  )
+  family.set(derived, { ...family.get(derived)!, methods: [] })
+  assert.equal(classMethodValueArmsOf(family, base, 'read'), null)
+})
+
 test('virtual dispatch publishes native transport despite different implementation receivers', () => {
   const result = verdict()
   assert.equal(result.refused.length, 0)

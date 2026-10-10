@@ -2,6 +2,16 @@ import ts from 'typescript'
 import { staticRequireOutcomeOf } from '../commonjs-require.js'
 import { isNullBlindParameter } from '../null-blind-parameter.js'
 import { intrinsicPropertyCallOf } from '../intrinsic-property-call.js'
+import { intrinsicObjectReturnIdentityOf } from '../intrinsic-return-identity.js'
+import { nativeOwnAssignmentOf } from './native-own-assignment.js'
+import { freshOrdinaryObjectOf } from '../fresh-ordinary-object.js'
+import { intrinsicStaticMemberIsIntact } from '../intrinsic-static-member.js'
+import {
+  ordinaryCallableBuiltinDataWriteOf,
+  ordinaryCallableDataWriteIsAbsent,
+  ordinaryCallableProgramSymbolDataWriteIsAbsent,
+  ordinaryObjectDataWriteIsAbsent
+} from '../callable-data-write.js'
 import { contributeObjectTag } from './object-tag.js'
 import { isIntrinsicAccessorGetterPart } from '../intrinsic-accessor-getter.js'
 import { bagShapeTypeAt } from '../object-bag-bindings.js'
@@ -10,7 +20,7 @@ import { contextualArrayConstructTypeAt, contextualCollectionTypeAt, statedColle
 import { implementationSignatureOf } from '../structural-declarations.js'
 import { physicalGeneratorOverloadResultAt, physicalInheritedCallableReturnAt } from '../physical-overload-result.js'
 import { unsharedArrayResultBodyOf } from '../unshared-array-result.js'
-import { regionId, semanticResultId, type FunctionId, type StructuralTypeId } from '../../../identity/ids.js'
+import { regionId, semanticResultId, withoutSpecialization, type FunctionId, type StructuralTypeId } from '../../../identity/ids.js'
 import type { CensusCandidate } from '../census.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import type { ProducerContext } from '../producer-context.js'
@@ -116,17 +126,17 @@ const parameterShapeOf = (context: ProducerContext, parameter: ts.Symbol, anchor
   // both `type` and `slot` below are derived from this one `declared` value,
   // so there is nothing for this to drift out of step with.
   // The SYMBOL's own type, which for a member of an instantiated generic is
-  // the substituted one: `WeakMap<Texture, number>.delete`'s parameter symbol
-  // says `Texture`, while its declaration node in `lib.es2015.collection.d.ts`
+  // the substituted one: `WeakMap<Item, number>.delete`'s parameter symbol
+  // says `Item`, while its declaration node in `lib.es2015.collection.d.ts`
   // says `K` and always will -- one node, every instantiation in the program.
   const fromSymbol = context.checker.getTypeOfSymbolAtLocation(parameter, declaration ?? anchor)
   // A parameter whose DECLARATION is still open where this call's own resolved
   // signature has closed it. `rawTypeAt` reads the declaration node, which is
   // the right authority for the census (below) and the wrong one for an
-  // ambient generic's member: three's `_videoTextures.delete( texture )` and
-  // `_sources.has( source )` published `unresolved(type parameter K)` as the
+  // ambient generic's member: a class field `_items: WeakMap<Item, ...>` called
+  // as `_items.delete( item )` or `_sources.has( source )` published `unresolved(type parameter K)` as the
   // parameter slot while the callee carrier beside it correctly said
-  // `(class-ref(Texture)) -> boolean` -- two authorities over one call, and
+  // `(class-ref(Item)) -> boolean` -- two authorities over one call, and
   // preflight believes the slot. Gated on the symbol having actually CLOSED
   // it: a genuinely generic callee this compiler monomorphizes reads `T` at
   // both, and its copy is what substitutes, so nothing there changes.
@@ -149,6 +159,7 @@ const parameterShapeOf = (context: ProducerContext, parameter: ts.Symbol, anchor
   // literal shape and copies away fields that the census added later.
   const bag = isParameter && !substituted ? bagShapeTypeAt(context.table, context.types.typeOf, context.bags, declaration) : null
   const type =
+    (isParameter && !substituted ? context.types.indexedStorageTypeAt(declaration) : null) ??
     bag ??
     (impliedElement
       ? context.table.intern({ kind: 'array', element: context.types.typeOf(impliedElement), readonly: false, extension: [] })
@@ -334,15 +345,15 @@ const buildSelectedSignature = (
   // operation answered differently and `validateInvocationResult` failed the
   // producer closed -- correctly, because a producer really had published two
   // answers for one operation. The consequence is not a reported blocker but a
-  // WITHHELD operation, which silently takes its citers with it: three's
-  // `createCanvasElement` carries `@return {HTMLCanvasElement}`, a class the
-  // host declares absent, while its body returns what `createElementNS`
-  // actually yields on this target -- and because that call is the default
-  // initializer of `canvas` in `const { canvas = createCanvasElement(), context
-  // = null, ... } = parameters`, the whole `WebGLRenderer` configuration
-  // pattern went with it, `context` included. Measured on the three.js app: 26 of these
-  // disagreements across 14 declarations, withholding 52 of its 86 withheld
-  // producers and 105 operations.
+  // WITHHELD operation, which silently takes its citers with it: a JS helper
+  // `createCanvas` carrying `@return {HTMLCanvasElement}`, a class the host
+  // declares absent, while its body returns what `createElementNS` actually
+  // yields on this target -- and because that call is the default
+  // initializer of `canvas` in `const { canvas = createCanvas(), context
+  // = null, ... } = parameters`, a constructor's whole destructured
+  // configuration pattern went with it, `context` included. On a large JS
+  // program these disagreements withheld well over half of all withheld
+  // producers.
   //
   // The cure is to read the census, never to widen the guard.
   // `producer-context.ts` predicted this exact failure when it declared
@@ -419,13 +430,13 @@ const buildSelectedSignature = (
   const censusReturnArms = context.returns?.unionArmsAt(declaration) ?? null
   // ...and the SAME absent substitution, for the same reason.
   //
-  // Sharing the census closed 22 of the three.js app's 26 disagreements. The four left
+  // Sharing the census closed most of these disagreements. The ones left
   // were a second asymmetry between the two sides: `typeAt` ends in
   // `typeOf(absentSubstitutedTypeAt(node))`, so the RESULT has every
   // host-absent class collapsed to `never` before it is interned, while
-  // `typeOf` alone does not, so this side kept the class. Three's
-  // `createCanvasElement` returns `@return {HTMLCanvasElement}`, `WebGLTextures`
-  // constructs `new OffscreenCanvas(...)`, and the webgl plugin lists both
+  // `typeOf` alone does not, so this side kept the class. A helper
+  // returning `@return {HTMLCanvasElement}`, or a function constructing
+  // `new OffscreenCanvas(...)`, where the host plugin lists both classes
   // absent -- so the two sides interned two different ids for one type that
   // cannot exist, and the guard fired on a disagreement about nothing.
   //
@@ -435,8 +446,8 @@ const buildSelectedSignature = (
   // `context.returns` answers about the DECLARATION alone -- what a function
   // BODY's own `return`s agree on -- so it has nothing to say for a
   // signature whose declaration is an abstract call-signature member (an
-  // interface/type-alias entry, no body to read): hono's `H`, never
-  // instantiating its trailing generic, resolves ONE real two-parameter
+  // interface/type-alias entry, no body to read): a handler-signature alias
+  // whose trailing generic is never instantiated resolves ONE real two-parameter
   // signature whose return the checker still collapses to plain `any`.
   // `censusReturn` above is null there, so `returnType` stays the checker's
   // raw `any` with nothing left to try -- and the INVOCATION side
@@ -472,12 +483,14 @@ const buildSelectedSignature = (
     typeArguments,
     // A synthesized union has no public ts.Type. Its declaration and call
     // result still share the return census's exact alternatives.
-    returnType: censusReturnArms
-      ? context.table.intern({
-          kind: 'union',
-          members: censusReturnArms.map((arm) => context.types.typeOf(context.absentGlobals.substituteAbsentType(arm)))
-        })
-      : context.types.typeOf(substituted)
+    returnType:
+      context.types.indexedStorageResultAt(declaration) ??
+      (censusReturnArms
+        ? context.table.intern({
+            kind: 'union',
+            members: censusReturnArms.map((arm) => context.types.typeOf(context.absentGlobals.substituteAbsentType(arm)))
+          })
+        : context.types.typeOf(substituted))
   }
 }
 
@@ -649,9 +662,25 @@ const implicitSourceConstructorTarget = (context: ProducerContext, node: ts.NewE
   const declaration = context.identities.declarationOfSymbol(symbol)
   if (!declaration || !ts.isClassLike(declaration)) return null
   if (declaration.members.some(ts.isConstructorDeclaration)) return null
+  // The instance anchor still names the source root with separate type
+  // arguments. The shared specialization census, rather than that anchor's
+  // declaration spelling, names the copy this actual construction executes.
+  // Without it Cell<string> and Cell<boolean> are both marked unallocated:
+  // neither concrete native layout is the unspecialized source declaration.
+  const instance = context.table.get(context.types.typeAt(node)).shape
+  const source = context.identities.declarationIdOf(declaration)
+  if (instance.kind !== 'class-instance' || withoutSpecialization(instance.declaration) !== withoutSpecialization(source)) return null
+  const copy = context.specializations.specializationAt(node, context.types.substituteTypeParameter)
+  if (copy !== null && copy.declaration !== declaration) return null
+  const prefix = context.identities.prefixFor(declaration, context.path)
+  const last = prefix[prefix.length - 1]
+  const path =
+    copy === null || (last?.owner === declaration && last.ordinal === copy.ordinal)
+      ? prefix
+      : [...prefix, { owner: declaration, ordinal: copy.ordinal }]
   return {
     kind: 'exact',
-    target: { kind: 'implicit-source-constructor', classDeclaration: context.identities.declarationIdOf(declaration) },
+    target: { kind: 'implicit-source-constructor', classDeclaration: context.identities.declarationIdOf(declaration, path) },
     evidence: ['new-on-class-without-own-constructor']
   }
 }
@@ -939,7 +968,7 @@ const jsonParseResultOverride = (context: ProducerContext, node: ts.Node, callee
  * which has no elements of its own for a destination's element type to
  * contradict. There is no independent value here to override -- only an
  * allocation whose element carrier nobody has stated, and a destination that
- * states it. hono's trie router writes exactly that shape
+ * states it. A router's lazily-filled offset table is exactly that shape
  * (`let partOffsets: number[] | null = null` filled lazily with `partOffsets =
  * new Array(len)`), and the store was refused outright: two `array-object`
  * carriers whose elements disagree have no conversion and may never have one
@@ -1001,7 +1030,7 @@ const arrayConstructResultOverride = (
  * `lib.es5.d.ts` declares `create(o: object | null): any`, so this call's own
  * published result is `dynamic(declared-any-never-narrowed)` no matter what
  * the program says it is making. `const emptyParams: Params =
- * Object.create(null)` (hono's pattern router) therefore emitted a
+ * Object.create(null)` (a common dictionary idiom) therefore emitted a
  * `gea::Value::object()` -- a runtime `DynamicObject` -- stored into a
  * `gea::Ref<gea::Dictionary<std::string>>` cell through `unboxValue`, whose
  * payload-type check finds two different C++ types and aborts. Not a compile
@@ -1070,10 +1099,50 @@ export const objectCreateResultOverride = (
   return null
 }
 
+/** The standard zero-argument Object allocation is empty. A pure indexed
+ * destination supplies its native entry storage, like an empty Array/Map
+ * constructor; required or optional fixed fields never prove own presence.
+ */
+const freshObjectNativeStorageOf = (context: ProducerContext, node: ts.CallExpression | ts.NewExpression): StructuralTypeId | null => {
+  if (!freshOrdinaryObjectOf(context, node)) return null
+  const assertion = enclosingTypeAssertion(node)
+  let candidate = assertion === null ? null : context.types.typeAt(assertion)
+  if (candidate === null) {
+    const contextual = context.checker.getContextualType(node)
+    if (contextual !== undefined) candidate = context.types.typeOf(contextual)
+  }
+  if (candidate === null) {
+    let current: ts.Node = node
+    while (ts.isParenthesizedExpression(current.parent) && current.parent.expression === current) current = current.parent
+    const parent = current.parent
+    if ((ts.isVariableDeclaration(parent) || ts.isPropertyDeclaration(parent)) && parent.initializer === current && parent.type)
+      candidate = context.types.typeAt(parent.type)
+  }
+  if (candidate === null) return null
+  const seen = new Set<StructuralTypeId>()
+  let selected = candidate
+  while (!seen.has(selected)) {
+    seen.add(selected)
+    const shape = context.table.get(selected).shape
+    if ((shape.kind === 'declared' || shape.kind === 'object-anchor') && shape.body !== null) {
+      selected = shape.body
+      continue
+    }
+    return shape.kind === 'object' &&
+      !shape.membersDropped &&
+      shape.members.length === 0 &&
+      shape.index.length === 1 &&
+      (shape.index[0]!.key === 'string' || shape.index[0]!.key === 'number')
+      ? candidate
+      : null
+  }
+  return null
+}
+
 /**
  * `Object.fromEntries(pairs)` whose pairs are not tuples resolves to
  * `lib.es2019.object.d.ts`'s `fromEntries(entries: Iterable<readonly any[]>):
- * any` -- the mongodb driver's `const object: IndexDescriptionCompact =
+ * any` -- e.g. `const object: IndexDescription =
  * Object.fromEntries(indexes.map(({ name, key }) => [name, Object.entries(key)]))`,
  * whose literal pair widens to an array before the generic overload can see
  * a tuple. The destination states the dictionary the program is making.
@@ -1261,7 +1330,7 @@ const collectionConstructResultOverride = (context: ProducerContext, node: ts.Ne
  *
  * Narrowing the receiver's own type does nothing here: the checker types a
  * prototype call's result from the callee's signature, instantiated from the
- * receiver EXPRESSION, so `properties.get( renderTarget )` stays `any` no
+ * receiver EXPRESSION, so `properties.get( target )` stays `any` no
  * matter what carrier this compiler selects for `properties`.
  * `structural.ts`'s `typeAt` publishes the census's `V | undefined` instead
  * (`collectionMemberResultTypeAt`, `structural-array-element.ts`), and this
@@ -1318,9 +1387,9 @@ const arrayFromCopyResultOverride = (context: ProducerContext, node: ts.CallExpr
  * A call whose result IS an object bag this census bound.
  *
  * The last of the five overrides, and the only one whose subject is not an
- * ambient global: three's `WebGLProperties.get` returns a `{}` filled a
+ * ambient global: a JS method like `Properties.get` returns a `{}` filled a
  * property at a time, and nothing in the source states that. The bag census
- * knows all 47 members; the resolved signature knows `any`. Neither is wrong,
+ * knows every member; the resolved signature knows `any`. Neither is wrong,
  * and `bag-return-inference` is the reason that lets both stand.
  *
  * The GATE only, as with the two collection overrides above: it asks the bag
@@ -1368,6 +1437,15 @@ const intrinsicMutationOf = (
   if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(calleeUnwrapped)) return null
   const member = calleeUnwrapped.name.text
   const owner = calleeUnwrapped.expression
+  if (
+    !intrinsicStaticMemberIsIntact(
+      context,
+      context.checker.getSymbolAtLocation(owner),
+      context.checker.getSymbolAtLocation(calleeUnwrapped.name),
+      owner
+    )
+  )
+    return null
   if (isGlobalObjectConstructor(context.checker, owner, context.checker.getTypeAtLocation(owner))) {
     if (member === 'assign') return 'object-assign'
     if (member === 'defineProperty') return 'object-define-property'
@@ -1691,8 +1769,8 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // original spot matters -- moving it around this program's tens of
     // thousands of invocations changes evaluation order for every one of
     // them, and this producer has no license to do that just to reach the one
-    // override below. `ImageUtils.getDataURL` (three.js) is the concrete
-    // casualty a reordered version of this fix produced: an entirely
+    // override below. A static helper on an unrelated utility class was the
+    // concrete casualty a reordered version of this fix produced: an entirely
     // unrelated static call, whose ABI flipped from `undefined` to `void` for
     // parameter 0 the moment `calleeType`'s resolution (which interns/derives
     // representation state) started running BEFORE this line instead of
@@ -1750,12 +1828,29 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // callable the guard's present branch holds -- not the `fn | undefined` the
     // callee expression evaluates to. `calleeAwareTypeAt` deliberately answers
     // the second question for that shape, so the first is asked directly.
-    const calleeType = resolvedCalleeSignatureType(context, node.expression) ?? calleeAwareTypeAt(context, node.expression)
+    const ownInvocation = context.types.ordinaryOwnCallableInvocationAt(node)
+    const calleeType =
+      ownInvocation?.type ?? resolvedCalleeSignatureType(context, node.expression) ?? calleeAwareTypeAt(context, node.expression)
+    if (ownInvocation) {
+      const sourceSelection = buildSelectedSignature(context, node, ownInvocation.signature)
+      if (sourceSelection) {
+        selectedSignature = {
+          ...sourceSelection,
+          ...(selectedSignature ? { declaration: selectedSignature.declaration, provenance: selectedSignature.provenance } : {}),
+          parameters: ownInvocation.frame.parameters,
+          minimumArity: ownInvocation.frame.minimumArity,
+          thisParameter: ownInvocation.frame.thisParameter,
+          returnType: ownInvocation.frame.result,
+          sourceFrame: { kind: 'ordinary-own-data', declaration: context.identities.declarationIdOf(ownInvocation.body) }
+        }
+        signature = ownInvocation.signature
+      }
+    }
     // A mutable method's cell transports every replacement's public frame;
     // the initial implementation is only one possible body in that cell.
     const mutableMethod = context.types.mutableMethodReadTypeAt(node.expression)
     const mutableFrame = mutableMethod === null ? null : structuralCallSignatures(context.table, mutableMethod)?.[0]
-    if (mutableFrame && selectedSignature) {
+    if (mutableFrame && selectedSignature && !ownInvocation) {
       selectedSignature = {
         ...selectedSignature,
         parameters: mutableFrame.parameters,
@@ -1763,9 +1858,9 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
         thisParameter: mutableFrame.thisParameter
       }
     }
-    // `operation.handleOk(result)` inside a copy that binds `operation: T` to
-    // `InsertOneOperation`: the checker resolves the member on `T`'s
-    // CONSTRAINT (`AbstractOperation<TResult = any>`), so the selected return
+    // `operation.complete(result)` inside a copy that binds `operation: T` to
+    // `InsertOperation`: the checker resolves the member on `T`'s
+    // CONSTRAINT (`BaseOperation<TResult = any>`), so the selected return
     // is `any`, while the callee carrier is already the bound override's own
     // member (`substitutedReceiverMemberType`) returning what that override
     // declares. The call dispatches through that carrier, and any subclass
@@ -1778,9 +1873,8 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // And only where the result lands in a position that already expects
     // exactly that type, or expects nothing. The constraint's `any` is also
     // what let the program write the result into a slot of ANOTHER type:
-    // mongodb's `tryOperation<UpdateOneOperation, UpdateResult<DataKey>>`
-    // returns `UpdateOneOperation.handleOk`'s `UpdateResult<Document>` as its
-    // `UpdateResult<DataKey>` -- two layouts the checker never compared. The
+    // a generic `run<Op, Result<Key>>` whose constraint is `any` returns
+    // `Op.complete`'s `Result<Document>` as its `Result<Key>` -- two layouts the checker never compared. The
     // dynamic result was checked into the slot at run time; a native one needs
     // a record-to-record conversion no carrier installs. So a contextual type
     // that is neither this return nor a union holding it keeps the `any`.
@@ -1808,8 +1902,8 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // `getResolvedSignature` on it (above) is TypeScript's fabricated
     // zero-parameter `anySignature` -- the SAME fiction `resolvedCalleeSignatureType`
     // exists to see through for the callee's own representation, just read
-    // back here from the RAW checker API a second, disagreeing way. `gl.texImage2D(...arguments)`
-    // inside three.js's `WebGLState.js` (`gl` a genuinely untyped JS
+    // back here from the RAW checker API a second, disagreeing way. `gl.upload(...arguments)`
+    // inside a plain JS function (`gl` a genuinely untyped JS
     // parameter) is the concrete case: `calleeType` correctly resolves it
     // `dynamic`, but `checker.getResolvedSignature` still hands back its
     // fabricated 0-param signature, and `buildSelectedSignature` over THAT
@@ -1974,6 +2068,7 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // them; it is checked after `JSON.parse` only because both are calls.
     const objectCreateAnnotatedType =
       jsonParseAssertedType === null && ts.isCallExpression(node) ? objectCreateResultOverride(context, node, calleeUnwrapped) : null
+    const freshObjectNativeStorage = freshObjectNativeStorageOf(context, node)
     const objectFromEntriesAnnotatedType =
       jsonParseAssertedType === null && objectCreateAnnotatedType === null && ts.isCallExpression(node)
         ? objectFromEntriesResultOverride(context, node, calleeUnwrapped)
@@ -2027,6 +2122,7 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     else if (errorConstructAssertedType !== null) resultDivergence = { kind: 'error-construct-type-assertion' }
     else if (collectionConstructAssertedType !== null) resultDivergence = { kind: 'collection-construct-type-inference' }
     else if (objectCreateAnnotatedType !== null) resultDivergence = { kind: 'object-create-type-annotation' }
+    else if (freshObjectNativeStorage !== null) resultDivergence = { kind: 'fresh-object-native-storage' }
     else if (objectFromEntriesAnnotatedType !== null) resultDivergence = { kind: 'object-from-entries-type-annotation' }
     else if (objectAssignTargetType !== null) resultDivergence = { kind: 'object-assign-target-identity' }
     else if (collectionMemberInferredType !== null) resultDivergence = { kind: 'collection-member-type-inference' }
@@ -2044,16 +2140,17 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // back to `context.types.typeAt(node)`, which `callResultAt` (structural.ts)
     // already corrected -- only the LICENSE for that correction disagreeing
     // with `.call`/`.apply`'s own ambient signature is recorded.
+    else if (ownInvocation) resultDivergence = { kind: 'ordinary-own-data-call-return' }
     else if (ts.isCallExpression(node) && isExplicitThisCallWithAuthenticatedReceiver(context, calleeUnwrapped))
       resultDivergence = { kind: 'explicit-this-call-return' }
     // The ninth shape of "the checker published an ambient `any` and the
     // census knows better", and the only one where the better answer is the
     // CALLEE'S OWN, already selected, already published.
     //
-    // A receiver the census resolved is one the checker did not. Three reaches
-    // `renderer.state.buffers.depth.getReversed()` through `_this.state =
+    // A receiver the census resolved is one the checker did not. A JS program
+    // reaching `app.state.buffers.depth.isEnabled()` through `_this.state =
     // state`, where `state` is the classic `let state; state = new
-    // WebGLState( ... )` hoist: every link types here -- the operand carrier is
+    // State( ... )` hoist: every link types here -- the operand carrier is
     // a `native-record-ref` and the callee's is `callable( -> scalar)` -- and
     // then the RESULT was published `dynamic`, because `typeAt( node )` asks
     // the checker, for whom `renderer.state` is `any`. One cell, two answers,
@@ -2103,12 +2200,14 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
       errorConstructAssertedType ??
       collectionConstructAssertedType ??
       objectCreateAnnotatedType ??
+      freshObjectNativeStorage ??
       objectFromEntriesAnnotatedType ??
       objectAssignTargetType ??
       objectDescriptorAssertedType ??
       collectionMemberInferredType ??
       bagInferredType ??
       arrayFromCopyType ??
+      ownInvocation?.observedResult ??
       censusedReturnType ??
       checkerResultType
     // `a?.b()` is typed `T | undefined` by the checker, and both halves are
@@ -2120,15 +2219,15 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // nullability off the node's type instead would also strip a `T` that
     // genuinely includes `undefined`, so that shape stays refused by name.
     // Unless the whole expression is `any`, in which case there is nothing to
-    // strip and no signature to need. `hello?.hosts?.map(...)` is the shape --
-    // `hello: Document | undefined`, `hosts` reached through `Document`'s
+    // strip and no signature to need. `reply?.hosts?.map(...)` is the shape --
+    // `reply: Document | undefined`, `hosts` reached through `Document`'s
     // `[key: string]: any` index signature, so the callee is `any` and the
     // checker resolves no signature because there is none to resolve. The
     // reasoning above does not apply to it: `any | undefined` IS `any`, so
     // publishing the node's own type strips nothing, and the program asked for
     // a dynamic value by declaring the index `any`. Refusing instead denied a
-    // carrier to four `ServerDescription` fields and bson's whole
-    // startup-snapshot probe, whose calls are `@ts-expect-error`-marked
+    // carrier to several record fields and a library's whole
+    // optional-API feature probe, whose calls are `@ts-expect-error`-marked
     // optional APIs precisely because nothing declares them.
     const publishedShape = context.table.get(resultType)?.shape
     const publishesDynamic = publishedShape?.kind === 'primitive' && publishedShape.primitive === 'any'
@@ -2148,11 +2247,60 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     // an ambient `JSON.parse` receiver, neither of which can be an optional
     // chain. So at most one of the three reasons is ever recorded for one call.
     if (shortCircuit) resultDivergence = { kind: 'optional-call-short-circuit' }
-    if (selectedSignature) validateInvocationResult(selectedSignature, resultType, resultDivergence)
+    if (selectedSignature) {
+      if (ownInvocation)
+        validateInvocationResult({ ...selectedSignature, returnType: ownInvocation.observedResult }, resultType, { kind: 'none' })
+      validateInvocationResult(selectedSignature, resultType, resultDivergence)
+    }
 
     const intrinsicMutation = intrinsicMutationOf(context, node, calleeUnwrapped)
+    const nativeOwnAssignment =
+      intrinsicMutation === 'object-assign' && ts.isCallExpression(node) ? nativeOwnAssignmentOf(context, node, operands) : null
     const intrinsicPropertyCall = intrinsicPropertyCallOf(context, node, calleeUnwrapped)
+    const descriptorProtocol =
+      intrinsicMutation === 'object-define-property' && ts.isCallExpression(node) ? context.descriptorOwnProtocolAt?.(node) : null
+    const descriptorArgument = operands.find((value) => value.role === 'argument' && value.ordinal === 2)
+    const descriptorSource =
+      descriptorProtocol === null || descriptorProtocol === undefined ? null : sourceForValue(context, descriptorProtocol.descriptor)
+    const descriptorOwnProtocol =
+      descriptorProtocol?.definition === node &&
+      descriptorArgument?.source.kind === 'result' &&
+      descriptorSource?.kind === 'result' &&
+      descriptorArgument.source.result === descriptorSource.result
+        ? { descriptor: descriptorArgument.source.result, ownNames: descriptorProtocol.ownNames, prototype: descriptorProtocol.prototype }
+        : null
+    const reflectedKey = operands.find((value) => value.role === 'argument' && value.ordinal === 1)
+    const descriptorKeys =
+      intrinsicPropertyCall === 'getOwnPropertyDescriptor' && ts.isCallExpression(node) && node.arguments[1] !== undefined
+        ? context.computedKeyTextsOf?.(node.arguments[1])
+        : null
+    const callableBuiltinDataWrite =
+      intrinsicPropertyCall === 'set' && reflectedKey?.source.kind === 'constant' && reflectedKey.source.literal === 'string'
+        ? ordinaryCallableBuiltinDataWriteOf(reflectedKey.source.text, node, context)
+        : null
     const operation: InvocationOperation = {
+      ...(reflectedKey?.source.kind === 'result' && descriptorKeys?.length
+        ? { intrinsicDescriptorKeys: { key: reflectedKey.source.result, names: descriptorKeys } }
+        : {}),
+      ...(callableBuiltinDataWrite === null ? {} : { ordinaryCallableBuiltinDataWrite: callableBuiltinDataWrite }),
+      ...((intrinsicPropertyCall === 'set' || intrinsicMutation === 'object-define-property') &&
+      reflectedKey?.source.kind === 'constant' &&
+      reflectedKey.source.literal === 'string' &&
+      ordinaryCallableDataWriteIsAbsent(reflectedKey.source.text, node, context)
+        ? { ordinaryCallableDataWriteAbsent: true as const }
+        : {}),
+      ...(intrinsicPropertyCall === 'set' &&
+      ts.isCallExpression(node) &&
+      node.arguments[1] !== undefined &&
+      ordinaryCallableProgramSymbolDataWriteIsAbsent(node.arguments[1], node, context)
+        ? { ordinaryCallableProgramSymbolDataWriteAbsent: true as const }
+        : {}),
+      ...(intrinsicPropertyCall === 'set' &&
+      reflectedKey?.source.kind === 'constant' &&
+      reflectedKey.source.literal === 'string' &&
+      ordinaryObjectDataWriteIsAbsent(reflectedKey.source.text, node, context)
+        ? { ordinaryObjectDataWriteAbsent: true as const }
+        : {}),
       id: operationIdentity,
       family: 'invocation',
       caller: candidate.caller,
@@ -2163,9 +2311,21 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
       target: buildTarget(context, node, signature),
       ...(builtinModuleLookup?.kind === 'lookup' ? { builtinModuleLookup: builtinModuleLookup.value } : {}),
       ...(intrinsicMutation ? { intrinsicMutation } : {}),
+      ...(nativeOwnAssignment === null ? {} : { nativeOwnAssignment }),
+      ...(freshOrdinaryObjectOf(context, node) ? { freshOrdinaryObject: true as const } : {}),
+      ...intrinsicObjectReturnIdentityOf(context, node, calleeUnwrapped),
       ...(intrinsicPropertyCall === 'own-keys' ? { intrinsicOwnKeys: true as const } : {}),
       ...(intrinsicPropertyCall === 'define-property' ? { intrinsicDataDefinition: true as const } : {}),
+      ...(descriptorOwnProtocol === null ? {} : { descriptorOwnProtocol }),
       ...(intrinsicPropertyCall === 'carrier-predicate' ? { intrinsicCarrierPredicate: true as const } : {}),
+      ...(intrinsicPropertyCall === 'values' ||
+      intrinsicPropertyCall === 'entries' ||
+      intrinsicPropertyCall === 'stringify' ||
+      intrinsicPropertyCall === 'isFrozen' ||
+      intrinsicPropertyCall === 'isSealed' ||
+      intrinsicPropertyCall === 'isExtensible'
+        ? { intrinsicObservation: intrinsicPropertyCall }
+        : {}),
       ...unsharedArrayResultFactOf(context, node),
       ...freshIntrinsicArrayResultFactOf(context, node),
       ...deadEventCallFactOf(context, node),

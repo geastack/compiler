@@ -110,9 +110,9 @@ export const isClosedTupleSpread = (context: ProducerContext, expression: ts.Exp
  * declared type is a CLOSED tuple, or `null` for anything else.
  *
  * `/** @param {[number, number, number, number, number]} args *\/ function
- * texStorage2D( ...args ) { gl.texStorage2D( ...args ) }` -- three's
- * `WebGLState.js` as the native-webgl-angle plugin rewrites its
- * `...arguments` forwarders. The parameter's CELL is typed by
+ * storage( ...args ) { host.storage( ...args ) }` -- the shape a source
+ * transform produces when it rewrites a JavaScript `...arguments` forwarder
+ * into a typed rest parameter. The parameter's CELL is typed by
  * `structural.ts`'s `rest-parameter-array-element` form from call-site
  * evidence, an array of the joined argument types, so `isClosedTupleSpread`
  * above never sees a tuple and the spread fell through to the range-copy
@@ -179,8 +179,8 @@ export const declaredTupleRestSpreadReads = (
  * `admitsMaxArityTupleSpread` (`spread-arguments.ts`) already ask it -- not
  * `resolveExpressionOperand`'s own bundled `.type`, which asks past the same
  * wrapper for the type too and disagrees with both admission gates the
- * moment one is present. `args as Parameters<NewResponse>` (hono's
- * `Context.newResponse`) is the concrete case: the CAST states a real closed
+ * moment one is present. `args as Parameters<NewResponse>` (a method
+ * forwarding its rest arguments to an overloaded sibling) is the concrete case: the CAST states a real closed
  * shape the underlying `args` binding does not have on its own (an ordinary,
  * open-arity array, once the rest-parameter census has done its job) -- an
  * admission gate that reads the cast agrees to expand it, and an expansion

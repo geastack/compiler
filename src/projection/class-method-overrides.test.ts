@@ -11,7 +11,7 @@ const compileFixture = (source: string, projectFileName: string | null = null) =
   return compile({ rootFileNames: [entry], projectFileName, sourceOverlay: new Map([[entry, source]]), includeIr: true })
 }
 
-test('an inherited method assignment reserves one absent native slot with the method receiver ABI', () => {
+test('an inherited method assignment reserves one receiverless native Function slot', () => {
   const result = compileFixture(`
     class Base { hook(): number { return 1 } stable(): number { return 3 } }
     class Child extends Base {}
@@ -29,8 +29,7 @@ test('an inherited method assignment reserves one absent native slot with the me
   assert.equal(field.required, false)
   assert.equal(field.value.kind, 'function-value-dispatch')
   if (field.value.kind !== 'function-value-dispatch') return
-  assert.equal(field.value.abi.receiver?.kind, 'class-ref')
-  if (field.value.abi.receiver?.kind === 'class-ref') assert.equal(field.value.abi.receiver.declaration, base.declaration)
+  assert.equal(field.value.abi.receiver, null)
   assert.equal(classMemberOf(classes, child.declaration, 'hook')?.kind, 'method')
   assert.equal(classMethodOverrideOf(classes, child.declaration, 'stable'), null)
   assert.equal(classPrototypeMethodMutableOf(classes, base.declaration, 'hook'), false)
@@ -108,7 +107,12 @@ test('mutable method storage retains its public arguments independently of the i
   assert.equal(method.representation.abi.parameters.length, 0)
   assert.equal(method.storageRepresentation.abi.parameters.length, 3)
   const field = classMethodOverrideOf(result.projection.classes, layout.declaration, 'hook')!
-  assert.deepEqual(field.value, method.storageRepresentation)
+  assert.equal(field.value.kind, 'function-value-dispatch')
+  if (field.value.kind !== 'function-value-dispatch') return
+  assert.equal(field.value.abi.receiver, null)
+  assert.deepEqual(field.value.abi.parameters, method.storageRepresentation.abi.parameters)
+  assert.deepEqual(field.value.abi.result, method.storageRepresentation.abi.result)
+  assert.equal(field.value.abi.restFrom, method.storageRepresentation.abi.restFrom)
 })
 
 test('written constructors retain explicit ownership beside ordinary callbacks with the same receiver ABI', () => {
@@ -157,7 +161,7 @@ test('an inferred helper receiver reads the same public mutable method frame as 
 })
 
 // The key is a parameter so its declared domain reaches the write unnarrowed;
-// three.js spells this write in plain JavaScript (`vector[ key ] = value`).
+// plain JavaScript spells this write as `vector[ key ] = value`.
 const symbolIteratorClass = (keyType: string) => `
   class Vec {
     x = 1

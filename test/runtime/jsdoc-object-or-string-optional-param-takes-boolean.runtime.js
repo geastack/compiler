@@ -1,5 +1,5 @@
-// three.js `Object3D.toJSON( meta )` is documented `@param {?(Object|string)}`
-// and LightShadow calls it as `camera.toJSON( false )`. The parameter's carrier
+// A 3D scene-graph library's `SceneNode.toJSON( meta )` is documented `@param {?(Object|string)}`
+// and its light-shadow class calls it as `camera.toJSON( false )`. The parameter's carrier
 // is `optional(string | <Object>)`: JSDoc's `Object` is a dynamic arm. A
 // boolean argument enters that slot, and the dynamic arm is what holds it.
 

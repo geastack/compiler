@@ -3,13 +3,13 @@
 //! expect: stateChanged:connecting->connected
 //! expect: count:2
 
-// mongodb's utils.ts `makeStateMachine`: a Topology (an EventEmitter) is
+// A database client's `makeStateMachine`: a Topology (an EventEmitter) is
 // handed to a transition function as `ObjectWithState`, whose `emit` member
 // declares three FIXED string parameters, while the class's own
 // `emit(event, ...args)` packs everything past the event into a rest Array.
-// The record view binds the method into the member, so the view's adapter
-// must pack the member's trailing arguments into the method's rest -- not
-// forward them one by one to a body whose frame ends in an Array.
+// The record view preserves the method and its native origin. The member
+// call supplies the view as its receiver, and the adapter packs trailing
+// arguments into the method's rest Array.
 
 type Listener = (...args: any[]) => void
 

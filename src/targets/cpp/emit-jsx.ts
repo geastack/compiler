@@ -781,7 +781,7 @@ const emitClassTokens = (
  * it, joins the truthy keys, sets the attribute and drops it. So the table is a
  * heap allocation and one doubly-boxed `TaggedUnion` per entry, built to be
  * read once, by a walk whose every key the emitter already knows -- 19 of them
- * in `examples/apps/weather`, most inside list rows and therefore per row per
+ * in one measured app, most inside list rows and therefore per row per
  * render.
  *
  * An object literal is not one operation. It is an EMPTY `allocate-record`
@@ -807,7 +807,7 @@ const emitClassTokens = (
  * declines, and it is spelled away. Asking it here as well would mean
  * re-deriving an answer from facts that are not filled until callables render;
  * an earlier revision did exactly that and, being necessarily conservative,
- * excluded all 19 of `weather`'s tables to protect the 3 that bind.
+ * excluded all 19 of that app's tables to protect the 3 that bind.
  */
 /**
  * Which prop a literal table of this carrier can be spelled away at, if any:

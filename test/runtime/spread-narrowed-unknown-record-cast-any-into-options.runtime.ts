@@ -1,4 +1,4 @@
-// mongodb's `readPreference` option transform: a `values: unknown[]` element
+// A database client's `readPreference` option transform: a `values: unknown[]` element
 // narrowed by `isRecord(value, ['mode'])` is spread twice into
 // `{ readPreference: { ...options.readPreference, ...value }, ...value }`,
 // and the literal crosses `as any` into `ReadPreference.fromOptions`'s

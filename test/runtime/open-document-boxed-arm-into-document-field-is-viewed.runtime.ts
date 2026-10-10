@@ -1,7 +1,7 @@
 // AN OPEN-DOCUMENT CELL WITH A BOXED ARM, ITS `Array.isArray` READ STORED INTO
 // A `Document` FIELD.
 //
-// bson's serializer walks nested values typed `any` and hands each to
+// A binary-document serializer walks nested values typed `any` and hands each to
 // `makeFrame(sourceObject: Document, ...)`, so the cell holds a box beside the
 // dictionary, the guard's `any[]` and `Map`. Under `Array.isArray` the read is
 // the array arm OR the box (a boxed array passes the guard too). Each arm

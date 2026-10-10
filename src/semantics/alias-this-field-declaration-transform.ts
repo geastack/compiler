@@ -5,9 +5,9 @@ import ts from 'typescript'
  * `this` itself: `const scope = this; ... function later() { scope.field =
  * expr; } ...` -- a plain, generic JS idiom for reaching the enclosing
  * instance from inside a nested (non-arrow) helper, where a bare `this`
- * would rebind to something else. `WebGLRenderer`'s own constructor is built
- * out of it (`const _this = this;`, then a dozen nested `function
- * initGLContext() { ... _this.info = info; ... }`-shaped helpers).
+ * would rebind to something else. ES5-style library constructors are often
+ * built out of it (`const _this = this;`, then a dozen nested `function
+ * initContext() { ... _this.info = info; ... }`-shaped helpers).
  *
  * TypeScript's own JS-class member inference (the mechanism
  * `field-bindings.ts`'s header describes at length) reads a class's implicit

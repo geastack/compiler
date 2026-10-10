@@ -2,8 +2,8 @@
 // Promise<string>` -- the same shape
 // `co-return-union-of-value-or-promise-settles-same-tick.runtime.ts` and
 // `await-union-of-value-or-promise-settles-same-tick.runtime.ts` pin for
-// `co_return`/`await`, asked here of a `then` handler instead. mongodb's
-// hono/`Context.body`-style handlers return exactly this union (a ternary
+// `co_return`/`await`, asked here of a `then` handler instead. Database
+// client and HTTP-framework `Context.body`-style handlers return exactly this union (a ternary
 // with a thenable on one side), and 27.2.5.4.1 step 8 (`FulfillPromise`)
 // settles the RESULT promise SYNCHRONOUSLY, inside the reaction job itself,
 // whenever what the handler returned is not a thenable -- there is no extra

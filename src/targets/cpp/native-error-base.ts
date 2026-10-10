@@ -32,7 +32,7 @@ export const isNativeErrorBaseRefusal = isRefusal
  * `lib.es2022.error.d.ts` declares `Error.cause` as `unknown` -- the
  * destination is the dynamic thing, so writing a typed cause into it is the
  * widening the no-boxing rule permits for a store into a declared-`unknown`
- * slot (`dynamicCarrierBoxText`). mongodb's `constructor(message: string,
+ * slot (`dynamicCarrierBoxText`). An error subclass's `constructor(message: string,
  * options?: { cause?: Error }) { super(message, options) }` is the shape: its
  * bag states a typed `cause`, and the base installs it as the language does.
  * `null` for a carrier with no box tag.

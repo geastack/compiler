@@ -8,7 +8,7 @@
 //! emitted-lacks: atob;
 //! emitted-lacks: btoa;
 
-// bson's `web_byte_utils.ts` declares the globals it uses ITSELF, module-local,
+// A binary-document library's web byte-utility module declares the globals it uses ITSELF, module-local,
 // so it needs no DOM lib. An ambient declaration emits nothing in JavaScript: at
 // run time the name reads the GLOBAL, which the host implements natively. The
 // module-local declaration must therefore resolve to that native binding, not
@@ -28,7 +28,7 @@ declare const TextDecoder: TextDecoderConstructor
 declare const atob: (base64: string) => string
 declare const btoa: (binary: string) => string
 
-// bson's `parse_utf8.ts`: a slot typed by the module's own `TextDecoder`
+// The same library's UTF-8 parser: a slot typed by the module's own `TextDecoder`
 // alias holds what the global's constructor makes.
 let decoderNonFatal: TextDecoder
 let decoderFatal: TextDecoder

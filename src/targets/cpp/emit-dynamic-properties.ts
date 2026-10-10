@@ -1,3 +1,5 @@
+import { nativeConstructorPropertyClassesOf, nativeConstructorPropertyMissing } from '../../ir/native-constructor-reads.js'
+import { nativePrototypeMethodOf } from '../../ir/native-prototype-calls.js'
 import type { Ownership, Representation } from '../../representation/model.js'
 import { representationKey } from '../../representation/model.js'
 import { isNativeCallableCarrier } from '../../representation/callable-object.js'
@@ -14,6 +16,7 @@ import {
   cppConstructThunkName,
   createCppEmitBlockedError,
   defineValue,
+  defineValueAlias,
   operandText,
   type EmitContext,
   type PrototypeMethodRead
@@ -26,7 +29,8 @@ import {
   cppRecordFieldPresenceName,
   cppResultTypeOf,
   cppStringLiteral,
-  cppTypeOf
+  cppTypeOf,
+  cppUndefinedIn
 } from './types.js'
 import { runtimeClassLayoutsOf } from '../../projection/classes.js'
 import { classPrototypeReadOf } from '../../projection/class-prototype.js'
@@ -36,14 +40,26 @@ import { alignedValueText, dynamicCarrierBoxText, dynamicTagFor, recipeText, unb
 import { certifiedConversionText } from './emit-certified-conversion.js'
 import { dictionaryTableOf } from './emit-properties.js'
 import { keyedTableKeyText, memberAccessOperator, recordIndexSidecarTableOf, recordIndexAttributeKeyText } from './emit-carrier-members.js'
-import { declaredRecordFieldOf, recordFieldsOfShape, recordIndexesOfShape, tailAwareFieldReadText } from './records.js'
+import {
+  declaredRecordFieldOf,
+  nativeFieldPolicyType,
+  recordFieldsOfShape,
+  recordIndexesOfShape,
+  tailAwareFieldReadText
+} from './records.js'
 import { classStaticFieldStorageKeysOf, classMemberOf } from './class-layout.js'
 import { classConstructorStaticMemberTextFor, computedClassPrototypeMethodText } from './class-properties/emit-class-properties.js'
 import { hostMemberOf } from './host/host-members.js'
-import { objectShapePrototypeMethods } from '../../projection/callee.js'
 import { cppRegExpNativeTypes } from './regexp-types.js'
+import {
+  nativeCallableDataMaterializerText,
+  nativeCallableDataWriteText,
+  nativeCallablePrototypeReadText
+} from './emit-native-callable-data.js'
 import { arrayPrototypeMethods } from './prototype/emit-prototype-array.js'
 import { nativeAbsentPropertyReadOf } from '../../ir/native-absent-property.js'
+import { compatibilityFieldReadSourcesOf } from '../../ir/property-read-conversions.js'
+import { nativeCallableTypedDataReadRequiresAuthority } from '../../ir/native-callable-data-reads.js'
 
 /**
  * Property access over a genuinely dynamic receiver, and over the dynamic
@@ -111,7 +127,7 @@ const propertyKeyCarrierText = (ctx: EmitContext, carrier: Representation, text:
   // so `gea::host::toPropertyKey` (gea_runtime.h) renders 7.1.19 exactly for
   // those, and aborts by name for the one payload that genuinely needs the
   // dispatch this backend has none of (an Object or Function, whose
-  // ToPrimitive calls user code). three's `uuid in _materialCache` and
+  // ToPrimitive calls user code). `item.uuid in cache` and
   // `u.id in values` are the shape: both operands are values the JS source
   // never typed, and refusing the KEY refused the whole operator.
   if (carrier.kind === 'dynamic') return `gea::host::toPropertyKey(${text})`
@@ -133,7 +149,7 @@ export const propertyKeyText = (ctx: EmitContext, key: IrOperand, contextDescrip
  * `std::string` the chain's `__gea_key == "..."` arms compare.
  *
  * A `string` carrier is that string outright. A `symbol`, a `string | symbol`
- * union (test262's `verifyProperty(obj, name, ...)` carries `name` so, because
+ * union (a descriptor check over `(obj, name, ...)` carries `name` so, because
  * it spells a symbol's description into its messages) or an optional of either
  * goes through `gea::PropertyKey` first -- the one renderer that already
  * dispatches every key carrier, so a carrier it refuses is refused here by the
@@ -187,8 +203,8 @@ export const dynamicGetText = (ctx: EmitContext, operation: GetOperation): strin
   if (receiver === null) return null
   const staticKey = ctx.constantTexts.get(operation.key.value)
   // A literal key reads through a per-site cache of the types it has proved
-  // absent on (`gea::literalPropertyGet`): bson probes every value it
-  // serializes for members a driver record never declares.
+  // absent on (`gea::literalPropertyGet`): a generic serializer probes every
+  // value it walks for members its record types never declare.
   const read =
     staticKey !== undefined && !staticKey.includes('\u0000')
       ? `gea::literalPropertyGet<${cppStringLiteral(staticKey)}>(${receiver})`
@@ -451,7 +467,7 @@ const isPatternSidecarReceiver = (receiver: IrOperand): boolean =>
  * (see `reflection-demand.ts`: layout and ABI retain every body, only
  * impossible execution contributes no demand), so a set or delete inside it
  * must compile against a struct whose protocol is off. An inline spelling of
- * the same routing did not: @hono/node-server's lightweight `Response`, once
+ * the same routing did not: a library class that, once
  * nothing constructed it, named `gea_matchesOwnField` on a struct that had
  * never been asked to declare it, and the unit failed to compile on a line
  * the census had correctly proved dead.
@@ -515,11 +531,12 @@ export const deferredCallableShapeMethodClaim = (
   if (!isNativeCallableCarrier(representation.kind)) return null
   if (key.representation.kind === 'symbol') return null
   const staticKey = staticKeyTexts.get(key.value)
-  if (staticKey === undefined || !objectShapePrototypeMethods.has(staticKey)) return null
+  if (staticKey === undefined || nativePrototypeMethodOf(representation, staticKey) !== 'callable-shape') return null
   return { receiverKind: 'callable-shape', member: staticKey, receiver: { kind: 'operand', operand: receiver }, receiverElement: null }
 }
 
 export const callableSidecarGetText = (ctx: EmitContext, operation: GetOperation): string | null => {
+  if (operation.nativeCallablePrototype) return nativeCallablePrototypeReadText(ctx, operation.nativeCallablePrototype)
   const representation = operation.receiver.representation
   // A function object with no calling convention (`Array.from`, whose four
   // overloads disagree at parameter 0) owns the same identity table as every
@@ -539,6 +556,11 @@ export const callableSidecarGetText = (ctx: EmitContext, operation: GetOperation
     )
   }
   if (!isNativeCallableCarrier(representation.kind)) return null
+  if (nativeCallableTypedDataReadRequiresAuthority(operation, ctx.staticKeyTexts.get(operation.key.value) ?? null))
+    throw createCppEmitBlockedError(
+      'property-access:function:get:native-data-slot',
+      'a typed Function data read has no selected native storage receipt'
+    )
   if (operation.key.representation.kind === 'symbol') {
     const site = 'a computed symbol own-property read on a callable'
     return unboxedReadText(
@@ -684,7 +706,7 @@ const builtinCallableMethodText = (produced: Representation, key: string, read: 
  * `emit-prototype-regexp.ts`'s `stringObjectMemberText`/
  * `emitStringObjectSet`. A String OBJECT is the one native-record-ref type
  * whose whole point is arbitrary, program-chosen CONSTANT keys as dynamic
- * properties (`escapedString.isEscaped = true`, hono's `utils/html.ts`) --
+ * properties (`escapedString.isEscaped = true`) --
  * every other native-record-ref type's constant keys are enumerable ahead of
  * time and handled by a per-protocol interceptor that names each one
  * (`regexpMemberText`, `emitDateConstruct`), so `nativeSidecarGetText`/
@@ -693,7 +715,7 @@ const builtinCallableMethodText = (produced: Representation, key: string, read: 
  * route ITS constant, non-`length` keys through the identical
  * box/unbox machinery this pair already implements, rather than duplicate it.
  */
-export const unboxedReadText = (produced: Representation, text: string, site: string): string => {
+export const unboxedReadText = (produced: Representation, text: string, site: string, freshObject = false): string => {
   if (produced.kind === 'dynamic') return text
   // Undefined and null have no payload type.  `unboxAs<T>` is intentionally
   // stricter for payload-bearing values, but applying it to these two tags
@@ -703,8 +725,8 @@ export const unboxedReadText = (produced: Representation, text: string, site: st
   if (produced.kind === 'undefined') return `gea::detail::unboxUndefinedValue(${text}, ${cppStringLiteral(site)})`
   if (produced.kind === 'null') return `gea::detail::unboxNullValue(${text}, ${cppStringLiteral(site)})`
   // A sidecar holds one live JavaScript value, while a tagged union is only
-  // the native carrier that records which exact arm it is. This is the AJV
-  // `errors?: readonly Error[] | null` path: undefined/null/array are
+  // the native carrier that records which exact arm it is. This is the
+  // `errors?: readonly Error[] | null` field shape: undefined/null/array are
   // distinct live results, not an optional approximation of one another. Do
   // not use `DynamicCarrier<TaggedUnion>::in` here: that helper is for a CALL
   // argument, where `undefined` means a missing parameter. A property read
@@ -743,13 +765,12 @@ export const unboxedReadText = (produced: Representation, text: string, site: st
     // is the optional's own empty state, not an arm -- and what remains is an
     // ordinary union decode, arm by arm, on tag AND payload type. Without
     // this the pair fell through to `dynamicTagFor`, which has no single box
-    // tag to name for a union and refused: `@hono/node-server`'s
-    // `readBodyBufferedBeforeDisconnect` caches `Buffer | Error` under a
-    // symbol key on the incoming message and reads it back as
+    // tag to name for a union and refused: code that caches
+    // `Buffer | Error` under a symbol key on a host object and reads it back as
     // `Buffer | Error | undefined`, which is exactly this shape.
     if (produced.payload.kind === 'record' || produced.payload.kind === 'tagged-union') {
       const value = '__gea_optional_value'
-      const load = unboxedLoadText(produced.payload, value)
+      const load = unboxedLoadText(produced.payload, value, undefined, freshObject)
       if (load !== null) {
         return (
           `([&]() -> ${cppTypeOf(produced)} { const gea::Value ${value} = ${text}; ` +
@@ -809,7 +830,7 @@ const finiteRecordUnionGetText = (ctx: EmitContext, operation: GetOperation, rec
   const recipe = operation.typedComputedRead
   // A NUMBER-domain key bound by its OWN literal set (`literalKeyTextsOf`,
   // `typed-property-access.ts`) is exactly as closed a switch as a string one
-  // -- `element[BSONElementOffset.nameLength]` over a homogeneous tuple -- and
+  // -- `element[Offset.nameLength]` over a homogeneous tuple -- and
   // was refused here only because `__gea_key` below always binds as a
   // `std::string`: a plain `operandText` of a number operand does not convert
   // to one. `keyedTableKeyText(..., 'string')` is the existing answer to that
@@ -838,8 +859,8 @@ const finiteRecordUnionGetText = (ctx: EmitContext, operation: GetOperation, rec
     const held = bindsReceiver ? '__gea_receiver' : receiver
     // The same `.fields` list `tailAwareFieldReadText` needs, resolved once
     // for every arm below rather than per-arm: a computed (`obj[key]`) read
-    // over a finite key set is exactly the case a tail-eligible mongodb-style
-    // options record reaches through `mongoOptions[name]`, so an arm naming a
+    // over a finite key set is exactly the case a tail-eligible wide
+    // options record reaches through `options[name]`, so an arm naming a
     // field `records.ts` moved behind the tail must spell it through the
     // never-allocating `RecordTail::peek()`, not `RecordTail::ensure()` --
     // this read is not presence-gated when an arm has no absence conversion
@@ -916,7 +937,7 @@ const finiteRecordUnionGetText = (ctx: EmitContext, operation: GetOperation, rec
       const binding = bindsReceiver ? `const auto& __gea_receiver = ${receiver}; ` : ''
       // A key whose type is one literal (a `const` table's field, an enum
       // member) proves the one field it names, so there is nothing to test --
-      // mongodb's `element[BSONElementOffset.nameLength]` on every BSON element.
+      // `element[Offset.nameLength]` over a fixed-layout tuple.
       const [only] = arms
       if (arms.length === 1 && only !== undefined && recipe.receiverBounded === undefined) {
         return `([&]() -> ${resultType} { ${binding}${only.answer} })()`
@@ -943,13 +964,8 @@ const finiteRecordUnionGetText = (ctx: EmitContext, operation: GetOperation, rec
   const produced = operation.result.representation
   if (produced.kind !== 'tagged-union' || operation.key.representation.kind !== 'string') return null
   const representation = operation.receiver.representation
-  const fields =
-    representation.kind === 'record' || representation.kind === 'record-with-index'
-      ? representation.fields
-      : representation.kind === 'class-ref' || (representation.kind === 'native-record-ref' && representation.native === null)
-        ? recordFieldsOfShape(ctx.deriver, representation.shapeId)
-        : null
-  if (fields === null || fields.length === 0) return null
+  const fields = compatibilityFieldReadSourcesOf(operation, ctx.deriver)
+  if (fields.length === 0) return null
   const accessor = memberAccessOperator(ownershipOfGeneratedCarrier(representation))
   const arms: string[] = []
   for (const field of fields) {
@@ -1024,6 +1040,20 @@ export const constructorValueDispatchGetText = (ctx: EmitContext, operation: Get
   const key = ctx.staticKeyTexts.get(operation.key.value)
   const site = `a "get" of ${key === undefined ? 'a computed key' : `"${key}"`} on a constructor carried by its ABI`
   if (key === undefined) throw createCppEmitBlockedError('property-access:constructor-value-dispatch:get:true', `${site} is not rendered`)
+  if (operation.result.representation.kind !== 'dynamic') {
+    const typed = constructorValueDispatchTypedMemberText(
+      ctx,
+      receiver,
+      operandText(ctx, operation.receiver),
+      key,
+      operation.result.representation
+    )
+    if (typed !== null) return typed
+    throw createCppEmitBlockedError(
+      'property-access:constructor-value-dispatch:native-result',
+      `${site} has no native member projection into its published carrier`
+    )
+  }
   const boxed: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
   const arms: string[] = []
   for (const layout of runtimeClassLayoutsOf(ctx.classes)) {
@@ -1087,7 +1117,7 @@ export const constructorValueDispatchGetText = (ctx: EmitContext, operation: Get
  *
  * `constructorValueDispatchGetText` answers through a box because a lone
  * dispatch read may publish anything; a read that publishes a typed callable
- * (mongodb's `(responseType ?? MongoDBResponse).make(bson)`, a static factory
+ * (`(responseType ?? DefaultResponse).make(bytes)`, a static factory
  * off a union of a structural constructor type and the class) has no
  * conversion out of that box, and boxing a typed class's static to reach it
  * would be the forbidden shortcut. The member is the same per-class answer a
@@ -1106,28 +1136,24 @@ export const constructorValueDispatchTypedMemberText = (
   key: string,
   published: Representation
 ): string | null => {
-  if (receiver.kind !== 'constructor-value-dispatch' || published.kind === 'dynamic' || key === 'prototype') return null
-  const produced = receiver.abi.result
-  if (produced.kind !== 'class-ref') return null
-  const descends = (declaration: DeclarationId): boolean => {
-    const seen = new Set<DeclarationId>()
-    for (
-      let current: DeclarationId | null = declaration;
-      current !== null && !seen.has(current);
-      current = ctx.classes.get(current)?.base ?? null
-    ) {
-      if (current === produced.declaration) return true
-      seen.add(current)
-    }
-    return false
-  }
+  if (receiver.kind !== 'constructor-value-dispatch' || published.kind === 'dynamic') return null
   const arms: string[] = []
-  for (const layout of runtimeClassLayoutsOf(ctx.classes)) {
-    if (layout.construct === null || !descends(layout.declaration)) continue
-    if (!constructorOwnKeysOf(ctx, [layout.declaration]).has(key)) continue
+  for (const layout of nativeConstructorPropertyClassesOf(receiver, ctx.classes, key, published) ?? []) {
+    if (layout.construct === null) continue
     const family: Representation = { kind: 'constructor-family', members: [layout.declaration], abi: layout.construct }
     const self = 'gea_class_constructor'
-    const text = classConstructorStaticMemberTextFor(ctx, family, key, published, () => self)
+    let text: string | null
+    if (key === 'prototype') {
+      const instance = layout.instance
+      if (instance?.kind !== 'class-ref' || classPrototypeReadOf(ctx.classes, family, key, instance) === null) return null
+      const prototype = classConstructorStaticMemberTextFor(ctx, family, key, instance, () => self)
+      text = prototype === null ? null : alignedValueText(ctx, 'constructor-value-dispatch:typed-prototype', instance, published, prototype)
+    } else {
+      if (!constructorOwnKeysOf(ctx, [layout.declaration]).has(key)) {
+        if (!nativeConstructorPropertyMissing(ctx.classes, layout.declaration, key)) continue
+        text = cppUndefinedIn(published)
+      } else text = classConstructorStaticMemberTextFor(ctx, family, key, published, () => self)
+    }
     if (text === null) return null
     arms.push(
       `if (gea_class == &gea::nativeClassMethodDeclaration<${cppClassName(layout.declaration)}>) { ` +
@@ -1190,19 +1216,7 @@ const constructorFamilyComputedGetText = (ctx: EmitContext, operation: GetOperat
   return unboxedReadText(operation.result.representation, read, site)
 }
 
-/**
- * A sidecar read's rendering, plus the DECLARED type the read's own slot has
- * to be spelled with when it is not `operation.result.representation`'s.
- *
- * Non-null `spelling` for exactly one shape, and it is not an option this
- * chooses: a METHOD read through a runtime key publishes a value whose
- * physical convention leads with the receiver
- * (`class-properties/emit-class-properties.ts`'s
- * `boundMethodValueRepresentation`, and `direct-call-receivers.ts`'s claim,
- * which has already committed the CALL to passing that receiver), while the
- * TS signature the result carrier was derived from declares none. Both arms of
- * the read are rendered at that corrected carrier, so the slot has to be too.
- */
+/** A sidecar read and its exact published native carrier spelling, when required. */
 export interface SidecarGetValue {
   readonly text: string
   readonly spelling: string | null
@@ -1288,19 +1302,8 @@ export const nativeSidecarGetText = (ctx: EmitContext, operation: GetOperation):
     ? `gea::runtime::regex::dynamicGet(${receiver}, ${key})`
     : `gea::nativeDynamicGet(${receiver}, ${key})`
   const prototypeMethod = computedClassPrototypeMethodText(ctx, operation)
-  // ONE carrier for the whole read, and it is the prototype arm's when there
-  // is a prototype arm. A `?:` has a single type, and the two arms are the two
-  // halves of one `[[Get]]`: whatever this read yields, it yields at one
-  // convention. `boundMethodValueRepresentation` is the authority that decides
-  // it for a method value -- receiver first, because that is what the thunk the
-  // value points at really takes -- and the sidecar arm's `unboxAs` tag check
-  // is equally exact at either spelling, since the expando holds a boxed
-  // callable that the same `receivesThis` convention hands the instance back
-  // through. Spelling the sidecar arm from the UNCORRECTED result carrier made
-  // hono's `raw[key]()` (`HonoRequest.#cachedBody`, five monomorphs) emit a
-  // ternary whose arms were `CallableObject<Promise<std::string>()>` and
-  // `CallableObject<Promise<std::string>(Ref<Request>)>` and a slot declared as
-  // the first while the call passed the receiver the second wants.
+  // Prototype and own-property alternatives publish one certified carrier.
+  // Its native logical-this entry forwards the receiver supplied by each call.
   const result = prototypeMethod === null ? operation.result.representation : prototypeMethod.carrier
   const decoded = unboxedReadText(result, read, site)
   const own =
@@ -1324,6 +1327,40 @@ export const nativeSidecarGetText = (ctx: EmitContext, operation: GetOperation):
 
 /** `[[Set]]` with a runtime key on a receiver that keeps its native type. */
 export const emitNativeSidecarSet = (ctx: EmitContext, lines: string[], operation: SetOperation | DefineOwnPropertyOperation): boolean => {
+  if (operation.kind === 'set' && operation.nativeCallableReadonlySet) {
+    lines.push(
+      `(void)(${operandText(ctx, operation.receiver)});`,
+      `(void)(${operandText(ctx, operation.key)});`,
+      `(void)(${operandText(ctx, operation.value)});`
+    )
+    if (operation.strict) lines.push('gea::host::throwRuntimeError("TypeError", "Cannot assign to read-only Function own property");')
+    if (operation.result) defineValueAlias(ctx, operation.result, operandText(ctx, operation.receiver))
+    return true
+  }
+  if (operation.kind === 'set' && operation.nativeCallableDataWrite) {
+    const write = nativeCallableDataWriteText(
+      ctx,
+      operation.nativeCallableDataWrite,
+      propertyKeyText(ctx, operation.key, 'native Function data writer')
+    )
+    if (operation.strict)
+      lines.push(`if (!${write}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read-only Function own property");`)
+    else lines.push(`${write};`)
+    if (operation.result) defineValueAlias(ctx, operation.result, operandText(ctx, operation.receiver))
+    return true
+  }
+  if (operation.kind === 'set' && operation.nativeCallableDataSlot) {
+    const value = `${cppTypeOf(operation.nativeCallableDataSlot.storage)}(${operandText(ctx, operation.value)})`
+    const receiver = operandText(ctx, operation.receiver)
+    const key = propertyKeyText(ctx, operation.key, 'native Function data installation')
+    const materializer = nativeCallableDataMaterializerText(ctx, operation.nativeCallableDataSlot)
+    const write = `gea::callableNativeDataSet<${nativeFieldPolicyType(operation.nativeCallableDataSlot.storage)}>(${receiver}, ${key}, ${value}${materializer})`
+    if (operation.strict)
+      lines.push(`if (!${write}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read-only Function own property");`)
+    else lines.push(`${write};`)
+    if (operation.result) defineValueAlias(ctx, operation.result, operandText(ctx, operation.receiver))
+    return true
+  }
   const callable = callableSidecarReceiver(ctx, operation.receiver)
   if (callable !== null && operation.kind === 'set') {
     // The "own" vs "computed" wording names whether the KEY is one the
@@ -1345,7 +1382,7 @@ export const emitNativeSidecarSet = (ctx: EmitContext, lines: string[], operatio
         ? `([&]() -> bool { const auto& __gea_callable = ${callable}; gea::installCallableOwnFacts(__gea_callable.functionObjectIdentity(), __gea_callable.name(), __gea_callable.length()); ` +
           `const gea::PropertyKey __gea_key = ${key}; ` +
           `if (!__gea_key.isSymbol() && __gea_key.text() == "prototype") gea::installCallableConstructorPrototype(__gea_callable); ` +
-          `return __gea_callable.functionObjectIdentity()->properties->set(__gea_key, ${value}, gea::Value::box(gea::Value::Tag::Function, __gea_callable)); })()`
+          `return __gea_callable.functionObjectIdentity()->properties->setWithReceiver(__gea_key, ${value}, [&] { return gea::Value::box(gea::Value::Tag::Function, __gea_callable); }); })()`
         : `gea::callableDynamicSet(${callable}, ${key}, ${value})`
     if (operation.strict) {
       lines.push(`if (!${write}) gea::host::throwRuntimeError("TypeError", "Cannot assign to read-only Function own property");`)
@@ -1537,6 +1574,32 @@ const emitNativeSidecarDelete = (ctx: EmitContext, lines: string[], operation: D
  * does for a get: there is no runtime member table to search a non-constant
  * key against.
  */
+/**
+ * `[[Delete]]` of a runtime key on a namespace-shaped host intrinsic, over the
+ * per-protocol sidecar its computed get and set use (`emit-host-properties.ts`'s
+ * `computedNativeHandleGetText` states the design): a non-configurable member
+ * answers false and changes nothing, anything else is marked removed there and
+ * answers true. `null` for a handle with no runtime member table.
+ */
+export const nativeHandleSidecarDeleteText = (
+  ctx: EmitContext,
+  representation: Extract<Representation, { kind: 'native-handle' }>,
+  key: IrOperand
+): string | null => {
+  const memberProtocol = representation.native ?? representation.protocol
+  const members = representation.native === null ? ctx.hosts.intrinsicMembers.get(memberProtocol) : undefined
+  if (members === undefined) return null
+  const computedSite = `a computed "delete" on a "${representation.protocol}" host handle`
+  const fixed = members
+    .filter((member) => !intrinsicMemberValueOf(ctx, memberProtocol, member, computedSite).configurable)
+    .map((member) => `__gea_key.text() == ${cppStringLiteral(member.name)}`)
+  const keep = fixed.length === 0 ? 'false' : `(!__gea_key.isSymbol() && (${fixed.join(' || ')}))`
+  return (
+    `([&]() -> bool { const gea::PropertyKey __gea_key = ${propertyKeyText(ctx, key, computedSite)}; if (${keep}) return false; ` +
+    `gea::detail::hostIntrinsicSidecar(${cppStringLiteral(memberProtocol)}).remove(__gea_key); return true; })()`
+  )
+}
+
 const emitNativeHandleDelete = (ctx: EmitContext, lines: string[], operation: DeleteOperation): boolean => {
   const representation = operation.receiver.representation
   if (representation.kind !== 'native-handle') return false
@@ -1553,21 +1616,13 @@ const emitNativeHandleDelete = (ctx: EmitContext, lines: string[], operation: De
     // `computedNativeHandleGetText` states the design): a non-configurable
     // member answers false and changes nothing, anything else is marked
     // removed there and answers true.
-    const members = representation.native === null ? ctx.hosts.intrinsicMembers.get(memberProtocol) : undefined
-    if (members === undefined) {
+    const answer = nativeHandleSidecarDeleteText(ctx, representation, operation.key)
+    if (answer === null) {
       throw createCppEmitBlockedError(
         'property-access:native-handle:delete:true',
         `${site} has no compile-time-constant key, and a "${representation.protocol}" host handle has no runtime member table for a computed key to search`
       )
     }
-    const computedSite = `a computed "delete" on a "${representation.protocol}" host handle`
-    const fixed = members
-      .filter((member) => !intrinsicMemberValueOf(ctx, memberProtocol, member, computedSite).configurable)
-      .map((member) => `__gea_key.text() == ${cppStringLiteral(member.name)}`)
-    const keep = fixed.length === 0 ? 'false' : `(!__gea_key.isSymbol() && (${fixed.join(' || ')}))`
-    const answer =
-      `([&]() -> bool { const gea::PropertyKey __gea_key = ${propertyKeyText(ctx, operation.key, computedSite)}; if (${keep}) return false; ` +
-      `gea::detail::hostIntrinsicSidecar(${cppStringLiteral(memberProtocol)}).remove(__gea_key); return true; })()`
     emitDeleteOutcome(ctx, lines, operation, answer)
     return true
   }

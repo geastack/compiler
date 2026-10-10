@@ -6,6 +6,7 @@ import { censusParameterBindings, indexParameterBindingProgram } from './paramet
 import { wholeProgram } from './reachability.js'
 import { indexValueFlow } from './flow/value-flow.js'
 import { attachClosedScriptScope } from './flow/targets.js'
+import { attachDeferredIntrinsicProtocolLedger, createDeferredIntrinsicProtocolLedger } from './deferred-intrinsic-protocols.js'
 
 const infer = (
   extra: string,
@@ -58,6 +59,10 @@ const inferSource = (source: string, scope: 'closed' | 'open' = 'closed') => {
   // test exists to probe into the very thing the census is told to assume.
   const valueFlow = indexValueFlow(checker, [file], wholeProgram)
   if (scope === 'closed') attachClosedScriptScope(valueFlow, { files: new Set([file]) })
+  // Production carries exact Script binding obligations through the final
+  // mutation ledger; a closed realm alone cannot prove global rebinding absent.
+  const ledger = createDeferredIntrinsicProtocolLedger()
+  attachDeferredIntrinsicProtocolLedger(valueFlow, ledger)
   const index = indexParameterBindingProgram(checker, [file], wholeProgram, valueFlow)
   const census = censusParameterBindings(checker, [file], wholeProgram, undefined, index, valueFlow)
   let callback: ts.FunctionExpression | ts.ArrowFunction | undefined
@@ -71,7 +76,12 @@ const inferSource = (source: string, scope: 'closed' | 'open' = 'closed') => {
   }
   visit(file)
   assert.ok(callback)
-  return { checker, types: callback.parameters.map((parameter) => census.typeAt(parameter)), debug: census.debugReport?.() ?? '' }
+  return {
+    checker,
+    types: callback.parameters.map((parameter) => census.typeAt(parameter)),
+    debug: census.debugReport?.() ?? '',
+    requirements: ledger.requirements()
+  }
 }
 
 test('inline mutable method parameters receive typed arguments through an inferred receiver', () => {
@@ -146,8 +156,14 @@ test('a nested ordinary function owns its own receiver separately from the metho
 })
 
 test('a closed factory result carries the same complete receiver use proof', () => {
-  const { checker, types } = infer('', false, false, 'return third.value', true)
+  const { checker, types, requirements } = infer('', false, false, 'return third.value', true)
   assert.ok(types[2] && checker.getPropertyOfType(types[2], 'value'))
+  const bindings = requirements.flatMap((requirement) => {
+    const name = requirement.sourceGlobalBinding?.name
+    return name && ts.isIdentifier(name) ? [name.text] : []
+  })
+  assert.ok(bindings.includes('makeObject'))
+  assert.ok(bindings.includes('dispatch'))
 })
 
 test('an escaping factory or one escaping result does not prove a closed receiver', () => {

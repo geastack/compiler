@@ -1,4 +1,4 @@
-// mongodb's ClientBulkWriteExecutor: `...(cond && { timeoutMode })` spreads
+// A database client's bulk-write executor: `...(cond && { timeoutMode })` spreads
 // `false` (nothing to copy) or a record into a literal that names its keys.
 interface Options {
   ordered?: boolean

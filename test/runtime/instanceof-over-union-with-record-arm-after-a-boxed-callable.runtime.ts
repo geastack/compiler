@@ -1,6 +1,6 @@
 // `init instanceof HeaderBag` over `HeaderBag | Record<string, string> |
 // [string, string][]` -- node-compat's `Headers` constructor again, now in a
-// program that BOXES a callable whose parameter reaches a HeaderBag (hono's
+// program that BOXES a callable whose parameter reaches a HeaderBag (a framework's
 // middleware handed to an `any` slot: `(c: Context, next) => ...`).
 //
 // Boxing a callable boxes the callable, not the classes its parameters name:

@@ -3,7 +3,7 @@
 //! expect: many:["1","3"]
 //! expect: missing:undefined
 
-// hono's utils/url.ts: one implementation with an optional third parameter is
+// An HTTP framework's URL utilities: one implementation with an optional third parameter is
 // exported twice -- once asserted to a two-parameter signature whose result
 // union omits the `multiple` arms, once wrapped to pass `true`. The asserted
 // value is the same function; a call through it simply never supplies the

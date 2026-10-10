@@ -13,10 +13,10 @@ import type { PairConvertible } from './record-view.js'
  * promise back, mapped onto the record, and so can only fill an awaited
  * `next`.
  *
- * node-compat's `URLSearchParams` implements `keys()` as a generator behind an
+ * A `URLSearchParams` written in TypeScript implements `keys()` as a generator behind an
  * `IterableIterator<string>` overload, so its call result is the cursor
  * (`semantics/normalize/physical-overload-result.ts`), while
- * `mongodb-connection-string-url`'s subclass overrides it as `keys():
+ * a library subclass may override it as `keys():
  * IterableIterator<K> { return super.keys() as IterableIterator<K> }`: an
  * interface result, which derives to a record, built from a cursor.
  *

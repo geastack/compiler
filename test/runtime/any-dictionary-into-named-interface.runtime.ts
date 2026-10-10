@@ -1,14 +1,14 @@
-// The MongoDB driver reads server replies as `Document` --
+// A database client reads server replies as `Document` --
 // `{ [key: string]: any }` -- and hands them to parameters typed by a named
-// interface: `new MongoServerError(document)` takes an `ErrorDescription`,
+// interface: `new ServerError(document)` takes an `ErrorDescription`,
 // which itself extends `Document`. The named fields are read out of the open
 // document with a checked unbox, absent optional fields stay absent, and every
 // other key survives in the interface's own index.
-interface BsonDocument {
+interface WireDocument {
   [key: string]: any
 }
 
-interface ErrorDescription extends BsonDocument {
+interface ErrorDescription extends WireDocument {
   message?: string
   errmsg?: string
   code?: number
@@ -30,10 +30,10 @@ function replyStatus(reply: Reply): string {
   return `${reply.ok}:${reply.n ?? 'none'}`
 }
 
-const parsed: BsonDocument = JSON.parse('{"ok":0,"errmsg":"not primary","code":10107,"codeName":"NotWritablePrimary"}')
+const parsed: WireDocument = JSON.parse('{"ok":0,"errmsg":"not primary","code":10107,"codeName":"NotWritablePrimary"}')
 console.log(describe(parsed))
-const reply: BsonDocument = JSON.parse('{"ok":1,"n":3}')
-// @ts-expect-error mongodb's `UpdateOperation.handleOk` returns a `Document` as its result interface the same way
+const reply: WireDocument = JSON.parse('{"ok":1,"n":3}')
+// @ts-expect-error the client's update operation's `handleOk` returns a `Document` as its result interface the same way
 const failed: string = replyStatus(parsed)
 // @ts-expect-error
 console.log(failed, replyStatus(reply))

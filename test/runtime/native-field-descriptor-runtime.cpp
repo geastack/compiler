@@ -27,7 +27,172 @@ struct CopyObserved {
   CopyObserved& operator=(const CopyObserved&) { ++copies; return *this; }
 };
 
+struct NativeAccessorOwner {
+  gea::Ref<gea::ArrayObject<double>> value;
+  int reads = 0;
+  int writes = 0;
+  friend void geaTraceRefs(const NativeAccessorOwner& owner, gea::detail::RefVisitor& visitor) {
+    gea::detail::traceRefs(owner.value, visitor);
+  }
+};
+
+void verifyNativeDescriptorFieldPolicies() {
+  using Number = gea::Optional<double>;
+  using NullPolicy = gea::NativeFieldOptionalPolicy<true>;
+  using UndefinedPolicy = gea::NativeFieldOptionalPolicy<false>;
+  auto absentNull = PropertyDescriptor::nativeAssignment<Number, NullPolicy>(Number{});
+  auto absentUndefined = PropertyDescriptor::nativeAssignment<Number, UndefinedPolicy>(Number{});
+  auto presentNull = PropertyDescriptor::nativeAssignment<Number, NullPolicy>(Number(9));
+  absentNull.hasWritable = absentNull.hasEnumerable = absentNull.hasConfigurable = false;
+  absentUndefined.hasWritable = absentUndefined.hasEnumerable = absentUndefined.hasConfigurable = false;
+  presentNull.hasWritable = presentNull.hasEnumerable = presentNull.hasConfigurable = false;
+  bool present = true;
+  NativeIndexAttributes frozen{false, true, false};
+  Number field;
+  assert((!gea::applyNativeFieldDescriptor<Number, UndefinedPolicy>(field, frozen, present, absentNull, true, Value::Tag::Number)));
+  assert(present && !field.has_value() && !frozen.writable && frozen.enumerable && !frozen.configurable);
+  assert((gea::applyNativeFieldDescriptor<Number, UndefinedPolicy>(field, frozen, present, absentUndefined, true, Value::Tag::Number)));
+  assert((!gea::applyNativeFieldDescriptor<Number, NullPolicy>(field, frozen, present, absentUndefined, true, Value::Tag::Number)));
+  field = 9;
+  assert((gea::applyNativeFieldDescriptor<Number, UndefinedPolicy>(field, frozen, present, presentNull, true, Value::Tag::Number)));
+  assert(field.has_value() && *field == 9);
+  assert((!gea::applyNativeFieldDescriptor<Number, UndefinedPolicy>(field, frozen, present, absentNull, true, Value::Tag::Number)));
+  assert(field.has_value() && *field == 9);
+  int loaded = 0;
+  const auto load = [&](const Value&) { ++loaded; return Number(99); };
+  field = Number{};
+  assert((!gea::applyNativeFieldDescriptorLoaded<Number, UndefinedPolicy>(field, frozen, present, absentNull, true, load)));
+  assert((gea::applyNativeFieldDescriptorLoaded<Number, UndefinedPolicy>(field, frozen, present, absentUndefined, true, load)));
+  field = 9;
+  assert((gea::applyNativeFieldDescriptorLoaded<Number, UndefinedPolicy>(field, frozen, present, presentNull, true, load)));
+  assert(loaded == 0 && field.has_value() && *field == 9);
+  using Union = gea::TaggedUnion<Number, std::string>;
+  using NullUnionPolicy = gea::NativeFieldUnionPolicy<NullPolicy, gea::NativeFieldLeafPolicy>;
+  using UndefinedUnionPolicy = gea::NativeFieldUnionPolicy<UndefinedPolicy, gea::NativeFieldLeafPolicy>;
+  Union unionField = Union::ofArm<0>(Number{});
+  auto unionNull = PropertyDescriptor::nativeAssignment<Union, NullUnionPolicy>(Union::ofArm<0>(Number{}));
+  unionNull.hasWritable = unionNull.hasEnumerable = unionNull.hasConfigurable = false;
+  assert((!gea::applyNativeFieldDescriptor<Union, UndefinedUnionPolicy>(unionField, frozen, present, unionNull, true, Value::Tag::Object)));
+  unionField = Union::ofArm<0>(Number(9));
+  auto unionPresent = PropertyDescriptor::nativeAssignment<Union, NullUnionPolicy>(Union::ofArm<0>(Number(9)));
+  unionPresent.hasWritable = unionPresent.hasEnumerable = unionPresent.hasConfigurable = false;
+  assert((gea::applyNativeFieldDescriptor<Union, UndefinedUnionPolicy>(unionField, frozen, present, unionPresent, true, Value::Tag::Object)));
+  // The old API did not publish an absence policy, so retain its exact C++
+  // payload behavior for callers that still deliberately use Leaf.
+  field = Number{};
+  assert(define(field, frozen, present, absentNull, Value::Tag::Number));
+}
+
+void verifyNativeAccessorDescriptors() {
+  using OptionalNumber = gea::Optional<double>;
+  using NullPolicy = gea::NativeFieldOptionalPolicy<true>;
+  using UndefinedPolicy = gea::NativeFieldOptionalPolicy<false>;
+  const auto nativeNull = gea::NativeDescriptorData::make<OptionalNumber, NullPolicy>(OptionalNumber{});
+  std::optional<OptionalNumber> optionalAnswer;
+  assert(!nativeNull.read(gea::NativeFieldRead(optionalAnswer)));
+  assert(!nativeNull.read(gea::NativeFieldRead(optionalAnswer, UndefinedPolicy{})));
+  assert(nativeNull.read(gea::NativeFieldRead(optionalAnswer, NullPolicy{})));
+  assert(optionalAnswer.has_value() && !optionalAnswer->has_value());
+  const auto nativeUndefined = gea::NativeDescriptorData::make<OptionalNumber, UndefinedPolicy>(OptionalNumber{});
+  const auto presentNull = gea::NativeDescriptorData::make<OptionalNumber, NullPolicy>(OptionalNumber(9));
+  const auto presentUndefined = gea::NativeDescriptorData::make<OptionalNumber, UndefinedPolicy>(OptionalNumber(9));
+  assert(!nativeNull.sameValue(nativeUndefined) && !nativeUndefined.sameValue(nativeNull));
+  assert(presentNull.sameValue(presentUndefined) && presentUndefined.sameValue(presentNull));
+  const Value dynamicNull = Value::box(Value::Tag::Null, nullptr);
+  const Value dynamicUndefined{};
+  assert(nativeNull.sameValue(dynamicNull) && !nativeNull.sameValue(dynamicUndefined));
+  assert(nativeUndefined.sameValue(dynamicUndefined) && !nativeUndefined.sameValue(dynamicNull));
+  assert(presentNull.sameValue(Value::box(Value::Tag::Number, 9.0)));
+  assert(!presentUndefined.sameValue(Value::box(Value::Tag::Number, 10.0)));
+  const auto negativeZero = gea::NativeDescriptorData::make<OptionalNumber, NullPolicy>(OptionalNumber(-0.0));
+  const auto positiveZero = gea::NativeDescriptorData::make<OptionalNumber, UndefinedPolicy>(OptionalNumber(0.0));
+  assert(!negativeZero.sameValue(positiveZero));
+  using OptionalArm = gea::TaggedUnion<OptionalNumber, std::string>;
+  using NullArmPolicy = gea::NativeFieldUnionPolicy<NullPolicy, gea::NativeFieldLeafPolicy>;
+  using UndefinedArmPolicy = gea::NativeFieldUnionPolicy<UndefinedPolicy, gea::NativeFieldLeafPolicy>;
+  const auto nestedNull = gea::NativeDescriptorData::make<OptionalArm, NullArmPolicy>(OptionalArm::ofArm<0>(OptionalNumber{}));
+  const auto nestedUndefined = gea::NativeDescriptorData::make<OptionalArm, UndefinedArmPolicy>(OptionalArm::ofArm<0>(OptionalNumber{}));
+  assert(!nestedNull.sameValue(nestedUndefined));
+  assert(nestedNull.sameValue(dynamicNull) && nestedUndefined.sameValue(dynamicUndefined));
+  const auto nestedPresentNull = gea::NativeDescriptorData::make<OptionalArm, NullArmPolicy>(OptionalArm::ofArm<0>(OptionalNumber(9)));
+  const auto nestedPresentUndefined = gea::NativeDescriptorData::make<OptionalArm, UndefinedArmPolicy>(OptionalArm::ofArm<0>(OptionalNumber(9)));
+  assert(nestedPresentNull.sameValue(nestedPresentUndefined));
+  assert(nestedPresentUndefined.sameValue(Value::box(Value::Tag::Number, 9.0)));
+  using Array = gea::Ref<gea::ArrayObject<double>>;
+  using Owner = gea::Ref<NativeAccessorOwner>;
+  using Get = gea::CallableObject<Array(Owner)>;
+  using Set = gea::CallableObject<void(Owner, Array)>;
+  Get getter(+[](void*, Owner owner) { ++owner->reads; return owner->value; }, nullptr);
+  Set setter(+[](void*, Owner owner, Array value) { ++owner->writes; owner->value = value; }, nullptr);
+  PropertyDescriptor accessor;
+  gea::installNativeDescriptorGetter(accessor, gea::NativeDescriptorAccessor::make(getter,
+    +[](const gea::NativeDescriptorData& function, const gea::NativeCallReceiver& receiver, const gea::NativeFieldRead& answer) {
+      if (!answer.accepts<Array>()) return false;
+      const auto* source = function.get<Get>();
+      return source != nullptr && answer.assign(source->call(receiver.as<NativeAccessorOwner>()));
+    }, nullptr));
+  gea::installNativeDescriptorSetter(accessor, gea::NativeDescriptorAccessor::make(setter, nullptr,
+    +[](const gea::NativeDescriptorData& function, const gea::NativeCallReceiver& receiver, const gea::NativeFieldWrite& written) {
+      std::optional<Array> value;
+      const auto* source = function.get<Set>();
+      if (source == nullptr || !written.read(value)) return false;
+      source->call(receiver.as<NativeAccessorOwner>(), *value);
+      return true;
+    }));
+  auto table = gea::makeRef<gea::DynamicObject>();
+  const auto key = gea::PropertyKey::string("items");
+  assert(table->defineOwnProperty(key, accessor));
+  auto owner = gea::makeRef<NativeAccessorOwner>();
+  owner->value = gea::arrayOf<double>({1});
+  auto other = gea::makeRef<NativeAccessorOwner>();
+  other->value = gea::arrayOf<double>({2});
+  std::optional<Array> answer;
+  assert(table->readNativeAccessor(key, gea::NativeCallReceiver::object(owner), gea::NativeFieldRead(answer)) == true);
+  assert(*answer == owner->value && owner->reads == 1 && other->reads == 0);
+  (*answer)->push(3);
+  assert(owner->value->size() == 2);
+  answer.reset();
+  assert(table->readNativeAccessor(key, gea::NativeCallReceiver::object(other), gea::NativeFieldRead(answer)) == true);
+  assert(*answer == other->value && other->reads == 1);
+  auto replacement = gea::arrayOf<double>({7});
+  assert(table->writeNativeAccessor(key, gea::NativeCallReceiver::object(other), gea::NativeFieldWrite::exact(replacement)) == true);
+  assert(other->value == replacement && other->writes == 1 && owner->writes == 0);
+  assert(table->writeNativeAccessor(key, gea::NativeCallReceiver::object(owner), gea::NativeFieldWrite::exact(9.0)) == false);
+  assert(owner->writes == 0 && owner->value->size() == 2);
+  const auto* snapshot = table->ownProperty(key);
+  assert(snapshot && snapshot->nativeGet.function.get<Get>() != nullptr);
+  assert(snapshot->nativeGet.identity() == getter.functionObjectIdentity().get());
+  assert(snapshot->nativeSet.identity() == setter.functionObjectIdentity().get());
+  assert(table->defineOwnProperty(key, accessor));
+  Get different(+[](void*, Owner owner) { return owner->value; }, nullptr);
+  auto changed = accessor;
+  gea::installNativeDescriptorGetter(changed, gea::NativeDescriptorAccessor::make(different, accessor.nativeGet.read, nullptr));
+  assert(!table->defineOwnProperty(key, changed));
+  PropertyDescriptor setterOnly;
+  gea::installNativeDescriptorSetter(setterOnly, accessor.nativeSet);
+  const auto missing = gea::PropertyKey::string("noGetter");
+  assert(table->defineOwnProperty(missing, setterOnly));
+  std::optional<gea::Undefined> absent;
+  assert(table->readNativeAccessor(missing, gea::NativeCallReceiver::object(owner), gea::NativeFieldRead(absent)) == true);
+  assert(absent.has_value());
+  using DynamicGet = gea::CallableObject<Value(Owner)>;
+  DynamicGet dynamicGetter(+[](void*, Owner receiver) {
+    ++receiver->reads;
+    return Value::box(Value::Tag::Number, static_cast<double>(receiver->reads));
+  }, nullptr);
+  auto dynamicHalf = gea::NativeDescriptorAccessor::make(dynamicGetter, nullptr, nullptr, nullptr,
+    +[](const gea::NativeDescriptorData& function, const gea::NativeCallReceiver& receiver) -> Value {
+      return function.get<DynamicGet>()->call(receiver.as<NativeAccessorOwner>());
+    });
+  const auto observed = dynamicHalf.observeRead(gea::NativeCallReceiver::object(owner));
+  assert(observed.tag() == Value::Tag::Number && observed.as<double>() == 2);
+  assert(owner->reads == 2 && other->reads == 1);
+  assert(dynamicHalf.identity() == dynamicGetter.functionObjectIdentity().get());
+}
+
 int main() {
+  verifyNativeDescriptorFieldPolicies();
+  verifyNativeAccessorDescriptors();
   double field = 1;
   bool present = true;
   NativeIndexAttributes attributes;

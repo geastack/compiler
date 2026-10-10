@@ -14,7 +14,9 @@ import {
 } from './flow/model.js'
 import { ownedClassReceiverInventoryOf } from './flow/owned-class-receivers.js'
 import { closedValueOriginAuthorityOf } from './flow/callable-reach.js'
-import { seededOriginSolver, type SeededOriginNode } from './flow/seeded-origins.js'
+import { isVacuousOrigin, seededOriginSolver, type SeededOriginNode } from './flow/seeded-origins.js'
+import { callableCompletionSummaryOf } from './flow/callable-completions.js'
+import { sourceGlobalCallableBindingIsClosed } from './flow/source-global-binding.js'
 import {
   deferredIntrinsicProtocolLedgerOf,
   intrinsicProtocolRequirementKind,
@@ -270,11 +272,11 @@ const soleCallArity = (type: ts.Type): number | null => {
  *
  * Two writes to one cell, two calls to one parameter, two `return`s from one
  * function: each has to settle on a single carrier, and requiring the observed
- * types to be IDENTICAL refuses a case the program answers itself. In three's
- * renderer `let _gl = context;` is followed by
- * `if ( _gl === null ) _gl = getContext( ... );` -- the writes are
- * `NativeWebGL2RenderingContext` and `NativeWebGL2RenderingContext | null`, and
- * the null check on the very next line says which one the cell is.
+ * types to be IDENTICAL refuses a case the program answers itself. A local
+ * written `let ctx = context;` and then
+ * `if ( ctx === null ) ctx = getContext( ... );` has the writes
+ * `Context` and `Context | null`, and the null check on the very next line
+ * says which one the cell is.
  *
  * Nothing is invented here. The answer is always one of the types the program
  * itself produced, admitted only because the checker says every other observed
@@ -289,11 +291,11 @@ const soleCallArity = (type: ts.Type): number | null => {
  * named -- so joining `(event) => void` and `() => void` by assignability
  * alone picks `() => void`: the least informative signature, with the
  * parameter every real call site actually passes silently dropped.
- * `EventDispatcher.addEventListener`'s `listener` parameter, bound once bare
- * `Function` stopped being usable evidence (`parameter-bindings.ts`'s
- * `isUnusableEvidence`), is exactly this: joined by assignability it
- * collapsed to `() => void` while `dispatchEvent` calls every listener with
- * one argument, and that reached the emitter as a real ABI mismatch. Requiring
+ * An event-emitter class's `addEventListener( type, listener )` parameter,
+ * bound once bare `Function` stopped being usable evidence
+ * (`parameter-bindings.ts`'s `isUnusableEvidence`), is exactly this: joined by
+ * assignability it collapsed to `() => void` while `dispatchEvent` calls every
+ * listener with one argument, and that reached the emitter as a real ABI mismatch. Requiring
  * the SAME arity when either side is a single-signature callable is the
  * narrow fix -- compatible same-arity callables still agree exactly as
  * `isTypeAssignableTo` already decided; only arity itself stops being
@@ -305,10 +307,9 @@ const soleCallArity = (type: ts.Type): number | null => {
  * carries the `Any` flag).
  *
  * `checker.getTypeFromTypeNode` degrades to this when the node NAMES something
- * the checker cannot bind at that site, and three.js's source does it
- * constantly: `Box3.js` JSDoc-references `Sphere`/`Object3D`/`Triangle`/
- * `Line3`/`Plane`/`Matrix3`/`Matrix4`/`Raycaster`/`Sprite` while its only
- * import is `Vector3`, and every one of those resolves to `any` here.
+ * the checker cannot bind at that site, and JSDoc-typed JavaScript does it
+ * constantly: a module whose JSDoc references a dozen sibling classes while
+ * importing only one of them, so every other name resolves to `any` here.
  *
  * The distinction this draws is the whole point: a tag the checker CAN read is
  * the program stating a type, and stops a census exactly as a TS annotation
@@ -317,8 +318,8 @@ const soleCallArity = (type: ts.Type): number | null => {
  * for a fact that is not there. `parameter-bindings.ts` has drawn this
  * distinction since the call-site census landed; `return-bindings.ts` and
  * `local-bindings.ts` did not, and bailed on the mere PRESENCE of a tag, which
- * is why 48 of the app's three.js returns stayed `any` while the identical
- * shape on a parameter was rescued. One predicate, three censuses.
+ * is why such returns stayed `any` while the identical shape on a parameter
+ * was rescued. One predicate, three censuses.
  */
 /**
  * The type one member of `receiver` produces, or `null` when nothing usable
@@ -334,8 +335,8 @@ const soleCallArity = (type: ts.Type): number | null => {
  * ## The receiver's own null is not part of the question
  *
  * `getPropertyOfType` on a UNION answers only with properties every member
- * has, and `null` has none -- so `_gl.R32F`, where `_gl` is
- * `NativeWebGL2RenderingContext | null`, came back with no property at all and
+ * has, and `null` has none -- so `ctx.CONSTANT`, where `ctx` is
+ * `Context | null`, came back with no property at all and
  * the whole chain below it refused. That is not the program being unreadable;
  * it is the question being asked of the wrong type. A member read either runs
  * with a non-null receiver or does not run, so what the read PRODUCES is the
@@ -347,8 +348,8 @@ const soleCallArity = (type: ts.Type): number | null => {
  * null, `getNonNullableType` is the identity, and where it does, the
  * alternative was `null` -- the boxed carrier -- rather than some other type.
  *
- * Measured on the three.js app: 52 boxed identifier reads hang off `WebGLTextures.js`'s
- * `internalFormat` cell alone, whose every write is a `_gl.<CONSTANT>` read.
+ * A single cell whose every write is a `ctx.<CONSTANT>` read off a nullable
+ * host context can hold dozens of boxed identifier reads downstream of it.
  */
 /**
  * `resolved` when it names ONE calling convention, the convention this call
@@ -365,8 +366,7 @@ const soleCallArity = (type: ts.Type): number | null => {
  * program picked one, with its arguments, and TypeScript resolves exactly that
  * with `getResolvedSignature`. Reading the type back off the selected
  * signature's own declaration yields a single-signature function type -- the
- * real convention this call uses. `string.split( '\n' )` in `WebGLProgram.js`
- * is the whole of it: two `String.prototype.split` overloads, one call.
+ * real convention this call uses. `string.split( '\n' )` is the whole of it: two `String.prototype.split` overloads, one call.
  *
  * NOT the refuted overload-selector. That one lived inside
  * `resolvedCalleeSignatureType`, where the receiver had collapsed to `never` --
@@ -382,16 +382,16 @@ const soleCallArity = (type: ts.Type): number | null => {
 /**
  * The type an ELEMENT read produces, when the key is not a name.
  *
- * `lights[ i ]`, `state.probe[ j ]`, `array[ i ]` -- the census resolvers
+ * `items[ i ]`, `state.entries[ j ]`, `array[ i ]` -- the census resolvers
  * handled only a STRING-LITERAL key, which is a named member spelled with
- * brackets. Every other key was refused, and on the three.js app that is 470 boxed
- * identifier reads at the root of the chain plus everything downstream of
- * them: `const light = lights[ i ]` is the single largest one.
+ * brackets. Every other key was refused, which boxes the identifier read at
+ * the root of the chain plus everything downstream of it: a loop body's
+ * `const item = items[ i ]` is the commonest case.
  *
  * A key not known until runtime is answered by the receiver's INDEX signature,
  * which is the only thing that CAN answer it -- and an array's element type is
- * exactly its numeric index signature, so `Light[]` indexed by a `number`
- * yields `Light` with no array special-case. Which signature to ask is decided
+ * exactly its numeric index signature, so `Item[]` indexed by a `number`
+ * yields `Item` with no array special-case. Which signature to ask is decided
  * by the key's own type, resolved by the caller's own operand resolver so each
  * census keeps its own view of what a key expression holds.
  *
@@ -429,8 +429,8 @@ export const indexedTypeOf = (
 /**
  * A closed object LITERAL declares no index signature, but every string (or
  * number) key reading it either lands on one of its own properties or misses
- * -- exactly the fact an index signature states. `const shaderIDs = { a: '1',
- * b: '2' }; shaderIDs[ material.type ]` is not a different question from
+ * -- exactly the fact an index signature states. `const ids = { a: '1',
+ * b: '2' }; ids[ node.kind ]` is not a different question from
  * `Record<string, string>[ k ]`; TypeScript answers it `any` only because
  * nobody wrote the signature down, and the checker's own `getIndexTypeOfType`
  * has nothing to hand back. Synthesizing `(join of the literal's own property
@@ -445,7 +445,7 @@ export const indexedTypeOf = (
  * an absent property, the same precedent `structural-indexed-access.ts`
  * already relies on for `T[K]` -- so the synthesized type always carries it,
  * matching how the source itself is written: every real call site of this
- * shape (`shaderIDs[ material.type ]` chained into `if ( shaderID )`, a
+ * shape (`ids[ node.kind ]` chained into `if ( id )`, a
  * dispatch-table `handlers[ event ]?.()`) already treats the read as
  * possibly-absent.
  */
@@ -565,13 +565,12 @@ const numericAbsenceEnabled = process.env['GEA_NUMERIC_ABSENCE']
  * `undefined`, when a NUMBER key can name no property that any instance of the
  * receiver's class family will ever hold; `null` when that is not proved.
  *
- * three's `WebGLUtils.convert( p )` ends `return ( gl[ p ] !== undefined ) ?
- * gl[ p ] : null;`, `gl` a `NativeWebGL2RenderingContext` and `p` a numeric
- * format constant. The context declares no member a number can name, so the
- * read is `undefined` on every call -- but the checker reads it `any`, the
- * return census refused `convert` whole (`return-index-signature-absent`), and
- * everything downstream of it (`getInternalFormat` and the texture upload
- * paths) carried a dynamic value.
+ * A lookup helper ending `return ( ctx[ p ] !== undefined ) ? ctx[ p ] :
+ * null;`, `ctx` a host context interface and `p` a numeric constant, is the
+ * shape. The context declares no member a number can name, so the read is
+ * `undefined` on every call -- but the checker reads it `any`, the return
+ * census refuses the helper whole (`return-index-signature-absent`), and
+ * everything downstream of it carries a dynamic value.
  *
  * JavaScript reads an absent property as `undefined`, and a number key spells
  * only canonical numeric strings. So the read is absent on every instance when:
@@ -628,21 +627,16 @@ const absentNumericIndexTypeOf = (
       active.add(root)
       try {
         const compute = () => {
-          // The numeric twin of `class-family-member-read.ts`'s
-          // `GEA_FAMILY_MEMBER_ABSENT_KEYS`, and it exists for the same reason.
-          // The obligation below is DEFERRED: `requirePrototypeKeys` admits it
-          // on the spot (it only records into the active capture) and the
-          // sealed host census judges it much later. Under the `*` wildcard it
-          // cannot be judged true, and the result is a certification
-          // diagnostic that costs the WHOLE program its certificate -- a sound
-          // outcome, but a worse one than the boxed read this proof replaced,
-          // since refusing here simply leaves the read as it was. `0` refuses
-          // the proof outright and keeps the program compiling; the default is
-          // unchanged. Remove this switch when the census stops taking the
-          // wildcard, exactly as that sibling switch says.
-          // ... and the installed hosts state the same refusal for every build
-          // that loads them: `PluginCapabilities.refusesObjectPrototypeAbsenceProofs`.
-          if (numericAbsenceEnabled === '0' || ledger?.refusesObjectPrototypeAbsenceProofs === true) return false
+          // A kill switch, the numeric twin of `class-family-member-read.ts`'s
+          // `GEA_FAMILY_MEMBER_ABSENT_KEYS=0`. The obligation below is
+          // DEFERRED: `requirePrototypeKeys` records it into the active
+          // capture and the sealed host census judges it much later. Under
+          // the `*` wildcard it cannot be judged true, and the result is a
+          // certification diagnostic that costs the WHOLE program its
+          // certificate -- sound, but worse than refusing here, which simply
+          // leaves the read as it was. `0` refuses the proof outright; the
+          // default admits it.
+          if (numericAbsenceEnabled === '0') return false
           // Numeric absence also depends on the complete numeric key domain of
           // Object.prototype. Record that dependency in the same deferred
           // ledger as the class-family proof; otherwise an opaque call may
@@ -810,13 +804,13 @@ const numericNamesAbsentFrom = (
   const holdsFamily = (declaration: SourceClass): boolean =>
     family.has(declaration) || [...ancestorsOf.values()].some((ancestors) => ancestors.has(declaration))
   // The checker's type, or -- only where the checker says nothing -- the
-  // settled census's. Three stores through receivers the checker types `any`
-  // (`currentRenderState.state.transmissionRenderTarget[ camera.id ] = new
-  // WebGLRenderTarget(...)`, `programs[ programCacheKey ] = program`); the
-  // census types the first `Record<string, WebGLRenderTarget | undefined>`,
-  // a carrier no class instance can be stored into, so the write cannot land
-  // on a family member. Those two writes alone held `WebGLUtils.convert`'s
-  // result -- and 409 results downstream of it -- dynamic on the three.js app.
+  // settled census's. Keyed stores through receivers the checker types `any`
+  // (`state.cache[ key.id ] = new Target(...)`, `entries[ cacheKey ] =
+  // entry`) are common; where the census types the receiver
+  // `Record<string, Target | undefined>`, a carrier no class instance can be
+  // stored into, the write cannot land on a family member. Without this, such
+  // writes alone hold the absence proof -- and every result downstream of
+  // it -- dynamic.
   const typeOf = (expression: ts.Expression): ts.Type => {
     const own = checker.getTypeAtLocation(expression)
     if (!census || (own.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) return own
@@ -938,10 +932,9 @@ const numericNamesAbsentFrom = (
       }
       continue
     }
-    // This is the shape the debug arm was built for: the three.js app's `programs[
-    // programCacheKey ] = program` and `state.transmissionRenderTarget[
-    // camera.id ] = ...` are TWO independent keyed writes onto the same class
-    // family, and the old first-refusal-ends-the-proof behavior meant a run
+    // This is the shape the debug arm was built for: `entries[ cacheKey ] =
+    // entry` and `state.cache[ key.id ] = ...` in one program are TWO
+    // independent keyed writes onto the same class family, and the old first-refusal-ends-the-proof behavior meant a run
     // could only ever report one of them.
     if (domainMayNameNumeric(keys.of(access.argumentExpression)) && mayHold(receiver)) {
       if (numericAbsenceForce === undefined || (numericAbsenceForce !== '*' && numericAbsenceForce !== root.name?.text)) {
@@ -1108,7 +1101,8 @@ const closedLiteralMemberAbsent = (
   record: ts.Type,
   name: string,
   at: ts.Node,
-  census: SettledReceiverCensus | null
+  census: SettledReceiverCensus | null,
+  depth = 0
 ): boolean => {
   const refuse = (reason: string, site?: ts.Node): false => {
     if (closedLiteralAbsenceDebug !== undefined) {
@@ -1129,6 +1123,18 @@ const closedLiteralMemberAbsent = (
   // reaching here at all means none was stated, but a defensive check keeps
   // this proof correct even if that changes upstream.
   if (checker.getIndexInfosOfType(record).length > 0) return refuse('index-signature')
+  // A spread copies every own enumerable key its SOURCE holds at run time,
+  // which is what the source's type lists only when the source is itself a
+  // closed literal: `{ ...x }` over an `x: Object`, an interface or an `any`
+  // holds whatever `x` holds. The checker's member list for such a literal is
+  // the source's declared list, so a key missing from it proves nothing.
+  if (depth > 8) return refuse('spread-depth')
+  for (const declaration of declarations)
+    for (const property of declaration.properties) {
+      if (!ts.isSpreadAssignment(property)) continue
+      if (!closedLiteralMemberAbsent(checker, flow, checker.getTypeAtLocation(property.expression), name, at, census, depth + 1))
+        return refuse('spread-source-open', property)
+    }
 
   const domains = createPropertyKeyDomains(checker, flow, () => true)
   // The checker's type, or -- only where the checker says nothing -- the
@@ -1309,26 +1315,147 @@ const publishClosedLiteralAbsenceRequirements = (
   if (added) ledger.replace(CLOSED_LITERAL_ABSENCE_LEDGER_SCOPE, held.all)
 }
 
+interface LiteralReceiverOrigins {
+  readonly literals: ReadonlySet<ts.ObjectLiteralExpression> | null
+  readonly requirements: readonly IntrinsicProtocolRequirement[]
+}
+
+const literalReceiverOrigins = new WeakMap<ValueFlowIndex, WeakMap<ts.Expression, LiteralReceiverOrigins>>()
+
+/**
+ * Every object literal `receiver` can denote at runtime, with the obligations
+ * that inventory leans on, or `null` when it can hold anything else -- the
+ * provenance half of the absence proof below, which the write scan over the
+ * receiver's static type cannot supply on its own.
+ *
+ * A literal's TYPE describes a receiver's static shape, never where its value
+ * came from. Every object is assignable to `{}`, and structural typing lets a
+ * cell typed `{ a: number }` hold an object with more keys, so a key the
+ * literal lacks can still be present on what the receiver holds. The measured
+ * case is a method `setOptions( options = {} )`: TypeScript declares the
+ * parameter `{}` from its default, its callers hand it a full options record,
+ * and the empty literal's absence proof folded `options.type !== undefined` to
+ * `false` for an argument that had `type`.
+ *
+ * The values come from the shared closed-origin authority
+ * (`closedValueOriginAuthorityOf`) the numeric absence proof above already
+ * asks: a parameter's complete inventory (every caller, its default and its
+ * reassignments), a binding's writes and a field's stores, plus the returns of
+ * a directly called source function. An open value set -- an unknown caller,
+ * a value from outside the program -- refuses, and so does any allocation
+ * that is not an object literal. A read whose receiver expression is not
+ * known (a census asking about a write's value) has no receiver to prove and
+ * refuses as well.
+ */
+const literalOriginsOfReceiver = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  ledger: DeferredIntrinsicProtocolLedger,
+  receiver: ts.Expression | null
+): {
+  readonly literals: ReadonlySet<ts.ObjectLiteralExpression>
+  readonly requirements: readonly IntrinsicProtocolRequirement[]
+} | null => {
+  if (receiver === null) return null
+  let byReceiver = literalReceiverOrigins.get(flow)
+  if (!byReceiver) literalReceiverOrigins.set(flow, (byReceiver = new WeakMap()))
+  let origins = byReceiver.get(receiver)
+  if (origins === undefined) {
+    // The origin authority states the obligations its caller inventory leans
+    // on (a source-global callee binding staying intact) into the ACTIVE
+    // capture frame and refuses without one. A binding census asks this
+    // outside any frame, so the walk opens its own and hands the obligations
+    // back to be published with the answer they license.
+    const captured = ledger.capture(() => literalsHeldBy(checker, flow, receiver))
+    origins = { literals: captured.value, requirements: captured.requirements }
+    byReceiver.set(receiver, origins)
+  }
+  const { literals, requirements } = origins
+  return literals === null ? null : { literals, requirements }
+}
+
+/** The object literals `receiver`'s complete value set allocates, or `null` when it holds anything else or is open. */
+const literalsHeldBy = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  receiver: ts.Expression
+): ReadonlySet<ts.ObjectLiteralExpression> | null => {
+  // `numericNamesAbsentFrom`'s own origin walk, over the same shared
+  // authority: one per query, so its proof context covers every parameter and
+  // field continuation this receiver reaches.
+  let origins: ReturnType<typeof closedValueOriginAuthorityOf> | undefined
+  const sourcesOf = (anchor: ts.Expression) => (origins ??= closedValueOriginAuthorityOf(checker, flow, anchor))
+  const literals = new Set<ts.ObjectLiteralExpression>()
+  const through = (values: readonly ts.Expression[]): SeededOriginNode<ts.Expression> => ({
+    admitted: true,
+    seed: false,
+    dependencies: values.map(unwrapValueExpression)
+  })
+  const refused: SeededOriginNode<ts.Expression> = { admitted: false, seed: false, dependencies: [] }
+  const solve = seededOriginSolver<ts.Expression>((value) => {
+    if (isVacuousOrigin(flow, value)) return { admitted: true, seed: false, dependencies: [] }
+    if (ts.isObjectLiteralExpression(value)) {
+      literals.add(value)
+      return { admitted: true, seed: true, dependencies: [] }
+    }
+    if (ts.isConditionalExpression(value)) return through([value.whenTrue, value.whenFalse])
+    if (
+      ts.isBinaryExpression(value) &&
+      [ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.QuestionQuestionToken].includes(
+        value.operatorToken.kind
+      )
+    )
+      return through([value.left, value.right])
+    if (ts.isCallExpression(value)) {
+      // A direct call of a source function declaration completes with what
+      // its body returns, while its binding is never replaced.
+      const callee = unwrapValueExpression(value.expression)
+      const declaration = ts.isIdentifier(callee) ? flow.targetOf(callee)?.declaration : undefined
+      if (!declaration || !ts.isFunctionDeclaration(declaration) || !sourceGlobalCallableBindingIsClosed(checker, flow, declaration))
+        return refused
+      if (
+        flow.writesToDeclaration(declaration).some((write) => write.slot === 'whole' && write.edge !== 'return' && write.edge !== 'yield')
+      )
+        return refused
+      const summary = callableCompletionSummaryOf(flow, declaration)
+      return summary && summary.execution === 'sync' ? through(summary.values) : refused
+    }
+    if (ts.isPropertyAccessExpression(value) || ts.isElementAccessExpression(value)) {
+      const stored = sourcesOf(value).fieldValuesOf(value)
+      return stored !== null && stored.length > 0 ? through(stored) : refused
+    }
+    if (!ts.isIdentifier(value)) return refused
+    const declaration = flow.targetOf(value)?.declaration
+    if (declaration && ts.isParameter(declaration)) {
+      const incoming = sourcesOf(value).parameterValuesOf(declaration)
+      return incoming !== null && incoming.length > 0 ? through(incoming) : refused
+    }
+    if (!declaration || !ts.isVariableDeclaration(declaration)) return refused
+    const values = sourcesOf(value).bindingValuesOf(declaration)
+    return values !== null && values.length > 0 ? through(values) : refused
+  })
+  return solve(unwrapValueExpression(receiver)) === 'allocated' && literals.size > 0 ? literals : null
+}
+
 /**
  * `undefined`, when a NAMED key is proven absent from a CLOSED object-literal
  * record and nothing in the program can add it -- the same fact
  * `flow/class-family-member-read.ts` states for an absent CLASS key, restated
  * for a record with no class behind it at all.
  *
- * three's `getProgramCacheKey( parameters )` pushes
- * `parameters.morphAttributeCount` into the program's cache-key array.
- * `parameters` is the 135-field literal `getParameters` returns, and
- * `morphAttributeCount` is not one of its fields -- not written anywhere in
- * the file, not anywhere in three's whole source (measured: the only mention
- * is this one read). JavaScript reads an absent own property as `undefined`,
- * falling through to `Object.prototype.morphAttributeCount`, which nothing
+ * A cache-key builder `getKey( parameters )` that pushes
+ * `parameters.staleField` into its key array, where `parameters` is a large
+ * object literal some other function returns and `staleField` is not one of
+ * its fields -- not written anywhere in the program, the only mention being
+ * this one read. JavaScript reads an absent own property as `undefined`,
+ * falling through to `Object.prototype.staleField`, which nothing
  * defines -- so the push is `undefined` on every call, while the checker's own
  * answer for the read (an unknown member of an object type with no index
  * signature) is `any`.
  *
  * `closedObjectLiteralIndexTypeOf` already states this fact for an
  * unresolved KEY read on a closed literal, from the literal's own declared
- * properties alone. A NAMED read commits to one key (`morphAttributeCount`)
+ * properties alone. A NAMED read commits to one key (`staleField`)
  * up front, so unlike an index read it can be wrong about a SPECIFIC name if
  * the literal is handed to code that adds exactly that key through an alias
  * this read never sees syntactically -- which is why this proof also has to
@@ -1347,7 +1474,8 @@ const absentClosedObjectLiteralMemberTypeOf = (
   receiver: ts.Type,
   name: string,
   at: ts.Node,
-  census: SettledReceiverCensus | null
+  census: SettledReceiverCensus | null,
+  receiverExpression: ts.Expression | null
 ): ts.Type | null => {
   const ledger = deferredIntrinsicProtocolLedgerOf(flow)
   if (!ledger) {
@@ -1361,12 +1489,14 @@ const absentClosedObjectLiteralMemberTypeOf = (
         process.stderr.write(`[CLOSED-LITERAL-ABSENCE] ${name} property-found-on-arm ${checker.typeToString(arm)}\n`)
       return null
     }
+  }
+  const proofOf = (record: ts.Type): ClosedLiteralAbsenceProof => {
     let proofsByCensus = closedLiteralAbsenceProofs.get(flow)
     if (!proofsByCensus) closedLiteralAbsenceProofs.set(flow, (proofsByCensus = new WeakMap()))
     let proofsByType = proofsByCensus.get(census ?? NO_SETTLED_CENSUS)
     if (!proofsByType) proofsByCensus.set(census ?? NO_SETTLED_CENSUS, (proofsByType = new WeakMap()))
-    let proofs = proofsByType.get(arm)
-    if (!proofs) proofsByType.set(arm, (proofs = new Map()))
+    let proofs = proofsByType.get(record)
+    if (!proofs) proofsByType.set(record, (proofs = new Map()))
     let proved = proofs.get(name)
     if (!proved) {
       proved = ledger.capture(() => {
@@ -1379,24 +1509,51 @@ const absentClosedObjectLiteralMemberTypeOf = (
             process.stderr.write(`[CLOSED-LITERAL-ABSENCE] ${name} require-prototype-keys-failed\n`)
           return false
         }
-        return closedLiteralMemberAbsent(checker, flow, arm, name, at, census)
+        return closedLiteralMemberAbsent(checker, flow, record, name, at, census)
       })
       proofs.set(name, proved)
     }
+    return proved
+  }
+  const proven: ClosedLiteralAbsenceProof[] = []
+  for (const arm of arms) {
+    const proved = proofOf(arm)
     if (!proved.value) {
       if (closedLiteralAbsenceDebug !== undefined) process.stderr.write(`[CLOSED-LITERAL-ABSENCE] ${name} proof-rejected\n`)
       return null
     }
-    // `ledger.include` only reaches an active `capture` frame; a caller that
-    // asks this OUTSIDE one (every binding census's `propertyTypeOf`, unlike
-    // the producer-context hook which wraps its own ask) would silently lose
-    // the obligation right here. Publish it into a persistent scope instead --
-    // the same `capture`-independent path `flow/class-family-member-read.ts`'s
-    // own `publish` uses for the identical class-family obligation -- so the
-    // requirement survives to the final sealed-census discharge regardless of
-    // which caller asked first.
-    publishClosedLiteralAbsenceRequirements(ledger, proved.requirements)
+    proven.push(proved)
   }
+  // Asked last: it is the one costly half, and a key some write can add has
+  // already refused without it.
+  const origins = literalOriginsOfReceiver(checker, flow, ledger, receiverExpression)
+  if (origins === null) {
+    if (closedLiteralAbsenceDebug !== undefined) process.stderr.write(`[CLOSED-LITERAL-ABSENCE] ${name} receiver-origins-open\n`)
+    return null
+  }
+  // The arms are the receiver's static type; the literals are what it holds.
+  // A caller's literal can be a record the arms never name (an argument
+  // `{ size }` into a parameter defaulted to `{}`), so each one the receiver
+  // can hold answers the same two questions the arms did.
+  for (const literal of origins.literals) {
+    const record = checker.getTypeAtLocation(literal)
+    const proved = checker.getPropertyOfType(record, name) ? null : proofOf(record)
+    if (!proved?.value) {
+      if (closedLiteralAbsenceDebug !== undefined) process.stderr.write(`[CLOSED-LITERAL-ABSENCE] ${name} held-literal-not-proven\n`)
+      return null
+    }
+    proven.push(proved)
+  }
+  // `ledger.include` only reaches an active `capture` frame; a caller that
+  // asks this OUTSIDE one (every binding census's `propertyTypeOf`, unlike
+  // the producer-context hook which wraps its own ask) would silently lose
+  // the obligations right here. Publish them into a persistent scope instead --
+  // the same `capture`-independent path `flow/class-family-member-read.ts`'s
+  // own `publish` uses for the identical class-family obligation -- so they
+  // survive to the final sealed-census discharge regardless of which caller
+  // asked first.
+  for (const proved of proven) publishClosedLiteralAbsenceRequirements(ledger, proved.requirements)
+  publishClosedLiteralAbsenceRequirements(ledger, origins.requirements)
   return checker.getUndefinedType()
 }
 
@@ -1420,7 +1577,8 @@ export const closedLiteralMemberAbsenceProven = (
   census: SettledReceiverCensus | null = null
 ): boolean =>
   deferredIntrinsicProtocolLedgerOf(flow) !== null &&
-  absentClosedObjectLiteralMemberTypeOf(checker, flow, receiver, name, at, census) !== null
+  ts.isExpression(at) &&
+  absentClosedObjectLiteralMemberTypeOf(checker, flow, receiver, name, at, census, at) !== null
 
 /**
  * The literal member NAME an element access spells, or `null` when its key is
@@ -1446,9 +1604,9 @@ export const literalMemberNameOf = (node: ts.ElementAccessExpression): string | 
  * choice among its members is missing. Counting arguments is the checker's own
  * first step (`chooseOverload` discards every candidate the count rules out
  * before comparing one type), so it is the step that can be repeated without
- * the receiver the checker refused to type; a tie keeps the set whole. Three's
- * `LOD.addLevel` is the measured case: `levels` is a descriptor-defined field
- * the checker declares nothing for, and `levels.splice( l, 0, level )` chose
+ * the receiver the checker refused to type; a tie keeps the set whole. The
+ * case: `levels` is a field defined by a property descriptor that the
+ * checker declares nothing for, and `levels.splice( l, 0, level )` chose
  * the two-parameter overload by joining, so the item reached the emitter
  * unpacked -- `Array.prototype.splice`'s renderer refused it by name.
  */
@@ -1624,7 +1782,16 @@ export const memberTypeOf = (
     // wrong thing. Left unanswered, the callee falls through to the record
     // member get, which refuses by name (`"Array.prototype.join" has no
     // rendering off a "record(...)"`), exactly as before absence existed.
-    return flow && !calleePosition(at) ? absentClosedObjectLiteralMemberTypeOf(checker, flow, nonNullReceiver, name, at, census) : null
+    // The receiver's own expression is what the provenance half of that proof
+    // walks; only a read spelled as `receiver.name` or `receiver[ 'name' ]`
+    // names one.
+    const receiverExpression =
+      (ts.isPropertyAccessExpression(at) && at.name.text === name) || (ts.isElementAccessExpression(at) && literalMemberNameOf(at) === name)
+        ? at.expression
+        : null
+    return flow && !calleePosition(at)
+      ? absentClosedObjectLiteralMemberTypeOf(checker, flow, nonNullReceiver, name, at, census, receiverExpression)
+      : null
   }
   const type = checker.getTypeOfSymbolAtLocation(property, at)
   if (isUnusableEvidence(type)) return null
@@ -1670,7 +1837,7 @@ const isTruthinessOnlyPosition = (node: ts.Expression): boolean => {
  *
  * Only a non-optional method signature outside the default library, declared
  * ambiently or read off an ambient value: `Buffer.alloc` is a member of
- * node-compat's plain `interface BufferConstructor`, and what makes it a host
+ * a host's plain `interface BufferConstructor`, and what makes it a host
  * method is the `declare const Buffer` it is read through. A program's own
  * methods and `lib.*.d.ts` members keep their function type. Whether the program may have replaced the key on some host
  * surface is the producer's question, asked against the sealed mutation census
@@ -1712,14 +1879,14 @@ export const jsDocTypeIsUninformative = (checker: ts.TypeChecker, typeNode: ts.T
   // the statement a TS `: unknown` annotation makes, and stays one: a name
   // that fails to resolve degrades to `any`, never to `unknown`, so this
   // spelling cannot be the degradation this exists to admit. Measured the
-  // other way on test262's own harness compiled as JavaScript: `@param
+  // other way on a conformance harness compiled as JavaScript: `@param
   // {unknown} actual` on `assert.sameValue` was admitted, the call sites
   // bound the slot `number`, and the body -- laid out from the checker's
   // `unknown` -- declared the same parameter dynamic, so the ABI and the
   // frame disagreed and every case using the shim refused. `{any}`/`{*}`
-  // stay admitted: three.js writes `{any}` 31 times on parameters the three.js app
-  // measures as call-site-bindable, and that tag IS indistinguishable in
-  // resolved type from a degraded name.
+  // stay admitted: JSDoc-typed libraries write `{any}` routinely on
+  // parameters that are call-site-bindable, and that tag IS indistinguishable
+  // in resolved type from a degraded name.
   if (typeNode.kind === ts.SyntaxKind.UnknownKeyword || typeNode.kind === ts.SyntaxKind.JSDocUnknownType) return false
   const resolved = checker.getTypeFromTypeNode(typeNode)
   return (resolved.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0
@@ -1741,10 +1908,10 @@ export const jsDocTypeIsUninformative = (checker: ts.TypeChecker, typeNode: ts.T
  * this file asserted that TypeScript's JSDoc parser maps a capitalized
  * `{Object}` tag to `any`, so `jsDocTypeIsUninformative` would catch it and
  * `isGlobalObjectInterface` was documented as "not reachable from JSDoc".
- * That is false, measured on three's `UniformsUtils.js`:
+ * That is false, measured on a JSDoc-typed helper of this shape:
  *
- *     &#64;return {Object} The cloned uniforms.
- *     export function cloneUniforms( src ) { const dst = {}; ... return dst }
+ *     &#64;return {Object} The cloned table.
+ *     export function cloneTable( src ) { const dst = {}; ... return dst }
  *
  * `getReturnTypeOfSignature` answers the REAL `lib.es5.d.ts` `Object`
  * interface -- 7 properties, `TypeFlags.Object`, not `any` and not empty. So
@@ -1752,10 +1919,9 @@ export const jsDocTypeIsUninformative = (checker: ts.TypeChecker, typeNode: ts.T
  * the honest `dictionary` the body builds had to convert to a named record
  * with zero members (every one of `Object`'s members is an ambient method
  * `structural.ts` drops). No backend can render that pair, and the whole
- * uniforms chain downstream of it -- `parameters.uniforms`,
- * `materialProperties.uniforms`, and the 338 boxed carriers of
- * `WebGLMaterials.js`'s `refreshUniforms*( uniforms, material )` -- was
- * dynamic because of one tag.
+ * chain downstream of it -- every field the result is stored into and every
+ * function that later receives it as a parameter -- was dynamic because of
+ * one tag.
  *
  * Recording that premise as false is the finding; making the tag path REFUSE
  * an `{Object}` is not the cure, and the inline comment below carries the
@@ -1768,12 +1934,11 @@ export const jsDocTypeStatesNothing = (checker: ts.TypeChecker, typeNode: ts.Typ
   // authority now.
   //
   // Deliberately NOT `annotationStatesNothing`: that also refuses a tag
-  // resolving to the global `Object` interface. Adding that arm was measured on
-  // the three.js app and is a DEAD LEVER -- boxedTop stayed at exactly 9431, boxed rose
-  // 15899 -> 15906, and `withheld` went 8 -> 39, taking 134 operations with it
-  // (the 31 new ones sit on `mergeUniforms`/`cloneUniforms` results cited by
-  // object literals: ShaderLib 20, WebGLBackground 8, plus ShaderMaterial,
-  // Object3D and WebGLEnvironments). The carrier does not change because refusing
+  // resolving to the global `Object` interface. Adding that arm was measured
+  // and is a DEAD LEVER -- top-level boxing did not move, total boxing rose
+  // slightly, and more operations were withheld (the new ones sit on
+  // `@return {Object}` helper results cited by object literals). The carrier
+  // does not change because refusing
   // the tag only makes the census decline, after which the CHECKER hands the
   // very same named-empty `Object` record to the signature -- so the two
   // authorities on one call's result stop agreeing while the boxing stays put.
@@ -1796,14 +1961,14 @@ export const jsDocTypeStatesNothing = (checker: ts.TypeChecker, typeNode: ts.Typ
  *
  * `jsDocTypeIsUninformative` above catches a tag that resolves to
  * `any`/`unknown` -- an unimported cross-module name, or the JSDoc-special
- * `Object`/`object`. It does NOT catch this: three writes `@param {Object}
- * data` for `InterleavedBuffer.clone( data )`, and
+ * `Object`/`object`. It does NOT catch this: a JSDoc source writes `@param
+ * {Object} data` for `Buffer.clone( data )`, and
  * `declaration-overlay-transform.ts`'s `replaceVagueParamTags` correctly
  * prefers the SHIPPED declaration's answer over that vague tag -- but the
- * shipped declaration (`@types/three`) states `clone(data: {}): ...`, and
- * `{}` is itself a type with nothing IN it. The overlay's replacement is a
- * real improvement in the general case (`Material.fromJSON`'s `json` gets a
- * real `MaterialJSON`); here it swaps one uninformative spelling for another,
+ * shipped `.d.ts` states `clone(data: {}): ...`, and `{}` is itself a type
+ * with nothing IN it. The overlay's replacement is a real improvement in the
+ * general case (a `fromJSON( json )` whose `json` gets the shipped
+ * declaration's real `NodeJSON`); here it swaps one uninformative spelling for another,
  * and without this check the resolved `{}` reads as "the program stated a
  * real type" and stays excluded from the call-site census forever, even
  * though it states precisely as much as `any` does about what the parameter
@@ -1822,9 +1987,9 @@ export const isEmptyObjectType = (type: ts.Type): boolean => {
   // here rather than folded into `jsDocTypeIsUninformative`: lowercase
   // `object` resolves to this REAL, non-`any`/`unknown` type (and so, it
   // turns out, does capitalized `Object` -- see `isGlobalObjectInterface`,
-  // which handles that one) -- `WebGLProgram`'s own
-  // `@param {object} parameters` (matching what `@types/three` itself
-  // declares: `constructor(..., parameters: object)`) reads as "the program
+  // which handles that one) -- a constructor's `@param {object} parameters`
+  // (matching a shipped `.d.ts` that declares `constructor(..., parameters:
+  // object)`) reads as "the program
   // stated a real type" without this check, even though `object` carries
   // exactly as little information as `any` does for what can be read off it.
   if ((type.flags & ts.TypeFlags.NonPrimitive) !== 0) return true
@@ -1842,10 +2007,10 @@ export const isEmptyObjectType = (type: ts.Type): boolean => {
  *
  * This distinction does not arise on the JSDoc path and is what makes
  * `annotationStatesNothing` below narrower than `isEmptyObjectType`. Measured
- * over the three.js app's whole program: 168 of the 197 parameter annotations that
- * `isEmptyObjectType` alone calls empty are NAMED, and they are `lib.dom`'s
- * opaque handle interfaces -- `interface WebGLProgram {}`, `WebGLBuffer`,
- * `WebGLShader`, `PeriodicWave`, `FragmentDirective`. Those are declared
+ * over a large browser-targeting program: most of the parameter annotations
+ * that `isEmptyObjectType` alone calls empty are NAMED, and they are
+ * `lib.dom`'s opaque handle interfaces -- graphics-API program, buffer and
+ * shader handles, `PeriodicWave`, `FragmentDirective`. Those are declared
  * empty on purpose: emptiness IS the statement, a nominal handle nobody may
  * read a member off. Re-deriving one of them from its call sites would
  * replace a nominal identity the host owns with whatever this compiler's own
@@ -1934,7 +2099,7 @@ export const isStandardInterfaceType = (checker: ts.TypeChecker, anchor: ts.Node
  *
  * Reachable from JSDoc TOO, contrary to what this comment said for a long
  * time. A capitalized `{Object}` tag does NOT degrade to `any`: measured on
- * three's `@return {Object}`, the checker answers this very interface. See
+ * a JSDoc `@return {Object}`, the checker answers this very interface. See
  * `jsDocTypeStatesNothing`, which is what makes the tag path ask.
  *
  * `normalize/structural.ts` interns exactly THIS interface as `any`, and the
@@ -1943,15 +2108,15 @@ export const isStandardInterfaceType = (checker: ts.TypeChecker, anchor: ts.Node
  *
  * - an anonymous `{}` (empty, no signatures, no index, excluding fresh object
  *   literals, which share the identical type and are real values whose shape
- *   the object-bag and collection censuses discover): the three.js app's unmet
- *   obligations went 33 UP to 34 and `boxed` 17190 -> 17568. `{}` is the
+ *   the object-bag and collection censuses discover): unmet obligations went
+ *   UP and `boxed` rose by a few percent. `{}` is the
  *   checker's answer for a great many things that are not "unstated" at all --
  *   an intersection reduced to nothing, a mapped type over no keys, a bag
  *   before its census runs -- and boxing all of them costs more pairings than
  *   it closes.
  * - the lowercase `object` KEYWORD (`TypeFlags.NonPrimitive`), which really is
  *   one unambiguous spelling and really does state nothing: exactly NEUTRAL on
- *   unmet obligations (33 -> 33) at `boxed` +103. A cost with no return.
+ *   unmet obligations at a measurable `boxed` increase. A cost with no return.
  *
  * Both remain correct as statements about what those types SAY. Neither is
  * worth what it costs as a carrier decision.
@@ -1963,15 +2128,35 @@ export const isGlobalObjectInterface = (checker: ts.TypeChecker, anchor: ts.Node
 }
 
 /**
+ * Whether a property is one only the global `Object` interface declares --
+ * `constructor`, `toString`, `hasOwnProperty` and the rest -- by declaration
+ * identity, as `isGlobalObjectInterface` is.
+ *
+ * The member-level half of the same rule. Those members live on
+ * `Object.prototype`, never on an object of their own, so a shape that lists
+ * them is lying about its OWN data: the checker types `{ ...x }` over an
+ * `x: Object` as a copy of exactly these members, and laying them out as
+ * required fields made the spread enumerate `constructor,toString,...` before
+ * the keys it really copied, and answer every key it really copied as
+ * statically absent. A user interface or literal that declares a member of
+ * the same name is a real own member and does not match.
+ */
+export const isGlobalObjectMember = (checker: ts.TypeChecker, property: ts.Symbol): boolean => {
+  const declarations = property.declarations
+  const anchor = declarations?.[0]
+  if (!declarations || !anchor) return false
+  const owners = standardInterfaceSymbol(checker, anchor, 'Object')?.declarations
+  return owners !== undefined && declarations.every((declaration) => owners.includes(declaration.parent as ts.Declaration))
+}
+
+/**
  * Whether `type` is the standard library's `ObjectConstructor` interface --
  * the type the global `Object` VALUE has, as opposed to `isGlobalObjectInterface`'s
  * `Object` INSTANCE interface immediately above.
  *
- * Exported so the two call sites that ask "is this call really `Object.assign`
- * on the real global" (`flow/value-flow.ts`'s `isGlobalObjectAssign`,
- * `object-bag-bindings.ts`'s `isGlobalObjectAssignCall`) ask one shared
- * question instead of two byte-for-byte-identical copies of it, each
- * comparing `checker.getTypeAtLocation(callee.expression).getSymbol()?.getName()`
+ * Exported so "is this call really `Object.assign` on the real global"
+ * (`isGlobalObjectAssign` below) is asked by declaration identity rather than
+ * by comparing `checker.getTypeAtLocation(callee.expression).getSymbol()?.getName()`
  * against the literal string `'ObjectConstructor'`.
  */
 export const isGlobalObjectConstructor = (checker: ts.TypeChecker, anchor: ts.Node, type: ts.Type): boolean =>
@@ -2010,7 +2195,7 @@ export const isStandardGlobalValue = (checker: ts.TypeChecker, expression: ts.Ex
  * this backend does not implement wrapper-object carriers.
  */
 export const objectAssignTargetType = (checker: ts.TypeChecker, node: ts.Node): ts.Type | null => {
-  if (!isAuthenticatedObjectAssign(checker, node)) return null
+  if (!isGlobalObjectAssign(checker, node) || node.arguments.length < 2) return null
   const target = node.arguments[0]
   if (!target) return null
   const fresh = ts.isObjectLiteralExpression(target) ? objectAssignFreshTargetType(checker, target) : null
@@ -2060,10 +2245,10 @@ export const objectAssignedValueTypeOf = (checker: ts.TypeChecker, node: ts.Node
  * (typically the call's own `T & U`, or a wider interface of it, which the
  * checker has already proved the value satisfies) is a view of it, not a
  * second layout. Holding the return to the annotation asked for a conversion
- * of one object into another carrier at the `return` (bson's
- * `DBRef.toJSON(): DBRefLike & Document`), which is a copy: it would sever the
- * caller's object from the one assigned into and re-order its keys, since the
- * annotation names `$db` while the object gained it after the spread-in
+ * of one object into another carrier at the `return` (a `toJSON(): RefLike &
+ * Doc` that returns an `Object.assign` result), which is a copy: it would
+ * sever the caller's object from the one assigned into and re-order its keys,
+ * since the annotation names a key the object only gained after the spread-in
  * fields. The return census publishes the target as the function's return,
  * and a `const` cell initialized by a call to it holds the same object.
  */
@@ -2088,9 +2273,16 @@ export const returnsOnlyAssignedObjects = (checker: ts.TypeChecker, declaration:
   return !other && returns > 0
 }
 
-/** `Object.assign(...)` on the real global with at least one source, resolved by declaration identity. */
-const isAuthenticatedObjectAssign = (checker: ts.TypeChecker, node: ts.Node): node is ts.CallExpression => {
-  if (!ts.isCallExpression(node) || node.arguments.length < 2) return false
+/**
+ * Whether this node is a call of `Object.assign` on the real global, resolved
+ * by the receiver's DECLARATION IDENTITY (`isGlobalObjectConstructor`) rather
+ * than by its spelling: `globalThis.Object.assign(...)` is the same intrinsic
+ * as `Object.assign(...)`, and a local binding named `Object` is not. The one
+ * test every census, the value-flow index and the source session ask; the
+ * source-count requirement belongs to each caller.
+ */
+export const isGlobalObjectAssign = (checker: ts.TypeChecker, node: ts.Node): node is ts.CallExpression => {
+  if (!ts.isCallExpression(node)) return false
   const callee = node.expression
   if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'assign') return false
   return isGlobalObjectConstructor(checker, callee.expression, checker.getTypeAtLocation(callee.expression))
@@ -2109,7 +2301,7 @@ const isAuthenticatedObjectAssign = (checker: ts.TypeChecker, node: ts.Node): no
  * reduced, dropping the empty member (`{} & Record<string, number[]>` reports
  * as `Record<string, number[]>`). Publishing the literal's own `{}` in its
  * place put an empty record on one side of the copy and a dictionary on the
- * other: three's `Object.assign( {}, source.defines )` then refused for want of
+ * other: `Object.assign( {}, source.table )` then refused for want of
  * a record<-dictionary arm, and no such arm can exist, since an empty struct
  * has nowhere to put a key.
  *
@@ -2122,15 +2314,16 @@ export const objectAssignFreshTargetType = (checker: ts.TypeChecker, literal: ts
   // A literal with properties keeps its own shape and its keys' creation
   // order: laid out as the call's `T & U` instead, a key the result type
   // declares would enumerate in layout position rather than where the copy
-  // created it -- bson's `DBRef.toJSON` builds `{ $ref, $id }`, copies the
-  // fields in, and adds `$db` last, and BSON key order is data.
+  // created it -- a `toJSON` that builds `{ ref, id }`, copies the fields
+  // in, and adds one more key last produces a key order a serializer may
+  // treat as data.
   if (literal.properties.length !== 0) return null
   const call = literal.parent
-  if (!isAuthenticatedObjectAssign(checker, call) || call.arguments[0] !== literal) return null
+  if (!isGlobalObjectAssign(checker, call) || call.arguments.length < 2 || call.arguments[0] !== literal) return null
   const type = checker.getTypeAtLocation(call)
   // The call's `T & U` stays an INTERSECTION whenever the checker cannot fold
-  // it -- a generic source (`options?: T` in mongodb's `resolveOptions`) or
-  // two interfaces (`MongoOptions & DbOptions`) -- and it is still the one
+  // it -- a generic source (`options?: T` in a `resolveOptions<T>` helper)
+  // or two interfaces (`ClientOptions & ScopeOptions`) -- and it is still the one
   // statement of what the object holds. Left out, the literal kept its empty
   // own layout: every key the copy stores had nowhere to go but the sidecar,
   // and a later view of the result read none of them.
@@ -2191,7 +2384,7 @@ const statesNothingPart = (checker: ts.TypeChecker, anchor: ts.Node | null, part
  * `statesNothingPart` asked THROUGH a constraint, for a part that is not
  * itself a type at all but a stand-in for one.
  *
- * `E['Bindings']`, where hono declares `type Bindings = object` and
+ * `E['Bindings']`, where a library declares `type Bindings = object` and
  * `E extends Env`, is a deferred indexed access: not an object type, so
  * neither arm of `statesNothingPart` sees it, and yet the checker relates
  * every object type to it exactly as it does to `object` -- through that
@@ -2233,7 +2426,8 @@ const statesNothingThroughConstraint = (checker: ts.TypeChecker, anchor: ts.Node
  * which is the right question for evidence: a type that says nothing must not
  * become the answer. It is the wrong question for a JOIN with a vacuous
  * member ALONGSIDE a real one -- `{} | E['Bindings'] | undefined`, the first
- * element of the tuple TypeScript gives hono's `fetch(request, ...rest)`.
+ * element of the tuple TypeScript gives a generic `fetch(request, ...rest)`
+ * whose rest parameter is typed through such an indexed access.
  * That type is not entirely vacuous (the indexed access is a statement), yet
  * the `{}` inside it still makes EVERY object type assignable to the whole,
  * so a `widestOf` join hands it back as "the" type and the other elements --
@@ -2346,10 +2540,10 @@ export const containsUnstatedPosition = (checker: ts.TypeChecker, anchor: ts.Nod
  *
  * `annotationStatesNothing` is all-or-nothing about one annotation, which is
  * the right question for a parameter written `: {}` and the wrong one for
- * hono's `matchResult: Result<[unknown, RouterRoute]>`. That annotation states
+ * a router's `matchResult: Result<[unknown, Route]>`. That annotation states
  * plenty -- a two-armed union of tuples of arrays of tuples -- and states
  * NOTHING at exactly one leaf, the `unknown` where the handler goes. The
- * program's only writer hands it `Result<[H, RouterRoute]>`, identical
+ * program's only writer hands it `Result<[H, Route]>`, identical
  * everywhere the annotation spoke and concrete at the one place it did not.
  *
  * Reading the annotation as the last word there is what forces a value that is
@@ -2385,6 +2579,16 @@ export const narrowsOnlyUnstatedPositions = (
   if (isStandardInterfaceType(checker, anchor, 'Iterable', declared)) {
     return (actual.flags & ts.TypeFlags.Any) === 0 && checker.isTypeAssignableTo(actual, declared)
   }
+  // Mutual assignability can equate an open dictionary with an optional
+  // named record. The latter does not retain the declared arbitrary-key
+  // protocol, so it cannot replace that dictionary's physical parameter.
+  const actualIndexes = checker.getIndexInfosOfType(actual)
+  if (
+    checker
+      .getIndexInfosOfType(declared)
+      .some((index) => !actualIndexes.some((candidate) => checker.isTypeAssignableTo(index.keyType, candidate.keyType)))
+  )
+    return false
   // Two spellings of one type -- an alias and its expansion, `Params` and
   // `Record<string, string>` -- state the identical thing at every position.
   if (checker.isTypeAssignableTo(actual, declared) && checker.isTypeAssignableTo(declared, actual)) return true
@@ -2410,7 +2614,7 @@ export const narrowsOnlyUnstatedPositions = (
   // the whole union look open: `string | ArrayBuffer | ReadableStream<unknown>`
   // observed at an incomplete indirect call as only `ReadableStream` dropped
   // the two fully stated body arms, and generated Response construction then
-  // read a string as the stream arm. Hono's `Result<[unknown, Route]>` remains
+  // read a string as the stream arm. A `Result<[unknown, Route]>` remains
   // refinable because each member's differing position is itself unstated.
   if (declared.isUnion()) {
     const actualMembers = actual.isUnion() ? actual.types : [actual]
@@ -2498,12 +2702,12 @@ export const isStructuralConstructorType = (type: ts.Type): boolean =>
  * constructor (`typeof C`) assignable to the one structural constructor the
  * statement names, and every absence `actual` carries the statement admits.
  *
- * mongodb's `command(..., responseType?: MongoDBResponseConstructor)` is fed
- * `operation.SERVER_COMMAND_RESPONSE_TYPE`, a closed family of response
- * classes. Reading the statement as the last word re-carries that family as a
+ * A `command(..., responseType?: ResponseConstructor)` parameter, declared
+ * as a structural constructor interface, fed `operation.RESPONSE_TYPE`, a
+ * closed family of response classes, is the shape. Reading the statement as the last word re-carries that family as a
  * `constructor-value-dispatch` -- a slot no class constructor converts into
  * and whose statics (`make`) are not the family's own -- so the census may hold
- * the parameter to the callers' family instead, exactly as it holds hono's
+ * the parameter to the callers' family instead, exactly as it holds a
  * `Result<[unknown, Route]>` to its concrete handler.
  */
 export const narrowsStructuralConstructorToClasses = (checker: ts.TypeChecker, declared: ts.Type, actual: ts.Type): boolean => {
@@ -2525,7 +2729,7 @@ export const narrowsStructuralConstructorToClasses = (checker: ts.TypeChecker, d
 }
 
 // lib declares it; a program or host ambient may still augment it
-// (node-compat's `interface Uint8Array` members), which keeps it lib's type.
+// (a host's `interface Uint8Array` members), which keeps it lib's type.
 const isDefaultLibDeclared = (type: ts.Type): boolean =>
   (type.getSymbol()?.getDeclarations() ?? []).some((declaration) => declaration.getSourceFile().hasNoDefaultLib)
 
@@ -2550,7 +2754,7 @@ export const statesAnArrayBufferView = (declared: ts.Type): boolean =>
  * `ArrayBuffer`, ...) assignable to the statement, and every absence it
  * carries the statement admits.
  *
- * mongodb's aws4 signing hands a `Uint8Array` to Web Crypto's
+ * A request-signing helper that hands a `Uint8Array` to Web Crypto's
  * `digest(algorithm, data: BufferSource)`. Held to the statement, the slot is
  * `ArrayBuffer | ArrayBufferView` with the view arm a generated record no
  * typed array reaches; held to its callers, it is the array itself.
@@ -2615,6 +2819,14 @@ export const nominalConstructorChoiceTypeAt = (
   return null
 }
 
+const isEvaluatedEmptyObjectLiteralType = (checker: ts.TypeChecker, type: ts.Type): boolean =>
+  (type.flags & ts.TypeFlags.Object) !== 0 &&
+  // A JS `const x = {}` reads back as the checker's expando-able JS literal, not an object literal.
+  ((type as ts.ObjectType).objectFlags & (ts.ObjectFlags.ObjectLiteral | ts.ObjectFlags.JSLiteral)) !== 0 &&
+  checker.getPropertiesOfType(type).length === 0 &&
+  checker.getIndexInfosOfType(type).length === 0 &&
+  type.getCallSignatures().length === 0
+
 export const widestOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts.Type | null => {
   const agree = (other: ts.Type, candidate: ts.Type): boolean => {
     const candidateArity = soleCallArity(candidate)
@@ -2627,10 +2839,19 @@ export const widestOf = (checker: ts.TypeChecker, types: readonly ts.Type[]): ts
     // as "the" type made the other's default convert into it --
     // `[cls = class {}, xCls = class X {}]` read `xCls.name` as `"cls"`.
     if (isDistinctClassConstructorPair(other, candidate)) return false
+    // An empty object literal the program EVALUATED covers nothing but another
+    // empty literal. It is a fresh object with zero members -- the most precise
+    // statement there is (see `exactEmptyObjectLiteralType`) -- and a table
+    // the program then fills by computed key, so its checker type `{}` being
+    // assignable-to by every object type is not carriage: an empty table
+    // literal passed beside a class instance made the parameter that empty
+    // literal's type, and the class instance and the filled table each had
+    // no conversion into it. Disagreeing leaves the two as union arms.
+    if (isEvaluatedEmptyObjectLiteralType(checker, candidate) && !isEvaluatedEmptyObjectLiteralType(checker, other)) return false
     if (!checker.isTypeAssignableTo(other, candidate)) return false
     // Assignability is not carriage, the same reason the nominal veto above
-    // exists. A union with a VACUOUS member alongside real ones -- hono's
-    // `Env?: E['Bindings'] | {}` -- absorbs every object type there is, so a
+    // exists. A union with a VACUOUS member alongside real ones -- a
+    // generic `Env?: E['Bindings'] | {}` -- absorbs every object type there is, so a
     // candidate carrying one "covers" observations it says nothing about:
     // `widestOf([E['Bindings'] | {} | undefined, ExecutionContext |
     // undefined])` answered the first, and the array built from it
@@ -2786,9 +3007,10 @@ const sameStablePureRead = (checker: ts.TypeChecker, left: ts.Expression, right:
  * or `null` when the expression does not prove that one carrier.
  *
  * A binding census can know more about `values[i]` than TypeScript's checker
- * does. Three's `UniformsGroup.copy` is the measured case: the census has
- * `Uniform | Uniform[]`, while the JSDoc-backed array literal still has
- * `Uniform[]`. The generic conditional join sees `Uniform | Uniform[]` and
+ * does. A JSDoc-typed `copy( source )` that normalizes each entry is the
+ * measured case: the census has `Entry | Entry[]`, while the JSDoc-backed
+ * array literal still has `Entry[]`. The generic conditional join sees
+ * `Entry | Entry[]` and
  * republishes that union, losing the fact the condition just established;
  * the subsequent numeric read then correctly refuses a union whose scalar arm
  * is not indexable.
@@ -2796,9 +3018,9 @@ const sameStablePureRead = (checker: ts.TypeChecker, left: ts.Expression, right:
  * The rule is tied to the real global `Array.isArray`, to a repeated stable
  * PURE READ -- a bare identifier, or one slot of one proven native Array --
  * and to a one-element alternate containing that same read. The IDENTIFIER
- * form is what a one-or-many parameter is normally written over -- hono's
- * `node-server` websocket bridge is `const datas = Array.isArray(data) ?
- * data : [data]` over `data: WebSocketData` -- and without it the join
+ * form is what a one-or-many parameter is normally written over -- a
+ * websocket bridge's `const datas = Array.isArray(data) ? data : [data]`
+ * over `data: SocketData` -- and without it the join
  * republished the whole union, so the `for (const data of datas)` that
  * follows read an element off a carrier whose scalar arms are not indexable
  * at all. Every array arm already discovered for the slot must fit the
@@ -2828,8 +3050,8 @@ export const normalizedArrayConditionalType = (
   const sourceMembers = source.isUnion() ? source.types : [source]
   // A `readonly T[]` member is NOT admitted here, although `readonly` has no
   // physical reading in this compiler (`structural.ts` publishes every array
-  // as `readonly: false`) and node-server's
-  // `WebSocketData = string | ArrayBuffer | Uint8Array | readonly Uint8Array[]`
+  // as `readonly: false`) and a
+  // `SocketData = string | ArrayBuffer | Uint8Array | readonly Uint8Array[]`
   // is refused for exactly that spelling. Admitting it was measured: the
   // arm's element is NARROWER than the alternate's (`Uint8Array` against the
   // whole union), so the answer widens an array's element -- and the binding
@@ -2867,7 +3089,7 @@ export const normalizedArrayConditionalType = (
  *     Array.isArray(value) ? value[0] : value          // value: string
  *     Array.isArray(pattern) ? pattern[0] : p          // readonly [...] | '*'
  *
- * (`@hono/node-server`'s `createUpgradeRequest` and hono's trie router; a
+ * (a header-normalizing request helper and a trie router's pattern match; a
  * `readonly` tuple is not assignable to the mutable `any[]` either, so the
  * fallback fires for a type that IS an array.) That `any` is an artifact of a
  * failed narrowing, not a boundary the program declared: the value is a
@@ -2907,7 +3129,7 @@ export const arrayPredicateNarrowedTypeOf = (checker: ts.TypeChecker, type: ts.T
  * TypeScript narrows a value whose declared type has a call or construct
  * signature to `X & Function`, and `lib.es5.d.ts` declares
  * `Function.prototype: any`. The intersection's `prototype` is therefore `any`
- * although `X` states it exactly: bson's `byte_utils.ts` declares `Buffer: {
+ * although `X` states it exactly: a byte-utility module that declares `Buffer: {
  * new (): unknown; prototype?: { _isBuffer?: boolean } } | undefined` and
  * reads `typeof Buffer === 'function' && Buffer.prototype?._isBuffer !==
  * true`, and both links of that chain were typed `any` -- a boxed `gea::Value`
@@ -2966,8 +3188,8 @@ export const arrayPredicateNarrowedElementTypeOf = (checker: ts.TypeChecker, nod
  * literal) when `read` types `x` as nothing but the nullish value(s) it is
  * compared with or against -- `null` when the operands do not decide it.
  *
- * `( gl[ p ] !== undefined ) ? gl[ p ] : null` (three's `WebGLUtils.convert`)
- * is the shape: once the element read is proved `undefined`, the arms are
+ * `( ctx[ p ] !== undefined ) ? ctx[ p ] : null` (a host-constant
+ * lookup helper) is the shape: once the element read is proved `undefined`, the arms are
  * `undefined` and `null`, which `joinOfWrites` rightly refuses to join -- but
  * the untaken arm contributes no value, so the conditional is its other arm.
  * The literal side is recognised by syntax and the standard `undefined`
@@ -3114,7 +3336,7 @@ const widenLiteralForm = (checker: ts.TypeChecker, type: ts.Type): ts.Type =>
  * ## A literal FORM is not a disagreement either
  *
  * The other shape is storage whose every write is a different LITERAL of one
- * primitive: `let type;` in three's `WebGLAttributes.js` is written `5126`,
+ * primitive: `let type;` in a host-constant switch is written `5126`,
  * `5131`, `5123`, `5122`, `5125`, `5124`, `5120`, `5121` -- eight writes,
  * eight literal types, none covering another, refused. The storage question
  * has an answer nobody has to invent: `number`. It is TypeScript's own
@@ -3220,6 +3442,8 @@ export const disjointArmsOf = (checker: ts.TypeChecker, types: readonly ts.Type[
       // Two different classes' constructor objects are disjoint by identity,
       // whatever the checker says of their shapes -- `widestOf`'s rule.
       if (isDistinctClassConstructorPair(type, existing)) continue
+      // An evaluated empty literal subsumes nothing it is not -- `widestOf`'s rule.
+      if (isEvaluatedEmptyObjectLiteralType(checker, type) !== isEvaluatedEmptyObjectLiteralType(checker, existing)) continue
       const forward = checker.isTypeAssignableTo(type, existing)
       const backward = checker.isTypeAssignableTo(existing, type)
       if (forward && backward) {
@@ -3354,7 +3578,7 @@ export const isTrackedCallable = (node: ts.Node): node is ts.SignatureDeclaratio
  * `this` wrapper -- `.call( thisArg, ...args )` or `.apply( thisArg, [ ...
  * args ] )` -- is unwrapped, or `null` when this call is neither.
  *
- * `EventDispatcher.dispatchEvent` calls every registered listener as
+ * An event-emitter class's `dispatchEvent` calls every registered listener as
  * `array[ i ].call( this, event )`: a call to `array[ i ]`, with ONE argument,
  * not a call to `Function.prototype.call` with two. Left wrapped, `checker.
  * getResolvedSignature` resolves `.call`'s own (unrelated) ambient signature
@@ -3479,7 +3703,7 @@ const superConstructorHomeOf = (call: ts.CallExpression): ts.ClassDeclaration | 
  * `pendingExplicitThisAt` is the round-over-round counterpart of
  * `unwrapExplicitThisCall`'s own static gate: that gate needs the receiver's
  * CHECKER type to already carry a call signature, which an untyped JS array
- * element never does -- `EventDispatcher.dispatchEvent`'s `array[ i ].call(
+ * element never does -- an event emitter's `dispatchEvent` doing `array[ i ].call(
  * this, event )` types `array[ i ]` as `any` even with a `@param {Function}`
  * JSDoc tag on the pushing `addEventListener`, because the field the array
  * lives on (`this._listeners`) itself carries no type. Unwrapping THAT
@@ -3556,7 +3780,7 @@ export const nameOfCallable = (declaration: ts.SignatureDeclaration): ts.MemberN
   if (ts.isMethodDeclaration(declaration) && (ts.isIdentifier(declaration.name) || ts.isPrivateIdentifier(declaration.name))) {
     return declaration.name
   }
-  // A constructor is named by its class: `new WebGLRenderer( ... )` reaches it
+  // A constructor is named by its class: `new Renderer( ... )` reaches it
   // through that name and no other.
   if (ts.isConstructorDeclaration(declaration)) {
     const owner = declaration.parent
@@ -3569,8 +3793,9 @@ export const nameOfCallable = (declaration: ts.SignatureDeclaration): ts.MemberN
   if (parent && ts.isPropertyAssignment(parent) && parent.initializer === declaration && ts.isIdentifier(parent.name)) {
     return parent.name
   }
-  // `this.render = function ( scene, camera ) { ... }` and `_this.shadowMap =
-  // shadowMap` are how `WebGLRenderer` declares half its surface. TypeScript's
+  // `this.render = function ( node, view ) { ... }` and `_this.state =
+  // state` are how a constructor-function-style class can declare half its
+  // surface. TypeScript's
   // JavaScript inference does not read that idiom as a declaration, but the
   // member being assigned is still a NAME -- the same kind of name a method
   // declaration is -- and a name is all this needs to count references against.
@@ -3587,7 +3812,7 @@ export const nameOfCallable = (declaration: ts.SignatureDeclaration): ts.MemberN
  * An import or export specifier re-binds the name in another module's scope
  * without letting anything hold the function as a value, and a declaration's
  * own name is not a reference to it. A shorthand property in a returned object
- * (`return { has, init, get }`) is the idiom three's factories are built on:
+ * (`return { has, init, get }`) is the idiom closure-based factories are built on:
  * the function is reachable only as a member of that record, so every call to
  * it is a member call this census resolves once the record has a type -- which
  * is what the fixpoint is for.
@@ -3798,7 +4023,7 @@ export const indexAliasEvidence = (
   // Pass 2: every member publication, now free to resolve a selector call
   // on the right side through the completed `returnedFrom`.  Object
   // literals need the same treatment as `receiver.member = callable`:
-  // factories such as WebGLState return a record whose properties are the
+  // closure factories return a record whose properties are the
   // local forwarding functions.  The property symbol is the checker-owned
   // identity that later member calls expose, so recording it here keeps the
   // alias path generic and does not depend on the property's spelling.
@@ -3885,18 +4110,27 @@ export const censusedTypeAt = (
  * answered `null`, and `null` is exactly how a census says "the checker's
  * answer stands".
  *
- * Measured on the three.js app: **176 top-level `dynamic` carriers sat on identifiers
- * reading a parameter the census had already resolved** -- 104 + 57 + 15,
- * the three synthesized-union parameters in the renderer's object walks, to
- * the unit. Answering here instead swapped exactly 171 `dynamic` carriers for
- * 171 `tagged-union` ones (a carrier kind the same program already selected
- * 2040 times), with `ops` unchanged and 92 FEWER unmet obligations.
+ * Measured on a large program whose object walks take synthesized-union
+ * parameters: every top-level `dynamic` carrier on an identifier reading such
+ * a parameter was one the census had already resolved. Answering here instead
+ * swapped those `dynamic` carriers one-for-one for `tagged-union` ones (a
+ * carrier kind the same program already selected widely), with `ops`
+ * unchanged and FEWER unmet obligations.
  *
- * No flow narrowing is discarded by answering at a read, which is the one
- * thing that could make this unsound and the reason a census's `typeAt` needs
- * an equality guard for its ordinary bindings: a synthesized union arises only
- * where the declaration's own checker type is `any`, and `any` carries no
- * narrowing for a reference to report differently.
+ * No flow narrowing may be discarded by answering at a read, which is the
+ * one thing that could make this unsound and the reason a census's `typeAt`
+ * needs an equality guard for its ordinary bindings. A synthesized union
+ * arises where the declaration's own checker type states nothing -- `any`,
+ * or an annotation that resolves to no statement (`object`, `{}`, `Object`;
+ * see `annotationStatesNothing`) -- but `instanceof`, `typeof` and assignment
+ * flow still narrow a reference to it. A read is the whole cell when the
+ * checker types it as `any` or as the declaration's own type, unchanged;
+ * any other read keeps its narrowed type, and the ordinary narrowing
+ * conversion connects it to the declaration's storage union. Testing for
+ * `any` alone read every unnarrowed `fields` of a `fields: object` parameter
+ * as narrowed, so the read lost the union its own declaration carries. That
+ * rule is stated here, once, for every census that publishes synthesized
+ * arms.
  *
  * `declarations.length === 1` is the same soleness test every resolver in this
  * module applies -- a name with two declarations is two cells, and answering
@@ -3912,5 +4146,18 @@ export const synthesizedUnionArmsAt = <D extends ts.Declaration>(
   if (!ts.isIdentifier(node)) return null
   const declarations = checker.getSymbolAtLocation(node)?.declarations
   const declaration = declarations && declarations.length === 1 ? declarations[0] : undefined
-  return declaration && owns(declaration) ? (arms.get(declaration) ?? null) : null
+  if (!declaration || !owns(declaration) || !readsWholeSynthesizedCell(checker, node, declaration)) return null
+  return arms.get(declaration) ?? null
+}
+
+/**
+ * Whether a read of a synthesized-union cell is the whole cell rather than a
+ * flow-narrowed arm -- the rule `synthesizedUnionArmsAt` states, for a caller
+ * that already resolved the declaration. A shorthand property `{ fields }`
+ * names the PROPERTY to `getSymbolAtLocation`, so re-resolving the read there
+ * finds no cell at all.
+ */
+export const readsWholeSynthesizedCell = (checker: ts.TypeChecker, node: ts.Node, declaration: ts.Declaration): boolean => {
+  const read = checker.getTypeAtLocation(node)
+  return (read.flags & ts.TypeFlags.Any) !== 0 || read === checker.getTypeAtLocation(declaration)
 }

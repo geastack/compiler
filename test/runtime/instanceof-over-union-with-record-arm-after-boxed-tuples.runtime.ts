@@ -1,11 +1,11 @@
 // `init instanceof Headers` over `Headers | Record<string, string> | [string,
-// string][]` -- node-compat's `Headers` constructor, which every hono request
+// string][]` -- node-compat's `Headers` constructor, which every framework request
 // reaches. The record arm could only answer `false` for a `true` value if some
 // `Headers` instance were ever VIEWED as that record, so the instance-test
 // census asks the view census whether one can be.
 //
 // Two conversions made that census answer "every class": an `any` unboxed
-// into an array of tuples (hono's router `Result`, read back out of a box),
+// into an array of tuples (a framework router's `Result`, read back out of a box),
 // and a tuple read as the record of its index keys. Both were paired whole --
 // every class any box ever held landing in every view carrier anywhere in
 // the target -- so the `Record<string, string>` a tuple element declares

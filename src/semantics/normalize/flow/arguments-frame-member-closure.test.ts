@@ -6,18 +6,18 @@ import { censusParameterBindings } from '../parameter-bindings.js'
 import { wholeProgram } from '../reachability.js'
 
 /**
- * three's `Object3D.add( object )` also walks its own `arguments` to add
- * several children at once. A member proof that follows an Object3D into
+ * A tree node's `add( object )` that also walks its own `arguments` to add
+ * several children at once. A member proof that follows a node into
  * `scene.add( sun )` must follow it into that frame too, not give up on the
- * whole family: every `onBeforeRender` callback's `renderer` hung on that one
+ * whole family: every `beforeDraw` callback's `renderer` hangs on that one
  * refusal.
  */
 const censusOf = (tail: string) => {
   const entry = resolve('test/fixtures/arguments-frame-member-closure.js')
   const source = `export {};
-    class Object3D {
+    class TreeNode {
       constructor() { this.parent = null; }
-      /** @param {Object3D} object */
+      /** @param {TreeNode} object */
       add( object ) {
         if ( arguments.length > 1 ) {
           for ( let i = 0; i < arguments.length; i ++ ) this.add( arguments[ i ] );
@@ -26,15 +26,15 @@ const censusOf = (tail: string) => {
         object.parent = this;
         return this;
       }
-      onBeforeRender() {}
+      beforeDraw() {}
     }
     class Renderer {
-      /** @param {Object3D} object */
-      render( object ) { object.onBeforeRender( this, object ); }
+      /** @param {TreeNode} object */
+      render( object ) { object.beforeDraw( this, object ); }
     }
-    const scene = new Object3D();
-    const mesh = new Object3D();
-    mesh.onBeforeRender = function ( renderer, object ) { this.parent = object.parent; };
+    const scene = new TreeNode();
+    const mesh = new TreeNode();
+    mesh.beforeDraw = function ( renderer, object ) { this.parent = object.parent; };
     scene.add( mesh );
     new Renderer().render( mesh );
     ${tail}`
@@ -53,7 +53,7 @@ const censusOf = (tail: string) => {
       ts.isFunctionExpression(node) &&
       ts.isBinaryExpression(node.parent) &&
       ts.isPropertyAccessExpression(node.parent.left) &&
-      node.parent.left.name.text === 'onBeforeRender'
+      node.parent.left.name.text === 'beforeDraw'
     )
       callback = node
     ts.forEachChild(node, visit)
@@ -64,15 +64,15 @@ const censusOf = (tail: string) => {
   return { spelled: bound === null ? null : checker.typeToString(bound), report: () => census.debugReport?.() ?? '' }
 }
 
-test('an argument that also lands in the frame an Object3D-style add walks stays closed', () => {
+test('an argument that also lands in the frame a variadic add walks stays closed', () => {
   const { spelled, report } = censusOf('')
   assert.equal(spelled, 'Renderer', report())
 })
 
 test('a frame that goes anywhere else keeps the member open', () => {
   for (const leak of [
-    'Object3D.prototype.leak = function () { globalThis.unknownConsumer( arguments ); }; mesh.leak( scene );',
-    'Object3D.prototype.keep = function () { globalThis.kept = arguments[ 0 ]; }; mesh.keep( scene );'
+    'TreeNode.prototype.leak = function () { globalThis.unknownConsumer( arguments ); }; mesh.leak( scene );',
+    'TreeNode.prototype.keep = function () { globalThis.kept = arguments[ 0 ]; }; mesh.keep( scene );'
   ])
     assert.equal(censusOf(leak).spelled, null, leak)
 })

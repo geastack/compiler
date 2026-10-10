@@ -1,7 +1,7 @@
 // A CLASS EXTENDING `Error`, HANDED TO AN `Error | null | undefined` SLOT.
 //
-// mongodb calls every `(err?: AnyError)` callback, and `onError(error)`, with
-// its own `MongoNetworkError`/`MongoRuntimeError` subclasses. A bare `Error`
+// A database client calls every `(err?: AnyError)` callback, and `onError(error)`, with
+// its own `NetworkError`/`ServiceRuntimeError` subclasses. A bare `Error`
 // slot already takes the pointer upcast (`nativeRecordBaseTransportKind`), but
 // the union had no home for the class: the pair fell through to the boxed
 // assertion, which boxed `Ref<DriverError>` and aborted on every call with "a

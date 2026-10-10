@@ -1,10 +1,10 @@
-// The synchronous form of mongodb's `tryOperation`: a function generic over
+// The synchronous form of a database client's `tryOperation`: a function generic over
 // `T extends AbstractOperation` declares its result as the conditional
 // `ReturnType<T['handleOk']>` and returns `operation.handleOk(reply)`. Each
 // copy is instantiated at one concrete operation class, so both the declared
 // result and the call's result resolve to that class's `handleOk` result --
 // not to an unresolved conditional, not to the base's unfilled `TResult`.
-// `handleOk` takes mongodb's polymorphic-`this` parameter
+// `handleOk` takes the client's polymorphic-`this` parameter
 // (`InstanceType<typeof this.SERVER_COMMAND_RESPONSE_TYPE>`), so the member's
 // signature is instantiated at the receiver as well.
 type Doc = { [key: string]: any }

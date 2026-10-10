@@ -1,6 +1,6 @@
 // Two recursive wrappers that name each other: an Array of optional values
 // that may be the other wrapper, and a dictionary whose values may be the
-// Array (a JSON-like value tree, as bson's and mongodb's option documents
+// Array (a JSON-like value tree, as a database client's option documents
 // declare). Each wrapper derives from its runtime container in place, so ADL
 // finds the ARRAY's cycle-tracing friend for the array's own element type
 // too, and its `requires TraceEdges<Element>::supported` constraint depended

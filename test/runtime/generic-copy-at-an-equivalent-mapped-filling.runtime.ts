@@ -1,6 +1,6 @@
 // A class copy filled with `WithId<File>` (an Omit-and-intersect mapped
 // spelling) is returned where the copy filled with `StoredFile` is expected -- the
-// MongoDB driver's `GridFSBucket.find`. The two fillings name the same fields,
+// file-bucket `find` of a database client. The two fillings name the same fields,
 // so they must be one physical class, not two copies with no conversion.
 type EnhancedOmit<T, K> = string extends keyof T ? T : T extends any ? Pick<T, Exclude<keyof T, K>> : never
 type WithId<T> = EnhancedOmit<T, '_id'> & { _id: number }

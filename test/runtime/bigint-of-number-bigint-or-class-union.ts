@@ -1,6 +1,7 @@
 // ECMA-262 21.2.1.1: `BigInt(value)` is ToPrimitive(value, number) and then
-// NumberToBigInt or ToBigInt. mongodb's `parseServerConnectionID` hands it a
-// `number | bigint | Double`, where bson's `Double.prototype.valueOf` answers
+// NumberToBigInt or ToBigInt. A database client's server-connection-id parser
+// hands it a `number | bigint | Double`, where a binary-document serializer's
+// `Double.prototype.valueOf` answers
 // the wrapped number; each arm converts without boxing the union.
 
 class Wrapped {

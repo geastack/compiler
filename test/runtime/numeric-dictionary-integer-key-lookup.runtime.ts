@@ -1,7 +1,7 @@
 //! expect: true false true false false true
 //! expect: 1 false 2 3
 //! expect: 4 true
-// `index in this.indexFound` per element (mongodb's `OnDemandDocument.getElement`)
+// `index in this.indexFound` per element (a lazily-parsed document's `getElement`)
 // asks a `Record<number, boolean>` by an integer; the answer is read off the
 // key's digits in a stack buffer. Any number that is not a non-negative
 // integer below 2^53 spells its key the long way and must still agree.

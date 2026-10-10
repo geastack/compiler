@@ -1,6 +1,6 @@
 // `Object.assign(literal, options, extra)` returns its first argument.
 //
-// bson's `EJSON.stringify` merges its defaults with the caller's optional
+// An extended-JSON serializer merges its defaults with the caller's optional
 // options this way and hands the result on. The literal target is laid out by
 // the same answer the call's result reads (`objectAssignTargetType`); resolved
 // against its contextual `T` instead, it minted a second record of the same
@@ -8,7 +8,7 @@
 // adds lives in the target's sidecar, and a view that requires it reads it
 // from there rather than starting it value-initialized.
 //
-// Not covered here: bson's own `seenObjects: [{ propertyName, obj: null }]`
+// Not covered here: that serializer's own `seenObjects: [{ propertyName, obj: null }]`
 // viewed as `{ propertyName; obj: unknown }[]` needs a dynamic -> owned-record
 // array conversion `DynamicCarrier` does not have; it aborts by name.
 

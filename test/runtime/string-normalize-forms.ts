@@ -1,5 +1,5 @@
-// ECMA-262 22.1.3.15 String.prototype.normalize over UAX #15. The mongodb
-// driver's saslprep NFKC-normalizes a SCRAM password before hashing it, so
+// ECMA-262 22.1.3.15 String.prototype.normalize over UAX #15. A database
+// client's password normalizer NFKC-normalizes a SCRAM password before hashing it, so
 // the compatibility forms matter as much as the canonical ones.
 
 const hex = (s: string): string => Array.from(s, (c) => c.codePointAt(0)!.toString(16)).join(' ')

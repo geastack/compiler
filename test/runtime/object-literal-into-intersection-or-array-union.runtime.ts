@@ -1,4 +1,4 @@
-// An object literal handed to `Filter & Document | Document[]` (mongodb's
+// An object literal handed to `Filter & Document | Document[]` (a database client's
 // `updateOne(filter, update: UpdateFilter<TSchema> | Document[])`) is the
 // object arm, never the array arm -- whatever keys it carries.
 

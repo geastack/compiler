@@ -1,13 +1,50 @@
+import type { DeclarationId } from '../identity/ids.js'
 import type { Representation, TaggedUnionArm } from '../representation/model.js'
 import { isOpenDocument, representationKey, standInRefuses } from '../representation/model.js'
 import type { ConversionCapability, ConversionNode, ConversionNodeId } from './algebra.js'
-import { validateCapability } from './algebra.js'
+import { transfersNativeStorage, validateCapability } from './algebra.js'
+import { recipeClosureOf, recipeIsMaterializableWithoutPriorSourceGuard } from './recipe-closure.js'
 import { createConversionDerivationContext, deriveConversionCapability } from './derive.js'
 import { narrowingCapabilityFor } from './build.js'
 import type { CoercionOperation, ConversionRuntimeRegistry } from './registry.js'
 import type { FamilyMemberKeys } from './record-view.js'
 import { impossibleFieldReadOf, IMPOSSIBLE_FIELD_READ } from './impossible-field-read.js'
 import { nativeUnboundMethodContractOf, NATIVE_UNBOUND_METHOD_MATERIALIZER } from './native-method.js'
+import { nativeBufferUnboundMethodContractOf } from './native-buffer-method.js'
+import { siblingClassArgumentOf, SIBLING_CLASS_ARGUMENT } from './sibling-class.js'
+import { structuralRecipeRequiredFor } from './structural-plan.js'
+import { promiseAdoptionPlanOf } from './promise-adoption.js'
+import { CHECKED_NATIVE_FIELD_READ, checkedNativeFieldReadMismatchOf } from './checked-native-field-read.js'
+import { nativeObjectSamplePlanOf } from './native-object-sample.js'
+import { nativeDescriptorSnapshotPlanOf } from './native-descriptor-snapshot.js'
+import { nativeLogicalReceiverRecipeOf } from './native-logical-receiver.js'
+import { abiOfCallee } from '../projection/callee.js'
+import { dynamicWrapperDependenciesOf, dynamicWrapperPlanOf } from './dynamic-wrapper.js'
+import { nativeSumPayloadCapabilityMatches } from './native-sum.js'
+
+const containsSharedStructuralRecord = (value: Representation): boolean => {
+  if (value.kind === 'optional') return containsSharedStructuralRecord(value.payload)
+  if (value.kind === 'tagged-union') return value.arms.some((arm) => containsSharedStructuralRecord(arm.value))
+  if (value.kind === 'array-object') return containsSharedStructuralRecord(value.element)
+  if (value.kind === 'promise') return containsSharedStructuralRecord(value.value)
+  return (
+    (value.kind === 'record' && value.ownership === 'shared-refcount' && value.accessors.length === 0) ||
+    (value.kind === 'record-with-index' && value.ownership === 'shared-refcount') ||
+    (value.kind === 'native-record-ref' && value.native === null && value.ownership === 'shared-refcount')
+  )
+}
+
+/** A table entry that is a shared structural record (or its optional): the entries a Document view reads live. */
+const dictionaryEntriesAreSharedRecords = (value: Representation): boolean =>
+  value.kind === 'optional'
+    ? dictionaryEntriesAreSharedRecords(value.payload)
+    : value.kind !== 'tagged-union' && value.kind !== 'array-object' && containsSharedStructuralRecord(value)
+
+const containsArray = (value: Representation): boolean =>
+  value.kind === 'array-object' ||
+  (value.kind === 'optional' && containsArray(value.payload)) ||
+  (value.kind === 'promise' && containsArray(value.value)) ||
+  (value.kind === 'tagged-union' && value.arms.some((arm) => containsArray(arm.value)))
 
 /**
  * The conversion census: ONE node per (source, target) pair, minted on
@@ -37,9 +74,24 @@ import { nativeUnboundMethodContractOf, NATIVE_UNBOUND_METHOD_MATERIALIZER } fro
  * already read; nothing here decides a pair on its own.
  */
 export interface ConversionCensus {
+  readonly nativeDescriptorSnapshotFor: (
+    context: string,
+    plan: import('./native-descriptor-snapshot.js').NativeDescriptorSnapshotPlan
+  ) => ConversionNode | null
+  /** A source-owned allocation and complete writer schema, independently replayed at the conversion site. */
+  readonly nativeObjectSampleFor: (
+    context: string,
+    plan: import('./native-object-sample.js').NativeObjectSamplePlan
+  ) => ConversionNode | null
+  readonly dictionaryReadFor: (source: Representation, target: Representation) => ConversionNode | null
+  readonly readOnlyDictionaryFor: (source: Representation, target: Representation) => ConversionNode | null
+  readonly callArgumentFor: (source: Representation, target: Representation) => ConversionNode
   readonly fieldReadFor: (source: Representation, target: Representation) => ConversionNode
+  /** The selected live view's checked primitive reader, replayed on its original native storage. */
+  readonly checkedFieldReadFor: (source: Representation, target: Representation, checked: ConversionNode) => ConversionNode | null
   readonly absentIndexReadFor: (source: Representation, target: Representation) => ConversionNode
   readonly nativeMethodFor: (source: Representation, target: Representation) => ConversionNode | null
+  readonly nativeBufferMethodFor: (source: Representation, target: Representation) => ConversionNode | null
   readonly nodeFor: (source: Representation, target: Representation) => ConversionNode
   /**
    * The node for an abstract operation over a source: `ToNumber` lands on
@@ -106,6 +158,18 @@ export interface ConversionCensus {
    */
   readonly assertedUnionFor: (source: Representation, target: Representation, copyAllowed: boolean) => ConversionNode | null
   /**
+   * A structural record the program asserts (`/** @type {C | ...} *\/ (x)`) into
+   * a slot whose only object homes are classes, where nothing else converts
+   * the pair. A record value is one of those classes only as a view of that
+   * class's allocation, so the node tests the view's origin per class arm
+   * (`gea::record::viewOriginClassIs`) and loads that allocation; a record
+   * that is no such view -- or one that cannot be a view at all -- is the
+   * assertion failing, a `TypeError` like `exactArmFor`'s. An absent source
+   * converts as its own absence. `null` when the target has no class home or
+   * cannot hold the source's absence.
+   */
+  readonly assertedViewFor: (source: Representation, target: Representation) => ConversionNode | null
+  /**
    * A record entering a slot whose record arm is an interface FAMILY's
    * layout, viewed knowing which members of the family the site named
    * (`record-view.ts`'s `FamilyMemberKeys`). `nodeFor`'s answer for the same
@@ -120,10 +184,9 @@ export interface ConversionCensus {
    * A CAUGHT value -- a `catch (error)` binding typed `any` -- handed to a
    * class-typed slot: the checked read of the class instance, which, when the
    * thrown value is not one, rethrows that value rather than aborting.
-   * mongodb's `executeOperation` does `catch (error) { return
-   * operation.handleError(error) }` with `handleError(error: MongoError)`,
-   * whose every implementation rethrows what it does not recognize; in JS a
-   * non-MongoError reaches it and propagates as the operation's rejection.
+   * `catch (error) { return operation.handleError(error) }` with
+   * `handleError(error: KnownError)`, whose every implementation rethrows what
+   * it does not recognize, is the case; in JS a non-`KnownError` reaches it and propagates as the operation's rejection.
    * The slot cannot hold that value, so the handoff itself propagates it.
    * `null` for any other pair.
    */
@@ -144,9 +207,9 @@ export interface ConversionCensus {
   /**
    * An `any` argument entering an OPTIONAL parameter (`x?: T`, no default)
    * whose payload has no `null` state: a `null` the value holds reads as the
-   * parameter's absence. mongodb's `executeCommands` keeps `let thrownError =
-   * null` (typed `any`) and, on success, passes it to `mergeBatchResults(...,
-   * err?: AnyError, ...)`. The callee was checked against `T | undefined`, so
+   * parameter's absence. A function keeping `let thrownError = null` (typed
+   * `any`) and, on success, passing it to `merge(..., err?: AnyError, ...)` is
+   * the case. The callee was checked against `T | undefined`, so
    * the only null it can see is one an `any` smuggled past that check; it has
    * no default initializer that could tell the two apart. `null` for any
    * other pair.
@@ -168,9 +231,9 @@ export interface ConversionCensusInput {
  * one taking a receiver of class `Y` that does not extend `X`, or `null` for
  * any other pair.
  *
- * `X.prototype.m.call(y, ...)` is the program shape: `mongodb-connection-
- * string-url` borrows `CaseInsensitiveMap.prototype._normalizeKey` onto its
- * `URLSearchParams` subclass. The body was compiled against `X`'s layout and
+ * `X.prototype.m.call(y, ...)` is the program shape: a library borrowing
+ * `CaseInsensitiveMap.prototype._normalizeKey` onto its `URLSearchParams`
+ * subclass. The body was compiled against `X`'s layout and
  * dispatch -- its `this.keys()` is `Map`'s -- and no conversion of the function
  * VALUE can retarget that; running it on a `Y` needs the body compiled again
  * for `Y`, which this compiler does not do. The pair was already refused; this
@@ -210,9 +273,67 @@ export const coercionTargetOf = (operation: CoercionOperation): Representation =
 
 const containsUnresolved = (representation: Representation): boolean => representationKey(representation).includes('unresolved')
 
+const exactAccessorPayloadOf = (capability: ConversionCapability): boolean =>
+  capability.kind === 'optional'
+    ? exactAccessorPayloadOf(capability.payload)
+    : capability.kind === 'atom' &&
+      capability.classifier.domain === capability.materializer.domain &&
+      capability.materializer.nativeAccessorPayload === 'preserved' &&
+      capability.materializer.nativeFieldProtocol === 'unused' &&
+      capability.materializer.nativePayloadTransport === 'preserved' &&
+      !capability.materializer.allocates
+
+const registeredRecordPayloadOf = (
+  capability: ConversionCapability,
+  target: Representation,
+  registry: ConversionRuntimeRegistry
+): boolean => {
+  if (capability.kind === 'optional' && target.kind === 'optional')
+    return registeredRecordPayloadOf(capability.payload, target.payload, registry)
+  if (capability.kind !== 'atom' || target.kind !== 'native-record-ref' || target.ownership !== 'shared-refcount') return false
+  const installed = registry.recordRefMaterializer(target.shapeId, target.ownership)
+  return (
+    installed !== null &&
+    installed.materializer.wrapperKind === 'unbox-payload' &&
+    capability.classifier.id === installed.classifier.id &&
+    capability.classifier.domain === installed.classifier.domain &&
+    capability.materializer.id === installed.materializer.id &&
+    capability.materializer.domain === installed.materializer.domain &&
+    capability.classifier.domain === capability.materializer.domain &&
+    capability.materializer.nativeFieldProtocol === 'unused' &&
+    capability.materializer.nativePayloadTransport === 'preserved' &&
+    !capability.materializer.allocates &&
+    installed.materializer.nativeFieldProtocol === 'unused' &&
+    installed.materializer.nativePayloadTransport === 'preserved' &&
+    !installed.materializer.allocates
+  )
+}
+
 export const createConversionNodes = (input: ConversionCensusInput): ConversionCensus => {
   const minted = new Map<ConversionNodeId, ConversionNode>()
-  const deriving = new Set<ConversionNodeId>()
+  /** Every pair being derived, at the depth of its derivation frame. */
+  const deriving = new Map<ConversionNodeId, number>()
+  /**
+   * The shallowest open pair the current derivation re-entered, or `Infinity`.
+   * A re-entered pair answers `never` while it is open, and that answer is an
+   * assumption, not a fact: a Document view of a self-referential `image`
+   * record asks for its own optional read, and a refusal of that read minted
+   * inside the view's derivation was kept for the whole unit after the view
+   * itself succeeded. A result that saw such an assumption -- directly or
+   * through any child -- is provisional until the re-entered pair closes.
+   */
+  let shallowestReentry = Infinity
+  /**
+   * Provisional results, keyed by pair, with the depth of the open pair they
+   * assumed. Within one open component a pair answers exactly one way, so a
+   * recipe never cites two derivations of one pair. When the component's head
+   * closes, a provisional refusal is discarded -- it assumed a pair that now
+   * has its real answer, so asking again derives against that answer -- and
+   * every other provisional result is committed: the head's own recipe cites
+   * those nodes by identity, and each is a finite proof that cites no
+   * assumption.
+   */
+  const provisional = new Map<ConversionNodeId, { readonly node: ConversionNode; readonly assumes: number }>()
   const context = createConversionDerivationContext(input.registry)
 
   const capabilityOf = (source: Representation, target: Representation, sourceKey: string, targetKey: string): ConversionCapability => {
@@ -226,6 +347,13 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
       return { kind: 'never', reason: `an unresolved carrier in ${sourceKey} -> ${targetKey} names no conversion` }
     }
     if (source.kind === 'dynamic') {
+      if (source.reason !== 'untyped-callable') {
+        const installed = input.registry.widening(source, target)
+        if (installed) {
+          const native: ConversionCapability = { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
+          if (nativeSumPayloadCapabilityMatches(source, target, native)) return native
+        }
+      }
       // The eager graph keys its dynamic-source nodes by the target alone and
       // mints them from one generic dynamic carrier; a dynamic source with a
       // different reason is the same conversion, so the same node answers.
@@ -244,9 +372,23 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
       const installed = table(source, target)
       if (installed) return { kind: 'atom', classifier: installed.classifier, materializer: installed.materializer }
     }
-    const structural = input.registry.structuralRecipe?.(source, target, nodeFor)
-    if (structural) return { kind: 'static', materializer: structural }
+    // An admitted ordinary static recipe precedes structural reconstruction.
+    // The registry marks its final fallback recipes so a sealed structural
+    // proof can precede those without changing the ordinary recipe's reads or
+    // allocation ownership. The same order applies to eager fallback nodes.
     const recipe = input.registry.staticRecipe(source, target)
+    if (recipe && !recipe.staticRecipeFallback) return { kind: 'static', materializer: recipe }
+    const structural = input.registry.structuralRecipe?.(
+      source,
+      target,
+      nodeFor,
+      undefined,
+      nativeMethodFor,
+      nodeById,
+      dictionaryReadFor,
+      assertedClassDowncastFor
+    )
+    if (structural) return { kind: 'static', materializer: structural }
     if (recipe) return { kind: 'static', materializer: recipe }
     const foreign = foreignReceiverOf(source, target)
     const missing = `no runtime conversion is installed from ${sourceKey} to ${targetKey}`
@@ -259,41 +401,282 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     const id = `${sourceKey}->${targetKey}`
     const remembered = minted.get(id)
     if (remembered !== undefined) return remembered
-    if (deriving.has(id))
+    const pending = provisional.get(id)
+    if (pending !== undefined) {
+      shallowestReentry = Math.min(shallowestReentry, pending.assumes)
+      return pending.node
+    }
+    const open = deriving.get(id)
+    if (open !== undefined) {
+      shallowestReentry = Math.min(shallowestReentry, open)
       return { id, source, target, capability: { kind: 'never', reason: `recursive structural conversion ${id} has no finite leaf proof` } }
-    deriving.add(id)
+    }
+    const depth = deriving.size
+    deriving.set(id, depth)
+    const outerReentry = shallowestReentry
+    shallowestReentry = Infinity
     let capability: ConversionCapability
     try {
       const eager = input.nodes.get(id)
-      capability = eager?.capability ?? capabilityOf(source, target, sourceKey, targetKey)
+      capability =
+        eager !== undefined &&
+        !((eager.capability.kind === 'static' || eager.capability.kind === 'atom') && eager.capability.materializer.staticRecipeFallback)
+          ? eager.capability
+          : capabilityOf(source, target, sourceKey, targetKey)
+      const nativeRecord = target.kind === 'optional' ? target.payload : target
+      // An open Document read as an Array is the Array it views: the same live
+      // view a boxed Array gets, never an element-wise copy that loses writes.
+      if (target.kind === 'array-object' && (source.kind === 'dynamic' || source.kind === 'array-object' || isOpenDocument(source))) {
+        const array = input.registry.nativeArrayViewRecipe?.(source, target, nodeFor, dictionaryReadFor, nodeById)
+        if (array?.materializer.nativeArrayView)
+          capability = source.kind === 'dynamic' ? { kind: 'atom', ...array } : { kind: 'static', materializer: array.materializer }
+        else if (
+          // A pair that already refuses keeps its own, more specific reason.
+          capability.kind !== 'never' &&
+          (source.kind === 'dynamic' ||
+            (source.kind === 'array-object' &&
+              source.ownership === 'shared-refcount' &&
+              target.ownership === 'shared-refcount' &&
+              representationKey(source.element) !== representationKey(target.element) &&
+              // An installed recast between two element carriers that mints
+              // nothing is the same object read through the other element
+              // (`gea::emptyArraySentinel` is the one such pair): it has no
+              // copy to lose a later write, so it needs no live view.
+              !((capability.kind === 'atom' || capability.kind === 'static') && !capability.materializer.allocates)))
+        ) {
+          capability = { kind: 'never', reason: `${target.kind} ${id} has no selected live native array reader` }
+        }
+      }
+      if (
+        source.kind === 'dynamic' &&
+        source.reason !== 'untyped-callable' &&
+        (nativeRecord.kind === 'record' ||
+          nativeRecord.kind === 'record-with-index' ||
+          (nativeRecord.kind === 'native-record-ref' && nativeRecord.native === null)) &&
+        nativeRecord.ownership === 'shared-refcount' &&
+        !exactAccessorPayloadOf(capability)
+      ) {
+        // An optional record follows its payload's own selection: a payload
+        // recovered as its exact registered native object is wrapped below,
+        // never re-read through a document view the payload itself refused.
+        // Otherwise the answer would depend on which of the two pairs the
+        // census happened to mint first.
+        const payload = target.kind === 'optional' ? nodeFor(source, target.payload).capability : null
+        const sealed =
+          payload === null || ('materializer' in payload && payload.materializer.documentRecordView)
+            ? input.registry.structuralRecipe?.(
+                source,
+                target,
+                nodeFor,
+                undefined,
+                nativeMethodFor,
+                nodeById,
+                dictionaryReadFor,
+                assertedClassDowncastFor
+              )
+            : undefined
+        capability = sealed?.documentRecordView
+          ? { kind: 'static', materializer: sealed }
+          : registeredRecordPayloadOf(capability, target, input.registry)
+            ? capability
+            : { kind: 'never', reason: `shared dynamic record ${id} has no admitted live field view` }
+      }
+      if (
+        source.kind === 'dynamic' &&
+        (containsSharedStructuralRecord(target) || containsArray(target)) &&
+        (target.kind === 'optional' || target.kind === 'promise' || target.kind === 'tagged-union') &&
+        !nativeSumPayloadCapabilityMatches(source, target, capability) &&
+        !('materializer' in capability && capability.materializer.documentRecordView) &&
+        // An exact accessor payload keeps its own authenticated contract
+        // through absence, exactly as the shared-record branch above keeps it.
+        !exactAccessorPayloadOf(capability)
+      ) {
+        const plan = dynamicWrapperPlanOf(source, target, capability, nodeFor, nodeById)
+        capability = plan
+          ? {
+              kind: 'static',
+              materializer: {
+                id: 'dynamic-wrapper',
+                domain: `dynamic-wrapper:${targetKey}`,
+                allocates:
+                  plan.kind === 'promise' ||
+                  dynamicWrapperDependenciesOf(plan).some(
+                    (child) => 'materializer' in child.capability && child.capability.materializer.allocates
+                  ),
+                executesSourceGuard: true,
+                dynamicWrapper: plan,
+                dependencies: dynamicWrapperDependenciesOf(plan)
+              }
+            }
+          : { kind: 'never', reason: `dynamic wrapper ${id} has no selected native structural payload readers` }
+      }
       if (capability.kind === 'static' || capability.kind === 'atom') {
+        const targetReceiver = source.kind === 'dynamic' ? abiOfCallee(target)?.receiver : null
+        if (capability.materializer.wrapperKind === 'dynamic-carrier-in' && targetReceiver) {
+          const receiver = nativeLogicalReceiverRecipeOf(targetReceiver, nodeFor, nodeById)
+          capability =
+            receiver === null
+              ? { kind: 'never', reason: `dynamic callable ${id} has no native physical receiver transport` }
+              : {
+                  ...capability,
+                  materializer: {
+                    ...capability.materializer,
+                    nativeLogicalReceiver: receiver,
+                    dependencies: [...(capability.materializer.dependencies ?? []), ...receiver.materializers]
+                  }
+                }
+        }
+        // The constructed object is read back the way any boxed value of the
+        // frame's result carrier is: by this census's own reader, never a
+        // runtime payload match a class instance read as a record would fail.
+        if (
+          capability.kind !== 'never' &&
+          capability.materializer.wrapperKind === 'dynamic-constructor-in' &&
+          target.kind === 'constructor-value-dispatch'
+        ) {
+          const result = nodeFor({ kind: 'dynamic', reason: 'declared-any-never-narrowed' }, target.abi.result)
+          capability =
+            result.capability.kind === 'never' || !recipeIsMaterializableWithoutPriorSourceGuard(result, nodeById)
+              ? { kind: 'never', reason: `dynamic constructor ${id} has no checked reader of its constructed result` }
+              : {
+                  ...capability,
+                  materializer: {
+                    ...capability.materializer,
+                    constructedResult: result,
+                    dependencies: [...(capability.materializer.dependencies ?? []), result]
+                  }
+                }
+        }
+      }
+      if (capability.kind === 'static' || capability.kind === 'atom') {
+        // A conditional can have one exact record arm and another record
+        // that satisfies the same interface. Dispatch the complete source
+        // when its native view is admitted; selecting the exact arm would
+        // discard the other live value.
+        if (
+          source.kind === 'tagged-union' &&
+          (target.kind === 'record' || (target.kind === 'native-record-ref' && target.native === null)) &&
+          (capability.materializer.armSelection !== undefined || capability.materializer.nativeSelection !== undefined)
+        ) {
+          const complete = input.registry.structuralRecipe?.(
+            source,
+            target,
+            nodeFor,
+            undefined,
+            nativeMethodFor,
+            nodeById,
+            dictionaryReadFor,
+            assertedClassDowncastFor
+          )
+          if (complete?.recordView?.view.kind === 'dispatch') capability = { kind: 'static', materializer: complete }
+        }
+        // A dynamic object read as a typed table of records: the boxed round
+        // trip admits only a table this program boxed, and the copying unbox
+        // behind it rebuilds the table and refuses every entry that is not
+        // that record's exact payload. When the table's entries have a live
+        // Document view, the object is viewed instead -- the same object, each
+        // entry the stored entry seen through the record's layout. The view
+        // still hands back a table this program boxed at this carrier as itself.
+        if (
+          source.kind === 'dynamic' &&
+          source.reason !== 'untyped-callable' &&
+          target.kind === 'dictionary' &&
+          target.key === 'string' &&
+          target.value.kind !== 'dynamic' &&
+          (capability.materializer.wrapperKind === 'unbox-tag' || capability.materializer.wrapperKind === 'unbox-payload') &&
+          dictionaryEntriesAreSharedRecords(target.value)
+        ) {
+          const viewed = input.registry.structuralRecipe?.(
+            source,
+            target,
+            nodeFor,
+            undefined,
+            nativeMethodFor,
+            nodeById,
+            dictionaryReadFor,
+            assertedClassDowncastFor
+          )
+          if (viewed?.dictionaryView !== undefined) capability = { kind: 'static', materializer: viewed }
+        }
         const materializer = capability.materializer
-        if (materializer.id === 'view:structural-record' || materializer.id === 'gea::record::classStructuralView') {
-          const sealed = input.registry.structuralRecipe?.(source, target, nodeFor)
-          capability = sealed?.recordView
-            ? { ...capability, materializer: { ...materializer, ...sealed, id: materializer.id } }
-            : { kind: 'never', reason: `structural conversion ${id} has no admitted leaf plan` }
+        if (structuralRecipeRequiredFor({ id, source, target, capability })) {
+          const sealed = input.registry.structuralRecipe?.(
+            source,
+            target,
+            nodeFor,
+            undefined,
+            nativeMethodFor,
+            nodeById,
+            dictionaryReadFor,
+            assertedClassDowncastFor
+          )
+          capability =
+            sealed?.recordView ||
+            sealed?.documentRecordView ||
+            sealed?.callableView ||
+            sealed?.callablePayload ||
+            sealed?.iteratorObjectView ||
+            sealed?.iterableObjectView ||
+            sealed?.protocolIterator
+              ? // The structural recipe replaces the provisional transport
+                // contract. A missing unused-field claim is meaningful: merging
+                // the old claim would hide a live dynamic accessor's receiver
+                // exposure. Only the atom's classifier identity remains fixed.
+                { ...capability, materializer: { ...sealed, id: materializer.id, domain: materializer.domain } }
+              : { kind: 'never', reason: `structural conversion ${id} has no admitted leaf plan` }
         } else if (materializer.id === 'gea::Promise::adopt-converted' && source.kind === 'promise' && target.kind === 'promise') {
-          const child = nodeFor(source.value, target.value)
-          capability = child.capability.kind === 'never'
-            ? child.capability
-            : { ...capability, materializer: { ...materializer, dependencies: [child] } }
+          const plan = promiseAdoptionPlanOf(source, target, nodeFor, nodeById)
+          capability =
+            plan === null
+              ? { kind: 'never', reason: `promise conversion ${id} has no admitted completion plan` }
+              : {
+                  ...capability,
+                  materializer: {
+                    ...materializer,
+                    promiseAdoption: plan,
+                    dependencies: plan.kind === 'payload-transfer' ? [plan.conversion] : []
+                  }
+                }
         }
       }
     } finally {
       deriving.delete(id)
     }
+    const assumes = shallowestReentry
+    shallowestReentry = Math.min(outerReentry, assumes)
     // A membership view, not a Set copied from both tables: the copy was made
-    // once per minted pair, quadratic in the census, and was the mongodb
-    // driver's single largest lowering cost (20 of 35 seconds).
-    validateCapability(capability, { has: (known) => known === id || input.nodes.has(known) || minted.has(known) })
+    // once per minted pair, quadratic in the census, and was the single
+    // largest lowering cost on a large program (over half of it).
+    validateCapability(capability, {
+      has: (known) => known === id || input.nodes.has(known) || minted.has(known) || provisional.has(known)
+    })
     const node: ConversionNode = { id, source, target, capability }
+    if (assumes < depth) {
+      // Whatever this derivation recorded as provisional now rests on the
+      // same open ancestor this result does: depths are reused by later
+      // frames, so the entries are re-pointed at that ancestor's.
+      for (const [pendingId, entry] of provisional) if (entry.assumes >= depth) provisional.set(pendingId, { node: entry.node, assumes })
+      provisional.set(id, { node, assumes })
+      return node
+    }
     minted.set(id, node)
+    // This pair closes every component it heads: nothing still open was
+    // assumed by a result recorded while it was being derived.
+    for (const [pendingId, entry] of provisional) {
+      if (entry.assumes < depth) continue
+      provisional.delete(pendingId)
+      if (entry.node.capability.kind !== 'never') minted.set(pendingId, entry.node)
+    }
     return node
   }
 
   const contextual = new Map<ConversionNodeId, ConversionNode>()
-  const contextualNode = (source: Representation, target: Representation, context: string, materializer: import('./algebra.js').MaterializerContract): ConversionNode => {
+  const contextualNode = (
+    source: Representation,
+    target: Representation,
+    context: string,
+    materializer: import('./algebra.js').MaterializerContract
+  ): ConversionNode => {
     const id = `${conversionNodeIdOf(source, target)}#${context}`
     const remembered = contextual.get(id)
     if (remembered) return remembered
@@ -301,26 +684,216 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     contextual.set(id, node)
     return node
   }
+  const readOnlyDictionaryFor = (source: Representation, target: Representation): ConversionNode | null => {
+    const materializer = input.registry.readOnlyDictionaryRecipe?.(source, target, nodeFor, nodeById, dictionaryReadFor)
+    return materializer?.readOnlyDictionary === undefined ? null : contextualNode(source, target, 'read-only-dictionary', materializer)
+  }
+  const nativeObjectSampleFor = (
+    context: string,
+    plan: import('./native-object-sample.js').NativeObjectSamplePlan
+  ): ConversionNode | null => {
+    if (context.length === 0) return null
+    const sealed = nativeObjectSamplePlanOf(plan.source, plan.target, plan.fields, nodeById)
+    if (sealed === null) return null
+    // Different writer states of one allocation must never reuse a plan just
+    // because their public source and destination carriers happen to agree.
+    const inventory = sealed.fields.map((entry) => [
+      entry.field.key,
+      entry.from,
+      representationKey(entry.storage),
+      entry.presence,
+      entry.present.id,
+      entry.absent?.id ?? null
+    ])
+    return contextualNode(sealed.source, sealed.target, `native-object-sample:${JSON.stringify([context, inventory])}`, {
+      id: 'native-object-sample',
+      domain: 'static:native-object-sample',
+      allocates: true,
+      nativeObjectSample: sealed,
+      dependencies: [
+        ...new Map(
+          sealed.fields.flatMap((entry) => [entry.present, ...(entry.absent ? [entry.absent] : [])]).map((child) => [child.id, child])
+        ).values()
+      ]
+    })
+  }
+  const nativeDescriptorSnapshotFor = (
+    context: string,
+    plan: import('./native-descriptor-snapshot.js').NativeDescriptorSnapshotPlan
+  ): ConversionNode | null => {
+    if (context.length === 0) return null
+    const sealed = nativeDescriptorSnapshotPlanOf(plan.source, plan.target, plan.fields, plan.originalAny, nodeById)
+    if (sealed === null) return null
+    const inventory = sealed.fields.map((entry) => [entry.field.key, entry.reads.map((read) => read.id)])
+    return contextualNode(
+      sealed.source,
+      sealed.target,
+      `native-descriptor-snapshot:${JSON.stringify([context, sealed.originalAny, inventory])}`,
+      {
+        id: 'native-descriptor-snapshot',
+        domain: 'static:native-descriptor-snapshot',
+        allocates: true,
+        nativeFieldProtocol: 'unused',
+        nativePayloadTransport: 'preserved',
+        nativeFieldViewProtocol: 'live',
+        nativeDescriptorSnapshot: sealed,
+        dependencies: sealed.dependencies
+      }
+    )
+  }
+  const dictionaryReadFor = (source: Representation, target: Representation): ConversionNode | null => {
+    const ordinary = nodeFor(source, target)
+    if (ordinary.capability.kind === 'never') return null
+    const materializer = input.registry.dictionaryReadRecipe?.(ordinary)
+    if (materializer !== undefined && materializer !== null) return contextualNode(source, target, 'dictionary-entry-read', materializer)
+    if (
+      source.kind === 'dynamic' &&
+      target.kind === 'optional' &&
+      ordinary.capability.kind === 'optional' &&
+      ordinary.capability.payload.kind === 'never'
+    ) {
+      // `globalThis as unknown as { SomeGlobal?: Ctor }`: a present entry has
+      // no native reader, so the pair refuses at compile time rather than
+      // certifying a read whose every present value is a run-time TypeError.
+      return null
+    }
+    if (source.kind === 'dynamic' && target.kind === 'optional') {
+      const present = dictionaryReadFor(source, target.payload)
+      const absent = nodeFor({ kind: target.absence }, target)
+      if (
+        !present ||
+        !recipeIsMaterializableWithoutPriorSourceGuard(present, nodeById) ||
+        !recipeIsMaterializableWithoutPriorSourceGuard(absent, nodeById)
+      )
+        return null
+      return contextualNode(source, target, 'dictionary-entry-read', {
+        id: 'view:checked-dictionary-entry',
+        domain: 'static:checked-dictionary-entry',
+        allocates: 'materializer' in present.capability && present.capability.materializer.allocates,
+        requiresSourceGuard: true,
+        executesSourceGuard: true,
+        dictionaryRead: { kind: 'dynamic-optional', conversion: ordinary, target, present, absent },
+        dependencies: [ordinary, present, absent]
+      })
+    }
+    return ordinary
+  }
   const fieldReadFor = (source: Representation, target: Representation): ConversionNode => {
+    const method = nativeMethodFor(source, target)
+    if (method) return method
     const ordinary = nodeFor(source, target)
     if (ordinary.capability.kind !== 'never' || !impossibleFieldReadOf(source, target)) return ordinary
     return contextualNode(source, target, 'field-read', {
-      id: IMPOSSIBLE_FIELD_READ, domain: 'static:impossible-field-read', allocates: false, nativeFieldProtocol: 'unused'
+      id: IMPOSSIBLE_FIELD_READ,
+      domain: 'static:impossible-field-read',
+      allocates: false,
+      normalCompletion: 'never',
+      nativeFieldProtocol: 'unused'
+    })
+  }
+  const callArgumentFor = (source: Representation, target: Representation): ConversionNode => {
+    const ordinary = nodeFor(source, target)
+    if (ordinary.capability.kind !== 'never' || !siblingClassArgumentOf(source, target)) return ordinary
+    return contextualNode(source, target, 'call-argument', {
+      id: SIBLING_CLASS_ARGUMENT,
+      domain: 'static:sibling-class-argument',
+      allocates: false,
+      nativeFieldProtocol: 'unused'
+    })
+  }
+  const checkedFieldReadFor = (source: Representation, target: Representation, checked: ConversionNode): ConversionNode | null => {
+    if (nodeById(checked.id) !== checked || !checkedNativeFieldReadMismatchOf(source, target, checked)) return null
+    return contextualNode(source, target, `checked-field-read:${checked.id}`, {
+      id: CHECKED_NATIVE_FIELD_READ,
+      domain: `static:checked-field-read:${checked.id}`,
+      allocates: false,
+      normalCompletion: 'never',
+      nativeFieldProtocol: 'unused',
+      dependencies: [checked],
+      checkedNativeFieldRead: { checked }
     })
   }
   const absentIndexReadFor = (source: Representation, target: Representation): ConversionNode => {
     const ordinary = nodeFor(source, target)
     if (ordinary.capability.kind !== 'never') return ordinary
     return contextualNode(source, target, 'index-read', {
-      id: IMPOSSIBLE_INDEX_READ, domain: 'static:impossible-index-read', allocates: false, nativeFieldProtocol: 'unused'
+      id: IMPOSSIBLE_INDEX_READ,
+      domain: 'static:impossible-index-read',
+      allocates: false,
+      normalCompletion: 'never',
+      nativeFieldProtocol: 'unused'
     })
   }
   const nativeMethodFor = (source: Representation, target: Representation): ConversionNode | null => {
     const nativeMethod = nativeUnboundMethodContractOf(source, target)
     if (!nativeMethod) return null
+    const frame: Representation = {
+      kind: 'function-value-dispatch',
+      abi: { ...nativeMethod.target, receiver: nativeMethod.receiver }
+    }
+    const erased: Representation = { kind: 'function-value-dispatch', abi: { ...nativeMethod.target, receiver: null } }
+    const checkedResult = nativeMethod.resultNarrowing
+    let frameAdaptation: ConversionNode | null = null
+    if (checkedResult !== undefined) {
+      const checked = assertedClassDowncastFor(checkedResult.source, checkedResult.target)
+      if (checked === null) return null
+      const result = contextualNode(checkedResult.source, checkedResult.target, 'native-method-result', {
+        id: 'view:checked-native-method-result',
+        domain: 'static:checked-native-method-result',
+        allocates: false,
+        requiresSourceGuard: true,
+        executesSourceGuard: true,
+        nativeFieldProtocol: 'unused',
+        nativePayloadTransport: 'preserved',
+        nativeClassReferenceIdentity: 'preserved',
+        dependencies: [checked],
+        nativeMethodResult: { checked }
+      })
+      const sealed = input.registry.structuralRecipe?.(
+        source,
+        frame,
+        (from, into) =>
+          representationKey(from) === representationKey(result.source) && representationKey(into) === representationKey(result.target)
+            ? result
+            : nodeFor(from, into),
+        undefined,
+        nativeMethodFor,
+        nodeById,
+        dictionaryReadFor,
+        assertedClassDowncastFor
+      )
+      if (sealed?.callableView === undefined) return null
+      frameAdaptation = contextualNode(source, frame, 'native-method-result-frame', sealed)
+    } else frameAdaptation = representationKey(source) === representationKey(frame) ? null : nodeFor(source, frame)
+    const publicAdaptation = nativeMethod.target.receiver === null ? null : nodeFor(erased, target)
+    const dependencies = [...(frameAdaptation === null ? [] : [frameAdaptation]), ...(publicAdaptation === null ? [] : [publicAdaptation])]
     return contextualNode(source, target, 'native-method', {
-      id: NATIVE_UNBOUND_METHOD_MATERIALIZER, domain: 'static:native-unbound-method', allocates: true,
-      callableIdentityTransport: 'preserved', nativeFieldProtocol: 'unused', nativeMethod
+      id: NATIVE_UNBOUND_METHOD_MATERIALIZER,
+      domain: 'static:native-unbound-method',
+      allocates: true,
+      callableIdentityTransport: 'preserved',
+      ...(nativeMethod.receiver.kind !== 'dynamic' &&
+      [...recipeClosureOf(dependencies, nodeById).values()].every((node) => transfersNativeStorage(node.capability))
+        ? { nativeFieldProtocol: 'unused' as const }
+        : {}),
+      dependencies,
+      nativeMethod: {
+        ...nativeMethod,
+        ...(frameAdaptation === null ? {} : { frameAdaptation }),
+        ...(publicAdaptation === null ? {} : { publicAdaptation })
+      }
+    })
+  }
+  const nativeBufferMethodFor = (source: Representation, target: Representation): ConversionNode | null => {
+    const nativeMethod = nativeBufferUnboundMethodContractOf(source, target)
+    if (!nativeMethod) return null
+    return contextualNode(source, target, 'native-buffer-method', {
+      id: NATIVE_UNBOUND_METHOD_MATERIALIZER,
+      domain: 'static:native-buffer-unbound-method',
+      allocates: true,
+      callableIdentityTransport: 'preserved',
+      nativeFieldProtocol: 'unused',
+      nativeMethod
     })
   }
 
@@ -421,11 +994,29 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
 
   const assertedUnions = new Map<ConversionNodeId, ConversionNode>()
   const assertedUnionFor = (source: Representation, target: Representation, copyAllowed: boolean): ConversionNode | null => {
-    if (source.kind !== 'tagged-union') return null
-    if (target.kind === 'tagged-union' || target.kind === 'dynamic' || target.kind === 'optional') return null
+    if (source.kind !== 'tagged-union' && !(source.kind === 'optional' && source.payload.kind === 'tagged-union')) return null
+    if (target.kind === 'tagged-union' || target.kind === 'dynamic') return null
     const id = `${representationKey(source)}->${representationKey(target)}#asserted-union${copyAllowed ? ':copy' : ''}`
     const remembered = assertedUnions.get(id)
     if (remembered !== undefined) return remembered
+    // The dispatch (`emit-narrowing.ts`'s `assertedUnionText`) is a switch on
+    // the live tag whose every home is the arm's own conversion into the
+    // target or a TypeError. It reads no field protocol of its own, so it is
+    // native exactly when each home is: an arm held in the target's carrier,
+    // an arm with no conversion (it throws), or an arm whose conversion
+    // transfers native storage. The one exception is the copying rebuild of
+    // an uncovered `Array<any>` arm, which reads boxed elements.
+    const homeIsNative = (arm: Representation): boolean => {
+      if (representationKey(arm) === representationKey(target)) return true
+      const capability = nodeFor(arm, target).capability
+      if (capability.kind === 'never') return !(copyAllowed && arm.kind === 'array-object')
+      return transfersNativeStorage(capability)
+    }
+    const union = source.kind === 'optional' ? source.payload : source
+    const native =
+      union.kind === 'tagged-union' &&
+      union.arms.every((arm) => homeIsNative(arm.value)) &&
+      (source.kind !== 'optional' || homeIsNative({ kind: source.absence }))
     const node: ConversionNode = {
       id,
       source,
@@ -435,11 +1026,57 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
         materializer: {
           id: copyAllowed ? ASSERTED_UNION_COPY_MATERIALIZER : ASSERTED_UNION_MATERIALIZER,
           domain: copyAllowed ? 'static:asserted-union-copy' : 'static:asserted-union',
-          allocates: copyAllowed
+          allocates: copyAllowed,
+          ...(native ? { nativeFieldProtocol: 'unused' as const } : {})
         }
       }
     }
     assertedUnions.set(id, node)
+    return node
+  }
+
+  const assertedViews = new Map<ConversionNodeId, ConversionNode>()
+  const assertedViewFor = (source: Representation, target: Representation): ConversionNode | null => {
+    const record = source.kind === 'optional' ? source.payload : source
+    if (!isStructuralRecordCarrier(record)) return null
+    const classArms = assertedViewClassArmsOf(target)
+    if (classArms.length === 0) return null
+    const absent = source.kind === 'optional' ? nodeFor({ kind: source.absence }, target) : null
+    if (absent !== null && absent.capability.kind === 'never') return null
+    const id = `${representationKey(source)}->${representationKey(target)}#asserted-view`
+    const remembered = assertedViews.get(id)
+    if (remembered !== undefined) return remembered
+    // An owned record is a value of its own and never views an allocation:
+    // every present value is then the assertion failing.
+    const views = 'ownership' in record && record.ownership === 'shared-refcount'
+    const arms: AssertedViewArm[] = []
+    if (views)
+      for (const arm of classArms) {
+        const load = nodeFor(arm, target)
+        if (load.capability.kind === 'never') return null
+        arms.push({ declaration: arm.declaration, load })
+      }
+    const plan: AssertedViewPlan = { views, arms, absent }
+    const node: ConversionNode = {
+      id,
+      source,
+      target,
+      capability: {
+        kind: 'static',
+        materializer: {
+          id: ASSERTED_VIEW_MATERIALIZER,
+          domain: 'static:asserted-view',
+          allocates: false,
+          // The load is the view's origin allocation itself, read through no
+          // field of the record.
+          nativeFieldProtocol: 'unused',
+          nativeClassReferenceIdentity: 'preserved',
+          assertedView: plan,
+          dependencies: [...arms.map((arm) => arm.load), ...(absent === null ? [] : [absent])]
+        }
+      }
+    }
+    assertedViews.set(id, node)
     return node
   }
 
@@ -452,7 +1089,17 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     const id = `${representationKey(source)}->${representationKey(target)}#family-members(${named})`
     const remembered = familyMemberViews.get(id)
     if (remembered !== undefined) return remembered
-    const materializer = input.registry.structuralRecipe?.(source, target, nodeFor, members) ?? null
+    const materializer =
+      input.registry.structuralRecipe?.(
+        source,
+        target,
+        nodeFor,
+        members,
+        nativeMethodFor,
+        nodeById,
+        dictionaryReadFor,
+        assertedClassDowncastFor
+      ) ?? null
     if (materializer === null) return null
     const node: ConversionNode = { id, source, target, capability: { kind: 'static', materializer }, familyMembers: members }
     familyMemberViews.set(id, node)
@@ -506,17 +1153,25 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
 
   const nullishOptionals = new Map<ConversionNodeId, ConversionNode>()
   const nullishOptionalFor = (source: Representation, target: Representation): ConversionNode | null => {
-    if (source.kind !== 'dynamic' || target.kind !== 'optional' || target.absence !== 'undefined') return null
+    if (source.kind !== 'dynamic' || source.reason === 'untyped-callable' || target.kind !== 'optional' || target.absence !== 'undefined')
+      return null
     const id = `${representationKey(source)}->${representationKey(target)}#nullish-optional`
     const remembered = nullishOptionals.get(id)
     if (remembered !== undefined) return remembered
+    const payload = nodeFor(source, target.payload)
+    if (!recipeIsMaterializableWithoutPriorSourceGuard(payload, nodeById)) return null
     const node: ConversionNode = {
       id,
       source,
       target,
       capability: {
         kind: 'static',
-        materializer: { id: NULLISH_OPTIONAL_MATERIALIZER, domain: 'static:nullish-optional', allocates: false }
+        materializer: {
+          id: NULLISH_OPTIONAL_MATERIALIZER,
+          domain: 'static:nullish-optional',
+          allocates: 'materializer' in payload.capability && payload.capability.materializer.allocates,
+          dependencies: [payload]
+        }
       }
     }
     nullishOptionals.set(id, node)
@@ -525,6 +1180,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
 
   const nodeById = (id: ConversionNodeId): ConversionNode | null =>
     minted.get(id) ??
+    provisional.get(id)?.node ??
     contextual.get(id) ??
     input.nodes.get(id) ??
     coercions.get(id) ??
@@ -532,6 +1188,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     nativeBaseViews.get(id) ??
     armViews.get(id) ??
     assertedUnions.get(id) ??
+    assertedViews.get(id) ??
     familyMemberViews.get(id) ??
     caughtHandoffs.get(id) ??
     assertedClassDowncasts.get(id) ??
@@ -539,15 +1196,23 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     null
 
   return {
+    nativeObjectSampleFor,
+    nativeDescriptorSnapshotFor,
+    dictionaryReadFor,
+    readOnlyDictionaryFor,
+    callArgumentFor,
     fieldReadFor,
+    checkedFieldReadFor,
     absentIndexReadFor,
     nativeMethodFor,
+    nativeBufferMethodFor,
     nodeFor,
     coercionFor,
     exactArmFor,
     nativeBaseViewFor,
     armViewFor,
     assertedUnionFor,
+    assertedViewFor,
     familyMemberViewFor,
     caughtHandoffFor,
     assertedClassDowncastFor,
@@ -631,6 +1296,49 @@ export const ASSERTED_UNION_MATERIALIZER = 'gea::host::assertedUnion'
 
 /** The asserted-union node that may rebuild an `Array<any>` arm as a copy. */
 export const ASSERTED_UNION_COPY_MATERIALIZER = 'gea::host::assertedUnionCopy'
+
+/** The materializer id every asserted-view node carries; the printer dispatches its recipe on it. */
+export const ASSERTED_VIEW_MATERIALIZER = 'gea::host::assertedView'
+
+/** A structural record carrier: a value that can be a view of a class allocation only through its origin. */
+export const isStructuralRecordCarrier = (value: Representation): boolean =>
+  value.kind === 'record' || value.kind === 'record-with-index' || (value.kind === 'native-record-ref' && value.native === null)
+
+/** One class an asserted record's origin may be, and the certified load of that allocation into the target. */
+export interface AssertedViewArm {
+  readonly declaration: DeclarationId
+  readonly load: ConversionNode
+}
+
+/**
+ * `assertedViewFor`'s plan. `views` is false for an owned record, which has no
+ * origin allocation, so `arms` is then empty and every present value fails the
+ * assertion. `arms` is in origin-test order (`assertedViewClassArmsOf`);
+ * `absent` converts the optional source's absence.
+ */
+export interface AssertedViewPlan {
+  readonly views: boolean
+  readonly arms: readonly AssertedViewArm[]
+  readonly absent: ConversionNode | null
+}
+
+/**
+ * The shared class arms an asserted record may be a view of, in the order the
+ * origin test must try them: a descendant before its base, so an allocation
+ * of the derived class selects its own arm.
+ */
+export const assertedViewClassArmsOf = (target: Representation): readonly Extract<Representation, { kind: 'class-ref' }>[] => {
+  const present = target.kind === 'optional' ? target.payload : target
+  const leaves = present.kind === 'tagged-union' ? present.arms.map((arm) => arm.value) : [present]
+  const classes = leaves.filter(
+    (leaf): leaf is Extract<Representation, { kind: 'class-ref' }> => leaf.kind === 'class-ref' && leaf.ownership === 'shared-refcount'
+  )
+  // Every other present leaf must be one no record can be: a primitive.
+  const primitive = (leaf: Representation): boolean =>
+    leaf.kind === 'scalar' || leaf.kind === 'string' || leaf.kind === 'symbol' || leaf.kind === 'undefined' || leaf.kind === 'null'
+  if (!leaves.every((leaf) => (leaf.kind === 'class-ref' ? leaf.ownership === 'shared-refcount' : primitive(leaf)))) return []
+  return [...classes].sort((left, right) => right.ancestors.length - left.ancestors.length)
+}
 
 /** The materializer id every exact-arm node carries; the printer dispatches its recipe on it. */
 export const EXACT_ARM_MATERIALIZER = 'gea::host::exactArm'

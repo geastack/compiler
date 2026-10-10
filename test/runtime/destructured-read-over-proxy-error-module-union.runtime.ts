@@ -1,9 +1,9 @@
-//! expect: guarded: kerberos is not installed
-//! expect: unguarded: kerberos is not installed
+//! expect: guarded: auth-plugin is not installed
+//! expect: unguarded: auth-plugin is not installed
 //! expect: loaded: svc@host
 
-// mongodb's cmap/auth/gssapi.ts: `const { initializeClient } = krb`, where
-// `krb` is deps.ts's `Kerberos` -- a module type or `{ kModuleError }` -- and
+// A database client's authentication mechanism: `const { initializeClient } = plugin`, where
+// `plugin` is the client's `AuthPlugin` -- a module type or `{ kModuleError }` -- and
 // holds either the loaded module or `makeErrorModule`'s Proxy. The pattern's
 // own `[[Get]]` reads the union, so the proxy arm runs its `get` trap (which
 // throws the stored error, as node does) and every other arm reads its field.
@@ -30,54 +30,54 @@ function makeErrorModule(error: any) {
   })
 }
 
-interface KerberosClient {
+interface AuthPluginClient {
   step(challenge: string): Promise<string>
 }
-// kerberos's lib/index.js implements it as `promisifiedInitializeClient.call(
+// The auth plugin implements it as `promisifiedInitializeClient.call(
 // this, ...)`, so its `this` is `any` and the convention states a receiver; the
 // destructured bare call passes `undefined` there, as the language does.
-interface KerberosModule {
-  initializeClient(this: any, service: string, options?: { user?: string }): Promise<KerberosClient>
+interface AuthPluginModule {
+  initializeClient(this: any, service: string, options?: { user?: string }): Promise<AuthPluginClient>
 }
-type Kerberos = KerberosModule | { kModuleError: MissingDependencyError }
+type AuthPlugin = AuthPluginModule | { kModuleError: MissingDependencyError }
 
-const installed: KerberosModule = {
+const installed: AuthPluginModule = {
   initializeClient: async function (this: any, service: string) {
     const bound = this === undefined ? '' : '?'
     return { step: async (challenge: string) => service + bound + challenge }
   }
 }
 
-function getKerberos(present: boolean): Kerberos {
-  let kerberos: Kerberos
+function getAuthPlugin(present: boolean): AuthPlugin {
+  let authPlugin: AuthPlugin
   try {
-    if (!present) throw new Error('Cannot find module kerberos')
-    kerberos = installed
+    if (!present) throw new Error('Cannot find module auth-plugin')
+    authPlugin = installed
   } catch {
-    kerberos = makeErrorModule(new MissingDependencyError('kerberos is not installed'))
+    authPlugin = makeErrorModule(new MissingDependencyError('auth-plugin is not installed'))
   }
-  return kerberos
+  return authPlugin
 }
 
-let krb: Kerberos
+let plugin: AuthPlugin
 
-async function makeKerberosClient(): Promise<KerberosClient> {
-  if ('kModuleError' in krb) {
-    throw krb['kModuleError']
+async function makeAuthPluginClient(): Promise<AuthPluginClient> {
+  if ('kModuleError' in plugin) {
+    throw plugin['kModuleError']
   }
-  const { initializeClient } = krb
+  const { initializeClient } = plugin
   return await initializeClient('svc', {})
 }
 
-async function unguarded(): Promise<KerberosClient> {
-  const { initializeClient } = krb as KerberosModule
+async function unguarded(): Promise<AuthPluginClient> {
+  const { initializeClient } = plugin as AuthPluginModule
   return await initializeClient('svc')
 }
 
 async function main(): Promise<void> {
-  krb = getKerberos(false)
+  plugin = getAuthPlugin(false)
   try {
-    await makeKerberosClient()
+    await makeAuthPluginClient()
     console.log('guarded: unexpected')
   } catch (error) {
     console.log('guarded: ' + (error as MissingDependencyError).message)
@@ -88,8 +88,8 @@ async function main(): Promise<void> {
   } catch (error) {
     console.log('unguarded: ' + (error as MissingDependencyError).message)
   }
-  krb = getKerberos(true)
-  const client = await makeKerberosClient()
+  plugin = getAuthPlugin(true)
+  const client = await makeAuthPluginClient()
   console.log('loaded: ' + (await client.step('@host')))
 }
 

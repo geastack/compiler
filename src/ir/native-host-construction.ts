@@ -16,11 +16,9 @@ import type { ConstructOperation } from './model.js'
  * through the new collection is a `get`/`set`/call of its own and is censused
  * there, the same way a closed call's result is.
  *
- * three.js is the shape this exists for. `WebGLProperties` holds every
- * texture/material/render-target bag in `new WeakMap()`, `WebGLRenderStates`
- * its per-scene state arrays in `new Map()`, `WebGLShaderCache`,
- * `WebGLGeometries`, `WebGLMorphtargets`, `WebGLTextures` and
- * `WebGLObjects` the same. None of these callees states a construct
+ * A library of cache and registry classes is the shape this exists for: one
+ * holds every per-object property bag in `new WeakMap()`, another its
+ * per-scene state arrays in `new Map()`, and a handful more the same. None of these callees states a construct
  * convention (`native-handle(...;construct=-)`): their overload sets join
  * into none, correctly. So each construction read as unknown and published
  * the collection's key and value carriers -- the full field protocol of every
@@ -41,7 +39,7 @@ import type { ConstructOperation } from './model.js'
  *
  * Refused, and left to the unknown-construction boundary:
  * - a callee that is not a bare `native-handle` -- `new this.constructor()`
- *   in three's `clone()` bodies holds a `dynamic[]`-rest constructor value;
+ *   in `clone()` bodies holds a `dynamic[]`-rest constructor value;
  *   that is genuinely dynamic and belongs to the class paths, not here;
  * - a construction whose new-target is not its own callee, which emission
  *   refuses as well (`emitConstruct`);

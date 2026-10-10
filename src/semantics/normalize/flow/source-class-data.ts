@@ -21,8 +21,9 @@ import { privateNameKeyText } from '../../model/structural-types.js'
  * call's own attributes. TypeScript's JS class inference reads it as a member
  * declaration and hands it back as the property's declaration node, so a proof
  * that accepts `this.key = value` and refuses this one is refusing the same
- * fact written in the spelling this compiler itself chose. Three's `LOD`
- * declares `levels` that way, and reading it was the terminal of 35 escapes.
+ * fact written in the spelling this compiler itself chose. A class that
+ * declares a data member that way would otherwise terminate every escape
+ * proof that reads the member.
  */
 export const declaredDataMemberAccess = (declaration: ts.Node): boolean =>
   (ts.isPropertyAccessExpression(declaration) || ts.isElementAccessExpression(declaration)) &&
@@ -50,10 +51,10 @@ const carriesTypeParameter = (type: ts.Type): boolean =>
  * what that code does. This asks the narrower, additional question of
  * whether the code it runs is PROVABLY nothing but forwarding to a real data
  * member, so that a read through the accessor can be answered from the same
- * authority that answers for the member it forwards to -- three's
- * `Texture.image` (`get image() { return this.source.data } set image(v) {
- * this.source.data = v }`) is the motivating case: every read of it across
- * `WebGLTextures.js` is a `Source.data` read wearing a different name.
+ * authority that answers for the member it forwards to -- an accessor pair
+ * like `get image() { return this.source.data } set image(v) {
+ * this.source.data = v }` is the motivating case: every read of `image` is a
+ * `source.data` read wearing a different name.
  *
  * Every one of these must hold, on THIS owner, for the answer to be anything
  * but `null`:
@@ -131,11 +132,11 @@ export type SourceClassFamilyQuery =
  * `this`/`super`, or a local binding that is provably nothing else: its only
  * whole-slot write is its own initializer, and that initializer is `this`/
  * `super`. TypeScript's own JS constructor-function member inference scans
- * only a LITERAL `this.<name> = ...`; three's `WebGLRenderer` instead writes
- * most of its instance data through exactly this alias, often from inside a
- * nested helper (`WebGLRenderer.js`: `const _this = this; ... function
- * initGLContext() { ... _this.shadowMap = shadowMap; ... }`). The checker's
- * inferred type for `WebGLRenderer` then has no `shadowMap` member at all --
+ * only a LITERAL `this.<name> = ...`; a class may instead write most of its
+ * instance data through exactly this alias, often from inside a nested
+ * helper (`const _this = this; ... function init() { ... _this.cache =
+ * cache; ... }`). The checker's inferred type for the class then has no
+ * `cache` member at all --
  * not a wrong answer, an absent one, because the checker never looked. The
  * value-flow index already proves an alias like this exact for other
  * purposes (`callable-reach.ts`'s `thisFamilyAt`, walking straight through
@@ -173,10 +174,9 @@ const thisReceiverOf = (flow: ValueFlowIndex, expression: ts.Expression): ts.Exp
  * answers with the innermost enclosing FUNCTION-LIKE node -- for a
  * constructor-function `owner` that IS `owner` itself, but for a real
  * `class Owner { constructor() { ... } }` it is the `constructor` method,
- * never the class node. Three's `WebGLRenderer` is the real-file case: an
- * ES6 class whose constructor keeps a `const _this = this` alias and installs
- * `properties`/`textures`/... through it from a nested `initGLContext`
- * helper, same shape as a constructor function's own alias writes -- so the
+ * never the class node. The real-world case is an ES6 class whose
+ * constructor keeps a `const _this = this` alias and installs its members
+ * through it from a nested `init` helper, same shape as a constructor function's own alias writes -- so the
  * comparison frame must be the constructor method, not the class.
  */
 /**
@@ -196,7 +196,7 @@ const thisReceiverOf = (flow: ValueFlowIndex, expression: ts.Expression): ts.Exp
 // cache is proof-local and deliberately bypassed for those -- see
 // `cachedByAnchorAndKey`'s `proofLocal` branch), which is once per re-ask
 // inside the escape proof's coinductive cycle -- millions of times on
-// the three.js app. Recomputing an O(allWrites) scan that many times turned a single
+// a large program. Recomputing an O(allWrites) scan that many times turned a single
 // full-program pass into the dominant cost; cache it by (flow, owner) here,
 // independent of that proof-local machinery, the same way every other
 // checker-stable answer in this module is held in a WeakMap off `flow`.
@@ -293,7 +293,7 @@ const familyRootsOf = (checker: ts.TypeChecker, query: SourceClassFamilyQuery): 
   const exact = query.kind === 'value' ? query.originsOf(query.expression) : null
   if (exact) for (const owner of exact.classes) roots.add(owner)
   else if (!collect(query.receiver)) return null
-  // TEMPORARY diagnostic for root A's real-WebGLRenderer probe -- names which
+  // TEMPORARY diagnostic for a real-file family-roots probe -- names which
   // arm of this function supplied `roots` and how many it found, since a
   // truthy-but-EMPTY `exact` short-circuits the `collect()` fallback and
   // silently produces zero roots. Remove once the real-file refusal is found.
@@ -339,8 +339,8 @@ export const sourceClassConstructorSlotIsOriginal = (
  * member of a receiver family and once per class of an inventory -- while the
  * answer depends only on the flow index and the class: two checker calls, a
  * write-set lookup, and a `getSourceFile()` parent walk per declaration, all
- * of which give the same result every time. A live three.js profile put it at
- * 7.4% of self time once the proof memo stopped dominating.
+ * of which give the same result every time. Profiled unmemoized on a large
+ * program it was a top self-time frame once the proof memo stopped dominating.
  */
 const constructorSlotOriginal = new WeakMap<ValueFlowIndex, WeakMap<SourceClass, boolean>>()
 
@@ -386,8 +386,8 @@ const keyReadPlans: AnchorCache<SourceClassKeyReadPlan | null> = new WeakMap()
 // Read once at load: `process.env` is a native interceptor, and the member
 // plan below runs once per uncached (anchor, receiver, key) question -- and
 // once per VALUE query outright, since those are proof-local -- so a per-call
-// read was a measurable slice of the three.js app's frontend for a value that cannot
-// change mid-process.
+// read was a measurable slice of a large program's frontend for a value that
+// cannot change mid-process.
 const watchedOwnedClass = process.env['GEA_OWNED_CLASS_DEBUG']
 
 const cachedByAnchorAndKey = <R>(
@@ -588,11 +588,10 @@ const primitiveType = (type: ts.Type): boolean => (type.isUnion() ? type.types.e
  * A read of `key` through a receiver of this source class family, classified
  * per class -- including keys the receiver's own class never declares.
  *
- * Three's renderer asks every drawable `object.isInstancedMesh` and
- * `object.isSkinnedMesh` (`WebGLRenderLists.js`, `WebGLObjects.js`,
- * `WebGLPrograms.js`, ...). Only `InstancedMesh`/`SkinnedMesh` declare them,
- * and neither is in the three.js app's import graph, so on a `Mesh` the read is simply
- * absent. The read runs no code exactly when no class in the family -- nor
+ * A library commonly type-tests every object with a brand flag such as
+ * `node.isInstanced`, declared only on the one subclass it brands. When that
+ * subclass is not in the program's import graph, the read on every other
+ * class in the family is simply absent. The read runs no code exactly when no class in the family -- nor
  * any class on its prototype chain up to `Object.prototype` -- has a method
  * or accessor for the key. An absent key further needs the key not to be an
  * `Object.prototype` member and the intrinsic Object prototype intact (the

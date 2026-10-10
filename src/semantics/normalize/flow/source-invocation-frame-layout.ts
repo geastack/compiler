@@ -2,7 +2,11 @@ import ts from 'typescript'
 import type { FlowInvocationOperands, ReceiverReference, ValueFlowIndex } from './model.js'
 import { unwrapErasedExpression } from '../producers/erasure.js'
 import { runtimeParametersOf } from './targets.js'
-import { sourceInvocationReceiverOf, type SourceInvocationReceiverFact } from './source-invocation-receiver.js'
+import {
+  ordinaryOwnInvocationOperandsMatch,
+  sourceInvocationReceiverOf,
+  type SourceInvocationReceiverFact
+} from './source-invocation-receiver.js'
 
 export type SourceInvocationParameterSlot =
   | {
@@ -37,6 +41,13 @@ export interface SourceInvocationFrameLayout {
 const layouts = new WeakMap<
   ValueFlowIndex,
   WeakMap<ts.CallExpression | ts.NewExpression, WeakMap<ts.SignatureDeclaration, SourceInvocationFrameLayout | null>>
+>()
+const ownLayouts = new WeakMap<
+  ValueFlowIndex,
+  WeakMap<
+    ts.CallExpression | ts.NewExpression,
+    WeakMap<FlowInvocationOperands, WeakMap<ts.SignatureDeclaration, SourceInvocationFrameLayout | null>>
+  >
 >()
 
 const unwrapped = (expression: ts.Expression): ts.Expression => {
@@ -83,12 +94,26 @@ const defaultActivationOf = (
 export const sourceInvocationFrameLayoutOf = (
   flow: ValueFlowIndex,
   call: ts.CallExpression | ts.NewExpression,
-  body: ts.SignatureDeclaration
+  body: ts.SignatureDeclaration,
+  ordinaryOwnOperands?: FlowInvocationOperands
 ): SourceInvocationFrameLayout | null => {
-  let calls = layouts.get(flow)
-  if (!calls) layouts.set(flow, (calls = new WeakMap()))
-  let bodies = calls.get(call)
-  if (!bodies) calls.set(call, (bodies = new WeakMap()))
+  if (ordinaryOwnOperands !== undefined && !ordinaryOwnInvocationOperandsMatch(call, ordinaryOwnOperands)) return null
+  let bodies: WeakMap<ts.SignatureDeclaration, SourceInvocationFrameLayout | null>
+  if (ordinaryOwnOperands !== undefined) {
+    let calls = ownLayouts.get(flow)
+    if (!calls) ownLayouts.set(flow, (calls = new WeakMap()))
+    let entries = calls.get(call)
+    if (!entries) calls.set(call, (entries = new WeakMap()))
+    const known = entries.get(ordinaryOwnOperands)
+    bodies = known ?? new WeakMap()
+    if (!known) entries.set(ordinaryOwnOperands, bodies)
+  } else {
+    let calls = layouts.get(flow)
+    if (!calls) layouts.set(flow, (calls = new WeakMap()))
+    const known = calls.get(call)
+    bodies = known ?? new WeakMap()
+    if (!known) calls.set(call, bodies)
+  }
   if (bodies.has(body)) return bodies.get(body)!
   const site = flow.callSiteOf(call)
   if (!site || !flow.callableBodyIsIndexed(body)) {
@@ -96,7 +121,8 @@ export const sourceInvocationFrameLayoutOf = (
     return null
   }
   const parameters = runtimeParametersOf(body)
-  const args = site.operands.args
+  const operands = ordinaryOwnOperands ?? site.operands
+  const args = operands.args
   const slots: SourceInvocationParameterSlot[] = parameters.map((parameter, index) =>
     parameter.dotDotDotToken
       ? { kind: 'rest', parameter, actuals: args.slice(index) }
@@ -111,8 +137,8 @@ export const sourceInvocationFrameLayoutOf = (
   const layout: SourceInvocationFrameLayout = {
     call,
     body,
-    operands: site.operands,
-    receiver: sourceInvocationReceiverOf(flow, call, body),
+    operands,
+    receiver: sourceInvocationReceiverOf(flow, call, body, ordinaryOwnOperands),
     receiverUses: ts.isArrowFunction(body) ? [] : flow.receiverReferencesToDeclaration(body),
     parameters,
     arguments: args.some(ts.isSpreadElement) ? { kind: 'spread', values: args } : { kind: 'positional', slots }

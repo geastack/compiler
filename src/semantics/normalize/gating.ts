@@ -298,8 +298,8 @@ export const gatingEdges = (input: GatingInput): readonly SemanticEdge[] => {
         // reopen for the loop's own gated operations, which
         // `lower-flow.ts`'s `enterArm` refuses by name: "the truthy arm of
         // guard ... was re-entered after it had already ended". Confirmed by
-        // tracing hono's `Context#newResponse` (`context.ts:613`'s `for
-        // (const [key, value] of argHeaders)`, `argHeaders` a `Headers`):
+        // tracing a guarded `for (const [key, value] of headers)` over a
+        // `Headers` value:
         // `get-method`'s own operation carried an EMPTY scope chain while
         // `get-iterator`/`next` for the identical for-of correctly carried
         // `guard(...,truthy)`.

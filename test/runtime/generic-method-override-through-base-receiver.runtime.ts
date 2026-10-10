@@ -1,7 +1,8 @@
 // A generic method a subclass overrides, called through a receiver typed as
-// the base with several instantiations. mongodb's `OnDemandDocument.get<T>`
-// is overridden by `MongoDBResponse.get<T>` (wrapping bson errors), and
-// `this.get('cursor', BSONType.object)?.get('atClusterTime', BSONType.timestamp)`
+// the base with several instantiations. A database client's lazy
+// document's `get<T>` is overridden by `ServerResponse.get<T>` (wrapping
+// serializer errors), and
+// `this.get('cursor', WireType.object)?.get('atClusterTime', WireType.timestamp)`
 // reads a nested document -- typed as the base -- at another instantiation.
 interface TypeOf {
   num: number
@@ -19,7 +20,7 @@ class Doc {
     if (value === undefined) return null
     return this.toJSValue(value, as)
   }
-  // bson's shape: the conversion answers `any`, which the generic signature
+  // The binary-document serializer's shape: the conversion answers `any`, which the generic signature
   // then states per instantiation.
   private toJSValue(value: number | string | Doc, as: keyof TypeOf): any {
     if (as === 'num' && typeof value === 'number') return value

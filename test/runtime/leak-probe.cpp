@@ -20,7 +20,7 @@
 // async-signal-safe: it is a debugging aid for a single-threaded program that
 // is idle when the signal arrives.
 //
-// This is how the hono-hello leak of 2026-09-17 was found: one IncomingMessage
+// This is how an HTTP server app's leak of 2026-09-17 was found: one IncomingMessage
 // per request kept strong=2 with a single live pointer to it; the retain/release
 // ledger showed the second count came from a `gea::Value` stored in a
 // `DynamicObject` -- the expando table `detail::expandoFor` keyed on a dead

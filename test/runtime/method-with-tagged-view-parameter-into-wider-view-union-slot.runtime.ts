@@ -1,5 +1,5 @@
 // A method whose parameter names an intersection over `ArrayBufferView`
-// (bson's `webByteUtils.toLocalBufferType`) stored in a slot whose function
+// (a binary-document library's byte-utility `toLocalBufferType`) stored in a slot whose function
 // type names plain `ArrayBufferView`: the adapter's parameter conversion must
 // carry every arm, not select the shared ones.
 type ViewWithTag = ArrayBufferView & { [Symbol.toStringTag]?: string }

@@ -1,7 +1,7 @@
 // A script-level `var` is an own data property of the global object
 // (ECMA-262 9.1.1.4.17), so `globalThis.X` is the live cell `X` names -- not
 // a lookup in the expando dictionary, which holds only what the program
-// installed at run time. @hono/node-server's `headers.ts` does exactly
+// installed at run time. An HTTP server adapter does exactly
 // `export const GlobalHeaders = globalThis.Headers` against a platform class
 // this program declares as a `var`; a `??` over a missing one falls through.
 class HeadersImpl {

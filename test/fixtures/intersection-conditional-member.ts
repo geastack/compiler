@@ -5,9 +5,9 @@
 // walk either. The intersection deriver used to demand a record of every member
 // before it would read the checker's own reconciliation -- which asks the wrong
 // member the wrong question, because that branch reads no member at all, only
-// the reconciled type. mongodb's `WithId<T> = EnhancedOmit<T, '_id'> & { _id:
-// InferIdType<T> }` is the shape, and it is a member of nearly every collection
-// type the driver declares.
+// the reconciled type. A database client's `WithId<T> = EnhancedOmit<T, '_id'> &
+// { _id: InferIdType<T> }` is the shape, and it is a member of nearly every
+// collection type the driver declares.
 //
 // What still outranks the reconciliation is a member carrying its own answer --
 // a nominal class, a primitive value, a signature, a type parameter -- and each

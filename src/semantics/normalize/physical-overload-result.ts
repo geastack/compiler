@@ -14,8 +14,8 @@ import { inheritedImplementationOf } from './merged-declaration.js'
  * are not interchangeable: a generator's body returns the generator object
  * `EvaluateGeneratorBody` creates, which this compiler carries as `iterator`,
  * while the overload signature above it is free to spell that object as any
- * interface it satisfies. node-compat's `URLSearchParams`
- * (`runtime/node/globals.ts`) spells it `IterableIterator<string>` over
+ * interface it satisfies. A host's `URLSearchParams` (declared in its
+ * global script) spells it `IterableIterator<string>` over
  * `*entries(): Generator<string>`, and an interface is a `native-record-ref` --
  * so the call site asked for a record result from a callee whose convention
  * returns an iterator, and cpp refused the conversion.
@@ -55,7 +55,7 @@ import { inheritedImplementationOf } from './merged-declaration.js'
  * Asked of the callee's SYMBOL rather than of `getResolvedSignature`, which is
  * the answer this wants and the one thing that must not be asked from inside
  * `typeAt`: `structural-callable.ts`'s own comment records resolving every
- * arbitrary call there recursively instantiating hono's conditional route types
+ * arbitrary call there recursively instantiating a library's conditional types
  * until the host stack overflowed. Nothing is lost by not asking -- TypeScript
  * never resolves a call to the implementation signature while overloads exist,
  * so a symbol carrying both shapes resolves to a bodiless overload at every call
@@ -109,11 +109,11 @@ export const physicalGeneratorOverloadReturnOf = (checker: ts.TypeChecker, decla
  * rule for the callee: the interface member has no body, so the call runs the
  * base class's and passes its arguments in that body's frame. The RESULT kept
  * the typing view, and for one shape the view cannot be given to the value at
- * all. mongodb's `TypedEventEmitter<Events>` declares
- * `listeners<K extends keyof Events>(event: K | ...): Events[K][]`, and
- * `encrypter.ts` asks it with `K` the union of every event name, so the view
- * is an array of a 26-arm union of listener signatures -- while the body
- * (node-compat's `EventEmitter.listeners`) hands back its stored `Listener[]`.
+ * all. A `TypedEventEmitter<Events>` declares
+ * `listeners<K extends keyof Events>(event: K | ...): Events[K][]`, and a
+ * caller asks it with `K` the union of every event name, so the view
+ * is an array of a many-arm union of listener signatures -- while the body
+ * (an event emitter's `listeners`) hands back its stored `Listener[]`.
  * A union of callables has no runtime discriminator: every arm is `typeof
  * 'function'`, and TypeScript itself never narrows one function type out of
  * another. So no conversion can place a stored listener into the arm it
@@ -181,10 +181,10 @@ const viewNamesUnplaceableCallableUnion = (checker: ts.TypeChecker, view: ts.Typ
 
 /**
  * A SINGLE callable view the stored callable still cannot be converted into:
- * the stored body declares the receiver it runs on (node-compat's `Listener`
+ * the stored body declares the receiver it runs on (an emitter's `Listener`
  * is `(this: EventEmitter, ...args) => unknown`, because `emit` applies each
  * listener to its emitter), and no signature of the view declares a receiver
- * that is one. mongodb's event maps are method shorthands
+ * that is one. Event maps written as method shorthands
  * (`{ close(): void }`), whose receiver is the map record, never an emitter.
  * An adapter from the stored listener into such a view would have to invent
  * the emitter it calls it on -- there is none to hand -- so this view is as

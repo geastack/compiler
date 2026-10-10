@@ -518,8 +518,8 @@ export const buildCaptureIndex = (
  * ever reassigns it is pure loss, and it is the expensive kind: an indirect
  * call is not inlinable, so the body stays opaque and every optimization that
  * would have followed it -- constant propagation into it, and the
- * devirtualization of a closure it RETURNS -- is lost with it. `closure`'s
- * hot loop is two such calls and nothing else.
+ * devirtualization of a closure it RETURNS -- is lost with it. A hot loop
+ * of two such calls and nothing else loses all of it.
  *
  * Written exactly once is the whole condition, and it is the same arithmetic
  * `buildCaptureIndex` uses for a reassignment: a declaration the program ever
@@ -568,8 +568,8 @@ export const buildDirectCallableIndex = (
     if (writeCounts.get(declaration) !== 1) continue
     // The cell and the function it holds can disagree about the CONVENTION
     // even when the language calls them the same function: `const mergePath:
-    // (...paths: string[]) => string = (base?, sub?, ...rest) => ...` (hono's
-    // `utils/url.ts`) declares one rest parameter at position 0 and holds a
+    // (...paths: string[]) => string = (base?, sub?, ...rest) => ...`
+    // declares one rest parameter at position 0 and holds a
     // body taking two optionals and its own rest at position 2. A call site
     // packs its arguments the way the CELL says, so naming the body directly
     // would hand a one-argument call to a three-parameter definition.

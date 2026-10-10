@@ -52,9 +52,9 @@ static void retainedThunk(void* environment) {
 static void executorWritesAndRetainsThunk(void* environment, Resolve, Reject) {
   auto* env = static_cast<ExecutorEnv*>(environment);
   *env->box = env->base;
-  // Stashed for later, exactly like the mongodb `Timeout` pattern
-  // (`node_modules/mongodb/src/timeout.ts`'s `super(executor)`, which the
-  // measured driver already shows retaining a resolver into a `Ref<Optional<
+  // Stashed for later, exactly like a database client's `Timeout` pattern
+  // (a Promise subclass whose constructor calls `super(executor)`, which the
+  // measured client already shows retaining a resolver into a `Ref<Optional<
   // CallableObject<...>>>` cell): this MUST keep its own heap environment
   // regardless of the executor's own borrow, because it outlives this call.
   auto held = gea::makeRef<gea::HeapEnvironmentBlock<RetainedEnv>>(RetainedEnv{env->box});

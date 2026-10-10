@@ -8,23 +8,22 @@ import ts from 'typescript'
  * ARGUMENTS into its structural key (`class-instance:${declaration}:${
  * typeArguments.join(',')}`), because in general two different arguments mean
  * two different physical layouts. That is correct for `Context<E,...>`,
- * whose `env: E['Bindings']` field genuinely differs in C++ type per `E`. It
+ * whose `env: E['Env']` field genuinely differs in C++ type per `E`. It
  * is NOT correct for a type parameter that participates only in a method's
  * overload/return-type composition and never in an instance field's own
- * type: hono's `Hono<E,S,BasePath,CurrentPath>` names `S` inside
- * `get!: HandlerInterface<E,'get',S,BasePath,CurrentPath>`, but
- * `HandlerInterface` is a pure call-signature bag with no data field of its
- * own, so no C++ struct anywhere actually stores a value shaped by `S`.
- * Folding it into the key anyway mints one `Hono` specialization per distinct
- * route-registration call in the program -- `#addRoute`'s own generic
- * recursion is self-similar across them, and the census walks each copy
+ * type: a `Router<E,S,Path>` that names `S` inside
+ * `get!: Handler<E,'get',S,Path>`, where `Handler` is a pure call-signature
+ * bag with no data field of its own, so no C++ struct anywhere actually
+ * stores a value shaped by `S`. Folding it into the key anyway mints one
+ * `Router` specialization per distinct registration call in the program --
+ * a generic method whose recursion is self-similar across them, and the census walks each copy
  * again, which is the shape of the stack overflow this module exists to cut
  * off at the root.
  *
  * The test is deliberately NOT "does the parameter appear, textually, in a
  * member's type" -- `S` appears that way too, nested inside
- * `HandlerInterface`'s own argument list, and a syntactic-appearance test
- * cannot tell that occurrence apart from `E`'s in `E['Bindings']`. It is
+ * `Handler`'s own argument list, and a syntactic-appearance test
+ * cannot tell that occurrence apart from `E`'s in `E['Env']`. It is
  * whether the parameter reaches a storage position, followed through nested
  * generic references: a member typed `Other<Args>` propagates relevance only
  * through the positions of `Other` that `Other`'s OWN fields (computed by
@@ -77,12 +76,12 @@ import ts from 'typescript'
  * ... already have dedicated derivation in `representation/derive.ts`, which
  * reads `shape.typeArguments` directly). An ambient class that does state its
  * fields can be analyzed from those declarations just like a source class;
- * this is what lets Hono's declarations prove its schema and path parameters
+ * this is what lets a library's declarations prove that some type parameters
  * occur only through call-signature-only interfaces. The standard library's
  * own no-default-lib declarations remain conservative even when they expose a
  * descriptive property such as `Set.size`: their native carrier can store a
  * type parameter that no declared JavaScript field names. A declaration
- * mid-computation (a genuine cycle -- `Hono` naming
+ * mid-computation (a genuine cycle -- a class naming
  * itself through a field, say) answers "every parameter relevant" for that
  * reentrant call rather than guessing at a fixed point. Any type shape this
  * module does not model (a conditional type, a mapped type, an anonymous
@@ -232,12 +231,12 @@ const typeMentionsParameter = (checker: ts.TypeChecker, type: ts.Type, parameter
   // AbortSignal }`, an inline `{ value: T }` -- spells out every member it
   // has, so its members answer exactly as a field's declared type does, the
   // alias's own arguments already substituted into them. The fail-closed
-  // default below said "mentions every parameter" for it instead, and the
-  // MongoDB driver's `AbstractOperation<TResult>` -- whose only field
-  // touching such a literal is `options: OperationOptions & Abortable` --
-  // was therefore "storing" `TResult`: fourteen layouts, one per operation
-  // result type, and every subclass instance refused at each call into the
-  // `any` copy that `executeOperation<T extends AbstractOperation>` names.
+  // default below said "mentions every parameter" for it instead, and an
+  // abstract `Operation<TResult>` -- whose only field touching such a
+  // literal is `options: Options & Abortable` -- was therefore "storing"
+  // `TResult`: one layout per result type, and every subclass instance
+  // refused at each call into the `any` copy that
+  // `execute<T extends Operation>` names.
   // A callable literal keeps the conservative answer: its signatures are not
   // modeled here.
   if (
@@ -438,13 +437,13 @@ export interface StoredCopy {
  * answers by the parameter's name.
  *
  * A parameter can reach storage without reaching any datum a copy writes.
- * hono's `Context<E>` stores `E` only as `env: E['Bindings']` (the unchecked
- * top at both `any` and `BlankEnv`), as callables (`#notFoundHandler:
- * NotFoundHandler<E>`, the `set`/`get` arrow fields), and through `Context`
- * itself. Splitting it on the parameter's name made `#dispatch`'s `Context`
+ * A `Context<E>` may store `E` only as `env: E['Env']` (the unchecked
+ * top at both `any` and a default `BlankEnv`), as callables (`#fallback:
+ * Handler<E>`, `set`/`get` arrow fields), and through `Context` itself.
+ * Splitting it on the parameter's name made a dispatcher's `Context`
  * (built at `any`) a different C++ type from the one every user handler is
  * compiled for (`BlankEnv`) -- the program hands one to the other on every
- * request, so the split has no honest conversion at all. Where the copies
+ * call, so the split has no honest conversion at all. Where the copies
  * DO write different data -- `class CaseInsensitiveMap<V = any> extends
  * Map<string, V>` at `any` and at `unknown[]`, whose base stores `V` itself
  * -- the answer is still `true` and they split.

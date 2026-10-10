@@ -1,4 +1,4 @@
-// `new Map(entries)` over an Array of `[K, V]` tuples -- mongodb's sort
+// `new Map(entries)` over an Array of `[K, V]` tuples -- a database client's sort
 // converters (`new Map(sortEntries)` with `sortEntries: [string, number][]`).
 // A later duplicate key overwrites an earlier one, in insertion position.
 type Pair = [string, number]

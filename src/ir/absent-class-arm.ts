@@ -11,7 +11,7 @@ import type { ReflectionExposure } from './reflection-demand.js'
 /**
  * A union read whose class arm has no such member at all.
  *
- * three asks `scene.background` -- a `Texture | Color` there -- for
+ * A program asks `scene.background` -- a `Texture | Color` there -- for
  * `isCubeTexture`, `mapping` and `colorSpace`; `Color` declares none of them.
  * The reflection census used to require EVERY surface of the receiver to
  * declare the key, so the lacking arm promoted both classes to a full dynamic

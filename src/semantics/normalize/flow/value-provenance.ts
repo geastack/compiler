@@ -3,6 +3,8 @@ import { unwrapErasedExpression } from '../producers/erasure.js'
 import type { ValueFlowIndex } from './model.js'
 import type { OriginAuthority } from './origin-authority.js'
 import { closedScriptScopeOf } from './targets.js'
+import { sourceGlobalVariableBindingIsClosed } from './source-global-binding.js'
+import { sourceCommonJsScopeIsClosed } from './source-commonjs-exports.js'
 
 /** Whole-binding writes whose value is the binding's new content (or, for `||=`, one of two). */
 const LOCAL_WRITES: ReadonlySet<string> = new Set(['declaration-initializer', 'identifier-assignment', 'logical-assignment'])
@@ -28,27 +30,48 @@ export const localBindingWritesAreComplete = (flow: ValueFlowIndex, declaration:
   if (ts.isForInStatement(list.parent) || ts.isForOfStatement(list.parent)) return false
   const file = declaration.getSourceFile()
   if (ts.isVariableStatement(list.parent) && list.parent.parent === file && !ts.isExternalModule(file))
-    return (ts.getCombinedNodeFlags(list) & ts.NodeFlags.BlockScoped) !== 0 && closedScriptScopeOf(flow)?.files.has(file) === true
+    return (
+      sourceCommonJsScopeIsClosed(flow, file) ||
+      ((ts.getCombinedNodeFlags(list) & ts.NodeFlags.BlockScoped) !== 0 && closedScriptScopeOf(flow)?.files.has(file) === true)
+    )
   return true
 }
+
+/** The global case remains conditional on one exact source binding receipt;
+ * closing writers does not close a value's consumers.
+ * @semanticCategory generic-primitive
+ */
+export const sourceBindingWritesAreComplete = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  declaration: ts.VariableDeclaration
+): boolean => localBindingWritesAreComplete(flow, declaration) || sourceGlobalVariableBindingIsClosed(checker, flow, declaration)
 
 /** Complete values bound to a local cell. Iteration projects elements from
  * its recorded source through the caller's closed iterator/content authority;
  * the iterable itself is never substituted for an element value. */
-export const localBindingValuesOf = (
+const bindingValuesOf = (
   flow: ValueFlowIndex,
   declaration: ts.VariableDeclaration,
-  iterationValuesAt?: (source: ts.Expression) => readonly ts.Expression[] | null
+  iterationValuesAt?: (source: ts.Expression) => readonly ts.Expression[] | null,
+  sourceGlobalClosed = false
 ): readonly ts.Expression[] | null => {
   const writes = flow.writesToDeclaration(declaration).filter((write) => write.slot === 'whole')
   if (writes.length === 0) return null
-  if (!localBindingWritesAreComplete(flow, declaration) && !writes.some((write) => write.iterationOrigin !== undefined)) return null
+  if (
+    !sourceGlobalClosed &&
+    !localBindingWritesAreComplete(flow, declaration) &&
+    !writes.some((write) => write.iterationOrigin !== undefined)
+  )
+    return null
   const list = declaration.parent
   if (
     ts.isVariableDeclarationList(list) &&
     (ts.getCombinedNodeFlags(list) & ts.NodeFlags.BlockScoped) === 0 &&
     !ts.isExternalModule(declaration.getSourceFile()) &&
-    !ts.findAncestor(declaration, ts.isFunctionLike)
+    !ts.findAncestor(declaration, ts.isFunctionLike) &&
+    !sourceCommonJsScopeIsClosed(flow, declaration.getSourceFile()) &&
+    !sourceGlobalClosed
   )
     return null
   const values: ts.Expression[] = []
@@ -61,6 +84,45 @@ export const localBindingValuesOf = (
     } else return null
   }
   return values
+}
+
+export const localBindingValuesOf = (
+  flow: ValueFlowIndex,
+  declaration: ts.VariableDeclaration,
+  iterationValuesAt?: (source: ts.Expression) => readonly ts.Expression[] | null
+): readonly ts.Expression[] | null => bindingValuesOf(flow, declaration, iterationValuesAt)
+
+/** Source queries can retain a closed Script var through the same writer
+ * inventory as locals. The exact global integrity receipt is carried by the
+ * active ledger and must survive its final mutation-census discharge.
+ * @semanticCategory generic-primitive
+ */
+export const sourceBindingValuesOf = (
+  checker: ts.TypeChecker,
+  flow: ValueFlowIndex,
+  declaration: ts.VariableDeclaration,
+  iterationValuesAt?: (source: ts.Expression) => readonly ts.Expression[] | null
+): readonly ts.Expression[] | null =>
+  bindingValuesOf(flow, declaration, iterationValuesAt, sourceGlobalVariableBindingIsClosed(checker, flow, declaration))
+
+/**
+ * Whether `read` can observe the `undefined` a `let`/`var` with no initializer
+ * binds before its first write -- a value none of its writes produce.
+ *
+ * The checker's definite-assignment analysis covers one function body, so a
+ * read there is proven written; a read from any other body (a module helper,
+ * a closure) is not. A lazily-loaded module binding -- `let codec: Codec`
+ * then `if (!codec) codec = load()` in a function -- reads exactly that `undefined`: a value set built
+ * from the writes alone proved `!codec` false and deleted the loader. Same
+ * owner rule as the storage carrier's (`representation/unassigned-binding-cells.ts`).
+ */
+export const bindingReadMayPrecedeFirstWrite = (declaration: ts.VariableDeclaration, read: ts.Node): boolean => {
+  if (declaration.initializer !== undefined || !ts.isIdentifier(declaration.name)) return false
+  const list = declaration.parent
+  if (!ts.isVariableDeclarationList(list) || ts.isForInStatement(list.parent) || ts.isForOfStatement(list.parent)) return false
+  if (declaration.getSourceFile().isDeclarationFile || (ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Ambient) !== 0)
+    return false
+  return ts.findAncestor(read.parent, ts.isFunctionLike) !== ts.findAncestor(declaration, ts.isFunctionLike)
 }
 
 /**

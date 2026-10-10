@@ -1,6 +1,6 @@
 // A COMPUTED STORE THROUGH A RECEIVER THE PROGRAM FILLS WITH SEVERAL OBJECTS.
 //
-// `@hono/node-server`'s `readBodyWithFastPath(request: Record<string | symbol,
+// An HTTP server adapter's `readBodyWithFastPath(request: Record<string | symbol,
 // any>, ...)` caches a body under a module symbol on whichever request object
 // it was handed -- `this` of a method installed with `Object.defineProperty`,
 // declared `any` by the descriptor's `ThisType<any>` -- and reads it back later

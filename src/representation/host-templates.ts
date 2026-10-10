@@ -113,14 +113,20 @@ export const isArrayConstantOf = (kind: Representation['kind']): boolean | null 
 /**
  * A single `%TypedArray%.prototype.set` source: a typed array, read through its
  * own element type, or an Array of numbers, whose holes read as `undefined`
- * (ECMA-262 23.2.3.26 steps 5 and 6). `null` for anything else.
+ * (ECMA-262 23.2.3.26 steps 5 and 6). A `dynamic` source is already a box --
+ * an attribute buffer's `set( value, offset )` takes whatever its caller
+ * passed -- so it is read as the generic array-like it is at run time:
+ * `LengthOfArrayLike`, then `Get` and `ToNumber` per index. `null` for anything
+ * else.
  */
-export const typedArraySetSourceOf = (carrier: Representation): 'typed-array' | 'number-array' | null =>
+export const typedArraySetSourceOf = (carrier: Representation): 'typed-array' | 'number-array' | 'array-like' | null =>
   carrier.kind === 'typed-array'
     ? 'typed-array'
     : carrier.kind === 'array-object' && carrier.element.kind === 'scalar' && carrier.element.domain === 'number'
       ? 'number-array'
-      : null
+      : carrier.kind === 'dynamic'
+        ? 'array-like'
+        : null
 
 /** Whether `set` copies from this source: a single source, or a union whose every arm is one. */
 export const typedArraySetSourceAccepted = (carrier: Representation): boolean =>

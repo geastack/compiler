@@ -32,8 +32,8 @@ export const withStableTypeQueries = (checker: ts.TypeChecker, program?: ts.Prog
   // MISSES are cached too, and they are the ones that matter: an identifier
   // that resolves to nothing sends the checker down its diagnostic path
   // (`getCannotFindNameDiagnosticForName`, and for JSDoc the link-parsing
-  // beside it), which is far more work than a hit. A three.js-scale program is
-  // full of them. `undefined` cannot be told from absent in a WeakMap, so the
+  // beside it), which is far more work than a hit. A large JavaScript library compiled
+  // from source is full of them. `undefined` cannot be told from absent in a WeakMap, so the
   // misses are remembered in a set of their own.
   const symbols = new WeakMap<ts.Node, ts.Symbol>()
   const symbolMisses = new WeakSet<ts.Node>()
@@ -58,8 +58,8 @@ export const withStableTypeQueries = (checker: ts.TypeChecker, program?: ts.Prog
   // of a coinductive walk that revisits the same family on every member of
   // every class, and because each is expensive in its own right: apparent-type
   // and property resolution force lazy member tables, and `getPropertiesOfType`
-  // materializes the whole inherited member list of a three.js class on every
-  // call.
+  // materializes the whole inherited member list of a deep class hierarchy on
+  // every call.
   //
   // The array-returning three hand back the checker's own array, shared by
   // every caller of the same type -- sound only while no consumer mutates a
@@ -121,8 +121,11 @@ export const withStableTypeQueries = (checker: ts.TypeChecker, program?: ts.Prog
     return signatures
   }
   // Preserve the checker's full surface, including capability-checked internal
-  // constructors used by existing inference producers, without copying it.
-  const stable: Readonly<Record<string, unknown>> = {
+  // constructors used by existing inference producers, without copying it: the
+  // checker is the prototype, so every other member is the checker's own. Not
+  // a `Proxy` -- every checker call the frontend makes goes through this
+  // object, and a proxy's `get` trap was a measurable share of normalization.
+  return Object.assign(Object.create(checker) as ts.TypeChecker, {
     getTypeAtLocation,
     getSymbolAtLocation,
     getApparentType,
@@ -131,11 +134,5 @@ export const withStableTypeQueries = (checker: ts.TypeChecker, program?: ts.Prog
     getBaseTypes,
     getPropertyOfType,
     getSignaturesOfType
-  }
-  return new Proxy(checker, {
-    get: (target, key, receiver) => {
-      if (typeof key === 'string' && key in stable) return stable[key]
-      return Reflect.get(target, key, receiver)
-    }
   })
 }

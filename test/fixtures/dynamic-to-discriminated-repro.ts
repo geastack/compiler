@@ -20,8 +20,8 @@
 // materializable (`algebra.ts`, `kind: 'sum'`: `arms.every(isMaterializable)`)
 // before the whole union can be reached from `dynamic` -- so ANY discriminated
 // union with so much as one plain-object or named-interface arm is
-// permanently `not-materializable`, which is most of them: mongodb's
-// many-armed bulk-write/command-option unions are built almost entirely out
+// permanently `not-materializable`, which is most of them: a database
+// client's many-armed bulk-write/command-option unions are built almost entirely out
 // of exactly these two arm shapes.
 
 interface OpA {

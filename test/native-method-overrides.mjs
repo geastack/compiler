@@ -1,3 +1,5 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
+import { mkdirSync } from 'node:fs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
@@ -6,8 +8,11 @@ import { execFileSync } from 'node:child_process'
 import ts from 'typescript'
 import { compile } from '../dist/compiler.js'
 
+// Its own build directory, so the suite can run it beside the other native scripts.
+mkdirSync(new URL('../measurements/cxx-native-method-overrides', import.meta.url), { recursive: true })
+
 const root = path.resolve(import.meta.dirname, '..')
-const output = path.join(root, 'measurements/cxx')
+const output = path.join(root, 'measurements/cxx-native-method-overrides')
 const runtime = path.join(root, 'src/targets/cpp/runtime')
 const select = process.argv.find((value) => value.startsWith('--only='))?.slice(7)
 let failed = 0
@@ -73,7 +78,7 @@ for (const name of [
     }
     execFileSync(
       process.env.CXX ?? 'clang++',
-      ['-std=c++20', '-O0', '-fsanitize=address,undefined', `-I${runtime}`, `${binary}.cpp`, '-o', binary],
+      ['-std=c++20', ...nativeOptimization('correctness'), '-fsanitize=address,undefined', `-I${runtime}`, `${binary}.cpp`, '-o', binary],
       { stdio: 'inherit', env: { ...process.env, TMPDIR: output } }
     )
     const actual = execFileSync(binary, { encoding: 'utf8', env: { ...process.env, UBSAN_OPTIONS: 'halt_on_error=1' } })

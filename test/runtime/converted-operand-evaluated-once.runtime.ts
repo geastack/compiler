@@ -1,12 +1,12 @@
 // A converted or deferred operand is ONE evaluation, however many times the
 // consumer's rendering names it. The C++ emitter used to paste such an
-// operand's text once per use inside a single expression: mongodb's
+// operand's text once per use inside a single expression: a database client's
 // `Object.entries(this.options)` repeated the options' record conversion
 // about 188 times in one 8 MB statement, and `new Collection(db, name,
 // this.options)` repeated it once per field of the target record -- and
 // every pasted copy re-ran the conversion's dynamic sidecar reads.
 //
-// mongodb's `CreateCollectionOperation` shape: the base class stores
+// A database client's `CreateCollectionOperation` shape: the base class stores
 // `options` at its own wider type, the subclass re-declares it narrower, so
 // every read of `this.options` in the subclass is a CONVERSION of the stored
 // carrier into the subclass's record, and each consumer below converts or
@@ -112,7 +112,7 @@ const describe = (options: Options | string): string => {
 }
 console.log('union', describe(spread), describe('text'))
 
-// The mongodb shape itself. Only its emitted C++ is checked (the
+// The client's shape itself. Only its emitted C++ is checked (the
 // `emitted-lacks` lines above): storing the subclass's `Options` into the
 // base's `BaseOptions & Abortable` field builds a new record that keeps only
 // the base's fields, so the subclass's reads of `capped`/`size` find nothing

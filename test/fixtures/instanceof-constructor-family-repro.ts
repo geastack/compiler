@@ -1,5 +1,5 @@
 // Reproduces `runtime-helper:computation:instanceof:dynamic:constructor-family`
-// (mongodb CMAP-ping compass, 61 unmet rows / 28 distinct sites, all `catch`
+// (a database-client connection-pool compass, 61 unmet rows / 28 distinct sites, all `catch`
 // bindings or `unknown`/`any`-typed values tested against a program-defined
 // `Error` subclass). TypeScript types an unannotated catch binding `unknown`
 // (`useUnknownInCatchVariables`, the strict default) -- a genuine dynamic

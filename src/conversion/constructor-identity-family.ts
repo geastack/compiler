@@ -6,9 +6,9 @@ import type { RecordLayoutPolicy } from '../representation/policies.js'
  * `x.constructor` -- a `constructor-identity`, the class evaluation `x` was
  * allocated by -- stored where a `constructor-family` is declared.
  *
- * `mongodb-connection-string-url` hands `this.searchParams.constructor as
- * any` to its mixin factory's `typeof URLSearchParams` parameter; `new
- * (item.constructor as typeof Shape)(...)` clones are the commoner shape. The
+ * A library may hand `this.searchParams.constructor as any` to a mixin
+ * factory's `typeof URLSearchParams` parameter; `new (item.constructor as
+ * typeof Shape)(...)` clones are the commoner shape. The
  * identity names a class and every class that extends it; the family names a
  * closed set of classes with one construct convention. The store is exact
  * when every class the identity can be -- each class of the table in that
@@ -44,9 +44,9 @@ const memberEntryOf = (
 
 /**
  * A constructor carried by its convention alone -- `responseType?:
- * MongoDBResponseConstructor`, a structural construct signature -- read where
- * the checker names a class family: `(responseType ?? MongoDBResponse).make(
- * bson)`, whose subtype reduction answers `typeof MongoDBResponse`.
+ * ResponseConstructor`, a structural construct signature -- read where the
+ * checker names a class family: `(responseType ?? BaseResponse).make(bytes)`,
+ * whose subtype reduction answers `typeof BaseResponse`.
  *
  * Unlike `x.constructor`, nothing proves which classes the value can be: the
  * slot admits any constructor with that convention. So the conversion is a

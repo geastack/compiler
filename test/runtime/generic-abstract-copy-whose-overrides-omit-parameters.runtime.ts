@@ -1,5 +1,5 @@
 // A generic abstract base has one copy per result type, and one copy's every
-// override leaves out the abstract method's trailing parameters (mongodb's
+// override leaves out the abstract method's trailing parameters (a database client's
 // `FindOperation.buildCommandDocument()` under `CommandOperation<Document>`
 // against the abstract `(connection, session?)`). The base's own call passes
 // both arguments, so it holds the declaration's wider convention; each

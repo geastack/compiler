@@ -27,9 +27,9 @@ export interface HostMethodBinding {
  *
  * A declaration file is named either by its absolute path (a declaration the
  * host itself ships) or PACKAGE-RELATIVELY, `<package name>/<path inside the
- * package>` (`bson/src/utils/node_byte_utils.ts`): a third-party package's
+ * package>` (`some-pkg/src/utils/bytes.ts`): a third-party package's
  * declaration lives wherever that application installed or acquired it --
- * `node_modules/bson/src/...`, or a per-version source checkout under
+ * `node_modules/some-pkg/src/...`, or a per-version source checkout under
  * `node_modules/.cache/geatsc/sources/<hash>/<hash>/src/...` -- so no absolute
  * name a plugin could state in advance names it. The package's own manifest
  * name plus the file's place inside that package does, wherever it lives.
@@ -98,7 +98,7 @@ export const resolveHostMethod = (
   node: ts.PropertyAccessExpression | ts.ElementAccessExpression,
   /**
    * The receiver's type where the checker has none: a JavaScript receiver the
-   * checker types `any` and a binding census proved -- memory-pager's
+   * checker types `any` and a binding census proved -- an ES5 package's
    * `buf.copy(cpy)` over the `Buffer` its callers pass.
    */
   receiverTypeOf?: (receiver: ts.Expression) => ts.Type,

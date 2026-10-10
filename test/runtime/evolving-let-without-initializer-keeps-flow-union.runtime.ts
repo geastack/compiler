@@ -1,6 +1,6 @@
 // An implicit-any `let` with no initializer takes the union of what is assigned
-// to it (TypeScript's evolving-let typing), not a dynamic carrier. bson's
-// ObjectId constructor declares `let workingId;` and assigns it from a decoded
+// to it (TypeScript's evolving-let typing), not a dynamic carrier. A binary-document
+// serializer's ObjectId constructor declares `let workingId;` and assigns it from a decoded
 // Uint8Array, from an `id` property that is a string or a Uint8Array, or from
 // the argument itself.
 interface IdLike {

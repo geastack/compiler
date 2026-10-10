@@ -1,5 +1,5 @@
 // A Date held as `unknown` and narrowed by `instanceof Date` reads its
-// method off the box (the probe's `show` over mongodb documents). A boxed
+// method off the box (the probe's `show` over database documents). A boxed
 // Date modeled no Date.prototype, so `value.toISOString` read `undefined` and
 // the call threw "Value is not a function".
 function show(value: unknown): string {

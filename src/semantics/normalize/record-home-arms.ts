@@ -3,9 +3,8 @@ import ts from 'typescript'
 /**
  * A record handed to a union of record arms that does not say which arm it is.
  *
- * mongodb's `Server.command` passes its `ServerCommandOptions` to the private
- * `decorateCommandError(..., options: CommandOptions | GetMoreOptions |
- * undefined, ...)`. The record fits both arms, and neither arm declares every
+ * A method that passes its `ServerOptions` to a private
+ * `decorateError(..., options: OptionsA | OptionsB | undefined, ...)`. The record fits both arms, and neither arm declares every
  * key the other does, so the representation has no home for it:
  * `conversion/record-view.ts`'s `widestHome` refuses the tie. Choosing an arm
  * anyway rebuilds the record as that arm -- a copy, which drops the keys only

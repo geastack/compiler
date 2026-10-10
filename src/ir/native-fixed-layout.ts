@@ -77,7 +77,7 @@ export const hasClosedFixedLayout = (
       // Asking the shape here asks the one authority the struct was rendered
       // from, exactly as the `native-record-ref` case above already does.
       // Answering "unproven" instead retained the unrestricted field protocol
-      // for a struct whose every slot the compiler itself chose: in the three.js app the
+      // for a struct whose every slot the compiler itself chose: the
       // carriers in this state are reached only through an INFERRED field type
       // -- no live identifier spells the class, so reachability never opens its
       // declaration -- and the generic protocol they kept was the single

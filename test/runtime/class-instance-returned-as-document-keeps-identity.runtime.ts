@@ -1,4 +1,4 @@
-// A class instance handed where the MongoDB driver's `Document` (`{ [key:
+// A class instance handed where a database client's `Document` (`{ [key:
 // string]: any }`) is declared IS the instance, viewed at another static type:
 // `RenameOperation.handleOk(): Document` returns a `Collection`,
 // `ValidateCollectionOperation.handleOk` returns its response object, and
@@ -8,7 +8,7 @@
 // fields and its prototype getters -- writes through the document land on the
 // instance, and the document narrows back to the very same object. A snapshot
 // of the own fields would print `2 1`, `1`, `1`, `false` instead.
-interface BsonDocument {
+interface WireDocument {
   [key: string]: any
 }
 
@@ -23,7 +23,7 @@ class CursorResponse {
   }
 }
 
-function asDocument(response: CursorResponse): BsonDocument {
+function asDocument(response: CursorResponse): WireDocument {
   return response
 }
 

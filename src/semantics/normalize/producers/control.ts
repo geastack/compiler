@@ -216,7 +216,7 @@ const contributeBranch = (context: ProducerContext, candidate: CensusCandidate, 
 
 /**
  * A `for`-`of` whose operand is iterable ONLY through its type assertion
- * iterates the asserted type: bson's `calculate_size.ts` walks a `Document`
+ * iterates the asserted type: a serializer that walks a `Document`
  * frame `for (const [key, value] of target as Map<string, unknown>)` under
  * `instanceof Map`. The cited operand is the value under the `as`, whose type
  * (an open `Document`) has no `@@iterator` at all, so iterating it could only
@@ -282,7 +282,7 @@ const contributeForOfIn = (
   const nativeGeneratorSource = isForOf && isGeneratorType(context, source.type)
   // An async generator is its own async iterator the same way (ECMA-262
   // 27.6.1.2 `%AsyncGeneratorPrototype%[@@asyncIterator]` returns `this`), so
-  // `for await` over one -- mongodb's `for await (const r of this.readMany())`
+  // `for await` over one -- `for await (const r of this.readMany())`
   // -- resolves to the cursor already in hand with no method lookup.
   // A possibly-absent one (`AsyncGenerator | null`) walks its payload behind
   // the presence assertion, as `presentIterationArm` routes the sync cursors.
@@ -300,9 +300,9 @@ const contributeForOfIn = (
     {
       includeGetMethod: !arrayFastPath && isForOf && !dynamicSource && !asyncGeneratorSource,
       // `for await` closes too (ECMA-262 14.7.5.7 AsyncIteratorClose): an
-      // abrupt exit calls the iterator's `return()`. mongodb's `readMany`
-      // depends on it -- `return` out of `for await (... of this.dataEvents)`
-      // is what removes `onData`'s socket listeners.
+      // abrupt exit calls the iterator's `return()`. An async generator that
+      // wraps an event stream depends on it -- `return` out of `for await (...
+      // of this.dataEvents)` is what removes its socket listeners.
       includeClose: isForOf && (!arrayFastPath || nativeGeneratorSource || asyncGeneratorSource)
     }
   )

@@ -1,8 +1,9 @@
 import { nativePrototypeObjectText } from './native-prototype.js'
+import { staticFieldStorageAlongOf, constructorViewFieldsOf } from '../../../ir/class-static-fields.js'
 import type { CallableAbi, RecordField, Representation } from '../../../representation/model.js'
 import { abiKey, representationKey } from '../../../representation/model.js'
 import { abiOfCallee } from '../../../projection/callee.js'
-import type { GetOperation, IrOperand } from '../../../ir/model.js'
+import type { GetOperation } from '../../../ir/model.js'
 import type { DeclarationId, FunctionId } from '../../../identity/ids.js'
 import { runtimeClassLayoutsOf, sharedStaticOwnerOf, type ClassLayout } from '../../../projection/classes.js'
 import { classMethodOverrideOf, classPrototypeMethodMutableOf } from '../../../projection/fields.js'
@@ -43,10 +44,12 @@ import {
   cppUndefinedIn
 } from '../types.js'
 import { alignedValueText } from '../emit-narrowing.js'
+import { operationConversionText } from '../emit-certified-conversion.js'
 import { nativeMethodValueRecipeText } from '../emit-native-method.js'
 import { computedOverriddenMethodValueText, heldMethodCopyOf } from './computed-method-value.js'
 import { nativePrototypeMethodFallbackText } from './native-prototype.js'
 import {
+  classFamilyMayAllocate,
   classMethodValueArmsOf,
   classPrototypeMethodKeysOf,
   classPrototypeMethodValueArmsOf,
@@ -79,7 +82,7 @@ import {
  * body's environment struct and dereferences it unconditionally
  * (`translation-unit.ts` writes that cast), so a `nullptr` there is a null
  * dereference at the first captured read. It was reached, certified clean and
- * segfaulted: `.scratch/probe/capture` compiles, clang accepts it, and
+ * segfaulted: such a program compiles, clang accepts it, and
  * `make(41)` dies on `gea_e->c0`. The environment is not optional information
  * this can default; it is the frame the body will read.
  *
@@ -100,7 +103,7 @@ import {
  *   exists only if the reading frame has a receiver at all, a fact this
  *   expression-level path has no way to establish.
  */
-const methodEnvironmentText = (ctx: EmitContext, callable: FunctionId, what: string): string => {
+export const methodEnvironmentText = (ctx: EmitContext, callable: FunctionId, what: string): string => {
   const admission = ctx.captures.of(callable)
   if (admission.kind === 'none') return 'nullptr'
   if (admission.kind === 'refused') {
@@ -157,7 +160,7 @@ export const classMethodValueText = (
   operation: GetOperation,
   key: string,
   method: ClassLayout['methods'][number],
-  // The carrier the read publishes: a bound-method convention for a typed
+  // The carrier the read publishes: its logical-this native convention for a typed
   // read, or the read's own `dynamic` carrier for a computed key the census
   // could not type (`d[String(k)]()`), which boxes the method with
   // `receivesThis` so the call's `callWithReceiver` hands the instance back.
@@ -190,18 +193,16 @@ export const classMethodValueText = (
   const bodyValue = `gea::nativeClassMethodValue<${cppClassName(owner.declaration)}, &${cppCallableDeclarationTagName(method.callable)}>(${state}, ${payload})`
   const materialized =
     nativeMethodValueRecipeText(ctx, operation, key, bodyRepresentation, valueRepresentation, bodyValue, 'prototype', method.callable) ??
-    alignedValueText(ctx, 'class-properties/emit-class-properties.ts:212', bodyRepresentation, valueRepresentation, bodyValue)
+    operationConversionText(ctx, operation, 'method-frame', bodyRepresentation, valueRepresentation, bodyValue)
   if (materialized === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(bodyRepresentation)}->${representationKey(valueRepresentation)}`,
-      `method "${key}" body convention cannot fill its published bound-method convention`
+      `method "${key}" body convention cannot fill its published method-value convention`
     )
   }
   const publicAbi = abiOfCallee(valueRepresentation)
-  // The adapter cache is per class evaluation, so it may only hold a value
-  // every instance shares. A receiver-bound value carries THIS read's
-  // receiver: cached, the second instance would call the first one's body
-  // (two hono `SmartRouter`s, the second matching against the first's routes).
+  // A prototype adapter stores the source only, so every instance shares
+  // it safely; each invocation supplies its own logical receiver.
   const originalValue =
     publicAbi !== null && abiKey(publicAbi) !== abiKey(bodyAbi)
       ? `gea::nativeClassAdaptedMethodValue<${cppClassName(owner.declaration)}, &${cppCallableDeclarationTagName(method.callable)}, ${valueType}>(${state}, [&]() { return ${materialized}; })`
@@ -220,7 +221,7 @@ export const classMethodValueText = (
   const ownedStorage = `${heldReceiver}->${cppRecordFieldName(key)}`
   const owned =
     nativeMethodValueRecipeText(ctx, operation, key, override.value, valueRepresentation, ownedStorage, 'own', null) ??
-    alignedValueText(ctx, 'class-properties/emit-class-properties.ts:own-method', override.value, valueRepresentation, ownedStorage)
+    operationConversionText(ctx, operation, 'method-frame', override.value, valueRepresentation, ownedStorage)
   if (owned === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(override.value)}->${representationKey(valueRepresentation)}`,
@@ -254,8 +255,8 @@ const classDescendsFrom = (classes: ReadonlyMap<DeclarationId, ClassLayout>, dec
  * `static make()` redeclared by one subclass, a class `name` per member: a
  * family `[Base, Derived]` holding `Derived` must answer `Derived`'s. Rendering
  * the first member's answer for every value was a silent wrong answer, and it
- * is reachable as soon as a family has two members that differ -- mongodb's
- * `(responseType ?? MongoDBResponse).make(bson)` over a response subclass
+ * is reachable as soon as a family has two members that differ --
+ * `(responseType ?? DefaultResponse).make(bytes)` over a subclass
  * that declares its own `make`.
  */
 const constructorFamilyMemberDispatchText = (
@@ -333,7 +334,7 @@ const dynamicConstructorActualText = (ctx: EmitContext, target: CallableAbi, act
         `a dynamic constructor rest array carries "${representationKey(packed.value.element)}", which cannot state an omitted argument`
       )
     }
-    const source = `(${packedName} && ${packedName}->hasElementAtIndex(${packedIndex}) ? ${packedName}->elementAtIndex(${packedIndex}) : ${absent})`
+    const source = `(${packedName} && ${packedName}->hasElementAtIndex(${packedIndex}) ? ${packedName}->readElementAtIndex(${packedIndex}) : ${absent})`
     const converted = alignedValueText(ctx, 'class-properties/emit-class-properties.ts:259', packed.value.element, parameter.value, source)
     if (converted !== null) return converted
     throw createCppEmitBlockedError(
@@ -474,28 +475,6 @@ const dynamicClassConstructorText = (ctx: EmitContext, operation: GetOperation):
 }
 
 /**
- * The body an instance-method read can invoke directly, or `null` when the
- * callable carrier is part of the semantics of the read.
- *
- * This is deliberately asked before rendering by dead-value analysis as well
- * as by `classMemberText`: once a call names the body, its callee operand is
- * not a read of the materialized `CallableObject`. Keeping the two decisions
- * on this one query prevents a devirtualized call from leaving a dead carrier
- * construction in every hot invocation.
- */
-export const directClassMethodBody = (ctx: EmitContext, operation: GetOperation, key: string | null): FunctionId | null => {
-  const receiver = operation.receiver.representation
-  if (receiver.kind !== 'class-ref' || key === null) return null
-  const site = classMemberOf(ctx.classes, receiver.declaration, key)
-  if (site === null || site.kind !== 'method' || site.method.callable === null) return null
-  const isSuperAccess = dispatchesStatically(ctx, operation.receiver)
-  if (classPrototypeMethodMutableOf(ctx.classes, receiver.declaration, key)) return null
-  if (!isSuperAccess && classMethodOverrideOf(ctx.classes, receiver.declaration, key) !== null) return null
-  if (classFamilyOverridesOf(ctx.classes, receiver.declaration, key).length > 0 && !isSuperAccess) return null
-  return ctx.captures.of(site.method.callable).kind === 'none' ? site.method.callable : null
-}
-
-/**
  * A class receiver's key, resolved against what the class and everything it
  * inherits actually have.
  *
@@ -606,10 +585,9 @@ export const classMemberText = (ctx: EmitContext, operation: GetOperation): Clas
   // method's callable -- and a receiver annotated as a base can hold anything
   // derived from it, so a key some subclass redeclares reaches the wrong body
   // for every instance of that subclass. Nothing about that shows up later: it
-  // compiles, it links, and it runs the base's implementation. gea3d-cube's
-  // scene walk is the worked case -- `Object3D.collectSelf` is empty and
-  // `Mesh`/`Light` override it, so a bound base body collected zero meshes and
-  // drew an empty frame with no diagnostic anywhere.
+  // compiles, it links, and it runs the base's implementation. A tree walk is the worked case -- a
+  // base `Node.collectSelf` is empty and every subclass overrides it, so a
+  // bound base body collected nothing, with no diagnostic anywhere.
   //
   // `virtual-methods.ts` puts a dispatch member on such a family's root struct,
   // and `ctx.virtualDispatch` names every one it really emitted. A key it did
@@ -619,8 +597,8 @@ export const classMemberText = (ctx: EmitContext, operation: GetOperation): Clas
   const overriding = classFamilyOverridesOf(ctx.classes, receiver.declaration, key)
   // `super.m()` is the one member access the language binds STATICALLY: 13.3.7
   // resolves it against the home object's prototype, not against the object,
-  // and dispatching it would re-enter the override that wrote it -- `Camera`'s
-  // `updateMatrixWorld` calling `super.updateMatrixWorld(force)` recursed until
+  // and dispatching it would re-enter the override that wrote it -- an override's
+  // `update` calling `super.update(force)` recursed until
   // the stack ran out. The receiver tells them apart on its own: `ir/lower.ts`
   // mints a `receiver` operation for `this` at the frame's own class and for
   // `super` at the BASE's, so a receiver-defined value carrying any other class
@@ -699,48 +677,33 @@ export const classMemberText = (ctx: EmitContext, operation: GetOperation): Clas
     if (!ctx.virtualCallees.has(operation.result.id)) {
       throw createCppEmitBlockedError('call-abi:virtual-dispatch', `virtual dispatch ABI for "${key}" was not retained`)
     }
-    // The receiver is recorded by `emit.ts`'s prepass, which asked
-    // `classMethodValueReceiverClaim` -- the same layout question this branch
-    // reached by resolving the member.
     return { text: '', spelling: null }
   }
-  // An ABSTRACT declaration NOTHING in this program implements: no body of its
-  // own (the branch above already took every family that has one to dispatch
-  // to), so there is neither a function object to materialise nor a dispatch
-  // to publish. hono's `FetchEventLike` (`types.ts`) is the shape -- an
-  // abstract class declaring only abstract members, extended by nothing,
-  // constructed nowhere, written purely to TYPE the service-worker event
-  // `hono-base.ts`'s `fire` reads `respondWith` off.
-  //
-  // That read cannot execute. A `class-ref` to a class with no concrete
-  // descendant names a struct this unit never constructs, so no value of it
-  // exists to read a member from -- which is why a trap is the honest
-  // lowering and not a shortcut: it states the fact rather than inventing a
-  // body, keeps the read at its published callable carrier (nothing is
-  // boxed), and fails loudly in the impossible case instead of running some
-  // other class's implementation. It is the same answer, spelled the same
-  // way, that `dynamicClassConstructorText` above gives a `constructor` read
-  // whose receiver matches no runtime class.
-  //
-  // `super.m()` is excluded: that spelling binds statically (13.3.7) and an
-  // abstract base really has nothing for it, which stays a refusal.
-  if (site.method.callable === null && !isSuperAccess) {
+  // An ABSTRACT declaration with no implementation, read through a family the
+  // allocation census proves never has an instance:
+  // no value exists to read the member from, so the read cannot execute. The
+  // trap states that fact at the read's own published carrier -- nothing is
+  // boxed and no other class's body is invented. It is gated on exactly the
+  // proof certification uses (`classFamilyMayAllocate`) to waive its
+  // `computed-class-method-virtual` demand; a family that may allocate stays a
+  // refusal below. `super.m()` binds statically (13.3.7) and stays a refusal.
+  if (site.method.callable === null && !isSuperAccess && !classFamilyMayAllocate(ctx.classes, receiver.declaration)) {
     const carrier = cppTypeOf(operation.result.representation)
     const failure =
-      `std::fprintf(stderr, "gea: \\"${key}\\" of class ${String(site.owner)} is abstract and no class in this program implements it\\n"); ` +
+      `std::fprintf(stderr, "gea: \\"${key}\\" of class ${String(site.owner)} is abstract and no instance of its class family exists\\n"); ` +
       'std::abort();'
     return { text: `[]() -> ${carrier} { ${failure} }()`, spelling: carrier }
   }
+  // Certification requires a native implementation family for an evaluated
+  // method read. A declaration without a body cannot provide a callable:
+  // JavaScript can still construct its class through an erased assertion.
+  if (site.method.callable === null && !isSuperAccess) {
+    throw createCppEmitBlockedError(
+      'property-access:computed-class-method-virtual',
+      `native method "${key}" of class ${String(site.owner)} has no executable source implementation or override family`
+    )
+  }
   const materialized = classMethodValueText(ctx, operation, key, site.method)
-  // Keep the receiver beside the exact method value this property read
-  // publishes. An immediate `object.method()` call can need it even when the
-  // method is not eligible for the body-by-name optimization below: the
-  // materialized callable's physical convention includes its leading class
-  // receiver, while the semantic method signature does not. A detached read
-  // (`const method = object.method; method()`) reaches the call through a
-  // different SSA value, so this does not bind `this` where the language does
-  // not. `emit-callable.ts` consults it only for the identical callee value.
-  // It is recorded by `emit.ts`'s prepass -- see `classMethodValueReceiverClaim`.
   // An overridden method goes through the object instead: the callee is
   // recorded for `emit-callable.ts` to render as `receiver->member(args)`, and
   // deliberately NOT as a direct callee -- a second, name-bound path to the
@@ -755,11 +718,8 @@ export const classMemberText = (ctx: EmitContext, operation: GetOperation): Clas
     }
     return { text: materialized.text, spelling: materialized.type }
   }
-  // A method that captures nothing IS its own body: a call through this
-  // value can name it rather than reach it through the carrier. That NAME is
-  // registered up front now, by `emitBody`'s walk of `CallOperation.target`
-  // (`ir/call-dispatch.ts`, which asks the identical `directClassMethodBody`
-  // question) -- nothing is left for this read to register itself.
+  // Materialization stores the source Function object only. The settled native
+  // call target supplies the logical receiver separately at each invocation.
   return { text: materialized.text, spelling: materialized.type }
 }
 
@@ -805,40 +765,7 @@ export const virtualCalleeClaim = (
 }
 
 /**
- * Whether a `[[Get]]` on a class receiver publishes a METHOD VALUE, and the
- * receiver it went through -- `null` for every other read.
- *
- * A method value carries its body's own physical convention, receiver first,
- * while the language's view of the value declares no receiver; the call that
- * consumes it therefore has to be handed the object the read went through
- * (`EmitContext.directCallReceivers`, and `emit-callable.ts`'s use of it).
- * That is a property of the READ, decided from the projected class layout, so
- * it is stated here once and recorded by `emit.ts`'s prepass -- the resolvers
- * below simply spell the value the layout already committed them to.
- *
- * Both shapes the class path publishes a method value through are here,
- * because both hand the same receiver to the same consumer: the ordinary
- * `object.method` read, and `computedClassPrototypeMethodText`'s finite
- * `object[key]` dispatch.
- */
-export const classMethodValueReceiverClaim = (ctx: EmitContext, operation: GetOperation): IrOperand | null => {
-  const receiver = operation.receiver.representation
-  if (receiver.kind !== 'class-ref') return null
-  const key = ctx.staticKeyTexts.get(operation.key.value)
-  if (key === undefined) {
-    const result = operation.result.representation
-    if (result.kind !== 'function-value-dispatch' && result.kind !== 'dynamic') return null
-    if (operation.key.representation.kind !== 'string') return null
-    for (const { method } of reachableClassMethodsOf(ctx.classes, receiver.declaration)) {
-      if (method !== null && ctx.abiOfCallable(method.callable) !== null) return operation.receiver
-    }
-    return null
-  }
-  return classMemberOf(ctx.classes, receiver.declaration, key)?.kind === 'method' ? operation.receiver : null
-}
-
-/**
- * A computed class-method read such as Hono's `raw[key]()` where `key` is a
+ * A computed class-method read such as `raw[key]()` where `key` is a
  * finite `keyof` set whose literal arms share one callable convention.
  *
  * String-literal unions intentionally collapse to the native `std::string`
@@ -861,7 +788,13 @@ export const computedClassPrototypeMethodText = (ctx: EmitContext, operation: Ge
   const result = operation.result.representation
   if (result.kind === 'dynamic') {
     if (staticKey === undefined && operation.key.representation.kind !== 'string') return null
-    const keys = staticKey === undefined ? classPrototypeMethodKeysOf(ctx.classes, receiver.declaration) : [staticKey]
+    // A computed key whose domain the IR proved (`GetOperation.provenKeyTexts`:
+    // `this[ key ]` over the keys of the one parameter record a
+    // `setValues( values )` method is handed) can name only those members. The method-frame
+    // census publishes exactly that set (`native-method-frames.ts`), so a
+    // method outside it has no certified frame and is no value this read takes.
+    const keys =
+      staticKey === undefined ? (operation.provenKeyTexts ?? classPrototypeMethodKeysOf(ctx.classes, receiver.declaration)) : [staticKey]
     const type = cppTypeOf(result)
     const object = operandText(ctx, operation.receiver)
     const branches: string[] = []
@@ -892,10 +825,9 @@ export const computedClassPrototypeMethodText = (ctx: EmitContext, operation: Ge
 
   // Which of the class's methods this read can actually YIELD: the ones whose
   // body convention fills the carrier the read publishes. That carrier is the
-  // census's answer for the key -- `readBodyWithFastPath`'s `request[method]()`
-  // (@hono/node-server's `request.ts`) publishes the join of `text`,
-  // `arrayBuffer` and `blob` because `DirectBodyReadMethod` is exactly those
-  // three literals -- so a method outside it is a key this read cannot take,
+  // census's answer for the key -- a `request[method]()` whose `method` is a
+  // `'text' | 'arrayBuffer' | 'blob'` union publishes the join of those
+  // three methods' results -- so a method outside it is a key this read cannot take,
   // and skipping it is how this walk narrows to the proven domain.
   const fillsTarget = (callable: FunctionId): boolean => {
     const bodyAbi = ctx.abiOfCallable(callable)
@@ -908,10 +840,8 @@ export const computedClassPrototypeMethodText = (ctx: EmitContext, operation: Ge
         representationKey(candidate.source) === representationKey(bodyRepresentation) &&
         representationKey(candidate.target) === representationKey(target)
     )
-    return (
-      (recipe === undefined ? ctx.conversions.nodeFor(bodyRepresentation, target) : ctx.conversions.nodeById(recipe.conversion))?.capability
-        .kind !== 'never'
-    )
+    const node = recipe === undefined ? ctx.conversions.nodeFor(bodyRepresentation, target) : ctx.conversions.nodeById(recipe.conversion)
+    return node !== null && node.capability.kind !== 'never'
   }
   const methods: { readonly key: string; readonly method: ClassLayout['methods'][number] }[] = []
   const overriddenKeys: string[] = []
@@ -927,8 +857,8 @@ export const computedClassPrototypeMethodText = (ctx: EmitContext, operation: Ge
     // The SAME question, asked of an overridden key's every arm. Left
     // unasked, a key outside the read's domain reached
     // `classMethodValueText` anyway and refused the whole program on a
-    // conversion it was never going to need: the node-server shim's
-    // `LightRequest extends Request` overrides `json`, whose
+    // conversion it was never going to need: a
+    // `class MyRequest extends Request` overriding `json`, whose
     // `() -> promise(dynamic)` cannot fill a read that publishes
     // `text|arrayBuffer|blob` -- and `json` is not one of the three keys the
     // read can take. Every arm must fill it, because the arm is chosen at run
@@ -987,17 +917,10 @@ export const classConstructorStaticFieldStorage = (
   // `Base.x` is the one cell both spellings name. Stopping at the receiver's
   // own class found no storage, fell through to the member scan, and refused
   // the inherited field as "no emitted storage yet".
-  const walked = new Set<DeclarationId>()
-  for (const member of receiver.members) {
-    let declaration: DeclarationId | null = member
-    while (declaration !== null && !walked.has(declaration)) {
-      walked.add(declaration)
-      const stored = classStaticFieldStorageOf(ctx.classes, declaration, key)
-      if (stored) return stored
-      declaration = ctx.classes.get(declaration)?.base ?? null
-    }
-  }
-  return null
+  return (
+    staticFieldStorageAlongOf(ctx.classes, receiver.members, key, (owner, key) => classStaticFieldStorageOf(ctx.classes, owner, key))
+      ?.value ?? null
+  )
 }
 
 /**
@@ -1020,10 +943,8 @@ export interface ConstructorViewField {
 
 export const constructorViewFieldFor = (ctx: EmitContext, key: string): ConstructorViewField | null => {
   const owners: ConstructorViewField[] = []
-  for (const shapeId of constructorViewShapesOf(ctx.classes)) {
-    const field = ctx.layouts.forShape(shapeId)?.find((candidate) => candidate.key === key)
-    if (field) owners.push({ struct: cppRecordStructName(shapeId), field })
-  }
+  for (const { shape, field } of constructorViewFieldsOf(constructorViewShapesOf(ctx.classes), ctx.deriver, key))
+    owners.push({ struct: cppRecordStructName(shape), field })
   if (owners.length > 1) {
     throw createCppEmitBlockedError(
       'property-access:constructor-view:ambiguous',
@@ -1045,7 +966,7 @@ export const classConstructorStaticFieldName = (ctx: EmitContext, receiver: Repr
   classConstructorStaticFieldStorage(ctx, receiver, key)?.name ?? null
 
 /**
- * `classMemberText`'s twin for the constructor side: `Quaternion.fromEuler`,
+ * `classMemberText`'s twin for the constructor side: `Point.fromPolar`,
  * a static method or get-only accessor read off the class value itself
  * rather than off an instance.
  *

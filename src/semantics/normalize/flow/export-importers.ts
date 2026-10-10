@@ -7,10 +7,10 @@ import { nodeIsReachable } from '../reachability.js'
  * Every in-program reference an exported binding reaches, or null when its
  * exposure is not closed.
  *
- * `exportIsUnimported` closes an export nobody imports. Three's
- * `WebGLRenderLists.js` is the case it cannot: `WebGLRenderer.js` imports
- * `WebGLRenderLists` and calls it once, and that is the only module that does
- * -- the same holds for `WebGLState`, `WebGLProperties`, `WebGLExtensions`. An
+ * `exportIsUnimported` closes an export nobody imports. A module-per-factory
+ * library is the case it cannot: one module exports a factory, exactly one
+ * other module imports it and calls it once, and the library is built from
+ * dozens of such pairs. An
  * import is not an escape; it is a set of references the importer spells, and
  * inside a stated module set every one of them is enumerable. What is NOT
  * enumerable is a module object handed to code this layer cannot follow, an
@@ -186,10 +186,10 @@ export const inProgramImportReferencesOf = (
   const resolvesToTarget = (symbol: ts.Symbol): boolean => resolveFlowSymbolAlias(checker, symbol) === target
   // A mention in code the program never runs reads nothing and hands nothing
   // on. `files` is every module the checker loaded, which is more than the
-  // program evaluates: three's `ColorSpaceNode.js` imports `ColorManagement`
-  // and passes it a fresh `Matrix3`, and counting that dead call left every
-  // `ColorManagement` method's parameters open -- boxed, and dispatched
-  // dynamically on the three.js app's first frame.
+  // program evaluates: a library module the program never runs may import a
+  // shared configuration record and pass it a fresh value, and counting that
+  // dead call left every one of the record's method parameters open -- boxed,
+  // and dispatched dynamically at run time.
   const reachable = modules.reachable
   const runs = (reference: ts.Node): boolean => reachable === undefined || nodeIsReachable(reachable, reference)
 

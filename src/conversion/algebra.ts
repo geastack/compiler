@@ -1,9 +1,12 @@
-import type { CallableAbi, Representation } from '../representation/model.js'
+import type { CallableAbi, Representation, TaggedUnionArm } from '../representation/model.js'
 import type { FunctionId } from '../identity/ids.js'
 import type { NativeSelectionRecipe } from './native-selection.js'
 import type { FamilyMemberKeys } from './record-view.js'
-import type { CertifiedRecordViewPlan, RecordToArrayPlan } from './structural-plan.js'
-import type { NativeUnboundMethodContract } from './native-method.js'
+import type { PromiseAdoptionRecipe } from './promise-adoption.js'
+import type { CallableViewPlan, CertifiedRecordViewPlan, RecordToArrayPlan } from './structural-plan.js'
+import type { NativeMethodResultContract, NativeUnboundMethodContract } from './native-method.js'
+import type { CertifiedIteratorObjectViewPlan } from './certified-iterator-object-view.js'
+import type { CertifiedIterableObjectViewPlan, CertifiedProtocolIteratorPlan } from './certified-iterator-protocols.js'
 
 /**
  * The closed dynamic-conversion algebra.
@@ -42,6 +45,8 @@ export interface ClassifierContract {
    * domain strings for disjoint executable predicates.
    */
   readonly callableDomain?: { readonly kind: 'tag' } | { readonly kind: 'membership'; readonly members: readonly FunctionId[] }
+  /** The literal-field discriminator a record arm's classifier tests, stated so a printer authenticates it structurally. */
+  readonly recordDiscriminator?: Extract<TaggedUnionArm['runtimeDiscriminator'], { readonly kind: 'record-literal' }>
 }
 
 /** Whether two executable classifier predicates can accept the same value. */
@@ -70,18 +75,76 @@ export const classRefDomainsOverlap = (
 
 /** A checked conversion. It reports match, mismatch, or a pre-existing abrupt completion. */
 export interface MaterializerContract {
+  /** This selected recipe has no normal result. Dead control-flow arms may
+   * render it, but it cannot authenticate storage for a live source value. */
+  readonly normalCompletion?: 'never'
+  /** Native physical-this forwarding, with lazy exact Function ABI boundaries. */
+  readonly nativeLogicalReceiver?: import('./native-logical-receiver.js').NativeLogicalReceiverRecipe
+  /** Exact primitive boxing retains the ECMAScript value while changing its physical envelope. */
+  readonly primitiveIdentityTransport?: 'preserved'
+  /** Completion transfer selected before certification, including payload-free promise states. */
+  readonly promiseAdoption?: PromiseAdoptionRecipe
+  /** Selected dynamic wrapper payloads, including deferred promise completion readers. */
+  readonly dynamicWrapper?: import('./dynamic-wrapper.js').DynamicWrapperPlan
+  /** Element callbacks retain their exact source Array storage and native entry holders. */
+  readonly nativeArrayView?: import('./array-view.js').NativeArrayViewPlan
+  /** Copied original descriptors retain native storage and defer public field projections. */
+  readonly nativeDescriptorSnapshot?: import('./native-descriptor-snapshot.js').NativeDescriptorSnapshotPlan
   /** Exact nested recipes whose capabilities must also be certified. */
   readonly dependencies?: readonly ConversionNode[]
   readonly recordView?: CertifiedRecordViewPlan
+  readonly documentRecordView?: import('./document-record-view.js').ComposedDocumentRecordViewPlan
+  /** The renderer retains live native field routes; a sealed layout plan alone does not assert alias transport. */
+  readonly nativeFieldViewProtocol?: 'live'
   readonly recordToArray?: RecordToArrayPlan
+  readonly callableView?: CallableViewPlan
+  readonly callablePayload?: import('./structural-plan.js').CallablePayloadPlan
+  readonly iteratorObjectView?: CertifiedIteratorObjectViewPlan
+  readonly iterableObjectView?: CertifiedIterableObjectViewPlan
+  readonly protocolIterator?: CertifiedProtocolIteratorPlan
+  readonly dictionaryView?: import('./dictionary-view.js').ComposedDictionaryViewPlan
+  readonly dictionaryRead?: import('./dictionary-view.js').DictionaryReadContract
+  readonly readOnlyDictionary?: import('./dictionary-view.js').ComposedDictionaryViewPlan
+  readonly nativeObjectSample?: import('./native-object-sample.js').NativeObjectSamplePlan
   readonly nativeMethod?: NativeUnboundMethodContract
+  readonly nativeMethodResult?: NativeMethodResultContract
+  /** Replays only the failure of this exact selected field tag reader on a disjoint native primitive. */
+  readonly checkedNativeFieldRead?: { readonly checked: ConversionNode }
+  /** An asserted record's per-class origin loads (`nodes.ts`'s `assertedViewFor`). */
+  readonly assertedView?: import('./nodes.js').AssertedViewPlan
+  /**
+   * The materializer loads ONE arm of a sum: `guarded-load` reads the arm a
+   * tag test selected, `native-sum` the alternative a native selection chose.
+   * Either trusts a narrowing to have excluded every other arm.
+   */
+  readonly armSelection?: 'guarded-load' | 'native-sum'
+  /**
+   * How a dynamic source is read: `unbox-tag` checks the box's primitive tag
+   * (`boxTag`), `unbox-payload` its exact native payload type,
+   * `dynamic-carrier-in` adapts a boxed callable, `dynamic-constructor-in` a
+   * boxed constructor (its result read by `constructedResult`), and
+   * `promise-from-dynamic` adopts a boxed promise.
+   */
+  readonly wrapperKind?: 'unbox-tag' | 'unbox-payload' | 'dynamic-carrier-in' | 'dynamic-constructor-in' | 'promise-from-dynamic'
+  /** The census's own reader of what `new` through the box returned, at the construct frame's result carrier. */
+  readonly constructedResult?: ConversionNode
+  /** The primitive tag an `unbox-tag` read checks. */
+  readonly boxTag?: string
   readonly id: string
+  /** The registry offers this static recipe only after a sealed structural recipe has declined. */
+  readonly staticRecipeFallback?: true
   /** The domain the materializer actually accepts; must equal the classifier's. */
   readonly domain: string
   /** Whether the conversion can allocate, which is an ownership fact. */
   readonly allocates: boolean
+  /** A classifier must prove the source lies in this narrower domain; it is not a total store home. */
+  readonly requiresSourceGuard?: true
+  /** This materializer performs that domain check before exposing a native payload. */
+  readonly executesSourceGuard?: true
   /** Explicit proof that this recipe transfers native storage without invoking or publishing its dynamic field protocol. */
   readonly nativeFieldProtocol?: 'unused'
+  /** An accessor-bearing native payload is recovered exactly, without rebuilding its environments or observing a getter. */
+  readonly nativeAccessorPayload?: 'preserved'
   /**
    * The recipe reads no field protocol of its OPERAND, but converts some of
    * the operand's parts on the way: each carrier listed needs the reflection
@@ -89,7 +152,8 @@ export interface MaterializerContract {
    * its per-field conversions here (`recordViewResidualReflection`).
    */
   readonly residualReflection?: readonly Representation[]
-  /** Only selects, wraps or unwraps existing native payloads; never reconstructs fields or adapts callable entries. */
+  /** Every normal result only selects, wraps or unwraps native payloads;
+   * normalCompletion separately excludes recipes that cannot store a value. */
   readonly nativePayloadTransport?: 'preserved'
   /** Every resulting native class reference still names an input object (or absence); no fresh field aliases are materialized. */
   readonly nativeClassReferenceIdentity?: 'preserved'
@@ -152,8 +216,8 @@ export type ConversionCapability =
   | { readonly kind: 'static'; readonly materializer: MaterializerContract }
   /**
    * A base class-ref handle narrowed to a union of its own descendant
-   * classes (`instanceof Mesh || instanceof Line || instanceof Points`
-   * proving a `Ref<Object3D>` is one of the three). Distinct from `atom`
+   * classes (`instanceof Circle || instanceof Square || instanceof Triangle`
+   * proving a `Ref<Shape>` is one of the three). Distinct from `atom`
    * because its recipe -- `targets/cpp/emit-narrowing.ts`'s
    * `classFamilyLoadText` -- orders a most-specific-first cascade over
    * `ctx.classes`, the whole-program class table. The chain every other
@@ -169,6 +233,55 @@ export type ConversionCapability =
   | { readonly kind: 'sum'; readonly arms: readonly ConversionArm[] }
   /** A cycle, referring to a node that must exist and must not itself be materializer-free. */
   | { readonly kind: 'recursive-ref'; readonly node: ConversionNodeId }
+
+export type ConversionNodeResolver = (id: ConversionNodeId) => ConversionNode | null
+
+const guardRequiredOf = (
+  capability: ConversionCapability,
+  resolve: ConversionNodeResolver | undefined,
+  prior: boolean,
+  visiting: Set<ConversionNodeId>
+): boolean => {
+  const materializerNeedsGuard = (materializer: MaterializerContract): boolean =>
+    materializer.requiresSourceGuard === true && (!prior || materializer.executesSourceGuard !== true)
+  const child = (capability: ConversionCapability): boolean => guardRequiredOf(capability, resolve, prior, visiting)
+  switch (capability.kind) {
+    case 'atom':
+    case 'static':
+    case 'coercion':
+    case 'class-family':
+      return materializerNeedsGuard(capability.materializer)
+    case 'optional':
+      return child(capability.payload)
+    case 'product':
+      return materializerNeedsGuard(capability.materializer) || capability.fields.some((field) => child(field.capability))
+    case 'sum':
+      return capability.arms.some((arm) => child(arm.capability))
+    case 'collection':
+      return child(capability.element)
+    case 'recursive-ref': {
+      const node = resolve?.(capability.node) ?? null
+      if (node === null || node.capability.kind === 'never' || node.capability.kind === 'recursive-ref') return true
+      if (visiting.has(node.id)) return false
+      visiting.add(node.id)
+      try {
+        return child(node.capability)
+      } finally {
+        visiting.delete(node.id)
+      }
+    }
+    default:
+      return false
+  }
+}
+
+/** Composite eager conversions retain every immediate payload guard, including authenticated recursive references. */
+export const conversionRequiresSourceGuard = (capability: ConversionCapability, resolve?: ConversionNodeResolver): boolean =>
+  guardRequiredOf(capability, resolve, false, new Set())
+
+/** A future callback cannot reuse a control-flow proof about the value that constructed it. */
+export const conversionNeedsPriorSourceGuard = (capability: ConversionCapability, resolve?: ConversionNodeResolver): boolean =>
+  guardRequiredOf(capability, resolve, true, new Set())
 
 /** One node of a conversion graph, with the exact carriers it converts between. */
 export interface ConversionNode {

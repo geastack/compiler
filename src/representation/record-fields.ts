@@ -124,8 +124,8 @@ export type StaticKeyPresence = 'present' | 'flagged' | 'unprovable'
  * `record` (or a compiler-emitted `native-record-ref`) declared no such field,
  * reasoning that such a carrier is a plain struct with `Object.prototype`
  * behind it. It is -- and the answer was still wrong, because getting there
- * can SLICE. `test/fixtures/in-operator-class-through-interface.ts` is the case:
- * passing `new Box()` to a parameter typed as the interface `Shape` emits
+ * can SLICE. An `in` test on a class instance reached through an interface is
+ * the case: passing `new Box()` to a parameter typed as the interface `Shape` emits
  * `gea_record_type_8{v2->size}`, a fresh struct holding one field, so the
  * `Box`'s `describe` is gone at the boundary. `'describe' in shape` then
  * compiled to `false` where JavaScript answers `true` -- a program that

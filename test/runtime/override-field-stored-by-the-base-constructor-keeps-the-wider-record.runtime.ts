@@ -1,5 +1,5 @@
 // The base constructor stores the options, and the subclass only redeclares
-// the field (`declare`, which mongodb's `override` is under its
+// the field (`declare`, which a database client's `override` is under its
 // `useDefineForClassFields: false`): `super(options)` hands the subclass's wider record to a parameter
 // typed by the base's narrower one, and `this.options = options` in the base
 // stores it. JavaScript stores the object the subclass passed, so a read

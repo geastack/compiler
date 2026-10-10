@@ -6,8 +6,8 @@ import ts from 'typescript'
  * past the `T | undefined` check may enter as the absence
  * (`conversion/nodes.ts`'s `nullishOptionalFor`).
  *
- * mongodb's `mergeBatchResults(batch, result, err?: AnyError)` only asks `if
- * (err)` and reads `err` again inside that branch, so the `null` its caller's
+ * A `merge(batch, result, err?: Error)` that only asks `if (err)` and reads
+ * `err` again inside that branch is the shape: the `null` its caller's
  * `let thrownError = null` hands it behaves as no error either way. A body
  * that compares `value === undefined`, asks `typeof value`, or passes the
  * value on before narrowing it CAN tell them apart, and there the `null` must

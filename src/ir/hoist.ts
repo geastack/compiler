@@ -253,9 +253,9 @@ export const loopInvariantHoistsOf = (
    *
    * passes the operand check -- it is the same array every turn -- and hoisting
    * it froze the loop's own condition at the value it had before the loop began.
-   * Measured on `examples/apps/maps`: the `while`'s test AND the inner
+   * Measured on a grid-routing UI program: the `while`'s test AND the inner
    * `for (j = 1; j < wanted.length; j++)` bound were both computed once in the
-   * preheader, and the app aborted on its first frame reading `grid[11]` of an
+   * preheader, and the program aborted on its first frame reading `grid[11]` of an
    * eleven-element array.
    *
    * So the storage has to be proved unmodified, and what proves it here is a
@@ -386,8 +386,8 @@ export const loopInvariantHoistsOf = (
           // it is other code running while the loop does. A loop that runs
           // none reads the same value on every turn as at its preheader's end,
           // and a capture this body holds its own copy of reads the same value
-          // whatever the loop calls: spectral-norm's row loop calls `entry`
-          // and re-read its captured `n` bound on every turn.
+          // whatever the loop calls: a row loop calling a helper otherwise re-read
+          // its captured bound on every turn.
           if (operation.kind === 'binding-read' && !isProgramConstant(operation.declaration)) {
             const written = cellWrites.get(operation.declaration) ?? []
             const assigned =
@@ -433,8 +433,8 @@ export const loopInvariantHoistsOf = (
  *
  * This distinction is the whole difference between restating a loop's BOUND and
  * restating the quantity it is compared against: `x * x + y * y <= 4` in
- * `mandelbrot.ts` reads two cells the loop writes every iteration, and turning
- * its left side into an integer bound cost 13% of that fixture before this
+ * an escape-time loop reads two cells the loop writes every iteration, and
+ * turning its left side into an integer bound cost such a loop 13% before this
  * existed.
  */
 export const loopInvariantValuesOf = (body: IrBody): ReadonlySet<IrValueId> => {
@@ -482,8 +482,8 @@ export const loopInvariantValuesOf = (body: IrBody): ReadonlySet<IrValueId> => {
  * divisor holds still while the dividend runs, and a loss for trial division,
  * `n % d` with `d` the loop's own counter: a rebuild on every turn is a
  * division AND the multiply, where the plain remainder is the division alone.
- * Measured on `benchmarks/node/parallel/fixtures/primes.ts`: 890 ms with the
- * memo, against 490 ms for the same loop in Rust.
+ * Measured on a trial-division loop: 890 ms with the memo, against 490 ms for
+ * the same loop in Rust.
  */
 export const churningRemaindersOf = (body: IrBody, remainders: ReadonlySet<IrValueId>): ReadonlySet<IrValueId> => {
   const churning = new Set<IrValueId>()

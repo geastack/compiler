@@ -4,9 +4,33 @@ import { settlesOverPayloadOrPromise } from '../../projection/slots.js'
 import type { EmitContext } from './emit-context.js'
 import { operandText, createCppEmitBlockedError } from './emit-context.js'
 import { cppTypeOf, cppUndefinedIn } from './types.js'
-import { alignedValueText, dynamicPromiseAdoptionText } from './emit-narrowing.js'
+import { alignedValueText, dynamicPromiseAdoptionText, recipeText } from './emit-narrowing.js'
 import { structuralRecordViewText } from './emit-record-view.js'
 import { awaitTickText } from './prototype/emit-prototype-promise.js'
+
+/**
+ * The settle of an async `return` of an `any` through the payload conversion
+ * lowering certified for it (an `async (value: any): Promise<R> => value`
+ * over an open document type, which is a live document view rather than the
+ * exact boxed `R` a layout-free unbox demands). A boxed promise is still
+ * adopted first, so the recipe sees only a settled value.
+ */
+const certifiedDynamicAdoptionText = (ctx: EmitContext, value: IrOperand, result: Representation, dynamic: IrOperand): string | null => {
+  if (result.kind !== 'promise' || result.value.kind === 'void' || value.representation.kind === 'dynamic') return null
+  const id = ctx.conversionUses.get(value.value)
+  const node = id === undefined ? null : ctx.conversions.nodeById(id)
+  if (
+    node === null ||
+    node.source.kind !== 'dynamic' ||
+    representationKey(node.source) !== representationKey(dynamic.representation) ||
+    representationKey(node.target) !== representationKey(result.value)
+  )
+    return null
+  const settled = recipeText(ctx, node, 'gea_settled')
+  if (settled === null) return null
+  const type = cppTypeOf(result.value)
+  return `gea::detail::promiseFromDynamic<${type}>(${operandText(ctx, dynamic)}, [](const gea::Value& gea_settled) -> ${type} { return ${settled}; })`
+}
 
 /**
  * The `return` terminator: the one place a body's own value meets the calling
@@ -101,7 +125,9 @@ export const coroutineReturnOf = (ctx: EmitContext, terminator: Extract<IrTermin
   const dynamicSource =
     terminator.value.representation.kind === 'dynamic' ? terminator.value : (ctx.conversionSources.get(terminator.value.value) ?? null)
   if (dynamicSource?.representation.kind === 'dynamic') {
-    const adopted = dynamicPromiseAdoptionText(result, operandText(ctx, dynamicSource), ctx.layouts)
+    const adopted =
+      certifiedDynamicAdoptionText(ctx, terminator.value, result, dynamicSource) ??
+      dynamicPromiseAdoptionText(result, operandText(ctx, dynamicSource), ctx.layouts)
     if (adopted !== null) return adoptionOf(payload, adopted)
   }
   if (terminator.value.representation.kind === 'promise') {
@@ -304,15 +330,17 @@ export const emitReturn = (ctx: EmitContext, lines: string[], terminator: Extrac
   // keeps the guard below fail-closed on the part that really is a conversion.
   // Returning an already-promise value (a pass-through) reconciles against the
   // promise itself, so it is left to the general path.
-  // A DYNAMIC value may itself be a promise (hono's `formData()` returns its
-  // `any`-typed `#cachedBody(...)`), and an async return adopts one rather
+  // A DYNAMIC value may itself be a promise (a method that returns an
+  // `any`-typed cached body), and an async return adopts one rather
   // than fulfilling with it (ECMA-262 27.2.1.3.2) -- decided at run time.
   // Lowering already converted the value toward the payload, so the dynamic
   // operand is the convert's source.
   const dynamicSource =
     terminator.value.representation.kind === 'dynamic' ? terminator.value : (ctx.conversionSources.get(terminator.value.value) ?? null)
   if (ctx.abi?.result.kind === 'promise' && dynamicSource?.representation.kind === 'dynamic') {
-    const adopted = dynamicPromiseAdoptionText(ctx.abi.result, operandText(ctx, dynamicSource), ctx.layouts)
+    const adopted =
+      (terminator.value ? certifiedDynamicAdoptionText(ctx, terminator.value, ctx.abi.result, dynamicSource) : null) ??
+      dynamicPromiseAdoptionText(ctx.abi.result, operandText(ctx, dynamicSource), ctx.layouts)
     if (adopted !== null) {
       lines.push(`return ${adopted};`)
       return
@@ -373,7 +401,7 @@ export const emitReturn = (ctx: EmitContext, lines: string[], terminator: Extrac
   // field list, so the general conversion cannot reach the target's members --
   // this is the one place the deriver is available to resolve them. `return
   // options` out of a method declared to return an overlapping named shape is
-  // ordinary TypeScript and the mongodb driver is built out of it.
+  // ordinary TypeScript, and options-heavy libraries are built out of it.
   const converted = abiResult
     ? (alignedValueText(ctx, 'emit-return.ts:202', terminator.value.representation, abiResult, text) ??
       structuralRecordViewText(ctx, terminator.value.representation, abiResult, text))
@@ -404,8 +432,8 @@ export const emitReturn = (ctx: EmitContext, lines: string[], terminator: Extrac
   // user-defined conversion per implicit sequence. clang rejected it -- "no
   // viable conversion from returned value of type 'double'" -- on a body that
   // certified clean and emitted. `async next(): Promise<number | null>` with
-  // `return this.index++` is the whole program it takes; mongodb's
-  // `AbstractCursor.next` is the same shape.
+  // `return this.index++` is the whole program it takes; a cursor's async
+  // `next()` is the same shape.
   //
   // Naming the promise explicitly spends the sequence's one slot on the
   // payload widening instead, which is the step that actually needs it. The

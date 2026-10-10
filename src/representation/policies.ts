@@ -445,8 +445,8 @@ export const defaultRegExpDeclarationPolicy: RegExpDeclarationPolicy = {
  * and binds it as an opaque host protocol named `String`. That binding is
  * right about the constructor object and wrong about instances -- it would
  * turn every wrapper object in the program into a `native-handle` with no
- * layout, so a dynamic write like `escapedString.isEscaped = true` (hono's
- * `utils/html.ts`) has nowhere to land.
+ * layout, so a dynamic write like `escapedString.isEscaped = true` has
+ * nowhere to land.
  *
  * `String`'s body is NOT empty after `declaredBodyOf`'s method stripping
  * either, the second half of why this cannot be left to fall through: it
@@ -633,7 +633,7 @@ export const defaultClassHeritagePolicy: ClassHeritagePolicy = {
  * `..._ServiceWorker_v1` -- that no plugin declares and no header defines. That
  * struct is unreachable from any value in the program and still lands in the
  * translation unit, because `targets/cpp/records.ts` seeds from every selected
- * carrier; `examples/bouncing-balls` certified clean, emitted 6230 lines, and
+ * carrier; a small program certified clean, emitted thousands of lines, and
  * was rejected by clang for exactly that.
  *
  * The answer is a `native-record-ref` with the stated `native` spelling, which
@@ -674,22 +674,29 @@ export const defaultHostNamespaceRootPolicy: HostNamespaceRootPolicy = {
  */
 export interface RecordLayoutPolicy {
   readonly forShape: (shapeId: string) => readonly RecordField[] | null
-  readonly indexesForShape?: (
-    shapeId: string
-  ) => readonly { readonly value: Representation; readonly key: 'string' | 'number' | 'symbol' }[]
+  readonly indexesForShape: (shapeId: string) => readonly { readonly value: Representation; readonly key: 'string' | 'number' | 'symbol' }[]
   /** Data-only layouts, excluding accessors and open property sidecars. */
   readonly plainFieldsForShape?: (shapeId: string) => readonly RecordField[] | null
   /** The accessors a shape declares; `null` for a shape with no record layout. */
-  readonly accessorsForShape?: (shapeId: string) => readonly RecordAccessor[] | null
-  /** Whether a generated class provides a bindable instance method for this key. */
+  readonly accessorsForShape: (shapeId: string) => readonly RecordAccessor[] | null
+  /** Actual projected body frame of a native record getter/setter. */
+  readonly accessorAbiFor?: (callable: FunctionId) => CallableAbi | null
+  /** Whether a generated class provides a native Function property read for this key. */
   readonly classMethodFor?: (declaration: DeclarationId, key: string) => boolean
   /**
    * The convention of the method `classMethodFor` names, or `null` when it
-   * publishes none. A view binds the class's body into the interface member
-   * and forwards the member's arguments as they arrive, so a member with a
-   * rest parameter is bindable only where the method packs the same rest.
+   * publishes none. A view retains the selected Function's identity and
+   * adapts its finite public frame. Invocation authenticates the supplied
+   * logical receiver, including a native view's retained origin; the read
+   * does not capture the instance as that Function's receiver.
    */
   readonly classMethodAbiFor?: (declaration: DeclarationId, key: string) => CallableAbi | null
+  /** The prototype and live own method carriers a native property read may select. */
+  readonly classMethodValueSourcesFor?: (
+    declaration: DeclarationId,
+    key: string,
+    carrier?: Representation
+  ) => readonly Representation[] | null
   /**
    * The zero-argument instance method this key names when a call to it can be
    * spelled DIRECTLY from a bare receiver expression -- the body to call and
@@ -713,7 +720,7 @@ export interface RecordLayoutPolicy {
     /**
      * The carriers of the declared parameters, every one of which binds to
      * `undefined` when the method is called with no arguments (an optional
-     * `encoding?` on bson's `ObjectId.toString`). A parameter that cannot
+     * `encoding?` on a class's `toString`). A parameter that cannot
      * hold `undefined` makes the method uncallable this way, and the whole
      * answer is `null`.
      */
@@ -734,6 +741,7 @@ export interface RecordLayoutPolicy {
    * two are not always the same carrier.
    */
   readonly classAccessorFor?: (declaration: DeclarationId, key: string) => Representation | null
+  readonly classAccessorSetterFor?: (declaration: DeclarationId, key: string) => Representation | null
   /** Whether no evaluation can instantiate this class (`semantics/uninstantiable-classes.ts`). */
   readonly classUninstantiable?: (declaration: DeclarationId) => boolean
   /**
@@ -755,4 +763,8 @@ export interface RecordLayoutPolicy {
   ) => readonly { readonly declaration: DeclarationId; readonly construct: CallableAbi | null }[] | null
 }
 
-export const defaultRecordLayoutPolicy: RecordLayoutPolicy = { forShape: () => null }
+export const defaultRecordLayoutPolicy: RecordLayoutPolicy = {
+  forShape: () => null,
+  indexesForShape: () => [],
+  accessorsForShape: () => null
+}

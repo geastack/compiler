@@ -1,12 +1,16 @@
 import type { Representation } from '../representation/model.js'
 import { representationKey } from '../representation/model.js'
 import { numberStorageTarget, type NumberScalar } from './number-storage.js'
+import type { ConversionCapability } from './algebra.js'
+
+export const NATIVE_SUM_CLASSIFIER = 'gea::native-sum::live-alternative'
+export const NATIVE_SUM_MATERIALIZER = 'gea::native-sum::inject-alternative'
 
 type Sum = Extract<Representation, { kind: 'optional' | 'tagged-union' }>
 export type NativeSumPlan =
   | { readonly kind: 'identity' }
   | { readonly kind: 'number-storage'; readonly target: NumberScalar }
-  | { readonly kind: 'class-upcast'; readonly target: Extract<Representation, { kind: 'class-ref' }> }
+  | { readonly kind: 'class-upcast'; readonly target: Extract<Representation, { kind: 'class-ref' } | { kind: 'native-record-ref' }> }
   | { readonly kind: 'null-reference'; readonly target: Extract<Representation, { kind: 'class-ref' }> }
   | { readonly kind: 'empty'; readonly target: Sum }
   | { readonly kind: 'wrap'; readonly target: Sum; readonly payload: NativeSumPlan; readonly index: number | null }
@@ -18,7 +22,13 @@ export type NativeSumPlan =
       readonly absent: NativeSumPlan
     }
   | { readonly kind: 'dispatch'; readonly target: Representation; readonly arms: readonly NativeSumPlan[] }
-  | { readonly kind: 'nullable-reference'; readonly present: NativeSumPlan; readonly absent: NativeSumPlan }
+  | {
+      readonly kind: 'nullable-reference'
+      readonly present: NativeSumPlan
+      readonly absent: NativeSumPlan
+      /** The native undefined sentinel has its own home; it is never the null branch. */
+      readonly undefined: { readonly value: 'source' | 'undefined'; readonly plan: NativeSumPlan }
+    }
 
 const isSum = (value: Representation): value is Sum => value.kind === 'optional' || value.kind === 'tagged-union'
 
@@ -52,13 +62,22 @@ const plan = (source: Representation, target: Representation, sourcePresent = fa
 
 const computePlan = (source: Representation, target: Representation, sourcePresent: boolean): NativeSumPlan | null => {
   if (representationKey(source) === representationKey(target)) return { kind: 'identity' }
-  // Ref<T> also carries the collapsed T|null representation. A destination
-  // that represents null separately, even under nested sums, must inspect
-  // that state before wrapping T in a present arm.
+  // Ref<T> carries distinct null and native undefined states. A destination
+  // that represents either separately must inspect it before wrapping T in
+  // a present arm. Without an explicit undefined alternative, the admitted
+  // native reference payload home still retains the source's sentinel.
   if (!sourcePresent && source.kind === 'class-ref' && source.ownership === 'shared-refcount' && isSum(target)) {
     const present = plan(source, target, true)
     const absent = present ? plan(absences.null, target, true) : null
-    if (present && absent) return { kind: 'nullable-reference', present, absent }
+    if (present && absent) {
+      const undefinedHome = plan(absences.undefined, target, true)
+      return {
+        kind: 'nullable-reference',
+        present,
+        absent,
+        undefined: undefinedHome === null ? { value: 'source', plan: present } : { value: 'undefined', plan: undefinedHome }
+      }
+    }
   }
   if (source.kind === 'optional') {
     const present = plan(source.payload, target)
@@ -78,8 +97,8 @@ const computePlan = (source: Representation, target: Representation, sourcePrese
   const numberTarget = numberStorageTarget(source, target)
   if (numberTarget !== null) return { kind: 'number-storage', target: numberTarget }
   // A sum's leaf can still need the ordinary nominal widening a bare class
-  // value already supports. Three's `light.shadow && light.shadow.map` reads
-  // two WebGLRenderTarget descendants on the evaluated arm and merges them
+  // value already supports. `owner.child && owner.child.target` reads
+  // two descendants of one base class on the evaluated arm and merges them
   // into the declared base-class arm beside null/undefined. Exact carrier-key
   // matching cannot find that home, but the source class names its complete
   // ancestry and ownership, so this is the same unambiguous upcast
@@ -170,6 +189,24 @@ const armIndexOf = (union: Extract<Representation, { kind: 'tagged-union' }>): A
   return built
 }
 
+/**
+ * A class instance read as the intrinsic record its struct derives from in
+ * place (`class-ref.nativeBase` -- `Error`): the same pointer upcast
+ * `targets/cpp/class-ref-transport.ts` admits for a bare store, refused for a
+ * family that answers one of the record's own members differently. A leaf
+ * fact for callers selecting into that bare record; sum widening still finds
+ * homes only by key or class ancestry, so no union gains a second candidate.
+ */
+export const nativeRecordBaseUpcastPlan = (source: Representation, target: Representation): NativeSumPlan | null =>
+  source.kind === 'class-ref' &&
+  target.kind === 'native-record-ref' &&
+  source.nativeBase?.kind === 'native-record-ref' &&
+  source.nativeBaseOverridden !== true &&
+  source.ownership === target.ownership &&
+  representationKey(source.nativeBase) === representationKey(target)
+    ? { kind: 'class-upcast', target }
+    : null
+
 export const nativeSumPlan = (source: Representation, target: Representation): NativeSumPlan | null =>
   isSum(target) ? plan(source, target) : null
 
@@ -183,11 +220,34 @@ export const nativeSumPreservesPayload = (step: NativeSumPlan): boolean => {
     case 'wrap':
       return nativeSumPreservesPayload(step.payload)
     case 'optional':
-    case 'nullable-reference':
       return nativeSumPreservesPayload(step.present) && nativeSumPreservesPayload(step.absent)
+    case 'nullable-reference':
+      return (
+        nativeSumPreservesPayload(step.present) && nativeSumPreservesPayload(step.absent) && nativeSumPreservesPayload(step.undefined.plan)
+      )
     case 'dispatch':
       return step.arms.every(nativeSumPreservesPayload)
     default:
       return true
   }
+}
+
+/** A declared dynamic value may already be an exact native sum payload. No other arm is read on that edge. */
+export const nativeSumPayloadCapabilityMatches = (
+  source: Representation,
+  target: Representation,
+  capability: ConversionCapability
+): boolean => {
+  const plan = nativeSumPlan(source, target)
+  if (plan === null || !nativeSumPreservesPayload(plan) || capability.kind !== 'atom') return false
+  const domain = `sum-widen:${representationKey(source)}->${representationKey(target)}`
+  return (
+    capability.classifier.id === NATIVE_SUM_CLASSIFIER &&
+    capability.classifier.domain === domain &&
+    capability.materializer.id === NATIVE_SUM_MATERIALIZER &&
+    capability.materializer.domain === domain &&
+    capability.materializer.nativeFieldProtocol === 'unused' &&
+    capability.materializer.nativePayloadTransport === 'preserved' &&
+    !capability.materializer.allocates
+  )
 }

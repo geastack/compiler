@@ -1,6 +1,6 @@
 //! expect-refusal: "Object.create" was passed a prototype carried as
 //! expect-refusal: only the null-prototype form renders
-// `@hono/node-server`'s `requestPrototype`: an object literal annotated
+// An HTTP server adapter's request prototype: an object literal annotated
 // `Record<string | symbol, any>` whose accessor and symbol-keyed method read
 // `this[methodKey]`, used as the PROTOTYPE of `Object.create` objects that
 // carry the symbol-keyed state. The literal's layout refuses the index

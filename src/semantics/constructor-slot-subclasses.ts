@@ -12,7 +12,7 @@ import type { IdentityTable } from './normalize/identities.js'
  * promise every consumer cashes: construction inlines `Base`'s initializer
  * (`ir/native-class-construction.ts`), static reads resolve to `Base`'s
  * members. `var Request: typeof RequestImpl = RequestImpl`, later replaced by
- * `@hono/node-server`'s own subclass, breaks the promise -- `new Request()`
+ * a library's own subclass, breaks the promise -- `new Request()`
  * must build the subclass -- so the family has to name every class the
  * program can put there, and that is a fact about the program's WRITES, which
  * only this layer can see.
@@ -47,8 +47,8 @@ export const constructorSlotSubclassesOf = (
   // `x.constructor` is the constructor of whichever class `x` was allocated
   // as: its static class or any class extending it. `lib.es5.d.ts` types the
   // read `Function`, so a program stores it into a `typeof Base` slot through
-  // `as any` -- `mongodb-connection-string-url` hands
-  // `this.searchParams.constructor as any` to its `typeof URLSearchParams`
+  // `as any` -- a library that hands
+  // `this.searchParams.constructor as any` to a `typeof URLSearchParams`
   // mixin parameter -- and every class it can be is a write of its own.
   const constructorReadClassOf = (source: ts.Expression): DeclarationId | null => {
     let inner = source
@@ -91,8 +91,8 @@ export const constructorSlotSubclassesOf = (
    * The statement names no class, but the census may hold the slot to the
    * classes its callers pass (`narrowsStructuralConstructorToClasses`), and
    * the checker then subtype-reduces `typeof Derived | typeof Base` to
-   * `typeof Base`: mongodb's `responseType ?? MongoDBResponse` over a
-   * `CursorResponse` argument is typed `typeof MongoDBResponse`. That family
+   * `typeof Base`: `responseType ?? BaseResponse` over a `DerivedResponse`
+   * argument is typed `typeof BaseResponse`. That family
    * has to name the subclass, or the checked projection into it refuses the
    * very class the caller handed in.
    */

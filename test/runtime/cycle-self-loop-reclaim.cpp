@@ -1,8 +1,8 @@
 // A self-loop is reclaimed by the candidate filter that follows the release
 // leaving only its own edges, with no collection: the filter's edge probe
 // counts the edges that point back at the object, and a strong count equal to
-// that number means nothing outside refers to it. mongodb's `List` sentinel (`next` and
-// `prev` both pointing at itself) is the shape; the driver built two per
+// that number means nothing outside refers to it. A database client's `List` sentinel (`next` and
+// `prev` both pointing at itself) is the shape; the client built two per
 // command, each one a buffered candidate and a collection before this.
 //
 // Everything that is NOT a bare self-loop must still wait for the collector:

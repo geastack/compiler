@@ -1,4 +1,4 @@
-// A canonical index read through a union whose other arm is a number. bson's
+// A canonical index read through a union whose other arm is a number. A binary-document
 // deserializer keys array elements by number and object members by string,
 // and tests `(name as string)[0] === '$'` on a key it knows is a string there;
 // JavaScript answers `undefined` for `(5)[0]`, and the string-typed read spells

@@ -1,7 +1,7 @@
 // An overload implementation typed `any` may return a `null` none of the
 // overload signatures admit: the checker relates that `any` to no overload.
-// mongodb's `OnDemandDocument.toJSValue<T>(el, as: T): JSTypeOf[T]` returns
-// `null` for an element of another BSON type, and `get` tests `value == null`.
+// A lazy wire-document reader's `toJSValue<T>(el, as: T): JSTypeOf[T]` returns
+// `null` for an element of another wire type, and `get` tests `value == null`.
 type TypeOf = { 1: number; 8: boolean; 2: string }
 
 class Doc {

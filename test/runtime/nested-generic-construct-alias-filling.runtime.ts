@@ -1,10 +1,10 @@
-// mongodb's `Collection<TSchema>.find` constructs `FindCursor<WithId<TSchema>>`,
+// A database client's `Collection<TSchema>.find` constructs `FindCursor<WithId<TSchema>>`,
 // where `WithId` is an alias over a conditional. Under each copy of
 // `Collection` the filling closes to `WithId<DataKey>`, but the public checker
 // API cannot instantiate the alias under that copy, so no `FindCursor` copy
 // was minted at all and every cursor member was refused at emission.
 //
-// `find` is OVERLOADED, as mongodb's is, and no other member of `Collection`
+// `find` is OVERLOADED, as the client's is, and no other member of `Collection`
 // spells `WithId<TSchema>`: the overloads are the only place the closed image
 // `WithId<DataKey>` can be read from.
 type EnhancedOmit<TRecord, KeyUnion> = string extends keyof TRecord

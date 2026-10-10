@@ -1,7 +1,7 @@
 // Node's `global` is `declare var global: typeof globalThis` in @types/node:
 // an ambient, initializer-less name for the one global object. It must read
 // as that object -- the same operation `globalThis` lowers to -- rather than
-// as an external binding some host is expected to define (@hono/node-server
+// as an external binding some host is expected to define (an HTTP server adapter
 // reads `global.Request`/`global.Response` at module load).
 class Marker {}
 var Marker2 = Marker

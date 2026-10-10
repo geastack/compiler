@@ -10,6 +10,7 @@ import {
 import {
   classConstructorKeepsInstanceOf,
   exactSourceConstructionOf,
+  sourceConstructorPromisedClassesOf,
   sourceConstructorSelectionsOf,
   type SourceConstructionFact
 } from './member-call-forwarding.js'
@@ -80,7 +81,7 @@ const ancestryOf = (checker: ts.TypeChecker, type: ts.InterfaceType): readonly S
 // The family of ONE class is heritage read from a fixed program, yet the
 // value-origin solver asks for it on every re-evaluation of every query that
 // touches a member of that class -- a walk of every class in the program each
-// time (6 s of the mongodb driver's compile). A multi-root question is asked
+// time (seconds of a large program's compile). A multi-root question is asked
 // once per inventory and is not kept.
 const singleRootFamilies = new WeakMap<
   ValueFlowIndex,
@@ -181,7 +182,11 @@ const collectOwnedClassReceiverInventory = (
     } else {
       const type = checker.getTypeAtLocation(call)
       const alternatives = type.isUnion() ? type.types : [type]
-      if (!alternatives.some((value) => value.isClassOrInterface() && family.has(declarationOf(value)!))) continue
+      if (
+        !alternatives.some((value) => value.isClassOrInterface() && family.has(declarationOf(value)!)) &&
+        !sourceConstructorPromisedClassesOf(checker, flow, call.expression).some((owner) => family.has(owner))
+      )
+        continue
       // An opaque constructor promising this family cannot be silently
       // omitted from its allocation inventory.
       return refuse('opaque-construction', call.getText().slice(0, 60))
@@ -193,9 +198,9 @@ const collectOwnedClassReceiverInventory = (
   // `classConstructorKeepsInstanceOf` accounts for every mention of every
   // class binding in the family. Reaching here empty means the program creates
   // no instance of this family at all, so there is no receiver for a caller to
-  // explain. Refusing it instead made three's `SpotLight` (never constructed
-  // by the renderer under measurement) the terminal of 32 escapes, among them
-  // `WebGLState`'s whole colour/depth/stencil buffer family.
+  // explain. Refusing it instead made a library class the program never
+  // constructs the terminal of dozens of escapes, among them whole unrelated
+  // class families that merely referenced it.
   const initializers: OwnedClassReceiverInventory['initializers'][number][] = []
   for (const owner of owners) {
     if (!isClassSpelledSourceClass(owner)) {
@@ -216,7 +221,7 @@ const inventories = new WeakMap<ValueFlowIndex, Map<SourceClass, OwnedClassRecei
 /**
  * A multi-class family (a union receiver, or several exact allocation
  * origins) asks the identical question every time the SAME set of roots is
- * handed back -- measured on the three.js app at 23.3 s of self time in
+ * handed back -- measured on a large program at 23.3 s of self time in
  * `collectOwnedClassReceiverInventory` alone, because the singleton fast path
  * below only ever covered `roots.size === 1` and every larger family fell
  * through to the uncached walk on every call, including every one of a

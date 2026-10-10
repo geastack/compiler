@@ -1,7 +1,7 @@
 // Repro for `property-access:function-value-dispatch:get:false`, the root
-// with 31 unmet mandatory obligations in the mongodb CMAP-ping probe
-// (geastack/node-compat, apps/hono-mongodb-todo/correctness/native/mongodb-cmap-ping.ts,
-// through vendored mongodb/bson/mongodb-connection-string-url sources).
+// with 31 unmet mandatory obligations in a database-client connection-pool
+// probe (a node-compat correctness app, through the client's vendored sources
+// and their serializer and connection-string dependencies).
 //
 // `predicate.actual` is uniformly `"absent"` for all 31 rows, but grouping the
 // real probe's rows by the exact property NAME read shows two independent,
@@ -22,9 +22,9 @@
 //      all). 15 `bind` + 9 `call` = 24 of the real probe's 31 rows.
 //
 //  (B) A NAMED property read off an ambient value whose declared type
-//      combines a call signature with its own members -- mongodb's own
+//      combines a call signature with its own members -- the client's own
 //      `declare const Bun: { (): void; version?: string }` Bun-detection shim
-//      (`vendored-sources/mongodb/src/cmap/handshake/client_metadata.ts:328`),
+//      (in its handshake metadata module),
 //      and node-compat's `BufferConstructor` (`(value?) => Buffer` plus
 //      `from`/`isBuffer`/`byteLength`/...). `semantics/normalize/structural.ts`
 //      (~line 1047) takes the "this type has a call/construct signature"

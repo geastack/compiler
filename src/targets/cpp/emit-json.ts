@@ -109,7 +109,8 @@ interface JsonStructEntry {
  * three-armed `tagged-union` (`undefined`, `null`, `present`) rather than a
  * nested `optional`. `RTCIceCandidateInit.sdpMid` (`sdpMid?: string | null`,
  * declared by the engine, so the app cannot be changed) is the shape that
- * proved it -- it refused `dialer` on both halves, stringify and parse.
+ * proved it -- it refused a program carrying one on both halves, stringify
+ * and parse.
  */
 interface JsonNullableUnionEntry {
   readonly typeName: string
@@ -501,7 +502,7 @@ const jsonUnsupportedReason = (
       // RECURSIVE TYPE, and a recursive type is not a cyclic value. `type Node
       // = { children: Node[] }` describes every tree as well as every cycle,
       // and a tree serializes finitely -- which is what the corpus actually
-      // holds: `bench/comparison`'s `json_stringify_nested` builds a depth-6
+      // holds: a nested-stringify loop builds a depth-6
       // fan-4 tree and node prints it without complaint.
       //
       // So the answer is the overload pair, which is recursive C++ and
@@ -792,7 +793,7 @@ const renderJsonRecordOverloads = (entry: JsonStructEntry): string => {
   // The fast chain: each candidate field name matched against the document
   // where it stands, no scan for its closing quote. `nextKey` had to find that
   // quote before it could compare anything at all, and finding it was 19% of
-  // `json_parse_records`. Only reachable when every key is plain ASCII -- see
+  // parsing an array of records. Only reachable when every key is plain ASCII -- see
   // `isPlainAsciiKey` -- and a key the chain misses (an escaped spelling, a
   // space before the colon, a key this record does not declare) falls through
   // to the decoded chain below, which is what the reader always did.
@@ -802,7 +803,7 @@ const renderJsonRecordOverloads = (entry: JsonStructEntry): string => {
   // read body exactly once. Rendering the body under every match spelled every
   // field twice, once per chain: N extra copies of a read per N-field record,
   // which the C++ compiler cannot share and which doubled the reader of every
-  // store record in `examples/apps/weather`.
+  // record a JSON-backed store parses.
   readLines.push(`    int gea_json_which = -1;`)
   if (fastKeys) {
     entry.fields.forEach((field, at) => {
@@ -1136,7 +1137,7 @@ export const renderJsonStructDeclarations = (
 /**
  * Whether a box of `representation` holds nothing the dynamic JSON writer
  * cannot walk. The boxed route exists for a UNION of host objects and
- * classes (hono's `BodyInit | null`, re-stringified from its body cache):
+ * classes (a `BodyInit | null`-shaped union, re-stringified from a cache):
  * what the value is at runtime is one of many arms, so serializing it is a
  * dispatch over the box either way, and a class arm is admitted when the
  * reflection census made the class boxable (`classBoxable`: its dynamic
@@ -1175,8 +1176,8 @@ const boxHoldsOnlyBoxable = (ctx: EmitContext, representation: Representation, s
 }
 
 /**
- * A value with no native serializer -- a union of host objects hono stringifies
- * as `BodyInit` -- serialized from its box, which the dynamic writer walks as
+ * A value with no native serializer -- a union of host objects stringified as
+ * one declared union type -- serialized from its box, which the dynamic writer walks as
  * JSON.stringify walks any object.
  */
 const boxedJsonArgumentText = (ctx: EmitContext, argument: IrOperand): string | null => {

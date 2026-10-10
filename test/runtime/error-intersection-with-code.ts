@@ -2,7 +2,7 @@
 //! expect: premature
 //! expect: unknown error
 //! expect: not an error
-// `@hono/node-server` listener.ts `handleResponseError`: the caught value is
+// An HTTP server adapter's listener `handleResponseError`: the caught value is
 // re-typed `Error & { code: string }` so the handler can tell a premature
 // stream close from an application error. `Error` is an INTERFACE bound to the
 // native `gea::runtime::Error`, and the intersection has to keep that native

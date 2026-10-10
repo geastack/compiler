@@ -115,55 +115,33 @@ let emitContextMapOrSetReassignmentCount = 0
 let constantTextsPassedAsArgumentCount = 0
 let mutableEmitContextFieldCount = 0
 
-/**
- * Mechanically enforced, this count must stay zero: `convertedValueText`/`narrowedLoadText`/
- * `widenedStoreText`/`recastedUnionText` are the recipe printer's own
- * renderers (`emit-narrowing.ts`). A caller anywhere else bypasses the one
- * census-backed entry point (`alignedValueText`/`namedConversionText`) that
- * asks `ConversionCensus.nodeFor` first and records printer drift -- calling
- * the renderer directly answers "how is this pair spelled" without ever
- * recording "the census was asked".
- *
- * The tree already has 20 such calls across 8 files, pre-dating this gate.
- * Rewriting each to go through `alignedValueText` cannot be done as a
- * mechanical import/call swap: for any pair whose census node is not
- * `identity`/`never`, `recipeText` renders through `coercionText` or the
- * chain by a different path than calling the raw renderer directly, and
- * telling those apart needs the corpus/runtime-test gate this task is
- * forbidden from running (a private, unverified change to shared,
- * concurrently-measured `src/targets/cpp` is exactly what CLAUDE.md's "One
- * compiler" rule warns against). So these 20 are named here, not fixed, and
- * the gate fails on any count that moves -- up (a new bypass) or down (a
- * site was migrated and this table went stale).
- */
-const recipeTextExternalCallAllowance = {
-  // The fourth is the `dispatch` plan's chain-converted arm, the same call the
-  // `recast-union` plan's `convert` arm already makes one case up.
-  convertedValueText: {},
-  narrowedLoadText: { 'targets/cpp/emit-properties.ts': 1, 'targets/cpp/emit-arrays.ts': 2 },
-  widenedStoreText: {
-    'targets/cpp/emit-equality.ts': 1,
-    'targets/cpp/emit.ts': 1,
-    'targets/cpp/emit-dynamic-properties.ts': 1,
-    'targets/cpp/emit-union-properties.ts': 5,
-    'targets/cpp/emit-carrier-members.ts': 1,
-    'targets/cpp/emit-arrays.ts': 2,
-    // `records.ts`'s two sites were migrated: both asked the SAME edge -- how a
-    // native carrier boxes into a dynamic cell -- and both now go through
-    // `dynamicCarrierBoxText`, which states that reason once in the recipe
-    // printer's own module instead of letting each field table spell it.
-    'targets/cpp/host/object-protocol.ts': 1
-  },
-  recastedUnionText: {}
+/** Raw conversion renderers belong exclusively to the census recipe dispatcher. */
+const recipeTextFunctionNames = new Set(['convertedValueText', 'narrowedLoadText', 'widenedStoreText', 'recastedUnionText'])
+
+// The dispatcher's exemption belongs to representation recipes and their probes,
+// not an IR renderer placed in the same module. Nested callbacks inherit that
+// renderer's context, so an arm callback cannot hide an uncertified conversion.
+const rawConversionHasIrContext = (node) => {
+  const carriesIrContext = (type) => {
+    if (ts.isTypeReferenceNode(type) && ts.isIdentifier(type.typeName)) {
+      const name = type.typeName.text
+      if (name === 'EmitContext' || name === 'IrOperand' || name.endsWith('Operation')) return true
+    }
+    return ts.forEachChild(type, carriesIrContext) === true
+  }
+  for (let owner = node.parent; owner; owner = owner.parent) {
+    if (
+      (ts.isFunctionDeclaration(owner) || ts.isFunctionExpression(owner) || ts.isArrowFunction(owner)) &&
+      owner.parameters.some((parameter) => parameter.type && carriesIrContext(parameter.type))
+    )
+      return true
+  }
+  return false
 }
-const recipeTextFunctionNames = new Set(Object.keys(recipeTextExternalCallAllowance))
-/** Per-file call counts for the current run, filled while walking the tree, checked against the allowance once each file is done. */
-const recipeTextExternalCallCounts = { convertedValueText: {}, narrowedLoadText: {}, widenedStoreText: {}, recastedUnionText: {} }
 
 // POSIX separators, because every rule table above keys on them while
 // `path.relative` answers in the platform's. On Windows that made each
-// owner and allowance lookup miss, so the gate reported callable-reach as
-// violating the rule it owns and every allowed printer call as a new bypass.
+// owner lookup miss, so the gate reported callable-reach as violating the rule it owns.
 const relativeToSource = (file) => (path.relative(sourceRoot, file) || '.').split(path.sep).join('/')
 
 const withinDirectory = (file, directory) => file === directory || file.startsWith(`${directory}${path.sep}`)
@@ -407,7 +385,6 @@ for (const file of collectTypeScriptFiles(sourceRoot).sort()) {
   // core's does.
   const inPlugins = withinDirectory(file, pluginsRoot)
   const isRecipePrinterTable = file === recipePrinterTableFile
-  const recipeTextCallsInFile = { convertedValueText: 0, narrowedLoadText: 0, widenedStoreText: 0, recastedUnionText: 0 }
 
   const visit = (node) => {
     if (
@@ -513,33 +490,16 @@ for (const file of collectTypeScriptFiles(sourceRoot).sort()) {
       ts.isCallExpression(node) &&
       ts.isIdentifier(node.expression) &&
       recipeTextFunctionNames.has(node.expression.text) &&
-      !isRecipePrinterTable
+      (!isRecipePrinterTable || rawConversionHasIrContext(node))
     ) {
       const name = node.expression.text
-      recipeTextCallsInFile[name] += 1
-      recipeTextExternalCallCounts[name][relativeFile] = (recipeTextExternalCallCounts[name][relativeFile] ?? 0) + 1
+      recipeTextExternalCallCount += 1
+      violations.push(`${lineOf(node)}: ${name}(...) bypasses the certified conversion recipe dispatcher (emit-narrowing.ts)`)
     }
 
     ts.forEachChild(node, visit)
   }
   visit(sourceFile)
-
-  if (!isRecipePrinterTable) {
-    for (const name of recipeTextFunctionNames) {
-      const allowed = recipeTextExternalCallAllowance[name][relativeFile] ?? 0
-      const actual = recipeTextCallsInFile[name]
-      recipeTextExternalCallCount += actual
-      if (actual === allowed) continue
-      violations.push(
-        `${relativeFile}: ${actual} call(s) to ${name}(...) outside the recipe printer table (emit-narrowing.ts), ` +
-          `${allowed} allowed by the named exception in scripts/architecture.mjs -- ${
-            actual > allowed
-              ? 'a new bypass of alignedValueText/namedConversionText'
-              : 'the allowance is stale; lower it to match the fixed count'
-          }`
-      )
-    }
-  }
 }
 
 /**
@@ -786,7 +746,7 @@ console.log(
     `${diagnosticClassificationOutsideSweepCount} diagnostic classifications outside sweep, ` +
     `${stringSpelledCppTypeCheckCount} string-spelled C++ type checks under targets/, ` +
     `${rawDominanceBuilderCallCount} raw dominance-builder calls under targets/, ` +
-    `${recipeTextExternalCallCount} recipe-text calls outside the printer table (all named allowances), ` +
+    `${recipeTextExternalCallCount} raw conversion calls outside the recipe dispatcher, ` +
     `${emitContextMapOrSetReassignmentCount} EmitContext Map/Set fields reconstructed outside emit-context.ts, ` +
     `${mutableEmitContextFieldCount} mutable EmitContext collections (all justified render-mutable), ` +
     `${constantTextsPassedAsArgumentCount} render-time constantTexts maps passed as an argument`

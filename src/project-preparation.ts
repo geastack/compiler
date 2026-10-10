@@ -38,11 +38,11 @@ const manifestAt = (root: string, files: SourceFileSystem = disk): Manifest => o
  *
  * The dependency walk below stops at this package. A program never imports
  * its compiler, so nothing reachable only through the compiler's manifest can
- * be program input -- but node-compat states the compiler as a peer, and the
+ * be program input -- but a host package states the compiler as a peer, and the
  * compiler in turn states TypeScript as a dependency and the Apple package
  * (hence the whole gea toolchain) as peers. Walking through it acquired the
  * TypeScript repository twice, Babel four times, Vite, Rolldown and Postcss
- * for `raw-http-hello`, a program whose only import is `node:http`: 2.1 GB of
+ * for a minimal HTTP server whose only import is `node:http`: 2.1 GB of
  * checkouts and a serial registry round trip per package, on every cold cache.
  */
 const ownPackageName = (): string | undefined => {
@@ -277,16 +277,16 @@ const describedPackageOf = (typesName: string): string => {
  * A package whose runtime dependency is untyped JavaScript names that
  * dependency's `@types/*` package as a DEVELOPMENT dependency: its own build
  * needs it, its published declarations do not. The installed tree therefore
- * has the JavaScript and not its declarations -- `@mongodb-js/saslprep`
- * imports `sparse-bitfield` and names `bitfield.BitFieldInstance`, which only
- * `@types/sparse-bitfield` declares. Compiling the checkout without them turns
+ * has the JavaScript and not its declarations -- a package imports an untyped
+ * dependency and names one of its types, which only that dependency's
+ * `@types/*` package declares. Compiling the checkout without them turns
  * every such name into a checker error.
  *
  * Only the `@types/*` counterpart of a runtime package that is installed and
  * ships no declarations of its own is fetched, at the range the checkout
  * states, and a fetched declaration package's own `@types/*` dependencies
- * under the same rule (`@types/sparse-bitfield` imports `memory-pager`'s
- * types). `@types/node` never qualifies: no installed package is named `node`.
+ * under the same rule (an `@types/*` package may import another untyped
+ * package's types). `@types/node` never qualifies: no installed package is named `node`.
  *
  * It goes into the `node_modules` holding the package it describes -- where
  * `npm install -D` would have put it. That is where the declaration overlay
@@ -345,11 +345,10 @@ const runtimeOutputs = (manifest: Manifest): string[] => {
  * Whether the installed package already proves which typed file one of its
  * runtime outputs was built from, through the same metadata the resolver reads
  * (a tsconfig outDir/rootDir pair, a `source` condition, a static Rollup
- * input). Shipping a `src/` directory is not that proof: `bson` publishes
- * `src/` beside a Rollup bundle but no build config, so nothing maps
- * `lib/bson.node.mjs` back to `src/index.ts` and the compiled bundle was
- * silently used instead -- the checkout carries the `rollup.config.mjs` that
- * does.
+ * input). Shipping a `src/` directory is not that proof: a package may
+ * publish `src/` beside a Rollup bundle but no build config, so nothing maps
+ * the bundle back to `src/index.ts` and the compiled bundle would be silently
+ * used instead -- the checkout carries the `rollup.config.mjs` that does.
  */
 const installedSourceMapped = (directory: string, manifest: Manifest, files: SourceFileSystem): boolean => {
   const { sourceOf } = createPackageSourceHost({
@@ -368,8 +367,7 @@ const installedSourceMapped = (directory: string, manifest: Manifest, files: Sou
  * must name the installed package at the installed version. The repository's
  * stated `directory` is authoritative when it names one. When it does not and
  * the checkout root is some other package -- a monorepo whose published
- * manifest omits `repository.directory`, as `@mongodb-js/saslprep` (in
- * `mongodb-js/devtools-shared`) does -- the checkout at the exact published
+ * manifest omits `repository.directory` -- the checkout at the exact published
  * commit is searched for the one manifest with that name and version. Zero or
  * several matches refuse, exactly as a mismatched root does.
  */

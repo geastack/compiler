@@ -81,7 +81,7 @@ export interface HostOwnedDeclaration {
    * declarations still contribute the global cell that names it.  The merged
    * Symbol is authentic only when EVERY declaration is one of these explicit
    * rows; this is not a name fallback.  `process` is the motivating case:
-   * node-compat owns `Process`, while `@types/node/globals.d.ts` contributes
+   * a Node host owns `Process`, while `@types/node/globals.d.ts` contributes
    * the global `var process` declaration that points at that type.
    */
   readonly compatibleDeclarations?: readonly HostOwnedDeclaration[]
@@ -220,8 +220,8 @@ export interface PluginCapabilities {
    * definition for. This says something narrower and different: "the language
    * surface documents this parameter as one ambient type, but every value
    * this program actually supplies is an INSTANCE OF A CLASS THE PACKAGE
-   * SHIPS AS TYPESCRIPT" -- three's `WebGLRenderer` states its `_gl` as the
-   * browser's `WebGLRenderingContext`, and `@geastack/native-webgl-angle`
+   * SHIPS AS TYPESCRIPT" -- a library written for the browser declares its GL
+   * context as the browser's `WebGLRenderingContext`, and `@geastack/native-webgl-angle`
    * supplies `NativeWebGL2RenderingContext`, a real class this compiler reads
    * and compiles like any other. No carrier needs inventing for it, no host
    * protocol needs installing -- the ambient name only needs to stop meaning
@@ -360,7 +360,7 @@ export interface PluginCapabilities {
    * constructor and a namespace of statics; this compiler answers the namespace
    * half and carries the VALUE as an empty facade struct
    * (`namespaceRootTypes`), which has no prototype chain for 13.10.2 to walk.
-   * But `x instanceof Buffer` is live code in `@hono/node-server`, the question
+   * But `x instanceof Buffer` is ordinary live code in Node libraries, the question
    * is not unanswerable at all, and the host already knows the exact answer:
    * `Buffer.isBuffer` IS `instanceof Buffer` (Node's own docs say so), and it is
    * a host brand read, not a structural guess -- a `Uint8Array` that no Buffer
@@ -410,8 +410,9 @@ export interface PluginCapabilities {
    * file defines, so a library's own absence guard takes the branch that cannot
    * work and the failure lands in the linker, or at runtime, rather than here.
    *
-   * three.js is written to run where these may not exist and says so in its own
-   * source -- `typeof VideoFrame !== 'undefined' && image instanceof VideoFrame`.
+   * Portable browser libraries are written to run where these may not exist and
+   * say so in their own source -- `typeof VideoFrame !== 'undefined' && image
+   * instanceof VideoFrame`.
    * A native ANGLE context is exactly such a place. Stating the absence is what
    * lets that guard mean what it says.
    *
@@ -565,36 +566,6 @@ export interface PluginCapabilities {
    * host's contract living in the compiler.
    */
   readonly reachedMemberKeys: ReadonlySet<string>
-  /**
-   * Whether programs holding this host cannot discharge an obligation on
-   * `Object.prototype`'s keys, so the proofs that would raise one must refuse
-   * up front and leave the read boxed.
-   *
-   * Two proofs replace a boxed read with a proven `undefined` by resting on
-   * "Object.prototype lacks this key": the class-family absence proof
-   * (`flow/class-family-member-read.ts`) and the numeric-absence proof
-   * (`derived-expression-type.ts`). Each records a DEFERRED obligation the
-   * final host mutation census judges long after the read is typed. Under the
-   * census's `*` wildcard no such obligation can be judged true, and the
-   * program loses its certificate to a diagnostic -- a sound outcome, but a
-   * worse one than the boxed read the proof replaced. three.js programs take
-   * that wildcard through the ANGLE host (troika's writes through receivers
-   * the census cannot prove non-global, `threeWebGLBufferData( ... )`'s
-   * arguments), so that host states the fact here instead of every build
-   * remembering `GEA_FAMILY_MEMBER_ABSENT_KEYS=0 GEA_NUMERIC_ABSENCE=0`.
-   *
-   * The statement is about programs that HOLD this host, not every compile:
-   * the built-in plugins are installed for every compilation, so a host's word
-   * alone would refuse the proofs for programs that never touch it. A program
-   * is this host's when reachable code names one of its `hostFunctions` --
-   * `nativeWebGL.ts` calls `threeWebGLBufferData` and its kin on every path,
-   * and nothing else spells those names.
-   *
-   * A stopgap by construction: it mirrors those two kill switches and goes
-   * away with them when the census stops taking the wildcard. Optional;
-   * absent means the proofs run.
-   */
-  readonly refusesObjectPrototypeAbsenceProofs?: boolean
   /**
    * Which class fields this library holds in a REACTIVE CELL, keyed by the
    * class that declares them.

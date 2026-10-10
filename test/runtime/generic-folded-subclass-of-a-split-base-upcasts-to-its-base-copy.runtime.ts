@@ -1,8 +1,7 @@
 // A generic subclass whose own copies share ONE layout, deriving from a
-// generic base whose copies split into one layout per filling: the MongoDB
-// driver's `ListCollectionsCursor<T> extends AbstractCursor<T>`, reached as
-// `db.listCollections(filter, { nameOnly: false }).toArray()` (`Collection.options`,
-// `operations/drop.ts`). The subclass is one struct, and it derives from the
+// generic base whose copies split into one layout per filling: a database
+// client's `ListCollectionsCursor<T> extends AbstractCursor<T>`, reached as
+// `db.listCollections(filter, { nameOnly: false }).toArray()`. The subclass is one struct, and it derives from the
 // base copy its canonical filling names; calling an inherited base method on
 // it must upcast into THAT copy.
 //

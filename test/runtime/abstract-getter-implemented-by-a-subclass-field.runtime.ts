@@ -1,8 +1,9 @@
 // An abstract accessor a subclass implements with a plain DATA FIELD: the
 // field is an own property of the instance and shadows the prototype accessor,
-// so a read through the base type must reach it. mongodb's `TimeoutContext`
-// declares `abstract get clearServerSelectionTimeout(): boolean`; the legacy
-// and CSOT contexts answer with a field, the cursor context with a getter.
+// so a read through the base type must reach it. A database client's timeout
+// context declares `abstract get clearServerSelectionTimeout(): boolean`; the
+// legacy and operation-timeout contexts answer with a field, the cursor context
+// with a getter.
 abstract class Context {
   abstract get clearTimeout(): boolean
   abstract get label(): string

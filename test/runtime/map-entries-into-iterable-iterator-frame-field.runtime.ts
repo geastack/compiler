@@ -1,4 +1,4 @@
-// bson's serializer keeps a Map's entry cursor in a frame record:
+// A binary-document serializer keeps a Map's entry cursor in a frame record:
 // `mapIterator: (sourceObject as Map<unknown, unknown>).entries()` stored in
 // a field typed `IterableIterator<[unknown, unknown]> | null`, then stepped
 // with `.next()` one entry per loop turn. The field holds the map's own

@@ -6,11 +6,11 @@
 //! expect: merged:{"a":1,"b":2}
 //! emitted-has: gea::callableBindIsIntrinsic
 
-// mongodb's mongo_logger.ts and cmap/connection.ts: `this.log.bind(this,
+// A database client's logger and connection: `this.log.bind(this,
 // 'error')`, `this.clearPendingLog.bind(this)`, on classes whose instances
-// DO reach dynamic code -- `sessions.ts`'s `this.emit('ended', this)` hands the
+// DO reach dynamic code -- the session's `this.emit('ended', this)` hands the
 // session to an EventEmitter's `unknown[]` listener arguments. The census
-// marks the class fully reflected, and utils.ts's option merging writes a
+// marks the class fully reflected, and the client's option merging writes a
 // computed key through an `any`, so it cannot prove `bind` unshadowed; the
 // bind is lowered natively behind a run-time own-`bind` check, which nothing
 // here trips. `same` pins that a boxed read of a method is the one Function
@@ -28,7 +28,7 @@ class Emitter {
   }
 }
 
-class MongoLogger extends Emitter {
+class ClientLogger extends Emitter {
   pending: Promise<unknown> | null = null
   cleared = false
   failed = false
@@ -63,7 +63,7 @@ function merge(target: any, source: Record<string, number>): any {
   return target
 }
 
-const logger = new MongoLogger()
+const logger = new ClientLogger()
 logger.on((event, self) => {
   const held = self as any
   console.log(String(event) + ':' + (held === logger))
@@ -74,5 +74,7 @@ logger.debug('pool ready')
 logger.end()
 logger.flush().then(() => {
   console.log('cleared:' + logger.cleared + ' failed:' + logger.failed)
-  console.log('merged:' + JSON.stringify(merge({ a: 1 }, { b: 2 })))
+  // The merged keys come from parsed text, so no proven key set (`provenKeyTexts`)
+  // rules out a computed write of `bind`.
+  console.log('merged:' + JSON.stringify(merge({ a: 1 }, JSON.parse('{"b":2}'))))
 })

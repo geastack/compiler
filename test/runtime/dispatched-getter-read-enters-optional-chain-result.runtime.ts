@@ -2,7 +2,7 @@
 //! expect: none:true
 //! expect: absent:true
 
-// mongodb's on_data.ts: `const timeoutForSocketRead =
+// A database client's socket reader: `const timeoutForSocketRead =
 // timeoutContext?.timeoutForSocketRead`, where `timeoutForSocketRead` is an
 // abstract getter (`Timeout | null`) every TimeoutContext overrides. The read
 // dispatches through the family's virtual getter, whose carrier is the

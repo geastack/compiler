@@ -1114,7 +1114,7 @@ inline Value invoke(void* environment, Value receiver, Args arguments) {
   if (!closure.strict && nullish(receiver)) receiver = closure.context->global;
   if (!closure.strict && !isObjectValue(receiver)) unsupported("Sloppy this boxing for primitive receivers");
   for (std::size_t i = 0; i < closure.parameters.size(); ++i)
-    scope->bindings[closure.parameters[i]] = {(i < arguments->size() ? arguments->at(i) : Value()), true, false};
+    scope->bindings[closure.parameters[i]] = {(i < arguments->size() ? arguments->readElement(i) : Value()), true, false};
   std::unordered_set<std::string> names;
   vars(closure.body, names);
   for (const auto& name : names) scope->bindings.emplace(name, Binding{{}, true, false});
@@ -1143,10 +1143,10 @@ inline Value makeFunction(const Tree& body, const std::vector<std::string>& para
   return fn;
 }
 inline Value method(Function::Invoke entry) { return Value::boxMethod<1>(Function(entry, nullptr)); }
-inline Value argument(const Args& args, std::size_t i) { return i < args->size() ? args->at(i) : Value(); }
+inline Value argument(const Args& args, std::size_t i) { return i < args->size() ? args->readElement(i) : Value(); }
 inline std::vector<Value> list(const Args& args, std::size_t begin = 0) {
   std::vector<Value> result;
-  for (std::size_t i = begin; i < args->size(); ++i) result.push_back(args->at(i));
+  for (std::size_t i = begin; i < args->size(); ++i) result.push_back(args->readElement(i));
   return result;
 }
 struct Bound {
@@ -1283,11 +1283,11 @@ inline Value initializeRealmGlobal(Value global) {
   math.setProperty(PropertyKey::string("abs"),
                    method(+[](void*, Value, Args args) { return number(std::fabs(numeric(argument(args, 0)))); }));
   define("Math", math);
-  define("Number", method(+[](void*, Value, Args args) { return args->size() ? number(numeric(args->at(0))) : number(0); }));
+  define("Number", method(+[](void*, Value, Args args) { return args->size() ? number(numeric(args->readElement(0))) : number(0); }));
   define("String", method(+[](void*, Value, Args args) {
            if (!args->size()) return string("");
-           if (args->at(0).tag() == Value::Tag::Symbol) unsupported("String(Symbol) in Eval");
-           return string(text(args->at(0)));
+           if (args->readElement(0).tag() == Value::Tag::Symbol) unsupported("String(Symbol) in Eval");
+           return string(text(args->readElement(0)));
          }));
   define("Boolean", method(+[](void*, Value, Args args) { return boolean(truth(argument(args, 0))); }));
   return global;

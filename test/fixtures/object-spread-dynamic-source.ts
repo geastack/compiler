@@ -1,6 +1,6 @@
 // Object spread's `CopyDataProperties` (ECMA-262 7.3.25) when the SOURCE's
 // own-property set is not statically known -- a plain index-signature type,
-// or (the harder case, mirroring hono's `HeaderRecord`) a union with one
+// or (the harder case, mirroring an HTTP framework's header record) a union with one
 // arm that is a fixed record and one that is an index signature. Before
 // `producers/protocol.ts` learned to publish a runtime copy for this and
 // `structural-layout-type.ts` learned to pick the union's own index-
@@ -21,8 +21,8 @@ export function withDefault(headers: Record<string, string>): Record<string, str
 }
 
 // Case 2: the source's OWN type is a union of a fixed record and an index
-// signature -- the shape `HeaderRecord` in hono's `context.ts` actually
-// has. TypeScript drops the index signature from its OWN inferred type of
+// signature -- the shape an HTTP framework's request-context header record
+// actually has. TypeScript drops the index signature from its OWN inferred type of
 // the spread's result (`{ a: string }`, no index info survives), so the
 // receiving literal's layout has to come from the DECLARED return type
 // here, not the checker's inferred type of the literal itself -- exactly
@@ -33,7 +33,7 @@ type FixedOrDynamic = Record<'kind', string> | Record<string, string>
 // `label`, not `kind`: a literal key that COULD be present in the fixed
 // record arm's own type would trip TypeScript's own "specified more than
 // once" suggestion diagnostic (ts(2783)) and refuse certification for a
-// reason that has nothing to do with this backend -- the real hono source
+// reason that has nothing to do with this backend -- the real framework source
 // this fixture mirrors reaches that same diagnostic too, on top of ~19
 // unrelated gaps, so it never reaches "cert: yes" either. Keeping the
 // literal's own key OUTSIDE the fixed arm's key set here isolates this

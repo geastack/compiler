@@ -1,5 +1,5 @@
 // A generic class whose method returns a record holding a conditional type
-// only inside an INDEX signature -- mongodb's `insertMany` returns
+// only inside an INDEX signature -- a database client's `insertMany` returns
 // `InsertManyResult<TSchema>`, whose `insertedIds` is `{ [key: number]:
 // InferIdType<TSchema> }`. The copy for a concrete schema reads the member's
 // image off the checker's own instantiation, index signatures included, so the

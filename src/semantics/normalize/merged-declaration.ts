@@ -11,7 +11,7 @@ import ts from 'typescript'
  * because every class census -- evaluation, construct convention, member
  * publication, specialization -- keys on the class node, while a lookup
  * through the symbol answered the interface whenever it is written first.
- * mongodb's `TypedEventEmitter` is written that way: its subclasses' implicit
+ * A `TypedEventEmitter` class+interface merge is written that way: its subclasses' implicit
  * `super()` found "no construct convention" under the interface's id and its
  * instances were laid out as a plain record.
  *
@@ -41,8 +41,8 @@ export const mergedDeclarationOf = (symbol: ts.Symbol): ts.Declaration | null =>
  *
  * `interface TypedEventEmitter<Events> extends EventEmitter { emit<K>(event:
  * K | symbol, ...args: Parameters<Events[K]>): boolean }` merged with an
- * empty `class TypedEventEmitter<Events> extends EventEmitter {}` is how the
- * MongoDB driver types its events. The interface member has no body: every
+ * empty `class TypedEventEmitter<Events> extends EventEmitter {}` is a common
+ * way for a library to type its events. The interface member has no body: every
  * `this.emit(...)` runs `EventEmitter.emit`, whatever the merged signature
  * says, so the value -- and the frame a call passes its arguments in -- is
  * the base class's. Laying the call out from the typing view gave it a packed

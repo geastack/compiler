@@ -1,4 +1,4 @@
-// mongodb's `defineAspects`: `Object.defineProperty(operation, 'aspects', ...)`
+// A database client's `defineAspects`: `Object.defineProperty(operation, 'aspects', ...)`
 // where `operation: { aspects?: Set<symbol> }` receives several operation
 // class constructors and a plain object. The parameter is a union of a record
 // and one constructor family per class, and the define lands on whichever arm

@@ -14,7 +14,7 @@ import {
 import { fillHostTemplate, hostIntrinsicLengthOf, hostMemberOf, type HostSpellings } from './host-members.js'
 import type { HostMethodAlias } from './host-method-aliases.js'
 import { staticKeyTextOf } from '../emit-properties.js'
-import { objectShapePrototypeMethods } from '../../../projection/callee.js'
+import { nativeHostReflectionMemberOf } from '../../../projection/native-prototype-methods.js'
 import { cppStringLiteral } from '../types.js'
 import { boxedValueText, propertyKeyText, unboxedReadText } from '../emit-dynamic-properties.js'
 import { intrinsicMemberValueOf } from './emit-host-object.js'
@@ -115,8 +115,8 @@ export const deferredIntrinsicReflectionClaim = (
   const hostProtocol = nativeHostProtocol(receiver)
   if (hostProtocol === null) return null
   const staticKey = staticKeyTexts.get(key.value)
-  if (staticKey === undefined || !objectShapePrototypeMethods.has(staticKey)) return null
-  if (!hosts.intrinsicMembers.has(hostProtocol.protocol)) return null
+  if (staticKey === undefined || !nativeHostReflectionMemberOf(hosts.members, hosts.intrinsicMembers, hostProtocol.protocol, staticKey))
+    return null
   return {
     receiverKind: 'native-handle-shape',
     member: staticKey,
@@ -400,7 +400,7 @@ export const emitNativeHostStore = (
  * the sidecar does NOT reach is a CONSTANT-key read (`Math.pow`), which
  * renders the host symbol directly: a program that writes `Math['pow'] = f`
  * through a runtime key and then calls `Math.pow` by name still calls the
- * host's. test262's `verifyProperty` restores what it writes and reads back
+ * host's. A property-descriptor check restores what it writes and reads back
  * through the same computed path, so the two never disagree there.
  */
 const namespaceIntrinsicMembersOf = (ctx: EmitContext, receiver: IrOperand) => {
@@ -578,7 +578,7 @@ export const hostMemberReadsOf = (
         // `Math.hasOwnProperty` and friends are `Object.prototype`'s own, not
         // this protocol's, and `nativeHostMemberText` hands them to the
         // prototype channel before ever asking `hostMemberOf`.
-        if (objectShapePrototypeMethods.has(staticKey) && hosts.intrinsicMembers.has(memberProtocol)) continue
+        if (nativeHostReflectionMemberOf(hosts.members, hosts.intrinsicMembers, memberProtocol, staticKey)) continue
         const host = hostMemberOf(hosts.members, memberProtocol, staticKey)
         const numericRest = host?.kind === 'property' && host.numericRestCall !== undefined && numericRestCallees.has(operation.result.id)
         const numericArities = numericCallArities.get(operation.result.id)

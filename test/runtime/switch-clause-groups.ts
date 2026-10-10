@@ -3,9 +3,8 @@
 // An empty clause has no statements to skip, so falling out of its bottom runs
 // nothing the language would have run: the group is one arm whose test is
 // `A || B`. That is what `producers/control.ts` mints, and it is the commonest
-// multi-case idiom there is -- three.js writes it in `getByteLength`,
-// `getTextureTypeByteLength`, `getSingularSetter`, `getPureArraySetter` and
-// `Color.setStyle`.
+// multi-case idiom there is -- a 3D scene-graph library writes it in its byte-length,
+// uniform-setter and color-parsing helpers.
 //
 // What running it proves that reading the emitted C++ does not: EVERY member of
 // a group selects the arm, not just the last one; the discriminant is still

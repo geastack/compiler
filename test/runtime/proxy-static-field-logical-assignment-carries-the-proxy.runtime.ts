@@ -2,7 +2,7 @@
 //! expect: loads: 1
 //! expect: get threw: sdk is not installed
 
-// mongodb's `aws_temporary_credentials.ts`: a static field typed by a loader's
+// A database client's cloud-credentials provider: a static field typed by a loader's
 // return type is filled lazily by `??=`, and the loader's failure path returns
 // `makeErrorModule`'s `new Proxy`. A proxy therefore really does flow into the
 // static field, so the field, the `??=` merge and every later read of it must

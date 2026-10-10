@@ -1,5 +1,5 @@
 // An overload implementation whose parameter the overloads let callers omit.
-// mongodb's `OnDemandDocument.getNumber<Req>(name, required?: Req)` is
+// A lazy wire-document reader's `getNumber<Req>(name, required?: Req)` is
 // implemented as `getNumber(name, required: boolean)`; `this.getNumber('ok')`
 // resolves to the overload and runs the implementation with `required` bound
 // to `undefined` (ECMA-262 10.2.11), which the body observes.

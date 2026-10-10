@@ -3,7 +3,7 @@
 // `isBareEmptyLiteral` / `declaresOwnType`), is an OPEN PROPERTY BAG this
 // census infers member types for from the writes the program actually makes.
 // `bag.lightProbeGrid` is written a `boolean` in one function and a
-// `Grid | null` in another -- three's own
+// `Grid | null` in another -- a 3D library's own
 // `materialProperties.lightProbeGrid` shape -- so no single write covers the
 // other. Before the fix, `joined` answered only `widestOf`, which refuses a
 // genuine disagreement, and the member degraded to `any`: every read of

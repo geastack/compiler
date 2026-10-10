@@ -1,8 +1,8 @@
 // A `Map` PASSED WHERE `Record<string, any> | string` IS DECLARED.
 //
-// mongodb's `LimitedSizeDocument.ifItFitsItSits(key, value: Record<string,
-// any> | string)` (`cmap/handshake/client_metadata.ts`) is handed plain
-// records, a string, and the `Map`s `makeClientMetadata` builds for `os` and
+// A database client's size-limited metadata document (`add(key, value: Record<string,
+// any> | string)`) is handed plain
+// records, a string, and the `Map`s its metadata builder makes for `os` and
 // `env`. It stores the value itself (not a copy) in its own `Map`, and the
 // caller keeps deleting keys from that same `Map` afterwards -- so what is
 // finally serialized sees the deletions: the stored value IS the caller's Map.

@@ -1,5 +1,5 @@
-// ECMA-262 20.1.2.6: `Object.freeze` of an open Document. The mongodb
-// RunCommandCursor freezes `{ ...command }` before sending it; the frozen
+// ECMA-262 20.1.2.6: `Object.freeze` of an open Document. A database
+// client's run-command cursor freezes `{ ...command }` before sending it; the frozen
 // copy must keep its keys and order, refuse writes in strict code, and leave
 // the source untouched.
 

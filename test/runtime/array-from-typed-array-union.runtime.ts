@@ -1,4 +1,4 @@
-// `Array.from` over a sum of typed-array views -- three's `image.data` is any
+// `Array.from` over a sum of typed-array views -- a 3D library's `image.data` is any
 // of the nine element kinds. The copy goes by the arm the value holds, each
 // arm the same `fromTypedArray` a single-view source takes.
 function copy(data: Float32Array | Uint8Array | Int16Array): number[] {

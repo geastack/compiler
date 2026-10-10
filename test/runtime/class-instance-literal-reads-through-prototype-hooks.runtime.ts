@@ -21,7 +21,7 @@ class Tagged {
 }
 
 function read(x: any): string {
-  return [x.kind, x.toBSON, x.n, x.missing].map((part) => String(part)).join('|')
+  return [x.kind, x.toWire, x.n, x.missing].map((part) => String(part)).join('|')
 }
 
 function tag(x: any): string {
@@ -32,6 +32,6 @@ const first = new Plain()
 const second = new Plain()
 console.log(read(first))
 console.log(read(second))
-;(second as any).toBSON = 7
+;(second as any).toWire = 7
 console.log(read(second))
 console.log(tag(new Plain()), tag(new Tagged()), tag({ a: 1 }))

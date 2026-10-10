@@ -7,17 +7,16 @@ import { indexValueFlow } from './flow/value-flow.js'
 import { censusReachability } from './reachability.js'
 
 /**
- * On 2026-09-14 the three.js app reported `array-element-unresolved` for
- * `uploadCubeTexture`'s `cubeImage` with the ternary write
- * `isDataTexture ? textureImages[ i ].image : textureImages[ i ]` named as
+ * A program once reported `array-element-unresolved` for an array whose
+ * ternary write `isRaw ? images[ i ].image : images[ i ]` was named as
  * the offending element, which read as "the array census cannot type a
  * conditional". It can: `derivedExpressionType` joins a ternary's two arms
  * as a two-element write set, exactly as it does for a cell. The `any` came
- * from the plugin's `requireTextureImageRecords` typing a cube face as
- * `{ data?, width?, height?, depth? }`, a record with NO `image` member, so
- * the checker's answer for `textureImages[ i ].image` was the error type and
- * the whole conditional inherited it. This test pins the compiler's side of
- * that finding: the same three writes, with every arm well typed, bind one
+ * from a declaration typing each element as `{ data?, width?, height?,
+ * depth? }`, a record with NO `image` member, so the checker's answer for
+ * `images[ i ].image` was the error type and the whole conditional
+ * inherited it. This test pins the compiler's side of that finding: three
+ * writes of that shape, with every arm well typed, bind one
  * element type and refuse nothing -- so a future `array-element-unresolved`
  * naming a ternary is a typing hole in the PROGRAM, not in this census.
  */

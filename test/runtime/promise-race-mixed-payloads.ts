@@ -2,7 +2,8 @@
 //! expect: literal
 //! expect: gave up
 
-// The shape `@hono/node-server`'s `readWithoutBlocking` actually writes:
+// The shape an HTTP framework's Node server adapter's `readWithoutBlocking`
+// actually writes:
 // `Promise.race([readPromise, Promise.resolve().then(() => undefined)])`, whose
 // elements carry DIFFERENT payloads -- so the argument is a two-field TUPLE,
 // not an Array -- and whose result carries their union. The settled value has

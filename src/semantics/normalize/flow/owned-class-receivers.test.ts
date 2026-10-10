@@ -146,6 +146,29 @@ test('source constructor selections retain allocations hidden by result assertio
   assert.equal(inventoryOf('declare const unknownConstructor:new()=>Owner; new unknownConstructor();').inventory, null)
 })
 
+test('immutable constructor cells preserve exact allocation selections and refuse an escaped alias', () => {
+  const selected = inventoryOf('const constructor: any = Child; const forwarded = constructor; const held = new forwarded();').inventory
+  assert.ok(selected)
+  assert.equal(selected.constructionFacts.length, 3)
+  const hidden = selected.constructionFacts.find(({ call }) => call.getText() === 'new forwarded()')
+  assert.deepEqual(
+    hidden?.alternatives.map((owner) => owner.name?.text),
+    ['Child']
+  )
+  assert.deepEqual(
+    hidden?.familyProjection.map((owner) => owner.name?.text),
+    ['Child']
+  )
+  assert.equal(inventoryOf('const constructor: any = Child; external(constructor); const held = new constructor();').inventory, null)
+  assert.equal(inventoryOf('const constructor: any = Child; constructor = Owner; const held = new constructor();').inventory, null)
+  assert.equal(inventoryOf('const constructor: any = external as unknown as typeof Child; const held = new constructor();').inventory, null)
+  assert.equal(
+    inventoryOf('const constructor: any = external as unknown as typeof Child; const forwarded = constructor; new forwarded();').inventory,
+    null,
+    'a further erased alias cannot remove an unresolved family construction promise'
+  )
+})
+
 test('constructor callers retain the exact family projection of a mixed source choice', () => {
   const entry = resolve('test/fixtures/conditional-constructor-callers.ts')
   const source = `export {};

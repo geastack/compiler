@@ -2,19 +2,28 @@ import ts from 'typescript'
 import { intrinsicStaticMemberIsIntact } from './intrinsic-static-member.js'
 import type { ValueFlowIndex } from './flow/model.js'
 import type { ProducerContext } from './producer-context.js'
-import { intactIntrinsicPrototypeKeysType, intactIntrinsicPrototypeType } from './intrinsic-prototype.js'
-import { prototypeKeyQuerySignature, type PrototypeKeyQuery } from './host-mutation-keys.js'
+import { intactIntrinsicPrototypeKeysType, intactIntrinsicPrototypeType, intrinsicPrototypeKeyIsAbsent } from './intrinsic-prototype.js'
+import { intrinsicObjectKeysIntact, keySetTouches, prototypeKeyQuerySignature, type PrototypeKeyQuery } from './host-mutation-keys.js'
 
 /** @semanticCategory generic-primitive */
 export interface IntrinsicProtocolRequirement {
-  readonly intrinsic: 'Array' | 'Object' | 'Map' | 'WeakMap' | 'Reflect' | 'Function'
+  readonly intrinsic: 'Array' | 'Object' | 'Map' | 'WeakMap' | 'Reflect' | 'Function' | 'Symbol' | 'JSON' | 'Date'
   readonly member?: string
   /**
-   * Without `member`: the prototype keys the obligation depends on. Absent,
+   * Without `sourceGlobalBinding` or `member`: the prototype keys the obligation depends on. Absent,
    * the obligation is the whole prototype -- which any single key write the
    * census cannot attribute fails. See `intactIntrinsicPrototypeKeysType`.
    */
   readonly prototypeKeys?: PrototypeKeyQuery
+  /** Exact keys proven absent, in addition to preserving their declared state. */
+  readonly prototypeAbsentNames?: readonly string[]
+  /** Own lookup slots on an exact primordial prototype method. These are
+   * separate from inherited Function.prototype forwarding entries. */
+  readonly callableOwnKeys?: { readonly prototypeMember: string; readonly keys: PrototypeKeyQuery }
+  /** An exact source global binding, distinct from the intrinsic prototype.
+   * Its consumer separately proves complete Script scope and all value uses.
+   */
+  readonly sourceGlobalBinding?: ts.FunctionDeclaration | ts.VariableDeclaration
   readonly location: ts.Node
 }
 
@@ -23,7 +32,8 @@ export interface DeferredIntrinsicProtocolLedger {
   readonly capture: <T>(work: () => T) => { readonly value: T; readonly requirements: readonly IntrinsicProtocolRequirement[] }
   readonly guard: <T>(work: () => T, accepts: (value: T) => boolean) => T
   readonly require: (intrinsic: IntrinsicProtocolRequirement['intrinsic'], location: ts.Node) => boolean
-  readonly requireMember: (intrinsic: 'Object' | 'Reflect', member: string, location: ts.Node) => boolean
+  readonly requireMember: (intrinsic: 'Object' | 'Reflect' | 'JSON', member: string, location: ts.Node) => boolean
+  readonly requireSourceGlobalBinding: (declaration: ts.FunctionDeclaration | ts.VariableDeclaration) => boolean
   /** The per-key prototype obligation: only `keys` of the intrinsic's prototype must be as declared. */
   readonly requirePrototypeKeys: (
     intrinsic: IntrinsicProtocolRequirement['intrinsic'],
@@ -34,13 +44,6 @@ export interface DeferredIntrinsicProtocolLedger {
   /** A later inference round replaces its scope, including with no surviving requirements. */
   readonly replace: (scope: object | string, requirements: readonly IntrinsicProtocolRequirement[]) => void
   readonly requirements: () => readonly IntrinsicProtocolRequirement[]
-  /**
-   * Whether a proof resting on an `Object.prototype` key obligation must
-   * refuse instead of recording one -- the installed hosts' statement
-   * (`PluginCapabilities.refusesObjectPrototypeAbsenceProofs`), read by the
-   * class-family and numeric absence proofs before they ask.
-   */
-  readonly refusesObjectPrototypeAbsenceProofs: boolean
 }
 
 /** Closure can depend on an intrinsic whose mutation census runs after type
@@ -48,9 +51,7 @@ export interface DeferredIntrinsicProtocolLedger {
  * published inference replaces a ledger scope. Failed alternatives and
  * withdrawn bindings never become compiler-wide assumptions.
  */
-export const createDeferredIntrinsicProtocolLedger = (
-  options: { readonly refuseObjectPrototypeAbsenceProofs?: boolean } = {}
-): DeferredIntrinsicProtocolLedger => {
+export const createDeferredIntrinsicProtocolLedger = (): DeferredIntrinsicProtocolLedger => {
   const captures: IntrinsicProtocolRequirement[][] = []
   const scopes = new Map<object | string, readonly IntrinsicProtocolRequirement[]>()
   const unique = (requirements: readonly IntrinsicProtocolRequirement[]): readonly IntrinsicProtocolRequirement[] => {
@@ -95,6 +96,8 @@ export const createDeferredIntrinsicProtocolLedger = (
     },
     require: (intrinsic, location) => include([{ intrinsic, location }]),
     requireMember: (intrinsic, member, location) => include([{ intrinsic, member, location }]),
+    requireSourceGlobalBinding: (declaration) =>
+      include([{ intrinsic: 'Function', sourceGlobalBinding: declaration, location: declaration }]),
     requirePrototypeKeys: (intrinsic, prototypeKeys, location) => include([{ intrinsic, prototypeKeys, location }]),
     include,
     replace: (scope, requirements) => {
@@ -113,18 +116,23 @@ export const createDeferredIntrinsicProtocolLedger = (
         }
       scopes.set(scope, kept)
     },
-    requirements: () => unique([...scopes.values()].flat()),
-    refusesObjectPrototypeAbsenceProofs: options.refuseObjectPrototypeAbsenceProofs === true
+    requirements: () => unique([...scopes.values()].flat())
   }
 }
 
 /** What distinguishes two obligations on one intrinsic at one location: a static member, a key set, or the whole prototype. */
 export const intrinsicProtocolRequirementKind = (requirement: IntrinsicProtocolRequirement): string | undefined =>
-  requirement.member !== undefined
-    ? requirement.member
-    : requirement.prototypeKeys
-      ? `keys:${prototypeKeyQuerySignature(requirement.prototypeKeys)}`
-      : undefined
+  requirement.sourceGlobalBinding !== undefined
+    ? 'source-global-binding'
+    : requirement.callableOwnKeys !== undefined
+      ? `callable-own:${requirement.callableOwnKeys.prototypeMember}:${prototypeKeyQuerySignature(requirement.callableOwnKeys.keys)}`
+      : requirement.member !== undefined
+        ? requirement.member
+        : requirement.prototypeKeys
+          ? `keys:${prototypeKeyQuerySignature(requirement.prototypeKeys)}${
+              requirement.prototypeAbsentNames === undefined ? '' : `:absent:${[...requirement.prototypeAbsentNames].sort().join(',')}`
+            }`
+          : undefined
 
 const ledgers = new WeakMap<ValueFlowIndex, DeferredIntrinsicProtocolLedger>()
 export const attachDeferredIntrinsicProtocolLedger = (flow: ValueFlowIndex, ledger: DeferredIntrinsicProtocolLedger): void => {
@@ -134,6 +142,39 @@ export const deferredIntrinsicProtocolLedgerOf = (flow: ValueFlowIndex): Deferre
 
 type IntrinsicContext = Pick<ProducerContext, 'checker' | 'identities' | 'globalHostMutationTaint' | 'isStandardLibraryDeclaration'>
 
+/** The binding receipt names one source-owned global property. Scope and
+ * complete indexed writers are the source query's separate obligations.
+ * @semanticCategory generic-primitive
+ */
+export const sourceGlobalBindingSymbolOf = (
+  checker: ts.TypeChecker,
+  declaration: ts.FunctionDeclaration | ts.VariableDeclaration
+): ts.Symbol | null => {
+  const file = declaration.getSourceFile()
+  if (file.isDeclarationFile || ts.isExternalModule(file) || !declaration.name || !ts.isIdentifier(declaration.name)) return null
+  if (ts.isFunctionDeclaration(declaration)) {
+    if (declaration.parent !== file || declaration.body === undefined) return null
+  } else {
+    const list = declaration.parent
+    if (
+      declaration.initializer === undefined ||
+      !ts.isVariableDeclarationList(list) ||
+      (ts.getCombinedNodeFlags(list) & ts.NodeFlags.BlockScoped) !== 0 ||
+      !ts.isVariableStatement(list.parent) ||
+      list.parent.parent !== file ||
+      (ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Ambient) !== 0
+    )
+      return null
+  }
+  const symbol = checker.getSymbolAtLocation(declaration.name)
+  return symbol !== undefined &&
+    symbol.valueDeclaration === declaration &&
+    symbol.declarations?.length === 1 &&
+    checker.resolveName(declaration.name.text, undefined, ts.SymbolFlags.Value, false) === symbol
+    ? symbol
+    : null
+}
+
 /** Discharge solely against the final shared mutation census. No preliminary
  * spelling scan or root inventory substitutes for the sealed host evidence.
  */
@@ -142,10 +183,63 @@ export const failedIntrinsicProtocolRequirements = (
   requirements: readonly IntrinsicProtocolRequirement[]
 ): readonly IntrinsicProtocolRequirement[] =>
   requirements.filter((requirement) => {
+    if (requirement.sourceGlobalBinding !== undefined) {
+      const declaration = requirement.sourceGlobalBinding
+      if (
+        requirement.location !== declaration ||
+        requirement.intrinsic !== 'Function' ||
+        requirement.member !== undefined ||
+        requirement.prototypeKeys !== undefined ||
+        requirement.prototypeAbsentNames !== undefined ||
+        requirement.callableOwnKeys !== undefined
+      )
+        return true
+      const symbol = sourceGlobalBindingSymbolOf(context.checker, declaration)
+      if (symbol === null || declaration.name === undefined || !ts.isIdentifier(declaration.name)) return true
+      const id = context.identities.symbolValueDeclarationId(symbol, declaration)
+      const taint = context.globalHostMutationTaint
+      // Global replacement stamps the whole binding's identity. A named
+      // property write on the Function itself does not replace that binding;
+      // its callable/descriptor effects are the consumer's separate closure.
+      return (
+        id === null ||
+        taint.has('*') ||
+        taint.keysOf(id)?.every === true ||
+        keySetTouches(taint.surfaceKeys, { names: [declaration.name.text] })
+      )
+    }
+    if (requirement.callableOwnKeys !== undefined) {
+      if (requirement.member !== undefined || requirement.prototypeKeys !== undefined || requirement.prototypeAbsentNames !== undefined)
+        return true
+      const own = requirement.callableOwnKeys
+      const prototype = intactIntrinsicPrototypeKeysType(
+        context,
+        requirement.intrinsic,
+        { names: [own.prototypeMember] },
+        requirement.location
+      )
+      const member = prototype === null ? undefined : context.checker.getPropertyOfType(prototype, own.prototypeMember)
+      const id = member ? context.identities.symbolDeclarationId(member) : null
+      return (
+        member === undefined ||
+        !member.declarations?.some((declaration) => context.isStandardLibraryDeclaration?.(declaration) === true) ||
+        context.checker.getTypeOfSymbolAtLocation(member, requirement.location).getCallSignatures().length === 0 ||
+        id === null ||
+        !intrinsicObjectKeysIntact(context.globalHostMutationTaint, id, own.keys)
+      )
+    }
     if (requirement.member === undefined) {
-      return requirement.prototypeKeys
-        ? intactIntrinsicPrototypeKeysType(context, requirement.intrinsic, requirement.prototypeKeys, requirement.location) === null
-        : intactIntrinsicPrototypeType(context, requirement.intrinsic, requirement.location) === null
+      const prototype = requirement.prototypeKeys
+        ? intactIntrinsicPrototypeKeysType(context, requirement.intrinsic, requirement.prototypeKeys, requirement.location)
+        : intactIntrinsicPrototypeType(context, requirement.intrinsic, requirement.location)
+      return (
+        prototype === null ||
+        (requirement.prototypeAbsentNames ?? []).some(
+          (name) =>
+            !requirement.prototypeKeys?.names?.includes(name) ||
+            !intrinsicPrototypeKeyIsAbsent(context.checker, requirement.intrinsic, prototype, name)
+        )
+      )
     }
     const owner = context.checker.resolveName(requirement.intrinsic, requirement.location, ts.SymbolFlags.Value, false)
     const member = owner

@@ -29,7 +29,7 @@ const noClasses: ReadonlyMap<DeclarationId, ClassLayout> = new Map()
 // census reachability, so no class-lifecycle operation is published for it and
 // the projection has no row. `targets/cpp/records.ts` still emits its struct,
 // rendered from the carrier's own shape and standalone, so those fields ARE
-// the object's slots. Fourteen carriers in the three.js app were in this state.
+// the object's slots. A large program can have many carriers in this state.
 test('a class-ref with no published layout answers from the shape its struct is rendered from', () => {
   const representation = classRef('decl|f1|1', 'shape|closed')
   const deriver = deriverOf({

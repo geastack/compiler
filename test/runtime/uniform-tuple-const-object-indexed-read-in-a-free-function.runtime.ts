@@ -1,13 +1,13 @@
-// Mirrors mongodb's `responses.ts` `isErrorResponse(bson, elements)` exactly:
+// Mirrors a database client's `isErrorResponse(bytes, elements)` exactly:
 // a MODULE-SCOPE `const X = { ... } as const` lookup object (an "enum-shaped"
-// constant, not a TypeScript `enum` keyword -- neither `document.ts` nor
-// `responses.ts` in the real package uses an actual `enum`; both declare their
+// constant, not a TypeScript `enum` keyword -- neither the document nor
+// the response module in the real package uses an actual `enum`; both declare their
 // own local `as const` object literal instead) whose members index a closed,
 // homogeneous tuple inside a FREE FUNCTION (not a class method). The real
-// driver reads `elements[i]` with no non-null assertion at all, because
-// mongodb's OWN tsconfig has `noUncheckedIndexedAccess` off -- but THIS
+// client reads `elements[i]` with no non-null assertion at all, because
+// the client's OWN tsconfig has `noUncheckedIndexedAccess` off -- but THIS
 // project's tsconfig has it on, so the same array-index read is statically
-// `Elem | undefined` here and needs the `!` mongodb's source omits. That
+// `Elem | undefined` here and needs the `!` the client's source omits. That
 // source difference is immaterial to what this test actually proves: this
 // compiler's own representation layer makes a plain array-index read
 // `optional` regardless of the source's static type, so a bare `elements[i]`

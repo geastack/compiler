@@ -2,7 +2,7 @@
 // The sibling of `class-arm-into-declared-interface-slot.ts`: the class arm
 // cannot be viewed as the interface (its `param` field is another class the
 // view has no plan for), so the store has NO sound answer -- selecting the
-// record arm read the class instance's bytes as the record (skytail's
+// record arm read the class instance's bytes as the record (an app's
 // `NativeAudioContext`, SIGBUS at launch, certified). The census refuses the
 // pair instead; the refusal is the correct outcome until an interface slot
 // can hold a class instance by identity.

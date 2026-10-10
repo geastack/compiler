@@ -1,11 +1,11 @@
 // A generic cursor's async iterator yielding a value narrowed away from null,
-// in the copy a generic COLLECTION mints with a composite filling: the MongoDB
-// driver's `Collection<TSchema>.find()` returns `new FindCursor<WithId<TSchema>>`,
+// in the copy a generic COLLECTION mints with a composite filling: a database
+// client's `Collection<TSchema>.find()` returns `new FindCursor<WithId<TSchema>>`,
 // and `AbstractCursor`'s `async *[Symbol.asyncIterator]()` does
 // `const document = await this.next(); if (document === null) return; yield document`.
 // The yielded value is the narrowed `WithId<Document>`, one type however the
 // copy spells it.
-interface BsonDocument {
+interface WireDocument {
   [key: string]: any
 }
 class ObjectId {
@@ -42,7 +42,7 @@ abstract class AbstractCursor<TSchema = any> {
 
 class FindCursor<TSchema = any> extends AbstractCursor<TSchema> {}
 
-class Collection<TSchema extends BsonDocument = BsonDocument> {
+class Collection<TSchema extends WireDocument = WireDocument> {
   constructor(private readonly seed: WithId<TSchema>[]) {}
   find(): FindCursor<WithId<TSchema>> {
     return new FindCursor<WithId<TSchema>>(this.seed)

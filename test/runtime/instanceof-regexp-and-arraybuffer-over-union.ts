@@ -3,7 +3,7 @@
 //! expect: buffer
 //! expect: not a buffer
 
-// hono's trie router carries a route matcher as `RegExp | true` and asks
+// An HTTP framework's trie router carries a route matcher as `RegExp | true` and asks
 // `matcher instanceof RegExp`; node-compat's `Response` constructor narrows
 // `BodyInit` down to `ArrayBuffer | <shim classes>` and asks `body instanceof
 // ArrayBuffer`. Both are a discriminant test over arms whose identity IS their

@@ -2,7 +2,7 @@
 //! expect: extra x 2
 // A ternary whose arms are an interface-typed record and a class that
 // satisfies the interface, stored into a slot declared as the interface:
-// skytail's `const ctx: AudioContextLike | null = Ctor ? new Ctor() :
+// an app's `const ctx: AudioContextLike | null = Ctor ? new Ctor() :
 // createNativeAudioContext()`. On 2026-09-22 the store projected the union's
 // record arm unchecked (`(*v).get<1>()`) while the class arm was the live one,
 // so every method call read a callable out of the class instance's bytes

@@ -11,8 +11,8 @@ import type { IrBlockId } from '../../ir/model.js'
  * widest possible lifetime: every `Ref`, `Value`, union and string any path
  * could need was constructed on entry and destroyed on exit, on EVERY call,
  * whichever path ran. An async body kept all of them in its coroutine frame
- * (2136 bytes for one hot mongodb command body), and the epilogue that
- * destroyed them all was code every call fetched -- measured, the driver
+ * (2136 bytes for one hot request-handling body), and the epilogue that
+ * destroyed them all was code every call fetched -- measured, a client
  * benchmark spent two thirds of its cycles waiting on instruction delivery.
  *
  * Nesting by dominance is what makes the narrow answer legal. Blocks are

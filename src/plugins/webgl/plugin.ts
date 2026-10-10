@@ -15,11 +15,11 @@ import {
  *
  * The third host in this build, and the smallest by a long way: it states its
  * free functions and nothing else. That is not a stub. This host's surface
- * really is 127 ambient functions -- `threeWebGLCreateBuffer`,
- * `threeWebGLDrawElements`, `threeWebGLTexImage2D` -- declared in the package's
- * `nativeWebGLHost.ts` and defined in its `angle_webgl_host.mm`. The
- * `WebGL2RenderingContext` a three.js program actually holds is a TypeScript
- * class in that same package, and this compiler compiles it as one.
+ * really is a flat set of ambient functions -- one per GL entry point (create
+ * buffer, draw elements, upload a 2D texture, ...) -- declared in the package's
+ * own host declarations and defined in its Objective-C++ bridge. The
+ * `WebGL2RenderingContext` a program actually holds is a TypeScript class in
+ * that same package, and this compiler compiles it as one.
  *
  * So there is no `nativeTypes` here, and its absence is a statement rather than
  * a gap. `nativeTypes` says "this declared name is a host object, and here is
@@ -31,22 +31,19 @@ import {
  * bases, no includes, no constants.
  *
  * `ambientTypeRealizations` is the one non-empty table below, and it exists
- * for a fact `nativeTypes` cannot state: three's own `WebGLRenderer` and its
- * `@types/three` declarations describe the context this program holds as an
- * AMBIENT BROWSER interface (`WebGLRenderingContext`, `WebGL2RenderingContext`)
- * -- structurally unrelated to `NativeWebGL2RenderingContext`, which is why a
- * `renderbufferStorageMultisample`/`blitFramebuffer`/`invalidateFramebuffer`
- * call, or a `DRAW_FRAMEBUFFER`/`READ_FRAMEBUFFER` constant read -- real
- * WebGL2 members `WebGLRenderingContext` (WebGL1) lacks entirely -- typed
- * `any` and boxed every one of the ~230 boxed carriers rooted at
- * `WebGLTextures.js`'s own `_gl` parameter. The fix is not a carrier this
- * layer invents; it is the ambient name meaning the class the value already
- * is. See `webglAmbientTypeRealizations` (`host.ts`).
+ * for a fact `nativeTypes` cannot state: a library written against the browser
+ * may declare the context it holds as an AMBIENT BROWSER interface
+ * (`WebGLRenderingContext`, `WebGL2RenderingContext`) -- structurally unrelated
+ * to `NativeWebGL2RenderingContext`. Then every WebGL2-only member read through
+ * a WebGL1-typed parameter (`blitFramebuffer`, `DRAW_FRAMEBUFFER`, ...) types
+ * `any`, and every carrier rooted at that parameter boxes. The fix is not a
+ * carrier this layer invents; it is the ambient name meaning the class the
+ * value already is. See `webglAmbientTypeRealizations` (`host.ts`).
  *
  * No producer and no lowering: like Apple's, this host adds no meaning to a
- * language form. A three.js program is ordinary TypeScript calling methods on
- * ordinary classes; the only thing the core cannot know is that seven-score
- * bare names are C++ functions somebody else links in.
+ * language form. A WebGL program is ordinary TypeScript calling methods on
+ * ordinary classes; the only thing the core cannot know is that a set of bare
+ * names are C++ functions somebody else links in.
  */
 export const webglPlugin: CompilerPlugin = {
   name: 'native-webgl-angle-host',
@@ -100,10 +97,6 @@ export const webglPlugin: CompilerPlugin = {
       elementTextTags: [],
       // Nothing this host lowers calls a class member the program does not name.
       reachedMemberKeys: new Set<string>(),
-      // three's programs take the host mutation census's `*` wildcard through
-      // this host, under which no Object-prototype obligation is ever
-      // discharged; see `PluginCapabilities.refusesObjectPrototypeAbsenceProofs`.
-      refusesObjectPrototypeAbsenceProofs: true,
       reactiveClassFields: new Map(),
       nativeReactiveCell: null,
       nativeReactiveCellPreamble: []

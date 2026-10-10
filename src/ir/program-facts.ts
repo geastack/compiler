@@ -128,12 +128,11 @@ export interface ProgramFactsPolicy {
  * depending on how often the body constructs. Both were measured, on the same
  * day, with the same compiler:
  *
- * - `bench/comparison/fixtures/binary_trees.ts` constructs a million times
- *   inside a recursive body. Through the carrier the construction is an
+ * - A recursive binary-tree build constructs a million times inside a
+ *   recursive body. Through the carrier the construction is an
  *   INDIRECT call taking two `gea::Ref` arguments by address, with a retain
  *   and a release around each: 46.1ms. Named, and therefore inlined: 41.9ms.
- * - `bench/comparison/fixtures/method_calls.ts` constructs ONCE, before its
- *   hot loop. Naming it there spent the caller's inlining budget on a
+ * - A method-call loop constructs ONCE, before its hot loop. Naming it there spent the caller's inlining budget on a
  *   construction that runs a single time, and the loop's own callee stopped
  *   being inlined: 38.1ms to 49.0ms.
  *
@@ -147,7 +146,7 @@ export interface ProgramFactsPolicy {
  *
  * `noinline` on the construct function was measured too, as the way to have
  * the direct call without the inlining, and it is worse than either
- * (binary_trees 41.9ms to 44.5ms): the inlining IS the win where the win is.
+ * (the binary-tree build 41.9ms to 44.5ms): the inlining IS the win where the win is.
  */
 /**
  * Cells the whole program writes exactly once, and with the function or class
@@ -297,8 +296,8 @@ const buildRepeatedConstructorIndex = (
  * read is spelled `std::move(...)` (`emit-narrowing.ts`), which a `const&`
  * refuses.
  *
- * `examples/apps/weather` formats temperatures and labels through forty such
- * string parameters; every one of them was a copy.
+ * One UI program formats its values and labels through forty such string
+ * parameters; every one of them was a copy.
  */
 /** An `optional` over a reference-counted or string payload: physically one handle, copied by value only because the wrapper states no ownership. */
 const refCarrierByValue = (value: import('../representation/model.js').Representation): boolean =>

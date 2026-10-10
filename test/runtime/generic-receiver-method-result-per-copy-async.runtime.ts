@@ -1,4 +1,4 @@
-// mongodb's `executeOperation`/`tryOperation` (operations/execute_operation.ts):
+// A database client's `executeOperation`/`tryOperation`:
 // `async function tryOperation<T extends AbstractOperation, TResult =
 // ResultTypeFromOperation<T>>(operation: T): Promise<TResult>` ends in
 // `return operation.handleOk(result)`. The receiver is typed by the type

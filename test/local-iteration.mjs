@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
@@ -18,7 +19,17 @@ test('private native cursors preserve key deletion, snapshots, live array growth
   const binary = resolve(root, `measurements/local-iteration${executableSuffix}`)
   execFileSync(
     'clang++',
-    ['-std=c++20', '-O2', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
+    [
+      '-std=c++20',
+      ...nativeOptimization('optimized'),
+      '-fsanitize=address,undefined',
+      `-I${resolve(root, 'src/targets/cpp/runtime')}`,
+      '-x',
+      'c++',
+      '-',
+      '-o',
+      binary
+    ],
     { input: `${result.source}\nint main() { __gea_top_level(); }\n` }
   )
   const expected = execFileSync(process.execPath, ['--experimental-strip-types', fixture], { encoding: 'utf8' }).trim()

@@ -1,7 +1,11 @@
 import type { GetOperation } from '../../../ir/model.js'
 import type { ClassMethod } from '../../../projection/classes.js'
 import type { CallableAbi, Representation } from '../../../representation/model.js'
-import { classMethodValueArmsOf, methodCopyHeldBy } from '../../../projection/dispatch.js'
+import { classMethodValueArmsOf } from '../../../projection/dispatch.js'
+import {
+  heldMethodCopyOf as projectedHeldMethodCopyOf,
+  publishedMethodCopyOf as projectedPublishedMethodCopyOf
+} from '../../../projection/method-values.js'
 import { abiOfCallee } from '../../../projection/callee.js'
 import { createCppEmitBlockedError, operandText, type EmitContext } from '../emit-context.js'
 import { cppClassName } from '../types.js'
@@ -57,17 +61,11 @@ export const overriddenMethodValueText = (
 /**
  * The copy of a generic method's arm the read holds: the projected selection
  * names the owning class's first same-key method, and a generic method's
- * copies all share that key (mongodb's `OnDemandDocument.get<T>`, read at
+ * copies all share that key (a generic `get<T>` method, read at
  * several `T`), so the copy is re-chosen by convention among the owner's own.
  */
 export const heldMethodCopyOf = (ctx: EmitContext, method: ClassMethod, key: string, held: CallableAbi): ClassMethod => {
-  for (const layout of ctx.classes.values()) {
-    if (!layout.methods.includes(method)) continue
-    const copies = layout.methods.filter((candidate) => candidate.key === key)
-    if (copies.length < 2) return method
-    return methodCopyHeldBy(copies, held, ctx.abiOfCallable) ?? method
-  }
-  return method
+  return projectedHeldMethodCopyOf(ctx.classes, ctx.abiOfCallable, method, key, held)
 }
 
 /**
@@ -78,18 +76,5 @@ export const heldMethodCopyOf = (ctx: EmitContext, method: ClassMethod, key: str
  * chosen and the class's own first stands, which the conversion refuses.
  */
 export const publishedMethodCopyOf = (ctx: EmitContext, method: ClassMethod, key: string, published: Representation): ClassMethod => {
-  const held = (published.kind === 'tagged-union' ? published.arms.map((arm) => arm.value) : [published]).flatMap((carrier) => {
-    const abi = abiOfCallee(carrier)
-    return abi === null ? [] : [abi]
-  })
-  // By body, not by object: a selection arm (`classMethodValueArmsOf`) is
-  // not the layout's own entry.
-  for (const layout of ctx.classes.values()) {
-    if (!layout.methods.some((entry) => entry.key === key && entry.callable === method.callable)) continue
-    const copies = layout.methods.filter((candidate) => candidate.key === key)
-    if (copies.length < 2) return method
-    const chosen = new Set(held.flatMap((abi) => methodCopyHeldBy(copies, abi, ctx.abiOfCallable) ?? []))
-    return chosen.size === 1 ? [...chosen][0]! : method
-  }
-  return method
+  return projectedPublishedMethodCopyOf(ctx.classes, ctx.abiOfCallable, method, key, published)
 }

@@ -42,7 +42,7 @@ const infer = (
       /** @param {Renderer} renderer */
       render(renderer) { renderer.draw({drawRange:{start:0,count:12}}); }
     }
-    class Unrelated { type = 'Mesh'; }
+    class Unrelated { type = 'item'; }
     const unrelated = new Unrelated();
     console.log(unrelated.type);
     const held = new Renderer();

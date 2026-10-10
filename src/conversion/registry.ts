@@ -27,12 +27,32 @@ export interface ClassifierMaterializerPair {
 }
 
 export interface ConversionRuntimeRegistry {
+  readonly nativeArrayViewRecipe?: (
+    source: Representation,
+    target: Representation,
+    lookup: (source: Representation, target: Representation) => ConversionNode,
+    read: (source: Representation, target: Representation) => ConversionNode | null,
+    resolve: (id: string) => ConversionNode | null
+  ) => ClassifierMaterializerPair | null
+  /** A contextual view with no writer; admission additionally requires a closed SSA-use proof. */
+  readonly readOnlyDictionaryRecipe?: (
+    source: Representation,
+    target: Representation,
+    lookup: (source: Representation, target: Representation) => ConversionNode,
+    resolve?: (id: string) => ConversionNode | null,
+    read?: (source: Representation, target: Representation) => ConversionNode | null
+  ) => MaterializerContract | null
+  readonly dictionaryReadRecipe?: (conversion: ConversionNode) => MaterializerContract | null
   /** Structural recipes cite each exact leaf admitted by the same census. */
   readonly structuralRecipe?: (
     source: Representation,
     target: Representation,
     lookup: (source: Representation, target: Representation) => ConversionNode,
-    members?: FamilyMemberKeys
+    members?: FamilyMemberKeys,
+    nativeMethod?: (source: Representation, target: Representation) => ConversionNode | null,
+    resolve?: (id: string) => ConversionNode | null,
+    dictionaryRead?: (source: Representation, target: Representation) => ConversionNode | null,
+    classDowncast?: (source: Representation, target: Representation) => ConversionNode | null
   ) => MaterializerContract | null
   /**
    * The exact JS tag/range materializer for one scalar domain, or `null` if
@@ -118,6 +138,15 @@ export interface ConversionRuntimeRegistry {
    * each call.
    */
   readonly functionValueDispatchMaterializer: (abi: CallableAbi) => ClassifierMaterializerPair | null
+
+  /**
+   * The `[[Construct]]` sibling of `functionValueDispatchMaterializer`: a
+   * dynamic value read into one evaluated construct ABI. It claims no class
+   * identity -- the slot names none -- so a box of a different frame is
+   * constructed through the box, each argument boxed and the result read back
+   * as the ABI's own carrier.
+   */
+  readonly constructorValueDispatchMaterializer: (abi: CallableAbi) => ClassifierMaterializerPair | null
 
   /**
    * The exact runtime tag that marks an `Optional`'s absent case as `absence`,
@@ -251,7 +280,9 @@ export interface ConversionRuntimeRegistry {
    * the three registered pairs, exposed so the conversion census
    * (`conversion/nodes.ts`) can mint one node per pair from the same table
    * the printer renders from, instead of a second predicate list that has to
-   * be kept in step with it by hand.
+   * be kept in step with it by hand. Ordinary recipes precede a structural
+   * view; a recipe marked `staticRecipeFallback` runs only after that view
+   * declines. The registry publishes that order with its recipe.
    */
   readonly staticRecipe: (source: Representation, target: Representation) => MaterializerContract | null
 

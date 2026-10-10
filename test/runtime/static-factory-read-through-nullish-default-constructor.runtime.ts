@@ -1,5 +1,5 @@
 // A structural constructor type with a static factory, unioned with the class
-// that satisfies it (mongodb's `(responseType ?? MongoDBResponse).make(bson)`),
+// that satisfies it (a database client's `(responseType ?? ServerResponse).make(bytes)`),
 // here through a `??` default the checker types as the base class's
 // constructor, whose family must still name the subclasses callers pass.
 // The union arm carried by its construct ABI still has to answer `make` from

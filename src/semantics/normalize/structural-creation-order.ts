@@ -34,8 +34,8 @@ import { emptyParameterBindingCensus, type ParameterBindingCensus } from './para
 /**
  * A computed key the checker types as a union of string literals names ONE
  * of those keys at run time, and TypeScript's type for the literal drops it
- * altogether: `{ [helloOk ? 'hello' : 'isMaster']: 1, ...rest }` (mongodb's
- * monitor heartbeat) is typed `{ ...rest }`. The object still owns that key,
+ * altogether: `{ [flag ? 'a' : 'b']: 1, ...rest }` (a command document built
+ * per protocol version) is typed `{ ...rest }`. The object still owns that key,
  * in that position -- and for a command document the position is the
  * protocol (the command name must be the first key). Each such name is a
  * PHANTOM member: optional, typed by the initializer, created where the

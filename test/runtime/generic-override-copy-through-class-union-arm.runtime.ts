@@ -1,4 +1,4 @@
-// mongodb's `tryOperation(operation)` over bulk writes' `UpdateOperation |
+// A database client's `tryOperation(operation)` over bulk writes' `UpdateOperation |
 // DeleteOperation` union (`runBatch` here): `operation.handleOk(reply)` reads
 // a method off each class arm. `AbstractOperation<TResult>.handleOk` is one body per class copy
 // -- `void` for `AbstractOperation<void>`, a document for `Command<Document>`

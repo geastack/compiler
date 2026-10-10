@@ -6,8 +6,7 @@ import ts from 'typescript'
  *
  * ## The shape
  *
- * `sparse-bitfield` and `memory-pager` (under `@mongodb-js/saslprep`, which the
- * MongoDB driver's SCRAM authentication needs) are ES5:
+ * Many small npm packages are ES5:
  *
  *     function Pager (pageSize, opts) {
  *       if (!(this instanceof Pager)) return new Pager(pageSize, opts)
@@ -28,7 +27,7 @@ import ts from 'typescript'
  *
  * - Every body keeps its text, parameters and JSDoc.
  * - When the class exists: a function declaration is hoisted, a class is not,
- *   and memory-pager's first line is `module.exports = Pager`. The class goes
+ *   and such a module's first line may well be `module.exports = Pager`. The class goes
  *   at the head of the file, after the directive prologue. Its definition has
  *   no heritage clause, no computed key and no field, so evaluating it runs
  *   nothing and reads nothing -- exactly as early and as inert as the hoisted

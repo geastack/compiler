@@ -1,4 +1,4 @@
-// mongodb's `onData` (src/cmap/wire_protocol/on_data.ts) hand-writes an
+// A database client's `onData` hand-writes an
 // async iterator's `next()`: `Promise.resolve({ value, done: false })` from one
 // branch, a pending `Promise<IteratorResult<T>>` from another, and
 // `Promise.resolve(doneResult)` for `{ value: undefined, done: true } as
@@ -13,7 +13,7 @@
 // 2. `{ value: undefined, done: true }` fitted the YIELD arm by carriers: the
 //    chain admits `undefined` into `string` as `never`'s dead branch, and the
 //    view took it, so the arm was built over `unreachableValue` and aborted.
-// 3. With `T = any` (mongodb's `Buffer` derives to `any`) both arms take any
+// 3. With `T = any` (the client's `Buffer` derives to `any`) both arms take any
 //    record by layout, since boolean literals do not survive structural
 //    normalization. The arm is chosen at runtime from the record's own `done`.
 //

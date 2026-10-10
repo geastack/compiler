@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
@@ -15,7 +16,7 @@ for (const compact of [false, true]) {
       cxx,
       [
         '-std=c++20',
-        '-O1',
+        ...nativeOptimization('allocation'),
         '-g',
         '-fsanitize=address,undefined',
         '-DGEA_PROFILE_ALLOCATIONS=1',
@@ -40,7 +41,7 @@ execFileSync(
   cxx,
   [
     '-std=c++20',
-    '-Os',
+    ...nativeOptimization('size'),
     '-ffunction-sections',
     '-fdata-sections',
     process.platform === 'darwin' ? '-Wl,-dead_strip' : '-Wl,--gc-sections',

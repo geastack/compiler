@@ -8,7 +8,7 @@
 // union -- alongside the read that publishes the class object. The case that
 // has no cell to read (a generic the program never instantiates, which the
 // census does not walk) needs a whole module graph to arise and is covered by
-// the node-compat hono build, not reproducible in one file here.
+// a node-compat HTTP-framework build, not reproducible in one file here.
 class Chunks<R = number> {
   constructor(readonly items: readonly R[]) {}
 }

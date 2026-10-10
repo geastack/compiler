@@ -44,10 +44,12 @@ int main() { auto video = ${expression}; assert(video.id == 42 && reads == 1); }
 
 test('conversion capability probes do not emit dynamic helper functions', () => {
   const source = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+  // An OWNED record: a shared one is a live structural view whose field plan
+  // only the conversion graph selects, so its context-free text renders nothing.
   const target = {
     kind: 'record',
     shapeId: 'probe-record',
-    ownership: 'shared-refcount',
+    ownership: 'owned',
     accessors: [],
     fields: [{ key: 'name', required: true, value: { kind: 'string' } }]
   }

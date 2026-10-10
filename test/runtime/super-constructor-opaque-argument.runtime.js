@@ -1,7 +1,7 @@
 // A derived constructor's `super( color, intensity )` runs the base body on the
 // object it already owns. The host-mutation census used to read that call as an
-// unauthenticated callee, and an opaque argument there (the three.js app's light
-// intensities come through untyped three.js parameters) was the `*` wildcard
+// unauthenticated callee, and an opaque argument there (an app's light
+// intensities come through a 3D scene-graph library's untyped parameters) was the `*` wildcard
 // that refused every Object-prototype obligation in the program.
 class Light {
   /**

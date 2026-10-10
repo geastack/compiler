@@ -1,4 +1,4 @@
-// mongodb's `executeCommands` keeps `let thrownError = null` (typed `any`)
+// A database client's bulk `executeCommands` keeps `let thrownError = null` (typed `any`)
 // and, on success, passes it to `mergeBatchResults(batch, result, err?:
 // AnyError, ...)`, which only tests `if (err)`. The null reaches a parameter
 // declared `T | undefined` with no default; it reads as the absence.

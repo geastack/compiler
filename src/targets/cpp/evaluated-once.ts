@@ -10,9 +10,9 @@
  * arm reads it in the value, the presence test, the `[[Enumerable]]` test and
  * the creation-order walk) then pastes that whole expression once per use, so
  * the program RUNS it once per use: JavaScript evaluated the operand exactly
- * once. mongodb's `new Collection(db, name, this.options)` pasted the options'
- * record conversion once per field of `CollectionOptions` -- 32 copies in one
- * 1.4 MB statement -- and each copy re-ran the conversion's sidecar reads.
+ * once. A `new C(a, b, this.options)` call pasted the options' record
+ * conversion once per field of the parameter's options type -- 32 copies in
+ * one 1.4 MB statement -- and each copy re-ran the conversion's sidecar reads.
  *
  * The rendering is taken with the operand's own text first, so an operand
  * named at most once -- the overwhelmingly common case -- renders exactly as
@@ -24,7 +24,7 @@
  * lambda's `auto&&` parameter. A parameter of a generic lambda has a DEPENDENT
  * type, and a rendering that names a member template on it -- a tagged union's
  * `(*gea_once).is<0>()` -- then needs the `template` disambiguator C++ demands
- * in a template, which no renderer spells: mongodb's `hint` field, an
+ * in a template, which no renderer spells: an options field holding an
  * `Optional` of a string/document union boxed for a dynamic read, was rejected
  * by clang with "missing 'template' keyword prior to dependent template name".
  * A deduced local is not dependent. It is declared under a second name and
@@ -115,7 +115,7 @@ export const namesMoreThanOnce = (rendered: string, text: string): boolean =>
 export const evaluatedOnceText = <Rendered extends string | null>(text: string, render: (operand: string) => Rendered): Rendered => {
   // A LONG operand is rendered over the name first. Rendering it pasted, only
   // to count the pastes, is the blow-up this helper exists to prevent:
-  // mongodb's `Object.entries(this.options)` over a 200-field options family
+  // `Object.entries(this.options)` over a 200-field options family
   // pasted a 2.6 MB receiver conversion into every field's read and died with
   // "Invalid string length" before any count could run. The output is the
   // same as the pasted-first order: a name used at most once is re-rendered

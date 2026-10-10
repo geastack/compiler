@@ -7,13 +7,17 @@ import {
   type ProtocolIteratorMember,
   type ProtocolIteratorPlan
 } from '../../conversion/protocol-iterator.js'
-import { alignedValueText, chainConverts, type ConversionSite } from './emit-narrowing.js'
+import { namedConversionText, chainConverts, type ConversionSite } from './emit-narrowing.js'
+import { nativeCallReceiverText } from './emit-native-method.js'
+import { structuralConversionKey } from '../../conversion/structural-plan.js'
+import type { CertifiedProtocolIteratorPlan } from '../../conversion/certified-iterator-protocols.js'
 import { viewPlanFor } from './emit-record-view.js'
 import { memberAccessOperator } from './emit-carrier-members.js'
 import { paddedArguments } from './emit-context.js'
 import { booleanTestText } from './emit-presence.js'
 import { unionPropertyLeaves } from './emit-union-properties.js'
-import { cppRecordFieldName, cppRecordFieldPresenceName, cppTypeOf } from './types.js'
+import { cppRecordFieldName, cppRecordFieldPresenceName, cppStringLiteral, cppTypeOf } from './types.js'
+import { nativeFieldPolicyType } from './records.js'
 
 /** The materializer id `conversions.ts` installs a protocol-object cursor under, and `recipeText` renders. */
 export const PROTOCOL_ITERATOR = 'gea::Iterator::protocol'
@@ -29,6 +33,23 @@ export const protocolIteratorPlanFor = (
 ): ProtocolIteratorPlan | null => protocolIteratorPlan(layouts, source, target, planConverts(layouts))
 
 const holder = 'gea_protocol_holder'
+
+interface ProtocolIteratorSite extends ConversionSite {
+  readonly protocolRecipe: CertifiedProtocolIteratorPlan
+}
+
+const protocolLeafText = (
+  ctx: ConversionSite,
+  site: string,
+  source: Representation,
+  target: Representation,
+  text: string
+): string | null => {
+  const key = structuralConversionKey(source, target)
+  const node = (ctx as ProtocolIteratorSite).protocolRecipe.leaves.get(key)
+  if (node === undefined) throw new Error(`protocol iterator has no certified conversion for ${key}`)
+  return namedConversionText(ctx, site, node, text)
+}
 
 /** Whether an optional member is there when the step runs: its presence bit, then its payload. */
 const presenceText = (plan: ProtocolIteratorPlan, member: ProtocolIteratorMember): string | null => {
@@ -48,11 +69,12 @@ const memberCallText = (ctx: ConversionSite, plan: ProtocolIteratorPlan, member:
   const receiver =
     member.abi.receiver === null
       ? []
-      : [alignedValueText(ctx, 'emit-protocol-iterator.ts:receiver', plan.source, member.abi.receiver, holder)]
+      : [protocolLeafText(ctx, 'emit-protocol-iterator.ts:receiver', plan.source, member.abi.receiver, holder)]
   if (receiver.some((text) => text === null)) return null
   const args = paddedArguments(member.abi, [...(receiver as string[]), ...leading], `protocol iterator ${member.key}()`)
   const stored = `${holder}${memberAccessOperator(plan.source.ownership)}${cppRecordFieldName(member.key)}`
-  return `${member.presence.payload ? `(*${stored})` : stored}.call(${args.join(', ')})`
+  const logical = nativeCallReceiverText(plan.source, holder)
+  return `${member.presence.payload ? `(*${stored})` : stored}.callWithReceiver(${logical}${args.length === 0 ? '' : `, ${args.join(', ')}`})`
 }
 
 /**
@@ -69,18 +91,26 @@ const stepResultText = (ctx: ConversionSite, plan: ProtocolIteratorPlan, member:
   for (const leaf of leaves) {
     const arm = records.find((candidate) => representationKey(candidate.record) === representationKey(leaf.representation))
     if (arm === undefined || (arm.record.kind !== 'record' && arm.record.kind !== 'native-record-ref')) return null
+    const shared = arm.record.ownership === 'shared-refcount'
     const read = `${leaf.text}${memberAccessOperator(arm.record.ownership)}`
-    const done = booleanTestText(`${read}${cppRecordFieldName('done')}`, arm.done.value)
-    const valueText = `${read}${cppRecordFieldName('value')}`
+    // A shared result arm may be a live view whose struct slots are inert:
+    // its declared fields are read through the view's own route.
+    const field = (key: 'done' | 'value', value: Representation): string =>
+      shared
+        ? `gea::record::readDeclaredField<${cppTypeOf(value)}, ${nativeFieldPolicyType(value)}>(${leaf.text}, ` +
+          `${cppStringLiteral(key)}, [&]() -> ${cppTypeOf(value)} { return ${read}${cppRecordFieldName(key)}; })`
+        : `${read}${cppRecordFieldName(key)}`
+    const done = booleanTestText(field('done', arm.done.value), arm.done.value)
+    const valueText = field('value', arm.value.value)
     let yielded = 'false'
     if (arm.yields) {
-      const element = alignedValueText(ctx, 'emit-protocol-iterator.ts:element', arm.value.value, plan.target.element, valueText)
+      const element = protocolLeafText(ctx, 'emit-protocol-iterator.ts:element', arm.value.value, plan.target.element, valueText)
       if (element === null) return null
       yielded = `(${out} = ${element}, true)`
     }
     let returned = 'false'
     if (arm.returns && !valueless) {
-      const value = alignedValueText(ctx, 'emit-protocol-iterator.ts:completion', arm.value.value, plan.target.completion, valueText)
+      const value = protocolLeafText(ctx, 'emit-protocol-iterator.ts:completion', arm.value.value, plan.target.completion, valueText)
       if (value === null) return null
       returned = `(${completion} = ${value}, false)`
     }
@@ -100,14 +130,23 @@ const stepResultText = (ctx: ConversionSite, plan: ProtocolIteratorPlan, member:
  * reference to the object, each calling its own member.
  */
 export const protocolIteratorText = (ctx: ConversionSite, source: Representation, target: Representation, text: string): string | null => {
-  // Into an optional cursor slot the view is the present value.
-  if (target.kind === 'optional') {
-    const present = protocolIteratorText(ctx, source, target.payload, text)
-    return present === null ? null : `${cppTypeOf(target)}(${present})`
+  const node = ctx.conversions.nodeById(structuralConversionKey(source, target))
+  const materializer = node?.capability.kind === 'atom' || node?.capability.kind === 'static' ? node.capability.materializer : null
+  return materializer?.protocolIterator === undefined ? null : certifiedProtocolIteratorText(ctx, materializer.protocolIterator, text)
+}
+
+export const certifiedProtocolIteratorText = (
+  ctx: ConversionSite,
+  certified: CertifiedProtocolIteratorPlan,
+  text: string
+): string | null => {
+  ctx = { ...ctx, protocolRecipe: certified } as ProtocolIteratorSite
+  const plan = certified.view
+  const wrap = (text: string): string => (certified.target.kind === 'optional' ? `${cppTypeOf(certified.target)}(${text})` : text)
+  if (plan.target.kind === 'async-generator') {
+    const built = asyncProtocolText(ctx, plan, text)
+    return built === null ? null : wrap(built)
   }
-  const plan = protocolIteratorPlanFor(ctx.layouts, source, target)
-  if (plan === null) return null
-  if (plan.target.kind === 'async-generator') return asyncProtocolText(ctx, plan, text)
   const cursor = cppTypeOf(plan.target)
   const element = cppTypeOf(plan.target.element)
   const storage = `${cursor}::ReturnStorage`
@@ -132,7 +171,7 @@ export const protocolIteratorText = (ctx: ConversionSite, source: Representation
     const parameter = plan.raise.abi.parameters[0]
     if (parameter === undefined) return null
     const thrownType = cppTypeOf(thrownValueCarrier)
-    const argument = alignedValueText(ctx, 'emit-protocol-iterator.ts:thrown', thrownValueCarrier, parameter.value, 'gea_protocol_error')
+    const argument = protocolLeafText(ctx, 'emit-protocol-iterator.ts:thrown', thrownValueCarrier, parameter.value, 'gea_protocol_error')
     const raiseCall = argument === null ? null : memberCallText(ctx, plan, plan.raise, [argument])
     const raiseStep = stepResultText(ctx, plan, plan.raise)
     if (raiseCall === null || raiseStep === null) return null
@@ -149,16 +188,16 @@ export const protocolIteratorText = (ctx: ConversionSite, source: Representation
         `auto ${result} = ${raiseCall}; (void)${completion}; return ${raiseStep}; };`
     )
   }
-  return (
+  return wrap(
     `([&]() -> ${cursor} { ${holderType} ${holder} = ${text}; ` +
-    `auto gea_protocol_steps = gea::makeRef<${cursor}::ProtocolSteps>(); ${steps.join(' ')} ` +
-    `return ${cursor}(gea_protocol_steps); }())`
+      `auto gea_protocol_steps = gea::makeRef<${cursor}::ProtocolSteps>(); ${steps.join(' ')} ` +
+      `return ${cursor}(gea_protocol_steps); }())`
   )
 }
 
 /**
- * The async-generator view of a hand-written async iterator object (mongodb's
- * `onData`): `AsyncGenerator::ProtocolSteps` closures that hand the member's
+ * The async-generator view of a hand-written async iterator object (an
+ * event-stream `onData` iterator): `AsyncGenerator::ProtocolSteps` closures that hand the member's
  * own promise back, mapped onto the generator's step. Nothing here waits --
  * the `for await` that drives the view suspends on the promise, so the object's
  * `next()` can settle from the event queue that pump is serving.
@@ -188,7 +227,8 @@ const asyncProtocolText = (ctx: ConversionSite, plan: ProtocolIteratorPlan, text
     const present = presenceText(plan, plan.finish)
     // AsyncIteratorClose reads only that `return()` answered an object; a
     // result whose value cannot reach the completion still closes as done.
-    const finishStep = stepResultText(ctx, plan, plan.finish) ?? 'false'
+    const finishStep = (ctx as ProtocolIteratorSite).protocolRecipe.finishStep ? stepResultText(ctx, plan, plan.finish) : 'false'
+    if (finishStep === null) throw new Error('a protocol iterator return step has no renderable certified frame')
     steps.push(
       `gea_protocol_steps->finish = [&${holder}](${cursor}::ReturnStorage gea_protocol_value) -> gea::Promise<${step}> { ` +
         (present === null
@@ -201,7 +241,7 @@ const asyncProtocolText = (ctx: ConversionSite, plan: ProtocolIteratorPlan, text
     const parameter = plan.raise.abi.parameters[0]
     if (parameter === undefined) return null
     const thrownType = cppTypeOf(thrownValueCarrier)
-    const argument = alignedValueText(ctx, 'emit-protocol-iterator.ts:thrown', thrownValueCarrier, parameter.value, 'gea_protocol_error')
+    const argument = protocolLeafText(ctx, 'emit-protocol-iterator.ts:thrown', thrownValueCarrier, parameter.value, 'gea_protocol_error')
     const raiseCall = argument === null ? null : memberCallText(ctx, plan, plan.raise, [argument])
     const raiseStep = stepResultText(ctx, plan, plan.raise)
     if (raiseCall === null || raiseStep === null) return null

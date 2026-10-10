@@ -1,20 +1,14 @@
 // A CLASS METHOD READ THROUGH A RUNTIME KEY, CAST TO A RECEIVER-LESS FUNCTION
 // TYPE, AND CALLED.
 //
-// `raw[key]()` where `key` is a generic over a literal union is hono's
-// `HonoRequest.#cachedBody` exactly: the reader is selected at run time and
+// `raw[key]()` where `key` is a generic over a literal union is an HTTP
+// framework's `AppRequest.#cachedBody` exactly: the reader is selected at run time and
 // the read is cast to `() => Promise<Body[Key]>`, a function type that
 // declares no `this` because no TypeScript method type ever does.
 //
-// The value that read publishes is a METHOD, whose emitted thunk takes the
-// instance as its leading formal. Three parties have to agree about that and
-// used not to: the class-layout arm materialises the method at the corrected,
-// receiver-first convention (`boundMethodValueRepresentation`); the call is
-// handed the receiver the read went through (`direct-call-receivers.ts`); and
-// the read's own slot, plus the object's OWN-property arm that shadows the
-// prototype, were both spelled from the uncorrected, receiver-less type the
-// cast named. The ternary would not reconcile and the call passed an argument
-// to a zero-parameter callable.
+// The getter publishes the selected Function without capturing the object.
+// The immediate member call supplies its logical receiver through the native
+// method entry, while own-property overrides keep the same published carrier.
 
 type Body = {
   text: string
@@ -44,7 +38,7 @@ const reader = new Reader('payload')
 // the receiver-less callable the language sees.
 const read = <Key extends keyof Body>(key: Key): Promise<Body[Key]> => (reader[key] as () => Promise<Body[Key]>)()
 
-// Called by name as well, exactly as hono's `HonoRequest.text()` wraps the
+// Called by name as well, exactly as that framework's `AppRequest.text()` wraps the
 // same reader `#cachedBody` selects at run time: a method reachable ONLY
 // through the computed read is shaken before the class layout is projected,
 // and the read then has no prototype arm to select at all.

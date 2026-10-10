@@ -16,9 +16,8 @@ import type { IrBody } from './model.js'
  * When the declaration is evaluated ONCE there is only one such state for the
  * whole program, and a handle per instance says nothing the class itself
  * could not say. `records.ts` then states it once, as a `static` member of
- * the struct, and the construct function fills it in. On
- * `bench/comparison/fixtures/binary_trees.ts` that is eight bytes off every
- * one of a million nodes.
+ * the struct, and the construct function fills it in. On a recursive
+ * binary-tree build that is eight bytes off every one of a million nodes.
  *
  * "Once" is the operation sitting in a region body -- a module body or a
  * static block, which the language runs a single time -- outside any cyclic

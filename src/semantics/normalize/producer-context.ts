@@ -23,6 +23,9 @@ import type { HostMethodBinding } from '../host-methods.js'
 import type { CommonJsRequireCensus } from './commonjs-require.js'
 import type { CommonJsModuleRecordCensus } from './commonjs-module-record.js'
 import type { DeadEventCall } from './dead-event-emissions.js'
+import type { SourceDescriptorOwnProtocol } from './flow/source-descriptor-protocol.js'
+import type { SourceOwnAssignment, SourceOwnSlot } from './flow/source-value-session.js'
+import type { SourceCallableReadonlySet } from './flow/source-callable-readonly-set.js'
 
 /**
  * What every family producer is given.
@@ -49,6 +52,22 @@ import type { DeadEventCall } from './dead-event-emissions.js'
  * them into one.
  */
 export interface ProducerContext {
+  readonly readonlyCallableSetAt?: (access: ts.PropertyAccessExpression | ts.ElementAccessExpression) => SourceCallableReadonlySet | null
+  /** Exact source slots after shared Object.assign and prototype obligations are discharged. `describedKeysOf` is the
+   * caller's representation key authority for a source no closed family describes (see `SourceValueSession.ownAssignmentOf`). */
+  readonly ownAssignmentAt?: (
+    call: ts.CallExpression,
+    path: SpecializationPath,
+    describedKeysOf: (expression: ts.Expression) => readonly string[] | null
+  ) => SourceOwnAssignment | null
+  readonly ownSlotAt?: (expression: ts.Expression, key: string) => SourceOwnSlot | null
+  /** Actual descriptor own-field/prototype receipt after final shared intrinsic discharge. */
+  readonly descriptorOwnProtocolAt?: (definition: ts.CallExpression) => SourceDescriptorOwnProtocol | null
+  /** Complete actual source-object roots for this exact logical left or negation operand, after final intrinsic discharge. */
+  readonly logicalLeftObjectTruthyAt?: (left: ts.Expression) => boolean
+  /** A closed installation proof places this global property in its declaration's native cell. */
+  readonly installedGlobalPropertyBindingAt?: (node: ts.PropertyAccessExpression | ts.ElementAccessExpression) => DeclarationId | null
+  readonly ownsInstalledGlobalProperty?: (declaration: DeclarationId) => boolean
   /** Declaration provenance from the one ts.Program; callers must not infer library ownership from names or paths. */
   readonly isStandardLibraryDeclaration?: (declaration: ts.Declaration) => boolean
   readonly hostMethodOf?: (node: ts.PropertyAccessExpression | ts.ElementAccessExpression) => HostMethodBinding | null
@@ -103,13 +122,13 @@ export interface ProducerContext {
    * caller's own specialization frame whenever that class happens to be the
    * SAME declaration as the frame's owner, purely because `identities.ts`'s
    * `contains` is (correctly, and by design -- see `structural.ts`'s
-   * `isSelfReference`) self-inclusive. `parseBody(this, options)` inside
-   * `HonoRequest.parseBody`'s own body is the concrete case: `parseBody`'s
-   * declared parameter type names `HonoRequest`, which is not `HonoRequest`'s
-   * own body reaching itself, but `body.ts`'s unrelated parameter type
-   * happening to collide in NAME with the enclosing method's class while
-   * `this` walk is inside `HonoRequest`'s copy 0 -- and it must not mint
-   * `HonoRequest@0` for that reason alone.
+   * `isSelfReference`) self-inclusive. A method
+   * `Req.parse` whose body calls a module function `parse(this, options)` is
+   * the concrete case: that function's declared parameter type names `Req`,
+   * which is not `Req`'s own body reaching itself, but another module's
+   * unrelated parameter type happening to collide in NAME with the enclosing
+   * method's class while `this` walk is inside `Req`'s copy 0 -- and it must
+   * not mint `Req@0` for that reason alone.
    *
    * `producers/invocations.ts`'s `buildSelectedSignature` tried the same
    * narrowing for a `SelectedSignature`'s `thisParameter`/`parameters`/
@@ -126,8 +145,8 @@ export interface ProducerContext {
    * inside the caller's frame" (what `prefixFor` alone answers). A resolved
    * signature's RETURN type can carry real, call-dependent generic
    * substitution that this collapse-to-canonical narrowing has no way to
-   * tell apart from the `HonoRequest.parseBody`-style name collision above.
-   * `hono-base.ts`'s `Object.assign(this, optionsWithoutStrict)`
+   * tell apart from the `Req.parse`-style name collision above.
+   * A constructor's `Object.assign(this, options)`
    * (`Object.assign<T, U>`, `T`/`U` inferred from the call's own arguments)
    * and `this.router.match(method, path)` (`Router<T>.match`, `T` fixed by
    * the RECEIVER `this.router`'s own concrete instantiation, not by
@@ -137,8 +156,8 @@ export interface ProducerContext {
    * result through the callee's canonical frame mints a fresh identity for
    * a class the caller's own frame already has a name for, instead of
    * reusing it: the same disagreement shape as that regression, by a
-   * different route. The `HonoRequest.parseBody` case this field's own
-   * fix handles carries no substitution at all -- `HonoRequest | Request`
+   * different route. The `Req.parse` case this field's own
+   * fix handles carries no substitution at all -- `Req | Request`
    * is a plain, unconditional union annotation, not a generic instantiation
    * -- which is exactly why narrowing is safe for a callee's own VALUE type
    * (`resolvedCalleeSignatureType`'s `plain`) but is not, in general, safe
@@ -150,7 +169,7 @@ export interface ProducerContext {
    * a real substitution reaches) should keep resolving through the
    * caller's own `types`, unfiltered, exactly as this field's `path` was
    * never threaded into `buildSelectedSignature` to begin with. (Verified
-   * 2026-09-03: on a fresh build of the live tree, `hono-base.ts:171`/`:419`
+   * 2026-09-03: on a fresh build of the live tree, both call shapes above
    * raised zero producer failures, and `producers/invocations.ts` carried no
    * uncommitted change -- the two disagreements this paragraph describes as
    * a HAZARD were never actually observed at HEAD. The hypothesis, unconfirmed,

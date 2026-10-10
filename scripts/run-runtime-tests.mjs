@@ -50,7 +50,7 @@
  * refused by name now certifies, which is worth catching by name, the same
  * way `known-wrong` catches a silent fix in the other direction.
  *
- *   node scripts/run-runtime-tests.mjs [--dist <dir>] [--only <substring>] [--shard <i>/<n>] [--translation-units single|per-file]
+ *   node scripts/run-runtime-tests.mjs [--dist <dir>] [--only <substring>] [--shard <i>/<n>] [--jobs <n>] [--translation-units single|per-file]
  *
  * `--shard <i>/<n>` runs every n-th program (1-based offset), which is the
  * only parallelism this suite has: each program is an independent
@@ -62,12 +62,13 @@
  * links and prints the same answers is one that split the program without
  * changing it.
  *
- * `--timings`, `--no-native-cache`, and `--no-pch` pass through to the native
- * builder. Each shard requires its own existing --out-dir; serial runs reuse
- * the default build directory and runtime PCH across programs and suite runs.
+ * `--timings`, `--no-native-cache`, `--no-pch` and `--runtime prebuilt|single`
+ * pass through to the native builder (docs/NATIVE-BUILD-CACHE.md). Each shard
+ * requires its own existing --out-dir; the runtime PCH and object are shared
+ * by every worker and suite run through one content-keyed cache.
  */
-import { spawnSync } from 'node:child_process'
-import { readFileSync, readdirSync, existsSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -128,6 +129,21 @@ if (shard !== null && output === null) {
   console.error('--shard requires --out-dir pointing to an existing directory exclusive to that worker')
   process.exit(2)
 }
+// `--jobs <n>`: run n programs at once inside this one process. Each worker
+// builds into its own `<out-dir>/j<k>`, because run-emitted's native build
+// writes fixed file names into its output directory. A serial loop left a
+// many-core machine idle for every `--only` slice.
+const jobs = Math.max(1, Number(flag('--jobs', '1')) || 1)
+if (jobs > 1 && output === null) {
+  console.error('--jobs requires --out-dir; each worker builds into <out-dir>/j<k>')
+  process.exit(2)
+}
+const workerDirs = Array.from({ length: jobs }, (_, index) => {
+  if (jobs === 1) return output === null ? null : resolve(output)
+  const directory = join(resolve(output), `j${index + 1}`)
+  mkdirSync(directory, { recursive: true })
+  return directory
+})
 
 const dir = join(here, 'test', 'runtime')
 // The dialect these programs are compiled under, stated rather than inherited.
@@ -171,7 +187,7 @@ const files = readdirSync(dir)
       !name.endsWith('.d.ts') &&
       !name.startsWith('_')
   )
-  .filter((name) => (only ? name.includes(only) : true))
+  .filter((name) => (only ? only.split(',').some((part) => name.includes(part)) : true))
   .sort()
   .filter((_, index) => shardOf === null || index % shardOf.count === shardOf.index - 1)
 
@@ -213,7 +229,16 @@ const hasFlag = (source, name) =>
 let failed = 0
 let known = 0
 const outcomes = new Map()
-for (const file of files) {
+const runProgram = (args) =>
+  new Promise((done) => {
+    const child = spawn('node', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    let text = ''
+    child.stdout.on('data', (chunk) => (text += chunk))
+    child.stderr.on('data', (chunk) => (text += chunk))
+    child.on('error', (error) => done({ stdout: text + error.message, status: 1 }))
+    child.on('close', (status) => done({ stdout: text, status: status ?? 1 }))
+  })
+const runFile = async (file, workerDir) => {
   const path = join(dir, file)
   const perProgramProject = join(dir, file.replace(/\.(?:tsx?|runtime\.js|js)$/, '.tsconfig.json'))
   const projectForProgram = existsSync(perProgramProject) ? perProgramProject : project
@@ -222,7 +247,7 @@ for (const file of files) {
   // and dying on it threw away every result before it.
   if (!existsSync(path)) {
     console.log(`skip  ${file}   (removed while the suite was running)`)
-    continue
+    return
   }
   const source = readFileSync(path, 'utf8')
   const expects = directives(source, 'expect')
@@ -247,23 +272,25 @@ for (const file of files) {
   let status = 0
   try {
     const passthrough = [
-      ...(output ? ['--out-dir', resolve(output)] : []),
+      ...(workerDir ? ['--out-dir', workerDir] : []),
       ...(layout ? ['--translation-units', layout] : []),
       ...(compileOnly ? ['--compile-only'] : []),
       ...(dynamicFallback ? ['--dynamic-fallback'] : []),
-      ...['--no-native-cache', '--no-pch', '--timings'].filter((option) => argv.includes(option))
+      ...['--no-native-cache', '--no-pch', '--timings'].filter((option) => argv.includes(option)),
+      ...(flag('--runtime', null) ? ['--runtime', flag('--runtime', null)] : [])
     ]
-    const result = spawnSync(
-      'node',
-      [join(here, 'scripts', 'run-emitted.mjs'), path, '--dist', dist, '--project', projectForProgram, ...passthrough, ...shape],
-      {
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe']
-      }
-    )
-    stdout = `${result.stdout ?? ''}${result.stderr ?? ''}`
-    status = result.status ?? 1
-    if (result.error) stdout += result.error.message
+    const result = await runProgram([
+      join(here, 'scripts', 'run-emitted.mjs'),
+      path,
+      '--dist',
+      dist,
+      '--project',
+      projectForProgram,
+      ...passthrough,
+      ...shape
+    ])
+    stdout = result.stdout
+    status = result.status
     if (argv.includes('--timings')) {
       for (const line of stdout.split('\n').filter((line) => line.startsWith('NATIVE BUILD '))) console.error(`${file}: ${line}`)
     }
@@ -307,11 +334,18 @@ for (const file of files) {
     failed += 1
     console.log(`FAIL  ${file}`)
     for (const problem of problems) console.log(`        ${problem}`)
+    if (stdout.trim() !== '') console.log(stdout.trimEnd())
   } else {
     console.log(`ok    ${file}${wrongs.length ? `   (${wrongs.length} known-wrong)` : ''}`)
   }
   outcomes.set(file, problems.length ? 'FAIL' : 'ok')
 }
+const queue = [...files]
+await Promise.all(
+  workerDirs.map(async (workerDir) => {
+    while (queue.length) await runFile(queue.shift(), workerDir)
+  })
+)
 
 console.log(`\n${files.length} programs: ${files.length - failed} ok, ${failed} failed, ${known} known-wrong reproduced`)
 

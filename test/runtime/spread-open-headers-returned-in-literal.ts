@@ -1,18 +1,18 @@
 // An open `Document` spread with two more keys into a const, then returned as
 // a member of a literal whose declared type is again the open `Document` --
-// mongodb's Azure KMS `prepareRequest`. The const keeps the source's dynamic
+// a cloud key-service client's `prepareRequest`. The const keeps the source's dynamic
 // keys, and so does the member it becomes.
 
-interface BsonDocument {
+interface WireDocument {
   [key: string]: any
 }
 
 interface RequestOptions {
-  headers?: BsonDocument
+  headers?: WireDocument
   url?: string
 }
 
-function prepareRequest(options: RequestOptions): { headers: BsonDocument; url: string } {
+function prepareRequest(options: RequestOptions): { headers: WireDocument; url: string } {
   const url = options.url ?? 'http://169.254.169.254/metadata/identity/oauth2/token'
   const headers = { ...options.headers, 'Content-Type': 'application/json', Metadata: true }
   return { headers, url }

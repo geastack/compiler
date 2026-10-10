@@ -1,7 +1,7 @@
 // SYMBOL-KEYED CLASS FIELDS DECLARED WITHOUT AN INITIALIZER, BESIDE
 // SYMBOL-KEYED METHODS.
 //
-// The shape `@hono/node-server`'s lightweight request takes once its prototype
+// The shape a Node HTTP adapter's lightweight request takes once its prototype
 // surgery is written as the class the language has for it: nine fields on
 // module-level `unique symbol` keys, most of them absent until something
 // assigns them, and methods on symbol keys of their own.
@@ -21,7 +21,7 @@ class Box {
   }
 }
 
-// Declared BEFORE the class it names: `@hono/node-server`'s body readers sit
+// Declared BEFORE the class it names: the adapter's body readers sit
 // two hundred lines above the request they take, and a class used as a type
 // ahead of its own declaration is exactly what the adapter produces.
 const clearBuffer = (holder: LightHolder): void => {

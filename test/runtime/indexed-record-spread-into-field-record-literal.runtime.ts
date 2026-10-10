@@ -1,4 +1,4 @@
-// mongodb's ScramSHA.prepare: `{ ...handshakeDoc, speculativeAuthenticate }`
+// A database client's SCRAM auth `prepare`: `{ ...handshakeDoc, speculativeAuthenticate }`
 // spreads an interface with an index signature into a literal whose own type
 // names its keys. Declared fields and index entries the literal names both land.
 interface Doc {

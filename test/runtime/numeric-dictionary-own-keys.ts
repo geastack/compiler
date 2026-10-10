@@ -6,8 +6,8 @@
 //! emitted-has: gea::host::ObjectConstructor::ownPropertyNamesOf
 
 // `Object.keys`/`Object.getOwnPropertyNames`/`Object.hasOwn` over a
-// NUMBER-keyed dictionary of class instances (`webglTextures`/`programs`
-// shape in three.js: `{[id: number]: T}`) used to convert the whole table to
+// NUMBER-keyed dictionary of class instances (`gpuTextures`/`programs`
+// shape in a 3D scene-graph library: `{[id: number]: T}`) used to convert the whole table to
 // `dynamic` -- `object-protocol.ts`'s own-key views refused a numeric
 // dictionary by name, so the call fell back to the intrinsic's declared
 // `(o: object) => string[]` ABI and boxed every member `T` carries. The

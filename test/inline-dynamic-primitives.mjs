@@ -1,3 +1,4 @@
+import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -7,7 +8,17 @@ const root = resolve(import.meta.dirname, '..')
 const binary = resolve(root, `measurements/inline-dynamic-primitives${executableSuffix}`)
 execFileSync(
   'clang++',
-  ['-std=c++20', '-O2', '-fsanitize=address,undefined', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],
+  [
+    '-std=c++20',
+    ...nativeOptimization('optimized'),
+    '-fsanitize=address,undefined',
+    `-I${resolve(root, 'src/targets/cpp/runtime')}`,
+    '-x',
+    'c++',
+    '-',
+    '-o',
+    binary
+  ],
   {
     input: `#include "gea_runtime.h"
       #include <iostream>

@@ -4,7 +4,7 @@
 //! expect: 0 -
 //! expect: 4 5,6,7,8
 //! expect: 1 -
-// bson's `tryReadBasicLatin` pushes the bytes of a key that starts at some
+// A binary-document serializer's `tryReadBasicLatin` pushes the bytes of a key that starts at some
 // offset into the buffer: `for (let i = start; i < end; i++) bytes.push(...)`.
 // The capacity hint is the loop's trip count, `end - start`; the test's bound
 // alone reserved `end` slots for every key.

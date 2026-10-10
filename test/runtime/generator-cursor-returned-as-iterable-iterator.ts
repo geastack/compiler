@@ -1,6 +1,6 @@
 // A native generator cursor returned where `IterableIterator<T>` is declared.
 //
-// `mongodb-connection-string-url`'s case-insensitive `URLSearchParams`
+// A connection-string parser's case-insensitive `URLSearchParams`
 // subclass overrides `keys()`/`values()`/`entries()` with `return
 // super.keys() as IterableIterator<K>`. node-compat's `URLSearchParams`
 // (`runtime/node/globals.ts`) implements each as a generator behind an

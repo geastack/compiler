@@ -1,4 +1,4 @@
-// The MongoDB driver's connection sends a command by walking async
+// A database client's connection sends a command by walking async
 // generators: `for await (const response of this.readMany(options))` inside
 // `sendWire`, itself an `async *` walked by `sendCommand`, walked by
 // `command`. An async generator is its own async iterator, so each loop walks

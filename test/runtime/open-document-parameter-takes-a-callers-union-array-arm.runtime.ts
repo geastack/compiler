@@ -1,6 +1,6 @@
 // A CALLER'S `Document | Document[]` HANDED TO AN OPEN-DOCUMENT PARAMETER.
 //
-// mongodb's `Collection.updateOne(filter, update: UpdateFilter<TSchema> |
+// A database client's `Collection.updateOne(filter, update: UpdateFilter<TSchema> |
 // Document[])` passes `update` on to `new UpdateOneOperation(ns, filter,
 // update: Document, options)`, which asks `hasAtomicOperators(update)` -- an
 // update pipeline is an array. The constructor's cell must hold the array the

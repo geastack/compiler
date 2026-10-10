@@ -32,6 +32,23 @@ export const intrinsicOwnKeyQueryOf = (
   return key === 'ownKeys' && isStandardGlobalValue(checker, callee.expression, 'Reflect') ? { owner: 'Reflect', member: key } : null
 }
 
+/** Identity only. The caller must retain the exact static-member mutation
+ * obligation and prove that serialization enters no source-owned hooks.
+ * @semanticCategory generic-primitive
+ */
+export const intrinsicJsonStringifyQueryOf = (checker: ts.TypeChecker, callee: ts.Expression): boolean => {
+  if (!ts.isPropertyAccessExpression(callee) || callee.name.text !== 'stringify') return false
+  const owner = checker.getSymbolAtLocation(callee.expression)
+  const member = checker.getSymbolAtLocation(callee.name)
+  return (
+    owner?.valueDeclaration !== undefined &&
+    member?.declarations !== undefined &&
+    member.declarations.length > 0 &&
+    [owner.valueDeclaration, ...member.declarations].every((declaration) => declaration.getSourceFile().hasNoDefaultLib) &&
+    isStandardGlobalValue(checker, callee.expression, 'JSON')
+  )
+}
+
 export type IntrinsicPropertyCallContext = Pick<
   ProducerContext,
   'checker' | 'identities' | 'isStandardLibraryDeclaration' | 'globalHostMutationTaint'
@@ -42,7 +59,13 @@ export const intrinsicPropertyCallOf = (
   context: IntrinsicPropertyCallContext,
   node: ts.CallExpression | ts.NewExpression,
   callee: ts.Node
-): 'own-keys' | 'define-property' | 'carrier-predicate' | NonNullable<InvocationOperation['intrinsicReflection']> | null => {
+):
+  | 'own-keys'
+  | 'define-property'
+  | 'carrier-predicate'
+  | NonNullable<InvocationOperation['intrinsicReflection']>
+  | NonNullable<InvocationOperation['intrinsicObservation']>
+  | null => {
   if (!ts.isCallExpression(node) || !ts.isPropertyAccessExpression(callee)) return null
   const member = callee.name.text
   const owner = callee.expression
@@ -50,8 +73,11 @@ export const intrinsicPropertyCallOf = (
   const memberSymbol = context.checker.getSymbolAtLocation(callee.name)
   if (!intrinsicStaticMemberIsIntact(context, symbol, memberSymbol, owner)) return null
   if (intrinsicOwnKeyQueryOf(context.checker, callee) !== null) return 'own-keys'
+  if (intrinsicJsonStringifyQueryOf(context.checker, callee)) return 'stringify'
   if (isGlobalObjectConstructor(context.checker, owner, context.checker.getTypeAtLocation(owner))) {
     if (member === 'getOwnPropertyDescriptor') return 'getOwnPropertyDescriptor'
+    if (member === 'values' || member === 'entries' || member === 'isFrozen' || member === 'isSealed' || member === 'isExtensible')
+      return member
     if (member === 'defineProperty') {
       const prototype = context.checker.getTypeAtLocation(owner).getProperty('prototype')
       const prototypeId = prototype ? context.identities.symbolDeclarationId(prototype) : null

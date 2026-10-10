@@ -106,10 +106,10 @@ const superCallsIn = (constructor: ts.ConstructorDeclaration): ts.CallExpression
  * writing the frame cannot change the parameter, so enumerating the call
  * arguments still enumerates every value the parameter can hold.
  *
- * three's `Object3D.add( object )` walks its own `arguments` to add several
- * children at once, and that alone refused `object`'s value set -- which is
- * the cell behind the `array-element` carriers, the largest single group in
- * the three.js app's nested population.
+ * A tree's `add( object )` method that walks its own `arguments` to add
+ * several children at once is the shape this admits: that alone refused
+ * `object`'s value set -- the cell behind a whole group of `array-element`
+ * carriers in the nested population.
  *
  * ⚠ Narrow on purpose. A plain function in an ES module, or under an explicit
  * `'use strict'`, is also always unmapped and could join this -- but proving
@@ -154,7 +154,7 @@ export const constructorCallsOf = (
 
 /**
  * The calls of a callable bound once to an unexported name that only direct
- * calls mention (three's `uploadTexture`). Callable reach leaves exactly
+ * calls mention (a module-private helper called by name). Callable reach leaves exactly
  * these to its consumer. Any other mention -- an alias, an export, a
  * publication -- is callable reach's to prove.
  */
@@ -252,7 +252,7 @@ export const parameterValuesOf = (
   }
   // A recursive query for the same parameter is refused while it is proven.
   held.set(parameter, null)
-  enterHypothesisGuard(parameter)
+  enterHypothesisGuard(parameter, true)
   try {
     const values = computeParameterValues(checker, flow, parameter)
     held.set(parameter, values)

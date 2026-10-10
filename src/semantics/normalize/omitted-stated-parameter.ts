@@ -11,17 +11,17 @@ import {
  * A JavaScript parameter whose JSDoc states its type, but which some caller
  * leaves out.
  *
- * The declaration overlay now carries `@types/three`'s parameter types into
- * three's own sources, and `.d.ts` files state what a well-typed caller
- * passes -- not what three itself passes. `WebGLState`'s `ColorBuffer`:
+ * The declaration overlay carries a separate type package's parameter types
+ * into a JavaScript library's own sources, and `.d.ts` files state what a
+ * well-typed caller passes -- not what the library itself passes:
  *
- *     // @param {boolean} premultipliedAlpha      (required in the .d.ts)
- *     setClear: function ( r, g, b, a, premultipliedAlpha ) {
- *       if ( premultipliedAlpha === true ) { ... }
+ *     // @param {boolean} premultiplied      (required in the .d.ts)
+ *     setClear: function ( r, g, b, a, premultiplied ) {
+ *       if ( premultiplied === true ) { ... }
  *     }
  *
- *     colorBuffer.setClear( 0, 0, 0, 1 );                // WebGLState
- *     _state.buffers.color.setClear( 0, 0, 0, 0 );       // WebGLShadowMap
+ *     buffer.setClear( 0, 0, 0, 1 );                 // one module
+ *     state.buffers.color.setClear( 0, 0, 0, 0 );    // another module
  *
  * A readable JSDoc type keeps a parameter out of the census's inference
  * (`isUnannotated`), and the tag is no optionality mark, so the parameter
@@ -88,11 +88,10 @@ export const statedParameterWithOmission = (
   const reachedBySpread = (args: readonly ts.Expression[]): boolean => args.slice(0, index + 1).some(ts.isSpreadElement)
   // Absence reaches the parameter two ways: a call that leaves the argument
   // out, and a call that passes a value which can itself be `undefined`. The
-  // second is the first with a forwarding hop in between -- three's
-  // `refreshMaterialUniforms( ..., transmissionRenderTarget )` hands its own
-  // parameter (`state.transmissionRenderTarget[ camera.id ]`, undefined until
-  // the first transmissive draw) to `refreshUniformsPhysical`, which reads it
-  // only under `material.transmission > 0`. Forwarding an absent value is no
+  // second is the first with a forwarding hop in between -- a function
+  // `refresh( ..., target )` hands its own parameter (`state.targets[ id ]`,
+  // undefined until first written) to a helper which reads it only under a
+  // guard such as `options.enabled > 0`. Forwarding an absent value is no
   // read of it, so the callee's slot must be able to hold it; refusing the
   // widening left a required slot that threw at the call.
   const carriesAbsence = (type: ts.Type): boolean =>
@@ -107,10 +106,10 @@ export const statedParameterWithOmission = (
   if (!omitted && !passedAbsent) return null
   // A statement that already admits `undefined` holds a passed absent value as
   // written, so this rule has nothing to add -- and binding it anyway would
-  // pre-empt every later rule that refines the parameter. The native-webgl
-  // overlay states three's uniform setters as `NativeUniformValue`, which
-  // includes `undefined`; claiming those left `array[ 0 ]` reading the whole
-  // value union. (An omitted argument keeps its existing answer.)
+  // pre-empt every later rule that refines the parameter. An overlay that
+  // states a setter's parameter as a value union which includes `undefined`
+  // is the case; claiming it left `array[ 0 ]` reading the whole value
+  // union. (An omitted argument keeps its existing answer.)
   if (!omitted && carriesAbsence(stated)) return null
   for (const args of argumentLists) {
     if (reachedBySpread(args)) return { refused: 'stated-omission-spread-argument' }

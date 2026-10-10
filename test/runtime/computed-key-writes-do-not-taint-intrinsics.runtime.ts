@@ -4,7 +4,7 @@
 // it cannot rule that out, every intrinsic is distrusted and recognitions such
 // as `Object.prototype.toString.call(x)` or the %TypedArray%.prototype
 // @@toStringTag getter are refused. These are the shapes a serializer or
-// document builder writes (bson, the mongodb driver): a null-prototype record
+// document builder writes (a binary-document serializer, a database client): a null-prototype record
 // filled from a Map, a `dest[name] = v` helper whose every caller passes a
 // fresh literal, a record rebuilt from another record's entries.
 

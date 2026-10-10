@@ -29,8 +29,8 @@ import { sharedPrimitiveDomainOf } from './primitive-domain.js'
  *     again one level down; and a field of its own type would make the struct
  *     contain itself, which has no size.
  *
- * What this buys is the layout the fixture comment in
- * `bench/comparison/fixtures/object_create.ts` describes: a `Point[]` becomes a
+ * What this buys is the layout a program filling an array with small
+ * `{ x, y }` objects wants: a `Point[]` becomes a
  * contiguous `std::vector` of structs, with no per-object allocation and no
  * refcount traffic on a store -- exactly what the hand-written C++ baseline
  * does, and what `gea::Ref<Point>` per element cannot.
@@ -76,7 +76,8 @@ const objectCoresOf = (graph: SemanticGraph, id: StructuralTypeId, into: Set<Str
   // is keyed by -- so a write through the NAME has to reach the layout the
   // name stands for, or `type Point = {...}` would be judged immutable while
   // `p.x = 1` sits in the program.
-  if (shape.kind === 'declared' && shape.body !== null) objectCoresOf(graph, shape.body, into)
+  if ((shape.kind === 'declared' || shape.kind === 'class-instance') && shape.body !== null) objectCoresOf(graph, shape.body, into)
+  if (shape.kind === 'object-anchor') objectCoresOf(graph, shape.body, into)
   if (shape.kind === 'union' || shape.kind === 'intersection') for (const member of shape.members) objectCoresOf(graph, member, into)
 }
 
@@ -121,6 +122,53 @@ const isFlatTupleData = (graph: SemanticGraph, shape: Extract<StructuralShape, {
 
 export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<StructuralTypeId> => {
   const disqualified = new Set<StructuralTypeId>()
+  // Binding initialization and assignment preserve object identity, even
+  // when their two checker views use different structural ids. Connect all
+  // reads/writes of the exact declaration before propagating copy failures.
+  const aliases = new Map<StructuralTypeId, Set<StructuralTypeId>>()
+  const bindings = new Map<DeclarationId, Set<StructuralTypeId>>()
+  const connect = (values: Iterable<StructuralTypeId>): void => {
+    const cores = new Set<StructuralTypeId>()
+    for (const value of values) objectCoresOf(graph, value, cores)
+    const ids = [...cores]
+    const root = ids[0]
+    if (root === undefined) return
+    for (const id of ids.slice(1)) {
+      const from = aliases.get(root) ?? new Set<StructuralTypeId>()
+      const into = aliases.get(id) ?? new Set<StructuralTypeId>()
+      from.add(id)
+      into.add(root)
+      aliases.set(root, from)
+      aliases.set(id, into)
+    }
+  }
+  const hasOnlyDataReads = (id: StructuralTypeId, seen = new Set<StructuralTypeId>()): boolean => {
+    if (seen.has(id)) return false
+    const next = new Set(seen).add(id)
+    const shape = graph.structuralTypes.get(id)?.shape
+    if (!shape) return false
+    if (shape.kind === 'declared' || shape.kind === 'class-instance') return shape.body !== null && hasOnlyDataReads(shape.body, next)
+    if (shape.kind === 'object-anchor') return hasOnlyDataReads(shape.body, next)
+    if (shape.kind === 'union' || shape.kind === 'intersection') return shape.members.every((member) => hasOnlyDataReads(member, next))
+    if (shape.kind === 'primitive') return shape.primitive !== 'any' && shape.primitive !== 'unknown'
+    if (shape.kind === 'literal' || shape.kind === 'unique-symbol') return true
+    if (shape.kind === 'tuple') return isFlatTupleData(graph, shape)
+    return shape.kind === 'object' && isFlatData(graph, shape)
+  }
+  for (const operation of graph.operations.values()) {
+    if (operation.family !== 'binding') continue
+    const types = bindings.get(operation.declaration) ?? new Set<StructuralTypeId>()
+    for (const result of operation.results) types.add(result.type)
+    if (operation.action === 'initialize' || operation.action === 'write')
+      for (const operand of operation.operands) {
+        types.add(operand.type)
+        // A primitive-looking projection of a class/accessor object must not
+        // run its getter while it is bound, nor cache later native writes.
+        if (!hasOnlyDataReads(operand.type)) objectCoresOf(graph, operand.type, disqualified)
+      }
+    bindings.set(operation.declaration, types)
+  }
+  for (const types of bindings.values()) connect(types)
   /** Whether this operand names the result of an allocation -- the object being built. */
   const namesFreshObject = (operand: SemanticOperand): boolean => {
     if (operand.source.kind !== 'result') return false
@@ -333,8 +381,8 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
   // array with it, by reference -- `gea::jsx::reactiveChild` takes a
   // `const gea::Ref<Owner>&` and a member pointer INTO the object, so a
   // by-value copy would leave it observing storage that has gone.
-  // `examples/reactive-nested-probe`'s `RailItem` is exactly that: a flat,
-  // never-written interface that is also `RailStore.items`' element type.
+  // An `Item` interface that is a flat, never-written record and also a
+  // store's `items` element type is exactly that.
   //
   // A class is identified by having a CONSTRUCTOR shape, which is what keeps
   // this from reading every interface: `Array<Point>`'s own body declares
@@ -380,6 +428,14 @@ export const valueRecordTypesOf = (graph: SemanticGraph): ReadonlySet<Structural
   let disqualifiedMethodsChanged = true
   while (disqualifiedMethodsChanged) {
     disqualifiedMethodsChanged = false
+    const pending = [...disqualified]
+    for (let index = 0; index < pending.length; index++)
+      for (const alias of aliases.get(pending[index]!) ?? []) {
+        if (disqualified.has(alias)) continue
+        disqualified.add(alias)
+        pending.push(alias)
+        disqualifiedMethodsChanged = true
+      }
     for (const id of [...disqualified]) {
       const shape = graph.structuralTypes.get(id)?.shape
       if (shape?.kind !== 'object') continue

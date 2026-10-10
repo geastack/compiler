@@ -1,8 +1,8 @@
 // A record recast into another layout keeps every field's presence. Presence
 // bits are laid out for required fields too once the program deletes a
 // declared field (so none can be a static constant); a positional initializer
-// that skipped them put the optional bits on the required ones, and mongodb's
-// `TimeoutContext.create` saw `'serverSelectionTimeoutMS' in options` false.
+// that skipped them put the optional bits on the required ones, and a database
+// client's `TimeoutContext.create` saw `'serverSelectionTimeoutMS' in options` false.
 type Legacy = { serverSelectionTimeoutMS: number; waitQueueTimeoutMS: number; socketTimeoutMS?: number }
 type Csot = { timeoutMS: number; serverSelectionTimeoutMS: number; socketTimeoutMS?: number }
 type Options = (Legacy | Csot) & { label?: string }

@@ -9,8 +9,8 @@ import { attachDeferredIntrinsicProtocolLedger, createDeferredIntrinsicProtocolL
 
 /**
  * The target-identity half of slot closure: a call through a receiver the
- * proof cannot resolve (`stir(x: any)` below, three's `geometry.getAttribute`
- * off an untyped parameter) is not a write and must not open the slot for
+ * proof cannot resolve (`stir(x: any)` below, or a method call such as
+ * `geometry.getAttribute` off an untyped parameter) is not a write and must not open the slot for
  * the typed call sites of the same key. Only a WRITE that may reach a family
  * instance -- named, computed, through an intrinsic mutator, or a prototype
  * replacement -- refuses the target set.

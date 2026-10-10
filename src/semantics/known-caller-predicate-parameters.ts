@@ -11,8 +11,8 @@ import ts from 'typescript'
  * per call. When the method is `private`, every reference to it is inside the
  * class's own file; if each is a direct call whose argument the checker types
  * without `any`, the parameter only ever receives those types, and the same
- * body over their union narrows exactly as it narrowed `unknown`. bson's
- * `ObjectId.is(inputId)` is the shape.
+ * body over their union narrows exactly as it narrowed `unknown`. An
+ * `Ident.is(input)` called only with typed arguments is the shape.
  *
  * Fail-closed: the box stays unless ALL of these hold.
  * - a `private static` method of a class declaration, with a body, not

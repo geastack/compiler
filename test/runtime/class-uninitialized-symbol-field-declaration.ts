@@ -1,6 +1,6 @@
 // A symbol-keyed class field declared WITHOUT an initializer, beside fields
 // that have one, in a class that extends a base and assigns the field right
-// after `super()`. Mirrors `@hono/node-server`'s adapted `LightRequest`:
+// after `super()`. Mirrors an HTTP server adapter's `LightRequest`:
 // `[incomingKey]: IncomingMessage | Http2ServerRequest;`.
 class Incoming {
   constructor(readonly url: string) {}

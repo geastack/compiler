@@ -124,7 +124,7 @@ export const prototypeMutatedConstructorTypes = (
  * An object type the program writes through a key the checker types as
  * `any`, with a value its declared fields do not hold.
  *
- * `hono`'s `bodyCache[key] = raw[key]()` stores a Promise into a
+ * A cache written as `cache[key] = raw[key]()` stores a Promise into a
  * `Partial<Body>` whose fields say `ArrayBuffer`/`FormData`/...: the write
  * type-checks only because `Body['json']` is `any`, which makes every
  * `Body[keyof Body]` `any`. A layout built from the declared fields has no

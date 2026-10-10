@@ -1,4 +1,4 @@
-import { carriesMergeAbsence, carriesUndefined, type Representation } from '../../representation/model.js'
+import { carriesMergeAbsence, carriesNativeUndefined, carriesUndefined, type Representation } from '../../representation/model.js'
 import { createCppEmitBlockedError } from './emit-context.js'
 
 /**
@@ -59,7 +59,12 @@ export const definedTestText = (text: string, representation: Representation): s
   // standing for `null` says nothing about `undefined`; only the
   // `undefined`-tagged optional's flag IS this question.
   if (!carriesUndefined(representation)) return 'true'
-  if (representation.kind === 'optional') return `(${text}).has_value()`
+  if (carriesNativeUndefined(representation)) return `!(${text}).isUndefined()`
+  if (representation.kind === 'optional') {
+    const payload = definedTestText(`(*${text})`, representation.payload)
+    if (payload === 'true') return representation.absence === 'undefined' ? `(${text}).has_value()` : 'true'
+    return representation.absence === 'undefined' ? `((${text}).has_value() && ${payload})` : `(!(${text}).has_value() || ${payload})`
+  }
   if (representation.kind === 'tagged-union') {
     // An `undefined`-tagged optional ARM is a second place definedness can
     // live, and reading both is what the language says: the value is
@@ -69,9 +74,7 @@ export const definedTestText = (text: string, representation: Representation): s
     // the arm test that already tells them apart.
     const undefinedTests = representation.arms.flatMap((arm, index) => {
       if (arm.value.kind === 'undefined' || arm.value.kind === 'void') return [`${text}.is<${index}>()`]
-      if (arm.value.kind === 'optional' && arm.value.absence === 'undefined') {
-        return [`(${text}.is<${index}>() && !${text}.get<${index}>().has_value())`]
-      }
+      if (carriesUndefined(arm.value)) return [`(${text}.is<${index}>() && !(${definedTestText(`${text}.get<${index}>()`, arm.value)}))`]
       return []
     })
     if (undefinedTests.length === 0) return 'true'
@@ -83,7 +86,11 @@ export const definedTestText = (text: string, representation: Representation): s
 
 export const presenceTestText = (text: string, representation: Representation): string => {
   if (absent.has(representation.kind)) return 'false'
-  if (representation.kind === 'optional') return `(${text}).has_value()`
+  if (carriesNativeUndefined(representation)) return `static_cast<bool>(${text})`
+  if (representation.kind === 'optional') {
+    const payload = presenceTestText(`(*${text})`, representation.payload)
+    return payload === 'true' ? `(${text}).has_value()` : `((${text}).has_value() && ${payload})`
+  }
   if (representation.kind === 'borrowed-ref') return presenceTestText(text, representation.referent)
   if (representation.kind === 'tagged-union') {
     // Present unless the live arm is an absent one. Testing the absent arms and
@@ -97,13 +104,13 @@ export const presenceTestText = (text: string, representation: Representation): 
     // names. The arm test tells the two cases apart, so joining them states
     // one answer rather than choosing between two.
     //
-    // hono reaches this on the `Data` union its `Context.body` builds and on
-    // `compose`'s own middleware result; refusing it left `conversion:
+    // A response-body union and a middleware composer's result reach this; refusing it left `conversion:
     // is-present:tagged-union` uninstalled for the WHOLE program, since that
     // helper key carries only the kind.
     const absentTests = representation.arms.flatMap((arm, index) => {
       if (absent.has(arm.value.kind)) return [`${text}.is<${index}>()`]
-      if (arm.value.kind === 'optional') return [`(${text}.is<${index}>() && !${text}.get<${index}>().has_value())`]
+      if (arm.value.kind === 'optional') return [`(${text}.is<${index}>() && !(${presenceTestText(`${text}.get<${index}>()`, arm.value)}))`]
+      if (carriesNativeUndefined(arm.value)) return [`(${text}.is<${index}>() && !static_cast<bool>(${text}.get<${index}>()))`]
       return []
     })
     if (absentTests.length === 0) return 'true'
@@ -206,7 +213,7 @@ export const absenceComparisonText = (
   // immediately after asking this function, so declining here (as this used
   // to, before `gea::Value` had a tag to read) refused `caught !== null` --
   // the single most ordinary thing a `catch` body does, and the reason
-  // `test/fixtures/try-catch-equality.ts` could not emit at all.
+  // a program comparing a caught value could not emit at all.
   //
   // `other.text` is read twice in the loose form, which is safe because
   // `operandText` always answers an already-materialized SSA value name
@@ -221,11 +228,23 @@ export const absenceComparisonText = (
   if (loose) return negate(`!(${presenceTestText(other.text, other.representation)})`)
 
   if (other.representation.kind === 'optional') {
+    if (carriesUndefined(other.representation.payload) || carriesMergeAbsence(other.representation.payload)) {
+      const payload = absenceComparisonText('===', { text: `(*${other.text})`, representation: other.representation.payload }, literal)
+      if (payload !== null)
+        return negate(
+          `(${other.text}.has_value() ? ${payload} : ${other.representation.absence === literal.representation.kind ? 'true' : 'false'})`
+        )
+    }
     return negate(other.representation.absence === literal.representation.kind ? `!(${other.text}).has_value()` : 'false')
   }
   if (other.representation.kind === 'tagged-union') {
-    const arm = other.representation.arms.findIndex((candidate) => candidate.value.kind === literal.representation.kind)
-    return negate(arm < 0 ? 'false' : `(${other.text}).is<${arm}>()`)
+    const tests = other.representation.arms.flatMap((arm, index) => {
+      const answer = absenceComparisonText('===', { text: `${other.text}.get<${index}>()`, representation: arm.value }, literal)
+      return answer === null || answer === 'false'
+        ? []
+        : [answer === 'true' ? `(${other.text}).is<${index}>()` : `(${other.text}.is<${index}>() && ${answer})`]
+    })
+    return negate(tests.length === 0 ? 'false' : tests.length === 1 ? tests[0]! : `(${tests.join(' || ')})`)
   }
   // The two carriers that hold their own absence answer `=== null` at RUNTIME,
   // where every other carrier answers it before the program runs. Folding it to
@@ -233,6 +252,9 @@ export const absenceComparisonText = (
   // `optional.ts` collapsed `TreeNode | null` onto the bare `Ref`, so the
   // carrier no longer says whether absence is possible and the value has to.
   // `=== undefined` stays settled: neither collapse admits that absence.
+  if (carriesNativeUndefined(other.representation)) {
+    return negate(literal.representation.kind === 'undefined' ? `${other.text}.isUndefined()` : `(${other.text} == nullptr)`)
+  }
   if (carriesMergeAbsence(other.representation)) {
     return negate(literal.representation.kind === 'null' ? `!(${presenceTestText(other.text, other.representation)})` : 'false')
   }
@@ -264,10 +286,9 @@ export const absenceComparisonText = (
  *
  * It changes one answer and it has to: a `long long` has no NaN, so `v == v`
  * is not a NaN test there but a tautology, and gcc rejects it outright under
- * `-Werror=tautological-compare`. `examples/apps/weather` is where that
- * surfaced -- five `if (store.searchResultVisible)` sites the moment those
- * flags became `Signal<long long>` -- and it is a compile error rather than a
- * wrong answer only because the board builds with `-Werror`.
+ * `-Werror=tautological-compare`. That surfaced on five `if (store.flag)`
+ * sites the moment those flags became `Signal<long long>` -- and it is a
+ * compile error rather than a wrong answer only because the board builds with `-Werror`.
  */
 export const booleanTestText = (text: string, representation: Representation, integral = false): string => {
   switch (representation.kind) {
@@ -342,9 +363,9 @@ export const booleanTestText = (text: string, representation: Representation, in
       // Every object is truthy, but a refcounted handle is only an object
       // while it holds one. A `gea::Ref` left default-constructed -- a
       // declared member no write ever filled -- is the `undefined` JavaScript
-      // reads there, and answering `true` without looking made mongodb's
-      // `if (mongoClient && mongoOptions.autoEncryption)` run
-      // `checkForMongoCrypt()` for an option nobody set. The carrier cannot
+      // reads there, and answering `true` without looking made an
+      // `if (client && options.autoEncryption)` guard run its optional-feature
+      // check for an option nobody set. The carrier cannot
       // prove the handle full, so the handle is read; a by-value struct has no
       // empty state and stays settled.
       if (representation.ownership === 'shared-refcount') return `static_cast<bool>(${text})`

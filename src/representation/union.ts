@@ -172,13 +172,13 @@ export const createUnionDeriver = (
    *
    * They were two. `T | undefined` collapsed to `optional(T, undefined)` while
    * `T | void` became `tagged-union(undefined | T)`, and the two spellings met
-   * at hono's `defineWebSocketHelper`: the handler slot is
+   * at a WebSocket helper whose handler slot is
    * `Response | void | Promise<Response | void>`, whose promise arm derived
    * `promise(tagged-union(undefined | class-ref(Response)))`, while the async
    * arrow the program passes returns `Promise<Response | undefined>` and
    * derived `promise(optional(class-ref(Response), undefined))`. One carrier,
-   * two names, and therefore no conversion between them -- the
-   * `CallExpression|1065` slot drift on `websocket.ts`.
+   * two names, and therefore no conversion between them -- a
+   * slot drift at the call site.
    */
   const absenceOf = (id: StructuralTypeId): 'null' | 'undefined' | null => {
     const member = shapeOf(id)
@@ -224,8 +224,23 @@ export const createUnionDeriver = (
   const canonicalMembersOf = (present: readonly StructuralTypeId[]): readonly StructuralTypeId[] => {
     const byCarrier = new Map<string, StructuralTypeId>()
     const unresolvedMembers: StructuralTypeId[] = []
+    // `Promise<never>` beside another Promise contributes no arm: it can only
+    // reject or stay pending, so it is a subtype of every `Promise<T>` and
+    // TypeScript's own subtype reduction folds `c ? rejectUnusable() :
+    // Promise.resolve('ok')` to `Promise<string>`. Kept, it built a sum whose
+    // `Promise<never>` arm no selection into the declared `Promise<string>`
+    // could take, and the program aborted where node rejects. It enters the
+    // fulfilling arm through the same state adoption a `Promise<never>`
+    // returned as `Promise<T>` takes.
+    const neverPromise = (value: Representation): boolean =>
+      value.kind === 'promise' && value.value.kind === 'void' && value.value.bottom === true
+    const fulfilling = present.some((member) => {
+      const value = deriveStored(member)
+      return value.kind === 'promise' && !neverPromise(value)
+    })
     for (const member of present) {
       const value = deriveStored(member)
+      if (fulfilling && neverPromise(value)) continue
       if (value.kind === 'unresolved') {
         unresolvedMembers.push(member)
         continue
@@ -258,7 +273,7 @@ export const createUnionDeriver = (
    * `instanceof`, whose narrowing is the checked class-family downcast this
    * backend already renders over a single base carrier.
    *
-   * `@hono/node-server` reaches this through `request[incomingKey] as
+   * A Node server adapter reaches this through `request[incomingKey] as
    * IncomingMessage | Http2ServerRequest`, where the node shim's
    * `Http2ServerRequest extends IncomingMessage`.
    *

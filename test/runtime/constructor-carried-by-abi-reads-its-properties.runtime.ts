@@ -1,7 +1,7 @@
 // A constructor carried by its construct ABI alone -- a record field typed
 // with a construct signature -- still is a function object with properties:
-// its class's statics (mongodb-client-encryption's
-// `mc.MongoCrypt.libmongocryptVersion`), its real prototype object (bson's
+// its class's statics (an encryption plugin's
+// `mc.Cipher.cipherLibraryVersion`), its real prototype object (a binary-document serializer's
 // `Buffer.prototype?._isBuffer`), and `undefined` for a key nothing
 // declares.
 
@@ -9,14 +9,14 @@
 // boxed -- a genuine dynamic boundary. A slot answering a structural interface
 // would need the class instance viewed as that record, which is not installed
 // and refuses at certification rather than slicing the instance into a copy.
-interface MongoCryptConstructor {
+interface CipherConstructor {
   new (options: { tag: string }): unknown
-  libmongocryptVersion: string
+  cipherLibraryVersion: string
   missing?: string
 }
 
-class NativeMongoCrypt {
-  static libmongocryptVersion = '1.8.4'
+class NativeCipher {
+  static cipherLibraryVersion = '1.8.4'
   tag: string
   constructor(options: { tag: string }) {
     this.tag = options.tag
@@ -26,20 +26,20 @@ class NativeMongoCrypt {
   }
 }
 
-const bindings: { MongoCrypt: MongoCryptConstructor } = { MongoCrypt: NativeMongoCrypt }
+const bindings: { Cipher: CipherConstructor } = { Cipher: NativeCipher }
 
-class MongoCrypt {
-  static readonly libmongocryptVersion: string = bindings.MongoCrypt.libmongocryptVersion
+class Cipher {
+  static readonly cipherLibraryVersion: string = bindings.Cipher.cipherLibraryVersion
 }
 
-console.log(MongoCrypt.libmongocryptVersion, typeof new bindings.MongoCrypt({ tag: 'x' }), bindings.MongoCrypt.missing === undefined)
+console.log(Cipher.cipherLibraryVersion, typeof new bindings.Cipher({ tag: 'x' }), bindings.Cipher.missing === undefined)
 
 interface BufferLike {
   new (options: { tag: string }): unknown
   prototype?: { describe?: unknown; _isBuffer?: boolean }
 }
 
-const holder: { Buffer: BufferLike } = { Buffer: NativeMongoCrypt }
+const holder: { Buffer: BufferLike } = { Buffer: NativeCipher }
 const proto = holder.Buffer.prototype
 console.log(typeof proto, typeof proto?.describe, proto?._isBuffer !== true)
 

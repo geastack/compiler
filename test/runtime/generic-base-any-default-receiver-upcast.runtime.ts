@@ -1,5 +1,5 @@
 // A method inherited from a generic base whose type parameter defaults to
-// `any`, called on a receiver typed by that default: the MongoDB driver's
+// `any`, called on a receiver typed by that default: a database client's
 // `executeOperation<T extends AbstractOperation>(op: T)` calls
 // `op.hasAspect(...)`, and every operation class reaches `AbstractOperation`
 // through a DIFFERENT filling (`CommandOperation<Document>`,

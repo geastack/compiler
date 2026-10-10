@@ -7,9 +7,9 @@ import { basename, dirname, join, relative, resolve, sep } from 'path'
  * package ships, into JSDoc the checker already reads.
  *
  * A package distributed as JavaScript states its types in a sibling `.d.ts`
- * tree -- `@types/three/src/renderers/webgl/WebGLTextures.d.ts` declares
- * `setTexture2D( texture: Texture, slot: number )` for the very
- * `three/src/renderers/webgl/WebGLTextures.js` this compiler compiles. The
+ * tree -- `@types/lib/src/render/Samplers.d.ts` declares
+ * `bind( sampler: Sampler, slot: number )` for the very
+ * `lib/src/render/Samplers.js` this compiler compiles. The
  * types are shipped DATA, exactly like a plugin's shim tables, and inferring
  * what a package already states is work nobody needs done.
  *
@@ -22,13 +22,13 @@ import { basename, dirname, join, relative, resolve, sep } from 'path'
  *
  * ## Why JSDoc, and why `@import`
  *
- * Emitting `@param {Texture} texture` needs `Texture` in scope, and memory of
- * the earlier attempt records exactly how that fails: three's own
- * `@param {Matrix4}` tags resolve to `any` in files that never import
- * `Matrix4`. TypeScript 5.5 added the `@import` tag for precisely this, and
- * the declaration tree MIRRORS the source tree -- `WebGLTextures.d.ts` imports
- * `Texture` from `"../../textures/Texture.js"`, and that same relative
- * specifier resolves from `WebGLTextures.js` to the real JS module. So the
+ * Emitting `@param {Sampler} sampler` needs `Sampler` in scope, and memory of
+ * the earlier attempt records exactly how that fails: a library's own
+ * `@param {Matrix}` tags resolve to `any` in files that never import
+ * `Matrix`. TypeScript 5.5 added the `@import` tag for precisely this, and
+ * the declaration tree MIRRORS the source tree -- `Samplers.d.ts` imports
+ * `Sampler` from `"../../sampling/Sampler.js"`, and that same relative
+ * specifier resolves from `Samplers.js` to the real JS module. So the
  * specifiers transfer VERBATIM; nothing has to be re-resolved.
  *
  * `@import` is type-only, so no runtime import is introduced and no module
@@ -154,8 +154,8 @@ const typeNamesIn = (text: string): readonly string[] | null => {
   const walk = (node: ts.Node): void => {
     if (ts.isTypeReferenceNode(node)) names.push(leftmost(node.typeName).text)
     // `typeof AlphaFormat` names a VALUE, and a value needs bringing into
-    // scope exactly as a type does -- three's `PixelFormat` is a union of
-    // eleven of them.
+    // scope exactly as a type does -- a declaration file's `Format` alias is
+    // commonly a union of a dozen `typeof` constants.
     if (ts.isTypeQueryNode(node)) names.push(leftmost(node.exprName).text)
     if (ts.isImportTypeNode(node)) return
     ts.forEachChild(node, walk)
@@ -167,8 +167,8 @@ const typeNamesIn = (text: string): readonly string[] | null => {
 /**
  * A class's type arguments as the JS class itself means them.
  *
- * `class BufferGeometry<Attributes extends NormalOrGLBufferAttributes =
- * NormalBufferAttributes>` describes a JS class that has no type parameters at
+ * `class Shape<Attributes extends AnyAttributes = DefaultAttributes>`
+ * describes a JS class that has no type parameters at
  * all, so the only faithful reading of `attributes: Attributes` for that JS is
  * the declaration file's OWN stated default. Substituting it is transferring
  * shipped data, not inventing a type. A parameter with no default has no such
@@ -216,24 +216,23 @@ const runtimeImportsOf = (fileName: string): readonly string[] => {
  * The names a JS module exports as a FACTORY: a plain function that builds and
  * RETURNS an object, rather than a class or a constructor assigning to `this`.
  *
- * three's renderer modules are written this way -- `function WebGLState( gl,
- * extensions ) { ...; return { buffers, ... } }` -- while `@types/three`
- * declares each as a CLASS. So the declaration file's `state: WebGLState` and
- * the JS module's `WebGLState` do not denote the same thing: transferred
+ * Some libraries write whole subsystems this way -- `function State( ctx,
+ * extensions ) { ...; return { buffers, ... } }` -- while their `@types`
+ * package declares each as a CLASS. So the declaration file's `state: State`
+ * and the JS module's `State` do not denote the same thing: transferred
  * verbatim, the tag resolves to the FACTORY'S OWN SIGNATURE, and a parameter
- * holding a state object is typed as the function that makes one. 31
- * parameters land this way in the three.js app, 462 boxed carriers behind them, and
- * `WebGLState` alone is 216.
+ * holding a state object is typed as the function that makes one -- and
+ * every carrier behind such a parameter boxes.
  *
- * What the JS means by "a WebGLState" is what calling `WebGLState` yields, and
- * that is `ReturnType<WebGLState>` -- the tag already denotes the function
+ * What the JS means by "a State" is what calling `State` yields, and
+ * that is `ReturnType<State>` -- the tag already denotes the function
  * type, so no `typeof` is needed, which matters because `@import` binds a
  * type, not a value.
  *
  * ⛔ Only the pure `return` shape qualifies. A function that assigns to `this`
  * is one TypeScript already reads as a constructor, and its instance type is
- * NOT its return type; 30 of the 31 measured are pure, and the rule refuses
- * the rest rather than guessing between the two.
+ * NOT its return type; nearly every factory measured is pure, and the rule
+ * refuses the rest rather than guessing between the two.
  */
 const factoryCache = new Map<string, ReadonlySet<string>>()
 const factoryExportsOf = (fileName: string): ReadonlySet<string> => {
@@ -274,13 +273,13 @@ const factoryExportsOf = (fileName: string): ReadonlySet<string> => {
  * The names a JS module actually exports.
  *
  * A declaration file's import is not evidence that the mirrored JS module has
- * anything by that name: `WebGLUtils.d.ts` reaches `PixelFormat` through
- * `"../../constants.js"`, and `three/src/constants.js` exports two hundred
- * numeric constants and no types at all, because `PixelFormat` exists only in
- * the declaration tree. Writing `@import { PixelFormat } from
+ * anything by that name: `Utils.d.ts` reaches `Format` through
+ * `"../../constants.js"`, and the JS `constants.js` exports hundreds of
+ * numeric constants and no types at all, because `Format` exists only in
+ * the declaration tree. Writing `@import { Format } from
  * "../../constants.js"` into the JS therefore imports NOTHING, and every
- * annotation naming it resolves to `any` -- measured, 47 of the 307 names this
- * overlay was importing were of that kind.
+ * annotation naming it resolves to `any` -- measured, a sizeable fraction of
+ * the names this overlay was importing were of that kind.
  */
 const jsExportCache = new Map<string, ReadonlySet<string>>()
 const jsExportsOf = (fileName: string, depth = 0): ReadonlySet<string> => {
@@ -308,7 +307,7 @@ const jsExportsOf = (fileName: string, depth = 0): ReadonlySet<string> => {
       if (clause && ts.isNamedExports(clause)) {
         for (const element of clause.elements) names.add(element.name.text)
       } else if (!clause && statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
-        // `export * from './Three.Core.js'` -- the names are the target's.
+        // `export * from './Core.js'` -- the names are the target's.
         const text = statement.moduleSpecifier.text
         if (text.startsWith('.')) for (const name of jsExportsOf(resolve(dirname(fileName), text), depth + 1)) names.add(name)
       }
@@ -321,13 +320,13 @@ const jsExportsOf = (fileName: string, depth = 0): ReadonlySet<string> => {
  * Whether `from` reaches `target` through runtime imports.
  *
  * ⛔ THE guard on every `@import` this module writes. An `@import` is a real
- * module EDGE, and three's runtime graph is carefully acyclic. Adding an edge
- * that points back at the file adding it closes a cycle -- `WebXRManager.js`
- * naming `../WebGLRenderer.js` closes one through the renderer hub -- and the
- * checker then answers `any` for every symbol caught in it. Measured on
- * the three.js app: unguarded, boxes fall by 2099 and OPERATIONS by 2294, nearly one
- * for one, because the code stopped being censused rather than started being
- * typed, and withheld producers go 8 -> 21.
+ * module EDGE, and a library's runtime graph is often carefully acyclic.
+ * Adding an edge that points back at the file adding it closes a cycle -- a
+ * submodule naming `../Hub.js` closes one through the hub that imports it --
+ * and the checker then answers `any` for every symbol caught in it.
+ * Measured: unguarded, boxes and OPERATIONS fall by thousands, nearly one for
+ * one, because the code stopped being censused rather than started being
+ * typed, and withheld producers more than double.
  *
  * Fail-closed: an unreadable file contributes no edges, so a specifier whose
  * module cannot be read is refused by the caller rather than assumed safe.
@@ -353,9 +352,9 @@ const modulesReachableFrom = (start: string): ReadonlySet<string> => {
 
 /** The declaration file mirroring this source file, or `null`. */
 const declarationPathFor = (spelledFileName: string): string | null => {
-  // A Windows program spells files with backslashes (`...\node_modules\three\...`)
+  // A Windows program spells files with backslashes (`...\node_modules\pkg\...`)
   // wherever the module graph stated them; matched as-is, no JS file there ever
-  // found its `@types` mirror and three's sources compiled untyped.
+  // found its `@types` mirror and the package's sources compiled untyped.
   const fileName = spelledFileName.replaceAll('\\', '/')
   const marker = '/node_modules/'
   const at = fileName.lastIndexOf(marker)
@@ -450,14 +449,14 @@ const declaredNamesIn = (file: ts.SourceFile): ReadonlySet<string> => {
  * interfaces, member by member, keyed `Owner.member` -- the surface a JS
  * RECORD is matched against.
  *
- * three writes much of its renderer as factories returning object literals:
- * `WebGLState.js`'s nested `ColorBuffer()` returns `{ setMask: function (
- * colorMask ) {...}, setClear: function ( r, g, b, a, premultipliedAlpha )
- * {...}, ... }`, and `@types/three` describes that record as `declare class
- * WebGLColorBuffer { setClear(r: number, g: number, b: number, a: number,
- * premultipliedAlpha: boolean): void }`. The flat `signatures` map cannot
- * carry it: the same file declares `setClear` on `WebGLDepthBuffer` and
- * `WebGLStencilBuffer` too, with different parameter lists, so by NAME it is
+ * Some libraries write whole subsystems as factories returning object
+ * literals: a `State.js` whose nested `ColorBuffer()` returns `{ setMask:
+ * function ( mask ) {...}, setClear: function ( r, g, b, a, premultiplied )
+ * {...}, ... }`, and whose `@types` package describes that record as
+ * `declare class ColorBuffer { setClear(r: number, g: number, b: number, a:
+ * number, premultiplied: boolean): void }`. The flat `signatures` map cannot
+ * carry it: the same file declares `setClear` on `DepthBuffer` and
+ * `StencilBuffer` too, with different parameter lists, so by NAME it is
  * an overload set and is dropped. Which declaration a record's `setClear`
  * answers to is decided by the record's OWNER, and this is the map that can
  * say so.
@@ -473,7 +472,7 @@ interface RecordSurface {
   readonly signatures: ReadonlyMap<string, ts.SignatureDeclarationBase>
   /** `Owner.member` -> the stated type of a member that is NOT callable, to walk into a nested record through. */
   readonly types: ReadonlyMap<string, ts.TypeNode>
-  /** A declared `const`'s name -> its stated type (`export const ColorManagement: ColorManagement`). */
+  /** A declared `const`'s name -> its stated type (`export const Registry: Registry`). */
   readonly constants: ReadonlyMap<string, ts.TypeNode>
 }
 
@@ -565,10 +564,10 @@ const interfaceShapeOf = (node: ts.InterfaceDeclaration, file: ts.SourceFile): I
  * A CLASS's own surface, as an `InterfaceShape`, when the class states
  * nothing but plain data.
  *
- * `@types/three` sometimes states a JSON shape as a `class` rather than an
- * `interface` -- `SourceJSON` is two properties and nothing else, even
- * though nothing in three's own JS ever constructs or extends one:
- * `textures/Source.js` exports `Source`, never `SourceJSON`, so no import
+ * A `@types` package sometimes states a JSON shape as a `class` rather than
+ * an `interface` -- a `SourceJSON` of two properties and nothing else, even
+ * though nothing in the package's own JS ever constructs or extends one:
+ * `Source.js` exports `Source`, never `SourceJSON`, so no import
  * can reach it, and TypeScript's structural typing means a class used only
  * as an annotation -- never `new`'d, never the target of `instanceof` --
  * means exactly what an interface with the same members would mean. The
@@ -646,13 +645,13 @@ const readDeclarationFile = (path: string): DeclarationFile | null => {
     if (ts.isFunctionDeclaration(node)) add(nameOf(node), node)
     else if (ts.isMethodDeclaration(node) || ts.isMethodSignature(node)) add(nameOf(node), node)
     // A PROPERTY whose declared type is a function type is a signature too.
-    // `@types/three` publishes a factory's members that way --
-    // `renderMultiDraw: ( starts: Int32Array, counts: Int32Array, drawCount:
-    // number ) => void` on `WebGLBufferRenderer` -- because the JS assigns
-    // them rather than declaring methods. Reading only `MethodSignature`
+    // A `@types` package often publishes a factory's members that way --
+    // `drawMany: ( starts: Int32Array, counts: Int32Array, count: number )
+    // => void` on a `declare class` -- because the JS assigns them rather
+    // than declaring methods. Reading only `MethodSignature`
     // missed every one, and those are exactly the functions the parameter
     // census then refuses as `function-escapes:BinaryExpression`: their name
-    // is referenced once more, by the `this.renderMultiDraw = renderMultiDraw`
+    // is referenced once more, by the `this.drawMany = drawMany`
     // that publishes them.
     else if ((ts.isPropertySignature(node) || ts.isPropertyDeclaration(node)) && node.type && ts.isFunctionTypeNode(node.type)) {
       add(nameOf(node), node.type)
@@ -709,8 +708,8 @@ const readDeclarationFile = (path: string): DeclarationFile | null => {
  * `specifier`, written relative to `from`, re-expressed relative to `to`.
  *
  * A base class's annotations name types the BASE declaration file imports,
- * over specifiers relative to ITS OWN directory: `Object3D.d.ts` reaches
- * `Vector3` as `"../math/Vector3.js"`, which from `cameras/Camera.js` means a
+ * over specifiers relative to ITS OWN directory: `core/Node.d.ts` reaches
+ * `Point` as `"../math/Point.js"`, which from `views/View.js` means a
  * different module or none at all. The two trees mirror each other, so a
  * specifier rebased onto the derived file's directory resolves from the JS
  * module at that same path -- which is the whole premise this overlay rests
@@ -728,12 +727,12 @@ const rebased = (specifier: string, from: string, to: string): string => {
  * The declaration surface a JS module compiles against, INCLUDING what it
  * inherits.
  *
- * `Camera.js` writes `updateMatrixWorld( force )` and `Camera.d.ts` says
- * nothing about it, because the method is declared once, on `Object3D`, and
- * `Camera extends Object3D`. Reading only the file beside the module misses
- * every inherited member: measured on the three.js app, 351 of the parameters still
- * boxed after everything else -- 3925 boxed carriers -- are refused for
- * exactly this reason, more than every other cause combined.
+ * `View.js` writes `updateTransform( force )` and `View.d.ts` says
+ * nothing about it, because the method is declared once, on `Node`, and
+ * `View extends Node`. Reading only the file beside the module misses
+ * every inherited member: measured, most of the parameters still boxed
+ * after everything else are refused for exactly this reason, more than every
+ * other cause combined.
  *
  * Depth decides collisions, which is what overriding means: a name the
  * derived file declares is the answer, and a base's is consulted only where
@@ -857,7 +856,7 @@ const fieldsIn = (file: ts.SourceFile): ReadonlyMap<string, string> => {
  *
  * ⛔ The leading-operator strip is the whole reason this exists. TypeScript
  * lets a union or intersection ANNOTATION open with its own operator, and
- * `@types/three` writes `TypedArray` exactly that way:
+ * `@types` packages commonly write a `TypedArray` alias exactly that way:
  *
  *     export type TypedArray =
  *         | Int8Array
@@ -867,8 +866,8 @@ const fieldsIn = (file: ts.SourceFile): ReadonlyMap<string, string> => {
  * `getText()` hands that back verbatim, and every consumer here puts the text
  * into a JSDoc type position -- where `{(| Int8Array | Uint8Array)}` is a
  * PARSE ERROR (`'}' expected.`), because JSDoc's parenthesized union has no
- * leading-operator form. Two of three's `animation/` modules came out
- * unparseable from that alone, and a file the checker cannot parse answers
+ * leading-operator form. Whole modules came out unparseable from that
+ * alone, and a file the checker cannot parse answers
  * every question about itself wrongly rather than refusing.
  *
  * Whitespace to single spaces for the same reason: these texts are spliced
@@ -906,12 +905,11 @@ const withTypeArguments = (text: string, defaults: ReadonlyMap<string, string | 
  * `null` when position alone cannot say so.
  *
  * Position is the only link between a JS signature and its declaration, and a
- * declaration file drifts from the source it describes. three's
- * `WebGLState.js` writes `setBlending( blending, ..., blendDstAlpha,
- * blendColor, blendAlpha, premultipliedAlpha )` -- ten parameters -- while
- * `WebGLState.d.ts` still states eight, ending in `premultiplyAlpha?:
- * boolean`. Read by position, `blendColor` (a `Color`) is stated `boolean`,
- * a type the declaration never gave it. So:
+ * declaration file drifts from the source it describes. A JS module writes
+ * `setMode( mode, ..., dstAlpha, tint, alpha, premultiplied )` -- ten
+ * parameters -- while its `.d.ts` still states eight, ending in
+ * `premultiply?: boolean`. Read by position, `tint` (an object) is stated
+ * `boolean`, a type the declaration never gave it. So:
  *
  * - equal arity, equal names: the declared parameter.
  * - equal arity, different names: the declared parameter, unless the JS name
@@ -941,7 +939,7 @@ const counterpartOf = (
 }
 
 /**
- * A declared parameter type that states nothing. `WebGLProperties.d.ts` writes
+ * A declared parameter type that states nothing. A declaration file writing
  * `get: (object: unknown) => unknown`; transferred, `@param {unknown} object`
  * would be a STATEMENT, and `withJsDocTypeNames` sits OUTERMOST in the composed
  * census, so it would outrank the carrier the census derives from the call
@@ -955,23 +953,20 @@ const STATES_NOTHING: ReadonlySet<string> = new Set(['any', 'unknown'])
  * `any`/`unknown` array element, type argument, or member.
  *
  * `STATES_NOTHING` catches the bare spelling; this catches the same silence one
- * level down, and it matters for the same reason. `WebGLPrograms.d.ts` states
- * `getParameters( ..., lights: WebGLLightsState, ..., lightProbeGrids:
- * unknown[] )`, and `WebGLLightsState` states `probe: unknown[]`,
- * `directional: unknown[]`. Transferred, each is a STATEMENT, so the census
- * never derives the parameter from its call site -- yet the one call site
- * passes `lights.state` and `lightProbeGridArray` whose elements the program
- * DOES type (`Vector3`, the uniform classes, `NativeLightProbeGrid`). The
- * argument is then a typed array and the parameter an array of dynamic
- * elements, the element layouts differ, and no conversion exists or should:
- * measured on the three.js app, those two parameters were two of the three certificate
- * refusals. The package said nothing about those elements, so the overlay says
+ * level down, and it matters for the same reason. A declaration file states
+ * `configure( ..., state: SceneState, ..., grids: unknown[] )`, and
+ * `SceneState` states `items: unknown[]`. Transferred, each is a STATEMENT,
+ * so the census never derives the parameter from its call site -- yet the one
+ * call site passes arrays whose elements the program DOES type (program
+ * classes). The argument is then a typed array and the parameter an array of
+ * dynamic elements, the element layouts differ, and no conversion exists or
+ * should: measured, exactly such parameters were certificate refusals. The package said nothing about those elements, so the overlay says
  * nothing about the parameter, and the census derives it from what callers
  * actually pass.
  *
  * ⛔ Only DATA positions count: an array/tuple element, a type argument, a
  * record member's value. A function type is a different statement entirely --
- * `traverse( callback: ( object: Object3D ) => any )` states the callback's
+ * `traverse( callback: ( node: Node ) => any )` states the callback's
  * parameter, which is the CONTEXTUAL type an app's arrow function has no
  * other source for, and its `any` return says nothing a caller supplies. The
  * census cannot re-derive a callback's signature from call sites, so dropping
@@ -1008,19 +1003,18 @@ export const statesNothingWithin = (text: string): boolean => {
  * Whether a parameter type holds an object-literal type INSIDE a container --
  * a type argument, an array or a tuple element.
  *
- * `ColorManagement.d.ts` states `define: (colorSpaces: Record<string,
- * ColorSpaceDefinition>) => void`, and `ColorSpaceDefinition` is plain data
- * the overlay spells inline. Stated, it makes the parameter a dictionary of
- * THAT record, while `createColorManagement`'s own `ColorManagement.define( {
- * [ LinearSRGBColorSpace ]: { primaries: REC709_PRIMARIES, ... }, ... } )`
- * builds a dictionary of the literals' own record type. The two element
- * layouts differ, every element would need a structural conversion inside the
- * container, and none is installed: measured on the three.js app, that one parameter
- * is the whole of the certificate refusal ("no runtime conversion is installed
+ * A declaration file states `define: (entries: Record<string,
+ * EntryDefinition>) => void`, and `EntryDefinition` is plain data the
+ * overlay spells inline. Stated, it makes the parameter a dictionary of
+ * THAT record, while the factory's own `Registry.define( { [ KEY ]: {
+ * values: DEFAULTS, ... }, ... } )` builds a dictionary of the literals' own
+ * record type. The two element layouts differ, every element would need a
+ * structural conversion inside the container, and none is installed:
+ * measured, one such parameter was the whole of a certificate refusal ("no runtime conversion is installed
  * from dictionary(string,native-record-ref(...)) to
  * dictionary(string,record#...)"). Unannotated, the census derives the
  * argument's own type and certifies. A record at the TOP of a parameter
- * (`WebGLProgramParameters`, `GeometryGroup`, the `toJSON( meta )` bag with
+ * (a parameters record, a group record, a `toJSON( meta )` bag with
  * its own `geometries: Record<string, ...>` inside) converts as a record,
  * certified before this rule existed, and keeps its statement -- so the walk
  * stops at the first record it meets outside a container.
@@ -1056,8 +1050,8 @@ const recordInsideContainer = (text: string): boolean => {
  * and every type name those lines refer to.
  *
  * The names come back with the lines because an annotation is only worth
- * writing if what it names is in scope: `@param {Texture}` in a file that
- * never imports `Texture` resolves to `any`, and `withJsDocTypeNames` sits
+ * writing if what it names is in scope: `@param {Sampler}` in a file that
+ * never imports `Sampler` resolves to `any`, and `withJsDocTypeNames` sits
  * OUTERMOST in the composed census, so that `any` OUTRANKS the type the census
  * would otherwise have derived from the call site. The caller turns these
  * names into the `@import` lines that make them mean what they say.
@@ -1085,7 +1079,7 @@ const paramLinesFor = (
   })
   // A JavaScript function with no `@param` reads every parameter as optional;
   // one with any reads each UNTAGGED parameter as required. Tagging `pageSize`
-  // of memory-pager's `function Pager(pageSize, opts)` from a declaration that
+  // of a `function Pager(pageSize, opts)` from a declaration that
   // states only `(pageSize?: number)` therefore turned `opts` required -- "A
   // required parameter cannot follow an optional parameter", and every
   // one-argument call an arity error. A trailing parameter this overlay leaves
@@ -1108,7 +1102,7 @@ const paramLinesFor = (
 
 /**
  * How many bindings, factory calls and nested properties a record may be
- * reached through. three's deepest is two (`WebGLState`'s record ->
+ * reached through. Real factories go about two deep (`State`'s record ->
  * `buffers` -> `colorBuffer` -> `new ColorBuffer()`'s record); the bound is
  * a guard, not a tuning knob.
  */
@@ -1157,10 +1151,10 @@ type RecordBinding = ts.FunctionDeclaration | ts.VariableDeclaration
  * when that declaration is a function declaration or a `const` -- the only
  * two whose value a reader can know without following the program's flow.
  *
- * `WebGLState` returns `{ buffers: { color: colorBuffer } }`, and the
+ * `State` returns `{ buffers: { color: colorBuffer } }`, and the
  * `colorBuffer` there is the `const colorBuffer = new ColorBuffer()` two
- * hundred lines up in the same body; `ColorManagement.js`'s factory returns
- * `ColorManagement`, which is its OWN `const ColorManagement = { ... }` and
+ * hundred lines up in the same body; a `Registry.js` factory returns
+ * `Registry`, which is its OWN `const Registry = { ... }` and
  * not the module's exported binding of the same name. So this walks scopes
  * outward rather than matching names file-wide.
  *
@@ -1358,18 +1352,17 @@ interface RecordMethod extends RecordFunction {
  * ## Where an owner comes from
  *
  * - An exported factory named like a class or interface of its own
- *   declaration file: `function WebGLState( gl, extensions ) { ...; return
- *   { enable, useProgram, ... } }` is `declare class WebGLState`. This is
+ *   declaration file: `function State( ctx, extensions ) { ...; return
+ *   { enable, useProgram, ... } }` is `declare class State`. This is
  *   the identification `factoryExportsOf` already makes when it spells
- *   `WebGLState` as `ReturnType<WebGLState>` across an import.
+ *   `State` as `ReturnType<State>` across an import.
  * - An exported `const` the declaration file states a type for: `export
- *   const ColorManagement = createColorManagement()` is `export const
- *   ColorManagement: ColorManagement`, and the record is what
- *   `createColorManagement` returns.
+ *   const Registry = createRegistry()` is `export const Registry: Registry`,
+ *   and the record is what `createRegistry` returns.
  * - A property of a record that already has an owner, through the type the
  *   owner states for it: `buffers: { color: colorBuffer, ... }` is
- *   `buffers: { color: WebGLColorBuffer; ... }`, so the literal is that
- *   inline type and `colorBuffer`'s record is a `WebGLColorBuffer`. Only a
+ *   `buffers: { color: ColorBuffer; ... }`, so the literal is that
+ *   inline type and `colorBuffer`'s record is a `ColorBuffer`. Only a
  *   type literal or a bare reference to one of the file's own owners is
  *   followed -- a union, a generic, an imported class is not a record this
  *   file writes.
@@ -1479,19 +1472,19 @@ const recordMethodsIn = (file: ts.SourceFile, records: RecordSurface): ReadonlyM
  *
  * ES5 libraries are declared in one shape: the module's value is a callable
  * `export = X`, and every type a consumer names lives in `declare namespace
- * X`. `@types/sparse-bitfield`:
+ * X`. A typical `@types` package for such a library:
  *
- *     export = BitField
- *     declare const BitField: BitField
- *     interface BitField { (options?: BitField.Options | Buffer): BitField.BitFieldInstance; new (...): ... }
- *     declare namespace BitField { interface BitFieldInstance { get(index: number): boolean; ... } }
+ *     export = Lib
+ *     declare const Lib: Lib
+ *     interface Lib { (options?: Lib.Options | Buffer): Lib.Instance; new (...): ... }
+ *     declare namespace Lib { interface Instance { get(index: number): boolean; ... } }
  *
- * and `@mongodb-js/saslprep` writes `function read(): bitfield.BitFieldInstance
- * { return bitfield({ buffer }) }`. The program compiles the JavaScript, not
- * the declaration, so `bitfield` is the JS module and has no namespace member:
- * "Cannot find namespace 'bitfield'".
+ * and a consumer writes `function read(): lib.Instance
+ * { return lib({ buffer }) }`. The program compiles the JavaScript, not
+ * the declaration, so `lib` is the JS module and has no namespace member:
+ * "Cannot find namespace 'lib'".
  *
- * The declaration states what `BitFieldInstance` IS: the result of calling the
+ * The declaration states what `Instance` IS: the result of calling the
  * export. In the JS module that is `ReturnType<typeof F>` for `module.exports =
  * F` -- the implementation's own instance type, so the consumer holds the
  * class the module builds rather than an interface it would have to be sliced
@@ -1660,8 +1653,8 @@ const memberOverlay = (input: {
   const declaredAccessorTypes = new Set<ts.TypeNode>()
   // Every name the JS module itself binds at top level. A `@import` of a name
   // the source already declares would be a duplicate binding AND a second
-  // identity for one class -- `Object3D.d.ts` states `parent: Object3D`, and
-  // importing that INTO `Object3D.js` would give the file two `Object3D`s. So
+  // identity for one class -- `Node.d.ts` states `parent: Node`, and
+  // importing that INTO `Node.js` would give the file two `Node`s. So
   // a field whose type needs such a name is refused.
   const boundHere = new Set<string>()
   for (const statement of file.statements) {
@@ -1702,14 +1695,14 @@ const memberOverlay = (input: {
    * ⛔ Only a specifier the declaration file itself wrote may be used, because
    * those are RELATIVE and the two trees mirror each other, so they resolve
    * from the JS file to the real JS module. Naming the declaration tree
-   * directly -- `../../@types/three/src/.../X.js`, to reach a type the
+   * directly -- `../../@types/pkg/src/.../X.js`, to reach a type the
    * declaration file declares rather than imports -- looks like the same idea
-   * and is not: it pulls `@types/three` into the program, and a `.d.ts`
-   * REPLACES a `.js` for the checker. Every three module with no declaration
-   * beside it (`WebGLShaderCache`, `WebXRDepthSensing`) then resolves to
-   * nothing at all, so `new WebGLShaderCache()` becomes `any` and its whole
-   * invocation is withheld. Measured: 13 new withheld operations and +94
-   * unmet obligations, for types the census was already deriving correctly.
+   * and is not: it pulls the `@types` package into the program, and a `.d.ts`
+   * REPLACES a `.js` for the checker. Every package module with no
+   * declaration beside it then resolves to nothing at all, so `new
+   * ShaderCache()` becomes `any` and its whole invocation is withheld.
+   * Measured: new withheld operations and dozens more unmet obligations, for
+   * types the census was already deriving correctly.
    */
   /**
    * How this file must SPELL the type a declaration file calls `Name`, or
@@ -1741,9 +1734,9 @@ const memberOverlay = (input: {
    * NOTHING the declaration meant.
    *
    * Two shapes: a class or interface the declaration file declares itself
-   * (`WebGLState.d.ts`'s `declare class WebGLColorBuffer`, which no JS module
+   * (`State.d.ts`'s `declare class ColorBuffer`, which no JS module
    * exports), and a name it imports from a module whose JS does not export it
-   * (`PixelFormat` from `"../../constants.js"`, see `jsExportsOf`). Neither
+   * (`Format` from `"../../constants.js"`, see `jsExportsOf`). Neither
    * is the "unrecognized" name `spellingOf` leaves for a wider scope: a bare
    * spelling reaches `withJsDocTypeNames`, which binds it to whatever ONE type
    * the PROGRAM declares by that name -- a JS class elsewhere that merely
@@ -1833,13 +1826,13 @@ const memberOverlay = (input: {
   /**
    * What a name means when the JS module has nothing by that name.
    *
-   * `PixelFormat` and `TypedArray` live only in the declaration tree, so no
+   * `Format` and `TypedArray` live only in the declaration tree, so no
    * import can reach them and every annotation naming one resolves to `any`.
    * But an ALIAS is just a spelling, and an INTERFACE with no method, index
    * signature or type parameter is exactly a JSDoc object-literal type: both
    * say the same thing without needing the name in scope at all. `TypedArray`
-   * becomes the union of nine ambient array types; `WebGLProgramParameters`
-   * becomes `{ shaderID: string, ... }`.
+   * becomes the union of nine ambient array types; a `ProgramParameters`
+   * interface becomes `{ shaderID: string, ... }`.
    *
    * Every name the definition (or, for an interface, every member's type)
    * refers to must itself be reachable -- ambient, bound in this file
@@ -1956,14 +1949,14 @@ const memberOverlay = (input: {
    *
    * ⛔ A JSDoc NAMEPATH's head must be a NAME. `{TypedArray.constructor}` is a
    * type this compiler cannot read, so the overlay reaches for the alias body --
-   * and `@types/three` spells `TypedArray` as a nine-arm union, which turns the
+   * and a `@types` package may spell `TypedArray` as a nine-arm union, which turns the
    * tag into `{(Int8Array | ... | Float64Array).constructor}`: a parenthesized
    * union with a property access on it, which JSDoc has no grammar for. The
    * file stops parsing (`'}' expected.`), and a file the checker cannot parse
    * answers every question about itself from a broken tree rather than
    * refusing.
    *
-   * So refuse: the tag keeps the spelling three wrote, the parameter stays
+   * So refuse: the tag keeps the spelling the source wrote, the parameter stays
    * whatever the checker already made of it, and nothing downstream is told a
    * type that is not there. A box is a worse answer than a real carrier and a
    * far better one than an unparseable module.
@@ -2094,10 +2087,10 @@ const memberOverlay = (input: {
   }
 
   /**
-   * A `@param` tag whose STATED type says nothing -- three writes
+   * A `@param` tag whose STATED type says nothing -- a library writes
    * `@param {Object} json` for `fromJSON( json )` and `@param {object}
    * parameters` for a parameters bag, while the declaration file states
-   * `MaterialJSON` and `WebGLProgramParameters` for the very same positions.
+   * `ShapeJSON` and `ProgramParameters` for the very same positions.
    * A vague tag is a program stating strictly LESS than the package's own
    * declaration file already ships, so the declared type wins -- as a
    * REPLACEMENT over the existing tag's type-expression span, never a second
@@ -2177,18 +2170,18 @@ const memberOverlay = (input: {
     edits.push({ at: start, end: start, text: `/**\n${lines.map((l) => indent + l).join('\n')}\n${indent} */\n${indent}` })
   }
   /**
-   * `this.copyTextureToTexture = function ( ... ) { ... }` -- a member the
+   * `this.copyRegion = function ( ... ) { ... }` -- a member the
    * declaration file states as a METHOD and the source writes as an
    * assignment.
    *
-   * three's renderer modules are factories, not classes: `WebGLTextures.js`
-   * declares its functions locally and publishes them by assignment, and
-   * `WebGLRenderer` writes a large part of its own surface the same way. The
-   * declaration file describes every one of them as a method, so the types are
-   * already shipped -- the walk simply never reached them, because a
-   * `FunctionExpression` on the right of an `=` is not a `MethodDeclaration`.
-   * `copyTextureToTexture` alone accounts for 418 boxed carriers and 72 of
-   * the three.js app's unmet obligations.
+   * Some libraries write modules as factories, not classes: a factory
+   * declares its functions locally and publishes them by assignment, and a
+   * pre-class constructor function writes a large part of its own surface the
+   * same way. The declaration file describes every one of them as a method,
+   * so the types are already shipped -- the walk simply never reached them,
+   * because a `FunctionExpression` on the right of an `=` is not a
+   * `MethodDeclaration`. A single such member can account for hundreds of
+   * boxed carriers and dozens of unmet obligations.
    *
    * The JSDoc is anchored on the STATEMENT rather than the function, because
    * that is where the checker looks for an assignment's tags.
@@ -2277,15 +2270,15 @@ const memberOverlay = (input: {
   }
   walk(file)
 
-  // The type names the SOURCE'S OWN JSDoc already uses. three writes
-  // `@type {?Texture}` in files that never import `Texture` at runtime, and
+  // The type names the SOURCE'S OWN JSDoc already uses. A library writes
+  // `@type {?Sampler}` in files that never import `Sampler` at runtime, and
   // memory of the earlier attempt records the consequence: the tag resolves to
   // `any`, so a field the program plainly stated is boxed anyway. The package's
   // own declaration tree knows where every one of those names lives, so this
   // brings them into scope and the tag starts meaning what it says. Nothing is
   // annotated here -- only the names the program ALREADY wrote are resolved.
-  // The type names the SOURCE'S OWN JSDoc already uses. three writes
-  // `@type {?Texture}` in files that never import `Texture` at runtime, and
+  // The type names the SOURCE'S OWN JSDoc already uses. A library writes
+  // `@type {?Sampler}` in files that never import `Sampler` at runtime, and
   // the tag then resolves to `any` -- which, because `withJsDocTypeNames` is
   // OUTERMOST in the composed census, OUTRANKS the type the census would have
   // derived from the call site. Nothing is annotated here: only names the
@@ -2296,8 +2289,8 @@ const memberOverlay = (input: {
    * a name means something only the declaration tree can say, rewrite the tag
    * to say it directly.
    *
-   * `WebGLState.js` writes `@param {BlendingSrcFactor} blendSrc` and
-   * `BufferAttribute.js` writes `@param {TypedArray} array`. Both name pure
+   * A JS module writes `@param {SrcFactor} src` and another writes
+   * `@param {TypedArray} array`. Both name pure
    * declaration-tree aliases, so no import can reach them and the tags have
    * always resolved to `any` -- which, `withJsDocTypeNames` being OUTERMOST,
    * OUTRANKS whatever the census derived. `respell` already knows how to say
@@ -2338,13 +2331,13 @@ const memberOverlay = (input: {
   // in the text the previous ones already rewrote, and it holds for edits that
   // do not overlap. Two that DO overlap break it: the second's `end` lands
   // inside the first's inserted text, so the splice keeps a fragment of the
-  // insertion and drops real source. Three's `AnimationUtils.js` is the
-  // measured case -- `@param {TypedArray.constructor}` collected an edit for
+  // insertion and drops real source. A module tagging a typed-array
+  // constructor is the measured case -- `@param {TypedArray.constructor}` collected an edit for
   // the namepath AND one for the `TypedArray` inside it, both starting at the
   // same offset, and came out as
   // `{(| Int8Array | ... ).constructorray | Uint8ClampedArray | ... }`:
-  // syntactically invalid JavaScript. 58 `'}' expected.` diagnostics across
-  // three's `animation/` modules, every one of them a file whose whole
+  // syntactically invalid JavaScript. Dozens of `'}' expected.` diagnostics
+  // across a library's modules, every one of them a file whose whole
   // semantics the checker then answered from a broken parse.
   //
   // The OUTERMOST edit wins, which is why the accept order is by `at`

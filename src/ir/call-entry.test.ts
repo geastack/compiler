@@ -497,7 +497,12 @@ test('TypedArray.prototype.set copies a typed or numeric-array source in place a
   assert.equal(set([numbers, number]), true)
   assert.equal(set([unionOf(floats, numbers)], null), true)
   assert.equal(set([{ kind: 'array-object', element: { kind: 'string' }, ownership: 'shared-refcount', extension: null }]), false)
-  assert.equal(set([unionOf(floats, dynamic)]), false)
+  // A boxed source is the generic array-like its caller passed (an attribute
+  // buffer's `set( value, offset )`): the template reads it by
+  // `LengthOfArrayLike`/`Get`/`ToNumber`, bare or as one arm of a union.
+  assert.equal(set([dynamic]), true)
+  assert.equal(set([unionOf(floats, dynamic)]), true)
+  assert.equal(set([unionOf(floats, { kind: 'string' })]), false)
   assert.equal(set([floats, { kind: 'optional', absence: 'undefined', payload: number }]), false)
   assert.equal(set([floats, number, number]), false)
   assert.equal(set([floats], dynamic), false)

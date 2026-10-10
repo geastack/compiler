@@ -57,10 +57,20 @@ test('structural reconstruction and dynamic boundaries do not publish payload tr
   for (const [source, target] of [
     [record, otherRecord],
     [record, optional(otherRecord)],
-    [reference, dynamic],
-    [dynamic, reference]
+    [reference, dynamic]
   ]) {
     assert.ok(source && target)
     assert.equal(nativePayloadTransportMatches(source, target, census.nodeFor(source, target)), false)
   }
+})
+
+test('a registered native record payload recovered from a box is its exact payload transport', () => {
+  // `gea::Value::payloadType` checks the exact registered payload before
+  // `unboxValue` hands back that same object, so the recovery publishes the
+  // transport the dynamic-wrapper and accessor-record contracts cite.
+  const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+  const node = conversions().nodeFor(dynamic, reference)
+  assert.ok(node.capability.kind === 'atom')
+  assert.equal(node.capability.classifier.id, 'gea::Value::payloadType')
+  assert.ok(nativePayloadTransportMatches(dynamic, reference, node))
 })

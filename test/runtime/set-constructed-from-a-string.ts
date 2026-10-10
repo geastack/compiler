@@ -3,8 +3,8 @@
 //! expect: 2
 
 // `new Set(iterable)` over a STRING iterates it by code point (ECMA-262
-// 22.1.5.1), so this holds one-character strings -- the form Hono's
-// RegExpRouter writes its metacharacter set in.
+// 22.1.5.1), so this holds one-character strings -- the form an HTTP
+// framework's regex router writes its metacharacter set in.
 const metaChars = new Set('.+*[]')
 console.log(metaChars.size)
 console.log(metaChars.has('*'), metaChars.has('x'))

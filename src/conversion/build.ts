@@ -45,6 +45,7 @@ export const emptyConversionRegistry: ConversionRuntimeRegistry = Object.freeze(
   arrayObjectDomain: () => null,
   functionMaterializer: () => null,
   functionValueDispatchMaterializer: () => null,
+  constructorValueDispatchMaterializer: () => null,
   optionalAbsenceTag: (_absence: 'null' | 'undefined') => null,
   boxedIdentityMaterializer: () => null,
   dynamicMapViewMaterializer: () => null,
@@ -142,8 +143,8 @@ const dropOneArmUnionsOf = (union: Extract<Representation, { kind: 'tagged-union
  *
  * It did. The closure treated every target alike, so a union of N arms
  * produced C(N,2) drop-two unions at its second level and C(N,3) at its
- * third, each keyed by digesting N arm keys. TypeScript's own compiler
- * carries `Node` unions past a hundred arms; the representations stage ran
+ * third, each keyed by digesting N arm keys. A large program can carry
+ * node unions past a hundred arms; the representations stage ran
  * 25 minutes without returning, and a CPU profile was 85% inside this
  * closure's `representationKey`. A referenced multi-arm subset is still
  * proposed -- `subsetNarrowingTargetsOf` draws it from `referenced`, one
@@ -160,22 +161,22 @@ const narrowingStepsOf = (source: Representation): NarrowingSteps => {
   if (source.kind === 'tagged-union') {
     // A union whose absence lives INSIDE an arm's own optional narrows to an
     // OPTIONAL of another arm, which neither the bare arms nor the
-    // drop-one-arm unions reach. hono's `compose` binds `let handler` to a
+    // drop-one-arm unions reach. A middleware composer binding `let handler` to a
     // `Function | (Next | undefined)` cell -- arms `record` and
     // `optional(callable)` -- and reads it back as `Function | undefined`.
     // The absence tag comes from the optional arm that holds it, because that
     // is the only absence this union can express.
     //
-    // The absence may also be an arm of its OWN -- three's `@type {?Array<Plane>}`
+    // The absence may also be an arm of its OWN -- a JSDoc `@type {?Array<Plane>}`
     // field is `undefined | null | Array<Plane>` (a JS field is readable before
     // its constructor writes it, so the census tags both absences), and
     // `if ( srcPlanes !== null )` rules out exactly one of them. What is left is
     // one absence beside one value, which IS an optional -- and every read past
     // that guard carries it. Without this the cell answered the three-arm union
     // and its guarded reads answered `optional(Array<Plane>, undefined)`, with
-    // no pair between them in the graph: 4 unmet `binding-read-conversion`
-    // obligations on the three.js app for one field, and the same shape wherever a
-    // nullable JSDoc field is guarded. `targets/cpp/conversions.ts` already
+    // no pair between them in the graph: unmet `binding-read-conversion`
+    // obligations for one field, and the same shape wherever a nullable JSDoc
+    // field is guarded. `targets/cpp/conversions.ts` already
     // installs `tagged-union -> optional(arm)` (`live-arm-optional`); only the
     // pairing was missing.
     const absences: readonly ('null' | 'undefined')[] = [
@@ -206,8 +207,7 @@ const narrowingStepsOf = (source: Representation): NarrowingSteps => {
   // inside that branch carries the absent value's OWN carrier -- `null`, whose
   // C++ value is `nullptr`, or `undefined`. This enumeration offered only the
   // present side, so those reads asked for an `optional(T,null) -> null`
-  // conversion that nothing had ever proposed a node for. three's
-  // `WebGLClipping` does it twice on one field.
+  // conversion that nothing had ever proposed a node for.
   const absent = { kind: source.absence } as const
   const payload = source.payload
   if (payload.kind !== 'tagged-union') return { nested: distinctByKey([payload, absent]), subsets: [] }
@@ -235,7 +235,7 @@ const narrowingStepsOf = (source: Representation): NarrowingSteps => {
  * unions or optionals.
  *
  * `narrowingStepsOf` strips exactly one level, and one level is not what the
- * language proves. three's JSDoc nullable field is `undefined | null | X`, and
+ * language proves. A JSDoc nullable field is `undefined | null | X`, and
  * when `X` is itself a union -- `?(string|number|boolean)` -- a guard past the
  * two absences lands inside `X`: `undefined | null | (string|number)` narrowed
  * to `number` is two steps, and the outer shape narrowed to the same outer
@@ -263,8 +263,8 @@ const NARROWING_DEPTH = 3
  * arrays). Every minted object is a fresh miss, so an unmemoized closure pays
  * a full structural rebuild, crypto digest included, for values it has already
  * built -- and `narrowingReachesTarget` asks for the same closure twice, once
- * up front and again inside a RECURSIVE `reaches`. Measured on the three.js app, the
- * closure and the keying it forces were about 16% of a 58s compile.
+ * up front and again inside a RECURSIVE `reaches`. Measured on a large program,
+ * the closure and the keying it forces were about 16% of the compile.
  *
  * Sound to memo because the walk is a pure function of the representation: it
  * reads `narrowingStepsOf` and nothing else, and representations are immutable
@@ -406,11 +406,11 @@ export const narrowingReachesTarget = (source: Representation, target: Represent
  * `instanceof` performs, which `narrowingStepsOf` cannot enumerate.
  *
  * `narrowingStepsOf` answers "what can this carrier narrow to" from the
- * carrier alone, and a `class-ref(Object3D)` states nothing about which
+ * carrier alone, and a `class-ref(Shape)` states nothing about which
  * classes descend from it -- that is a fact about each OTHER class. So this is
- * a TEST, asked of the target, which does state its own ancestry. three's
- * `getDepthMaterial` writes `result = cond ? _distanceMaterial : _depthMaterial`
- * into a cell the checker widened to `undefined | null | Material` and reads
+ * a TEST, asked of the target, which does state its own ancestry. A function
+ * writing `result = cond ? circle : square` into a cell the checker widened to
+ * `undefined | null | Shape` reads
  * it back at the two-class union the assignment proved: an arm subset whose
  * arms are descendants of the source's own arm, and without this every read
  * past that assignment reported a conversion with no node.
@@ -433,22 +433,22 @@ const heldClassOf = (source: Representation): Extract<Representation, { kind: 'c
 }
 
 /**
- * A base-class handle read at a UNION of its descendants -- `instanceof Mesh ||
- * instanceof Line || instanceof Points`, which is the guard three's
- * `WebGLShadowMap.renderObject` is written with once the gea plugin restores
- * real class tests in place of three's duck-typed `isMesh` flags.
+ * A base-class handle read at a UNION of its descendants -- `instanceof Circle ||
+ * instanceof Square || instanceof Triangle`, the guard a program writes over a
+ * class hierarchy (or that a source transform produces from duck-typed
+ * `isCircle` flags).
  *
  * `narrowsToDescendantClass` answers this one arm at a time and
  * `subsetNarrowingTargetsOf`'s union branch answers it for a union SOURCE;
- * neither covers a class source read at a union target, so twenty reads past
- * that one guard carried an obligation nothing had proposed and the three.js app could
- * not certify at all. The renderer has always been able to spell it --
+ * neither covers a class source read at a union target, so every read past
+ * that one guard carried an obligation nothing had proposed and the program
+ * could not certify at all. The renderer has always been able to spell it --
  * `targets/cpp/emit-narrowing.ts`'s `classFamilyLoadText` projects exactly
  * this, testing the most-specific family first and rebuilding the arm -- so
  * the gap was the capability side alone, which is the two-authorities shape:
  * fix the side that is wrong, never the consumer.
  *
- * Asked of the target because a `class-ref(Object3D)` states nothing about
+ * Asked of the target because a `class-ref(Shape)` states nothing about
  * which classes descend from it; each arm states its own ancestry.
  * `targets/cpp/conversions.ts` imports this rather than restating it so the
  * proposal and the admission cannot disagree about which pairs install.
@@ -494,7 +494,7 @@ const isArmSubsetOf = (
   if (target.arms.length < 2 || target.arms.length > source.arms.length) return false
   // An arm's home may be an arm the target's own arm NARROWS OUT OF, not only
   // one it equals -- which is also why the arm-count test is `>` and not `>=`.
-  // three's `?(string|number|boolean)` field is `undefined | null |
+  // A JSDoc `?(string|number|boolean)` field is `undefined | null |
   // (string|number|boolean)`, and a guard on the inner union leaves the SAME
   // three-arm outer shape with a smaller union in its `present` arm: same arm
   // count, genuinely narrower, and matching arms by key alone read it as a
@@ -548,8 +548,8 @@ const nestedTaggedUnionsOf = (source: Representation): readonly Extract<Represen
  * always some OTHER representation `referencedRepresentations` already put in
  * the plan -- an explicit `as`-cast's own asserted type, a declared return
  * type, a parameter annotation, ... -- whose arms are a genuine subset of
- * `source`'s. hono's `_getQueryParam(url, key, true) as string[] | undefined
- * | Record<string, string[]>` (`utils/url.ts:314`) is the case: the cast
+ * `source`'s. `getParam(url, key, true) as string[] | undefined |
+ * Record<string, string[]>` is the case: the cast
  * narrows the callee's real 4-arm return union down to the 2 array-bearing
  * arms, and the cast's own asserted type is what makes that 2-arm union a
  * member of `referenced` in the first place -- this only has to notice it is
@@ -575,9 +575,9 @@ const subsetNarrowingTargetsOf = (source: Representation, referenced: ReadonlyMa
     return [...referenced.values()].filter((candidate) => {
       // A BARE subset union is a candidate too, not only one that keeps the
       // source's own absence tag. Presence and arm-narrowing are proven by
-      // separate guards and both proofs land on one read: mongodb's
-      // `formatSort` writes `if (sort == null) return` and then `if (typeof
-      // sort !== 'object') throw`, so the five reads after it are subsets with
+      // separate guards and both proofs land on one read: a function
+      // writing `if (sort == null) return` and then `if (typeof sort !==
+      // 'object') throw`, so the five reads after it are subsets with
       // no optional wrapper left at all -- which this branch, matching only
       // optional candidates, never offered. `targets/cpp/conversions.ts`'s
       // `narrowing` already accepts the pairing (its `selected` stays optional
@@ -622,8 +622,8 @@ const optionalArmSourcesOf = (arms: readonly Representation[], absences: readonl
  * target can widen from -- structural candidates for `gea::CallableObject`'s
  * prefix-dropping converting constructor (`targets/cpp/emit-narrowing.ts`'s
  * `dropsUnboundParameters`, `gea_runtime.h`'s own `IsTypePrefix`-gated
- * constructor). hono's own `Hono.getPath`: `this.getPath = (strict ?? true)
- * ? (options.getPath ?? getPath) : getPathNoStrict` merges two
+ * constructor). `this.getPath = (strict ?? true) ? (options.getPath ??
+ * getPath) : getPathNoStrict` merges two
  * `(request: Request) => string` values into a field declared
  * `(request: Request, options?: {env?}) => string` -- a real value in the
  * program is a callable with exactly the target's own LEADING run of
@@ -671,8 +671,7 @@ const callablePrefixSourcesOf = (target: Representation): readonly Representatio
  * union result -- structural candidates for `gea_runtime.h`'s
  * `ResultWidensIntoArm`-gated converting constructor
  * (`targets/cpp/emit-narrowing.ts`'s `dropsAllParametersIntoResultArm`).
- * hono's own `Context.notFound`: `this.#notFoundHandler ??=
- * () => createResponseInstance()` merges a `() => Response` into a field
+ * `this.#notFoundHandler ??= () => createResponse()` merges a `() => Response` into a field
  * declared `(c: Context) => Response | Promise<Response>` -- a real value in
  * the program is a zero-parameter callable whose result is exactly the
  * `Response` arm, never the union itself.
@@ -735,8 +734,8 @@ const wideningSourcesOf = (target: Representation): readonly Representation[] =>
     //
     // The bare absence marker itself -- `{kind: target.absence}` -- is a
     // source too, and a distinct one from the payload: a value whose own
-    // TYPE is exactly `undefined` (hono's `E['Bindings']` resolved for
-    // `BlankEnv`, which genuinely has no such field) stores as the optional's
+    // TYPE is exactly `undefined` (an indexed access `E['Bindings']` resolved
+    // for an `E` that genuinely has no such field) stores as the optional's
     // empty state with no payload conversion at all. `emit-narrowing.ts`'s
     // `emptyOptionalText` already renders this (`written.kind === held.
     // absence`); without offering the source here `registry.widening` is
@@ -747,9 +746,9 @@ const wideningSourcesOf = (target: Representation): readonly Representation[] =>
     // own proper prefixes (`callablePrefixSourcesOf`), an optional target
     // admits its own payload, and `((gl, v) => void)` written where
     // `((gl, v, textures) => void) | undefined` is expected is both at once.
-    // three's `getSingularSetter` is 30 returns of exactly that shape --
-    // `setValueV1f( gl, v )` and `setValueT1( gl, v, textures )` returned from
-    // one `switch` whose fall-through makes the slot optional.
+    // A setter factory with dozens of returns of exactly that shape --
+    // `setScalar( gl, v )` and `setTexture( gl, v, textures )` returned from
+    // one `switch` whose fall-through makes the slot optional -- is the case.
     //
     // The emitter renders it by constructing the payload EXPLICITLY
     // (`convertedValueText`'s optional branch): C++ allows one user-defined
@@ -804,7 +803,7 @@ const distinctByKey = (representations: readonly Representation[]): readonly Rep
  * wrong when read straight off `plan.selected`:
  *
  *   - `plan.selected` is keyed by RESULT, not by carrier. A program publishes
- *     one entry per SSA result, so `ios-metal-world-game` has 95,670 of them
+ *     one entry per SSA result, so a mid-sized program has tens of thousands of them
  *     naming vastly fewer distinct carriers. Conversions are a fact about
  *     carriers, so every duplicate is an iteration that re-derives an answer
  *     already in `nodes`.
@@ -1015,7 +1014,11 @@ export const buildConversionGraph = (
     // than special-casing the one that cannot fail it.
     for (const target of [...narrowingClosureOf(representation), ...subsetNarrowingTargetsOf(representation, referenced)]) {
       const targetKey = representationKey(target)
-      if (!referencedKeys.has(targetKey)) continue
+      // One carrier on both sides is the identity `capabilityOf` answers, not
+      // a narrowing: a recursive sum's closure reaches itself, and a minted
+      // self-selection made every `X -> X` look like a checked transform (a
+      // native array entry could no longer cite its identity storage).
+      if (sourceKey === targetKey || !referencedKeys.has(targetKey)) continue
       const id = `${sourceKey}->${targetKey}`
       if (nodes.has(id)) continue
       const installed = registry.narrowing(representation, target)
@@ -1039,8 +1042,8 @@ export const buildConversionGraph = (
   }
 
   // An absent array proven present and then read as the interface that
-  // extends it -- tsc's `createNodeArray(elements?: readonly T[])` after
-  // `isNodeArray(elements)` -- lands on a referenced `array-object` whose only
+  // extends it -- `createList(elements?: readonly T[])` after a type guard on
+  // `elements` -- lands on a referenced `array-object` whose only
   // difference from the payload is the extension, one C++ type either way.
   // Proposed here because neither closure above reaches it: the payload is
   // not that carrier, and the target is not a subset of any sum.
@@ -1207,8 +1210,8 @@ export const buildConversionGraph = (
   // the whole point of the carrier -- so it cannot name its own sources the
   // way `function-value-dispatch` names them by matching ABI key; "every
   // carrier this backend spells as a CallableObject" is a fact about each
-  // SOURCE. `stackCrawlMark || assertIsDefined` (tsc's `debug.ts`, and the
-  // largest single family in its self-compile) is the shape: the merge target
+  // SOURCE. `mark || assertDefined` (the largest single family in one large
+  // program) is the shape: the merge target
   // is the identity and the right arm is an ordinary concrete function.
   const identityTargets = referencedKeyed.filter(([, target]) => target.kind === 'callable-identity')
   for (const [targetKey, target] of identityTargets) {
@@ -1230,14 +1233,13 @@ export const buildConversionGraph = (
   // Class upcasts: a derived class-ref stored where a base class-ref is
   // declared. Its own loop for the same reason the boxing loop above has one
   // -- `wideningSourcesOf` reads valid sources off the TARGET's own shape, and
-  // `class-ref(MongoError)` states nothing about which classes descend from
+  // `class-ref(BaseError)` states nothing about which classes descend from
   // it; that is a fact about each SOURCE. So this asks every referenced pair
   // once and lets the registry's own heritage answer decide, gated the
   // identical strict way every widening is.
   //
-  // `previousOperationError ?? new MongoRuntimeError(...)` (mongodb's
-  // `execute_operation.ts`) is the shape: TypeScript reduces the merge to the
-  // base `MongoError`, the freshly constructed arm carries the derived class,
+  // `previousError ?? new DerivedError(...)` is the shape: TypeScript reduces
+  // the merge to the base `BaseError`, the freshly constructed arm carries the derived class,
   // and without this loop the two never meet and the merge refuses.
   const classRefs = keyedDistinct(referenced.values()).filter(([, one]) => one.kind === 'class-ref')
   for (const [targetKey, target] of classRefs) {
@@ -1250,9 +1252,9 @@ export const buildConversionGraph = (
       // handle read at a descendant, which is what `instanceof` narrows -- is
       // a narrowing, and it needs exactly the same pair enumeration for
       // exactly the same reason the comment above gives: which classes descend
-      // from `class-ref(Object3D)` is a fact about each other class, not
+      // from `class-ref(Shape)` is a fact about each other class, not
       // something the carrier states. Asking only `widening` here left
-      // `if ( part instanceof Mesh )`'s own reads with no node at all.
+      // `if ( part instanceof Circle )`'s own reads with no node at all.
       const installed = registry.widening(source, target) ?? registry.narrowing(source, target)
       if (!installed) continue
       nodes.set(id, {
@@ -1405,7 +1407,7 @@ export const buildConversionGraph = (
         // `native-record-ref` joins on the TARGET side: it names a layout instead
         // of carrying one, so the pair `record -> native-record-ref` -- `return
         // options` out of a method declared to return a named overlapping shape,
-        // which the mongodb driver is built out of -- was filtered out before
+        // a pervasive pattern in options-heavy libraries -- was filtered out before
         // `registry.recasting` was ever asked what it thought.
         one.kind === 'native-record-ref' ||
         // A concrete generated class can be rebuilt as a structural interface

@@ -1,4 +1,4 @@
-// `for (const i in array)` binds a STRING key, and hono's RegExp router
+// `for (const i in array)` binds a STRING key, and an HTTP framework's RegExp router
 // indexes straight back with it: `handlerMap[i] = handlerData[indexReplacementMap[i]]`
 // over a SPARSE replacement map, which is exactly why the loop is a `for`-`in`
 // and not a counted one. Both directions needed a CanonicalNumericIndexString

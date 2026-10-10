@@ -135,12 +135,12 @@ const lowerObjectPatternStep = (ctx: LoweringContext, flow: FlowController, bloc
   const keyOperand = namedOperand(operation, 'key')
   const key = resolveRequiredOperand(ctx, block, lineage, keyOperand)
   const representation = requireResultRepresentation(ctx, operation, 'value', 'an object destructuring step')
-  // mongodb's `const { initializeClient } = krb` over deps.ts's
+  // `const { initialize } = mod` over an optional dependency's
   // `Module | makeErrorModule(...)`: the pattern's `[[Get]]` is a proxy's
   // `[[Get]]` when the union holds the proxy arm, so it branches on the arm
   // exactly as `lower-property.ts`'s own read does -- the trap runs for the
   // proxy, every other arm reads its field.
-  // `let krb: Kerberos` is declared before it is assigned, so the source is
+  // `let mod: Module` is declared before it is assigned, so the source is
   // optional over the union; the pattern's `object-source` step has already
   // run RequireObjectCoercible, so the payload is what the `[[Get]]` reads.
   const present = receiver.representation.kind === 'optional' ? receiver.representation.payload : receiver.representation
@@ -164,7 +164,24 @@ const lowerObjectPatternStep = (ctx: LoweringContext, flow: FlowController, bloc
     keyOperand.source.kind === 'constant'
       ? reactiveFieldReadOf(ctx.program.classes, receiver.representation, keyOperand.source.text, ctx.program.reactiveFields)
       : false
-  registerResult(ctx, operation, ctx.builder.get(block, lineage, receiver, key, representation, undefined, reactive))
+  registerResult(
+    ctx,
+    operation,
+    ctx.builder.get(
+      block,
+      lineage,
+      receiver,
+      key,
+      representation,
+      undefined,
+      reactive,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      operation.ordinaryObjectPrototypeKeyAbsent
+    )
+  )
 }
 
 /** Whether a carrier is one of the two record shapes a tuple can be given -- see `lower-allocation.ts`'s `lowerTupleLiteral` for why there is no separate tuple carrier. */
@@ -172,8 +189,8 @@ const isTupleCarrier = (kind: string): boolean => kind === 'record' || kind === 
 
 /**
  * Whether a source carries a `tagged-union` all of whose arms are themselves
- * tuple carriers -- `[T, ParamIndexMap] | [T, Params]`, hono's own router
- * match result, is exactly this: a fixed-arity 2-tuple in EVERY arm, differing
+ * tuple carriers -- `[T, ParamIndexMap] | [T, Params]`, a router's match
+ * result, is exactly this: a fixed-arity 2-tuple in EVERY arm, differing
  * only in one slot's own value type.
  *
  * A tuple's shape is closed and known at compile time, so reading its
@@ -290,7 +307,8 @@ const lowerArrayPatternSource = (ctx: LoweringContext, block: IrBlockId, operati
     !isCursorCarrier(source.representation.kind)
   ) {
     throw new IrLoweringBlockedError(
-      `an array binding pattern's own source carries a "${source.representation.kind}" carrier; the array fast path only reads ` +
+      `an array binding pattern's own source carries a "${source.representation.kind}" carrier (declared ` +
+        `"${representationKey(declared)}"); the array fast path only reads ` +
         'an "array-object" source by index, the tuple fast path only reads a "record"/"native-record-ref" source by position, a ' +
         'tagged-union-of-tuples source reads the same way per live arm, the Set/string snapshot path only covers a source whose ' +
         'own step published an "array-object", and the native cursor path only covers a source that is ALREADY a "Generator<T>" -- ' +

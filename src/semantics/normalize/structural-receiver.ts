@@ -48,9 +48,9 @@ export const firstOwnThisKeyword = (node: ts.Node): ts.Node | null => {
  * parameter is `PropertyDescriptor & ThisType<any>`. That is the language
  * stating a fact, not a gap in the checker: a descriptor's `get` or `value`
  * function is installed onto the defineProperty TARGET and entered with
- * whatever object the later lookup resolved on -- `@hono/node-server`
- * installs `text()` onto its request prototype this way, and the object that
- * reaches it is a request, never the descriptor literal. Taking the literal
+ * whatever object the later lookup resolved on -- a library that installs
+ * `text()` onto its request prototype this way is handed a request, never the
+ * descriptor literal. Taking the literal
  * as the receiver declared a convention whose frame is the descriptor record,
  * so the dynamic call through the installed property refused the request it
  * was handed at runtime.
@@ -158,8 +158,8 @@ export const createReceiverResolver = (
    * mention `this`. Two rules, one member: the field is
    * `CallableObject<void(Self, double)>` and the value assigned into it is
    * `CallableObject<void(double)>`, which is not a conversion C++ has -- the
-   * emitted unit is rejected at the store. (`examples/canvas-3d-cube`'s
-   * `createCanvasCubeDemo` is exactly this; so is a 20-line reproducer.)
+   * emitted unit is rejected at the store. (A canvas demo's factory function
+   * was exactly this; so is a 20-line reproducer.)
    *
    * So when the body does not settle the question, the DECLARED member does --
    * by asking this same function about that member's own declaration, so there
@@ -194,8 +194,8 @@ export const createReceiverResolver = (
    * declaration. A generic declaration states its result over its own type
    * parameters -- `AsyncGenerator<T, TReturn, TNext>[Symbol.asyncIterator]()`
    * answers `AsyncGenerator<T, TReturn, TNext>` -- and a `T` read there has no
-   * binding, which derives to `any` (mongodb's `onData`: the literal's `return
-   * this` then published `AsyncGenerator<any>` into a field that holds
+   * binding, which derives to `any` (an object literal implementing an async
+   * iterator: its `return this` then published `AsyncGenerator<any>` into a field that holds
    * `AsyncGenerator<Buffer>`). The contextual type's member is the same
    * declaration with `T = Buffer` applied, which is the store's other side.
    */
@@ -270,19 +270,18 @@ export const createReceiverResolver = (
   /**
    * The receiver an ordinary JavaScript function is entered with, for the one
    * shape where the language supplies one the type system never spells: the
-   * pre-`class` constructor function three.js's renderer is built out of.
+   * pre-`class` constructor function an ES5-style library is built out of.
    *
-   * `function WebGLClipping( properties ) { this.uniform = uniform; ... }`,
-   * invoked as `new WebGLClipping(...)`. TypeScript's own JS inference already
+   * `function Clipping( properties ) { this.uniform = uniform; ... }`,
+   * invoked as `new Clipping(...)`. TypeScript's own JS inference already
    * gives such a function BOTH a call signature and exactly one construct
    * signature, and gives the construct signature's return type ("Constructed")
    * the property set those `this.x = ` assignments produce -- so the receiver
    * is not derived here, it is READ from the construct signature the checker
    * already resolved. Without it the convention declares no receiver while the
    * body reads `this` from a frame slot that does not exist, and the whole
-   * body is withheld: ten of them in one program (`WebGLTextures`,
-   * `WebGLProgram`, `WebGLShadowMap`, `WebGLClipping`, ...), which is the
-   * renderer.
+   * body is withheld -- for a library written this way, most of its
+   * constructors.
    *
    * The candidate rule: exactly one construct signature and at least one
    * call signature. Zero call signatures is a real constructor (a class, or

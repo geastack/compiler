@@ -1,4 +1,5 @@
 import type { ClassifierMaterializerPair, CoercionOperation, ConversionRuntimeRegistry } from '../../conversion/registry.js'
+import { nativeLogicalReceiverProtocolOf, nativeLogicalReceiverProtocolSupported } from '../../representation/native-logical-receiver.js'
 import { coercionText } from './emit-coercion.js'
 import {
   classRefTransportKind,
@@ -6,10 +7,34 @@ import {
   constructorUpcastMember,
   nativeRecordBaseTransportKind
 } from './class-ref-transport.js'
-import type { ClassifierContract, CollectionDomain, ConversionNode, MaterializerContract } from '../../conversion/algebra.js'
-import { certifiedRecordViewPlan, recordToArrayPlan } from '../../conversion/structural-plan.js'
-import { chainFieldProtocolUnused, nativeSumNarrowingTransports } from './native-narrowing-transport.js'
-import { classRefDomainsOverlap, classifierDomainsOverlap } from '../../conversion/algebra.js'
+import type {
+  ClassifierContract,
+  CollectionDomain,
+  ConversionNode,
+  ConversionNodeResolver,
+  MaterializerContract
+} from '../../conversion/algebra.js'
+import { callablePayloadPlan, callableViewPlan, certifiedRecordViewPlan, recordToArrayPlan } from '../../conversion/structural-plan.js'
+import { recipeClosureOf } from '../../conversion/recipe-closure.js'
+import { nativeFieldViewPlanIsLive } from '../../conversion/native-field-view.js'
+import { promiseAdoptionPlanOf } from '../../conversion/promise-adoption.js'
+import { composedDictionaryViewPlan } from '../../conversion/dictionary-view.js'
+import {
+  nativeArrayViewBasePlanOf,
+  nativeArrayViewSourceIsBoxed,
+  nativeArrayViewWithObservation,
+  nativeArrayViewWithOwnerObservation
+} from '../../conversion/array-view.js'
+import { composedDocumentRecordViewPlanOf } from '../../conversion/document-record-view.js'
+import { certifiedIteratorObjectViewPlan } from '../../conversion/certified-iterator-object-view.js'
+import { chainFieldProtocolUnused, chainPayloadNeedsSourceGuard, nativeSumNarrowingTransports } from './native-narrowing-transport.js'
+import {
+  classRefDomainsOverlap,
+  classifierDomainsOverlap,
+  conversionNeedsPriorSourceGuard,
+  conversionRequiresSourceGuard,
+  transfersNativeStorage
+} from '../../conversion/algebra.js'
 import { emptyConversionRegistry, narrowingReachesTarget, narrowsToDescendantClassUnion } from '../../conversion/build.js'
 import type { CallableAbi, Representation, TaggedUnionArm } from '../../representation/model.js'
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
@@ -32,12 +57,12 @@ import {
   conversionRecipeOf,
   boxedAssertionText,
   classDocumentViewText,
+  documentViewable,
   dropsAllParametersIntoResultArm,
   dropsUnboundParameters,
   dynamicTagFor,
   promisePayloadConvertible,
   rebasesRestOverLeadingParameters,
-  dictionaryCastableToDictionary,
   CONSTRUCTOR_STATIC_VIEW,
   constructorStaticViewAdmitted,
   DYNAMIC_DICTIONARY_TO_NAMED_RECORD,
@@ -59,10 +84,18 @@ import {
   CHECKED_ARM_NARROWING,
   checkedArmNarrowingText
 } from './emit-narrowing.js'
-import { cppTypeOf } from './types.js'
-import { nativeSumPlan, nativeSumPreservesPayload } from '../../conversion/native-sum.js'
-import { nativeSelectionRecipeOf, nativeTotalSelectionRecipeOf, type NativeSelectionRecipe } from '../../conversion/native-selection.js'
+import { NATIVE_SUM_CLASSIFIER, NATIVE_SUM_MATERIALIZER, nativeSumPlan, nativeSumPreservesPayload } from '../../conversion/native-sum.js'
+import { NATIVE_REFERENCE_ABSENCE, nativeReferenceAbsenceOf } from '../../conversion/native-absence.js'
+import {
+  nativeSelectionGuardContractOf,
+  nativeSelectionPreservesPayload,
+  nativeSelectionRecipeOf,
+  nativeSubsetSelectionRecipeOf,
+  nativeTotalSelectionRecipeOf,
+  type NativeSelectionRecipe
+} from '../../conversion/native-selection.js'
 import { nativeClassReferenceIdentityOf } from '../../conversion/native-class-reference.js'
+import { certifiedIterableObjectViewPlan, certifiedProtocolIteratorPlan } from '../../conversion/certified-iterator-protocols.js'
 import {
   isRecordViewTarget,
   ownedRecordMaterializationPlan,
@@ -80,6 +113,7 @@ import { ITERABLE_OBJECT_VIEW, iterableObjectViewPlanFor } from './emit-iterable
 import { ITERATOR_OBJECT_VIEW, iteratorObjectViewPlanFor } from './emit-iterator-object-view.js'
 import { CONSTRUCTOR_DISPATCH_FAMILY, CONSTRUCTOR_IDENTITY_FAMILY } from './emit-constructor-identity-family.js'
 import { proxyArmWithoutHome } from '../../representation/proxy-carriers.js'
+import { samePhysicalCarrier } from '../../representation/physical-carrier.js'
 import { constructorDispatchFamilyPlan, constructorIdentityFamilyPlan } from '../../conversion/constructor-identity-family.js'
 
 /** Called only after the native converting-constructor predicate has selected this pair. */
@@ -102,9 +136,9 @@ const nativeSumConversion = (source: Representation, target: Representation): Cl
   if (plan === null) return null
   const domain = `sum-widen:${representationKey(source)}->${representationKey(target)}`
   return {
-    classifier: { id: 'gea::native-sum::live-alternative', domain },
+    classifier: { id: NATIVE_SUM_CLASSIFIER, domain },
     materializer: {
-      id: 'gea::native-sum::inject-alternative',
+      id: NATIVE_SUM_MATERIALIZER,
       domain,
       allocates: false,
       nativeFieldProtocol: 'unused',
@@ -126,9 +160,11 @@ const nativeSelectionConversion = (
       id: 'gea::native-sum::select',
       domain,
       allocates: false,
+      armSelection: 'native-sum',
       nativeFieldProtocol: 'unused',
-      nativePayloadTransport: 'preserved',
+      ...(nativeSelectionPreservesPayload(nativeSelection) ? { nativePayloadTransport: 'preserved' as const } : {}),
       nativeSelection,
+      ...nativeSelectionGuardContractOf(nativeSelection),
       ...nativeClassReferenceIdentityOf(source, target)
     }
   }
@@ -207,13 +243,13 @@ const nativeSelectionConversion = (
  * carriers, exactly as `emit-narrowing.ts`'s `widenedStoreText` recurses when
  * it RENDERS the store. Asked as one predicate rather than restated per
  * branch, because the branch that restated it read only one level and refused
- * `tagged-union(record | optional(callable))`: hono's `compose` builds that
- * carrier for its `handler`, and the render was ready for it.
+ * `tagged-union(record | optional(callable))`: a middleware-composition
+ * function builds that carrier for its handler, and the render was ready for it.
  */
 const boxable = (representation: Representation): boolean => {
   // Already a box. `dynamicTagFor` answers `null` for it -- a box holds
   // whichever tag its value carries, not one fixed tag -- and reading that as
-  // "cannot be boxed" refused hono's `compose` handler,
+  // "cannot be boxed" refused a composed handler typed
   // `tagged-union(dynamic | optional(callable))`, whose first arm is one.
   if (representation.kind === 'dynamic') return true
   if (representation.kind === 'optional') return boxable(representation.payload)
@@ -223,7 +259,7 @@ const boxable = (representation: Representation): boolean => {
 
 const exactTagRead = (tag: string): ClassifierMaterializerPair => ({
   classifier: { id: 'gea::Value::tag', domain: `tag:${tag}` },
-  materializer: { id: 'gea::detail::unboxValue', domain: `tag:${tag}`, allocates: false }
+  materializer: { id: 'gea::detail::unboxValue', domain: `tag:${tag}`, allocates: false, wrapperKind: 'unbox-tag', boxTag: tag }
 })
 
 /**
@@ -249,8 +285,8 @@ const upcastsToBase = (source: Representation, target: Representation): boolean 
  * The exact mirror: a BASE class-ref read at one of its descendants, which is
  * what `instanceof` narrows and what `upcastsToBase` above cannot express.
  *
- * `Object3D.traverse( part => { if ( part instanceof Mesh ) part.castShadow =
- * true } )` is the shape, and it is the one `instanceof` exists for -- the
+ * `node.visit( part => { if ( part instanceof Derived ) part.flag = true } )`
+ * is the shape, and it is the one `instanceof` exists for -- the
  * handle is declared at the base and the guard proves the object is a
  * descendant. Nothing had ever PROPOSED the pair (`conversion/build.ts`'s
  * class-ref loop asked only `widening`), so the reads past the guard carried
@@ -269,8 +305,8 @@ const downcastsToDerived = (source: Representation, target: Representation): boo
 /** Exactly one class arm inside `target` accepts `source` by inheritance. */
 const hasSingleClassUpcastHome = (source: Representation, target: Representation): boolean => {
   // A class extending the intrinsic `Error` reaches an `Error` arm by the same
-  // pointer upcast a bare `Error` slot takes: mongodb hands every
-  // `MongoNetworkError` to an `(err?: Error | null)` callback.
+  // pointer upcast a bare `Error` slot takes: a program hands its own error
+  // subclass to an `(err?: Error | null)` callback.
   if (upcastsToBase(source, target) || (target.kind !== source.kind && nativeRecordBaseTransportKind(source, target) === 'upcast'))
     return true
   if (target.kind === 'optional') return hasSingleClassUpcastHome(source, target.payload)
@@ -305,7 +341,7 @@ const genericFunctionSetPair = (source: Representation, target: Representation):
   const domain = `generic-function-set:${representationKey(source)}->${representationKey(target)}`
   return {
     classifier: { id: 'generic-function-set::index', domain },
-    materializer: { id: 'generic-function-set::remap', domain, allocates: false }
+    materializer: { id: 'generic-function-set::remap', domain, allocates: false, nativeFieldProtocol: 'unused' }
   }
 }
 
@@ -403,7 +439,11 @@ const cppTaggedUnionArmClassifier = (arm: TaggedUnionArm): ClassifierContract | 
   }
   if (discriminants === null || discriminants.length === 0) return null
   if (arm.runtimeDiscriminator.kind === 'record-literal') {
-    return { id: 'gea::detail::dynamicRecordDiscriminator', domain: `record-literal:${JSON.stringify(arm.runtimeDiscriminator)}` }
+    return {
+      id: 'gea::detail::dynamicRecordDiscriminator',
+      domain: `record-literal:${JSON.stringify(arm.runtimeDiscriminator)}`,
+      recordDiscriminator: arm.runtimeDiscriminator
+    }
   }
   if (arm.runtimeDiscriminator.kind === 'callable-tag') {
     return {
@@ -509,29 +549,89 @@ const dynamicCarrierSupported = (representation: Representation, seen = new Set<
   }
 }
 
-const dynamicCallableAbiSupported = (abi: CallableAbi, seen = new Set<Representation>()): boolean => {
+const dynamicCallableAbiSupported = (
+  abi: CallableAbi,
+  seen = new Set<Representation>(),
+  argument: (value: Representation, seen: Set<Representation>) => boolean = dynamicCarrierSupported
+): boolean => {
   if (abi.receiver !== null && !dynamicCarrierSupported(abi.receiver, seen)) return false
   if (abi.result.kind !== 'void' && !dynamicCarrierSupported(abi.result, seen)) return false
-  if (!abi.parameters.every((parameter) => dynamicCarrierSupported(parameter.value, seen))) return false
+  if (!abi.parameters.every((parameter) => argument(parameter.value, seen))) return false
   if (abi.restFrom === null) return true
   const rest = abi.parameters[abi.restFrom]?.value
-  return (
-    abi.restFrom === abi.parameters.length - 1 &&
-    rest?.kind === 'array-object' &&
-    rest.ownership === 'shared-refcount' &&
-    dynamicCarrierSupported(rest.element, seen)
-  )
+  if (abi.restFrom !== abi.parameters.length - 1 || rest === undefined) return false
+  if (rest.kind === 'array-object') return rest.ownership === 'shared-refcount' && dynamicCarrierSupported(rest.element, seen)
+  return dynamicRestTupleSupported(rest, seen)
 }
+
+/**
+ * A rest slot carried as a closed tuple record, not an Array: a function that
+ * forwards `arguments` to a fixed-arity call (a wrapper written as
+ * `function f() { target.f( ...arguments ) }`) lowers
+ * its argument list to a record whose own keys are the canonical indexes. The
+ * runtime's `DynamicRestArgument<Ref<T>>` spreads its present index keys in
+ * order and packs incoming arguments by index, through the record's own field
+ * table -- so the record must be nothing but those index slots.
+ */
+const dynamicRestTupleSupported = (rest: Representation, seen: Set<Representation>): boolean =>
+  rest.kind === 'record' &&
+  rest.ownership === 'shared-refcount' &&
+  rest.accessors.length === 0 &&
+  rest.fields.every((field, index) => field.key === String(index) && dynamicCarrierSupported(field.value, seen))
+
+/**
+ * What a checked adapter over a dynamic function does with an argument: it
+ * only boxes it OUT (`adapt` in gea_runtime.h); only the result is read back
+ * in. A union argument therefore needs every arm boxable, which is exactly
+ * `DynamicCallableCarrier<TaggedUnion>::supported` -- not the disjoint arm
+ * classifiers that reading one back from a Value needs. A property-bag
+ * `update(object, key, value)` takes `value` as the union of everything the
+ * bag holds -- itself a union nested inside the absences -- whose class arms
+ * share a family, beside typed string-keyed tables.
+ */
+const dynamicArgumentCarrierSupported = (representation: Representation, seen: Set<Representation>): boolean =>
+  representation.kind === 'tagged-union'
+    ? representation.arms.every((arm) => dynamicArgumentCarrierSupported(arm.value, seen))
+    : // A typed `Record<string, V>` table boxes out as itself
+      // (`DynamicCarrier<Ref<T>>::out`); only reading one back in needs the
+      // entry-checking view a bare frame position has no recipe for.
+      (representation.kind === 'dictionary' && representation.ownership === 'shared-refcount') ||
+      dynamicCarrierSupported(representation, seen)
 
 const dynamicCallablePair = (target: Extract<Representation, { kind: 'function-value-dispatch' }>): ClassifierMaterializerPair => {
   const domain = `dynamic-callable:${representationKey(target)}`
   return {
     classifier: { id: 'gea::Value::tag', domain },
-    materializer: { id: 'gea::detail::DynamicCarrier::in', domain, allocates: true }
+    materializer: {
+      id: 'gea::detail::DynamicCarrier::in',
+      domain,
+      allocates: true,
+      callableIdentityTransport: 'preserved',
+      wrapperKind: 'dynamic-carrier-in'
+    }
   }
 }
 
-type NativeNarrowingContract = Pick<MaterializerContract, 'nativeFieldProtocol' | 'nativePayloadTransport'>
+// A reader's physical receiver uses its separately sealed native factory.
+// Positional/result Optional carriers retain the ordinary dynamic-frame
+// restrictions; the factory alone supplies null/undefined receiver policy.
+const dynamicCallableReadAbiSupported = (abi: CallableAbi): boolean =>
+  dynamicCallableAbiSupported({ ...abi, receiver: null }, new Set(), dynamicArgumentCarrierSupported) &&
+  (abi.receiver === null || nativeLogicalReceiverProtocolSupported(nativeLogicalReceiverProtocolOf(abi.receiver)))
+
+type NativeNarrowingContract = Pick<MaterializerContract, 'nativeFieldProtocol' | 'nativePayloadTransport' | 'requiresSourceGuard'>
+
+/** Record/array construction immediately performs every cited payload conversion. */
+const sourceGuardsOf = (
+  nodes: readonly ConversionNode[],
+  resolve?: ConversionNodeResolver
+): Pick<MaterializerContract, 'requiresSourceGuard' | 'executesSourceGuard'> => {
+  if (!nodes.some((node) => conversionRequiresSourceGuard(node.capability, resolve))) return {}
+  return {
+    requiresSourceGuard: true,
+    ...(!nodes.some((node) => conversionNeedsPriorSourceGuard(node.capability, resolve)) ? { executesSourceGuard: true as const } : {})
+  }
+}
 
 /**
  * A shared class handle among a sum's arms, at a record-shaped target it
@@ -540,17 +640,17 @@ type NativeNarrowingContract = Pick<MaterializerContract, 'nativeFieldProtocol' 
  * Nothing in the program proves that arm dead: an interface-typed slot holds
  * whatever object the program put there (`semantics/interface-implementors.ts`),
  * and a class this cannot view as the record is still a value the slot can be
- * handed -- skytail's `const ctx: AudioContextLike | null = Ctor ? new Ctor()
- * : createNativeAudioContext()`, whose `NativeAudioContext` carries class-typed
- * fields and a promise the view cannot rebuild. Selecting the record arm
+ * handed -- `const x: SomeInterface | null = Ctor ? new Ctor() : createOther()`,
+ * where the other class carries class-typed fields and a promise the view
+ * cannot rebuild. Selecting the record arm
  * there read the class instance's bytes as the record and crashed at launch,
  * certified. A record arm beside the exact one is the opposite case: a record
  * the view cannot rebuild as the target is not assignable to it either, so the
  * checker's own narrowing is what put the pair here, and the selection stands.
  *
- * Asked by every table that could answer the pair -- `narrowing` and
- * `staticRecipe` -- so the census refuses it outright rather than one table
- * declining and the next selecting.
+ * Asked by every table that could answer the pair -- `narrowing`,
+ * `structuralRecipe` and `staticRecipe` -- so the census refuses it outright
+ * rather than one table declining and the next selecting.
  */
 const classArmWithoutHome = (layouts: RecordLayoutPolicy, source: Representation, target: Representation): boolean => {
   const union = source.kind === 'optional' ? source.payload : source
@@ -575,7 +675,10 @@ export const createCppConversionRegistry = (layouts: RecordLayoutPolicy = defaul
     layouts,
     (source, target) =>
       nativeSumNarrowingTransports(registry, source, target) ? { nativeFieldProtocol: 'unused', nativePayloadTransport: 'preserved' } : {},
-    (source, payload) => (chainFieldProtocolUnused(registry, source, payload) ? { nativeFieldProtocol: 'unused' } : {})
+    (source, payload) => ({
+      ...(chainFieldProtocolUnused(registry, source, payload) ? { nativeFieldProtocol: 'unused' as const } : {}),
+      ...(chainPayloadNeedsSourceGuard(registry, source, payload) ? { requiresSourceGuard: true as const } : {})
+    })
   )
   return registry
 }
@@ -659,21 +762,54 @@ const cppConversionTables = (
      *
      * Install only the ABI presently proved end to end: a receiver-less,
      * fixed-arity numeric comparator whose arguments are themselves dynamic
-     * values. This is Three's public `Function | null` sort hook. Broadening the
+     * values -- the shape of a public `Function | null` sort hook. Broadening the
      * predicate requires matching `DynamicCarrier<T>::supported` for every new
      * parameter/result carrier; guessing there would move an honest preflight
      * refusal into a C++ template failure.
      */
     functionValueDispatchMaterializer: (abi) => {
       const target = { kind: 'function-value-dispatch' as const, abi }
-      return dynamicCallableAbiSupported(abi) ? dynamicCallablePair(target) : null
+      return dynamicCallableReadAbiSupported(abi) ? dynamicCallablePair(target) : null
+    },
+    /**
+     * `DynamicCarrier<ConstructorObject<R(A...)>>::readWith`: an exact payload
+     * is the constructor itself; any other box is constructed through
+     * `Value::construct`, which throws the language's `TypeError` for a value
+     * with no `[[Construct]]`, and the object it returns is read by the
+     * census's own reader (`constructedResult`, nodes.ts). Only a frame with
+     * no receiver and no rest slot is a construct frame `readWith` adapts, and
+     * each argument only boxes out, as the callable adapter's do.
+     */
+    constructorValueDispatchMaterializer: (abi) => {
+      if (abi.receiver !== null || abi.restFrom !== null || abi.argumentsFrame !== undefined || abi.overloadJoined) return null
+      if (abi.result.kind === 'void' || !abi.parameters.every((parameter) => dynamicArgumentCarrierSupported(parameter.value, new Set())))
+        return null
+      const domain = `dynamic-constructor:${representationKey({ kind: 'constructor-value-dispatch', abi })}`
+      return {
+        classifier: { id: 'gea::Value::tag', domain },
+        // An adapted read shares one environment per Function object, which is
+        // a constructor's identity, so every read hands back the same one.
+        materializer: {
+          id: 'gea::detail::DynamicCarrier::readWith',
+          domain,
+          allocates: true,
+          callableIdentityTransport: 'preserved',
+          wrapperKind: 'dynamic-constructor-in'
+        }
+      }
     },
     functionMaterializer: (functionId, abi) => {
-      if (!dynamicCallableAbiSupported(abi)) return null
+      if (!dynamicCallableReadAbiSupported(abi)) return null
       const domain = `dynamic-callable-identity:${functionId}:${representationKey({ kind: 'function', functionId, abi })}`
       return {
         classifier: { id: 'gea::Value::callableDeclarationIdentity', domain },
-        materializer: { id: 'gea::detail::DynamicCarrier::in', domain, allocates: true }
+        materializer: {
+          id: 'gea::detail::DynamicCarrier::in',
+          domain,
+          allocates: true,
+          callableIdentityTransport: 'preserved',
+          wrapperKind: 'dynamic-carrier-in'
+        }
       }
     },
     /**
@@ -694,8 +830,7 @@ const cppConversionTables = (
      *
      * The cost of its absence was not one conversion: `deriveTaggedUnion`
      * derives one arm at a time and a single `never` arm makes the whole sum
-     * `never`, so EVERY nullable tagged-union read out of a box was refused --
-     * 15 of the three.js app's 74 unmet obligations, all on this one arm.
+     * `never`, so EVERY nullable tagged-union read out of a box was refused.
      */
     nullMaterializer: () => ({
       classifier: { id: 'gea::Value::tag', domain: 'tag:Null' },
@@ -777,7 +912,13 @@ const cppConversionTables = (
       const domain = `class-family:${declaration}:${ownership}`
       return {
         classifier: { id: 'gea::Value::classIdentity', domain },
-        materializer: { id: 'gea::detail::unboxClassRef', domain, allocates: false }
+        materializer: {
+          id: 'gea::detail::unboxClassRef',
+          domain,
+          allocates: false,
+          nativeFieldProtocol: 'unused',
+          nativePayloadTransport: 'preserved'
+        }
       }
     },
     // The compiler's own opaque host carrier is `NativeHandle<protocol>`: its
@@ -792,7 +933,7 @@ const cppConversionTables = (
       const domain = `opaque-native-handle:${protocol}@${version}`
       return {
         classifier: { id: 'gea::Value::payloadType', domain },
-        materializer: { id: 'gea::detail::unboxValue', domain, allocates: false }
+        materializer: { id: 'gea::detail::unboxValue', domain, allocates: false, wrapperKind: 'unbox-payload' }
       }
     },
     // Compiler-owned records have a closed field census, so a dynamic object can
@@ -868,7 +1009,26 @@ const cppConversionTables = (
       const domain = `boxed-identity:${representationKey(target)}`
       return {
         classifier: { id: 'gea::Value::payloadType', domain },
-        materializer: { id: 'gea::detail::unboxValue', domain, allocates: false }
+        materializer: {
+          id: 'gea::detail::unboxValue',
+          domain,
+          allocates: false,
+          wrapperKind: 'unbox-payload',
+          ...((target.kind === 'typed-array' ||
+            target.kind === 'array-buffer' ||
+            target.kind === 'shared-array-buffer' ||
+            target.kind === 'data-view') &&
+          target.ownership === 'shared-refcount'
+            ? { nativeFieldProtocol: 'unused' as const, nativePayloadTransport: 'preserved' as const }
+            : {}),
+          ...(target.kind === 'record' && target.accessors.length > 0
+            ? {
+                nativeAccessorPayload: 'preserved' as const,
+                nativeFieldProtocol: 'unused' as const,
+                nativePayloadTransport: 'preserved' as const
+              }
+            : {})
+        }
       }
     },
     dynamicPromiseAdoptionMaterializer: (target) => {
@@ -876,7 +1036,7 @@ const cppConversionTables = (
       const domain = `dynamic-promise-adoption:${representationKey(target)}`
       return {
         classifier: { id: 'gea::detail::adoptBoxedPromise', domain },
-        materializer: { id: 'gea::detail::promiseFromDynamic', domain, allocates: true }
+        materializer: { id: 'gea::detail::promiseFromDynamic', domain, allocates: true, wrapperKind: 'promise-from-dynamic' }
       }
     },
     dynamicMapViewMaterializer: (target) => {
@@ -894,7 +1054,15 @@ const cppConversionTables = (
       const domain = `record-payload:${shapeId}:${ownership}`
       return {
         classifier: { id: 'gea::Value::payloadType', domain },
-        materializer: { id: 'gea::detail::unboxValue', domain, allocates: false }
+        materializer: {
+          id: 'gea::detail::unboxValue',
+          domain,
+          allocates: false,
+          wrapperKind: 'unbox-payload',
+          nativeFieldProtocol: 'unused',
+          nativePayloadTransport: 'preserved',
+          ...((layouts.accessorsForShape(shapeId)?.length ?? 0) > 0 ? { nativeAccessorPayload: 'preserved' as const } : {})
+        }
       }
     },
     /**
@@ -952,6 +1120,9 @@ const cppConversionTables = (
     // checker-only semantic type into a fake runtime domain.
     taggedUnionArmClassifier: cppTaggedUnionArmClassifier,
     narrowing: (source: Representation, target: Representation) => {
+      // An open Document accepts every native object arm. Its live alias
+      // recipe must run before an exact-tag subset drops those objects.
+      if (isOpenDocument(target) && documentViewable(source)) return null
       // Presence loads and native class casts below inspect tags/allocation
       // identity, never a property's reflection protocol. State that on the
       // installed materializer, where the implementation is known; the IR
@@ -1037,13 +1208,19 @@ const cppConversionTables = (
         const domain = `uninstantiable-class:${representationKey(target)}`
         return {
           classifier: { id: 'gea::host::neverInstance', domain },
-          materializer: { id: 'gea::host::unreachableValue', domain, allocates: false, nativeFieldProtocol: 'unused' }
+          materializer: {
+            id: 'gea::host::unreachableValue',
+            domain,
+            allocates: false,
+            nativeFieldProtocol: 'unused',
+            normalCompletion: 'never'
+          }
         }
       }
       // A shared structural view read as a class, under the `instanceof` that
       // proved it was built from one: the view remembers its origin
-      // (`gea::record::viewOrigin`) and the origin is narrowed like any boxed
-      // class instance, checked. An optional view is the same read of its
+      // (`gea::record::viewOrigin`) and authenticates that native allocation's
+      // class layout. An optional view is the same read of its
       // payload, which the test proved present.
       // An open `any` document may view an instance too (`classDocumentViewText`).
       const sharedView = (value: Representation): boolean =>
@@ -1058,7 +1235,14 @@ const cppConversionTables = (
         const domain = `view-origin:${representationKey(target)}`
         return {
           classifier: { id: 'gea::record::viewOriginIs', domain },
-          materializer: { id: 'gea::record::viewOrigin', domain, allocates: false, nativeFieldProtocol: 'unused' }
+          materializer: {
+            id: 'gea::record::viewOrigin',
+            domain,
+            allocates: false,
+            nativeFieldProtocol: 'unused',
+            requiresSourceGuard: true,
+            executesSourceGuard: true
+          }
         }
       }
       // A base class-ref read at a descendant -- see `downcastsToDerived` above.
@@ -1072,14 +1256,15 @@ const cppConversionTables = (
             id: 'gea::host::downcastClassRef',
             domain: `class-descendant:${representationKey(target)}`,
             allocates: false,
+            requiresSourceGuard: true,
             nativeFieldProtocol: 'unused',
             nativePayloadTransport: 'preserved',
             ...nativeClassReferenceIdentityOf(source, target)
           }
         }
       }
-      // The same handle read at a UNION of descendants -- `object instanceof Mesh
-      // || object instanceof Line || object instanceof Points`. The physical
+      // The same handle read at a UNION of descendants -- `object instanceof A
+      // || object instanceof B || object instanceof C`. The physical
       // carrier stays one `Ref<Base>`; allocation identity is the discriminant,
       // so the classifier is the same family test and the materializer the same
       // checked downcast, applied per arm by `emit-narrowing.ts`'s
@@ -1092,6 +1277,7 @@ const cppConversionTables = (
             id: 'gea::host::downcastClassRef',
             domain: `class-descendant-union:${representationKey(target)}`,
             allocates: false,
+            requiresSourceGuard: true,
             nativeFieldProtocol: 'unused',
             // Each arm is `ofArm<I>(downcastClassRef<D>(held))`: one pointee,
             // injected into the target union (and its optional, if any).
@@ -1120,9 +1306,10 @@ const cppConversionTables = (
             id: 'gea::host::downcastClassRef',
             domain: `class-descendant-sum:${representationKey(target)}`,
             allocates: false,
+            requiresSourceGuard: true,
             // Presence and sum selection over native class handles never reads
             // field values. Mixed sums retain their general converting protocol.
-            // A mixed sum (`Error | MongoError` narrowed by `instanceof`) composes
+            // A mixed sum (`Error | CustomError` narrowed by `instanceof`) composes
             // its leaves' contracts, as the exact-arm narrowing below does.
             ...(nativeClassPresence(source)
               ? { nativeFieldProtocol: 'unused' as const, ...nativeClassReferenceIdentityOf(source, target) }
@@ -1179,6 +1366,8 @@ const cppConversionTables = (
           )
         )
         if (!installed) return null
+        const selection = nativeSubsetSelectionRecipeOf(source, target)
+        if (selection) return nativeSelectionConversion(source, target, selection)
         return {
           classifier: { id: 'gea::TaggedUnion::is', domain: `live-arm-subset:${targetKey}` },
           materializer: {
@@ -1191,6 +1380,18 @@ const cppConversionTables = (
           }
         }
       }
+      // The same admitted tag selection can load one exact opaque record arm.
+      // It rejects every omitted tag; composing a possible structural rebuild
+      // from those tags would lose the selected allocation's storage identity.
+      // Only a structural target can be reached by a rebuild of another arm; a
+      // guard-proven load of any other arm keeps the unchecked `get<k>()`
+      // below, and an `as` assertion takes `assertedUnionFor`'s checked
+      // projection instead.
+      const exactSelection =
+        isRecordViewTarget(selected) || selected.kind === 'record-with-index' || selected.kind === 'dictionary'
+          ? nativeSubsetSelectionRecipeOf(source, target)
+          : null
+      if (exactSelection) return nativeSelectionConversion(source, target, exactSelection)
       // A target OPTIONAL whose payload is one of the union's arms, where the
       // union carries no bare absent arm at all -- absence living inside another
       // arm's own optional. `emit-narrowing.ts`'s `narrowedLoadText` renders the
@@ -1202,13 +1403,14 @@ const cppConversionTables = (
             id: 'gea::TaggedUnion::get',
             domain: `live-arm-optional:${targetKey}`,
             allocates: false,
+            armSelection: 'guarded-load',
             ...nativeNarrowing(source, target)
           }
         }
       }
       if (!union.arms.some((arm) => representationKey(arm.value) === targetKey)) {
         // An arm the target lives INSIDE, not one that equals it. A narrowing
-        // does not stop at the top level: three's `?(string|number|boolean)`
+        // does not stop at the top level: a `?(string|number|boolean)`
         // field is `undefined | null | (string|number|boolean)`, and a guard past
         // the two absences lands on one of the inner arms -- two steps, and this
         // test saw only one. `narrowingReachesTarget` (`conversion/build.ts`) is
@@ -1223,13 +1425,20 @@ const cppConversionTables = (
             id: 'gea::TaggedUnion::get',
             domain: `live-arm-nested:${targetKey}`,
             allocates: false,
+            armSelection: 'guarded-load',
             ...nativeNarrowing(source, target)
           }
         }
       }
       return {
         classifier: { id: 'gea::TaggedUnion::is', domain: `live-arm:${targetKey}` },
-        materializer: { id: 'gea::TaggedUnion::get', domain: `live-arm:${targetKey}`, allocates: false, ...nativeNarrowing(source, target) }
+        materializer: {
+          id: 'gea::TaggedUnion::get',
+          domain: `live-arm:${targetKey}`,
+          allocates: false,
+          armSelection: 'guarded-load',
+          ...nativeNarrowing(source, target)
+        }
       }
     },
     // The mirror of `narrowing`: a plain value taking the place of the tagged
@@ -1243,6 +1452,19 @@ const cppConversionTables = (
     // (`representation.arms`'s own order).
     widening: (source: Representation, target: Representation) => {
       if (!isSpellable(target)) return null
+      const nativeAbsence = nativeReferenceAbsenceOf(source, target)
+      if (nativeAbsence !== null)
+        return {
+          classifier: { id: NATIVE_REFERENCE_ABSENCE, domain: `absence:${nativeAbsence}` },
+          materializer: {
+            id: NATIVE_REFERENCE_ABSENCE,
+            domain: `absence:${nativeAbsence}`,
+            allocates: false,
+            nativeFieldProtocol: 'unused',
+            nativePayloadTransport: 'preserved',
+            ...nativeClassReferenceIdentityOf(source, target)
+          }
+        }
       const nativeSum = nativeSumConversion(source, target)
       if (nativeSum) return nativeSum
       const totalSelection = nativeTotalSelectionRecipeOf(source, target)
@@ -1264,7 +1486,7 @@ const cppConversionTables = (
         source.kind === 'dynamic' &&
         source.reason === 'untyped-callable' &&
         target.kind === 'function-value-dispatch' &&
-        dynamicCallableAbiSupported(target.abi)
+        dynamicCallableReadAbiSupported(target.abi)
       ) {
         return dynamicCallablePair(target)
       }
@@ -1474,6 +1696,10 @@ const cppConversionTables = (
             id: 'gea::Value::box',
             domain: `box:${tag}`,
             allocates: !absent,
+            ...(['scalar', 'string', 'symbol', 'null', 'undefined'].includes(source.kind)
+              ? { primitiveIdentityTransport: 'preserved' as const }
+              : {}),
+            ...(callableObjectAbi(source) === null ? {} : { callableIdentityTransport: 'preserved' as const }),
             ...(absent ? { nativeFieldProtocol: 'unused' as const } : {})
           }
         }
@@ -1495,6 +1721,7 @@ const cppConversionTables = (
             domain: `absence:${target.absence}`,
             allocates: false,
             nativeFieldProtocol: 'unused',
+            nativePayloadTransport: 'preserved',
             ...nativeClassReferenceIdentityOf(source, target)
           }
         }
@@ -1568,6 +1795,7 @@ const cppConversionTables = (
             domain: `payload:${sourceKey}`,
             allocates: false,
             nativeFieldProtocol: 'unused',
+            nativePayloadTransport: 'preserved',
             ...nativeClassReferenceIdentityOf(source, target)
           }
         }
@@ -1576,8 +1804,8 @@ const cppConversionTables = (
       // `gea::CallableObject` converting constructors above. Every one of those
       // was installed only for a BARE callable target, so
       // `((gl, v) => void)` returned where `((gl, v, textures) => void) |
-      // undefined` is expected -- three's `getSingularSetter`, 30 returns of
-      // exactly that shape -- refused for a pair whose two halves this backend
+      // undefined` is expected -- a setter-selecting function with many returns
+      // of exactly that shape -- refused for a pair whose two halves this backend
       // performs individually. The same four authorities are asked here, one
       // optional layer down, so the graph and the emitter cannot disagree about
       // which pairs the runtime accepts.
@@ -1679,9 +1907,9 @@ const cppConversionTables = (
         }
       }
       // A hand-written iterator object read as the cursor its declared type
-      // names -- mongodb's `onData` literal, `return this` out of its own
-      // `[Symbol.asyncIterator]()` (`conversion/protocol-iterator.ts`).
-      // `Connection.dataEvents` holds it as `AsyncGenerator<Buffer> | null`.
+      // names -- an object literal whose `[Symbol.asyncIterator]()` does
+      // `return this` (`conversion/protocol-iterator.ts`), held by a field
+      // declared `AsyncGenerator<T> | null`.
       const cursor = target.kind === 'optional' ? target.payload : target
       if ((cursor.kind === 'iterator' || cursor.kind === 'async-generator') && protocolIteratorPlanFor(layouts, source, cursor) !== null) {
         const domain = `protocol-iterator:${representationKey(source)}->${representationKey(target)}`
@@ -1691,8 +1919,8 @@ const cppConversionTables = (
         }
       }
       // The reverse: a native cursor read as the iterator OBJECT an interface
-      // declares -- `mongodb-connection-string-url`'s `keys():
-      // IterableIterator<K> { return super.keys() as IterableIterator<K> }`
+      // declares -- a subclass's `keys(): IterableIterator<K> { return
+      // super.keys() as IterableIterator<K> }`
       // over a generator-backed `URLSearchParams.keys()`
       // (`conversion/iterator-object-view.ts`).
       // `x.constructor` stored where a constructor family is declared
@@ -1746,7 +1974,7 @@ const cppConversionTables = (
       }
       // Built on demand, never up front: this function is asked about EVERY
       // ordered pair of recastable carriers (`conversion/build.ts`), hundreds
-      // of millions on TypeScript's own compiler, and almost every pair leaves
+      // of millions on a large program, and almost every pair leaves
       // through an early `null` without ever needing its key. Concatenating
       // it first was one string allocation per pair and a collector busy
       // reclaiming them -- the same cost `build.ts`'s own loop already paid once.
@@ -1761,7 +1989,7 @@ const cppConversionTables = (
         source.native !== null &&
         source.native === target.native &&
         source.ownership === target.ownership &&
-        cppTypeOf(source) === cppTypeOf(target)
+        samePhysicalCarrier(source, target)
       ) {
         return {
           classifier: { id: 'gea::native-record::identity', domain: `native-identity:${source.native}:${source.ownership}` },
@@ -1792,10 +2020,10 @@ const cppConversionTables = (
         }
       }
       // The plain array and the array an interface extended with typed fields
-      // (`NodeArray<T> extends ReadonlyArray<T>`, `array-object.extension`) are
+      // (`List<T> extends ReadonlyArray<T>`, `array-object.extension`) are
       // ONE `gea::ArrayObject<E>`: the fields live in the object's own
-      // extension sidecar, so `elements.slice() as MutableNodeArray<T>` is the
-      // same object gaining fields on their first write, and a `NodeArray<T>`
+      // extension sidecar, so `elements.slice() as MutableList<T>` is the
+      // same object gaining fields on their first write, and a `List<T>`
       // handed to a `readonly T[]` parameter is that object read as the array
       // it is. Same element, same ownership, and only the extension differs;
       // the identity spelling `convertedValueText` already renders for two
@@ -1809,13 +2037,20 @@ const cppConversionTables = (
       ) {
         return {
           classifier: { id: 'gea::ArrayObject::identity', domain: `array-extension:${pairKey()}` },
-          materializer: { id: 'gea::ArrayObject::identity', domain: `array-extension:${pairKey()}`, allocates: false }
+          // The extension is a typed native sidecar struct, never the field
+          // protocol: the elements and the fields cross unchanged.
+          materializer: {
+            id: 'gea::ArrayObject::identity',
+            domain: `array-extension:${pairKey()}`,
+            allocates: false,
+            nativeFieldProtocol: 'unused',
+            nativePayloadTransport: 'preserved'
+          }
         }
       }
-      // `never[]` into `E[]`: THE empty array of `E`, by identity. tsc's
-      // `emptyArray: never[]` is a sentinel the program compares by identity
-      // (`type.resolvedBaseTypes = emptyArray` marks a circular resolution in
-      // progress; `=== emptyArray` detects it), so a fresh `[]` is a silently
+      // `never[]` into `E[]`: THE empty array of `E`, by identity. A shared
+      // `emptyArray: never[]` is a sentinel a program can compare by identity
+      // (storing it marks a state; `=== emptyArray` detects it), so a fresh `[]` is a silently
       // wrong answer and a boxed one a refusal; `gea::emptyArraySentinel<E>()`
       // is one object per element type, so every `never[]` that reaches an
       // `E[]` slot is the same one and compares equal to itself. The carrier
@@ -1844,10 +2079,9 @@ const cppConversionTables = (
       // can still reach is a mutable reference, so a fresh array silently drops
       // every later write through the other name and loses identity outright.
       // `gea::ArrayObject::recastElements` did exactly that at a call argument
-      // in three's `getProgramCacheKey`: the two helpers pushed ~60 values into
-      // the COPY, so every material's cache key came out identical, one shader
-      // program served the whole scene, and every HUD glyph rendered as a solid
-      // rectangle. A compile refusal is the correct outcome here, and the fix
+      // where two helpers pushed their values into the COPY, so every key the
+      // caller built from the array came out identical and every cache lookup
+      // keyed on it collided -- silently wrong output. A compile refusal is the correct outcome here, and the fix
       // for a disagreement is to make the two authorities agree -- which is
       // where `structural-array-element.ts`'s `unstatedNeverArray` parameter
       // form and `structural.ts`'s `refusedArrayParameterTypeAt` now put it.
@@ -1931,11 +2165,11 @@ const cppConversionTables = (
             // the view remembers boxed is read back only by `instanceof` and
             // by the `gea::record::viewOrigin` narrowing to the class, never by
             // program code that could write through it. Without it
-            // the reflection census read node-compat's `emitter as unknown as
-            // PausableEmitterMethods` as an unknown boundary, promoted every
+            // the reflection census read an `emitter as unknown as
+            // SomeMethodsInterface` cast as an unknown boundary, promoted every
             // emitter subclass and everything their fields reach to full
-            // reflection, and refused each `this.method.bind(this)` in mongodb
-            // as `call-abi:bind-shadowable`.
+            // reflection, and refused each `this.method.bind(this)` in those
+            // subclasses as `call-abi:bind-shadowable`.
             const plan = conversionRecipeOf(source, target)?.renders === true ? null : viewPlanFor(layouts, source, target)
             return {
               classifier: { id: 'gea::record::classStructuralView', domain: `class-view:${pairKey()}` },
@@ -1956,8 +2190,8 @@ const cppConversionTables = (
       // `emit-narrowing.ts`'s `convertedValueText` renders it; installed here so
       // the merge that needs it is certified rather than emitted uncertified.
       // The same for an open record whose every declared field is optional:
-      // mongodb's `deleteOne(filter: Filter<TSchema> = {})` defaults a query
-      // document to the empty literal, and the value-initialized struct IS that
+      // `f(filter: Filter<T> = {})` defaults an all-optional parameter to the
+      // empty literal, and the value-initialized struct IS that
       // object -- every presence bit off, an empty index sidecar.
       if (
         source.kind === 'record' &&
@@ -1972,7 +2206,7 @@ const cppConversionTables = (
       }
       if (source.kind === 'record-with-index' && target.kind === 'native-record-ref' && target.native === null) {
         const targetFields = layouts.forShape(target.shapeId)
-        const targetIndexes = layouts.indexesForShape?.(target.shapeId) ?? []
+        const targetIndexes = layouts.indexesForShape(target.shapeId)
         const sourceFields = {
           kind: 'record',
           shapeId: source.shapeId,
@@ -2009,8 +2243,9 @@ const cppConversionTables = (
         // A closed named interface may receive an open record at runtime even
         // though the interface itself declares no index signature. TypeScript's
         // structural assignment permits that value, and JavaScript keeps the
-        // extra own properties: BSON's `Object.assign(o, this.fields)` returns a
-        // `DBRefLike` whose user fields must still enumerate and serialize.
+        // extra own properties: `Object.assign(o, this.fields)` returned as a
+        // closed interface still carries user fields that must enumerate and
+        // serialize.
         //
         // The target does not need an inline index member. Every shared native
         // record already has the identity-keyed expando table implemented by
@@ -2039,10 +2274,10 @@ const cppConversionTables = (
           }
         }
       }
-      // A class viewed as a record of its own properties: mongodb's
-      // `defineAspects(AggregateOperation, ...)` takes the class as
-      // `{ aspects?: Set<symbol> }`, and `hasAspect` reads
-      // `(this.constructor as { aspects?: Set<symbol> }).aspects`. The view is
+      // A class viewed as a record of its own properties: a helper takes the
+      // class itself as `{ tags?: Set<symbol> }` and writes a static, and an
+      // instance method reads `(this.constructor as { tags?: Set<symbol> }).tags`.
+      // The view is
       // the class evaluation's own record for the shape, so a write through one
       // view is every later view's read (`gea::constructorStaticView`).
       if (constructorStaticViewAdmitted(source, target, target.kind === 'native-record-ref' ? layouts.forShape(target.shapeId) : null)) {
@@ -2051,30 +2286,18 @@ const cppConversionTables = (
           materializer: { id: CONSTRUCTOR_STATIC_VIEW, domain: `constructor-view:${pairKey()}`, allocates: true }
         }
       }
-      // An open `any` document read as a named interface: mongodb's
-      // `new MongoServerError(document)` hands a `Document` to a parameter typed
-      // `ErrorDescription`. The same checked rebuild `dictionary-to-record`
-      // performs for an anonymous record, over the layout the name resolves to;
-      // a string index sidecar of `any` keeps every key the fields do not name.
-      // `emit-narrowing.ts`'s `documentAdoptionText` renders it, and the
-      // Document then views the record rather than leaving a copy beside it.
-      // `DbOptions` in mongodb's `new Db(client, name, options?)` is the
-      // optional case: `filterOptions` returns a Document.
+      // The provisional layout pair is sealed into exact deferred field routes
+      // by structuralRecipe; no shared document migration is rendered here.
       const named = target.kind === 'optional' ? target.payload : target
-      // Lifted through an optional of the same absence: mongodb's
-      // `this.statements.find((o: Document) => o.hint)` answers
-      // `Document | undefined` where `DeleteStatement | undefined` is carried.
+      // Lifted through an optional of the same absence: `items.find((o:
+      // Document) => o.flag)` answers `Document | undefined` where a named
+      // `Item | undefined` is carried.
       const document =
         source.kind === 'optional' && target.kind === 'optional' && source.absence === target.absence ? source.payload : source
       if (
         document.kind === 'dictionary' &&
         named.kind === 'native-record-ref' &&
-        dynamicDictionaryToNamedRecordAdmitted(
-          document,
-          named,
-          layouts.forShape(named.shapeId),
-          layouts.indexesForShape?.(named.shapeId) ?? []
-        )
+        dynamicDictionaryToNamedRecordAdmitted(document, named, layouts.forShape(named.shapeId), layouts.indexesForShape(named.shapeId))
       ) {
         return {
           classifier: { id: DYNAMIC_DICTIONARY_TO_NAMED_RECORD, domain: `dictionary-record:${pairKey()}` },
@@ -2101,8 +2324,8 @@ const cppConversionTables = (
       }
       // The arm the value belongs in, written as a DIFFERENT shape id than the
       // arm declares. A tuple literal returned into a union of tuple types is
-      // the case -- hono's `PatternRouter.match` writes `[handlers]` against
-      // `Result<T> = [[T, Params][]] | [[T, ParamIndexMap][], ParamStash]` --
+      // the case -- a method writes `[items]` against
+      // `Result<T> = [[T, A][]] | [[T, B][], C]` --
       // and an exact-key search cannot see it, because the literal's own shape
       // id is minted at the literal and the arm's at the declaration. It is
       // still the same shape: `recordsRecastable` is the one authority on that,
@@ -2123,23 +2346,6 @@ const cppConversionTables = (
             allocates: sole.ownership === 'shared-refcount',
             nativeFieldProtocol: 'unused'
           }
-        }
-      }
-      // The same admission for a dictionary whose values widen into ONE
-      // dictionary arm of the union -- the string dictionary `@hono/node-server`
-      // merges into `[string, string][] | OutgoingHttpHeaders`. Only a SOLE
-      // castable arm, for the same reason as the record rule: two would make
-      // the choice of arm a guess. `emit-narrowing.ts`'s `widenedStoreText`
-      // renders it through `recastedDictionaryText` at the arm it finds first,
-      // which under this admission is the only one.
-      if (source.kind === 'dictionary' && target.kind === 'tagged-union') {
-        const recastable = target.arms
-          .map((arm) => arm.value)
-          .filter((arm) => arm.kind === 'dictionary' && dictionaryCastableToDictionary(source, arm))
-        if (recastable.length !== 1) return null
-        return {
-          classifier: { id: 'gea::TaggedUnion::ofArm', domain: `arm-recast:${pairKey()}` },
-          materializer: { id: 'gea::TaggedUnion::ofArm', domain: `arm-recast:${pairKey()}`, allocates: true, nativeFieldProtocol: 'unused' }
         }
       }
       if (source.kind === 'record' && target.kind === 'record') {
@@ -2169,10 +2375,10 @@ const cppConversionTables = (
       // `emit-narrowing.ts`'s `recordCastableToDictionary` is the one authority
       // for which pairs actually rebuild, asked here rather than restated.
       // A named interface is the same closed field list, resolved through the
-      // layout it names (`asRecord`): mongodb builds `OIDCCommand` and hands it
-      // to `connection.command(ns, cmd: Document)`.
-      // A record that also carries an open string index -- mongodb's
-      // `Filter<TSchema>`, or a named interface whose layout declares one --
+      // layout it names (`asRecord`): a program builds a named interface value
+      // and hands it to a parameter typed `Document`.
+      // A record that also carries an open string index -- a mapped
+      // `Filter<T>`, or a named interface whose layout declares one --
       // poured into an open string dictionary, or into the ONE dictionary arm of
       // a union (`Document | Document[]`): the named fields, then every
       // enumerable index entry (`indexedRecordCastableToDictionary`). Ahead of
@@ -2205,17 +2411,11 @@ const cppConversionTables = (
           materializer: { id: 'gea::record::recastToDictionary', domain: `recast:${pairKey()}`, allocates: true }
         }
       }
-      // One shape wider: an open dictionary's values widened into another open
-      // dictionary's -- `Record<string, string>` reaching `OutgoingHttpHeaders`.
-      // `emit-narrowing.ts`'s `dictionaryCastableToDictionary` is the one
-      // authority for which pairs rebuild, asked here rather than restated.
-      if (source.kind === 'dictionary' && target.kind === 'dictionary') {
-        if (!dictionaryCastableToDictionary(source, target)) return null
-        return {
-          classifier: { id: 'gea::dictionary::recastValues', domain: `recast:${pairKey()}` },
-          materializer: { id: 'gea::dictionary::recastValues', domain: `recast:${pairKey()}`, allocates: true }
-        }
-      }
+      // Structural recipes publish live dictionary views with checked reads
+      // and total writes. This widening table must not replace that shared
+      // storage with an entry-by-entry copy. Exact identity and native-sum
+      // transport are handled by their ordinary authorities.
+      if (source.kind === 'dictionary' && target.kind === 'dictionary') return null
       // Two optionals over the IDENTICAL payload that disagree only on which
       // falsy JS value spends the absence -- `string | null` widened into a
       // `string | undefined` slot (`request.ts`'s `this.raw.headers.get(name) ??
@@ -2247,7 +2447,7 @@ const cppConversionTables = (
         // The payload is a record recast one level in: `return toSearchResult(
         // undefined)` where the copy at `T = undefined` returns `{ value:
         // undefined } | undefined` into a slot declared `SearchResult<Resolved>`
-        // (13 rows on tsc's moduleNameResolver.ts). The bare pair is already
+        // (13 rows from one module). The bare pair is already
         // admitted just below (`gea::record::recast`); the presence bit adds
         // nothing to convert, only a branch to render, so the admission is the
         // same question asked of the payloads. Same absence on both sides, as
@@ -2265,33 +2465,6 @@ const cppConversionTables = (
               id: 'gea::Optional::recastPayload',
               domain: `recast:${pairKey()}`,
               allocates: target.payload.ownership === 'shared-refcount',
-              nativeFieldProtocol: 'unused'
-            }
-          }
-        }
-        // The payload is a dictionary reaching the one wider dictionary arm of
-        // the target's union, still wrapped in its presence bit: `cache[2] ||
-        // (... ? undefined : { 'content-type': ... })` merged as `optional(
-        // dictionary(string, string))` into `optional([string, string][] |
-        // OutgoingHttpHeaders)`. The bare pair is the arm-recast admission just
-        // above; the presence bit adds only the branch `emit-narrowing.ts`'s
-        // `optional-payload-convert` already renders around any converted
-        // payload. Same absence on both sides, as for every optional pair here.
-        const sourceDictionary = source.payload.kind === 'dictionary' ? source.payload : null
-        if (
-          sourceDictionary !== null &&
-          target.payload.kind === 'tagged-union' &&
-          source.absence === target.absence &&
-          target.payload.arms.filter(
-            (arm) => arm.value.kind === 'dictionary' && dictionaryCastableToDictionary(sourceDictionary, arm.value)
-          ).length === 1
-        ) {
-          return {
-            classifier: { id: 'gea::Optional::has_value', domain: `recast:${pairKey()}` },
-            materializer: {
-              id: 'gea::Optional::recastPayloadArm',
-              domain: `recast:${pairKey()}`,
-              allocates: true,
               nativeFieldProtocol: 'unused'
             }
           }
@@ -2324,9 +2497,9 @@ const cppConversionTables = (
       }
       // A sum every arm of which reaches ONE payload, wrapped in the presence
       // bit: `fn === undefined ? node : fn(node, ...)` returned as `T |
-      // undefined` from tsc's `visitEachChild<T>` -- `tagged-union(
+      // undefined` from a generic visitor `visit<T>` -- `tagged-union(
       // native-record-ref | dynamic)` into `optional(native-record-ref)`, 74
-      // rows from one site on the self-compile, one per instantiation. The
+      // rows from one site, one per instantiation. The
       // typed arm is the payload and the dynamic arm is the checked unbox, and
       // `emit-narrowing.ts`'s `sumIntoPayloadText` is asked here so the pair is
       // admitted on exactly the render that will spell it.
@@ -2375,18 +2548,162 @@ const cppConversionTables = (
             domain: `coercion:${operation}:${representationKey(source)}`,
             allocates: operation === 'ToString'
           },
+    nativeArrayViewRecipe: (source, target, lookup, read, resolve) => {
+      const base = nativeArrayViewBasePlanOf(source, target, lookup, read, resolve)
+      if (base === null) return null
+      const observationTarget: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+      const observed = nativeArrayViewWithObservation(base, lookup(base.storage.element, observationTarget), resolve)
+      const plan =
+        observed !== null && source.kind === 'array-object' && observed.write.kind === 'conversion'
+          ? nativeArrayViewWithOwnerObservation(observed, lookup(observed.storage, observationTarget), resolve)
+          : observed
+      if (plan === null) return null
+      // An open Document is checked as the object it views, exactly as a box is.
+      const boxed = nativeArrayViewSourceIsBoxed(source)
+      const domain = boxed
+        ? `any-of:array-payload:${representationKey(plan.storage)}|array-payload:${representationKey(plan.target)}`
+        : `native-array-view:${representationKey(source)}->${representationKey(target)}`
+      return {
+        classifier: { id: boxed ? 'gea::detail::nativeArrayViewAccepts' : 'gea::ArrayObject::identity', domain },
+        materializer: {
+          id: boxed ? 'gea::detail::checkedNativeArrayView' : 'gea::makeNativeArrayView',
+          domain,
+          allocates: true,
+          nativeFieldProtocol: 'unused',
+          nativePayloadTransport: 'preserved',
+          ...(boxed ? { requiresSourceGuard: true, executesSourceGuard: true } : {}),
+          nativeArrayView: plan,
+          dependencies: plan.dependencies
+        }
+      }
+    },
+    dictionaryReadRecipe: (conversion) => {
+      const { source, target, capability } = conversion
+      if (capability.kind === 'atom' || capability.kind === 'static') {
+        if (capability.materializer.documentRecordView !== undefined || capability.materializer.nativeArrayView !== undefined) return null
+        const selection = capability.materializer.nativeSelection
+        if (selection !== undefined)
+          return {
+            id: 'view:checked-dictionary-entry',
+            domain: 'static:checked-dictionary-entry',
+            allocates: false,
+            requiresSourceGuard: true,
+            executesSourceGuard: true,
+            dictionaryRead: { kind: 'native-selection', conversion, selection },
+            dependencies: [conversion]
+          }
+      }
+      if (source.kind !== 'dynamic' || target.kind === 'dynamic') return null
+      if (target.kind === 'null' || target.kind === 'undefined')
+        return {
+          id: 'view:checked-dictionary-entry',
+          domain: 'static:checked-dictionary-entry',
+          allocates: false,
+          requiresSourceGuard: true,
+          executesSourceGuard: true,
+          dictionaryRead: { kind: 'dynamic-absence', conversion, absence: target.kind },
+          dependencies: [conversion]
+        }
+      if (target.kind === 'class-ref' && target.ownership === 'shared-refcount')
+        return {
+          id: 'view:checked-dictionary-entry',
+          domain: 'static:checked-dictionary-entry',
+          allocates: false,
+          requiresSourceGuard: true,
+          executesSourceGuard: true,
+          dictionaryRead: { kind: 'dynamic-class', conversion, target },
+          dependencies: [conversion]
+        }
+      // A construct-frame entry reads through its own adapter too: the exact
+      // payload check below would refuse a constructor boxed at another frame.
+      if (callableObjectAbi(target) !== null || target.kind === 'constructor-value-dispatch')
+        return {
+          id: 'view:checked-dictionary-entry',
+          domain: 'static:checked-dictionary-entry',
+          // The adapter may build a native frame around the same function.
+          allocates: 'materializer' in capability && capability.materializer.allocates,
+          requiresSourceGuard: true,
+          executesSourceGuard: true,
+          dictionaryRead: { kind: 'dynamic-callable', conversion },
+          dependencies: [conversion]
+        }
+      const tag = dynamicTagFor(target)
+      if (tag === null || target.kind === 'optional' || target.kind === 'record' || target.kind === 'record-with-index') return null
+      return {
+        id: 'view:checked-dictionary-entry',
+        domain: 'static:checked-dictionary-entry',
+        allocates: false,
+        requiresSourceGuard: true,
+        executesSourceGuard: true,
+        dictionaryRead: { kind: 'dynamic-payload', conversion, target, tag },
+        dependencies: [conversion]
+      }
+    },
+    readOnlyDictionaryRecipe: (source, target, lookup, resolve, read) => {
+      const plan = composedDictionaryViewPlan(source, target, 'read-only', lookup, resolve, read)
+      return plan === null
+        ? null
+        : {
+            id: 'view:read-only-dictionary',
+            domain: 'static:read-only-dictionary',
+            allocates: true,
+            readOnlyDictionary: plan,
+            dependencies: plan.dependencies
+          }
+    },
     structuralRecipe: (
       source: Representation,
       target: Representation,
       lookup: (source: Representation, target: Representation) => ConversionNode,
-      members?: FamilyMemberKeys
+      members?: FamilyMemberKeys,
+      nativeMethod?: (source: Representation, target: Representation) => ConversionNode | null,
+      resolve?: ConversionNodeResolver,
+      dictionaryRead?: (source: Representation, target: Representation) => ConversionNode | null,
+      classDowncast?: (source: Representation, target: Representation) => ConversionNode | null
     ): MaterializerContract | null => {
       if (!isSpellable(source) || !isSpellable(target)) return null
-      if (classArmWithoutHome(layouts, source, target) || proxyArmWithoutHome(source, target)) return null
+      if (classArmWithoutHome(layouts, source, target)) return null
+      if (proxyArmWithoutHome(source, target)) return null
       const accepted = (from: Representation, into: Representation): ConversionNode | null => {
         const node = lookup(from, into)
         return node.capability.kind === 'never' ? null : node
       }
+      const nativeDependencies = (nodes: readonly ConversionNode[]): boolean =>
+        [...recipeClosureOf(nodes, resolve).values()].every((node) => transfersNativeStorage(node.capability))
+      // `writeDocumentNativeEntry` stores through `nativeDocumentSetNative`,
+      // which checks an Array owner's element lane before an index store.
+      const documentRecordView = composedDocumentRecordViewPlanOf(source, target, layouts, accepted, dictionaryRead ?? accepted, resolve, {
+        laneChecked: true
+      })
+      if (documentRecordView !== null)
+        return {
+          id: 'view:document-record',
+          domain: 'static:document-record',
+          allocates: true,
+          documentRecordView,
+          nativeFieldViewProtocol: 'live',
+          dependencies: documentRecordView.dependencies
+        }
+      const dictionaryView = composedDictionaryViewPlan(source, target, 'mutable', accepted, resolve, dictionaryRead)
+      if (dictionaryView !== null)
+        return {
+          id: 'view:mutable-dictionary',
+          domain: 'static:mutable-dictionary',
+          allocates: true,
+          dictionaryView,
+          dependencies: dictionaryView.dependencies
+        }
+      const callablePayload = callablePayloadPlan(source, target, accepted, resolve)
+      if (callablePayload !== null)
+        return {
+          id: 'view:callable-payload',
+          domain: 'static:callable-payload',
+          allocates: true,
+          callablePayload,
+          dependencies: [callablePayload.payload],
+          ...(nativeDependencies([callablePayload.payload]) ? { nativeFieldProtocol: 'unused' as const } : {}),
+          ...(callablePayload.mode === 'unwrap' ? { requiresSourceGuard: true as const, executesSourceGuard: true as const } : {})
+        }
       if (source.kind === 'record' && target.kind === 'array-object') {
         const plan = recordToArrayPlan(source, target, accepted)
         return plan === null
@@ -2395,10 +2712,89 @@ const cppConversionTables = (
               id: 'gea::record::recastToArray',
               domain: `recast:${representationKey(source)}->${representationKey(target)}`,
               allocates: true,
-              recordToArray: plan
+              recordToArray: plan,
+              ...sourceGuardsOf(
+                plan.fields.map((field) => field.conversion),
+                resolve
+              )
             }
       }
-      const plan = certifiedRecordViewPlan(layouts, source, target, accepted, members)
+      if (source.kind === 'promise' && target.kind === 'promise') {
+        const plan = promiseAdoptionPlanOf(source, target, lookup, resolve)
+        return plan === null
+          ? null
+          : {
+              id: 'gea::Promise::adopt-converted',
+              domain: `promise-state-adoption:${representationKey(source)}->${representationKey(target)}`,
+              allocates: true,
+              promiseAdoption: plan,
+              ...(plan.kind === 'payload-transfer' ? { dependencies: [plan.conversion] } : {})
+            }
+      }
+      const protocol = certifiedProtocolIteratorPlan(layouts, source, target, accepted, resolve)
+      if (protocol !== null)
+        return {
+          id: PROTOCOL_ITERATOR,
+          domain: `protocol-iterator:${representationKey(source)}->${representationKey(target)}`,
+          allocates: true,
+          protocolIterator: protocol,
+          dependencies: [...protocol.leaves.values()]
+        }
+      if (source.kind === 'array-object' || source.kind === 'keyed-collection') {
+        const plan = certifiedIterableObjectViewPlan(layouts, source, target, accepted, resolve)
+        if (plan !== null)
+          return {
+            id: ITERABLE_OBJECT_VIEW,
+            domain: `iterable-object-view:${representationKey(source)}->${representationKey(target)}`,
+            allocates: true,
+            iterableObjectView: plan,
+            dependencies: [...plan.leaves.values()]
+          }
+      }
+      if (source.kind === 'iterator' || source.kind === 'async-generator') {
+        const plan = certifiedIteratorObjectViewPlan(layouts, source, target, accepted, resolve)
+        if (plan !== null)
+          return {
+            id: ITERATOR_OBJECT_VIEW,
+            domain: `iterator-object-view:${representationKey(source)}->${representationKey(target)}`,
+            allocates: true,
+            iteratorObjectView: plan,
+            dependencies: [...plan.leaves.values()]
+          }
+      }
+      const sourceCallable = callableObjectAbi(source)
+      const targetCallable = callableObjectAbi(target)
+      if (sourceCallable !== null && targetCallable !== null) {
+        const plan = callableViewPlan(source, target, accepted, resolve, classDowncast)
+        if (plan !== null) {
+          const dependencies = [
+            ...(plan.logicalReceiver?.materializers ?? []),
+            ...(plan.receiver === null ? [] : [plan.receiver]),
+            ...plan.parameters,
+            ...(plan.omittedArguments ?? []),
+            ...(plan.restPacking?.elements ?? []),
+            ...(plan.restUnpacking?.elements.flatMap((element) =>
+              element.absent === null ? [element.present] : [element.present, element.absent]
+            ) ?? []),
+            ...(plan.result === null ? [] : [plan.result])
+          ]
+          return {
+            id: VIEW_ADAPTED_CALLABLE,
+            domain: 'static:adapted-callable',
+            allocates: true,
+            callableView: plan,
+            dependencies,
+            // adaptSourceWithReceiver shares the original Function identity.
+            // Executable native frames are a separate claim, authenticated by
+            // every sealed leaf rather than inherited from a provisional atom.
+            callableIdentityTransport: 'preserved',
+            ...(nativeDependencies(dependencies)
+              ? { nativeFieldProtocol: 'unused' as const, callableAdapter: { from: sourceCallable, to: targetCallable } }
+              : {})
+          }
+        }
+      }
+      const plan = certifiedRecordViewPlan(layouts, source, target, accepted, members, nativeMethod, resolve)
       return plan === null
         ? null
         : {
@@ -2406,7 +2802,10 @@ const cppConversionTables = (
             domain: members === undefined ? 'static:structural-record-view' : 'static:family-member-record-view',
             allocates: true,
             recordView: plan,
-            ...viewProtocolOf(plan.view)
+            ...(nativeFieldViewPlanIsLive(plan) ? { nativeFieldViewProtocol: 'live' as const } : {}),
+            dependencies: [...plan.leaves.values()],
+            ...viewProtocolOf(plan.view),
+            ...sourceGuardsOf([...plan.leaves.values()], resolve)
           }
     },
     staticRecipe: (source: Representation, target: Representation) => {
@@ -2426,18 +2825,27 @@ const cppConversionTables = (
         // chain's own text for (source, payload), so it reads a field table
         // exactly when that inner conversion does (`nativeWrappedPayload`).
         const native: NativeNarrowingContract =
-          recipe.id === 'unreachable-value' || recipe.id === 'same-cpp-type'
-            ? { nativeFieldProtocol: 'unused', nativePayloadTransport: 'preserved' }
-            : recipe.id === 'narrowed-load' && (source.kind === 'optional' || source.kind === 'tagged-union')
-              ? nativeNarrowing(source, target)
-              : recipe.id === 'optional-wrap-converted' && target.kind === 'optional'
-                ? nativeWrappedPayload(source, target.payload)
-                : // `optional-payload-convert` spells `has_value() ? T{P{convert(*x)}} : T{}`,
-                  // the same shape around the payload's own conversion.
-                  recipe.id === 'optional-payload-convert' && source.kind === 'optional' && target.kind === 'optional'
-                  ? nativeWrappedPayload(source.payload, target.payload)
-                  : {}
-        return { id: `chain:${recipe.id}`, domain: `static:${recipe.id}`, allocates: allocatingRecipes.has(recipe.id), ...native }
+          recipe.id === 'unreachable-value'
+            ? { nativeFieldProtocol: 'unused', ...(source.kind === 'undefined' ? { nativePayloadTransport: 'preserved' as const } : {}) }
+            : recipe.id === 'same-cpp-type'
+              ? { nativeFieldProtocol: 'unused', nativePayloadTransport: 'preserved' }
+              : recipe.id === 'narrowed-load' && (source.kind === 'optional' || source.kind === 'tagged-union')
+                ? nativeNarrowing(source, target)
+                : recipe.id === 'optional-wrap-converted' && target.kind === 'optional'
+                  ? nativeWrappedPayload(source, target.payload)
+                  : // `optional-payload-convert` spells `has_value() ? T{P{convert(*x)}} : T{}`,
+                    // the same shape around the payload's own conversion.
+                    recipe.id === 'optional-payload-convert' && source.kind === 'optional' && target.kind === 'optional'
+                    ? nativeWrappedPayload(source.payload, target.payload)
+                    : {}
+        return {
+          id: `chain:${recipe.id}`,
+          domain: `static:${recipe.id}`,
+          allocates: allocatingRecipes.has(recipe.id),
+          ...(recipe.id === 'narrowed-load' ? { armSelection: 'guarded-load' as const } : {}),
+          ...native,
+          ...(recipe.id === 'unreachable-value' && source.kind === 'undefined' ? { normalCompletion: 'never' as const } : {})
+        }
       }
       // A callable whose parameter reaches the source's only through a record
       // view (`emit-narrowing.ts`'s `VIEW_ADAPTED_CALLABLE`): the chain's own
@@ -2453,13 +2861,13 @@ const cppConversionTables = (
           )
         ) !== null
       )
-        return { id: VIEW_ADAPTED_CALLABLE, domain: 'static:adapted-callable', allocates: true }
+        return { id: VIEW_ADAPTED_CALLABLE, domain: 'static:adapted-callable', allocates: true, staticRecipeFallback: true }
       // Some arms homed, some with no home anywhere (`CHECKED_ARM_NARROWING`).
       if (checkedArmNarrowingText(source, target, 'gea_conversion_probe') !== null)
-        return { id: CHECKED_ARM_NARROWING, domain: 'static:checked-arm-narrowing', allocates: false }
+        return { id: CHECKED_ARM_NARROWING, domain: 'static:checked-arm-narrowing', allocates: false, staticRecipeFallback: true }
       // The printer's own last resort behind the view (`structuralRecordViewText`).
       if (boxedAssertionText(source, target, 'gea_conversion_probe') !== null)
-        return { id: 'view:boxed-assertion', domain: 'static:boxed-assertion', allocates: true }
+        return { id: 'view:boxed-assertion', domain: 'static:boxed-assertion', allocates: true, staticRecipeFallback: true }
       return null
     }
   }

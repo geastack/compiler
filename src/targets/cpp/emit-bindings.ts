@@ -24,7 +24,6 @@ import {
 import { alignedValueText, classFamilyLoadText, emptyArraySentinelText, movedValueText } from './emit-narrowing.js'
 import { stringAppendStatement, stringStoreText } from './emit-tostring.js'
 import { cppAbiParameterType, cppBoxedType, cppNarrowedFloatType, cppStringLiteral, cppTypeOf } from './types.js'
-import { receiverBoundCallableText } from './emit-callable.js'
 import { structuralRecordViewText } from './emit-record-view.js'
 import { owningConversionInputText } from './owning-conversion-input.js'
 
@@ -328,8 +327,8 @@ export const emitBindingRead = (ctx: EmitContext, lines: string[], operation: Bi
   // once in the WHOLE unit, by the class evaluation, so no call between this
   // read and its use can change what the cell holds -- the proof a module
   // cell otherwise lacks. Copying a `ConstructorObject` is two `Ref` pairs
-  // (its environment owner and its function identity), and `binary_trees`
-  // paid them per node: `build` read the class into a temporary, recursed
+  // (its environment owner and its function identity), and a binary-tree
+  // build paid them per node: the builder read the class into a temporary, recursed
   // twice, then constructed through the copy.
   const stableClassCell = ctx.repeatedConstructors.has(operation.declaration)
   // The same proof, for every cell the program defines a function or class
@@ -406,7 +405,7 @@ const compoundAppendLines = (ctx: EmitContext, operation: BindingWriteOperation,
   // so both append in place. The alias form is the one `s += 'a'` in a loop
   // takes; when only the withheld form was recognised here the loop fell to
   // `s = concatStrings({s, 'a'})` -- the quadratic copy this function exists
-  // to remove, 0.2 ms to 82 ms on `string_concat`.
+  // to remove, 0.2 ms to 82 ms on a string-append loop.
   if (ctx.deferredTexts.has(left.value) || ctx.valueNames.get(left.value) === target) return [stringAppendStatement(ctx, target, suffix)]
   // A call between the read and write forces the old value into a snapshot.
   // Grow a final-use snapshot and move it home, preserving the observable
@@ -530,15 +529,7 @@ export const emitBindingWrite = (ctx: EmitContext, lines: string[], operation: B
   // `record`: certified, preflight-clean, and rejected only by clang with
   // "no viable overloaded '='" pointing at generated code, not at this refusal.
   // A missing conversion is a refusal, not a silently unconverted store.
-  // A method read as a value stored into a cell the program declared without
-  // a receiver -- `const twice: (n: number) => number = fmt.double`. The
-  // receiver travels with the value, recovered from the read itself
-  // (`emit-callable.ts`'s `receiverBoundCallableText`); it is asked here
-  // rather than inside `convertedValueText` because the answer depends on
-  // this emitter's record of which read produced the value, not on the two
-  // carriers alone.
-  const boundReceiver = held && converted === null ? receiverBoundCallableText(ctx, operation.value, held, rawText) : null
-  if (held && converted === null && boundReceiver === null) {
+  if (held && converted === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(operation.value.representation)}->${representationKey(held)}`,
       // The KIND alone reads as a contradiction whenever both sides share it --
@@ -554,7 +545,7 @@ export const emitBindingWrite = (ctx: EmitContext, lines: string[], operation: B
   // A DYING owning value moves into the cell rather than being copied into it.
   // `movedValueText` declines whenever the cell holds something other than what
   // the value holds, so a converted store below is never wrapped.
-  const movedText = movedValueText(ctx, operation.value, held ?? null, converted ?? boundReceiver ?? rawText)
+  const movedText = movedValueText(ctx, operation.value, held ?? null, converted ?? rawText)
   // A value stored into an `int`/`i32` cell becomes the cell's integer by the
   // annotation's rule (`gea::toDeclaredInteger`: truncate, wrap, NaN to 0),
   // never by a bare C++ conversion, which is undefined for a Number out of
@@ -579,13 +570,7 @@ export const emitBindingWrite = (ctx: EmitContext, lines: string[], operation: B
     else lines.push(...append)
     // An immutable frame cell holding a closure the emitter saw allocated: every
     // later read of it, in this body, runs that function.
-    if (
-      cell.frame === true &&
-      !cell.boxed &&
-      converted === null &&
-      boundReceiver === null &&
-      (ctx.bindingWriteCounts.get(operation.declaration) ?? 0) === 1
-    ) {
+    if (cell.frame === true && !cell.boxed && converted === null && (ctx.bindingWriteCounts.get(operation.declaration) ?? 0) === 1) {
       const entry = ctx.knownCallableEntry(valueText)
       if (entry !== null) ctx.callableEntryTexts.set(cellValueText(cell), entry)
     }

@@ -1,10 +1,10 @@
 // `for (const x of param ?? [])` OVER AN OPTIONAL `Iterable<T>` PARAMETER.
 //
-// mongodb's `DeprioritizedServers` constructor (`sdam/server_selection.ts`)
+// A database client's `DeprioritizedServers` constructor (in its server selection)
 // takes `descriptions?: Iterable<ServerDescription>` and walks
 // `descriptions ?? []`. Every caller passes an array (or nothing), so the
 // census carries the parameter as an array; the `??` fallback is an empty
-// array literal whose element the merge's own `Iterable<T>` states. mongodb
+// array literal whose element the merge's own `Iterable<T>` states. The client
 // itself never passes the argument at all, so there the census narrows the
 // parameter to `undefined` and the loop walks the fallback alone (`Never`
 // below). The walk is an ordinary Array Iterator over whichever array arrived.

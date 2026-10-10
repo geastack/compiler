@@ -89,7 +89,7 @@ test('a literal whose only consumer is one initializer is minted as that cell re
 })
 
 test('a member that would need a presence proof to enter its destination field keeps the literal carrier', () => {
-  // DataTexture's shape: `data = null` stored into a JSDoc-declared non-null
+  // An image-data class's shape: `data = null` stored into a JSDoc-declared non-null
   // `data`. The only recipe is the present-optional load, and nothing proved it.
   const nullableLiteral = record('type|literal', ['data', 'width', 'height'], 'shared-refcount', nullableData)
   const nonNull = record('type|destination', ['data', 'width', 'height'])
@@ -125,9 +125,9 @@ test('a literal already in the destination carrier needs no override', () => {
 })
 
 // ---------------------------------------------------------------------------
-// End to end: a DataTexture-shaped JS class whose JSDoc declares `data` non-null
+// End to end: an image-data-shaped JS class whose JSDoc declares `data` non-null
 // while its constructor defaults it to `null`. `// @ts-nocheck` stands in for
-// three.js, whose JSDoc the compiler trusts but the checker never reports on.
+// a JS library whose JSDoc the compiler trusts but the checker never reports on.
 // ---------------------------------------------------------------------------
 
 const imageLibrary = resolve('test/runtime/literal-destination-nullable-image.js')

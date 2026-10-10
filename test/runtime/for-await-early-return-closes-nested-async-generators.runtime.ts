@@ -1,4 +1,4 @@
-// mongodb's `readMany` shape with the early `return`: a source async
+// A database client's `readMany` shape with the early `return`: a source async
 // generator (the wire stream) is read by a middle async generator that
 // `return`s out of its `for await` once a message is complete, and the
 // command path `return`s out of ITS `for await` over the middle one after the

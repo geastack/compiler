@@ -1,6 +1,6 @@
 import { Tint } from './group.js'
 
-// The shape of `@types/three`'s `ColorManagement.d.ts`: an exported const
+// The shape of a 3D library's color-management declaration: an exported const
 // whose type is an interface of the same name.
 /** Plain data, declared only here: inlined wherever the overlay may state it. */
 interface Space {

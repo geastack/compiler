@@ -1,5 +1,5 @@
-// Some tests here compile REAL third-party applications -- three.js from the
-// example apps, fastify/hono/mongodb from the node-compat apps. That corpus is
+// Some tests here compile REAL third-party applications -- a 3D library from the
+// example apps, HTTP frameworks and a database client from the node-compat apps. That corpus is
 // not part of this repository and is not a package this one depends on, so its
 // location is supplied, never guessed: a sibling-checkout default only ever
 // resolves on the machine it was written on.

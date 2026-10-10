@@ -1,6 +1,6 @@
 // A slot typed as a union of two unrelated classes that share a method set,
 // with calls dispatched through the union: what an interface implemented by
-// two classes (hono's `Router<T>`: `RegExpRouter`, `TrieRouter`, held by a
+// two classes (an HTTP framework's `Router<T>`: `RegExpRouter`, `TrieRouter`, held by a
 // `SmartRouter`) has to lower to.
 class RegexRouter<T> {
   name = 'regex'

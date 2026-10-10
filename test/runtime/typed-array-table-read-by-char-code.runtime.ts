@@ -1,6 +1,6 @@
-// `table[s.charCodeAt(i)]` -- bson's hex and base64 lookup tables -- reads a
+// `table[s.charCodeAt(i)]` -- a binary-document library's hex and base64 lookup tables -- reads a
 // typed array by a code unit that is already an integer; a record cache read
-// by a `string | number` key (mongodb's `OnDemandDocument.getElement`) spells
+// by a `string | number` key (a database client's on-demand document `getElement`) spells
 // an integer index as its digits without building the double's string. Both
 // must agree with the plain answers: every ASCII digit, a code unit above the
 // ASCII range, and the numbers whose key is NOT a plain digit run.

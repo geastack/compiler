@@ -1,6 +1,6 @@
 // A call with MORE arguments than the callee declares.
 //
-// three.js's `Object3D.onAfterRender( /* renderer, scene, camera, geometry,
+// A 3D scene-graph library's `SceneNode.onAfterRender( /* renderer, scene, camera, geometry,
 // material, group */ ) {}` names its six formals entirely inside a comment and
 // is called with all six -- ordinary JavaScript, and 10.2.1.1 binds only the
 // declared formals, so no body can observe the rest. C++ has no such

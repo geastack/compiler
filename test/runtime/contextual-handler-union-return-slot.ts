@@ -1,6 +1,6 @@
 //! expect: / a
 //! expect: /async b
-// hono's handler slot is a UNION of two callable shapes -- `Handler` returning
+// An HTTP framework's handler slot is a UNION of two callable shapes -- `Handler` returning
 // `R` and `MiddlewareHandler` returning `Promise<R | void>` -- and a call site
 // infers `R` from the argument it is given. The checker COMBINES a union's two
 // call signatures into one whose return is `R | Promise<R | void>`, so an

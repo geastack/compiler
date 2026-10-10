@@ -34,6 +34,7 @@ import { memberTypeOf } from '../derived-expression-type.js'
 import { bindingKindOf } from './binding-kind.js'
 import { iteratorYieldStructuralType, iteratorYieldTypesOf } from './iteration-yield.js'
 import { isDynamicIterationSource, mintIteratorSteps } from './protocol.js'
+import { ordinaryObjectDataWriteIsAbsent } from '../callable-data-write.js'
 
 /**
  * The result carrying the value a binding element finally receives.
@@ -414,7 +415,13 @@ export const createDestructuringProducer = (context: ProducerContext): FamilyPro
         throwingCompletion,
         { readsMutableState: true, writesMutableState: false, allocates: false, callsUserCode: true }
       )
-      operations.push(getOperation)
+      operations.push(
+        key.source.kind === 'constant' &&
+          key.source.literal === 'string' &&
+          ordinaryObjectDataWriteIsAbsent(key.source.text, element, context)
+          ? { ...getOperation, ordinaryObjectPrototypeKeyAbsent: true }
+          : getOperation
+      )
       const edge = baseEdge(getId)
       if (edge) edges.push(edge)
       const keyEdge = resultEdge(key.source, getId, 'key', 0)
@@ -553,8 +560,8 @@ export const createDestructuringProducer = (context: ProducerContext): FamilyPro
    * whichever ARM is live and checks it against THIS step's carrier. It then
    * refused the flattened answer by name -- "not every arm of this union
    * answers this position with the same carrier" -- about arms that all answer
-   * it identically. hono's `HonoRequest.routePath` over `Result<T> = [[T,
-   * ParamIndexMap][], ParamStash] | [[T, Params][]]` is the measured case.
+   * it identically. A destructure over a union of tuples such as `Result<T> =
+   * [[T, IndexMap][], Stash] | [[T, Params][]]` is the measured case.
    *
    * `isFixedArityTupleType` because that is the predicate the source was
    * admitted by: the two must agree, or this would state positions for a source
@@ -587,8 +594,8 @@ export const createDestructuringProducer = (context: ProducerContext): FamilyPro
    * that plus the `undefined` a read past the end yields), because indexing an
    * `array-object` cannot produce anything else. Two shapes reach that
    * disagreement: a tuple ASSERTION over an array -- `const [createEvents,
-   * options] = args as [(c: Ctx) => Events, number?]`, hono's
-   * `defineWebSocketHelper` -- and a rest parameter whose checker tuple this
+   * options] = args as [(c: Ctx) => Events, number?]` in a
+   * helper factory that unpacks its rest arguments -- and a rest parameter whose checker tuple this
    * compiler already collapsed to the one Array the language binds. Neither
    * converts anything.
    *

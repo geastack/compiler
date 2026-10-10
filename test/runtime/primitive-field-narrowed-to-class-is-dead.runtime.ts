@@ -1,7 +1,7 @@
-// A user type guard narrowing a PRIMITIVE field to a class: bson's
-// `Timestamp.fromExtendedJSON` reads `doc.$timestamp.i` (declared `number`)
-// under `Long.isLong(...)`, whose `value is Long` makes the checker type the
-// read `number & Long`. No number is a Long, so the guard answers false and
+// A user type guard narrowing a PRIMITIVE field to a class: a binary-document
+// serializer's `Timestamp.fromExtendedJSON` reads `doc.$timestamp.i` (declared
+// `number`) under `Long.isLong(...)`, whose `value is Long` makes the checker
+// type the read `number & Long`. No number is a Long, so the guard answers false and
 // the branch is dead; the live `: doc.$timestamp.i` arm is what runs.
 class Long {
   readonly low: number

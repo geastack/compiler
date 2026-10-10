@@ -170,7 +170,7 @@ export const dictionaryKeyDomainOf = (declared: RecordIndexKey, key: Representat
 }
 
 /**
- * `{ [key: string]: any }` held by reference -- mongodb's `Document`. The one
+ * `{ [key: string]: any }` held by reference -- a typical `Document` type. The one
  * dictionary carrier that can be a live view of another object rather than a
  * table of its own (`gea::dictionary::aliasOf`): every value read through it
  * is already `any`, so viewing an instance boxes nothing the program typed.
@@ -293,6 +293,9 @@ export interface CallableAbi {
    * language itself defines exactly.
    */
   readonly restFrom: number | null
+  /** A physical implicit-arguments slot packs the complete supplied argument
+   * list, before omitted named formals are filled with undefined. */
+  readonly argumentsFrame?: 'actual'
   /**
    * Present on a program overload set joined across a callback overload
    * (`host-abi.ts`'s `callbackOverloadJoinedAbi`): `step(c): Promise<string>`
@@ -400,8 +403,8 @@ export type Representation =
    * Two instantiations of one generic class therefore have one physical
    * carrier, and folding the shape in gave that carrier two spellings -- the
    * "one value, two carriers" case this key exists to CATCH, arrived at from
-   * the other side. hono is the measured case: `Context.notFound` reads
-   * `#notFoundHandler: NotFoundHandler<E>` -- a callable over `Context<E>`,
+   * the other side. The measured case: a method of `Context` reads
+   * `#handler: Handler<E>` -- a callable over `Context<E>`,
    * which is `Context<E, any, BlankInput>` once the class's later parameters
    * take their defaults -- and the narrowed read in a monomorphized copy
    * spells the same class through its own instantiation. Identical carriers
@@ -612,17 +615,17 @@ export type Representation =
       readonly recursive?: RecursiveCarrier
       /**
        * The typed fields an interface ADDS to the Array it extends --
-       * TypeScript's `NodeArray<T> extends ReadonlyArray<T>, ReadonlyTextRange`
-       * puts `pos`, `end`, `hasTrailingComma` on every node list -- or `null`
+       * `interface List<T> extends ReadonlyArray<T>, Range` puts `pos` and
+       * `end` on every such list -- or `null`
        * for a plain array. The C++ type is the same `gea::ArrayObject<E>`
        * either way: the fields live in the array's own extension sidecar
        * (`ArrayObject::extensionFields`), typed by a generated struct
        * (`records.ts`'s `arrayExtensionDeclarations`), so a plain array cast
-       * to the interface (`elements.slice() as MutableNodeArray<T>`) is the
+       * to the interface (`elements.slice() as MutableList<T>`) is the
        * SAME object and converts by identity (`conversions.ts`). Part of the
        * carrier's identity because a property read has to know the layout;
-       * keyed by the FIELDS, not the interface, so `MutableNodeArray<T>` and
-       * `NodeArray<T>` -- one object under two spellings -- are one carrier.
+       * keyed by the FIELDS, not the interface, so `MutableList<T>` and
+       * `List<T>` -- one object under two spellings -- are one carrier.
        */
       readonly extension: readonly RecordField[] | null
     }
@@ -738,8 +741,8 @@ export type Representation =
    * pump. Sharing the `iterator` kind let every capability keyed on that kind
    * -- `protocol:iterator:next:iterator`, the spread and destructuring rows,
    * the cursor conversions -- claim this carrier for a synchronous step it
-   * cannot take, and the mongodb driver deadlocked on exactly that: its
-   * `readMany` generator ran as nested blocking pumps and a timer that fired
+   * cannot take, and one large program deadlocked on exactly that: an async
+   * generator ran as nested blocking pumps and a timer that fired
    * inside one started a loop the pump beneath it never returned from.
    *
    * `resume`/`completion` collapse to `undefined` for the reason `iterator`'s
@@ -877,10 +880,10 @@ export type Representation =
    * A function VALUE with no calling convention: storable, passable and
    * comparable, but not callable.
    *
-   * `(...args: never[]) => void` -- TypeScript's `AnyFunction`, and tsc's own
-   * (`core.ts`) -- is not a convention at all. `never` is uninhabited, so no
+   * `(...args: never[]) => void` -- the usual `AnyFunction` alias -- is not a
+   * convention at all. `never` is uninhabited, so no
    * call through such a slot can supply an argument, and the type exists to say
-   * "some function, which nobody here calls": tsc passes it straight to
+   * "some function, which nobody here calls": programs pass it straight to
    * `Error.captureStackTrace`. Giving it a frame is where the silent miscompile
    * lives -- a concrete `f(a, b, c)` converted into a zero-argument frame
    * compiles and then runs with garbage the first time anyone calls it.
@@ -900,9 +903,8 @@ export type Representation =
    *
    * `lib.es5.d.ts` types every `.constructor` read as the bare `Function`, which
    * states no frame, so a program that only uses the constructor as an OBJECT --
-   * the MongoDB driver's `(this.constructor as { aspects?: Set<symbol> })`
-   * reading a property its `defineAspects(AggregateOperation, ...)` defined on
-   * the class -- has no convention to carry and no reason for a box. The carrier
+   * `(this.constructor as { aspects?: Set<symbol> })` reading a property a
+   * module-level `defineAspects(SomeClass, ...)` defined on the class -- has no convention to carry and no reason for a box. The carrier
    * is the class evaluation itself (`gea::NativeClassMethodState`), which is
    * what a constructor value's environment already is, what `===` compares, and
    * whose `parent` is the base class's: the constructor's own `[[Prototype]]`.
@@ -913,7 +915,7 @@ export type Representation =
   /**
    * The constructor of an Error instance, carried by the instance itself.
    *
-   * `e.constructor` over `CompiledError | Error` (mongodb's `errorStrictEqual`)
+   * `e.constructor` over `CompiledError | Error` (an error-equality helper)
    * is one of two kinds of object: a compiled `class X extends Error`'s
    * constructor, whose class evaluation the instance's own allocation names,
    * or an intrinsic one (`TypeError`, ...), which the runtime error's kind
@@ -1030,8 +1032,9 @@ const abiKeys = new WeakMap<CallableAbi, string>()
  *
  * ⛔ This used to be the child's WHOLE key, spliced in as text -- which makes a
  * key a tree serialization of a graph, and that is not merely wasteful, it does
- * not terminate at any useful size. mongodb's `Filter` carrier has three fields
- * that each contain the next level, so every level TRIPLED its parent's key:
+ * not terminate at any useful size. A recursive query-filter carrier with three
+ * fields that each contain the next level made every level TRIPLE its
+ * parent's key:
  * measured at 1,191 characters at the innermost level, 11 MB eight levels up,
  * 299 MB three levels above that, and then `Array.join` threw
  * `RangeError: Invalid string length` -- V8 caps a string at 536,870,888
@@ -1051,7 +1054,8 @@ const abiKeys = new WeakMap<CallableAbi, string>()
  * rather than left opaque. A key is read by people: it names the missing
  * primitive in every unmet-obligation row the compass prints, and an obligation
  * that says only `k9f2c...` would trade one unreadable report (8 KB of inlined
- * header fields on ONE line, which is what this produced for hono's `Context`)
+ * header fields on ONE line, which is what this produced for one request
+ * context class)
  * for another.
  */
 // `GEA_FULL_KEYS` prints every nested key in full: a digest names WHICH union a
@@ -1063,7 +1067,7 @@ const nestedKeyLimit = process.env['GEA_FULL_KEYS'] ? Number.POSITIVE_INFINITY :
 // Memoized beside `keysByRepresentation`, and for the same reason: the digest
 // is a pure function of the carrier, and a parent key asks for it once per
 // field on every rebuild of a parent that is not itself remembered yet. On
-// TypeScript's own compiler the digest, not the walk, was half the cost of
+// a large program the digest, not the walk, was half the cost of
 // keying a union's arms.
 const nestedKeys = new WeakMap<Representation, string>()
 
@@ -1130,6 +1134,7 @@ const buildRepresentationKey = (representation: Representation): string => {
     case 'unresolved':
       return `unresolved(${representation.reason})`
     case 'void':
+      return representation.bottom === true ? 'never' : 'void'
     case 'string':
     case 'symbol':
     case 'null':
@@ -1250,7 +1255,7 @@ export const abiKey = (abi: CallableAbi): string => {
 
 const buildAbiKey = (abi: CallableAbi): string =>
   `(${abi.parameters.map((parameter) => `${nestedKey(parameter.value)}/${parameter.ownership}`).join(',')}` +
-  `${abi.restFrom === null ? '' : `|rest@${abi.restFrom}`})` +
+  `${abi.restFrom === null ? '' : `|rest@${abi.restFrom}`}${abi.argumentsFrame ? '|actual-arguments' : ''})` +
   `->${nestedKey(abi.result)}` +
   `@${abi.receiver ? nestedKey(abi.receiver) : '-'}` +
   (abi.overloadJoined === true ? '|overloads' : '')
@@ -1318,7 +1323,7 @@ const alwaysTruthyKinds: ReadonlySet<Representation['kind']> = new Set([
  * `T | null` onto -- and so are `optional`, `dynamic` and every sum, each of
  * which plainly has one.
  *
- * `constructor-family` is the measured case: node-server's `export const
+ * `constructor-family` is the measured case: a polyfilling module's `export const
  * CloseEvent: typeof globalThis.CloseEvent = globalThis.CloseEvent ?? class
  * extends Event {...}`. The plan gives the global read a bare constructor
  * family, which is the census's own statement that the value is there -- a host
@@ -1328,7 +1333,14 @@ const alwaysTruthyKinds: ReadonlySet<Representation['kind']> = new Set([
  * between two unrelated program classes is asking for a value that arm never
  * produces.
  */
-export const carriesNoAbsence = (representation: Representation): boolean => alwaysTruthyKinds.has(representation.kind)
+export const carriesNoAbsence = (representation: Representation): boolean =>
+  alwaysTruthyKinds.has(representation.kind) && !carriesNativeUndefined(representation)
+
+/** Native object references reserve an undefined lane for strict unbound method receivers, separate from null. */
+export const carriesNativeUndefined = (representation: Representation): boolean =>
+  ((representation.kind === 'class-ref' || representation.kind === 'record' || representation.kind === 'record-with-index') &&
+    representation.ownership === 'shared-refcount') ||
+  (representation.kind === 'native-record-ref' && representation.native === null && representation.ownership === 'shared-refcount')
 
 /**
  * Whether `representation` -- unwrapped once if it is an `optional` -- can
@@ -1366,7 +1378,7 @@ export const carriesNoAbsence = (representation: Representation): boolean => alw
  * `kind === 'optional'` test then refused a program the collapse itself
  * created.
  *
- * Measured on `examples/dialer`: `if (e.candidate && this.ws)`, with
+ * Measured on a WebRTC signalling program: `if (e.candidate && this.ws)`, with
  * `ws: WebSocketInstance | null`, raised
  * `merge-narrowing:optional(native-record-ref(...),null)->native-handle(...)`,
  * an obligation no conversion could ever satisfy, on a program with zero
@@ -1394,8 +1406,9 @@ export const carriesNoAbsence = (representation: Representation): boolean => alw
  */
 export const carriesUndefined = (representation: Representation): boolean => {
   if (representation.kind === 'undefined' || representation.kind === 'void') return true
+  if (carriesNativeUndefined(representation)) return true
   if (representation.kind === 'borrowed-ref') return carriesUndefined(representation.referent)
-  if (representation.kind === 'optional') return representation.absence === 'undefined'
+  if (representation.kind === 'optional') return representation.absence === 'undefined' || carriesUndefined(representation.payload)
   if (representation.kind === 'tagged-union') return representation.arms.some((arm) => carriesUndefined(arm.value))
   return representation.kind === 'dynamic'
 }
@@ -1453,9 +1466,7 @@ export const absentFieldPayload = (field: RecordField): Representation | null =>
   !field.required && field.value.kind === 'optional' && field.value.absence === 'undefined' ? field.value.payload : null
 
 export const carriesMergeAbsence = (representation: Representation): boolean =>
-  representation.kind === 'optional' ||
-  representation.kind === 'native-handle' ||
-  (representation.kind === 'class-ref' && representation.ownership === 'shared-refcount')
+  representation.kind === 'optional' || representation.kind === 'native-handle' || carriesNativeUndefined(representation)
 
 /**
  * Whether a tagged union tags absence in an arm of its own.
@@ -1480,7 +1491,7 @@ const unionTagsAbsence = (union: Extract<Representation, { kind: 'tagged-union' 
  *
  * - a union carrying its own `null`/`undefined` arm. Arms are disjoint, so a
  *   `present:` arm sitting beside a `null:` arm carries a type null was already
- *   removed from. Without this, three's `this.environment &&
+ *   removed from. Without this, `this.environment &&
  *   this.environment.isTexture` over a `Texture | null` field raised
  *   `merge-narrowing:tagged-union(undefined|null|present:class-ref(...,shared-
  *   refcount))->tagged-union(undefined|null|present:scalar(boolean))` -- an
@@ -1491,11 +1502,16 @@ const unionTagsAbsence = (union: Extract<Representation, { kind: 'tagged-union' 
  *   only be tagged `'undefined'` -- and `union.ts` reaches that wrapper solely
  *   when the source union had exactly ONE absent member. Both facts together
  *   say `null` was never in the type, so the pointer inside is object-shaped
- *   and therefore always truthy. Without this, mongodb's `this.session &&
- *   this.session.inTransaction()` -- `session: ClientSession | undefined`, the
+ *   and therefore always truthy. Without this, `this.session &&
+ *   this.session.inTransaction()` -- `session: Session | undefined`, the
  *   guard-and-call idiom -- raised `merge-narrowing:optional(class-ref(...,
  *   shared-refcount),undefined)->optional(scalar(boolean),undefined)`, 39 rows
  *   over three classes, for a merge whose kept arm can only ever be absent.
+ *
+ * Native record references now reserve their own undefined lane too. That
+ * physical lane makes a bare reference potentially falsy, while an outside
+ * absence tag still proves its payload denotes a present object. The same
+ * proof therefore applies to every carrier named by `carriesNativeUndefined`.
  */
 const isDeadMergePayload = (representation: Representation, absenceTaggedOutside: boolean): boolean => {
   if (representation.kind === 'optional') return isDeadMergePayload(representation.payload, true)
@@ -1503,13 +1519,17 @@ const isDeadMergePayload = (representation: Representation, absenceTaggedOutside
     const tagsAbsence = unionTagsAbsence(representation)
     return representation.arms.every((arm) => isDeadMergePayload(arm.value, tagsAbsence || absenceTaggedOutside))
   }
-  if (absenceTaggedOutside && (representation.kind === 'class-ref' || representation.kind === 'native-handle')) return true
+  if (
+    absenceTaggedOutside &&
+    (carriesNativeUndefined(representation) || representation.kind === 'class-ref' || representation.kind === 'native-handle')
+  )
+    return true
   // A class instance is object-shaped and so always truthy -- unless it is the
   // one shape that self-encodes absence, exactly as `native-handle` does. A
   // REFCOUNTED instance is a `gea::Ref<T>` that `optional.ts` collapses
   // `T | null` onto, so a null one is a falsy state this must not claim away.
   if (representation.kind === 'class-ref') return representation.ownership !== 'shared-refcount'
-  return alwaysTruthyKinds.has(representation.kind)
+  return carriesNoAbsence(representation)
 }
 
 export const isDeadMergeContribution = (representation: Representation): boolean => isDeadMergePayload(representation, false)
@@ -1517,7 +1537,7 @@ export const isDeadMergeContribution = (representation: Representation): boolean
 /**
  * The `||` mirror of `isDeadMergeContribution`: a kept operand with NO truthy
  * state. `a || b` publishes `a` only when `ToBoolean(a)` is true, and a carrier
- * that is only ever `null`/`undefined` (propertyHelper's `verifyProp || name`,
+ * that is only ever `null`/`undefined` (a helper's `label || name`,
  * where every caller passes `null` or nothing) has no such state, so the
  * kept branch never runs and the merge only ever publishes the evaluated
  * side. Nothing is converted because nothing arrives. Asked by
@@ -1623,7 +1643,7 @@ export interface PartialMergeArmSplit {
  * `ToBoolean` in the first place, so when the checker's type for the whole
  * expression is a plain `boolean` while the kept operand's own carrier is
  * not, it has already proven the kept contribution meaningful only as its
- * truthiness. `object && object.isObject3D` over three's `Object3D` is the
+ * truthiness. `object && object.isShape` over a class with a boolean brand field is the
  * shape: the merge publishes `boolean`, the kept side is a
  * `class-ref(shared-refcount)` -- nullable, because `optional.ts` collapses
  * `T | null` onto it -- and its `ToBoolean` (`emit-presence.ts`'s
@@ -1778,7 +1798,7 @@ export const captureCapabilityOf = (representation: Representation | null): stri
  * how a fail-closed guard silently stops covering a kind.
  *
  * ⛔ `record-with-index` was missing from this switch and fell through to
- * `default`, so nothing inside one was ever visited: mongodb's `Filter` -- a
+ * `default`, so nothing inside one was ever visited: a query `Filter` -- a
  * record-with-index whose fields are the whole query -- was invisible to every
  * guard built on this walk.
  */

@@ -3,6 +3,7 @@ import type { HostMemberTable } from '../targets/cpp/host/host-members.js'
 import { withoutSpecialization } from '../identity/ids.js'
 import { narrowedOperandView } from '../conversion/operand-view.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
+import type { NativeCallableDataPlan } from '../representation/native-callable-data-storage.js'
 import {
   recordIndexForKeyCarrier,
   representationKey,
@@ -153,8 +154,11 @@ export interface SlotCensusInput {
   readonly placements: ReadonlyMap<DeclarationId, BindingPlacement>
   /** Declarations that hold one host method forever -- see `projection/callee.ts`'s `hostMethodAliasDeclarations`. */
   readonly hostMethodAliasDeclarations: ReadonlySet<DeclarationId>
-  readonly hostMembers?: HostMemberTable
+  readonly hostMembers: HostMemberTable
+  readonly hostIntrinsicProtocols?: ReadonlySet<string>
   readonly slotHooks?: readonly SlotHook[]
+  /** The published callable own-data storage (`RepresentationPublication`). */
+  readonly nativeCallableData: NativeCallableDataPlan
 }
 
 export interface SlotCensus {
@@ -201,7 +205,7 @@ export const callArgumentSlotOf = (abi: CallableAbi | null, callee: Representati
     const rest = abi.parameters[abi.restFrom]?.value
     if (!rest) return unclassified('a variadic convention declares no parameter at its own rest position')
     if (isClosedContiguousTupleRecord(rest)) {
-      const field = rest.fields[position - abi.restFrom]
+      const field = rest.fields[abi.argumentsFrame === 'actual' ? position : position - abi.restFrom]
       return field ? slot(field.value, 'element') : unclassified(`argument ${position} is past the arity of a tuple-shaped rest slot`)
     }
     if (rest.kind === 'array-object') return slot(rest.element, 'element')
@@ -217,6 +221,28 @@ const unwrapBorrowed = (representation: Representation): Representation =>
   representation.kind === 'borrowed-ref' ? representation.referent : representation
 
 /** The callable a call dispatches through: an optional chain's payload, a borrowed reference's referent. */
+/**
+ * A method read off a union some arm of which is not the class whose body the
+ * read's convention names: a primitive beside it (`(string | URL).toString()`,
+ * `(Int32 | number).valueOf()`) or another class -- a generic class's split
+ * copies, each its own struct (`cursor: AbstractCursor` holding any copy). No
+ * conversion takes such an arm into that class receiver, so a selection
+ * entered here aborts whenever it is live; the printer dispatches the call per
+ * arm from the union itself (the union method/ToString reads), so the receiver
+ * travels as it is.
+ */
+const unionArmBesideClassReceiver = (held: Representation, receiver: Representation): boolean => {
+  const carrier = unwrapBorrowed(held)
+  const union = carrier.kind === 'optional' ? carrier.payload : carrier
+  const owner = unwrapBorrowed(receiver)
+  if (union.kind !== 'tagged-union' || owner.kind !== 'class-ref') return false
+  return union.arms.some((arm) => {
+    const value = arm.value
+    if (value.kind === 'string' || value.kind === 'scalar') return true
+    return value.kind === 'class-ref' && value.declaration !== owner.declaration && !value.ancestors.includes(owner.declaration)
+  })
+}
+
 const calleeCarrierOf = (representation: Representation): Representation => {
   const held = unwrapBorrowed(representation)
   return held.kind === 'optional' ? unwrapBorrowed(held.payload) : held
@@ -231,8 +257,7 @@ const numberScalar: Representation = { kind: 'scalar', domain: 'number' }
  * One promise is the obvious case. A tagged union every arm of which is a
  * promise is the same fact expressed over a value whose exact promise is not
  * known statically: whichever arm is live, `return v` still hands a promise
- * back whole. `@hono/node-server`'s `readBodyWithFastPath` produces exactly
- * that -- `request[getRequestCache]()[method]()` indexes a `Request` by a
+ * back whole. A body reader can produce exactly that -- `request[getRequestCache]()[method]()` indexes a `Request` by a
  * union of `'text' | 'arrayBuffer' | 'blob'`, so the call's carrier is
  * `Promise<string> | Promise<ArrayBuffer> | Promise<Blob>` -- and reading the
  * payload slot for it asked the census to convert a union of promises into a
@@ -345,9 +370,8 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
    * whether a constant STRING key ("0", "NaN") addresses a NUMBER index.
    * Asking only "is there exactly one sidecar" let a named key take a sidecar
    * keyed by a domain it cannot address: `lib.es5.d.ts`'s `interface String`
-   * has `readonly [index: number]: string`, so hono's `escapedString.isEscaped
-   * = true` (`utils/html.ts`'s `raw`, over the `new String(...)` wrapper-object
-   * carrier) was given a `string` slot and the census then wanted a
+   * has `readonly [index: number]: string`, so `escapedString.isEscaped = true`
+   * (over the `new String(...)` wrapper-object carrier) was given a `string` slot and the census then wanted a
    * `scalar(boolean) -> string` conversion that does not and should not exist.
    * Such a key is an own DYNAMIC property, which the printer's String-object
    * interceptor owns (`emitStringObjectSet`), and it reaches it by this census
@@ -392,6 +416,8 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
 
   /** The carrier a `[[Set]]`/`[[DefineOwnProperty]]` store writes, given the receiver's carrier and the key. */
   const storeSlot = (operation: SemanticOperation, receiver: Representation, key: SemanticOperand | undefined): SlotAnswer => {
+    const nativeData = input.nativeCallableData.routeAt(operation.id)
+    if (nativeData !== null) return slot(nativeData.storage, 'field')
     const carrier = unwrapBorrowed(receiver)
     const constantKey = key?.source.kind === 'constant' ? key.source.text : null
     switch (carrier.kind) {
@@ -503,6 +529,27 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
     return coerce('ToNumber')
   }
 
+  const staticUnionMethodCall = (operation: InvocationOperation): boolean => {
+    if (operation.internalMethod !== 'call') return false
+    const calleeOperand = operandOf(operation, 'callee')
+    if (calleeOperand?.source.kind !== 'result') return false
+    const producerId = input.graph.results.get(calleeOperand.source.result)
+    const producer = producerId === undefined ? undefined : input.graph.operations.get(producerId)
+    if (producer?.family !== 'property' || producer.internalMethod !== 'get') return false
+    const key = operandOf(producer, 'key')
+    const receiver = operandOf(producer, 'receiver')
+    if (key?.source.kind !== 'constant' || key.source.literal !== 'string' || receiver === undefined) return false
+    const held = carrierOf(producer, receiver)
+    const keyText = key.source.text
+    const staticArm = (arm: Representation): boolean => {
+      if (arm.kind === 'tagged-union') return arm.arms.every((nested) => staticArm(nested.value))
+      if (arm.kind !== 'constructor-family' || arm.members.length !== 1) return false
+      const site = classStaticMemberOf(input.classes, arm.members[0]!, keyText)
+      return site?.kind === 'method' && site.method.callable !== null && input.abis.get(site.method.callable)?.receiver === null
+    }
+    return held !== null && held.kind === 'tagged-union' && staticArm(held)
+  }
+
   const invocationSlot = (operation: InvocationOperation, operand: SemanticOperand): SlotAnswer => {
     const role = operand.role
     if (role === 'callee') return raw('callee')
@@ -539,6 +586,11 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
       return callArgumentSlotOf(deferred.abi, null, operand.ordinal - 1)
     }
     if (callee?.kind === 'generic-function-set') return role === 'receiver' ? raw('discarded') : raw('dispatch-argument')
+    // A static read off a union of class constructors is called per arm, each
+    // body converting the argument to what IT declares; the joined
+    // convention's parameter is the intersection of every arm's, which no one
+    // argument need satisfy (`codecsByKey[k].fromJSON(doc)`).
+    if (role === 'argument' && staticUnionMethodCall(operation)) return raw('dispatch-argument')
     // A host handle invoked or constructed directly (`String(x)`, `new
     // Error(m)`, `new Uint8Array(n)`) is rendered from the host table by the
     // argument's own carrier (`targets/cpp/host/emit-host-invoke.ts`).
@@ -552,7 +604,12 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
     const constructs = operation.internalMethod === 'construct' || operation.resultDivergence.kind === 'super-constructor-initialization'
     const abi = callee ? (constructs ? constructAbiOfCallee(callee) : abiOfCallee(callee)) : null
     if (role === 'receiver') {
-      if (abi?.receiver) return slot(abi.receiver, 'receiver')
+      if (abi?.receiver) {
+        const held = carrierOf(operation, operand)
+        if (held !== null && unionArmBesideClassReceiver(narrowedOperandView(held, operand, input.deriver), abi.receiver))
+          return raw('receiver')
+        return slot(abi.receiver, 'receiver')
+      }
       if (callee?.kind === 'dynamic') return slot(callee, 'dynamic')
       return raw('discarded')
     }
@@ -654,8 +711,8 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
           case 'unary': {
             if (operation.operator === 'void') return raw('discarded')
             // Unary `+`/`-` over a non-Number operand is ToNumber first
-            // (ECMA-262 13.5.4/13.5.5): mongodb's `Number.isInteger(+MEMORY_MB)`
-            // over a string and BSON's `new Int32(value: number | string)`
+            // (ECMA-262 13.5.4/13.5.5): `Number.isInteger(+MEMORY_MB)`
+            // over a string and a `new Int32(value: number | string)`
             // storing `+value`. The operand converts exactly as a mixed binary
             // operand does; a BigInt operand keeps its own `-` (the result is
             // then not a Number and this does not apply).
@@ -756,6 +813,10 @@ export const createSlotCensus = (input: SlotCensusInput): SlotCensus => {
         if (role === 'key') return raw('key')
         if (role === 'short-circuit-guard') return raw('condition')
         if (role !== 'value') return unclassified(`role "${role}" on a property ${operation.internalMethod}`)
+        if (operation.internalMethod === 'set' && operation.resolvedBinding !== undefined) {
+          const cell = input.placements.get(operation.resolvedBinding)?.representation
+          return cell ? slot(cell, 'cell') : unclassified(`binding ${operation.resolvedBinding} has no placed cell carrier`)
+        }
         const receiverOperand = operandOf(operation, 'receiver')
         const receiver = receiverOperand ? carrierOf(operation, receiverOperand) : null
         if (!receiver || !receiverOperand) return unclassified('a property store whose receiver has no carrier')

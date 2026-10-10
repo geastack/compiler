@@ -5,9 +5,17 @@ import ts from 'typescript'
 import { indexValueFlow } from './value-flow.js'
 import { wholeProgram } from '../reachability.js'
 import { closedCallableAuthorityOf } from './callable-reach.js'
-import { attachDeferredIntrinsicProtocolLedger, createDeferredIntrinsicProtocolLedger } from '../deferred-intrinsic-protocols.js'
+import {
+  attachDeferredIntrinsicProtocolLedger,
+  createDeferredIntrinsicProtocolLedger,
+  failedIntrinsicProtocolRequirements
+} from '../deferred-intrinsic-protocols.js'
+import { createIdentityTable } from '../identities.js'
+import { censusGlobalHostMutations } from '../global-host-mutations.js'
+import { censusUnresolvableNames } from '../unresolvable-names.js'
 import { attachClosedScriptScope } from './targets.js'
 import { sourceValueSessionOf } from './source-value-session.js'
+import { censusParameterBindings, indexParameterBindingProgram } from '../parameter-bindings.js'
 
 /** The frame `closedCallableAuthorityOf` gives the parameter spelled `second`, as source text. */
 /** The graph's own answer for the first `new this.constructor()` in `source`: what the fresh object is, or null. */
@@ -35,7 +43,13 @@ const constructionValue = (source: string, js = false): readonly string[] | null
   return values === null ? null : values.map((value) => (ts.isVoidExpression(value) ? 'undefined' : value.getText(file))).sort()
 }
 
-const frame = (source: string, js = false, module = true, closedScriptScope = false): readonly string[] | null => {
+const frame = (
+  source: string,
+  js = false,
+  module = true,
+  closedScriptScope = false,
+  sealGlobalBinding = false
+): readonly string[] | null => {
   const entry = resolve(`test/fixtures/closed-callable-authority.${js ? 'js' : 'ts'}`)
   const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022, allowJs: js, checkJs: js }
   const host = ts.createCompilerHost(options)
@@ -71,6 +85,26 @@ const frame = (source: string, js = false, module = true, closedScriptScope = fa
   assert.deepEqual(repeated.requirements, captured.requirements, 'cached frame queries retain every prototype obligation')
   if (values !== null && source.includes('take.call'))
     assert.ok(captured.requirements.some((requirement) => requirement.intrinsic === 'Function'))
+  if (sealGlobalBinding && values !== null) {
+    const globals = captured.requirements.filter((requirement) => requirement.sourceGlobalBinding !== undefined)
+    assert.equal(globals.length, 1)
+    const global = globals[0]!
+    assert.ok(ts.isVariableDeclaration(global.sourceGlobalBinding!))
+    assert.equal(global.sourceGlobalBinding!.name!.getText(file), 'held')
+    assert.equal(global.location, global.sourceGlobalBinding)
+    const identities = createIdentityTable(program, checker)
+    const taint = censusGlobalHostMutations(checker, identities, [file], censusUnresolvableNames(checker, [file]), new Set(), flow)
+    const failed = failedIntrinsicProtocolRequirements(
+      {
+        checker,
+        identities,
+        globalHostMutationTaint: taint,
+        isStandardLibraryDeclaration: (node) => program.isSourceFileDefaultLibrary(node.getSourceFile())
+      },
+      captured.requirements
+    )
+    if (failed.length > 0) return null
+  }
   return values === null ? null : values.map((value) => (ts.isVoidExpression(value) ? 'undefined' : value.getText(file))).sort()
 }
 
@@ -95,7 +129,17 @@ test('a stated script lexical realm closes bindings while retaining object and p
       null
     )
   }
-  assert.equal(frame(`${owner} var held = new Owner(); held.take(1);`, false, false, true), null)
+  const global = `${owner} var held = new Owner(); held.take(1);`
+  assert.deepEqual(frame(global, false, false, true, true), ['1'])
+  assert.equal(frame(global, false, false), null)
+  for (const effect of [
+    'held = new Owner();',
+    'declare function external(value: unknown): void; external(held);',
+    'declare function replacement(value: number): void; Owner.prototype.take = replacement;',
+    'declare const key: string; (globalThis as any)[key] = undefined;',
+    'const realm = globalThis; (realm as any).held = undefined;'
+  ])
+    assert.equal(frame(`${global} ${effect}`, false, false, true, true), null, effect)
 })
 
 test('a closed script realm includes writes and callers from every script', () => {
@@ -141,6 +185,55 @@ test('an omitted argument is the value undefined, and a spread before the slot r
   assert.equal(frame(`${take} take(1); declare function external(value: unknown): void; external(take);`), null)
 })
 
+test('a same-key override contributes only calls that enter the selected base body', () => {
+  assert.deepEqual(
+    frame(`
+      class Base { take(second: number) { return second } }
+      class Derived extends Base { take(value: number) { super.take(3); return value } }
+      new Base().take(1)
+      new Derived().take(2)
+    `),
+    ['1', '3']
+  )
+})
+
+test('a retained returned member cannot infer an arguments frame from only its direct caller', () => {
+  const entry = resolve('test/fixtures/closed-callable-retained-member.js')
+  const source = `
+    function factory() {
+      function method() { return arguments[0] }
+      return { method }
+    }
+    const retained = []
+    function retain(value) { retained.push(value) }
+    const record = factory()
+    retain(record)
+    record.method(1)
+    retained[0].method('text')
+  `
+  const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022, strict: true, allowJs: true }
+  const host = ts.createCompilerHost(options)
+  const read = host.getSourceFile.bind(host)
+  host.getSourceFile = (name, version, ...rest) =>
+    resolve(name) === entry ? ts.createSourceFile(name, source, version, true, ts.ScriptKind.JS) : read(name, version, ...rest)
+  const program = ts.createProgram([entry], options, host)
+  const checker = program.getTypeChecker()
+  const file = program.getSourceFile(entry)!
+  const flow = indexValueFlow(checker, [file], wholeProgram)
+  attachClosedScriptScope(flow, { files: new Set([file]) })
+  const ledger = createDeferredIntrinsicProtocolLedger()
+  attachDeferredIntrinsicProtocolLedger(flow, ledger)
+  const factory = file.statements.find(ts.isFunctionDeclaration)!
+  const method = factory.body!.statements.find(ts.isFunctionDeclaration)!
+  const frame = ledger.capture(() => {
+    const index = indexParameterBindingProgram(checker, [file], wholeProgram, flow)
+    const census = censusParameterBindings(checker, [file], wholeProgram, undefined, index, flow)
+    assert.ok(census.implicitArgumentsTupleAt)
+    return census.implicitArgumentsTupleAt(method)
+  })
+  assert.equal(frame.value, null, 'the uncounted call through retained array storage keeps the complete frame open')
+})
+
 test('the exported authority answers callers from the same closed inventory', () => {
   const entry = resolve('test/fixtures/closed-callable-authority.ts')
   const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022 }
@@ -161,6 +254,37 @@ test('the exported authority answers callers from the same closed inventory', ()
   )
   const take = file.statements.find(ts.isFunctionDeclaration)!
   assert.equal(authority.closedCallerSitesOf?.(take)?.length, 2)
+})
+
+test('a stable local anonymous callable initializer owns its complete direct callers', () => {
+  const callerCount = (source: string): number | null => {
+    const entry = resolve('test/fixtures/closed-callable-authority.ts')
+    const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022 }
+    const host = ts.createCompilerHost(options)
+    const read = host.getSourceFile.bind(host)
+    host.getSourceFile = (name, version, ...rest) =>
+      resolve(name) === entry ? ts.createSourceFile(name, `export {};\n${source}`, version, true) : read(name, version, ...rest)
+    const program = ts.createProgram([entry], options, host)
+    const checker = program.getTypeChecker()
+    const file = program.getSourceFile(entry)!
+    const binding = file.statements.find(ts.isVariableStatement)!.declarationList.declarations[0]!
+    const initializer = binding.initializer!
+    assert.ok(ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer))
+    const flow = indexValueFlow(checker, [file], wholeProgram)
+    const authority = closedCallableAuthorityOf(
+      checker,
+      flow,
+      () => null,
+      () => undefined
+    )
+    return authority.closedCallerSitesOf(initializer)?.length ?? null
+  }
+  for (const initializer of ['(value: number) => value', 'function(value: number) { return value; }']) {
+    assert.equal(callerCount(`const take = ${initializer}; take(1); take(2);`), 2)
+    assert.equal(callerCount(`let take = ${initializer}; take = (value) => value + 1; take(1);`), null)
+    assert.equal(callerCount(`const take = ${initializer}; declare function retain(value: unknown): void; retain(take); take(1);`), null)
+    assert.equal(callerCount(`export const take = ${initializer}; take(1);`), null)
+  }
 })
 
 test('explicit receiver calls retain executable parameter positions', () => {
@@ -515,18 +639,18 @@ test('a generic class in the heritage chain does not open a receiver family', ()
   assert.equal(invocationTargets(transitive, named('draw'))?.length, 1)
 })
 
-/** Three's `WebGLProperties()`: a factory returning `{ get: get, ... }`,
- * always invoked as `new WebGLProperties()`. TypeScript's own JS-constructor
+/** A pre-ES6 `Properties()`: a factory returning `{ get: get, ... }`,
+ * always invoked as `new Properties()`. TypeScript's own JS-constructor
  * inference recognizes only a `this.x = ...` body as a constructor; a plain
  * function that instead returns an object literal makes `new F()` type `any`
  * -- `checker.getResolvedSignature` then names no declaration for
  * `properties.get( material )` at all. The call still closes: `properties`'s
- * one origin is the literal `WebGLProperties` returns, that literal's `get`
+ * one origin is the literal `Properties` returns, that literal's `get`
  * slot is written exactly once, and the write is a source function --
  * `closedCalleeBodiesOf` reaches this by ALLOCATION (record-method-call
  * closure), never by matching the name `get` against candidate bodies. */
 const propertiesFactory = `
-  function WebGLProperties() {
+  function Properties() {
     let properties = new WeakMap();
     function get(object) {
       let map = properties.get(object);
@@ -543,7 +667,7 @@ const propertiesGetMarker = (call: ts.CallExpression): boolean =>
 
 test('closedCalleeBodiesOf closes a `new`-constructed record factory from its allocation', () => {
   const source = `${propertiesFactory}
-    const properties = new WebGLProperties();
+    const properties = new Properties();
     const material = {};
     const m = properties.get(material);`
   const closed = closedCalleeBodies(source, propertiesGetMarker)
@@ -562,7 +686,7 @@ test('closedCalleeBodiesOf refuses when the slot is replaced or the allocation i
   // A later write to the SAME slot puts a different callable in the call's
   // path -- the write, not the record shape, is what must refuse this.
   const replaced = `${propertiesFactory}
-    const properties = new WebGLProperties();
+    const properties = new Properties();
     properties.get = function replacement(object) { return object; };
     const material = {};
     const m = properties.get(material);`
@@ -574,67 +698,67 @@ test('closedCalleeBodiesOf refuses when the slot is replaced or the allocation i
   const merged = `declare function external(): any
     ${propertiesFactory}
     declare const choice: boolean
-    const properties: any = choice ? new WebGLProperties() : external();
+    const properties: any = choice ? new Properties() : external();
     const material = {};
     const m = properties.get(material);`
   assert.equal(closedCalleeBodies(merged, propertiesGetMarker), null)
 })
 
-/** Three's `Object3D.prototype.onBeforeRender( ) {}`: a per-instance render
- * hook. `WebGLBackground.js` does `boxMesh.onBeforeRender = function( ... )
- * { ... }` on a `Mesh` instance from OUTSIDE any class body, so
+/** A base class's empty `beforeDraw( ) {}`: a per-instance hook. Some
+ * other module does `node.beforeDraw = function( ... ) { ... }` on one
+ * subclass instance from OUTSIDE any class body, so
  * `instanceMemberWritesOf` (which only sees `this.x =` / `super.x =`) never
  * learns of it and `memberImplementationsOf` alone would answer with only
- * the base's empty body. `WebGLRenderer.js` then calls `scene.onBeforeRender(
- * ... )` through a slot with that one instance override -- a write
+ * the base's empty body. A caller then invokes `root.beforeDraw( ... )`
+ * through a slot with that one instance override -- a write
  * `slotClosedForTargets`'s "nothing writes this slot" refuses outright, even
  * though the write installs a nameable compiled function. */
-const onBeforeRenderSource = `
-  class Base { onBeforeRender(value: number) { return value; } }
+const beforeDrawSource = `
+  class Base { beforeDraw(value: number) { return value; } }
   class Derived extends Base {}
   const instance = new Derived();
-  instance.onBeforeRender = function replacement(value: number) { return value + 1; };
-  instance.onBeforeRender(1);`
-const onBeforeRenderMarker = (call: ts.CallExpression): boolean =>
-  ts.isPropertyAccessExpression(call.expression) && call.expression.name.text === 'onBeforeRender'
+  instance.beforeDraw = function replacement(value: number) { return value + 1; };
+  instance.beforeDraw(1);`
+const beforeDrawMarker = (call: ts.CallExpression): boolean =>
+  ts.isPropertyAccessExpression(call.expression) && call.expression.name.text === 'beforeDraw'
 
 test('closedCalleeBodiesOf admits a member slot written elsewhere with a compiled function', () => {
-  const closed = closedCalleeBodies(onBeforeRenderSource, onBeforeRenderMarker)
+  const closed = closedCalleeBodies(beforeDrawSource, beforeDrawMarker)
   assert.equal(closed?.length, 2)
-  assert.ok(closed?.some((target) => ts.isMethodDeclaration(target) && target.name.getText() === 'onBeforeRender'))
+  assert.ok(closed?.some((target) => ts.isMethodDeclaration(target) && target.name.getText() === 'beforeDraw'))
   assert.ok(closed?.some((target) => ts.isFunctionExpression(target) && target.name?.text === 'replacement'))
   // `invocationTargetsOf` reaches the same answer here too -- this tiny,
   // self-contained fixture also satisfies `memberSlotClosed`'s stronger
   // whole-program promise (every mention of the key, not just its writes,
   // is closed), so it does not by itself demonstrate the relaxation. The
   // gap this mechanism closes only opens at a real app's scale, where
-  // `Object3D.prototype.onBeforeRender` has far more mentions than
+  // a base-class hook like `beforeDraw` has far more mentions than
   // `memberSlotClosed` can enumerate but the WRITES alone are still closed.
-  assert.ok((invocationTargets(onBeforeRenderSource, onBeforeRenderMarker)?.length ?? 0) > 0)
+  assert.ok((invocationTargets(beforeDrawSource, beforeDrawMarker)?.length ?? 0) > 0)
 })
 
 test('closedCalleeBodiesOf refuses a written member slot the moment one write cannot be named', () => {
   for (const changed of [
     // A write of an ambient value: nothing this walk can enumerate.
-    onBeforeRenderSource.replace(
-      'instance.onBeforeRender = function replacement(value: number) { return value + 1; };',
-      'declare function external(value: number): number;\n  instance.onBeforeRender = external;'
+    beforeDrawSource.replace(
+      'instance.beforeDraw = function replacement(value: number) { return value + 1; };',
+      'declare function external(value: number): number;\n  instance.beforeDraw = external;'
     ),
     // An intrinsic mutator reaching the family cannot be reduced to one value.
-    onBeforeRenderSource.replace(
-      'instance.onBeforeRender = function replacement(value: number) { return value + 1; };',
-      "Object.defineProperty(instance, 'onBeforeRender', { value: function (value: number) { return value + 1; } });"
+    beforeDrawSource.replace(
+      'instance.beforeDraw = function replacement(value: number) { return value + 1; };',
+      "Object.defineProperty(instance, 'beforeDraw', { value: function (value: number) { return value + 1; } });"
     ),
     // A compound assignment does not state what it installs.
-    onBeforeRenderSource.replace(
-      'instance.onBeforeRender = function replacement(value: number) { return value + 1; };',
-      'instance.onBeforeRender ||= function replacement(value: number) { return value + 1; };'
+    beforeDrawSource.replace(
+      'instance.beforeDraw = function replacement(value: number) { return value + 1; };',
+      'instance.beforeDraw ||= function replacement(value: number) { return value + 1; };'
     )
   ])
-    assert.equal(closedCalleeBodies(changed, onBeforeRenderMarker), null, changed)
+    assert.equal(closedCalleeBodies(changed, beforeDrawMarker), null, changed)
 })
 
-/** A real app's `engine.ts`: `loadBuffer( url, onLoad, nativeName )` calls
+/** A loader shaped `loadBuffer( url, onLoad, nativeName )` that calls
  * `onLoad( nativeBuffer )` where `onLoad` is a PARAMETER, so the checker's
  * `getResolvedSignature` names the parameter's declared function TYPE, which
  * has no body. Every closed caller of `loadBuffer` supplies a compiled
@@ -667,18 +791,18 @@ test('closedCalleeBodiesOf refuses a parameter callee the moment a caller or its
   assert.equal(closedCalleeBodies(escapedOwner, onLoadMarker), null)
 })
 
-// Three's `WebGLRenderStates.get( scene )` idiom: a factory (`makeCache`)
+// The `states.get( key )` cache idiom: a factory (`makeCache`)
 // returns a record whose `get` method memoizes into a native `Map` and
 // returns another factory's own record. Nothing in `invocationTargetsOf`'s
 // dispatch is new here -- `recordMethodCallTargetsOf` already names `get`'s
 // own body for `cacheRecord.get('a')`, and `sourceRecordDataWritePlanOf`'s
 // origin walk (`source-record-data.ts`) already threads a call receiver
-// through a record method's own completions (the `renderLists.get(...)`
+// through a record method's own completions (the `lists.get(...)`
 // worked example in that file's doc comment) and through a native `Map`'s
 // stored values (`collectionStoredValuesOf`) for the memoization cache
 // itself. This fixture exists to pin that chain end-to-end for the shape
-// the three.js app actually has -- `currentRenderState.setupLightsView(camera)`,
-// reached through `renderStates.get(targetScene)` -- rather than only the
+// real programs have -- `currentState.setup(value)`, reached through
+// `states.get(key)` -- rather than only the
 // direct-factory shape the earlier tests in this file cover.
 const cacheGetSource = `
   function makeRecord(): { setup(value: number): number } {

@@ -1,6 +1,6 @@
 // `for`-`of` OVER `string[] | HostAddress[]` AFTER NORMALIZING A LONE SEED.
 //
-// mongodb's `Topology` constructor (`sdam/topology.ts`) takes `seeds: string |
+// A database client's `Topology` constructor takes `seeds: string |
 // string[] | HostAddress | HostAddress[]`, rewraps a lone string or address
 // into a one-element array, then walks `for (const seed of seeds)`: a string
 // seed is parsed into a `HostAddress`, an address is kept as the same object.

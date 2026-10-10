@@ -1,6 +1,6 @@
 // `Object.fromEntries` over pairs that widened to arrays resolves to the
 // `Iterable<readonly any[]>` overload, which returns `any`; the annotated
-// destination names the dictionary being built. The mongodb driver's
+// destination names the dictionary being built. A database client's
 // `Collection.indexes({ full: false })` makes one exactly this way.
 
 type Direction = 1 | -1 | 'text'

@@ -1,9 +1,9 @@
 // AN UNTYPED `new Map()` FILLED WITH TWO VALUE KINDS AND RETURNED AS A TYPED MAP.
 //
-// mongodb's `getFAASEnv(): Map<string, string | Int32> | null`
-// (`cmap/handshake/client_metadata.ts`) builds `const faasEnv = new Map()`,
+// A database client's `getRuntimeEnv(): Map<string, string | Int32> | null`
+// builds `const faasEnv = new Map()`,
 // sets string entries and `new Int32(...)` entries into it, and returns it.
-// `makeClientMetadata` then walks `faasEnv.keys()` deleting entries until the
+// Its metadata builder then walks `faasEnv.keys()` deleting entries until the
 // document fits. The returned object is that same Map, in insertion order.
 
 class Int32 {

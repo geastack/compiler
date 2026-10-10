@@ -1,5 +1,5 @@
 // A record erased into `any` still inherits Object.prototype.toString
-// (ECMA-262 20.1.3.6): mongodb's `prepareDirection` stringifies whatever
+// (ECMA-262 20.1.3.6): a database client's `prepareDirection` stringifies whatever
 // direction it was handed with `${direction}` before testing it, and a
 // `{ $meta }` record there must read "[object Object]", not throw.
 class Plain {

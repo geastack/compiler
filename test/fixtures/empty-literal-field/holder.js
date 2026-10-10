@@ -1,4 +1,4 @@
-// three's `Material`/`Object3D`/`Texture`/`BufferGeometry` shape: the field is
+// a 3D library's `Material`/`SceneNode`/`Texture`/`BufferGeometry` shape: the field is
 // annotated `Object` -- which a JS checker reads as `any` -- and the only
 // value the program ever stores in it is a fresh empty literal.
 export class Holder {

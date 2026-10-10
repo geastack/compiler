@@ -22,9 +22,9 @@ import type { IrBody, IrOperation, IrOperand } from './model.js'
  * `superAccess` marks a `super.x` access, which the language binds to the
  * base's accessor statically (13.3.7) and the emitter does too
  * (`dispatchesStatically`): the subclass redeclaring the key -- the very
- * reason it writes `super.x` -- does not make this entry ambiguous. mongodb's
- * `super.canRetryWrite` in three operations failed this and published every
- * `CommandOperation` subclass to full reflection. */
+ * reason it writes `super.x` -- does not make this entry ambiguous. A
+ * `super.canRetry` in a few subclasses failed this and published every
+ * subclass of the base to full reflection. */
 export const nativeClassAccessorEntryOf = (
   operation: IrOperation,
   key: string | null,

@@ -4,11 +4,13 @@
 // class, unrelated to the one the global holds, and no conversion between two
 // nominal constructor families exists or should.
 //
-// None is needed: the plan gives the global read a bare `constructor-family`,
-// which is the census's own statement that the value is there -- a host that
-// says otherwise says so through `absent-globals.ts`, which types the read
-// `undefined` instead. A carrier with no absent state is never nullish, so
-// `??` never evaluates its right arm.
+// None is needed after proving the program's own installation below. Every
+// observation of the global property goes through that one typed cell, the
+// unconditional store dominates its reads, and the global object never
+// escapes. The cell therefore retains the nominal native constructor without
+// boxing it into an open dictionary. Its read has no absent state, so `??`
+// never evaluates its right arm. The ambient declaration alone proves none
+// of this; an escaping or conditionally installed property stays open.
 class BaseThing {
   tag: string
 

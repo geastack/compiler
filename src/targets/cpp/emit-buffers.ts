@@ -1,4 +1,10 @@
-import type { ConstructOperation, IrOperand } from '../../ir/model.js'
+export { dataViewPrototypeMethods, typedArrayPrototypeMethods } from '../../representation/prototype-domains.js'
+import { nativePrototypeMethodOf } from '../../ir/native-prototype-calls.js'
+import { binaryToStringTagOf, nativeDataPropertyOf, type NativeDataProperty } from '../../representation/native-data-properties.js'
+import type { ConstructOperation, GetOperation, IrOperand } from '../../ir/model.js'
+import { nativeBufferMethodDescriptorOf } from '../../conversion/native-buffer-method.js'
+import { operationConversionText } from './emit-certified-conversion.js'
+import { nativeMethodValueRecipeText } from './emit-native-method.js'
 import type { IrValueId } from '../../identity/ids.js'
 import { representationKey, type Representation } from '../../representation/model.js'
 import { typedArrayMemberTemplateOf, typedArraySetSourceAccepted, typedArraySetSourceOf } from '../../representation/host-templates.js'
@@ -10,27 +16,35 @@ import {
   type EmitContext,
   type PrototypeMethodRead
 } from './emit-context.js'
-import { cppRecordFieldName, cppRecordFieldPresenceName, cppScalarType, cppStringLiteral, cppTypeOf } from './types.js'
+import { cppAbiParameterType, cppRecordFieldName, cppRecordFieldPresenceName, cppScalarType, cppStringLiteral, cppTypeOf } from './types.js'
 import { recordFieldsOfShape } from '../../projection/fields.js'
-
-const typedArrayTagNames: Readonly<Record<Extract<Representation, { kind: 'typed-array' }>['element'], string>> = {
-  int8: 'Int8Array',
-  uint8: 'Uint8Array',
-  'uint8-clamped': 'Uint8ClampedArray',
-  int16: 'Int16Array',
-  uint16: 'Uint16Array',
-  int32: 'Int32Array',
-  uint32: 'Uint32Array',
-  float32: 'Float32Array',
-  float64: 'Float64Array'
-}
 
 /** Builtin `@@toStringTag` values carried directly by the binary-view family. */
 export const binaryToStringTagText = (representation: Representation): string | null => {
-  if (representation.kind === 'typed-array') return cppStringLiteral(typedArrayTagNames[representation.element])
-  if (representation.kind === 'array-buffer') return cppStringLiteral('ArrayBuffer')
-  if (representation.kind === 'shared-array-buffer') return cppStringLiteral('SharedArrayBuffer')
-  if (representation.kind === 'data-view') return cppStringLiteral('DataView')
+  const tag = binaryToStringTagOf(representation)
+  return tag === null ? null : cppStringLiteral(tag)
+}
+
+/** Render the native load selected by the shared data-property schema. */
+export const nativeDataPropertyText = (receiver: string, representation: Representation, property: NativeDataProperty): string | null => {
+  if (property.kind === 'to-string-tag') return cppStringLiteral(property.tag)
+  if (property.kind === 'length') {
+    if (representation.kind === 'string') return `static_cast<double>(gea::runtime::string::utf16Length(${receiver}))`
+    if (representation.kind === 'array-object' || representation.kind === 'typed-array') return `${receiver}->length()`
+  }
+  if (property.kind === 'byte-length') {
+    if (representation.kind === 'array-buffer' || representation.kind === 'shared-array-buffer')
+      return `static_cast<double>(${receiver}->size())`
+    if (representation.kind === 'typed-array' || representation.kind === 'data-view') return `${receiver}->byteLength()`
+  }
+  if (property.kind === 'byte-offset' && (representation.kind === 'typed-array' || representation.kind === 'data-view'))
+    return `${receiver}->byteOffset()`
+  if (property.kind === 'buffer') {
+    if (representation.kind === 'typed-array' && representation.buffer === 'shared-array-buffer') return `${receiver}->sharedBuffer()`
+    if (representation.kind === 'typed-array' || representation.kind === 'data-view') return `${receiver}->buffer()`
+  }
+  if (property.kind === 'element-width' && representation.kind === 'typed-array')
+    return `static_cast<double>(sizeof(${typedArrayElementSpelling(representation)}))`
   return null
 }
 
@@ -318,6 +332,44 @@ export const arrayBufferMemberRefusals: ReadonlyMap<string, string> = new Map<st
 /** `ArrayBuffer.prototype` methods that defer at the `[[Get]]` and fuse with the call that follows. */
 export const arrayBufferPrototypeMethods: ReadonlySet<string> = new Set<string>(['slice'])
 
+/** A source-only intrinsic Function object; invocation authenticates logical this, never the object read. */
+export const nativeBufferMethodValueText = (
+  ctx: EmitContext,
+  operation: GetOperation,
+  receiver: Representation,
+  readText: () => string,
+  key: string,
+  target: Representation
+): string | null => {
+  const descriptor = nativeBufferMethodDescriptorOf(receiver, key, target)
+  if (!descriptor) return null
+  const parameter = (position: number, fallback: string): string => {
+    const slot = descriptor.abi.parameters[position]
+    if (!slot) return fallback
+    const value = `gea_buffer_arg_${position}`
+    return slot.value.kind === 'optional'
+      ? `(${value}.has_value() ? static_cast<double>(*${value}) : ${fallback})`
+      : `static_cast<double>(${value})`
+  }
+  const sourceType = cppTypeOf(descriptor.source)
+  const receiverType = cppTypeOf(receiver)
+  const shared = receiver.kind === 'shared-array-buffer'
+  const physical =
+    `gea::detail::${shared ? 'sharedArrayBufferSlice' : 'arrayBufferSlice'}(gea_buffer_receiver, ` +
+    `${parameter(0, '0.0')}, ${parameter(1, 'static_cast<double>(gea_buffer_receiver->size())')})`
+  const result = operationConversionText(ctx, operation, 'buffer-method-result', descriptor.physicalResult, descriptor.abi.result, physical)
+  if (result === null) return null
+  const formals = [
+    `${receiverType} gea_buffer_receiver`,
+    ...descriptor.abi.parameters.map((slot, index) => `${cppAbiParameterType(slot)} gea_buffer_arg_${index}`)
+  ]
+  const source =
+    `[]() -> ${sourceType} { ${sourceType} gea_buffer_method{+[](void*, ${formals.join(', ')}) -> ${cppTypeOf(descriptor.abi.result)} { ` +
+    `return ${result}; }, nullptr}; gea_buffer_method.shareFunctionObject(gea::detail::bufferSliceMethodIdentity(${shared})); return gea_buffer_method; }()`
+  const method = nativeMethodValueRecipeText(ctx, operation, key, descriptor.source, target, source, 'prototype', null)
+  return method === null ? null : `((void)((${readText()}).operator->()), ${method})`
+}
+
 /**
  * The ArrayBuffer reading of a property access, or `null` when the receiver is
  * not one.
@@ -348,7 +400,7 @@ export const arrayBufferAccessText = (ctx: EmitContext, receiver: IrOperand, key
   // reads the pre-render map rather than `constantTexts`'s render-time accretion.
   const staticKey = ctx.staticKeyTexts.get(key.value)
   if (staticKey === 'byteLength') return `static_cast<double>(${receiverText}->size())`
-  if (wellKnownSymbolMemberOf(ctx, key) === 'toStringTag') return cppStringLiteral('ArrayBuffer')
+  if (wellKnownSymbolMemberOf(ctx, key) === 'toStringTag') return binaryToStringTagText(receiver.representation)
   if (staticKey !== undefined) {
     if (deferredArrayBufferMethodClaim(ctx.staticKeyTexts, receiver, key) !== null) {
       if (result === null) {
@@ -357,7 +409,10 @@ export const arrayBufferAccessText = (ctx: EmitContext, receiver: IrOperand, key
           `"${staticKey}" is an ArrayBuffer.prototype method, and this access publishes no value for its call to consume`
         )
       }
-      return ''
+      throw createCppEmitBlockedError(
+        'property-access:array-buffer:get:false',
+        `"${staticKey}" has no certified finite intrinsic method frame for this read`
+      )
     }
     const stated = arrayBufferMemberRefusals.get(staticKey)
     throw createCppEmitBlockedError(
@@ -375,7 +430,7 @@ export const arrayBufferAccessText = (ctx: EmitContext, receiver: IrOperand, key
   )
 }
 
-/** SharedArrayBuffer has fixed geometry but intentionally no ArrayBuffer-only slice/transfer surface. */
+/** SharedArrayBuffer geometry; its slice Function object is handled by the intrinsic getter above. */
 export const sharedArrayBufferAccessText = (ctx: EmitContext, receiver: IrOperand, key: IrOperand): string | null => {
   if (receiver.representation.kind !== 'shared-array-buffer') return null
   // Same static-key claim as `arrayBufferAccessText` above: the pre-render
@@ -383,7 +438,7 @@ export const sharedArrayBufferAccessText = (ctx: EmitContext, receiver: IrOperan
   const staticKey = ctx.staticKeyTexts.get(key.value)
   const receiverText = operandText(ctx, receiver)
   if (staticKey === 'byteLength') return `static_cast<double>(${receiverText}->size())`
-  if (wellKnownSymbolMemberOf(ctx, key) === 'toStringTag') return cppStringLiteral('SharedArrayBuffer')
+  if (wellKnownSymbolMemberOf(ctx, key) === 'toStringTag') return binaryToStringTagText(receiver.representation)
   if (staticKey !== undefined) {
     throw createCppEmitBlockedError(
       'property-access:shared-array-buffer:get:false',
@@ -434,7 +489,6 @@ export const dataViewMemberRefusals: ReadonlyMap<string, string> = new Map<strin
 ])
 
 /** `DataView.prototype` methods that defer at the `[[Get]]` and fuse with the call that follows. */
-export const dataViewPrototypeMethods: ReadonlySet<string> = new Set<string>([...dataViewAccessors.keys()])
 
 /** Whether a DataView member read is a deferred prototype method read. Stated once; the renderer and the prototype-read walk both ask it. */
 export const deferredDataViewMethodClaim = (
@@ -444,8 +498,7 @@ export const deferredDataViewMethodClaim = (
 ): PrototypeMethodRead | null => {
   if (receiver.representation.kind !== 'data-view') return null
   const staticKey = staticKeyTexts.get(key.value)
-  if (staticKey === undefined || staticKey === 'byteLength' || staticKey === 'byteOffset' || staticKey === 'buffer') return null
-  if (!dataViewPrototypeMethods.has(staticKey)) return null
+  if (staticKey === undefined || nativePrototypeMethodOf(receiver.representation, staticKey) !== 'data-view') return null
   return { receiverKind: 'data-view', member: staticKey, receiver: { kind: 'operand', operand: receiver }, receiverElement: null }
 }
 
@@ -456,7 +509,7 @@ export const dataViewAccessText = (ctx: EmitContext, receiver: IrOperand, key: I
   // Same static-key claim as `arrayBufferAccessText` above: the pre-render
   // map, so a render-time-folded text is never mistaken for a static member name.
   const staticKey = ctx.staticKeyTexts.get(key.value)
-  if (wellKnownSymbolMemberOf(ctx, key) === 'toStringTag') return cppStringLiteral('DataView')
+  if (wellKnownSymbolMemberOf(ctx, key) === 'toStringTag') return binaryToStringTagText(receiver.representation)
   if (staticKey === 'byteLength') return `${receiverText}->byteLength()`
   if (staticKey === 'byteOffset') return `${receiverText}->byteOffset()`
   if (staticKey === 'buffer') return `${receiverText}->buffer()`
@@ -549,7 +602,6 @@ const booleanArgumentText = (ctx: EmitContext, argument: IrOperand, member: stri
 export const typedArrayBufferMembers: ReadonlySet<string> = new Set<string>(['buffer', 'byteLength', 'byteOffset', 'BYTES_PER_ELEMENT'])
 
 /** `%TypedArray%.prototype` methods this file renders, which defer at the `[[Get]]` and fuse with the call. */
-export const typedArrayPrototypeMethods: ReadonlySet<string> = new Set<string>(['set', 'subarray', 'slice', 'fill', 'toString', 'toBase64'])
 
 /** The buffer-shaped reading of a typed-array property, or `null` when the key is not one of them. */
 export const typedArrayBufferMemberText = (
@@ -557,15 +609,9 @@ export const typedArrayBufferMemberText = (
   representation: Extract<Representation, { kind: 'typed-array' }>,
   key: string
 ): string | null => {
-  if (key === 'buffer')
-    return representation.buffer === 'shared-array-buffer' ? `${receiverText}->sharedBuffer()` : `${receiverText}->buffer()`
-  if (key === 'byteLength') return `${receiverText}->byteLength()`
-  if (key === 'byteOffset') return `${receiverText}->byteOffset()`
-  // The same storage spelling drives TypedArray<T> and this immutable element
-  // width. Reading an empty/subarray view must not divide byteLength by length.
-  // Both concrete receivers and selected union arms use this member authority.
-  if (key === 'BYTES_PER_ELEMENT') return `static_cast<double>(sizeof(${typedArrayElementSpelling(representation)}))`
-  return null
+  if (!typedArrayBufferMembers.has(key)) return null
+  const property = nativeDataPropertyOf(representation, key)
+  return property === null ? null : nativeDataPropertyText(receiverText, representation, property)
 }
 
 /**
@@ -610,8 +656,8 @@ export const typedArrayCallText = (
   // Node's `Buffer` overrides `toString` to DECODE its bytes, which is a
   // different function on a different type. A receiver whose declared type is
   // a Buffer reaches that class's own member; a receiver declared
-  // `Uint8Array` -- which is what `@hono/node-server`'s `websocket-types.ts`
-  // declares its close `reason` as -- gets the specification's answer, and
+  // `Uint8Array` -- as a WebSocket close event's `reason` commonly is --
+  // gets the specification's answer, and
   // this renders the type the program actually stated.
   if (member === 'toString') {
     if (args.length !== 0) {
@@ -660,11 +706,16 @@ export const typedArrayCallText = (
   if (single === 'number-array') {
     return `(${receiver}->setFromArray(${operandText(ctx, source)}, ${offset}), gea::Undefined{})`
   }
+  if (single === 'array-like') {
+    return `(gea::typedArraySetFromValue(*${receiver}, ${operandText(ctx, source)}, ${offset}), gea::Undefined{})`
+  }
   if (carrier.kind === 'tagged-union' && typedArraySetSourceAccepted(carrier)) {
     const sourceText = operandText(ctx, source)
     const branches = carrier.arms.map((arm, index) => {
       const value = `${sourceText}.get<${index}>()`
-      if (typedArraySetSourceOf(arm.value) === 'typed-array') return `(${receiver}->setFrom(*${value}, ${offset}), gea::Undefined{})`
+      const kind = typedArraySetSourceOf(arm.value)
+      if (kind === 'typed-array') return `(${receiver}->setFrom(*${value}, ${offset}), gea::Undefined{})`
+      if (kind === 'array-like') return `(gea::typedArraySetFromValue(*${receiver}, ${value}, ${offset}), gea::Undefined{})`
       return `(${receiver}->setFromArray(${value}, ${offset}), gea::Undefined{})`
     })
     return branches.reduceRight<string>(
@@ -706,8 +757,8 @@ const textDecoderLabelText = (ctx: EmitContext, label: IrOperand | undefined): s
  * The `fatal` and `ignoreBOM` members of a `TextDecoder` options bag, as C++
  * booleans, or `null` when the bag is not a static record this can read.
  *
- * The bag is the program's own record -- bson's `new TextDecoder('utf8', {
- * fatal })` -- so its fields are read off the carrier the plan selected, the
+ * The bag is the program's own record -- `new TextDecoder('utf8', { fatal })`
+ * -- so its fields are read off the carrier the plan selected, the
  * way `native-error-base.ts` reads an `Error` options bag's `cause`: an absent
  * or `undefined` member is the dictionary default `false` (Encoding Standard
  * 6.2, `TextDecoderOptions`), and any member that is not a boolean refuses.

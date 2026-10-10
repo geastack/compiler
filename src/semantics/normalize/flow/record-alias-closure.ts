@@ -127,7 +127,7 @@ export const recordAllocationAliasesClosed = (checker: ts.TypeChecker, flow: Val
  * literal's slot. If no alias of the literal hands that slot's function out as
  * a value, and every alias reaches only uses this proof enumerates, then every
  * call of the function is `alias.key( ... )`, and its receiver is the literal.
- * Three's `ColorManagement` is such a record: `convert` reads `this.enabled`,
+ * A module-level settings record is the typical case: `convert` reads `this.enabled`,
  * and the checker names the literal's `enabled: true` for it -- a name a second
  * literal with a getter under that key would satisfy just as well, which is why
  * the checker's answer alone is not evidence.

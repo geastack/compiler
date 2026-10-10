@@ -2,8 +2,8 @@
 //! expect: numbered:404
 //! expect: inited:500
 
-// hono's `Context.json: JSONRespond = <T, U>(object, arg?, headers?) => ...`
-// (`context.ts`): the annotation is an interface of two GENERIC overloads that
+// An HTTP framework's `Context.json: JSONRespond = <T, U>(object, arg?, headers?)
+// => ...`: the annotation is an interface of two GENERIC overloads that
 // DISAGREE at parameter 1 (`U` in one, an object in the other), so no single
 // convention joins out of the annotation -- while the value allocated is one
 // generic arrow with one convention. `generic-field-initializer.ts` is the

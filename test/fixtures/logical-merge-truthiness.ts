@@ -2,8 +2,8 @@
  * A `&&` whose merged type is a plain `boolean`, kept over an operand that is
  * not one.
  *
- * three's `object && object.isObject3D` and `renderTarget &&
- * renderTarget.isWebGLRenderTarget`: the checker collapses the whole
+ * A 3D library's `object && object.isSceneNode` and `renderTarget &&
+ * renderTarget.isRenderTarget`: the checker collapses the whole
  * expression to `boolean` because a class instance has no falsy part, so no
  * VALUE of the kept operand survives -- only its `ToBoolean`, which is the
  * question `&&` asked of it in the first place. The carrier does not collapse

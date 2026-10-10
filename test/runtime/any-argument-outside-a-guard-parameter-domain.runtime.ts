@@ -1,5 +1,6 @@
 // An `any` argument is unchecked: TypeScript lets it reach a parameter whose
-// declared type does not admit the runtime value. mongodb's `pairToMap` does
+// declared type does not admit the runtime value. A database client's sort
+// `pairToMap` does
 // exactly this -- `prepareDirection([v[1]])` hands an ARRAY through
 // `direction: any` to `isMeta(t: SortDirection)`, which must simply answer
 // false for it, not stop the program.

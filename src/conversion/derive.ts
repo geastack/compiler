@@ -202,9 +202,8 @@ const deriveAt = (target: Representation, context: ConversionDerivationContext, 
       // boxed promise itself when it already is this carrier, otherwise its
       // state followed into one, each fulfilment value taking the payload's
       // own checked load. That is the recipe an async body's `return` of an
-      // `any` promise already runs (ECMA-262 27.2.1.3.2), and the one hono's
-      // `(bodyCache[key] as Promise<BodyInit>).then(...)` needs for its
-      // receiver. Only the payload's own conversion decides admissibility.
+      // `any` promise already runs (ECMA-262 27.2.1.3.2), and the one a
+      // `(cache[key] as Promise<T>).then(...)` needs for its receiver. Only the payload's own conversion decides admissibility.
       const payload =
         target.value.kind === 'void' || target.value.kind === 'dynamic' ? null : deriveAt(target.value, nested, `${path}.value`)
       if (payload !== null && payload.kind === 'never') return never(`a boxed promise's fulfilment has no checked load: ${payload.reason}`)
@@ -255,8 +254,14 @@ const deriveAt = (target: Representation, context: ConversionDerivationContext, 
       return never(
         'a closed authenticated family tag and ABI join are required, and family authority is not a runtime classifier/materializer'
       )
-    case 'constructor-family':
     case 'constructor-value-dispatch':
+      // A value dispatch names a construct frame, not a class: no identity
+      // has to be rediscovered, only `[[Construct]]` performed at that frame.
+      return atomFrom(
+        context.registry.constructorValueDispatchMaterializer(target.abi),
+        'no checked dynamic constructor adapter is installed for this evaluated construct ABI'
+      )
+    case 'constructor-family':
     case 'function-and-constructor':
       return never('constructor identity is nominal authority; no runtime materializer can rediscover it from a dynamic value')
     case 'function-value-family':
@@ -376,9 +381,9 @@ const deriveTaggedUnion = (
     // A `proxy-object` arm is minted only by a native `new Proxy` site
     // (`representation/proxy-carriers.ts`), and a native proxy never enters a
     // box -- that conversion has no recipe. So no dynamic value can be one,
-    // and the arm is simply not a destination: mongodb's `kerberos =
-    // require('kerberos')` fills the ordinary arms of a slot that another
-    // path fills with `makeErrorModule(...)`'s proxy.
+    // and the arm is simply not a destination: an optional-dependency
+    // `mod = require('mod')` fills the ordinary arms of a slot that another
+    // path fills with a fallback module's proxy.
     if (arm.value.kind === 'proxy-object') continue
     const classifier = context.registry.taggedUnionArmClassifier(arm)
     if (!classifier) return never(`no installed disjointness-proving classifier for tagged-union arm "${arm.tag}"`)

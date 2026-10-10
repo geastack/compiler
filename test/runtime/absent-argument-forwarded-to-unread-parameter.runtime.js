@@ -1,4 +1,4 @@
-// three's `WebGLMaterials.refreshMaterialUniforms( ..., transmissionRenderTarget )`
+// A 3D renderer's `refreshMaterialUniforms( ..., transmissionRenderTarget )`
 // receives `state.transmissionRenderTarget[ camera.id ]` -- a read of an open
 // `{}` keyed by camera, `undefined` until the first transmissive draw creates
 // the target -- and forwards it to `refreshUniformsPhysical`, which only reads

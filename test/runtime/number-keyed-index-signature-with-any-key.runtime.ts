@@ -1,6 +1,6 @@
 // A `{ [index: number]: any }` TABLE WRITTEN AND READ WITH A KEY TYPED `any`.
 //
-// mongodb's `BulkWriteResult.generateIdMap` (`bulk/common.ts`):
+// A database client's `BulkWriteResult.generateIdMap`:
 // `idMap[doc.index] = doc._id` where `doc` is a `Document`. The key reaches
 // the table through ToPropertyKey, the same canonical string a literal
 // numeric key names.

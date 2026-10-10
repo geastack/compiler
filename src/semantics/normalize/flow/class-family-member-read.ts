@@ -25,21 +25,22 @@ import { censusArgumentsObjects } from '../arguments-objects.js'
  * A member read through a receiver whose static class does not declare the
  * member, answered from the CLOSED family of objects that receiver can hold.
  *
- * three's `WebGLPrograms.getParameters` builds one 135-field shader-parameters
- * record, and three of its fields read a member only some subclasses declare:
+ * A JS library method builds one large parameters record from base-class
+ * receivers, and some of its fields read a member only some subclasses
+ * declare:
  *
- *     glslVersion: material.glslVersion,          // ShaderMaterial only
- *     fogExp2: ( !! fog && fog.isFogExp2 ),       // FogExp2 only; Fog is a sibling root
- *     depthPacking: material.depthPacking || 0,   // MeshDepthMaterial only
+ *     version: base.version,           // declared by one subclass only
+ *     isB: ( !! ab && ab.isB ),        // declared by `B` only; `A` is a sibling root
+ *     packing: base.packing || 0,      // declared by one subclass only
  *
- * To the checker each is an unknown member of `Material` (or of the union
- * `Fog | FogExp2`) and reads `any`, so the WHOLE record -- 931 plan values,
- * and roughly a thousand more that contain it (`WebGLProgram`'s `parameters`,
- * the program cache-key helpers) -- carried a `dynamic` leaf. The
+ * To the checker each is an unknown member of `Base` (or of the union
+ * `A | B`) and reads `any`, so the WHOLE record -- hundreds of plan values,
+ * and roughly a thousand more that contain it (the objects that store it,
+ * the cache-key helpers that read it) -- carried a `dynamic` leaf. The
  * `subclass-member-overlay-transform.ts` source overlay covers the idiom when
- * every declarer's type text is a primitive keyword; these three spell theirs
- * with named constants (`@type {?(GLSL1|GLSL3)}`,
- * `{(BasicDepthPacking|RGBADepthPacking|...)}`) or live on a class with no
+ * every declarer's type text is a primitive keyword; these spell theirs
+ * with named constants (`@type {?(V1|V2)}`,
+ * `{(PackingA|PackingB|...)}`) or live on a class with no
  * common base, so the overlay rightly leaves them alone.
  *
  * ## The fact this states
@@ -72,7 +73,8 @@ import { censusArgumentsObjects } from '../arguments-objects.js'
  * - No keyed write can create `k`: every `o[key] = v` whose key domain
  *   (`property-key-domain.ts`) may spell `k` has such a receiver too -- or is
  *   a store GUARDED by the same slot's absence test (see
- *   `guardedAbsentKeyStore`), which is `Material.setValues`'s own shape.
+ *   `guardedAbsentKeyStore`), which is an options-applying `setValues`
+ *   method's own shape.
  * - No reflective write or prototype change: `Object.assign`/
  *   `defineProperty`/`defineProperties`/`setPrototypeOf` and their `Reflect`
  *   twins, and `o.__proto__ = v`, against a receiver that may hold a family
@@ -90,15 +92,15 @@ import { censusArgumentsObjects } from '../arguments-objects.js'
  *
  * ## Receivers the checker cannot type
  *
- * Three stores through receivers the checker types `any`:
- * `currentRenderState.state.transmissionRenderTarget[ camera.id ] = ...`,
- * `programs[ programCacheKey ] = program`, `data.arrayBuffers[ uuid ] = ...`.
- * Read from the checker alone each "may hold" a Material, and each blocked
- * the whole family. Where the checker says nothing, the caller's SETTLED
- * binding census is asked instead: it types the first receiver
- * `Record<string, WebGLRenderTarget | undefined>` and `camera.id` `number`.
+ * JS programs store through receivers the checker types `any`:
+ * `renderState.state.targets[ view.id ] = ...`,
+ * `programs[ cacheKey ] = program`, `data.buffers[ uuid ] = ...`.
+ * Read from the checker alone each "may hold" a family instance, and each
+ * blocked the whole family. Where the checker says nothing, the caller's
+ * SETTLED binding census is asked instead: it types the first receiver
+ * `Record<string, Target | undefined>` and `view.id` `number`.
  * That carrier is the value set the compiled program holds there -- storing a
- * Material into it would need a conversion from a class instance into that
+ * family instance into it would need a conversion from a class instance into that
  * dictionary, which certification refuses -- so a family instance cannot be
  * the receiver. A census that also has no answer leaves the checker's `any`,
  * which still refuses.
@@ -117,21 +119,18 @@ import { censusArgumentsObjects } from '../arguments-objects.js'
  * over-require.
  *
  * The obligation an absent class needs is PER KEY -- "Object.prototype
- * lacks `glslVersion`" -- and it is admitted by default exactly when the plan
+ * lacks `version`" -- and it is admitted by default exactly when the plan
  * published it in that form (`requirePrototypeKeys('Object', { names: [key]
  * })`). A plan that still publishes the whole-prototype `require('Object')`
  * is refused by default, for the reason below, and admitted only under
- * `GEA_FAMILY_MEMBER_ABSENT_KEYS=1`; `=0` refuses every absent class. A host
- * that knows its programs take the wildcard states that `=0` refusal for every
- * build loading it (`PluginCapabilities.refusesObjectPrototypeAbsenceProofs`,
- * carried on the ledger), which `=1` does not override.
+ * `GEA_FAMILY_MEMBER_ABSENT_KEYS=1`; `=0` refuses every absent class.
  *
- * The whole-prototype form is what used to be refused BY DEFAULT. The three.js app's final host
- * census holds the `*` wildcard: `native-webgl-angle`'s troika text writes
- * `material.color.r = ...` and `this.material.opacity = ...` through
- * receivers it cannot prove non-global, and `nativeWebGL.ts` hands values to
- * `threeWebGLBufferData( ... )`. Under `*` every Object-prototype requirement
- * fails, so `glslVersion`, `isFogExp2` and `depthPacking` became 8
+ * The whole-prototype form is what used to be refused BY DEFAULT. A large
+ * program's final host census can hold the `*` wildcard: a dependency writes
+ * `item.color.r = ...` and `this.item.opacity = ...` through
+ * receivers it cannot prove non-global, or a host binding is handed values
+ * it may mutate. Under `*` every Object-prototype requirement
+ * fails, so `version`, `isB` and `packing` became
  * `intrinsic-protocol/Object` diagnostics and the certificate was lost -- a
  * sound outcome, but a worse one than the boxed read it replaced. A
  * preliminary scan must not substitute for that sealed evidence
@@ -155,7 +154,7 @@ interface FamilyWriteInventory {
    * `excludesFamily` asks the opposite question -- "what can a slot of this
    * name hold" -- and for that a literal's own member IS an origin. Keyed by
    * name alone because the receiver whose slot is being asked about is
-   * typically `any` (three's `data.arrayBuffers`, `clone`'s `@param {Object}`),
+   * typically `any` (an expando like `data.buffers`, a `@param {Object}`),
    * so no symbol narrows it; a union over every object in the program is the
    * only sound over-approximation available, and over-approximating can only
    * make that proof refuse.
@@ -218,7 +217,7 @@ const INERT_COMPARISONS: ReadonlySet<ts.SyntaxKind> = new Set([
  * A mention of the global `Object`/`Reflect` value that cannot hand one of
  * its mutators out: a member read (the member's own symbol is then scanned),
  * a call or construction of it, or an identity/`instanceof` comparison --
- * three's `value.constructor === Object` style checks.
+ * `value.constructor === Object` style checks.
  */
 const globalValueUseIsInert = (reference: ts.Node): boolean => {
   let node = reference
@@ -312,12 +311,11 @@ const NO_CENSUS: object = {}
 
 /**
  * Whether a computed write's key is PROVEN to range over a finite set that
- * excludes `target` -- three's `for ( const key in values ) { this[ key ] =
- * newValue }` in `Texture.setValues`/`Material.setValues`, whose `values`
- * only ever holds the options literals the program passes, none of which
- * spell `isFogExp2` or `arrayBuffers`. `computed-key-set.ts` proves the exact
- * set (`this[key]` in `Texture.setValues` is 13 keys, `Material.setValues` is
- * 7, neither containing either name).
+ * excludes `target` -- `for ( const key in values ) { this[ key ] =
+ * newValue }` in an options-applying `setValues( values )` method, whose
+ * `values` only ever holds the options literals the program passes, none of
+ * which spell `isB` or `buffers`. `computed-key-set.ts` proves the exact
+ * set (a handful of keys per class, containing neither name).
  *
  * `false` whenever the set cannot be proven -- an open caller, an unresolved
  * alias, anything `computed-key-set.ts`'s own header lists -- and the write
@@ -497,8 +495,8 @@ const writeInventoryOf = (checker: ts.TypeChecker, flow: ValueFlowIndex): Family
 /**
  * Whether a keyed store can only overwrite a key the receiver already holds.
  *
- * three's `Material.setValues` is the shape, and it is the only computed-key
- * store on a `Material` receiver:
+ * An options-applying `setValues( values )` method is the shape -- typically
+ * the only computed-key store on its class's receivers:
  *
  *     for ( const key in values ) {
  *       ...
@@ -705,8 +703,8 @@ const computeClosureRefusal = (
   }
   /**
    * Whether every value `expression` can hold was allocated by something that
-   * is not a family constructor -- `const cache = {}` in three's
-   * `WebGLPrograms`/`WebGLShaderCache`, typed `{}` by the checker and so
+   * is not a family constructor -- a module-level `const cache = {}` in a
+   * JS factory, typed `{}` by the checker and so
    * assignable-from every class. A literal is a fresh object; a `new` of a
    * library constructor or of a source class outside the family (whose
    * constructor provably returns its own `this`) is an instance of that class;
@@ -761,7 +759,7 @@ const computeClosureRefusal = (
    * anywhere in the program.
    *
    * The receiver is asked by NAME rather than by symbol because the receivers
-   * that reach here have none -- three's `data.arrayBuffers` is an expando on
+   * that reach here have none -- `data.buffers` is an expando on
    * a `@param {Object} [data]`, so the checker declares no such member and
    * `flow.targetOf` resolves nothing. A union over every object in the
    * program is the sound over-approximation of "some object whose slot of
@@ -799,7 +797,7 @@ const computeClosureRefusal = (
       // `keyedWritesNaming` answers from `property-key-domain.ts`'s coarser,
       // forever-cached "may name" proof; `computed-key-set.ts` can PROVE a
       // finite key set for the same expression (a `for (const k in values)`
-      // loop closed over an options literal, three's `Texture`/`Material`
+      // loop closed over an options literal, as in an options-applying
       // `setValues`) and rule this one write out even where that coarser
       // proof would not. Asked fresh on every call -- never folded into that
       // cache -- so the intrinsic requirement it raises lands in whichever
@@ -849,9 +847,9 @@ const computeClosureRefusal = (
   // `GEA_FAMILY_MEMBER_FORCE_ABSENT=<name>[,<name>...]` (or `*`) skips the
   // blocking write scan for those member names, granting the absence proof as
   // if every store had been discharged. It exists because this proof sits at
-  // the head of a long causal chain -- `isFogExp2` alone decides whether
-  // three's `WebGLPrograms` parameters record has a boxed field, which decides
-  // whether the program cache key is built at all -- and the only honest way
+  // the head of a long causal chain -- one absent member alone can decide
+  // whether a large parameters record has a boxed field, which decides
+  // whether a cache key derived from it is built at all -- and the only honest way
   // to price a discharge before writing it is to grant it and measure what
   // moves. Anything it makes green is a claim about the chain, never about the
   // program being correct.
@@ -958,9 +956,9 @@ const computeClosureRefusal = (
 /**
  * Whether `type` is a plain, closed record shape -- an object literal's type,
  * or the same shape after the parameter census widens an assigned value --
- * with no index signature and no call/construct signature: `_emptyScene` in
- * three's `WebGLRenderer` (`{ background: null, fog: null, environment: null,
- * overrideMaterial: null, isScene: true }`), assigned into a parameter cell
+ * with no index signature and no call/construct signature: a module-level
+ * sentinel like `_emptyNode = { parent: null, data: null, isNode: true }`,
+ * assigned into a parameter cell
  * right beside real class instances as a sentinel default. It is never a
  * class or a declared interface (no constructor, no prototype chain to
  * enumerate) and never open-ended (no index signature lets an unrelated key
@@ -1027,8 +1025,8 @@ export const classFamilyMemberReadTypeOf = (
     return null
   }
   const union = (checker as unknown as { getUnionType?: (types: readonly ts.Type[]) => ts.Type }).getUnionType
-  // A receiver flowing through a guarded reassignment -- three's `if (
-  // scene.isScene !== true ) scene = _emptyScene` -- holds a union of real
+  // A receiver flowing through a guarded reassignment -- `if (
+  // node.isNode !== true ) node = _emptyNode` -- holds a union of real
   // class instances AND a sentinel object literal. `familyRootsOf` (below,
   // through `sourceClassKeyReadPlanOf`) can only enumerate a CLASS family; a
   // bare literal in the same union is neither a family member nor an
@@ -1068,17 +1066,13 @@ export const classFamilyMemberReadTypeOf = (
   // whole-prototype obligation fails under any key write the census cannot
   // attribute, so an answer resting on one is still refused.
   // GEA_FAMILY_MEMBER_ABSENT_KEYS is a kill switch: `0` refuses, `1` admits.
-  // The installed hosts can state the `0` refusal for every build that loads
-  // them (`ledger.refusesObjectPrototypeAbsenceProofs`); `=1` exists for tests
-  // of the proof itself and does not override a host's statement.
   const absentKeys = process.env['GEA_FAMILY_MEMBER_ABSENT_KEYS']
   if (
     plan.needsDefaultPrototype &&
-    (ledger.refusesObjectPrototypeAbsenceProofs ||
-      (absentKeys !== '1' &&
-        (absentKeys === '0' ||
-          requirements.some(isWholeObjectPrototypeRequirement) ||
-          !requirements.some((requirement) => objectPrototypeLacksKeyRequirement(requirement, name)))))
+    absentKeys !== '1' &&
+    (absentKeys === '0' ||
+      requirements.some(isWholeObjectPrototypeRequirement) ||
+      !requirements.some((requirement) => objectPrototypeLacksKeyRequirement(requirement, name)))
   )
     return refuse('absent-class-needs-object-prototype')
   const carriers: ts.Type[] = []

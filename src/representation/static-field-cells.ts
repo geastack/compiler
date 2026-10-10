@@ -102,7 +102,7 @@ const admitsUndefined = (carrier: Representation): boolean =>
  * requires a static to be definitely assigned -- `strictPropertyInitialization`
  * covers instance fields only. So such a field's declared type is a claim the
  * language does not enforce: until the first write, every read observes
- * `undefined`. mongodb's `AWSSDKCredentialProvider._awsSDK ??= load()` is the
+ * `undefined`. A lazily loaded `Provider._sdk ??= load()` is the
  * idiom that relies on it; carried as its declared `T`, the `??` sees no
  * absence and never loads.
  *

@@ -1,4 +1,4 @@
-// hono's `RegExpRouter.match: typeof match<Router<T>, T> = match`: a generic
+// An HTTP router's `RegExpRouter.match: typeof match<Router<T>, T> = match`: a generic
 // function used as a VALUE, initializing a field whose declared type is an
 // instantiation expression over that same generic. The field slot is one
 // concrete signature; the initializer publishes the whole generic set.

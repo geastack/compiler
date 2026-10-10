@@ -45,7 +45,12 @@ const same = (left: number[], right: number[]): number => {
 
 const random: number[] = []
 for (let index = 0; index < 3000; index++) random.push(next() % 1000)
-console.log(`random=${same(random.slice().sort((a, b) => a - b), reference(random))}`)
+console.log(
+  `random=${same(
+    random.slice().sort((a, b) => a - b),
+    reference(random)
+  )}`
+)
 
 const keyed: Keyed[] = []
 for (let index = 0; index < 2000; index++) keyed.push({ key: next() % 17, index })
@@ -64,11 +69,21 @@ for (let run = 0; run < 40; run++) {
   const length = 1 + (next() % 60)
   for (let index = 0; index < length; index++) runs.push(start + index * (next() % 3))
 }
-console.log(`runs=${same(runs.slice().sort((a, b) => a - b), reference(runs))}`)
+console.log(
+  `runs=${same(
+    runs.slice().sort((a, b) => a - b),
+    reference(runs)
+  )}`
+)
 
 const reversed: number[] = []
 for (let index = 0; index < 500; index++) reversed.push(1000 - index - (index % 7 === 0 ? 1 : 0))
-console.log(`reversed=${same(reversed.slice().sort((a, b) => a - b), reference(reversed))}`)
+console.log(
+  `reversed=${same(
+    reversed.slice().sort((a, b) => a - b),
+    reference(reversed)
+  )}`
+)
 
 const zeros = [-0, 0, -0, 0].sort((a, b) => a - b)
 console.log(`zeros=${zeros.map((value) => (Object.is(value, -0) ? '-0' : '0')).join(',')}`)
@@ -78,4 +93,9 @@ const shuffled = random.slice().sort(() => {
   turn = (turn * 16807) % 2147483647
   return (turn % 3) - 1
 })
-console.log(`permutation=${same(shuffled.sort((a, b) => a - b), reference(random))}`)
+console.log(
+  `permutation=${same(
+    shuffled.sort((a, b) => a - b),
+    reference(random)
+  )}`
+)

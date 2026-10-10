@@ -1,7 +1,7 @@
 //! expect: ctor undefined
 //! expect: fetch undefined
 // `globalThis as unknown as { X?: ... }` -- the feature-detection idiom
-// (skytail's `src/io/audio/engine.ts`: `AudioContext ?? webkitAudioContext`,
+// (an app's audio engine: `AudioContext ?? webkitAudioContext`,
 // an optional `fetch`). Refused on 2026-09-22 with "no runtime conversion is
 // installed from dictionary(string,dynamic) to record(...)" after having
 // built on 2026-09-19; pinned here so the next regression is named.

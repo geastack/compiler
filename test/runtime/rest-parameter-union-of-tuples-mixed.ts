@@ -3,8 +3,8 @@
 //! expect: n 3
 //! expect: s hi
 // A rest parameter annotated as a union of tuples whose arms state UNRELATED
-// types -- `[a: number] | [a: number, b: string]`, hono's
-// `defineWebSocketHelper` shape one step smaller. `[] | [TNext]`'s widening
+// types -- `[a: number] | [a: number, b: string]`, an HTTP
+// framework's WebSocket-helper factory shape one step smaller. `[] | [TNext]`'s widening
 // has nothing to pick here, and the answer is not to leave the union alone:
 // the array holds one argument per slot, so its element is the union of what
 // the arms state at every position. The ABI slot and the body's own binding

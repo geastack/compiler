@@ -1,12 +1,12 @@
-//! expect: compress: missing zstd
-//! expect: decompress: missing zstd
+//! expect: compress: missing compressor
+//! expect: decompress: missing compressor
 //! expect: loads 1
 //! expect: loaded: z(abc) u(xyz)
 //! expect: loads 2
 
-// mongodb's `compression.ts`, reduced to its shape: `let zstd: ZStandard` has
+// A database client's compression module, reduced to its shape: `let compressor: Compressor` has
 // no initializer, a helper fills it lazily, and each async caller narrows the
-// union with `'kModuleError' in zstd` before calling through the library arm.
+// union with `'kModuleError' in compressor` before calling through the library arm.
 // The read carries `undefined` (the cell is unwritten until the loader runs),
 // so the narrowing selects an arm out of `optional(tagged-union)`, and the
 // union keeps the Proxy arm `makeErrorModule` puts there.
@@ -18,17 +18,17 @@ class MissingDependencyError extends Error {
   }
 }
 
-type ZStandardLib = {
+type CompressorLib = {
   compress(buf: string, level?: number): Promise<string>
   decompress(buf: string): Promise<string>
 }
 
-type ZStandard = ZStandardLib | { kModuleError: MissingDependencyError }
+type Compressor = CompressorLib | { kModuleError: MissingDependencyError }
 
 let installed = false
 let loads = 0
 
-// mongodb's `makeErrorModule`: the missing module is a Proxy whose every
+// The client's `makeErrorModule`: the missing module is a Proxy whose every
 // read but `kModuleError` throws, so the union also carries a proxy arm.
 function makeErrorModule(error: any) {
   const props = error ? { kModuleError: error } : {}
@@ -45,10 +45,10 @@ function makeErrorModule(error: any) {
   })
 }
 
-function getZstdLibrary(): ZStandardLib | { kModuleError: MissingDependencyError } {
+function getCompressorLibrary(): CompressorLib | { kModuleError: MissingDependencyError } {
   loads++
-  let library: ZStandardLib | { kModuleError: MissingDependencyError }
-  if (!installed) library = makeErrorModule(new MissingDependencyError('missing zstd'))
+  let library: CompressorLib | { kModuleError: MissingDependencyError }
+  if (!installed) library = makeErrorModule(new MissingDependencyError('missing compressor'))
   else library = { kModuleError: new MissingDependencyError('unused') }
   if (!installed) return library
   return {
@@ -57,28 +57,28 @@ function getZstdLibrary(): ZStandardLib | { kModuleError: MissingDependencyError
   }
 }
 
-let zstd: ZStandard
+let compressor: Compressor
 
-function loadZstd(): void {
-  if (!zstd) {
-    zstd = getZstdLibrary()
+function loadCompressor(): void {
+  if (!compressor) {
+    compressor = getCompressorLibrary()
   }
 }
 
 async function compress(data: string): Promise<string> {
-  loadZstd()
-  if ('kModuleError' in zstd) {
-    throw zstd['kModuleError']
+  loadCompressor()
+  if ('kModuleError' in compressor) {
+    throw compressor['kModuleError']
   }
-  return await zstd.compress(data, 3)
+  return await compressor.compress(data, 3)
 }
 
 async function decompress(data: string): Promise<string> {
-  loadZstd()
-  if ('kModuleError' in zstd) {
-    throw zstd.kModuleError
+  loadCompressor()
+  if ('kModuleError' in compressor) {
+    throw compressor.kModuleError
   }
-  return await zstd.decompress(data)
+  return await compressor.decompress(data)
 }
 
 const failure = (error: unknown): string => (error instanceof MissingDependencyError ? error.message : 'unexpected')
@@ -88,7 +88,7 @@ async function main(): Promise<void> {
   console.log(`decompress: ${await decompress('abc').catch(failure)}`)
   console.log(`loads ${loads}`)
   installed = true
-  zstd = getZstdLibrary()
+  compressor = getCompressorLibrary()
   console.log(`loaded: ${await compress('abc')} ${await decompress('xyz')}`)
   console.log(`loads ${loads}`)
 }

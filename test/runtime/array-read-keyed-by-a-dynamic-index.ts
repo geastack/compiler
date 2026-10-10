@@ -1,4 +1,4 @@
-// An element read whose key the program carries as `any`: the mongodb driver
+// An element read whose key the program carries as `any`: a database client
 // looks up `cursor.operations[document.idx]` with `idx` off a parsed server
 // reply. ToPropertyKey of a Number or a canonical numeric String names the
 // element.

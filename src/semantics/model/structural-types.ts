@@ -81,6 +81,9 @@ export interface TupleElement {
 /** One parameter of a signature shape. */
 export interface SignatureParameter {
   readonly type: StructuralTypeId
+  /** The checker-authenticated implicit arguments slot holds every supplied
+   * argument, independently of the named parameters preceding this slot. */
+  readonly argumentsFrame?: 'actual'
   /**
    * The type the physical SLOT holds, which is not always the type the body
    * binds.
@@ -95,8 +98,8 @@ export interface SignatureParameter {
    * an absence flag over an already-derived carrier -- what this used to do --
    * cannot express `T | null | undefined`: one flag cannot say which of the two
    * absent values it holds, so `function f(x: T | null = null)` was refused
-   * outright, and the JSDoc spelling of it (`@param {?T} [x=null]`, which
-   * three.js writes 100+ times) reached the deriver as an already-flat
+   * outright, and the JSDoc spelling of it (`@param {?T} [x=null]`, common in
+   * JSDoc-typed JavaScript) reached the deriver as an already-flat
    * three-armed union and got a redundant fourth state stacked on top. Both are
    * the same mistake: the widening belongs where types are made, not where
    * carriers are chosen.
@@ -174,11 +177,10 @@ export type StructuralShape =
        * also holds every sibling member's fields; absent otherwise.
        *
        * The layout cannot say which member a site named, and the answer
-       * differs: mongodb's `WriteConcernOptions` never declares `metadata`,
-       * while its family-mate `GridFSBucketWriteStreamOptions` does. A
-       * conversion into a site that named the former may leave a source's
-       * unrelated `metadata` out, exactly as a lone `WriteConcernOptions`
-       * layout would; one that named the latter must read it. Like
+       * differs: an `Options` may never declare `metadata`, while its
+       * family-mate `StreamOptions` does. A conversion into a site that named
+       * the former may leave a source's unrelated `metadata` out, exactly as
+       * a lone `Options` layout would; one that named the latter must read it. Like
        * `nativeError`, a function of the declaration alone, so not part of
        * the shape key.
        */
@@ -503,7 +505,7 @@ const keyOfSignature = (signature: SignatureShape): string =>
     signature.parameters
       .map(
         (parameter) =>
-          `${parameter.type}${parameter.optional ? '?' : ''}${parameter.rest ? '...' : ''}${parameter.hasInitializer ? '=' : ''}`
+          `${parameter.type}${parameter.optional ? '?' : ''}${parameter.rest ? '...' : ''}${parameter.argumentsFrame ? '@actual' : ''}${parameter.hasInitializer ? '=' : ''}`
       )
       .join(','),
     signature.minimumArity,
@@ -549,10 +551,10 @@ export const structuralShapeKey = (shape: StructuralShape): string => {
       // arrive here with zero members, and interning them together makes the
       // FIRST one to arrive decide the flag for every later one: `intern`
       // returns the existing id and discards the incoming shape, so `byId`
-      // holds whichever shape got there first. Measured on the three.js app before
-      // this line existed: 722 genuinely empty `{}` and 28 methods-only
-      // projections collapsed onto one id, the projection won the race, and
-      // 722 real empty records read back "members were dropped".
+      // holds whichever shape got there first. Before this line existed, hundreds of
+      // genuinely empty `{}` and a few methods-only projections could
+      // collapse onto one id; when the projection won the race, every real
+      // empty record read back "members were dropped".
       //
       // That is not inert. `hasNativeEnumerationCursor`'s
       // `isCompleteRecordBody` refused a native cursor for six `for`-`in`

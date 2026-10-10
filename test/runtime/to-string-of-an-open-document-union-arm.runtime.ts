@@ -3,7 +3,7 @@
 //! expect: own=custom:7 valueOf=42
 //! expect: TypeError
 //! emitted-lacks: dynamicToString
-// ToString of an open table (`{ [key: string]: any }`, mongodb's `Document`)
+// ToString of an open table (`{ [key: string]: any }`, a database client's `Document`)
 // is OrdinaryToPrimitive over `Object.prototype`: the table's own `toString`
 // when it holds a callable one -- called with the table as `this` -- else
 // "[object Object]"; an own `valueOf` answers when `toString` does not.

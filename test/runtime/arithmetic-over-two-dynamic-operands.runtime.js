@@ -1,6 +1,6 @@
 // 13.15.3: `-`, `*`, `/`, `%` and `**` ToNumeric both operands, left first,
-// and apply the Number operator. sparse-bitfield (a mongodb dependency via
-// saslprep) computes `this.pages.length * this.pageSize` off an untyped
+// and apply the Number operator. A sparse-bitfield package (a database-client
+// dependency via its string normalizer) computes `this.pages.length * this.pageSize` off an untyped
 // `opts`, so both operands are `any`.
 
 function Pager(opts) {

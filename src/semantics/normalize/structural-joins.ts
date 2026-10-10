@@ -17,11 +17,10 @@ import type { SignatureParameter, SignatureShape } from '../model/structural-typ
  * `A` in hand reaches it by the ordinary widening into that union, which is
  * a conversion this compiler already renders.
  *
- * TypeScript builds exactly this shape by contravariance and hono hits it:
- * `this.#matchResult[0].map(([[, route]]) => route)` (`request.ts:421`) has a
- * receiver that is a union of two array types, so `map`'s callback parameter
- * is the INTERSECTION of the two arms' callbacks. Fourteen mandatory
- * obligations on two lines, and the arrow written there has one parameter
+ * TypeScript builds exactly this shape by contravariance:
+ * `this.#result[0].map(([[, route]]) => route)` over a receiver that is a
+ * union of two array types makes `map`'s callback parameter the INTERSECTION
+ * of the two arms' callbacks. Many mandatory obligations on two lines, and the arrow written there has one parameter
  * list, which is the whole point.
  *
  * Congruence is required, not assumed: same arity, same minimum arity, same
@@ -63,6 +62,7 @@ export const joinedCallableOf = (
         (parameter, index) =>
           parameter.optional === first.parameters[index]?.optional &&
           parameter.rest === first.parameters[index]?.rest &&
+          parameter.argumentsFrame === first.parameters[index]?.argumentsFrame &&
           parameter.hasInitializer === first.parameters[index]?.hasInitializer
       )
   )
@@ -94,65 +94,4 @@ export const joinedCallableOf = (
       }
     ]
   })
-}
-
-/**
- * Join compatible index-signature arms even inside a mixed union. A table
- * must keep the same storage when it enters `Table | string`: leaving its
- * component table types separate there would require splitting one mutable
- * object into several homogeneous dictionaries and lose aliasing.
- *
- * Each group requires exactly one index signature, the same key type and
- * readonly state, no named members, and no call or construct signatures.
- * Non-table arms and incompatible tables remain separate union members.
- */
-export const joinedIndexUnionOf = (
-  checker: ts.TypeChecker,
-  table: StructuralTypeTable,
-  typeOf: (type: ts.Type) => StructuralTypeId,
-  members: readonly ts.Type[]
-): StructuralTypeId | null => {
-  const groups: { key: 'string' | 'number' | 'symbol'; index: ts.IndexInfo; members: ts.Type[]; values: ts.Type[] }[] = []
-  for (const member of members) {
-    const indexes = checker.getIndexInfosOfType(member)
-    const index = indexes.length === 1 ? indexes[0] : undefined
-    const key = index ? keyDomainOf(index.keyType) : null
-    if (
-      !index ||
-      key === null ||
-      member.getProperties().length !== 0 ||
-      member.getCallSignatures().length !== 0 ||
-      member.getConstructSignatures().length !== 0
-    )
-      continue
-    const group = groups.find((candidate) => candidate.index.keyType === index.keyType && candidate.index.isReadonly === index.isReadonly)
-    if (group) {
-      group.members.push(member)
-      group.values.push(index.type)
-    } else groups.push({ key, index, members: [member], values: [index.type] })
-  }
-  const joined = groups.filter((group) => group.members.length > 1)
-  if (joined.length === 0) return null
-  const replacements = new Map<ts.Type, StructuralTypeId>()
-  for (const group of joined) {
-    const values = [...new Set(group.values.map(typeOf))]
-    const value = values.length === 1 ? values[0] : undefined
-    const id = table.intern({
-      kind: 'object',
-      members: [],
-      membersDropped: false,
-      index: [{ key: group.key, value: value ?? table.intern({ kind: 'union', members: values }), readonly: group.index.isReadonly }]
-    })
-    for (const member of group.members) replacements.set(member, id)
-  }
-  const result = [...new Set(members.map((member) => replacements.get(member) ?? typeOf(member)))]
-  return result.length === 1 ? (result[0] ?? null) : table.intern({ kind: 'union', members: result })
-}
-
-/** The key domain an index signature's key type names, or `null` for one this layer does not model. */
-const keyDomainOf = (keyType: ts.Type): 'string' | 'number' | 'symbol' | null => {
-  if ((keyType.flags & ts.TypeFlags.String) !== 0) return 'string'
-  if ((keyType.flags & ts.TypeFlags.Number) !== 0) return 'number'
-  if ((keyType.flags & ts.TypeFlags.ESSymbol) !== 0) return 'symbol'
-  return null
 }

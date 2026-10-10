@@ -1,5 +1,5 @@
 // A `for`-`in` over an optional record FIELD behind its own `!== undefined`
-// guard -- three's `WebGLPrograms.getProgramCacheKey` over
+// guard -- a 3D renderer's program-cache `getProgramCacheKey` over
 // `parameters.defines`, once `Material.defines` is typed `Record | undefined`.
 // ECMA-262 14.7.5.5 runs the loop zero times for an absent source, and the
 // checker narrows the guarded read to the record; the loop must key on that
@@ -7,7 +7,7 @@
 class Material {
   defines: Record<string, string | number | boolean> | undefined = undefined
 }
-class ShaderMaterial extends Material {
+class ShadedMaterial extends Material {
   constructor() {
     super()
     this.defines = {}
@@ -28,7 +28,7 @@ function getProgramCacheKey(parameters: ReturnType<typeof getParameters>): strin
   }
   return array.join(',')
 }
-const shader = new ShaderMaterial()
+const shader = new ShadedMaterial()
 const defines = shader.defines
 if (defines !== undefined) {
   defines['VSM_SAMPLES'] = 8

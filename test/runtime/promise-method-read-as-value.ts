@@ -1,6 +1,6 @@
 //! expect: then:function 1
 //! expect: then:function 2
-// `@hono/node-server`'s `isPromise` reads `(res as Promise<Response>).then` as
+// An HTTP framework's Node server adapter's `isPromise` reads `(res as Promise<Response>).then` as
 // a VALUE, never calling it, in a program that instantiates `Promise` at more
 // than one type. `then<TResult1 = T>`'s default was resolved from its
 // declaration node, in `Promise`'s own scope, and handed the open `T` to

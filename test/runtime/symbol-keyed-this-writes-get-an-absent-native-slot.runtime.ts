@@ -1,4 +1,4 @@
-// `@hono/node-server`'s `LightweightResponse` (response.ts) keeps its cached
+// A Node HTTP adapter's lightweight response class keeps its cached
 // status/body/headers under a module-private symbol it never declares on the
 // class: the constructor writes `(this as any)[cacheKey] = [...]`, methods read
 // it back through an interface cast, `delete` it, and memoize a second symbol

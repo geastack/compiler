@@ -1,6 +1,4 @@
-import type { Representation } from '../../representation/model.js'
-
-export const cppErrorNativeType = 'gea::runtime::Error'
+export { cppErrorNativeType, isNativeError } from '../../representation/prototype-domains.js'
 
 export const errorConstructorNames: ReadonlyMap<string, string> = new Map([
   ['ErrorConstructor', 'Error'],
@@ -11,6 +9,3 @@ export const errorConstructorNames: ReadonlyMap<string, string> = new Map([
   ['TypeErrorConstructor', 'TypeError'],
   ['URIErrorConstructor', 'URIError']
 ])
-
-export const isNativeError = (carrier: Representation): boolean =>
-  carrier.kind === 'native-record-ref' && carrier.native === cppErrorNativeType && carrier.ownership === 'shared-refcount'

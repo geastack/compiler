@@ -24,13 +24,28 @@ import { calleeAwareTypeAt, isStrictContext, logicalAssignmentOperators, sourceF
 import type { ProducerContext } from '../producer-context.js'
 import { citeExpressionResult } from './references.js'
 import { moduleNamespaceOf, namespaceMembersUnderClosedKeyOf } from '../flow/targets.js'
-import { isGlobalFunctionConstructor, isHostMethodPresenceTest, literalMemberNameOf } from '../derived-expression-type.js'
+import {
+  isGlobalFunctionConstructor,
+  isHostMethodPresenceTest,
+  literalMemberNameOf,
+  objectAssignedValueTypeOf
+} from '../derived-expression-type.js'
 import { assertsType, enclosingCallIfCallee, outermostErasureOf, unwrapErasedExpression } from './erasure.js'
 import { isScriptGlobalObjectPropertyDeclaration } from '../script-global-redefinition.js'
 import { primitivePropertyIsAbsent } from '../primitive-property-absence.js'
+import { nativeOwnSlotOf } from './native-own-assignment.js'
+import { nativeCallableReadonlySetSourceOf } from './native-callable-readonly-set.js'
 import { assertedReceiverArmMayLackMember } from '../asserted-arm-absence.js'
 import { keySetTouches } from '../host-mutation-keys.js'
 import { privateNameKeyText } from '../../model/structural-types.js'
+import {
+  ordinaryCallableBuiltinDataWriteOf,
+  ordinaryCallableDataWriteIsAbsent,
+  ordinaryCallableProgramSymbolDataWriteIsAbsent,
+  ordinaryCallableStockChainWriteOf,
+  ordinaryObjectDataWriteIsAbsent,
+  ordinaryFunctionDataWriteIsUnintercepted
+} from '../callable-data-write.js'
 
 type AccessNode = ts.PropertyAccessExpression | ts.ElementAccessExpression
 
@@ -47,6 +62,13 @@ type PropertyIntent =
    * short-circuit on, and stores the RIGHT-HAND side rather than the merge.
    */
   | { readonly kind: 'logical-set'; readonly takenWhen: 'truthy' | 'falsy' | 'nullish' }
+
+/** Only a receiver that may hold a Function can consume the stock-chain fact. */
+const receiverMayBeCallable = (checker: ts.TypeChecker, type: ts.Type): boolean =>
+  (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.TypeParameter)) !== 0 ||
+  (type.isUnionOrIntersection()
+    ? type.types.some((member) => receiverMayBeCallable(checker, member))
+    : type.getCallSignatures().length > 0 || ['Function', 'CallableFunction', 'NewableFunction'].includes(type.getSymbol()?.name ?? ''))
 
 const compoundAssignmentOperators: ReadonlySet<ts.SyntaxKind> = new Set([
   ts.SyntaxKind.PlusEqualsToken,
@@ -312,9 +334,9 @@ const provenNumericReadIsAbsent = (context: ProducerContext, node: AccessNode): 
 
 /**
  * A named read (`x.name` or its bracket spelling `x[ 'name' ]`) proven absent
- * from every instance of a closed object-literal record -- `getParameters()`'s
- * `parameters.morphAttributeCount` in three's `WebGLPrograms.js` is the
- * motivating case: `closedLiteralMemberAbsenceProvenAt` (wired from
+ * from every instance of a closed object-literal record -- a `getParameters()`
+ * that builds its result as one literal, read back as `parameters.optionalCount`
+ * for a key no allocation writes, is the motivating case: `closedLiteralMemberAbsenceProvenAt` (wired from
  * `closedLiteralMemberAbsenceProven`) is the ONLY thing that licenses treating
  * this GET as a compile-time `undefined` rather than a runtime lookup -- a
  * `record` receiver is typically `owned` (a by-value struct with no stable
@@ -342,8 +364,8 @@ const assertsNativeCollection = (checker: ts.TypeChecker, expression: ts.Express
  * `(base as Derived).b = x` where `base: Base` is the same claim with a single
  * class arm; the receiver need not be a union.
  *
- * `(mesh.material as MeshPhongMaterial).emissiveIntensity = x` where
- * `material: Material | Material[]`: the assertion names a class that DESCENDS
+ * `(shape.style as OutlineStyle).outlineWidth = x` where
+ * `style: Style | Style[]`: the assertion names a class that DESCENDS
  * from one of the union's class arms, and no class arm declares the member --
  * the member exists only on the asserted descendant. A per-arm dispatch has
  * nowhere to put it (the base arm declares no such field, the array arm is not
@@ -404,7 +426,7 @@ const assertedReadMayLackMember = (context: ProducerContext, node: AccessNode): 
  * does -- `buildReference` (references.ts) keeps `new` out of the callee
  * narrowing for the reason it states: the resolved construct signature names
  * no class, and publishing it for one overload of an overloaded constructor
- * (mongodb's `new BSON.Long(lo, hi)`) mints a carrier the class's own
+ * (`new ns.Long(lo, hi)` on a namespace-exported class) mints a carrier the class's own
  * `constructor-family` has no conversion into. A generic class is left to
  * `resolvedCalleeSignatureType`, which names the copy the site constructs.
  */
@@ -614,8 +636,9 @@ const isIndexedObjectFor = (
  * evaluates to `undefined` for a nullish base. `lib.es5.d.ts`'s number index
  * signature says `T` instead, which is a convenience the checker offers (and
  * withdraws under `noUncheckedIndexedAccess`), not a fact about the read.
- * hono's `compose` relies on the real rule: `if (middleware[i])` walks off the
- * end of the array on the 404 path, and under the checker's carrier that guard
+ * A middleware composer relies on the real rule: `if (middleware[i])` walks
+ * off the end of the array on its fall-through path, and under the checker's
+ * carrier that guard
  * compiled to `if (true)` and the read aborted in `ArrayObject::elementAt`.
  *
  * Bounded to a test position, and that bound is not timidity: everywhere else
@@ -669,8 +692,8 @@ const observablyAbsentElementTypeOf = (context: ProducerContext, node: AccessNod
 
   if (!ts.isElementAccessExpression(node) || !testsItsOperand(node)) return valueType
   // Each constituent, because a union of array types indexes the same way:
-  // hono's `compose` declares `middleware: [[Function, unknown], unknown][] |
-  // [[Function]][]`, and asking `isArrayType` of the union answers no.
+  // a parameter declared `middleware: [[Function, unknown], unknown][] |
+  // [[Function]][]` is such a union, and asking `isArrayType` of the union answers no.
   const receiver = context.types.rawTypeAt(node.expression)
   const constituents = receiver.isUnion() ? receiver.types : [receiver]
   const indexable = (one: ts.Type): boolean => context.checker.isArrayType(one) && !context.checker.isTupleType(one)
@@ -747,9 +770,8 @@ const buildOperations = (
   // evaluates an optional chain to `undefined` whenever the base is nullish,
   // which is unconditional -- but the checker drops that arm from the
   // expression's type whenever it believes the receiver cannot be nullish, and
-  // an `as` assertion is enough to make it believe that. hono's
-  // `resolveCallback` is the case: `(str as HtmlEscapedString).callbacks as
-  // HtmlEscapedCallback[]` gives `callbacks` a non-nullable type, so
+  // an `as` assertion is enough to make it believe that. The case:
+  // `(str as Escaped).callbacks as Callback[]` gives `callbacks` a non-nullable type, so
   // `callbacks?.length` is typed plain `number` while the cell the value came
   // from is still an optional this compiler placed from the initializer's own
   // type. `publishesShortCircuit` is syntactic and builds both arms either
@@ -759,7 +781,7 @@ const buildOperations = (
   // Widening rather than dropping the arm, deliberately: the other repair is
   // to believe the non-nullish claim and emit the access unguarded, which
   // trades a compile error for an unchecked read of an absent optional on a
-  // path hono takes on every call.
+  // path the program may take on every call.
   const expressionValueType = shortCircuits && !shortCircuitAlwaysPresent ? chainValueTypeOf(context, node) : context.types.typeAt(node)
   // Only a link carrying ?. proves its own receiver present. A plain suffix
   // such as a?.b.c is gated on a, and must still throw when b itself is absent.
@@ -793,7 +815,7 @@ const buildOperations = (
   // actual arm. Loading the asserted arm unconditionally turns a harmless
   // missing property on a string into an invalid native record dereference.
   // A genuinely unknown receiver still needs the assertion's checked unbox.
-  // A union only the census built -- a `Document` parameter bson's callers
+  // A union only the census built -- a `Document` parameter whose callers
   // hand a Map, a Document and an `any` alike, which the checker narrows to
   // one `Map` under `instanceof Map` -- is not a union the program states:
   // every arm is the asserted object, boxed or viewed. It enters the asserted type through
@@ -882,14 +904,96 @@ const buildOperations = (
       isGlobalFunctionConstructor(context.checker, node.expression, context.checker.getTypeAtLocation(node.expression))
         ? 'function-prototype'
         : null
+    // A computed key whose proven name set is one text is that key exactly.
+    const callableBuiltinDataWrite =
+      internalMethod === 'set' && key.source.kind === 'constant' && key.source.literal === 'string'
+        ? ordinaryCallableBuiltinDataWriteOf(key.source.text, node, context)
+        : internalMethod === 'set' && provenKeyTexts?.length === 1
+          ? ordinaryCallableBuiltinDataWriteOf(provenKeyTexts[0]!, node, context)
+          : null
+    const readonlyCallableSet =
+      internalMethod === 'set' ? nativeCallableReadonlySetSourceOf(context, node, receiverSource, key.source) : null
+    const nativeOwnSlot =
+      (internalMethod === 'get' || internalMethod === 'set') && key.source.kind === 'constant' && key.source.literal === 'string'
+        ? nativeOwnSlotOf(context, node.expression, key.source.text)
+        : null
+    const nativeOwnSlots =
+      (internalMethod === 'get' || internalMethod === 'set') && nativeOwnSlot === null && provenKeyTexts?.length
+        ? provenKeyTexts.map((text) => nativeOwnSlotOf(context, node.expression, text))
+        : []
+    const assertedType = receiverWasAsserted ? context.checker.getTypeAtLocation(node.expression) : null
+    // An assertion to a document whose string index is any/unknown and which
+    // declares no member of this name reads the key as the source's own any.
+    const assertedDynamicIndex =
+      assertedType !== null &&
+      key.source.kind === 'constant' &&
+      assertedType.getProperty(key.source.text) === undefined &&
+      ((context.checker.getIndexTypeOfType(assertedType, ts.IndexKind.String)?.flags ?? 0) & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !==
+        0
+    // `Object.assign(target, source)` the program types `T & U`, which is
+    // `any` once a source is: the census keeps the target's own carrier for
+    // the object's identity (`objectAssignedValueTypeOf`), but a key beyond
+    // that carrier is the source's any, read exactly as an asserted one.
+    const assignedAnyRead =
+      !receiverWasAsserted &&
+      (context.checker.getTypeAtLocation(receiverExpression).flags & ts.TypeFlags.Any) !== 0 &&
+      objectAssignedValueTypeOf(context.checker, receiverExpression) !== null
+    const assertedAnyRead = assertedType !== null && ((assertedType.flags & ts.TypeFlags.Any) !== 0 || assertedDynamicIndex)
     return {
+      ...(internalMethod === 'get' && (assertedAnyRead || assignedAnyRead) ? { sourceAnyRead: true as const } : {}),
+      ...(readonlyCallableSet === null ? {} : { nativeCallableReadonlySet: readonlyCallableSet }),
+      ...(nativeOwnSlot === null ? {} : { nativeOwnSlot }),
+      ...(nativeOwnSlots.length > 0 && nativeOwnSlots.every((slot) => slot !== null)
+        ? { nativeOwnSlots: nativeOwnSlots.filter((slot) => slot !== null) }
+        : {}),
+      ...(callableBuiltinDataWrite === null ? {} : { ordinaryCallableBuiltinDataWrite: callableBuiltinDataWrite }),
+      ...(internalMethod === 'get' &&
+      key.source.kind === 'constant' &&
+      key.source.literal === 'string' &&
+      ordinaryObjectDataWriteIsAbsent(key.source.text, node, context)
+        ? { ordinaryObjectPrototypeKeyAbsent: true as const }
+        : {}),
+      ...(internalMethod === 'set' &&
+      key.source.kind === 'constant' &&
+      key.source.literal === 'string' &&
+      ordinaryCallableDataWriteIsAbsent(key.source.text, node, context)
+        ? { ordinaryCallableDataWriteAbsent: true as const }
+        : {}),
+      ...(internalMethod === 'set' &&
+      receiverMayBeCallable(context.checker, context.types.rawTypeAt(node.expression)) &&
+      ordinaryCallableStockChainWriteOf(
+        key.source.kind === 'constant' && key.source.literal === 'string' ? [key.source.text] : (provenKeyTexts ?? []),
+        node,
+        context
+      )
+        ? { ordinaryCallableStockChainWrite: true as const }
+        : {}),
+      ...(internalMethod === 'set' &&
+      ts.isElementAccessExpression(node) &&
+      ordinaryCallableProgramSymbolDataWriteIsAbsent(node.argumentExpression, node, context)
+        ? { ordinaryCallableProgramSymbolDataWriteAbsent: true as const }
+        : {}),
+      ...(internalMethod === 'set' &&
+      (key.source.kind === 'constant' && key.source.literal === 'string'
+        ? ordinaryObjectDataWriteIsAbsent(key.source.text, node, context)
+        : provenKeyTexts !== undefined &&
+          provenKeyTexts.length > 0 &&
+          provenKeyTexts.every((text) => ordinaryObjectDataWriteIsAbsent(text, node, context)))
+        ? { ordinaryObjectDataWriteAbsent: true as const }
+        : {}),
       ...(hostMethod ? { hostMethod } : {}),
       ...(hostReadType !== null ? { hostReadType } : {}),
-      ...(internalMethod === 'get' && resolvedBinding !== null ? { resolvedBinding } : {}),
+      ...((internalMethod === 'get' || internalMethod === 'set') && resolvedBinding !== null ? { resolvedBinding } : {}),
       ...(internalMethod === 'get' && resolvedBindingsByKey !== null ? { resolvedBindingsByKey } : {}),
-      ...(internalMethod === 'get' && resolvedGlobalBinding ? { resolvedGlobalBinding: true as const } : {}),
+      ...((internalMethod === 'get' || internalMethod === 'set') && resolvedGlobalBinding ? { resolvedGlobalBinding: true as const } : {}),
       ...(internalMethod === 'get' && shortCircuitAlwaysPresent ? { shortCircuitAlwaysPresent: true as const } : {}),
       ...(intrinsicValue ? { intrinsicValue } : {}),
+      ...(internalMethod === 'set' &&
+      key.source.kind === 'constant' &&
+      key.source.literal === 'string' &&
+      ordinaryFunctionDataWriteIsUnintercepted(context.types.rawTypeAt(node.expression), key.source.text, node, context)
+        ? { ordinaryFunctionDataWrite: true as const }
+        : {}),
       ...(internalMethod === 'get' && normalReadIsAbsent(context, node) ? { normalResult: 'undefined' as const } : {}),
       ...(internalMethod === 'get' && !normalReadIsAbsent(context, node) && isHostMethodPresenceRead(context, node)
         ? { methodPresenceTest: true as const }
@@ -974,7 +1078,12 @@ const buildOperations = (
       }
     }
     case 'set':
-      return { operations: [makeOperation('set', runtime, runtime, writes)], edges: [] }
+      return {
+        operations: [
+          makeOperation('set', resolvedBinding === null ? runtime : provenance, resolvedBinding === null ? runtime : provenance, writes)
+        ],
+        edges: []
+      }
     case 'delete':
       return { operations: [makeOperation('delete', runtime, runtime, writes)], edges: [] }
     case 'logical-set': {
@@ -1099,7 +1208,7 @@ const hostGlobalMemberBindingOf = (
  * object names.
  *
  * `var Headers: typeof HeadersImpl = HeadersImpl` in a script, then
- * `globalThis.Headers` in `@hono/node-server`'s `headers.ts`: 9.1.1.4 makes
+ * `globalThis.Headers` in another module: 9.1.1.4 makes
  * the `var` an own property of the global object, so the read IS the `var`'s
  * cell -- the same live-binding answer `hostGlobalMemberDeclarationOf` gives
  * a host singleton, for the same reason. Reading it through the open expando
@@ -1309,7 +1418,9 @@ const contributeAccess = (candidate: CensusCandidate, node: AccessNode, context:
   if (prototypeMember !== null) return { kind: 'blocked', blocker: blocked(candidate.id, 'property', prototypeMember, null) }
 
   const namespaceBinding = intent.kind === 'get' ? namespaceMemberBindingOf(node, key, context) : null
-  const globalBinding = intent.kind === 'get' ? (hostGlobalMemberBindingOf(node, key, context) ?? scriptGlobalDeclaration) : null
+  const installedGlobalBinding = context.installedGlobalPropertyBindingAt?.(node) ?? null
+  const globalBinding =
+    installedGlobalBinding ?? (intent.kind === 'get' ? (hostGlobalMemberBindingOf(node, key, context) ?? scriptGlobalDeclaration) : null)
   const resolvedBinding = namespaceBinding ?? globalBinding
   const resolvedBindingsByKey =
     intent.kind === 'get' && resolvedBinding === null ? namespaceMemberBindingsByKeyOf(node, key, context) : null

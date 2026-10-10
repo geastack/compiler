@@ -140,6 +140,8 @@ export interface ClassLayout {
   readonly prototypeBase?: true
   /** No evaluation can produce an instance of this class (`semantics/uninstantiable-classes.ts`). */
   readonly uninstantiable?: true
+  /** The reachable allocation census excludes this exact class; base initialization does not allocate a base object. */
+  readonly allocationAbsent?: true
   /**
    * A built-in native class extended directly: the intrinsic Error family,
    * whose instance is a native record, a standard keyed collection, whose
@@ -1273,7 +1275,10 @@ export const publishClassMethodOverrides = (
       const abi = abiOfCallee(representation)
       if (!abi) continue
       const fields = overrides.get(owner.declaration) ?? new Map<string, RecordField>()
-      fields.set(name, { key: name, value: { kind: 'function-value-dispatch', abi }, required: false })
+      // An own method holds the Function object, independently of the object
+      // used to read it. Its stored entry therefore accepts logical this;
+      // a public method frame adds its typed receiver at the later call.
+      fields.set(name, { key: name, value: { kind: 'function-value-dispatch', abi: { ...abi, receiver: null } }, required: false })
       overrides.set(owner.declaration, fields)
       if (prototype !== null) {
         const keys = prototypeMutations.get(prototype) ?? new Set<string>()

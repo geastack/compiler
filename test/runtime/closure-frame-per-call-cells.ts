@@ -1,4 +1,4 @@
-// The shape of mongodb's `onData`: several `let`s that closures share, and
+// The shape of a database client's `onData`: several `let`s that closures share, and
 // closures that capture each other. Every captured declaration of the call
 // lives in ONE frame, so the call allocates that frame and a closure's
 // environment is a handle to it, instead of one cell per variable and one

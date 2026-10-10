@@ -72,7 +72,7 @@ const deferrableOperationKinds: ReadonlySet<IrNonTerminatorOperation['kind']> = 
  * two releases, and a store-forwarding stall on the 16-byte reload of what
  * two 8-byte stores had just written. Rendered as the store's right-hand side
  * the value is move-assigned straight from the call's return slot: the
- * `closure` fixture went from 104 to 63 instructions per iteration.
+ * closure-building loop went from 104 to 63 instructions per iteration.
  *
  * Unlike a pure deferral the producer is NOT marked withheld, so it goes on
  * bounding every other value's window: a read defined before the call and
@@ -279,7 +279,7 @@ const isDeferrableOperation = (operation: IrNonTerminatorOperation, pureGet: (op
 /**
  * `pureGet` widens the `get` rule past Arrays and strings to whatever the
  * emitter can prove is a plain field load (`emit-properties.ts`'s
- * `isPlainMemberRead`): `v20 = gea_this->cities; if (b0 < v20->length())`
+ * `isPlainMemberRead`): `v20 = gea_this->items; if (b0 < v20->length())`
  * is a `Ref` copy -- an atomic pair -- made only to name the field once, and
  * with the read deferred the comparison spells the field itself. The default
  * refuses every such read, which is the answer the census gave before it was
@@ -453,7 +453,7 @@ export const deferrableValuesOf = (
     // step and read by nothing but the loop binding's write: the binding's one
     // read may name it as it stands. Copying it into the cell first reread a
     // string the step had only just stored, at a different width, which on
-    // `strings.ts` stalled the copy and then the hash that read it.
+    // a string-hashing loop stalled the copy and then the hash that read it.
     const steppedOnce = producer?.kind === 'iterator-next' && uses.get(candidate.value.value)?.length === 1
     if (!deferrable.has(candidate.value.value) && !steppedOnce) continue
     // A formal reaches its reads by name already (`emit-bindings.ts`'s

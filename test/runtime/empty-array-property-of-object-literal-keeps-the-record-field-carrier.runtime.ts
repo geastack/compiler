@@ -1,4 +1,4 @@
-// mongodb's `CursorResponse.emptyGetMore` (src/cmap/wire_protocol/responses.ts:235)
+// A database client's `CursorResponse.emptyGetMore`
 // serializes `{ ok: 1, cursor: { id: 0n, nextBatch: [] } }`. The empty
 // literal is a property of an object literal, so it is stored in that
 // literal's own record, whose field is the checker's `never[]`; the array is

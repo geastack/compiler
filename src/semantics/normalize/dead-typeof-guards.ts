@@ -23,8 +23,8 @@ import type { IdentityTable } from './identities.js'
  * is provably `false`; `&&` short-circuits; the consequent never executes.
  * That is a proof from the host's own statement, not an inference this
  * compiler drew -- the one warrant this rule is allowed to rest on. Either
- * conjunct may be individually wrapped in its own `( ... )` (three.js's
- * `Source.js`) -- `unwrapParens` strips that before the shape checks, since
+ * conjunct may be individually wrapped in its own `( ... )` --
+ * `unwrapParens` strips that before the shape checks, since
  * it is a syntactic artifact of how the source was written, not a different
  * logical shape. Only the `!==` polarity is handled. The `else`/`else if`
  * chain is never touched: it
@@ -66,7 +66,7 @@ const isUndefinedStringLiteral = (expr: ts.Expression): boolean => ts.isStringLi
  * Strips a wrapping `( ... )`, repeatedly.
  *
  * `( typeof HTMLVideoElement !== 'undefined' ) && ( data instanceof
- * HTMLVideoElement )` (three.js's `Source.js`) is the identical `&&`-of-two-
+ * HTMLVideoElement )` is the identical `&&`-of-two-
  * conjuncts shape this module matches, with each conjunct individually
  * parenthesized -- a purely syntactic wrapper TypeScript's parser leaves in
  * the tree as a `ParenthesizedExpression` node around an otherwise identical
@@ -121,7 +121,7 @@ const isInstanceofAbsentName = (expr: ts.Expression, absent: AbsentGlobalCensus)
  * statement -- one `typeof X !== 'undefined' && v instanceof X` conjunction,
  * or a `||` chain of them where EVERY disjunct is one.
  *
- * three's `resizeImage` (`WebGLTextures.js`) is the disjunctive form, and it
+ * A `resizeImage(image)` helper in a graphics library is the disjunctive form, and it
  * is the shape that matters: four clauses, one each for `HTMLImageElement`,
  * `HTMLCanvasElement`, `ImageBitmap` and `VideoFrame`, all four host-absent.
  * A disjunction is false exactly when every disjunct is false, so the warrant
@@ -133,14 +133,14 @@ const isInstanceofAbsentName = (expr: ts.Expression, absent: AbsentGlobalCensus)
  * Requiring EVERY disjunct is what keeps this sound: one live clause makes the
  * whole condition possibly true, and there is no partial credit to take.
  *
- * WHAT IT IS WORTH, MEASURED: 12 fewer obligations on the three.js app and nothing else.
- * missingRows is unchanged (408), so none of the twelve were mandatory, and the
- * boxed count does not move.
+ * WHAT IT IS WORTH, MEASURED: a dozen fewer obligations on one program and
+ * nothing else. missingRows is unchanged, so none of them were mandatory, and
+ * the boxed count does not move.
  *
  * ⛔ The obvious next step does NOT pay, and this is the place to say so. It
  * looks as though `return-bindings.ts` should consult reachability -- a `return`
  * inside a proven-dead branch is not evidence about what a function returns, and
- * `resizeImage` (`WebGLTextures.js`) is exactly that shape: `return canvas`
+ * `resizeImage` is exactly that shape: `return canvas`
  * inside this guard, refusing the census against the other returns. It gains
  * nothing. `resizeImage`'s other two returns are both `return image`, and
  * `image` is its own unannotated parameter, so the census refuses on `any` with

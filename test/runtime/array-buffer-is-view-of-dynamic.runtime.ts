@@ -1,4 +1,5 @@
-// `ArrayBuffer.isView` of an `any` -- bson's `calculateElementSize(name, value:
+// `ArrayBuffer.isView` of an `any` -- a binary-document serializer's
+// `calculateElementSize(name, value:
 // any, ...)` sizes a binary element when `ArrayBuffer.isView(value)`. The box
 // carries its payload's exact type, which is the [[ViewedArrayBuffer]] test.
 function sized(value: any): string {
@@ -18,7 +19,7 @@ const k: any = { byteLength: 1 }
 console.log([sized(d), sized(e), sized(f), sized(g), sized(h), sized(k)].join(','))
 //! expect: other,other,other,other,other,other
 
-// bson's own shape: the size read happens off the `any` itself, after a
+// The serializer's own shape: the size read happens off the `any` itself, after a
 // disjunction of guards -- the box's own property protocol answers it.
 function binarySize(value: any): number {
   if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return 6 + value.byteLength

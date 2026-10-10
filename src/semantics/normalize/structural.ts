@@ -10,12 +10,14 @@ import {
   type StructuralRule
 } from './structural-rules.js'
 import type { ValueFlowIndex } from './flow/model.js'
+import { sourceAccessorDescriptorOf, type SourceAccessorDescriptor } from './flow/source-accessor-descriptor.js'
 import { noSloppyAbsence, withAbsences, type SloppyAbsenceCensus } from './sloppy-absence.js'
 import { emptySuppressedWriteArmCensus, type SuppressedWriteArmCensus } from './suppressed-write-arms.js'
 import { recordStorageFamilies } from './record-storage-families.js'
 import { emptyRecordStandInArmCensus, type RecordStandInArmCensus } from './record-stand-in-arms.js'
 import { emptyAssertedArgumentArmCensus, type AssertedArgumentArmCensus } from './asserted-argument-arms.js'
 import { emptySymbolKeyedThisSlotCensus, type SymbolKeyedThisSlotCensus } from './symbol-keyed-this-slots.js'
+import type { SourceCallableObject } from './flow/source-callable-own-data.js'
 import { emptyRecordLinkFamilyCensus, type RecordLinkFamilyCensus } from './record-link-families.js'
 import {
   bivariantSlotArrayAliasTypeOf,
@@ -27,9 +29,16 @@ import {
 import { emptyDeclaredMemberCensus, type DeclaredMemberCensus } from './structural-declarations.js'
 import { createLocalUnionResolver } from './structural-local-union.js'
 import { createMutableMethodResolver } from './structural-mutable-method.js'
+import { createMutableFieldResolver } from './structural-mutable-field.js'
 import { structuralArrayReadAt } from './structural-array-read.js'
 import { enclosingArgumentsFunction, implicitArgumentsSlotOf, isArgumentsObjectIdentifier } from './implicit-arguments.js'
-import { createStructuralCallResultResolver, createStructuralConstructResultResolver } from './structural-callable.js'
+import type { ImplicitArgumentsTuple } from './implicit-arguments-tuple.js'
+import {
+  createStructuralCallResultResolver,
+  createStructuralConstructResultResolver,
+  createStructuralOwnCallableInvocationResolver,
+  type StructuralOwnCallableInvocation
+} from './structural-callable.js'
 import type { DeclarationId, StructuralTypeId } from '../../identity/ids.js'
 import { genericFunctionChoiceMembersOf, genericSourceFunctionDeclarationOf } from './generic-function-choice.js'
 import type { StructuralTypeTable } from '../model/structural-type-table.js'
@@ -55,6 +64,7 @@ import {
   functionIntersectionMemberTypeOf,
   impliedPatternTargetOf,
   isGlobalObjectInterface,
+  isGlobalObjectMember,
   isHostMethodPresenceTest,
   isStandardInterfaceType,
   isLibArrayBufferViewType,
@@ -74,7 +84,13 @@ import { emptyParameterBindingCensus, parameterCensusForCopy, type ParameterBind
 import { emptyCollectionBindingCensus, type CollectionBindingCensus } from './collection-bindings.js'
 import { bagShapeOfType, bagShapeTypeAt, emptyObjectBagCensus, type ObjectBagCensus } from './object-bag-bindings.js'
 import { indexedAccessMemberTypes } from './structural-indexed-access.js'
-import { joinedCallableOf, joinedIndexUnionOf } from './structural-joins.js'
+import { joinedCallableOf } from './structural-joins.js'
+import {
+  censusFreshDictionaryStorage,
+  dictionaryArmIndexOf,
+  type FreshDictionaryStorageCensus,
+  type FreshDictionaryStorageFact
+} from './fresh-dictionary-storage.js'
 import { creationOrderOf, creationOrderedProperties } from './structural-creation-order.js'
 import {
   collectionMemberResultTypeAt,
@@ -186,8 +202,13 @@ export interface StructuralMapper {
   readonly substituteTypeParameter: (candidate: ts.Type) => ts.Type
   readonly typeOf: (type: ts.Type) => StructuralTypeId
   readonly typeAt: (node: ts.Node) => StructuralTypeId
+  /** A source-keyed closed fresh allocation channel, shared by bindings and native frames. */
+  readonly indexedStorageTypeAt: (node: ts.Node) => StructuralTypeId | null
+  readonly indexedStorageResultAt: (node: ts.Node) => StructuralTypeId | null
   readonly mutableMethodStorageTypeAt: (node: ts.MethodDeclaration) => StructuralTypeId | null
   readonly mutableMethodReadTypeAt: (node: ts.Node) => StructuralTypeId | null
+  readonly mutableFieldStorageTypeOf: (symbol: ts.Symbol, stated: StructuralTypeId) => StructuralTypeId | null
+  readonly mutableFieldReadTypeAt: (node: ts.Node) => StructuralTypeId | null
   /**
    * What a `Function.prototype.bind` call produces -- the bound callable,
    * receiver-less -- or `null` for any other node. One answer for the two
@@ -198,6 +219,7 @@ export interface StructuralMapper {
   readonly boundCallResultAt: (node: ts.Node) => StructuralTypeId | null
   /** The result of every native constructor alternative, shared with the invocation's selected return. */
   readonly constructResultAt: (node: ts.Node) => StructuralTypeId | null
+  readonly ordinaryOwnCallableInvocationAt: (node: ts.Node) => StructuralOwnCallableInvocation | null
   /** The carrier of the value a declaration binds, which for a class is its constructor object rather than its instances. */
   readonly valueTypeAt: (node: ts.Declaration) => StructuralTypeId
   /**
@@ -258,8 +280,9 @@ export interface StructuralMapper {
    * checker's own answer and `context.returns` (the DECLARATION's own
    * return-statement census) first; once both are unusable evidence -- a
    * generic default collapsing the checker's answer to `any`, and no
-   * function body for `context.returns` to read at all (hono's `H` resolves
-   * to an abstract call-signature member, not a declaration with `return`s)
+   * function body for `context.returns` to read at all (a handler type that
+   * resolves to an abstract call-signature member, not a declaration with
+   * `return`s)
    * -- only this node-level, CALL-SITE census may still have a real answer,
    * and building a signature shape needs a raw `ts.Type` override, not
    * `typeAt`'s interned id. This is that same resolution
@@ -313,7 +336,7 @@ export interface StructuralMapper {
  * `T`. TypeScript computes an APPARENT type for the reference so member
  * lookups and narrowing have a concrete shape to work against, and for an
  * unnarrowed generic that apparent type is the parameter's base constraint --
- * `object` inside hono's `json = <T extends JSONValue | {} | InvalidJSONValue>
+ * `object` inside a `json = <T extends JSONValue | {} | InvalidJSONValue>
  * (object: T) => ... JSON.stringify(object)` reads back as the whole
  * constraint union.
  *
@@ -374,9 +397,13 @@ export const createStructuralMapper = (
   sloppyAbsence: SloppyAbsenceCensus = noSloppyAbsence,
   suppressedWrites: SuppressedWriteArmCensus = emptySuppressedWriteArmCensus,
   assertedArguments: AssertedArgumentArmCensus = emptyAssertedArgumentArmCensus,
-  symbolSlots: SymbolKeyedThisSlotCensus = emptySymbolKeyedThisSlotCensus
+  symbolSlots: SymbolKeyedThisSlotCensus = emptySymbolKeyedThisSlotCensus,
+  ordinaryOwnCallableSourceAt?: (call: ts.CallExpression) => SourceCallableObject | null,
+  accessorDescriptorAt?: (call: ts.CallExpression) => SourceAccessorDescriptor | null,
+  nativeClassAliasTypeAt?: (node: ts.Node) => ts.Type | null
 ): StructuralMapper => {
   const storageTypeOf = recordStorageFamilies(checker, flow, parameters)
+  const freshDictionaries = censusFreshDictionaryStorage(checker, flow, parameters)
   // One disagreement list for the WHOLE mapper, for the same reason the caches
   // below are shared: two rules answering for one node is a fact about the rule
   // set, and a per-view list would report it once per copy that asked.
@@ -422,6 +449,7 @@ export const createStructuralMapper = (
       bags,
       flow,
       storageTypeOf,
+      freshDictionaries,
       families,
       moduleRecords,
       declaredMembers,
@@ -437,7 +465,10 @@ export const createStructuralMapper = (
       sloppyAbsence,
       suppressedWrites,
       assertedArguments,
-      symbolSlots
+      symbolSlots,
+      ordinaryOwnCallableSourceAt,
+      accessorDescriptorAt,
+      nativeClassAliasTypeAt
     )
     views.set(key, built)
     return built
@@ -460,6 +491,7 @@ const buildMapper = (
   bags: ObjectBagCensus,
   flow: ValueFlowIndex | undefined,
   storageTypeOf: (type: ts.Type) => ts.Type,
+  freshDictionaries: FreshDictionaryStorageCensus,
   families: InterfaceFamilyCensus,
   moduleRecords: CommonJsModuleRecordCensus,
   declaredMembers: DeclaredMemberCensus,
@@ -475,7 +507,10 @@ const buildMapper = (
   sloppyAbsence: SloppyAbsenceCensus,
   suppressedWrites: SuppressedWriteArmCensus,
   assertedArguments: AssertedArgumentArmCensus,
-  symbolSlots: SymbolKeyedThisSlotCensus
+  symbolSlots: SymbolKeyedThisSlotCensus,
+  ordinaryOwnCallableSourceAt: ((call: ts.CallExpression) => SourceCallableObject | null) | undefined,
+  accessorDescriptorAt: ((call: ts.CallExpression) => SourceAccessorDescriptor | null) | undefined,
+  nativeClassAliasTypeAt: ((node: ts.Node) => ts.Type | null) | undefined
 ): StructuralMapper => {
   const {
     boundByPath,
@@ -519,11 +554,10 @@ const buildMapper = (
    * steps -- what this copy binds, what the program-wide census binds, and the
    * author's own DEFAULT -- and only the first of those reached here, so a
    * parameter answered by either of the other two carried a `T[K]` that had
-   * nothing left to refuse with. hono's `class Hono<E extends Env = Env, ...>`
-   * is the case: nothing writes `Hono<Something>`, so every `E['Bindings']` in
-   * `hono-base.ts` and `context.ts` -- 96 obligations, the file's largest
-   * single cluster -- asked about a parameter whose answer is its default,
-   * `Env`, and got the refusal instead.
+   * nothing left to refuse with. A `class App<E extends Env = Env, ...>` that
+   * nothing ever instantiates as `App<Something>` is the case: every
+   * `E['Bindings']` in its methods asked about a parameter whose answer is its
+   * default, `Env`, and got the refusal instead.
    *
    * The default is the language's own substitution, not a guess: a reference
    * that omits the argument IS the default, and the checker has already typed
@@ -718,15 +752,15 @@ const buildMapper = (
    * carrier, which is not a cell at all.
    *
    * The case that forced it is not a naked parameter, which is why this is not
-   * inside `resolvedObjectType`. hono's router chain substitutes `E` with a
-   * growing INTERSECTION -- `IfAnyThenEmptyObject<E extends Env ? Env extends
-   * E ? {} : E : E> & IfAnyThenEmptyObject<E2 ...> & {}`, one arm per `.get()`
-   * in the program -- because every route returns a `Hono` whose environment
-   * merges the last one's. Substitution resolves `E` to that intersection
+   * inside `resolvedObjectType`. A fluent builder chain can substitute `E` with
+   * a growing INTERSECTION -- `IfAnyThenEmptyObject<E extends Env ? Env extends
+   * E ? {} : E : E> & IfAnyThenEmptyObject<E2 ...> & {}`, one arm per chained
+   * call in the program -- because every call returns a builder whose
+   * environment merges the last one's. Substitution resolves `E` to that intersection
    * perfectly well; what cannot answer `['Bindings']` is the intersection,
    * whose constituents are CONDITIONAL types the checker leaves deferred while
-   * `E` is generic. Its base constraint is `{}`, the environment hono's own
-   * `BlankEnv` states, and `{}` declares no `Bindings` -- so the access is
+   * `E` is generic. Its base constraint is `{}`, the empty environment the
+   * declaration states, and `{}` declares no `Bindings` -- so the access is
    * `undefined`, which is what `indexedAccessMemberTypes` already answers for
    * a missing key on a real object type.
    *
@@ -749,8 +783,8 @@ const buildMapper = (
     // object type that genuinely declares no such member. `{}` arrived at as
     // the constraint of a conditional the checker could not evaluate is a
     // different fact wearing the same shape: it is TypeScript's fallback, not
-    // the author's claim. hono's `env: E['Bindings'] = {}` is where the two
-    // part company -- in the copy whose object type is the router chain's
+    // the author's claim. A field `env: E['Bindings'] = {}` is where the two
+    // part company -- in the copy whose object type is the builder chain's
     // intersection of deferred conditionals, absence would carrier the field as
     // `undefined`, a cell that provably cannot hold the initializer written on
     // the very same line. `unknown` is what is actually known there, and it is
@@ -787,6 +821,56 @@ const buildMapper = (
     const arms = suppressedWrites.armsAt(parameter)
     return arms === null ? null : withForeignArms(typeOf(checker.getTypeAtLocation(parameter)), arms)
   }
+  const dictionaryStorageType = (fact: FreshDictionaryStorageFact): StructuralTypeId => {
+    const entries = [...new Set(fact.component.values.map(typeOf))]
+    const value = entries.length === 1 ? entries[0]! : table.intern({ kind: 'union', members: entries })
+    return table.intern({
+      kind: 'object',
+      members: [],
+      membersDropped: false,
+      index: [{ key: fact.key, value, readonly: false }]
+    })
+  }
+  const replaceDictionaryArms = (type: ts.Type, fact: FreshDictionaryStorageFact): StructuralTypeId | null => {
+    const arms = type.isUnion() ? type.types : [type]
+    if (!arms.some((arm) => dictionaryArmIndexOf(checker, arm)?.key === fact.key)) return null
+    const storage = dictionaryStorageType(fact)
+    const members = [...new Set(arms.map((arm) => (dictionaryArmIndexOf(checker, arm)?.key === fact.key ? storage : typeOf(arm))))]
+    return members.length === 1 ? members[0]! : table.intern({ kind: 'union', members })
+  }
+  const indexedStorageTypeAt = (node: ts.Node): StructuralTypeId | null => {
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const receiverType = checker.getTypeAtLocation(node.expression)
+      const receivers = receiverType.isUnion() ? receiverType.types : [receiverType]
+      const fact = freshDictionaries.storageAt(node.expression)
+      if (fact && receivers.every((arm) => dictionaryArmIndexOf(checker, arm)?.key === fact.key)) {
+        const members = fact.component.values.map(typeOf)
+        const raw = checker.getTypeAtLocation(node)
+        const rawArms = raw.isUnion() ? raw.types : [raw]
+        if (rawArms.some((arm) => (arm.flags & ts.TypeFlags.Undefined) !== 0)) members.push(typeOf(checker.getUndefinedType()))
+        const unique = [...new Set(members)]
+        return unique.length === 1 ? unique[0]! : table.intern({ kind: 'union', members: unique })
+      }
+      return null
+    }
+    const fact = freshDictionaries.storageAt(node)
+    if (fact === null) return null
+    if (ts.isObjectLiteralExpression(node)) return dictionaryStorageType(fact)
+    return replaceDictionaryArms(checker.getTypeAtLocation(node), fact)
+  }
+  const indexedStorageResultAt = (node: ts.Node): StructuralTypeId | null => {
+    if (!ts.isFunctionLike(node)) return null
+    const fact = freshDictionaries.resultOf(node)
+    const signature = checker.getSignatureFromDeclaration(node)
+    return fact && signature ? replaceDictionaryArms(checker.getReturnTypeOfSignature(signature), fact) : null
+  }
+  const mutableFields = createMutableFieldResolver(
+    checker,
+    table,
+    flow,
+    (type) => typeOf(type),
+    (node) => mapper.typeAt(node)
+  )
   const { signatureOf, memberOf, indexesOf, tupleElementsOf } = createStructuralParts({
     parameters,
     checker,
@@ -794,10 +878,13 @@ const buildMapper = (
     typeOf: (type) => typeOf(type),
     layoutTypeAt: (node) => layoutTypeAt(node),
     parameterOverrideAt: (parameter) =>
+      indexedStorageTypeAt(parameter) ??
       refusedArrayParameterTypeAt(parameter) ??
       prototypeObjectParameterTypeAt(parameter) ??
       bivariantSlotParameterAt(parameter) ??
       suppressedWriteParameterAt(parameter),
+    implicitArgumentsTypeAt: (declaration, frame) => implicitArgumentsSourceTypeAt(declaration, frame),
+    resultOverrideAt: indexedStorageResultAt,
     implicitReceiverOf,
     declaredMemberResultOf,
     declaredMembers,
@@ -817,6 +904,7 @@ const buildMapper = (
     // `StructuralPartsInput.bags`.
     bags,
     sloppyAbsence,
+    mutableFieldStorageTypeOf: mutableFields.storageTypeOf,
     foreignArmsOfMember: (symbol, id) => withForeignArms(id, suppressedWrites.armsOfMember(symbol))
   })
 
@@ -837,12 +925,11 @@ const buildMapper = (
    * mention of the same array got the projection too, and the array branch
    * was never reached again.
    *
-   * Reached that way, `Object3D[]` carried as a `native-record-ref`:
-   * CubeCamera's `const [ cameraPX, ... ] = cameras` asked for a
+   * Reached that way, a `Node[]` carried as a `native-record-ref`: a
+   * `const [ first, second, ... ] = nodes` asked for a
    * `destructuring:array-pattern:native-record-ref` helper no manifest
-   * claims or should. Measured on the three.js app, 34 shapes and 52 selected
-   * carriers were Array projections of this kind, against 4258 honest
-   * `array-object` carriers -- an ordering leak, not a systemic
+   * claims or should. Array projections of this kind were a small minority
+   * against the honest `array-object` carriers -- an ordering leak, not a systemic
    * misclassification, which is exactly why it survived: most arrays are
    * reached from a position that asks the array branch first.
    *
@@ -945,9 +1032,8 @@ const buildMapper = (
     // `Array.prototype.concat(...items: ConcatArray<T>[])` argument lands --
     // so deriving it as a record made `a.concat(b)` refuse the rest pack it
     // had just built (`conversion:array-object(E)->native-record-ref`), for
-    // every element type, in every program. hono's `RegExpRouter`
-    // (`Object.keys(a).concat(Object.keys(b))`) and its trie router
-    // (`tempNodes.concat(shifted)`) are the two that named it.
+    // every element type, in every program, e.g.
+    // `Object.keys(a).concat(Object.keys(b))` or `nodes.concat(shifted)`.
     if (
       !reachesStandardArray(target as ts.InterfaceType, location, new Set()) &&
       !isStandardInterfaceType(checker, location, 'ConcatArray', type)
@@ -995,7 +1081,9 @@ const buildMapper = (
     members: MemberMode = 'all',
     excluded?: (property: ts.Symbol) => boolean
   ): StructuralShape => {
-    const ordered = creationOrderedProperties(checker, type, parameters)
+    // `Object.prototype`'s members are no shape's own data, whichever type
+    // carried them here -- see `isGlobalObjectMember`.
+    const ordered = creationOrderedProperties(checker, type, parameters).filter((property) => !isGlobalObjectMember(checker, property))
     const properties = excluded ? ordered.filter((property) => !excluded(property)) : ordered
     const kept = members === 'all' ? properties : properties.filter(keeperFor(properties, members))
     const stated = kept.flatMap((property) => {
@@ -1157,17 +1245,14 @@ const buildMapper = (
     // K]: T }`, so an instantiation's own symbol answers the anonymous
     // `__type` of that `MappedTypeNode` rather than the `TypeAliasDeclaration`
     // -- which means a type recursing THROUGH a mapped alias has no
-    // declaration to break the cycle on, and hono's `class Node { #children:
-    // Record<string, Node> }` (`router/reg-exp-router/node.ts`) refuses as `a
-    // self-referential type of this shape is not modelled`. Routing such a
-    // type through the ALIAS instead does fix that, and it costs
-    // `examples/weather` its whole certificate: with the alias as the anchor,
-    // a host-bound member reached through a mapped type demands
-    // `native-boundary:__type@1`, a protocol nothing registers. Net on hono
-    // once `router/reg-exp-router` stopped being reachable at all (see
-    // `reachability.ts`'s type-only import rule) it was WORSE by two
-    // obligations as well, so there is nothing left on the other side of the
-    // trade. A cycle through a mapped alias needs `selfReferentialShapeOf` to
+    // declaration to break the cycle on, and a `class Node { #children:
+    // Record<string, Node> }` refuses as `a self-referential type of this
+    // shape is not modelled`. Routing such a type through the ALIAS instead
+    // does fix that, and it costs a whole certificate elsewhere: with the
+    // alias as the anchor, a host-bound member reached through a mapped type
+    // demands `native-boundary:__type@1`, a protocol nothing registers, and
+    // it was net WORSE in obligations as well, so there is nothing left on
+    // the other side of the trade. A cycle through a mapped alias needs `selfReferentialShapeOf` to
     // model that shape, not a second nominal anchor for it -- which is what it
     // now does: its dictionary case closes `Record<string, Node>` on the
     // anchor the retry already reserved, leaving this decision untouched.
@@ -1209,7 +1294,7 @@ const buildMapper = (
     // the anchor key below, folded through `layoutRelevantParameterIndices` so
     // that two instantiations differing only in a phantom parameter share one
     // physical layout. The copy path says nothing the arguments do not, and
-    // saying it twice is what split hono's `Context` and `Hono` into a
+    // saying it twice is what split generic classes into a
     // root-cited half and a copy-cited half whose members only one of the two
     // could ever find.
     const id = identities.declarationIdOf(declaration, rootSpecialization)
@@ -1235,12 +1320,12 @@ const buildMapper = (
       return { kind: 'declared', declaration: id, declarationNode: declaration }
     }
     // A pre-`class` JavaScript CONSTRUCTOR FUNCTION's instances are nominal,
-    // and named by the function: `function WebGLClipping( properties ) {
+    // and named by the function: `function Clipping( properties ) {
     // this.uniform = uniform; ... }` gives TypeScript's own JS inference a
-    // construct signature whose return type it prints as `WebGLClipping`,
+    // construct signature whose return type it prints as `Clipping`,
     // symboled to the function declaration itself. Anchoring it here is what
     // lets that type be SELF-REFERENTIAL, which every one of these is: the
-    // instance carries `this.setState = function ( material ) { ... }`, whose
+    // instance carries `this.setState = function ( state ) { ... }`, whose
     // own receiver is the instance (`structural-receiver.ts`'s
     // `jsConstructorReceiverOf`). Reached anonymously the walk collides with
     // itself and `selfReferentialShapeOf` models no object shape with NAMED
@@ -1269,9 +1354,9 @@ const buildMapper = (
    *
    * Shared between the ordinary declared-anchor path (`translate`, below) and
    * the self-referential retry (`typeOf`'s `selfReferential` branch): a class
-   * whose OWN type argument mentions the class again -- `Object3D<EventMap>`
-   * where `EventMap` describes an event carrying `Object3D<EventMap>` as its
-   * target, exactly what three.js's own `Object3DEventMap` does -- cannot
+   * whose OWN type argument mentions the class again -- `Node<EventMap>`
+   * where `EventMap` describes an event carrying `Node<EventMap>` as its
+   * target, the usual typed event-map pattern -- cannot
    * compute this anchor's key up front, because the key needs the argument's
    * structural id and deriving that id is what re-enters the class. That is a
    * genuine cycle, not an undeclared shape: the retry mechanism already
@@ -1853,7 +1938,7 @@ const buildMapper = (
       try {
         // A declared name (class instance, class constructor, interface, type
         // alias) whose OWN type argument mentions it again -- see
-        // `buildDeclaredShape`'s docstring for the concrete three.js case --
+        // `buildDeclaredShape`'s docstring for the concrete event-map case --
         // is not an anonymous cycle `selfReferentialShapeOf` needs to know a
         // fourth shape for: it is one of the three shapes the ordinary
         // declared-anchor path already builds, just reached through the one
@@ -2055,8 +2140,8 @@ const buildMapper = (
    * below compose. The image is the checker's own instantiation of a copy's
    * member type (`structural-instantiated-member.ts`); the path substitution
    * answers for a bare parameter a copy binds; and the recursion answers for a
-   * parameter wrapped in one of the operators -- `NonNullable<TSchema>` closes
-   * because `TSchema` does.
+   * parameter wrapped in one of the operators -- `NonNullable<T>` closes
+   * because `T` does.
    */
   const closedForm = (type: ts.Type): ts.Type | null => {
     const image = instantiatedMembers.through(type)
@@ -2075,8 +2160,8 @@ const buildMapper = (
    * while `T` is open, so it keeps the conditional unreduced -- and a
    * conditional type names no structure, so everything downstream of it
    * refused: the await's own result, the `const` it initializes, the `return`
-   * that publishes it. mongodb's driver is generic almost everywhere and this
-   * was its single largest root, 616 of its mandatory obligations.
+   * that publishes it. In a library that is generic almost everywhere this
+   * is the single largest root of refusals.
    *
    * Monomorphization has already closed the hole this walk is inside, so the
    * reduction is not deferred any more -- only the checker's ability to spell
@@ -2097,10 +2182,10 @@ const buildMapper = (
    *
    * `NonNullable` is NOT gated on `TypeFlags.Conditional`, and that is not an
    * oversight: since TypeScript 4.8 it is spelled `T & {}`, so a deferred one
-   * arrives as an INTERSECTION. mongodb's `abstract_cursor.ts` is the case --
-   * `transformDocument(document: NonNullable<TSchema>): Promise<NonNullable<TSchema>>`,
-   * awaited at four sites in six copies -- and gating on the flag is what left
-   * it unreduced while the bare `Awaited<TSchema>` beside it reduced fine.
+   * arrives as an INTERSECTION. A generic method
+   * `transform(item: NonNullable<T>): Promise<NonNullable<T>>`, awaited in
+   * several copies, is the case -- and gating on the flag is what left
+   * it unreduced while the bare `Awaited<T>` beside it reduced fine.
    */
   const reducedOperator = (type: ts.Type): ts.Type | null => {
     const awaited = operatorArgument(type, 'Awaited')
@@ -2122,7 +2207,7 @@ const buildMapper = (
    * A DEFERRED `Parameters<F>`, laid out as the tuple of the parameters the
    * closed `F` declares.
    *
-   * mongodb's `TypedEventEmitter<Events>` declares its logging helpers as
+   * A typed event emitter `Emitter<Events>` can declare helpers as
    * `emitAndLog<EventKey extends keyof Events>(event: EventKey | symbol,
    * ...args: Parameters<Events[EventKey]>)`. Each call site's copy binds both
    * `Events` (the subclass's event map) and `EventKey` (the literal event
@@ -2208,20 +2293,20 @@ const buildMapper = (
     // `getAwaitedType` reduction below it only ever ran for a `NonNullable`,
     // which since TypeScript 4.8 arrives as an INTERSECTION instead.
     //
-    // `@hono/node-server`'s `readBodyWithFastPath<T>` is the case:
+    // A generic `readBody<T>` is the case:
     // `Promise.resolve(fromBuffer(raw, request))` over a
     // `(buf, request) => T | Promise<T>` types as
     // `Promise<Awaited<T | Promise<T>>>`, and the copy that closed `T` got the
-    // refusal rather than the reduction -- 54 of hono-hello's 225 roots, every
-    // one of them a `promise(unresolved)` obligation off those two lines.
+    // refusal rather than the reduction -- a `promise(unresolved)` obligation
+    // at every such site.
     //
     // Safe ahead of the refusal because this reads only `aliasSymbol` and
     // `aliasTypeArguments`, two plain fields on the type object, and calls the
     // checker only with an argument monomorphization has already CLOSED. What
     // the refusal is positioned to come before is declared-alias
     // NORMALIZATION further down, which asks a recursive conditional alias to
-    // instantiate the very form it deferred -- hono's fluent environment
-    // accumulator (`IfAnyThenEmptyObject<...>`, one alias deeper per route)
+    // instantiate the very form it deferred -- a fluent builder's environment
+    // accumulator (`IfAnyThenEmptyObject<...>`, one alias deeper per chained call)
     // exhausted TypeScript's stack there. That alias is neither `Awaited` nor
     // `NonNullable`, so `operatorArgument` rejects it on the name and this
     // line returns before any checker call.
@@ -2255,7 +2340,7 @@ const buildMapper = (
     // language is assignable to it, so it states nothing about what a
     // particular cell holds. `derived-expression-type.ts`'s
     // `annotationStatesNothing` has said exactly that for a long time, and
-    // three's `@type {Object}` / `@return {Object}` tags reach this very
+    // JSDoc `@type {Object}` / `@return {Object}` tags reach this very
     // interface -- but only the write-discovery CENSUSES consulted it, so
     // this layer went on interning `Object` as a `declared` shape with a
     // real body, and `representation/derive.ts` went on turning that body
@@ -2263,9 +2348,8 @@ const buildMapper = (
     // authorities, one saying "states nothing" and the other emitting a
     // layout for it.
     //
-    // Nothing can be stored in that struct. On the three.js app it was the target
-    // of 11 of the 29 unmet conversion obligations whose pair simply has no
-    // node -- `boolean`, an `HTMLElement` handle, an object literal and an
+    // Nothing can be stored in that struct. It was the target of unmet
+    // conversion obligations whose pair simply has no node -- `boolean`, an `HTMLElement` handle, an object literal and an
     // array of class instances all flowing into a cell typed `?Object` --
     // and no conversion could exist for any of them, because the target
     // layout was never real.
@@ -2331,10 +2415,9 @@ const buildMapper = (
       // `SymbolFlags.Class` alongside `Function`, `getDeclaredTypeOfSymbol`
       // answers with the inferred instance type exactly as it does for a
       // class -- and its declaration is a `FunctionDeclaration`, so
-      // `isClassLike` alone said no. three.js's WebGL internals are written
-      // this way throughout, and every `this.` inside one reached
-      // representation as an uninstantiated parameter: 151 of the three.js app's root
-      // diagnostics. The flag is checked rather than the syntax because the
+      // `isClassLike` alone said no. Pre-`class` JavaScript libraries are
+      // written this way throughout, and every `this.` inside one reached
+      // representation as an uninstantiated parameter. The flag is checked rather than the syntax because the
       // syntax is the only thing that differs.
       if (symbol && declaration && (ts.isClassLike(declaration) || (symbol.flags & ts.SymbolFlags.Class) !== 0)) {
         // Routed through the class's own declared type rather than interned
@@ -2372,20 +2455,20 @@ const buildMapper = (
       // base carried a naked parameter into its own field layout, which the
       // deriver correctly refused ("field \"el\" carries unresolved(type
       // parameter ... reached representation without monomorphization)") and
-      // which cost `ttf-bench` its whole emission.
+      // which cost a font-rendering program its whole emission.
       //
       // After the two bindings above on purpose: a copy that really did
       // substitute something must keep what it substituted, and the default is
       // only the answer when nothing did.
       //
-      // Measured cost, stated rather than hidden: three programs that import
-      // `three` gain ~3,400 boxed carriers, because `lib.dom`'s `E = Element`
+      // Measured cost, stated rather than hidden: programs that reach DOM
+      // generics gain boxed carriers, because `lib.dom`'s `E = Element`
       // and `lib.es5`'s `TArrayBuffer = ArrayBuffer` resolve to types no host
-      // table claims a carrier for. None of the three compiles either way, and
+      // table claims a carrier for. None of them compiles either way, and
       // before this they were the same values counted as missing primitives
       // rather than as boxes -- neither state is native, and the cure for both
       // is a carrier for `Element`, not a naked type parameter. Excluding
-      // defaults of `any` was tried and measured: it moved the number by 32.
+      // defaults of `any` was tried and measured: it barely moved the number.
       //
       // The default is asked of THIS parameter, not re-typed from its
       // declaration node. A method's default can name the enclosing
@@ -2394,7 +2477,7 @@ const buildMapper = (
       // `Promise`'s open `T` even when the receiver was `Promise<Response>`
       // and the checker had already instantiated the default to `Response`.
       // That open `T` reached representation through a promise method read as
-      // a VALUE with no call to bind it -- `@hono/node-server`'s `isPromise`
+      // a VALUE with no call to bind it -- an `isPromise` guard
       // (`typeof (res as Promise<Response>).then === 'function'`) -- and the
       // function-value carrier `(...)->promise(unresolved)` had no emitter
       // recipe. `getDefaultFromTypeParameter` returns the instantiated default
@@ -2468,8 +2551,8 @@ const buildMapper = (
       const indexType = resolvedIndexType(access.indexType)
       // `any[K]` is `any` and `unknown[K]` is an error the checker already
       // reported -- neither is a member set to enumerate, and refusing it
-      // reports a gap where the program declared one. hono's `Handler<E = any>`
-      // binds `E` to `any` in one of `Context`'s copies, so `E['Bindings']`
+      // reports a gap where the program declared one. A `Handler<E = any>`
+      // binds `E` to `any` in one of a generic class's copies, so `E['Bindings']`
       // there is the top type by the language's own rule, not a hole this
       // layer failed to fill. Answering with the object type itself adds no
       // dynamism: it IS the declared-any the program already carries.
@@ -2492,8 +2575,8 @@ const buildMapper = (
       const substituted =
         objectType === access.objectType && indexType === access.indexType ? null : indexedAccessMemberTypes(checker, objectType, indexType)
       // The bound of the type the PROGRAM WROTE is asked before the bound of
-      // what this copy substituted into it, and the two disagree in hono's
-      // favour of the first. `Context<E extends Env>`'s `env: E['Bindings']`
+      // what this copy substituted into it, and the two disagree in
+      // favour of the first. A `class App<E extends Env>`'s `env: E['Bindings']`
       // has `Env`'s own `Bindings?: Record<string, unknown>` as its bound
       // answer -- a dictionary that may be absent, which is what the
       // declaration says. The substituted intersection's bound is `{}`, which
@@ -2502,8 +2585,8 @@ const buildMapper = (
       // Both are upper bounds; the tighter one is not always the truer one,
       // and the one the author stated outranks the one a copy produced.
       // A substitution that answers pure ABSENCE steps aside for the bound, and
-      // hono's `env: E['Bindings'] = {}` is why. The copy that binds `E` to
-      // `BlankEnv` (`{}`) really does have no `Bindings` member, so absence is
+      // a field `env: E['Bindings'] = {}` is why. The copy that binds `E` to
+      // an empty environment (`{}`) really does have no `Bindings` member, so absence is
       // the language's own answer for a READ there -- but the field's STORAGE
       // was sized by the declaration, which TypeScript checked against `E`'s
       // constraint `Env`, where `Bindings?: Record<string, unknown>`. That is
@@ -2549,8 +2632,8 @@ const buildMapper = (
       // BESIDE a string one. A sum with an open arm is not a sum: its arms are
       // not disjoint (every value is the open arm's), a `false` handed to the
       // parameter matched neither arm, and a live string was ambiguous between
-      // them at the unbox. three.js's `Object3D.toJSON( meta )` is documented
-      // `{?(Object|string)}` and `LightShadow.toJSON` passes `false`. `Object`
+      // them at the unbox. A JSDoc parameter documented `{?(Object|string)}`
+      // to which some caller passes `false` is the case. `Object`
       // admits every non-nullish value -- strings included -- so the union
       // states nothing the open carrier does not.
       const objectMember = type.types.find((member) => {
@@ -2569,8 +2652,8 @@ const buildMapper = (
       // `never[]` is what an EMPTY ARRAY LITERAL with no contextual type
       // checks as, and it is assignable to every array type -- so beside
       // another array-like arm it names no value the union does not already
-      // hold, and no second carrier. `(path.match(/.../g) || [])` (hono's
-      // pattern router) is the shape: `RegExpMatchArray | never[]`, which
+      // hold, and no second carrier. `(path.match(/.../g) || [])` is the
+      // shape: `RegExpMatchArray | never[]`, which
       // carried as a tagged union of a match result and an EMPTY STRUCT, and
       // an `Array.prototype` method on that has no static receiver at all --
       // the read fell back to boxing the arm and asking a dynamic
@@ -2584,8 +2667,7 @@ const buildMapper = (
       // Contentless means EMPTY, not merely tuple-shaped: a tuple's numeric
       // index type is the union of its own elements, so a `[T, Params]` arm
       // answers a real element type and is a distinct shape this must not
-      // touch (`Result<T>`'s two arms in hono's own router are a 1-tuple and a
-      // 2-tuple). The two contentless spellings are `never[]` and the
+      // touch (a `Result<T>` whose two arms are a 1-tuple and a 2-tuple). The two contentless spellings are `never[]` and the
       // zero-length tuple `[]`, which is what `x.match(re) || []` derives:
       // 13.2.4.2 gives an ArrayLiteral with no elements an Array of length 0,
       // and a value with no element cannot disagree with any element type, so
@@ -2622,18 +2704,11 @@ const buildMapper = (
       const assertedArms = assertedArguments.armsOf(type)
       if (assertedArms)
         return remember(type, table.intern({ kind: 'union', members: [...present.map(typeOf), ...assertedArms.map(typeOf)] }))
-      // A union of pure INDEX-SIGNATURE objects is one table whose values are
-      // the union. `Record<string, string> | Record<string, string[]>` (hono's
-      // `_getQueryParam`, `utils/url.ts:255`) describes one object either way:
-      // the arms differ in what an entry HOLDS, never in how entries are
-      // stored, so the physical answer is a single `gea::Dictionary` over the
-      // union of the value types. A tagged union of two dictionaries is the
-      // wrong shape for it, and provably so: `results[name] = []` writes an
-      // array through a carrier whose tag says the entries are strings, which
-      // no per-arm dispatch can make correct -- there is one object and its
-      // tag was fixed when `{}` was allocated.
-      const table_ = joinedIndexUnionOf(checker, table, typeOf, present)
-      return remember(type, table_ ?? table.intern({ kind: 'union', members: present.map(typeOf) }))
+      // A union of homogeneous tables retains the native storage of whichever
+      // table entered it. Joining their entry types would require changing that
+      // mutable allocation's storage and every alias; a type union supplies no
+      // such allocation proof. Exact carrier duplicates collapse in union.ts.
+      return remember(type, table.intern({ kind: 'union', members: present.map(typeOf) }))
     }
     // A family view that is not a member -- an object literal the family
     // adopted, or a member through `Omit` and its kin (`interface-families.ts`'s
@@ -2669,23 +2744,23 @@ const buildMapper = (
       if (distributed !== null) return remember(type, distributed)
       // The same reduction for a product with no union member, taken only
       // where it closes the product to ONE member or to `never`. Narrowing a
-      // copy's `TSchema | null` away from null gives `Awaited<TSchema> & ({} |
-      // undefined)`, and the checker cannot reduce it while `TSchema` is open;
-      // after substitution `WithId<GridFSChunk> & {}` stood as an intersection
+      // copy's `T | null` away from null gives `Awaited<T> & ({} |
+      // undefined)`, and the checker cannot reduce it while `T` is open;
+      // after substitution `WithKey<Chunk> & {}` stood as an intersection
       // with an `unknown` member and derived a SECOND record for the one
-      // filling. The yield slot of mongodb's `AbstractCursor`
+      // filling. The yield slot of a generic cursor class's
       // `[Symbol.asyncIterator]` held that record while the narrowed read held
       // the filling's own, and no conversion joins two records of one type.
       const collapsed = declaration === null ? collapsedIntersectionOf(members) : undefined
       if (collapsed !== undefined) return remember(type, collapsed ?? typeOf(checker.getNeverType()))
       // `Pick<D, Exclude<keyof D, K>> & { [k in K]: D[k] }` restores `D`
-      // field for field -- mongodb's `WithId<GridFSFile>`, whose `_id` the
+      // field for field -- a `WithKey<Item>`, whose `_id` the
       // omit drops and the intersection puts back with the same type. It is
       // `D` to the language (identical properties), and a separately laid-out
-      // record for it would give `FindCursor<WithId<GridFSFile>>` and
-      // `FindCursor<GridFSFile>` two layouts that no conversion may join
+      // record for it would give `Cursor<WithKey<Item>>` and
+      // `Cursor<Item>` two layouts that no conversion may join
       // without breaking the objects' aliasing. Asked for a named alias too:
-      // `WithId` is one, and its name states no host carrier.
+      // `WithKey` is one, and its name states no host carrier.
       const restated = restatedDeclaredOf(type)
       if (restated !== null) return remember(type, typeOf(restated))
       // The checker's own reconciliation of the members, interned beside them.
@@ -2706,7 +2781,7 @@ const buildMapper = (
       // checker reconciles `{ waitMS: number } & T` through `T`'s CONSTRAINT,
       // while `members` above carry the copy's own filling of `T`. Reading
       // the reconciliation there drops every member the filling has beyond
-      // its bound (mongodb's `resolveTimeoutOptions` lost `name` off a
+      // its bound (a generic `resolveOptions<T>` lost `name` off a
       // `Named & Timeouts` filling), so the substituted members stand alone.
       const resolved =
         carriesDeferredForm(type) || type.types.some((part) => (part.flags & ts.TypeFlags.TypeParameter) !== 0)
@@ -2732,12 +2807,12 @@ const buildMapper = (
       // A class or interface's own type parameter that never reaches a stored
       // field -- `layoutRelevantParameterIndices`'s own question -- is folded
       // to one canonical placeholder instead of its real argument. Two
-      // instantiations that disagree ONLY on such a parameter (hono's
-      // `Hono<E,S,BasePath,CurrentPath>` across every distinct route
-      // registration, `S` never stored) are the SAME physical layout, and
+      // instantiations that disagree ONLY on such a parameter (a fluent
+      // builder `App<E,S,BasePath>` across every distinct chained call,
+      // `S` never stored) are the SAME physical layout, and
       // keying them apart mints one specialization per call site -- the
-      // shape of the `#addRoute` producer stack overflow this exists to cut
-      // off. `Context<E,...>`'s `env: E['Bindings']` keeps `E` unerased: an
+      // shape of the producer stack overflow this exists to cut
+      // off. An `App<E,...>`'s `env: E['Bindings']` keeps `E` unerased: an
       // unproven position is never folded, only one the field walk actually
       // proved irrelevant.
       const genericOwner =
@@ -2790,7 +2865,7 @@ const buildMapper = (
       // has one layout, its `any` copy, and every concrete instantiation is
       // only a view of it. That copy may have no checker spelling at all, so
       // its body is built from the class's own declared type read through
-      // the copy's bindings -- `transform: (doc: TSchema) => any` as
+      // the copy's bindings -- `transform: (doc: T) => any` as
       // `(doc: any) => any` -- and never from the concrete view that happened
       // to reach the anchor first, which would store one view's filling.
       const reinterpretedOrdinal =
@@ -3002,8 +3077,8 @@ const buildMapper = (
       // `typeOfSymbolAt`), which is available here and strictly more truthful
       // than borrowing an unrelated member's node. Every member with a
       // declaration still resolves at its own, so nothing that already worked
-      // moves; what this unblocks is three.js, whose JSDoc-typed objects reach
-      // here with no member declaration anywhere (three.js app violations 157 -> 21).
+      // moves; what this unblocks is JSDoc-typed JavaScript, whose objects
+      // reach here with no member declaration anywhere.
       const anchorLocation =
         type
           .getProperties()
@@ -3035,12 +3110,12 @@ const buildMapper = (
     // this empty shape will either fabricate a fresh, identity-unrelated empty
     // struct -- breaking anything that depended on WHICH object it was, a
     // WeakMap key or an `===` -- or be reinterpreted as a struct type it never
-    // was. Measured on the three.js app: 56 obligations of exactly this form, every one
-    // a key argument to a bare `new WeakMap()` in three's renderer, where TS's
+    // was. The measured form is a key argument to a bare `new WeakMap()`
+    // in untyped JavaScript, where TS's
     // own `K extends object = object` default filled in for inference it had
     // nothing to work from. The cure is upstream -- infer the collection's type
     // arguments from its uses -- NOT a carrier general enough to swallow the
-    // question, which would box the renderer's hot path and hide the gap.
+    // question, which would box a hot path and hide the gap.
     if (type.flags & ts.TypeFlags.NonPrimitive)
       return remember(type, table.intern({ kind: 'object', members: [], index: [], membersDropped: false }))
 
@@ -3056,7 +3131,7 @@ const buildMapper = (
     //
     // Not any of the flags the tests above match, so without this a
     // substitution falls through to the bare-flags refusal below. Measured
-    // ZERO on the mongodb probe and kept for the reason the reduction itself
+    // at zero sites so far and kept for the reason the reduction itself
     // states: a form the language erases must not be a refusal, and the one
     // line costs nothing.
     if (type.flags & ts.TypeFlags.Substitution) return remember(type, typeOf((type as ts.SubstitutionType).baseType))
@@ -3085,7 +3160,7 @@ const buildMapper = (
     return id
   }
 
-  const layoutTypeAt = createLayoutTypeResolver(checker, parameters, absent)
+  const layoutTypeAt = createLayoutTypeResolver(checker, parameters, absent, nativeClassAliasTypeAt)
 
   /**
    * The type at a node, with an absent host type collapsed -- and with that
@@ -3093,7 +3168,7 @@ const buildMapper = (
    *
    * `substituteAbsentType` answers about the type a node was declared with, so
    * it collapses the RECEIVER on its own: `canvas`, declared
-   * `HTMLCanvasElement` by three.js's JSDoc, is `never` on a host with no DOM.
+   * `HTMLCanvasElement` by a library's JSDoc, is `never` on a host with no DOM.
    * The member read is a different node, and the checker still answers it with
    * `HTMLCanvasElement.addEventListener`'s whole overload set -- so one
    * expression ends up carrying two incompatible facts: a receiver no value can
@@ -3101,8 +3176,8 @@ const buildMapper = (
    * member is the half that has to give. Reading a property of a value that
    * cannot exist produces a value that cannot exist.
    *
-   * This is not an optimization. `three-angle-metal`'s seven violations and
-   * seven unresolved carriers were all this one shape -- `canvas.getContext`
+   * This is not an optimization. On a headless rendering target, a whole
+   * class of violations and unresolved carriers was this one shape -- `canvas.getContext`
    * (five overloads) and `canvas.addEventListener`/`removeEventListener` (two
    * each) -- refused as "no primitive joining N overload signatures into one
    * calling convention". That refusal was correct about the overloads and
@@ -3130,9 +3205,9 @@ const buildMapper = (
    * the operand of the `value != null` that follows was converted to the
    * zero-field record `object` lowers to -- an `adoptProduct` that allocates
    * a struct and migrates the document into an alias view -- only to test
-   * the optional for presence. bson's `isAnyArrayBuffer` asked that of every
-   * object it serialized; on the mongodb driver benchmark it was 4.5% of the
-   * client's CPU.
+   * the optional for presence. A serializer's `isAnyArrayBuffer(value)` guard
+   * asks that of every object it serializes, which made the wasted allocation
+   * a measurable share of CPU on a serialization-heavy benchmark.
    */
   const narrowedOnlyToObject = (type: ts.Type): boolean => {
     if ((type.flags & ts.TypeFlags.NonPrimitive) !== 0) return true
@@ -3230,15 +3305,23 @@ const buildMapper = (
    * constructor ends up carried as one of its own instances.
    */
 
+  const ordinaryOwnCallableInvocationAt = createStructuralOwnCallableInvocationResolver(
+    checker,
+    table,
+    flow,
+    signatureOf,
+    ordinaryOwnCallableSourceAt
+  )
   const localUnionAt = createLocalUnionResolver(
     checker,
     table,
     parameters,
     flow,
     (node) => mapper.typeAt(node),
-    (node) => (ts.isExpression(node) ? objectDescriptorReturnTypeAt(unwrapErasedExpression(node)) : null)
+    (node) => (ts.isExpression(node) ? objectDescriptorReturnTypeAt(unwrapErasedExpression(node)) : null),
+    (node) => (ts.isExpression(node) ? (ordinaryOwnCallableInvocationAt(unwrapErasedExpression(node))?.observedResult ?? null) : null)
   )
-  const callResultAt = createStructuralCallResultResolver(checker, table, (node) => mapper.typeAt(node))
+  const callResultAt = createStructuralCallResultResolver(checker, table, (node) => mapper.typeAt(node), ordinaryOwnCallableInvocationAt)
   const constructResultAt = createStructuralConstructResultResolver(table, (node) => mapper.typeAt(node))
   const impliedPatternArrayLiteralType = (node: ts.ArrayLiteralExpression): StructuralTypeId | null => {
     // A tuple, or the empty literal the checker types `never[]` against a
@@ -3422,11 +3505,11 @@ const buildMapper = (
    * an id the census, which walks that generic from its own scope, never
    * publishes.
    *
-   * A SELF-instantiation (`Hono#clone()` naming `new Hono<...>` with its own
+   * A SELF-instantiation (`App#clone()` naming `new App<...>` with its own
    * type parameters) resolves to the identical (declaration, ordinal) pair as
    * the enclosing path's own last step, since `prefixFor` is inclusive of
-   * self-containment. Appending a second frame there composes `decl|Hono@0.0`
-   * for a copy already named `decl|Hono@0` -- the spurious-nesting shape, one
+   * self-containment. Appending a second frame there composes `decl|App@0.0`
+   * for a copy already named `decl|App@0` -- the spurious-nesting shape, one
    * step short -- so the enclosing path is reused unchanged when its last
    * step already IS this copy.
    */
@@ -3478,10 +3561,10 @@ const buildMapper = (
    * The class copy an overloaded method's value was read off, when this view
    * does not already bind that class's parameters.
    *
-   * The overloads of `Collection<DataKey>.find` arrive instantiated, but the
+   * The overloads of a generic `Store<Item>.find` arrive instantiated, but the
    * one IMPLEMENTATION signature the value physically carries is read off the
-   * open declaration, so a read from outside the class (mongodb's
-   * `db.collection<DataKey>(c).find(filter, options)`) left `WithId<TSchema>`
+   * open declaration, so a read from outside the class
+   * (`db.store<Item>(name).find(filter, options)`) left `WithKey<T>`
    * and its conditionals naked. The copy whose instantiated class has this
    * very member type is the receiver's; reading the value under it binds the
    * implementation's class parameters exactly as the method's own body is.
@@ -3591,7 +3674,7 @@ const buildMapper = (
 
   /**
    * The signature of a member read off a receiver the CENSUS typed and the
-   * checker carries as `any` -- three's `LOD.addLevel` reading `levels`
+   * checker carries as `any` -- a method reading `this.levels`
    * through a descriptor-defined field -- when the member is an overload set
    * the census could not narrow to one convention: `memberTypeOf`'s
    * `singleConventionAt` needs the checker's resolved signature to pick, and a
@@ -3688,6 +3771,35 @@ const buildMapper = (
       : null
     const intern = (built: StructuralShape): StructuralTypeId => table.intern(built)
     const boolId = intern({ kind: 'primitive', primitive: 'boolean' })
+    const accessor = accessorDescriptorAt ? accessorDescriptorAt(call) : flow ? sourceAccessorDescriptorOf(checker, flow, call) : null
+    if (accessor !== null) {
+      const undefinedId = intern({ kind: 'primitive', primitive: 'undefined' })
+      const callableType = (body: NonNullable<typeof accessor.getter>): StructuralTypeId | null => {
+        const shape = table.get(mapper.typeAt(body)).shape
+        if (shape.kind !== 'signature' || shape.call.length !== 1) return null
+        // Reflecting a Function does not bind its original receiver. Its
+        // public invocation view retains the source result/parameter types;
+        // the later native callable conversion preserves the actual frame.
+        const { implicitReceiver: _implicit, ...signature } = shape.call[0]!
+        return intern({ kind: 'signature', call: [{ ...signature, thisParameter: null }], construct: [] })
+      }
+      const get = accessor.getter === null ? undefinedId : callableType(accessor.getter)
+      const set = accessor.setter === null ? undefinedId : callableType(accessor.setter)
+      if (get !== null && set !== null) {
+        const descriptor = intern({
+          kind: 'object',
+          members: [
+            { key: { kind: 'string', value: 'get' }, type: get, optional: false, readonly: false, accessor: null },
+            { key: { kind: 'string', value: 'set' }, type: set, optional: false, readonly: false, accessor: null },
+            { key: { kind: 'string', value: 'enumerable' }, type: boolId, optional: false, readonly: false, accessor: null },
+            { key: { kind: 'string', value: 'configurable' }, type: boolId, optional: false, readonly: false, accessor: null }
+          ],
+          index: [],
+          membersDropped: false
+        })
+        return intern({ kind: 'union', members: [descriptor, undefinedId] })
+      }
+    }
     // The `value` this descriptor carries for one candidate receiver shape, or
     // `null` when this shape names no rendering this feature supports (a plain
     // `dynamic`/`unknown` receiver, an interface flattened to `membersDropped`).
@@ -3853,13 +3965,34 @@ const buildMapper = (
       }
       return null
     }
-    const valueId = valueIdOfShape(table.get(mapper.typeAt(target)).shape)
+    const targetShape = table.get(mapper.typeAt(target)).shape
+    const containsArrayDescriptor = (shape: StructuralShape, visited = new Set<StructuralTypeId>()): boolean => {
+      if (shape.kind === 'array') return true
+      const children =
+        shape.kind === 'union'
+          ? shape.members
+          : (shape.kind === 'declared' || shape.kind === 'class-instance') && shape.body !== null
+            ? [shape.body]
+            : []
+      return children.some((id) => {
+        if (visited.has(id)) return false
+        visited.add(id)
+        return containsArrayDescriptor(table.get(id).shape, visited)
+      })
+    }
+    const valueId = valueIdOfShape(targetShape)
     if (valueId === null) return null
+    // An indexed accessor descriptor omits writable. Array<T> alone does
+    // not prove each current own index remains a data property.
+    const writableId =
+      containsArrayDescriptor(targetShape) && literalKey !== 'length'
+        ? unionOf([boolId, intern({ kind: 'primitive', primitive: 'undefined' })])
+        : boolId
     const descriptor = intern({
       kind: 'object',
       members: [
         { key: { kind: 'string', value: 'value' }, type: valueId, optional: false, readonly: false, accessor: null },
-        { key: { kind: 'string', value: 'writable' }, type: boolId, optional: false, readonly: false, accessor: null },
+        { key: { kind: 'string', value: 'writable' }, type: writableId, optional: false, readonly: false, accessor: null },
         { key: { kind: 'string', value: 'enumerable' }, type: boolId, optional: false, readonly: false, accessor: null },
         { key: { kind: 'string', value: 'configurable' }, type: boolId, optional: false, readonly: false, accessor: null }
       ],
@@ -4004,16 +4137,23 @@ const buildMapper = (
   // `obj.getTime` where `obj` is the prototype through a parameter) is the
   // prototype's own copy of it -- the receiver-taking signature above -- not
   // the instance's, which is what the checker answers for the access.
-  const prototypeObjectMemberTypeAt = (node: ts.Node): StructuralTypeId | null => {
+  const prototypeObjectMemberTypeAt = (node: ts.Node, visiting: Set<ts.ParameterDeclaration> = new Set()): StructuralTypeId | null => {
     if (!ts.isPropertyAccessExpression(node)) return null
-    const receiver = prototypeObjectTypeAt(node.expression) ?? prototypeObjectParameterTypeAt(node.expression)
+    const receiver = prototypeObjectTypeAt(node.expression) ?? prototypeObjectParameterTypeAt(node.expression, visiting)
     if (receiver === null) return null
     const shape = table.get(receiver).shape
-    if (shape.kind !== 'declared' || shape.body === null) return null
-    const body = table.get(shape.body).shape
-    if (body.kind !== 'object') return null
-    const member = body.members.find((candidate) => candidate.key.kind === 'string' && candidate.key.value === node.name.text)
-    return member?.type ?? null
+    const arms = shape.kind === 'union' ? shape.members : [receiver]
+    const members: StructuralTypeId[] = []
+    for (const arm of arms) {
+      const declared = table.get(arm).shape
+      if (declared.kind !== 'declared' || declared.body === null) return null
+      const body = table.get(declared.body).shape
+      if (body.kind !== 'object') return null
+      const member = body.members.find((candidate) => candidate.key.kind === 'string' && candidate.key.value === node.name.text)
+      if (!member) return null
+      if (!members.includes(member.type)) members.push(member.type)
+    }
+    return members.length === 1 ? members[0]! : table.intern({ kind: 'union', members })
   }
 
   // A local initialized to the prototype object or one of its methods
@@ -4035,7 +4175,7 @@ const buildMapper = (
     if (!ts.isPropertyAccessExpression(initializer)) return null
     const writes = flow?.writesToDeclaration(declaration) ?? null
     // Only a WHOLE-slot write re-binds the cell; `f[k] = v` on the held method
-    // (propertyHelper's `isWritable` writing `length`) is a member write on
+    // (a writability helper writing `length`) is a member write on
     // the function object the cell keeps holding.
     if (writes === null || writes.some((write) => write.slot === 'whole' && write.value !== initializer)) return null
     return prototypeObjectMemberTypeAt(initializer) ?? prototypeObjectTypeAt(initializer)
@@ -4078,7 +4218,8 @@ const buildMapper = (
   // A parameter every call site hands `X.prototype` to, and every read of it:
   // the census bound it to the checker's image of the argument (the instance
   // type), so it is re-asked here from the argument expressions themselves.
-  // One disagreeing site returns the question to the census's answer.
+  // Disagreeing callers retain every source arm: a checker join cannot erase
+  // one prototype handle or a method's physical receiver from that union.
   const prototypeObjectParameterTypeAt = (node: ts.Node, visiting: Set<ts.ParameterDeclaration> = new Set()): StructuralTypeId | null => {
     const parameter = ts.isParameter(node)
       ? node
@@ -4089,20 +4230,63 @@ const buildMapper = (
     const passed = parameters.argumentsAt?.(parameter) ?? null
     if (passed === null || passed.length === 0) return null
     visiting.add(parameter)
-    let agreed: StructuralTypeId | null = null
-    for (const argument of passed) {
-      // The handle travels through helper calls (`verifyProperty(obj, ...)`
-      // forwards `obj` to `isWritable(obj, ...)`), so an argument that is
-      // itself such a parameter is asked the same question.
-      const own =
-        prototypeObjectTypeAt(argument) ??
-        prototypeObjectMemberTypeAt(argument) ??
-        prototypeObjectLocalTypeAt(argument) ??
-        prototypeObjectParameterTypeAt(argument, visiting)
-      if (own === null || (agreed !== null && agreed !== own)) return null
-      agreed = own
+    try {
+      const members: StructuralTypeId[] = []
+      let hasSourceArm = false
+      for (const argument of passed) {
+        const own =
+          prototypeObjectTypeAt(argument) ??
+          prototypeObjectMemberTypeAt(argument, visiting) ??
+          prototypeObjectLocalTypeAt(argument) ??
+          prototypeObjectParameterTypeAt(argument, visiting)
+        hasSourceArm ||= own !== null
+        const id = own ?? typeOf(layoutTypeAt(argument))
+        const shape = table.get(id).shape
+        for (const arm of shape.kind === 'union' ? shape.members : [id]) if (!members.includes(arm)) members.push(arm)
+      }
+      if (!hasSourceArm) return null
+      return members.length === 1 ? members[0]! : table.intern({ kind: 'union', members })
+    } finally {
+      visiting.delete(parameter)
     }
-    return agreed
+  }
+
+  const resolvingArgumentSources = new Set<ts.SignatureDeclaration>()
+  const implicitArgumentsSourceTypeAt = (declaration: ts.SignatureDeclaration, frame: ImplicitArgumentsTuple): StructuralTypeId | null => {
+    if (frame.sourcePositions === undefined || resolvingArgumentSources.has(declaration)) return null
+    resolvingArgumentSources.add(declaration)
+    try {
+      const join = (sources: readonly ts.Expression[]): StructuralTypeId | null => {
+        const members: StructuralTypeId[] = []
+        for (const source of sources) {
+          const id = mapper.typeAt(source)
+          const shape = table.get(id).shape
+          for (const arm of shape.kind === 'union' ? shape.members : [id]) {
+            const sourceShape = table.get(arm).shape
+            const widened = sourceShape.kind === 'literal' ? table.intern({ kind: 'primitive', primitive: sourceShape.primitive }) : arm
+            if (!members.includes(widened)) members.push(widened)
+          }
+        }
+        if (frame.sourceUndefined) {
+          const undefinedId = table.intern({ kind: 'primitive', primitive: 'undefined' })
+          if (!members.includes(undefinedId)) members.push(undefinedId)
+        }
+        return members.length === 0 ? null : members.length === 1 ? members[0]! : table.intern({ kind: 'union', members })
+      }
+      if (frame.frame === 'array') {
+        const element = join(frame.sourcePositions.flat())
+        return element === null ? null : table.intern({ kind: 'array', element, readonly: false, extension: [] })
+      }
+      const elements: TupleElement[] = []
+      for (const [position] of frame.elements.entries()) {
+        const type = join(frame.sourcePositions[position] ?? [])
+        if (type === null) return null
+        elements.push({ type, optional: position >= frame.required, rest: false, variadic: false })
+      }
+      return table.intern({ kind: 'tuple', readonly: false, elements })
+    } finally {
+      resolvingArgumentSources.delete(declaration)
+    }
   }
 
   // The SIGNATURE side of the `unstated-never-array` rule's parameter form.
@@ -4199,8 +4383,8 @@ const buildMapper = (
    * only when what it wraps is an ARRAY: those wrappers evaluate to nothing of
    * their own (`producers/erasure.ts`), so `citeExpressionResult` cites the
    * WRAPPED expression's result -- and the pattern that then reads that result
-   * by index was being typed off the assertion instead. hono's
-   * `defineWebSocketHelper` writes the shape exactly: `const [createEvents,
+   * by index was being typed off the assertion instead. The shape is
+   * exactly: `const [createEvents,
    * options] = args as [(c: Ctx) => Events, number?]` over a rest parameter,
    * whose value is one Array. `lower-destructuring.ts` refused the pair --
    * 'an array binding pattern's source resolved to "array-object(...)", but its
@@ -4284,8 +4468,8 @@ const buildMapper = (
    * -- a type with an index signature -- or `null` when no spread does.
    *
    * TypeScript's spread type drops the source's index signatures once the
-   * literal writes a key of its own (`{ ...handshakeDoc, speculativeAuthenticate
-   * }` over mongodb's `HandshakeDocument extends Document` is a closed object
+   * literal writes a key of its own (`{ ...doc, extra }` over an
+   * `interface Doc extends { [key: string]: any }` is a closed object
    * to the checker), but `CopyDataProperties` (ECMA-262 7.3.25) copies every
    * own enumerable key the source holds, so the value carries keys that closed
    * type does not list. A carrier derived from that type has nowhere to put
@@ -4484,8 +4668,8 @@ const buildMapper = (
    */
   /**
    * A reference `x instanceof Map` narrowed out of a declared union whose one
-   * map arm is a `ReadonlyMap<K, V>` -- mongodb's `isMap(t: Sort)` is `t
-   * instanceof Map && t.size > 0`. `ReadonlyMap` is not a subtype of `Map`
+   * map arm is a `ReadonlyMap<K, V>` -- an `isMap(t: SortSpec)` written as
+   * `t instanceof Map && t.size > 0`. `ReadonlyMap` is not a subtype of `Map`
    * (it has no `set`), so the checker narrows to a synthesized `Map<any, any>`
    * that no arm of the union is, and reading the arm as that would ask for a
    * boxing view of a typed map. The only arm whose runtime value can pass the
@@ -4511,7 +4695,7 @@ const buildMapper = (
 
   /**
    * An `any` binding read where a guard narrowed it to lib's `ArrayBufferView`
-   * -- bson's `ArrayBuffer.isView(value) || value instanceof ArrayBuffer` over
+   * -- `ArrayBuffer.isView(value) || value instanceof ArrayBuffer` over
    * `value: any`, then `value.byteLength`. The interface leaves open WHICH view
    * sits behind it, so its generated record is a carrier no typed array or
    * DataView reaches: converting the box into it admits nothing and stops the
@@ -4566,6 +4750,28 @@ const buildMapper = (
     (node) => mapper.rawTypeAt(node)
   )
   const structuralRules: readonly StructuralRule[] = [
+    {
+      name: 'mutable-field-storage',
+      forms: [ts.SyntaxKind.PropertyAccessExpression, ts.SyntaxKind.ElementAccessExpression],
+      resolve: mutableFields.readTypeAt
+    },
+    {
+      name: 'closed-fresh-indexed-storage',
+      forms: [
+        ts.SyntaxKind.VariableDeclaration,
+        ts.SyntaxKind.Parameter,
+        ts.SyntaxKind.Identifier,
+        ts.SyntaxKind.ObjectLiteralExpression,
+        ts.SyntaxKind.CallExpression,
+        ts.SyntaxKind.AsExpression,
+        ts.SyntaxKind.TypeAssertionExpression,
+        ts.SyntaxKind.ConditionalExpression,
+        ts.SyntaxKind.BinaryExpression,
+        ts.SyntaxKind.PropertyAccessExpression,
+        ts.SyntaxKind.ElementAccessExpression
+      ],
+      resolve: indexedStorageTypeAt
+    },
     {
       // A read the checker narrowed to a bare class that may hold a record
       // spread from it -- see `record-stand-in-arms.ts`.
@@ -4623,8 +4829,8 @@ const buildMapper = (
     },
     {
       // A CommonJS wrapper's `module` is not the ambient `{ exports: any }`
-      // silhouette when the source itself proves one exact top-level callable
-      // export.  Keep the record local to that source module and map the same
+      // silhouette when the source proves one exact native export. Keep the
+      // record local to that source module and map the same
       // expression at `module.exports` and a resolved `require` so a binding
       // cannot store a function while its read asks for a dynamic record.
       name: 'module-exports-record',
@@ -4701,10 +4907,9 @@ const buildMapper = (
       // value has no JSON form -- `undefined` itself, a function, a symbol
       // (ECMA-262 25.5.2.1 step 12, SerializeJSONProperty's final
       // `return undefined`). lib.d.ts declares `string` regardless, so a value
-      // that may be one of those is typed here as it really behaves. The
-      // MongoDB driver's handshake is the measured case:
-      // `JSON.stringify(hello.maxWireVersion) ?? 0`, whose `?? 0` TypeScript
-      // considers dead is the arm an old server's reply takes.
+      // that may be one of those is typed here as it really behaves.
+      // `JSON.stringify(reply.version) ?? 0`, whose `?? 0` TypeScript
+      // considers dead, is the arm a reply missing that field takes.
       name: 'json-stringify-may-be-undefined',
       forms: [ts.SyntaxKind.CallExpression],
       resolve: (node) => {
@@ -4766,8 +4971,8 @@ const buildMapper = (
     },
     {
       // A generic source function handed to a slot that states ONE closed
-      // signature: `match: typeof match<Router<T>, T> = match` (hono's
-      // `RegExpRouter`), `const f: (x: number) => number = identity`.
+      // signature: `match: typeof match<Router<T>, T> = match`,
+      // `const f: (x: number) => number = identity`.
       //
       // The checker's type for the name is the OPEN generic, which derives to
       // `generic-function-set` -- a choice tag, not a callable -- while the
@@ -5208,9 +5413,9 @@ const buildMapper = (
           const narrowedMember = receiver.isIntersection() ? narrowedFamilyMemberOf(receiver) : null
           // Only a property the intersection's other parts RESTATE: one the
           // family member alone names keeps the checker's flow-sensitive
-          // answer. mongodb's `options: CommandOptions & Abortable` (an
-          // absorbed partner, `interface-families.ts`) reads
-          // `options.documentsReturnedIn` after a `== null` guard, and the
+          // answer. An `options: RequestOptions & Abortable` (an
+          // absorbed partner, `interface-families.ts`) that reads
+          // `options.resultKey` after a `== null` guard is the case: the
           // declared `string | undefined` refused it as a computed key.
           const restated =
             narrowedMember !== null &&
@@ -5267,8 +5472,8 @@ const buildMapper = (
       resolve: (node) => {
         const open = openSpreadResolutionOf(node)
         if (open !== null || !ts.isObjectLiteralExpression(node) || node.properties.some(ts.isSpreadAssignment)) return open
-        // A literal holding such an object as a member value -- mongodb's
-        // Azure `prepareRequest` returns `{ headers, url }` where `headers`
+        // A literal holding such an object as a member value -- a function
+        // returning `{ headers, url }` where `headers`
         // is `{ ...options.headers, 'Content-Type': ..., Metadata: true }`.
         // The checker types the member by the same closed spread type, so the
         // literal is rebuilt from its members, each asked here in turn.
@@ -5299,20 +5504,31 @@ const buildMapper = (
     },
     {
       // A literal the checker typed `any` only because it spreads a source it
-      // could not close: mongodb's `emitAndLogHeartbeat<EventKey>` builds
-      // `{ topologyId, serverConnectionId, ...args[0] }` with `args:
+      // could not close: a generic `emitWithContext<EventKey>` that builds
+      // `{ sourceId, connectionId, ...args[0] }` with `args:
       // Parameters<Events[EventKey]>`, whose element is `any` to the checker in
       // the generic body -- and a spread of `any` makes the whole literal
       // `any`. Every copy knows `args[0]` (the rest tuple closes per copy), so
       // the literal's shape is its written members and the source's own data
       // members, in `CopyDataProperties` order. Boxing it was a typed value
       // lowered to the dynamic carrier for want of this answer.
+      //
+      // A spread of the `Object` top type is the same literal: `Object` is
+      // interned as `any` (see `typeOf`), but the checker does not fold
+      // `{ ...x }` over it to `any` the way it does over `any` itself -- it
+      // copies `Object`'s prototype members, which state none of the keys
+      // the copy creates.
       name: 'object-literal-spreading-a-deferred-source',
       forms: [ts.SyntaxKind.ObjectLiteralExpression],
       resolve: (node) =>
         ts.isObjectLiteralExpression(node) &&
-        (checker.getTypeAtLocation(node).flags & ts.TypeFlags.Any) !== 0 &&
-        node.properties.some(ts.isSpreadAssignment)
+        node.properties.some(ts.isSpreadAssignment) &&
+        ((checker.getTypeAtLocation(node).flags & ts.TypeFlags.Any) !== 0 ||
+          node.properties.some((property) => {
+            if (!ts.isSpreadAssignment(property)) return false
+            const source = checker.getNonNullableType(checker.getTypeAtLocation(property.expression))
+            return isGlobalObjectInterface(checker, property.expression, source)
+          }))
           ? spreadLiteralShapeOf(node)
           : null
     },
@@ -5431,9 +5647,9 @@ const buildMapper = (
       //
       // Asked BEFORE the bag census, not after, because the two answer the
       // same node about the same storage and the collection census is the one
-      // that looked at this cell's own uses. `WebGLRenderer.js`'s `let
-      // programs = materialProperties.programs` is the shape: `programs` is a
-      // slot of the `WebGLProperties` bag, so `bagShapeTypeAt` answers first
+      // that looked at this cell's own uses. `let programs =
+      // entryProperties.programs` is the shape: `programs` is a
+      // slot of a property bag, so `bagShapeTypeAt` answers first
       // with the slot's own type -- `Map<any, any> | undefined`, the checker's
       // reading of the `new Map()` stored into it -- and the declaration kept
       // `optional(keyed-collection(map, dynamic, dynamic))` while every read
@@ -5615,7 +5831,7 @@ const buildMapper = (
       // already read through them (`transparentConstClassAliasTarget`), and
       // the cell answering the annotation instead asked for a conversion of a
       // class constructor into a structural construct signature no class
-      // constructor has (bson's `LongWithoutOverridesClass`).
+      // constructor has (a class re-exported through such a double cast).
       name: 'physical-class-alias',
       forms: [ts.SyntaxKind.VariableDeclaration, ts.SyntaxKind.Identifier],
       resolve: (node) => {
@@ -5733,10 +5949,15 @@ const buildMapper = (
     substituteTypeParameter,
     typeOf,
     typeAt,
+    indexedStorageTypeAt,
+    indexedStorageResultAt,
     mutableMethodStorageTypeAt: mutableMethods.storageTypeAt,
     mutableMethodReadTypeAt: mutableMethods.readTypeAt,
+    mutableFieldStorageTypeOf: mutableFields.storageTypeOf,
+    mutableFieldReadTypeAt: mutableFields.readTypeAt,
     boundCallResultAt,
     constructResultAt,
+    ordinaryOwnCallableInvocationAt,
     evolvingArrayMemberTypeAt,
     objectDescriptorReturnTypeAt,
     instanceTypeAt: (node) => {
@@ -5745,6 +5966,8 @@ const buildMapper = (
       return construct ? typeOf(construct.getReturnType()) : typeAt(node)
     },
     valueTypeAt: (node) => {
+      const nativeClassAlias = nativeClassAliasTypeAt?.(node)
+      if (nativeClassAlias) return typeOf(nativeClassAlias)
       const localUnion = localUnionAt(node)
       if (localUnion) return localUnion
       const accessor = accessorSignatureOf(checker, node)
@@ -5785,8 +6008,8 @@ const buildMapper = (
         // function has exactly one physical convention -- the initializer's.
         // `structural-parts.ts`'s `memberOf` already asks this for a member;
         // a module-level `const` is the same fact spelled at file scope, and
-        // hono's `export const parseBody: ParseBody = async (...)` is the
-        // case that showed the two answers apart.
+        // `export const parseBody: ParseBody = async (...)` over an
+        // overloaded `ParseBody` is the case that showed the two answers apart.
         return typeOf(physicalInitializerTypeOf(checker, node, declared, parameters) ?? declared)
       }
       const layout = layoutTypeAt(node)
@@ -5800,8 +6023,8 @@ const buildMapper = (
       // The overload set is not always written as one. `[].map` over a UNION
       // of two array types resolves to a callback parameter that is the
       // INTERSECTION of the two arms' callbacks -- contravariance -- and an
-      // intersection of callables is exactly an overload set. hono's
-      // `this.#matchResult[0].map(([[, route]]) => route)` (`request.ts:421`)
+      // intersection of callables is exactly an overload set.
+      // `this.#matchResult[0].map(([[, route]]) => route)` over such a union
       // is that, and the arrow written there has one parameter list.
       //
       // Gated on the layout actually carrying more than one signature, so an
@@ -5831,18 +6054,17 @@ const buildMapper = (
         }
       }
       // TRIED AND MEASURED DEAD (2026-09-03): widening this `> 1` gate to
-      // also fire on an unannotated trailing rest -- hono's `newResponse:
-      // NewResponse = (...args) => ...`, whose `layout` here is ONE
+      // also fire on an unannotated trailing rest -- `newResponse:
+      // NewResponse = (...args) => ...` over an overloaded `NewResponse`, whose `layout` here is ONE
       // TypeScript-joined signature (`args_0: any, args_1?: any, args_2?:
       // unknown`), the checker's own collapse of a bare-rest literal against
       // several overloads, done before this function runs. Preferring `own`
-      // there is a no-op: isolated A/B (snapshot, hono-hello + the three.js app)
-      // byte-identical -- `own`'s contextual type for the rest
+      // there is a no-op: isolated A/B byte-identical -- `own`'s contextual type for the rest
       // parameter is EQUALLY `any`/`unknown`-degraded by that same join, so
       // `own`/`layout` are two views of one already-lossy checker answer,
       // not two to disagree between. Also checked: the call-site census
       // (`StructuralPartsInput.parameters`) never binds a rest parameter's
-      // declaration either (`bound` null for every `...args` in hono,
+      // declaration either (`bound` null for every such `...args`,
       // confirmed directly). The richer per-position record `abiBlockers`
       // reports seeing comes from neither path -- likely the `args as
       // Parameters<NewResponse>` cast at its one use site, narrowing a

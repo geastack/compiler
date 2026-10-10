@@ -2,25 +2,25 @@ import ts from 'typescript'
 import { documentationRangesIn } from './documentation-ranges.js'
 
 /**
- * JSDoc namepaths (`WebGLRenderer~Options`), respelled as legal identifiers.
+ * JSDoc namepaths (`Renderer~Options`), respelled as legal identifiers.
  *
  * JSDoc's own grammar scopes a name to its owner with `~` for an inner
- * declaration, `#` for an instance member and `.` for a static one. three
- * writes its configuration objects that way:
+ * declaration, `#` for an instance member and `.` for a static one. JavaScript
+ * libraries write their configuration objects that way:
  *
  * ```js
- * /** @typedef {Object} WebGLRenderer~Options
+ * /** @typedef {Object} Renderer~Options
  *  *  @property {DOMElement} [canvas]
  *  *  @property {boolean} [antialias] ... *\/
  *
- * /** @param {WebGLRenderer~Options} [parameters] *\/
+ * /** @param {Renderer~Options} [parameters] *\/
  * constructor( parameters = {} ) { ... }
  * ```
  *
  * TypeScript has no `~` in a type name. It reads the `@typedef` name as far as
- * `WebGLRenderer` and stops, and the `@param` reference resolves to nothing --
+ * `Renderer` and stops, and the `@param` reference resolves to nothing --
  * which is `any`. So a type the library *did* state is lost twice over, and
- * `WebGLRenderer`'s entire configuration -- `canvas`, `context`, and every
+ * `Renderer`'s entire configuration -- `canvas`, `context`, and every
  * flag -- arrives untyped.
  *
  * `~` is not meaning, it is punctuation: the namepath denotes exactly one

@@ -1,8 +1,10 @@
 import { isNativeCallableCarrier } from '../../representation/callable-object.js'
 import { numberStorageTarget } from '../../conversion/number-storage.js'
 import { numberStorageText } from './emit-number-storage.js'
+import { NATIVE_REFERENCE_ABSENCE, nativeReferenceAbsenceOf } from '../../conversion/native-absence.js'
 import { isNativeError } from './error-types.js'
 import { proxyArmWithoutHome } from '../../representation/proxy-carriers.js'
+import { physicalCarrierKey, samePhysicalCarrier } from '../../representation/physical-carrier.js'
 import type { NativeSelectionHelper } from './native-selection-helpers.js'
 import { cppRecordIndexSidecarName, tailAwareFieldReadText, tailAwareFieldWriteText, tailFieldsOf } from './records.js'
 import {
@@ -17,7 +19,6 @@ import {
   abiKey,
   arrayExtensionKey,
   containsUnresolved,
-  isBooleanShapedMergeTarget,
   isCanonicalNumberPropertyKeyText,
   isOpenDocument,
   representationKey,
@@ -26,6 +27,7 @@ import {
   carriesUndefined
 } from '../../representation/model.js'
 import type { IrOperand, MergeLiveArmRebuildOperation } from '../../ir/model.js'
+import { programConversionKey, type ProgramConversionRecipe, type ProgramConversionRole } from '../../ir/program-conversions.js'
 import { transferOf } from '../../ir/transfer.js'
 import type { DeclarationId, FunctionId } from '../../identity/ids.js'
 import type { ConversionNode } from '../../conversion/algebra.js'
@@ -34,12 +36,15 @@ import {
   ARM_VIEW_MATERIALIZER,
   ASSERTED_UNION_MATERIALIZER,
   ASSERTED_UNION_COPY_MATERIALIZER,
+  ASSERTED_VIEW_MATERIALIZER,
+  type AssertedViewPlan,
   EXACT_ARM_MATERIALIZER,
   FAMILY_MEMBER_VIEW_MATERIALIZER,
   CAUGHT_HANDOFF_MATERIALIZER,
   ASSERTED_CLASS_DOWNCAST_MATERIALIZER,
   NULLISH_OPTIONAL_MATERIALIZER,
   NATIVE_BASE_VIEW_MATERIALIZER,
+  IMPOSSIBLE_INDEX_READ,
   exactArmIndexOf,
   isNativeCollectionUpcast,
   type ConversionCensus
@@ -47,17 +52,25 @@ import {
 import type { RecordLayoutPolicy } from '../../representation/policies.js'
 import type { ClassLayout } from '../../projection/classes.js'
 import type { CaptureIndex } from './emit-context.js'
-import { familyMemberViewText, structuralRecordViewText, unionRecastPlanOf, viewPlanFor } from './emit-record-view.js'
-import { PROTOCOL_ITERATOR, protocolIteratorText } from './emit-protocol-iterator.js'
-import { ITERABLE_OBJECT_VIEW, iterableObjectViewText } from './emit-iterable-object-view.js'
-import { ITERATOR_OBJECT_VIEW, iteratorObjectViewText } from './emit-iterator-object-view.js'
+import { certifiedRecordViewText, familyMemberViewText, structuralRecordViewText } from './emit-record-view.js'
+import { documentRecordViewText } from './emit-document-record-view.js'
+import { dynamicRecordLoadNeedsPlan } from '../../conversion/document-record-view.js'
+import { IMPOSSIBLE_FIELD_READ } from '../../conversion/impossible-field-read.js'
+import { checkedNativeFieldReadMismatchOf } from '../../conversion/checked-native-field-read.js'
+import { callablePayloadText, callableViewText } from './emit-callable-view.js'
+import { dictionaryReadText, dictionaryViewText } from './emit-dictionary-view.js'
+import { nativeObjectSampleText } from './emit-native-object-sample.js'
+import { nativeDescriptorSnapshotViewText } from './emit-descriptor-snapshot.js'
+import { SIBLING_CLASS_ARGUMENT } from '../../conversion/sibling-class.js'
+import { PROTOCOL_ITERATOR, protocolIteratorText, certifiedProtocolIteratorText } from './emit-protocol-iterator.js'
+import { ITERABLE_OBJECT_VIEW, iterableObjectViewText, certifiedIterableObjectViewText } from './emit-iterable-object-view.js'
+import { ITERATOR_OBJECT_VIEW, certifiedIteratorObjectViewText, iteratorObjectViewText } from './emit-iterator-object-view.js'
 import {
   CONSTRUCTOR_DISPATCH_FAMILY,
   CONSTRUCTOR_IDENTITY_FAMILY,
   constructorDispatchFamilyText,
   constructorIdentityFamilyText
 } from './emit-constructor-identity-family.js'
-import { recordViewDispatchesArms } from '../../conversion/record-view.js'
 import {
   createCppEmitBlockedError,
   cppConstructThunkName,
@@ -72,7 +85,7 @@ import { booleanTestText } from './emit-presence.js'
 import { recastedRecordToArrayText } from './emit-arrays.js'
 import {
   cppAbiParameterType,
-  cppAbiType,
+  cppCallableFrameArguments,
   cppClassName,
   cppConstantLiteral,
   cppRecordFieldName,
@@ -95,6 +108,11 @@ import { widenedNativeSumText } from './emit-sum-widening.js'
 import { nativeSelectionText } from './emit-native-selection.js'
 import { narrowingReachesTarget } from '../../conversion/build.js'
 import { evaluatedOnceText } from './evaluated-once.js'
+import { nativeCallReceiverText, nativeUnboundMethodText } from './emit-native-method.js'
+import type { PromiseAdoptionRecipe } from '../../conversion/promise-adoption.js'
+import { dynamicWrapperPlanMatches, type DynamicWrapperPlan } from '../../conversion/dynamic-wrapper.js'
+import { nativeArrayViewText } from './emit-array-view.js'
+import { nativeFieldPolicyType } from './records.js'
 
 /**
  * `native-record-ref` (the String WRAPPER OBJECT, `new String(x)`) -> `string`,
@@ -137,9 +155,9 @@ export const promisePayloadConvertible = (source: Representation, target: Repres
   // unit pair reconciles by supplying or dropping the value, in either
   // direction. An unknown payload can also hold that undefined value; it must
   // receive the fulfillment value rather than a boxed source promise.
-  // `@hono/node-server`'s `listener.ts` needs exactly this: `responseViaCache`
-  // is declared `Promise<undefined | void>` and both callers `return` its
-  // promise from an async function whose own result is `Promise<void>`.
+  // A function declared `Promise<undefined | void>` whose callers `return` its
+  // promise from an async function whose own result is `Promise<void>` needs
+  // exactly this.
   if (target.kind === 'void') return isUnitPromisePayload(source)
   if (source.kind === 'void') return source.bottom === true || acceptsVoidPromisePayload(target)
   try {
@@ -220,8 +238,8 @@ export const classFamilyLoadText = (ctx: ConversionSite, held: Representation, r
   if (!arms.every((arm) => arm.kind === 'class-ref' && arm.ownership === source.ownership && arm.ancestors.includes(source.declaration)))
     return null
   const classes = arms as readonly Extract<Representation, { kind: 'class-ref' }>[]
-  // A target may retain both an ancestor and one of its descendants (Three's
-  // WebGLRenderTarget | WebGLCubeRenderTarget flow does). JS unions do not
+  // A target may retain both an ancestor and one of its descendants (a
+  // `Base | Derived` union where `Derived extends Base`). JS unions do not
   // preserve which syntactic arm produced an object, so allocation identity
   // supplies the canonical answer: test the most-specific family first and
   // retain each arm's original target-union index when rebuilding it.
@@ -286,11 +304,11 @@ const taggedUnionArmText = (
   // An arm that CONVERTS to the target answers too. An exact arm is the
   // cheapest answer for its own discriminant, but its existence cannot erase
   // a different live arm which is structurally assignable to the same target.
-  // Hono's RegExpRouter exposed this: a truthy value is either `string[]` or
+  // A regex-driven router exposed this: a truthy value is either `string[]` or
   // `RegExpMatchArray`; both are `Array<string>`, yet preferring the exact arm
   // emitted an unconditional `get<0>()` and crashed on a match-result arm.
   //
-  // Hono's `Hono.fetch` is another converting case: the cell is
+  // A method reading a boxed-or-optional cell is another converting case: the cell is
   // `dynamic | optional(record)` and the read is a
   // `native-record-ref`, so the live arm is the BOX and the load is the
   // unboxing check `unboxedLoadText` already renders. The narrowing that
@@ -315,9 +333,9 @@ const taggedUnionArmText = (
   // arm needs its home or the read would rebuild a live arm as another.
   // Whatever the uncovered arm is: a class or a named record left without a
   // home is dropped just as surely as a structural one, and the chain then
-  // reads the wrong arm's payload. mongodb's `resolveOptions(parent:
-  // OperationParent)` handed a Collection to `resolveBSONOptions`'s
-  // `Db | MongoClient | { bsonOptions? }` parameter and read it as a Db.
+  // reads the wrong arm's payload: an instance of one class handed to a
+  // `ClassA | ClassB | { option? }` parameter, of which it is none of the
+  // classes, was read as the first class.
   const partialWidening =
     target.kind === 'tagged-union' &&
     candidates.some((candidate) => !exact.includes(candidate)) &&
@@ -439,7 +457,7 @@ const narrowedUnionSubsetText = (
   // this chain is what a NESTED union arm reaches through (`homeOf` there
   // asks `convertedValueText`, which lands here for an inner union narrowed
   // one level down), and it spelled the ~1.3KB target type and the source
-  // expression once per arm -- 928 inner spellings on one three.js line after
+  // expression once per arm -- 928 inner spellings on one emitted line after
   // the outer recast alone was bound. A single-pair chain keeps the direct
   // spelling: there is nothing to share.
   const multiPair = pairs.length > 1
@@ -490,14 +508,14 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
     held.native !== null &&
     held.native === read.native &&
     held.ownership === read.ownership &&
-    cppTypeOf(held) === cppTypeOf(read)
+    samePhysicalCarrier(held, read)
   )
     return text
   const unwrapped = held.kind === 'optional' ? `(*${text})` : text
   const inner = held.kind === 'optional' ? held.payload : held
   if (representationKey(inner) === representationKey(read)) return unwrapped
   // The same array read as the interface that extends it (`elements` of
-  // `readonly T[] | undefined`, proven present and then `isNodeArray`): one
+  // `readonly T[] | undefined`, proven present and then type-guarded): one
   // C++ type either way -- the fields an extension adds live beside the
   // elements -- so the load is the payload itself, exactly as
   // `conversions.ts`'s `gea::ArrayObject::identity` recast states for the
@@ -525,9 +543,8 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
   // dynamic branch owns that (`has_value() ? box(payload) : box(absence)`).
   // Handing it the unwrapped payload boxed `(*cell)` unconditionally, so a
   // `number | null` holding `null` reached an `...args: any[]` listener as
-  // `Tag::Number` over whatever the dereference found -- node-compat's
-  // cluster 'exit' event reported `code=0 signal=` for a worker Node reports
-  // as `code=null signal=SIGTERM`. Certified, compiled, wrong.
+  // `Tag::Number` over whatever the dereference found -- an event reporting
+  // `code=null` reported `code=0`. Certified, compiled, wrong.
   if (read.kind === 'dynamic') return widenedStoreText(read, held, text)
   // And the mirror: a cell the program declared `any` read at a place the
   // checker narrowed. `if (a instanceof Error) throw a` reads the same cell as
@@ -553,8 +570,8 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
   ) {
     return `${cppTypeOf(read)}(${unwrapped})`
   }
-  // A program-class handle read at a DERIVED class -- `part instanceof Mesh`
-  // then `part.castShadow = true` on a `traverse` callback's `Object3D`.
+  // A program-class handle read at a DERIVED class -- `node instanceof Derived`
+  // then `node.derivedField = true` on a callback parameter typed as the base.
   // `gea::Ref<Base>` and `gea::Ref<Derived>` are different C++ types, so the
   // narrowed read needs a cast even though nothing about the object changes:
   // `downcastClassRef` (gea_runtime.h) is `staticCast` plus the one thing this
@@ -579,7 +596,7 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
     return `gea::host::downcastClassRef<${cppClassName(read.declaration)}>(${unwrapped})`
   }
   // A cell that provably holds nothing but absence, read at a place declared
-  // wider. hono's `#dispatch` binds `env: E['Bindings']` -- an indexed access
+  // wider. A parameter typed `env: E['Bindings']` -- an indexed access
   // through a type parameter's constraint that this program never instantiates
   // -- so its cell is placed `undefined` while every read of it is the declared
   // optional. A read cannot be narrower than the cell here; it is a widening,
@@ -591,7 +608,7 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
   // Every arm search below SELECTS: it loads the arm the read names and
   // trusts the narrowing that licensed the load to have killed the rest. A
   // store into a declared slot has no such licence -- `const ctx:
-  // AudioContextLike | null = Ctor ? new Ctor() : createNativeAudioContext()`
+  // SomeInterface | null = Ctor ? new Ctor() : createOther()`
   // converts a `record | class` into the interface's record, and the class
   // arm is as live as the record's. This chain cannot tell the two apart (a
   // class viewed as a record needs the program's layouts), so the census
@@ -646,10 +663,18 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
     const absentIndex = inner.arms.findIndex((arm) => arm.value.kind === read.absence)
     if (absentIndex >= 0) {
       const narrowed = cppTypeOf(read)
-      return `(${unwrapped}.is<${absentIndex}>() ? ${narrowed}() : ${narrowed}(${taggedUnionArmText(inner, read.payload, unwrapped)}))`
+      // The absent arm is tested first, so it never needs a home in the
+      // payload. Searching with `refuse` counted it as an unhomed arm of a
+      // union payload and refused, and the chain fell through to
+      // `optional-wrap-converted`, which loaded the present arm into a PRESENT
+      // optional unconditionally: `describe(holder.image)` over `A | B |
+      // undefined` passed into `A | B | C | null | undefined` read the
+      // undefined arm as the present union. Any other unhomed arm is proven
+      // dead by the narrowing that licensed this load, and is checked.
+      return `(${unwrapped}.is<${absentIndex}>() ? ${narrowed}() : ${narrowed}(${taggedUnionArmText(inner, read.payload, unwrapped, 'throw')}))`
     }
     // No arm is the bare absent literal, because absence lives INSIDE another
-    // arm's own optional. hono's `compose` binds `let handler` to a
+    // arm's own optional. A middleware composer binds `let handler` to a
     // `Function | (Next | undefined)` cell and reads it back as `Function |
     // undefined`: the union's arms are the record and an
     // `optional(callable)`, and the read's payload is the record alone.
@@ -678,7 +703,7 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
     // only ever shrink a union -- the cell's placement is the union of what the
     // program writes to it, and a read's carrier is the declared type at that
     // site, so a cell every writer narrows still gets read at its full declared
-    // width. hono's `#newResponse` is the case: the cell holds
+    // width. A response-building method is the case: the cell holds
     // `Response | ResponseInit` and the read wants
     // `StatusCode | Response | ResponseInit`. Every arm the cell can hold is an
     // arm of the read, which is exactly what `recastedUnionText` proves, and
@@ -700,8 +725,8 @@ export const narrowedLoadText = (held: Representation, read: Representation, tex
  * refused with "narrows a tagged union to string, which none of its arms
  * carries" -- an accurate sentence about the outer union only.
  *
- * `node-compat`'s `new Request(url, init)` is the case: `typeof init.body ===
- * 'string'` narrows `BodyInit | null | undefined` to `string`.
+ * `typeof init.body === 'string'` over a nested `string | Blob | null |
+ * undefined` body field is the case: it narrows to `string`.
  *
  * The discriminant is tested whenever more than one arm can answer, exactly as
  * `taggedUnionArmText` does for the flat case, and for the same reason: with
@@ -713,7 +738,7 @@ const nestedArmLoadText = (inner: Extract<Representation, { kind: 'tagged-union'
   const nestedLoad = (held: Representation, at: string): string | null => {
     if (representationKey(held) === readKey) return at
     // A leaf can satisfy a wider nested read through a real carrier
-    // conversion. Hono's RegExpRouter reads an optional `Array<string>` from
+    // conversion. A regex-driven router reads an optional `Array<string>` from
     // an optional union whose leaves are `string[]` and `RegExpMatchArray`:
     // neither leaf equals the OPTIONAL target, but both convert to it. Looking
     // only for exact nested keys found the first leaf and emitted its `get`
@@ -845,8 +870,8 @@ export const dynamicTagFor = (representation: Representation): string | null => 
     // ever one payload address to record, never one per element domain the
     // way `typed-array` needs). `Value::box` records that address as
     // `payloadType()` the identical way it does for every other `Ref<...>`
-    // in this list. Missing here meant an `ArrayBuffer` value -- hono's
-    // `Context.body`'s own `Data` union carries one -- could never widen
+    // in this list. Missing here meant an `ArrayBuffer` value -- a
+    // request-body data union carries one -- could never widen
     // into a `dynamic` cell, the same silent gap `typed-array`'s own
     // addition just above closed for typed arrays, blocking both this
     // widen and the reverse read (`unboxedLoadText`, below) for the
@@ -888,8 +913,8 @@ export const dynamicTagFor = (representation: Representation): string | null => 
     // whichever `T` this instantiation closes over, one program-wide address
     // per payload type, exactly as it does for every other kind sharing this
     // tag. Missing here meant a value returned from a plain (non-async)
-    // function -- `#cachedBody`'s `return (bodyCache[k] as Promise<BodyInit>)
-    // .then(...)` in hono's `request.ts`, whose OWN inferred return type is a
+    // function -- a body cache's `return (bodyCache[k] as Promise<BodyInit>)
+    // .then(...)`, whose OWN inferred return type is a
     // real `Promise<unknown>` folding to `dynamic` only because its sibling
     // return arm reads a program-declared `any` -- could never widen into a
     // `dynamic` cell at all: `emit-narrowing.ts`'s own generic `held.kind ===
@@ -978,16 +1003,16 @@ const restFromOf = (representation: Representation): number | null => {
  * the packed array (10.2.11 binds a rest parameter to an Array of ALL the
  * remaining ones). The emitter is the only reader of the ABI, so it states the
  * position here and `gea::Value::boxCallable` records the matching thunk.
- * hono's `this[method] = (args1, ...args) => ...` is every `app.get(path,
- * handler)` in the program.
+ * A method table built as `this[method] = (args1, ...args) => ...` makes
+ * every call through it such a call.
  */
 export const boxedText = (representation: Representation, tag: string, text: string): string => {
   const restFrom = restFromOf(representation)
   const value = `static_cast<${cppTypeOf(representation)}>(${text})`
   const abi = representation.kind === 'function-and-constructor' ? representation.call : 'abi' in representation ? representation.abi : null
-  if (abi?.receiver) return `gea::Value::boxMethod<${restFrom === null ? -1 : restFrom + 1}>(${value})`
+  if (abi?.receiver) return `gea::Value::boxMethod<${restFrom === null ? -1 : restFrom + 1}, ${abi.argumentsFrame === 'actual'}>(${value})`
   if (restFrom === null) return `gea::Value::box(gea::Value::Tag::${tag}, ${value})`
-  return `gea::Value::boxCallable<${restFrom}>(${value})`
+  return `gea::Value::boxCallable<${restFrom}, ${abi?.argumentsFrame === 'actual'}>(${value})`
 }
 
 /**
@@ -1024,9 +1049,9 @@ export const dynamicPromiseAdoptionText = (
   layouts?: RecordLayoutPolicy
 ): string | null => {
   // A settled value read as a NAMED record is rebuilt from its layout, as a
-  // plain `any -> T` read is (`dynamicNamedRecordText`): mongodb's
-  // `tryOperation` returns `operation.handleOk(result)` -- typed `any`,
-  // holding a Document -- from a body declared `Promise<InsertOneResult>`,
+  // plain `any -> T` read is (`dynamicNamedRecordText`): an async function
+  // returns a call typed `any` -- holding a plain object -- from a body
+  // declared `Promise<SomeResult>`,
   // and the layout-free load below would unbox it by identity only.
   if (layouts !== undefined && result.value.kind !== 'void') {
     const settledType = cppTypeOf(result.value)
@@ -1072,7 +1097,7 @@ const readOnlyMapViewStoreText = (held: Representation, written: Representation,
   if (held.kind !== 'tagged-union') return readOnlyMapViewText(written, held, text)
   // An arm the written map already IS, or shares a C++ type with, is its
   // home as it stands (`widenedStoreText`); a view is only for the rest.
-  if (held.arms.some((arm) => cppTypeOf(arm.value) === cppTypeOf(written))) return null
+  if (held.arms.some((arm) => samePhysicalCarrier(arm.value, written))) return null
   for (const [armIndex, arm] of held.arms.entries()) {
     const inner = readOnlyMapViewStoreText(arm.value, written, text)
     if (inner !== null) return `${cppTypeOf(held)}::ofArm<${armIndex}>(${inner})`
@@ -1084,15 +1109,15 @@ const readOnlyMapViewStoreText = (held: Representation, written: Representation,
  * A typed `Map<K, V>` stored where a union holding `Map<unknown, unknown>` --
  * and no arm of the written map's own C++ type -- is declared: the SAME map,
  * boxed and read back through `unboxDynamicMap`'s `DynamicMapSource` view.
- * bson's `serialize(object: Document)` walks such a parameter under
+ * A serializer taking `object: Document` walks such a parameter under
  * `object instanceof Map`, so a copy would be a different object and would
- * miss every later `set` (mongodb's client_metadata `LimitedSizeDocument`).
+ * miss every later `set` (a `Map` subclass that keeps writing after the hand-off).
  */
 const dynamicMapArmViewStoreText = (held: Representation, written: Representation, text: string): string | null => {
   if (written.kind !== 'keyed-collection' || written.family !== 'map' || written.ownership !== 'shared-refcount') return null
   if (written.recursive !== undefined || written.value === null) return null
   if (held.kind !== 'tagged-union') return null
-  if (held.arms.some((arm) => cppTypeOf(arm.value) === cppTypeOf(written))) return null
+  if (held.arms.some((arm) => samePhysicalCarrier(arm.value, written))) return null
   for (const [armIndex, arm] of held.arms.entries()) {
     const target = arm.value
     if (target.kind !== 'keyed-collection' || target.family !== 'map' || target.ownership !== 'shared-refcount') continue
@@ -1128,7 +1153,7 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
   // stands and renders `left = nullptr`, which `Ref` does not accept.
   if (held.kind === 'class-ref' && held.ownership === 'shared-refcount' && written.kind === 'null') return `${cppTypeOf(held)}()`
   // A dynamic value returned where `Promise<T>` is declared may itself be a
-  // promise -- hono's `formData()` returns its `any`-typed `#cachedBody(...)`
+  // promise -- an async method returning an `any`-typed call that yields one
   // -- and an async function's return adopts it (ECMA-262 27.2.1.3.2) rather
   // than fulfilling with the promise object.
   if (held.kind === 'promise' && written.kind === 'dynamic') {
@@ -1224,7 +1249,7 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
         // An arm that is itself a box is stored as-is, and cannot go through
         // the recursion below: this function's identity gate answers `null`
         // for a same-carrier pair -- "no widening needed", which the loop
-        // would read as a refusal. hono's `compose` carries its `handler` as
+        // would read as a refusal. A middleware composer carries its `handler` as
         // `tagged-union(dynamic(untyped-callable) | optional(Next))`, and
         // reading that cell as `dynamic` asks exactly this of arm 0.
         if (arm.value.kind === 'dynamic') {
@@ -1241,7 +1266,7 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
         const armTag = dynamicTagFor(arm.value)
         // An arm with no tag is not a carrier this box cannot hold -- it is one
         // whose JavaScript type depends on something a level further in.
-        // `BodyInit | null | undefined` (hono's `createResponseInstance`) has a
+        // `BodyInit | null | undefined` (a `Response` body parameter) has a
         // `present` arm that is ITSELF a union of seven, every one tagged. So
         // the arm recurses here -- this case and the optional one above answer
         // exactly the shapes `dynamicTagFor` returns `null` for -- and an arm
@@ -1256,8 +1281,8 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
     return tag === null ? null : boxedText(written, tag, text)
   }
   // A CALLABLE CELL whose held convention differs from the written one only in
-  // its RESULT -- `const slot: (n: number) => any = concrete`, and hono's
-  // `#addRoute(handler: H)` one union layer up. Asked before the tagged-union
+  // its RESULT -- `const slot: (n: number) => any = concrete`, and a
+  // `register(handler: A | B)` parameter one union layer up. Asked before the tagged-union
   // gate below because a bare callable cell never reaches the arm loop, and
   // `emitBindingWrite` renders a store through this function rather than
   // through `convertedValueText`, so the pair has no other way in.
@@ -1281,7 +1306,7 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
   if (written.kind === 'optional') {
     // An arm that IS this optional, whole. The deref below spends the
     // optional's own absence on the grounds that no arm ever wraps one -- and
-    // hono's `compose` disproves that: `let handler` is a `Function | (Next |
+    // a middleware composer disproves that: `let handler` is a `Function | (Next |
     // undefined)` cell whose arms are the record and `optional(callable)`, so
     // writing `next || undefined` into it stores the optional AS the arm.
     // Dereferencing there would drop the absence the arm exists to hold.
@@ -1319,21 +1344,6 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
   const writtenKey = representationKey(written)
   const index = held.arms.findIndex((arm) => representationKey(arm.value) === writtenKey)
   if (index >= 0) return `${cppTypeOf(held)}::ofArm<${index}>(${text})`
-  // An open Document into the ONE record arm it can be adopted as, beside a
-  // `dynamic` arm: mongodb's `decorateDecryptionResult(decrypted: Document & {
-  // [kDecoratedKeys]?: string[] })` takes the caller's Document and, through
-  // its own recursion, any `decrypted[k]`. The record arm is the Document's
-  // home -- adopted, the Document views it, so the symbol-keyed member the
-  // body defines is the one a later read through the Document finds -- while
-  // boxing it into the `dynamic` arm would leave that member nowhere to live.
-  if (isOpenDocument(written)) {
-    const adoptions = held.arms.flatMap((arm, armIndex) => {
-      const fields = arm.value.kind === 'record' || arm.value.kind === 'record-with-index' ? arm.value.fields : null
-      const adopted = fields === null ? null : documentAdoptionText(written, arm.value, fields, text)
-      return adopted === null ? [] : [`${cppTypeOf(held)}::ofArm<${armIndex}>(${adopted})`]
-    })
-    if (adoptions.length === 1) return adoptions[0]!
-  }
   // A join can nest: `string | number | boolean | null | undefined` derives as
   // an outer union over the two absence arms and an *inner* union over the
   // three value arms, so a written `bool` is an arm of an arm and reaches its
@@ -1353,7 +1363,7 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
     // one of `gea::CallableObject`'s own implicit converting constructors,
     // which take the value as it stands and are what `convertedValueText`
     // already answers with for the identical pair when the target is not a
-    // union. hono's `H = Handler | MiddlewareHandler` is the case -- a
+    // union. `H = Handler | MiddlewareHandler` is the case -- a
     // middleware `(c, next) => Promise<void>` is assignable to one arm and the
     // exact-key search above cannot see it, because assignability here is not
     // carrier equality.
@@ -1363,7 +1373,7 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
     // what the program wrote, which is the same line the record recasts below
     // stay on.
     if (
-      cppTypeOf(written) === cppTypeOf(arm.value) ||
+      samePhysicalCarrier(written, arm.value) ||
       dropsUnboundParameters(written, arm.value) ||
       dropsAllParametersIntoResultArm(written, arm.value) ||
       widensResultIntoArm(written, arm.value) ||
@@ -1383,29 +1393,23 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
     const view = readOnlyMapViewText(written, arm.value, text)
     if (view !== null) return `${cppTypeOf(held)}::ofArm<${armIndex}>(${view})`
     // The fifth pair is not an implicit constructor, so it wraps the text
-    // rather than passing it through -- see `resultAdapterOf`. hono's `H =
+    // rather than passing it through -- see `resultAdapterOf`. `H =
     // Handler | MiddlewareHandler` reaches its arm exactly here: same frame,
     // a result the arm declares `any`.
     const adaptedArm = resultAdaptedCallableText(written, arm.value, text)
     if (adaptedArm !== null) return `${cppTypeOf(held)}::ofArm<${armIndex}>(${adaptedArm})`
     // A record recasts into a dictionary/array-object ARM the same way
     // `convertedValueText`'s own top level recasts it directly -- identity above never matches an object literal against either.
-    // A dictionary reaches a WIDER dictionary arm the same way (`dictionaryCastableToDictionary`);
-    // `conversions.ts` admits only a union with ONE such arm, so the first match is the match.
     const recast =
       written.kind === 'record'
         ? arm.value.kind === 'dictionary'
           ? recastedRecordToDictionaryText(written, arm.value, text)
-          : arm.value.kind === 'array-object'
-            ? recastedRecordToArrayText(written, arm.value, text)
-            : arm.value.kind === 'record'
-              ? recastedRecordText(written, arm.value, text)
-              : null
-        : written.kind === 'dictionary' && arm.value.kind === 'dictionary'
-          ? recastedDictionaryText(written, arm.value, text)
-          : written.kind === 'record-with-index' && arm.value.kind === 'dictionary'
-            ? recastedIndexedRecordToDictionaryText(written, arm.value, text)
+          : arm.value.kind === 'record'
+            ? recastedRecordText(written, arm.value, text)
             : null
+        : written.kind === 'record-with-index' && arm.value.kind === 'dictionary'
+          ? recastedIndexedRecordToDictionaryText(written, arm.value, text)
+          : null
     if (recast !== null) return `${cppTypeOf(held)}::ofArm<${armIndex}>(${recast})`
   }
   return null
@@ -1433,8 +1437,8 @@ const renderedWidenedStoreText = (held: Representation, written: Representation,
  * A sum converted ARM BY ARM into one payload, or `null` when an arm has no
  * way there.
  *
- * tsc's `visitEachChild<T>` returns `fn === undefined ? node : fn(node, ...)`
- * where `fn` is a `VisitEachChildFunction<any>`: the conditional merges `T`
+ * A generic visitor `visit<T>` returns `fn === undefined ? node : fn(node, ...)`
+ * where `fn` is a visitor function typed over `any`: the conditional merges `T`
  * with a declared `any` into `tagged-union(native-record-ref | dynamic)`, and
  * the function returns `T | undefined`. The typed arm IS the payload; the
  * dynamic arm is the checked unbox every read of a declared-`any` value into
@@ -1513,16 +1517,16 @@ export const recastedUnionText = (
   // the representation -- `emit-callable.ts`'s `structuralRecordViewText` is
   // where both are in hand. `conversions.ts` already ADMITS that pair, so
   // without this the admission and the render disagree, which is the one
-  // failure mode this compiler exists to remove: hono's `c.json()` passes
-  // `ResponseOrInit<ContentfulStatusCode>` into `ResponseOrInit<StatusCode>`
+  // failure mode this compiler exists to remove: a generic alias instantiated
+  // at a narrower argument (`Init<Narrow>`) passed into `Init<Wide>`
   // -- two shape ids over identical field carriers -- and the arm had no home
   // here even though the conversion graph said it did.
   viaLayout?: (source: Representation, target: Representation, text: string) => string | null
 ): string | null => {
   // A union with N arms otherwise interpolates BOTH the full target spelling
   // and the source expression at every arm -- and a nested inner-union arm
-  // repeats that again inside every outer arm. The three.js app's `NativeUniformValue
-  // | null | undefined` is a 3-arm outer union over a 32-arm inner one, and
+  // repeats that again inside every outer arm. A `Value | null | undefined`
+  // whose `Value` is itself a 32-arm union is a 3-arm outer union over a 32-arm inner one, and
   // one recast of it -- reached from several sibling call sites glued by the
   // caller's own `&&`/`||` -- emitted a single line over 1.29MB: 957
   // `::ofArm<` sites each re-spelling a ~1.3KB template type, because neither
@@ -1561,10 +1565,16 @@ export const recastedUnionText = (
     }
     const homes: RecastUnionHome[] = []
     for (const [candidateIndex, candidate] of target.arms.entries()) {
+      // An absence arm is never the home of a live value: the chain's
+      // `unreachable-value` step would answer it by DISCARDING the value
+      // (correct only for a flow-proved `undefined` read), and as the first
+      // home found it silently turned every such arm into `undefined`.
+      const absence = candidate.value.kind === 'undefined' || candidate.value.kind === 'null' || candidate.value.kind === 'void'
+      if (absence && candidate.value.kind !== arm.value.kind) continue
       // `convertedValueText` and not `widenedStoreText` alone: an arm can
       // reach its home by a recast rather than a widening -- two records that
-      // declare the same fields under two interned shapes, which is what
-      // hono's `Result<T>` is made of -- and only the superset tries all of
+      // declare the same fields under two interned shapes, which is what a
+      // generic result alias instantiated twice is made of -- and only the superset tries all of
       // them.
       const stored = tryCandidateText(() => convertedValueText(arm.value, candidate.value, armText))
       const home = stored ?? viaLayout?.(arm.value, candidate.value, armText) ?? null
@@ -1672,8 +1682,8 @@ export const recastedUnionFromHomes = (
  * The relation admitted is TypeScript's own structural one, not shape equality,
  * because that equality was never the question a return conversion asks.
  * `return this.options` out of a method declared to return a narrower options
- * type is legal TypeScript and lowers to exactly this pair, and mongodb's
- * driver is built out of it: every `CommandOptions` producer hands a record
+ * type is legal TypeScript and lowers to exactly this pair, and options-heavy
+ * programs are built out of it: every options producer hands a record
  * carrying dozens of fields to a slot declaring an overlapping, differently
  * ordered, differently optional subset. So:
  *
@@ -1698,8 +1708,8 @@ export const recastedUnionFromHomes = (
  * performs it, and two optionals over one payload are one C++ type since
  * `cppTypeOf` never reads `.absence`), or by being the same recast one level
  * down. The nominal-identity split this exists for does not stop at the top:
- * hono's pattern router hands `[Pattern, string, [Handler, ParamIndexMap]]` to
- * a `Route<T>` slot whose innermost tuple interned under a second shape id with
+ * a nested tuple like `[Pattern, string, [Handler, ParamIndexMap]]` handed to
+ * a generic `Route<T>` slot whose innermost tuple interned under a second shape id with
  * a byte-identical field list, so the OUTER pair matched everywhere but there.
  * Refusing would refuse the identical question one level in.
  *
@@ -1714,7 +1724,7 @@ const absentFieldText = (value: Representation): string | null => {
   // Remembered per carrier: an unspellable carrier answers by CATCHING a
   // thrown refusal, and the recast admission below asks about the same
   // absent target field once per candidate source -- thousands of throws
-  // for one field on TypeScript's own compiler.
+  // for one field on a large program.
   const remembered = absentFieldTexts.get(value)
   if (remembered !== undefined) return remembered
   const built = absentFieldTextOf(value)
@@ -1727,7 +1737,7 @@ const absentFieldTextOf = (value: Representation): string | null => {
   // absent AS, so the field is not recastable -- a refusal, not a throw. This
   // is asked from the conversion registry's ADMISSION (`conversions.ts`'s
   // `recasting`), whose own `cppTypeOf(target)` guard spells the record by
-  // shape id and never looks inside it: TypeScript's own compiler put an
+  // shape id and never looks inside it: a large program put an
   // `optional(function(...))` whose ABI still carried an unmonomorphized type
   // parameter in a field here, and the throw took the whole compile down
   // instead of costing this one pair. Same idiom as `manifest.ts`'s
@@ -1797,10 +1807,9 @@ const recastableFieldValue = (from: Representation, to: Representation, seen: Se
     // same admission the bare tagged-union branch below makes, one presence
     // flag deeper -- and the same render, `recastFieldText`'s optional branch
     // already descends into its payload before spelling the arm. Without it
-    // tsc's `return evaluatorResult(0)` -- the copy `EvaluatorResult<number>`
-    // with `value: number`, returned where `EvaluatorResult` (default `T`,
-    // `value: string | number | undefined`) is declared -- had the renderer
-    // but not the admission: 19 rows across `checker.ts` and `utilities.ts`.
+    // `return result(0)` -- the copy `Result<number>` with `value: number`,
+    // returned where `Result` (default `T`, `value: string | number |
+    // undefined`) is declared -- had the renderer but not the admission.
     if (to.payload.kind === 'tagged-union' && soleArmIndexFor(to.payload, fromPayload) !== null) return true
     // A structural conversion does not stop at a presence flag. A required
     // source record can fill an optional target record of another interned
@@ -1820,7 +1829,7 @@ const recastableFieldValue = (from: Representation, to: Representation, seen: Se
   if (from.kind === 'function-value-dispatch' && to.kind === 'function-value-dispatch')
     return !containsUnresolved(from) && !containsUnresolved(to) && resultAdapterOf(from, to) !== null
   // Containers copy element by element (`array-copy-recast`,
-  // `dictionary-to-dictionary`), so a field holding one recasts when its
+  // `record-to-dictionary`), so a field holding one recasts when its
   // elements convert.
   // A dynamic field is read out of its box the way any assertion reads one.
   if (
@@ -1861,7 +1870,7 @@ const recordRecastAnswers = new WeakMap<Representation, WeakMap<Representation, 
  *
  * The guard's key and set exist only once a descent happens. The conversion
  * registry asks this about every ordered pair of record carriers a program
- * has (`conversion/build.ts`), and TypeScript's own compiler has enough of
+ * has (`conversion/build.ts`), and a large program has enough of
  * them, with enough fields each, that a key string, a fresh set and a linear
  * field scan per target field, per pair, WAS the representations stage (the
  * main thread sat at 100% for an hour past the previous run's total). Fields
@@ -2043,8 +2052,8 @@ const recastedRecordText = (
   // and makes a required bit a `static` member only when the program never
   // deletes/freezes a declared field -- so a positional list that skips the
   // required bits lands each optional bit on a REQUIRED one whenever that
-  // census says no. mongodb's `TimeoutContext.create` then saw
-  // `'serverSelectionTimeoutMS' in options` answer false. Left alone, every
+  // census says no. An `'optionalKey' in options` check then answered
+  // false for a key the program had set. Left alone, every
   // bit keeps its declared default (required present, optional absent).
   const target_ = target.ownership === 'shared-refcount' ? '->' : '.'
   const presences = target.fields.flatMap((field) => {
@@ -2150,7 +2159,7 @@ const recastedRecordToDictionaryText = (
     if (converted === null) return null
     const insert = `gea_dict${dictArrow}operator[](${key}) = ${converted};`
     // An optional field never written is no own property, and the dictionary
-    // must not gain the key: a BSON document would serialize it as `null`.
+    // must not gain the key: a serializer walking it would write it as `null`.
     return field.required ? insert : `if (gea_from${fieldArrow}${cppRecordFieldPresenceName(field.key)}) ${insert}`
   })
   if (inserts.some((insert) => insert === null)) return null
@@ -2164,7 +2173,7 @@ const recastedRecordToDictionaryText = (
 
 /**
  * A record with an open string index poured into an open string dictionary:
- * mongodb's `Filter<TSchema>` -- named query operators plus
+ * a generic query type -- named operator fields plus
  * `[key: string]: any` -- handed to a `filter: Document` parameter. The named
  * fields go in as `recastedRecordToDictionaryText` puts them, and every
  * enumerable entry of the index sidecar after them, converted into the
@@ -2221,8 +2230,8 @@ export const recastedIndexedRecordToDictionaryText = (
  *
  * The static copy lists the named fields before the index entries, which is
  * the record's own order only until it has a key outside its layout -- a
- * command document gains its options that way, and a BSON command's first key
- * has to stay the command's name. The runtime then knows the order
+ * command document gains its options that way, and a serialized command whose
+ * first key is its name has to keep that key first. The runtime then knows the order
  * (`gea::copyOwnPropertiesInCreationOrder`); each value it hands over is a
  * property read through the record's own protocol, converted into the
  * dictionary's carrier.
@@ -2247,8 +2256,8 @@ const creationOrderedDictionaryCopyText = (
 
 /**
  * The indexed record a carrier holds: itself, or the layout a named interface
- * resolves to when that layout declares an index -- mongodb's `WithoutId<TSchema>`
- * is a name. A named layout with NO index is the plain record recast's.
+ * resolves to when that layout declares an index -- a mapped alias like
+ * `WithoutId<TSchema>` is a name. A named layout with NO index is the plain record recast's.
  */
 export const indexedRecordViewOf = (
   source: Representation,
@@ -2257,7 +2266,7 @@ export const indexedRecordViewOf = (
   if (source.kind === 'record-with-index') return source
   if (source.kind !== 'native-record-ref' || source.native !== null || source.recursive) return null
   const fields = layouts.forShape(source.shapeId)
-  const indexes = layouts.indexesForShape?.(source.shapeId) ?? []
+  const indexes = layouts.indexesForShape(source.shapeId)
   if (fields === null || indexes.length === 0) return null
   return { kind: 'record-with-index', shapeId: source.shapeId, fields, indexes, ownership: source.ownership }
 }
@@ -2278,65 +2287,13 @@ export const indexedRecordDictionaryArmOf = (
 }
 
 /**
- * An open dictionary recast into another open dictionary over the same key
- * domain whose VALUES it widens into -- `Record<string, string>` reaching a
- * slot declared `OutgoingHttpHeaders` (`{ [name: string]: string | number |
- * boolean | readonly string[] | undefined }`). TypeScript's `||` typing
- * subtype-reduces the two into the wider one, so `@hono/node-server`'s `get
- * headers()` -- `cache[2] || { 'content-type': defaultContentType }` where
- * the slot is `Record<string, string> | [string, string][] |
- * OutgoingHttpHeaders | undefined` -- publishes ONLY the wider dictionary as
- * the merge's arm, and both the literal and the slot's own string-dictionary
- * arm have to reach it. Nothing between the two carriers is a view: a
- * `gea::Dictionary<std::string>` and a `gea::Dictionary<gea::Optional<...>>`
- * are two template instantiations.
- *
- * One level out from `recordCastableToDictionary` above and admitted on the
- * same terms: every value the source holds converts into the target's value
- * carrier by the store it would have performed had the entry been written
- * against the wider index signature in the first place, and the rebuild is a
- * fresh table -- the same fresh table the record pour builds, with the same
- * consequence, that a program which keeps writing the SOURCE afterwards and
- * reads the widened copy does not see the write. The record pour already
- * stands on that ground for the identical pair one shape narrower; this does
- * not extend it further.
- *
- * String keys only. `gea::NumericDictionary` and `gea::SymbolDictionary` are
- * different containers with their own iteration, and nothing has asked for
- * them; a pair over either refuses by name rather than guessing a spelling.
- */
-export const dictionaryCastableToDictionary = (
-  source: Extract<Representation, { kind: 'dictionary' }>,
-  target: Extract<Representation, { kind: 'dictionary' }>
-): boolean => {
-  // A number-keyed table is the same store under canonical numeric keys
-  // (`gea::NumericDictionary`), so it recasts into another number-keyed one
-  // exactly as a string-keyed table does: mongodb's `insertMany` returns the
-  // bulk result's `{ [key: number]: any }` id map as `InsertManyResult`'s
-  // `{ [key: number]: InferIdType<TSchema> }`.
-  if (source.key !== target.key || (source.key !== 'string' && source.key !== 'number')) return false
-  if (representationKey(source.value) === representationKey(target.value)) return false
-  if (containsUnresolved(source) || containsUnresolved(target)) return false
-  try {
-    return convertedValueText(source.value, target.value, 'gea_entry_value') !== null
-  } catch (error) {
-    // Queried while the conversion graph is being built, exactly as
-    // `recordCastableToDictionary` is: a nested recipe's named refusal means
-    // the value pair does not convert, not that graph construction failed.
-    if (isCppEmitBlockedError(error)) return false
-    throw error
-  }
-}
-
-/**
  * A class instance handed where an open `{ [key: string]: any }` document is
  * declared, as a live VIEW of the instance (`gea::dictionary::aliasOf`): the
  * same object, read and written through its own property protocol.
  *
- * Not a copy. mongodb's `RenameOperation.handleOk(): Document` returns a
- * `Collection` its caller goes on to use as the collection, and
- * `ClientBulkWriteResultsMerger` reads `document.insertedCount` -- a
- * PROTOTYPE getter -- off a response class. A table of the instance's own
+ * Not a copy. A method declared `(): Document` may return a class instance
+ * its caller goes on to use as that class, and a consumer may read
+ * `document.someCount` -- a PROTOTYPE getter -- off a response class. A table of the instance's own
  * fields answers neither, and loses every write made through either name
  * afterwards; the view answers all of it because it is the object. Only the
  * one dictionary whose values are already `any` can view: every value read
@@ -2345,76 +2302,63 @@ export const dictionaryCastableToDictionary = (
  */
 /**
  * Whether an open `any` Document can view `source` as the very object it is.
- * A union of such objects is viewable too -- mongodb's `{ message; code } |
- * WriteConcernError | AnyError` into `ErrorDescription` -- because its box
+ * A union of such objects is viewable too -- `{ message; code } |
+ * SomeError | OtherError` into an open description record -- because its box
  * names whichever arm is live; so is the intrinsic Error.
  */
 export const documentViewable = (source: Representation): boolean => {
-  if (source.kind === 'tagged-union') return source.arms.every((arm) => isOpenDocument(arm.value) || documentViewable(arm.value))
+  // A `dynamic` arm beside them is the rest of the same declared Document --
+  // already a box, so the view (`aliasOf(const Value&)`) boxes nothing typed.
+  if (source.kind === 'tagged-union')
+    return source.arms.every((arm) => arm.value.kind === 'dynamic' || isOpenDocument(arm.value) || documentViewable(arm.value))
   const viewable =
     source.kind === 'class-ref' ||
     source.kind === 'record' ||
     source.kind === 'record-with-index' ||
     (source.kind === 'native-record-ref' && !source.recursive) ||
-    // An Array or a Map is an object as well: bson's serializer and
-    // `calculate_size.ts` hold every nested value -- plain, array or Map -- in
-    // one `Document` frame field, then walk it by what it turned out to be.
+    // An Array or a Map is an object as well: a recursive document serializer
+    // holds every nested value -- plain, array or Map -- in one `Document`
+    // frame field, then walks it by what it turned out to be.
     source.kind === 'array-object' ||
     (source.kind === 'keyed-collection' && source.family === 'map')
   return viewable && source.ownership === 'shared-refcount'
 }
 
 export const classDocumentViewText = (source: Representation, target: Representation, text: string): string | null => {
-  // A shared record a copy could not be made of views the same way: mongodb's
-  // `session.clusterTime` (`ClusterTime`) handed to a `Document | null` slot.
+  // A shared record a copy could not be made of views the same way: a
+  // named interface-typed field handed to a `Document | null` slot.
   // A record a Document adopted (`gea::dictionary::adopt`) is that Document.
   if (!isOpenDocument(target) || !documentViewable(source)) return null
-  const boxed = dynamicCarrierBoxText(source, text)
-  return boxed === null ? null : `gea::dictionary::aliasOf(${boxed})`
-}
-
-/**
- * An open `any` Document read as a shared typed record: the record the
- * Document's entries are checked into, after which the Document views it
- * (`gea::dictionary::adopt`). A copy would give one JavaScript object two
- * identities -- a write through the typed name would never reach the Document.
- * A required symbol-keyed field cannot be in a string-keyed Document, so it
- * refuses here rather than at run time.
- */
-export const documentAdoptionText = (
-  source: Representation,
-  target: Representation,
-  fields: readonly RecordField[],
-  text: string
-): string | null => {
-  if (!isOpenDocument(source)) return null
-  if (target.kind !== 'record' && target.kind !== 'record-with-index' && target.kind !== 'native-record-ref') return null
-  if (target.ownership !== 'shared-refcount') return null
-  if (fields.some((field) => field.required && cppRecordFieldKeyIsSymbol(field.key))) return null
-  const keys = (required: boolean): string =>
-    fields
-      .filter((field) => field.required === required && !cppRecordFieldKeyIsSymbol(field.key))
-      .map((field) => cppStringLiteral(field.key))
-      .join(', ')
-  return (
-    `gea::dictionary::adopt<${cppRecordStructName(target.shapeId)}>(` +
-    `${text}, {${keys(true)}}, {${keys(false)}}, ${cppStringLiteral(assertionSite(target))})`
-  )
+  if (source.kind === 'tagged-union') {
+    const entries = source.arms.map((arm, index) => {
+      const value = `gea_source.template get<${index}>()`
+      if (arm.value.kind === 'dynamic') return `gea::dictionary::aliasOf(${value})`
+      return isOpenDocument(arm.value) ? value : classDocumentViewText(arm.value, target, value)
+    })
+    if (entries.some((entry) => entry === null)) return null
+    const tail = entries[entries.length - 1]
+    if (tail === undefined) return null
+    const selected = entries
+      .slice(0, -1)
+      .reduceRight((next, entry, index) => `gea_source.template is<${index}>() ? ${entry} : (${next})`, tail)
+    return `[](const ${cppTypeOf(source)}& gea_source) -> ${cppTypeOf(target)} { return ${selected}; }(${text})`
+  }
+  return `gea::dictionary::aliasOf(${text})`
 }
 
 /**
  * An open `any` Document read as a class instance or a byte view: only the
  * object the Document views (`gea::dictionary::aliasOf`) can be one, so the
  * read is that object's checked unbox, and a Document holding its own entries
- * refuses. mongodb reaches it under `Buffer.isBuffer(options.schemaMap)`.
+ * refuses. A `Buffer.isBuffer(options.someDocument)` guard reaches it.
  */
 const documentViewedObjectText = (source: Representation, target: Representation, text: string): string | null => {
-  // `options.schemaMap?: Document` is optional; the guard that narrows it to a
+  // `options.someDocument?: Document` is optional; the guard that narrows it to a
   // Buffer has already proved it present, and an absent one refuses like any
   // other value that is not a Buffer.
   const optional = source.kind === 'optional' && isOpenDocument(source.payload)
   if (!optional && !isOpenDocument(source)) return null
-  // bson reads a frame's `Document` back `as unknown[]` under
+  // A document serializer reads a frame's `Document` back `as unknown[]` under
   // `Array.isArray`, and `as Map<string, unknown>` under `instanceof Map`.
   const viewable =
     target.kind === 'typed-array' ||
@@ -2422,24 +2366,27 @@ const documentViewedObjectText = (source: Representation, target: Representation
     target.kind === 'array-object' ||
     (target.kind === 'keyed-collection' && target.family === 'map')
   if (!viewable) return null
-  const viewed = 'gea_viewed'
-  const load = unboxedLoadText(target, viewed)
-  if (load === null) return null
-  const object = optional
-    ? `gea_document.has_value() ? gea::dictionary::aliasedObject(*gea_document) : gea::Value()`
-    : 'gea::dictionary::aliasedObject(gea_document)'
+  const object = optional ? '*gea_document' : 'gea_document'
+  const method =
+    target.kind === 'keyed-collection' && target.family === 'map' && target.key.kind === 'dynamic' && target.value?.kind === 'dynamic'
+      ? 'gea::dictionary::viewedDynamicMap'
+      : `gea::dictionary::viewedObjectAs<${cppTypeOf(target)}>`
+  const load = `${method}(${object}, ${cppStringLiteral(assertionSite(target))})`
   return (
     `[](const ${cppTypeOf(source)}& gea_document) -> ${cppTypeOf(target)} { ` +
-    `const gea::Value ${viewed} = ${object}; return ${load}; }(${text})`
+    (optional
+      ? `if (!gea_document.has_value()) return ${cppTypeOf(target)}${source.kind === 'optional' && source.absence === 'undefined' ? '::undefined()' : '()'}; `
+      : '') +
+    `return ${load}; }(${text})`
   )
 }
 
 const dictionaryToRecordText = (source: Representation, target: Representation, text: string): string | null => {
   if (source.kind !== 'dictionary' || source.key !== 'string' || source.value.kind !== 'dynamic' || source.ownership !== 'shared-refcount')
     return null
-  if (target.kind === 'record-with-index') return documentAdoptionText(source, target, target.fields, text)
+  if (target.kind === 'record-with-index') return null
   if (target.kind !== 'record' || target.accessors.length !== 0 || target.ownership === 'borrowed') return null
-  if (target.ownership === 'shared-refcount') return documentAdoptionText(source, target, target.fields, text)
+  if (target.ownership === 'shared-refcount') return null
   const boxed = dynamicCarrierBoxText(source, text)
   return boxed === null ? null : unboxedLoadText(target, boxed)
 }
@@ -2511,28 +2458,6 @@ export const dynamicDictionaryToNamedRecordAdmitted = (
       field.value.kind === 'dynamic' ||
       (!containsUnresolved(field.value) &&
         withoutUnitFunctions(() => tryCandidateText(() => unboxedLoadText(field.value, 'gea_value'))) !== null)
-  )
-}
-
-const recastedDictionaryText = (
-  source: Extract<Representation, { kind: 'dictionary' }>,
-  target: Extract<Representation, { kind: 'dictionary' }>,
-  text: string
-): string | null => {
-  if (!dictionaryCastableToDictionary(source, target)) return null
-  const converted = convertedValueText(source.value, target.value, 'gea_entry.second')
-  if (converted === null) return null
-  const storage = `gea::${target.key === 'number' ? 'NumericDictionary' : 'Dictionary'}<${cppTypeOf(target.value)}>`
-  const construct = target.ownership === 'shared-refcount' ? `auto gea_dict = gea::makeRef<${storage}>();` : `${storage} gea_dict{};`
-  const dictArrow = target.ownership === 'shared-refcount' ? '->' : '.'
-  // `gea::Dictionary`'s own `const_iterator` walks entries in creation order,
-  // which is the order the language enumerates them in and the order the copy
-  // must therefore insert them in.
-  const range = source.ownership === 'shared-refcount' ? '*gea_from' : 'gea_from'
-  return (
-    `[](const ${cppTypeOf(source)}& gea_from) { ${construct} ` +
-    `for (const auto& gea_entry : ${range}) { gea_dict${dictArrow}operator[](gea_entry.first) = ${converted}; } ` +
-    `return gea_dict; }(${text})`
   )
 }
 
@@ -2617,7 +2542,7 @@ const callablePartText = (source: Representation, target: Representation, text: 
  * field is refused for the same reason -- its absence is a presence flag the
  * caller must read, not a value.
  *
- * `@hono/node-server`'s `RequestHeaders.forEach` is the measured case: it
+ * A headers class's `forEach` is the measured case: it
  * forwards to the caller's `(value, key, parent) => void` through
  * `callback.call(thisArg, value, key, this)`.
  */
@@ -2631,7 +2556,7 @@ const restTupleFieldActual = (
   if (field === undefined || !field.required) return null
   const arrow = slot.ownership === 'shared-refcount' ? '->' : '.'
   const access = `${adapterFormalName(restOrdinal)}${arrow}${cppRecordFieldName(field.key)}`
-  if (cppTypeOf(field.value) === cppTypeOf(parameter.value)) return access
+  if (samePhysicalCarrier(field.value, parameter.value)) return access
   try {
     return convertedValueText(field.value, parameter.value, access)
   } catch (error) {
@@ -2657,8 +2582,8 @@ const restElementActual = (to: CallableAbi, restOrdinal: number, position: numbe
   const elementType = cppTypeOf(element)
   const access =
     `(${rest}.get() == nullptr || ${rest}->size() <= static_cast<std::size_t>(${position}) ` +
-    `? ${elementType}() : ${rest}->at(${position}))`
-  if (elementType === cppTypeOf(parameter.value)) return access
+    `? ${elementType}() : ${rest}->readElement(${position}))`
+  if (samePhysicalCarrier(element, parameter.value)) return access
   try {
     return convertedValueText(element, parameter.value, access)
   } catch (error) {
@@ -2709,7 +2634,7 @@ export const boxedAssertionText = (source: Representation, target: Representatio
  *
  * Anything else is a box no arm reads back: the dispatch's final
  * `refusePayloadMismatch` is the only path it has, so every value, however
- * well it satisfies the union's TypeScript type, aborts at run time. mongodb's
+ * well it satisfies the union's TypeScript type, aborts at run time. A
  * named `[key: string]: any` interface handed to `Document | Document[]` was
  * the measured case, before its own recast existed. Refusing here turns that
  * certain abort into the missing-conversion row certify names.
@@ -2793,7 +2718,7 @@ const recastUnionAliasName = 'GeaRecastArm'
  * in `gea_runtime.h` is precisely the two-authorities defect this compiler
  * exists to avoid.
  *
- * hono's `H = Handler | MiddlewareHandler` is the case that needs it:
+ * A handler union `H = Handler | MiddlewareHandler` is the case that needs it:
  * `Handler<E, P, I, R = any>` defaults its result parameter to `any`, so both
  * arms take `(Context, Next)` and return `any`/`Promise<any>` while every
  * handler a program writes returns something concrete. Same frame, boxed
@@ -2840,13 +2765,14 @@ const resultAdapterOf = (
   const from = callableObjectAbi(source)
   const to = callableObjectAbi(target)
   if (!from || !to) return null
+  if (from.argumentsFrame !== to.argumentsFrame && !(from.restFrom === 0 && to.restFrom === 0)) return null
   if (from.receiver !== null && to.receiver === null) return null
   const ignoresReceiver = from.receiver === null && to.receiver !== null
   // A fixed-arity source filling a slot whose trailing frame is ONE rest array:
   // `(...args: any[]) => void`, JavaScript's "some function, arguments not my
-  // business" idiom. tsc's whole `Debug` family passes itself through it --
-  // `assertIsDefined(value, message, stackCrawlMark || checkDefined)` -- and
-  // every such argument refused to lower, 265 rows in `debug.ts` alone, because
+  // business" idiom. A family of assertion helpers passes itself through it --
+  // `assertDefined(value, message, mark || checkDefined)` -- and every such
+  // argument refused to lower, hundreds of rows in one module, because
   // the rest placements did not match. They do not have to: the language
   // defines the call exactly, the slot binds one Array and the source reads its
   // own parameters positionally out of it. The rest ELEMENT is what makes this
@@ -2872,9 +2798,9 @@ const resultAdapterOf = (
   // So the refusal is not "the source frame is wider" but "a source formal
   // past the slot's frame cannot hold the absence", which `cppUndefinedIn`
   // (the one authority `paddedArguments` already asks at a direct call that
-  // omits a trailing argument) answers. hono's `utils/url.ts` is the measured
-  // case: `export const getQueryParam: (url, key?) => ... = _getQueryParam as
-  // (...)`, where `_getQueryParam` declares a third `multiple?: boolean`; the
+  // omits a trailing argument) answers. The measured case is
+  // `export const getParam: (url, key?) => ... = _getParam as
+  // (...)`, where `_getParam` declares a third `multiple?: boolean`; the
   // slot is the only contract any caller has, so the third formal is
   // `Optional<bool>()` at every one of them.
   //
@@ -2905,7 +2831,7 @@ const resultAdapterOf = (
   let receiverActual: string | null = null
   if (from.receiver !== null && to.receiver !== null) {
     const narrowedReceiver = receiverDowncastText(to.receiver, from.receiver, adapterReceiverName)
-    if (cppTypeOf(from.receiver) === cppTypeOf(to.receiver)) {
+    if (samePhysicalCarrier(from.receiver, to.receiver)) {
       receiverActual = adapterReceiverName
     } else if (narrowedReceiver !== null) {
       receiverActual = narrowedReceiver
@@ -2968,13 +2894,13 @@ const resultAdapterOf = (
     // that; a slot that cannot is a genuine mismatch.
     convertedResult = cppUndefinedIn(to.result)
     if (convertedResult === null) return null
-  } else if (cppTypeOf(from.result) === cppTypeOf(to.result)) {
+  } else if (samePhysicalCarrier(from.result, to.result)) {
     convertedResult = adapterResultName
   } else if (
     from.overloadJoined === true &&
     from.result.kind === 'optional' &&
     to.result.kind !== 'optional' &&
-    cppTypeOf(from.result.payload) === cppTypeOf(to.result)
+    samePhysicalCarrier(from.result.payload, to.result)
   ) {
     // A call naming one overload of a callback-joined set
     // (`host-abi.ts`'s `callbackOverloadJoinedAbi`): that overload answers
@@ -2998,12 +2924,11 @@ const resultAdapterOf = (
     from.receiver !== null && to.receiver !== null && classRefTransportKind(to.receiver, from.receiver) !== null
   const ignoresParameters = from.parameters.length < to.parameters.length
   const parametersChange = actuals.some((actual, ordinal) => actual !== adapterFormalName(ordinal))
-  const resultChanges =
-    from.result.kind !== to.result.kind || (from.result.kind !== 'void' && cppTypeOf(from.result) !== cppTypeOf(to.result))
+  const resultChanges = from.result.kind !== to.result.kind || (from.result.kind !== 'void' && !samePhysicalCarrier(from.result, to.result))
   // A source whose fixed frame ends before the slot's rest reads no element
   // of that Array: nothing is unboxed and the Array itself is never passed.
-  // mongodb hands `() => new Topology(...)`-shaped thunks to `(...args: any[])
-  // => void` slots; counting that as a spread made the census publish the
+  // A program handing `() => new SomeClass(...)`-shaped thunks to `(...args: any[])
+  // => void` slots is the case; counting that as a spread made the census publish the
   // thunk's result class, and everything it reaches, to full reflection.
   const spreadsRest = restSpread && to.restFrom !== null && from.parameters.length > to.restFrom
   const nativeFieldProtocolUnused =
@@ -3011,7 +2936,7 @@ const resultAdapterOf = (
     !restPack &&
     (!receiverChanges || nativeReceiverTransport) &&
     !parametersChange &&
-    (from.result.kind === 'void' || to.result.kind === 'void' || cppTypeOf(from.result) === cppTypeOf(to.result))
+    (from.result.kind === 'void' || to.result.kind === 'void' || samePhysicalCarrier(from.result, to.result))
   return ignoresReceiver || ignoresParameters || receiverChanges || parametersChange || resultChanges
     ? { from, to, receiverActual, actuals, convertedResult, nativeFieldProtocolUnused }
     : null
@@ -3023,8 +2948,8 @@ const resultAdapterOf = (
  *
  * The checker admits a callable into such a slot only through an assertion:
  * a function's result must be assignable to its slot's, so the pair exists
- * because the program wrote `f as (...) => Narrower`. hono's `utils/url.ts`
- * is the measured case -- `_getQueryParam`'s `string | undefined |
+ * because the program wrote `f as (...) => Narrower`. The measured case
+ * is a helper whose `string | undefined |
  * Record<string, string> | string[] | Record<string, string[]>` asserted to
  * `string | undefined | Record<string, string>`, the two array arms reachable
  * only through the third parameter the slot omits. The assertion is checked
@@ -3050,8 +2975,8 @@ const assertedResultNarrowingText = (from: Representation, to: Representation, t
  * A callable whose `this` is a descendant class (or the copies of a split
  * generic class, `derive.ts`'s `anyCopyFamilyOf`) filling a slot whose
  * receiver is an ancestor: node's `EventEmitter` calls every listener with
- * `fn.apply(this, args)`, and the MongoDB driver registers `function
- * removeActiveCursor(this: AbstractCursor)` on its own cursors. The function
+ * `fn.apply(this, args)`, and a program may register `function
+ * onClose(this: BaseClass)` on instances of its own subclasses. The function
  * only ever runs against the object that emitted, so the receiver narrows to
  * the arm whose class the allocation extends -- most specific arm first, read
  * off the allocation's own `classBase` chain, which is emitted only from
@@ -3111,8 +3036,8 @@ export type LayoutConversion = (source: Representation, target: Representation, 
 
 /**
  * The materializer id of a callable adapter one of whose PARAMETERS converts
- * only through a structural view: bson's `ByteUtils.toLocalBufferType` slot
- * `(Uint8Array | ArrayBufferView | ArrayBuffer) => Uint8Array` holding the web
+ * only through a structural view: a platform-selected byte-utility slot
+ * `(Uint8Array | ArrayBufferView | ArrayBuffer) => Uint8Array` holding an
  * implementation declared over `Uint8Array | (ArrayBufferView & { [Symbol.toStringTag]?: string })
  * | ArrayBuffer`. The slot's `ArrayBufferView` arm is a `native-record-ref`
  * reaching the method's intersection record by a record view; the chain's
@@ -3168,6 +3093,18 @@ const dynamicArrayRebuildText = (arm: Representation, target: Representation, te
  * can be the target at all, which the printer refuses.
  */
 export const assertedUnionText = (source: Representation, target: Representation, text: string, copyAllowed: boolean): string | null => {
+  // An absent-capable union: the absence converts as its own constant, the
+  // present payload dispatches per arm below.
+  if (source.kind === 'optional' && source.payload.kind === 'tagged-union') {
+    const payload = source.payload
+    return tryCandidateText(() =>
+      evaluatedOnceText(text, (operand) => {
+        const present = assertedUnionText(payload, target, `(*${operand})`, copyAllowed)
+        const absent = convertedValueText({ kind: source.absence }, target, source.absence === 'null' ? 'nullptr' : 'gea::Undefined{}')
+        return present === null || absent === null ? null : `(${operand}.has_value() ? ${present} : ${absent})`
+      })
+    )
+  }
   if (source.kind !== 'tagged-union') return null
   const targetKey = representationKey(target)
   return tryCandidateText(() =>
@@ -3187,6 +3124,32 @@ export const assertedUnionText = (source: Representation, target: Representation
         if (home !== null && home !== undefined) result = `${operand}.is<${index}>() ? ${home} : (${result})`
       }
       return `(${result})`
+    })
+  )
+}
+
+/**
+ * `nodes.ts`'s `assertedViewFor`: a record asserted into a slot whose object
+ * homes are classes. Each class arm the plan names, descendant first, is tested
+ * by the view's origin and loads that allocation through its cited node; no
+ * origin is the assertion failing.
+ */
+const assertedViewText = (ctx: ConversionSite, node: ConversionNode, plan: AssertedViewPlan, text: string): string | null => {
+  const { source, target } = node
+  return tryCandidateText(() =>
+    evaluatedOnceText(text, (operand) => {
+      const held = source.kind === 'optional' ? `(*${operand})` : operand
+      let present = `gea::host::unhomedAssertedRecord<${cppTypeOf(target)}>()`
+      for (const arm of [...plan.arms].reverse()) {
+        const name = cppClassName(arm.declaration)
+        const home = recipeText(ctx, arm.load, `gea::record::viewOriginClassRef<${name}>(${held})`)
+        if (home === null) return null
+        present = `(gea::record::viewOriginClassIs<${name}>(${held}) ? ${home} : ${present})`
+      }
+      if (source.kind !== 'optional') return present
+      if (plan.absent === null) return null
+      const absent = recipeText(ctx, plan.absent, source.absence === 'null' ? 'nullptr' : 'gea::Undefined{}')
+      return absent === null ? null : `(${operand}.has_value() ? ${present} : ${absent})`
     })
   )
 }
@@ -3222,20 +3185,35 @@ export const resultAdaptedCallableText = (
     known === null
       ? `static_cast<${sourceType}*>(${adapterEnvironmentName})->call(${sourceActuals.join(', ')})`
       : `${known}(${[adapterEnvironmentName, ...sourceActuals].join(', ')})`
-  const body =
+  const bodyOf = (invocation: string): string =>
     adapter.from.result.kind === 'void'
-      ? `${call};${adapter.convertedResult === null ? '' : ` return ${adapter.convertedResult};`}`
+      ? `${invocation};${adapter.convertedResult === null ? '' : ` return ${adapter.convertedResult};`}`
       : adapter.to.result.kind === 'void'
-        ? `${call};`
-        : `${cppTypeOf(adapter.from.result)} ${adapterResultName} = ${call}; return ${adapter.convertedResult};`
-  const adapt = known === null ? 'adaptSource' : `adaptSourceInPlace<&${known}>`
-  return `${cppTypeOf(target)}::${adapt}(${sourceType}{${text}}, [](${formals.join(', ')}) -> ${cppResultTypeOf(adapter.to.result)} { ${body} })`
+        ? `${invocation};`
+        : `${cppTypeOf(adapter.from.result)} ${adapterResultName} = ${invocation}; return ${adapter.convertedResult};`
+  if (known === null && adapter.from.receiver === null) {
+    const receiverActual =
+      adapter.to.receiver === null
+        ? 'gea::NativeCallReceiver::undefined()'
+        : nativeCallReceiverText(adapter.to.receiver, adapterReceiverName)
+    const invokeWith = (receiver: string): string =>
+      `static_cast<${sourceType}*>(${adapterEnvironmentName})->callWithReceiver(${[receiver, ...adapter.actuals].join(', ')})`
+    const receiverFormals = [`void* ${adapterEnvironmentName}`, 'const gea::NativeCallReceiver& gea_adapt_this', ...formals.slice(1)]
+    return (
+      `${cppTypeOf(target)}::adaptSourceWithReceiver<${cppCallableFrameArguments(adapter.to)}>(${sourceType}{${text}}, ` +
+      `[](${formals.join(', ')}) -> ${cppResultTypeOf(adapter.to.result)} { ${bodyOf(invokeWith(receiverActual))} }, ` +
+      `[](${receiverFormals.join(', ')}) -> ${cppResultTypeOf(adapter.to.result)} { ${bodyOf(invokeWith('gea_adapt_this'))} })`
+    )
+  }
+  const frame = cppCallableFrameArguments(adapter.to)
+  const adapt = known === null ? `adaptSource<${frame}>` : `adaptSourceInPlace<&${known}, ${frame}>`
+  return `${cppTypeOf(target)}::${adapt}(${sourceType}{${text}}, [](${formals.join(', ')}) -> ${cppResultTypeOf(adapter.to.result)} { ${bodyOf(call)} })`
 }
 
 /**
  * A class stored into a construct-signature slot whose convention differs from
- * the class's own -- `const bindings: { MongoCrypt: MongoCryptConstructor } =
- * { MongoCrypt: NativeMongoCrypt }`, where the slot's `new` answers an
+ * the class's own -- `const bindings: { Impl: ImplConstructor } =
+ * { Impl: NativeImpl }`, where the slot's `new` answers an
  * interface and the class's answers its own instance.
  *
  * The adapter keeps the class evaluation as its environment, so the value is
@@ -3281,10 +3259,9 @@ const constructorDispatchAdapterText = (source: Representation, target: Represen
   const [sole] = members
   if (members.length === 1 && sole !== undefined) {
     const invocation = invocationOf(sole)
-    const result =
-      cppTypeOf(from.result) === cppTypeOf(to.result)
-        ? invocation
-        : tryCandidateText(() => convertedValueText(from.result, to.result, invocation))
+    const result = samePhysicalCarrier(from.result, to.result)
+      ? invocation
+      : tryCandidateText(() => convertedValueText(from.result, to.result, invocation))
     if (result === null) return null
     body = `return ${result};`
   } else {
@@ -3316,7 +3293,7 @@ const constructorDispatchAdapterText = (source: Representation, target: Represen
 export const adaptsConstructorIntoDispatch = (source: Representation, target: Representation): boolean =>
   source.kind === 'constructor-family' &&
   target.kind === 'constructor-value-dispatch' &&
-  cppTypeOf(source) !== cppTypeOf(target) &&
+  !samePhysicalCarrier(source, target) &&
   constructorDispatchAdapterText(source, target, 'gea_probe') !== null
 
 /**
@@ -3327,7 +3304,7 @@ export const adaptsConstructorIntoDispatch = (source: Representation, target: Re
  *
  * ECMA-262 does not bind the extra arguments, so `() => void` really is a
  * `(time: number) => void` and TypeScript accepts it everywhere, and the same
- * is true one prefix over: hono's `Hono.getPath` merges two
+ * is true one prefix over: a class field may merge two
  * `(request: Request) => string` values into a field declared
  * `(request: Request, options?: {env?}) => string` -- one shared leading
  * parameter, one trailing parameter neither physical function looks at.
@@ -3349,67 +3326,6 @@ export const adaptsConstructorIntoDispatch = (source: Representation, target: Re
  * receiver must still agree exactly -- neither is dropped by a call, so a
  * difference in either is a real mismatch, not a binding the language elides.
  */
-/**
- * A method value -- its receiver first in its physical convention -- filling
- * a slot that declares the same convention WITHOUT one: `gea_runtime.h`'s
- * `CallableObject::bindReceiver`, which packs the receiver the property read
- * went through in with the value. Everything but the receiver has to agree
- * exactly, in the C++ spelling the runtime's own signature matching sees
- * (`cppAbiType`, the one authority on that spelling), so the adapter's
- * `Result(Receiver, Arguments...)` is the source's own type and nothing is
- * coerced on the way through.
- *
- * Only the SHAPE is decided here; whether the pair can actually be rendered
- * -- the read's receiver has to be recoverable at the site, and the body must
- * never read `this` -- is `emit-callable.ts`'s `receiverBoundCallableText`'s
- * question, a fact of the emitter's context and not of the two carriers.
- */
-/**
- * A `this`-TYPED function value, stored in a field and read through the object
- * whose `this` it names: `gea_runtime.h`'s `CallableObject::bindReceiver`
- * again, but reached from a fact about the two DECLARATIONS rather than from a
- * method body.
- *
- * hono's `RegExpRouter` writes `match: typeof match<Router<T>, T> = match`
- * over `function match<R extends Router<T>, T>(this: R, method, path)`, while
- * `TrieRouter` and `SmartRouter` declare `match` as an ordinary method -- and
- * `Router<T>` itself declares it as a method, with no `this` at all. So the
- * field's carrier names a receiver and every read through the interface (or
- * through the union of the three implementors) publishes one that does not,
- * and nothing converted between them.
- *
- * Binding the read's own receiver is the only call the language admits here,
- * which is what makes this sound where the detached-METHOD case next door
- * needs `readsReceiver` to hold: a `this` parameter is a parameter, and
- * TypeScript refuses a call through the value that does not supply one
- * (`The 'this' context of type 'void' is not assignable...`). A method has no
- * such annotation, so a detached call really can reach it with `this`
- * undefined, and binding there would answer where the program would have
- * thrown.
- */
-export const receiverBoundFieldText = (
-  ctx: ConversionSite,
-  stored: Representation,
-  published: Representation,
-  storedText: string,
-  receiver: Representation,
-  receiverText: string
-): string | null => {
-  if (!bindsReceiver(stored, published)) return null
-  const abi = callableObjectAbi(stored)
-  if (abi === null || abi.receiver === null) return null
-  const bound = alignedValueText(ctx, 'emit-narrowing.ts:receiver-bound-field', receiver, abi.receiver, receiverText)
-  if (bound === null) return null
-  return `${cppTypeOf(published)}::bindReceiver(${storedText}, ${bound})`
-}
-
-export const bindsReceiver = (source: Representation, target: Representation): boolean => {
-  const from = callableObjectAbi(source)
-  const to = callableObjectAbi(target)
-  if (!from || !to || from.receiver === null || to.receiver !== null) return false
-  return cppAbiType({ ...from, receiver: null }) === cppAbiType(to)
-}
-
 export const dropsUnboundParameters = (source: Representation, target: Representation): boolean => {
   const from = callableObjectAbi(source)
   const to = callableObjectAbi(target)
@@ -3432,8 +3348,8 @@ export const dropsUnboundParameters = (source: Representation, target: Represent
  * `dropsUnboundParameters` requires an IDENTICAL result, and a bare `ofArm`
  * conversion has no arity adaptation of its own.
  *
- * hono's `Context.notFound`: `this.#notFoundHandler ??=
- * () => createResponseInstance()` merges a `() => Response` into a field
+ * A lazily defaulted field: `this.#handler ??=
+ * () => makeResponse()` merges a `() => Response` into a field
  * declared `(c: Context) => Response | Promise<Response>`.
  * `gea_runtime.h`'s `ResultWidensIntoArm` proves the identical pairing at
  * the type level; this re-asks the same two-part question so the two cannot
@@ -3470,7 +3386,7 @@ export const dropsAllParametersIntoResultArm = (source: Representation, target: 
  * result -- `Array.prototype.forEach`'s callback contract is the textbook
  * case, and this port's own is `node:http`'s `RequestListener = (req, res)
  * => void`: `createServer(async (req, res) => { ... })` is an everyday Node
- * idiom (`apps/hono-hello/server.ts` is one), and TypeScript accepts a
+ * idiom, and TypeScript accepts a
  * `Promise<void>`-returning callback there for the identical reason -- a
  * `void`-returning function TYPE is satisfied by ANY return type, precisely
  * so a caller who ignores the result is never forced to wrap it.
@@ -3512,7 +3428,7 @@ export const dropsAllParametersIntoResultArm = (source: Representation, target: 
  *
  * That predicate requires a ZERO-parameter source and `dropsUnboundParameters`
  * an IDENTICAL result, so a pair moving along only the result axis at a nonzero
- * arity satisfies neither -- hono's `Hono.fetch` is one, a `(Context) =>
+ * arity satisfies neither -- e.g. a `(Context) =>
  * Response` assigned into a field declared `(Context) => Response |
  * Promise<Response>`. Sound for exactly the reason `gea_runtime.h`'s
  * `ResultWidensIntoArm` states, and asked in the same terms so the two cannot
@@ -3526,7 +3442,7 @@ export const widensResultIntoArm = (source: Representation, target: Representati
   if (!from || !to) return false
   if (from.receiver !== null || to.receiver !== null) return false
   if (from.parameters.length === 0 || from.parameters.length !== to.parameters.length) return false
-  if (from.restFrom !== to.restFrom || to.result.kind !== 'tagged-union') return false
+  if (from.restFrom !== to.restFrom || from.argumentsFrame !== to.argumentsFrame || to.result.kind !== 'tagged-union') return false
   if (!from.parameters.every((parameter, index) => representationKey(parameter.value) === representationKey(to.parameters[index]!.value)))
     return false
   const resultKey = representationKey(from.result)
@@ -3538,7 +3454,7 @@ export const widensResultIntoArm = (source: Representation, target: Representati
  *
  * ECMAScript has one calling convention, so `(base?: string, sub?: string,
  * ...rest: string[]) => string` and `(...paths: string[]) => string` are the
- * same function -- hono's `utils/url.ts` declares exactly that pair on one
+ * same function -- a module may declare exactly that pair on one
  * `const mergePath`, the annotation stating the second and the initializer
  * being the first. C++ sees two unrelated function types, and the store
  * refused.
@@ -3560,6 +3476,7 @@ export const rebasesRestOverLeadingParameters = (source: Representation, target:
   const from = callableObjectAbi(source)
   const to = callableObjectAbi(target)
   if (!from || !to) return false
+  if (from.argumentsFrame === 'actual' || to.argumentsFrame === 'actual') return false
   if (from.receiver !== null || to.receiver !== null) return false
   if (representationKey(from.result) !== representationKey(to.result)) return false
   if (to.restFrom !== 0 || to.parameters.length !== 1) return false
@@ -3584,6 +3501,7 @@ export const discardsResultIntoVoid = (source: Representation, target: Represent
   const from = callableObjectAbi(source)
   const to = callableObjectAbi(target)
   if (!from || !to) return false
+  if (from.restFrom !== to.restFrom || from.argumentsFrame !== to.argumentsFrame) return false
   if (from.receiver !== null || to.receiver !== null) return false
   if (to.result.kind !== 'void') return false
   if (to.parameters.length === 0) return false
@@ -3804,31 +3722,25 @@ const narrowedIntegerFromDynamicName = (): string => {
   return named ?? `[](double gea_value) -> ${cppNarrowedIntegerType} { ${body} }`
 }
 
-export const unboxedLoadText = (target: Representation, text: string): string | null => {
+/**
+ * `freshObject`: the box holds an object the RUNTIME just built and nothing
+ * else references (`Reflect.getOwnPropertyDescriptor`'s descriptor), so a
+ * shared record is materialized field by field into a new allocation -- there
+ * is no program identity for the rebuild to lose.
+ */
+export const unboxedLoadText = (target: Representation, text: string, receiverFactory?: string, freshObject = false): string | null => {
   const formal = 'gea_unboxed'
-  const load = unboxedLoadTextAt(target, formal)
+  const load = unboxedLoadTextAt(target, formal, receiverFactory, freshObject)
   if (load === null) return null
-  if (load.length <= unitLoadInlineLimit) return unboxedLoadTextAt(target, text)
+  if (load.length <= unitLoadInlineLimit) return unboxedLoadTextAt(target, text, receiverFactory, freshObject)
   const named = unitFunctionName('gea_unbox', (name) => `${cppTypeOf(target)} ${name}(const gea::Value& ${formal})`, `return ${load};`)
-  return named === null ? unboxedLoadTextAt(target, text) : `${named}(${text})`
+  return named === null ? unboxedLoadTextAt(target, text, receiverFactory, freshObject) : `${named}(${text})`
 }
 
 /** A load no longer than this stays inline: naming a unit function costs about as much as it saves. */
 const unitLoadInlineLimit = 64
 
-/**
- * The load of a record member that is a plain receiverless callable, bound to
- * the object it was read from -- or `null` when the member is anything else
- * (the ordinary `unboxedLoadText` answers it).
- */
-const boundMethodLoadText = (target: Representation, text: string, holder: string): string | null => {
-  if (target.kind !== 'function-value-dispatch') return null
-  const abi = callableObjectAbi(target)
-  if (abi === null || abi.receiver !== null || abi.restFrom !== null) return null
-  return `gea::detail::DynamicCarrier<${cppTypeOf(target)}>::inBound(${text}, 0, ${holder})`
-}
-
-const unboxedLoadTextAt = (target: Representation, text: string): string | null => {
+const unboxedLoadTextAt = (target: Representation, text: string, receiverFactory?: string, freshObject = false): string | null => {
   // A `Function` arm remains a Value because its ABI is unknown. Loading it
   // out of a broader dynamic boundary is an identity-preserving copy guarded
   // by the Function tag, not an adaptation to an invented signature.
@@ -3851,10 +3763,10 @@ const unboxedLoadTextAt = (target: Representation, text: string): string | null 
       restFrom === null
         ? callableAbi.receiver === null
           ? `gea::detail::DynamicCarrier<${type}>::in(${value}, 0)`
-          : `gea::detail::DynamicCarrier<${type}>::inWithReceiver(${value}, 0)`
+          : `gea::detail::DynamicCarrier<${type}>::inWithReceiver(${value}, 0${receiverFactory === undefined ? '' : `, ${receiverFactory}`})`
         : callableAbi.receiver === null
-          ? `gea::detail::DynamicCarrier<${type}>::template inWithRest<${restFrom}>(${value}, 0)`
-          : `gea::detail::DynamicCarrier<${type}>::template inWithReceiverAndRest<${restFrom + 1}>(${value}, 0)`
+          ? `gea::detail::DynamicCarrier<${type}>::template inWithRest<${restFrom}, ${callableAbi.argumentsFrame === 'actual'}>(${value}, 0)`
+          : `gea::detail::DynamicCarrier<${type}>::template inWithReceiverAndRest<${restFrom + 1}, ${callableAbi.argumentsFrame === 'actual'}>(${value}, 0${receiverFactory === undefined ? '' : `, ${receiverFactory}`})`
     const members =
       target.kind === 'function'
         ? [target.functionId]
@@ -4043,7 +3955,7 @@ const unboxedLoadTextAt = (target: Representation, text: string): string | null 
     return `(${text}.tag() == gea::Value::Tag::${absentTag} ? ${targetType}() : ${targetType}(${payload}))`
   }
   // A dynamic container commonly carries dynamic elements even when the
-  // assertion names a typed Array. BSON deserialization is the concrete case:
+  // assertion names a typed Array. A binary document decoder is the concrete case:
   // it builds `Array<Value>` because each element is decided by the wire type,
   // then its public result is asserted as `string[]`, `Document[]`, and so on.
   // The runtime bridge preserves an exact typed payload by identity and
@@ -4053,8 +3965,8 @@ const unboxedLoadTextAt = (target: Representation, text: string): string | null 
   if (target.kind === 'array-object') {
     // A record element is not a carrier `DynamicCarrier` can rebuild: which
     // struct is a record rather than a class is a compiler fact, and the
-    // runtime's `Ref<T>` rule reads a box back by identity alone -- so a JSON
-    // or BSON document element aborted. The element takes this function's own
+    // runtime's `Ref<T>` rule reads a box back by identity alone -- so a
+    // parsed or decoded document element aborted. The element takes this function's own
     // record conversion instead, the one every other `any -> record` read takes.
     if (adoptsDynamicRecord(target.element)) {
       const element = 'gea_dynamic_element'
@@ -4093,35 +4005,21 @@ const unboxedLoadTextAt = (target: Representation, text: string): string | null 
   if (target.kind === 'dictionary' && target.key === 'string' && target.ownership === 'shared-refcount') {
     return `gea::detail::unboxDynamicDictionary<${cppTypeOf(target.value)}>(${text}, ${cppStringLiteral(assertionSite(target))})`
   }
-  // An open document deserializer cannot know the concrete interface a later
-  // assertion will name, so it stores a native `Dictionary<Value>`. Requiring
-  // that payload to already be the target record's C++ struct rejects valid
-  // BSON/JSON document assertions. Rebuild the declared record from checked
-  // dynamic field reads instead. The exact-payload branch preserves identity
-  // when the box already carries this record.
-  //
-  // A Document is then ADOPTED into the product (`gea::dictionary::
-  // adoptProduct`): it views the record, so a write through the typed name is
-  // a read through the `any` one, and the keys the record does not declare
-  // move with it -- into the index sidecar of a `record-with-index`, whose
-  // open half a field-by-field copy would otherwise drop. A value that is not
-  // this record is the program's contract violated, not the compiler's, so it
-  // is a TypeError the program may catch, as `exactArm` is.
+  // A generic shared structural load requires the selected live field plan.
+  // A context-free identity cast cannot stand in for that plan. Nominal and
+  // accessor payload recovery below keep their independent exact contracts.
   if ((target.kind === 'record' && target.accessors.length === 0) || target.kind === 'record-with-index') {
     if (target.ownership === 'borrowed') return null
-    const indexed = target.kind === 'record-with-index'
-    if (indexed && (target.ownership !== 'shared-refcount' || target.fields.some((field) => cppRecordFieldKeyIsSymbol(field.key))))
-      return null
+    const shared = target.ownership === 'shared-refcount'
+    if (shared && !freshObject) return null
+    if (target.kind === 'record-with-index') return null
     const targetType = cppTypeOf(target)
     const structName = cppRecordStructName(target.shapeId)
     const holder = 'gea_dynamic_record'
     const fields = target.fields.map((field, index) => {
       const present = `gea_dynamic_record_present_${index}`
       const value = `gea_dynamic_record_value_${index}`
-      // A method read off the dynamic object is called as `object.method(...)`,
-      // so its adapter binds the object as `this` (`DynamicCarrier::inBound`).
-      const boundMember = boundMethodLoadText(field.value, value, holder)
-      const unboxed = field.value.kind === 'dynamic' ? value : (boundMember ?? unboxedLoadText(field.value, value))
+      const unboxed = field.value.kind === 'dynamic' ? value : unboxedLoadText(field.value, value)
       // A member the integer census narrowed is a `long long`, and a braced
       // initializer refuses the `double` a box unboxes to. The census admitted
       // this rebuild because the box carries exactly this struct, which the
@@ -4156,56 +4054,37 @@ const unboxedLoadTextAt = (target: Representation, text: string): string | null 
     // A layout that moved fields behind its `RecordTail` no longer declares
     // them positionally, and storing an absent one would allocate the tail
     // for nothing, so it is filled by name, present fields only.
-    const tailed = !indexed && tailFieldsOf({ fields: target.fields }).size > 0
+    const tailed = tailFieldsOf({ fields: target.fields }).size > 0
     const product = (): string => {
-      if (tailed) {
-        const access = target.ownership === 'shared-refcount' ? '->' : '.'
+      if (shared) {
         const assignments = fields.map(({ field, present, load }) => {
-          const store = `gea_built${access}${tailAwareFieldWriteText(target.fields, field.key)} = ${load!};`
-          return field.required ? store : `if (${present}) { ${store} gea_built${access}${cppRecordFieldPresenceName(field.key)} = true; }`
+          const store = `gea_built->${tailAwareFieldWriteText(target.fields, field.key)} = ${load!};`
+          return field.required ? store : `if (${present}) { ${store} gea_built->${cppRecordFieldPresenceName(field.key)} = true; }`
         })
-        const built =
-          target.ownership === 'shared-refcount' ? `auto gea_built = gea::makeRef<${structName}>();` : `${structName} gea_built{};`
-        return `[&]() { ${built} ${assignments.join(' ')} return gea_built; }()`
+        return `[&]() { auto gea_built = gea::makeRef<${structName}>(); ${assignments.join(' ')} return gea_built; }()`
       }
-      if (!indexed) {
-        const presences = fields.filter(({ field }) => !field.required).map(({ present }) => present)
-        const structure = `${structName}{${[...reads, ...presences].join(', ')}}`
-        return target.ownership === 'shared-refcount' ? `gea::makeRef<${structName}>(${structure})` : structure
+      if (tailed) {
+        const assignments = fields.map(({ field, present, load }) => {
+          const store = `gea_built.${tailAwareFieldWriteText(target.fields, field.key)} = ${load!};`
+          return field.required ? store : `if (${present}) { ${store} gea_built.${cppRecordFieldPresenceName(field.key)} = true; }`
+        })
+        return `[&]() { ${structName} gea_built{}; ${assignments.join(' ')} return gea_built; }()`
       }
-      // The index sidecar sits between the fields and their presence bits, so
-      // this layout is filled by name rather than by position.
-      const assignments = fields.map(({ field, present }, index) => {
-        const store = `gea_built->${cppRecordFieldName(field.key)} = ${reads[index]!};`
-        return field.required ? store : `${store} gea_built->${cppRecordFieldPresenceName(field.key)} = ${present};`
-      })
-      return `[&]() { auto gea_built = gea::makeRef<${structName}>(); ${assignments.join(' ')} return gea_built; }()`
+      const presences = fields.filter(({ field }) => !field.required).map(({ present }) => present)
+      return `${structName}{${[...reads, ...presences].join(', ')}}`
     }
-    const adopted =
-      target.ownership === 'shared-refcount'
-        ? `gea::dictionary::adoptProduct<${structName}>(${holder}, [&]() -> ${targetType} { return ${product()}; })`
-        : product()
-    const exactPayload =
-      target.ownership === 'shared-refcount'
-        ? `if (${holder}.tag() == gea::Value::Tag::Object && ${holder}.payloadType() == gea::detail::payloadTypeTagFor<${targetType}>()) ` +
-          `return gea::detail::unboxValue<${targetType}>(${holder}, gea::Value::Tag::Object, ${cppStringLiteral(assertionSite(target))}); `
-        : ''
-    // An indexed record's open half has no source but a Document's entries:
-    // any other object would lose them, which a snapshot cast may not.
-    const documentOnly = indexed
-      ? `if (${holder}.payloadType() != gea::detail::payloadTypeTagFor<gea::Ref<gea::Dictionary<gea::Value>>>()) ` +
-        `gea::detail::refusePayloadMismatch(${cppStringLiteral(assertionSite(target))}); `
-      : ''
     const body =
-      exactPayload +
       `if (${holder}.tag() != gea::Value::Tag::Object && ${holder}.tag() != gea::Value::Tag::Function) ` +
       `${refused('an assertion to a record requires an object')} ` +
-      documentOnly +
       `${fields.map(({ field, present }) => `const bool ${present} = gea::detail::dynamicRecordHasField(${holder}, ${cppStringLiteral(field.key)});`).join(' ')} ` +
-      `${checks.join(' ')} ${values.join(' ')} ${admissions.join(' ')} return ${adopted};`
+      `${checks.join(' ')} ${values.join(' ')} ${admissions.join(' ')} return ${product()};`
     // The text depends on the target alone, so a unit defines it once and
     // every site calls it -- see `unitFunctionName`.
-    const named = unitFunctionName(`gea_from_dynamic_${structName}`, (name) => `${targetType} ${name}(const gea::Value& ${holder})`, body)
+    const named = unitFunctionName(
+      `gea_from_${shared ? 'fresh_' : ''}dynamic_${structName}`,
+      (name) => `${targetType} ${name}(const gea::Value& ${holder})`,
+      body
+    )
     if (named !== null) return `${named}(${text})`
     return `[](const gea::Value& ${holder}) -> ${targetType} { ${body} }(${text})`
   }
@@ -4374,12 +4253,12 @@ const claimed = (text: string | null): string | null | undefined => (text === nu
  * what carries the payload (`IteratorResult<T>`'s arms are named interfaces a
  * `{ value, done: false }` literal reaches only by a view).
  *
- * A source still PENDING links through `observe`: hono's `#cachedBody` is one
+ * A source still PENDING links through `observe`: a request's body cache is one
  * callable returning `Promise<string | ArrayBuffer | Blob | ...>` that every
  * reader (`text()`, `json()`, `formData()`) adapts to its own `Promise<T>` at
  * the call, and the promise it hands back is the body read that has not
  * arrived yet. Snapshotting it (`if (!settled()) return Target()`) minted a
- * target nothing ever settled -- every `await c.req.json()` hung and the POST
+ * target nothing ever settled -- every `await request.json()` hung and the POST
  * never answered. The conversion runs when the value exists; a conversion that
  * throws (a dynamic arm not of the declared type) becomes the target's
  * rejection, which is what the same failure inside a `then` handler is.
@@ -4407,6 +4286,21 @@ const promiseAdoptionText = (
   )
 }
 
+const promiseCompletionText = (
+  source: Extract<Representation, { kind: 'promise' }>,
+  target: Extract<Representation, { kind: 'promise' }>,
+  text: string,
+  plan: PromiseAdoptionRecipe,
+  payload: (node: ConversionNode, value: string) => string | null
+): string | null => {
+  if (plan.kind === 'payload-transfer') return promiseAdoptionText(source, target, text, (value) => payload(plan.conversion, value))
+  const fulfillment =
+    plan.kind === 'rejection-only'
+      ? `gea::host::throwRuntimeError("TypeError", "a Promise<never> fulfilled"); co_return${target.value.kind === 'void' ? '' : ` gea::host::unreachableValue<${cppTypeOf(target.value)}>()`};`
+      : `co_return${plan.fulfillment === 'void' ? '' : ` ${plan.fulfillment === 'dynamic' ? 'gea::Value()' : cppUndefinedValue}`};`
+  return `([](${cppTypeOf(source)} ${promiseSourceName}) -> ${cppTypeOf(target)} { co_await ${promiseSourceName}; ${fulfillment} }(${text}))`
+}
+
 /**
  * The `rebuild: 'unshared-array'` conversion (`ir/model.ts`'s `ConvertOperation`):
  * a call result lowering proved no other reference holds, rebuilt once at the
@@ -4419,13 +4313,16 @@ export const unsharedArrayRebuildText = (
   ctx: ConversionSite,
   source: Representation,
   target: Representation,
-  text: string
+  text: string,
+  elementNode: ConversionNode
 ): string | null => {
   if (source.kind === 'promise' && target.kind === 'promise') {
-    return promiseAdoptionText(source, target, text, (value) => unsharedArrayRebuildText(ctx, source.value, target.value, value))
+    return promiseAdoptionText(source, target, text, (value) =>
+      unsharedArrayRebuildText(ctx, source.value, target.value, value, elementNode)
+    )
   }
   if (source.kind !== 'array-object' || target.kind !== 'array-object') return null
-  const element = alignedValueText(ctx, 'emit-narrowing.ts:unshared-array', source.element, target.element, 'gea_element')
+  const element = namedConversionText(ctx, 'emit-narrowing.ts:unshared-array', elementNode, 'gea_element')
   if (element === null) return null
   return (
     `([&]() -> ${cppTypeOf(target)} { const auto& gea_fresh = ${text}; ` +
@@ -4442,13 +4339,12 @@ export const conversionChain: readonly ConversionStep[] = [
   // which would pass the SOURCE's index through unchanged -- both sets are one
   // `std::uint8_t`, and `0` means a different member in each.
   { id: 'generic-set-remap', apply: (source, target, text) => claimed(genericFunctionSetWideningText(source, target, text)) },
-  // Two carriers this backend spells identically convert by identity. The
-  // representation tells them apart for reasons the C++ type does not carry --
+  // Two carriers with one physical storage convert by identity. The
+  // representation tells them apart for reasons storage does not carry --
   // `constructor-family` names the class its `new` reaches and
-  // `constructor-value-dispatch` does not -- but both are one
-  // `gea::ConstructorObject<...>`, and a value of one already IS a value of the
-  // other. Checking the spelling rather than enumerating the pairs is what keeps
-  // this from becoming a second table that could disagree with `cppTypeOf`.
+  // `constructor-value-dispatch` does not -- but a value of one already IS a
+  // value of the other. `physicalCarrierKey` (representation/physical-carrier.ts)
+  // states which distinctions are storage, callable packing frames included.
   {
     id: 'declared-integer-scalar',
     apply: (source, target, text) => {
@@ -4456,7 +4352,10 @@ export const conversionChain: readonly ConversionStep[] = [
       return numberTarget === null ? undefined : numberStorageText(numberTarget, text, cppTypeOf)
     }
   },
-  { id: 'same-cpp-type', apply: (source, target, text) => (cppTypeOf(source) === cppTypeOf(target) ? text : undefined) },
+  {
+    id: 'same-cpp-type',
+    apply: (source, target, text) => (samePhysicalCarrier(source, target) ? text : undefined)
+  },
   { id: 'empty-array-sentinel', apply: (source, target, text) => claimed(emptyArraySentinelText(source, target, text)) },
   { id: 'callable-identity', apply: (source, target, text) => claimed(callableIdentityText(source, target, text)) },
   { id: 'callable-construct-entry', apply: (source, target, text) => claimed(callableConstructEntryText(source, target, text)) },
@@ -4487,7 +4386,12 @@ export const conversionChain: readonly ConversionStep[] = [
       const [member] = source.members
       if (member === undefined || source.members.length !== 1 || !target.members.includes(member)) return undefined
       if (source.abi.receiver !== null || target.abi.receiver !== null) return undefined
-      if (source.abi.restFrom !== target.abi.restFrom || source.abi.parameters.length !== target.abi.parameters.length) return undefined
+      if (
+        source.abi.restFrom !== target.abi.restFrom ||
+        source.abi.argumentsFrame !== target.abi.argumentsFrame ||
+        source.abi.parameters.length !== target.abi.parameters.length
+      )
+        return undefined
       if (classRefTransportKind(source.abi.result, target.abi.result) !== 'upcast') return undefined
       const formals: string[] = []
       const actuals: string[] = []
@@ -4552,7 +4456,7 @@ export const conversionChain: readonly ConversionStep[] = [
   },
   // The same one base over for a class extending the intrinsic `Error`: its
   // struct derives from `gea::runtime::Error` in place (`records.ts`'s native
-  // link), so `MongoError` stored where `Error` is declared is `Ref`'s own
+  // link), so a subclass instance stored where `Error` is declared is `Ref`'s own
   // converting constructor. `nativeRecordBaseTransportKind` states when a
   // family's overrides refuse it.
   // An instance of a class extending the intrinsic `Promise` stored where a
@@ -4666,7 +4570,7 @@ export const conversionChain: readonly ConversionStep[] = [
   // an `Img | null` segfaulted on `null` having certified clean. It is the ONLY
   // answer for an optional source: a payload this cannot convert refuses rather
   // than falling through, because the fallthrough was that same unwrap one frame
-  // deeper (hono's `c.json` answered `HTTP/1.1 0 unknown` through it).
+  // deeper (an HTTP response answered status `0` through it).
   {
     id: 'optional-payload-convert',
     apply: (source, target, text) => {
@@ -4804,15 +4708,8 @@ export const conversionChain: readonly ConversionStep[] = [
         ? claimed(recastedIndexedRecordToDictionaryText(source, target, text))
         : undefined
   },
-  // One shape wider: an open dictionary's values widened into another's
-  // (`dictionaryCastableToDictionary`).
-  {
-    id: 'dictionary-to-dictionary',
-    apply: (source, target, text) =>
-      source.kind === 'dictionary' && target.kind === 'dictionary' ? claimed(recastedDictionaryText(source, target, text)) : undefined
-  },
   // The mirror of `record-to-dictionary` for the one dictionary whose values
-  // are boxed: `globalThis as unknown as { AudioContext?: Ctor }` reads named
+  // are boxed: `globalThis as unknown as { SomeGlobal?: Ctor }` reads named
   // fields out of the open string-keyed surface `references.ts` gives
   // `globalThis`. The closed field list comes from the TARGET, so this is not
   // the reconstruction `conversion/derive.ts` refuses (recovering a field list
@@ -4831,7 +4728,7 @@ export const conversionChain: readonly ConversionStep[] = [
   // An Array of one element carrier copied into an Array of another, each
   // element through its own conversion. A copy, so only for an array that is
   // not written through both names afterwards: a matcher table built once
-  // (hono's `[handlers.map(...), emptyParam]` literal) or a shared empty one.
+  // (a `[handlers.map(...), emptyParam]` literal) or a shared empty one.
   {
     id: 'array-copy-recast',
     apply: (source, target, text) => {
@@ -4843,12 +4740,11 @@ export const conversionChain: readonly ConversionStep[] = [
       // `var array = []` whose pushes the census could not type -- and such an
       // array is a shared MUTABLE local passed by reference: copying it hands
       // the callee a twin, so its pushes never reach the caller
-      // (`test/runtime/array-object-call-argument-aliasing.ts`, and the
-      // three.js `getProgramCacheKey` glyph miscompile its `.runtime.js`
-      // sibling reproduces). Both polarities were live miscompiles that the
+      // (`test/runtime/array-object-call-argument-aliasing.ts` and its
+      // `.runtime.js` sibling reproduce it). Both polarities were live miscompiles that the
       // refusal fixed on 2026-09-12; re-admitting them here silently undid
       // that fix. The record- and union-element copies this recipe was added
-      // for (hono's matcher tables, built from literals) do not cross it --
+      // for (router matcher tables, built from literals) do not cross it --
       // and the test is the ELEMENT's own carrier, not a field somewhere
       // inside a record element: a record field boxed on the way is a shape
       // change, not the census-refused evolving array this rule names.
@@ -4878,7 +4774,7 @@ export const conversionChain: readonly ConversionStep[] = [
       if (!target.fields.every((field, index) => field.key === String(index) && field.required)) return undefined
       const reads: string[] = []
       for (const [index, field] of target.fields.entries()) {
-        const converted = tryCandidateText(() => convertedValueText(source.element, field.value, `gea_from->at(${index})`))
+        const converted = tryCandidateText(() => convertedValueText(source.element, field.value, `gea_from->readElement(${index})`))
         if (converted === null) return null
         reads.push(
           field.value.kind === 'scalar' && field.value.domain !== 'bigint'
@@ -4896,11 +4792,6 @@ export const conversionChain: readonly ConversionStep[] = [
       )
     }
   },
-  {
-    id: 'record-to-array',
-    apply: (source, target, text) =>
-      source.kind === 'record' && target.kind === 'array-object' ? claimed(recastedRecordToArrayText(source, target, text)) : undefined
-  },
   // TWO PROMISES WHOSE PAYLOADS DIFFER. `widenedStoreText` reads a `promise`
   // target as "widen the written VALUE into a promise of it", correct for the
   // `return` terminator and wrong here, where the source is already a promise.
@@ -4916,8 +4807,8 @@ export const conversionChain: readonly ConversionStep[] = [
   // nothing with `undefined`, which `cppResultTypeOf` elides for `void`), so
   // the state crosses and the unit value is supplied or dropped. That recipe
   // awaits the source rather than snapshotting a settled state, because
-  // its source is routinely still PENDING -- `@hono/node-server`'s
-  // `responseViaCache` awaits inside -- and a snapshot of a pending promise is
+  // its source is routinely still PENDING -- an async function that awaits
+  // inside -- and a snapshot of a pending promise is
   // a target nothing ever settles.
   //
   // `Promise<never>` is the one void-payload SOURCE that does not refuse, and
@@ -4970,7 +4861,7 @@ export const conversionChain: readonly ConversionStep[] = [
   { id: 'dynamic-map-arm-view', apply: (source, target, text) => claimed(dynamicMapArmViewStoreText(target, source, text)) },
   { id: 'dynamic-unbox', apply: (source, target, text) => (source.kind === 'dynamic' ? unboxedLoadText(target, text) : undefined) },
   // A String OBJECT reconciled against the `string` primitive its alias widens
-  // to (hono's `HtmlEscapedString`). Before the two general paths for the same
+  // to (a `String` object branded as a string alias). Before the two general paths for the same
   // reason the dynamic case is: `narrowedLoadText` would read this as a search
   // through a union's arms and refuse, and `widenedStoreText` reads it backwards.
   {
@@ -4999,8 +4890,8 @@ export const conversionChain: readonly ConversionStep[] = [
       // A sum holds an absence only through an arm that does: a
       // `tagged-union(array-buffer|typed-array|native-record-ref)` has no
       // arm for `undefined` to widen into, so an `undefined` reaching it is
-      // `never`'s (bson's `ObjectId` normalizes a view it already narrowed to
-      // `Uint8Array`, src/objectid.ts:226).
+      // `never`'s (a constructor normalizing a view it already narrowed to
+      // `Uint8Array`).
       const holdsAbsence = (carrier: Representation): boolean =>
         carrier.kind === 'optional' ||
         (carrier.kind === 'tagged-union' && carrier.arms.some((arm) => holdsAbsence(arm.value))) ||
@@ -5041,11 +4932,8 @@ export interface PrinterDrift {
   readonly owner: string
   readonly site: string
   /**
-   * `refused`: the census has no recipe for the pair and the chain rendered
-   * it (or refused it too). `converted`: the census answered and the printer
-   * rendered its node -- a site that still converts at all, which after
-   * Phase 1.3 is a decision lowering should have made; the by-category
-   * deletion of chain callers (1.4) works this list down.
+   * `refused`: the census has no recipe and no text is rendered.
+   * `converted`: the printer rendered the census's admitted node.
    */
   readonly kind: 'refused' | 'converted'
   readonly source: string
@@ -5065,13 +4953,9 @@ export interface PrinterDrift {
  * expression and lowering had nothing to convert; every operand-side pair
  * already arrived converted (`ir/lower-operands.ts`'s `enter`).
  *
- * A pair the census has no recipe for is recorded as printer drift with the
- * census's reason and STILL handed to the chain, because the chain renders
- * some pairs the census does not yet own (a `dynamic` source the eager
- * derivation refused, a callable adapter) and refusing them here would
- * uncertify programs that run. The drift rows are the list of pairs the
- * census still has to learn; a row whose chain rendering is also `null` is
- * the refusal the site reports.
+ * A refused pair is recorded with the census's reason and renders no text.
+ * Internal adaptations and structural leaves must already have exact nodes
+ * published and authenticated by the IR certificate.
  */
 /**
  * What a conversion site needs from its context: the census, the drift list
@@ -5081,6 +4965,8 @@ export interface PrinterDrift {
  * `translation-unit.ts`) build one over the same census.
  */
 export interface ConversionSite {
+  readonly programConversionRecipes?: readonly ProgramConversionRecipe[]
+  readonly conversionIsCertified?: (id: string) => boolean
   readonly conversions: ConversionCensus
   readonly nativeSelectionHelpers?: ReadonlyMap<string, NativeSelectionHelper>
   readonly printerDrift: PrinterDrift[]
@@ -5090,10 +4976,13 @@ export interface ConversionSite {
   readonly captures: CaptureIndex
   /** The dispatch members this unit emitted; absent where a site has none to name. */
   readonly virtualDispatch?: ReadonlyMap<string, CallableAbi>
-  /** The function facts a minted function object registers (`cppThunkEntryText`); absent where a site mints none. */
-  readonly functionFacts?: EmitContext['functionFacts']
+  /** The function facts a minted function object registers (`cppThunkEntryText`). */
+  readonly functionFacts: EmitContext['functionFacts']
   /** The function an expression is known to run (`EmitContext.callableEntryTexts`); absent where a site records none. */
   readonly knownCallableEntry?: (text: string) => FunctionId | null
+  readonly abiOfCallable?: EmitContext['abiOfCallable']
+  /** A scope-aware read of the method body's native lexical environment. */
+  readonly methodEnvironment?: (callable: FunctionId, what: string) => string
 }
 
 export const alignedValueText = (
@@ -5116,7 +5005,32 @@ export const alignedValueText = (
     sourceRepresentation: source,
     targetRepresentation: target
   })
-  return refused ? convertedValueText(source, target, text) : recipeText(ctx, node, text)
+  return recipeText(ctx, node, text)
+}
+
+/** A native artifact consumes the exact pair published for its own physical slot. */
+export const programConversionText = (
+  ctx: ConversionSite,
+  role: ProgramConversionRole,
+  owner: string,
+  slot: string,
+  source: Representation,
+  target: Representation,
+  text: string
+): string | null => {
+  if (representationKey(source) === representationKey(target)) return text
+  const key = programConversionKey({ role, owner, slot })
+  const recipe = ctx.programConversionRecipes?.find((candidate) => programConversionKey(candidate) === key)
+  if (
+    recipe === undefined ||
+    representationKey(recipe.source) !== representationKey(source) ||
+    representationKey(recipe.target) !== representationKey(target)
+  )
+    throw createCppEmitBlockedError(
+      'runtime-helper:program-conversion-recipes',
+      `native artifact ${key} names no certified physical conversion`
+    )
+  return recipeText(ctx, recipe.conversion, text)
 }
 
 /**
@@ -5145,7 +5059,7 @@ export const alignedValueText = (
  * an Array: the layout is resolved here, where the layouts are in hand, and
  * the read is `unboxedLoadText`'s own record conversion (checked product,
  * Document adoption, TypeError). The ctx-free chain would otherwise read the
- * name back by identity alone, which aborts on every JSON or BSON document.
+ * name back by identity alone, which aborts on every parsed or decoded document.
  */
 const dynamicNamedRecordText = (
   layouts: RecordLayoutPolicy,
@@ -5160,19 +5074,38 @@ const dynamicNamedRecordText = (
 
 /**
  * A declared `any` read into `target` where no conversion node was minted --
- * a boxed struct's field dispatcher writing a member (`records.ts`). The same
- * two recipes a census `dynamic -> target` node renders, in the same order: a
- * named interface expands to its layout first, so a box that is not already
- * the target's struct is rebuilt by the checked record product rather than
- * refused by identity; everything else is the generic load.
+ * a boxed struct's field dispatcher writing a member (`records.ts`). Shared
+ * structural objects require an explicit canonical recipe. Exact nominal
+ * payloads and owned copies retain their context-free native contracts.
  */
-export const dynamicValueLoadText = (layouts: RecordLayoutPolicy, target: Representation, text: string): string | null =>
-  dynamicNamedRecordText(layouts, { kind: 'dynamic', reason: 'declared-any-never-narrowed' }, target, text) ?? unboxedLoadText(target, text)
+export const dynamicValueLoadText = (
+  layouts: RecordLayoutPolicy,
+  target: Representation,
+  text: string,
+  selected?: { readonly site: ConversionSite; readonly conversion: ConversionNode }
+): string | null => {
+  if (selected !== undefined) {
+    const node = selected.conversion
+    if (
+      node.source.kind !== 'dynamic' ||
+      node.source.reason === 'untyped-callable' ||
+      representationKey(node.target) !== representationKey(target) ||
+      selected.site.conversions.nodeById(node.id) !== node
+    )
+      return null
+    return recipeText(selected.site, node, text)
+  }
+  if (dynamicRecordLoadNeedsPlan(target, layouts)) return null
+  return (
+    dynamicNamedRecordText(layouts, { kind: 'dynamic', reason: 'declared-any-never-narrowed' }, target, text) ??
+    unboxedLoadText(target, text)
+  )
+}
 
 /**
- * An `any` entering a union one arm of which is a native Proxy: mongodb's
- * deps.ts `kerberos = require('kerberos')` into `Module | { kModuleError }`,
- * a slot `makeErrorModule(...)`'s Proxy also fills. No box holds a native
+ * An `any` entering a union one arm of which is a native Proxy: an optional
+ * dependency `dep = require('dep')` into `Module | { kModuleError }`,
+ * a slot an error-module Proxy also fills. No box holds a native
  * Proxy (`dynamicTagFor` refuses one, and `conversion/derive.ts` skips the
  * arm), so the proxy arm is never the destination. Every other arm must be a
  * record the checked dynamic record conversion builds: a box holding that
@@ -5264,14 +5197,14 @@ const expandedNamedRecords = (layouts: RecordLayoutPolicy, target: Representatio
     return null
   if (open.has(target.shapeId)) return null
   const fields = layouts.forShape(target.shapeId)
-  if (fields === null || (layouts.accessorsForShape?.(target.shapeId)?.length ?? 0) !== 0) return null
+  if (fields === null || (layouts.accessorsForShape(target.shapeId)?.length ?? 0) !== 0) return null
   open.add(target.shapeId)
   const expandedFields = fields.map((field) => {
     const value = expandedNamedRecords(layouts, field.value, open)
     return value === null ? field : { ...field, value }
   })
   open.delete(target.shapeId)
-  const indexes = layouts.indexesForShape?.(target.shapeId) ?? []
+  const indexes = layouts.indexesForShape(target.shapeId)
   return indexes.length === 0
     ? { kind: 'record', shapeId: target.shapeId, fields: expandedFields, accessors: [], ownership: target.ownership }
     : { kind: 'record-with-index', shapeId: target.shapeId, fields: expandedFields, indexes, ownership: target.ownership }
@@ -5281,12 +5214,227 @@ const expandedNamedRecords = (layouts: RecordLayoutPolicy, target: Representatio
  * The recipe's text with its source evaluated once, however many times the
  * recipe names it -- see `evaluated-once.ts`.
  */
-export const recipeText = (ctx: ConversionSite, node: ConversionNode, text: string): string | null =>
-  evaluatedOnceText(text, (operand) => renderedRecipeText(ctx, node, operand))
+export const recipeText = (ctx: ConversionSite, node: ConversionNode, text: string): string | null => {
+  if (ctx.conversionIsCertified !== undefined && (ctx.conversions.nodeById(node.id) !== node || !ctx.conversionIsCertified(node.id)))
+    throw createCppEmitBlockedError(`conversion:${node.id}`, 'the conversion dispatcher requires the exact certified recipe')
+  return evaluatedOnceText(text, (operand) => renderedRecipeText(ctx, node, operand))
+}
+
+const dynamicWrapperText = (ctx: ConversionSite, plan: DynamicWrapperPlan, node: ConversionNode, text: string): string | null => {
+  if (!dynamicWrapperPlanMatches(plan, node.source, node.target, ctx.conversions.nodeById)) return null
+  const targetType = cppTypeOf(plan.target)
+  if (plan.kind === 'optional') {
+    const payload = recipeText(ctx, plan.payload, text)
+    if (payload === null) return null
+    const absentTag = plan.target.absence === 'null' ? 'Null' : 'Undefined'
+    return `(${text}.tag() == gea::Value::Tag::${absentTag} ? ${targetType}() : ${targetType}(${payload}))`
+  }
+  if (plan.kind === 'promise') {
+    const payload = recipeText(ctx, plan.payload, 'gea_settled')
+    return payload === null
+      ? null
+      : `gea::detail::promiseFromDynamic<${cppTypeOf(plan.target.value)}>(${text}, [](const gea::Value& gea_settled) { return ${payload}; })`
+  }
+  const test = (discriminant: BoxDiscriminant): string => {
+    if (discriminant.callableMembers !== null) {
+      const membership = discriminant.callableMembers
+        .map((member) => `${text}.callableDeclarationIdentity() == gea::detail::callableDeclarationTagFor<&${cppThunkName(member)}>()`)
+        .join(' || ')
+      return `(${text}.tag() == gea::Value::Tag::Function && (${membership}))`
+    }
+    if (discriminant.nominal !== null)
+      return (
+        `(${text}.tag() == gea::Value::Tag::Object && ${text}.classObject() && ` +
+        `gea::detail::classIdentityExtends(${text}.classIdentity(), &gea::detail::RefOperationsFor<${discriminant.nominal}>::table))`
+      )
+    return discriminant.payload === null
+      ? `${text}.tag() == gea::Value::Tag::${discriminant.tag}`
+      : `(${text}.tag() == gea::Value::Tag::${discriminant.tag} && ${text}.payloadType() == gea::detail::payloadTypeTagFor<${discriminant.payload}>())`
+  }
+  const branch = (entry: Extract<DynamicWrapperPlan, { kind: 'union' }>['arms'][number]): { condition: string; value: string } | null => {
+    const arm = plan.target.arms[entry.index]!
+    if (entry.classifier.id === 'gea::detail::nativeArrayViewAccepts') {
+      if (entry.conversion.capability.kind !== 'atom' || !entry.conversion.capability.materializer.nativeArrayView) return null
+      const selected = entry.conversion.capability.materializer.nativeArrayView
+      if (entry.classifier !== entry.conversion.capability.classifier) return null
+      const value = recipeText(ctx, entry.conversion, text)
+      return value === null
+        ? null
+        : {
+            condition: `gea::detail::${entry.byElements ? 'nativeArrayViewAcceptsExact' : 'nativeArrayViewAccepts'}<${cppTypeOf(selected.target.element)}, ${nativeFieldPolicyType(selected.target.element)}>(${text})`,
+            value: `${targetType}::ofArm<${entry.index}>(${value})`
+          }
+    }
+    const discriminants = boxDiscriminantsOfArm(arm)
+    if (!discriminants?.length) return null
+    const tagCondition = discriminants.map(test).join(' || ')
+    let condition: string
+    if (entry.classifier.id === 'gea::detail::dynamicRecordDiscriminator') {
+      const discriminator = arm.runtimeDiscriminator
+      const certified = entry.classifier.recordDiscriminator
+      if (
+        discriminator.kind !== 'record-literal' ||
+        certified === undefined ||
+        certified.key !== discriminator.key ||
+        certified.primitive !== discriminator.primitive ||
+        certified.text !== discriminator.text
+      )
+        return null
+      const tag = discriminator.primitive === 'string' ? 'String' : discriminator.primitive === 'number' ? 'Number' : 'Boolean'
+      const type = discriminator.primitive === 'string' ? 'std::string' : discriminator.primitive === 'number' ? 'double' : 'bool'
+      const literal = discriminator.primitive === 'string' ? cppStringLiteral(discriminator.text) : discriminator.text
+      condition =
+        `([](const gea::Value& object, bool nativeRecord) { if (object.tag() != gea::Value::Tag::Object) return false; ` +
+        `const auto value = gea::detail::dynamicRecordDiscriminator(object, ${cppStringLiteral(discriminator.key)}, nativeRecord); ` +
+        `return value.tag() == gea::Value::Tag::${tag} && ` +
+        `gea::detail::unboxValue<${type}>(value, gea::Value::Tag::${tag}, "a union discriminator") == ${literal}; }(${text}, ${tagCondition}))`
+    } else if (
+      entry.classifier.id === 'gea::Value::tag' ||
+      entry.classifier.id === 'gea::Value::tagAnyOf' ||
+      entry.classifier.id === 'gea::Value::tag+payloadType' ||
+      entry.classifier.id === 'gea::Value::callableDeclarationIdentity' ||
+      entry.classifier.id === 'gea::detail::classIdentityExtends'
+    )
+      condition = tagCondition
+    else return null
+    const value = recipeText(ctx, entry.conversion, text)
+    return value === null ? null : { condition, value: `${targetType}::ofArm<${entry.index}>(${value})` }
+  }
+  // A record arm read through a live view admits any object holding its
+  // required keys: another instantiation's layout of the same interface, or a
+  // Document. Those shape tests run after every exact test, and an object no
+  // arm admits is the TypeError a program may catch, never an abort.
+  const shaped = plan.arms.filter((entry) => entry.byShape)
+  const elementwise = plan.arms.filter((entry) => entry.byElements)
+  let result =
+    shaped.length === 0 && elementwise.length === 0
+      ? `([]() -> ${targetType} { gea::detail::refusePayloadMismatch("a dynamic value admitted by no union arm"); }())`
+      : `([]() -> ${targetType} { gea::host::throwRuntimeError("TypeError", ${cppStringLiteral("a dynamic value is none of the union's object arms")}); }())`
+  for (let index = shaped.length - 1; index >= 0; index--) {
+    const entry = shaped[index]!
+    const value = plan.target.arms[entry.index]!.value
+    const fields =
+      value.kind === 'record' || value.kind === 'record-with-index'
+        ? value.fields
+        : value.kind === 'native-record-ref'
+          ? ctx.layouts.forShape(value.shapeId)
+          : null
+    if (fields === null || fields.some((field) => field.required && cppRecordFieldKeyIsSymbol(field.key))) return null
+    const payload = recipeText(ctx, entry.conversion, text)
+    if (payload === null) return null
+    const condition = [
+      `${text}.tag() == gea::Value::Tag::Object || ${text}.tag() == gea::Value::Tag::Function`,
+      ...fields
+        .filter((field) => field.required)
+        .map((field) => `gea::detail::dynamicRecordHasField(${text}, ${cppStringLiteral(field.key)})`)
+    ]
+    result = `((${condition.join(') && (')}) ? ${targetType}::ofArm<${entry.index}>(${payload}) : ${result})`
+  }
+  for (let index = elementwise.length - 1; index >= 0; index--) {
+    const entry = elementwise[index]!
+    if (entry.conversion.capability.kind !== 'atom' || !entry.conversion.capability.materializer.nativeArrayView) return null
+    const element = entry.conversion.capability.materializer.nativeArrayView.target.element
+    const payload = recipeText(ctx, entry.conversion, text)
+    if (payload === null) return null
+    result =
+      `(gea::detail::nativeArrayViewElementsAccept<${cppTypeOf(element)}, ${nativeFieldPolicyType(element)}>(${text}) ? ` +
+      `${targetType}::ofArm<${entry.index}>(${payload}) : ${result})`
+  }
+  for (let index = plan.arms.length - 1; index >= 0; index--) {
+    const arm = branch(plan.arms[index]!)
+    if (arm === null) return null
+    result = `(${arm.condition} ? ${arm.value} : ${result})`
+  }
+  return result
+}
 
 const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: string): string | null => {
   if (node.capability.kind === 'identity') return text
   if (node.capability.kind === 'never') return null
+  if (node.capability.kind === 'atom' || node.capability.kind === 'static') {
+    const materializer = node.capability.materializer
+    if (materializer.nativeArrayView) return nativeArrayViewText(ctx, node, materializer.nativeArrayView, text)
+    if (materializer.dynamicWrapper) return dynamicWrapperText(ctx, materializer.dynamicWrapper, node, text)
+    if (
+      node.source.kind === 'dynamic' &&
+      node.target.kind === 'native-record-ref' &&
+      node.capability.kind === 'atom' &&
+      node.capability.classifier.id === 'gea::Value::payloadType' &&
+      materializer.id === 'gea::detail::unboxValue' &&
+      materializer.nativeFieldProtocol === 'unused' &&
+      materializer.nativePayloadTransport === 'preserved' &&
+      !materializer.allocates
+    )
+      return `gea::detail::unboxValue<${cppTypeOf(node.target)}>(${text}, gea::Value::Tag::Object, ${cppStringLiteral(assertionSite(node.target))})`
+    if (materializer.id === NATIVE_REFERENCE_ABSENCE) {
+      const absence = nativeReferenceAbsenceOf(node.source, node.target)
+      if (absence === null) return null
+      return `((void)(${text}), ${cppTypeOf(node.target)}${absence === 'undefined' ? '::undefined()' : '{}'})`
+    }
+    if (materializer.nativeLogicalReceiver) {
+      const receiver = materializer.nativeLogicalReceiver
+      const transport = nativeCallReceiverText(receiver.receiver, 'gea_physical_receiver', (source, value) => {
+        const child = receiver.materializers.find((candidate) => representationKey(candidate.source) === representationKey(source))
+        return child === undefined ? null : recipeText(ctx, child, value)
+      })
+      const factory = `+[](const ${cppTypeOf(receiver.receiver)}& gea_physical_receiver) -> gea::NativeCallReceiver { return ${transport}; }`
+      return unboxedLoadText(node.target, text, factory)
+    }
+    // A boxed constructor adapted to its construct frame: `new` runs through
+    // the box and the census's reader converts what it built.
+    if (materializer.constructedResult && node.target.kind === 'constructor-value-dispatch') {
+      const result = node.target.abi.result
+      const read = recipeText(ctx, materializer.constructedResult, 'gea_constructed')
+      if (read === null) return null
+      const reader = `+[](const gea::Value& gea_constructed) -> ${cppTypeOf(result)} { return ${read}; }`
+      return `gea::detail::DynamicCarrier<${cppTypeOf(node.target)}>::template readWith<${reader}>(${text})`
+    }
+    if (materializer.dictionaryView) return dictionaryViewText(ctx, materializer.dictionaryView, text)
+    if (materializer.dictionaryRead)
+      return dictionaryReadText(materializer.dictionaryRead, text, (child, value) => recipeText(ctx, child, value))
+    if (materializer.readOnlyDictionary) return dictionaryViewText(ctx, materializer.readOnlyDictionary, text)
+    if (materializer.documentRecordView) return documentRecordViewText(ctx, materializer.documentRecordView, text)
+    if (materializer.nativeDescriptorSnapshot) return nativeDescriptorSnapshotViewText(ctx, materializer.nativeDescriptorSnapshot, text)
+    if (materializer.nativeObjectSample)
+      return nativeObjectSampleText(materializer.nativeObjectSample, text, (child, value) => recipeText(ctx, child, value))
+    if (materializer.recordView) return certifiedRecordViewText(ctx, materializer.recordView, text)
+    if (materializer.recordToArray) return recastedRecordToArrayText(ctx, materializer.recordToArray, text)
+    if (materializer.callableView) return callableViewText(ctx, materializer.callableView, text)
+    if (materializer.callablePayload) return callablePayloadText(ctx, materializer.callablePayload, text)
+    if (materializer.iteratorObjectView) return certifiedIteratorObjectViewText(ctx, materializer.iteratorObjectView, text)
+    if (materializer.iterableObjectView) return certifiedIterableObjectViewText(ctx, materializer.iterableObjectView, text)
+    if (materializer.protocolIterator) return certifiedProtocolIteratorText(ctx, materializer.protocolIterator, text)
+    if (materializer.nativeMethod)
+      return nativeUnboundMethodText(materializer.nativeMethod, text, (child, value) => recipeText(ctx, child, value))
+    if (materializer.nativeMethodResult && node.source.kind === 'class-ref' && node.target.kind === 'class-ref') {
+      const checked = recipeText(ctx, materializer.nativeMethodResult.checked, 'gea_native_method_result')
+      if (checked === null) return null
+      const target = cppTypeOf(node.target)
+      return (
+        `[&](const ${cppTypeOf(node.source)}& gea_native_method_result) -> ${target} { ` +
+        `if (gea_native_method_result.isUndefined()) return ${target}::undefined(); ` +
+        `if (!gea_native_method_result) return ${target}{}; return ${checked}; }(${text})`
+      )
+    }
+    if (materializer.checkedNativeFieldRead) {
+      if (!checkedNativeFieldReadMismatchOf(node.source, node.target, materializer.checkedNativeFieldRead.checked)) return null
+      return (
+        `[&](const ${cppTypeOf(node.source)}& gea_checked_field) -> ${cppTypeOf(node.target)} { ` +
+        `(void)gea_checked_field; gea::detail::refusePayloadMismatch(${cppStringLiteral(assertionSite(node.target))}); }(${text})`
+      )
+    }
+    if (materializer.id === SIBLING_CLASS_ARGUMENT)
+      return `((void)(${text}), []() -> ${cppTypeOf(node.target)} { gea::host::throwRuntimeError("TypeError", "a value of another instantiation of this generic class was passed"); }())`
+    if (materializer.id === 'gea::Promise::adopt-converted' && node.source.kind === 'promise' && node.target.kind === 'promise') {
+      return materializer.promiseAdoption
+        ? promiseCompletionText(node.source, node.target, text, materializer.promiseAdoption, (payload, value) =>
+            recipeText(ctx, payload, value)
+          )
+        : null
+    }
+    if (materializer.id === IMPOSSIBLE_FIELD_READ || materializer.id === IMPOSSIBLE_INDEX_READ)
+      return `((void)(${text}), gea::host::unreachableValue<${cppTypeOf(node.target)}>())`
+  }
   if (node.capability.kind === 'coercion') return coercionText(node.capability.operation, text, node.source, ctx.layouts)
   if (node.capability.kind === 'class-family') return classFamilyLoadText(ctx, node.source, node.target, text)
   // A callable the emitter saw allocated, adapted to another result convention.
@@ -5295,7 +5443,8 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
     node.capability.materializer.id === 'gea::CallableObject::result-adapter'
   ) {
     const known = ctx.knownCallableEntry?.(text) ?? null
-    if (known !== null) {
+    const knownAbi = known === null ? null : ctx.abiOfCallable?.(known)
+    if (known !== null && knownAbi && 'abi' in node.source && abiKey(knownAbi) === abiKey(node.source.abi)) {
       const adapted = resultAdaptedCallableText(node.source, node.target, text, undefined, known)
       if (adapted !== null) return adapted
     }
@@ -5320,6 +5469,9 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
     return assertedUnionText(node.source, node.target, text, false)
   if (node.capability.kind === 'static' && node.capability.materializer.id === ASSERTED_UNION_COPY_MATERIALIZER)
     return assertedUnionText(node.source, node.target, text, true)
+  // The census's asserted record-to-class view (`nodes.ts`'s `assertedViewFor`).
+  if (node.capability.kind === 'static' && node.capability.materializer.id === ASSERTED_VIEW_MATERIALIZER)
+    return node.capability.materializer.assertedView ? assertedViewText(ctx, node, node.capability.materializer.assertedView, text) : null
   // The census's per-arm view (`nodes.ts`'s `armViewFor`).
   if (node.capability.kind === 'static' && node.capability.materializer.id === ARM_VIEW_MATERIALIZER)
     return armViewText(node.source, node.target, text)
@@ -5330,7 +5482,13 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
     node.target.kind === 'optional'
   ) {
     const optionalType = cppTypeOf(node.target)
-    const payload = dynamicValueLoadText(ctx.layouts, node.target.payload, 'gea_nullish')
+    const payloadNode = node.capability.materializer.dependencies?.find(
+      (child) =>
+        representationKey(child.source) === representationKey(node.source) &&
+        representationKey(child.target) === representationKey(node.target.kind === 'optional' ? node.target.payload : node.target)
+    )
+    if (!payloadNode || ctx.conversions.nodeById(payloadNode.id) !== payloadNode) return null
+    const payload = recipeText(ctx, payloadNode, 'gea_nullish')
     if (payload === null) return null
     return (
       `[](const gea::Value& gea_nullish) -> ${optionalType} { return gea_nullish.tag() == gea::Value::Tag::Null || ` +
@@ -5357,21 +5515,22 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
     return checkedArmNarrowingText(node.source, node.target, text)
   // `conversions.ts`'s callable adapter whose parameters need the layouts.
   if (node.capability.kind === 'static' && node.capability.materializer.id === VIEW_ADAPTED_CALLABLE)
-    return resultAdaptedCallableText(node.source, node.target, text, (source, target, value) =>
-      structuralRecordViewText(ctx, source, target, value)
-    )
+    return node.capability.materializer.callableView ? callableViewText(ctx, node.capability.materializer.callableView, text) : null
   // The census's family-member view (`nodes.ts`'s `familyMemberViewFor`).
   if (node.capability.kind === 'static' && node.capability.materializer.id === FAMILY_MEMBER_VIEW_MATERIALIZER)
     return node.familyMembers === undefined ? null : familyMemberViewText(ctx, node.source, node.target, node.familyMembers, text)
-  // `conversions.ts`'s read of a class instance's structural view as the class: the boxed origin, narrowed.
-  if (node.capability.kind === 'atom' && node.capability.materializer.id === 'gea::record::viewOrigin')
-    return narrowedLoadText(
-      { kind: 'dynamic', reason: 'declared-any-never-narrowed' },
-      node.target,
-      node.source.kind === 'optional'
-        ? `((${text}).has_value() ? gea::record::viewOrigin(*(${text})) : gea::Value())`
-        : `gea::record::viewOrigin(${text})`
-    )
+  // Recover the authenticated native class origin of a structural view.
+  if (
+    node.capability.kind === 'atom' &&
+    node.capability.materializer.id === 'gea::record::viewOrigin' &&
+    node.target.kind === 'class-ref'
+  ) {
+    const target = node.target
+    const load = (value: string): string => `gea::record::viewOriginClassRef<${cppClassName(target.declaration)}>(${value})`
+    return node.source.kind === 'optional'
+      ? `((${text}).has_value() ? ${load(`(*${text})`)} : ${cppTypeOf(target)}${node.source.absence === 'null' ? '()' : '::undefined()'})`
+      : load(text)
+  }
   if ((node.capability.kind === 'atom' || node.capability.kind === 'static') && node.capability.materializer.nativeSelection) {
     const helper = ctx.nativeSelectionHelpers?.get(node.id)
     return helper
@@ -5417,83 +5576,6 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
   ) {
     return constructorStaticViewText(node.source, node.target, text)
   }
-  if (
-    (node.capability.kind === 'static' || node.capability.kind === 'atom') &&
-    node.capability.materializer.id === DYNAMIC_DICTIONARY_TO_NAMED_RECORD
-  ) {
-    const named = node.target.kind === 'optional' ? node.target.payload : node.target
-    if (named.kind !== 'native-record-ref') return null
-    const fields = ctx.layouts.forShape(named.shapeId)
-    if (fields === null) return null
-    // The census lifts the pair through an optional of the same absence
-    // (`conversions.ts`): the absent state stays absent, the present one adopts.
-    if (node.source.kind === 'optional') {
-      if (node.target.kind !== 'optional' || node.source.absence !== node.target.absence) return null
-      const present = documentAdoptionText(node.source.payload, named, fields, '(*gea_document)')
-      if (present === null) return null
-      const targetType = cppTypeOf(node.target)
-      return (
-        `[](const ${cppTypeOf(node.source)}& gea_document) -> ${targetType} { ` +
-        `return gea_document.has_value() ? ${targetType}(${present}) : ${targetType}(); }(${text})`
-      )
-    }
-    const adopted = documentAdoptionText(node.source, named, fields, text)
-    if (adopted === null || named === node.target) return adopted
-    return `${cppTypeOf(node.target)}(${adopted})`
-  }
-  // A view that DISPATCHES on a sum's live arm is rendered ahead of the
-  // chain: the chain would select the exact arm and trust a narrowing that,
-  // at a store, never happened (`narrowedLoadText`'s arm search says why).
-  // `conversions.ts`'s `staticRecipe` installs the node in the same order.
-  if (node.capability.kind === 'static' && node.capability.materializer.id === 'view:structural-record') {
-    const view = viewPlanFor(ctx.layouts, node.source, node.target)
-    if (view !== null && recordViewDispatchesArms(view)) return structuralRecordViewText(ctx, node.source, node.target, text)
-    // A whole-sum recast the census chose over the chain: the chain declined
-    // the pair (some source arm only WIDENS into the target, so its
-    // arm-selecting load would drop that arm -- `taggedUnionArmText`'s
-    // `partialWidening`), and the view homes every arm. Rendering the chain
-    // here would contradict the node.
-    if (unionRecastPlanOf(ctx.layouts, node.source, node.target) !== null)
-      return structuralRecordViewText(ctx, node.source, node.target, text)
-  }
-  // A boxed fulfilment read as a NAMED interface: the layout is resolved here,
-  // where the layouts are, exactly as a plain `any -> T` read is
-  // (`dynamicNamedRecordText`). mongodb's `findOne` settles
-  // `Promise<WithId<TSchema> | null>` with a deserialized BSON Document, and
-  // the ctx-free chain read the interface back by identity alone, aborting on
-  // every document ("an assertion out of a dynamic value").
-  if (node.source.kind === 'promise' && node.target.kind === 'promise') {
-    const promiseSource = node.source
-    const promiseTarget = node.target
-    if (dynamicNamedRecordText(ctx.layouts, promiseSource.value, promiseTarget.value, promiseValueName) !== null)
-      return promiseAdoptionText(promiseSource, promiseTarget, text, (value) =>
-        dynamicNamedRecordText(ctx.layouts, promiseSource.value, promiseTarget.value, value)
-      )
-  }
-  // State adoption whose payload only a record view carries: the chain's own
-  // `promise-payload` step asks the ctx-free chain for the payload and cannot
-  // see the view, which needs the layouts (`conversions.ts`'s `recasting`
-  // admits the pair on the same plan).
-  if (
-    node.capability.kind === 'atom' &&
-    node.capability.materializer.id === 'gea::Promise::adopt-converted' &&
-    node.source.kind === 'promise' &&
-    node.target.kind === 'promise'
-  ) {
-    const promiseSource = node.source
-    const promiseTarget = node.target
-    const source = promiseSource.value
-    const target = promiseTarget.value
-    // A view that dispatches -- `IteratorResult`'s arm read off `done` -- wins
-    // over the chain, which would pick one arm statically.
-    const view = viewPlanFor(ctx.layouts, source, target)
-    const viewed = () =>
-      promiseAdoptionText(promiseSource, promiseTarget, text, (value) => structuralRecordViewText(ctx, source, target, value))
-    if (view !== null && recordViewDispatchesArms(view)) return viewed()
-    const chained = convertedValueText(node.source, node.target, text)
-    if (chained !== null) return chained
-    return view === null ? null : viewed()
-  }
   const adopted = dynamicNamedRecordText(ctx.layouts, node.source, node.target, text)
   if (adopted !== null) return adopted
 
@@ -5521,16 +5603,19 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
  */
 export const namedConversionText = (ctx: ConversionSite, site: string, node: ConversionNode, text: string): string | null => {
   const refused = node.capability.kind === 'never'
-  ctx.printerDrift.push({
-    owner: String(ctx.owner),
-    site,
-    kind: refused ? 'refused' : 'converted',
-    source: representationKey(node.source),
-    target: representationKey(node.target),
-    reason: node.capability.kind === 'never' ? node.capability.reason : node.capability.kind,
-    sourceRepresentation: node.source,
-    targetRepresentation: node.target
-  })
+  // A named, certified node is the IR's conversion decision. Drift records
+  // decisions the printer supplies itself, including uncertified named nodes.
+  if (ctx.conversionIsCertified?.(node.id) !== true)
+    ctx.printerDrift.push({
+      owner: String(ctx.owner),
+      site,
+      kind: refused ? 'refused' : 'converted',
+      source: representationKey(node.source),
+      target: representationKey(node.target),
+      reason: node.capability.kind === 'never' ? node.capability.reason : node.capability.kind,
+      sourceRepresentation: node.source,
+      targetRepresentation: node.target
+    })
   return recipeText(ctx, node, text)
 }
 
@@ -5563,32 +5648,17 @@ export const convertedValueText = (source: Representation, target: Representatio
 }
 
 /**
- * Which chain step answers a pair, decided by running the chain on a
- * placeholder: the steps decide from the two carriers alone and only thread
- * the text through, so the answer is the one `convertedValueText` gives. A
- * step that claims the pair but cannot render it is reported with
- * `renders: false`; a pair no step claims is `null`.
- */
-/**
- * Whether this backend can spell a carrier at all. Asked about every pair the
- * registry is probed with -- spelling the same target ten thousand times,
- * catching a throw each time it cannot be, was a measurable share of that
- * loop -- so remembered by identity, as `representationKey`'s own memo is.
- * The mapping's throw is still the answer; `manifest.ts`'s `isSpellable`
- * reads it the same way.
+ * Whether a carrier has physical storage at all: the representation's own
+ * answer (`physicalCarrierKey`), so admissibility is never decided by trying
+ * to print a type and catching the throw. Remembered by identity -- the
+ * registry asks it of every pair it is probed with.
  */
 const spellability = new WeakMap<Representation, boolean>()
 
 export const isSpellable = (representation: Representation): boolean => {
   const known = spellability.get(representation)
   if (known !== undefined) return known
-  let spellable: boolean
-  try {
-    cppTypeOf(representation)
-    spellable = true
-  } catch {
-    spellable = false
-  }
+  const spellable = physicalCarrierKey(representation) !== null
   spellability.set(representation, spellable)
   return spellable
 }
@@ -5602,6 +5672,13 @@ export const isSpellable = (representation: Representation): boolean => {
 export const chainConverts = (source: Representation, target: Representation): boolean =>
   isSpellable(source) && isSpellable(target) && (conversionRecipeOf(source, target)?.renders ?? false)
 
+/**
+ * Which chain step answers a pair, decided by running the chain on a
+ * placeholder: the steps decide from the two carriers alone and only thread
+ * the text through, so the answer is the one `convertedValueText` gives. A
+ * step that claims the pair but cannot render it is reported with
+ * `renders: false`; a pair no step claims is `null`.
+ */
 export const conversionRecipeOf = (
   source: Representation,
   target: Representation
@@ -5631,7 +5708,7 @@ export const conversionRecipeOf = (
  *
  * An `optional` owns whatever its payload owns and nothing else --
  * `gea::Optional<gea::Ref<T>>` is a `Ref` plus a presence bit, and moving it
- * moves the `Ref`. `binary_trees` is the case: `sum(node.left)` reads a
+ * moves the `Ref`. A recursive binary-tree sum is the case: `sum(node.left)` reads a
  * `TreeNode | null` field into a temporary and passes it by value, which is an
  * increment on the way in and a decrement, a branch and an out-of-line
  * destructor on the way out, twice for every one of a million nodes. The
@@ -5641,7 +5718,7 @@ const ownsItsStorage = (carrier: Representation): boolean => {
   if (carrier.kind === 'string') return true
   // A box is three counted handles (`gea::Value`'s function, class and held
   // payload references) plus a tag: copying one is three retain/release
-  // pairs, moving one is a 48-byte copy and three nulled sources. The bson
+  // pairs, moving one is a 48-byte copy and three nulled sources. A document
   // serializer's per-key loop read each document value into a cell it never
   // read again, and paid the three pairs per key.
   if (carrier.kind === 'dynamic') return true
@@ -5649,8 +5726,8 @@ const ownsItsStorage = (carrier: Representation): boolean => {
   // A sum owns whatever its live arm owns. `gea::TaggedUnion` has a real move
   // constructor (`TaggedUnionOps::moveConstruct`), so a dying union hands its
   // string or reference over instead of `copyConstruct`ing it and then
-  // destroying the original -- per header value, per request, in node-compat's
-  // `writeHead`, where this was three heap copies of one content-type string.
+  // destroying the original -- per value, per call, where a header-writing hot
+  // path paid three heap copies of one string.
   if (carrier.kind === 'tagged-union') return carrier.arms.some((arm) => ownsItsStorage(arm.value))
   // Every counted handle, not only a class instance: a record, an Array, a
   // typed array or a dictionary is the same `gea::Ref` with the same
@@ -5661,8 +5738,8 @@ const ownsItsStorage = (carrier: Representation): boolean => {
   // identity handle each. Only `function` was listed, so a function
   // declaration that needs its identity (`function-value-dispatch`, what
   // `emitter.off(handler)` makes of a hoisted handler) was copied into its
-  // own cell -- two retain/release pairs per closure, per mongodb operation
-  // for every listener `onData` installs.
+  // own cell -- two retain/release pairs per closure, per operation, for
+  // every listener a hot path installs.
   if (isNativeCallableCarrier(carrier.kind)) return true
   return (
     carrier.kind === 'promise' ||
@@ -5707,7 +5784,7 @@ export const movedValueText = (ctx: EmitContext, value: IrOperand, held: Represe
   if (
     held !== null &&
     representationKey(held) !== representationKey(carrier) &&
-    !(text === operandText(ctx, value) && cppTypeOf(held) === cppTypeOf(carrier))
+    !(text === operandText(ctx, value) && samePhysicalCarrier(held, carrier))
   )
     return text
   // Two renderers on one argument's path each ask this (a sum-widenable
@@ -5736,20 +5813,9 @@ export const movedValueText = (ctx: EmitContext, value: IrOperand, held: Represe
  * the held arm is one of them. The source's own absence (if it is optional)
  * reads the result's own absent value instead of testing any arm at all.
  *
- * Each live arm converts into the result's carrier through `convertedValueText`
- * (below) FIRST, unmodified, and only when that finds no installed load AND
- * the result is boolean-shaped (`isBooleanShapedMergeTarget`) does it fall
- * back to `ToBoolean` (`emit-presence.ts`'s `booleanTestText`) instead. That
- * fallback is not a general "any carrier converts to boolean" capability -- it
- * is not added to `convertedValueText`'s own representation-keyed dispatch,
- * which would let it fire for any unrelated occurrence of the same
- * representation pair. It fires only here, for an arm THIS merge's own
- * partial-dead-arm proof already marked live, because a `&&` merge's own
- * published type collapsing to `boolean | undefined` is the checker having
- * already proven the kept contribution meaningful only as its truthiness:
- * ECMA-262's `&&` picks its kept operand by `ToBoolean` in the first place, so
- * restating that answer as a plain `bool` is not a new fact about the arm's
- * carrier, it is the exact question this merge already asked of it.
+ * The finalized plan names the exact recipe for every live arm and absence.
+ * A contextual truthiness arm additionally cites ToBoolean's runtime helper;
+ * certification authenticates its && split before this renderer can use it.
  */
 export const emitMergeLiveArmRebuild = (ctx: EmitContext, lines: string[], operation: MergeLiveArmRebuildOperation): void => {
   const sourceRepresentation = operation.source.representation
@@ -5761,9 +5827,11 @@ export const emitMergeLiveArmRebuild = (ctx: EmitContext, lines: string[], opera
     )
   }
   const target = operation.result.representation
+  const plan = operation.mergeConversionPlan
+  if (!plan || plan.source !== representationKey(sourceRepresentation) || plan.target !== representationKey(target))
+    throw createCppEmitBlockedError('runtime-helper:merge-live-arm-rebuild:conversion-plan', 'a merge has no matching certified arm plan')
   const sourceText = operandText(ctx, operation.source)
   const unwrapped = sourceRepresentation.kind === 'optional' ? `(*${sourceText})` : sourceText
-  const booleanPayload: Representation = { kind: 'scalar', domain: 'boolean' }
   const armText = (index: number): string => {
     const arm = payload.arms[index]
     if (!arm) {
@@ -5773,28 +5841,14 @@ export const emitMergeLiveArmRebuild = (ctx: EmitContext, lines: string[], opera
       )
     }
     const loaded = `${unwrapped}.get<${index}>()`
-    if (operation.nativeTransport) {
-      const citation = operation.nativeTransport.arms.find((entry) => entry.index === index)
-      const node = citation ? ctx.conversions.nodeById(citation.conversion) : null
-      const text = node ? namedConversionText(ctx, 'emit-narrowing.ts:merge-native-arm', node, loaded) : null
-      if (text !== null) return text
-      throw createCppEmitBlockedError(
-        `conversion:${citation?.conversion ?? 'merge-native-arm'}`,
-        'a sealed native merge arm has no conversion spelling'
-      )
-    }
-    const converted = convertedValueText(arm.value, target, loaded)
+    const citation = plan.arms.find((entry) => entry.index === index)
+    const node = citation ? ctx.conversions.nodeById(citation.conversion) : null
+    const input = citation?.mode === 'truthiness' ? booleanTestText(loaded, arm.value) : loaded
+    const converted = node ? namedConversionText(ctx, 'emit-narrowing.ts:merge-arm', node, input) : null
     if (converted !== null) return converted
-    if (isBooleanShapedMergeTarget(target)) {
-      const boolText = booleanTestText(loaded, arm.value)
-      if (representationKey(target) === representationKey(booleanPayload)) return boolText
-      const wrapped = convertedValueText(booleanPayload, target, boolText)
-      if (wrapped !== null) return wrapped
-    }
     throw createCppEmitBlockedError(
-      `conversion:${representationKey(arm.value)}->${representationKey(target)}`,
-      `rebuilds live arm ${index} (${representationKey(arm.value)}) of ${representationKey(sourceRepresentation)} into ` +
-        `${representationKey(target)}, which no installed load performs`
+      `conversion:${citation?.conversion ?? 'merge-arm'}`,
+      'a sealed merge arm has no certified conversion spelling'
     )
   }
   const indices = operation.liveArms
@@ -5811,11 +5865,9 @@ export const emitMergeLiveArmRebuild = (ctx: EmitContext, lines: string[], opera
   }
   if (indices.length > 1) dispatch = `(${dispatch})`
   const absenceText = (): string => {
-    const citation = operation.nativeTransport?.absence
+    const citation = plan.absence
     if (citation === undefined || sourceRepresentation.kind !== 'optional')
-      return sourceRepresentation.kind === 'optional'
-        ? cppConstantLiteral(sourceRepresentation.absence, sourceRepresentation.absence, target)
-        : ''
+      throw createCppEmitBlockedError('runtime-helper:merge-live-arm-rebuild:conversion-plan', 'a live merge absence names no recipe')
     const node = ctx.conversions.nodeById(citation)
     const text = node
       ? namedConversionText(

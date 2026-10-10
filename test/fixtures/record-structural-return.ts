@@ -4,7 +4,7 @@
 // fields with exactly the same requiredness, which is shape EQUALITY -- not the
 // relation TypeScript admits at a return. `return options` out of a method
 // declared to return an overlapping subset is ordinary TypeScript, and the
-// mongodb driver is built out of it: every `CommandOptions` producer hands a
+// database client is built out of it: every `CommandOptions` producer hands a
 // record of dozens of fields to a slot declaring a differently ordered,
 // differently optional subset, which is 16 of the probe's unmet obligations
 // under one predicate.

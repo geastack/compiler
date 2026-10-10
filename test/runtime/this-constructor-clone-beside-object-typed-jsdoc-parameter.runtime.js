@@ -1,5 +1,5 @@
 // @ts-nocheck
-// `new this.constructor()` -- three's clone idiom -- in a program where a
+// `new this.constructor()` -- a 3D scene-graph library's clone idiom -- in a program where a
 // JSDoc-typed `Object` parameter exists. `Object` carries `constructor:
 // Function`, so the bare `Function` interface becomes a bound host protocol,
 // and the callee of the (asserted) `new` was published as that protocol's

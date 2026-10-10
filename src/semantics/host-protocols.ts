@@ -234,8 +234,8 @@ const isHostNamespaceRoot = (input: HostProtocolInput, symbol: ts.Symbol): boole
   const configured = input.hostNamespaceRootDeclarations.filter((row) => row.declarationName === symbol.name)
   if (configured.length > 0) {
     if (configured.some((row) => hasExactHostDeclaration(symbol, row))) return true
-    // A module-scoped `declare const Buffer: NodeJsBufferConstructor` (bson's
-    // `node_byte_utils.ts`) introduces no binding: at run time the name reads
+    // A module-scoped `declare const Buffer: NodeJsBufferConstructor` (a
+    // library declaring the global it reads) introduces no binding: at run time the name reads
     // the GLOBAL, so it is that global's root exactly when the global itself
     // is authenticated -- the declaration identity stays exact, it is only
     // looked up through the one symbol the program's name really denotes.
@@ -322,10 +322,10 @@ const bindNativeType = (input: HostProtocolInput, census: HostCensus, reference:
   // named type this table mentions, and interning is order-sensitive: which
   // member of a type cycle gets the nominal anchor depends on which was interned
   // first, so a pass that interned thirty-nine extra types would move that
-  // anchor. It did: an early version of this took the three.js app from 2
-  // guard violations to 269, all of them
+  // anchor. It did: an early version of this took a real program from a
+  // couple of guard violations to hundreds, all of them
   // `unresolved(a self-referential type of this shape is not modelled)`
-  // propagating out of three.js's `Object3D`/`Mesh` cycle. The declaration
+  // propagating out of one base-class/subclass type cycle. The declaration
   // identity is all a binding needs, and the identity table answers it without
   // interning anything.
   //
@@ -341,22 +341,22 @@ const bindNativeType = (input: HostProtocolInput, census: HostCensus, reference:
   // The join key is a bare name, which is the admitted exception this
   // function's own comment states -- but a name is not unique, and a plugin's
   // row means *its* declaration, never whichever same-named one a program
-  // happens to import. The three.js app shims `troika-three-text` as
-  // `declare module 'troika-three-text' { export class Text extends Object3D }`,
-  // and the gea plugin states `Text -> gea::embedded::ui::NodeHandle` for the
-  // DOM text node. Same name, unrelated types: every troika `Text` in the HUD
-  // bound as a gea UI node handle, and the closure walk then followed that
-  // handle's `userData`/`toJSON` into `lib.es5`'s own `Object` and `Function`
-  // and demanded host boundaries for them -- 1329 of the three.js app's 3394 root
-  // diagnostics, all from one collision, on top of a silent miscompile of
-  // every text object in the program.
+  // happens to import. A program can shim a third-party module as
+  // `declare module 'text-lib' { export class Text extends Node }`, while
+  // the gea plugin states `Text -> gea::embedded::ui::NodeHandle` for the
+  // DOM text node. Same name, unrelated types: every shimmed `Text` bound as
+  // a gea UI node handle, and the closure walk then followed that handle's
+  // members into `lib.es5`'s own `Object` and `Function` and demanded host
+  // boundaries for them -- over a third of that program's root diagnostics,
+  // all from one collision, on top of a silent miscompile of every text
+  // object in the program.
   //
   // What separates the two is not the name but the hierarchy. A host protocol
   // is OPAQUE: the host owns the type and everything it derives from, which is
   // why `@geastack/core`'s `Element extends Node` and AppKit's
   // `NSView extends NSResponder` bind exactly as before -- every base of each
-  // is itself declared, never defined. troika's `Text` derives from three.js's
-  // `Object3D`, an ordinary class this program COMPILES FROM SOURCE; a handle
+  // is itself declared, never defined. The shimmed `Text` derives from
+  // `Node`, an ordinary class this program COMPILES FROM SOURCE; a handle
   // with no layout cannot be the carrier of a type half of whose members this
   // compilation is emitting. So a declaration with a defined base is not the
   // host's, whatever it is called.
@@ -661,8 +661,8 @@ export const typedArrayDeclarationsOf = (
  * `interface Buffer extends Uint8Array<ArrayBuffer>` is node's own declaration
  * of its byte view, and TypeScript's answer for it is unambiguous: a `Buffer`
  * has every member a `Uint8Array` has and is assignable to one, which is why
- * bson and the mongodb driver pass a `Buffer` to every `Uint8Array` parameter
- * in the codebase. A physical carrier that is not the typed array cannot be
+ * Node.js libraries routinely pass a `Buffer` to every `Uint8Array`
+ * parameter. A physical carrier that is not the typed array cannot be
  * right for such a type, and the one it got instead is the failure this file
  * already records for `TextEncoder.encode`'s return type: the interface's
  * structural body, a record whose `set`/`subarray`/`fill` are
@@ -733,8 +733,8 @@ const extendedTypedArrayDeclarations = (
       const own = ownSymbol ? identities.symbolDeclarationId(ownSymbol) : null
       if (!own || found.has(own)) continue
       // An exact host row masks the ordinary source-file route too. This is
-      // load-bearing for declaration-only `.ts` modules such as node-compat's
-      // buffer-types.ts: they are part of `files`, but a caller augmentation
+      // load-bearing for declaration-only `.ts` modules such as a host's
+      // buffer type declarations: they are part of `files`, but a caller augmentation
       // must still revoke the host's Buffer carrier claim.
       const configured = configuredByName.get(declaration.name.text)
       if (configured && (!ownSymbol || !configured.some((row) => hasExactHostDeclaration(ownSymbol, row)))) continue
@@ -1050,8 +1050,8 @@ export const wellKnownSymbolDeclarationsOf = (
  * `representation/model.ts`), never the synchronous `iterator` cursor: its
  * body is a coroutine that suspends at every `await` and `yield`, and each
  * `next()` answers a promise the caller's `for await` suspends on. Reading
- * those promises in place was the nested pump that deadlocked mongodb's
- * `readMany` once two pipelines ran at once.
+ * those promises in place was the nested pump that deadlocked an async
+ * generator reader once two pipelines ran at once.
  */
 export const asyncGeneratorDeclarationOf = (
   checker: ts.TypeChecker,
@@ -1180,7 +1180,7 @@ const standardBufferKinds: ReadonlyMap<string, StandardBufferKind> = new Map<str
  * interfaces, resolved exactly the way `keyedCollectionDeclarationsOf` below
  * resolves `Map`/`Set` and for the same two reasons.
  *
- * Independence from the program's own text is the first: `three.js` writes
+ * Independence from the program's own text is the first: a library can write
  * `function f(b: ArrayBuffer)` in files that never construct one, and a
  * program that only ever receives a `DataView` from a signature names neither
  * as a value. `checker.resolveName` answers "what does this name mean here"
@@ -1419,7 +1419,7 @@ const bindHostObjectClosure = (
       //
       // The slot itself, read as a VALUE (`Date.prototype`), is a different
       // thing again: a namespace-shaped intrinsic whose own members are the
-      // instance methods (`verifyProperty(Date.prototype, "getTime", ...)`).
+      // instance methods (`checkProperty(Date.prototype, "getTime", ...)`).
       // It is registered under its own protocol, keyed by the slot's
       // declaration -- which only a `X.prototype` read is ever typed by
       // (`prototypeObjectTypeAt`) -- so constructed instances stay what the
@@ -1820,8 +1820,8 @@ const bindAmbientValue = (
       ts.isTypeLiteralNode(declaration.type)
     const protocol = inlineConstructor ? `${symbol.name}Constructor` : type.getSymbol()?.name
     // A namespace root claims nothing: a host states that name as a PATH, and
-    // a path has no value to carry. Three apps lost their certificate to the
-    // `Window@1` this used to demand.
+    // a path has no value to carry. Demanding `Window@1` here refused every
+    // program that merely names a host path.
     if (protocol && namespaceRoot) {
       // The seed is still returned below and still walked by
       // `bindHostObjectClosure` -- a namespace root's OWN members are exactly

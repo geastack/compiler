@@ -39,7 +39,11 @@ export const arrayAllocationDrainsDynamicIterator = (operation: AllocateArrayObj
  * test can invent an escape that indirectly restores every reflection hook.
  */
 export const observesNativeCarrierOnly = (operation: IrOperation): boolean =>
+  (operation.kind === 'get' && operation.nativeHostMethodRead !== undefined) ||
+  ((operation.kind === 'get' || operation.kind === 'set' || operation.kind === 'call') && operation.nativeCallableDataSlot !== undefined) ||
+  ((operation.kind === 'get' || operation.kind === 'set') && operation.privateNativeCallableSlot !== undefined) ||
   nativeAbsentPropertyReadOf(operation) !== null ||
+  operation.kind === 'dead-logical-merge-value' ||
   operation.kind === 'test' ||
   // Promise<T>'s native awaiter returns its stored T; it does not inspect T's
   // fields. Dynamic thenables and result conversions retain ordinary demand.
@@ -76,8 +80,8 @@ export const observesNativeCarrierOnly = (operation: IrOperation): boolean =>
       // Loose equality against a nullish operand asks only whether the other
       // side is nullish (ECMA-262 7.2.15 steps 2-3): no ToPrimitive, no field
       // read, and the emitter answers it from the presence flag or tag
-      // (`absenceComparisonText`). mongodb's `session == null` guards alone
-      // published ClientSession and every class reaching it to full reflection.
+      // (`absenceComparisonText`). `session == null` guards alone once
+      // published a session class and every class reaching it to full reflection.
       (operation.form === 'equality' &&
         (operation.operator === '==' || operation.operator === '!=') &&
         operation.operands.some((operand) => operand.representation.kind === 'null' || operand.representation.kind === 'undefined'))))
@@ -132,9 +136,28 @@ export const resultOfIrOperation = (operation: IrOperation): IrResult | null => 
 export const operandsOfIrOperation = (operation: IrOperation): readonly IrOperand[] => {
   switch (operation.kind) {
     case 'get':
+      return [
+        operation.receiver,
+        operation.key,
+        ...(operation.privateNativeCallableSlot ? [operation.privateNativeCallableSlot.value] : []),
+        ...(operation.nativeCallableDataSlot?.presentRead ? [operation.nativeCallableDataSlot.value] : []),
+        ...(operation.nativeObjectDataSlot ? [operation.nativeObjectDataSlot.owner] : [])
+      ]
     case 'has-property':
       return [operation.receiver, operation.key]
     case 'set':
+      return [
+        operation.receiver,
+        operation.key,
+        operation.value,
+        ...(operation.nativeCallableDataWrite ? [operation.nativeCallableDataWrite.storedValue] : []),
+        ...(operation.nativeObjectDataSlot
+          ? [
+              operation.nativeObjectDataSlot.owner,
+              ...(operation.nativeObjectDataSlot.write ? [operation.nativeObjectDataSlot.write.value] : [])
+            ]
+          : [])
+      ]
     case 'define-own-property':
       return [operation.receiver, operation.key, operation.value]
     case 'delete':
@@ -150,7 +173,15 @@ export const operandsOfIrOperation = (operation: IrOperation): readonly IrOperan
         operation.callee,
         ...(operation.receiver ? [operation.receiver] : []),
         ...(operation.thisArgument && operation.thisArgument.value !== operation.receiver?.value ? [operation.thisArgument] : []),
-        ...operation.arguments
+        ...operation.arguments,
+        ...(operation.nativeCallableDataWrite ? [operation.nativeCallableDataWrite.storedValue] : []),
+        ...(operation.nativeOwnAssignment ? [operation.nativeOwnAssignment.owner] : []),
+        // Reinstallation reads the authenticated native descriptor at its
+        // original owner/key. Those retained SSA values are executable inputs,
+        // even when the call's descriptor argument is a reflected public view.
+        ...(operation.nativeAccessorReinstallation
+          ? [operation.nativeAccessorReinstallation.snapshotReceiver, operation.nativeAccessorReinstallation.snapshotKey]
+          : [])
       ]
     case 'commonjs-require':
     case 'commonjs-binding':
@@ -241,7 +272,9 @@ export const operandsOfIrOperation = (operation: IrOperation): readonly IrOperan
       // literal's own token; nothing in the body is read to build the object.
       return []
     case 'convert':
+      return [operation.source, ...(operation.nativeObjectSample ? [operation.nativeObjectSample.observed] : [])]
     case 'merge-live-arm-rebuild':
+    case 'dead-logical-merge-value':
       return [operation.source]
     case 'get-iterator':
       return operation.method ? [operation.receiver, operation.method] : [operation.receiver]

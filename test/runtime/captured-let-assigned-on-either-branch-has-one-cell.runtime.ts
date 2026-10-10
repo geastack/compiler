@@ -1,6 +1,6 @@
 // A captured `let` declared without an initializer and first assigned on one
 // of two branches: the closure's cell must exist whichever branch runs.
-// bson's deserializer declares `let validationSetting: boolean;`, assigns it
+// A binary-document deserializer declares `let validationSetting: boolean;`, assigns it
 // from `validation.utf8` when that is a boolean and otherwise from the first
 // key's value, then captures it in `values.every(item => item === setting)`.
 function uniform(setting: boolean | Record<string, boolean>): string {

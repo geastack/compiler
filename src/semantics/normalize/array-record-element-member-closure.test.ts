@@ -7,10 +7,10 @@ import { wholeProgram } from './reachability.js'
 import { attachDeferredIntrinsicProtocolLedger, createDeferredIntrinsicProtocolLedger } from './deferred-intrinsic-protocols.js'
 
 /**
- * Three's render lists, reduced: a drawn mesh goes into a pooled record
+ * A renderer's render lists, reduced: a drawable goes into a pooled record
  * (`getNextRenderItem`), the record into a per-list array, the list into a
  * per-scene array held in a `WeakMap`, and the current list onto a stack --
- * then comes back out of every one of those to be drawn. The mesh's own
+ * then comes back out of every one of those to be drawn. The drawable's own
  * callback is typed from that one draw call only if every one of those
  * containers is proven never to reach unknown code.
  */
@@ -30,10 +30,10 @@ interface Injection {
 const infer = (injection: Injection = {}) => {
   const entry = resolve('test/fixtures/array-record-element-member.js')
   const source = `export {};
-    class Mesh {
+    class Drawable {
       constructor() { this.id = 1; this.onDraw = function(input) { return input.amount; }; }
     }
-    function painterSortStable(a, b) { return a.id - b.id; }
+    function stableSortById(a, b) { return a.id - b.id; }
     function RenderList() {
       const renderItems = [];
       let renderItemsIndex = 0;
@@ -56,7 +56,7 @@ const infer = (injection: Injection = {}) => {
       function push(object) { const renderItem = getNextRenderItem(object); opaque.push(renderItem); }
       function unshift(object) { const renderItem = getNextRenderItem(object); opaque.unshift(renderItem); }
       function sort(customOpaqueSort, reversed) {
-        if (opaque.length > 1) opaque.sort(customOpaqueSort || painterSortStable);
+        if (opaque.length > 1) opaque.sort(customOpaqueSort || stableSortById);
         if (reversed) opaque.reverse();
       }
       function finish() {
@@ -91,7 +91,7 @@ const infer = (injection: Injection = {}) => {
       ${injection.lists ?? ''}
       return { get: get };
     }
-    /** @param {Array<{object: Mesh}>} renderList */
+    /** @param {Array<{object: Drawable}>} renderList */
     function renderObjects(renderList) {
       for (let i = 0, l = renderList.length; i < l; i++) {
         const renderItem = renderList[i];
@@ -107,13 +107,13 @@ const infer = (injection: Injection = {}) => {
     /** @type {ReturnType<typeof RenderList> | null} */
     let currentRenderList = null;
     const scene = {};
-    const mesh = new Mesh();
+    const drawable = new Drawable();
     function frame() {
       currentRenderList = renderLists.get(scene, renderListStack.length);
       currentRenderList.init();
       renderListStack.push(currentRenderList);
-      currentRenderList.push(mesh);
-      currentRenderList.unshift(mesh);
+      currentRenderList.push(drawable);
+      currentRenderList.unshift(drawable);
       currentRenderList.finish();
       currentRenderList.sort(opaqueSort, false);
       const { opaque: opaqueObjects } = currentRenderList;
@@ -159,7 +159,7 @@ const refused = (type: ts.Type | null | undefined): boolean => !type || (type.fl
 // at a conditional's operand). Fail-closed, so only the positive waits.
 const LIST_STACK_SUMMARY_OPEN = 'push slot closure stops at renderListStack[renderListStack.length - 1]'
 test(
-  'a mesh drawn through pooled render items, per-list arrays, a per-scene map and a list stack keeps its callback frame',
+  'a drawable drawn through pooled render items, per-list arrays, a per-scene map and a list stack keeps its callback frame',
   { todo: LIST_STACK_SUMMARY_OPEN },
   () => {
     const result = infer()
@@ -170,7 +170,7 @@ test(
   }
 )
 
-test('every escape of the render-list chain refuses the mesh callback frame', () => {
+test('every escape of the render-list chain refuses the drawable callback frame', () => {
   const escapes: readonly (readonly [string, Injection])[] = [
     ['current list opaque array', { frame: 'globalThis.unknownConsumer(currentRenderList.opaque);' }],
     ['opaque element', { frame: 'globalThis.unknownConsumer(opaqueObjects[0]);' }],
@@ -200,8 +200,8 @@ test('every escape of the render-list chain refuses the mesh callback frame', ()
     ['arguments leak', { list: 'function leak(list) { globalThis.unknownConsumer(arguments); } leak(opaque);' }],
     // A sibling read runs whatever the object read from holds under the key.
     // A pooled trap with a getter is reused as a render item; a twin of the
-    // item's shape gets the mesh through a field store; and a self backlink
-    // hands the item back out through a slot the mesh is not in.
+    // item's shape gets the drawable through a field store; and a self backlink
+    // hands the item back out through a slot the drawable is not in.
     [
       'getter sibling on a pooled item',
       { list: 'const trap = { get id() { globalThis.unknownConsumer(this); return 1; }, object: null }; renderItems.push(trap);' }
@@ -293,11 +293,11 @@ const inferModules = (modules: Readonly<Record<string, string>>) => {
 const inferStack = (tail: string) => {
   const entry = resolve('test/fixtures/array-record-element-member-stack.js')
   const source = `export {};
-    class Mesh { constructor() { this.onDraw = function(input) { return input.amount; }; } }
-    /** @param {Array<Mesh>} list */
+    class Drawable { constructor() { this.onDraw = function(input) { return input.amount; }; } }
+    /** @param {Array<Drawable>} list */
     function draw(list) { for (let i = 0; i < list.length; i++) list[i].onDraw({ amount: 7 }); }
     const stack = [];
-    stack.push(new Mesh());
+    stack.push(new Drawable());
     draw(stack);
     ${tail}
   `

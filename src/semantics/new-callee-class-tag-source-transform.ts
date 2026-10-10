@@ -15,8 +15,8 @@ import ts from 'typescript'
  * none of that evidence, so the checker types `new F()` as `any`, gives `F` no
  * construct signature, and this compiler then refuses the call with
  * "invocation result type any disagrees with selected return type void"
- * (`semantics/model/selected-signature.ts`). Measured on the 2026-09-05
- * test262 sample: 21 cases, every one `var F = function () {}; new F()` or
+ * (`semantics/model/selected-signature.ts`). Measured on a sample of
+ * conformance tests (2026-09-05): 21 cases, every one `var F = function () {}; new F()` or
  * `function F() {} ... new F()` with an empty or field-free body.
  *
  * The program's meaning is unchanged by the tag -- JSDoc is a comment -- but

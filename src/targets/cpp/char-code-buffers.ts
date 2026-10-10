@@ -18,7 +18,7 @@ import { arrayBulkAppendMethodName } from './prototype/emit-prototype-array.js'
  * The local arrays that are really a `String.fromCharCode` argument list.
  *
  * `const codes = []; for (...) codes.push(byte); return String.fromCharCode(...codes)`
- * is how bson decodes every short key, and it is a heap `ArrayObject` (control
+ * is how a binary decoder typically reads every short key, and it is a heap `ArrayObject` (control
  * block, element storage past four doubles) built only to be drained into the
  * string the call returns. A buffer is instead the `std::string` itself: each
  * `push(x)` appends `x`'s UTF-8 spelling in the order `fromCharCode` would, and
@@ -179,8 +179,10 @@ export const collectCharCodeBuffers = (ctx: EmitContext, deferrable: Set<IrValue
             operation.argumentsAreSpread !== true &&
             operation.family === undefined
           if (spread) consumers.push(use)
+          // A prototype-method call names its language receiver as `thisArgument`
+          // with no native receiver slot; either spelling is the push's receiver.
           else if (
-            operation.receiver?.value !== read.id ||
+            (operation.receiver?.value !== read.id && operation.thisArgument?.value !== read.id) ||
             operation.callee.value === read.id ||
             operation.arguments.some((a) => a.value === read.id)
           )
@@ -202,6 +204,7 @@ export const collectCharCodeBuffers = (ctx: EmitContext, deferrable: Set<IrValue
           operation.kind === 'call' &&
           operation.callee.value === lookup &&
           (operation.receiver === null || readIds.has(operation.receiver.value)) &&
+          (operation.thisArgument === undefined || readIds.has(operation.thisArgument.value)) &&
           operation.numericRestHostCall === undefined &&
           operation.family === undefined &&
           operation.builtinShadowGuard === undefined &&

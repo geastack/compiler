@@ -1,6 +1,6 @@
 // ECMA-262 23.1.3.16 includes compares with SameValueZero, which checks Types
-// first -- so the search value need not share the element's carrier. mongodb
-// asks `Object.values(Enum).includes(value as any)` and
+// first -- so the search value need not share the element's carrier. A database
+// client asks `Object.values(Enum).includes(value as any)` and
 // `(string | undefined)[]`'s `.includes(name)`.
 
 const modes: string[] = ['auto', 'poll', 'stream']

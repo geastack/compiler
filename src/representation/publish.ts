@@ -44,7 +44,7 @@ import {
   defaultTypedArrayElementPolicy,
   defaultValueRecordPolicy
 } from './derive.js'
-import { isArrayPatternCapable, representationKey, soleArrayPatternCapableArm, type Representation } from './model.js'
+import { abiKey, isArrayPatternCapable, representationKey, soleArrayPatternCapableArm, type Representation } from './model.js'
 import { literalDestinationsOf } from './literal-destination.js'
 import { proxyCarriersOf } from './proxy-carriers.js'
 import { staticFieldAbsenceOf, staticMembersOf, withStaticFieldAbsence } from './static-field-cells.js'
@@ -54,6 +54,8 @@ import type { RepresentationConflict, SealedRepresentationPlan } from './plan.js
 import { createRepresentationPlanBuilder } from './plan.js'
 import type { RepresentationViolation } from './verify.js'
 import { verifyRepresentationPlan } from './verify.js'
+import { isStructuralMethodReceiver } from './structural-method-abi.js'
+import { nativeCallableDataPlanOf, type NativeCallableDataPlan } from './native-callable-data-storage.js'
 
 /**
  * Turning a sealed semantic graph into a sealed representation plan.
@@ -105,6 +107,9 @@ export interface RepresentationPublication {
    * what a type physically is, and the drift between them is silent.
    */
   readonly deriver: RepresentationDeriver
+  /** Callable own-data storage, computed once over this deriver and published
+   * for projection, lowering and certification to read by id. */
+  readonly nativeCallableData: NativeCallableDataPlan
 }
 
 const resultsOfComponent = (graph: SemanticGraph, members: readonly OperationId[]): readonly SemanticResultId[] =>
@@ -112,6 +117,26 @@ const resultsOfComponent = (graph: SemanticGraph, members: readonly OperationId[
     const operation = graph.operations.get(member)
     return operation ? operation.results.map((result) => result.id) : []
   })
+
+/** An allocation retains its authenticated body frame; later stores expose the public Function frame. */
+const nativeStructuralMethodAllocationOf = (
+  operation: SemanticOperation | undefined,
+  result: SemanticResult,
+  deriver: RepresentationDeriver
+): Representation | null => {
+  if (operation?.family !== 'allocation' || operation.allocated !== 'function-object' || operation.callable === null) return null
+  const publicValue = deriver.derive(result.type)
+  if (publicValue.kind !== 'function-value-dispatch' || publicValue.abi.receiver !== null) return null
+  const physical = deriver.nativeCallableConventions(operation.callable)
+  if (
+    physical === null ||
+    physical.construct !== null ||
+    !isStructuralMethodReceiver(physical.call.receiver) ||
+    abiKey({ ...physical.call, receiver: null }) !== abiKey(publicValue.abi)
+  )
+    return null
+  return { kind: 'function-value-dispatch', abi: physical.call }
+}
 
 /**
  * The element type a minted iterator record declares it will yield, read back
@@ -247,7 +272,7 @@ const nativeCursorIteratorOf = (
   // optional receiver: a possibly-absent TABLE walks its keys or, absent, an
   // empty cursor (`emit-iterator.ts`'s `enumerateIfPresent` -- ECMA-262
   // 14.7.5.5 runs the loop zero times), while an optional record such as
-  // Fastify's `schema.properties` stays honestly keyed `optional(record)`
+  // a schema's `properties` stays honestly keyed `optional(record)`
   // at its get-iterator site, and neither's paired next step fabricates the
   // unreachable `protocol:enumerate:next:record` obligation. The target key,
   // not a false result carrier, is the fail-closed boundary.
@@ -292,8 +317,7 @@ const nativeCursorIteratorOf = (
   // point, which is itself a string -- hence `iterator(string)`, an element
   // carrier equal to the source's own.
   if (source.kind === 'string') return sequenceIterator({ kind: 'string' })
-  // A sum of Arrays (`seeds: string[] | HostAddress[]` in mongodb's Topology
-  // constructor) -- or of Arrays and Sets (`isSuperset`'s rebound
+  // A sum of Arrays (`seeds: string[] | HostAddress[]` in a constructor) -- or of Arrays and Sets (`isSuperset`'s rebound
   // `string[] | Set<string>`) -- walks whichever arm is live by that arm's
   // own storage walk. The element carrier is the iterator record's declared element --
   // the union of the arms' elements -- and the emitter widens each arm's
@@ -395,8 +419,7 @@ const patternSourceSnapshotOf = (
   if (!base) return null
   const source = deriver.derive(base.type)
   if (source.kind === 'string') return { kind: 'array-object', element: { kind: 'string' }, ownership: 'shared-refcount', extension: null }
-  // A `RegExpExecArray` (`const [, major, minor = '0'] = re.exec(text)`,
-  // tsc's semver.ts) is the third source the same argument admits: its
+  // A `RegExpExecArray` (`const [, major, minor = '0'] = re.exec(text)`) is the third source the same argument admits: its
   // capture slots are storage the runtime already holds, and a snapshot of
   // them can run no user code. The element is `optional(string)` and not the
   // `string` the interface's `extends Array<string>` claims, because ECMA-262
@@ -635,6 +658,12 @@ const dynamicCallableValueOf = (
  * that fact onto the operation; no arbitrary typed value reaches this route.
  */
 const commonJsBoundaryOf = (graph: SemanticGraph, operation: SemanticOperation | undefined): Representation | null => {
+  // A package absent from the build has no record: the require always throws
+  // `MODULE_NOT_FOUND`, so its value is never produced. `undefined` is that
+  // never-produced value's carrier (`primitives.ts`), and every consumer
+  // converts it by `unreachable-value` instead of needing a reader for a
+  // module that does not exist.
+  if (operation?.family === 'invocation' && operation.commonJsRequire?.target === null) return { kind: 'undefined' }
   if (
     operation?.family === 'invocation' &&
     operation.commonJsRequire !== undefined &&
@@ -765,30 +794,23 @@ export const publishRepresentations = (
   classCopies?: ClassCopyPolicy
 ): RepresentationPublication => {
   const callableOrigins = callableOriginsOf(graph)
-  // The deriver may recover a boxed callable's declaration-owned frame only
+  // The deriver may recover a source callable's declaration-owned frame only
   // from this exact semantic allocation index. A StructuralTypeId is not an
   // identity: unrelated same-signature functions intentionally share one.
-  const dynamicCallableShapes = new Map<FunctionId, StructuralTypeId>()
+  const sourceCallableShapes = new Map<FunctionId, StructuralTypeId>()
   const conflictingCallableShapes = new Set<FunctionId>()
   for (const operation of graph.operations.values()) {
     if (operation.family !== 'allocation' || operation.allocated !== 'function-object' || operation.callable === null) continue
-    // Every function-object allocation under fallback, not only the ones
-    // `dynamicFallbackCallables` names. That set decides which callable VALUES
-    // are boxed and must stay exactly as narrow as it is; this map answers a
-    // different question -- what frame a body binds when it runs -- and the
-    // answer is a fact about the DECLARATION whichever carrier the value ended
-    // up in (`projection/abi.ts` says so where it reads this back). A function
-    // handed to `new Proxy(fn, ...)` is boxed for a reason that has nothing to
-    // do with a mutated `.prototype`, and its body was refused a calling
-    // convention it had stated perfectly well in its own parameter list.
-    if (!dynamicFallback) continue
-    const previous = dynamicCallableShapes.get(operation.callable)
+    // Public method storage can erase an implicit structural receiver. The
+    // body still binds its physical receiver, keyed by this exact allocation
+    // identity rather than by a structural signature shared by other Functions.
+    const previous = sourceCallableShapes.get(operation.callable)
     if (previous !== undefined && previous !== operation.shape) {
       conflictingCallableShapes.add(operation.callable)
-      dynamicCallableShapes.delete(operation.callable)
+      sourceCallableShapes.delete(operation.callable)
       continue
     }
-    if (!conflictingCallableShapes.has(operation.callable)) dynamicCallableShapes.set(operation.callable, operation.shape)
+    if (!conflictingCallableShapes.has(operation.callable)) sourceCallableShapes.set(operation.callable, operation.shape)
   }
   // A required member some object is created without is absent until written (`unwritten-record-members.ts`).
   const unwrittenMembers = unwrittenRecordMembersOf(graph, binding)
@@ -812,7 +834,7 @@ export const publishRepresentations = (
     errors,
     dynamicFallback,
     dynamicFallbackTypes,
-    dynamicCallableShapes,
+    sourceCallableShapes,
     dynamicWrittenTypes,
     classCopies,
     unwrittenMembers.members
@@ -838,6 +860,8 @@ export const publishRepresentations = (
   const staticAbsence = staticFieldAbsenceOf(graph, statics)
   // A `let` with no initializer read from outside its declaring body holds `undefined` until written (`unassigned-binding-cells.ts`).
   const unassignedBindings = unassignedBindingAbsenceOf(graph)
+  const nativeCallableData = nativeCallableDataPlanOf(graph, deriver)
+  const nativeCallableDataResults = nativeCallableData.results
   const staticFieldCarriers = new Map<DeclarationId, Representation>(proxies.staticFields)
   for (const field of statics.fields.values())
     if (staticAbsence.fields.has(field.declaration))
@@ -863,6 +887,7 @@ export const publishRepresentations = (
     // all of them, and this degrades to exactly the unconditional `exact`
     // publish this loop always did.
     const provenance =
+      nativeCallableDataResults.get(resultId) ??
       proxyCarriers.get(resultId) ??
       commonJsBoundaryOf(graph, operation) ??
       shadowedCallableBuiltinReadOf(graph, operation, callableOrigins) ??
@@ -870,6 +895,7 @@ export const publishRepresentations = (
       exactClassInstanceReadOf(operation, result, deriver) ??
       dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables) ??
       dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables) ??
+      nativeStructuralMethodAllocationOf(operation, result, deriver) ??
       nativeCursorIteratorOf(graph.structuralTypes, operation, result, deriver) ??
       patternSourceSnapshotOf(graph.structuralTypes, regexp, operation, result, deriver) ??
       patternSourceArmOf(operation, result, deriver) ??
@@ -932,23 +958,27 @@ export const publishRepresentations = (
             ? 'unassigned-binding-absence'
             : unwrittenMember
               ? 'unwritten-record-member'
-              : override === proxyCarriers.get(resultId)
-                ? 'proxy-provenance'
-                : override === literalDestinations.get(resultId)
-                  ? 'literal-destination'
-                  : commonJsBoundaryOf(graph, operation)
-                    ? 'commonjs-module-boundary'
-                    : shadowedCallableBuiltinReadOf(graph, operation, callableOrigins)
-                      ? 'shadowed-callable-builtin'
-                      : instanceConstructorReadOf(operation, result, deriver, isErrorInstance)
-                        ? 'instance-constructor-read'
-                        : exactClassInstanceReadOf(operation, result, deriver)
-                          ? 'exact-class-instance'
-                          : dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables)
-                            ? 'dynamic-callable-identity'
-                            : dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables)
-                              ? 'dynamic-call-frame'
-                              : 'protocol-array-fast-path',
+              : override === nativeCallableDataResults.get(resultId)
+                ? 'native-callable-data-source'
+                : override === proxyCarriers.get(resultId)
+                  ? 'proxy-provenance'
+                  : override === literalDestinations.get(resultId)
+                    ? 'literal-destination'
+                    : commonJsBoundaryOf(graph, operation)
+                      ? 'commonjs-module-boundary'
+                      : shadowedCallableBuiltinReadOf(graph, operation, callableOrigins)
+                        ? 'shadowed-callable-builtin'
+                        : instanceConstructorReadOf(operation, result, deriver, isErrorInstance)
+                          ? 'instance-constructor-read'
+                          : exactClassInstanceReadOf(operation, result, deriver)
+                            ? 'exact-class-instance'
+                            : dynamicCallableValueOf(result, callableOrigins, dynamicFallbackCallables)
+                              ? 'dynamic-callable-identity'
+                              : dynamicCallableReadOf(operation, result, deriver, callableOrigins, dynamicFallbackCallables)
+                                ? 'dynamic-call-frame'
+                                : nativeStructuralMethodAllocationOf(operation, result, deriver)
+                                  ? 'native-source-method-frame'
+                                  : 'protocol-array-fast-path',
         joinsClosedFamily: false
       })
     }
@@ -972,5 +1002,14 @@ export const publishRepresentations = (
   }
 
   const plan = builder.seal()
-  return { plan, committed, blocked, conflicts, violations: verifyRepresentationPlan(plan), deriver, staticFieldCarriers }
+  return {
+    plan,
+    committed,
+    blocked,
+    conflicts,
+    violations: verifyRepresentationPlan(plan),
+    deriver,
+    staticFieldCarriers,
+    nativeCallableData
+  }
 }

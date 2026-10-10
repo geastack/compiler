@@ -9,7 +9,12 @@ import { censusGlobalHostMutations } from './global-host-mutations.js'
 import { censusUnresolvableNames } from './unresolvable-names.js'
 import { wholeProgram } from './reachability.js'
 
-const intact = (source: string, intrinsic: 'Array' | 'Object' | 'Map' | 'WeakMap' | 'Reflect', member?: string): boolean => {
+const intact = (
+  source: string,
+  intrinsic: 'Array' | 'Object' | 'Map' | 'WeakMap' | 'Reflect' | 'JSON',
+  member?: string,
+  absentName?: string
+): boolean => {
   const entry = resolve('test/fixtures/deferred-intrinsic-protocols.ts')
   const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022, types: [] }
   const host = ts.createCompilerHost(options)
@@ -48,10 +53,41 @@ const intact = (source: string, intrinsic: 'Array' | 'Object' | 'Map' | 'WeakMap
         globalHostMutationTaint,
         isStandardLibraryDeclaration: (declaration) => program.isSourceFileDefaultLibrary(declaration.getSourceFile())
       },
-      [{ intrinsic, ...(member === undefined ? {} : { member }), location: file }]
+      [
+        {
+          intrinsic,
+          ...(member === undefined ? {} : { member }),
+          ...(absentName === undefined ? {} : { prototypeKeys: { names: [absentName] }, prototypeAbsentNames: [absentName] }),
+          location: file
+        }
+      ]
     ).length === 0
   )
 }
+
+test('final absence discharge excludes inherited builtins and keys added through prototype mutation', () => {
+  assert.equal(intact('', 'Object', undefined, 'inspect'), true)
+  for (const key of ['hasOwnProperty', 'isPrototypeOf', 'propertyIsEnumerable', '__defineGetter__', '__lookupSetter__'])
+    assert.equal(intact('', 'Object', undefined, key), false, key)
+  assert.equal(intact('(Object.prototype as any).inspect = function() {};', 'Object', undefined, 'inspect'), false)
+})
+
+test('JSON observation obligations reject member replacement and inherited serialization hooks', () => {
+  assert.equal(intact('', 'JSON', 'stringify'), true)
+  assert.equal(intact('JSON.stringify = () => "changed";', 'JSON', 'stringify'), false)
+  assert.equal(intact('const alias = JSON; alias.stringify = () => "changed";', 'JSON', 'stringify'), false)
+  assert.equal(intact('delete (JSON as any).stringify;', 'JSON', 'stringify'), false)
+  assert.equal(intact('Object.assign(JSON, { stringify() { return "changed"; } });', 'JSON', 'stringify'), false)
+  assert.equal(intact('Object.defineProperty(JSON, "stringify", { get() { return () => "changed"; } });', 'JSON', 'stringify'), false)
+  assert.equal(
+    intact('const alias = JSON; Reflect.defineProperty(alias, "stringify", { value: () => "changed" });', 'JSON', 'stringify'),
+    false
+  )
+  assert.equal(intact('JSON.parse = () => null;', 'JSON', 'stringify'), true)
+  assert.equal(intact('const JSON = { stringify() { return "local"; } };', 'JSON', 'stringify'), false)
+  assert.equal(intact('', 'Object', undefined, 'toJSON'), true)
+  assert.equal(intact('(Object.prototype as any).toJSON = function() { return this; };', 'Object', undefined, 'toJSON'), false)
+})
 
 test('only accepted inference captures retain protocol obligations and later scopes replace earlier rounds', () => {
   const ledger = createDeferredIntrinsicProtocolLedger()

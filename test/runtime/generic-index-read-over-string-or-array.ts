@@ -1,4 +1,4 @@
-// `T[number]` for a `T` bound to `string` is `string`: saslprep's
+// `T[number]` for a `T` bound to `string` is `string`: a string normalizer's
 // `first = <T extends string | any[]>(x: T): T[number] => x[0]` reads a code
 // unit off the normalized input, and its copy at `T = string` must carry the
 // read as a string rather than the dynamic box the open constraint suggests.

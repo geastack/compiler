@@ -1,7 +1,7 @@
 // `typeof x.then === 'function'` AS THE DISCRIMINANT OF A UNION WHOSE ARMS
 // DISAGREE ABOUT `then`.
 //
-// `@hono/node-server`'s `isPromise` is exactly this: a `Response |
+// A Node HTTP adapter's `isPromise` is exactly this: a `Response |
 // Promise<Response>` narrowed by reading `then` off it and asking whether the
 // read produced a callable. `promise-method-read-as-value.ts` covers the
 // easier shape, where every arm IS a promise and the answer is the same on all

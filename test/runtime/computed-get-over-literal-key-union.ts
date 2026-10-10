@@ -1,5 +1,5 @@
 // Copying a fixed list of named options out of a typed options record by a
-// computed key -- mongodb's `parseSslOptions`:
+// computed key -- a database client's `parseSslOptions`:
 // `for (const name of LEGAL_TLS_SOCKET_OPTIONS) if (options[name] != null) (result as Document)[name] = options[name]`.
 // The key is a union of the record's own member names, so the read answers
 // the union of those members' types.
@@ -10,13 +10,13 @@
 // node into the union -- the constant-key read of that member, never a box.
 // The dynamic route it replaces boxed each member and had no decoder back
 // into the union's callable arm (`checkServerIdentity`). `sink` exposes the
-// options record to an `any` boundary, as mongodb's options are, so the
-// receiver's reflection demand is `full` and the recipe must survive it.
+// options record to an `any` boundary, as a database client's options are,
+// so the receiver's reflection demand is `full` and the recipe must survive it.
 //! expect: db 2 undefined 1024 7 ctx
 //! expect: undefined mismatch other
 //! emitted-has: if (__gea_key == "checkServerIdentity") { if (__gea_receiver->gea_present_checkServerIdentity)
 
-interface BsonDocument {
+interface WireDocument {
   [key: string]: any
 }
 
@@ -51,7 +51,7 @@ function parseSslOptions(options: ConnectionOptions & { existingSocket?: object 
   const result: TlsOptions & { host?: string } = { host: options.host }
   for (const name of LEGAL_TLS_SOCKET_OPTIONS) {
     if (options[name] != null) {
-      ;(result as BsonDocument)[name] = options[name]
+      ;(result as WireDocument)[name] = options[name]
     }
   }
   return result

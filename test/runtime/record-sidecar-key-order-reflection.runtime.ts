@@ -4,14 +4,14 @@
 // spread, `for...in`, `Object.assign` and `Object.entries` read the same
 // ECMA-262 OrdinaryOwnPropertyKeys list. A native record keeps its declared
 // fields in its layout and every other key in a sidecar, so each of them used
-// to list the layout first whatever order the keys arrived in -- and a BSON
+// to list the layout first whatever order the keys arrived in -- and a wire
 // command document serialized with its command name anywhere but first is one
 // the server rejects.
 
-interface BsonDocument {
+interface WireDocument {
   [key: string]: any
 }
-interface Command extends BsonDocument {
+interface Command extends WireDocument {
   find: string
   filter?: number
   limit?: number
@@ -63,13 +63,13 @@ console.log(`entries=${entries()}`)
 
 // The record handed where an open document is declared -- the driver's
 // `command(ns, cmd: Document)` -- and spread into one, as `prepareCommand` does.
-function names(document: BsonDocument): string {
+function names(document: WireDocument): string {
   return Object.keys(document).join(',')
 }
 //! expect: recast=find,lsid,limit,extra,filter
 console.log(`recast=${names(build())}`)
 function prepared(): string {
-  const command: BsonDocument = { comment: 'c', ...build(), $db: 'admin' }
+  const command: WireDocument = { comment: 'c', ...build(), $db: 'admin' }
   return Object.keys(command).join(',')
 }
 //! expect: prepared=comment,find,lsid,limit,extra,filter,$db

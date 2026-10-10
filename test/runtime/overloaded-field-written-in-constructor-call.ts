@@ -1,7 +1,7 @@
 //! expect: get:/a
 //! expect: post:/b:2
 
-// hono's `HonoBase`: `get!: HandlerInterface<...>` is annotated with an
+// An HTTP framework's `AppBase`: `get!: HandlerInterface<...>` is annotated with an
 // interface of many overloads that join into no single convention, and the one
 // function that ever lives in the cell is written by the constructor's
 // `allMethods.forEach((method) => { this[method] = (args1, ...args) => {...} })`.

@@ -1,7 +1,7 @@
 // `value.toJSON` read off a union of a number and a class that declares the
 // method: the scalar arm has no such member, so it answers `undefined`, and the
 // read's result is the open carrier (the class arm publishes a method there).
-// three.js's `ShaderMaterial.toJSON` walks uniforms shaped exactly like this.
+// A 3D scene-graph library's `ShadedMaterial.toJSON` walks uniforms shaped exactly like this.
 
 class Texture {
   constructor() {

@@ -1,6 +1,6 @@
 //! expect: debug:command:false:commandStarted:1:ping:false:true:false debug:command:false:commandSucceeded:1:ping:true:true:false debug:direct:false:commandStarted:2:find:false:false:true
 // A literal spreading a class instance, stored into a union whose only arm
-// the literal fits is that CLASS: mongodb's `emitAndLogCommand` logs
+// the literal fits is that CLASS: a database client's `emitAndLogCommand` logs
 // `{ databaseName, ...args[0] }` as `CommandStartedEvent |
 // LoggableCommandFailedEvent | LoggableCommandSucceededEvent`, and the
 // started copy's literal is the event's own fields -- a plain object, never

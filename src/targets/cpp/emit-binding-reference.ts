@@ -132,7 +132,7 @@ export const bindingReference = (
     // carrier is a struct this compilation mints: no object file outside the
     // unit can define a variable of a type private to it, and the program
     // introduces the cell nowhere, so the `extern` would compile and never
-    // link. mongodb's correctness probe did exactly that with `declare const
+    // link. A probe program did exactly that with `declare const
     // process: { exitCode: number | undefined }` -> `Undefined symbols:
     // _process`. Refused at the reference, not at the declaration: a
     // declaration nothing renders a use of links fine and stays harmless.

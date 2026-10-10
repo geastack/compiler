@@ -19,8 +19,8 @@
 // already-mature object, an edge this young collection clips -- would then
 // be read and written by `bufferCycleCandidate` after the destroy phase had
 // already freed it: a heap-use-after-free on the real object, confirmed by
-// AddressSanitizer against the actual node-compat/hono-hello server under
-// `GEA_WORKERS=8` load (see measurements/hono-v2-bench-2026-09-17f-gea8.log).
+// AddressSanitizer against a real node-compat HTTP server under
+// `GEA_WORKERS=8` load.
 //
 // This reproduces the mechanism with a small untraced-registry analog rather
 // than the real `nativeExpandos()`/HTTP server, so it needs no fork and no
