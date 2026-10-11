@@ -622,9 +622,322 @@ bool nativeDocumentEnumerable(const Ref<T>& source, const PropertyKey& key) {
   return false;
 }
 
+/**
+ * The document protocol of an `ArrayObject<E>`, written once for every `E`.
+ *
+ * An array's own properties are its elements, `length` and its expando, and
+ * its element access is already type-erased behind `NativeArrayOps`; the
+ * element type changes nothing else. Instantiating the generic
+ * `nativeDocument*` templates per element type compiled ~20 KB of identical
+ * code into the binary for every array type a program boxes. What really
+ * depends on the type is the handful of guards below, which are small.
+ *
+ * `payload` points at the caller's typed `Ref<ArrayObject<E>>`, the
+ * convention every `NativeArrayOps` entry takes; `source` is the same handle
+ * erased. Each function is the generic template's array path, unchanged.
+ */
+struct NativeArrayDocumentBridge {
+  const NativeArrayOps* elements;
+  bool (*fieldsWritable)(const void* payload);
+  bool (*extensible)(const void* payload);
+  NativeCallReceiver (*receiver)(const void* payload);
+  void (*requireLane)(const void* payload, const NativeDescriptorData& value);
+};
+
+inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKey& key) {
+  noteNativeOwnKeyCreated(source, key, [](std::vector<PropertyKey>&) {});
+}
+
+[[gnu::noinline]] inline bool arrayDocumentHas(const Ref<void>& source, const void* payload, const NativeArrayDocumentBridge& bridge,
+                                               const PropertyKey& key, bool own) {
+  const auto* elements = bridge.elements;
+  if (const auto* origin = record::nativeViewRoute(source); origin && origin->hasOwn)
+    return own ? origin->hasOwn(origin->immediate, key) : origin->hasProperty && origin->hasProperty(origin->immediate, key);
+  if (!key.isSymbol() && key.text() == "length") return true;
+  std::size_t index = 0;
+  if (arrayIndexOfKey(key, index)) return index < elements->length(payload) && elements->has(payload, index);
+  const auto overlay = expandoFor(elements->owner(payload), false);
+  if (overlay && (own ? overlay->ownProperty(key) != nullptr : overlay->hasProperty(key))) return true;
+  if (own) return false;
+  return dynamicArrayPrototypeHas(key) || ordinaryObjectPrototypeHas(key);
+}
+
+[[gnu::noinline]] inline bool arrayDocumentRead(const Ref<void>&, const void* payload, const NativeArrayDocumentBridge& bridge,
+                                                const PropertyKey& key, Value& out) {
+  const auto* elements = bridge.elements;
+  if (!key.isSymbol() && key.text() == "length") {
+    out = Value::box(Value::Tag::Number, static_cast<double>(elements->length(payload)));
+    return true;
+  }
+  std::size_t index = 0;
+  if (arrayIndexOfKey(key, index)) {
+    elements->element(payload, index, out);
+    return true;
+  }
+  const auto sidecar = expandoFor(elements->owner(payload), false);
+  if (sidecar && sidecar->hasProperty(key)) {
+    out = sidecar->getWithNativeReceiver(key, bridge.receiver(payload));
+    return true;
+  }
+  out = dynamicArrayPrototypeGet(key);
+  return out.tag() != Value::Tag::Undefined;
+}
+
+[[gnu::noinline]] inline bool arrayDocumentDescriptor(const Ref<void>& source, const void* payload, const NativeArrayDocumentBridge& bridge,
+                                                      const PropertyKey& key, PropertyDescriptor& out) {
+  const auto* elements = bridge.elements;
+  const bool frozen = elements->frozen(payload) || !bridge.fieldsWritable(payload);
+  if (!key.isSymbol() && key.text() == "length") {
+    out = PropertyDescriptor::assignment(Value::box(Value::Tag::Number, static_cast<double>(elements->length(payload))));
+    out.enumerable = out.configurable = false;
+    out.writable = !frozen && (elements->writableLength == nullptr || elements->writableLength(payload));
+    return true;
+  }
+  std::size_t index = 0;
+  if (arrayIndexOfKey(key, index)) return elements->ownDescriptor(payload, index, out);
+  if (!source) return false;
+  Optional<PropertyDescriptor> original;
+  if (record::ownNativeViewDescriptor(source, key, original)) {
+    if (!original.has_value()) return false;
+    out = *original;
+    return true;
+  }
+  const Ref<DynamicObject> expando = expandoFor(elements->owner(payload), false);
+  const PropertyDescriptor* descriptor = expando ? expando->ownProperty(key) : nullptr;
+  if (descriptor == nullptr) return false;
+  out = *descriptor;
+  return true;
+}
+
+[[gnu::noinline]] inline std::vector<PropertyKey> arrayDocumentKeys(const Ref<void>& source, const void* payload,
+                                                                    const NativeArrayDocumentBridge& bridge) {
+  const auto* elements = bridge.elements;
+  std::vector<PropertyKey> properties;
+  if (source) {
+    for (std::size_t index = 0; index < elements->length(payload); ++index)
+      if (elements->has(payload, index)) properties.push_back(arrayIndexedKey(index));
+    properties.push_back(PropertyKey::string("length"));
+    if (const auto expando = expandoFor(elements->owner(payload), false))
+      for (const auto& key : expando->ownKeys())
+        if (std::find(properties.begin(), properties.end(), key) == properties.end()) properties.push_back(key);
+  }
+  std::vector<PropertyKey> keys;
+  for (std::size_t index = 0; index < elements->length(payload); ++index) {
+    const auto key = PropertyKey::string(std::to_string(index));
+    if (!arrayDocumentHas(source, payload, bridge, key, true)) continue;
+    if (std::find(keys.begin(), keys.end(), key) == keys.end()) keys.push_back(key);
+  }
+  const auto length = PropertyKey::string("length");
+  if (std::find(keys.begin(), keys.end(), length) == keys.end()) keys.push_back(length);
+  for (auto& key : properties)
+    if (std::find(keys.begin(), keys.end(), key) == keys.end()) keys.push_back(std::move(key));
+  return ordinaryOwnPropertyKeyOrder(std::move(keys));
+}
+
+[[gnu::noinline]] inline bool arrayDocumentSet(const Ref<void>& source, void* payload, const NativeArrayDocumentBridge& bridge,
+                                               const PropertyKey& key, const Value& value) {
+  const auto* elements = bridge.elements;
+  if (elements->frozen(payload) || !bridge.fieldsWritable(payload)) return false;
+  std::size_t index = 0;
+  if (arrayIndexOfKey(key, index)) return elements->setElement(payload, index, value);
+  if (!key.isSymbol() && key.text() == "length") {
+    const double length = dynamicToNumber(value);
+    if (!std::isfinite(length) || length < 0 || length > 4294967295.0 || length != std::floor(length))
+      host::throwRuntimeError("RangeError", "Invalid array length");
+    elements->resize(payload, length);
+    return true;
+  }
+  const auto receiver = bridge.receiver(payload);
+  const auto anchor = elements->owner(payload);
+  const auto existing = expandoFor(anchor, false);
+  if (existing && existing->ownProperty(key) != nullptr) return existing->setWithNativeReceiver(key, value, receiver);
+  if (!bridge.extensible(payload)) return false;
+  if (!expandoFor(anchor, true)->setWithNativeReceiver(key, value, receiver)) return false;
+  noteArrayExpandoKeyCreated(source, key);
+  return true;
+}
+
+[[gnu::noinline]] inline bool arrayDocumentDefine(const Ref<void>& source, void* payload, const NativeArrayDocumentBridge& bridge,
+                                                  const PropertyKey& key, const PropertyDescriptor& descriptor) {
+  const auto* elements = bridge.elements;
+  if (!key.isSymbol() && key.text() == "length") return elements->defineLength(payload, descriptor);
+  std::size_t index = 0;
+  if (arrayIndexOfKey(key, index)) return elements->define(payload, index, descriptor);
+  if (!source) return false;
+  if (record::immutableDescriptorSnapshotView(source))
+    host::throwRuntimeError("TypeError", "a native descriptor snapshot definition has no certified source protocol");
+  if (const auto defined = record::defineDocumentView(source, key, descriptor)) return *defined;
+  const auto anchor = elements->owner(payload);
+  const Ref<DynamicObject> existing = expandoFor(anchor, false);
+  if (existing && existing->ownProperty(key) != nullptr) return existing->defineOwnProperty(key, descriptor);
+  if (!bridge.extensible(payload)) return false;
+  if (!expandoFor(anchor, true)->defineOwnProperty(key, descriptor)) return false;
+  noteArrayExpandoKeyCreated(source, key);
+  return true;
+}
+
+[[gnu::noinline]] inline bool arrayDocumentDelete(const Ref<void>& source, void* payload, const NativeArrayDocumentBridge& bridge,
+                                                  const PropertyKey& key) {
+  const auto* elements = bridge.elements;
+  if (!key.isSymbol() && key.text() == "length") return false;
+  std::size_t index = 0;
+  if (arrayIndexOfKey(key, index)) return elements->remove(payload, index);
+  if (!source) return true;
+  if (record::immutableDescriptorSnapshotView(source))
+    host::throwRuntimeError("TypeError", "a native descriptor snapshot deletion has no certified source protocol");
+  if (const auto* document = record::documentViewRoute(source)) return document->document->remove(document->held, key);
+  const Ref<DynamicObject> expando = expandoFor(elements->owner(payload), false);
+  return expando ? expando->deleteOwnProperty(key) : true;
+}
+
+[[gnu::noinline]] inline bool arrayDocumentEnumerable(const Ref<void>& source, const void* payload, const NativeArrayDocumentBridge& bridge,
+                                                      const PropertyKey& key) {
+  const auto* elements = bridge.elements;
+  if (!key.isSymbol() && key.text() == "length") return false;
+  std::size_t index = 0;
+  if (arrayIndexOfKey(key, index)) {
+    PropertyDescriptor descriptor;
+    return elements->ownDescriptor(payload, index, descriptor) && descriptor.enumerable;
+  }
+  const auto overlay = expandoFor(elements->owner(payload), false);
+  const auto* descriptor = overlay ? overlay->ownProperty(key) : nullptr;
+  if (descriptor) return descriptor->enumerable;
+  if (arrayDocumentHas(source, payload, bridge, key, true))
+    host::throwRuntimeError("TypeError", "a native Document field has no enumerability-only protocol");
+  return false;
+}
+
+[[gnu::noinline]] inline std::optional<bool> arrayDocumentReadNative(const Ref<void>& source, const void* payload,
+                                                                     const NativeArrayDocumentBridge& bridge, const PropertyKey& key,
+                                                                     const NativeFieldRead& read) {
+  const auto* elements = bridge.elements;
+  if (record::hasLiveFieldView(source)) return record::readFieldView(source, key, read);
+  std::size_t index = 0;
+  if (arrayIndexOfKey(key, index)) {
+    PropertyDescriptor descriptor;
+    if (!elements->ownDescriptor(payload, index, descriptor)) return std::nullopt;
+    if (!descriptor.isAccessor())
+      return descriptor.nativeValue ? std::optional<bool>(descriptor.nativeValue.read(read)) : std::nullopt;
+    if (descriptor.nativeGet && descriptor.nativeGet.read != nullptr) return descriptor.nativeGet.readNative(bridge.receiver(payload), read);
+    return std::nullopt;
+  }
+  const auto sidecar = expandoFor(elements->owner(payload), false);
+  return sidecar ? readDocumentNativeObject(sidecar, key, bridge.receiver(payload), read) : std::nullopt;
+}
+
+[[gnu::noinline]] inline bool arrayDocumentSetNative(const Ref<void>& source, void* payload, const NativeArrayDocumentBridge& bridge,
+                                                     const PropertyKey& key, const NativeDescriptorData& value,
+                                                     const NativeFieldWrite& written) {
+  const auto* elements = bridge.elements;
+  if (record::hasLiveFieldView(source)) return record::writeFieldView(source, key, written);
+  std::size_t index = 0;
+  if (arrayIndexOfKey(key, index)) {
+    if (elements->frozen(payload) || !bridge.fieldsWritable(payload)) return false;
+    PropertyDescriptor current;
+    const bool present = elements->ownDescriptor(payload, index, current);
+    if (present && current.isAccessor()) {
+      if (!current.hasSet) return false;
+      const auto receiver = bridge.receiver(payload);
+      if (current.nativeSet && current.nativeSet.write) return current.nativeSet.writeNative(receiver, written);
+      if (current.nativeSet && current.nativeSet.dynamicWrite) {
+        current.nativeSet.observeWrite(receiver, value.materialize());
+        return true;
+      }
+      if (!current.set) return false;
+      current.set(receiver.dynamicValue(), value.materialize());
+      return true;
+    }
+    if (present && !current.writable) return false;
+    bridge.requireLane(payload, value);
+    auto descriptor = present ? PropertyDescriptor{} : PropertyDescriptor::assignment(Value{});
+    descriptor.hasValue = true;
+    descriptor.nativeValue = value;
+    return elements->define(payload, index, descriptor);
+  }
+  if (!key.isSymbol() && key.text() == "length")
+    host::throwRuntimeError("TypeError", "a native Document length assignment needs a numeric entry writer");
+  const auto receiver = bridge.receiver(payload);
+  const auto anchor = elements->owner(payload);
+  const auto existing = expandoFor(anchor, false);
+  if (existing && existing->ownProperty(key)) return existing->setNativeDescriptorWithNativeReceiver(key, value, written, receiver);
+  if (!bridge.extensible(payload)) return false;
+  const auto overlay = existing ? existing : expandoFor(anchor, true);
+  if (!overlay->setNativeDescriptorWithNativeReceiver(key, value, written, receiver)) return false;
+  if (overlay->ownProperty(key)) noteArrayExpandoKeyCreated(source, key);
+  return true;
+}
+
+template <typename T>
+const NativeArrayDocumentBridge* arrayDocumentBridgeFor() {
+  using Held = Ref<T>;
+  // The shared functions transcribe the generic templates' path for a type
+  // with none of these member protocols; a type that gains one must not be
+  // routed through them.
+  static_assert(!NativeFieldTable<T> && !TypedStringDictionaryTable<T> && !NativePrototypeTable<T> && !NativeOwnFieldPredicate<T> &&
+                    !NativeOwnFieldPresenceTable<T> && !NativeOwnIndexPresenceTable<T> && !NativeOwnFieldEnumerableTable<T> &&
+                    !NativeOwnIndexEnumerableTable<T> && !NativeOwnKeysTable<T> && !IsMapPayload<Held>::value,
+                "an array type with its own field protocol needs the generic document templates");
+  static const NativeArrayDocumentBridge bridge{
+      nativeArrayOpsFor<Held>(),
+      [](const void* payload) { return nativeOwnFieldsWritable(*static_cast<const Held*>(payload)); },
+      [](const void* payload) { return nativeIsExtensible(*static_cast<const Held*>(payload)); },
+      [](const void* payload) { return NativeCallReceiver::object(*static_cast<const Held*>(payload)); },
+      [](const void* payload, const NativeDescriptorData& value) { requireNativeEntryFitsArrayLane(**static_cast<const Held*>(payload), value); }};
+  return &bridge;
+}
+
+template <typename T>
+const NativeDocumentOps* nativeArrayDocumentOpsFor() {
+  static const NativeDocumentOps operations{
+      +[](const Ref<void>& source, const PropertyKey& key, Value& out) {
+        const auto held = source.template staticCast<T>();
+        return arrayDocumentRead(source, &held, *arrayDocumentBridgeFor<T>(), key, out);
+      },
+      +[](const Ref<void>& source, const PropertyKey& key, const Value& value) {
+        auto held = source.template staticCast<T>();
+        return arrayDocumentSet(source, &held, *arrayDocumentBridgeFor<T>(), key, value);
+      },
+      +[](const Ref<void>& source, const PropertyKey& key, PropertyDescriptor& out) {
+        const auto held = source.template staticCast<T>();
+        return arrayDocumentDescriptor(source, &held, *arrayDocumentBridgeFor<T>(), key, out);
+      },
+      +[](const Ref<void>& source, const PropertyKey& key, const PropertyDescriptor& descriptor) {
+        auto held = source.template staticCast<T>();
+        return arrayDocumentDefine(source, &held, *arrayDocumentBridgeFor<T>(), key, descriptor);
+      },
+      +[](const Ref<void>& source, const PropertyKey& key) {
+        auto held = source.template staticCast<T>();
+        return arrayDocumentDelete(source, &held, *arrayDocumentBridgeFor<T>(), key);
+      },
+      +[](const Ref<void>& source, const PropertyKey& key, bool own) {
+        const auto held = source.template staticCast<T>();
+        return arrayDocumentHas(source, &held, *arrayDocumentBridgeFor<T>(), key, own);
+      },
+      +[](const Ref<void>& source) {
+        const auto held = source.template staticCast<T>();
+        return arrayDocumentKeys(source, &held, *arrayDocumentBridgeFor<T>());
+      },
+      +[](const Ref<void>& source, const PropertyKey& key) {
+        const auto held = source.template staticCast<T>();
+        return arrayDocumentEnumerable(source, &held, *arrayDocumentBridgeFor<T>(), key);
+      },
+      +[](const Ref<void>& source) { return Value::box(Value::Tag::Object, source.template staticCast<T>()); },
+      payloadTypeTagFor<Ref<T>>(), IsArrayPayload<Ref<T>>::value, false, nullptr,
+      +[](const Ref<void>& source, const PropertyKey& key, const NativeFieldRead& read) {
+        const auto held = source.template staticCast<T>();
+        return arrayDocumentReadNative(source, &held, *arrayDocumentBridgeFor<T>(), key, read);
+      },
+      +[](const Ref<void>& source, const PropertyKey& key, const NativeDescriptorData& value, const NativeFieldWrite& written) {
+        auto held = source.template staticCast<T>();
+        return arrayDocumentSetNative(source, &held, *arrayDocumentBridgeFor<T>(), key, value, written);
+      }};
+  return &operations;
+}
+
 template <typename T>
 const NativeDocumentOps* nativeDocumentOpsFor() {
   if constexpr (std::is_void_v<T> || refStandalone<T>) return nullptr;
+  else if constexpr (IsArrayObjectStruct<T>::value) return nativeArrayDocumentOpsFor<T>();
   else {
     Ref<Map<Value, Value>> (*mapView)(const Ref<void>&) = nullptr;
     if constexpr (IsMapPayload<Ref<T>>::value) {
