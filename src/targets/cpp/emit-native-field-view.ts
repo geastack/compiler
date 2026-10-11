@@ -5,7 +5,7 @@ import { createCppEmitBlockedError, operandText, type EmitContext } from './emit
 import { recipeText } from './emit-narrowing.js'
 import { nativeFieldPolicyType, staticKeyOrderText } from './records.js'
 import { tracksKeyOrder } from './key-order-tracking.js'
-import { cppTypeOf, cppStringLiteral, cppRecordFieldKeyIsSymbol, fieldPropertyKeyText } from './types.js'
+import { cppTypeOf, cppStringLiteral, cppRecordFieldKeyIsSymbol, fieldPropertyKeyText, unitFunctionName } from './types.js'
 import { propertyKeyText } from './emit-dynamic-properties.js'
 import { nativeDataPropertyText } from './emit-buffers.js'
 import { nativeDataPropertyOf } from '../../representation/native-data-properties.js'
@@ -96,16 +96,7 @@ export const nativeFieldViewReadForText = (
   keyOperand?: IrOperand
 ): string => {
   const result = cppTypeOf(target)
-  const arms = receipt.sources.map(({ source, conversion }) => {
-    const from = cppTypeOf(source)
-    const converted = renderedLeaf(ctx, conversion, `(*static_cast<const ${from}*>(gea_native))`)
-    return `if (${routeTokenOf(source)}) { static_cast<std::optional<${result}>*>(gea_out)->emplace(${converted}); return true; }`
-  })
-  const accepts = receipt.sources.map(({ source }) => `(${routeTokenOf(source)})`).join(' || ') || 'false'
-  const adapter =
-    '[&](void* gea_out, const void* gea_type, const void* gea_policy, const void* gea_native) -> bool { ' +
-    `${arms.join(' ')} return false; }`
-  const accepted = `+[](const void* gea_type, const void* gea_policy) -> bool { return ${accepts}; }`
+  const { adapter, accepted } = fieldViewRoutesText(ctx, receipt, result)
   const dynamicRead =
     (key: string) =>
     (carrier: Representation, text: string): string => {
@@ -312,14 +303,33 @@ export const nativeHeldFieldViewReadText = (
   plain: string
 ): string => {
   const result = cppTypeOf(target)
+  const { adapter, accepted } = fieldViewRoutesText(ctx, receipt, result)
+  return `gea::record::readLiveField<${result}>(${receiver}, ${viewKeyText(receipt.key)}, ${adapter}, ${accepted}, [&]() -> ${result} { return ${plain}; })`
+}
+
+/**
+ * The adapter a live view's certified routes answer through, and the policy
+ * check naming them. Both depend on the receipt's routes and result carrier
+ * alone, so a unit defines each once (`unitFunctionName`): spelled inline they
+ * were re-emitted for every read, every receiver arm and both the live and the
+ * plain path of each.
+ */
+const fieldViewRoutesText = (ctx: EmitContext, receipt: NativeFieldViewRead, result: string): { adapter: string; accepted: string } => {
   const arms = receipt.sources.map(({ source, conversion }) => {
     const converted = renderedLeaf(ctx, conversion, `(*static_cast<const ${cppTypeOf(source)}*>(gea_native))`)
     return `if (${routeTokenOf(source)}) { static_cast<std::optional<${result}>*>(gea_out)->emplace(${converted}); return true; }`
   })
   const accepts = receipt.sources.map(({ source }) => `(${routeTokenOf(source)})`).join(' || ') || 'false'
-  return (
-    `gea::record::readLiveField<${result}>(${receiver}, ${viewKeyText(receipt.key)}, ` +
-    `[&](void* gea_out, const void* gea_type, const void* gea_policy, const void* gea_native) -> bool { ${arms.join(' ')} return false; }, ` +
-    `+[](const void* gea_type, const void* gea_policy) -> bool { return ${accepts}; }, [&]() -> ${result} { return ${plain}; })`
-  )
+  const adapterParameters = '(void* gea_out, const void* gea_type, const void* gea_policy, const void* gea_native)'
+  const adapterBody = `${arms.join(' ')} return false;`
+  const acceptedParameters = '(const void* gea_type, const void* gea_policy)'
+  const acceptedBody = `return ${accepts};`
+  return {
+    adapter:
+      unitFunctionName('gea_field_view_adapter', (name) => `bool ${name}${adapterParameters}`, adapterBody) ??
+      `[&]${adapterParameters} -> bool { ${adapterBody} }`,
+    accepted:
+      unitFunctionName('gea_field_view_accepts', (name) => `bool ${name}${acceptedParameters}`, acceptedBody) ??
+      `+[]${acceptedParameters} -> bool { ${acceptedBody} }`
+  }
 }

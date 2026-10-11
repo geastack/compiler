@@ -5229,7 +5229,23 @@ export const recipeText = (ctx: ConversionSite, node: ConversionNode, text: stri
   return evaluatedOnceText(text, (operand) => renderedRecipeText(ctx, node, operand))
 }
 
+/**
+ * A union read out of a box depends on its plan alone, so a unit defines it
+ * once and every site calls it by name (`unitFunctionName`). Spelled inline it
+ * was re-emitted at every read: one `Headers`-or-record union in hono tests
+ * some seventy required keys, ~46 KB of machine code per copy.
+ */
 const dynamicWrapperText = (ctx: ConversionSite, plan: DynamicWrapperPlan, node: ConversionNode, text: string): string | null => {
+  if (plan.kind !== 'union') return dynamicWrapperTextAt(ctx, plan, node, text)
+  const formal = 'gea_dynamic_source'
+  const body = dynamicWrapperTextAt(ctx, plan, node, formal)
+  if (body === null) return null
+  const signature = (name: string): string => `${cppTypeOf(plan.target)} ${name}(const gea::Value& ${formal})`
+  const named = unitFunctionName('gea_dynamic_union', signature, `return ${body};`)
+  return named === null ? dynamicWrapperTextAt(ctx, plan, node, text) : `${named}(${text})`
+}
+
+const dynamicWrapperTextAt = (ctx: ConversionSite, plan: DynamicWrapperPlan, node: ConversionNode, text: string): string | null => {
   if (!dynamicWrapperPlanMatches(plan, node.source, node.target, ctx.conversions.nodeById)) return null
   const targetType = cppTypeOf(plan.target)
   if (plan.kind === 'optional') {
