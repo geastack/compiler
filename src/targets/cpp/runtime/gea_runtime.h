@@ -24867,8 +24867,12 @@ struct DynamicCallSignature<CallableObject<Result(Arguments...)>> {
   }
 
   static Value callWithReceiver(const void* payload, const Value& receiver, const Value* arguments, std::size_t count) {
-    return invokeWithReceiver(*static_cast<const CallableObject<Result(Arguments...)>*>(payload), receiver, arguments, count,
-                              std::index_sequence_for<Arguments...>{});
+    // The native-receiver frame decodes the same arguments the same way; a
+    // second decoder per signature was only code.
+    if constexpr (supported) return callWithNativeReceiver(payload, NativeCallReceiver::fromValue(receiver), arguments, count, false);
+    else
+      return invokeWithReceiver(*static_cast<const CallableObject<Result(Arguments...)>*>(payload), receiver, arguments, count,
+                                std::index_sequence_for<Arguments...>{});
   }
 
  private:
@@ -24929,7 +24933,11 @@ struct DynamicCallSignature<CallableConstructorObject<Result(Arguments...), Cons
   }
 
   static Value callWithReceiver(const void* payload, const Value& receiver, const Value* arguments, std::size_t count) {
-    return invokeWithReceiver(*static_cast<const CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>*>(payload), receiver, arguments, count,
+    // The native-receiver frame decodes the same arguments the same way; a
+    // second decoder per signature was only code.
+    if constexpr (supported) return callWithNativeReceiver(payload, NativeCallReceiver::fromValue(receiver), arguments, count, false);
+    else
+      return invokeWithReceiver(*static_cast<const CallableConstructorObject<Result(Arguments...), Constructed(ConstructArguments...)>*>(payload), receiver, arguments, count,
                               std::index_sequence_for<Arguments...>{});
   }
 
@@ -25148,7 +25156,11 @@ struct DynamicRestCallSignature<CallableObject<Result(Arguments...)>, RestFrom, 
   }
 
   static Value callWithReceiver(const void* payload, const Value& receiver, const Value* arguments, std::size_t count) {
-    return invokeWithReceiver(*static_cast<const CallableObject<Result(Arguments...)>*>(payload), receiver, arguments, count,
+    // The native-receiver frame decodes the same arguments the same way; a
+    // second decoder per signature was only code.
+    if constexpr (supported) return callWithNativeReceiver(payload, NativeCallReceiver::fromValue(receiver), arguments, count, false);
+    else
+      return invokeWithReceiver(*static_cast<const CallableObject<Result(Arguments...)>*>(payload), receiver, arguments, count,
                               std::make_index_sequence<RestFrom>{});
   }
 
@@ -25220,7 +25232,11 @@ struct DynamicRestCallSignature<CallableConstructorObject<Result(Arguments...), 
   }
 
   static Value callWithReceiver(const void* payload, const Value& receiver, const Value* arguments, std::size_t count) {
-    return invokeWithReceiver(*static_cast<const Callable*>(payload), receiver, arguments, count,
+    // The native-receiver frame decodes the same arguments the same way; a
+    // second decoder per signature was only code.
+    if constexpr (supported) return callWithNativeReceiver(payload, NativeCallReceiver::fromValue(receiver), arguments, count, false);
+    else
+      return invokeWithReceiver(*static_cast<const Callable*>(payload), receiver, arguments, count,
                               std::make_index_sequence<RestFrom>{});
   }
 
@@ -25406,16 +25422,17 @@ struct NativeLayoutInfo {
   // Each field's presence flag and attributes as offsets into the object, so
   // a scan is a loop over two byte arrays rather than a call per field down
   // the visitor chain (which `-Os` leaves out of line: a 250-field options
-  // record paid 250 calls per scan). `scannable` is false when a PRESENCE flag
-  // lives outside the object, and every scan then walks the visitor. An
-  // attribute triple outside the object is a `static` member (records.ts
-  // makes them program-constant for a struct nothing can freeze or redefine):
-  // its offset is `outsideObject` and its address is kept in `attributeAddresses`.
+  // record paid 250 calls per scan). A presence flag or attribute triple
+  // outside the object is a `static` member (records.ts makes them
+  // program-constant for a field that is always present, or a struct nothing
+  // can freeze or redefine): its offset is `outsideObject` and its address is
+  // kept beside it. Every layout is therefore scannable, and no scan has to be
+  // instantiated a second time down each type's own visitor chain.
   static constexpr std::uint32_t outsideObject = ~std::uint32_t{0};
   std::vector<std::uint32_t> presence;
+  std::vector<const bool*> presenceAddresses;
   std::vector<std::uint32_t> attributes;
   std::vector<const NativeIndexAttributes*> attributeAddresses;
-  bool scannable = false;
   // The flags sit side by side in layout order (records.ts declares them in
   // one run), so a scan reads them eight at a time and visits only the set
   // ones: a wide options record holds a handful of its ~140 fields, and a
@@ -25426,6 +25443,15 @@ struct NativeLayoutInfo {
   // test (a wide options record holds a handful of its fields, and the tests
   // were most of a spread's presence walk).
   bool plainEnumerable = false;
+
+  const bool& presentAt(const char* base, std::size_t position) const {
+    const std::uint32_t at = presence[position];
+    return at == outsideObject ? *presenceAddresses[position] : *reinterpret_cast<const bool*>(base + at);
+  }
+  const NativeIndexAttributes& attributesAt(const char* base, std::size_t position) const {
+    const std::uint32_t at = attributes[position];
+    return at == outsideObject ? *attributeAddresses[position] : *reinterpret_cast<const NativeIndexAttributes*>(base + at);
+  }
 
   void index() {
     std::size_t size = 16;
@@ -25448,6 +25474,37 @@ struct NativeLayoutInfo {
   }
 };
 
+// Out of line and shared by every layout: each type's own walk then costs one
+// call per declared field instead of six inlined vector appends per field.
+[[gnu::noinline]] inline void recordLayoutField(NativeLayoutInfo& built, const char* base, std::size_t size, std::string_view name,
+                                                const bool* present, const NativeIndexAttributes* attributes) {
+  const auto offsetWithin = [&](const void* member) {
+    const char* at = static_cast<const char*>(member);
+    return at >= base && at < base + size ? static_cast<std::uint32_t>(at - base) : NativeLayoutInfo::outsideObject;
+  };
+  built.names.push_back(name);
+  const std::uint32_t presence = offsetWithin(present);
+  built.presence.push_back(presence);
+  built.presenceAddresses.push_back(presence == NativeLayoutInfo::outsideObject ? present : nullptr);
+  const std::uint32_t attribute = offsetWithin(attributes);
+  built.attributes.push_back(attribute);
+  built.attributeAddresses.push_back(attribute == NativeLayoutInfo::outsideObject ? attributes : nullptr);
+}
+
+[[gnu::noinline]] inline void finishLayout(NativeLayoutInfo& built) {
+  built.presenceContiguous = !built.presence.empty() && built.presence[0] != NativeLayoutInfo::outsideObject;
+  for (std::size_t position = 1; built.presenceContiguous && position < built.presence.size(); ++position)
+    if (built.presence[position] != built.presence[0] + position) built.presenceContiguous = false;
+  built.plainEnumerable = true;
+  for (std::size_t position = 0; built.plainEnumerable && position < built.names.size(); ++position) {
+    const std::string_view name = built.names[position];
+    if (built.attributes[position] != NativeLayoutInfo::outsideObject || !built.attributeAddresses[position]->enumerable ||
+        (!name.empty() && name[0] >= '0' && name[0] <= '9'))
+      built.plainEnumerable = false;
+  }
+  built.index();
+}
+
 template <typename T>
 const NativeLayoutInfo& nativeLayoutInfoOf(const T& self) {
   // The visitor sees every declared field whatever its presence, so any
@@ -25455,38 +25512,11 @@ const NativeLayoutInfo& nativeLayoutInfoOf(const T& self) {
   static const NativeLayoutInfo info = [&] {
     NativeLayoutInfo built;
     const char* base = reinterpret_cast<const char*>(std::addressof(self));
-    const auto within = [&](const void* member) {
-      const char* at = static_cast<const char*>(member);
-      return at >= base && at < base + sizeof(T);
-    };
-    built.scannable = true;
     T::gea_eachOwnField(self, [&](std::string_view name, const bool& present, const NativeIndexAttributes& attributes) {
-      built.names.push_back(name);
-      if (within(std::addressof(present))) {
-        built.presence.push_back(static_cast<std::uint32_t>(reinterpret_cast<const char*>(std::addressof(present)) - base));
-        if (within(std::addressof(attributes))) {
-          built.attributes.push_back(static_cast<std::uint32_t>(reinterpret_cast<const char*>(std::addressof(attributes)) - base));
-          built.attributeAddresses.push_back(nullptr);
-        } else {
-          built.attributes.push_back(NativeLayoutInfo::outsideObject);
-          built.attributeAddresses.push_back(std::addressof(attributes));
-        }
-      } else {
-        built.scannable = false;
-      }
+      recordLayoutField(built, base, sizeof(T), name, std::addressof(present), std::addressof(attributes));
       return false;
     });
-    built.presenceContiguous = built.scannable && !built.presence.empty();
-    for (std::size_t position = 1; built.presenceContiguous && position < built.presence.size(); ++position)
-      if (built.presence[position] != built.presence[0] + position) built.presenceContiguous = false;
-    built.plainEnumerable = built.scannable;
-    for (std::size_t position = 0; built.plainEnumerable && position < built.names.size(); ++position) {
-      const std::string_view name = built.names[position];
-      if (built.attributes[position] != NativeLayoutInfo::outsideObject || !built.attributeAddresses[position]->enumerable ||
-          (!name.empty() && name[0] >= '0' && name[0] <= '9'))
-        built.plainEnumerable = false;
-    }
-    built.index();
+    finishLayout(built);
     return built;
   }();
   return info;
@@ -25494,89 +25524,77 @@ const NativeLayoutInfo& nativeLayoutInfoOf(const T& self) {
 
 /**
  * `visit(position, name, present, attributes)` for each PRESENT declared
- * field of `self` in layout order, until it answers true (which this
- * returns): eight flags at a time when they are contiguous, else over the
- * layout's offset tables, else down the visitor. `present` is always true; it
- * stays in the signature so a visitor reads like one over every field.
+ * field of the object at `base` in layout order, until it answers true (which
+ * this returns): eight flags at a time when they are contiguous, else over the
+ * layout's offset tables. `present` is always true; it stays in the signature
+ * so a visitor reads like one over every field.
  */
-template <typename T, typename Visit>
-bool eachNativeDeclaredField(const T& self, Visit&& visit) {
-  const NativeLayoutInfo& layout = nativeLayoutInfoOf(self);
-  if (layout.scannable) {
-    const char* base = reinterpret_cast<const char*>(std::addressof(self));
-    const std::size_t count = layout.names.size();
-    const auto visitAt = [&](std::size_t position) {
-      const bool& present = *reinterpret_cast<const bool*>(base + layout.presence[position]);
-      const std::uint32_t attributesAt = layout.attributes[position];
-      const NativeIndexAttributes& attributes = attributesAt == NativeLayoutInfo::outsideObject
-                                                    ? *layout.attributeAddresses[position]
-                                                    : *reinterpret_cast<const NativeIndexAttributes*>(base + attributesAt);
-      return visit(position, layout.names[position], present, attributes);
-    };
-    if (layout.presenceContiguous) {
-      const char* flags = base + layout.presence[0];
-      for (std::size_t word = 0; word < count; word += 8) {
-        // A variable-length memcpy is a call into libc (memcpy@plt) per eight
-        // flags, ~17 per walk of a 134-field options record; the fixed-size
-        // loads below compile to one mov each. The short tail re-reads the last
-        // eight flags and shifts the already-visited ones out.
-        std::uint64_t bits = 0;
-        if (word + 8 <= count) {
-          std::memcpy(&bits, flags + word, 8);
-        } else if (count >= 8) {
-          std::memcpy(&bits, flags + count - 8, 8);
-          bits >>= (8 - (count - word)) * 8;
-        } else {
-          for (std::size_t at = 0; at < count; ++at) bits |= std::uint64_t{static_cast<unsigned char>(flags[at])} << (at * 8);
-        }
-        while (bits != 0) {
-          const unsigned byte = static_cast<unsigned>(__builtin_ctzll(bits)) >> 3;
-          bits &= ~(std::uint64_t{0xff} << (byte * 8));
-          if (visitAt(word + byte)) return true;
-        }
+template <typename Visit>
+bool eachDeclaredFieldIn(const NativeLayoutInfo& layout, const char* base, Visit&& visit) {
+  const std::size_t count = layout.names.size();
+  const auto visitAt = [&](std::size_t position) {
+    return visit(position, layout.names[position], layout.presentAt(base, position), layout.attributesAt(base, position));
+  };
+  if (layout.presenceContiguous) {
+    const char* flags = base + layout.presence[0];
+    for (std::size_t word = 0; word < count; word += 8) {
+      // A variable-length memcpy is a call into libc (memcpy@plt) per eight
+      // flags, ~17 per walk of a 134-field options record; the fixed-size
+      // loads below compile to one mov each. The short tail re-reads the last
+      // eight flags and shifts the already-visited ones out.
+      std::uint64_t bits = 0;
+      if (word + 8 <= count) {
+        std::memcpy(&bits, flags + word, 8);
+      } else if (count >= 8) {
+        std::memcpy(&bits, flags + count - 8, 8);
+        bits >>= (8 - (count - word)) * 8;
+      } else {
+        for (std::size_t at = 0; at < count; ++at) bits |= std::uint64_t{static_cast<unsigned char>(flags[at])} << (at * 8);
       }
-      return false;
+      while (bits != 0) {
+        const unsigned byte = static_cast<unsigned>(__builtin_ctzll(bits)) >> 3;
+        bits &= ~(std::uint64_t{0xff} << (byte * 8));
+        if (visitAt(word + byte)) return true;
+      }
     }
-    for (std::size_t position = 0; position < count; ++position)
-      if (*reinterpret_cast<const bool*>(base + layout.presence[position]) && visitAt(position)) return true;
     return false;
   }
-  std::size_t position = 0;
-  return T::gea_eachOwnField(self, [&](std::string_view name, const bool& present, const NativeIndexAttributes& attributes) {
-    const std::size_t at = position++;
-    return present && visit(at, name, present, attributes);
-  });
+  for (std::size_t position = 0; position < count; ++position)
+    if (layout.presentAt(base, position) && visitAt(position)) return true;
+  return false;
 }
 
-/** Whether any declared field of `self` after layout position `at` is present. */
-template <typename T>
-bool nativeDeclaredFieldPresentAfter(const T& self, std::size_t at) {
-  const NativeLayoutInfo& layout = nativeLayoutInfoOf(self);
-  if (layout.scannable) {
-    const char* base = reinterpret_cast<const char*>(std::addressof(self));
-    const std::size_t count = layout.names.size();
-    if (layout.presenceContiguous) {
-      // The flags after `at` are one run of bytes: eight at a time, and a
-      // wide options record's early field (a late store of `session` on a
-      // 134-field layout) tests ~16 words rather than ~130 bytes.
-      const char* flags = base + layout.presence[0];
-      std::size_t position = at + 1;
-      for (; position + 8 <= count; position += 8) {
-        std::uint64_t bits = 0;
-        std::memcpy(&bits, flags + position, 8);
-        if (bits != 0) return true;
-      }
-      for (; position < count; ++position)
-        if (flags[position] != 0) return true;
-      return false;
+template <typename T, typename Visit>
+bool eachNativeDeclaredField(const T& self, Visit&& visit) {
+  return eachDeclaredFieldIn(nativeLayoutInfoOf(self), reinterpret_cast<const char*>(std::addressof(self)), std::forward<Visit>(visit));
+}
+
+/** Whether any declared field of the object at `base` after layout position `at` is present. */
+inline bool declaredFieldPresentAfter(const NativeLayoutInfo& layout, const char* base, std::size_t at) {
+  const std::size_t count = layout.names.size();
+  if (layout.presenceContiguous) {
+    // The flags after `at` are one run of bytes: eight at a time, and a
+    // wide options record's early field (a late store of `session` on a
+    // 134-field layout) tests ~16 words rather than ~130 bytes.
+    const char* flags = base + layout.presence[0];
+    std::size_t position = at + 1;
+    for (; position + 8 <= count; position += 8) {
+      std::uint64_t bits = 0;
+      std::memcpy(&bits, flags + position, 8);
+      if (bits != 0) return true;
     }
-    for (std::size_t position = at + 1; position < count; ++position)
-      if (*reinterpret_cast<const bool*>(base + layout.presence[position])) return true;
+    for (; position < count; ++position)
+      if (flags[position] != 0) return true;
     return false;
   }
-  return eachNativeDeclaredField(self, [&](std::size_t position, std::string_view, const bool& present, const NativeIndexAttributes&) {
-    return position > at && present;
-  });
+  for (std::size_t position = at + 1; position < count; ++position)
+    if (layout.presentAt(base, position)) return true;
+  return false;
+}
+
+template <typename T>
+bool nativeDeclaredFieldPresentAfter(const T& self, std::size_t at) {
+  return declaredFieldPresentAfter(nativeLayoutInfoOf(self), reinterpret_cast<const char*>(std::addressof(self)), at);
 }
 
 /**
@@ -26548,13 +26566,18 @@ void pendNativeKeyOrder(const gea::Ref<T>& self, const std::string_view* keys, s
  * last note, each by position: no name is hashed or copied. `skip` (the key
  * about to be created) is left for its creation to place.
  */
-template <typename T>
-void learnDeclaredFieldsSinceLastNoteExcept(NativeOwnKeyOrder& order, const T& self, std::size_t skip) {
-  order.useDeclaredLayout(&nativeLayoutInfoOf(self));
-  eachNativeDeclaredField(self, [&](std::size_t index, std::string_view, const bool& isPresent, const NativeIndexAttributes&) {
+inline void learnDeclaredFieldsSinceLastNoteExcept(NativeOwnKeyOrder& order, const NativeLayoutInfo& layout, const char* base,
+                                                   std::size_t skip) {
+  order.useDeclaredLayout(&layout);
+  eachDeclaredFieldIn(layout, base, [&](std::size_t index, std::string_view, const bool& isPresent, const NativeIndexAttributes&) {
     if (isPresent && index != skip && !order.isDeclaredLearned(index)) order.learnDeclared(index);
     return false;
   });
+}
+
+template <typename T>
+void learnDeclaredFieldsSinceLastNoteExcept(NativeOwnKeyOrder& order, const T& self, std::size_t skip) {
+  learnDeclaredFieldsSinceLastNoteExcept(order, nativeLayoutInfoOf(self), reinterpret_cast<const char*>(std::addressof(self)), skip);
 }
 
 template <typename T>
@@ -26902,42 +26925,53 @@ bool nativeDeclaredKeyViewsInOrder(const T& self, NativeOwnKeyOrder& order, std:
   return true;
 }
 
-template <typename T>
-void noteNativeIndexKeyCreated(const T* self, const PropertyKey& key) {
-  if constexpr (requires { T::gea_eachOwnField(*self, [](std::string_view, const bool&, const NativeIndexAttributes&) { return false; }); }) {
-    // An existing log holds every earlier noted key; only the declared fields
-    // stored silently since the last note are missing from it.
-    if (self != nullptr && (refCountsOf(const_cast<T*>(self))->weak & expandoTagged) != 0) {
-      if (NativeOwnKeyOrder* existing = findNativeOwnKeyOrder(self)) {
-        learnDeclaredFieldsSinceLastNote(*existing, *self, &key);
-        existing->create(key);
-        return;
-      }
-    }
-    // No log, pend or expando yet, and no index entry: the present keys are
-    // exactly the declared fields, learned by view in layout order. Listing
-    // them as `PropertyKey`s first copied every present name of a wide
-    // options record per late store (`options.willRetryWrite = ...`).
-    bool undecorated = self != nullptr && (refCountsOf(const_cast<T*>(self))->weak & expandoTagged) == 0;
-    if constexpr (requires { self->gea_dynamic.size(); })
-      undecorated = undecorated && self->gea_dynamic.size() == 0;
-    if (undecorated) {
-      NativeOwnKeyOrder& order = nativeOwnKeyOrderFor(gea::refCastToVoid(gea::Ref<T>::adopt(const_cast<T*>(self), true)));
-      learnDeclaredFieldsSinceLastNote(order, *self, &key);
-      order.create(key);
+// Shared by every layout type: the per-type caller only supplies the layout,
+// the object's own field-key lister and whether anything decorates it.
+[[gnu::noinline]] inline void noteLayoutIndexKeyCreated(const gea::Ref<void>& payload, const PropertyKey& key, const NativeLayoutInfo& layout,
+                                                         bool undecorated, KeyLister fieldKeys) {
+  const char* base = static_cast<const char*>(payload.get());
+  const std::size_t skip = key.isSymbol() ? NativeLayoutInfo::npos : layout.position(std::string_view(key.text()));
+  // An existing log holds every earlier noted key; only the declared fields
+  // stored silently since the last note are missing from it.
+  if (payload && (refCountsOf(payload.get())->weak & expandoTagged) != 0) {
+    if (NativeOwnKeyOrder* existing = findNativeOwnKeyOrder(payload.get())) {
+      learnDeclaredFieldsSinceLastNoteExcept(*existing, layout, base, skip);
+      existing->create(key);
       return;
     }
   }
-  noteNativeOwnKeyCreated(
-      gea::refCastToVoid(gea::Ref<T>::adopt(const_cast<T*>(self), true)), key,
-      [&](std::vector<PropertyKey>& keys) { self->gea_ownFieldKeys(keys); },
-      [&](std::vector<PropertyKey>& keys) {
-        // The visitor chain stops at the first `true` (a find), so every field is seen by answering `false`.
-        T::gea_eachOwnField(*self, [&](std::string_view name, const bool& present, const NativeIndexAttributes&) {
-          if (present) keys.push_back(PropertyKey::string(std::string(name)));
-          return false;
-        });
-      });
+  // No log, pend or expando yet, and no index entry: the present keys are
+  // exactly the declared fields, learned by view in layout order. Listing
+  // them as `PropertyKey`s first copied every present name of a wide
+  // options record per late store (`options.willRetryWrite = ...`).
+  if (undecorated) {
+    NativeOwnKeyOrder& order = nativeOwnKeyOrderFor(payload);
+    learnDeclaredFieldsSinceLastNoteExcept(order, layout, base, skip);
+    order.create(key);
+    return;
+  }
+  auto declaredKeys = [&](std::vector<PropertyKey>& keys) {
+    eachDeclaredFieldIn(layout, base, [&](std::size_t, std::string_view name, const bool&, const NativeIndexAttributes&) {
+      keys.push_back(PropertyKey::string(std::string(name)));
+      return false;
+    });
+  };
+  noteNativeOwnKeyCreatedErased(payload, key, fieldKeys, KeyLister::of(declaredKeys));
+}
+
+template <typename T>
+void noteNativeIndexKeyCreated(const T* self, const PropertyKey& key) {
+  const gea::Ref<void> payload = gea::refCastToVoid(gea::Ref<T>::adopt(const_cast<T*>(self), true));
+  auto fieldKeys = [&](std::vector<PropertyKey>& keys) { self->gea_ownFieldKeys(keys); };
+  if constexpr (requires { T::gea_eachOwnField(*self, [](std::string_view, const bool&, const NativeIndexAttributes&) { return false; }); }) {
+    if (self == nullptr) return;
+    bool undecorated = (refCountsOf(const_cast<T*>(self))->weak & expandoTagged) == 0;
+    if constexpr (requires { self->gea_dynamic.size(); })
+      undecorated = undecorated && self->gea_dynamic.size() == 0;
+    noteLayoutIndexKeyCreated(payload, key, nativeLayoutInfoOf(*self), undecorated, KeyLister::of(fieldKeys));
+  } else {
+    noteNativeOwnKeyCreatedErased(payload, key, KeyLister::of(fieldKeys));
+  }
 }
 
 /**
@@ -26973,16 +27007,15 @@ struct SuppressNativeKeyNotes {
  * Answers false, leaving the pend untouched, when the list cannot hold them.
  * The block is a full `orderPositionCapacity` long whatever `count` says.
  */
-template <typename T>
-bool notePositionalPendKeyCreated(const T& self, InlineKeyOrder& held, std::size_t at) {
+inline bool notePositionalPendKeyCreated(const NativeLayoutInfo& layout, const char* base, InlineKeyOrder& held, std::size_t at) {
   constexpr std::size_t capacity = orderPositionCapacity;
   for (std::uint32_t index = 0; index < held.count; ++index)
     if (held.positions[index] == at) return true;
-  if (!nativeDeclaredFieldPresentAfter(self, at)) return true;
+  if (!declaredFieldPresentAfter(layout, base, at)) return true;
   std::uint32_t silent[capacity];
   std::size_t silentCount = 0;
   bool overflow = false;
-  eachNativeDeclaredField(self, [&](std::size_t index, std::string_view, const bool&, const NativeIndexAttributes&) {
+  eachDeclaredFieldIn(layout, base, [&](std::size_t index, std::string_view, const bool&, const NativeIndexAttributes&) {
     if (index == at) return false;
     for (std::uint32_t listed = 0; listed < held.count; ++listed)
       if (held.positions[listed] == index) return false;
@@ -27017,6 +27050,69 @@ inline NativeDeclaredKeyPositionHint (&nativeDeclaredKeyPositionHints())[256] {
   return hints->entries;
 }
 
+/** What `noteDeclaredKeyCreatedAt` needs of the type it was written for: reached only once a log must be made or reached. */
+struct DeclaredKeyNoteHooks {
+  NativeOwnKeyOrder& (*orderFor)(const void* self);
+  void (*indexKeyCreated)(const void* self, std::string_view key);
+};
+
+/**
+ * `noteNativeDeclaredKeyCreated` for any record type, given its layout, its
+ * counts, its inline order (null when the type has none) and whether it holds
+ * dynamic properties: every record type shares this one body.
+ */
+[[gnu::noinline]] inline void noteDeclaredKeyCreatedAt(const void* self, std::string_view key, const NativeLayoutInfo& layout,
+                                                       RefCounts* counts, InlineKeyOrder* held, bool undecorated,
+                                                       const DeclaredKeyNoteHooks& hooks) {
+  // The key is a string literal at nearly every call: its address names its position,
+  // verified against the layout (so a reused or torn entry only costs the hash).
+  auto& hints = nativeDeclaredKeyPositionHints();
+  NativeDeclaredKeyPositionHint& hint = hints[(reinterpret_cast<std::uintptr_t>(key.data()) * 0x9E3779B97F4A7C15ull) >> 56];
+  std::size_t at;
+  if (hint.data == key.data() && hint.position < layout.names.size() && layout.names[hint.position] == key) {
+    at = hint.position;
+  } else {
+    at = layout.position(key);
+    if (at == NativeLayoutInfo::npos) return;
+    hint.data = key.data();
+    hint.position = static_cast<std::uint32_t>(at);
+  }
+  const char* base = static_cast<const char*>(self);
+  if (held != nullptr) {
+    // A spread's list of positions takes the key without becoming a log.
+    constexpr std::uint32_t kinds = expandoTagged | keyOrderPending | expandoEntry;
+    if ((counts->weak & kinds) == (expandoTagged | keyOrderPending))
+      if (held->pending && held->positional && notePositionalPendKeyCreated(layout, base, *held, at)) return;
+  }
+  const bool tagged = (counts->weak & expandoTagged) != 0;
+  NativeOwnKeyOrder* order = tagged ? findNativeOwnKeyOrder(self) : nullptr;
+  // An absent field the log already places was placed by the literal that
+  // creates it, after its spread (`later`): a delete erases the place. The
+  // store keeps that place.
+  if (order != nullptr && order->ordinals.layout == &layout && order->isDeclaredLearned(at)) return;
+  if (!declaredFieldPresentAfter(layout, base, at)) return;
+  // `noteNativeIndexKeyCreated`'s two log arms, by position: the created
+  // field takes the next ordinal after every present field the log lacks.
+  // Spelling the key as a `PropertyKey` and hashing it back to its position
+  // cost a wide options record's every late store.
+  if (!tagged && undecorated) order = &hooks.orderFor(self);
+  if (order == nullptr) {
+    hooks.indexKeyCreated(self, key);
+    return;
+  }
+  learnDeclaredFieldsSinceLastNoteExcept(*order, layout, base, at);
+  order->learnDeclared(at);
+}
+
+template <typename T>
+inline constexpr DeclaredKeyNoteHooks declaredKeyNoteHooks{
+    [](const void* self) -> NativeOwnKeyOrder& {
+      return nativeOwnKeyOrderFor(gea::refCastToVoid(gea::Ref<T>::adopt(static_cast<T*>(const_cast<void*>(self)), true)));
+    },
+    [](const void* self, std::string_view key) {
+      noteNativeIndexKeyCreated(static_cast<const T*>(self), PropertyKey::string(std::string(key)));
+    }};
+
 template <typename T>
 void noteNativeDeclaredKeyCreated(const T* self, std::string_view key) {
   GEA_PARALLEL_SIDE_TABLE
@@ -27028,50 +27124,12 @@ void noteNativeDeclaredKeyCreated(const T* self, std::string_view key) {
 #if defined(GEA_MEASURE_SKIP_WIDE_KEY_ORDER)
     if (nativeLayoutInfoOf(*self).names.size() > 100) return;
 #endif
-    const NativeLayoutInfo& layout = nativeLayoutInfoOf(*self);
-    // The key is a string literal at nearly every call: its address names its position,
-    // verified against the layout (so a reused or torn entry only costs the hash).
-    auto& hints = nativeDeclaredKeyPositionHints();
-    NativeDeclaredKeyPositionHint& hint = hints[(reinterpret_cast<std::uintptr_t>(key.data()) * 0x9E3779B97F4A7C15ull) >> 56];
-    std::size_t at;
-    if (hint.data == key.data() && hint.position < layout.names.size() && layout.names[hint.position] == key) {
-      at = hint.position;
-    } else {
-      at = layout.position(key);
-      if (at == NativeLayoutInfo::npos) return;
-      hint.data = key.data();
-      hint.position = static_cast<std::uint32_t>(at);
-    }
-    if constexpr (requires { self->gea_keyOrder; }) {
-      // A spread's list of positions takes the key without becoming a log.
-      constexpr std::uint32_t kinds = expandoTagged | keyOrderPending | expandoEntry;
-      if ((refCountsOf(const_cast<T*>(self))->weak & kinds) == (expandoTagged | keyOrderPending)) {
-        InlineKeyOrder& held = const_cast<T*>(self)->gea_keyOrder;
-        if (held.pending && held.positional && notePositionalPendKeyCreated(*self, held, at)) return;
-      }
-    }
-    const bool tagged = (refCountsOf(const_cast<T*>(self))->weak & expandoTagged) != 0;
-    NativeOwnKeyOrder* order = tagged ? findNativeOwnKeyOrder(self) : nullptr;
-    // An absent field the log already places was placed by the literal that
-    // creates it, after its spread (`later`): a delete erases the place. The
-    // store keeps that place.
-    if (order != nullptr && order->ordinals.layout == &layout && order->isDeclaredLearned(at)) return;
-    if (!nativeDeclaredFieldPresentAfter(*self, at)) return;
-    // `noteNativeIndexKeyCreated`'s two log arms, by position: the created
-    // field takes the next ordinal after every present field the log lacks.
-    // Spelling the key as a `PropertyKey` and hashing it back to its position
-    // cost a wide options record's every late store.
-    if (!tagged) {
-      bool undecorated = true;
-      if constexpr (requires { self->gea_dynamic.size(); }) undecorated = self->gea_dynamic.size() == 0;
-      if (undecorated) order = &nativeOwnKeyOrderFor(gea::refCastToVoid(gea::Ref<T>::adopt(const_cast<T*>(self), true)));
-    }
-    if (order == nullptr) {
-      noteNativeIndexKeyCreated(self, PropertyKey::string(std::string(key)));
-      return;
-    }
-    learnDeclaredFieldsSinceLastNoteExcept(*order, *self, at);
-    order->learnDeclared(at);
+    InlineKeyOrder* held = nullptr;
+    if constexpr (requires { self->gea_keyOrder; }) held = &const_cast<T*>(self)->gea_keyOrder;
+    bool undecorated = true;
+    if constexpr (requires { self->gea_dynamic.size(); }) undecorated = self->gea_dynamic.size() == 0;
+    noteDeclaredKeyCreatedAt(self, key, nativeLayoutInfoOf(*self), refCountsOf(const_cast<T*>(self)), held, undecorated,
+                             declaredKeyNoteHooks<T>);
   }
 }
 
@@ -28846,8 +28904,30 @@ void nativeSpreadObjectDataSet(const gea::Ref<Receiver>& object, std::string_vie
  * attribute set against a fixed-layout member store is a larger feature this
  * call does not need yet, so it is left to a future caller to state.
  */
+namespace detail {/**
+ * Whether `T`'s document protocol is the shared record one
+ * (`gea_document_view.h`): every native object except the ones with a protocol
+ * of their own -- `DynamicObject`, dictionaries, `ArrayObject`, `Map`.
+ */
+template <typename T>
+inline constexpr bool sharedRecordDocument = !std::is_same_v<T, DynamicObject> && !std::is_same_v<T, Dictionary<Value>> &&
+                                             !IsArrayObjectStruct<T>::value && !IsMapPayload<Ref<T>>::value && !TypedStringDictionaryTable<T>;
+struct NativeRecordDocumentBridge;
+template <typename T>
+const NativeRecordDocumentBridge& recordDocumentBridgeOf();
+inline bool recordOwnDescriptor(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key,
+                                PropertyDescriptor& out);
+inline std::vector<PropertyKey> recordDocumentOwnKeys(const Ref<void>& source, const NativeRecordDocumentBridge& bridge);
+inline bool recordDynamicDefine(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key,
+                                const PropertyDescriptor& descriptor);
+inline bool recordDocumentDelete(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key);
+inline bool recordDynamicHas(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key);
+inline std::vector<PropertyKey> recordEnumerableStringKeys(const Ref<void>& source, const NativeRecordDocumentBridge& bridge);
+}  // namespace detail
+
 template <typename T>
 bool nativeDynamicDefineProperty(const gea::Ref<T>& object, const PropertyKey& key, const PropertyDescriptor& descriptor) {
+  if constexpr (detail::sharedRecordDocument<T>) return detail::recordDynamicDefine(Ref<void>(object), detail::recordDocumentBridgeOf<T>(), key, descriptor);
   if (!object) return false;
   if (record::immutableDescriptorSnapshotView(Ref<void>(object)))
     host::throwRuntimeError("TypeError", "a native descriptor snapshot definition has no certified source protocol");
@@ -28879,6 +28959,13 @@ bool nativeDynamicDefineProperty(const gea::Ref<T>& object, const PropertyKey& k
 
 template <typename T>
 Optional<PropertyDescriptor> nativeOwnPropertyDescriptor(const gea::Ref<T>& object, const PropertyKey& key) {
+  if constexpr (detail::sharedRecordDocument<T>) {
+    // The shared record path takes these exact steps once for every type.
+    PropertyDescriptor descriptor;
+    return detail::recordOwnDescriptor(Ref<void>(object), detail::recordDocumentBridgeOf<T>(), key, descriptor)
+               ? Optional<PropertyDescriptor>(descriptor)
+               : Optional<PropertyDescriptor>();
+  }
   if (!object) return Optional<PropertyDescriptor>();
   if constexpr (IsArrayObjectStruct<T>::value) {
     if (!key.isSymbol() && key.text() == "length") {
@@ -28932,6 +29019,7 @@ Optional<PropertyDescriptor> nativeOwnPropertyDescriptor(const gea::Ref<T>& obje
  */
 template <typename T>
 std::vector<PropertyKey> nativeOwnPropertyKeys(const gea::Ref<T>& object) {
+  if constexpr (detail::sharedRecordDocument<T>) return detail::recordDocumentOwnKeys(Ref<void>(object), detail::recordDocumentBridgeOf<T>());
   std::vector<PropertyKey> keys;
   if (!object) return keys;
   if constexpr (IsArrayObjectStruct<T>::value) {
@@ -29207,6 +29295,7 @@ struct NativeDocumentOwner {
 
 template <typename T>
 const NativeDocumentOps* nativeDocumentOpsFor();
+
 }  // namespace detail
 
 namespace json {
@@ -30077,6 +30166,7 @@ inline gea::Ref<void> viewOrigin(const gea::Ref<gea::Dictionary<gea::Value>>& vi
 
 template <typename T>
 bool nativeDynamicHas(const gea::Ref<T>& object, const PropertyKey& key) {
+  if constexpr (detail::sharedRecordDocument<T>) return detail::recordDynamicHas(Ref<void>(object), detail::recordDocumentBridgeOf<T>(), key);
   if (!object) return false;
   if constexpr (IsArrayObjectStruct<T>::value) {
     if (!key.isSymbol() && key.text() == "length") return true;
@@ -30138,6 +30228,7 @@ bool nativeDynamicHasProperty(const gea::Ref<T>& object, const PropertyKey& key)
 
 template <typename T>
 bool nativeDynamicDelete(const gea::Ref<T>& object, const PropertyKey& key) {
+  if constexpr (detail::sharedRecordDocument<T>) return detail::recordDocumentDelete(Ref<void>(object), detail::recordDocumentBridgeOf<T>(), key);
   if (!object) return true;
   if (record::immutableDescriptorSnapshotView(Ref<void>(object)))
     host::throwRuntimeError("TypeError", "a native descriptor snapshot deletion has no certified source protocol");
@@ -30197,6 +30288,7 @@ bool nativeDynamicDelete(const gea::Ref<T>& object, const PropertyKey& key) {
  */
 template <typename T>
 std::vector<PropertyKey> nativeEnumerableStringKeys(const gea::Ref<T>& object) {
+  if constexpr (detail::sharedRecordDocument<T>) return detail::recordEnumerableStringKeys(Ref<void>(object), detail::recordDocumentBridgeOf<T>());
   std::vector<PropertyKey> original;
   if (record::ownNativeViewKeys(Ref<void>(object), original, true)) return original;
   std::vector<PropertyKey> keys = nativeOwnPropertyKeys(object);
