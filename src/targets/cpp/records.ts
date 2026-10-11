@@ -18,7 +18,7 @@ export {
 }
 import { isNativeError } from './error-types.js'
 import type { ClassStaticFieldStorage, LazyArrowFieldPlan } from './class-layout.js'
-import { classBoxable, lazyArrowFieldPlansForClass } from './class-layout.js'
+import { lazyArrowFieldPlansForClass } from './class-layout.js'
 import type { ReactiveCellPlan } from './host/host-members.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import type { RecordAccessor, RecordField, RecordIndexSidecar, Representation, CallableAbi } from '../../representation/model.js'
@@ -3554,13 +3554,7 @@ const renderStructDefinition = (
    */
   methodStateUntraced = false,
   indexProtocol = true,
-  dynamicFieldLoad?: DynamicFieldLoad,
-  /**
-   * Whether the reflection census proved no dynamic code reads into this class
-   * (`classBoxable` is false for it). The runtime then builds no document
-   * protocol for its box -- `NativeDocumentUnread` in `gea_runtime.h`.
-   */
-  documentUnread = false
+  dynamicFieldLoad?: DynamicFieldLoad
 ): string | CppRecordRefusal => {
   const isNarrowed = (field: FieldLike): boolean => narrowedSlots.has(integerStorageSlot(structName, field.key))
   // A class keeps every field inline. Its fields are stored by the
@@ -3889,7 +3883,6 @@ const renderStructDefinition = (
   // forward-declared -- a member cannot forward to a body the file has not
   // named yet.
   for (const line of virtualMembers) lines.push(line)
-  if (documentUnread) lines.push(`  using gea_document_unread = ${structName};`)
   lines.push('};')
   return [...tailLines, ...lines].join('\n')
 }
@@ -3961,6 +3954,8 @@ export const cppRecordDeclarations = (
    * static in rather than a member the struct does not have.
    */
   readonly staticMethodStateClasses: ReadonlySet<DeclarationId>
+  /** Every program struct this pass declares. */
+  readonly structNames: ReadonlySet<string>
   /** Authenticated program-class ancestry; the translation unit owns namespace placement. */
   /** `nativeBase` marks a runtime-owned base spelled fully qualified, outside the program's namespace. */
   readonly runtimeClassBases: readonly { readonly derived: string; readonly base: string; readonly nativeBase?: true }[]
@@ -4034,7 +4029,8 @@ export const cppRecordDeclarations = (
       })),
       revisionFields: new Map(),
       celledFields: new Map(),
-      staticMethodStateClasses: new Set()
+      staticMethodStateClasses: new Set(),
+      structNames: new Set()
     }
   }
 
@@ -4233,8 +4229,7 @@ export const cppRecordDeclarations = (
         (shapesByStruct.get(structName)?.size ?? 0) > 0,
       immortalStateRoots.has(structName),
       declaration === undefined ? layout.indexes.length > 0 : classIndexProtocols.get(declaration) !== false,
-      dynamicFieldLoad,
-      declaration !== undefined && classes.has(declaration) && !classBoxable(classes, declaration)
+      dynamicFieldLoad
     )
   })
   const refused = rendered.filter((entry): entry is CppRecordRefusal => typeof entry !== 'string')
@@ -4247,7 +4242,8 @@ export const cppRecordDeclarations = (
       refused,
       revisionFields: new Map(),
       celledFields: new Map(),
-      staticMethodStateClasses: new Set()
+      staticMethodStateClasses: new Set(),
+      structNames: new Set()
     }
 
   // `Value` can only project a genuinely dynamic class back to a nominal
@@ -4308,7 +4304,8 @@ export const cppRecordDeclarations = (
     refused: [],
     revisionFields,
     celledFields,
-    staticMethodStateClasses
+    staticMethodStateClasses,
+    structNames: requiredStructs
   }
 }
 

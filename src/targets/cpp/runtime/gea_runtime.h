@@ -18408,16 +18408,18 @@ struct ValueMetadata {
 inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false, false, false, nullptr, nullptr, nullptr, nullptr};
 
 /**
- * A compiled class the whole-program reflection census proved no dynamic code
- * reads into (`translation-unit.ts`, from `prototypePropertyDeclarationsOf`).
- * A box may still carry one -- a typed listener adapted to a `gea::Value`
- * signature boxes its arguments only to unbox them -- but nothing looks inside,
- * so its box needs no document protocol, and building one for every boxable
- * class was ~400 KB of gea-raw's binary. The marker names the class itself so
- * a subclass never inherits its base's verdict.
+ * Whether a boxed `Ref<T>` carries no dynamic protocol: no document table and
+ * no array table. The compiler decides it per program type from the
+ * whole-program reflection census (`translation-unit.ts`) and states it as an
+ * explicit specialization ahead of every struct body; the default keeps both
+ * tables, which is the answer for every runtime type and for an incomplete
+ * census. A type the census proves no dynamic code reads into still reaches a
+ * box -- a typed listener adapted to a `gea::Value` signature boxes its
+ * arguments only to unbox them -- and building both tables for every such
+ * type, read or not, was most of gea-raw's binary growth since 1.0.16.
  */
 template <typename T>
-concept NativeDocumentUnread = requires { typename T::gea_document_unread; } && std::is_same_v<typename T::gea_document_unread, T>;
+inline constexpr bool dynamicProtocolOmitted = false;
 
 template <typename T, int RestFrom = -1, bool ActualArguments = false>
 const ValueMetadata* valueMetadataFor() {
@@ -18428,8 +18430,15 @@ const ValueMetadata* valueMetadataFor() {
     Ref<void> (*anchor)(const void*) = nullptr;
     bool (*viewValue)(const void*, Value&) = nullptr;
     const NativeDocumentOps* document = nullptr;
-    if constexpr (IsRefPayload<T>::value)
-      if constexpr (!NativeDocumentUnread<typename T::element_type>) document = nativeDocumentOpsFor<typename T::element_type>();
+    const NativeArrayOps* elements = nullptr;
+    if constexpr (IsRefPayload<T>::value) {
+      if constexpr (!dynamicProtocolOmitted<typename T::element_type>) {
+        document = nativeDocumentOpsFor<typename T::element_type>();
+        elements = nativeArrayOpsFor<T>();
+      }
+    } else {
+      elements = nativeArrayOpsFor<T>();
+    }
     if constexpr (IsRefPayload<T>::value && requires(const T& value) { value->viewAnchor(); }) {
       anchor = +[](const void* payload) -> Ref<void> {
         const T& value = *static_cast<const T*>(payload);
@@ -18442,7 +18451,7 @@ const ValueMetadata* valueMetadataFor() {
       };
     }
     return ValueMetadata{nativeFieldOpsFor<T>(), nativePrototypeOpsFor<T>(), calls,
-                         nativeArrayOpsFor<T>(), payloadTypeTagFor<T>(), RestFrom, ActualArguments,
+                         elements, payloadTypeTagFor<T>(), RestFrom, ActualArguments,
                          IsArrayPayload<T>::value, IsMapPayload<T>::value, IsNativeErrorRefPayload<T>::value,
                          nativeConstructFor<T>(), anchor, viewValue, document};
   }();

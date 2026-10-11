@@ -1,5 +1,6 @@
 import { asyncResultConventionsOf } from '../../ir/async-result-conventions.js'
 import { prototypePropertyDeclarationsOf, type ProgramConversionRecipe } from '../../ir/program-conversions.js'
+import { dynamicProtocolOmissionsOf } from '../../ir/dynamic-protocol.js'
 import { createNativeDebugSource, type NativeDebugInfo } from './native-debug-source.js'
 import type { DiagnosticLocation } from '../../diagnostics/model.js'
 import type { SemanticResultId } from '../../identity/ids.js'
@@ -2944,6 +2945,30 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
   // conversion builds and every body signature a record view's bound method
   // or getter calls. They are `inline` where several units include the header
   // that holds them.
+  // The published omissions (`ir/dynamic-protocol.ts`), spelled as the
+  // runtime's `gea::detail::dynamicProtocolOmitted` specializations. Only a
+  // type whose program structs this unit declares can be named, and several
+  // carriers can share one spelling, so the list is the set of distinct ones.
+  const dynamicProtocolOmissions = dynamicProtocolOmissionsOf(input.classes, input.reflection, emissionRepresentations)
+  const dynamicProtocolOmittedTypes = (): readonly string[] => {
+    if (dynamicProtocolOmissions === null) return []
+    const declared = (representation: Representation): boolean =>
+      [...walkRepresentation(representation)].every((inner) =>
+        inner.kind === 'class-ref'
+          ? structs.structNames.has(cppClassName(inner.declaration))
+          : inner.kind === 'record' || inner.kind === 'record-with-index' || (inner.kind === 'native-record-ref' && inner.native === null)
+            ? structs.structNames.has(cppRecordStructName(inner.shapeId))
+            : true
+      )
+    const types = new Set<string>()
+    for (const declaration of dynamicProtocolOmissions.classes)
+      if (structs.structNames.has(cppClassName(declaration))) types.add(cppClassName(declaration))
+    for (const shape of dynamicProtocolOmissions.records)
+      if (structs.structNames.has(cppRecordStructName(shape))) types.add(cppRecordStructName(shape))
+    for (const array of dynamicProtocolOmissions.arrays) if (declared(array)) types.add(cppTypeOf(array, 'owned'))
+    return [...types].sort()
+  }
+
   const unionAliasMarker = '// gea-union-aliases'
   const unitFunctionMarker = '// gea-unit-functions'
   const unitFunctionLinkage = perFile ? 'inline ' : '[[maybe_unused]] static '
@@ -2952,10 +2977,21 @@ const renderTranslationUnitSession = (input: CppTranslationUnitInput): CppTransl
     const forwards = [...recursiveContainers, ...structs.declarations, ...jsonStructs.declarations].filter(
       (declaration) => declaration.startsWith('struct ') && declaration.endsWith(';') && !declaration.includes('{')
     )
+    // Spelled after the alias session ends, so each is its full type.
+    const omitted = dynamicProtocolOmittedTypes()
     const block = [
       ...forwards,
       ...aliases.map(({ name, spelling }) => `using ${name} = ${spelling};`),
-      ...functions.map(({ signature }) => `${unitFunctionLinkage}${signature};`)
+      ...functions.map(({ signature }) => `${unitFunctionLinkage}${signature};`),
+      ...(omitted.length === 0
+        ? []
+        : [
+            ...(isolate ? [namespaceClose] : []),
+            'namespace gea::detail {',
+            ...omitted.map((type) => `template <> inline constexpr bool dynamicProtocolOmitted<${type}> = true;`),
+            '}  // namespace gea::detail',
+            ...(isolate ? [namespaceOpen] : [])
+          ])
     ].join('\n')
     const definitions = functions.map(({ signature, body }) => `${unitFunctionLinkage}${signature} { ${body} }`).join('\n')
     return spliceRendered(spliceRendered(source, unionAliasMarker, block), unitFunctionMarker, definitions)
