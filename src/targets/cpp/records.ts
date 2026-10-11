@@ -18,7 +18,7 @@ export {
 }
 import { isNativeError } from './error-types.js'
 import type { ClassStaticFieldStorage, LazyArrowFieldPlan } from './class-layout.js'
-import { lazyArrowFieldPlansForClass } from './class-layout.js'
+import { classBoxable, lazyArrowFieldPlansForClass } from './class-layout.js'
 import type { ReactiveCellPlan } from './host/host-members.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import type { RecordAccessor, RecordField, RecordIndexSidecar, Representation, CallableAbi } from '../../representation/model.js'
@@ -3554,7 +3554,13 @@ const renderStructDefinition = (
    */
   methodStateUntraced = false,
   indexProtocol = true,
-  dynamicFieldLoad?: DynamicFieldLoad
+  dynamicFieldLoad?: DynamicFieldLoad,
+  /**
+   * Whether the reflection census proved no dynamic code reads into this class
+   * (`classBoxable` is false for it). The runtime then builds no document
+   * protocol for its box -- `NativeDocumentUnread` in `gea_runtime.h`.
+   */
+  documentUnread = false
 ): string | CppRecordRefusal => {
   const isNarrowed = (field: FieldLike): boolean => narrowedSlots.has(integerStorageSlot(structName, field.key))
   // A class keeps every field inline. Its fields are stored by the
@@ -3883,6 +3889,7 @@ const renderStructDefinition = (
   // forward-declared -- a member cannot forward to a body the file has not
   // named yet.
   for (const line of virtualMembers) lines.push(line)
+  if (documentUnread) lines.push(`  using gea_document_unread = ${structName};`)
   lines.push('};')
   return [...tailLines, ...lines].join('\n')
 }
@@ -4226,7 +4233,8 @@ export const cppRecordDeclarations = (
         (shapesByStruct.get(structName)?.size ?? 0) > 0,
       immortalStateRoots.has(structName),
       declaration === undefined ? layout.indexes.length > 0 : classIndexProtocols.get(declaration) !== false,
-      dynamicFieldLoad
+      dynamicFieldLoad,
+      declaration !== undefined && classes.has(declaration) && !classBoxable(classes, declaration)
     )
   })
   const refused = rendered.filter((entry): entry is CppRecordRefusal => typeof entry !== 'string')

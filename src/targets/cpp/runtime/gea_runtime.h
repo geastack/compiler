@@ -18407,6 +18407,18 @@ struct ValueMetadata {
 };
 inline constexpr ValueMetadata emptyValueMetadata{nullptr, nullptr, nullptr, nullptr, nullptr, -1, false, false, false, false, nullptr, nullptr, nullptr, nullptr};
 
+/**
+ * A compiled class the whole-program reflection census proved no dynamic code
+ * reads into (`translation-unit.ts`, from `prototypePropertyDeclarationsOf`).
+ * A box may still carry one -- a typed listener adapted to a `gea::Value`
+ * signature boxes its arguments only to unbox them -- but nothing looks inside,
+ * so its box needs no document protocol, and building one for every boxable
+ * class was ~400 KB of gea-raw's binary. The marker names the class itself so
+ * a subclass never inherits its base's verdict.
+ */
+template <typename T>
+concept NativeDocumentUnread = requires { typename T::gea_document_unread; } && std::is_same_v<typename T::gea_document_unread, T>;
+
 template <typename T, int RestFrom = -1, bool ActualArguments = false>
 const ValueMetadata* valueMetadataFor() {
   static const ValueMetadata metadata = [] {
@@ -18416,7 +18428,8 @@ const ValueMetadata* valueMetadataFor() {
     Ref<void> (*anchor)(const void*) = nullptr;
     bool (*viewValue)(const void*, Value&) = nullptr;
     const NativeDocumentOps* document = nullptr;
-    if constexpr (IsRefPayload<T>::value) document = nativeDocumentOpsFor<typename T::element_type>();
+    if constexpr (IsRefPayload<T>::value)
+      if constexpr (!NativeDocumentUnread<typename T::element_type>) document = nativeDocumentOpsFor<typename T::element_type>();
     if constexpr (IsRefPayload<T>::value && requires(const T& value) { value->viewAnchor(); }) {
       anchor = +[](const void* payload) -> Ref<void> {
         const T& value = *static_cast<const T*>(payload);
