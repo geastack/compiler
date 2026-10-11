@@ -4255,6 +4255,13 @@ namespace host {
 }
 
 namespace detail {
+// Out of line and cold so a `Ref` dereference stays one compare clang inlines:
+// with the message built at every `->`, clang at -Os stopped inlining
+// `operator->` and gea-raw lost ~8% throughput (bench box, 2026-10-11).
+[[noreturn, gnu::cold, gnu::noinline]] inline void throwNullDereference(bool undefined) {
+  host::throwRuntimeError("TypeError", undefined ? "Cannot read properties of undefined" : "Cannot read properties of null");
+}
+
 /**
  * The one word every `Ref<T>` is: the object, erased.
  *
@@ -4401,14 +4408,14 @@ struct Ref : detail::RefStorage {
   }
 
   T* get() const { return pointer(); }
-  T* operator->() const {
-    if (!ownsObject()) host::throwRuntimeError("TypeError", isUndefined() ? "Cannot read properties of undefined" : "Cannot read properties of null");
-    return pointer();
+  [[gnu::always_inline]] T* operator->() const {
+    if (!ownsObject()) [[unlikely]] detail::throwNullDereference(isUndefined());
+    return static_cast<T*>(erased_);
   }
   /** `add_lvalue_reference_t` rather than `T&`, for the same reason `std::shared_ptr` spells it that way: `Ref<void>` is the box's own storage, and `void&` is not a type. */
-  typename std::add_lvalue_reference<T>::type operator*() const {
-    if (!ownsObject()) host::throwRuntimeError("TypeError", isUndefined() ? "Cannot read properties of undefined" : "Cannot read properties of null");
-    return *pointer();
+  [[gnu::always_inline]] typename std::add_lvalue_reference<T>::type operator*() const {
+    if (!ownsObject()) [[unlikely]] detail::throwNullDereference(isUndefined());
+    return *static_cast<T*>(erased_);
   }
   explicit operator bool() const { return ownsObject(); }
 
