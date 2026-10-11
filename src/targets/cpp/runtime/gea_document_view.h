@@ -632,12 +632,13 @@ bool nativeDocumentEnumerable(const Ref<T>& source, const PropertyKey& key) {
  * code into the binary for every array type a program boxes. What really
  * depends on the type is the handful of guards below, which are small.
  *
- * `payload` points at the caller's typed `Ref<ArrayObject<E>>`, the
- * convention every `NativeArrayOps` entry takes; `source` is the same handle
- * erased. Each function is the generic template's array path, unchanged.
+ * `payload` is the handle's address, the convention every erased table
+ * already takes from `Value::payload()`: a `Ref<void>` word read as the
+ * `Ref<ArrayObject<E>>` it holds. `source` is the same handle. Each function
+ * is the generic template's array path, unchanged.
  */
 struct NativeArrayDocumentBridge {
-  const NativeArrayOps* elements;
+  const NativeArrayOps* (*elements)();
   bool (*fieldsWritable)(const void* payload);
   bool (*extensible)(const void* payload);
   NativeCallReceiver (*receiver)(const void* payload);
@@ -650,7 +651,7 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
 
 [[gnu::noinline]] inline bool arrayDocumentHas(const Ref<void>& source, const void* payload, const NativeArrayDocumentBridge& bridge,
                                                const PropertyKey& key, bool own) {
-  const auto* elements = bridge.elements;
+  const auto* elements = bridge.elements();
   if (const auto* origin = record::nativeViewRoute(source); origin && origin->hasOwn)
     return own ? origin->hasOwn(origin->immediate, key) : origin->hasProperty && origin->hasProperty(origin->immediate, key);
   if (!key.isSymbol() && key.text() == "length") return true;
@@ -664,7 +665,7 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
 
 [[gnu::noinline]] inline bool arrayDocumentRead(const Ref<void>&, const void* payload, const NativeArrayDocumentBridge& bridge,
                                                 const PropertyKey& key, Value& out) {
-  const auto* elements = bridge.elements;
+  const auto* elements = bridge.elements();
   if (!key.isSymbol() && key.text() == "length") {
     out = Value::box(Value::Tag::Number, static_cast<double>(elements->length(payload)));
     return true;
@@ -685,7 +686,7 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
 
 [[gnu::noinline]] inline bool arrayDocumentDescriptor(const Ref<void>& source, const void* payload, const NativeArrayDocumentBridge& bridge,
                                                       const PropertyKey& key, PropertyDescriptor& out) {
-  const auto* elements = bridge.elements;
+  const auto* elements = bridge.elements();
   const bool frozen = elements->frozen(payload) || !bridge.fieldsWritable(payload);
   if (!key.isSymbol() && key.text() == "length") {
     out = PropertyDescriptor::assignment(Value::box(Value::Tag::Number, static_cast<double>(elements->length(payload))));
@@ -711,7 +712,7 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
 
 [[gnu::noinline]] inline std::vector<PropertyKey> arrayDocumentKeys(const Ref<void>& source, const void* payload,
                                                                     const NativeArrayDocumentBridge& bridge) {
-  const auto* elements = bridge.elements;
+  const auto* elements = bridge.elements();
   std::vector<PropertyKey> properties;
   if (source) {
     for (std::size_t index = 0; index < elements->length(payload); ++index)
@@ -736,7 +737,7 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
 
 [[gnu::noinline]] inline bool arrayDocumentSet(const Ref<void>& source, void* payload, const NativeArrayDocumentBridge& bridge,
                                                const PropertyKey& key, const Value& value) {
-  const auto* elements = bridge.elements;
+  const auto* elements = bridge.elements();
   if (elements->frozen(payload) || !bridge.fieldsWritable(payload)) return false;
   std::size_t index = 0;
   if (arrayIndexOfKey(key, index)) return elements->setElement(payload, index, value);
@@ -759,7 +760,7 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
 
 [[gnu::noinline]] inline bool arrayDocumentDefine(const Ref<void>& source, void* payload, const NativeArrayDocumentBridge& bridge,
                                                   const PropertyKey& key, const PropertyDescriptor& descriptor) {
-  const auto* elements = bridge.elements;
+  const auto* elements = bridge.elements();
   if (!key.isSymbol() && key.text() == "length") return elements->defineLength(payload, descriptor);
   std::size_t index = 0;
   if (arrayIndexOfKey(key, index)) return elements->define(payload, index, descriptor);
@@ -778,7 +779,7 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
 
 [[gnu::noinline]] inline bool arrayDocumentDelete(const Ref<void>& source, void* payload, const NativeArrayDocumentBridge& bridge,
                                                   const PropertyKey& key) {
-  const auto* elements = bridge.elements;
+  const auto* elements = bridge.elements();
   if (!key.isSymbol() && key.text() == "length") return false;
   std::size_t index = 0;
   if (arrayIndexOfKey(key, index)) return elements->remove(payload, index);
@@ -792,7 +793,7 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
 
 [[gnu::noinline]] inline bool arrayDocumentEnumerable(const Ref<void>& source, const void* payload, const NativeArrayDocumentBridge& bridge,
                                                       const PropertyKey& key) {
-  const auto* elements = bridge.elements;
+  const auto* elements = bridge.elements();
   if (!key.isSymbol() && key.text() == "length") return false;
   std::size_t index = 0;
   if (arrayIndexOfKey(key, index)) {
@@ -810,7 +811,7 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
 [[gnu::noinline]] inline std::optional<bool> arrayDocumentReadNative(const Ref<void>& source, const void* payload,
                                                                      const NativeArrayDocumentBridge& bridge, const PropertyKey& key,
                                                                      const NativeFieldRead& read) {
-  const auto* elements = bridge.elements;
+  const auto* elements = bridge.elements();
   if (record::hasLiveFieldView(source)) return record::readFieldView(source, key, read);
   std::size_t index = 0;
   if (arrayIndexOfKey(key, index)) {
@@ -828,7 +829,7 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
 [[gnu::noinline]] inline bool arrayDocumentSetNative(const Ref<void>& source, void* payload, const NativeArrayDocumentBridge& bridge,
                                                      const PropertyKey& key, const NativeDescriptorData& value,
                                                      const NativeFieldWrite& written) {
-  const auto* elements = bridge.elements;
+  const auto* elements = bridge.elements();
   if (record::hasLiveFieldView(source)) return record::writeFieldView(source, key, written);
   std::size_t index = 0;
   if (arrayIndexOfKey(key, index)) {
@@ -868,68 +869,549 @@ inline void noteArrayExpandoKeyCreated(const Ref<void>& source, const PropertyKe
 }
 
 template <typename T>
-const NativeArrayDocumentBridge* arrayDocumentBridgeFor() {
-  using Held = Ref<T>;
+constexpr bool sharedArrayDocument() {
   // The shared functions transcribe the generic templates' path for a type
   // with none of these member protocols; a type that gains one must not be
   // routed through them.
   static_assert(!NativeFieldTable<T> && !TypedStringDictionaryTable<T> && !NativePrototypeTable<T> && !NativeOwnFieldPredicate<T> &&
                     !NativeOwnFieldPresenceTable<T> && !NativeOwnIndexPresenceTable<T> && !NativeOwnFieldEnumerableTable<T> &&
-                    !NativeOwnIndexEnumerableTable<T> && !NativeOwnKeysTable<T> && !IsMapPayload<Held>::value,
+                    !NativeOwnIndexEnumerableTable<T> && !NativeOwnKeysTable<T> && !IsMapPayload<Ref<T>>::value,
                 "an array type with its own field protocol needs the generic document templates");
-  static const NativeArrayDocumentBridge bridge{
-      nativeArrayOpsFor<Held>(),
-      [](const void* payload) { return nativeOwnFieldsWritable(*static_cast<const Held*>(payload)); },
-      [](const void* payload) { return nativeIsExtensible(*static_cast<const Held*>(payload)); },
-      [](const void* payload) { return NativeCallReceiver::object(*static_cast<const Held*>(payload)); },
-      [](const void* payload, const NativeDescriptorData& value) { requireNativeEntryFitsArrayLane(**static_cast<const Held*>(payload), value); }};
-  return &bridge;
+  return true;
 }
 
 template <typename T>
+inline constexpr NativeArrayDocumentBridge arrayDocumentBridge{
+    &nativeArrayOpsFor<Ref<T>>,
+    [](const void* payload) { return nativeOwnFieldsWritable(*static_cast<const Ref<T>*>(payload)); },
+    [](const void* payload) { return nativeIsExtensible(*static_cast<const Ref<T>*>(payload)); },
+    [](const void* payload) { return NativeCallReceiver::object(*static_cast<const Ref<T>*>(payload)); },
+    [](const void* payload, const NativeDescriptorData& value) { requireNativeEntryFitsArrayLane(**static_cast<const Ref<T>*>(payload), value); }};
+
+template <typename T>
 const NativeDocumentOps* nativeArrayDocumentOpsFor() {
+  static_assert(sharedArrayDocument<T>());
   static const NativeDocumentOps operations{
-      +[](const Ref<void>& source, const PropertyKey& key, Value& out) {
-        const auto held = source.template staticCast<T>();
-        return arrayDocumentRead(source, &held, *arrayDocumentBridgeFor<T>(), key, out);
-      },
+      +[](const Ref<void>& source, const PropertyKey& key, Value& out) { return arrayDocumentRead(source, &source, arrayDocumentBridge<T>, key, out); },
       +[](const Ref<void>& source, const PropertyKey& key, const Value& value) {
-        auto held = source.template staticCast<T>();
-        return arrayDocumentSet(source, &held, *arrayDocumentBridgeFor<T>(), key, value);
+        return arrayDocumentSet(source, const_cast<Ref<void>*>(&source), arrayDocumentBridge<T>, key, value);
       },
       +[](const Ref<void>& source, const PropertyKey& key, PropertyDescriptor& out) {
-        const auto held = source.template staticCast<T>();
-        return arrayDocumentDescriptor(source, &held, *arrayDocumentBridgeFor<T>(), key, out);
+        return arrayDocumentDescriptor(source, &source, arrayDocumentBridge<T>, key, out);
       },
       +[](const Ref<void>& source, const PropertyKey& key, const PropertyDescriptor& descriptor) {
-        auto held = source.template staticCast<T>();
-        return arrayDocumentDefine(source, &held, *arrayDocumentBridgeFor<T>(), key, descriptor);
+        return arrayDocumentDefine(source, const_cast<Ref<void>*>(&source), arrayDocumentBridge<T>, key, descriptor);
       },
       +[](const Ref<void>& source, const PropertyKey& key) {
-        auto held = source.template staticCast<T>();
-        return arrayDocumentDelete(source, &held, *arrayDocumentBridgeFor<T>(), key);
+        return arrayDocumentDelete(source, const_cast<Ref<void>*>(&source), arrayDocumentBridge<T>, key);
       },
-      +[](const Ref<void>& source, const PropertyKey& key, bool own) {
-        const auto held = source.template staticCast<T>();
-        return arrayDocumentHas(source, &held, *arrayDocumentBridgeFor<T>(), key, own);
-      },
-      +[](const Ref<void>& source) {
-        const auto held = source.template staticCast<T>();
-        return arrayDocumentKeys(source, &held, *arrayDocumentBridgeFor<T>());
-      },
-      +[](const Ref<void>& source, const PropertyKey& key) {
-        const auto held = source.template staticCast<T>();
-        return arrayDocumentEnumerable(source, &held, *arrayDocumentBridgeFor<T>(), key);
-      },
+      +[](const Ref<void>& source, const PropertyKey& key, bool own) { return arrayDocumentHas(source, &source, arrayDocumentBridge<T>, key, own); },
+      +[](const Ref<void>& source) { return arrayDocumentKeys(source, &source, arrayDocumentBridge<T>); },
+      +[](const Ref<void>& source, const PropertyKey& key) { return arrayDocumentEnumerable(source, &source, arrayDocumentBridge<T>, key); },
       +[](const Ref<void>& source) { return Value::box(Value::Tag::Object, source.template staticCast<T>()); },
       payloadTypeTagFor<Ref<T>>(), IsArrayPayload<Ref<T>>::value, false, nullptr,
       +[](const Ref<void>& source, const PropertyKey& key, const NativeFieldRead& read) {
-        const auto held = source.template staticCast<T>();
-        return arrayDocumentReadNative(source, &held, *arrayDocumentBridgeFor<T>(), key, read);
+        return arrayDocumentReadNative(source, &source, arrayDocumentBridge<T>, key, read);
       },
       +[](const Ref<void>& source, const PropertyKey& key, const NativeDescriptorData& value, const NativeFieldWrite& written) {
-        auto held = source.template staticCast<T>();
-        return arrayDocumentSetNative(source, &held, *arrayDocumentBridgeFor<T>(), key, value, written);
+        return arrayDocumentSetNative(source, const_cast<Ref<void>*>(&source), arrayDocumentBridge<T>, key, value, written);
+      }};
+  return &operations;
+}
+
+/**
+ * The document protocol of every other native object -- a generated record or
+ * class, or a runtime type such as `Error` or `TypedArray` -- written once.
+ *
+ * The generic `nativeDocument*` templates ask each type at compile time which
+ * member hooks it states (`gea_ownFieldPresent`, `gea_readPrototypeProperty`,
+ * ...) and were instantiated per type: 10-22 KB of mostly identical key
+ * checks, expando and view routing, prototype fallbacks and refusals for
+ * every class or record a program reads dynamically. Here each hook is a
+ * pointer, null when the type does not state it, so `if constexpr (hook)`
+ * becomes `if (bridge.hook)` and only the hook calls stay per type.
+ *
+ * Hooks take the erased handle and read it as the `Ref<T>` it holds -- the
+ * convention every erased table already takes from `Value::payload()`.
+ */
+struct NativeRecordDocumentBridge {
+  bool (*fieldsWritable)(const Ref<void>& source);
+  bool (*extensible)(const Ref<void>& source);
+  NativeCallReceiver (*receiver)(const Ref<void>& source);
+  void (*keyCreated)(const Ref<void>& source, const PropertyKey& key);
+  const NativeFieldOps* (*fields)();
+  bool fieldTable;
+  bool indexFieldTable;
+  bool wholeOwnFieldProtocol;
+  bool prototypeTable;
+  bool ownFieldPredicate;
+  bool (*ownFieldPresent)(const Ref<void>&, const PropertyKey&, bool&);
+  bool (*ownIndexPresent)(const Ref<void>&, const PropertyKey&, bool&);
+  bool (*ownFieldEnumerable)(const Ref<void>&, const PropertyKey&, bool&);
+  bool (*ownIndexEnumerable)(const Ref<void>&, const PropertyKey&, bool&);
+  bool (*matchesOwnField)(const Ref<void>&, const PropertyKey&);
+  bool (*matchesOwnIndex)(const Ref<void>&, const PropertyKey&);
+  bool (*readOwnField)(const Ref<void>&, const PropertyKey&, Value&);
+  bool (*ownFieldDescriptor)(const Ref<void>&, const PropertyKey&, PropertyDescriptor&);
+  bool (*ownIndexDescriptor)(const Ref<void>&, const PropertyKey&, PropertyDescriptor&);
+  void (*ownFieldKeys)(const Ref<void>&, std::vector<PropertyKey>&);
+  bool (*defineOwnField)(const Ref<void>&, const PropertyKey&, const PropertyDescriptor&, bool extensible);
+  bool (*defineOwnIndex)(const Ref<void>&, const PropertyKey&, const PropertyDescriptor&, bool extensible);
+  bool (*deleteOwnField)(const Ref<void>&, const PropertyKey&);
+  bool (*deleteOwnIndex)(const Ref<void>&, const PropertyKey&);
+  // Each native field hook is stated only together with its predicate.
+  bool (*readOwnFieldNative)(const Ref<void>&, const PropertyKey&, NativeFieldRead&);
+  bool (*readOwnIndexNative)(const Ref<void>&, const PropertyKey&, NativeFieldRead&);
+  bool (*writeOwnFieldNative)(const Ref<void>&, const PropertyKey&, const NativeFieldWrite&, bool extensible);
+  bool (*writeOwnIndexNative)(const Ref<void>&, const PropertyKey&, const NativeFieldWrite&, bool extensible);
+  bool (*readPrototypeProperty)(const Ref<void>&, const PropertyKey&, Value&);
+  bool (*hasPrototypeProperty)(const Ref<void>&, const PropertyKey&);
+  NativePrototypeOps::SetResult (*setPrototypePropertyNative)(const Ref<void>&, const PropertyKey&, const Value&, const NativeCallReceiver&);
+  NativePrototypeOps::SetResult (*setPrototypePropertyFieldNative)(const Ref<void>&, const PropertyKey&, const NativeFieldWrite&,
+                                                                   const NativeCallReceiver&);
+};
+
+[[gnu::noinline]] inline bool recordDocumentHas(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key,
+                                                bool own) {
+  if (const auto* origin = record::nativeViewRoute(source); origin && origin->hasOwn)
+    return own ? origin->hasOwn(origin->immediate, key) : origin->hasProperty && origin->hasProperty(origin->immediate, key);
+  if (bridge.ownFieldPresent) {
+    bool present = false;
+    if (bridge.ownFieldPresent(source, key, present) && present) return true;
+  } else if (bridge.fieldTable && bridge.ownFieldPredicate) {
+    if (bridge.matchesOwnField(source, key)) host::throwRuntimeError("TypeError", "a native Document field has no presence-only protocol");
+  }
+  if (bridge.ownIndexPresent) {
+    bool present = false;
+    if (bridge.ownIndexPresent(source, key, present) && present) return true;
+  }
+  const auto overlay = expandoFor(source, false);
+  if (overlay && (own ? overlay->ownProperty(key) != nullptr : overlay->hasProperty(key))) return true;
+  if (own) return false;
+  if (bridge.hasPrototypeProperty && bridge.hasPrototypeProperty(source, key)) return true;
+  return ordinaryObjectPrototypeHas(key);
+}
+
+[[gnu::noinline]] inline bool recordDocumentRead(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key,
+                                                 Value& out) {
+  if (const auto* fields = bridge.fields()) {
+    if (fields->read(&source, key, out) || fields->readIndex(&source, key, out)) return true;
+    if (fields->matchesField(&source, key) || fields->matchesIndex(&source, key)) return false;
+  }
+  if (bridge.ownFieldPresent) {
+    bool present = false;
+    if (bridge.ownFieldPresent(source, key, present) && present)
+      host::throwRuntimeError("TypeError", "a native Document field has no published value protocol");
+  }
+  const auto sidecar = expandoFor(source, false);
+  if (sidecar && sidecar->hasProperty(key)) {
+    out = sidecar->getWithNativeReceiver(key, bridge.receiver(source));
+    return true;
+  }
+  if (bridge.readPrototypeProperty && bridge.readPrototypeProperty(source, key, out)) return true;
+  if (bridge.hasPrototypeProperty && bridge.hasPrototypeProperty(source, key))
+    host::throwRuntimeError("TypeError", "a native Document prototype property has no published read protocol");
+  return false;
+}
+
+[[gnu::noinline]] inline bool recordDocumentDescriptor(const Ref<void>& source, const NativeRecordDocumentBridge& bridge,
+                                                       const PropertyKey& key, PropertyDescriptor& out) {
+  if (!source) return false;
+  Optional<PropertyDescriptor> original;
+  if (record::ownNativeViewDescriptor(source, key, original)) {
+    if (!original.has_value()) return false;
+    out = *original;
+    return true;
+  }
+  if (bridge.ownFieldDescriptor) {
+    PropertyDescriptor descriptor;
+    if (bridge.ownFieldDescriptor(source, key, descriptor)) {
+      if (!bridge.fieldsWritable(source)) descriptor.writable = false;
+      out = descriptor;
+      return true;
+    }
+  }
+  if (bridge.wholeOwnFieldProtocol && bridge.matchesOwnField(source, key)) return false;
+  if (bridge.fieldTable) {
+    Value found;
+    if (bridge.readOwnField(source, key, found)) {
+      out = PropertyDescriptor::assignment(found);
+      out.configurable = false;
+      out.writable = bridge.fieldsWritable(source);
+      return true;
+    }
+    if (bridge.indexFieldTable) {
+      PropertyDescriptor descriptor;
+      if (bridge.ownIndexDescriptor(source, key, descriptor)) {
+        out = descriptor;
+        return true;
+      }
+      if (bridge.matchesOwnIndex(source, key)) return false;
+    }
+  }
+  const Ref<DynamicObject> expando = expandoFor(source, false);
+  const PropertyDescriptor* descriptor = expando ? expando->ownProperty(key) : nullptr;
+  if (descriptor == nullptr) return false;
+  out = *descriptor;
+  return true;
+}
+
+[[gnu::noinline]] inline std::vector<PropertyKey> recordDocumentKeys(const Ref<void>& source, const NativeRecordDocumentBridge& bridge) {
+  std::vector<PropertyKey> keys;
+  if (!source) return ordinaryOwnPropertyKeyOrder(std::move(keys));
+  if (record::ownNativeViewKeys(source, keys, false)) return ordinaryOwnPropertyKeyOrder(std::move(keys));
+  keys.reserve(16);
+  if (bridge.ownFieldKeys) bridge.ownFieldKeys(source, keys);
+  if (const Ref<DynamicObject> expando = expandoFor(source, false)) {
+    const std::size_t layout = keys.size();
+    for (const PropertyKey& key : expando->ownKeys()) {
+      if (std::find(keys.begin(), keys.begin() + static_cast<std::ptrdiff_t>(layout), key) == keys.begin() + static_cast<std::ptrdiff_t>(layout))
+        keys.push_back(key);
+    }
+  }
+  return ordinaryOwnPropertyKeyOrder(nativeOwnKeysInCreationOrder(source.get(), std::move(keys)));
+}
+
+[[gnu::noinline]] inline bool recordDocumentSet(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key,
+                                                const Value& value) {
+  if (const auto* fields = bridge.fields()) {
+    auto* payload = const_cast<Ref<void>*>(&source);
+    if (fields->matchesField(&source, key))
+      return bridge.fieldsWritable(source) && fields->write(payload, key, value, bridge.extensible(source));
+    if (fields->matchesIndex(&source, key)) return fields->writeIndex(payload, key, value, bridge.extensible(source));
+  }
+  const auto receiver = bridge.receiver(source);
+  const auto existing = expandoFor(source, false);
+  if (existing && existing->ownProperty(key) != nullptr) return existing->setWithNativeReceiver(key, value, receiver);
+  if (bridge.setPrototypePropertyNative) {
+    const auto accepted = bridge.setPrototypePropertyNative(source, key, value, receiver);
+    if (accepted != NativePrototypeOps::SetResult::Absent) return accepted == NativePrototypeOps::SetResult::Accepted;
+  } else if (bridge.prototypeTable) {
+    if (bridge.hasPrototypeProperty(source, key))
+      host::throwRuntimeError("TypeError", "a native Document prototype setter has no native receiver protocol");
+  }
+  if (!bridge.extensible(source)) return false;
+  if (!expandoFor(source, true)->setWithNativeReceiver(key, value, receiver)) return false;
+  bridge.keyCreated(source, key);
+  return true;
+}
+
+[[gnu::noinline]] inline bool recordDocumentDefine(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key,
+                                                   const PropertyDescriptor& descriptor) {
+  if (!source) return false;
+  if (record::immutableDescriptorSnapshotView(source))
+    host::throwRuntimeError("TypeError", "a native descriptor snapshot definition has no certified source protocol");
+  if (const auto defined = record::defineDocumentView(source, key, descriptor)) return *defined;
+  if (bridge.fieldTable) {
+    if (bridge.wholeOwnFieldProtocol) {
+      if (bridge.matchesOwnField(source, key)) return bridge.defineOwnField(source, key, descriptor, bridge.extensible(source));
+    } else {
+      Value fixed;
+      if (bridge.readOwnField(source, key, fixed)) return false;
+    }
+    if (bridge.indexFieldTable && bridge.matchesOwnIndex(source, key))
+      return bridge.defineOwnIndex(source, key, descriptor, bridge.extensible(source));
+  }
+  const Ref<DynamicObject> existing = expandoFor(source, false);
+  if (existing && existing->ownProperty(key) != nullptr) return existing->defineOwnProperty(key, descriptor);
+  if (!bridge.extensible(source)) return false;
+  if (!expandoFor(source, true)->defineOwnProperty(key, descriptor)) return false;
+  bridge.keyCreated(source, key);
+  return true;
+}
+
+[[gnu::noinline]] inline bool recordDocumentDelete(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key) {
+  if (!source) return true;
+  if (record::immutableDescriptorSnapshotView(source))
+    host::throwRuntimeError("TypeError", "a native descriptor snapshot deletion has no certified source protocol");
+  if (const auto* document = record::documentViewRoute(source)) return document->document->remove(document->held, key);
+  if (bridge.deleteOwnField) {
+    if (bridge.matchesOwnField(source, key)) {
+      if (!bridge.deleteOwnField(source, key)) return false;
+      forgetNativeOwnKey(source.get(), key);
+      return true;
+    }
+  } else if (bridge.fieldTable) {
+    Value probe;
+    if (bridge.readOwnField(source, key, probe)) return false;
+  }
+  if (bridge.deleteOwnIndex && bridge.matchesOwnIndex(source, key)) return bridge.deleteOwnIndex(source, key);
+  const Ref<DynamicObject> expando = expandoFor(source, false);
+  return expando ? expando->deleteOwnProperty(key) : true;
+}
+
+[[gnu::noinline]] inline bool recordDocumentEnumerable(const Ref<void>& source, const NativeRecordDocumentBridge& bridge,
+                                                       const PropertyKey& key) {
+  if (bridge.ownFieldEnumerable) {
+    bool enumerable = false;
+    if (bridge.ownFieldEnumerable(source, key, enumerable)) return enumerable;
+  }
+  if (bridge.ownIndexEnumerable) {
+    bool enumerable = false;
+    if (bridge.ownIndexEnumerable(source, key, enumerable)) return enumerable;
+  }
+  const auto overlay = expandoFor(source, false);
+  const auto* descriptor = overlay ? overlay->ownProperty(key) : nullptr;
+  if (descriptor) return descriptor->enumerable;
+  if (recordDocumentHas(source, bridge, key, true))
+    host::throwRuntimeError("TypeError", "a native Document field has no enumerability-only protocol");
+  return false;
+}
+
+[[gnu::noinline]] inline std::optional<bool> recordDocumentReadNative(const Ref<void>& source, const NativeRecordDocumentBridge& bridge,
+                                                                      const PropertyKey& key, const NativeFieldRead& read) {
+  if (record::hasLiveFieldView(source)) return record::readFieldView(source, key, read);
+  auto mutableRead = read;
+  if (bridge.readOwnFieldNative && bridge.matchesOwnField(source, key)) {
+    bool present = true;
+    if (bridge.ownFieldPresent && bridge.ownFieldPresent(source, key, present) && !present) return std::nullopt;
+    return bridge.readOwnFieldNative(source, key, mutableRead);
+  }
+  if (bridge.readOwnIndexNative && bridge.matchesOwnIndex(source, key)) {
+    bool present = true;
+    if (bridge.ownIndexPresent && bridge.ownIndexPresent(source, key, present) && !present) return std::nullopt;
+    return bridge.readOwnIndexNative(source, key, mutableRead);
+  }
+  const auto sidecar = expandoFor(source, false);
+  return sidecar ? readDocumentNativeObject(sidecar, key, bridge.receiver(source), read) : std::nullopt;
+}
+
+[[gnu::noinline]] inline bool recordDocumentSetNative(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key,
+                                                      const NativeDescriptorData& value, const NativeFieldWrite& written) {
+  if (record::hasLiveFieldView(source)) return record::writeFieldView(source, key, written);
+  if (bridge.writeOwnFieldNative && bridge.matchesOwnField(source, key))
+    return bridge.fieldsWritable(source) && bridge.writeOwnFieldNative(source, key, written, bridge.extensible(source));
+  if (bridge.writeOwnIndexNative && bridge.matchesOwnIndex(source, key))
+    return bridge.writeOwnIndexNative(source, key, written, bridge.extensible(source));
+  const auto* fields = bridge.fields();
+  if (fields && (fields->matchesField(&source, key) || fields->matchesIndex(&source, key)))
+    host::throwRuntimeError("TypeError", "a Document native entry has no selected physical field writer");
+  const auto receiver = bridge.receiver(source);
+  const auto existing = expandoFor(source, false);
+  if (existing && existing->ownProperty(key)) return existing->setNativeDescriptorWithNativeReceiver(key, value, written, receiver);
+  if (bridge.setPrototypePropertyFieldNative) {
+    const auto accepted = bridge.setPrototypePropertyFieldNative(source, key, written, receiver);
+    if (accepted != NativePrototypeOps::SetResult::Absent) return accepted == NativePrototypeOps::SetResult::Accepted;
+  } else if (bridge.prototypeTable) {
+    if (bridge.hasPrototypeProperty(source, key)) host::throwRuntimeError("TypeError", "a Document native entry has no selected prototype setter");
+  }
+  if (!bridge.extensible(source)) return false;
+  const auto overlay = existing ? existing : expandoFor(source, true);
+  if (!overlay->setNativeDescriptorWithNativeReceiver(key, value, written, receiver)) return false;
+  if (overlay->ownProperty(key)) bridge.keyCreated(source, key);
+  return true;
+}
+
+template <typename T>
+const Ref<T>& recordDocumentHandle(const Ref<void>& source) {
+  return *static_cast<const Ref<T>*>(static_cast<const void*>(&source));
+}
+
+template <typename T>
+inline constexpr NativeRecordDocumentBridge recordDocumentBridge{
+    [](const Ref<void>& source) { return nativeOwnFieldsWritable(recordDocumentHandle<T>(source)); },
+    [](const Ref<void>& source) { return nativeIsExtensible(recordDocumentHandle<T>(source)); },
+    [](const Ref<void>& source) { return NativeCallReceiver::object(recordDocumentHandle<T>(source)); },
+    [](const Ref<void>& source, const PropertyKey& key) { noteNativeExpandoKeyCreated(recordDocumentHandle<T>(source), key); },
+    &nativeFieldOpsFor<Ref<T>>,
+    NativeFieldTable<T>,
+    NativeFieldTable<T> && NativeIndexFieldTable<T>,
+    wholeNativeOwnFieldProtocol<T>(),
+    NativePrototypeTable<T>,
+    NativeOwnFieldPredicate<T>,
+    [] {
+      if constexpr (NativeOwnFieldPresenceTable<T>)
+        return +[](const Ref<void>& source, const PropertyKey& key, bool& present) {
+          return recordDocumentHandle<T>(source)->gea_ownFieldPresent(key, present);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, bool&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (NativeOwnIndexPresenceTable<T>)
+        return +[](const Ref<void>& source, const PropertyKey& key, bool& present) {
+          return recordDocumentHandle<T>(source)->gea_ownIndexPresent(key, present);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, bool&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (NativeOwnFieldEnumerableTable<T>)
+        return +[](const Ref<void>& source, const PropertyKey& key, bool& enumerable) {
+          return recordDocumentHandle<T>(source)->gea_ownFieldEnumerable(key, enumerable);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, bool&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (NativeOwnIndexEnumerableTable<T>)
+        return +[](const Ref<void>& source, const PropertyKey& key, bool& enumerable) {
+          return recordDocumentHandle<T>(source)->gea_ownIndexEnumerable(key, enumerable);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, bool&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& reader, const PropertyKey& key) { reader.gea_matchesOwnField(key); })
+        return +[](const Ref<void>& source, const PropertyKey& key) { return recordDocumentHandle<T>(source)->gea_matchesOwnField(key); };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& reader, const PropertyKey& key) { reader.gea_matchesOwnIndex(key); })
+        return +[](const Ref<void>& source, const PropertyKey& key) { return recordDocumentHandle<T>(source)->gea_matchesOwnIndex(key); };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (NativeFieldTable<T>)
+        return +[](const Ref<void>& source, const PropertyKey& key, Value& out) {
+          return recordDocumentHandle<T>(source)->gea_readOwnField(key, out);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, Value&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& reader, const PropertyKey& key, PropertyDescriptor& descriptor) {
+                      reader.gea_ownFieldDescriptor(key, descriptor);
+                    })
+        return +[](const Ref<void>& source, const PropertyKey& key, PropertyDescriptor& out) {
+          return recordDocumentHandle<T>(source)->gea_ownFieldDescriptor(key, out);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, PropertyDescriptor&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (NativeFieldTable<T> && NativeIndexFieldTable<T>)
+        return +[](const Ref<void>& source, const PropertyKey& key, PropertyDescriptor& out) {
+          return recordDocumentHandle<T>(source)->gea_ownIndexDescriptor(key, out);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, PropertyDescriptor&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (NativeOwnKeysTable<T>)
+        return +[](const Ref<void>& source, std::vector<PropertyKey>& keys) { recordDocumentHandle<T>(source)->gea_ownFieldKeys(keys); };
+      else return static_cast<void (*)(const Ref<void>&, std::vector<PropertyKey>&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (NativeFieldTable<T> && wholeNativeOwnFieldProtocol<T>())
+        return +[](const Ref<void>& source, const PropertyKey& key, const PropertyDescriptor& descriptor, bool extensible) {
+          return nativeDefineOwnField(*recordDocumentHandle<T>(source), key, descriptor, extensible, source);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, const PropertyDescriptor&, bool)>(nullptr);
+    }(),
+    [] {
+      if constexpr (NativeFieldTable<T> && NativeIndexFieldTable<T>)
+        return +[](const Ref<void>& source, const PropertyKey& key, const PropertyDescriptor& descriptor, bool extensible) {
+          return recordDocumentHandle<T>(source)->gea_defineOwnIndex(key, descriptor, extensible);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, const PropertyDescriptor&, bool)>(nullptr);
+    }(),
+    [] {
+      if constexpr (NativeOwnFieldPredicate<T> && NativeOwnFieldDeletion<T>)
+        return +[](const Ref<void>& source, const PropertyKey& key) { return recordDocumentHandle<T>(source)->gea_deleteOwnField(key); };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& writer, const PropertyKey& key) {
+                      writer.gea_matchesOwnIndex(key);
+                      writer.gea_deleteOwnIndex(key);
+                    })
+        return +[](const Ref<void>& source, const PropertyKey& key) { return recordDocumentHandle<T>(source)->gea_deleteOwnIndex(key); };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& reader, const PropertyKey& key, NativeFieldRead& read) {
+                      reader.gea_matchesOwnField(key);
+                      reader.gea_readOwnFieldNative(key, read);
+                    })
+        return +[](const Ref<void>& source, const PropertyKey& key, NativeFieldRead& read) {
+          return recordDocumentHandle<T>(source)->gea_readOwnFieldNative(key, read);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, NativeFieldRead&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& reader, const PropertyKey& key, NativeFieldRead& read) {
+                      reader.gea_matchesOwnIndex(key);
+                      reader.gea_readOwnIndexNative(key, read);
+                    })
+        return +[](const Ref<void>& source, const PropertyKey& key, NativeFieldRead& read) {
+          return recordDocumentHandle<T>(source)->gea_readOwnIndexNative(key, read);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, NativeFieldRead&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& writer, const PropertyKey& key, const NativeFieldWrite& written) {
+                      writer.gea_matchesOwnField(key);
+                      writer.gea_writeOwnFieldNative(key, written, true);
+                    })
+        return +[](const Ref<void>& source, const PropertyKey& key, const NativeFieldWrite& written, bool extensible) {
+          return recordDocumentHandle<T>(source)->gea_writeOwnFieldNative(key, written, extensible);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, const NativeFieldWrite&, bool)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& writer, const PropertyKey& key, const NativeFieldWrite& written) {
+                      writer.gea_matchesOwnIndex(key);
+                      writer.gea_writeOwnIndexNative(key, written, true);
+                    })
+        return +[](const Ref<void>& source, const PropertyKey& key, const NativeFieldWrite& written, bool extensible) {
+          return recordDocumentHandle<T>(source)->gea_writeOwnIndexNative(key, written, extensible);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, const NativeFieldWrite&, bool)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& reader, const PropertyKey& key, Value& out) { reader.gea_readPrototypeProperty(key, out); })
+        return +[](const Ref<void>& source, const PropertyKey& key, Value& out) {
+          return recordDocumentHandle<T>(source)->gea_readPrototypeProperty(key, out);
+        };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&, Value&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& reader, const PropertyKey& key) { reader.gea_hasPrototypeProperty(key); })
+        return +[](const Ref<void>& source, const PropertyKey& key) { return recordDocumentHandle<T>(source)->gea_hasPrototypeProperty(key); };
+      else return static_cast<bool (*)(const Ref<void>&, const PropertyKey&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& writer, const PropertyKey& key, const Value& value, const NativeCallReceiver& receiver) {
+                      writer.gea_setPrototypePropertyNative(key, value, receiver);
+                    })
+        return +[](const Ref<void>& source, const PropertyKey& key, const Value& value, const NativeCallReceiver& receiver) {
+          return recordDocumentHandle<T>(source)->gea_setPrototypePropertyNative(key, value, receiver);
+        };
+      else return static_cast<NativePrototypeOps::SetResult (*)(const Ref<void>&, const PropertyKey&, const Value&, const NativeCallReceiver&)>(nullptr);
+    }(),
+    [] {
+      if constexpr (requires(T& writer, const PropertyKey& key, const NativeFieldWrite& written, const NativeCallReceiver& receiver) {
+                      writer.gea_setPrototypePropertyFieldNative(key, written, receiver);
+                    })
+        return +[](const Ref<void>& source, const PropertyKey& key, const NativeFieldWrite& written, const NativeCallReceiver& receiver) {
+          return recordDocumentHandle<T>(source)->gea_setPrototypePropertyFieldNative(key, written, receiver);
+        };
+      else return static_cast<NativePrototypeOps::SetResult (*)(const Ref<void>&, const PropertyKey&, const NativeFieldWrite&,
+                                                                const NativeCallReceiver&)>(nullptr);
+    }()};
+
+template <typename T>
+inline constexpr bool sharedRecordDocument = !std::is_same_v<T, DynamicObject> && !std::is_same_v<T, Dictionary<Value>> &&
+                                             !IsArrayPayload<Ref<T>>::value && !IsMapPayload<Ref<T>>::value && !TypedStringDictionaryTable<T>;
+
+template <typename T>
+const NativeDocumentOps* nativeRecordDocumentOpsFor() {
+  static const NativeDocumentOps operations{
+      +[](const Ref<void>& source, const PropertyKey& key, Value& out) { return recordDocumentRead(source, recordDocumentBridge<T>, key, out); },
+      +[](const Ref<void>& source, const PropertyKey& key, const Value& value) {
+        return recordDocumentSet(source, recordDocumentBridge<T>, key, value);
+      },
+      +[](const Ref<void>& source, const PropertyKey& key, PropertyDescriptor& out) {
+        return recordDocumentDescriptor(source, recordDocumentBridge<T>, key, out);
+      },
+      +[](const Ref<void>& source, const PropertyKey& key, const PropertyDescriptor& descriptor) {
+        return recordDocumentDefine(source, recordDocumentBridge<T>, key, descriptor);
+      },
+      +[](const Ref<void>& source, const PropertyKey& key) { return recordDocumentDelete(source, recordDocumentBridge<T>, key); },
+      +[](const Ref<void>& source, const PropertyKey& key, bool own) { return recordDocumentHas(source, recordDocumentBridge<T>, key, own); },
+      +[](const Ref<void>& source) { return recordDocumentKeys(source, recordDocumentBridge<T>); },
+      +[](const Ref<void>& source, const PropertyKey& key) { return recordDocumentEnumerable(source, recordDocumentBridge<T>, key); },
+      +[](const Ref<void>& source) { return Value::box(Value::Tag::Object, source.template staticCast<T>()); },
+      payloadTypeTagFor<Ref<T>>(), false, false, nullptr,
+      +[](const Ref<void>& source, const PropertyKey& key, const NativeFieldRead& read) {
+        return recordDocumentReadNative(source, recordDocumentBridge<T>, key, read);
+      },
+      +[](const Ref<void>& source, const PropertyKey& key, const NativeDescriptorData& value, const NativeFieldWrite& written) {
+        return recordDocumentSetNative(source, recordDocumentBridge<T>, key, value, written);
       }};
   return &operations;
 }
@@ -938,6 +1420,7 @@ template <typename T>
 const NativeDocumentOps* nativeDocumentOpsFor() {
   if constexpr (std::is_void_v<T> || refStandalone<T>) return nullptr;
   else if constexpr (IsArrayObjectStruct<T>::value) return nativeArrayDocumentOpsFor<T>();
+  else if constexpr (sharedRecordDocument<T>) return nativeRecordDocumentOpsFor<T>();
   else {
     Ref<Map<Value, Value>> (*mapView)(const Ref<void>&) = nullptr;
     if constexpr (IsMapPayload<Ref<T>>::value) {

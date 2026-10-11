@@ -6478,6 +6478,16 @@ struct NativeCallReceiver {
     receiver.boxObject = &boxTypedObject<T>;
     return receiver;
   }
+  /** An object receiver whose boxer the holder recorded earlier, so naming it here instantiates nothing. */
+  static NativeCallReceiver erasedObject(Ref<void> held, Value (*box)(const Ref<void>&)) {
+    if (held.isUndefined()) return undefined();
+    if (!held) return null();
+    NativeCallReceiver receiver;
+    receiver.kind = Kind::Object;
+    receiver.held = std::move(held);
+    receiver.boxObject = box;
+    return receiver;
+  }
   template <typename T>
   static Value boxTypedObject(const Ref<void>&);
   template <typename T>
@@ -8941,6 +8951,15 @@ struct ArrayObject {
   bool lengthWritable = true;
   Ref<NativeArrayViewSource<Element>> liveSource;
   Ref<DynamicObject> indexedDescriptors;
+  /**
+   * How an index accessor's `this` boxes this array, recorded by the only
+   * paths that create `indexedDescriptors` -- every one of them already
+   * dynamic. Named statically from the element read instead, it made a plain
+   * `arr[i]` on any typed array instantiate that array's whole boxed protocol
+   * (`boxTypedObject` -> `Value::box` -> `valueMetadataFor`) for a branch
+   * that only runs once something defined an index descriptor.
+   */
+  Value (*indexedReceiverBox)(const Ref<void>&) = nullptr;
   const void* elementPolicy = nullptr;
   const NativeArrayElementPolicyOps<Element>* elementProtocol = nullptr;
   Value (*elementObserver)(const Element&) = nullptr;
@@ -8956,6 +8975,15 @@ struct ArrayObject {
   NativeCallReceiver nativeReceiver() const {
     if (liveSource) return liveSource->receiver();
     return NativeCallReceiver::object(Ref<ArrayObject<Element>>::adopt(const_cast<ArrayObject<Element>*>(this), true));
+  }
+  NativeCallReceiver indexedReceiver() const {
+    return NativeCallReceiver::erasedObject(
+        Ref<void>(Ref<ArrayObject<Element>>::adopt(const_cast<ArrayObject<Element>*>(this), true)), indexedReceiverBox);
+  }
+  void createIndexedDescriptors() {
+    if (indexedDescriptors) return;
+    indexedDescriptors = makeRef<DynamicObject>();
+    indexedReceiverBox = &NativeCallReceiver::template boxTypedObject<ArrayObject<Element>>;
   }
   void requireOrdinaryStorage() const {
     if (liveSource || indexedDescriptors) bigint_detail::fail("TypeError", "direct array cells require ordinary storage");
@@ -27590,9 +27618,8 @@ template <typename Element>
 Element readArrayIndexedDescriptor(const ArrayObject<Element>& array, std::size_t index) {
   const auto* descriptor = array.indexedDescriptors->ownProperty(arrayIndexedKey(index));
   if (!descriptor) host::throwRuntimeError("TypeError", "an array descriptor disappeared during its native read");
-  const auto receiver = Ref<ArrayObject<Element>>::adopt(const_cast<ArrayObject<Element>*>(&array), true);
   if constexpr (std::is_same_v<Element, Value>) {
-    return array.indexedDescriptors->getWithNativeReceiver(arrayIndexedKey(index), NativeCallReceiver::object(receiver));
+    return array.indexedDescriptors->getWithNativeReceiver(arrayIndexedKey(index), array.indexedReceiver());
   } else {
     if (!descriptor->isAccessor()) {
       std::optional<Element> value;
@@ -27620,7 +27647,7 @@ Element readArrayIndexedDescriptor(const ArrayObject<Element>& array, std::size_
     NativeFieldRead read(result);
     if (array.elementPolicy) read.requestedPolicy = array.elementPolicy;
     const auto answered = array.indexedDescriptors->readNativeAccessor(
-        arrayIndexedKey(index), NativeCallReceiver::object(receiver), read);
+        arrayIndexedKey(index), array.indexedReceiver(), read);
     if (!answered || !*answered || !result)
       host::throwRuntimeError("TypeError", "an array getter changed its native element carrier");
     return std::move(*result);
@@ -27629,12 +27656,11 @@ Element readArrayIndexedDescriptor(const ArrayObject<Element>& array, std::size_
 
 template <typename Element, typename Policy>
 bool arrayWriteIndexedDescriptor(ArrayObject<Element>& array, std::size_t index, const Element& value) {
-  const auto receiver = Ref<ArrayObject<Element>>::adopt(&array, true);
   if constexpr (std::is_same_v<Element, Value>) {
-    return array.indexedDescriptors->setWithNativeReceiver(arrayIndexedKey(index), value, NativeCallReceiver::object(receiver));
+    return array.indexedDescriptors->setWithNativeReceiver(arrayIndexedKey(index), value, array.indexedReceiver());
   } else {
     return array.indexedDescriptors->template setNativeDataWithNativeReceiver<Element, Policy>(
-        arrayIndexedKey(index), value, nullptr, NativeCallReceiver::object(receiver));
+        arrayIndexedKey(index), value, nullptr, array.indexedReceiver());
   }
 }
 template <typename Element>
@@ -27644,8 +27670,7 @@ bool writeArrayIndexedDescriptor(ArrayObject<Element>& array, std::size_t index,
 }
 template <typename Element>
 bool writeArrayUndefinedDescriptor(ArrayObject<Element>& array, std::size_t index) {
-  const auto receiver = Ref<ArrayObject<Element>>::adopt(&array, true);
-  return array.indexedDescriptors->setWithNativeReceiver(arrayIndexedKey(index), Value{}, NativeCallReceiver::object(receiver));
+  return array.indexedDescriptors->setWithNativeReceiver(arrayIndexedKey(index), Value{}, array.indexedReceiver());
 }
 
 template <typename Element>
@@ -27687,7 +27712,7 @@ bool ArrayObject<Element>::defineIndex(std::size_t index, const PropertyDescript
   PropertyDescriptor current;
   const bool exists = ownIndexDescriptor(index, current);
   if (!exists && !extensible()) return false;
-  if (!indexedDescriptors) indexedDescriptors = makeRef<DynamicObject>();
+  createIndexedDescriptors();
   const PropertyKey key = arrayIndexedKey(index);
   if (indexedDescriptors->ownProperty(key) == nullptr && exists && !indexedDescriptors->defineOwnProperty(key, current)) return false;
   if (!indexedDescriptors->defineOwnProperty(key, descriptor)) return false;
@@ -27744,8 +27769,7 @@ bool arrayReadNativeElement(const ArrayObject<Element>& array, std::size_t index
     return answer.template acceptsExact<Element, Policy>() && answer.template assign<Policy>(array.cells[index].value);
   }
   if (!descriptor->isAccessor()) return descriptor->nativeValue && descriptor->nativeValue.read(answer);
-  const auto receiver = Ref<ArrayObject<Element>>::adopt(const_cast<ArrayObject<Element>*>(&array), true);
-  const auto handled = array.indexedDescriptors->readNativeAccessor(arrayIndexedKey(index), NativeCallReceiver::object(receiver), answer);
+  const auto handled = array.indexedDescriptors->readNativeAccessor(arrayIndexedKey(index), array.indexedReceiver(), answer);
   return handled && *handled;
 }
 template <typename Element, typename Policy>
@@ -27777,12 +27801,11 @@ bool ArrayObject<Element>::setNativeElement(std::size_t index, const Native& val
   } else {
     PropertyDescriptor current;
     const bool exists = ownIndexDescriptor(index, current);
-    if (!indexedDescriptors) indexedDescriptors = makeRef<DynamicObject>();
+    createIndexedDescriptors();
     const PropertyKey key = arrayIndexedKey(index);
     if (exists && indexedDescriptors->ownProperty(key) == nullptr && !indexedDescriptors->defineOwnProperty(key, current)) return false;
-    const auto receiver = Ref<ArrayObject<Element>>::adopt(this, true);
     if (!indexedDescriptors->template setNativeDataWithNativeReceiver<Native, Policy>(
-            key, value, observe, NativeCallReceiver::object(receiver))) return false;
+            key, value, observe, indexedReceiver())) return false;
     if (index >= cells.size()) {
       openHoles();
       cells.resize(index + 1);
