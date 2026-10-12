@@ -2354,7 +2354,9 @@ const threadedFlowOf = (
     const result = resultOfIrOperation(operation)
     return result !== null && ctx.deadValues.has(result.id)
   }
+  const lifetimeBlocks = new Set(body.bindingLifetimeOrigins?.values())
   const rendersNothing = (block: IrBlock): boolean =>
+    !lifetimeBlocks.has(block.id) &&
     block.operations.every(rendersNothingAtOrigin) &&
     (mergeWrites.get(block.id) ?? []).length === 0 &&
     // A relocated operation renders here, in its destination block. Counting
@@ -2451,7 +2453,8 @@ const nestedBlocksOf = (
   rootText: string,
   facts: CppFacts,
   internalLabels: ReadonlyMap<IrBlockId, ReadonlySet<string>> = new Map(),
-  restricted: ReadonlyMap<IrBlockId, readonly { readonly name: string; readonly type: string }[]> = new Map()
+  restricted: ReadonlyMap<IrBlockId, readonly { readonly name: string; readonly type: string }[]> = new Map(),
+  lifetimeOrigins: ReadonlyMap<string, IrBlockId> = new Map()
 ): { readonly top: readonly { readonly name: string; readonly type: string }[]; readonly artifacts: readonly CppArtifact[] } => {
   const flat = (): { readonly top: typeof declarations; readonly artifacts: readonly CppArtifact[] } => ({
     top: declarations,
@@ -2470,7 +2473,10 @@ const nestedBlocksOf = (
       ...(internalLabels.get(id) ?? [])
     ])
     if (gotoTargetsOf(block.artifact.text).some((target) => !allowed.has(target))) return flat()
-    mentions.set(id, identifiersOf(block.artifact.text))
+    mentions.set(
+      id,
+      new Set([...identifiersOf(block.artifact.text), ...[...lifetimeOrigins].filter(([, origin]) => origin === id).map(([name]) => name)])
+    )
   }
   const scopes = declarationScopesOf(plan, declarations, mentions, rootText)
   const top: (typeof declarations)[number][] = []
@@ -2652,7 +2658,8 @@ const regionScopedBlocksOf = (
   labels: ReadonlyMap<IrBlockId, string>,
   declarations: readonly { readonly name: string; readonly type: string }[],
   rootText: string,
-  facts: CppFacts
+  facts: CppFacts,
+  lifetimeOrigins: ReadonlyMap<string, IrBlockId> = new Map()
 ): { readonly top: readonly { readonly name: string; readonly type: string }[]; readonly artifacts: readonly CppArtifact[] } | null => {
   if (chunkIds.length !== chunks.length) return null
   const allLabels = new Set(labels.values())
@@ -2701,7 +2708,26 @@ const regionScopedBlocksOf = (
   if (plan === null) return null
   const rendered = new Map<IrBlockId, { readonly label: string | null; readonly artifact: CppArtifact }>()
   for (const [id, artifact] of texts) rendered.set(id, { label: targeted.has(id) ? requireBlockLabel(labels, id) : null, artifact })
-  return nestedBlocksOf(plan, rendered, labels, successors, declarations, rootText, facts, internal)
+  const chunkOrigins = new Map<string, IrBlockId>()
+  const atRoot: string[] = []
+  for (const [name, origin] of lifetimeOrigins) {
+    const label = labels.get(origin)
+    const chunk = label === undefined ? undefined : (internalOf.get(label) ?? nodeOfLabel.get(label))
+    if (chunk === undefined) atRoot.push(name)
+    else chunkOrigins.set(name, chunk)
+  }
+  return nestedBlocksOf(
+    plan,
+    rendered,
+    labels,
+    successors,
+    declarations,
+    [rootText, ...atRoot].join('\n'),
+    facts,
+    internal,
+    new Map(),
+    chunkOrigins
+  )
 }
 
 /** One `blockN` label per block, in `blockOrder`, so a forward jump (a loop back-edge included) always resolves before any block renders. */
@@ -3517,6 +3543,16 @@ export const emitBody = (
   // scope of a variable whose declaration initializes it.
   const declarationFacts: CppFacts = { kind: 'materialized', representation: { kind: 'void' }, owner, lineage: null }
   let topDeclarations: readonly { readonly name: string; readonly type: string }[] = ctx.declarations
+  const lifetimeOrigins = new Map<string, IrBlockId>()
+  const atEntry: string[] = []
+  for (const [declaration, origin] of body.bindingLifetimeOrigins ?? []) {
+    const name = ctx.bindingNames.get(declaration)
+    if (name === undefined) continue
+    const rendered = flow.rendered.find((id) => id === origin || labels.get(id) === labels.get(origin))
+    if (origin === body.entry || rendered === undefined || rendered === body.entry) atEntry.push(name)
+    else lifetimeOrigins.set(name, rendered)
+  }
+  const lifetimeRootText = [...entryPrologue, ...atEntry].join('\n')
   if (plan !== null && flow.successors !== null) {
     const nested = nestedBlocksOf(
       plan,
@@ -3524,22 +3560,32 @@ export const emitBody = (
       labels,
       flow.successors,
       ctx.declarations,
-      entryPrologue.join('\n'),
+      lifetimeRootText,
       declarationFacts,
       new Map(),
-      restrictedParametersOf(ctx)
+      restrictedParametersOf(ctx),
+      lifetimeOrigins
     )
     topDeclarations = nested.top
     blocks.push(...nested.artifacts)
   } else if (!isSingleBlock && flow.successors === null) {
-    const nested = regionScopedBlocksOf(body.entry, chunkIds, blocks, labels, ctx.declarations, entryPrologue.join('\n'), declarationFacts)
+    const nested = regionScopedBlocksOf(
+      body.entry,
+      chunkIds,
+      blocks,
+      labels,
+      ctx.declarations,
+      lifetimeRootText,
+      declarationFacts,
+      lifetimeOrigins
+    )
     if (nested !== null) {
       topDeclarations = nested.top
       blocks.splice(0, blocks.length, ...nested.artifacts)
     }
   } else if (isSingleBlock && blocks.length === 1) {
     const only = blocks[0]!
-    const segmented = segmentScopedBodyOf(only.text, ctx.declarations, entryPrologue.join('\n'))
+    const segmented = segmentScopedBodyOf(only.text, ctx.declarations, lifetimeRootText)
     if (segmented !== null) {
       topDeclarations = segmented.top
       blocks.splice(0, 1, { text: segmented.text, facts: only.facts })

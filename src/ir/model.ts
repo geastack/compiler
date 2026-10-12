@@ -1611,6 +1611,8 @@ export interface IrBlock {
 export const allOperationsOf = (block: IrBlock): readonly IrOperation[] => [...block.operations, block.terminator]
 
 export interface IrBody {
+  /** Binding creation sites constrain cell lifetime even when no initializer writes a value. */
+  readonly bindingLifetimeOrigins?: ReadonlyMap<DeclarationId, IrBlockId>
   /** Host binding/path resolution published before conversion certification. */
   readonly hostNamespaceCensus?: import('./host-namespace-reads.js').HostNamespaceCensus
   /** Certified adaptations used by the published dense storage windows. */

@@ -1369,6 +1369,7 @@ const lowerOwner = (
     exactArmNarrowing
   }
   const blockStarts = new Map<OperationId, IrBlockId>()
+  const bindingLifetimeOrigins = new Map<DeclarationId, IrBlockId>()
   const finiteCloseStarts = new Map<OperationId, OperationId>()
   const finiteCloseByStart = new Map<OperationId, OperationId>()
   for (const id of order) {
@@ -1469,6 +1470,15 @@ const lowerOwner = (
       finiteEntries.set(finiteCloseAtStart, { start: operationId, entry: block })
     }
     blockStarts.set(operationId, block)
+    if (operation.family === 'binding' && operation.action === 'declare') {
+      // A var belongs to the call's environment, even when its declaration is
+      // inside a loop. An uninitialized lexical declaration still creates its
+      // cell here; dropping that event lets a later conditional write move the
+      // cell into a loop and reset it on every back edge.
+      const origin = operation.blockScoped ? block : builder.blockOrder()[0]
+      if (origin !== undefined && !bindingLifetimeOrigins.has(operation.declaration))
+        bindingLifetimeOrigins.set(operation.declaration, origin)
+    }
     const finiteStart = finiteCloseStarts.get(operationId)
     if (operation.family === 'destructuring' && operation.form === 'array-pattern-close' && finiteStart) {
       const entry = finiteEntries.get(operation.id)
@@ -1519,9 +1529,10 @@ const lowerOwner = (
       })),
       iteratorCloseRegions
     )
-    if (!isGenerator) return sealed
+    const withBindingLifetimes = { ...sealed, bindingLifetimeOrigins }
+    if (!isGenerator) return withBindingLifetimes
     const boundary = generatorPrologueBoundaryOf(graph, order, parameterPrologue, blockStarts, sealed)
-    return boundary === null ? sealed : { ...sealed, generatorPrologueBoundary: boundary }
+    return boundary === null ? withBindingLifetimes : { ...withBindingLifetimes, generatorPrologueBoundary: boundary }
   } catch (error) {
     throw new IrLoweringBlockedError(`IR verification failed for owner ${owner}: ${(error as Error).message}`)
   }

@@ -1,4 +1,4 @@
-import type { DeclarationId, SemanticResultId } from '../identity/ids.js'
+import type { DeclarationId, SemanticResultId, StructuralTypeId } from '../identity/ids.js'
 import { withoutFunctionSpecialization } from '../identity/ids.js'
 import type { SemanticGraph } from '../semantics/model/graph.js'
 import type { SemanticCaller } from '../semantics/model/operands.js'
@@ -11,7 +11,8 @@ import { resultOf } from '../semantics/model/operands.js'
  * `let x: T` with no initializer binds `undefined` (ECMA-262
  * LexicalDeclaration evaluation with no Initializer), and the checker's
  * definite-assignment analysis is scoped to one function body: a read in the
- * declaring body is proven assigned or rejected, but a read from any other
+ * declaring body is proven assigned, carries an undefined arm, or is rejected;
+ * a read from any other
  * function -- a module helper, a closure -- is simply assumed assigned. So
  * such a cell's declared type is a claim the language does not enforce there.
  * A lazily loaded optional module (`let codec: Codec`, then
@@ -23,8 +24,8 @@ import { resultOf } from '../semantics/model/operands.js'
  * read of it -- the storage is one carrier, and a read in the declaring body
  * that the checker proved is still a load of that storage. A read feeding a
  * position that states `T` converts through the ordinary checked unwrap. A
- * cell every read of which sits in the declaring body keeps its declared
- * carrier: the checker's analysis is the proof there.
+ * cell every read of which sits in the declaring body and excludes undefined
+ * keeps its declared carrier: the checker's analysis is the proof there.
  *
  * Same shape as an unwritten static field (`static-field-cells.ts`), whose
  * carrier helper this shares.
@@ -38,6 +39,14 @@ const ownerOf = (caller: SemanticCaller): string =>
   caller.kind === 'function' ? `f:${withoutFunctionSpecialization(caller.functionId)}` : `r:${caller.regionId}`
 
 export const unassignedBindingAbsenceOf = (graph: SemanticGraph): UnassignedBindingAbsence => {
+  const includesUndefined = (type: StructuralTypeId, seen = new Set<StructuralTypeId>()): boolean => {
+    if (seen.has(type)) return false
+    seen.add(type)
+    const shape = graph.structuralTypes.get(type)?.shape
+    return shape?.kind === 'primitive'
+      ? shape.primitive === 'undefined'
+      : shape?.kind === 'union' && shape.members.some((member) => includesUndefined(member, seen))
+  }
   const declared = new Map<DeclarationId, { owner: string; result: SemanticResultId }>()
   for (const operation of graph.operations.values()) {
     if (operation.family !== 'binding' || operation.action !== 'declare' || !operation.mutable) continue
@@ -58,7 +67,10 @@ export const unassignedBindingAbsenceOf = (graph: SemanticGraph): UnassignedBind
     const bucket = reads.get(operation.declaration)
     if (bucket) bucket.push(value.id)
     else reads.set(operation.declaration, [value.id])
-    if (ownerOf(operation.caller) !== cell.owner) declarations.add(operation.declaration)
+    // An evolving, unannotated local can legally be read before a conditional
+    // write in the same function. Its read's published undefined arm is the
+    // checker's proof that the initial absence must survive the writer census.
+    if (ownerOf(operation.caller) !== cell.owner || includesUndefined(value.type)) declarations.add(operation.declaration)
   }
   for (const declaration of declarations) {
     const cell = declared.get(declaration)
