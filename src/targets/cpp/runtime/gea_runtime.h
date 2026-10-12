@@ -28912,6 +28912,11 @@ namespace detail {/**
 template <typename T>
 inline constexpr bool sharedRecordDocument = !std::is_same_v<T, DynamicObject> && !std::is_same_v<T, Dictionary<Value>> &&
                                              !IsArrayObjectStruct<T>::value && !IsMapPayload<Ref<T>>::value && !TypedStringDictionaryTable<T>;
+// The generic own-property templates hand a type to the shared record path only
+// when its own-field protocol is whole: building the bridge asserts that, and a
+// partial protocol keeps the templates' own per-hook dispatch.
+template <typename T>
+inline constexpr bool sharedRecordDelegation = sharedRecordDocument<T> && nativeOwnFieldProtocolIsWhole<T>;
 struct NativeRecordDocumentBridge;
 template <typename T>
 const NativeRecordDocumentBridge& recordDocumentBridgeOf();
@@ -28927,7 +28932,7 @@ inline std::vector<PropertyKey> recordEnumerableStringKeys(const Ref<void>& sour
 
 template <typename T>
 bool nativeDynamicDefineProperty(const gea::Ref<T>& object, const PropertyKey& key, const PropertyDescriptor& descriptor) {
-  if constexpr (detail::sharedRecordDocument<T>) return detail::recordDynamicDefine(Ref<void>(object), detail::recordDocumentBridgeOf<T>(), key, descriptor);
+  if constexpr (detail::sharedRecordDelegation<T>) return detail::recordDynamicDefine(Ref<void>(object), detail::recordDocumentBridgeOf<T>(), key, descriptor);
   if (!object) return false;
   if (record::immutableDescriptorSnapshotView(Ref<void>(object)))
     host::throwRuntimeError("TypeError", "a native descriptor snapshot definition has no certified source protocol");
@@ -28959,7 +28964,7 @@ bool nativeDynamicDefineProperty(const gea::Ref<T>& object, const PropertyKey& k
 
 template <typename T>
 Optional<PropertyDescriptor> nativeOwnPropertyDescriptor(const gea::Ref<T>& object, const PropertyKey& key) {
-  if constexpr (detail::sharedRecordDocument<T>) {
+  if constexpr (detail::sharedRecordDelegation<T>) {
     // The shared record path takes these exact steps once for every type.
     PropertyDescriptor descriptor;
     return detail::recordOwnDescriptor(Ref<void>(object), detail::recordDocumentBridgeOf<T>(), key, descriptor)
@@ -29019,7 +29024,7 @@ Optional<PropertyDescriptor> nativeOwnPropertyDescriptor(const gea::Ref<T>& obje
  */
 template <typename T>
 std::vector<PropertyKey> nativeOwnPropertyKeys(const gea::Ref<T>& object) {
-  if constexpr (detail::sharedRecordDocument<T>) return detail::recordDocumentOwnKeys(Ref<void>(object), detail::recordDocumentBridgeOf<T>());
+  if constexpr (detail::sharedRecordDelegation<T>) return detail::recordDocumentOwnKeys(Ref<void>(object), detail::recordDocumentBridgeOf<T>());
   std::vector<PropertyKey> keys;
   if (!object) return keys;
   if constexpr (IsArrayObjectStruct<T>::value) {
@@ -30166,7 +30171,7 @@ inline gea::Ref<void> viewOrigin(const gea::Ref<gea::Dictionary<gea::Value>>& vi
 
 template <typename T>
 bool nativeDynamicHas(const gea::Ref<T>& object, const PropertyKey& key) {
-  if constexpr (detail::sharedRecordDocument<T>) return detail::recordDynamicHas(Ref<void>(object), detail::recordDocumentBridgeOf<T>(), key);
+  if constexpr (detail::sharedRecordDelegation<T>) return detail::recordDynamicHas(Ref<void>(object), detail::recordDocumentBridgeOf<T>(), key);
   if (!object) return false;
   if constexpr (IsArrayObjectStruct<T>::value) {
     if (!key.isSymbol() && key.text() == "length") return true;
@@ -30228,7 +30233,7 @@ bool nativeDynamicHasProperty(const gea::Ref<T>& object, const PropertyKey& key)
 
 template <typename T>
 bool nativeDynamicDelete(const gea::Ref<T>& object, const PropertyKey& key) {
-  if constexpr (detail::sharedRecordDocument<T>) return detail::recordDocumentDelete(Ref<void>(object), detail::recordDocumentBridgeOf<T>(), key);
+  if constexpr (detail::sharedRecordDelegation<T>) return detail::recordDocumentDelete(Ref<void>(object), detail::recordDocumentBridgeOf<T>(), key);
   if (!object) return true;
   if (record::immutableDescriptorSnapshotView(Ref<void>(object)))
     host::throwRuntimeError("TypeError", "a native descriptor snapshot deletion has no certified source protocol");
@@ -30288,7 +30293,7 @@ bool nativeDynamicDelete(const gea::Ref<T>& object, const PropertyKey& key) {
  */
 template <typename T>
 std::vector<PropertyKey> nativeEnumerableStringKeys(const gea::Ref<T>& object) {
-  if constexpr (detail::sharedRecordDocument<T>) return detail::recordEnumerableStringKeys(Ref<void>(object), detail::recordDocumentBridgeOf<T>());
+  if constexpr (detail::sharedRecordDelegation<T>) return detail::recordEnumerableStringKeys(Ref<void>(object), detail::recordDocumentBridgeOf<T>());
   std::vector<PropertyKey> original;
   if (record::ownNativeViewKeys(Ref<void>(object), original, true)) return original;
   std::vector<PropertyKey> keys = nativeOwnPropertyKeys(object);
