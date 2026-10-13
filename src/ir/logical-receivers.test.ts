@@ -487,12 +487,15 @@ test('verified native Math and String Function values retain their callable and 
       const maximum = Math.max
       const fromCode = String.fromCharCode
       const fromPoint = String.fromCodePoint
+      const hypotenuse = Math.hypot
       console.log(absolute.call([1], -2))
       console.log(maximum.call([1], 2, 3))
+      console.log(hypotenuse.call([1], 3, 4))
       console.log(fromCode.call([1], 65))
       console.log(fromPoint.call([1], 66))
       console.log(Math.abs(-3))
       console.log(Math.max(1, 2))
+      console.log(Math.hypot(5, 12))
       console.log(String.fromCharCode(67))`
       ]
     ])
