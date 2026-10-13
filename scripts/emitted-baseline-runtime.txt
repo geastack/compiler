@@ -695,6 +695,7 @@ mapped-constraint-callee-copy.ts.cpp 20574c0f54e3
 mapped-mixin-base-naming-its-subclass.runtime.ts.cpp 25bc1192b6c1
 math-abs-and-clz32-stay-integer.runtime.ts.cpp 28375eebeb25
 math-direct-rest.ts.cpp 716cb8adcf64
+math-hypot-matches-v8.ts.cpp eb5c96ba7b05
 math-hypot-member-call.ts.cpp d61cda8c9e4e
 math-numeric-constants.ts.cpp 4e4411e15c07
 member-read-as-never-names-its-runtime-primitive.runtime.ts.cpp c71480976219
