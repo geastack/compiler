@@ -695,7 +695,10 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
       logicalReceiver: 'ignored'
     }
   ],
-  ['Math.hypot', { kind: 'property', store: null, emit: 'gea::host::Math::hypot' }],
+  // `hypot_invoke` takes its receiver as an unread `void*`, like max/min's, so
+  // a member call needs no erased `Math` receiver: without the flag every
+  // `Math.hypot(a, b)` refused as `call-abi:logical-receiver`.
+  ['Math.hypot', { kind: 'property', store: null, emit: 'gea::host::Math::hypot', logicalReceiver: 'ignored' }],
   // The sixteen `Math` members `gea_runtime.h` did not have. `cbrt` is v1's
   // (`gea::runtime::math::cbrt`, stdlib.cpp); the other fifteen are written
   // against ECMA-262 §21.3.2 there, because v1's own `gea::runtime::math`
