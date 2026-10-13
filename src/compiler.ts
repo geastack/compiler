@@ -476,6 +476,23 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   const nativeTypes = new Map([...coreNativeTypes, ...plugins.flatMap((plugin) => [...plugin.capabilities.nativeTypes])])
   const nativeTypesByDeclaration = new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.nativeTypesByDeclaration ?? new Map())]))
   const hostNamespaceRootDeclarations = plugins.flatMap((plugin) => plugin.capabilities.hostNamespaceRootDeclarations ?? [])
+  const hostProvidedNames = new Set([
+    ...coreHostFunctions.keys(),
+    ...coreHostConstants.keys(),
+    ...plugins.flatMap((plugin) => [
+      ...plugin.capabilities.hostFunctions.keys(),
+      ...plugin.capabilities.nativeConstants.keys(),
+      ...[...plugin.capabilities.hostFunctionsByDeclaration.values()].flatMap((names) => [...names.keys()]),
+      ...[...plugin.capabilities.hostConstantsByDeclaration.values()].flatMap((names) => [...names.keys()]),
+      // A namespace root or singleton is equally the host's by name: the
+      // framework states `declare const __gea_Panel: {...}` module-locally
+      // for a root its host table claims, and no global declares it.
+      ...plugin.capabilities.hostNamespaces.roots,
+      ...[...plugin.capabilities.hostNamespaceRootsByDeclaration.values()].flatMap((names) => [...names]),
+      ...plugin.capabilities.hostSingletons,
+      ...[...plugin.capabilities.hostSingletonsByDeclaration.values()].flatMap((names) => [...names])
+    ])
+  ])
   const frontend = runFrontend({
     nativeFunctionDeclarations: plugins.flatMap((plugin) => plugin.capabilities.nativeFunctionDeclarations ?? []),
     ...(request.packageSources ? { packageSources: request.packageSources } : {}),
@@ -495,33 +512,17 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     nativeTypesByDeclaration,
     hostSingletonDeclarations: new Map(plugins.flatMap((plugin) => [...(plugin.capabilities.hostSingletonDeclarations ?? new Map())])),
     standardClasses: new Set(coreNativeTypes.keys()),
-    // What the installed hosts state they do NOT provide, unioned the same way
-    // their positive claims are. A name is absent only because a host said so:
-    // with no plugin stating one this set is empty and every ambient
-    // declaration is believed exactly as before.
-    absentGlobals: new Set(plugins.flatMap((plugin) => [...plugin.capabilities.absentGlobals])),
+    // An optional feature cannot erase a global another installed host
+    // actually supplies (for example WebGL absence versus Gea worker self).
+    absentGlobals: new Set(
+      plugins.flatMap((plugin) => [...plugin.capabilities.absentGlobals]).filter((name) => !hostProvidedNames.has(name))
+    ),
     // The members the installed hosts reach on their own, unioned the same way
     // every other plugin table here is. `reachability.ts` keeps an instance
     // method only when live code names it, and a name only a lowering
     // synthesizes is one no walk over the source can see.
     hostReachedMemberKeys: new Set(plugins.flatMap((plugin) => [...plugin.capabilities.reachedMemberKeys])),
-    hostProvidedNames: new Set([
-      ...coreHostFunctions.keys(),
-      ...coreHostConstants.keys(),
-      ...plugins.flatMap((plugin) => [
-        ...plugin.capabilities.hostFunctions.keys(),
-        ...plugin.capabilities.nativeConstants.keys(),
-        ...[...plugin.capabilities.hostFunctionsByDeclaration.values()].flatMap((names) => [...names.keys()]),
-        ...[...plugin.capabilities.hostConstantsByDeclaration.values()].flatMap((names) => [...names.keys()]),
-        // A namespace root or singleton is equally the host's by name: the
-        // framework states `declare const __gea_Panel: {...}` module-locally
-        // for a root its host table claims, and no global declares it.
-        ...plugin.capabilities.hostNamespaces.roots,
-        ...[...plugin.capabilities.hostNamespaceRootsByDeclaration.values()].flatMap((names) => [...names]),
-        ...plugin.capabilities.hostSingletons,
-        ...[...plugin.capabilities.hostSingletonsByDeclaration.values()].flatMap((names) => [...names])
-      ])
-    ]),
+    hostProvidedNames,
     hostNamespaceRoots: new Set(['Reflect', ...plugins.flatMap((plugin) => [...plugin.capabilities.hostNamespaces.roots])]),
     hostNamespaceRootDeclarations,
     // Every leaf path a plugin's own namespace tables publish -- see

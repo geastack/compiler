@@ -69,6 +69,41 @@ if (wanted('compiler')) {
   })
 }
 
+if (wanted('mosaico')) {
+  const demos = checkout('demos', 'apps/axel/package.json')
+  const cli = checkout('cli', 'bin/gea.mjs')
+  // Build a real camera/worker app with ESP-IDF's GCC, not the desktop Clang
+  // harness. Runtime headers can fail on this toolchain without moving emitted C++.
+  add(
+    'mosaico',
+    'Axel ESP32-S31 GCC firmware',
+    join(demos, 'apps/axel'),
+    [
+      'node',
+      join(cli, 'bin/gea.mjs'),
+      'build',
+      '--board',
+      'mosaico',
+      '--app',
+      'axel',
+      '--boards-config',
+      join(compiler, 'test/fixtures/mosaico-gcc-boards.json')
+    ],
+    {
+      IDF_TOOLCHAIN: 'gcc',
+      GEA_COMPILER_DIR: compiler,
+      GEA_CORE_DIR: join(workspace, 'core/packages/core'),
+      GEA_ENGINE_DIR: join(workspace, 'core/packages/engine'),
+      GEA_PLUGIN_DIR: join(workspace, 'core/packages/geatsc-plugin-gea'),
+      GEA_HOST_DIR: join(workspace, 'core/packages/host'),
+      GEA_CHIPS_DIR: join(workspace, 'core/packages/chips'),
+      GEA_ELEMENTS_DIR: join(workspace, 'core/packages/elements'),
+      GEA_TARGETS_ROOT: join(workspace, 'targets'),
+      GEA_IDF_JOBS: '2'
+    }
+  )
+}
+
 if (wanted('core')) {
   // The same discovery core's run-tests.sh does -- every test_*.mjs and every
   // run-*.sh except the runner itself and the two it never runs directly -- but

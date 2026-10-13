@@ -28920,14 +28920,14 @@ inline constexpr bool sharedRecordDelegation = sharedRecordDocument<T> && native
 struct NativeRecordDocumentBridge;
 template <typename T>
 const NativeRecordDocumentBridge& recordDocumentBridgeOf();
-inline bool recordOwnDescriptor(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key,
-                                PropertyDescriptor& out);
-inline std::vector<PropertyKey> recordDocumentOwnKeys(const Ref<void>& source, const NativeRecordDocumentBridge& bridge);
-inline bool recordDynamicDefine(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key,
-                                const PropertyDescriptor& descriptor);
-inline bool recordDocumentDelete(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key);
-inline bool recordDynamicHas(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key);
-inline std::vector<PropertyKey> recordEnumerableStringKeys(const Ref<void>& source, const NativeRecordDocumentBridge& bridge);
+bool recordOwnDescriptor(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key,
+                         PropertyDescriptor& out);
+std::vector<PropertyKey> recordDocumentOwnKeys(const Ref<void>& source, const NativeRecordDocumentBridge& bridge);
+bool recordDynamicDefine(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key,
+                         const PropertyDescriptor& descriptor);
+bool recordDocumentDelete(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key);
+bool recordDynamicHas(const Ref<void>& source, const NativeRecordDocumentBridge& bridge, const PropertyKey& key);
+std::vector<PropertyKey> recordEnumerableStringKeys(const Ref<void>& source, const NativeRecordDocumentBridge& bridge);
 }  // namespace detail
 
 template <typename T>

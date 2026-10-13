@@ -1,0 +1,6 @@
+{
+  "mosaico": {
+    "target": "esp32-s31-espressif-mosaico",
+    "adapter": "esp32-idf"
+  }
+}

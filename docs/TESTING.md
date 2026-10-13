@@ -37,6 +37,13 @@ core's `run-tests.sh`, every example app's `test`, `test:native` and `check`, an
 the `parallel` and `node-compat` package suites. `GEASTACK_ROOT` names the directory
 holding the sibling checkouts; a missing checkout and any skipped test fail it.
 
+The `mosaico` release lane also builds the sibling `demos/apps/axel` camera and
+worker application through the Gea CLI for ESP32-S31 with ESP-IDF 6.2 and GCC.
+It uses the candidate compiler and framework checkouts and a build-only board
+alias; no connected device or credentials are required. Missing demos or the
+S31 toolchain fail the release. Run only this lane with
+`GEASTACK_ROOT=<dir> node scripts/release-suite.mjs --only=mosaico`.
+
 The emitted-set comparison remains a separate check (`npm run gate`). Before any
 release or publish, run `GEASTACK_ROOT=<dir> npm run release:check` (checks, build, gate,
 release suite) on the build machine; a release does not go out until it passes. Pebble's

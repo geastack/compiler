@@ -105,7 +105,10 @@ const sets = only === undefined ? allSets : allSets.filter((set) => set.name ===
  * numbering reads as identical rather than as every program moving.
  */
 const hashOf = (directory, file) => {
-  const normalized = normalizeEmitted(readFileSync(join(directory, file), 'utf8'))
+  const source = readFileSync(join(directory, file), 'utf8')
+  // Diagnostic reports can name this checkout in filesystem errors. Its
+  // location differs on Mac and WSL and is not a compiler output change.
+  const normalized = normalizeEmitted(file.endsWith('.txt') ? source.replaceAll(here, '<compiler>') : source)
   return createHash('sha1').update(normalized).digest('hex').slice(0, 12)
 }
 
