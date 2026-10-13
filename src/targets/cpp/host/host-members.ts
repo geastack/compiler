@@ -594,6 +594,10 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
   // than a second severity: a server adapter writes one on the recoverable
   // client-abort path and refused by name until it existed.
   ['Console.info', { kind: 'method', emit: 'gea::host::console::info({args})', arity: 'variadic' }],
+  // `console.warn` writes what `console.error` writes, to stderr (see the
+  // runtime's `warn` overloads). An app's recoverable load-failure paths call
+  // it, and each call refused by name until this row existed.
+  ['Console.warn', { kind: 'method', emit: 'gea::host::console::warn({args})', arity: 'variadic' }],
   // `localStorage`. `gea::host::storage` is a singleton table rather than a
   // per-handle one, so no template here names a `{receiver}`.
   ['Storage.getItem', { kind: 'method', emit: 'gea::host::storage::getItem({arg0})', arity: 1 }],

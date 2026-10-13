@@ -258,6 +258,7 @@ conditional-empty-array-arm-takes-the-populated-arm.runtime.ts.cpp aaf4be2b6746
 conditional-subclass-constructor-into-base-constructor-field.runtime.ts.cpp f13f773fe130
 console-info-member.ts.cpp 5a795014a790
 console-log-inspects-negative-zero.runtime.ts.cpp d889fd682f2a
+console-warn-member.ts.cpp aa49143ed32c
 constant-key-table-reads-follow-every-table.runtime.ts.cpp 8eb9bed57232
 constant-table-repeated-negative.ts.cpp 4293743457c8
 constant-table.ts.cpp 01c9fca7da61
