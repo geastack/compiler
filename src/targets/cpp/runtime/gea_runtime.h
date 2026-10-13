@@ -166,6 +166,17 @@ namespace gea {
   return value;
 }
 
+/** `float32Product`'s pin for a double product: `Math.hypot` squares and sums
+ * in one expression, and Clang's default fuses that pair into one rounding. */
+[[gnu::always_inline]] inline double float64Product(double value) {
+#if defined(__aarch64__)
+  __asm__("" : "+w"(value));
+#elif (defined(__x86_64__) || defined(__i386__)) && defined(__SSE2__)
+  __asm__("" : "+x"(value));
+#endif
+  return value;
+}
+
 namespace detail {
 
 inline void collectReferenceCycles(bool full);
@@ -43251,9 +43262,15 @@ inline double min_invoke(void*, gea::Ref<gea::ArrayObject<double>> values) {
  * another argument is NaN*; any NaN with no infinity makes it NaN; no
  * arguments at all is +0. And squaring before summing overflows to +Infinity
  * for magnitudes above ~1.34e154 whose true hypotenuse is finite, and flushes
- * to +0 below ~1.5e-162. Scaling every term by the largest magnitude first --
- * the standard formulation, and the one V8 uses -- removes both, and is exact
- * on the cases that should be exact (hypot(3, 4) is 5).
+ * to +0 below ~1.5e-162. Scaling every term by the largest magnitude first
+ * removes both, and is exact on the cases that should be exact (hypot(3, 4)
+ * is 5).
+ *
+ * The sum is V8's: Kahan-compensated, in argument order, then
+ * `sqrt(sum) * largest`, each square rounded on its own. ECMA-262 lets the
+ * result be approximated, so this is for parity with the browser: a plain sum
+ * differs from V8 on about 6% of three-operand calls, and a fused
+ * square-and-add on about 1% of two-operand calls.
  */
 inline double hypot_invoke(void*, gea::Ref<gea::ArrayObject<double>> values) {
   bool sawNaN = false;
@@ -43270,13 +43287,17 @@ inline double hypot_invoke(void*, gea::Ref<gea::ArrayObject<double>> values) {
   }
   if (sawNaN) return std::numeric_limits<double>::quiet_NaN();
   if (largest == 0.0) return 0.0;
-  double sumOfSquares = 0.0;
+  double sum = 0.0;
+  double compensation = 0.0;
   for (const auto& slot : values->slots()) {
     if (!slot.present) continue;
-    const double scaled = slot.value / largest;
-    sumOfSquares += scaled * scaled;
+    const double scaled = std::fabs(slot.value) / largest;
+    const double summand = gea::float64Product(scaled * scaled) - compensation;
+    const double preliminary = sum + summand;
+    compensation = (preliminary - sum) - summand;
+    sum = preliminary;
   }
-  return largest * std::sqrt(sumOfSquares);
+  return std::sqrt(sum) * largest;
 }
 
 // ---------------------------------------------------------------------------
