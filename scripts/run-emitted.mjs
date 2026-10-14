@@ -42,7 +42,7 @@ import { nativeHostIncludes } from './native-host-includes.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { buildNative } from './native-build-cache.mjs'
+import { buildNative, nativeProgramName } from './native-build-cache.mjs'
 import { lockNativeOutput } from './native-output-lock.mjs'
 
 const argv = process.argv.slice(2)
@@ -181,7 +181,7 @@ if (compileOnly) {
   console.error('COMPILED OK')
   process.exit(0)
 }
-const binary = join(out, 'program')
+const binary = join(out, nativeProgramName)
 
 const ran = spawnSync(binary, { encoding: 'utf8' })
 process.stdout.write(ran.stdout ?? '')
@@ -191,6 +191,17 @@ if (ran.stderr) process.stderr.write(ran.stderr)
 // failures, and the whole point of this script is that they are not.
 if (ran.signal) {
   console.error(`CRASHED: ${ran.signal}`)
+  process.exit(1)
+}
+// Windows has no signals: `std::abort` (the UCRT fast-fails it), a trap, an
+// access violation or a stack overflow all end the process with an NTSTATUS
+// error code as its exit status -- 0xC0000409, 0xC000001D, 0xC0000005,
+// 0xC00000FD -- and `ran.signal` stays null. Read as `EXITED`, every
+// `expect-abort` program failed on Windows exactly where it passed elsewhere.
+const ntstatusCrash = (status) =>
+  process.platform === 'win32' && typeof status === 'number' && (status >>> 0 >= 0xc0000000 || status >>> 0 === 0x80000003)
+if (ntstatusCrash(ran.status)) {
+  console.error(`CRASHED: NTSTATUS 0x${(ran.status >>> 0).toString(16).toUpperCase().padStart(8, '0')}`)
   process.exit(1)
 }
 if (ran.status !== 0) {

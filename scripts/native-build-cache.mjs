@@ -51,9 +51,23 @@ const alive = (pid) => {
 
 // Decode Make dependency output, including spaces escaped by Clang. Include
 // system headers: changing an SDK must invalidate a PCH as well as our header.
+// Make escapes only a space or `#` with a backslash (and `$` as `$$`); any
+// other backslash belongs to the path. clang on Windows writes `C:\Users\x.h`
+// with bare separators, which unescaping every backslash read as `C:Usersx.h`.
 const dependencies = (text) => {
   const body = text.replace(/\\\r?\n/g, '').replace(/^[^:]*:\s*/, '')
-  return [...new Set((body.match(/(?:\\.|[^\s])+/g) ?? []).map((word) => word.replace(/\\(.)/g, '$1').replace(/\$\$/g, '$')))]
+  return [...new Set((body.match(/(?:\\[ #]|[^\s])+/g) ?? []).map((word) => word.replace(/\\([ #])/g, '$1').replace(/\$\$/g, '$')))]
+}
+
+/** The linked executable's name: Windows runs only a file with an executable suffix. */
+export const nativeProgramName = process.platform === 'win32' ? 'program.exe' : 'program'
+
+// The LLVM installer does not put clang on PATH by default on Windows.
+const defaultCxx = () => {
+  if (process.env.CXX) return process.env.CXX
+  if (process.platform !== 'win32') return 'clang++'
+  const installed = join(process.env.ProgramFiles ?? 'C:\\Program Files', 'LLVM', 'bin', 'clang++.exe')
+  return executableOnPath('clang++.exe') ?? (existsSync(installed) ? installed : 'clang++')
 }
 
 // Every worker, every oracle program and every suite run shares one runtime
@@ -259,7 +273,7 @@ export function buildNative({
   compileOnly = false,
   cache = true,
   pch = nativePch(),
-  cxx = process.env.CXX ?? 'clang++',
+  cxx = defaultCxx(),
   runtimeHeader = join(out, 'gea_runtime.h'),
   flags = ['-std=c++20', ...(nativeRelease ? [] : ['-g']), ...nativeOptimization('correctness')],
   runtime = nativeRuntimeLayout(),
@@ -322,6 +336,6 @@ export function buildNative({
   const lld = process.platform === 'linux' ? run(cxx, ['-print-prog-name=ld.lld']).trim() : ''
   const linker = isAbsolute(lld) && existsSync(lld) ? ['-fuse-ld=lld'] : []
   const linkFlags = flags.filter((flag) => /^-O|^-g$|^-fsanitize/.test(flag))
-  run(cxx, [...linkFlags, ...linker, ...objects, ...(runtimeObject ? [runtimeObject] : []), '-o', join(out, 'program')])
+  run(cxx, [...linkFlags, ...linker, ...objects, ...(runtimeObject ? [runtimeObject] : []), '-o', join(out, nativeProgramName)])
   return timing(compileMs, performance.now() - linkStarted)
 }
