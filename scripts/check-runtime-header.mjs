@@ -8,10 +8,14 @@ const root = resolve(import.meta.dirname, '..')
 // The ESP32 toolchains build this header with a 16-bit `wchar_t`
 // (xtensa-esp32s3-elf-g++ reports `__SIZEOF_WCHAR_T__ 2`); a host clang has
 // 32. A `static_assert` on the width once refused every embedded program from
-// a header this check had passed, so both widths are checked here.
+// a header this check had passed, so both widths are checked here. The regex
+// anchor rewrite for a standard library without LWG 2503's `multiline` is
+// compiled only on such a library, which a host clang does not use; the
+// simulation macro selects it so it is checked too.
 for (const [label, flags] of [
   ['native', []],
-  ['16-bit wchar_t', ['-fshort-wchar']]
+  ['16-bit wchar_t', ['-fshort-wchar']],
+  ['legacy regex anchors', ['-DGEA_REGEX_SIMULATE_LEGACY_MULTILINE=1']]
 ]) {
   const result = spawnSync(
     process.env.CXX ?? 'clang++',

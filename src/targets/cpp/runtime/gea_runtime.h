@@ -62,6 +62,16 @@
 #if defined(__linux__)
 #include <malloc.h>
 #endif
+#if defined(__linux__) && defined(__GLIBC__)
+#include <pthread.h>
+#include <sched.h>
+#endif
+#if defined(_WIN64) && defined(_MSC_VER)
+// `GEA_PARALLEL_AFFINITY` (RegionPool::pin), declared exactly as <windows.h>
+// declares it rather than by including that header, whose `near`/`far`
+// macros this one cannot take.
+extern "C" __declspec(dllimport) unsigned __int64 __stdcall SetThreadAffinityMask(void* thread, unsigned __int64 mask);
+#endif
 #endif
 
 /**
@@ -1727,6 +1737,130 @@ inline void tagGranules(const void* start, std::size_t bytes, std::uint64_t tag)
   }
 }
 
+/**
+ * Region memory is recycled a GRANULE at a time, never a cell at a time.
+ *
+ * A region thread bump-allocates from granules tagged with its region's tag,
+ * and that tag is the whole of how a count operation tells an object the
+ * thread built in THIS region from one any thread may now hold. So a cell
+ * freed after its region ended cannot simply be handed to a later region: the
+ * granule it sits in still holds objects of the earlier region, and tagging it
+ * for the new one would make them owned. Nor can it go to the freeing thread's
+ * ordinary free list, which is where it used to go: no region allocates from
+ * those lists, so a program that allocates mostly inside regions -- a frame
+ * loop of parallel maps -- grew that list by everything its regions built,
+ * frame after frame.
+ *
+ * Instead every region granule counts its live cells in a header at its start.
+ * A cell freed anywhere is subtracted there and goes on no list beyond its
+ * own region's; a granule that no region is bumping (`retired`) and whose
+ * count reaches zero holds nothing at all, and goes back to one process-wide
+ * pool from which any region thread takes its next granule and tags it anew.
+ * The count is written by one thread at a time: during a region only the
+ * thread whose region tagged the granule frees into it (anything else is
+ * foreign to it, and its counts are deferred to the join), and between regions
+ * only the joining thread runs.
+ *
+ * Memory still never goes back to the system, the bargain `AllocationPool`
+ * makes: a process holds its regions' high-water mark of granules, plus any
+ * granule a long-lived object keeps from emptying.
+ */
+struct RegionGranule {
+  /** The pool's link, while the granule is in it. */
+  RegionGranule* next;
+  /** Cells bumped or reused from this granule that are not yet freed. */
+  std::uint32_t live;
+  /** Granules in this span: 1, except for a cell too large for one granule. */
+  std::uint32_t span;
+  std::uint8_t state;
+  /** Already in its thread's `ThreadRegion::spent`, so it is checked once at the region's end. */
+  bool listed;
+};
+inline constexpr std::size_t granuleHeaderBytes = 64;
+static_assert(sizeof(RegionGranule) <= granuleHeaderBytes, "the region granule header must fit before the first cell");
+inline constexpr std::uint8_t granuleFree = 0;
+/** A thread's current bump granule, kept across regions: never pooled, whatever its count. */
+inline constexpr std::uint8_t granuleActive = 1;
+/** No longer bumped: pooled once its count reaches zero. */
+inline constexpr std::uint8_t granuleRetired = 2;
+
+[[gnu::always_inline]] inline RegionGranule* granuleOf(const void* cell) {
+  return reinterpret_cast<RegionGranule*>(reinterpret_cast<std::uintptr_t>(cell) & ~(static_cast<std::uintptr_t>(granuleBytes) - 1));
+}
+inline unsigned char* granuleCells(RegionGranule* granule) { return reinterpret_cast<unsigned char*>(granule) + granuleHeaderBytes; }
+inline unsigned char* granuleEnd(RegionGranule* granule) { return reinterpret_cast<unsigned char*>(granule) + granuleBytes; }
+
+/** The process-wide pool of empty region granules. */
+class RegionGranules {
+ public:
+  static RegionGranules& instance() {
+    static RegionGranules* pool = new RegionGranules;
+    return *pool;
+  }
+
+  /**
+   * An empty span of `span` granules, its header reset and untagged by this
+   * call (the taker tags it). A single granule comes from the pool, which is
+   * refilled `regionChunkBytes` at a time; a larger span is its own allocation,
+   * and joins the pool granule by granule once it empties.
+   */
+  RegionGranule* take(std::size_t span) {
+    if (span == 1) {
+      std::lock_guard lock(mutex_);
+      if (RegionGranule* granule = free_) {
+        free_ = granule->next;
+        return reset(granule, 1);
+      }
+    }
+    const std::size_t bytes = span == 1 ? regionChunkBytes : span * granuleBytes;
+    void* memory = nullptr;
+    if (::posix_memalign(&memory, granuleBytes, bytes) != 0) throw std::bad_alloc();
+    auto* first = static_cast<RegionGranule*>(memory);
+    if (span == 1) {
+      std::lock_guard lock(mutex_);
+      for (std::size_t offset = granuleBytes; offset < bytes; offset += granuleBytes) push(reinterpret_cast<RegionGranule*>(static_cast<unsigned char*>(memory) + offset));
+    }
+    return reset(first, static_cast<std::uint32_t>(span));
+  }
+
+  /** Back to the pool: an empty, retired span, split into its granules. */
+  void give(RegionGranule* granule) {
+    const std::size_t span = granule->span;
+    std::lock_guard lock(mutex_);
+    for (std::size_t index = 0; index < span; ++index) push(reinterpret_cast<RegionGranule*>(reinterpret_cast<unsigned char*>(granule) + index * granuleBytes));
+  }
+
+ private:
+  static RegionGranule* reset(RegionGranule* granule, std::uint32_t span) {
+    granule->next = nullptr;
+    granule->live = 0;
+    granule->span = span;
+    granule->state = granuleRetired;
+    granule->listed = false;
+    return granule;
+  }
+  void push(RegionGranule* granule) {
+    granule->state = granuleFree;
+    granule->span = 1;
+    granule->live = 0;
+    granule->listed = false;
+    granule->next = free_;
+    free_ = granule;
+  }
+
+  std::mutex mutex_;
+  RegionGranule* free_ = nullptr;
+};
+
+/**
+ * A region cell freed where no region is active: by the joining thread
+ * applying the counts its regions deferred, or by any later serial code.
+ */
+[[gnu::noinline]] inline void releaseRegionCell(void* cell) {
+  RegionGranule* granule = granuleOf(cell);
+  if (--granule->live == 0 && granule->state == granuleRetired) RegionGranules::instance().give(granule);
+}
+
 /** What a deferred count needs to be applied later without knowing its type. */
 struct DeferredCountOperations {
   void (*addStrong)(void* object, std::uint32_t count);
@@ -1742,7 +1876,11 @@ struct DeferredCount {
   std::int64_t weak;
 };
 
-/** A size class's free cells left in a region's chunks at its end, handed to the joining thread's own pool. */
+/**
+ * A size class's cells a region freed that are not region memory at all (see
+ * `AllocationPool::giveInRegion`), handed at its end to the joining thread's
+ * own pool. Region memory itself is never donated: it goes back to its granule.
+ */
 struct Donation {
   void (*donate)(void* head, void* tail);
   void* head;
@@ -1755,6 +1893,19 @@ struct ThreadRegion {
   unsigned char* chunk = nullptr;
   unsigned char* bump = nullptr;
   unsigned char* limit = nullptr;
+  /** The granule `bump` points into. Kept from region to region, so a short region does not start a granule of its own. */
+  RegionGranule* current = nullptr;
+  /**
+   * Where this region began inside `current` when an earlier region had
+   * tagged it, once `current` has moved on: `[head, headEnd)` is this region's
+   * although the ownership map says otherwise. Re-tagging that granule would
+   * claim the earlier region's objects below `head`, which other threads may
+   * now hold.
+   */
+  unsigned char* head = nullptr;
+  unsigned char* headEnd = nullptr;
+  /** Granules this region retired or emptied: pooled at its end if nothing in them is live. */
+  std::vector<RegionGranule*> spent;
   std::vector<DeferredCount> table;
   std::vector<std::uint32_t> used;
   std::size_t mask = 0;
@@ -1768,17 +1919,99 @@ struct ThreadRegion {
   [[gnu::always_inline]] bool owns(const void* address) const {
     const auto* bytes = static_cast<const unsigned char*>(address);
     if (bytes >= chunk && bytes < limit) return true;
+    if (bytes >= head && bytes < headEnd) [[unlikely]] return true;
     return ownerOf(address) == tag;
   }
 
-  [[gnu::noinline]] void* takeChunk(std::size_t size, std::size_t align) {
-    const std::size_t bytes = size + align > regionChunkBytes ? (size + align + granuleBytes - 1) & ~(granuleBytes - 1) : regionChunkBytes;
-    void* memory = nullptr;
-    if (::posix_memalign(&memory, granuleBytes, bytes) != 0) throw std::bad_alloc();
-    tagGranules(memory, bytes, tag);
-    chunk = static_cast<unsigned char*>(memory);
-    bump = chunk;
-    limit = chunk + bytes;
+  /**
+   * Starts a region (its `tag` given) where the last one left off: in the
+   * same granule, after whatever of the earlier region's is still live there,
+   * or at the granule's start, tagged anew, when nothing is. A fresh chunk per
+   * region and thread abandoned the untouched rest of the previous one, and
+   * where an allocation is committed when it is made (Windows) a frame of
+   * short regions on every core leaked a megabyte per thread per region.
+   */
+  void begin(std::uint64_t regionTag) {
+    tag = regionTag;
+    head = headEnd = nullptr;
+    if (current == nullptr) {
+      chunk = bump = limit = nullptr;
+      return;
+    }
+    if (current->live == 0) {
+      tagGranules(current, granuleBytes, tag);
+      bump = granuleCells(current);
+    }
+    chunk = bump;
+    limit = granuleEnd(current);
+  }
+
+  /** Runs on the region's own thread once its tasks are done and its cell lists dropped: pools each granule it left empty. */
+  void finish() {
+    for (RegionGranule* granule : spent) {
+      granule->listed = false;
+      if (granule->live == 0 && granule->state == granuleRetired) RegionGranules::instance().give(granule);
+    }
+    spent.clear();
+  }
+
+  void noteSpent(RegionGranule* granule) {
+    if (granule->listed) return;
+    granule->listed = true;
+    spent.push_back(granule);
+  }
+
+  /**
+   * A cell this region frees, back to its granule's count. False when the
+   * cell is not region memory at all, which the caller keeps apart. True with
+   * `reusable` false when it is an earlier region's: counted, but not for this
+   * region to build in, since the ownership map would call what it built
+   * there foreign.
+   */
+  [[gnu::always_inline]] bool recycle(const void* cell, bool& reusable) {
+    const auto* bytes = static_cast<const unsigned char*>(cell);
+    if (bytes >= chunk && bytes < limit) [[likely]] {
+      --current->live;
+      reusable = true;
+      return true;
+    }
+    if (bytes >= head && bytes < headEnd) {
+      reusable = true;
+    } else {
+      const std::uint64_t owner = ownerOf(cell);
+      if (owner == 0) return false;
+      reusable = owner == tag;
+    }
+    RegionGranule* granule = granuleOf(cell);
+    if (--granule->live == 0 && granule->state == granuleRetired) noteSpent(granule);
+    return true;
+  }
+
+  [[gnu::noinline]] void* takeGranule(std::size_t size, std::size_t align) {
+    if (granuleHeaderBytes + size + align > granuleBytes) {
+      // Too large for a granule: a span of its own, retired from the start.
+      const std::size_t span = (granuleHeaderBytes + size + align + granuleBytes - 1) / granuleBytes;
+      RegionGranule* large = RegionGranules::instance().take(span);
+      tagGranules(large, span * granuleBytes, tag);
+      large->live = 1;
+      noteSpent(large);
+      const auto bits = (reinterpret_cast<std::uintptr_t>(granuleCells(large)) + align - 1) & ~(static_cast<std::uintptr_t>(align) - 1);
+      return reinterpret_cast<void*>(bits);
+    }
+    if (current != nullptr) {
+      // This region's part of a granule an earlier region tagged stays its own.
+      if (ownerOf(current) != tag) {
+        head = chunk;
+        headEnd = limit;
+      }
+      current->state = granuleRetired;
+      noteSpent(current);
+    }
+    current = RegionGranules::instance().take(1);
+    current->state = granuleActive;
+    tagGranules(current, granuleBytes, tag);
+    chunk = bump = granuleCells(current);
+    limit = granuleEnd(current);
     return take(size, align);
   }
 
@@ -1786,8 +2019,9 @@ struct ThreadRegion {
     auto bits = reinterpret_cast<std::uintptr_t>(bump);
     bits = (bits + align - 1) & ~(static_cast<std::uintptr_t>(align) - 1);
     auto* cell = reinterpret_cast<unsigned char*>(bits);
-    if (bump == nullptr || cell + size > limit) [[unlikely]] return takeChunk(size, align);
+    if (bump == nullptr || cell + size > limit) [[unlikely]] return takeGranule(size, align);
     bump = cell + size;
+    ++current->live;
     return cell;
   }
 
@@ -1834,6 +2068,23 @@ struct ThreadRegion {
 
 /** The region the CURRENT thread is running region code under; null everywhere else, which is every thread almost always. */
 inline thread_local ThreadRegion* activeRegion = nullptr;
+/**
+ * How many `RegionPool::run` calls are in flight, process-wide. Zero means no
+ * thread is inside a region, so no thread's `activeRegion` is set: the count
+ * is raised before a region's epoch is published (which every helper acquires
+ * before it sets its own `activeRegion`) and lowered only after the join,
+ * when every helper has cleared it again. Every reference count change and
+ * pool allocation asks `currentRegion()`, and outside regions -- nearly
+ * always, on a frame thread -- that is one load of this word instead of the
+ * thread-local chain (`_tls_index`, the TEB's TLS array, the slot) that
+ * made up ~5% of the frame thread's samples in a three.js game.
+ */
+inline std::atomic<std::uint32_t> regionsInFlight{0};
+/** This thread's region, or none: `activeRegion` asked only while some region runs. */
+[[gnu::always_inline]] inline ThreadRegion* currentRegion() {
+  if (regionsInFlight.load(std::memory_order_relaxed) == 0) [[likely]] return nullptr;
+  return activeRegion;
+}
 
 /**
  * The address-keyed side tables -- expandos, pending and logged key orders,
@@ -1870,7 +2121,7 @@ class SideTableGuard {
 }
 
 [[gnu::always_inline]] inline ThreadRegion* foreignRegionFor(const void* object) {
-  ThreadRegion* region = activeRegion;
+  ThreadRegion* region = currentRegion();
   if (region == nullptr) [[likely]] return nullptr;
   return region->owns(object) ? nullptr : region;
 }
@@ -1943,7 +2194,7 @@ struct AllocationPool {
    */
   [[gnu::always_inline]] static void* take() {
 #if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
-    if (parallel::ThreadRegion* region = parallel::activeRegion) [[unlikely]] return takeInRegion(*region);
+    if (parallel::ThreadRegion* region = parallel::currentRegion()) [[unlikely]] return takeInRegion(*region);
 #endif
     auto& pool = state();
     // A freed cell is the common case in a steady state, and it is three
@@ -1992,7 +2243,10 @@ struct AllocationPool {
 
   static void give(void* block) {
 #if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
-    if (parallel::ThreadRegion* region = parallel::activeRegion) [[unlikely]] return giveInRegion(*region, block);
+    if (parallel::ThreadRegion* region = parallel::currentRegion()) [[unlikely]] return giveInRegion(*region, block);
+    // A cell a region built goes back to its granule, never onto this list:
+    // no region allocates from here (see `parallel::RegionGranule`).
+    if (parallel::ownerOf(block) != 0) [[unlikely]] return parallel::releaseRegionCell(block);
 #endif
     auto& available = state().available;
     Cell* cell = static_cast<Cell*>(block);
@@ -2003,21 +2257,23 @@ struct AllocationPool {
 #if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
   /**
    * This size class's cells inside the current region. A region allocates
-   * only from its own tagged chunks -- a cell off the thread's ordinary free
+   * only from its own tagged granules -- a cell off the thread's ordinary free
    * list could be anywhere, and the region would not recognise what it built
-   * there as its own -- so a cell freed inside the region is kept here for
-   * reuse in the same region, and what is left at its end is donated to the
-   * joining thread's ordinary pool (`ThreadRegion::donations`).
+   * there as its own -- so a cell this region built and freed is kept here for
+   * reuse in the same region. The list is dropped at the region's end: each
+   * cell on it was already subtracted from its granule's count when it was
+   * freed, so the granule, not this list, is what keeps it.
    */
   struct RegionCells {
     std::uint64_t tag = 0;
     Cell* available = nullptr;
-    // Cells are pushed and popped at the head, so the cell pushed onto an
-    // empty list stays last until the list empties. Walking to it at the join
-    // instead was serial work over every cell a region freed: a tree workload's
-    // 52 million nodes held the joining thread for 50 ms after every worker
-    // had finished.
-    Cell* tail = nullptr;
+    // A cell freed in the region that is not region memory at all (a block
+    // from an ordinary pool, released by an object the region owns) cannot be
+    // counted against a granule; it is kept apart and donated at the end to
+    // the joining thread's pool, as every leftover cell once was. The tail is
+    // kept as the list is built, so the join splices rather than walks.
+    Cell* strays = nullptr;
+    Cell* strayTail = nullptr;
   };
   static RegionCells& regionCells() {
     static thread_local RegionCells cells;
@@ -2028,21 +2284,23 @@ struct AllocationPool {
     if (cells.tag != region.tag) [[unlikely]] {
       cells.tag = region.tag;
       cells.available = nullptr;
-      cells.tail = nullptr;
+      cells.strays = nullptr;
+      cells.strayTail = nullptr;
       region.donors.push_back(&donateRegionCells);
     }
     return cells;
   }
-  /** Runs on the region thread at its end: hand what is left to the record the joining thread drains. */
+  /** Runs on the region thread at its end: drop the reuse list, and hand any strays to the record the joining thread drains. */
   static void donateRegionCells() {
     auto& cells = regionCells();
-    if (cells.available != nullptr && parallel::activeRegion != nullptr)
-      parallel::activeRegion->donations.push_back({&adoptDonatedCells, cells.available, cells.tail});
+    if (cells.strays != nullptr && parallel::activeRegion != nullptr)
+      parallel::activeRegion->donations.push_back({&adoptDonatedCells, cells.strays, cells.strayTail});
     cells.available = nullptr;
-    cells.tail = nullptr;
+    cells.strays = nullptr;
+    cells.strayTail = nullptr;
     cells.tag = 0;
   }
-  /** Runs on the joining thread: the region's leftover cells join its ordinary free list. */
+  /** Runs on the joining thread: a region's stray cells join its ordinary free list. */
   static void adoptDonatedCells(void* head, void* last) {
     Cell* tail = static_cast<Cell*>(last);
     auto& available = state().available;
@@ -2053,6 +2311,7 @@ struct AllocationPool {
     auto& cells = regionCellsFor(region);
     if (Cell* cell = cells.available) {
       cells.available = cell->next;
+      ++parallel::granuleOf(cell)->live;
       return cell;
     }
     return region.take(sizeof(Cell), alignof(Cell));
@@ -2060,7 +2319,14 @@ struct AllocationPool {
   [[gnu::noinline]] static void giveInRegion(parallel::ThreadRegion& region, void* block) {
     auto& cells = regionCellsFor(region);
     Cell* cell = static_cast<Cell*>(block);
-    if (cells.available == nullptr) cells.tail = cell;
+    bool reusable = false;
+    if (!region.recycle(block, reusable)) [[unlikely]] {
+      if (cells.strays == nullptr) cells.strayTail = cell;
+      cell->next = cells.strays;
+      cells.strays = cell;
+      return;
+    }
+    if (!reusable) [[unlikely]] return;
     cell->next = cells.available;
     cells.available = cell;
   }
@@ -2347,7 +2613,7 @@ struct RefHeader {
 };
 
 /** How far past its block a non-standalone object sits; see `RefStride`. */
-inline constexpr std::size_t refHeaderStride = 16;
+inline constexpr std::size_t refHeaderStride = std::max<std::size_t>(alignof(std::max_align_t), 16);
 
 /** An ownership edge, including the exact allocation's destruction recipe. */
 struct CycleReference {
@@ -4949,6 +5215,9 @@ class RegionPool {
     failure_ = nullptr;
     const std::size_t helpers = std::min(workers_.size(), count - 1);
     finished_.store(0, std::memory_order_relaxed);
+    // Raised before the release store below, which every helper acquires
+    // before its `work` sets `activeRegion` (see `regionsInFlight`).
+    regionsInFlight.fetch_add(1, std::memory_order_relaxed);
     bool sleeping;
     {
       std::lock_guard lock(mutex_);
@@ -4965,6 +5234,9 @@ class RegionPool {
       joining_ = false;
     }
     join(helpers + 1);
+    // Every helper has finished `work` (and cleared its `activeRegion`) before
+    // `finished_` reached `helpers`, which the join above acquired.
+    regionsInFlight.fetch_sub(1, std::memory_order_relaxed);
     if (failure_ != nullptr && failedIndex_ < decidedIndex_) {
       std::exception_ptr failure = failure_;
       failure_ = nullptr;
@@ -4982,8 +5254,41 @@ class RegionPool {
     if (count == 0) count = 1;
     if (count > 255) count = 255;
     regions_ = std::vector<ThreadRegion>(count);
-    for (std::size_t slot = 1; slot < count; ++slot) workers_.emplace_back([this, slot] { serve(slot); });
+    const std::uint64_t affinity = workerAffinity();
+    for (std::size_t slot = 1; slot < count; ++slot) {
+      workers_.emplace_back([this, slot] { serve(slot); });
+      if (affinity != 0) pin(workers_.back(), affinity);
+    }
     for (auto& worker : workers_) worker.detach();
+  }
+
+  /**
+   * `GEA_PARALLEL_AFFINITY`: a hex mask of logical processors (`0xfff` or
+   * `fff`) the pool's own worker threads are confined to; the thread that
+   * starts regions keeps whatever affinity its host gave it. Unset, empty or
+   * zero leaves the workers where the system puts them. A host that pins its
+   * frame thread to one cache complex (a dual-CCD part's V-Cache die) sets it
+   * to the same complex, so the region's helpers share that cache instead of
+   * reading the frame's data across the fabric. Read once, when the first
+   * region creates the pool; the first 64 processors only.
+   */
+  static std::uint64_t workerAffinity() {
+    const char* text = std::getenv("GEA_PARALLEL_AFFINITY");
+    if (text == nullptr || *text == '\0') return 0;
+    return static_cast<std::uint64_t>(std::strtoull(text, nullptr, 16));
+  }
+
+  static void pin([[maybe_unused]] std::thread& worker, [[maybe_unused]] std::uint64_t mask) {
+#if defined(_WIN64) && defined(_MSC_VER)
+    // MSVC's STL hands out the thread's HANDLE.
+    ::SetThreadAffinityMask(worker.native_handle(), mask);
+#elif defined(__linux__) && defined(__GLIBC__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (unsigned cpu = 0; cpu < 64 && cpu < CPU_SETSIZE; ++cpu)
+      if ((mask >> cpu) & 1) CPU_SET(cpu, &set);
+    ::pthread_setaffinity_np(worker.native_handle(), sizeof(set), &set);
+#endif
   }
 
   /**
@@ -5033,8 +5338,7 @@ class RegionPool {
   }
 
   void work(ThreadRegion& region, std::uint64_t epoch, std::size_t slot) {
-    region.tag = (epoch << 8) | slot;
-    region.chunk = region.bump = region.limit = nullptr;
+    region.begin((epoch << 8) | slot);
     for (const std::uint32_t index : region.used) region.table[index] = DeferredCount{nullptr, nullptr, 0, 0};
     region.used.clear();
     region.last = nullptr;
@@ -5067,6 +5371,7 @@ class RegionPool {
     }
     for (auto donor : region.donors) donor();
     flushDipCache(cycles);
+    region.finish();
     activeRegion = nullptr;
     --cycles.deferDepth;
   }
@@ -7619,6 +7924,23 @@ struct CallableObject<Result(Arguments...)> {
       if (entry->entry == invoke) return entry->withReceiver(environment, receiver, std::forward<Arguments>(arguments)...);
     return invoke(environment, std::forward<Arguments>(arguments)...);
   }
+  /**
+   * `callWithReceiver` with the receiver built on demand: only a target that
+   * registered a receiver entry (a method view) reads logical `this`, and every
+   * other target ignores it. three's `depthBuffer.setTest(...)`-style calls on
+   * a state object's function fields built a receiver per call -- a handle
+   * retain and two releases -- for closures that never look at it. The caller
+   * passes a builder only when the receiver is a value it already holds, so
+   * building it later or not at all evaluates nothing the program would see.
+   */
+  template <typename MakeReceiver>
+  Result callWithLazyReceiver(const MakeReceiver& make, Arguments... arguments) const {
+    requireCallable();
+    const auto keepAlive = environmentOwner;
+    for (auto* entry = receiverRegistrations().load(std::memory_order_acquire); entry; entry = entry->next)
+      if (entry->entry == invoke) return entry->withReceiver(environment, make(), std::forward<Arguments>(arguments)...);
+    return invoke(environment, std::forward<Arguments>(arguments)...);
+  }
 
   [[gnu::always_inline]] Result call(Arguments... arguments) const {
     requireCallable();
@@ -9231,11 +9553,47 @@ struct ArrayObject {
     return at(static_cast<size_t>(index));
   }
 
-  Element readElementAt(double key) const {
+  // `readElementAtIndex`'s dense case for a double key: ordinary storage, an
+  // integral in-range key (-0 included) and no hole or undefined bookkeeping
+  // answer the cell inline; every other key takes the checked path unchanged.
+  [[gnu::always_inline]] Element readElementAt(double key) const {
+    if (!liveSource && !indexedDescriptors && holes.empty() && undefineds.empty() && key >= 0 &&
+        key < static_cast<double>(cells.size())) [[likely]] {
+      const auto index = static_cast<std::size_t>(key);
+      if (static_cast<double>(index) == key) [[likely]] return cells[index].value;
+    }
+    return readElementAtChecked(key);
+  }
+  [[gnu::noinline]] Element readElementAtChecked(double key) const {
     const std::size_t index = requireIndex(key);
     if (index >= size() || !present(index)) detail::failAbsentElement(key, size());
     if (elementIsUndefined(index)) detail::failUndefinedElement();
+    if (index + 1 == size()) dropSpentFlags();
     return readElement(index);
+  }
+  /**
+   * Flags vectors that no longer flag anything. `new Array(n)` (or a `length`
+   * growth, or one undefined store) opens a holes/undefineds vector, and filling
+   * every slot afterwards only zeroes it: the vector itself stays, so every later
+   * read of the array misses the dense fast path for the array's whole life --
+   * three's uniform caches are read this way every draw. A checked read of the
+   * LAST element (a scan reaching its end) drops a vector that is all zero, which
+   * is exactly the state an empty vector states, so each scan pays at most one
+   * pass over the flags. A read inside a parallel region leaves them alone: other
+   * tasks may be reading the same array.
+   */
+  void dropSpentFlags() const {
+#if defined(GEA_RUNTIME_PARALLEL) && GEA_RUNTIME_PARALLEL
+    if (detail::parallel::activeRegion != nullptr) return;
+#endif
+    if (liveSource) return;
+    auto* self = const_cast<ArrayObject*>(this);
+    const auto spent = [](const std::vector<std::uint8_t>& flags) {
+      for (const std::uint8_t flag : flags) if (flag != 0) return false;
+      return true;
+    };
+    if (!self->holes.empty() && spent(self->holes)) self->holes.clear();
+    if (!self->undefineds.empty() && spent(self->undefineds)) self->undefineds.clear();
   }
   // `elementAtIndex`'s dense case first: ordinary storage, in range, no hole or
   // undefined bookkeeping answers the cell after one unsigned compare, so an
@@ -9250,6 +9608,7 @@ struct ArrayObject {
     if (index < 0 || static_cast<unsigned long long>(index) >= size() || !present(static_cast<std::size_t>(index)))
       detail::failAbsentElement(static_cast<double>(index), size());
     if (elementIsUndefined(static_cast<std::size_t>(index))) detail::failUndefinedElement();
+    if (static_cast<std::size_t>(index) + 1 == size()) dropSpentFlags();
     return readElement(static_cast<std::size_t>(index));
   }
   void setUndefinedElement(std::size_t index) {
@@ -9575,6 +9934,31 @@ struct ArrayObject {
     }
   }
 
+  /**
+   * `appendRangeConverted` over a source array the caller CONSUMES (a fresh
+   * factory result, a local returned as its last use): each element is moved
+   * out of its cell before it is converted, so one only the source held
+   * reaches `convert` with no other holder -- `gea::emptyArraySentinel`'s
+   * unshared test then makes an inner `[]` its own fresh array, as in JS. A
+   * source with live or descriptor storage is read as `appendRangeConverted`
+   * reads it; nothing reads the consumed source afterwards either way.
+   */
+  template <class Other, class Convert>
+  void appendRangeConvertedReleasing(ArrayObject<Other>& other, std::size_t from, Convert&& convert) {
+    if (!other.hasOrdinaryDenseStorage()) {
+      appendRangeConverted(other, from, std::forward<Convert>(convert));
+      return;
+    }
+    for (std::size_t index = from; index < other.size(); ++index) {
+      if (!other.present(index)) {
+        pushHole();
+        continue;
+      }
+      const Other released = std::move(other.cells[index].value);
+      push(convert(released));
+    }
+  }
+
   /** `Array.prototype.unshift`'s own bulk write, ECMA-262 23.1.3.31 steps 3-8: every element of `other` from index `from` onward, inserted in order AHEAD of this array's existing elements -- `appendRange`'s own hole-preserving contract, at the opposite end. */
   void prependRange(const ArrayObject<Element>& other, size_t from) {
     insertRange(0, other, from);
@@ -9763,6 +10147,25 @@ inline const gea::Ref<ArrayObject<Element>>& emptyArraySentinel() {
 
 class Value;
 
+// Only a never[] that something else also holds has an identity a program can
+// observe (tsc's shared `emptyArray`, compared with `===`). An inner `[]` an
+// unshared rebuild moved out of the array it CONSUMES
+// (`appendRangeConvertedReleasing`, `Array.from({length}, () => [])`) that
+// nothing else holds is a fresh array, and in JS every such `[]` is its own:
+// handing them all the one sentinel would make later pushes land in a single
+// array shared by every row. Only that rebuild passes `consumedSource`; any
+// other read -- a binding, even one the emitter spells as its literal
+// initializer -- keeps the sentinel, so the program's `=== emptyArray` holds.
+struct ConsumedSource {};
+inline constexpr ConsumedSource consumedSource{};
+
+namespace detail {
+template <typename Source>
+inline bool consumedEmptyArrayIsUnshared(const gea::Ref<ArrayObject<Source>>& source) {
+  return detail::refCountsOf(source.get())->strong <= 1;
+}
+}  // namespace detail
+
 template <typename Element, typename Source>
 inline gea::Ref<ArrayObject<Element>> emptyArraySentinel(const gea::Ref<ArrayObject<Source>>& source) {
   // `bigint_detail::fail` is the one thrower declared this early (beside
@@ -9771,13 +10174,52 @@ inline gea::Ref<ArrayObject<Element>> emptyArraySentinel(const gea::Ref<ArrayObj
   return emptyArraySentinel<Element>();
 }
 
+/** A consumed `never[]` (see above): its own fresh array when nothing else holds it. */
+template <typename Element, typename Source>
+inline gea::Ref<ArrayObject<Element>> emptyArraySentinel(const gea::Ref<ArrayObject<Source>>& source, ConsumedSource) {
+  if (source && source->length() != 0) bigint_detail::fail("TypeError", "a never[] value holds elements; its static type lied");
+  if (source && detail::consumedEmptyArrayIsUnshared(source)) return makeRef<ArrayObject<Element>>();
+  return emptyArraySentinel<Element>();
+}
+
+/**
+ * `never[]` (or a real `undefined[]`) into `E[]` whose element carrier holds
+ * `undefined` natively (a shared class or record reference): the carrier
+ * cannot tell the two sources apart, exactly as for `any[]`
+ * (`emptyArraySentinelOrBoxed` below), so the answer is decided the same way.
+ * Empty is the sentinel -- or, consumed and held by nothing else, a fresh
+ * array. Populated is a real `undefined[]`, whose every present slot is
+ * `undefined` in `E` too.
+ */
+template <typename Element, typename Source>
+inline gea::Ref<ArrayObject<Element>> emptyArraySentinelOrAbsent(const gea::Ref<ArrayObject<Source>>& source, bool consumed = false) {
+  if (!source) return emptyArraySentinel<Element>();
+  if (source->length() == 0)
+    return consumed && detail::consumedEmptyArrayIsUnshared(source) ? makeRef<ArrayObject<Element>>() : emptyArraySentinel<Element>();
+  auto converted = makeRef<ArrayObject<Element>>();
+  converted->reserve(static_cast<std::size_t>(source->length()));
+  for (const auto& slot : source->slots()) {
+    if (slot.present) converted->push(Element::undefined());
+    else converted->pushHole();
+  }
+  return converted;
+}
+
+template <typename Element, typename Source>
+inline gea::Ref<ArrayObject<Element>> emptyArraySentinelOrAbsent(const gea::Ref<ArrayObject<Source>>& source, ConsumedSource) {
+  return emptyArraySentinelOrAbsent<Element>(source, true);
+}
+
 /** `never[]` (or a real `undefined[]`) into `any[]`: the sentinel when empty, a boxed copy otherwise. */
 // `Boxed` is only ever `Value`; it is a parameter so the return type stays
 // dependent and `ArrayObject<Value>` is instantiated at the use, where `Value`
 // is complete, rather than here, where it is only declared.
 template <typename Source, typename Boxed = Value>
-inline gea::Ref<ArrayObject<Boxed>> emptyArraySentinelOrBoxed(const gea::Ref<ArrayObject<Source>>& source) {
-  if (!source || source->length() == 0) return emptyArraySentinel<Boxed>();
+inline gea::Ref<ArrayObject<Boxed>> emptyArraySentinelOrBoxed(const gea::Ref<ArrayObject<Source>>& source, bool consumed = false) {
+  if (!source) return emptyArraySentinel<Boxed>();
+  // A consumed, unshared `[]` gets its own array, as in `emptyArraySentinel` above.
+  if (source->length() == 0)
+    return consumed && detail::consumedEmptyArrayIsUnshared(source) ? makeRef<ArrayObject<Boxed>>() : emptyArraySentinel<Boxed>();
   auto boxed = makeRef<ArrayObject<Boxed>>();
   boxed->reserve(static_cast<std::size_t>(source->length()));
   // `Value()` is `undefined`; a populated `never[]`/`undefined[]` source
@@ -9787,6 +10229,11 @@ inline gea::Ref<ArrayObject<Boxed>> emptyArraySentinelOrBoxed(const gea::Ref<Arr
     else boxed->pushHole();
   }
   return boxed;
+}
+
+template <typename Source, typename Boxed = Value>
+inline gea::Ref<ArrayObject<Boxed>> emptyArraySentinelOrBoxed(const gea::Ref<ArrayObject<Source>>& source, ConsumedSource) {
+  return emptyArraySentinelOrBoxed<Source, Boxed>(source, true);
 }
 
 namespace detail {
@@ -12447,35 +12894,41 @@ struct DefaultUnionArmIndex {
   }();
 };
 
-/** Lifetime dispatch over a closed arm set, by index: a raw byte buffer holds whichever arm is live, so construct/copy/move/destroy need a hand-written vtable-by-recursion in place of what the language generates for a real union of non-trivial arms. */
+/**
+ * Lifetime dispatch over a closed arm set, by index: a raw byte buffer holds whichever arm is live, so construct/copy/move/destroy need a hand-written vtable in place of what the language generates for a real union of non-trivial arms.
+ *
+ * One flat fold per operation, not a recursion that peels an arm per level: the recursive form was a chain of real calls
+ * (each level its own function, past the inliner's depth), so destroying arm 20 of a uniform-value union walked twenty frames.
+ * The fold is a single compare sequence in one body, which the optimizer turns into a switch. An index past the last arm
+ * matches nothing and does nothing, as the empty recursion base did.
+ */
 template <typename... Arms>
-struct TaggedUnionOps;
-
-template <>
-struct TaggedUnionOps<> {
-  static void destroy(std::size_t, void*) {}
-  static void copyConstruct(std::size_t, void*, const void*) {}
-  static void moveConstruct(std::size_t, void*, void*) {}
-  static void defaultConstruct(std::size_t, void*) {}
-};
-
-template <typename Head, typename... Tail>
-struct TaggedUnionOps<Head, Tail...> {
-  static void destroy(std::size_t index, void* storage) {
-    if (index == 0) static_cast<Head*>(storage)->~Head();
-    else TaggedUnionOps<Tail...>::destroy(index - 1, storage);
-  }
+struct TaggedUnionOps {
+  static void destroy(std::size_t index, void* storage) { destroyAt(index, storage, std::index_sequence_for<Arms...>{}); }
   static void copyConstruct(std::size_t index, void* storage, const void* other) {
-    if (index == 0) constructCopy<Head>(storage, *static_cast<const Head*>(other));
-    else TaggedUnionOps<Tail...>::copyConstruct(index - 1, storage, other);
+    copyConstructAt(index, storage, other, std::index_sequence_for<Arms...>{});
   }
   static void moveConstruct(std::size_t index, void* storage, void* other) {
-    if (index == 0) ::new (storage) Head(std::move(*static_cast<Head*>(other)));
-    else TaggedUnionOps<Tail...>::moveConstruct(index - 1, storage, other);
+    moveConstructAt(index, storage, other, std::index_sequence_for<Arms...>{});
   }
-  static void defaultConstruct(std::size_t index, void* storage) {
-    if (index == 0) ::new (storage) Head();
-    else TaggedUnionOps<Tail...>::defaultConstruct(index - 1, storage);
+  static void defaultConstruct(std::size_t index, void* storage) { defaultConstructAt(index, storage, std::index_sequence_for<Arms...>{}); }
+
+ private:
+  template <std::size_t... Indices>
+  static void destroyAt(std::size_t index, void* storage, std::index_sequence<Indices...>) {
+    (void)((index == Indices ? (static_cast<Arms*>(storage)->~Arms(), true) : false) || ...);
+  }
+  template <std::size_t... Indices>
+  static void copyConstructAt(std::size_t index, void* storage, const void* other, std::index_sequence<Indices...>) {
+    (void)((index == Indices ? (constructCopy<Arms>(storage, *static_cast<const Arms*>(other)), true) : false) || ...);
+  }
+  template <std::size_t... Indices>
+  static void moveConstructAt(std::size_t index, void* storage, void* other, std::index_sequence<Indices...>) {
+    (void)((index == Indices ? (::new (storage) Arms(std::move(*static_cast<Arms*>(other))), true) : false) || ...);
+  }
+  template <std::size_t... Indices>
+  static void defaultConstructAt(std::size_t index, void* storage, std::index_sequence<Indices...>) {
+    (void)((index == Indices ? (::new (storage) Arms(), true) : false) || ...);
   }
 };
 
@@ -13005,6 +13458,62 @@ class Dictionary {
     if (first_ && first_->first == key) return first_->second;
     const std::size_t found = findPosition(key);
     return found == npos ? V{} : entries_[found].second;
+  }
+  /**
+   * `findPosition` for a constant key read at one site, asked first at the
+   * position that site last found it. Keys are unique in `entries_`, so an
+   * entry at the hinted position carrying exactly this key IS the key's entry;
+   * anything else (another table, a moved entry) is a plain lookup that
+   * refreshes the hint. Tables built by one constructor -- three's uniform
+   * tables, cloned from one template per material -- keep a key at one
+   * position, so a hot site stops hashing. The hint is only ever a guess:
+   * relaxed loads and stores suffice, and a stale one costs one compare.
+   */
+  std::size_t hintedPosition(std::string_view key, std::atomic<std::uint32_t>& hint) const {
+    const std::uint32_t at = hint.load(std::memory_order_relaxed);
+    if (at < entries_.size() && entries_[at].first == key) return at;
+    const std::size_t found = findPosition(key);
+    if (found != npos && found < 0xFFFFFFFFu) hint.store(static_cast<std::uint32_t>(found), std::memory_order_relaxed);
+    return found;
+  }
+  /** `read` with a site's position hint; any table that is not a plain own-entry table answers through `read`. */
+  V readHinted(std::string_view key, std::atomic<std::uint32_t>& hint) const {
+    if constexpr (!aliasable) {
+      if (!view_) [[likely]] {
+        if (first_ && first_->first == key) return first_->second;
+        const std::size_t found = hintedPosition(key, hint);
+        return found == npos ? V{} : entries_[found].second;
+      }
+    }
+    return read(key);
+  }
+  /** `readIfPresent` with a site's position hint. */
+  template <typename Carrier>
+  Carrier readIfPresentHinted(std::string_view key, std::atomic<std::uint32_t>& hint) const {
+    if constexpr (!aliasable) {
+      if (!view_) [[likely]] {
+        if (first_ && first_->first == key) return Carrier(first_->second);
+        const std::size_t found = hintedPosition(key, hint);
+        return found == npos ? Carrier() : Carrier(entries_[found].second);
+      }
+    }
+    return readIfPresent<Carrier>(key);
+  }
+  /**
+   * `has(key) ? Carrier(read(key)) : Carrier()` with one lookup for a plain
+   * table: no view and no Document alias or overlay, where `has` and `read`
+   * both answer exactly the own entry. Every other table asks both, as before.
+   */
+  template <typename Carrier>
+  Carrier readIfPresent(std::string_view key) const {
+    if constexpr (!aliasable) {
+      if (!view_) [[likely]] {
+        if (first_ && first_->first == key) return Carrier(first_->second);
+        const std::size_t found = findPosition(key);
+        return found == npos ? Carrier() : Carrier(entries_[found].second);
+      }
+    }
+    return has(key) ? Carrier(read(key)) : Carrier();
   }
   /**
    * Whether a read of `key` finds a property. For a table of its own entries
@@ -13701,7 +14210,20 @@ class NumericDictionary {
 
   using Entry = std::pair<const std::string, V>;
 
-  static std::string canonicalKey(double key) { return host::detail::toString(key); }
+  // An integral key -- every array-like `Record<number, T>` index, and three's
+  // capability ids -- spells as its decimal digits (`Number::toString` for a
+  // safe integer; -0 spells "0" either way), without the general formatter.
+  static std::string canonicalKey(double key) {
+    if (key >= -9007199254740991.0 && key <= 9007199254740991.0) {
+      const auto whole = static_cast<long long>(key);
+      if (static_cast<double>(whole) == key) {
+        char digits[24];
+        const auto written = std::to_chars(digits, digits + sizeof(digits), whole);
+        return std::string(digits, written.ptr);
+      }
+    }
+    return host::detail::toString(key);
+  }
   V& operator[](double key) { return entries_[canonicalKey(key)]; }
   V& operator[](const std::string& key) { return entries_[key]; }
   /**
@@ -13734,7 +14256,12 @@ class NumericDictionary {
   V read(double key) const {
     char buffer[24];
     const std::string_view digits = integerKeyView(key, buffer);
-    if (!digits.empty()) return entries_.read(digits);
+    // An integer key asks the position it was last found at in THIS table
+    // (`Dictionary::readHinted`: one key compare verifies it, a miss is the
+    // ordinary lookup and refreshes it). three's `enabledCapabilities[id]`
+    // per `enable`/`disable` call hashed the capability's digits into a
+    // table of a dozen keys every time.
+    if (!digits.empty()) return entries_.readHinted(digits, integerHints_.slots[static_cast<std::size_t>(key) & 7u]);
     return read(canonicalKey(key));
   }
   V read(const std::string& key) const { return entries_.read(key); }
@@ -13804,6 +14331,16 @@ class NumericDictionary {
 
  private:
   Dictionary<V> entries_;
+  // Position hints for integer keys, by the key's low bits. A hint is only a
+  // guess the entry's own key verifies, so a copied table starts without any,
+  // and racing relaxed stores from parallel readers can only cost a lookup.
+  struct IntegerHints {
+    mutable std::array<std::atomic<std::uint32_t>, 8> slots{};
+    IntegerHints() = default;
+    IntegerHints(const IntegerHints&) noexcept {}
+    IntegerHints& operator=(const IntegerHints&) noexcept { return *this; }
+  };
+  IntegerHints integerHints_;
 };
 
 /**
@@ -14126,6 +14663,60 @@ inline void canonicalizeKeyInPlace(Optional<T>& key) {
   if (key.has_value()) canonicalizeKeyInPlace(*key);
 }
 
+namespace detail {
+template <typename T>
+struct MapRefKey : std::false_type {};
+template <typename T>
+struct MapRefKey<Ref<T>> : std::bool_constant<!std::is_void_v<T>> {};
+/**
+ * The identity `operator==` on two handles compares, as one address: the
+ * object, or for a native view the object it views (`nativeIdentity`). An
+ * absent handle is its own key, distinct from null and from every object.
+ */
+template <typename T>
+inline const void* mapRefKeyIdentity(const Ref<T>& value) {
+  if (value.isUndefined()) return reinterpret_cast<const void*>(std::uintptr_t{1});
+  if (!value) return nullptr;
+  if constexpr (refStandalone<T>) return static_cast<const void*>(value.get());
+  else {
+    const auto native = refHeaderOf(value.get())->operations->nativeIdentity;
+    return native == nullptr ? static_cast<const void*>(value.get()) : native(value.get());
+  }
+}
+/**
+ * Key types `Map` may index by hash (see `Map::Index`): those whose hash below
+ * is consistent with `sameValueZero` -- numbers, strings, and handles, which
+ * hash the identity their equality compares (`mapRefKeyIdentity`). Any other
+ * key (unions, optionals, boxed values) keeps the linear SameValueZero scan,
+ * whose equality those types define in ways a hash would have to repeat.
+ */
+template <typename K>
+struct MapKeyIndexable
+    : std::bool_constant<std::is_arithmetic_v<K> || std::is_same_v<K, std::string>
+                         || MapRefKey<K>::value
+                         > {
+};
+struct MapKeyHash {
+  template <typename K>
+  std::size_t operator()(const K& key) const {
+    if constexpr (std::is_floating_point_v<K>) {
+      // SameValueZero: every NaN is one key, and -0 is +0.
+      if (key != key) return static_cast<std::size_t>(0x7ff8000000000000ull);
+      return std::hash<K>{}(key == static_cast<K>(0) ? static_cast<K>(0) : key);
+    } else if constexpr (MapRefKey<K>::value) {
+      return std::hash<const void*>{}(mapRefKeyIdentity(key));
+    } else {
+      return std::hash<K>{}(key);
+    }
+  }
+};
+struct MapKeyEqual {
+  template <typename K>
+  bool operator()(const K& left, const K& right) const { return sameValueZero(left, right); }
+};
+struct NoMapIndex {};
+}  // namespace detail
+
 /**
  * `Map<K, V>` -- ECMA-262 23.1.
  *
@@ -14233,14 +14824,14 @@ class Map {
       return;
     }
     canonicalizeKeyInPlace(key);
-    for (std::pair<K, V>& entry : entries_) {
-      if (sameValueZero(entry.first, key)) {
-        entry.second = std::move(value);
-        return;
-      }
+    const std::size_t found = positionOf(key);
+    if (found != notFound) {
+      entries_[found].second = std::move(value);
+      return;
     }
     entries_.emplace_back(std::move(key), std::move(value));
     serials_.push_back(nextSerial_++);
+    indexAppended();
   }
 
   /**
@@ -14252,18 +14843,13 @@ class Map {
    */
   Optional<V> get(const K& key) const {
     if (view_) [[unlikely]] return view_->get(key);
-    for (const std::pair<K, V>& entry : entries_) {
-      if (sameValueZero(entry.first, key)) return Optional<V>(entry.second);
-    }
-    return Optional<V>();
+    const std::size_t found = positionOf(key);
+    return found == notFound ? Optional<V>() : Optional<V>(entries_[found].second);
   }
 
   bool has(const K& key) const {
     if (view_) [[unlikely]] return view_->has(key);
-    for (const std::pair<K, V>& entry : entries_) {
-      if (sameValueZero(entry.first, key)) return true;
-    }
-    return false;
+    return positionOf(key) != notFound;
   }
 
   /** ECMA-262 23.1.3.3 `delete`: true when an entry was actually removed. */
@@ -14273,13 +14859,12 @@ class Map {
       if (!view_->remove(key, removed)) rejectViewWrite();
       return removed;
     }
-    for (std::size_t index = 0; index < entries_.size(); ++index) {
-      if (!sameValueZero(entries_[index].first, key)) continue;
-      entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(index));
-      serials_.erase(serials_.begin() + static_cast<std::ptrdiff_t>(index));
-      return true;
-    }
-    return false;
+    const std::size_t index = positionOf(key);
+    if (index == notFound) return false;
+    entries_.erase(entries_.begin() + static_cast<std::ptrdiff_t>(index));
+    serials_.erase(serials_.begin() + static_cast<std::ptrdiff_t>(index));
+    indexRemoved();
+    return true;
   }
 
   void clear() {
@@ -14289,6 +14874,7 @@ class Map {
     }
     entries_.clear();
     serials_.clear();
+    if constexpr (indexable) index_.clear();
   }
 
   /**
@@ -14334,10 +14920,61 @@ class Map {
     gea::host::throwRuntimeError("TypeError", "a Map read through a ReadonlyMap view cannot be written through that view");
   }
 
+  /**
+   * Key -> storage position, kept beside the insertion-ordered storage once the
+   * Map holds `indexFrom` entries, for key types whose hash agrees with
+   * SameValueZero (`detail::MapKeyHash`). A per-draw `map.get(id)` over a few
+   * hundred entries was a scan of all of them. The storage and its serials
+   * stay the authority for order and for iterators (`entryAfter` walks
+   * serials, never positions), so the index changes no observable behaviour.
+   * It is written only by the mutators, never by a read, so concurrent readers
+   * of an unchanging Map (parallel regions) stay read-only.
+   */
+  static constexpr bool indexable = detail::MapKeyIndexable<K>::value;
+  static constexpr std::size_t indexFrom = 8;
+  static constexpr std::size_t notFound = static_cast<std::size_t>(-1);
+  using Index = std::conditional_t<indexable, std::unordered_map<K, std::size_t, detail::MapKeyHash, detail::MapKeyEqual>,
+                                   detail::NoMapIndex>;
+
+  std::size_t positionOf(const K& key) const {
+    if constexpr (indexable) {
+      if (!index_.empty()) {
+        const auto found = index_.find(key);
+        return found == index_.end() ? notFound : found->second;
+      }
+    }
+    for (std::size_t index = 0; index < entries_.size(); ++index) {
+      if (sameValueZero(entries_[index].first, key)) return index;
+    }
+    return notFound;
+  }
+  void rebuildIndex() {
+    if constexpr (indexable) {
+      index_.clear();
+      if (entries_.size() < indexFrom) return;
+      index_.reserve(entries_.size() * 2);
+      for (std::size_t index = 0; index < entries_.size(); ++index) index_.emplace(entries_[index].first, index);
+    }
+  }
+  void indexAppended() {
+    if constexpr (indexable) {
+      if (!index_.empty()) index_.emplace(entries_.back().first, entries_.size() - 1);
+      else if (entries_.size() >= indexFrom) rebuildIndex();
+    }
+  }
+  // Erasing shifted every later entry down one position (an O(n) move already),
+  // so the index is renumbered by rebuilding it, or dropped below `indexFrom`.
+  void indexRemoved() {
+    if constexpr (indexable) {
+      if (!index_.empty()) rebuildIndex();
+    }
+  }
+
   std::vector<std::pair<K, V>> entries_;
   std::vector<std::uint64_t> serials_;
   std::uint64_t nextSerial_ = 1;
   std::shared_ptr<const detail::MapViewSource<K, V>> view_;
+  Index index_;
 };
 
 namespace detail {
@@ -21985,6 +22622,34 @@ inline Value installOrdinaryConstructorPrototype(Value ctor) {
 }  // namespace host
 
 namespace dictionary {
+/**
+ * The present-or-absent read of a keyed table (`has(k) ? Carrier(read(k)) :
+ * Carrier()`). A table with a single-lookup `readIfPresent` answers through
+ * it; any other answers through its own `has` and `read`, unchanged.
+ */
+template <typename Carrier, typename Table, typename Key>
+inline Carrier readIfPresent(const Table& table, const Key& key) {
+  if constexpr (requires { table.template readIfPresent<Carrier>(std::string_view(key)); })
+    return table.template readIfPresent<Carrier>(std::string_view(key));
+  else
+    return table.has(key) ? Carrier(table.read(key)) : Carrier();
+}
+/** `readIfPresent` for a constant key, with the emitting site's position hint (`Dictionary::hintedPosition`). */
+template <typename Carrier, typename Table, typename Key>
+inline Carrier readIfPresentHinted(const Table& table, const Key& key, std::atomic<std::uint32_t>& hint) {
+  if constexpr (requires { table.template readIfPresentHinted<Carrier>(std::string_view(key), hint); })
+    return table.template readIfPresentHinted<Carrier>(std::string_view(key), hint);
+  else
+    return readIfPresent<Carrier>(table, key);
+}
+/** `table.read(key)` for a constant key, with the emitting site's position hint. */
+template <typename Table, typename Key>
+inline auto readHinted(const Table& table, const Key& key, std::atomic<std::uint32_t>& hint) {
+  if constexpr (requires { table.readHinted(std::string_view(key), hint); })
+    return table.readHinted(std::string_view(key), hint);
+  else
+    return table.read(key);
+}
 inline gea::Ref<gea::Dictionary<gea::Value>> aliasOf(const gea::Value& object);
 template <typename T>
 gea::Ref<gea::Dictionary<gea::Value>> aliasOf(const gea::Ref<T>& object);
@@ -27484,6 +28149,21 @@ struct NativeFieldWrite {
   const void* slot;
   ReadFn readFn;
   bool exactOnly = false;
+  // A store of a key no view route and no source slot names
+  // (`record::writeLiveOpenField`). The pull above is by requested type, and
+  // an extension table has no type of its own to request, so the write site
+  // names the carrier its receipt certified and the Value materializer only a
+  // dynamic observer runs. Every other write leaves it null, and a live view
+  // then never reaches an extension table at all.
+  using ExtendFn = bool (*)(const NativeFieldWrite&, DynamicObject&, const PropertyKey&, const NativeCallReceiver&);
+  ExtendFn extend = nullptr;
+  void (*extendMaterializer)() = nullptr;
+
+  // The table keeps the carrier itself (`setNativeDataWithNativeReceiver`), a
+  // Value included, so `nativeObjectDataReadNative` reads it back typed.
+  template <typename T, typename Policy>
+  static bool extendNative(const NativeFieldWrite& write, DynamicObject& table, const PropertyKey& key,
+                           const NativeCallReceiver& receiver);
 
   template <typename S, typename Policy, std::size_t Index = 0>
   static constexpr bool policyComplete() {
@@ -28827,7 +29507,17 @@ bool nativeLiveViewSourceRead(const gea::Ref<Receiver>& source, const PropertyKe
     auto sourceRead = read;
     if (source->gea_readOwnFieldNative(key, sourceRead)) return true;
     if constexpr (NativeExtensions) {
-      if (source->gea_matchesOwnField(key)) return false;
+      // A declared slot that is not present is no own property at all: the
+      // language reads on past it (an optional `depth` the original literal
+      // never set). Only a present slot that refused the reader fails.
+      if (source->gea_matchesOwnField(key)) {
+        bool present = true;
+        if constexpr (requires(const Receiver& receiver, bool& out) { receiver.gea_ownFieldPresent(key, out); }) {
+          if (!source->gea_ownFieldPresent(key, present) || present) return false;
+        } else {
+          return false;
+        }
+      }
       return nativeObjectDataReadNative(source, key, read);
     } else {
       return false;
@@ -28838,14 +29528,85 @@ bool nativeLiveViewSourceRead(const gea::Ref<Receiver>& source, const PropertyKe
   }
 }
 
+template <typename T, typename Policy>
+bool NativeFieldWrite::extendNative(const NativeFieldWrite& write, DynamicObject& table, const PropertyKey& key,
+                                    const NativeCallReceiver& receiver) {
+  std::optional<T> value;
+  if (!write.template read<Policy>(value)) return false;
+  const auto materializer = reinterpret_cast<typename NativeDescriptorData::template Materializer<T>>(write.extendMaterializer);
+  return table.template setNativeDataWithNativeReceiver<T, Policy>(key, *value, materializer, receiver);
+}
+
+/** [[Set]] of a key the allocation's layout does not declare, carried by an
+ * open-key write (`NativeFieldWrite::extend`): OrdinarySet on the original
+ * allocation's own expando table -- an existing own entry is overwritten in
+ * place, an inherited setter runs, and anything else creates an own data
+ * property, noted in creation order. The value keeps its certified carrier.
+ */
+template <typename Receiver>
+bool nativeObjectDataExtend(const gea::Ref<Receiver>& object, const PropertyKey& key, const NativeFieldWrite& write) {
+  if (!object) host::throwRuntimeError("TypeError", "Cannot set native object data on a nullish receiver");
+  if (write.extend == nullptr) host::throwRuntimeError("TypeError", "an open native write has no certified extension carrier");
+  const auto existing = detail::expandoFor(nativePropertyAnchor(object), false);
+  const bool own = existing && existing->ownProperty(key) != nullptr;
+  if (!own && !nativeIsExtensible(object)) return false;
+  const auto table = own ? existing : detail::expandoFor(nativePropertyAnchor(object), true);
+  if (!write.extend(write, *table, key, NativeCallReceiver::object(object))) return false;
+  if (!own && table->ownProperty(key) != nullptr) detail::noteNativeExpandoKeyCreated(object, key);
+  return true;
+}
+
+/** A live view's write of a key it does not route, delegated to its immediate
+ * source. A slot the source declares takes it through the source's own-field
+ * protocol. Any other key is the source's extension only for an open-key
+ * write (`NativeFieldWrite::extend`), which names the carrier to keep; a
+ * fixed-key write that reaches here answers false exactly as before. A source
+ * whose undeclared keys live in an index sidecar has no certified extension
+ * route through a view and fails closed.
+ */
 template <typename Receiver>
 bool nativeLiveViewSourceWrite(const gea::Ref<Receiver>& source, const PropertyKey& key, const NativeFieldWrite& write) {
   if constexpr (requires(Receiver& receiver) { receiver.gea_writeOwnFieldNative(key, write, true); }) {
+    if (write.extend != nullptr) {
+      if constexpr (requires(const Receiver& receiver) { receiver.gea_matchesOwnIndex(key); }) {
+        if (source->gea_matchesOwnIndex(key))
+          host::throwRuntimeError("TypeError", "an open native view write reached an index sidecar it has no carrier for");
+      }
+      if constexpr (requires(const Receiver& receiver) { receiver.gea_matchesOwnField(key); }) {
+        if (!source->gea_matchesOwnField(key)) return nativeObjectDataExtend(source, key, write);
+      } else {
+        host::throwRuntimeError("TypeError", "an open native view write reached a source with no own-field predicate");
+      }
+    }
     return source->gea_writeOwnFieldNative(key, write, nativeIsExtensible(source));
   } else {
     std::fputs("gea: a live view write reached a source with no own-field protocol\n", stderr);
     gea::detail::abortAfterFlush();
   }
+}
+
+/** A live view's write of a key it forwards to its immediate source as a
+ * descriptor (`descriptorForward`), where the certified plan proves the
+ * source's layout does not declare it: JavaScript creates the property on
+ * that source. Only a write naming its carrier (`NativeFieldWrite::extend`)
+ * can store it; any other write answers false exactly as the route did
+ * before. A source that does state its own-field predicate is still asked.
+ */
+template <typename Receiver>
+bool nativeLiveViewForwardedWrite(const gea::Ref<Receiver>& source, const PropertyKey& key, const NativeFieldWrite& write) {
+  if (write.extend == nullptr) return false;
+  if constexpr (requires(const Receiver& receiver) { receiver.gea_matchesOwnIndex(key); }) {
+    if (source->gea_matchesOwnIndex(key))
+      host::throwRuntimeError("TypeError", "a forwarded native view write reached an index sidecar it has no carrier for");
+  }
+  if constexpr (requires(const Receiver& receiver) { receiver.gea_matchesOwnField(key); }) {
+    if (source->gea_matchesOwnField(key)) {
+      if constexpr (requires(Receiver& receiver) { receiver.gea_writeOwnFieldNative(key, write, true); })
+        return nativeOwnFieldsWritable(source) && source->gea_writeOwnFieldNative(key, write, nativeIsExtensible(source));
+      return false;
+    }
+  }
+  return nativeObjectDataExtend(source, key, write);
 }
 
 /**
@@ -29757,13 +30518,35 @@ bool defineLiveField(const gea::Ref<Receiver>& receiver, const PropertyKey& key,
   return nativeDynamicDefineProperty(receiver, key, descriptor);
 }
 
-template <typename Result, typename Receiver, typename Adapter, typename Fallback>
+/** A fixed field name a live-field access spells as a literal: the receipt's
+ * key, materialized as a `PropertyKey` only when the receiver IS a live view.
+ * The plain allocation every frame's reads and writes take never builds one. */
+struct LiteralFieldKey {
+  const char* text;
+  std::size_t size;
+};
+inline const PropertyKey& livePropertyKey(const PropertyKey& key) { return key; }
+inline PropertyKey livePropertyKey(const LiteralFieldKey& key) { return PropertyKey::string(std::string(key.text, key.size)); }
+
+/** `hasLiveFieldView` asked of the allocation itself: no `Ref` is copied, so
+ * the plain allocation's answer costs no count traffic. */
+template <typename Receiver>
+[[gnu::always_inline]] inline bool isLiveFieldViewReceiver(const gea::Ref<Receiver>& receiver) {
+  void* object = const_cast<void*>(static_cast<const void*>(receiver.get()));
+  const auto slot = detail::refHeaderOf(object)->operations->nativeViewOriginSlot;
+  if (slot == nullptr) return false;
+  const auto* route = static_cast<const NativeViewOrigin*>(slot(object));
+  return route != nullptr && route->read != nullptr;
+}
+
+template <typename Result, typename Receiver, typename Key, typename Adapter, typename Fallback>
 Result readLiveField(
-    const gea::Ref<Receiver>& receiver, const PropertyKey& key,
+    const gea::Ref<Receiver>& receiver, const Key& fieldKey,
     Adapter&& adapter, NativeFieldRead::AcceptFn accepts, Fallback&& fallback) {
   if (!receiver) host::throwRuntimeError("TypeError", "Cannot read a property of a nullish native view");
+  if (!isLiveFieldViewReceiver(receiver)) return std::forward<Fallback>(fallback)();
   const gea::Ref<void> held(receiver);
-  if (!hasLiveFieldView(held)) return std::forward<Fallback>(fallback)();
+  const auto& key = livePropertyKey(fieldKey);
   std::optional<Result> answer;
   struct Context { std::optional<Result>* answer; std::remove_reference_t<Adapter>* adapter; } context{&answer, &adapter};
   NativeFieldRead read(answer, +[](void* slot, const void* type, const void* policy, const void* value) -> bool {
@@ -29776,19 +30559,45 @@ Result readLiveField(
   return std::move(*answer);
 }
 
-template <typename Receiver, typename Source, typename Adapter, typename Fallback>
+template <typename Receiver, typename Key, typename Source, typename Adapter, typename Fallback>
 bool writeLiveField(
-    const gea::Ref<Receiver>& receiver, const PropertyKey& key, const Source& value,
+    const gea::Ref<Receiver>& receiver, const Key& fieldKey, const Source& value,
     Adapter&& adapter, Fallback&& fallback) {
   if (!receiver) host::throwRuntimeError("TypeError", "Cannot assign a property of a nullish native view");
+  if (!isLiveFieldViewReceiver(receiver)) return std::forward<Fallback>(fallback)();
   const gea::Ref<void> held(receiver);
-  if (!hasLiveFieldView(held)) return std::forward<Fallback>(fallback)();
+  const auto& key = livePropertyKey(fieldKey);
   auto write = NativeFieldWrite::exact(value);
   write.exactOnly = false;
   write.slot = &adapter;
   write.readFn = +[](const void* slot, const void* type, const void* policy, void* answer) -> bool {
     return (*static_cast<const std::remove_reference_t<Adapter>*>(slot))(type, policy, answer);
   };
+  return writeFieldView(held, key, write);
+}
+
+/** `writeLiveField` for a runtime key outside every route the receipt names
+ * (`NativeFieldViewWrite.openKeys`). The write additionally carries its
+ * certified carrier (`Source` under `Policy`) and Value materializer, so a
+ * view's source that does not declare the key keeps it natively in its
+ * expando (`nativeLiveViewSourceWrite`); a Document view pulls the same
+ * receipt's Value. A plain allocation runs `fallback` with that write.
+ */
+template <typename Policy, typename Receiver, typename Source, typename Adapter, typename Fallback>
+bool writeLiveOpenField(
+    const gea::Ref<Receiver>& receiver, const PropertyKey& key, const Source& value, Adapter&& adapter,
+    typename NativeDescriptorData::template Materializer<Source> materializer, Fallback&& fallback) {
+  if (!receiver) host::throwRuntimeError("TypeError", "Cannot assign a property of a nullish native view");
+  auto write = NativeFieldWrite::exact(value);
+  write.exactOnly = false;
+  write.slot = &adapter;
+  write.readFn = +[](const void* slot, const void* type, const void* policy, void* answer) -> bool {
+    return (*static_cast<const std::remove_reference_t<Adapter>*>(slot))(type, policy, answer);
+  };
+  write.extend = &NativeFieldWrite::template extendNative<Source, Policy>;
+  write.extendMaterializer = reinterpret_cast<void (*)()>(materializer);
+  const gea::Ref<void> held(receiver);
+  if (!hasLiveFieldView(held)) return std::forward<Fallback>(fallback)(static_cast<const NativeFieldWrite&>(write));
   return writeFieldView(held, key, write);
 }
 
@@ -34566,6 +35375,198 @@ inline std::string translateDotAll(const std::string &src) {
   return out;
 }
 
+/**
+ * Whether this standard library's `^` and `$` can match at a line terminator
+ * in a pattern compiled WITHOUT LWG 2503's `multiline`.
+ *
+ * A library without that flag -- the VS 2022 STL, 14.44 and earlier -- has
+ * only ever matched multiline: `^` after a `\n` and `$` before one. The VS 18
+ * STL keeps the same behaviour under `_REGEX_LEGACY_MULTILINE_MODE=1`. A
+ * pattern with `m` is right there, but `/^a/.test("x\na")` answered true where
+ * ES 22.2.2.6 answers false, so a pattern without `m` takes the anchor rewrite
+ * below instead of the library's own `^`/`$`.
+ *
+ * `GEA_REGEX_SIMULATE_LEGACY_MULTILINE` is test-only: on a library that HAS
+ * the flag it compiles every pattern multiline, which is the legacy matcher's
+ * behaviour, so the rewrite is exercised where the legacy library is absent.
+ * On a library without the flag the legacy matcher is already the one in use,
+ * and the macro adds nothing.
+ */
+#if defined(GEA_REGEX_SIMULATE_LEGACY_MULTILINE) || \
+    !(defined(_LIBCPP_VERSION) || defined(__GLIBCXX__) || (defined(_REGEX_LEGACY_MULTILINE_MODE) && !_REGEX_LEGACY_MULTILINE_MODE))
+#define GEA_REGEX_LEGACY_ANCHORS 1
+#endif
+
+#ifdef GEA_REGEX_LEGACY_ANCHORS
+/**
+ * A pattern without `m`, rewritten so a multiline-only matcher answers as ES
+ * does. Neither form contains a `^` or `$` the library could match at a line
+ * terminator, so which line terminators that library recognizes (the VS 2022
+ * STL knows only `\n`) does not matter.
+ *
+ * `$` is end of input, which needs no lookbehind: `(?![\s\S])` holds exactly
+ * where no code unit follows, and every search here ends at the end of input.
+ *
+ * `^` is position 0, which a lookahead cannot see, so the search is split by
+ * start position. `later` serves every start after 0 and never matches a `^`.
+ * `atStart` serves the one attempt at position 0 (`match_continuous`, no
+ * previous character): there a `^` reached before anything is consumed is
+ * always at position 0, and the library's own `^` answers it. A `^` that can
+ * be reached after consuming -- `/a\n^b/`, or inside a quantified group --
+ * instead checks that nothing was consumed: a leading lookahead captures the
+ * whole input into group 1, and `(?=\1)` can then only match at position 0,
+ * because anywhere later fewer code units remain than the capture holds. The
+ * program's own groups move up by one in that form, so its back-references
+ * are renumbered and its matches carry one extra group (`startCapture`).
+ *
+ * An anchor followed by a quantifier is left alone: ES rejects `^*`, and so
+ * does std::regex, at the same place it did before.
+ */
+struct LegacyAnchorRewrite {
+  bool needed = false;
+  bool anchoredStart = false;
+  bool startCapture = false;
+  std::wstring atStart;
+  std::wstring later;
+};
+
+inline LegacyAnchorRewrite rewriteLegacyAnchors(const std::wstring &source) {
+  struct Anchor {
+    std::size_t at;
+    bool leading;
+  };
+  struct Frame {
+    bool lookahead;
+    bool leading;
+    std::size_t firstAnchor;
+  };
+  const auto quantifierAt = [&](std::size_t at) {
+    return at < source.size() && (source[at] == L'*' || source[at] == L'+' || source[at] == L'?' || source[at] == L'{');
+  };
+  std::vector<Anchor> anchors;
+  std::vector<Frame> frames;
+  // Whether nothing can have been consumed since the match started, on every
+  // path to here. Conservative: a `^` wrongly called non-leading only costs
+  // the capture, while one wrongly called leading would be matched loosely.
+  bool leading = true;
+  bool topAlternativeStart = true;
+  bool everyAlternativeAnchored = true;
+  for (std::size_t i = 0; i < source.size();) {
+    const wchar_t c = source[i];
+    if (frames.empty() && topAlternativeStart) {
+      topAlternativeStart = false;
+      if (c != L'^' || quantifierAt(i + 1)) everyAlternativeAnchored = false;
+    }
+    if (c == L'\\') {
+      const wchar_t escape = i + 1 < source.size() ? source[i + 1] : L'\0';
+      i += 2;
+      if (escape == L'b' || escape == L'B') continue;
+      while (escape >= L'1' && escape <= L'9' && i < source.size() && source[i] >= L'0' && source[i] <= L'9') ++i;
+      leading = false;
+      continue;
+    }
+    if (c == L'[') {
+      // The first unescaped `]` closes the class, `[]` included -- the same
+      // reading `escapeLiteralBracesForStd` and `translateDotAll` use.
+      ++i;
+      while (i < source.size() && source[i] != L']') i += source[i] == L'\\' ? 2 : 1;
+      ++i;
+      leading = false;
+      continue;
+    }
+    if (c == L'(') {
+      const bool special = i + 1 < source.size() && source[i + 1] == L'?';
+      const bool lookahead = special && i + 2 < source.size() && (source[i + 2] == L'=' || source[i + 2] == L'!');
+      frames.push_back(Frame{lookahead, leading, anchors.size()});
+      i += special ? 3 : 1;
+      continue;
+    }
+    if (c == L')') {
+      ++i;
+      if (frames.empty()) {
+        leading = false;
+        continue;
+      }
+      const Frame frame = frames.back();
+      frames.pop_back();
+      // A repeated group enters its body again after consuming.
+      if (quantifierAt(i)) {
+        for (std::size_t k = frame.firstAnchor; k < anchors.size(); ++k) anchors[k].leading = false;
+      }
+      leading = frame.lookahead && frame.leading;
+      continue;
+    }
+    if (c == L'|') {
+      ++i;
+      leading = frames.empty() || frames.back().leading;
+      if (frames.empty()) topAlternativeStart = true;
+      continue;
+    }
+    if (c == L'^' || c == L'$') {
+      if (!quantifierAt(i + 1)) anchors.push_back(Anchor{i, leading});
+      ++i;
+      continue;
+    }
+    ++i;
+    leading = false;
+  }
+  LegacyAnchorRewrite out;
+  if (anchors.empty()) return out;
+  out.needed = true;
+  out.anchoredStart = everyAlternativeAnchored && !topAlternativeStart;
+  for (const Anchor &anchor : anchors) {
+    if (source[anchor.at] == L'^' && !anchor.leading) out.startCapture = true;
+  }
+  out.atStart.reserve(source.size() + 32);
+  out.later.reserve(source.size() + 32);
+  if (out.startCapture) out.atStart += L"(?=([\\s\\S]*))";
+  std::size_t nextAnchor = 0;
+  bool inClass = false;
+  for (std::size_t i = 0; i < source.size();) {
+    const wchar_t c = source[i];
+    if (c == L'\\' && i + 1 < source.size()) {
+      std::size_t end = i + 2;
+      if (!inClass && out.startCapture && source[i + 1] >= L'1' && source[i + 1] <= L'9') {
+        while (end < source.size() && source[end] >= L'0' && source[end] <= L'9') ++end;
+        // Decimal increment on the digits themselves, so no width can overflow.
+        std::wstring reference(source, i + 1, end - i - 1);
+        std::size_t digit = reference.size();
+        while (digit > 0 && reference[digit - 1] == L'9') reference[--digit] = L'0';
+        if (digit == 0) reference.insert(reference.begin(), L'1');
+        else ++reference[digit - 1];
+        out.atStart += L'\\';
+        out.atStart += reference;
+      } else {
+        out.atStart.append(source, i, 2);
+      }
+      out.later.append(source, i, end - i);
+      i = end;
+      continue;
+    }
+    if (inClass) {
+      if (c == L']') inClass = false;
+    } else if (c == L'[') {
+      inClass = true;
+    } else if (nextAnchor < anchors.size() && anchors[nextAnchor].at == i) {
+      const Anchor &anchor = anchors[nextAnchor++];
+      if (c == L'$') {
+        out.atStart += L"(?![\\s\\S])";
+        out.later += L"(?![\\s\\S])";
+      } else {
+        out.atStart += anchor.leading ? L"^" : L"(?=\\1)";
+        out.later += L"[^\\s\\S]";
+      }
+      ++i;
+      continue;
+    }
+    out.atStart.push_back(c);
+    out.later.push_back(c);
+    ++i;
+  }
+  return out;
+}
+#endif
+
 [[noreturn]] inline void throwTypeError(const std::string &message);
 
 /**
@@ -36025,7 +37026,13 @@ struct Pattern {
   std::regex::flag_type stdFlags() const {
     auto value = std::regex::ECMAScript;
     if (ignoreCase) value |= std::regex::icase;
+    // LWG 2503's `multiline` is not in every standard library.
+#if defined(GEA_REGEX_SIMULATE_LEGACY_MULTILINE) && \
+    (defined(_LIBCPP_VERSION) || defined(__GLIBCXX__) || defined(_REGEX_LEGACY_MULTILINE_MODE))
+    value |= std::regex_constants::multiline;
+#elif defined(_LIBCPP_VERSION) || defined(__GLIBCXX__) || defined(_REGEX_LEGACY_MULTILINE_MODE)
     if (multiline) value |= std::regex_constants::multiline;
+#endif
     return value;
   }
 
@@ -36074,6 +37081,55 @@ struct Pattern {
     if (compiledCache == nullptr) compiledCache = &cachedStdRegex(matcherSource(), stdFlags());
     return *compiledCache;
   }
+
+#ifdef GEA_REGEX_LEGACY_ANCHORS
+  // `rewriteLegacyAnchors`' two forms, resolved on first search: 0 unknown,
+  // 1 rewritten, -1 nothing to rewrite (`m`, or no anchor outside a class).
+  mutable signed char legacyAnchorState = 0;
+  mutable const Utf16Regex *legacyAtStart = nullptr;
+  // Null when every alternative opens with `^`: no later start can match.
+  mutable const Utf16Regex *legacyLater = nullptr;
+  mutable std::size_t legacyAtStartGroupOffset = 0;
+
+  /**
+   * The leftmost match starting at or after `startUnits`, as
+   * `std::regex_search` from there would find it on a library whose `^`/`$`
+   * respect `multiline`. Positions in `match` are absolute in `input`; capture
+   * group `n` is `match[n + groupOffset]`.
+   */
+  bool searchMatcher(const std::wstring &input, std::size_t startUnits, Utf16Match &match, std::size_t &groupOffset) const {
+    groupOffset = 0;
+    // The pattern as written is compiled first, so a pattern std::regex
+    // rejects raises the SyntaxError it always raised.
+    const Utf16Regex &compiled = compiledRegex();
+    if (legacyAnchorState == 0) {
+      const LegacyAnchorRewrite rewrite = multiline ? LegacyAnchorRewrite{} : rewriteLegacyAnchors(matcherSource());
+      if (rewrite.needed) {
+        // Settled only once both forms compiled: a throw here must not leave
+        // the library's loose anchors answering the next call.
+        legacyAtStart = &cachedStdRegex(rewrite.atStart, stdFlags());
+        if (!rewrite.anchoredStart) legacyLater = &cachedStdRegex(rewrite.later, stdFlags());
+        legacyAtStartGroupOffset = rewrite.startCapture ? 1 : 0;
+      }
+      legacyAnchorState = rewrite.needed ? 1 : -1;
+    }
+    if (legacyAnchorState < 0) {
+      auto flags = std::regex_constants::match_default;
+      if (startUnits > 0) flags |= std::regex_constants::match_prev_avail;
+      return std::regex_search(input.cbegin() + static_cast<std::ptrdiff_t>(startUnits), input.cend(), match, compiled, flags);
+    }
+    if (startUnits == 0) {
+      if (std::regex_search(input.cbegin(), input.cend(), match, *legacyAtStart, std::regex_constants::match_continuous)) {
+        groupOffset = legacyAtStartGroupOffset;
+        return true;
+      }
+      startUnits = 1;
+    }
+    if (legacyLater == nullptr || startUnits > input.size()) return false;
+    return std::regex_search(
+        input.cbegin() + static_cast<std::ptrdiff_t>(startUnits), input.cend(), match, *legacyLater, std::regex_constants::match_prev_avail);
+  }
+#endif
 
   std::wstring matcherInput(
       const std::string &input,
@@ -36129,6 +37185,15 @@ struct Pattern {
     // at that index instead of snapping backward to the pair's high surrogate.
     const std::wstring inputUnits = matcherInput(input, stateful ? startPublicUnits : std::numeric_limits<std::size_t>::max());
     const std::size_t startUnits = matcherIndexFromUtf16(inputUnits, startPublicUnits);
+#ifdef GEA_REGEX_LEGACY_ANCHORS
+    Utf16Match match;
+    std::size_t groupOffset = 0;
+    if (!searchMatcher(inputUnits, startUnits, match, groupOffset)) {
+      if (stateful) resetLastIndex();
+      return MatchSlice{};
+    }
+    const std::size_t matchStartUnits = static_cast<std::size_t>(match[0].first - inputUnits.cbegin());
+#else
     const Utf16Regex &compiled = compiledRegex();
     Utf16Match match;
     auto searchBegin = inputUnits.cbegin() + static_cast<std::ptrdiff_t>(startUnits);
@@ -36139,6 +37204,7 @@ struct Pattern {
       return MatchSlice{};
     }
     const std::size_t matchStartUnits = startUnits + static_cast<std::size_t>(match.position(0));
+#endif
     if (sticky && matchStartUnits != startUnits) {
       resetLastIndex();
       return MatchSlice{};
@@ -36154,6 +37220,9 @@ struct Pattern {
     out.length = matchEndPublicUnits - matchStartPublicUnits;
     out.captures.reserve(match.size());
     for (std::size_t i = 0; i < match.size(); ++i) {
+#ifdef GEA_REGEX_LEGACY_ANCHORS
+      if (i > 0 && i <= groupOffset) continue;
+#endif
       // An unmatched group is ABSENT, not the empty string: ES 22.2.7.2 step
       // 28.b stores `undefined` for it, and a program that tests
       // `m[2] === undefined` must be able to tell the two apart.
@@ -36180,7 +37249,13 @@ struct Pattern {
       }
     }
     const std::wstring inputUnits = matcherInput(input);
+#ifdef GEA_REGEX_LEGACY_ANCHORS
+    Utf16Match match;
+    std::size_t groupOffset = 0;
+    return searchMatcher(inputUnits, 0, match, groupOffset);
+#else
     return std::regex_search(inputUnits, compiledRegex());
+#endif
   }
 };
 
@@ -36922,6 +37997,30 @@ template <typename T>
  * (`rebuildDynamicArray`).
  */
 template <typename Target>
+bool boxedClassRefAdmits(const Value& value);
+
+/**
+ * A boxed (`any`) argument a callable adapter frame hands to a body that
+ * declares a class parameter (`emit-narrowing.ts`'s `assertedUnionText`,
+ * `FRAME_ARGUMENT_UNION_MATERIALIZER`): the function was stored into a slot
+ * whose frame also admits `any`. An instance of the class (or of a
+ * descendant) is that object; anything else -- `null` included, which the
+ * class parameter cannot hold -- is a catchable `TypeError`.
+ */
+template <typename Target>
+gea::Ref<Target> frameArgumentClassRef(const Value& value) {
+  const auto* target = &gea::detail::RefOperationsFor<Target>::table;
+  if (value.tag() != Value::Tag::Object || !value.classObject() ||
+      (!gea::detail::classIdentityExtends(value.classIdentity(), target) &&
+       value.classIdentity() != &gea::detail::PlainObjectOperationsFor<Target>::table)) {
+    throwRuntimeError("TypeError",
+                      "a function stored into a slot whose frame also admits `any` was passed an argument that is not an "
+                      "instance of the class its parameter declares");
+  }
+  return value.classObject().template staticCast<Target>();
+}
+
+template <typename Target>
 bool boxedClassRefAdmits(const Value& value) {
   if (value.tag() == Value::Tag::Null) return true;
   const auto* target = &gea::detail::RefOperationsFor<Target>::table;
@@ -37003,24 +38102,37 @@ inline gea::Ref<gea::ArrayObject<std::string>> splitByPattern(
   const std::string &input,
     const gea::runtime::regex::Pattern &pattern) {
   auto out = gea::makeRef<gea::ArrayObject<std::string>>();
+#ifndef GEA_REGEX_LEGACY_ANCHORS
   const gea::runtime::regex::Pattern::Utf16Regex &compiled = pattern.compiledRegex();
+#endif
   const std::wstring inputUnits = pattern.matcherInput(input);
   // Step 14: an empty input either yields one empty string or nothing at all,
   // decided by whether the separator matches it.
   if (input.empty()) {
     gea::runtime::regex::Pattern::Utf16Match probe;
+#ifdef GEA_REGEX_LEGACY_ANCHORS
+    std::size_t probeGroupOffset = 0;
+    if (!pattern.searchMatcher(inputUnits, 0, probe, probeGroupOffset)) out->push(input);
+#else
     if (!std::regex_search(inputUnits, probe, compiled)) out->push(input);
+#endif
     return out;
   }
   std::size_t chunkStartUnits = 0;
   std::size_t cursorMatcherUnits = 0;
   while (cursorMatcherUnits < inputUnits.size()) {
     gea::runtime::regex::Pattern::Utf16Match match;
+#ifdef GEA_REGEX_LEGACY_ANCHORS
+    std::size_t groupOffset = 0;
+    if (!pattern.searchMatcher(inputUnits, cursorMatcherUnits, match, groupOffset)) break;
+    const std::size_t positionMatcherUnits = static_cast<std::size_t>(match[0].first - inputUnits.cbegin());
+#else
     auto begin = inputUnits.cbegin() + static_cast<std::ptrdiff_t>(cursorMatcherUnits);
     auto flags = std::regex_constants::match_default;
     if (cursorMatcherUnits > 0) flags |= std::regex_constants::match_prev_avail;
     if (!std::regex_search(begin, inputUnits.cend(), match, compiled, flags)) break;
     const std::size_t positionMatcherUnits = cursorMatcherUnits + static_cast<std::size_t>(match.position(0));
+#endif
     const std::size_t endMatcherUnits = positionMatcherUnits + static_cast<std::size_t>(match.length(0));
     const std::size_t positionUnits = pattern.utf16IndexFromMatcher(inputUnits, positionMatcherUnits);
     const std::size_t endUnits = pattern.utf16IndexFromMatcher(inputUnits, endMatcherUnits);
@@ -37038,7 +38150,11 @@ inline gea::Ref<gea::ArrayObject<std::string>> splitByPattern(
     // order. An unmatched group appends `undefined` in the spec; the declared
     // element type here is `string`, so it appends the empty string -- the
     // same divergence `ExecResult::capture` states, for the same reason.
+#ifdef GEA_REGEX_LEGACY_ANCHORS
+    for (std::size_t group = 1 + groupOffset; group < match.size(); ++group) {
+#else
     for (std::size_t group = 1; group < match.size(); ++group) {
+#endif
       out->push(match[group].matched ? pattern.captureFromMatcher(match.str(group)) : std::string());
     }
     chunkStartUnits = endUnits;
@@ -38739,6 +39855,10 @@ inline double toNumber(double value) { return value; }
 
 // ECMAScript ToNumber(boolean): true -> 1, false -> 0.
 inline double toNumber(bool value) { return value ? 1.0 : 0.0; }
+
+// ECMAScript ToNumber of a boxed value (`Number` itself handed over as a callback
+// whose convention states `any`: `text.split(',').map(Number)`).
+inline double toNumber(const Value& value) { return gea::dynamicToNumber(value); }
 
 // ECMAScript ToNumber(null) = 0. See the top-of-file note: v1 has no
 // standalone carrier for null, only an arm of a union visitor.
