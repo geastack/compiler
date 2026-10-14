@@ -2,9 +2,10 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resolve } from 'node:path'
 import ts from 'typescript'
-import { indexValueFlow } from './value-flow.js'
+import { indexValueFlow, sameValueFlowContent } from './value-flow.js'
 import { censusReachability, wholeProgram } from '../reachability.js'
 import { censusParameterBindings } from '../parameter-bindings.js'
+import { withStableTypeQueries } from '../../stable-checker.js'
 
 test('object property and shorthand publications retain their own member identity and source aliases', () => {
   const entry = resolve('test/fixtures/object-publication-inventory.js')
@@ -702,4 +703,43 @@ test('module namespace publication retains exported runtime values and excludes 
   assert.ok(flow.referencesToDeclaration(writer).includes(namespaceReference))
   assert.ok(flow.referencesToDeclaration(callable).includes(namespaceReference))
   assert.ok(!flow.referencesToDeclaration(type).includes(namespaceReference))
+})
+
+test('two indices agree on their content exactly when every census-moved write and call agrees', () => {
+  const entry = resolve('test/fixtures/value-flow-content-identity.js')
+  const source = `function fill(list, item) { list.push(item); }
+    function other(a, b) { return [a, b]; }
+    const sample = [1];
+    fill(JSON.parse('[]'), { value: 1 });`
+  const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022, allowJs: true }
+  const host = ts.createCompilerHost(options)
+  const original = host.getSourceFile.bind(host)
+  host.getSourceFile = (name, version, ...rest) =>
+    resolve(name) === resolve(entry) ? ts.createSourceFile(name, source, version, true, ts.ScriptKind.JS) : original(name, version, ...rest)
+  const program = ts.createProgram([entry], options, host)
+  // The compiler's own checker view: the raw checker mints a fresh transient
+  // symbol for a literal's property on every ask, which no two indices share.
+  const checker = withStableTypeQueries(program.getTypeChecker(), program)
+  const file = program.getSourceFile(entry)!
+  const first = indexValueFlow(checker, [file], wholeProgram)
+  const rebuilt = indexValueFlow(checker, [file], wholeProgram)
+  assert.notEqual(first, rebuilt)
+  assert.ok(sameValueFlowContent(first, rebuilt), 'the same inputs build the same content')
+  assert.ok(sameValueFlowContent(first, first))
+  // A census answer for the `any` receiver `list` records the push the
+  // checker alone could not see: a write the first index does not hold.
+  const sample = (file.statements[2] as ts.VariableStatement).declarationList.declarations[0]!
+  const arrayType = checker.getTypeAtLocation(sample.name)
+  const typed = indexValueFlow(checker, [file], wholeProgram, (expression) =>
+    ts.isIdentifier(expression) && expression.text === 'list' ? arrayType : null
+  )
+  assert.ok(typed.allWrites.length > first.allWrites.length, 'the census-typed receiver records its push')
+  assert.ok(!sameValueFlowContent(first, typed))
+  // A census call attribution adds a target to the call site, and its argument edges.
+  const other = file.statements[1] as ts.FunctionDeclaration
+  const attributed = indexValueFlow(checker, [file], wholeProgram, undefined, undefined, (call) =>
+    ts.isCallExpression(call) && call.expression.getText() === 'fill' ? [other] : null
+  )
+  assert.ok(attributed.calls.some((site) => site.targets.includes(other)))
+  assert.ok(!sameValueFlowContent(first, attributed))
 })
