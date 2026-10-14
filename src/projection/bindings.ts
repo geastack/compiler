@@ -143,6 +143,25 @@ export interface BindingPlacement {
   readonly representation: Representation | null
 }
 
+/**
+ * The one spelling of a host declaration file that the per-file host tables
+ * (`hostFunctionsByDeclaration` and its siblings) and their lookups share.
+ *
+ * TypeScript names every source file with `/` separators on every platform,
+ * while a plugin builds its keys with `node:path` -- `C:\...\index.d.ts` on
+ * Windows. Matched verbatim, no Windows key ever matched: a plugin's claimed
+ * host functions (`@geastack/parallel`'s `tasks`) silently stayed unclaimed
+ * there, and with them every parallel region went uncertified as a region.
+ */
+export const hostDeclarationFileKey = (file: string): string => file.replace(/\\/g, '/')
+
+/** A per-declaration-file host table with every key in `hostDeclarationFileKey` spelling. */
+export const hostDeclarationFileTable = <T>(entries: Iterable<readonly [string, T]>): Map<string, T> => {
+  const table = new Map<string, T>()
+  for (const [file, value] of entries) table.set(hostDeclarationFileKey(file), value)
+  return table
+}
+
 export interface BindingPlacementInput {
   readonly graph: SemanticGraph
   readonly plan: SealedRepresentationPlan
@@ -273,7 +292,8 @@ const hostStorageOf = (
   // this program actually resolved to says which was meant. Computed once and
   // reused below, since it is the same file for every one of these questions
   // about the same declaration.
-  const file = input.externalFiles?.get(declaration)
+  const recorded = input.externalFiles?.get(declaration)
+  const file = recorded === undefined ? undefined : hostDeclarationFileKey(recorded)
   const declaredConstant = file === undefined ? undefined : input.hostConstantsByDeclaration?.get(file)?.get(linkageName)
   if (declaredConstant !== undefined) return { kind: 'host-constant', linkageName, emit: declaredConstant }
   const constant = input.hostConstants?.get(linkageName)

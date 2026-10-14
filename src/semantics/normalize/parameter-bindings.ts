@@ -2775,7 +2775,15 @@ export const censusParameterBindings = (
     const contracts = contractsFor(declaration) ?? []
     const contractTypes: ts.Type[] = []
     for (const contract of contracts) {
-      const type = callbackContractParameterType(checker, contract, parameterIndex)
+      // An intrinsic Array frame holds only while the method and the indices
+      // it reads are the intrinsic's. The obligation joins the answer being
+      // published: inference asks under `protocolLedger.capture`, and the
+      // seal below re-asks an answer that already carries it.
+      if ('intrinsic' in contract) {
+        if (!protocolLedger) return { refused: 'callback-contract-intrinsic-protocol-unavailable' }
+        protocolLedger.include(contract.requirements)
+      }
+      const type = callbackContractParameterType(checker, contract, parameterIndex, propagatingTypeAt)
       if (!type) return { refused: 'callback-contract-has-no-parameter' }
       contractTypes.push(type)
     }

@@ -9,7 +9,8 @@ import {
   callbackParameterContractsFor,
   inlineJsxCallbackParameterType
 } from './callback-parameter-contracts.js'
-import { censusParameterBindings } from './parameter-bindings.js'
+import { censusParameterBindings, indexParameterBindingProgram } from './parameter-bindings.js'
+import { attachDeferredIntrinsicProtocolLedger, createDeferredIntrinsicProtocolLedger } from './deferred-intrinsic-protocols.js'
 
 const contracts = (extra = '', consumer = '(event: Event) => void') => {
   const entry = resolve('test/fixtures/callback-parameter-contracts.ts')
@@ -128,6 +129,125 @@ test('parameter census cannot discard an unresolved direct argument beside a typ
   const type = census.typeAt(parameter)
   assert.ok(type === null || (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0)
   assert.equal(census.unionArmsAt(parameter), null)
+})
+
+const intrinsicCallbacks = (source: string) => {
+  const entry = resolve('test/fixtures/intrinsic-callback-contracts.js')
+  const options: ts.CompilerOptions = { target: ts.ScriptTarget.ES2022, allowJs: true, checkJs: true, strict: true, types: [] }
+  const host = ts.createCompilerHost(options)
+  const original = host.getSourceFile.bind(host)
+  host.getSourceFile = (name, version, ...rest) =>
+    resolve(name) === resolve(entry)
+      ? ts.createSourceFile(name, `export {};\n${source}`, version, true, ts.ScriptKind.JS)
+      : original(name, version, ...rest)
+  const program = ts.createProgram([entry], options, host)
+  const checker = program.getTypeChecker()
+  const file = program.getSourceFile(entry)!
+  const index = indexParameterBindingProgram(checker, [file], wholeProgram)
+  const ledger = createDeferredIntrinsicProtocolLedger()
+  attachDeferredIntrinsicProtocolLedger(index.valueFlow, ledger)
+  const census = censusParameterBindings(checker, [file], wholeProgram, undefined, index)
+  const functionNamed = (name: string): ts.FunctionDeclaration => {
+    let found: ts.FunctionDeclaration | undefined
+    const visit = (node: ts.Node): void => {
+      if (ts.isFunctionDeclaration(node) && node.name?.text === name) found = node
+      ts.forEachChild(node, visit)
+    }
+    visit(file)
+    assert.ok(found, name)
+    return found
+  }
+  const typeOf = (name: string, position = 0): string | null => {
+    const type = census.typeAt(functionNamed(name).parameters[position]!)
+    return type && checker.typeToString(type)
+  }
+  return { checker, flow: index.valueFlow, ledger, functionNamed, typeOf }
+}
+
+const lightSource = `
+  class Light { /** @param {number} id */ constructor(id) { this.id = id; this.castShadow = false; } }
+  function byShadow(lightA, lightB) { return (lightB.castShadow ? 1 : 0) - (lightA.castShadow ? 1 : 0); }
+`
+
+test('a named comparator handed only to an intrinsic sort receives the array elements', () => {
+  const checked = intrinsicCallbacks(`${lightSource}
+    const lights = [new Light(0), new Light(1)];
+    lights.sort(byShadow);
+  `)
+  assert.equal(checked.typeOf('byShadow', 0), 'Light')
+  assert.equal(checked.typeOf('byShadow', 1), 'Light')
+  const contracts = callbackParameterContractsFor(checked.checker, checked.flow, checked.functionNamed('byShadow'), new Set())
+  assert.ok(contracts && contracts.length === 1)
+  const contract = contracts[0]!
+  assert.ok('intrinsic' in contract)
+  assert.deepEqual(
+    contract.requirements.map(({ intrinsic, prototypeKeys }) => [intrinsic, prototypeKeys]),
+    [['Array', { names: ['sort'], arrayIndices: true }]]
+  )
+  assert.ok(
+    checked.ledger
+      .requirements()
+      .some((requirement) => requirement.intrinsic === 'Array' && requirement.prototypeKeys?.names?.includes('sort') === true),
+    'the frame obligation is published with the binding'
+  )
+})
+
+test('the receiver is read as the census types it when the checker calls it any', () => {
+  // three's `setup( lights )`: an unannotated parameter closed by its one caller.
+  const checked = intrinsicCallbacks(`${lightSource}
+    function Lights() { function setup(lights) { lights.sort(byShadow); return lights.length; } return { setup }; }
+    const lights = [new Light(0), new Light(1)];
+    Lights().setup(lights);
+  `)
+  assert.equal(checked.typeOf('setup'), 'Light[]')
+  assert.equal(checked.typeOf('byShadow', 0), 'Light')
+})
+
+test('element, index and array slots follow the method; holes and accumulators stay honest', () => {
+  const checked = intrinsicCallbacks(`${lightSource}
+    const lights = [new Light(0), new Light(1)];
+    function visit(light, index, all) { return light.id + index + all.length; }
+    lights.forEach(visit);
+    function isShadowed(light) { return light.castShadow; }
+    lights.find(isShadowed);
+    function total(sum, light) { return sum + light.id; }
+    lights.reduce(total, 0);
+  `)
+  assert.equal(checked.typeOf('visit', 0), 'Light')
+  assert.equal(checked.typeOf('visit', 1), 'number')
+  assert.equal(checked.typeOf('visit', 2), 'Light[]')
+  assert.equal(checked.typeOf('isShadowed'), 'Light | undefined')
+  assert.equal(checked.typeOf('total', 1), 'Light')
+  const accumulator = checked.typeOf('total', 0)
+  assert.ok(accumulator === null || accumulator === 'any', String(accumulator))
+})
+
+test('a direct call joins the sort frame, and an open mention or a lookalike sort establishes nothing', () => {
+  const joined = intrinsicCallbacks(`${lightSource}
+    const lights = [new Light(0), new Light(1)];
+    lights.sort(byShadow);
+    byShadow(new Light(2), new Light(3));
+  `)
+  assert.equal(joined.typeOf('byShadow'), 'Light')
+  for (const extra of [
+    'const alias = byShadow;',
+    'globalThis.unknownConsumer(byShadow);',
+    'const pair = [byShadow];',
+    'lights.sort(Math.random() > 0.5 ? byShadow : undefined);'
+  ]) {
+    const checked = intrinsicCallbacks(`${lightSource}
+      const lights = [new Light(0), new Light(1)];
+      lights.sort(byShadow);
+      ${extra}
+    `)
+    assert.equal(callbackParameterContractsFor(checked.checker, checked.flow, checked.functionNamed('byShadow'), new Set()), null, extra)
+  }
+  const lookalike = intrinsicCallbacks(`${lightSource}
+    class Shelf { /** @param {(a: number, b: number) => number} compare */ sort(compare) { return compare(1, 2); } }
+    new Shelf().sort(byShadow);
+  `)
+  const contracts = callbackParameterContractsFor(lookalike.checker, lookalike.flow, lookalike.functionNamed('byShadow'), new Set())
+  assert.ok(contracts === null || contracts.every((contract) => !('intrinsic' in contract)))
 })
 
 for (const reassigned of [false, true])

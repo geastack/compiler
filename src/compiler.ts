@@ -17,7 +17,7 @@ import { publishNativeOwnAssignments } from './ir/native-own-assignment.js'
 import { publishNativeAccessorDefinitions } from './ir/native-accessor-definition.js'
 import { publishNativeFieldViewFacts } from './ir/publish-native-field-view-facts.js'
 import { publishNativeArrayDescriptorSnapshots } from './ir/native-array-descriptor-snapshot.js'
-import { projectBindingPlacements } from './projection/bindings.js'
+import { hostDeclarationFileTable, projectBindingPlacements } from './projection/bindings.js'
 import {
   physicalClassInstanceResolverOf,
   physicalClassLayoutsOf,
@@ -958,9 +958,9 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     // is: each plugin's own table is keyed by ITS declaration files, so a
     // union of the per-plugin maps cannot let one plugin's file collide with
     // another's.
-    hostConstantsByDeclaration: new Map(plugins.flatMap((plugin) => [...plugin.capabilities.hostConstantsByDeclaration])),
+    hostConstantsByDeclaration: hostDeclarationFileTable(plugins.flatMap((plugin) => [...plugin.capabilities.hostConstantsByDeclaration])),
     hostFunctions: new Map([...plugins.flatMap((plugin) => [...plugin.capabilities.hostFunctions]), ...coreHostFunctions]),
-    hostFunctionsByDeclaration: new Map(plugins.flatMap((plugin) => [...plugin.capabilities.hostFunctionsByDeclaration])),
+    hostFunctionsByDeclaration: hostDeclarationFileTable(plugins.flatMap((plugin) => [...plugin.capabilities.hostFunctionsByDeclaration])),
     // The backend's own table, unioned in the same way `coreHostMembers` is
     // above and for the same reason: `btoa`/`encodeURIComponent` are language
     // builtins, so a plugin row for one would make an ECMAScript global
@@ -972,11 +972,11 @@ export const compile = (request: CompilationRequest): CompilationResult => {
     coreGlobalSingletons,
     standardLibraryExternals: frontend.standardLibraryBindings,
     hostNamespaces: hosts.namespaces,
-    hostNamespaceRootsByDeclaration: new Map(plugins.flatMap((plugin) => [...plugin.capabilities.hostNamespaceRootsByDeclaration])),
+    hostNamespaceRootsByDeclaration: hostDeclarationFileTable(plugins.flatMap((plugin) => [...plugin.capabilities.hostNamespaceRootsByDeclaration])),
     hostNamespaceBindings: frontend.hostNamespaceBindings,
     exactHostNamespaceNames: new Set(hostNamespaceRootDeclarations.map((row) => row.declarationName)),
     hostSingletons: hosts.singletons,
-    hostSingletonsByDeclaration: new Map(plugins.flatMap((plugin) => [...plugin.capabilities.hostSingletonsByDeclaration])),
+    hostSingletonsByDeclaration: hostDeclarationFileTable(plugins.flatMap((plugin) => [...plugin.capabilities.hostSingletonsByDeclaration])),
     hostSingletonBindings: frontend.hostSingletonBindings
   })
   stage('diagnostics+abi')

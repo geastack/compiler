@@ -2,22 +2,98 @@ import ts from 'typescript'
 import type { ValueFlowIndex, ValueWrite } from './flow/model.js'
 import { classifyCallableMention } from './flow/callable-reach.js'
 import { isModuleExportedDeclaration } from './flow/targets.js'
+import { intrinsicArrayCallbackFrameOf, type IntrinsicArrayCallbackFrame } from './flow/intrinsic-array-callback-frames.js'
+import type { IntrinsicProtocolRequirement } from './deferred-intrinsic-protocols.js'
 
-export interface CallbackParameterContract {
-  readonly signature: ts.Signature
-  readonly location: ts.CallExpression | ts.NewExpression
-}
+/**
+ * Who invokes a named callback other than its counted direct calls: a stated
+ * higher-order signature, or an intrinsic Array method the callback is handed
+ * to (`lights.sort( byShadow )`). The intrinsic has no source signature for the
+ * flow index to record an argument edge into, so its frame is the contract.
+ */
+export type CallbackParameterContract =
+  | {
+      readonly signature: ts.Signature
+      readonly location: ts.CallExpression | ts.NewExpression
+    }
+  | {
+      readonly intrinsic: IntrinsicArrayCallbackFrame
+      /**
+       * What the frame's arguments depend on: the method itself and the array
+       * indices (a hole read falls through to the prototype). The receiver's
+       * own shape is proved by its census type, not by this obligation.
+       */
+      readonly requirements: readonly IntrinsicProtocolRequirement[]
+    }
 
-/** Resolve at the receiving call so instantiated generic contracts stay instantiated. */
+/**
+ * The type a callback receives at `position`.
+ *
+ * A signature is resolved at the receiving call so instantiated generic
+ * contracts stay instantiated. An intrinsic frame's arguments are read off the
+ * receiver as the consuming census types it -- `receiverTypeAt` -- because the
+ * receiver of `lights.sort( cmp )` is commonly an unannotated JavaScript
+ * parameter the checker calls `any` while the census has closed it to
+ * `Light[]`. Only a receiver with exactly one non-nullish arm, an Array type,
+ * answers (a nullish receiver throws before any callback runs); the
+ * accumulator of `reduce` depends on the callback's own completions and
+ * refuses.
+ */
 export const callbackContractParameterType = (
   checker: ts.TypeChecker,
   contract: CallbackParameterContract,
-  position: number
+  position: number,
+  receiverTypeAt: (expression: ts.Expression) => ts.Type | null = (expression) => checker.getTypeAtLocation(expression)
 ): ts.Type | null => {
+  if ('intrinsic' in contract) return intrinsicFrameArgumentType(checker, contract.intrinsic, position, receiverTypeAt)
   const parameter = contract.signature.parameters[position]
   const declaration = parameter?.valueDeclaration ?? parameter?.declarations?.[0]
   if (!parameter || !declaration || !ts.isParameter(declaration) || declaration.dotDotDotToken) return null
   return checker.getTypeOfSymbolAtLocation(parameter, contract.location)
+}
+
+/** The methods that visit a hole as `undefined` rather than skipping it. */
+const HOLE_VISITING_METHODS: ReadonlySet<string> = new Set(['find', 'findIndex', 'findLast', 'findLastIndex'])
+
+const intrinsicFrameArgumentType = (
+  checker: ts.TypeChecker,
+  frame: IntrinsicArrayCallbackFrame,
+  position: number,
+  receiverTypeAt: (expression: ts.Expression) => ts.Type | null
+): ts.Type | null => {
+  const argument = frame.arguments.find((entry) => entry.position === position)
+  if (!argument) return null
+  if (argument.source.kind === 'array-index') return checker.getNumberType()
+  if (argument.source.kind === 'reduce-accumulator') return null
+  const receiver = receiverTypeAt(frame.receiver)
+  if (!receiver || (receiver.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return null
+  const arrays = (receiver.isUnion() ? receiver.types : [receiver]).filter(
+    (arm) => (arm.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined | ts.TypeFlags.Void)) === 0
+  )
+  const array = arrays.length === 1 ? arrays[0]! : null
+  if (!array || !checker.isArrayType(array)) return null
+  if (argument.source.kind === 'receiver') return array
+  const element = checker.getTypeArguments(array as ts.TypeReference)[0]
+  if (!element) return null
+  return HOLE_VISITING_METHODS.has(frame.method) ? checker.getNullableType(element, ts.TypeFlags.Undefined) : element
+}
+
+/**
+ * The intrinsic Array frame a mention of the callback is the callback operand
+ * of, or null when the mention is anything else.
+ */
+const intrinsicArrayContractAt = (checker: ts.TypeChecker, flow: ValueFlowIndex, reference: ts.Node): CallbackParameterContract | null => {
+  const call = reference.parent
+  if (!ts.isCallExpression(call) || call.arguments[0] !== reference) return null
+  const site = flow.callSiteOf(call)
+  if (!site) return null
+  const described = intrinsicArrayCallbackFrameOf(checker, flow, site)
+  if (described.kind !== 'frame' || described.frame.callback !== reference) return null
+  const frame = described.frame
+  return {
+    intrinsic: frame,
+    requirements: [{ intrinsic: 'Array', prototypeKeys: { names: [frame.memberKey], arrayIndices: true }, location: frame.call }]
+  }
 }
 
 /**
@@ -74,8 +150,6 @@ export const callbackParameterContractsFor = (
     acceptedArguments.add(write.value)
     signatures.push(...contracts)
   }
-  if (signatures.length === 0) return null
-
   // An export-list alias is not an expression reference in the value-flow
   // index. Its checker identity still publishes this callable to open callers.
   if (isModuleExportedDeclaration(checker, declaration, symbol)) return null
@@ -86,9 +160,11 @@ export const callbackParameterContractsFor = (
     const mention = classifyCallableMention(checker, reference, declaration.name)
     if (mention.kind === 'inert') continue
     if (mention.kind === 'call' && countedCalls.has(mention.call)) continue
-    return null
+    const intrinsic = intrinsicArrayContractAt(checker, flow, reference)
+    if (intrinsic === null) return null
+    signatures.push(intrinsic)
   }
-  return signatures
+  return signatures.length === 0 ? null : signatures
 }
 
 /** A directly supplied JSX callback receives the attribute's stated argument, including when its annotation exposes fewer fields. */

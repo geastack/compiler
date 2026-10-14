@@ -386,7 +386,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
       nativeMethodFor,
       nodeById,
       dictionaryReadFor,
-      assertedClassDowncastFor
+      checkedFrameNarrowingFor
     )
     if (structural) return { kind: 'static', materializer: structural }
     if (recipe) return { kind: 'static', materializer: recipe }
@@ -472,7 +472,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
                 nativeMethodFor,
                 nodeById,
                 dictionaryReadFor,
-                assertedClassDowncastFor
+                checkedFrameNarrowingFor
               )
             : undefined
         capability = sealed?.documentRecordView
@@ -566,7 +566,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
             nativeMethodFor,
             nodeById,
             dictionaryReadFor,
-            assertedClassDowncastFor
+            checkedFrameNarrowingFor
           )
           if (complete?.recordView?.view.kind === 'dispatch') capability = { kind: 'static', materializer: complete }
         }
@@ -594,7 +594,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
             nativeMethodFor,
             nodeById,
             dictionaryReadFor,
-            assertedClassDowncastFor
+            checkedFrameNarrowingFor
           )
           if (viewed?.dictionaryView !== undefined) capability = { kind: 'static', materializer: viewed }
         }
@@ -608,7 +608,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
             nativeMethodFor,
             nodeById,
             dictionaryReadFor,
-            assertedClassDowncastFor
+            checkedFrameNarrowingFor
           )
           capability =
             sealed?.recordView ||
@@ -860,7 +860,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
         nativeMethodFor,
         nodeById,
         dictionaryReadFor,
-        assertedClassDowncastFor
+        checkedFrameNarrowingFor
       )
       if (sealed?.callableView === undefined) return null
       frameAdaptation = contextualNode(source, frame, 'native-method-result-frame', sealed)
@@ -993,10 +993,18 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
   }
 
   const assertedUnions = new Map<ConversionNodeId, ConversionNode>()
-  const assertedUnionFor = (source: Representation, target: Representation, copyAllowed: boolean): ConversionNode | null => {
+  const assertedUnionFor = (source: Representation, target: Representation, copyAllowed: boolean): ConversionNode | null =>
+    liveArmDispatchFor(source, target, copyAllowed ? 'copy' : 'asserted')
+  const liveArmDispatchFor = (
+    source: Representation,
+    target: Representation,
+    mode: 'asserted' | 'copy' | 'frame-argument'
+  ): ConversionNode | null => {
+    const copyAllowed = mode === 'copy'
     if (source.kind !== 'tagged-union' && !(source.kind === 'optional' && source.payload.kind === 'tagged-union')) return null
     if (target.kind === 'tagged-union' || target.kind === 'dynamic') return null
-    const id = `${representationKey(source)}->${representationKey(target)}#asserted-union${copyAllowed ? ':copy' : ''}`
+    const suffix = mode === 'copy' ? 'asserted-union:copy' : mode === 'frame-argument' ? 'frame-argument-union' : 'asserted-union'
+    const id = `${representationKey(source)}->${representationKey(target)}#${suffix}`
     const remembered = assertedUnions.get(id)
     if (remembered !== undefined) return remembered
     // The dispatch (`emit-narrowing.ts`'s `assertedUnionText`) is a switch on
@@ -1024,8 +1032,13 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
       capability: {
         kind: 'static',
         materializer: {
-          id: copyAllowed ? ASSERTED_UNION_COPY_MATERIALIZER : ASSERTED_UNION_MATERIALIZER,
-          domain: copyAllowed ? 'static:asserted-union-copy' : 'static:asserted-union',
+          id:
+            mode === 'copy'
+              ? ASSERTED_UNION_COPY_MATERIALIZER
+              : mode === 'frame-argument'
+                ? FRAME_ARGUMENT_UNION_MATERIALIZER
+                : ASSERTED_UNION_MATERIALIZER,
+          domain: mode === 'copy' ? 'static:asserted-union-copy' : mode === 'frame-argument' ? 'static:frame-argument-union' : 'static:asserted-union',
           allocates: copyAllowed,
           ...(native ? { nativeFieldProtocol: 'unused' as const } : {})
         }
@@ -1098,7 +1111,7 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
         nativeMethodFor,
         nodeById,
         dictionaryReadFor,
-        assertedClassDowncastFor
+        checkedFrameNarrowingFor
       ) ?? null
     if (materializer === null) return null
     const node: ConversionNode = { id, source, target, capability: { kind: 'static', materializer }, familyMembers: members }
@@ -1149,6 +1162,37 @@ export const createConversionNodes = (input: ConversionCensusInput): ConversionC
     }
     assertedClassDowncasts.set(id, node)
     return node
+  }
+
+  // The checked narrowing a callable ADAPTER FRAME may apply to an argument
+  // (`structural-plan.ts`'s `callableViewPlan`, `downcast`). Besides the
+  // class downcast above, a union-typed public parameter entering a body
+  // that declares one of its arms: a function value stored into a method
+  // slot that some other writer widened (`m.hook = (s, r: Renderer) => ...`
+  // beside `n.hook = (s, r: any) => ...` makes the slot's frame take
+  // `Renderer | any`), which TypeScript admits through method-parameter
+  // bivariance. The frame has no `instanceof` guard for the ordinary arm
+  // selection to trust, so the live arm is dispatched instead
+  // (`FRAME_ARGUMENT_UNION_MATERIALIZER`): the arm the body declares passes as
+  // it is, with no conversion; every other arm through its own conversion,
+  // except that a boxed (`any`) arm is admitted by a class check first -- an
+  // `any` holding the instance unboxes to it, anything else is a catchable
+  // TypeError, never the unbox's abort -- and an arm that cannot be the
+  // parameter at all is the same TypeError. Only a union one of whose arms
+  // reaches the target without a prior guard qualifies; a frame narrowing
+  // that converts no arm stays refused. The ordinary unguarded conversion,
+  // where one exists, is still preferred (`callableViewPlan`'s `guarded`).
+  const checkedFrameNarrowingFor = (source: Representation, target: Representation): ConversionNode | null => {
+    const downcast = assertedClassDowncastFor(source, target)
+    if (downcast !== null) return downcast
+    if (source.kind !== 'tagged-union' || target.kind !== 'class-ref') return null
+    const targetKey = representationKey(target)
+    const homed = source.arms.some(
+      (arm) =>
+        representationKey(arm.value) === targetKey ||
+        (arm.value.kind !== 'dynamic' && recipeIsMaterializableWithoutPriorSourceGuard(nodeFor(arm.value, target), nodeById))
+    )
+    return homed ? liveArmDispatchFor(source, target, 'frame-argument') : null
   }
 
   const nullishOptionals = new Map<ConversionNodeId, ConversionNode>()
@@ -1296,6 +1340,14 @@ export const ASSERTED_UNION_MATERIALIZER = 'gea::host::assertedUnion'
 
 /** The asserted-union node that may rebuild an `Array<any>` arm as a copy. */
 export const ASSERTED_UNION_COPY_MATERIALIZER = 'gea::host::assertedUnionCopy'
+
+/**
+ * The live-arm dispatch of a union ARGUMENT a callable adapter frame hands to a
+ * body declaring one of its classes (`nodes.ts`'s `checkedFrameNarrowingFor`):
+ * `assertedUnionFor`'s dispatch, but a boxed arm is admitted by a class check
+ * and a value that is no instance is a catchable `TypeError`, not an abort.
+ */
+export const FRAME_ARGUMENT_UNION_MATERIALIZER = 'gea::host::frameArgumentUnion'
 
 /** The materializer id every asserted-view node carries; the printer dispatches its recipe on it. */
 export const ASSERTED_VIEW_MATERIALIZER = 'gea::host::assertedView'

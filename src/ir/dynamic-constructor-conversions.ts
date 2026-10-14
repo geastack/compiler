@@ -51,8 +51,11 @@ export const dynamicConstructorConversionsOf = (
           conversions.push({ role: 'construct-argument', source: packed.value.element, target: parameter.value })
         return
       }
+      // A frame shorter than the candidate's convention omits this
+      // parameter: the candidate receives `undefined` there, exactly as an
+      // ordinary call's omitted argument does.
       const source = target.parameters[position]
-      if (source !== undefined) conversions.push({ role: 'construct-argument', source: source.value, target: parameter.value })
+      conversions.push({ role: 'construct-argument', source: source?.value ?? { kind: 'undefined' }, target: parameter.value })
     })
     conversions.push({ role: 'construct-result', source: instance, target: target.result })
   }
