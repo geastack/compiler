@@ -1327,6 +1327,65 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     return matched
   }
   /**
+   * An EXPLICIT primitive declaration -- a TypeScript annotation, or a JSDoc
+   * @param/@type tag, whose type is only number, string, boolean, bigint, null,
+   * undefined or void -- is a boundary no object crosses: one is never forwarded
+   * into such a parameter, never published through such a field, and never kept
+   * among such a parameter's values. An inferred type (a default `x = 0`, an
+   * untyped assignment) is never trusted, because JS callers are not checked
+   * against it.
+   *
+   * The walk follows every branch of a type-guarded overload, so an object reached
+   * the numeric arm too: three's `Color.set( r )` hands a Color to `copy` and a
+   * number to `setRGB( r )`, but here the Color went to `setRGB` as well and was
+   * stored as another Color's `r`. `Object3D.lookAt( x )` did the same through
+   * `Vector3.set( x )`. From one numeric field `copy` spread each such object to
+   * every vector: on sakura-fantasy about 45 objects (uniform tables, Colors, the
+   * camera vector) were held as `x`/`y`/`z` of about 290 Vector3/Vector4 and as
+   * `r` of 93 Colors.
+   */
+  const primitiveTypeFlags =
+    ts.TypeFlags.StringLike |
+    ts.TypeFlags.NumberLike |
+    ts.TypeFlags.BigIntLike |
+    ts.TypeFlags.BooleanLike |
+    ts.TypeFlags.Null |
+    ts.TypeFlags.Undefined |
+    ts.TypeFlags.Void
+  const declaredPrimitiveType = (type: ts.Type): boolean =>
+    type.isUnion() ? type.types.every(declaredPrimitiveType) : (type.flags & primitiveTypeFlags) !== 0
+  const explicitTypeOf = (declaration: ts.Node): ts.TypeNode | undefined =>
+    ((ts.isParameter(declaration) || ts.isPropertyDeclaration(declaration) || ts.isPropertySignature(declaration)) && declaration.type) ||
+    ts.getJSDocType(declaration)
+  const objectLikeRoot = (root: Value): boolean => isObjectRoot(root) || isBody(root) || ts.isClassLike(root)
+  const primitiveParameters = new Map<ts.ParameterDeclaration, boolean>()
+  const primitiveDeclaredParameter = (parameter: ts.ParameterDeclaration): boolean => {
+    let known = primitiveParameters.get(parameter)
+    if (known === undefined) {
+      const declared = explicitTypeOf(parameter)
+      known = declared !== undefined && declaredPrimitiveType(checker.getTypeFromTypeNode(declared))
+      primitiveParameters.set(parameter, known)
+    }
+    return known
+  }
+  const objectEntersPrimitive = (root: Value, parameter: ts.ParameterDeclaration): boolean =>
+    objectLikeRoot(root) && primitiveDeclaredParameter(parameter)
+  // A JS property's every assignment is a declaration; TypeScript takes its type
+  // from the explicitly typed ones, and so does this.
+  const primitiveFields = new Map<ts.PropertyAccessExpression, boolean>()
+  const primitiveDeclaredField = (left: Access): boolean => {
+    if (!ts.isPropertyAccessExpression(left)) return false
+    let known = primitiveFields.get(left)
+    if (known === undefined) {
+      const explicit = (checker.getSymbolAtLocation(left.name)?.declarations ?? []).flatMap(
+        (declaration) => explicitTypeOf(declaration) ?? []
+      )
+      known = explicit.length > 0 && explicit.every((declared) => declaredPrimitiveType(checker.getTypeFromTypeNode(declared)))
+      primitiveFields.set(left, known)
+    }
+    return known
+  }
+  /**
    * The `new` sites the construction domain cannot place, found once. A
    * class member's instances are `constructionsOf` its family, and that list
    * is complete only while none of these names a family class: `new Owner()`
@@ -2068,6 +2127,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             for (const mention of spread) add(read(use(root, mention)))
             const parameter = runtimeParametersOf(body)[position]
             if (parameter?.dotDotDotToken) fail('rest-frame', parameter)
+            else if (parameter && objectEntersPrimitive(root, parameter)) continue
             else if (parameter && ts.isIdentifier(parameter.name)) refs(root, parameter)
             else if (parameter) patternReadsSlots(root, parameter.name as ts.BindingPattern)
           }
@@ -2094,6 +2154,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             for (const mention of mentions) add(read(use(root, mention)))
             const parameter = runtimeParametersOf(body)[position]
             if (parameter?.dotDotDotToken) fail('rest-frame', parameter)
+            else if (parameter && objectEntersPrimitive(root, parameter)) continue
             else if (parameter && ts.isIdentifier(parameter.name)) refs(root, parameter)
             else if (parameter) patternReadsSlots(root, parameter.name as ts.BindingPattern)
           }
@@ -2167,6 +2228,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                 add(read(use(root, parent)))
                 return
               }
+              if (objectLikeRoot(root) && primitiveDeclaredField(left)) return
               const keys = keysOf(left)
               const containers = read(value(left.expression))
               if (sealing && containers.size === 0) fail('unresolved-container', left)
@@ -2592,9 +2654,14 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           return
         }
         if (isBody(owner)) read(closure(owner))
-        for (const site of constructionSitesTargeting(owner)) add(carry(frameQuery('frame-argument', site.call, owner, parameter)))
+        const primitive = primitiveDeclaredParameter(parameter)
+        const addArguments = (held: ReadonlySet<Value>): void => {
+          for (const candidate of held) if (!primitive || !objectLikeRoot(candidate)) facts.add(candidate)
+        }
+        for (const site of constructionSitesTargeting(owner)) addArguments(carry(frameQuery('frame-argument', site.call, owner, parameter)))
         for (const call of read(callersOf(owner)))
-          if (ts.isCallExpression(call) || ts.isNewExpression(call)) add(carry(frameQuery('frame-argument', call, owner, parameter)))
+          if (ts.isCallExpression(call) || ts.isNewExpression(call))
+            addArguments(carry(frameQuery('frame-argument', call, owner, parameter)))
         for (const write of flow.writesToDeclaration(parameter)) {
           if (write.site === excluded) continue
           if (write.edge === 'call-argument' || write.edge === 'super-argument' || write.edge === 'default-parameter') continue
