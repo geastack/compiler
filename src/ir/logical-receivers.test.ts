@@ -457,6 +457,7 @@ test('readonly native host Function rows state receiver irrelevance explicitly',
     ['Math', 'round'],
     ['Math', 'max'],
     ['Math', 'min'],
+    ['Math', 'hypot'],
     ['Math', 'random'],
     ['StringConstructor', 'fromCharCode'],
     ['StringConstructor', 'fromCodePoint']
@@ -466,6 +467,15 @@ test('readonly native host Function rows state receiver irrelevance explicitly',
       true,
       `${protocol}.${member}`
     )
+
+  // Every readonly `Math` Function row reaches a runtime entry whose receiver slot is `void*`.
+  for (const [path, row] of coreHostMembers)
+    if (/^Math\.[a-z]/.test(path) && row.kind === 'property' && row.store === null)
+      assert.equal(
+        hostReadIgnoresLogicalReceiver({ ...read, hostMethod: { protocol: 'Math', member: path.slice(5) } }, hosts),
+        true,
+        path
+      )
 })
 
 test('verified native Math and String Function values retain their callable and numeric-rest entries', () => {

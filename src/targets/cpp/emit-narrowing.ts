@@ -36,6 +36,7 @@ import {
   ARM_VIEW_MATERIALIZER,
   ASSERTED_UNION_MATERIALIZER,
   ASSERTED_UNION_COPY_MATERIALIZER,
+  FRAME_ARGUMENT_UNION_MATERIALIZER,
   ASSERTED_VIEW_MATERIALIZER,
   type AssertedViewPlan,
   EXACT_ARM_MATERIALIZER,
@@ -3092,14 +3093,20 @@ const dynamicArrayRebuildText = (arm: Representation, target: Representation, te
  * (or may not be copied) is a `TypeError` (`gea::host::unhomedUnionArm`). `null` when no arm
  * can be the target at all, which the printer refuses.
  */
-export const assertedUnionText = (source: Representation, target: Representation, text: string, copyAllowed: boolean): string | null => {
+export const assertedUnionText = (
+  source: Representation,
+  target: Representation,
+  text: string,
+  copyAllowed: boolean,
+  frameArgument = false
+): string | null => {
   // An absent-capable union: the absence converts as its own constant, the
   // present payload dispatches per arm below.
   if (source.kind === 'optional' && source.payload.kind === 'tagged-union') {
     const payload = source.payload
     return tryCandidateText(() =>
       evaluatedOnceText(text, (operand) => {
-        const present = assertedUnionText(payload, target, `(*${operand})`, copyAllowed)
+        const present = assertedUnionText(payload, target, `(*${operand})`, copyAllowed, frameArgument)
         const absent = convertedValueText({ kind: source.absence }, target, source.absence === 'null' ? 'nullptr' : 'gea::Undefined{}')
         return present === null || absent === null ? null : `(${operand}.has_value() ? ${present} : ${absent})`
       })
@@ -3112,6 +3119,15 @@ export const assertedUnionText = (source: Representation, target: Representation
       const homes = source.arms.map((arm, index) => {
         const slot = `${operand}.get<${index}>()`
         if (representationKey(arm.value) === targetKey) return slot
+        // A frame argument's boxed arm: the class check first, so a value that
+        // is no instance is a catchable TypeError rather than the unbox's abort.
+        if (
+          frameArgument &&
+          arm.value.kind === 'dynamic' &&
+          target.kind === 'class-ref' &&
+          target.ownership === 'shared-refcount'
+        )
+          return `gea::host::frameArgumentClassRef<${cppClassName(target.declaration)}>(${slot})`
         return (
           tryCandidateText(() => convertedValueText(arm.value, target, slot) ?? narrowedLoadText(arm.value, target, slot)) ??
           (copyAllowed ? dynamicArrayRebuildText(arm.value, target, slot) : null)
@@ -5503,6 +5519,8 @@ const renderedRecipeText = (ctx: ConversionSite, node: ConversionNode, text: str
     return assertedUnionText(node.source, node.target, text, false)
   if (node.capability.kind === 'static' && node.capability.materializer.id === ASSERTED_UNION_COPY_MATERIALIZER)
     return assertedUnionText(node.source, node.target, text, true)
+  if (node.capability.kind === 'static' && node.capability.materializer.id === FRAME_ARGUMENT_UNION_MATERIALIZER)
+    return assertedUnionText(node.source, node.target, text, false, true)
   // The census's asserted record-to-class view (`nodes.ts`'s `assertedViewFor`).
   if (node.capability.kind === 'static' && node.capability.materializer.id === ASSERTED_VIEW_MATERIALIZER)
     return node.capability.materializer.assertedView ? assertedViewText(ctx, node, node.capability.materializer.assertedView, text) : null

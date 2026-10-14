@@ -176,6 +176,24 @@ const fileReassignsConstructor = (file: ts.SourceFile): boolean => {
 const castTo = (fileName: string, expression: string, type: string): string =>
   fileName.endsWith('.ts') || fileName.endsWith('.tsx') ? `(${expression} as ${type})` : `(/** @type {${type}} */ (${expression}))`
 
+/**
+ * The construct signature the cast states: exactly the frame this `new`
+ * supplies. Its argument count is a syntactic fact of the site -- unless an
+ * argument is spread -- and the cast's parameters become the dispatching
+ * constructor's frame, which every candidate class's constructor is adapted
+ * from. A rest `any[]` frame claims the site can hand any candidate parameter
+ * a dynamic value, so `new this.constructor()` -- which supplies none, and
+ * whose omitted parameters every candidate receives as `undefined` -- would
+ * demand a dynamic reader for each candidate's parameter carrier
+ * (`ShaderMaterial`'s `parameters` record union) the call never exercises.
+ * Each supplied argument stays `any`: only its count is a fact here.
+ */
+const constructFrameOf = (node: ts.NewExpression): string => {
+  const supplied = node.arguments ?? []
+  if (supplied.some((argument) => ts.isSpreadElement(argument))) return 'new (...args: any[]) => this'
+  return `new (${supplied.map((_, position) => `arg${position}: any`).join(', ')}) => this`
+}
+
 const candidatesIn = (file: ts.SourceFile): readonly Candidate[] => {
   const found: Candidate[] = []
   const visit = (node: ts.Node): void => {
@@ -183,7 +201,7 @@ const candidatesIn = (file: ts.SourceFile): readonly Candidate[] => {
       found.push({
         calleeStart: node.expression.getStart(file),
         calleeEnd: node.expression.end,
-        replacement: castTo(file.fileName, node.expression.getText(file), 'new (...args: any[]) => this')
+        replacement: castTo(file.fileName, node.expression.getText(file), constructFrameOf(node))
       })
     }
     ts.forEachChild(node, visit)

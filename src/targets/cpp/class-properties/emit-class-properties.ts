@@ -41,7 +41,8 @@ import {
   cppResultTypeOf,
   cppStringLiteral,
   cppTypeOf,
-  cppUndefinedIn
+  cppUndefinedIn,
+  cppUndefinedValue
 } from '../types.js'
 import { alignedValueText } from '../emit-narrowing.js'
 import { operationConversionText } from '../emit-certified-conversion.js'
@@ -357,7 +358,10 @@ const dynamicConstructorActualText = (ctx: EmitContext, target: CallableAbi, act
       `dynamic constructor parameter ${position} is carried as "${representationKey(source.value)}", while the selected class expects "${representationKey(parameter.value)}"`
     )
   }
-  const omitted = cppUndefinedIn(parameter.value)
+  // The omission `dynamicConstructorConversionsOf` certifies as `undefined` -> parameter.
+  const omitted =
+    cppUndefinedIn(parameter.value) ??
+    alignedValueText(ctx, 'class-properties/emit-class-properties.ts:omitted', { kind: 'undefined' }, parameter.value, cppUndefinedValue)
   if (omitted !== null) return omitted
   throw createCppEmitBlockedError(
     `conversion:undefined->${representationKey(parameter.value)}`,

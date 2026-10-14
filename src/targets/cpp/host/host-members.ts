@@ -695,7 +695,8 @@ export const coreHostMembers: HostMemberTable = new Map<string, HostMember>([
       logicalReceiver: 'ignored'
     }
   ],
-  ['Math.hypot', { kind: 'property', store: null, emit: 'gea::host::Math::hypot' }],
+  // `hypot_invoke(void*, values)` never reads `this`, exactly like `max`/`min`.
+  ['Math.hypot', { kind: 'property', store: null, emit: 'gea::host::Math::hypot', logicalReceiver: 'ignored' }],
   // The sixteen `Math` members `gea_runtime.h` did not have. `cbrt` is v1's
   // (`gea::runtime::math::cbrt`, stdlib.cpp); the other fifteen are written
   // against ECMA-262 §21.3.2 there, because v1's own `gea::runtime::math`
