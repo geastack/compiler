@@ -1,4 +1,5 @@
 import { isNativeCallableCarrier } from '../../representation/callable-object.js'
+import { unsharedDictionaryPairOf } from '../../ir/convert-carriers.js'
 import { numberStorageTarget } from '../../conversion/number-storage.js'
 import { numberStorageText } from './emit-number-storage.js'
 import { NATIVE_REFERENCE_ABSENCE, nativeReferenceAbsenceOf } from '../../conversion/native-absence.js'
@@ -24,6 +25,7 @@ import {
   representationKey,
   standInRefuses,
   walkRepresentation,
+  carriesNativeUndefined,
   carriesUndefined
 } from '../../representation/model.js'
 import type { IrOperand, MergeLiveArmRebuildOperation } from '../../ir/model.js'
@@ -4182,12 +4184,17 @@ export const genericFunctionSetWideningText = (source: Representation, target: R
  * sentinel, a populated one -- a real `undefined[]`, which the carrier cannot
  * tell apart -- is boxed element by element.
  */
-export const emptyArraySentinelText = (source: Representation, target: Representation, text: string): string | null => {
+export const emptyArraySentinelText = (source: Representation, target: Representation, text: string, consumed = false): string | null => {
   if (source.kind !== 'array-object' || target.kind !== 'array-object' || source.element.kind !== 'undefined') return null
   if (source.ownership !== 'shared-refcount' || target.ownership !== 'shared-refcount') return null
-  if (target.element.kind === 'dynamic') return `gea::emptyArraySentinelOrBoxed(${text})`
+  // `consumed`: an element an unshared rebuild released (`unsharedArrayRebuildText`).
+  const argument = consumed ? `${text}, gea::consumedSource` : text
+  if (target.element.kind === 'dynamic') return `gea::emptyArraySentinelOrBoxed(${argument})`
+  // A shared class or record reference holds `undefined` natively, so a
+  // populated source is the same real `undefined[]` as for `any[]`.
+  if (carriesNativeUndefined(target.element)) return `gea::emptyArraySentinelOrAbsent<${cppTypeOf(target.element)}>(${argument})`
   if (carriesUndefined(target.element)) return null
-  return `gea::emptyArraySentinel<${cppTypeOf(target.element)}>(${text})`
+  return `gea::emptyArraySentinel<${cppTypeOf(target.element)}>(${argument})`
 }
 
 /**
@@ -4339,21 +4346,58 @@ export const unsharedArrayRebuildText = (
   source: Representation,
   target: Representation,
   text: string,
-  elementNode: ConversionNode
+  elementNode: ConversionNode,
+  releasesSource = false
 ): string | null => {
   if (source.kind === 'promise' && target.kind === 'promise') {
     return promiseAdoptionText(source, target, text, (value) =>
-      unsharedArrayRebuildText(ctx, source.value, target.value, value, elementNode)
+      unsharedArrayRebuildText(ctx, source.value, target.value, value, elementNode, releasesSource)
     )
   }
   if (source.kind !== 'array-object' || target.kind !== 'array-object') return null
-  const element = namedConversionText(ctx, 'emit-narrowing.ts:unshared-array', elementNode, 'gea_element')
-  if (element === null) return null
+  const named = namedConversionText(ctx, 'emit-narrowing.ts:unshared-array', elementNode, 'gea_element')
+  if (named === null) return null
+  // A released inner `never[]` is told apart from a binding read by the
+  // `gea::consumedSource` tag, which only this rebuild can pass.
+  const element =
+    releasesSource && materializerIdOf(elementNode) === 'gea::emptyArraySentinel'
+      ? (emptyArraySentinelText(source.element, target.element, 'gea_element', true) ?? named)
+      : named
+  const append = releasesSource ? 'appendRangeConvertedReleasing' : 'appendRangeConverted'
   return (
     `([&]() -> ${cppTypeOf(target)} { const auto& gea_fresh = ${text}; ` +
     `auto gea_rebuilt = gea::makeRef<${cppTypeOf(target, 'owned')}>(); ` +
-    `gea_rebuilt->appendRangeConverted(*gea_fresh, 0, [&](const ${cppTypeOf(source.element)}& gea_element) { return ${element}; }); ` +
+    `gea_rebuilt->${append}(*gea_fresh, 0, [&](const ${cppTypeOf(source.element)}& gea_element) { return ${element}; }); ` +
     `return gea_rebuilt; }())`
+  )
+}
+
+const materializerIdOf = (node: ConversionNode): string | null =>
+  node.capability.kind === 'atom' || node.capability.kind === 'static' ? node.capability.materializer.id : null
+
+/**
+ * The `rebuild: 'unshared-dictionary'` conversion (`ir/model.ts`'s
+ * `ConvertOperation`): a fresh local table stored as its last use, rebuilt
+ * once at the slot's entry carrier -- its enumerable entries in creation
+ * order, the way `{ ...table }` copies them -- and wrapped when the slot is
+ * an optional. Rendered only for the instruction carrying the proof.
+ */
+export const unsharedDictionaryRebuildText = (
+  ctx: ConversionSite,
+  source: Representation,
+  target: Representation,
+  text: string,
+  entryNode: ConversionNode
+): string | null => {
+  const pair = unsharedDictionaryPairOf(source, target)
+  if (pair === null) return null
+  const entry = namedConversionText(ctx, 'emit-narrowing.ts:unshared-dictionary', entryNode, 'gea_entry')
+  if (entry === null) return null
+  return (
+    `([&]() -> ${cppTypeOf(target)} { const auto& gea_fresh = ${text}; ` +
+    `auto gea_rebuilt = gea::makeRef<${cppTypeOf(pair.target, 'owned')}>(); ` +
+    `gea_fresh->copyInto(*gea_rebuilt, [&](const ${cppTypeOf(pair.source.value)}& gea_entry) -> ${cppTypeOf(pair.target.value)} { return ${entry}; }); ` +
+    `return ${target.kind === 'optional' ? `${cppTypeOf(target)}(gea_rebuilt)` : 'gea_rebuilt'}; }())`
   )
 }
 

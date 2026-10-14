@@ -364,6 +364,14 @@ export interface InvocationOperation extends SemanticOperationBase {
    */
   readonly freshIntrinsicArrayResult?: true
   /**
+   * The call is the intact intrinsic `Array.from(...)` or `Array.of(...)`,
+   * which answers an array it just created (ECMA-262 ArrayCreate) and holds
+   * no reference to: unshared exactly as `freshIntrinsicArrayResult`'s
+   * result is. `Array.from({ length }, () => [])` typed `never[][]` entering
+   * a `T[][]` binding is the case.
+   */
+  readonly freshIntrinsicArrayFactory?: true
+  /**
    * An event emission no listener can observe, whose own result is unread
    * (`normalize/dead-event-emissions.ts`): lowered to the `false` an emit
    * with no listener answers, without dispatching.

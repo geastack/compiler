@@ -1252,8 +1252,25 @@ export interface ConvertOperation extends IrOperationBase {
    * array-to-array pair has a node of its own and this is carried here, on
    * the one instruction whose source was proven unshared, rather than on the
    * pair.
+   *
+   * `'unshared-dictionary'` is the same fact for an open string table: a fresh
+   * local table stored as its last use (`SemanticOperand.unsharedFreshTable`)
+   * into a slot of another entry carrier -- that table, or an `optional` of it
+   * -- rebuilt entry by entry in creation order, `conversionUse` naming the
+   * ENTRY conversion.
    */
-  readonly rebuild?: 'unshared-array'
+  readonly rebuild?: 'unshared-array' | 'unshared-dictionary'
+  /**
+   * On an `unshared-array` rebuild only: the source array is CONSUMED here --
+   * a fresh factory result, or a local returned as its last use -- so each
+   * element is moved out of it into its conversion rather than copied. An
+   * element the source alone held then reaches its conversion with no other
+   * holder, which is what lets an inner `never[]` (`Array.from({ length }, ()
+   * => [])`) become its own fresh array rather than the shared sentinel
+   * (`gea::emptyArraySentinel`'s unshared test). Absent for a borrowed source,
+   * an array its holder still reads afterwards.
+   */
+  readonly releasesSource?: true
 }
 
 /** A value demanded only on the impossible falsy edge of an exact source-proven object && left.

@@ -258,7 +258,10 @@ export const hostBuiltinFunctionIdentityText = (protocol: string, member: string
  * `new String(x)` is a different operation (a wrapper OBJECT) and is not this:
  * a class read as a value is only ever the callable half.
  */
-const hostClassCallPaths: ReadonlyMap<string, string> = new Map([['String', 'gea::host::detail::toString']])
+const hostClassCallPaths: ReadonlyMap<string, string> = new Map([
+  ['String', 'gea::host::detail::toString'],
+  ['Number', 'gea::host::detail::toNumber']
+])
 
 export const hostClassValueText = (representation: Representation, className: string): string | null => {
   // A host class READ carries its own `native-handle`, whose `call` half is

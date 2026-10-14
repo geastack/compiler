@@ -34,6 +34,7 @@ import { assertsType, enclosingCallIfCallee, outermostErasureOf, unwrapErasedExp
 import { isScriptGlobalObjectPropertyDeclaration } from '../script-global-redefinition.js'
 import { primitivePropertyIsAbsent } from '../primitive-property-absence.js'
 import { nativeOwnSlotOf } from './native-own-assignment.js'
+import { isUnsharedFreshTableStore } from '../fresh-table-last-use.js'
 import { nativeCallableReadonlySetSourceOf } from './native-callable-readonly-set.js'
 import { assertedReceiverArmMayLackMember } from '../asserted-arm-absence.js'
 import { keySetTouches } from '../host-mutation-keys.js'
@@ -690,7 +691,12 @@ const observablyAbsentElementTypeOf = (context: ProducerContext, node: AccessNod
     })
   }
 
-  if (!ts.isElementAccessExpression(node) || !testsItsOperand(node)) return valueType
+  // An equality test against `undefined` consumes nothing either: three's
+  // `if ( renderTargetProperties.__webglDepthbuffer[ i ] === undefined )`
+  // reads an array it fills in that very branch, so the read is out of range
+  // on its first pass, and the bare element carrier aborted the program at
+  // the comparison meant to observe that absence.
+  if (!ts.isElementAccessExpression(node) || !(testsItsOperand(node) || comparesWithUndefined(context, node))) return valueType
   // Each constituent, because a union of array types indexes the same way:
   // a parameter declared `middleware: [[Function, unknown], unknown][] |
   // [[Function]][]` is such a union, and asking `isArrayType` of the union answers no.
@@ -886,6 +892,17 @@ const buildOperations = (
     return { kind: 'result', result: semanticResultId(operationId(context.identities.nodeIdOf(parent), 'computation', 0), 'value') }
   }
 
+  // See `SemanticOperand.unsharedFreshTable`: only a plain `=` whose
+  // right-hand side is the local itself.
+  const unsharedFreshTableStore = (): boolean => {
+    const parent = outermostErasureOf(node).parent
+    return (
+      ts.isBinaryExpression(parent) &&
+      parent.left === outermostErasureOf(node) &&
+      isUnsharedFreshTableStore(context.checker, parent.right)
+    )
+  }
+
   const makeOperation = (
     internalMethod: PropertyOperation['internalMethod'],
     receiverEvaluation: OperandEvaluation,
@@ -1015,7 +1032,13 @@ const buildOperations = (
             ? { ...operand('receiver', 0, receiverSource, receiverType, receiverEvaluation), asserted: true as const }
             : operand('receiver', 0, receiverSource, receiverType, receiverEvaluation),
         operand('key', 0, key.source, key.type, keyEvaluation),
-        ...(stored ? [operand('value', 0, stored, valueType)] : []),
+        ...(stored
+          ? [
+              unsharedFreshTableStore()
+                ? { ...operand('value', 0, stored, valueType), unsharedFreshTable: true as const }
+                : operand('value', 0, stored, valueType)
+            ]
+          : []),
         ...(guardSource && guardExpression
           ? [operand('short-circuit-guard', 0, guardSource, context.types.typeAt(guardExpression), { kind: 'provenance' })]
           : [])

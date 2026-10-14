@@ -43,6 +43,7 @@ import {
   abiKey,
   arrayExtensionKey,
   representationKey,
+  carriesNativeUndefined,
   carriesUndefined,
   containsUnresolved,
   isOpenDocument
@@ -2059,14 +2060,17 @@ const cppConversionTables = (
       // admits for `never[]` alone: an element that does not carry `undefined`
       // (a genuine `undefined[]` is not assignable to it) and, for `any[]`, a
       // runtime test -- empty is the sentinel, anything else is boxed element
-      // by element, which is what a real `undefined[]` into `any[]` means.
+      // by element, which is what a real `undefined[]` into `any[]` means. A
+      // shared class or record reference element holds `undefined` natively,
+      // so it is that same runtime test (`gea::emptyArraySentinelOrAbsent`):
+      // a populated source becomes the array of `undefined` it really is.
       if (
         source.kind === 'array-object' &&
         target.kind === 'array-object' &&
         source.element.kind === 'undefined' &&
         source.ownership === 'shared-refcount' &&
         target.ownership === 'shared-refcount' &&
-        (target.element.kind === 'dynamic' || !carriesUndefined(target.element))
+        (target.element.kind === 'dynamic' || carriesNativeUndefined(target.element) || !carriesUndefined(target.element))
       ) {
         return {
           classifier: { id: 'gea::emptyArraySentinel', domain: `empty-array:${pairKey()}` },

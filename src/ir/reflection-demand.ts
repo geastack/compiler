@@ -1,4 +1,5 @@
 import { nativeReflectFieldTransportOf } from './native-reflect-field.js'
+import { unsharedDictionaryPairOf } from './convert-carriers.js'
 import { canonicalIndexLiteral } from '../representation/array-index.js'
 import { objectPrototypeMemberNames, staticOwnFieldsOf } from '../representation/record-fields.js'
 import { indexedRecordViewOf, spreadFieldRecordReceiverOf } from './certify/carrier-keys.js'
@@ -1319,7 +1320,7 @@ export const reflectionExposureOf = (
       // into a live view (hono's RegExpRouter maps routes to `[handler, any]`
       // tuples stored as `[handler, ParamIndexMap]`) read through a source
       // protocol nothing demanded.
-      const node = operation.rebuild === 'unshared-array' ? options.conversions?.nodeById(operation.conversionUse) : null
+      const node = operation.rebuild !== undefined ? options.conversions?.nodeById(operation.conversionUse) : null
       if (node) citeViewNode(node.id, node.source, node.target, operation)
       else citeViewNode(operation.conversionUse, operation.source.representation, operation.result.representation, operation)
     }
@@ -2380,6 +2381,27 @@ export const reflectionExposureOf = (
     // route table (`[handlers.map(([h]) => [h, Object.create(null)]),
     // emptyParam]`) is the case: the `[T, any]` tuples are rebuilt as `[T,
     // ParamIndexMap]`, and only the unboxed dictionary is read dynamically.
+    if (operation.kind === 'convert' && operation.rebuild === 'unshared-dictionary') {
+      const pair = unsharedDictionaryPairOf(operation.source.representation, operation.result.representation)
+      const node = options.conversions?.nodeById(operation.conversionUse)
+      if (
+        pair !== null &&
+        node !== null &&
+        node !== undefined &&
+        representationKey(node.source) === representationKey(pair.source.value) &&
+        representationKey(node.target) === representationKey(pair.target.value)
+      ) {
+        const capability = node.capability
+        if (
+          capability.kind === 'identity' ||
+          ((capability.kind === 'atom' || capability.kind === 'static' || capability.kind === 'class-family') &&
+            capability.materializer.nativeFieldProtocol === 'unused')
+        )
+          continue
+        promoteCitedConversion(operation.conversionUse, pair.source.value, pair.target.value, 'unshared-dictionary-entry-conversion')
+        continue
+      }
+    }
     if (operation.kind === 'convert' && operation.rebuild === 'unshared-array') {
       const unwrap = (value: Representation): Representation => (value.kind === 'promise' ? value.value : value)
       const source = unwrap(operation.source.representation)

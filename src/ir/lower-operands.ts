@@ -1,3 +1,4 @@
+import { unsharedDictionaryPairOf } from './convert-carriers.js'
 import {
   operationOfResult,
   type DeclarationId,
@@ -9,7 +10,13 @@ import {
   type StructuralTypeId
 } from '../identity/ids.js'
 import { exactArmIndexOf, type ConversionCensus } from '../conversion/nodes.js'
-import { conversionRequiresSourceGuard, type ConversionCapability, type ConversionNode } from '../conversion/algebra.js'
+import {
+  conversionRequiresSourceGuard,
+  type ConversionCapability,
+  type ConversionNode,
+  type ConversionNodeResolver
+} from '../conversion/algebra.js'
+import { recipeIsMaterializableWithoutPriorSourceGuard } from '../conversion/recipe-closure.js'
 import { SIBLING_CLASS_ARGUMENT } from '../conversion/sibling-class.js'
 import { nativeCallableSourceOf } from './native-callable-argument.js'
 import { nativeObjectSampleEntryOf } from './native-object-sample.js'
@@ -526,10 +533,12 @@ export const enter = (
     nativeBaseViewEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
     unproven ??
     assertedUnionEntry(ctx, block, lineage, operation, operand, resolved, answer.representation) ??
+    unsharedFreshTableEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
     convertTo(ctx, block, lineage, resolved, answer.representation) ??
     familyMemberEntry(ctx, block, lineage, operation, operand, resolved, answer.representation) ??
     assertedArmEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
     freshIntrinsicArrayEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
+    unsharedOperandArrayEntry(ctx, block, lineage, operand, resolved, answer.representation) ??
     assertedViewEntry(ctx, block, lineage, operand, resolved, answer.representation)
   if (entered !== null) return entered
   recordDrift(ctx, block, operation.id, operand.role, operand.ordinal, resolved.representation, answer.representation)
@@ -1077,6 +1086,36 @@ const assertedViewEntry = (
 }
 
 /**
+ * A fresh local table stored as its last use (`SemanticOperand.
+ * unsharedFreshTable`) into a slot of another entry carrier, where no
+ * ordinary conversion holds the pair: rebuilt once, entry by entry, at the
+ * slot's entry carrier (`ConvertOperation.rebuild`'s `unshared-dictionary`).
+ * Three's OutputPass stores its `{ [name: string]: string }` defines into
+ * `material.defines`, a table three reads and writes as `any` values; the
+ * read-only view the pair otherwise offers is refused because the slot IS
+ * written, and the local is never read again, so the copy is unobservable.
+ * An entry with no unguarded conversion keeps the store refused.
+ */
+const unsharedFreshTableEntry = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operand: SemanticOperand,
+  resolved: IrOperand,
+  slot: Representation
+): IrOperand | null => {
+  if (operand.unsharedFreshTable !== true) return null
+  const pair = unsharedDictionaryPairOf(resolved.representation, slot)
+  if (pair === null) return null
+  const ordinary = ctx.program.conversions.nodeFor(resolved.representation, slot)
+  if (ordinary.capability.kind !== 'never' && !conversionRequiresSourceGuard(ordinary.capability, ctx.program.conversions.nodeById))
+    return null
+  const entry = ctx.program.conversions.nodeFor(pair.source.value, pair.target.value)
+  if (!recipeIsMaterializableWithoutPriorSourceGuard(entry, ctx.program.conversions.nodeById)) return null
+  return { value: ctx.builder.convert(block, lineage, entry.id, resolved, slot, 'unshared-dictionary'), representation: slot }
+}
+
+/**
  * The array a native array's own `map`/`filter`/`slice`/... call just
  * allocated (`InvocationOperation.freshIntrinsicArrayResult`), entering a
  * slot of another element carrier: rebuilt once at the slot's element, as
@@ -1099,13 +1138,87 @@ const freshIntrinsicArrayEntry = (
   if (source.ownership !== slot.ownership || source.extension !== null || slot.extension !== null) return null
   if (operand.source.kind !== 'result') return null
   const producer = ctx.graph.operations.get(operationOfResult(operand.source.result))
-  if (producer?.family !== 'invocation' || producer.freshIntrinsicArrayResult !== true) return null
-  const receiver = operandOf(producer, 'receiver', 0)
-  const held = receiver?.source.kind === 'result' ? ctx.plan.selected.get(receiver.source.result) : undefined
-  if (held?.kind !== 'array-object' || held.extension !== null) return null
+  if (producer?.family !== 'invocation') return null
+  // `Array.from`/`Array.of` answer a fresh array off the intrinsic constructor
+  // itself, whose elements the program's own mapper produced: consumed here,
+  // so each element is moved into its conversion (`ConvertOperation.releasesSource`).
+  const factory = producer.freshIntrinsicArrayFactory === true
+  if (!factory) {
+    if (producer.freshIntrinsicArrayResult !== true) return null
+    const receiver = operandOf(producer, 'receiver', 0)
+    const held = receiver?.source.kind === 'result' ? ctx.plan.selected.get(receiver.source.result) : undefined
+    if (held?.kind !== 'array-object' || held.extension !== null) return null
+  }
   const element = ctx.program.conversions.nodeFor(source.element, slot.element)
   if (element.capability.kind === 'never') return null
-  return { value: ctx.builder.convert(block, lineage, element.id, resolved, slot, 'unshared-array'), representation: slot }
+  return {
+    value: ctx.builder.convert(
+      block,
+      lineage,
+      element.id,
+      resolved,
+      slot,
+      'unshared-array',
+      undefined,
+      undefined,
+      factory ? true : undefined
+    ),
+    representation: slot
+  }
+}
+
+/**
+ * An array local no other holder can observe past this consumer, entering a
+ * slot of another element carrier: rebuilt once at the slot's element. Either
+ * returned as its last use (`SemanticOperand.unsharedFreshArray`), when the
+ * local dies here and its elements are moved out, or handed to a formal that
+ * only reads it (`SemanticOperand.readOnlyArrayArgument`), when the caller's
+ * array is left intact. Asked only after the ordinary pair -- a live native
+ * array view, when one exists, keeps the array's identity and is always
+ * preferred.
+ *
+ * Unlike a fresh call result, the local's ELEMENTS may have other holders,
+ * so each element must cross by identity: a conversion that allocates would
+ * hand the consumer copies a write through another holder never reaches. And
+ * no element may be narrowed by a check the program never wrote, which a
+ * read through the original array would not have performed.
+ */
+const unsharedOperandArrayEntry = (
+  ctx: LoweringContext,
+  block: IrBlockId,
+  lineage: SemanticResultId,
+  operand: SemanticOperand,
+  resolved: IrOperand,
+  slot: Representation
+): IrOperand | null => {
+  const consumed = operand.unsharedFreshArray === true
+  if (!consumed && operand.readOnlyArrayArgument !== true) return null
+  const source = resolved.representation
+  if (source.kind !== 'array-object' || slot.kind !== 'array-object') return null
+  if (source.ownership !== slot.ownership || source.extension !== null || slot.extension !== null) return null
+  const element = ctx.program.conversions.nodeFor(source.element, slot.element)
+  if (!elementCrossesByIdentity(element, ctx.program.conversions.nodeById)) return null
+  return {
+    value: ctx.builder.convert(
+      block,
+      lineage,
+      element.id,
+      resolved,
+      slot,
+      'unshared-array',
+      undefined,
+      undefined,
+      consumed ? true : undefined
+    ),
+    representation: slot
+  }
+}
+
+const elementCrossesByIdentity = (element: ConversionNode, resolve: ConversionNodeResolver): boolean => {
+  const capability = element.capability
+  if (capability.kind === 'identity') return true
+  if (capability.kind !== 'atom' && capability.kind !== 'static') return false
+  return !capability.materializer.allocates && recipeIsMaterializableWithoutPriorSourceGuard(element, resolve)
 }
 
 /**

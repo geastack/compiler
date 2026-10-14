@@ -1,5 +1,5 @@
 import type { Representation } from '../../representation/model.js'
-import { representationKey } from '../../representation/model.js'
+import { carriesNativeUndefined, representationKey } from '../../representation/model.js'
 import { absenceComparisonText } from './emit-presence.js'
 import { emptyArraySentinelText } from './emit-narrowing.js'
 import { typeofAnswersFor, typeofTextFor } from './emit-typeof.js'
@@ -603,6 +603,21 @@ export const strictEqualityText = (
   if (index < 0 || other.representation.kind === 'class-ref' || callableIdentityCarrier(other.representation)) {
     const nested: string[] = []
     for (const [nestedIndex, arm] of union.arms.entries()) {
+      // An absent arm against a carrier that holds its own absence. `Ref<T>`
+      // is also the collapsed `T | null` and carries `undefined` as
+      // `Ref::undefined()`, so `null === null` is a live pairing here, not a
+      // carrier mismatch to skip. Skipping it answered three's
+      // `renderTargetProperties.__boundDepthTexture !== renderTarget.depthTexture`
+      // (`undefined | null | DepthTexture` against a null `Ref`) `true` on
+      // every call, so `setRenderTarget` re-ran `setupDepthRenderbuffer` each
+      // time and a cube target leaked six depth renderbuffers per face bound.
+      // `armPairEqualityText` already asks the same state test for two sums.
+      if (isAbsentArm(arm.value) && carriesNativeUndefined(other.representation)) {
+        const absent = absenceComparisonText('===', { text: `${unionText}.get<${nestedIndex}>()`, representation: arm.value }, other)
+        if (absent === null) return null
+        if (absent !== 'false') nested.push(absent === 'true' ? `${unionText}.is<${nestedIndex}>()` : `(${unionText}.is<${nestedIndex}>() && ${absent})`)
+        continue
+      }
       if (index < 0 && sameNumericType(arm.value, other.representation)) {
         nested.push(`(${unionText}.is<${nestedIndex}>() && (${unionText}.get<${nestedIndex}>() == ${other.text}))`)
         continue

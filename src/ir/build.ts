@@ -429,9 +429,10 @@ export interface IrBodyBuilder {
     conversionUse: ConversionUseId,
     source: IrOperand,
     representation: Representation,
-    rebuild?: 'unshared-array',
+    rebuild?: 'unshared-array' | 'unshared-dictionary',
     nativeCallableSource?: import('./native-callable-argument.js').NativeCallableSourceProof,
-    nativeObjectSample?: import('./native-object-sample.js').NativeObjectSampleReceipt
+    nativeObjectSample?: import('./native-object-sample.js').NativeObjectSampleReceipt,
+    releasesSource?: true
   ) => IrValueId
   /** See `MergeLiveArmRebuildOperation` -- the control-flow-proven live-arm sibling of representation-global `convert`. */
   readonly mergeLiveArmRebuild: (
@@ -1057,7 +1058,8 @@ export const createIrBodyBuilder = (
     representation,
     rebuild,
     nativeCallableSource,
-    nativeObjectSample
+    nativeObjectSample,
+    releasesSource
   ) => {
     const result = mintResult(representation)
     append(block, {
@@ -1067,6 +1069,7 @@ export const createIrBodyBuilder = (
       source,
       result,
       ...(rebuild ? { rebuild } : {}),
+      ...(rebuild === 'unshared-array' && releasesSource ? { releasesSource } : {}),
       ...(nativeCallableSource ? { nativeCallableSource } : {}),
       ...(nativeObjectSample ? { nativeObjectSample } : {})
     })

@@ -19,7 +19,7 @@ import { isFabricatedSignatureShape, structuralCallSignatures } from '../structu
 import { contextualArrayConstructTypeAt, contextualCollectionTypeAt, statedCollectionTypeAt } from '../structural-array-element.js'
 import { implementationSignatureOf } from '../structural-declarations.js'
 import { physicalGeneratorOverloadResultAt, physicalInheritedCallableReturnAt } from '../physical-overload-result.js'
-import { unsharedArrayResultBodyOf } from '../unshared-array-result.js'
+import { readOnlyArrayArgumentAt, unsharedArrayResultBodyOf, type ArgumentFormalOf } from '../unshared-array-result.js'
 import { regionId, semanticResultId, withoutSpecialization, type FunctionId, type StructuralTypeId } from '../../../identity/ids.js'
 import type { CensusCandidate } from '../census.js'
 import type { CandidateContribution, FamilyProducer } from '../contribution.js'
@@ -605,6 +605,39 @@ const exactFunctionTarget = (
   }
 }
 
+/**
+ * The body a call runs and the formal an argument binds, by the same exact
+ * target proof `buildTarget` publishes: a never-reassigned binding that holds
+ * exactly one source function. Positions after a spread are not known.
+ */
+const argumentFormalOf =
+  (context: ProducerContext): ArgumentFormalOf =>
+  (call, argument) => {
+    const index = call.arguments.indexOf(argument)
+    if (index < 0 || call.arguments.slice(0, index + 1).some(ts.isSpreadElement)) return null
+    const signature = context.checker.getResolvedSignature(call)
+    if (!signature || exactFunctionTarget(context, call, signature) === null) return null
+    const declaration = sourceImplementationSignatureOf(context, signature, 'generic-too')?.declaration ?? signature.declaration
+    return declaration && isFunctionLikeSourceDeclaration(declaration) ? { callee: declaration, index } : null
+  }
+
+/** See `SemanticOperand.readOnlyArrayArgument`: an argument the call may take as an element-wise copy. */
+const readOnlyArrayArgumentsOf = (
+  context: ProducerContext,
+  node: ts.CallExpression | ts.NewExpression | ts.TaggedTemplateExpression,
+  args: readonly ts.Expression[],
+  operands: readonly SemanticOperand[]
+): readonly SemanticOperand[] => {
+  if (!ts.isCallExpression(node) || args.some(ts.isSpreadElement)) return operands
+  const formalOf = argumentFormalOf(context)
+  return operands.map((entry) => {
+    const argument = entry.role === 'argument' ? args[entry.ordinal] : undefined
+    return argument !== undefined && readOnlyArrayArgumentAt(context.checker, argument, formalOf)
+      ? { ...entry, readOnlyArrayArgument: true as const }
+      : entry
+  })
+}
+
 /** See `InvocationOperation.unsharedArrayResult`; asked only of a call whose own result is an Array. */
 const unsharedArrayResultFactOf = (
   context: ProducerContext,
@@ -647,6 +680,31 @@ const freshIntrinsicArrayResultFactOf = (
     return ts.isInterfaceDeclaration(owner) && (owner.name.text === 'Array' || owner.name.text === 'ReadonlyArray')
   })
   return lib ? { freshIntrinsicArrayResult: true } : {}
+}
+
+/**
+ * `Array.from(...)` / `Array.of(...)`: the standard library's own static
+ * factories, which answer an array they just created (ECMA-262 ArrayCreate on
+ * the intrinsic `%Array%` receiver) and hold no reference to it. Only while
+ * neither the `Array` binding nor the member was replaced
+ * (`intrinsicStaticMemberIsIntact`). See `InvocationOperation.freshIntrinsicArrayFactory`.
+ */
+const freshIntrinsicArrayFactoryFactOf = (
+  context: ProducerContext,
+  node: ts.CallExpression | ts.NewExpression | ts.TaggedTemplateExpression
+): { freshIntrinsicArrayFactory?: true } => {
+  if (!ts.isCallExpression(node) || ts.isOptionalChain(node)) return {}
+  const callee = node.expression
+  if (!ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.name) || !ts.isIdentifier(callee.expression)) return {}
+  if (callee.expression.text !== 'Array' || (callee.name.text !== 'from' && callee.name.text !== 'of')) return {}
+  if (!context.checker.isArrayType(context.checker.getTypeAtLocation(node))) return {}
+  const member = context.checker.getSymbolAtLocation(callee.name)
+  const owner = context.checker.getSymbolAtLocation(callee.expression)
+  const statics = (member?.declarations ?? []).every((declaration) => {
+    const parent = declaration.parent
+    return ts.isInterfaceDeclaration(parent) && parent.name.text === 'ArrayConstructor'
+  })
+  return statics && intrinsicStaticMemberIsIntact(context, owner, member, callee) ? { freshIntrinsicArrayFactory: true } : {}
 }
 
 const implicitSourceConstructorTarget = (context: ProducerContext, node: ts.NewExpression): SemanticTargetProof | null => {
@@ -2021,7 +2079,7 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
     }
     const expansions = argumentList.operations
     const expansionEdges = argumentList.edges
-    operands.push(...argumentList.operands)
+    operands.push(...readOnlyArrayArgumentsOf(context, node, args, argumentList.operands))
 
     // This call's own published result stays the checker's real, un-awaited
     // type -- an un-awaited async call yields a genuine `Promise<T>` value
@@ -2336,6 +2394,7 @@ export const createInvocationProducer = (context: ProducerContext): FamilyProduc
         : {}),
       ...unsharedArrayResultFactOf(context, node),
       ...freshIntrinsicArrayResultFactOf(context, node),
+      ...freshIntrinsicArrayFactoryFactOf(context, node),
       ...deadEventCallFactOf(context, node),
       ...(intrinsicPropertyCall === 'get' ||
       intrinsicPropertyCall === 'set' ||
