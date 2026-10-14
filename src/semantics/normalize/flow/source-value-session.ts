@@ -1614,6 +1614,49 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     return constructionSitesByTarget.get(owner) ?? NO_SITES
   }
   /**
+   * The objects a store `this.k = p` can write `root` into, when `p` is a parameter
+   * of the body whose `this` the store writes and is never rebound there: the
+   * receivers of the frames whose argument for `p` can hold `root`. The frames are
+   * the parameter's own inventory, as `parameterValues` names them. Null when the
+   * store is not that shape, and every object `this` can be stays a candidate.
+   *
+   * Without it a shared constructor or setter put every argument any caller passed
+   * into every instance: three's `this.x = x` stored each value handed to any
+   * `new Vector3( ... )` into all of them. The frame queries are `read`, so a
+   * refused frame refuses the use instead of dropping a store.
+   */
+  const frameMatchedContainers = (root: Value, reference: ts.Expression, left: Access, read: Read): ReadonlySet<Value> | null => {
+    if (unwrapErasedExpression(left.expression).kind !== ts.SyntaxKind.ThisKeyword) return null
+    const stored = unwrapErasedExpression(reference)
+    if (!ts.isIdentifier(stored)) return null
+    const parameter = flow.targetOf(stored)?.declaration
+    if (!parameter || !ts.isParameter(parameter) || parameter.dotDotDotToken || !ts.isIdentifier(parameter.name)) return null
+    const owner = parameter.parent
+    if (!ts.isConstructorDeclaration(owner) && !(isBody(owner) && !ts.isArrowFunction(owner))) return null
+    // The body that binds this `this`: arrows pass it through, every other function,
+    // a class field or a static block binds its own.
+    let thisOwner: ts.Node = left.expression
+    while (
+      !ts.isSourceFile(thisOwner) &&
+      !ts.isClassStaticBlockDeclaration(thisOwner) &&
+      !ts.isPropertyDeclaration(thisOwner) &&
+      !(ts.isFunctionLike(thisOwner) && !ts.isArrowFunction(thisOwner))
+    )
+      thisOwner = thisOwner.parent
+    if (thisOwner !== owner) return null
+    for (const write of flow.writesToDeclaration(parameter))
+      if (write.slot === 'whole' && write.edge !== 'call-argument' && write.edge !== 'super-argument' && write.edge !== 'default-parameter')
+        return null
+    const matched = new Set<Value>()
+    const frame = (call: ts.CallExpression | ts.NewExpression): void => {
+      if (!read(frameQuery('frame-argument', call, owner, parameter)).has(root)) return
+      for (const held of read(frameQuery('frame-receiver', call, owner))) matched.add(held)
+    }
+    for (const site of constructionSitesTargeting(owner)) frame(site.call)
+    if (isBody(owner)) for (const call of read(callersOf(owner))) if (ts.isCallExpression(call) || ts.isNewExpression(call)) frame(call)
+    return matched
+  }
+  /**
    * The `new` sites the construction domain cannot place, found once. A
    * class member's instances are `constructionsOf` its family, and that list
    * is complete only while none of these names a family class: `new Owner()`
@@ -2466,7 +2509,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               const keys = keysOf(left)
               const containers = read(value(left.expression))
               if (sealing && containers.size === 0) fail('unresolved-container', left)
+              const frameMatched = frameMatchedContainers(root, reference, left, read)
               for (const container of containers) {
+                if (frameMatched !== null && !frameMatched.has(container)) continue
                 // A store on `null`/`undefined` throws before it lands: an
                 // element slot read through a counter carries `undefined` for
                 // the positions never written (`this.items[ i ]` filled in a
