@@ -3682,3 +3682,68 @@ test('a data definition of a key the class family never declares demands that ke
   // the call stays an open boundary over the whole instance.
   assert.equal(demand('version')?.fieldOperations, undefined)
 })
+
+test('an adapter narrowing a class-or-dynamic input to the class itself publishes nothing', () => {
+  const declaration = 'NarrowedRenderer' as never
+  const child = record('narrowed-renderer-lists', [{ key: 'count', value: { kind: 'scalar', domain: 'number' } }], 'shared-refcount')
+  const shape = record('narrowed-renderer-shape', [{ key: 'lists', value: child }])
+  const renderer: Representation = {
+    kind: 'class-ref',
+    declaration,
+    shapeId: 'narrowed-renderer-shape',
+    ownership: 'shared-refcount',
+    ancestors: []
+  }
+  const dynamic: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+  const joined: Representation = {
+    kind: 'tagged-union',
+    arms: [
+      { tag: 'renderer', value: renderer, semanticType: 'NarrowedRenderer' as never, runtimeDiscriminator: { kind: 'carrier' } },
+      { tag: 'any', value: dynamic, semanticType: 'Any' as never, runtimeDiscriminator: { kind: 'carrier' } }
+    ]
+  } as never
+  const layout = {
+    declaration,
+    base: null,
+    nativeBase: null,
+    construct: null,
+    instance: renderer,
+    constructor: null,
+    fields: [
+      {
+        declaration: 'NarrowedRenderer.lists' as never,
+        key: 'lists',
+        initializer: null,
+        representation: child,
+        syntheticSubclassMemberOverlay: false
+      }
+    ],
+    fieldOwnership: [],
+    methods: [],
+    accessors: [],
+    staticFields: [],
+    staticMethods: [],
+    staticAccessors: [],
+    name: null,
+    length: null
+  } as never
+  const hook = (parameter: Representation): Representation => ({
+    kind: 'function-value-dispatch',
+    abi: { receiver: null, parameters: [{ value: parameter }] as never, restFrom: null, result: { kind: 'void' } as never }
+  })
+  const demandFor = (listener: Representation): string | undefined => {
+    const converted = {
+      kind: 'convert',
+      lineage,
+      conversionUse: 'narrowed-renderer-adapter',
+      source: operand('listener', hook(listener)),
+      result: { id: 'installed', representation: hook(joined) }
+    } as never
+    return reflectionExposureOf([bodyOf([converted])], new Map([[declaration, layout]]), { layoutOf: () => shape } as never, {
+      representations: [renderer, child],
+      shakeComplete: true
+    }).classes.get(declaration)?.level
+  }
+  assert.notEqual(demandFor(renderer), 'full', 'a listener stating the class receives a typed value')
+  assert.equal(demandFor(dynamic), 'full', 'a listener taking `any` may read the renderer dynamically')
+})

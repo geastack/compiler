@@ -43,6 +43,7 @@ import { absentClassArmRead, classFamilyLacksKey } from './absent-class-arm.js'
 import type { ProgramConversionRecipe } from './program-conversions.js'
 import { nativeAbsentPropertyReadOf } from './native-absent-property.js'
 import { isPrivateNameKey } from '../semantics/model/structural-types.js'
+import { createUnobservedCallableInputs } from './unobserved-callable-inputs.js'
 
 /** A constructor carrier's own construct convention, seen through presence and borrowing; see its use in `closedConstructOperations`. */
 const constructorCarrierOf = (
@@ -563,9 +564,30 @@ const unwrappedCallableAbi = (representation: Representation): CallableAbi | nul
  * calls. An input the source convention states in the target's own carrier is
  * forwarded unchanged; only a converted one can reach a dynamic listener.
  */
-const callableAdapterInputsOf = (sourceAbi: CallableAbi | null, targetAbi: CallableAbi): readonly Representation[] => {
+const callableAdapterInputsOf = (
+  sourceAbi: CallableAbi | null,
+  targetAbi: CallableAbi,
+  // Target parameter positions the source body is proven never to observe
+  // (`unobserved-callable-inputs.ts`): the adapter's conversion of such an
+  // input is dropped unread, so it publishes nothing.
+  ignored: ((index: number) => boolean) | null = null
+): readonly Representation[] => {
+  // A class input carried beside `dynamic` -- three's `renderer` slot, joined
+  // from the JS declaration's unresolved JSDoc type and the typed one, is
+  // `WebGLRenderer | any` -- narrowed to exactly that class for a listener that
+  // states it: the class arm passes through as itself, and a dynamic arm is
+  // unboxed by the class's identity test, never adopted through a view (a class
+  // has no Document adoption). Neither reads a field of the instance, so the
+  // listener sees a typed value and the adapter publishes nothing; whoever
+  // boxed a dynamic arm published it there.
+  const narrowedToOwnClassArm = (target: Representation, source: Representation | undefined): boolean =>
+    source !== undefined &&
+    source.kind === 'class-ref' &&
+    target.kind === 'tagged-union' &&
+    target.arms.some((arm) => representationKey(arm.value) === representationKey(source)) &&
+    target.arms.every((arm) => arm.value.kind === 'dynamic' || representationKey(arm.value) === representationKey(source))
   const forwarded = (target: Representation, source: Representation | undefined): boolean =>
-    source !== undefined && representationKey(source) === representationKey(target)
+    source !== undefined && (representationKey(source) === representationKey(target) || narrowedToOwnClassArm(target, source))
   const inputs: Representation[] = []
   if (
     targetAbi.receiver !== null &&
@@ -577,7 +599,7 @@ const callableAdapterInputsOf = (sourceAbi: CallableAbi | null, targetAbi: Calla
       sourceAbi !== null && sourceAbi.restFrom === targetAbi.restFrom && sourceAbi.argumentsFrame === targetAbi.argumentsFrame
         ? sourceAbi.parameters[index]?.value
         : undefined
-    if (!forwarded(parameter.value, source)) inputs.push(parameter.value)
+    if (!forwarded(parameter.value, source) && ignored?.(index) !== true) inputs.push(parameter.value)
   })
   return inputs
 }
@@ -595,7 +617,8 @@ const callableAdapterInputsOf = (sourceAbi: CallableAbi | null, targetAbi: Calla
 const inlineCallableAdapterInputsOf = (
   source: Representation,
   target: Representation,
-  node: ConversionNode | null | undefined
+  node: ConversionNode | null | undefined,
+  ignored: ((index: number) => boolean) | null = null
 ): readonly Representation[] | null => {
   const sourceAbi = unwrappedCallableAbi(source)
   const targetAbi = unwrappedCallableAbi(target)
@@ -603,7 +626,7 @@ const inlineCallableAdapterInputsOf = (
   if (node.capability.kind !== 'atom' && node.capability.kind !== 'static') return null
   if (representationKey(node.source) !== representationKey(source) || representationKey(node.target) !== representationKey(target))
     return null
-  return callableAdapterInputsOf(sourceAbi, targetAbi)
+  return callableAdapterInputsOf(sourceAbi, targetAbi, ignored)
 }
 
 const promote = (
@@ -1547,6 +1570,19 @@ export const reflectionExposureOf = (
     const key = String(body.sourceOwner)
     bodyByFunction.set(key, bodyByFunction.has(key) ? null : body)
   }
+  const unobservedInputs = createUnobservedCallableInputs(bodies, (operation) => bodyByOperation.get(operation))
+  const storedCallableIgnores = (
+    operation: IrOperation,
+    value: Representation,
+    field: Representation
+  ): ((index: number) => boolean) | null => {
+    if (operation.kind !== 'set' && operation.kind !== 'define-own-property') return null
+    const sourceAbi = unwrappedCallableAbi(value)
+    const targetAbi = unwrappedCallableAbi(field)
+    return sourceAbi === null || targetAbi === null
+      ? null
+      : unobservedInputs.ignoredParametersOf(operation, operation.value, sourceAbi, targetAbi)
+  }
   const knownCallFunctionIds = (operation: Extract<IrOperation, { readonly kind: 'call' }>): readonly FunctionId[] | null => {
     if (operation.argumentsAreSpread || operation.closedCallee === undefined) return null
     return operation.closedCallee.kind === 'exact' ? [operation.closedCallee.functionId] : operation.closedCallee.functionIds
@@ -2320,7 +2356,8 @@ export const reflectionExposureOf = (
                               ? inlineCallableAdapterInputsOf(
                                   value,
                                   field.value,
-                                  options.conversions?.nodeById(conversionNodeIdOf(value, field.value))
+                                  options.conversions?.nodeById(conversionNodeIdOf(value, field.value)),
+                                  storedCallableIgnores(operation, value, field.value)
                                 )
                               : null
                         if (inputs === null) return false
@@ -2480,9 +2517,11 @@ export const reflectionExposureOf = (
         console.error(
           `[REFLECTION-ADAPTER] lineage=${String(operation.lineage)} node=${operation.conversionUse} capability=${node?.capability.kind ?? 'none'}`
         )
-      if (targetAbi !== null)
-        for (const input of callableAdapterInputsOf(unwrappedCallableAbi(operation.source.representation), targetAbi))
-          promoteFull(input, 'callable-adapter-input')
+      if (targetAbi !== null) {
+        const sourceAbi = unwrappedCallableAbi(operation.source.representation)
+        const ignored = sourceAbi === null ? null : unobservedInputs.ignoredParametersOf(operation, operation.source, sourceAbi, targetAbi)
+        for (const input of callableAdapterInputsOf(sourceAbi, targetAbi, ignored)) promoteFull(input, 'callable-adapter-input')
+      }
     }
     if (observesNativeCarrierOnly(operation)) continue
     if (
