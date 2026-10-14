@@ -2488,7 +2488,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             return
           }
           read(closure(body))
-          for (const call of read(callersOf(body))) if (ts.isCallExpression(call)) add(read(use(root, call)))
+          // `return this` hands back the frame's own receiver, so the tracked value
+          // comes out only where it went in. Continuing it at every caller made a
+          // chainable method (`v.set( ... ).add( ... )`, 43 of them in three's
+          // Vector3) spread each receiver to every chained result in the program.
+          // The frame receiver is `read`: a refused frame refuses this use rather
+          // than dropping a continuation.
+          const returnsReceiver = !ts.isArrowFunction(body) && unwrapErasedExpression(reference).kind === ts.SyntaxKind.ThisKeyword
+          for (const call of read(callersOf(body)))
+            if (ts.isCallExpression(call) && (!returnsReceiver || read(frameQuery('frame-receiver', call, body)).has(root)))
+              add(read(use(root, call)))
           return
         }
         // Enumerating an object reads its KEY SET and nothing else: no slot is
