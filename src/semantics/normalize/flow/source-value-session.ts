@@ -76,6 +76,7 @@ type Query =
   | { readonly kind: 'use'; readonly node: ts.Expression; readonly root: Value }
   | { readonly kind: 'publication'; readonly node: ObjectRoot; readonly key: string; readonly root: Value }
   | { readonly kind: 'unknown-reads'; readonly node: ObjectRoot }
+  | { readonly kind: 'readers'; readonly node: ObjectRoot; readonly key: string }
   | { readonly kind: 'callers'; readonly node: ts.SignatureDeclaration }
 
 interface Cause {
@@ -326,6 +327,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   const storedSlots = new Map<ObjectRoot, Map<string, Query>>()
   const uses = new Map<Value, Map<ts.Expression, Query>>()
   const publications = new Map<Value, Map<ObjectRoot, Map<string, Query>>>()
+  const readerQueries = new Map<ObjectRoot, Map<string, Query>>()
   const frameQueries = new Map<
     string,
     Map<ts.CallExpression | ts.NewExpression, Map<ts.SignatureDeclaration, Map<ts.Expression | ts.ParameterDeclaration | null, Query>>>
@@ -788,6 +790,20 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     if (!keys) containers.set(container, (keys = new Map()))
     let query = keys.get(key)
     if (!query) keys.set(key, (query = { kind: 'publication', root, node: container, key }))
+    return query
+  }
+  /**
+   * The accesses that can read `key` out of `container`, whatever value the key
+   * holds. Every `publication` of a value under that key needs the same answer, and
+   * asking it inside the publication repeated the scan of every program read of the
+   * key once per VALUE: on sakura (three.js r185) 41M of the solve's 45M observe edges
+   * after ten minutes, without the first query ever returning.
+   */
+  const readers = (container: ObjectRoot, key: string): Query => {
+    let keys = readerQueries.get(container)
+    if (!keys) readerQueries.set(container, (keys = new Map()))
+    let query = keys.get(key)
+    if (!query) keys.set(key, (query = { kind: 'readers', node: container, key }))
     return query
   }
   /** The cell holding the object a binding element takes apart, as a query. */
@@ -3372,6 +3388,28 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           }
           break
         }
+        case 'readers': {
+          const aliases = ts.isArrayLiteralExpression(query.node)
+            ? query.key === ELEMENT_KEY
+              ? [...readsByKey.keys()].filter((key) => key === ELEMENT_KEY || isCanonicalIndex(key))
+              : isCanonicalIndex(query.key)
+                ? [query.key, ELEMENT_KEY]
+                : [query.key]
+            : [query.key]
+          for (const alias of aliases)
+            for (const entry of readsByKey.get(alias) ?? NO_READS) {
+              if (!observe(entry.receiver).has(query.node)) continue
+              if (keyReaches(query.node, keysOf(entry.access), query.key)) facts.add(entry.access)
+            }
+          // Discovery-only, exactly as the receiver test it replaces was: a
+          // publication never required the unknown reads to have settled, it
+          // only had to see the ones that had.
+          for (const access of observe(unknownReadsOf(query.node))) {
+            if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) continue
+            if (keyReaches(query.node, keysOf(access), query.key)) facts.add(access)
+          }
+          break
+        }
         case 'publication': {
           read(closure(query.node))
           // A container merged into another by `Object.assign` hands this
@@ -3392,25 +3430,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             for (const held of read(value(stored.arguments[0]!)))
               if (isObjectRoot(held)) for (const key of plan.keys) add(read(publication(query.root, held, key)))
           }
-          const aliases = ts.isArrayLiteralExpression(query.node)
-            ? query.key === ELEMENT_KEY
-              ? [...readsByKey.keys()].filter((key) => key === ELEMENT_KEY || isCanonicalIndex(key))
-              : isCanonicalIndex(query.key)
-                ? [query.key, ELEMENT_KEY]
-                : [query.key]
-            : [query.key]
-          for (const alias of aliases)
-            for (const entry of readsByKey.get(alias) ?? NO_READS) {
-              if (!observe(entry.receiver).has(query.node)) continue
-              if (keyReaches(query.node, keysOf(entry.access), query.key)) add(read(use(query.root, entry.access)))
-            }
-          // Discovery-only, exactly as the receiver test it replaces was: a
-          // publication never required the unknown reads to have settled, it
-          // only had to see the ones that had.
-          for (const access of observe(unknownReadsOf(query.node))) {
-            if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) continue
-            if (keyReaches(query.node, keysOf(access), query.key)) add(read(use(query.root, access)))
-          }
+          // Required, so the readers' completeness and the ledger obligations their
+          // key tests raise still reach this publication.
+          for (const access of read(readers(query.node, query.key)))
+            if (ts.isPropertyAccessExpression(access) || ts.isElementAccessExpression(access)) add(read(use(query.root, access)))
           // The value this key holds also reaches every cell a binding element
           // of this container declares. Enumerating only `propertyAccesses`
           // left `const { app } = p; sink(app)` out of the inventory, which is
