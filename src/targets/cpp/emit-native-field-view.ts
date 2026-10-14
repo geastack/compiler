@@ -142,7 +142,18 @@ export const nativeFieldViewReadForText = (
         // `.is<N>()` on it does not parse. Read through the source's own
         // carrier type and the recipe sees a concrete value.
         const concrete = actual ? `static_cast<const ${cppTypeOf(actual.source)}&>(${actual.text})` : ''
-        const getterAnswer = ordinary && actual?.accessor === true ? `return ${renderedLeaf(ctx, ordinary.conversion, concrete)};` : null
+        // A declared, always-present field (not optional, no absent-descriptor
+        // route) is the plain allocation's own C++ member: read it the way an
+        // ordinary receipt-free read does, rather than through the string-keyed
+        // own-field protocol. A program-wide view target (any record a dynamic
+        // writer may store a view into) otherwise sends every plain read of the
+        // type through `gea_readOwnFieldNative`.
+        const memberAnswer =
+          ordinary && actual && actual.accessor !== true && actual.source.kind !== 'optional' && receipt.originalAbsent !== true
+            ? `return ${renderedLeaf(ctx, ordinary.conversion, concrete)};`
+            : null
+        const getterAnswer =
+          ordinary && actual?.accessor === true ? `return ${renderedLeaf(ctx, ordinary.conversion, concrete)};` : memberAnswer
         const plain =
           ordinary && actual && actual.source.kind === 'optional'
             ? `return ${renderedLeaf(ctx, ordinary.conversion, concrete)};`
@@ -167,7 +178,7 @@ export const nativeFieldViewReadForText = (
           `if (!gea_field_receiver->gea_ownFieldPresent(${property}, gea_plain_present) || gea_plain_present) ` +
           'gea::host::throwRuntimeError("TypeError", "a native allocation read has no certified carrier route"); '
         return (
-          `return gea::record::readLiveField<${result}>(gea_field_receiver, ${property}, ` +
+          `return gea::record::readLiveField<${result}>(gea_field_receiver, ${liveKeyText(key)}, ` +
           `${adapter}, ${accepted}, [&]() -> ${result} { ${getterAnswer ?? `${native}${plain}`} });`
         )
       },
@@ -308,7 +319,7 @@ export const nativeFieldViewWriteText = (
         `return gea_field_receiver->gea_writeOwnFieldNative(${viewKeyText(key)}, ` +
         'gea_plain_write, gea::nativeIsExtensible(gea_field_receiver));'
       return (
-        `return gea::record::writeLiveField(gea_field_receiver, ${viewKeyText(key)}, ` +
+        `return gea::record::writeLiveField(gea_field_receiver, ${liveKeyText(key)}, ` +
         `gea_field_value, ${adapter}, [&]() -> bool { ${plain} });`
       )
     })
@@ -380,7 +391,7 @@ export const nativeHeldFieldViewReadText = (
 ): string => {
   const result = cppTypeOf(target)
   const { adapter, accepted } = fieldViewRoutesText(ctx, receipt, result)
-  return `gea::record::readLiveField<${result}>(${receiver}, ${viewKeyText(receipt.key)}, ${adapter}, ${accepted}, [&]() -> ${result} { return ${plain}; })`
+  return `gea::record::readLiveField<${result}>(${receiver}, ${liveKeyText(receipt.key)}, ${adapter}, ${accepted}, [&]() -> ${result} { return ${plain}; })`
 }
 
 /**

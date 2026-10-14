@@ -87,6 +87,7 @@ import { splitGeneratorBodies } from './ir/generator-split.js'
 import { shakeProgram } from './ir/shake.js'
 import { pruneProvenBranches } from './ir/proven-branches.js'
 import { threadShortCircuitJoins } from './ir/short-circuit-threading.js'
+import { dropUnreadPureConversions } from './ir/pure-conversion-reuse.js'
 import { publishEmissionRepresentationsOf, type EmissionRepresentationPublication } from './ir/emission-representations.js'
 import { finalizeTypedComputedReads, reflectionExposureOf, type ReflectionExposure } from './ir/reflection-demand.js'
 import { confirmUnboxedMethodBinds } from './ir/boxed-bind-assumptions.js'
@@ -1464,7 +1465,7 @@ export const compile = (request: CompilationRequest): CompilationResult => {
   const absentArmBodies =
     finalizedBodies && reflection ? finalizeAbsentClassArms(finalizedBodies, reflection, executableClasses) : finalizedBodies
   // Last, so the call targets it follows into a callee are the final ones.
-  const emittedBodies = absentArmBodies
+  const sharedEmptyBodies = absentArmBodies
     ? shareReadOnlyEmptyRecords(absentArmBodies, {
         placements: splitPlacements,
         declaresField: (shapeId, key) => {
@@ -1477,6 +1478,9 @@ export const compile = (request: CompilationRequest): CompilationResult => {
         }
       })
     : absentArmBodies
+  // Before the recipes and certification that read the final operation list:
+  // a selection an `instanceof` no longer reads (`call-dispatch.ts`) goes.
+  const emittedBodies = sharedEmptyBodies ? dropUnreadPureConversions(sharedEmptyBodies, conversionCensus) : sharedEmptyBodies
   stage('reflection')
   // Certification is a walk of the IR lowering actually built
   // (one question, one census): every capability the printer

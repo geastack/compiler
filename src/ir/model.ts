@@ -450,6 +450,18 @@ export interface CallOperation extends IrOperationBase {
    */
   readonly target?: CallDispatchTarget
   /**
+   * A class method call `target` left `unresolved` ONLY because the receiver's
+   * class reserves an own-property slot that could shadow the method
+   * (`classMethodOverrideOf`): the body named here is what the call reaches
+   * whenever that slot is empty, which is the overwhelmingly common case
+   * (a computed-key write anywhere in the program reserves the slot for every
+   * method of the class). The emitter tests the slot's presence flag and calls
+   * this body by name, keeping the ordinary method-value call for an instance
+   * that does own the key. Set only when the held convention equals the body's,
+   * so both branches take the same arguments and produce the same result.
+   */
+  readonly ownShadowGuard?: { readonly functionId: FunctionId; readonly key: string }
+  /**
    * The compiler-owned body identity of this call's callee, when the same
    * producer/member resolution used by `target` proved it without requiring
    * capture-free physical devirtualization.  This is deliberately separate

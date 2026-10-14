@@ -779,6 +779,8 @@ export interface EmitBodyFacts {
   readonly stableBorrowActuals: ReadonlySet<IrValueId>
   /** See `EmitContext.borrowedArmProjections`. */
   readonly borrowedArmProjections: ReadonlyMap<IrValueId, BorrowedArmProjection>
+  /** See `EmitContext.repeatedConversions`. */
+  readonly repeatedConversions: ReadonlyMap<IrValueId, IrValueId>
   /** See `EmitContext.computeOrigins`. */
   readonly computeOrigins: ReadonlyMap<IrValueId, ComputeOperation>
   /** See `EmitContext.propertyReadOrigins`. */
@@ -1304,6 +1306,8 @@ export interface EmitContext {
   readonly stableBorrowActuals: ReadonlySet<IrValueId>
   /** Converts rendered as a reference to one arm of a borrowed union formal (`borrowed-arm-projections.ts`). Each is also a stable actual. */
   readonly borrowedArmProjections: ReadonlyMap<IrValueId, BorrowedArmProjection>
+  /** Pure conversions spelled as the storage of a dominating conversion of the same value (`ir/pure-conversion-reuse.ts`), later result -> earlier. */
+  readonly repeatedConversions: ReadonlyMap<IrValueId, IrValueId>
   readonly callableMemberCandidates: ReadonlyMap<string, FunctionId>
   /** This body's guard candidates for calls through callable parameters, captures and fields (`callableFlowCandidatesOf`). */
   readonly callableFlowCandidates: ReadonlyMap<IrValueId, CallableFlowCandidate>
@@ -2196,6 +2200,7 @@ export const createEmitContext = (
     stableBorrowEntries,
     stableBorrowActuals: bodyFacts.stableBorrowActuals,
     borrowedArmProjections: bodyFacts.borrowedArmProjections,
+    repeatedConversions: bodyFacts.repeatedConversions,
     repeatedConstructors,
     dyingArguments,
     hostMethodAliases,

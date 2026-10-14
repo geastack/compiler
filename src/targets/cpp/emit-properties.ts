@@ -219,7 +219,7 @@ export const dictionaryTableOf = (
   key: IrOperand,
   /** The key text is only read as a `std::string_view` (`read`/`has`), never subscripted: see `keyedTableKeyText`. */
   view = false
-): { readonly member: string; readonly subscript: string; readonly key: string } | null => {
+): { readonly member: string; readonly subscript: string; readonly key: string; readonly table: string } | null => {
   const representation = receiver.representation
   if (representation.kind !== 'dictionary') return null
   const receiverText = operandText(ctx, receiver)
@@ -228,7 +228,8 @@ export const dictionaryTableOf = (
   return {
     member: `${receiverText}${memberAccessOperator(representation.ownership)}`,
     subscript: `${indexed}[${keyText}]`,
-    key: keyText
+    key: keyText,
+    table: indexed
   }
 }
 
@@ -263,11 +264,23 @@ const dictionaryReadText = (ctx: EmitContext, operation: GetOperation): string |
   if (operation.receiver.representation.kind !== 'dictionary') return null
   const source = operation.receiver.representation.value
   const read = operation.result.representation
-  const raw = `${table.member}read(${table.key})`
+  // A constant string key reads with its own site's position hint
+  // (`Dictionary::hintedPosition`): the static lives in a lambda unique to the
+  // site, so each read site remembers where it last found its key.
+  const hinted = operation.receiver.representation.key === 'string' && ctx.staticKeyTexts.get(operation.key.value) !== undefined
+  const withHint = (text: string): string =>
+    `([&]() -> decltype(auto) { static constinit std::atomic<std::uint32_t> gea_key_hint{0}; return ${text}; }())`
+  const raw = hinted
+    ? withHint(`gea::dictionary::readHinted(${table.table}, ${table.key}, gea_key_hint)`)
+    : `${table.member}read(${table.key})`
   if (representationKey(source) === representationKey(read)) return raw
   if (read.kind === 'optional' && representationKey(source) === representationKey(read.payload)) {
+    // One lookup where the table can answer presence and value together
+    // (`gea::dictionary::readIfPresent`); otherwise its own `has` and `read`.
     const carrier = cppTypeOf(read)
-    return `(${table.member}has(${table.key}) ? ${carrier}(${raw}) : ${carrier}())`
+    return hinted
+      ? withHint(`gea::dictionary::readIfPresentHinted<${carrier}>(${table.table}, ${table.key}, gea_key_hint)`)
+      : `gea::dictionary::readIfPresent<${carrier}>(${table.table}, ${table.key})`
   }
   const converted = alignedValueText(ctx, 'emit-properties.ts:213', source, read, raw)
   if (converted !== null) return converted
@@ -1578,7 +1591,11 @@ export const emitFieldStore = (
         pendingPacks
       }
     }
-    const rendered = nativeFieldViewWriteText(viewContext, operation)
+    const rendered = nativeFieldViewWriteText(viewContext, operation, (bound, receiver) => {
+      const ordinary: string[] = []
+      emitFieldStoreLines(bound, ordinary, { ...operation, ...(receiver === undefined ? {} : { receiver }), result: null }, label)
+      return ordinary
+    })
     if (rendered === null) throw new Error('a published field-view write lost its receipt')
     lines.push(
       operation.strict

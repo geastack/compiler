@@ -23,10 +23,12 @@ import {
   type IrBlock,
   type IrBlockId,
   type IrBody,
-  type IrNonTerminatorOperation
+  type IrNonTerminatorOperation,
+  type IrOperand
 } from './model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from './queries.js'
 import { nativeUnionMethodTargetsOf } from './native-union-method-targets.js'
+import { pureNativeConversion } from './pure-conversion-reuse.js'
 
 /**
  * Fills the post-shake call facts. `CallOperation.target` says which
@@ -825,6 +827,7 @@ const constantStringKeyOf = (key: IrValueId, producers: ReadonlyMap<IrValueId, I
 interface ResolvedCall {
   readonly target: CallDispatchTarget
   readonly closedCallee?: CallCalleeIdentity
+  readonly ownShadowGuard?: { readonly functionId: FunctionId; readonly key: string }
 }
 
 const unresolvedCall: ResolvedCall = { target: unresolvedTarget }
@@ -915,11 +918,23 @@ const resolveClassMethod = (
     producers.get(producer.receiver.value)?.kind === 'receiver' &&
     body.abi?.receiver?.kind === 'class-ref' &&
     body.abi.receiver.declaration !== receiver.declaration
-  if (
-    (!isSuperAccess && classMethodOverrideOf(classes, receiver.declaration, key)) ||
-    classPrototypeMethodMutableOf(classes, receiver.declaration, key)
-  )
-    return unresolvedCall
+  if (classPrototypeMethodMutableOf(classes, receiver.declaration, key)) return unresolvedCall
+  if (!isSuperAccess && classMethodOverrideOf(classes, receiver.declaration, key)) {
+    // Only an own property can replace the body here: no subclass redeclares
+    // the key and the prototype is never written. An instance whose own slot
+    // is empty therefore runs exactly this body, so the call may name it
+    // behind a test of that slot (`CallOperation.ownShadowGuard`).
+    const functionId = site.method.callable
+    const heldAbi = abiOfCallee(producer.result.representation)
+    const bodyAbi = abiOf(functionId)
+    const guardable =
+      classFamilyOverridesOf(classes, receiver.declaration, key).length === 0 &&
+      capturesNothing(functionId) &&
+      heldAbi !== null &&
+      bodyAbi !== null &&
+      abiKey(heldAbi) === abiKey(bodyAbi)
+    return guardable ? { target: unresolvedTarget, ownShadowGuard: { functionId, key } } : unresolvedCall
+  }
   if (classFamilyOverridesOf(classes, receiver.declaration, key).length === 0 || isSuperAccess) {
     const functionId = site.method.callable
     return {
@@ -999,6 +1014,12 @@ const resolveCall = (
     const actual = operation.thisArgument ?? operation.receiver
     if (heldAbi === null || heldAbi.receiver === null || actual?.value !== producer.receiver.value)
       return { target: unresolvedTarget, ...(classCall.closedCallee ? { closedCallee: classCall.closedCallee } : {}) }
+    // The guarded body receives the call's own arguments in the held frame, so
+    // the frame the call fills must be the one the guard was proved against.
+    if (classCall.ownShadowGuard !== undefined) {
+      const bodyAbi = abiOf(classCall.ownShadowGuard.functionId)
+      if (bodyAbi === null || abiKey(heldAbi) !== abiKey(bodyAbi) || operation.argumentsAreSpread) return unresolvedCall
+    }
     return classCall
   }
   const arms = nativeUnionMethodTargetsOf(producer.receiver.representation, classes, key)
@@ -1036,15 +1057,40 @@ const rewriteBody = (
   viewHolders?: ReadonlyMap<string, ReadonlySet<DeclarationId>>
 ): IrBody => {
   const producers = producerMapOf(body)
+  let uses: Map<IrValueId, number> | null = null
+  const usesOf = (value: IrValueId): number => {
+    if (uses === null) {
+      const counted = new Map<IrValueId, number>()
+      for (const block of body.blocks.values())
+        for (const operation of [...block.operations, block.terminator])
+          for (const operand of operandsOfIrOperation(operation)) counted.set(operand.value, (counted.get(operand.value) ?? 0) + 1)
+      uses = counted
+    }
+    return uses.get(value) ?? 0
+  }
+  // `x instanceof C` asks about the object, which a native selection or
+  // widening of `x` keeps: a narrowing that exists only to be tested (the
+  // `else if (value instanceof SpotLight)` arm of a chain, after the earlier
+  // arms narrowed `value`'s carrier) is a union copy and a destruction around a
+  // tag test. Tested on the selection's own source, the test reads the tags in
+  // place and the selection, now unread, is dropped (`pure-conversion-reuse.ts`).
+  const instanceSourceOf = (left: IrOperand): IrOperand | null => {
+    if (conversions === undefined) return null
+    const producer = producers.get(left.value)
+    if (producer?.kind !== 'convert' || usesOf(left.value) !== 1 || !pureNativeConversion(producer, conversions)) return null
+    const source = producer.source.representation
+    return source.kind === 'tagged-union' || source.kind === 'optional' || source.kind === 'class-ref' ? producer.source : null
+  }
   let bodyChanged = false
   const blocks = new Map<IrBlockId, IrBlock>()
   for (const [blockId, block] of body.blocks) {
     let blockChanged = false
     const operations = block.operations.map((operation) => {
       if (operation.kind === 'compute' && operation.form === 'instanceof') {
-        const [left, right] = operation.operands
-        const classInstanceTest =
-          left && right
+        const [selected, right] = operation.operands
+        const tested = selected && right ? instanceSourceOf(selected) : null
+        const testOf = (left: IrOperand) =>
+          right
             ? classInstanceTestOf(left.representation, right.representation, classes, {
                 prototypeOf: classPrototypeOf(left.value, producers, classes),
                 materialized: prototypes,
@@ -1053,6 +1099,12 @@ const rewriteBody = (
                 ...(viewHolders === undefined ? {} : { viewHolders })
               })
             : undefined
+        const sourceTest = tested === null ? undefined : testOf(tested)
+        if (tested !== null && sourceTest !== undefined) {
+          blockChanged = true
+          return { ...operation, operands: [tested, ...operation.operands.slice(1)], classInstanceTest: sourceTest }
+        }
+        const classInstanceTest = selected ? testOf(selected) : undefined
         if (classInstanceTest === undefined) return operation
         blockChanged = true
         return { ...operation, classInstanceTest }
@@ -1080,7 +1132,7 @@ const rewriteBody = (
         return { ...operation, closedCallable: { kind: 'exact' as const, functionId } }
       }
       if (operation.kind !== 'call') return operation
-      const { target, closedCallee } = resolveCall(
+      const { target, closedCallee, ownShadowGuard } = resolveCall(
         operation,
         body,
         producers,
@@ -1091,7 +1143,11 @@ const rewriteBody = (
         callableBindings,
         callableMembers
       )
-      if (target.kind === 'unresolved' && closedCallee === undefined) return operation
+      if (target.kind === 'unresolved' && closedCallee === undefined) {
+        if (ownShadowGuard === undefined) return operation
+        blockChanged = true
+        return { ...operation, ownShadowGuard }
+      }
       // A closed static body whose ABI has no receiver cannot observe the
       // constructor used for method syntax. Keep its evaluation in preceding
       // IR, but normalize the invocation to the body's actual convention.

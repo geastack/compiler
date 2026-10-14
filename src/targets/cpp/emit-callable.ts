@@ -19,7 +19,7 @@ import type {
   IrOperand,
   SuperInitializeOperation
 } from '../../ir/model.js'
-import type { DeclarationId, FunctionId } from '../../identity/ids.js'
+import type { DeclarationId, FunctionId, IrValueId } from '../../identity/ids.js'
 import type { CallableAbi, Representation } from '../../representation/model.js'
 import { classLayoutsConstructedBy } from '../../projection/classes.js'
 import { classFamilyOverridesOf, virtualDispatchKey } from '../../projection/dispatch.js'
@@ -51,6 +51,7 @@ import {
   defineValue,
   defineValueAlias,
   isCppEmitBlockedError,
+  isDeferredValue,
   isIntegerStorageValue,
   operandText,
   paddedArguments,
@@ -95,6 +96,7 @@ import {
   cppConstructName,
   cppInitializeName,
   cppRecordFieldName,
+  cppRecordFieldPresenceName,
   cppRefcountedReceiver,
   cppStringLiteral,
   cppTypeOf,
@@ -1551,16 +1553,35 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
       )
       .map((argument) => argument.value)
   )
+  // `stableBorrowActualsOf` leaves out every value an operation computes, because
+  // the printer may withhold one as an expression naming mutable storage. By the
+  // time a call renders, every argument's own definition has rendered, so that
+  // choice is settled: an owned SSA temporary the printer declared a local of its
+  // own (`defineValue`) and did not withhold is a slot of this frame no callee can
+  // name, exactly like a private cell. `setNativeUniformValue(u, gl, v.value, t)`
+  // sent its freshly read uniform value through the owning wrapper, copying the
+  // seq element union and the optional texture table into by-value formals per
+  // uniform per draw.
+  // A repeated conversion spelled as an earlier one's storage (`repeatedConversions`) is that storage.
+  const storageOf = (value: IrValueId): IrValueId => ctx.repeatedConversions.get(value) ?? value
+  const stableActuals = new Set(
+    operation.arguments
+      .map((argument) => argument.value)
+      .filter(
+        (value) =>
+          ctx.stableBorrowActuals.has(value) ||
+          (ctx.ownedValues.has(storageOf(value)) && !isDeferredValue(ctx, storageOf(value)))
+      )
+  )
   const stableEntry =
-    stableCandidate !== undefined &&
-    stableBorrowEntryAccepts(stableCandidate, operation.arguments, ctx.stableBorrowActuals, potentiallyMovingArguments)
+    stableCandidate !== undefined && stableBorrowEntryAccepts(stableCandidate, operation.arguments, stableActuals, potentiallyMovingArguments)
       ? stableCandidate
       : undefined
   // A candidate's borrowed entry for this call, when it has one: the stable
   // entry its arguments are accepted by, or its borrowable body.
   const borrowedEntryOf = (target: FunctionId): string | undefined => {
     const stable = ctx.stableBorrowEntries.get(cppBodyName(target))
-    if (stable !== undefined && stableBorrowEntryAccepts(stable, operation.arguments, ctx.stableBorrowActuals, potentiallyMovingArguments))
+    if (stable !== undefined && stableBorrowEntryAccepts(stable, operation.arguments, stableActuals, potentiallyMovingArguments))
       return stable.name
     return ctx.borrowableMemberBodies.has(target) ? cppBodyName(target) : undefined
   }
@@ -1614,14 +1635,59 @@ export const emitCall = (ctx: EmitContext, lines: string[], operation: CallOpera
     )
   }
   const logicalThis = genericNativeLogicalReceiverOf(operation)
+  // `CallOperation.ownShadowGuard`: an instance that does not own the method key
+  // runs the prototype body, which this call names directly; the method-value
+  // read (rendered inline when deferred) and its adapter are then never built.
+  // A null receiver takes the ordinary path, which raises the language's error.
+  // The receiver argument is rendered once, as the parameter of an immediately
+  // invoked lambda, because a deferred operand may be spelled at one use only.
+  const guard = operation.ownShadowGuard
+  const guardable =
+    guard !== undefined &&
+    operation.receiver?.representation.kind === 'class-ref' &&
+    dispatched === undefined &&
+    direct === undefined &&
+    candidate === undefined &&
+    abi.receiver !== null &&
+    padded.length > 0 &&
+    operation.builtinShadowGuard === undefined &&
+    calleeOperand.value === operation.callee.value
+  const guardedInvocation = (): string => {
+    const [receiverArgument, ...rest] = padded
+    const self = 'gea_guard_receiver'
+    // A typed (non-generic) parameter: a generic lambda would make every
+    // member template the callee names a dependent name needing `template`.
+    const forwarded = `std::move(${self})`
+    return (
+      `[&](${cppTypeOf(abi.receiver!)} ${self}) -> decltype(auto) { return (static_cast<bool>(${self}) && !${self}->${cppRecordFieldPresenceName(guard!.key)}) ` +
+      `? ${cppBodyName(guard!.functionId)}(${[self, ...rest].join(', ')}) ` +
+      `: ${operandText(ctx, calleeOperand)}.${callMember}(${[forwarded, ...rest].join(', ')}); }(${receiverArgument})`
+    )
+  }
+  // A logical receiver that is a value this frame already holds (not withheld
+  // as an expression) can be built inside the callee's dispatch, only for a
+  // target that reads it (`CallableObject::callWithLazyReceiver`).
+  // Not inside a C++ coroutine (a generator or an async body): the clang-cl LTO
+  // jump threading (VS 18 toolchain) crashed on a coroutine resume function holding the builder
+  // lambda (instance-culling's generator), and a coroutine frame gains nothing here.
+  const lazyLogicalReceiver = (logical: IrOperand): boolean =>
+    !ctx.generatorBody &&
+    !ctx.asyncCoroutineBody &&
+    !isDeferredValue(ctx, logical.value) &&
+    calleeOperand.value === operation.callee.value &&
+    isCallableObject(calleeOperand.representation)
   const invocation =
     dispatched !== undefined
       ? `${virtualPadded[0]}->${dispatched.member}(${virtualPadded.slice(1).join(', ')})`
       : direct !== undefined
         ? `${stableEntry?.name ?? direct}(${padded.join(', ')})`
         : abi.receiver === null && logicalThis !== null
-          ? `${operandText(ctx, calleeOperand)}.callWithReceiver(${[operationNativeCallReceiverText(ctx, operation, logicalThis.representation, operandText(ctx, logicalThis)), ...padded].join(', ')})`
-          : `${operandText(ctx, calleeOperand)}.${callMember}(${padded.join(', ')})`
+          ? lazyLogicalReceiver(logicalThis)
+            ? `${operandText(ctx, calleeOperand)}.callWithLazyReceiver(${[`[&]() -> gea::NativeCallReceiver { return ${operationNativeCallReceiverText(ctx, operation, logicalThis.representation, operandText(ctx, logicalThis))}; }`, ...padded].join(', ')})`
+            : `${operandText(ctx, calleeOperand)}.callWithReceiver(${[operationNativeCallReceiverText(ctx, operation, logicalThis.representation, operandText(ctx, logicalThis)), ...padded].join(', ')})`
+          : guardable
+            ? guardedInvocation()
+            : `${operandText(ctx, calleeOperand)}.${callMember}(${padded.join(', ')})`
   // A result the integer census narrowed from the candidate body's returns is
   // checked where it lands, on every path the call can take: the guard above
   // may miss and run whatever callable the member holds.
