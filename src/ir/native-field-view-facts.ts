@@ -7,9 +7,10 @@ import { representationKey, type Representation } from '../representation/model.
 import type { NativeCallableFlow } from './callable-class-flow.js'
 import { allOperationsOf, type GetOperation, type SetOperation, type IrBody, type IrOperand } from './model.js'
 import { nativeFieldViewDynamicValueIsNative, nativeFieldViewPlansOf, type NativeFieldViewPlan } from '../conversion/native-field-view.js'
-import type { NativeFieldStorageDomain } from './native-field-view-domains.js'
+import { nativeFieldViewForwardedWriteKey, type NativeFieldStorageDomain } from './native-field-view-domains.js'
 import type { ProgramConversionRecipe } from './program-conversions.js'
 import type { HostNamespaceCensus } from './host-namespace-reads.js'
+import { nativeCallableDataCarrierHasStorageIdentity } from '../representation/native-callable-data-storage.js'
 
 export interface NativeFieldViewRead {
   readonly receiver: IrValueId
@@ -38,13 +39,41 @@ export interface NativeFieldViewWrite {
   readonly value: IrValueId
   readonly source: string
   readonly targets: readonly { readonly target: Representation | null; readonly conversion: ConversionNodeId | null }[]
+  /**
+   * A runtime key a descriptor may not name: `keyDomain` is every key a live
+   * descriptor names (of the proven set, when there is one), each keeping its
+   * exact slot route, and any other key is
+   * stored on the allocation's own extension -- the original source's
+   * expando behind a view, an installed Document's entry, or the plain
+   * allocation's own expando or index sidecar (`nativeFieldViewOpenWriteHomesOf`).
+   */
+  readonly openKeys?: true
+  /**
+   * The carrier an unnamed key keeps in an expando: the value's own, which the
+   * write threads to the runtime as its typed policy, with the certified Value
+   * materializer only a dynamic observer runs. Both are also `targets`, so the
+   * same adapter answers an expando, a Document entry, and every named slot.
+   */
+  readonly open?: { readonly carrier: Representation; readonly materializer: ConversionNodeId }
+  /**
+   * Named keys a live view forwards to an original source whose own layout
+   * does not declare them (a `sourceAbsent` descriptor): JavaScript creates
+   * the property on that source, so the write carries `open` as well and
+   * the source's expando keeps it, exactly as for an unnamed key.
+   */
+  readonly forwardedKeys?: readonly string[]
 }
 
 type FieldFlow = Pick<NativeCallableFlow, 'nativeFieldStorageValues' | 'nativeAccessorStorageValues' | 'nativeFieldMethodValues'> &
   Partial<
     Pick<
       NativeCallableFlow,
-      'nativeFieldViewStorageValues' | 'nativeFieldOperationStorageValues' | 'nativeFieldViewOrigins' | 'nativeFieldViewAbsentRoutesOf'
+      | 'nativeFieldViewStorageValues'
+      | 'nativeFieldOperationStorageValues'
+      | 'nativeFieldViewOrigins'
+      | 'nativeFieldViewAbsentRoutesOf'
+      | 'nativeFieldViewOpenWriteValues'
+      | 'nativeFieldViewForwardedWrites'
     >
   >
 
@@ -388,6 +417,24 @@ export const nativeFieldViewWriteOf = (
   )
     return null
   const targets = new Map<string, NativeFieldViewWrite['targets'][number]>()
+  // A forwarded key no source declares has no setter-less descriptor to
+  // refuse with: its store creates the key on that source.
+  const forwarded = !data && !accessor && descriptors?.some((entry) => entry.sourceAbsent === true) === true
+  let open: NativeFieldViewWrite['open']
+  if (forwarded) {
+    if (flow.nativeFieldViewForwardedWrites?.has(nativeFieldViewForwardedWriteKey(operation.receiver.value, key)) !== true) return null
+    const extension = nativeFieldViewExtensionOf(operation, conversions)
+    if (extension === null) return null
+    open = extension.open
+    for (const target of extension.targets) targets.set(representationKey(target.target!), target)
+    // A plain allocation of the receiver's own record keeps the key in its slot.
+    const own = ownRecordFieldOf(operation.receiver.representation, key)
+    if (own !== null) {
+      const node = conversions.nodeFor(operation.value.representation, own)
+      if (!recipeIsMaterializableWithoutPriorSourceGuard(node, conversions.nodeById)) return null
+      targets.set(representationKey(own), { target: own, conversion: node.id })
+    }
+  }
   for (const target of data ?? accessor?.map((entry) => entry.write) ?? descriptors!.map((entry) => entry.write)) {
     if (target === null) {
       targets.set('no-setter', { target, conversion: null })
@@ -399,6 +446,8 @@ export const nativeFieldViewWriteOf = (
     }
     const node = conversions.nodeFor(operation.value.representation, target)
     if (!recipeIsMaterializableWithoutPriorSourceGuard(node, conversions.nodeById)) return null
+    const previous = targets.get(representationKey(target))
+    if (previous !== undefined && previous.conversion !== node.id) return null
     targets.set(representationKey(target), { target, conversion: node.id })
   }
   return {
@@ -407,8 +456,17 @@ export const nativeFieldViewWriteOf = (
     key,
     value: operation.value.value,
     source: representationKey(operation.value.representation),
-    targets: [...targets.values()]
+    targets: [...targets.values()],
+    ...(open === undefined ? {} : { open, forwardedKeys: [key] })
   }
+}
+
+const ownRecordFieldOf = (receiver: Representation, key: string): Representation | null => {
+  if (receiver.kind === 'optional' || receiver.kind === 'borrowed-ref')
+    return ownRecordFieldOf(receiver.kind === 'optional' ? receiver.payload : receiver.referent, key)
+  return receiver.kind === 'record' || receiver.kind === 'record-with-index'
+    ? (receiver.fields.find((field) => field.key === key)?.value ?? null)
+    : null
 }
 
 export const nativeFieldViewWriteSelectionOf = (
@@ -423,7 +481,93 @@ export const nativeFieldViewWriteSelectionOf = (
   const targets = new Map<string, NativeFieldViewWrite['targets'][number]>()
   for (const write of writes)
     for (const target of write!.targets) targets.set(target.target === null ? 'no-setter' : representationKey(target.target), target)
-  return { ...writes[0]!, keyDomain, targets: [...targets.values()] }
+  const forwardedKeys = writes.flatMap((write) => write!.forwardedKeys ?? [])
+  const open = writes.find((write) => write!.open !== undefined)?.open
+  const { open: _open, forwardedKeys: _forwarded, ...first } = writes[0]!
+  return {
+    ...first,
+    keyDomain,
+    targets: [...targets.values()],
+    ...(open === undefined ? {} : { open, forwardedKeys })
+  }
+}
+
+const dynamicValue: Representation = { kind: 'dynamic', reason: 'declared-any-never-narrowed' }
+
+/**
+ * The carrier a store keeps on an allocation's own extension (its expando or
+ * a Document entry): the value's own, with its certified Value materializer.
+ * A carrier with no storage identity, or none a dynamic observer could
+ * materialize, has none.
+ */
+const nativeFieldViewExtensionOf = (
+  operation: SetOperation,
+  conversions: ConversionCensus
+): {
+  readonly open: NonNullable<NativeFieldViewWrite['open']>
+  readonly targets: readonly { readonly target: Representation; readonly conversion: ConversionNodeId }[]
+} | null => {
+  const carrier = operation.value.representation
+  if (carrier.kind !== 'dynamic' && !nativeCallableDataCarrierHasStorageIdentity(carrier)) return null
+  const materializer = conversions.nodeFor(carrier, dynamicValue)
+  if (!recipeIsMaterializableWithoutPriorSourceGuard(materializer, conversions.nodeById)) return null
+  const stored = conversions.nodeFor(carrier, carrier)
+  if (!recipeIsMaterializableWithoutPriorSourceGuard(stored, conversions.nodeById)) return null
+  return {
+    open: { carrier, materializer: materializer.id },
+    targets: [
+      { target: carrier, conversion: stored.id },
+      { target: dynamicValue, conversion: materializer.id }
+    ]
+  }
+}
+
+/**
+ * `for (const key in parameters) data[key] = parameters[key]` over a live view
+ * target (three's `BufferGeometry.toJSON`): the write counterpart of
+ * `nativeFieldViewOpenReadOf`. Every named key keeps its exact slot route; a
+ * key outside them is created or overwritten where JavaScript would put it
+ * -- the original source's own expando behind a record view, an installed
+ * Document's entry, or the plain allocation's expando or index sidecar --
+ * and only where every allocation the carrier can hold has such a home
+ * (`nativeFieldViewOpenWriteValues`). The value keeps its own carrier there,
+ * so a carrier with no storage identity or no certified Value materializer
+ * (what a dynamic observer of the key would need) is refused.
+ */
+export const nativeFieldViewOpenWriteOf = (
+  operation: SetOperation,
+  flow: FieldFlow,
+  conversions: ConversionCensus,
+  /** A proven finite key set (`provenKeyTexts`): only its named members keep a slot route. */
+  proven?: readonly string[]
+): NativeFieldViewWrite | null => {
+  if (flow.nativeFieldViewOpenWriteValues?.has(operation.receiver.value) !== true) return null
+  const named = flow.nativeFieldViewStorageValues?.get(operation.receiver.value)
+  if (named === undefined) return null
+  const keyDomain = (proven === undefined ? [...named.keys()] : [...new Set(proven)].filter((key) => named.has(key))).sort()
+  const fixed = keyDomain.length === 0 ? null : nativeFieldViewWriteSelectionOf(operation, keyDomain, flow, conversions)
+  if (keyDomain.length > 0 && fixed === null) return null
+  const extension = nativeFieldViewExtensionOf(operation, conversions)
+  if (extension === null) return null
+  const targets = new Map<string, NativeFieldViewWrite['targets'][number]>()
+  for (const target of fixed?.targets ?? []) targets.set(target.target === null ? 'no-setter' : representationKey(target.target), target)
+  for (const target of extension.targets) {
+    const previous = targets.get(representationKey(target.target))
+    if (previous !== undefined && previous.conversion !== target.conversion) return null
+    targets.set(representationKey(target.target), target)
+  }
+  return {
+    receiver: operation.receiver.value,
+    carrier: representationKey(operation.receiver.representation),
+    key: '',
+    keyDomain,
+    value: operation.value.value,
+    source: representationKey(operation.value.representation),
+    targets: [...targets.values()],
+    openKeys: true,
+    open: extension.open,
+    ...(fixed?.forwardedKeys === undefined ? {} : { forwardedKeys: fixed.forwardedKeys })
+  }
 }
 
 /** Independent certification recalculates the complete slot set and each canonical leaf. */
@@ -454,6 +598,13 @@ export const nativeFieldViewReceiptMatches = (
     return (
       expected.value === actual.value &&
       expected.source === actual.source &&
+      expected.openKeys === actual.openKeys &&
+      JSON.stringify(expected.forwardedKeys ?? []) === JSON.stringify(actual.forwardedKeys ?? []) &&
+      (expected.open === undefined
+        ? actual.open === undefined
+        : actual.open !== undefined &&
+          expected.open.materializer === actual.open.materializer &&
+          representationKey(expected.open.carrier) === representationKey(actual.open.carrier)) &&
       expected.targets.length === actual.targets.length &&
       expected.targets.every((entry, index) => {
         const held = actual.targets[index]!

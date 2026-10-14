@@ -29,7 +29,13 @@ import { nativeDictionaryTransportOf } from './native-dictionary-transport.js'
 import { nativeFieldViewIdentityTransportOf, nativeFieldViewLiveLeavesOf, nativeFieldViewPlansOf } from '../conversion/native-field-view.js'
 import { nativeRecordProductsOf } from '../conversion/native-record-products.js'
 import { nativeFieldViewCarrierNeedsReceipt, nativeFieldViewBodyCitationsOf } from './native-field-view-facts.js'
-import { nativeFieldViewDomainsOf, type NativeFieldStorageDomain } from './native-field-view-domains.js'
+import {
+  nativeFieldViewDomainsOf,
+  nativeFieldViewOpenWriteHomesOf,
+  nativeFieldViewForwardedWriteKey,
+  nativeFieldViewPlansByTargetOf,
+  type NativeFieldStorageDomain
+} from './native-field-view-domains.js'
 import { NATIVE_SUM_MATERIALIZER } from '../conversion/native-sum.js'
 import { recipeClosureOf } from '../conversion/recipe-closure.js'
 import { nativeSequenceTransportOf } from './native-sequence-transport.js'
@@ -135,6 +141,10 @@ export interface NativeCallableFlow {
   readonly nativeFieldOperationStorageValues?: ReadonlyMap<IrOperation, ReadonlyMap<string, readonly NativeFieldStorageDomain[]>>
   /** Installed physical descriptors; independent of mutable Function implementation provenance. */
   readonly nativeFieldViewStorageValues: ReadonlyMap<IrValueId, ReadonlyMap<string, readonly NativeFieldStorageDomain[]>>
+  /** Receivers of a runtime-keyed store whose every allocation has a certified home for an undeclared key (`nativeFieldViewOpenWriteHomesOf`). */
+  readonly nativeFieldViewOpenWriteValues?: ReadonlySet<IrValueId>
+  /** Stores of a named key a view forwards to a source that does not declare it (`nativeFieldViewForwardedWriteKey`). */
+  readonly nativeFieldViewForwardedWrites?: ReadonlySet<string>
   /** A static key no installed descriptor of the value's live carrier names (`NativeFieldViewDomains.absentRoutesOf`). */
   readonly nativeFieldViewAbsentRoutesOf?: (receiver: IrValueId, key: string | null) => readonly NativeFieldStorageDomain[] | null
   /** Complete physical data-slot carriers of the same native allocation/alias census. */
@@ -1823,6 +1833,31 @@ const computeNativeCallableFlow = (
             cell.fieldViews.add(node.id)
             changed(cell)
           }
+        } else if (node && (to.kind === 'optional' || to.kind === 'borrowed-ref')) {
+          // A live view installed for the payload of an optional (or borrowed)
+          // carrier: `options = {}` parameters receive their argument as
+          // `optional(view target)`, so the view node is a child of the
+          // wrapper conversion rather than the conversion itself. The value
+          // can still be that view, and a reader must see its routes; without
+          // this, the source allocations reached the parameter as if they were
+          // plain allocations of the target, and a key only the view answers
+          // (three's `_setTextureOptions( options )` reading `options.mapping`
+          // through WebGLCubeRenderTarget's `{}`) had no certified route.
+          const payload = to.kind === 'optional' ? to.payload : to.referent
+          const sources = new Set([representationKey(from)])
+          if (from.kind === 'optional') sources.add(representationKey(from.payload))
+          if (from.kind === 'borrowed-ref') sources.add(representationKey(from.referent))
+          const cell = value(operation.result.id)
+          for (const child of recipeClosureOf([node], conversions?.nodeById).values())
+            if (
+              nativeFieldViewIdentityTransportOf(child) &&
+              sources.has(representationKey(child.source)) &&
+              representationKey(child.target) === representationKey(payload) &&
+              !cell.fieldViews.has(child.id)
+            ) {
+              cell.fieldViews.add(child.id)
+              changed(cell)
+            }
         }
         const document = node === null || node === undefined ? null : nativeDocumentEntryViewOf(node, conversions?.nodeById)
         if (
@@ -2533,6 +2568,50 @@ const computeNativeCallableFlow = (
       if (source.described === true) storeExpando(owner, null, { kind: 'dynamic', reason: 'declared-any-never-narrowed' })
     }
   }
+  // A runtime-keyed store over a live view target (`for (const key in
+  // parameters) data[key] = parameters[key]`): a key no descriptor names
+  // lands, in the value's own carrier, in the expando of the plain allocation
+  // or of each original source behind a view (`nativeFieldViewOpenWriteOf`),
+  // under each proven key or, with none proven, under any key. Decided from
+  // the operation alone, so the publication and certification solves agree
+  // on what a reader may meet.
+  //
+  // A NAMED key lands there too when a view forwards it to an original
+  // source whose own layout does not declare it (`event.target = this` over
+  // a `{ type: 'dispose' }` literal viewed as an event with `target`): the
+  // descriptor's `sourceAbsent` route. Its readers already read that
+  // source's expando, and now meet the carrier stored there.
+  const openWritePlans = nativeFieldViewPlansByTargetOf(viewNodes)
+  const nativeFieldViewOpenWriteValues = new Set<IrValueId>()
+  const nativeFieldViewForwardedWrites = new Set<string>()
+  let forwardDomains: ReturnType<typeof nativeFieldViewDomainsOf> | undefined
+  const forwardedAbsentKeysOf = (receiver: Representation): ReadonlySet<string> => {
+    forwardDomains ??= nativeFieldViewDomainsOf(viewNodes, deriver, (id) => bodyById.get(id)?.abi ?? null, classes)
+    const keys = new Set<string>()
+    for (const [key, routes] of forwardDomains(receiver) ?? []) if (routes.some((route) => route.sourceAbsent === true)) keys.add(key)
+    return keys
+  }
+  if (openWritePlans.size > 0)
+    for (const operation of operations) {
+      if (operation.kind !== 'set') continue
+      const open = nativeFieldViewOpenWriteHomesOf(operation.receiver.representation, openWritePlans, deriver)
+      if (open === null) continue
+      const constant = keyOf(operation.key)
+      const forwarded = forwardedAbsentKeysOf(operation.receiver.representation)
+      const keys = constant !== null ? [constant] : (operation.provenKeyTexts ?? [null])
+      const forwardedKeys =
+        keys.length === 1 && keys[0] === null ? [...forwarded] : keys.filter((key): key is string => key !== null && forwarded.has(key))
+      for (const key of forwardedKeys) nativeFieldViewForwardedWrites.add(nativeFieldViewForwardedWriteKey(operation.receiver.value, key))
+      // A key the descriptors name, but no source behind them declares, is
+      // all a constant key can add; a proven key set the descriptors name in
+      // full stores nothing else.
+      const extending =
+        constant === null && (operation.provenKeyTexts === undefined || operation.provenKeyTexts.some((key) => !open.named.has(key)))
+      if (extending) nativeFieldViewOpenWriteValues.add(operation.receiver.value)
+      else if (forwardedKeys.length === 0) continue
+      for (const home of open.homes)
+        for (const key of extending ? keys : forwardedKeys) storeExpando(home, key, operation.value.representation)
+    }
   const expandoStoredOf = (shapeId: string, key: string | null): readonly Representation[] => {
     const byKey = expandoStored.get(shapeId)
     if (byKey === undefined) return []
@@ -2587,6 +2666,30 @@ const computeNativeCallableFlow = (
         )
       }
       domains.set(key, entries)
+    }
+    // A receiver that may hold a live view also holds, in this cell, the
+    // allocations behind each view -- of another layout, which the plain
+    // receiver's own C++ carrier can never be. When one of those leaves this
+    // read unanswered (its source may carry the key in an expando), the
+    // receiver's own allocations still answer with their slots, and the view
+    // answers through its installed routes below. Without this, three's
+    // `_setTextureOptions( options )` -- its own `{}` default, caller literals
+    // and an `Object.assign` result seen through a view -- read
+    // `options.mapping` with a receipt holding only the view's answers, and a
+    // plain allocation's slot was refused at run time.
+    if (operation.kind === 'get' && !domains.has(key) && receiver.fieldViews.size > 0) {
+      const own = new Set(nativeReferences(operation.receiver.representation).heaps)
+      const plain = heaps.filter((heap) => own.has(heap.template ?? heap))
+      if (plain.length > 0 && plain.every((heap) => heap.fields.has(key) || originalDescriptorAbsent(operation, key, heap))) {
+        const entries = new Map<string, NativeFieldStorageDomain>()
+        for (const heap of plain) {
+          const slot = heap.fields.get(key)
+          const entry: NativeFieldStorageDomain =
+            slot === undefined ? { read: { kind: 'undefined' }, write: null, originalAbsent: true } : { read: slot.representation, write: slot.representation }
+          entries.set(`${representationKey(entry.read)}:${entry.originalAbsent === true}`, entry)
+        }
+        domains.set(key, [...entries.values()])
+      }
     }
     if (receiver.fieldViews.size > 0) {
       const ids = [...receiver.fieldViews].sort()
@@ -2695,6 +2798,8 @@ const computeNativeCallableFlow = (
     nativeDescriptorSnapshotOpenValues,
     nativeFieldOperationStorageValues,
     nativeFieldViewStorageValues,
+    nativeFieldViewOpenWriteValues,
+    nativeFieldViewForwardedWrites,
     nativeFieldViewAbsentRoutesOf: (receiver: IrValueId, key: string | null) => {
       const carrier = valueCarriers.get(receiver)
       return carrier === undefined ? null : descriptorDomainsOf.absentRoutesOf(carrier, key)

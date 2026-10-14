@@ -266,3 +266,32 @@ test('an array view refuses copying reads, earlier source guards, synthetic dyna
     null
   )
 })
+
+test('a typed array is never viewed through an element read that checks an arm the program stored', () => {
+  const census = censusOf()
+  const classRef = (declaration: string): Representation => ({
+    kind: 'class-ref',
+    declaration: declaration as never,
+    shapeId: `type|${declaration}` as never,
+    ownership: 'shared-refcount',
+    ancestors: []
+  })
+  const v2 = classRef('decl|view-v2')
+  const v3 = classRef('decl|view-v3')
+  const points: Representation = {
+    kind: 'tagged-union',
+    arms: [v2, v3].map((value, index) => ({
+      tag: String(index),
+      value,
+      semanticType: `type|view-point-${index}` as never,
+      runtimeDiscriminator: { kind: 'carrier' }
+    }))
+  }
+  // Vector2 | Vector3 read as Vector2: the read throws on a Vector3 that
+  // JavaScript returns as is, so no view of the array exists.
+  assert.equal(nativeArrayViewPlanOf(arrayOf(points), arrayOf(v2), census.nodeFor, census.nodeFor, census.nodeById), null)
+  const node = census.nodeFor(arrayOf(points), arrayOf(v2))
+  assert.equal(node.capability.kind, 'never')
+  // The nested pair refuses with it, rather than gaining a reader.
+  assert.equal(census.nodeFor(arrayOf(arrayOf(points)), arrayOf(arrayOf(v2))).capability.kind, 'never')
+})

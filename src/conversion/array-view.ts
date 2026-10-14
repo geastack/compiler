@@ -82,6 +82,14 @@ const arrayStorageViewPlanOf = (
     return null
   const read = exact(source.element, target.element, readAccepted, resolve)
   if (!read || !liveRead(read, resolve)) return null
+  // A typed array holds exactly the values its element carrier admits, every
+  // one of which JavaScript reads back as is. A reader that checks them --
+  // `Array<Vector2 | Vector3>` seen as a stated `Array<Vector2>` -- throws on
+  // an element the program stored and never tested, so it is no view of that
+  // array; the pair refuses instead. A dynamic element stays checked: there
+  // the program's own type is the only statement of what the value is.
+  if (source.element.kind !== 'dynamic' && [...recipeClosureOf([read], resolve).values()].some((child) => conversionRequiresSourceGuard(child.capability, resolve)))
+    return null
   if (source.element.kind === 'dynamic') {
     const write = nativeEntryWriterOf(target.element, source.element, accepted, resolve)
     if (!write) return null

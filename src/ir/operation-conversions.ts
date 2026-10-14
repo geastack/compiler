@@ -154,7 +154,7 @@ export const operationConversionInputsOf = (
       return
     if (
       operation.kind === 'set' &&
-      (operation.nativeFieldViewWrite !== undefined ||
+      ((operation.nativeFieldViewWrite !== undefined && operation.nativeFieldViewWrite.openKeys !== true) ||
         operation.nativeObjectDataSlot !== undefined ||
         operation.nativeDocumentEntry !== undefined) &&
       role === 'field-write'
@@ -285,8 +285,20 @@ export const operationConversionInputsOf = (
           ? operation.key.representation.kind === 'scalar' && operation.key.representation.domain === 'number'
           : canonicalIndexLiteral(keyText) !== null)
       if (declared) add('field-write', operation.value.representation, declared.value)
+      // A computed key stores into each declared field it can name. Two facts
+      // name them: the flow's proven key set, and the sealed closed-record
+      // recipe, whose every key the emitter renders as its own constant-key
+      // store (`emitTypedComputedWrite`). The recipe is bounded by the key's
+      // literal TYPE, the proof by its closed callers, so the recipe can name
+      // a key the proof excludes -- every key, when nothing calls the store
+      // (`update( object, key, value )` typed `keyof Bag` / `Bag[keyof Bag]`
+      // and never invoked). Each such arm still converts the value into its
+      // field, so its pair is published here like any proven key's.
       if (keyText === null)
-        for (const key of (operation.kind === 'set' ? operation.provenKeyTexts : undefined) ?? []) {
+        for (const key of new Set([
+          ...((operation.kind === 'set' ? operation.provenKeyTexts : undefined) ?? []),
+          ...(operation.typedComputedWrite?.keys ?? [])
+        ])) {
           const field = declaredRecordFieldOf(deriver, receiver, key, classes)
           if (field) add('field-write', operation.value.representation, field.value)
         }

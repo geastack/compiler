@@ -2105,7 +2105,9 @@ export const reflectionExposureOf = (
       }
       if (operation.kind === 'get' && operation.result.representation.kind === 'dynamic')
         for (const source of operation.nativeFieldViewRead!.sources) promoteLogicalReceiver(source.source, 'native-view-dynamic-result')
-      continue
+      // An open write's plain allocation still stores an unnamed key through
+      // its ordinary route, whose demand follows below.
+      if (operation.kind !== 'set' || operation.nativeFieldViewWrite?.openKeys !== true) continue
     }
     if (operation.kind === 'own-property-keys' || (operation.kind === 'get-iterator' && operation.protocol === 'enumerate'))
       demandEnumeratedViewOrigins(operation.receiver.representation, operation)

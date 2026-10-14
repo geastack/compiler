@@ -16,6 +16,7 @@ import {
   nativeFieldViewWriteOf,
   nativeFieldViewReadSelectionOf,
   nativeFieldViewOpenReadOf,
+  nativeFieldViewOpenWriteOf,
   nativeFieldViewWriteSelectionOf
 } from './native-field-view-facts.js'
 import { nativeIteratorFieldReadOf } from './native-iterator-field-views.js'
@@ -136,13 +137,19 @@ export const publishNativeFieldViewFacts = (input: PublishNativeFieldViewFactsIn
         const write =
           key !== undefined
             ? nativeFieldViewWriteOf(operation, key, flow, input.conversions)
-            : nativeFieldViewWriteSelectionOf(operation, operation.provenKeyTexts ?? [], flow, input.conversions)
+            : (nativeFieldViewWriteSelectionOf(operation, operation.provenKeyTexts ?? [], flow, input.conversions) ??
+              nativeFieldViewOpenWriteOf(operation, flow, input.conversions, operation.provenKeyTexts))
+        // An open write's plain indexed allocation stores through the ordinary
+        // sidecar route, which keeps its own field-write recipes.
         return write === null
           ? ordinary
           : {
               ...ordinary,
               nativeFieldViewWrite: write,
-              conversionRecipes: operation.conversionRecipes?.filter((recipe) => recipe.role !== 'field-write') ?? []
+              conversionRecipes:
+                write.openKeys === true
+                  ? (operation.conversionRecipes ?? [])
+                  : (operation.conversionRecipes?.filter((recipe) => recipe.role !== 'field-write') ?? [])
             }
       }
       return [
