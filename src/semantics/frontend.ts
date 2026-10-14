@@ -50,7 +50,7 @@ import { createCensusComputedKeysOf } from './normalize/host-mutation-computed-k
 import { closedCallableAuthorityOf } from './normalize/flow/callable-reach.js'
 import { sourceDescriptorOwnProtocolOf } from './normalize/flow/source-descriptor-protocol.js'
 import { sourceAccessorDescriptorOf, sourceAccessorDescriptorOwnNamesOf } from './normalize/flow/source-accessor-descriptor.js'
-import { retireSourceValueSession, sourceValueSessionOf } from './normalize/flow/source-value-session.js'
+import { retireSourceValueSession, shareSourceValueSession, sourceValueSessionOf } from './normalize/flow/source-value-session.js'
 import { sourceNativeClassAliasTypeAt } from './normalize/flow/source-native-class-alias.js'
 import { createSpecializedSourceFrames } from './normalize/specialized-source-frames.js'
 import {
@@ -81,7 +81,7 @@ import { withLocalBindings } from './normalize/local-bindings.js'
 import { withFieldBindings } from './normalize/field-bindings.js'
 import { censusCollectionBindings, type CollectionBindingCensus } from './normalize/collection-bindings.js'
 import { censusObjectBagBindings, emptyObjectBagCensus, type ObjectBagCensus } from './normalize/object-bag-bindings.js'
-import { indexValueFlow } from './normalize/flow/value-flow.js'
+import { indexValueFlow, sameValueFlowContent } from './normalize/flow/value-flow.js'
 import type { ValueFlowIndex } from './normalize/flow/model.js'
 import { attachClosedScriptScope, attachStatedModuleSet, type ClosedScriptScope, type StatedModuleSet } from './normalize/flow/targets.js'
 import { censusRefusalCounts, type CensusRefusal } from './normalize/census-refusal.js'
@@ -1145,9 +1145,25 @@ export const runFrontend = (input: FrontendInput): FrontendResult => {
             upstream.explicitThisAt
           )
         : baseValueFlow
+    // The round that settles the fixpoint rebuilds the very index the round
+    // before it built (its census inputs no longer move), and that round's
+    // solver already holds every answer a fresh one would derive again from
+    // nothing -- on a large program, the most expensive work a round does.
+    // Only the session is carried over, never the index itself: other caches
+    // keyed on an index may hold answers that also depend on the round's
+    // census, while a session depends on nothing but its index
+    // (`shareSourceValueSession`). `GEA_SESSION_SHARE_OFF` keeps the
+    // rebuild, so the claim stays checkable from one build.
+    const sharedFrom =
+      process.env['GEA_SESSION_SHARE_OFF'] === undefined
+        ? roundFlows.find(
+            (earlier) => earlier !== valueFlow && sameValueFlowContent(earlier, valueFlow) && shareSourceValueSession(earlier, valueFlow)
+          )
+        : undefined
     // A round's solver is asked nothing once the next round's index replaces
-    // it (`retireSourceValueSession`); keeping it cost ~1 GB per round.
-    for (const earlier of roundFlows) if (earlier !== valueFlow) retireSourceValueSession(earlier)
+    // it (`retireSourceValueSession`); keeping it cost ~1 GB per round. A
+    // solver handed on above is the new round's own, and stays.
+    for (const earlier of roundFlows) if (earlier !== valueFlow && earlier !== sharedFrom) retireSourceValueSession(earlier)
     roundFlows.length = 0
     roundFlows.push(valueFlow)
     attachDeferredIntrinsicProtocolLedger(valueFlow, intrinsicProtocols)

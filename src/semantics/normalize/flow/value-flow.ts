@@ -237,6 +237,98 @@ const push = <K, V>(table: Map<K, V[]>, key: K, value: V): void => {
   else table.set(key, [value])
 }
 
+const sameNodes = (a: readonly ts.Node[], b: readonly ts.Node[]): boolean => {
+  if (a.length !== b.length) return false
+  for (let index = 0; index < a.length; index++) if (a[index] !== b[index]) return false
+  return true
+}
+
+const sameDispatch = (a: FlowInvocationOperands['dispatch'], b: FlowInvocationOperands['dispatch']): boolean => {
+  switch (a.kind) {
+    case 'direct':
+      return b.kind === 'direct'
+    case 'member':
+      return b.kind === 'member' && a.lookup === b.lookup && a.key === b.key
+    case 'lexical-super':
+      return b.kind === 'lexical-super' && a.home === b.home && a.static === b.static && a.key === b.key
+    case 'super-constructor':
+      return b.kind === 'super-constructor' && a.home === b.home
+  }
+}
+
+const sameOperands = (a: FlowInvocationOperands, b: FlowInvocationOperands): boolean =>
+  a.kind === b.kind &&
+  a.explicitThis === b.explicitThis &&
+  a.callee === b.callee &&
+  a.receiver === b.receiver &&
+  sameNodes(a.args, b.args) &&
+  sameDispatch(a.dispatch, b.dispatch)
+
+const sameIterationOrigin = (a: IterationOrigin | undefined, b: IterationOrigin | undefined): boolean =>
+  a === b ||
+  (a !== undefined && b !== undefined && a.source === b.source && a.mode === b.mode && a.asynchronous === b.asynchronous)
+
+const sameWrite = (a: ValueWrite, b: ValueWrite): boolean =>
+  a.edge === b.edge &&
+  a.slot === b.slot &&
+  a.member === b.member &&
+  a.value === b.value &&
+  a.site === b.site &&
+  a.naming === b.naming &&
+  a.propertyAccess === b.propertyAccess &&
+  a.target.symbol === b.target.symbol &&
+  a.target.nameSymbol === b.target.nameSymbol &&
+  a.target.declaration === b.target.declaration &&
+  'iterationOrigin' in a === 'iterationOrigin' in b &&
+  sameIterationOrigin(a.iterationOrigin, b.iterationOrigin)
+
+const sameExplicitThis = (a: ExplicitThisCallFrame | null, b: ExplicitThisCallFrame | null): boolean =>
+  a === b || (a !== null && b !== null && a.callee === b.callee && a.receiver === b.receiver && sameNodes(a.args, b.args))
+
+const sameCall = (a: FlowCallSite, b: FlowCallSite): boolean =>
+  a.call === b.call &&
+  a.checkerDeclaration === b.checkerDeclaration &&
+  'inferredDeclaration' in a === 'inferredDeclaration' in b &&
+  a.inferredDeclaration === b.inferredDeclaration &&
+  sameNodes(a.targets, b.targets) &&
+  sameOperands(a.operands, b.operands) &&
+  sameExplicitThis(a.explicitThis, b.explicitThis)
+
+/**
+ * Whether two indices `indexValueFlow` built over the same checker, files and
+ * reachability state the same index: every write and every call site equal,
+ * field by field, by node and symbol identity, in the same order.
+ *
+ * Those two lists are the only part of an index the census inputs can move.
+ * Every census-dependent decision `indexValueFlow` makes -- the effective type
+ * of an `any` receiver, a call's inferred declaration and extra targets, its
+ * `.call`/`.apply` operands -- lands in a write it records or in a field of a
+ * call site it records. Everything else (property accesses, references,
+ * receiver owners, indexed bodies, class declarations) comes from the same
+ * syntax walk over the same reachable statements and the same checker, and
+ * every lookup table is built from those lists in list order. Two indices
+ * equal here therefore answer every question identically; the remaining
+ * length checks are a cheap guard on that argument, not part of it.
+ */
+export const sameValueFlowContent = (a: ValueFlowIndex, b: ValueFlowIndex): boolean => {
+  if (a === b) return true
+  if (
+    a.buildIsStrict !== b.buildIsStrict ||
+    a.allWrites.length !== b.allWrites.length ||
+    a.calls.length !== b.calls.length ||
+    a.propertyAccesses.length !== b.propertyAccesses.length ||
+    a.bindingPatternReads.length !== b.bindingPatternReads.length ||
+    a.arrayLiterals.length !== b.arrayLiterals.length ||
+    a.classDeclarations.length !== b.classDeclarations.length ||
+    a.accessorNames.size !== b.accessorNames.size ||
+    a.hasComputedAccessorName !== b.hasComputedAccessorName
+  )
+    return false
+  for (let index = 0; index < a.allWrites.length; index++) if (!sameWrite(a.allWrites[index]!, b.allWrites[index]!)) return false
+  for (let index = 0; index < a.calls.length; index++) if (!sameCall(a.calls[index]!, b.calls[index]!)) return false
+  return true
+}
+
 /**
  * Index every write edge in the program.
  *

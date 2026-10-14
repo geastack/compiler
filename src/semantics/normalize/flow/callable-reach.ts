@@ -261,6 +261,18 @@ const callLookups = new WeakMap<
 /** Calls whose callee is a named member access, by key: record method calls
  * the checker cannot attribute are found here and authenticated per proof. */
 const callsByMemberName = new WeakMap<ValueFlowIndex, ReadonlyMap<string, readonly FlowCallSite[]>>()
+/**
+ * `isTypeAssignableTo(instance, stated)` per (owner instance type, receiver
+ * stated type). The caller-site inventory asks it for every same-named member
+ * call against every owner, in every proof that inventories one -- the same
+ * few hundred type pairs asked millions of times. Types are the checker's own
+ * identities and assignability between two of them is a fixed fact of the
+ * program, so the memo holds exactly what the checker would answer again.
+ */
+const statedTypeAdmissions = new WeakMap<ts.Type, WeakMap<ts.Type, boolean>>()
+/** `GEA_ALLOCATION_CALLERS_SHARE_OFF=1` re-derives the allocation caller inventory in every proof, as before it was shared. */
+const allocationCallersShared = process.env['GEA_ALLOCATION_CALLERS_SHARE_OFF'] === undefined
+const NO_PROTOCOL_REQUIREMENTS: readonly IntrinsicProtocolRequirement[] = []
 
 const omittedArguments = new WeakMap<ts.Node, Map<number, ts.Expression>>()
 /**
@@ -2521,6 +2533,24 @@ const closedMemberCallableUses = (
    * lookup still belongs to that body's caller inventory. This collects
    * candidates only; the existing slot/use proof must close every one.
    */
+  /** The declared instance type of a class owner; null where no stated type can exclude a receiver. */
+  const allocationOwnerInstanceTypeOf = (owner: SourceClass): ts.Type | null => {
+    if (!ts.isClassLike(owner)) return null
+    const symbol = owner.name ? checker.getSymbolAtLocation(owner.name) : checker.getTypeAtLocation(owner).getSymbol()
+    if (!symbol) return null
+    const declared = checker.getDeclaredTypeOfSymbol(symbol)
+    return declared.isClassOrInterface() ? declared : null
+  }
+  const statedTypeMayHold = (stated: ts.Type, instance: ts.Type): boolean => {
+    if ((stated.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.TypeParameter)) !== 0) return true
+    if (stated.isUnion()) return stated.types.some((member) => statedTypeMayHold(member, instance))
+    if ((stated.flags & ts.TypeFlags.Object) === 0) return false
+    let byStated = statedTypeAdmissions.get(instance)
+    if (byStated === undefined) statedTypeAdmissions.set(instance, (byStated = new WeakMap()))
+    let admitted = byStated.get(stated)
+    if (admitted === undefined) byStated.set(stated, (admitted = checker.isTypeAssignableTo(instance, stated)))
+    return admitted
+  }
   const allocationMemberCallerSitesOf = (
     declaration: ts.Declaration,
     family: boolean,
@@ -2533,8 +2563,42 @@ const closedMemberCallableUses = (
     // still pass its complete slot/use proof. Re-discovering their candidate
     // attribution through allocation origins adds a circular closure question,
     // rather than a caller. Unindexed aliases and constructor calls remain.
-    const candidates = memberNamedCallsOf(key).filter((site) => !counted.has(site.call))
+    const named = memberNamedCallsOf(key)
+    const candidates = named.filter((site) => !counted.has(site.call))
     if (candidates.length === 0) return []
+    // The inventory is a question about the program, not about the proof that
+    // asks it: everything it reads is the index, the checker, and answers that
+    // already share across proofs on their parks (`memberReceiverOriginsOf`).
+    // Asked unshared, every proof re-derived it -- one large program asked 715
+    // distinct inventories 2.4 million times, walking 130 million candidate
+    // calls and replaying each candidate's shared answer into a fresh frame
+    // every time. Shared, it is asked once per set of parks in force and a
+    // hit replays one merged answer.
+    //
+    // Only where a ledger capture is active: `sharedAnswerOf` captures the
+    // inventory's obligations itself, and a capture the asker did not have
+    // would admit candidates whose obligation the asker could not have filed.
+    // `include([])` asks exactly that and files nothing.
+    const ledger = deferredIntrinsicProtocolLedgerOf(flow)
+    if (allocationCallersShared && ledger !== null && ledger.include(NO_PROTOCOL_REQUIREMENTS)) {
+      // The answer depends on `counted` only through the candidates it drops.
+      let dropped = ''
+      if (candidates.length !== named.length)
+        for (let index = 0; index < named.length; index++) if (counted.has(named[index]!.call)) dropped += `${index.toString(36)},`
+      const shared = sharedAnswerOf(`allocation-callers:${nodePathToken(declaration)}:${family ? 'family' : 'own'}:${dropped}`, () =>
+        allocationMemberCallerSitesFrom(declaration, family, owner, key, candidates)
+      )
+      return shared.requirements.length === 0 || ledger.include(shared.requirements) ? shared.value : null
+    }
+    return allocationMemberCallerSitesFrom(declaration, family, owner, key, candidates)
+  }
+  const allocationMemberCallerSitesFrom = (
+    declaration: ts.Declaration,
+    family: boolean,
+    owner: SourceClass,
+    key: string,
+    candidates: readonly FlowCallSite[]
+  ): readonly FlowCallSite[] | null => {
     const guard = allocationCallerInventoryGuardOf(flow, declaration, family)
     if (hypothesisGuardIsOpen(guard)) {
       noteAssumption(guard)
@@ -2554,11 +2618,23 @@ const closedMemberCallableUses = (
           : null
       const wanted = new Set(family ? (memberImplementationsOf(declaration) ?? []) : body ? [body] : (ownMemberBodiesOf(declaration) ?? []))
       const symbol = slotSymbolOf(declaration)
+      const ownerType = allocationOwnerInstanceTypeOf(owner)
       const found: FlowCallSite[] = []
       for (const site of candidates) {
         if (!ts.isCallExpression(site.call) || site.explicitThis || site.operands.dispatch.kind !== 'member') continue
         const callee = site.operands.callee
         if ((!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) || accessKeyOf(callee) !== key) continue
+        // The candidates are every same-named member call the checker did not
+        // index under this body -- on a large program, every `v.set( ... )`
+        // for a class's `set`. A receiver whose stated type cannot hold an
+        // instance of the owner (a `Vector3` receiver for `Color.prototype.set`)
+        // is no allocation of it, and asking its allocation origins anyway --
+        // a whole provenance proof per candidate, per inventory -- was most of
+        // a large program's compile. An `any` receiver (`new this.constructor()`,
+        // an untyped alias: the calls this inventory exists for) still asks.
+        // The same stated-type test `source-value-session.ts` applies to its
+        // own caller candidates.
+        if (ownerType !== null && !statedTypeMayHold(checker.getTypeAtLocation(callee.expression), ownerType)) continue
         // Caller discovery and target admission must ask the same original
         // construction question. A computed own constructor has no standalone
         // allocation answer, but its closed slot and complete source family

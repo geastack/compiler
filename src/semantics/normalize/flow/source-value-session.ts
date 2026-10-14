@@ -76,6 +76,7 @@ type Query =
   | { readonly kind: 'use'; readonly node: ts.Expression; readonly root: Value }
   | { readonly kind: 'publication'; readonly node: ObjectRoot; readonly key: string; readonly root: Value }
   | { readonly kind: 'unknown-reads'; readonly node: ObjectRoot }
+  | { readonly kind: 'key-reads'; readonly node: ObjectRoot; readonly key: string }
   | { readonly kind: 'callers'; readonly node: ts.SignatureDeclaration }
 
 interface Cause {
@@ -309,6 +310,27 @@ export const sourceValueSessionOf = (checker: ts.TypeChecker, flow: ValueFlowInd
 export const retireSourceValueSession = (flow: ValueFlowIndex): void => {
   sessions.get(flow)?.retire()
 }
+/**
+ * Hands `next` the live session of `previous`, when `next` has none yet.
+ *
+ * A session's every answer is a function of the checker and its index alone
+ * (`createSession` is handed nothing else, and everything it consults is keyed
+ * on that index), so two indices that state the same content
+ * (`sameValueFlowContent`) have the same session. The binding fixpoint builds
+ * one index per round, and the round that settles it rebuilds exactly the
+ * index the round before it built: solving that round's session again from
+ * nothing reproduced every answer the previous round's solver already held.
+ *
+ * The two flows then hold ONE session entry: retiring either retires both, so
+ * the caller retires only the flow it keeps. Answers `false` -- and changes
+ * nothing -- when `previous` has no live session or `next` already has one.
+ */
+export const shareSourceValueSession = (previous: ValueFlowIndex, next: ValueFlowIndex): boolean => {
+  const known = sessions.get(previous)
+  if (known === undefined || sessions.has(next)) return false
+  sessions.set(next, known)
+  return true
+}
 
 const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceValueSession => {
   const isFreshOrdinaryObject = (node: ts.Node): boolean => sourceFreshOrdinaryObjectOf(checker, node)
@@ -324,6 +346,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   const unary = new Map<Query['kind'], Map<ts.Node, Query>>()
   const slots = new Map<ObjectRoot, Map<string, Query>>()
   const storedSlots = new Map<ObjectRoot, Map<string, Query>>()
+  const keyReadQueries = new Map<ObjectRoot, Map<string, Query>>()
   const uses = new Map<Value, Map<ts.Expression, Query>>()
   const publications = new Map<Value, Map<ObjectRoot, Map<string, Query>>>()
   const frameQueries = new Map<
@@ -501,6 +524,24 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * solver carries on a large program. It is one node's fact, asked once per container.
    */
   const unknownReadsOf = (container: ObjectRoot): Query => nodeQuery('unknown-reads', container)
+  /**
+   * The named reads of `key` (and of the keys that alias it on an array)
+   * whose receiver can hold THIS container.
+   *
+   * The same question `unknownReadsOf` answers for unspelled keys, and it
+   * does not depend on WHICH value was stored under the key either: every
+   * value a container publishes under one key used to run the scan itself,
+   * so a container holding N values re-subscribed to the same reads N times.
+   * As its own node it is asked once per (container, key) and found by
+   * reverse lookup rather than by subscribing to every read of the key.
+   */
+  const keyReadsOf = (container: ObjectRoot, key: string): Query => {
+    let keys = keyReadQueries.get(container)
+    if (!keys) keyReadQueries.set(container, (keys = new Map()))
+    let query = keys.get(key)
+    if (!query) keys.set(key, (query = { kind: 'key-reads', node: container, key }))
+    return query
+  }
   const targets = (call: ts.CallExpression): Query => nodeQuery('targets', call)
   const superTargets = (call: ts.CallExpression): Query => nodeQuery('super-targets', call)
   /**
@@ -674,6 +715,56 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     entries.push(entry)
   }
   /**
+   * The same inversion for the NAMED reads: each one under the query that
+   * answers what its receiver holds, with its key and its position in
+   * `flow.propertyAccesses` (the order `readsByKey` lists them in).
+   *
+   * `case 'key-reads'` uses it to go from a holder of a container (handed
+   * back by `holdersOf`) to the reads made through that holder, instead of
+   * `observe`-ing the receiver of every read of the key in the program. That
+   * per-key scan, run once per (stored value, container, key) publication,
+   * was the bulk of the session's edges on a large program: one subscription
+   * per (publication, read of the key) pair, millions of them, every one a
+   * Map entry on the publication and a Set entry on the receiver.
+   */
+  interface NamedRead {
+    readonly access: Access
+    readonly receiver: Query
+    readonly key: string
+    readonly order: number
+  }
+  const namedReadsByReceiver = new Map<Query, Map<string, NamedRead[]>>()
+  {
+    let order = 0
+    for (const access of flow.propertyAccesses) {
+      const key = accessKey(access)
+      const position = order++
+      if (key === null) continue
+      const receiver = value(access.expression)
+      let byKey = namedReadsByReceiver.get(receiver)
+      if (!byKey) namedReadsByReceiver.set(receiver, (byKey = new Map()))
+      let entries = byKey.get(key)
+      if (!entries) byKey.set(key, (entries = []))
+      entries.push({ access, receiver, key, order: position })
+    }
+  }
+  /**
+   * The read keys that can reach slot `key` of `container`: the key itself,
+   * and on an array literal the element key and the canonical indices, which
+   * alias one another (`keyReaches`).
+   */
+  let indexReadKeys: readonly string[] | null = null
+  const readKeysReaching = (container: ObjectRoot, key: string): readonly string[] =>
+    ts.isArrayLiteralExpression(container)
+      ? key === ELEMENT_KEY
+        ? (indexReadKeys ??= [...readsByKey.keys()].filter((candidate) => candidate === ELEMENT_KEY || isCanonicalIndex(candidate)))
+        : isCanonicalIndex(key)
+          ? [key, ELEMENT_KEY]
+          : [key]
+      : [key]
+  /** Keys whose reads' receivers are seeded: `holdersOf` finds only seeded states. */
+  const seededReadKeys = new Set<string>()
+  /**
    * Writes that go THROUGH some object, grouped by the name they write.
    *
    * Which root a write reaches is a solved question and changes as the graph
@@ -792,6 +883,88 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     if (ts.isParameter(holder)) return holder.dotDotDotToken ? null : nodeQuery('parameter', holder)
     if (ts.isBindingElement(holder)) return nodeQuery('binding-element', holder)
     return ts.isVariableDeclaration(holder) && holder.initializer ? value(holder.initializer) : null
+  }
+  /**
+   * A use `visitUse` ends without doing anything, whatever the root: the
+   * value is discarded (`x;`, `void x`), only tested (`!x`, `if ( x )`,
+   * `x === y`, `typeof x`, `k in x`, a conditional's test), enumerated by
+   * `for...in`, or the reference is the cell being declared or assigned
+   * rather than a read of it. Its node would hold no fact, read nothing, owe
+   * no obligation and be locally complete, so requiring it changes no
+   * answer -- and minting it is a state, an edge and a seal per (root,
+   * reference). A method returning a value is followed into EVERY call of
+   * the method, so every discarded `v.set( ... );` in the program was such a
+   * node for every root the method can return: hundreds of thousands on a
+   * large program.
+   *
+   * These are exactly the early returns of `visitUse` that precede any read,
+   * fact or refusal and do not depend on the root; anything else is a real use.
+   */
+  const inertUses = new Map<ts.Expression, boolean>()
+  const inertUse = (reference: ts.Expression): boolean => {
+    let inert = inertUses.get(reference)
+    if (inert === undefined) inertUses.set(reference, (inert = inertUseUncached(reference)))
+    return inert
+  }
+  const inertUseUncached = (reference: ts.Expression): boolean => {
+    if (isTypePositionReference(reference)) return true
+    const parent = reference.parent
+    if (!parent || outermostErasureOf(reference) !== reference) return false
+    if (ts.isVariableDeclaration(parent) || ts.isParameter(parent)) return parent.name === reference
+    if (ts.isBinaryExpression(parent)) {
+      const operator = parent.operatorToken.kind
+      if (operator === ts.SyntaxKind.EqualsToken) return parent.left === reference
+      if (operator === ts.SyntaxKind.InKeyword) return parent.right === reference
+      return operator === ts.SyntaxKind.EqualsEqualsEqualsToken || operator === ts.SyntaxKind.ExclamationEqualsEqualsToken
+    }
+    if (ts.isConditionalExpression(parent)) return parent.condition === reference
+    return (
+      (ts.isForInStatement(parent) && parent.expression === reference) ||
+      ts.isExpressionStatement(parent) ||
+      ts.isTypeOfExpression(parent) ||
+      ts.isVoidExpression(parent) ||
+      (ts.isPrefixUnaryExpression(parent) && parent.operator === ts.SyntaxKind.ExclamationToken) ||
+      (ts.isIfStatement(parent) && parent.expression === reference)
+    )
+  }
+  const NO_VALUES: ReadonlySet<Value> = new Set()
+  /**
+   * `return this` in a body's own frame (not in a nested arrow, whose return
+   * is the arrow's): the completion is the frame's receiver.
+   *
+   * A root reaches a non-arrow body's receiver only by being the receiver of
+   * a call that enters it -- `root.m()`, `m.call( root )`, `super.m()` from a
+   * frame it is the receiver of -- and each of those is a `forward` from the
+   * root's own use walk, holding the exact call. A plain call `F()` of a
+   * constructor function runs with some OTHER receiver. So the root comes
+   * back out of `return this` at exactly the calls it went in through, and
+   * nowhere else. Following it into every caller of the body instead (what a
+   * returned VALUE needs) made each root reaching a chainable method --
+   * `copy`, `set`, `add` on a vector or a color -- a use of the result of
+   * every such call in the program: roots x call sites, millions of nodes on
+   * a large program, every one of them a root the value never is.
+   */
+  const ownReceiverReturns = new Map<ts.SignatureDeclaration, boolean>()
+  const returnsOwnReceiver = (body: ts.SignatureDeclaration): boolean => {
+    let answer = ownReceiverReturns.get(body)
+    if (answer === undefined) {
+      answer = flow.receiverReferencesToDeclaration(body).some((reference) => isOwnReceiverReturn(outermostErasureOf(reference), body))
+      ownReceiverReturns.set(body, answer)
+    }
+    return answer
+  }
+  /** `reference` is `return`ed (or erased-and-returned) `this` of `body`'s own frame. */
+  const isOwnReceiverReturn = (reference: ts.Node, body: ts.Node): boolean => {
+    if (!isBody(body) || ts.isArrowFunction(body)) return false
+    const returned = reference.parent
+    if (!returned || !ts.isReturnStatement(returned) || ts.findAncestor(returned, ts.isFunctionLike) !== body) return false
+    if (!ts.isExpression(reference)) return false
+    const inner = unwrapErasedExpression(reference)
+    return (
+      inner.kind === ts.SyntaxKind.ThisKeyword &&
+      flow.receiverOwnerOf(inner as ts.ThisExpression) === body &&
+      outermostErasureOf(inner) === reference
+    )
   }
   const construction = (root: ts.NewExpression): SourceConstructionFact | null => exactSourceConstructionOf(checker, flow, root)
   /**
@@ -1093,6 +1266,43 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   }
   /** Every name a body can be reached by: its own, and every cell it is stored in. */
   const bodyNames = new Map<ts.SignatureDeclaration, readonly string[] | null>()
+  /**
+   * The callable objects installed as an own member of a Function -- through
+   * `Reflect.set` or a plain member store -- found in one pass over the calls
+   * and writes. `namesOf` asked it per body as two whole-program scans, each
+   * site re-deriving its installation; on a large program that per-body scan
+   * was a third of the session's time.
+   */
+  let installedCallableObjects: ReadonlySet<unknown> | null = null
+  const installedCallableObjectsOf = (): ReadonlySet<unknown> => {
+    if (installedCallableObjects !== null) return installedCallableObjects
+    const found = new Set<unknown>()
+    for (const site of flow.calls) {
+      const installed = ts.isCallExpression(site.call) ? sourceCallableReflectSetOf(checker, site.call) : null
+      if (installed !== null) found.add(sourceCallableObjectOf(checker, flow, installed.value))
+    }
+    for (const write of flow.allWrites)
+      if (write.propertyAccess !== null && write.value !== null) found.add(sourceCallableObjectOf(checker, flow, write.value))
+    found.delete(null)
+    found.delete(undefined)
+    return (installedCallableObjects = found)
+  }
+  /** Every write, by the body its value is (`namesOf`'s other whole-program scan). */
+  let writesByBodyValue: ReadonlyMap<ts.Node, readonly ValueWrite[]> | null = null
+  const writesOfBodyValue = (body: ts.SignatureDeclaration): readonly ValueWrite[] => {
+    if (writesByBodyValue === null) {
+      const index = new Map<ts.Node, ValueWrite[]>()
+      for (const write of flow.allWrites) {
+        if (write.value === undefined || write.value === null) continue
+        const held = unwrapErasedExpression(write.value)
+        let writes = index.get(held)
+        if (!writes) index.set(held, (writes = []))
+        writes.push(write)
+      }
+      writesByBodyValue = index
+    }
+    return writesByBodyValue.get(body) ?? []
+  }
   const namesOf = (body: ts.SignatureDeclaration): readonly string[] | null => {
     const known = bodyNames.get(body)
     if (known !== undefined) return known
@@ -1101,15 +1311,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     // A value installed on a Function can be read through any immutable alias
     // of that own member. Its declaration's spelling does not enumerate those
     // callers, so keep the complete indexed call set for this bounded family.
-    if (
-      flow.calls.some((site) => {
-        const installed = ts.isCallExpression(site.call) ? sourceCallableReflectSetOf(checker, site.call) : null
-        return installed !== null && sourceCallableObjectOf(checker, flow, installed.value) === body
-      }) ||
-      flow.allWrites.some(
-        (write) => write.propertyAccess !== null && write.value !== null && sourceCallableObjectOf(checker, flow, write.value) === body
-      )
-    ) {
+    if (installedCallableObjectsOf().has(body)) {
       bodyNames.set(body, null)
       return null
     }
@@ -1126,8 +1328,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     // write whose VALUE is this body names one such cell; a write this layer
     // cannot name means the body can be reached by a name it cannot enumerate.
     if (!declared || ts.isFunctionExpression(body) || ts.isArrowFunction(body))
-      for (const write of flow.allWrites) {
-        if (write.value === undefined || write.value === null || unwrapErasedExpression(write.value) !== body) continue
+      for (const write of writesOfBodyValue(body)) {
         const named = write.member ?? (write.naming && ts.isIdentifier(write.naming) ? write.naming.text : null)
         if (named === null) {
           bodyNames.set(body, null)
@@ -1230,6 +1431,30 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
     callerCandidates.set(owner, answer)
     return answer
   }
+  /** `callerCandidatesOf` indexed for `case 'callers'`: each call's position,
+   * and the positions that are callers unconditionally (`new F( ... )`). */
+  interface CallerCandidateIndex {
+    readonly list: readonly CallerCandidate[]
+    readonly positions: ReadonlyMap<ts.Node, number>
+    readonly unconditional: readonly number[]
+    /** Every candidate's `targets` state is seeded, so `holdersOf` sees it. */
+    seeded: boolean
+  }
+  const callerCandidateIndexes = new Map<ts.SignatureDeclaration, CallerCandidateIndex>()
+  const callerCandidateIndexOf = (owner: ts.SignatureDeclaration): CallerCandidateIndex => {
+    const known = callerCandidateIndexes.get(owner)
+    if (known !== undefined) return known
+    const list = callerCandidatesOf(owner)
+    const positions = new Map<ts.Node, number>()
+    const unconditional: number[] = []
+    list.forEach((candidate, position) => {
+      if (candidate.call === null) unconditional.push(position)
+      else if (!positions.has(candidate.call)) positions.set(candidate.call, position)
+    })
+    const index: CallerCandidateIndex = { list, positions, unconditional, seeded: false }
+    callerCandidateIndexes.set(owner, index)
+    return index
+  }
   let constructionsByOwner: Map<ts.Node, ts.NewExpression[]> | null = null
   /**
    * Every site that constructs: a `new`, or a `super(...)` standing in for one.
@@ -1247,6 +1472,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
    * it, the answer is the same set and the edges are none.
    */
   const NO_READS: readonly { readonly access: Access; readonly receiver: Query }[] = []
+  const NO_NAMED_READS: readonly NamedRead[] = []
   const NO_SITES: readonly FlowCallSite[] = []
   let constructionSitesByTarget: Map<ts.Node, FlowCallSite[]> | null = null
   const constructionSitesTargeting = (owner: ts.Node): readonly FlowCallSite[] => {
@@ -1432,7 +1658,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       readonly stamps: readonly (readonly [ReadonlySet<Value>, number])[]
       readonly holderStamps: readonly (readonly [Value, number])[]
     }
-    const ownKeysAnswers = new Map<Value, OwnKeysAnswer>()
+    // Allocated on the first answer: most nodes never ask an own-key question.
+    let ownKeysAnswers: Map<Value, OwnKeysAnswer> | null = null
     const evaluate = (
       required: Read,
       observe: Read,
@@ -1462,6 +1689,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         grounding.add(dependency)
         return read(dependency)
       }
+      /** `read(use(root, reference))`, without minting the node for a use that does nothing (`inertUse`). */
+      const readUse = (root: Value, reference: ts.Expression): ReadonlySet<Value> =>
+        inertUse(reference) ? NO_VALUES : read(use(root, reference))
       const add = (values: Iterable<Value>): void => {
         for (const held of values) facts.add(held)
       }
@@ -1567,7 +1797,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         // records merged into each other -- names no finite set on the way
         // round; the re-entry is unknown, and only the outer answer is kept.
         if (activeOwnKeys.has(root)) return null
-        const kept = ownKeysAnswers.get(root)
+        const kept = ownKeysAnswers?.get(root)
         if (kept !== undefined && kept.stamps.every(([held, size]) => held.size === size) && holdersUnchanged(kept.holderStamps)) {
           for (const stamps of stampLists) stamps.push(...kept.stamps)
           for (const stamps of holderStampLists) stamps.push(...kept.holderStamps)
@@ -1582,7 +1812,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         try {
           const answer = ownKeysUncached(root)
           ownKeys.set(root, answer)
-          ownKeysAnswers.set(root, { keys: answer, stamps, holderStamps })
+          ;(ownKeysAnswers ??= new Map()).set(root, { keys: answer, stamps, holderStamps })
           return answer
         } finally {
           stampLists.pop()
@@ -1790,9 +2020,9 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             parameterRebindingsOf(declaration).every((write) => write.value !== null && !read(value(write.value)).has(root))
           )
             continue
-          add(read(use(root, reference)))
+          add(readUse(root, reference))
         }
-        for (const reference of importerMentions(declaration) ?? []) add(read(use(root, reference)))
+        for (const reference of importerMentions(declaration) ?? []) add(readUse(root, reference))
       }
       /**
        * A binding pattern taken apart over this value: every element reads one
@@ -1840,7 +2070,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         if (!ts.isNewExpression(root)) return false
         const bodies = settersOf(root, key)
         if (bodies === null) return false
-        for (const setter of bodies) for (const reference of flow.receiverReferencesToDeclaration(setter)) add(read(use(root, reference)))
+        for (const setter of bodies) for (const reference of flow.receiverReferencesToDeclaration(setter)) add(readUse(root, reference))
         return true
       }
       /**
@@ -1919,7 +2149,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           for (const fact of read(closure(instance))) {
             if (!ts.isPropertyAccessExpression(fact) && !ts.isElementAccessExpression(fact)) continue
             if (writeEdgeByAccess.has(fact) || !keysOf(fact).includes(key)) continue
-            add(read(use(root, fact)))
+            add(readUse(root, fact))
           }
       }
       const setterStores = (setter: ts.SetAccessorDeclaration): void => {
@@ -2002,7 +2232,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               fail('arguments-object-frame', body)
               continue
             }
-            for (const mention of spread) add(read(use(root, mention)))
+            for (const mention of spread) add(readUse(root, mention))
             const parameter = runtimeParametersOf(body)[position]
             if (parameter?.dotDotDotToken) fail('rest-frame', parameter)
             else if (parameter && ts.isIdentifier(parameter.name)) refs(root, parameter)
@@ -2020,15 +2250,20 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           if (receiver) {
             // `arguments` never holds the receiver, so an arguments-using body
             // says nothing about where `this` goes.
-            if (!ts.isArrowFunction(body))
-              for (const reference of flow.receiverReferencesToDeclaration(body)) add(read(use(root, reference)))
+            if (!ts.isArrowFunction(body)) {
+              for (const reference of flow.receiverReferencesToDeclaration(body)) add(readUse(root, reference))
+              // `return this`: the call evaluates to its own receiver, so the
+              // root comes back out HERE, at the call it entered through --
+              // see `returnsOwnReceiver`.
+              if (returnsOwnReceiver(body) && callableCompletionSummaryOf(flow, body)?.execution === 'sync') add(readUse(root, site.call))
+            }
           } else {
             const mentions = argumentsReads(body)
             if (mentions === null) {
               fail('arguments-object-frame', body)
               continue
             }
-            for (const mention of mentions) add(read(use(root, mention)))
+            for (const mention of mentions) add(readUse(root, mention))
             const parameter = runtimeParametersOf(body)[position]
             if (parameter?.dotDotDotToken) fail('rest-frame', parameter)
             else if (parameter && ts.isIdentifier(parameter.name)) refs(root, parameter)
@@ -2045,7 +2280,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
         }
         const positioned = outermostErasureOf(reference)
         if (positioned !== reference) {
-          if (ts.isExpression(positioned)) add(read(use(root, positioned)))
+          if (ts.isExpression(positioned)) add(readUse(root, positioned))
           else fail('unindexed-use', positioned)
           return
         }
@@ -2073,7 +2308,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             const moduleUses = sourceCommonJsExportUsesOf(flow, parent)
             if (moduleUses !== null) {
               if (parent.right !== reference) fail('unmatched-commonjs-export', reference)
-              else for (const alias of moduleUses) add(read(use(root, alias)))
+              else for (const alias of moduleUses) add(readUse(root, alias))
               return
             }
             const left = unwrapNaming(parent.left)
@@ -2100,8 +2335,8 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                 const installed = sourceIntrinsicMemberDataWriteOf(checker, flow, left)
                 if (installed === null || installed.site !== parent || sourceCallableObjectOf(checker, flow, reference) !== installed.body)
                   fail('unproven-intrinsic-member-installation', left)
-                else for (const access of installed.reads) add(read(use(root, access)))
-                add(read(use(root, parent)))
+                else for (const access of installed.reads) add(readUse(root, access))
+                add(readUse(root, parent))
                 return
               }
               const keys = keysOf(left)
@@ -2139,7 +2374,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                 }
               }
             } else fail('unmodelled-store', left)
-            add(read(use(root, parent)))
+            add(readUse(root, parent))
             return
           }
           if (
@@ -2148,7 +2383,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken ||
             parent.operatorToken.kind === ts.SyntaxKind.CommaToken
           ) {
-            add(read(use(root, parent)))
+            add(readUse(root, parent))
             return
           }
           if (
@@ -2170,7 +2405,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           return
         }
         if (ts.isConditionalExpression(parent)) {
-          if (parent.condition !== reference) add(read(use(root, parent)))
+          if (parent.condition !== reference) add(readUse(root, parent))
           return
         }
         if (ts.isPropertyAssignment(parent) && parent.initializer === reference) {
@@ -2218,7 +2453,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             // sites as a key coercion, so `this.run()` had no callable slot at
             // all -- the one place a member name is not a key being coerced.
             if (ts.isPropertyAccessExpression(parent) && parent.name === reference) {
-              add(read(use(root, parent)))
+              add(readUse(root, parent))
               return
             }
             fail('coercing-property-key', reference)
@@ -2404,7 +2639,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               // through this fact) and is handed to nobody but, when the
               // intrinsic returns it, whoever reads the call.
               facts.add(parent)
-              if (plan.returnsTarget && !ts.isExpressionStatement(parent.parent)) add(read(use(root, parent)))
+              if (plan.returnsTarget && !ts.isExpressionStatement(parent.parent)) add(readUse(root, parent))
             } else if (parent.arguments[2] === reference) {
               // The descriptor literal: its `value` is copied into the target
               // (`case 'publication'` forwards it); the literal goes nowhere.
@@ -2422,7 +2657,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               // and a source literal itself goes nowhere. A source that is
               // not a literal could run getters, which this does not enter.
               facts.add(parent)
-              if (bulk.target === reference) add(read(use(root, parent)))
+              if (bulk.target === reference) add(readUse(root, parent))
               else if (!ts.isObjectLiteralExpression(root)) fail('bulk-assign-source-unmodelled', reference)
               return
             }
@@ -2446,7 +2681,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           if (ts.isCallExpression(parent)) {
             const continuations = collectionValueContinuationsOf(checker, flow, parent, reference, nativeProtocolClosed)
             if (continuations !== null) {
-              for (const continued of continuations) add(read(use(root, continued)))
+              for (const continued of continuations) add(readUse(root, continued))
               return
             }
           }
@@ -2468,7 +2703,11 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             return
           }
           read(closure(body))
-          for (const call of read(callersOf(body))) if (ts.isCallExpression(call)) add(read(use(root, call)))
+          // The body's own receiver, returned: it reaches only the calls it was
+          // the receiver of, and `forward` continues it at each of those. See
+          // `returnsOwnReceiver`.
+          if (isOwnReceiverReturn(reference, body)) return
+          for (const call of read(callersOf(body))) if (ts.isCallExpression(call)) add(readUse(root, call))
           return
         }
         // Enumerating an object reads its KEY SET and nothing else: no slot is
@@ -2802,7 +3041,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               // The getter runs with this construction as its receiver, and
               // the read yields what the getter's completions yield.
               for (const getter of getterRead.getters) {
-                for (const reference of flow.receiverReferencesToDeclaration(getter)) add(read(use(root, reference)))
+                for (const reference of flow.receiverReferencesToDeclaration(getter)) add(readUse(root, reference))
                 const summary = callableCompletionSummaryOf(flow, getter)
                 if (summary === null || summary.execution !== 'sync') fail('unmodelled-getter-completion', getter)
                 else {
@@ -3273,9 +3512,28 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             if ((ts.getCombinedModifierFlags(owner) & ts.ModifierFlags.Static) !== 0) fail('static-member-callers-open', owner)
             else for (const instance of familyInstancesOf(owner.parent, 'member-family-open') ?? []) read(closure(instance))
           }
-          for (const candidate of callerCandidatesOf(owner)) {
-            if (candidate.call === null || observe(targets(candidate.call)).has(owner)) facts.add(candidate.site.call)
+          // Which candidates target this owner is asked the other way round:
+          // the `targets` states that hold the owner, from the reverse index,
+          // looked up in the owner's candidate positions. Observing every
+          // candidate's `targets` instead stored one edge per (owner,
+          // candidate) pair -- for a body reached by name or handed to a host
+          // callee, every same-named or unspelled call in the program -- and
+          // that was the second-largest share of a large program's edges.
+          const candidates = callerCandidateIndexOf(owner)
+          if (!candidates.seeded) {
+            candidates.seeded = true
+            for (const candidate of candidates.list) if (candidate.call !== null) seed(targets(candidate.call))
           }
+          const matched: number[] = []
+          for (const holder of holdersOf(owner)) {
+            if (holder.kind !== 'targets') continue
+            const position = candidates.positions.get(holder.node)
+            if (position !== undefined) matched.push(position)
+          }
+          for (const position of candidates.unconditional) matched.push(position)
+          // Candidate order, the order the scan this replaces added them in.
+          matched.sort((a, b) => a - b)
+          for (const position of matched) facts.add(candidates.list[position]!.site.call)
           break
         }
         case 'closure': {
@@ -3292,7 +3550,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               if (key === null) fail('computed-method')
               else add(read(publication(root, root.parent, key)))
             } else refs(root, root)
-          } else if (ts.isExpression(root)) add(read(use(root, root)))
+          } else if (ts.isExpression(root)) add(readUse(root, root))
           else fail('unmodelled-root')
           if (ts.isNewExpression(root) && !isFreshOrdinaryObject(root)) {
             const owners = constructionFrames.receiverOwnersOf(root)
@@ -3302,7 +3560,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             }
             for (const owner of owners) {
               if (!isClassSpelledSourceClass(owner)) {
-                for (const reference of flow.receiverReferencesToDeclaration(owner)) add(read(use(root, reference)))
+                for (const reference of flow.receiverReferencesToDeclaration(owner)) add(readUse(root, reference))
                 continue
               }
               for (const member of owner.members) {
@@ -3310,7 +3568,7 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
                   ts.isConstructorDeclaration(member) ||
                   (ts.isPropertyDeclaration(member) && (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) === 0)
                 )
-                  for (const reference of flow.receiverReferencesToDeclaration(member)) add(read(use(root, reference)))
+                  for (const reference of flow.receiverReferencesToDeclaration(member)) add(readUse(root, reference))
               }
             }
           }
@@ -3329,6 +3587,31 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
           // is not in `unknownReadsByReceiver` and is simply skipped.
           for (const holder of holdersOf(query.node))
             for (const entry of unknownReadsByReceiver.get(holder) ?? NO_READS) facts.add(entry.access)
+          break
+        }
+        case 'key-reads': {
+          // `unknown-reads`' inversion for the reads that spell their key:
+          // the receivers holding this container, from the reverse index,
+          // then the reads of a reaching key made through each. A receiver
+          // is a holder only once it is seeded, so every receiver of every
+          // reaching key is seeded first -- the states the per-read
+          // `observe` this replaces created as a side effect.
+          const container = query.node
+          const reaching = readKeysReaching(container, query.key)
+          for (const key of reaching) {
+            if (seededReadKeys.has(key)) continue
+            seededReadKeys.add(key)
+            for (const entry of readsByKey.get(key) ?? NO_READS) seed(entry.receiver)
+          }
+          const found: NamedRead[] = []
+          for (const holder of holdersOf(container)) {
+            const byKey = namedReadsByReceiver.get(holder)
+            if (byKey === undefined) continue
+            for (const key of reaching) for (const entry of byKey.get(key) ?? NO_NAMED_READS) found.push(entry)
+          }
+          // Program order, the order the scan this replaces discovered them in.
+          found.sort((a, b) => a.order - b.order)
+          for (const entry of found) facts.add(entry.access)
           break
         }
         case 'own-keys': {
@@ -3381,24 +3664,17 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             for (const held of read(value(stored.arguments[0]!)))
               if (isObjectRoot(held)) for (const key of plan.keys) add(read(publication(query.root, held, key)))
           }
-          const aliases = ts.isArrayLiteralExpression(query.node)
-            ? query.key === ELEMENT_KEY
-              ? [...readsByKey.keys()].filter((key) => key === ELEMENT_KEY || isCanonicalIndex(key))
-              : isCanonicalIndex(query.key)
-                ? [query.key, ELEMENT_KEY]
-                : [query.key]
-            : [query.key]
-          for (const alias of aliases)
-            for (const entry of readsByKey.get(alias) ?? NO_READS) {
-              if (!observe(entry.receiver).has(query.node)) continue
-              if (keyReaches(query.node, keysOf(entry.access), query.key)) add(read(use(query.root, entry.access)))
-            }
+          // Discovery-only, as the per-read receiver test it replaces was.
+          for (const access of observe(keyReadsOf(query.node, query.key))) {
+            if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) continue
+            add(readUse(query.root, access))
+          }
           // Discovery-only, exactly as the receiver test it replaces was: a
           // publication never required the unknown reads to have settled, it
           // only had to see the ones that had.
           for (const access of observe(unknownReadsOf(query.node))) {
             if (!ts.isPropertyAccessExpression(access) && !ts.isElementAccessExpression(access)) continue
-            if (keyReaches(query.node, keysOf(access), query.key)) add(read(use(query.root, access)))
+            if (keyReaches(query.node, keysOf(access), query.key)) add(readUse(query.root, access))
           }
           // The value this key holds also reaches every cell a binding element
           // of this container declares. Enumerating only `propertyAccesses`
