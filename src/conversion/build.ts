@@ -1023,20 +1023,27 @@ export const buildConversionGraph = (
       if (nodes.has(id)) continue
       const installed = registry.narrowing(representation, target)
       // The same order `conversion/nodes.ts`'s `capabilityOf` asks in: an
-      // installed atom, else the registry's static recipe, else never. A
-      // `never` minted here is what `nodeFor` hands back for the pair, so a
-      // pair the static recipe answers must be answered here too or the
-      // eager graph would refuse what a late question would allow.
-      const recipe = installed ? null : registry.staticRecipe(representation, target)
+      // installed narrowing, else an installed widening or recast, else the
+      // registry's static recipe, else never. A `never` minted here is what
+      // `nodeFor` hands back for the pair, so a pair the static recipe
+      // answers must be answered here too or the eager graph would refuse
+      // what a late question would allow -- and an installed recast must win
+      // here as it does there: `never[]` into a class array is the identity
+      // `gea::emptyArraySentinel`, not the element-wise copy the static chain
+      // would mint for it, which the array rule then refuses.
+      const recast = installed ? null : (registry.widening(representation, target) ?? registry.recasting(representation, target))
+      const recipe = installed || recast ? null : registry.staticRecipe(representation, target)
       nodes.set(id, {
         id,
         source: representation,
         target,
         capability: installed
           ? narrowingCapabilityFor(representation, target, installed)
-          : recipe
-            ? { kind: 'static', materializer: recipe }
-            : { kind: 'never', reason: `no runtime narrowing is installed from ${sourceKey} to ${targetKey}` }
+          : recast
+            ? { kind: 'atom', classifier: recast.classifier, materializer: recast.materializer }
+            : recipe
+              ? { kind: 'static', materializer: recipe }
+              : { kind: 'never', reason: `no runtime narrowing is installed from ${sourceKey} to ${targetKey}` }
       })
     }
   }

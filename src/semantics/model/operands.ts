@@ -128,6 +128,36 @@ export interface SemanticOperand {
    * ordinary store into a collection slot may not.
    */
   readonly nativeBaseView?: true
+  /**
+   * A `return`'s value that names a fresh local array no other reference can
+   * observe again (`unshared-array-result.ts`'s `unsharedReturnedArray`, the
+   * array kind of `fresh-table-last-use.ts`): a `const` local built from an
+   * array literal, filled and read in place, returned as its last use. Its
+   * elements may be moved ONCE into the slot's element carrier
+   * (`ConvertOperation.rebuild`'s `unshared-array`, releasing the source),
+   * which for an array another alias could reach would lose that alias's
+   * writes.
+   */
+  readonly unsharedFreshArray?: true
+  /**
+   * A call argument naming a local array the caller alone holds, bound to a
+   * formal the callee only READS (`unshared-array-result.ts`'s
+   * `readOnlyArrayArgumentAt`): the callee can neither write it, keep it nor
+   * compare it, and nothing else reaches it while the callee runs, so it
+   * cannot tell the caller's array from an element-wise copy. The argument
+   * may be rebuilt at the formal's element carrier, each element crossing by
+   * identity; the caller's array is left as it was.
+   */
+  readonly readOnlyArrayArgument?: true
+  /**
+   * A store's `value` operand that names a fresh open table no other
+   * reference can observe again (`fresh-table-last-use.ts`): a `const` local
+   * built from an object literal, filled through keyed writes, and stored
+   * here as its last use. Its entries may be copied ONCE into the slot's
+   * entry carrier (`ConvertOperation.rebuild`'s `unshared-dictionary`), which
+   * for a table another alias could reach would lose that alias's writes.
+   */
+  readonly unsharedFreshTable?: true
 }
 
 /** One result an operation publishes, keyed by the role it fills. */

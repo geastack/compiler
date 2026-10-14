@@ -118,6 +118,7 @@ import {
   type PrinterDrift,
   alignedValueText,
   unsharedArrayRebuildText,
+  unsharedDictionaryRebuildText,
   documentViewable,
   dynamicCarrierBoxText,
   emitMergeLiveArmRebuild,
@@ -1434,12 +1435,35 @@ const emitConvert = (ctx: EmitContext, lines: string[], operation: ConvertOperat
     lines.push(`${defineValue(ctx, operation.result)} = ${sourceText};`)
     return
   }
+  if (operation.rebuild === 'unshared-dictionary') {
+    const entryNode = ctx.conversions.nodeById(operation.conversionUse)
+    const rebuilt =
+      entryNode === null
+        ? null
+        : unsharedDictionaryRebuildText(ctx, operation.source.representation, operation.result.representation, sourceText, entryNode)
+    if (rebuilt === null) {
+      throw createCppEmitBlockedError(
+        `conversion:${representationKey(operation.source.representation)}->${representationKey(operation.result.representation)}`,
+        `rebuilds a fresh ${representationKey(operation.source.representation)} at ${representationKey(operation.result.representation)}, ` +
+          `whose entry conversion no installed load performs (conversion use ${operation.conversionUse})`
+      )
+    }
+    lines.push(`${defineValue(ctx, operation.result)} = ${rebuilt};`)
+    return
+  }
   if (operation.rebuild === 'unshared-array') {
     const elementNode = ctx.conversions.nodeById(operation.conversionUse)
     const rebuilt =
       elementNode === null
         ? null
-        : unsharedArrayRebuildText(ctx, operation.source.representation, operation.result.representation, sourceText, elementNode)
+        : unsharedArrayRebuildText(
+            ctx,
+            operation.source.representation,
+            operation.result.representation,
+            sourceText,
+            elementNode,
+            operation.releasesSource === true
+          )
     if (rebuilt === null) {
       throw createCppEmitBlockedError(
         `conversion:${representationKey(operation.source.representation)}->${representationKey(operation.result.representation)}`,

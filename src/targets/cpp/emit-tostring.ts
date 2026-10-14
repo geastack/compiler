@@ -546,16 +546,39 @@ const joinedToStringText = (
  * template assigned to a local. Anything else keeps `fallback`'s spelling.
  */
 export const stringStoreText = (target: string, text: string, fallback: string): string => {
+  // Building into the target is only sound while no piece reads the target
+  // itself: `prefix = defines.join( '\n' ) + '\n' + prefix` (three's
+  // WebGLProgram GLSL3 wrapping) adopted the head into `prefix` first and then
+  // appended the overwritten `prefix`, losing the original prefix and
+  // doubling the head. Such a store keeps `fallback`'s temporary. Appending
+  // to the target's own moved head (`a = a + x`) reads it before any write,
+  // so that one stays in place.
   const appended = appendedPiecesOf(text)
   if (appended !== null) {
-    const adopt = appended.head === `std::move(${target})` ? '' : `gea::detail::adoptString(${target}, ${appended.head}); `
+    const inPlace = appended.head === `std::move(${target})`
+    // `gea::appendStrings` itself tolerates a piece aliasing the target; the
+    // adoption that precedes it does not.
+    if (!inPlace && (readsTarget(appended.pieces, target) || readsTarget(appended.head, target))) return fallback
+    const adopt = inPlace ? '' : `gea::detail::adoptString(${target}, ${appended.head}); `
     return `${adopt}gea::appendStrings(${target}, ${appended.pieces});`
   }
   // The pieces as arguments rather than a list of views, so each keeps its type: a literal's size is a constant
   // and a formatted number is stored from its register (`gea::concatStringsInto`'s variadic form).
   const pieces = concatenationPiecesOf(text)
+  // `gea::concatStringsInto` detects a piece aliasing the target and builds aside (`concatStringsAliased`).
   return pieces === null ? fallback : `gea::concatStringsInto(${target}, ${pieces});`
 }
+
+/** Whether rendered C++ `text` names the expression `target` (bounded, so `m2` does not match `m20`). */
+const readsTarget = (text: string, target: string): boolean => {
+  for (let at = text.indexOf(target); at >= 0; at = text.indexOf(target, at + 1)) {
+    if (!isIdentifierCharacter(text[at - 1]) && !isIdentifierCharacter(text[at + target.length])) return true
+  }
+  return false
+}
+
+const isIdentifierCharacter = (c: string | undefined): boolean =>
+  c !== undefined && ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c === '_')
 
 /** The moved head and appended pieces of a rendered `gea::appendedStrings(std::move(head), {...})`, or `null`. */
 const appendedPiecesOf = (text: string): { readonly head: string; readonly pieces: string } | null => {

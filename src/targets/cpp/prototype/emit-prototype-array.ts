@@ -411,12 +411,43 @@ const sortText: ArrayCallRenderer = (ctx, receiverText, element, args) => {
   // name, so the sort can inline it.
   const comparator = args[0]
   const direct = comparator === undefined ? undefined : ctx.directCallableValues.get(comparator.value)
-  if (
-    direct !== undefined &&
-    comparator?.representation.kind === 'function-value-dispatch' &&
-    comparator.representation.abi.receiver === null
-  )
-    return `gea::runtime::array::sort(${receiverText}, gea::DirectCallable<&${cppThunkName(direct)}>{})`
+  if (comparator?.representation.kind === 'function-value-dispatch' && comparator.representation.abi.receiver === null) {
+    // SortCompare (23.1.3.30.2) calls the comparator with two elements, which
+    // the runtime hands over as the element's own C++ type. Only a comparator
+    // whose two parameters ARE that carrier takes them as they are; one
+    // declared otherwise (`lights.sort( byShadow )` with `any` parameters over
+    // a class-instance array) needs each element converted at this boundary,
+    // exactly as `elementAdaptedCallbackText` converts for the callback family
+    // -- C++ performs no such conversion, and the inlining `DirectCallable`
+    // finds no invocable arity at all.
+    const abi = comparator.representation.abi
+    const compared = abi.parameters.slice(0, 2)
+    const exact = compared.every((parameter) => representationKey(parameter.value) === representationKey(element))
+    if (exact) {
+      if (direct !== undefined) return `gea::runtime::array::sort(${receiverText}, gea::DirectCallable<&${cppThunkName(direct)}>{})`
+    } else {
+      const refuse = (detail: string): never => {
+        throw createCppEmitBlockedError(
+          `runtime-helper:callback:sort:${elementKey(element)}`,
+          `"Array.prototype.sort" (ECMA-262 23.1.3.30) hands its comparator two elements "${elementKey(element)}"; ${detail}`
+        )
+      }
+      if (abi.restFrom !== null && abi.restFrom < 2) refuse('a comparator gathering them into a rest parameter has no runtime call shape')
+      const actuals = compared.map((parameter, position) => {
+        const converted = alignedValueText(
+          ctx,
+          'prototype/emit-prototype-array.ts:sortText',
+          element,
+          parameter.value,
+          `__gea_element_${position}`
+        )
+        return converted ?? refuse(`its parameter ${position} carries "${representationKey(parameter.value)}", and no installed conversion reconciles them`)
+      })
+      const formals = [0, 1].map((position) => `const ${cppTypeOf(element)}& __gea_element_${position}`)
+      const fn = direct !== undefined ? `gea::DirectCallable<&${cppThunkName(direct)}>{}` : operandText(ctx, comparator)
+      return `gea::runtime::array::sort(${receiverText}, [__gea_fn = ${fn}](${formals.join(', ')}) { return __gea_fn(${actuals.join(', ')}); })`
+    }
+  }
   if (args.length === 1) return call(ctx, 'sort', receiverText, args)
   if (element.kind !== 'string' && element.kind !== 'scalar') {
     throw createCppEmitBlockedError(
@@ -782,6 +813,25 @@ const includesText: ArrayCallRenderer = (ctx, receiverText, element, args, resul
     (element.payload.kind === 'string' || (element.payload.kind === 'scalar' && element.payload.domain !== 'bigint'))
   ) {
     return `gea::runtime::array::includesPresent(${receiverText}, ${operandText(ctx, search)})`
+  }
+  // The mirror case: an OPTIONAL search value over the elements of its own
+  // payload (`(['a', 'b'] as string[]).includes(value as string)` with `value:
+  // string | null`, which a type assertion does not unwrap). A primitive
+  // element is never `null` or `undefined`, so an absent search value answers
+  // false; a present one compares its payload. The receiver and the search
+  // value are evaluated first, in that order, either way.
+  if (
+    search.representation.kind === 'optional' &&
+    elementKey(search.representation.payload) === elementKey(element) &&
+    (element.kind === 'string' || (element.kind === 'scalar' && element.domain !== 'bigint'))
+  ) {
+    requireArity('includes', '23.1.3.16', [1, 2], args)
+    if (args[1] !== undefined) requireNumber('includes', 1, args)
+    const from = args[1] === undefined ? '' : `, ${operandText(ctx, args[1])}`
+    return (
+      `([&]() -> bool { auto&& gea_receiver = ${receiverText}; const auto& gea_search = ${operandText(ctx, search)}; ` +
+      `return gea_search.has_value() && gea::runtime::array::includes(gea_receiver, *gea_search${from}); }())`
+    )
   }
   // A search value whose every arm IS an arm of a union element -- the same
   // arm set spelled in another order, or one member of it -- widens into the

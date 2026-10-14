@@ -311,6 +311,12 @@ export const createFlowController = (deps: FlowControllerDeps): FlowController =
     builder.jump(arm, guard, join)
   }
 
+  const requireLoopHeader = (loop: OperationId): IrBlockId => {
+    const header = loopCache.get(loop)?.header
+    if (header === undefined) throw new IrLoweringBlockedError('a loop test branched before its loop header was opened')
+    return header
+  }
+
   const ensureGuardBlocks = (guard: SemanticResultId, predicate: TestPredicate = membership.predicateOf(guard)): GuardBlocks => {
     const cached = guardCache.get(guard)
     if (cached) return cached
@@ -326,8 +332,12 @@ export const createFlowController = (deps: FlowControllerDeps): FlowController =
     const arms = membership.armsOf(guard)
     // An arm nothing ever runs in would otherwise seal with no terminator: it
     // is dead as far as this owner's operations go, so it heads straight to
-    // whichever join the live arm eventually creates.
-    if (!arms.hasTruthy) sendArmToJoin(guard, info, armTrue, 'truthy')
+    // whichever join the live arm eventually creates -- except a loop test's
+    // truthy arm, which is the body. An empty body is still an iteration: its
+    // end is the back edge, never the exit, or the loop runs its test once.
+    const loop = membership.loopOfGuard(guard)
+    if (!arms.hasTruthy && loop !== null) builder.jump(armTrue, guard, requireLoopHeader(loop))
+    else if (!arms.hasTruthy) sendArmToJoin(guard, info, armTrue, 'truthy')
     if (!arms.hasFalsy) sendArmToJoin(guard, info, armFalse, 'falsy')
     return info
   }
@@ -590,7 +600,17 @@ export const createFlowController = (deps: FlowControllerDeps): FlowController =
       // when it failed, and its taken arm writes the back edge as that arm
       // closes -- so leaving such a loop is nothing more than closing this
       // frame.
-      if (membership.guardOfLoop(frame.loop) !== null) return
+      //
+      // Unless no operation ever ran in either arm: an empty body
+      // (`while (!it.next().done) {}`) asks for no arm scope, so nothing built
+      // the test's branch, and the code after the loop was appended to the
+      // header after one evaluation of the test. The branch is built here
+      // instead, where the test finished, and control leaves through its exit.
+      const guard = membership.guardOfLoop(frame.loop)
+      if (guard !== null) {
+        if (!guardCache.has(guard) && !isTerminated()) leaveInto(ensureGuardBlocks(guard).joinBlock)
+        return
+      }
       // A loop with no test has neither. Without the back edge below, the body
       // of `while (true)` ran exactly once and fell through to whatever came
       // after it -- an ordinary construct compiled into something that is not

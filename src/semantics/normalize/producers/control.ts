@@ -10,6 +10,7 @@ import type { CandidateContribution, FamilyProducer } from '../contribution.js'
 import { blocked, mintOperationId, mintResult, operand } from './mint.js'
 import { contributePlainLoop, contributeTailTestedLoop } from './control-loops.js'
 import { resolveExpressionOperand } from './boundary.js'
+import { unsharedReturnedArray } from '../unshared-array-result.js'
 import { unwrapErasedExpression } from './erasure.js'
 import type { IdentityTable } from '../identities.js'
 import type { ProducerContext } from '../producer-context.js'
@@ -547,7 +548,12 @@ const contributeReturn = (context: ProducerContext, candidate: CensusCandidate, 
   if (node.expression) {
     const resolved = resolveExpressionOperand(context, node.expression)
     if (!resolved) return blockedContribution(candidate, 'no normalized operation identifies the returned value')
-    valueOperand = { ...operand('value', 0, resolved.source, resolved.type), ...(resolved.asserted ? { asserted: true as const } : {}) }
+    valueOperand = {
+      ...operand('value', 0, resolved.source, resolved.type),
+      ...(resolved.asserted ? { asserted: true as const } : {}),
+      // A `finally` runs after the value is taken and may still fill the local.
+      ...(!nearestInterceptingFinally(node) && unsharedReturnedArray(context.checker, node) ? { unsharedFreshArray: true as const } : {})
+    }
   } else {
     const undefinedType = context.table.intern({ kind: 'primitive', primitive: 'undefined' })
     valueOperand = operand('value', 0, { kind: 'absent' }, undefinedType)

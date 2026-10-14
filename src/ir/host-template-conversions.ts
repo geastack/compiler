@@ -115,6 +115,14 @@ export const hostTemplateConversionInputsOf = (
         if (callback?.kind === 'function-value-dispatch' && callback.abi.receiver === null && callback.abi.parameters[0])
           add('prototype-callback', element, callback.abi.parameters[0].value)
       }
+      // SortCompare hands the comparator two elements; the emitter converts
+      // each into its parameter's carrier (`sortText`), so both pairs are
+      // this call's own certified conversions.
+      if (member === 'sort') {
+        const comparator = operation.arguments[0]?.representation
+        if (comparator?.kind === 'function-value-dispatch' && comparator.abi.receiver === null)
+          for (const parameter of comparator.abi.parameters.slice(0, 2)) add('prototype-callback', element, parameter.value)
+      }
       if (result && ['find', 'findLast', 'at', 'pop', 'shift'].includes(member))
         add('prototype-result', { kind: 'optional', payload: element, absence: 'undefined' }, result)
       if (member === 'filter' && result?.kind === 'array-object') add('prototype-result', element, result.element)
