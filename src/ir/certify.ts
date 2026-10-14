@@ -112,6 +112,7 @@ import {
   nativeFieldViewDocumentTargetSetOf,
   nativeFieldViewOpenDocumentRead,
   nativeFieldViewOpenReadOf,
+  nativeFieldViewOpenWriteOf,
   nativeFieldViewCarrierNeedsReceipt,
   nativeFieldViewOperationNeedsReceipt,
   nativeFieldViewReadOf,
@@ -1095,7 +1096,9 @@ const ownDemandsOf = (operation: IrOperation, ctx: CertifyContext): CapabilityDe
       // way: a demand is raised ONLY when the certificate has gone stale
       // against the operation it rides on. A well-formed one asks for nothing
       // new -- the emitter renders it as ordinary constant-key stores, whose
-      // storage the receiver's own `:set:` claims already cover.
+      // storage the receiver's own `:set:` claims already cover and whose
+      // value-into-field conversions are the operation's own `field-write`
+      // recipes, published for every recipe key (`operation-conversions.ts`).
       const recipe = operation.typedComputedWrite
       if (recipe === undefined) return []
       if (recipe.receiver === representationKey(operation.receiver.representation) && recipe.keys.length > 0) return []
@@ -1603,8 +1606,11 @@ const nativeFieldViewDemandsOf = (operation: IrOperation, ctx: CertifyContext): 
         : key !== null
           ? nativeFieldViewWriteOf(operation, key, ctx.nativeFieldViews, ctx.conversions)
           : authenticDomain
-            ? nativeFieldViewWriteSelectionOf(operation, keyDomain!, ctx.nativeFieldViews, ctx.conversions)
-            : null
+            ? (nativeFieldViewWriteSelectionOf(operation, keyDomain!, ctx.nativeFieldViews, ctx.conversions) ??
+              nativeFieldViewOpenWriteOf(operation, ctx.nativeFieldViews, ctx.conversions, keyDomain))
+            : copiedDomain === undefined
+              ? nativeFieldViewOpenWriteOf(operation, ctx.nativeFieldViews, ctx.conversions)
+              : null
       : null
   if (!nativeFieldViewReceiptMatches(expected, receipt))
     return [

@@ -715,11 +715,24 @@ const liveRecordFieldsText = (
     let write: LiveFieldViewAccess['write'] = null
     if (read.kind === 'held' || read.kind === 'view') {
       const type = cppTypeOf(route.read)
+      // An optional source field the source object does not have reads
+      // `undefined`: the target's own absence for an `optional`, or the
+      // `undefined` arm of a union that states one (three's
+      // `options.internalFormat`, `string | null | undefined`, read through
+      // the view a render target builds over a caller's options literal that
+      // never named it -- the source has no own field to answer from).
+      const undefinedArm = route.read.kind === 'tagged-union' ? route.read.arms.findIndex((arm) => arm.value.kind === 'undefined') : -1
+      const absentValue =
+        route.read.kind === 'optional' && route.read.absence === 'undefined'
+          ? `${type}{}`
+          : undefinedArm >= 0
+            ? `${type}::ofArm<${undefinedArm}>(gea::Undefined{})`
+            : null
       const absence =
-        !read.held.required && route.read.kind === 'optional' && route.read.absence === 'undefined'
+        !read.held.required && absentValue !== null
           ? `bool gea_origin_present = false; if (!${actual}->gea_ownFieldPresent(gea_key, gea_origin_present)) ` +
             'gea::host::throwRuntimeError("TypeError", "a live native field has no source presence protocol"); ' +
-            `if (!gea_origin_present) return ${type}{}; `
+            `if (!gea_origin_present) return ${absentValue}; `
           : ''
       got =
         `([&]() -> ${type} { ${absence}std::optional<${type}> gea_origin_field; gea::NativeFieldRead gea_origin_read(gea_origin_field); ` +

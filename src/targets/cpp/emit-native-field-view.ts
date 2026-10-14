@@ -9,6 +9,7 @@ import { cppTypeOf, cppStringLiteral, cppRecordFieldKeyIsSymbol, fieldPropertyKe
 import { propertyKeyText } from './emit-dynamic-properties.js'
 import { nativeDataPropertyText } from './emit-buffers.js'
 import { nativeDataPropertyOf } from '../../representation/native-data-properties.js'
+import { staticOwnFieldsOf } from '../../representation/record-fields.js'
 
 const tokenOf = (type: string): string => `gea::detail::payloadTypeTagFor<${type}>()`
 const routeTokenOf = (value: Representation): string =>
@@ -17,6 +18,17 @@ const routeTokenOf = (value: Representation): string =>
 /** A static symbol member reaches the IR as its `sym(decl|...)` key text, never as a string property. */
 const viewKeyText = (key: string): string =>
   cppRecordFieldKeyIsSymbol(key) ? fieldPropertyKeyText(key) : `gea::PropertyKey::string(${cppStringLiteral(key)})`
+
+/**
+ * The key a `readLiveField`/`writeLiveField` call names: a string key travels
+ * as a literal (`gea::record::LiteralFieldKey`) the runtime turns into a
+ * `PropertyKey` only for a receiver that is a live view, so the plain
+ * allocation every hot read and write takes builds no key at all.
+ */
+const liveKeyText = (key: string): string =>
+  cppRecordFieldKeyIsSymbol(key)
+    ? fieldPropertyKeyText(key)
+    : `gea::record::LiteralFieldKey{${cppStringLiteral(key)}, ${new TextEncoder().encode(key).length}}`
 
 const renderedLeaf = (ctx: EmitContext, id: string, text: string): string => {
   const node = ctx.conversions.nodeById(id)
@@ -235,7 +247,12 @@ export const nativeFieldViewReadText = (
         operation.key
       )
 
-export const nativeFieldViewWriteText = (ctx: EmitContext, operation: SetOperation): string | null => {
+export const nativeFieldViewWriteText = (
+  ctx: EmitContext,
+  operation: SetOperation,
+  /** The receiver's ordinary store of `operation`, rendered in `bound`: what an open write's plain indexed allocation runs. */
+  ordinaryStore?: (bound: EmitContext, receiver?: IrOperand) => readonly string[]
+): string | null => {
   const receipt = operation.nativeFieldViewWrite
   if (!receipt) return null
   const arms = receipt.targets.flatMap(({ target, conversion }) => {
@@ -245,8 +262,44 @@ export const nativeFieldViewWriteText = (ctx: EmitContext, operation: SetOperati
     return [`if (${routeTokenOf(target)}) { static_cast<std::optional<${result}>*>(gea_out)->emplace(${converted}); return true; }`]
   })
   const adapter = '[&](const void* gea_type, const void* gea_policy, void* gea_out) -> bool { ' + `${arms.join(' ')} return false; }`
+  // The carrier and materializer an extension store keeps (`receipt.open`).
+  const openMaterializer = (open: NonNullable<typeof receipt.open>): string =>
+    `+[](const ${cppTypeOf(open.carrier)}& gea_data) -> gea::Value { return ${renderedLeaf(ctx, open.materializer, 'gea_data')}; }`
+  // A declared, always-present member of the receiver's own record layout:
+  // the write counterpart of the read side's member answer. The plain
+  // allocation takes exactly the store a receiver that is no view target
+  // renders (`ordinaryStore`), instead of the string-keyed own-field protocol
+  // and its per-write policy dispatch. A program-wide view target -- a record
+  // a dynamic writer may store a view into, such as three's uniform
+  // `{ value }` -- otherwise sends every plain store of the type, every
+  // frame, through `gea_writeOwnFieldNative`.
+  const memberStore = (carrier: Representation, key: string): boolean => {
+    // The receiver as `withFieldReceiver` binds it: presence and borrowing
+    // peeled, never a union arm (an arm's member store is that arm's own).
+    let held = operation.receiver.representation
+    while (held.kind === 'optional' || held.kind === 'borrowed-ref') held = held.kind === 'optional' ? held.payload : held.referent
+    if (ordinaryStore === undefined || representationKey(carrier) !== representationKey(held)) return false
+    if (carrier.kind !== 'record' && carrier.kind !== 'native-record-ref') return false
+    if (carrier.kind === 'record' && carrier.accessors.some((accessor) => accessor.key === key)) return false
+    return (staticOwnFieldsOf(ctx.deriver, carrier) ?? []).some((field) => field.key === key && field.required)
+  }
   const forKey = (key: string): string =>
-    withFieldReceiver(operation.receiver.representation, 'gea_field_input', () => {
+    withFieldReceiver(operation.receiver.representation, 'gea_field_input', (carrier) => {
+      // A forwarded key no source behind a view declares is created on that
+      // source: the write names its carrier, as an open key's does. A plain
+      // allocation keeps it in its own slot.
+      if (receipt.open !== undefined && receipt.forwardedKeys?.includes(key))
+        return (
+          `return gea::record::writeLiveOpenField<${nativeFieldPolicyType(receipt.open.carrier)}>(gea_field_receiver, ${viewKeyText(key)}, ` +
+          `gea_field_value, ${adapter}, ${openMaterializer(receipt.open)}, [&](const gea::NativeFieldWrite& gea_open_write) -> bool { ` +
+          `return gea_field_receiver->gea_writeOwnFieldNative(${viewKeyText(key)}, gea_open_write, gea::nativeIsExtensible(gea_field_receiver)); });`
+        )
+      if (receipt.keyDomain === undefined && memberStore(carrier, key))
+        return (
+          `return gea::record::writeLiveField(gea_field_receiver, ${liveKeyText(key)}, ` +
+          `gea_field_value, ${adapter}, [&]() -> bool { ` +
+          `${ordinaryStore!(bound, { value: operation.receiver.value, representation: carrier }).join(' ')} return true; });`
+        )
       const plain =
         `auto gea_plain_adapter = ${adapter}; auto gea_plain_write = gea::NativeFieldWrite::exact(gea_field_value); ` +
         'gea_plain_write.exactOnly = false; gea_plain_write.slot = &gea_plain_adapter; ' +
@@ -275,11 +328,34 @@ export const nativeFieldViewWriteText = (ctx: EmitContext, operation: SetOperati
       ? ''
       : `const auto& gea_field_key_input = ${operandText(ctx, operation.key)}; ` +
         `const gea::PropertyKey gea_field_key = ${propertyKeyText(bound, operation.key, 'a computed native field-view write')}; `
+  // Any other runtime key of an open write: a live view takes it through its
+  // own routes to the original allocation (`nativeLiveViewSourceWrite` or a
+  // Document entry), carrying the receipt's value carrier and materializer as
+  // the typed policy an expando store needs. A plain allocation stores it in
+  // its own expando, or -- an indexed record -- through exactly the ordinary
+  // sidecar store a receiver that is no view target renders.
+  const open = receipt.open
+  const otherKey =
+    receipt.openKeys !== true || open === undefined
+      ? ' gea::host::throwRuntimeError("TypeError", "No admitted native field-view key");'
+      : ` ${withFieldReceiver(operation.receiver.representation, 'gea_field_input', (carrier) => {
+          const materializer = openMaterializer(open)
+          let plain =
+            '[&](const gea::NativeFieldWrite& gea_open_write) -> bool { return gea::nativeObjectDataExtend(gea_field_receiver, gea_field_key, gea_open_write); }'
+          if (carrier.kind === 'record-with-index') {
+            if (ordinaryStore === undefined) throw new Error('an open indexed field-view write has no ordinary sidecar store')
+            const plainContext = { ...bound, valueNames: new Map(bound.valueNames).set(operation.receiver.value, 'gea_field_input') }
+            plain = `[&](const gea::NativeFieldWrite&) -> bool { ${ordinaryStore(plainContext).join(' ')} return true; }`
+          }
+          return (
+            `return gea::record::writeLiveOpenField<${nativeFieldPolicyType(open.carrier)}>(gea_field_receiver, gea_field_key, ` +
+            `gea_field_value, ${adapter}, ${materializer}, ${plain});`
+          )
+        })}`
   const selected =
     receipt.keyDomain === undefined
       ? forKey(receipt.key)
-      : receipt.keyDomain.map((key) => `if (gea_field_key == ${viewKeyText(key)}) { ${forKey(key)} }`).join(' ') +
-        ' gea::host::throwRuntimeError("TypeError", "No admitted native field-view key");'
+      : receipt.keyDomain.map((key) => `if (gea_field_key == ${viewKeyText(key)}) { ${forKey(key)} }`).join(' ') + otherKey
   return (
     `([&](const auto& gea_field_input) -> bool { ` +
     computedKey +

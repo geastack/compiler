@@ -51,6 +51,82 @@ const binaryViewDataKeys = ['buffer', 'byteLength', 'byteOffset', 'length', 'BYT
 const isDocumentPlan = (plan: NativeFieldViewPlan): boolean =>
   plan.source.kind === 'dictionary' && plan.fields.every((field) => field.declaredAnyEntry === true)
 
+/** The identity of one receiver's store of a forwarded key no source declares (`NativeCallableFlow.nativeFieldViewForwardedWrites`). */
+export const nativeFieldViewForwardedWriteKey = (receiver: string, key: string): string => JSON.stringify([receiver, key])
+
+/** The installed live plans by target shape, as `nativeFieldViewDomainsOf` indexes them. */
+export const nativeFieldViewPlansByTargetOf = (nodes: Iterable<ConversionNode>): ReadonlyMap<string, readonly NativeFieldViewPlan[]> => {
+  const plans = new Map<string, NativeFieldViewPlan[]>()
+  for (const plan of nativeFieldViewPlansOf(nodes)) {
+    const entries = plans.get(plan.target.shapeId) ?? []
+    if (!entries.includes(plan)) entries.push(plan)
+    plans.set(plan.target.shapeId, entries)
+  }
+  return plans
+}
+
+/**
+ * Where a store of a runtime key outside every named descriptor lands, for a
+ * value carried as `receiver` (`data[key] = v` over a live view target): the
+ * record carriers whose own expando takes it -- the plain allocation itself
+ * and, through each installed live plan, its original source -- or null when
+ * some allocation behind the carrier has no certified home for an undeclared
+ * key. An installed Document view stores the key as its own entry, and an
+ * indexed record's plain allocation in its index sidecar; neither is an
+ * expando home. A class instance, a native base, a view whose source keeps
+ * undeclared keys in an index sidecar, and any union are homes this proof
+ * does not cover, so the store stays refused there. `named` is every key a
+ * slot, accessor or installed descriptor along the way declares: a store of
+ * one of those takes its route, never a home.
+ */
+export const nativeFieldViewOpenWriteHomesOf = (
+  receiver: Representation,
+  plans: ReadonlyMap<string, readonly NativeFieldViewPlan[]>,
+  layoutOf: Pick<RepresentationDeriver, 'layoutOf'> | null | undefined
+): { readonly homes: readonly Representation[]; readonly named: ReadonlySet<string> } | null => {
+  if (receiver.kind === 'optional' || receiver.kind === 'borrowed-ref')
+    return nativeFieldViewOpenWriteHomesOf(receiver.kind === 'optional' ? receiver.payload : receiver.referent, plans, layoutOf)
+  if (receiver.kind !== 'record' && receiver.kind !== 'record-with-index' && receiver.kind !== 'native-record-ref') return null
+  if (receiver.ownership !== 'shared-refcount') return null
+  const installed = plans.get(receiver.shapeId)
+  if (!installed?.length) return null
+  const named = new Set<string>()
+  const name = (keys: Iterable<{ readonly key: string }>): void => {
+    for (const { key } of keys) named.add(key)
+  }
+  if (receiver.kind === 'record-with-index') {
+    if (!installed.every(isDocumentPlan)) return null
+    name(receiver.fields)
+    for (const plan of installed) name(plan.fields)
+    return { homes: [], named }
+  }
+  const homes: Representation[] = []
+  const pending: Representation[] = [receiver]
+  const seen = new Set<string>()
+  while (pending.length > 0) {
+    const carrier = pending.pop()!
+    const identity = representationKey(carrier)
+    if (seen.has(identity)) continue
+    seen.add(identity)
+    if ((carrier.kind !== 'record' && carrier.kind !== 'native-record-ref') || carrier.ownership !== 'shared-refcount') return null
+    const ordinary =
+      carrier.kind === 'native-record-ref'
+        ? carrier.native === null
+          ? layoutOf?.layoutOf(carrier.shapeId as StructuralTypeId)
+          : null
+        : carrier
+    if (ordinary?.kind !== 'record') return null
+    homes.push(carrier)
+    name(ordinary.fields)
+    name(ordinary.accessors)
+    for (const plan of plans.get(carrier.shapeId) ?? []) {
+      name(plan.fields)
+      if (!isDocumentPlan(plan)) pending.push(plan.source)
+    }
+  }
+  return { homes, named }
+}
+
 /**
  * A callback's physical descriptor remains fixed when its Function identity
  * escapes. Enumerate only installed live allocation plans, plus the ordinary
@@ -117,6 +193,28 @@ export const nativeFieldViewDomainsOf = (
     if (ordinary.fields.some((field) => field.key === key) || ordinary.accessors.some((accessor) => accessor.key === key)) return false
     return (plans.get(receiver.shapeId) ?? []).every(
       (plan) => !plan.fields.some((field) => field.key === key) && keyAbsentIn(plan.source, key, seen)
+    )
+  }
+  /**
+   * Whether a plain allocation of `source` stores `key` in its own slot or
+   * accessor. A forwarded key a source's layout does not declare is answered
+   * from that allocation's expando -- even when the source is itself a view
+   * target whose installed plans route the key: the plain allocation has no
+   * such route, and its expando may be empty.
+   */
+  const ordinaryDeclares = (source: Representation, key: string): boolean => {
+    if (source.kind === 'optional' || source.kind === 'borrowed-ref')
+      return ordinaryDeclares(source.kind === 'optional' ? source.payload : source.referent, key)
+    const ordinary =
+      source.kind === 'native-record-ref'
+        ? source.native === null
+          ? layoutOf?.layoutOf(source.shapeId as StructuralTypeId)
+          : null
+        : source
+    if (ordinary?.kind !== 'record' && ordinary?.kind !== 'record-with-index') return true
+    return (
+      ordinary.fields.some((field) => field.key === key) ||
+      (ordinary.kind === 'record' && ordinary.accessors.some((accessor) => accessor.key === key))
     )
   }
   const domainsOf = (receiver: Representation, ordinaryArm = false): ReadonlyMap<string, readonly NativeFieldStorageDomain[]> | null => {
@@ -315,8 +413,11 @@ export const nativeFieldViewDomainsOf = (
         if (!field.descriptorForward) add(field.key, field)
         // A forwarded key the source never stores answers from its expando
         // table, which without an own descriptor reads `undefined`, and
-        // otherwise holds whatever native carrier a copy stored there.
-        else if (inherited !== null && !inherited.has(field.key)) {
+        // otherwise holds whatever native carrier a copy stored there. The
+        // forward reads that expando and nothing else, so its answers do not
+        // depend on whether the source's own layout is known: an unresolved
+        // source still answers `undefined` for a key it never received.
+        else if (inherited === null || !inherited.has(field.key) || !ordinaryDeclares(plan.source, field.key)) {
           add(field.key, { read: { kind: 'undefined' }, write: null, sourceAbsent: true })
           if ('shapeId' in plan.source)
             for (const stored of expandoStoredOf(plan.source.shapeId, field.key)) add(field.key, { read: stored, write: null })

@@ -6,7 +6,7 @@ import type { RecordViewPlan } from '../conversion/record-view.js'
 import type { Representation } from '../representation/model.js'
 import type { ClassLayout } from '../projection/classes.js'
 import type { DeclarationId, FunctionId } from '../identity/ids.js'
-import { nativeFieldViewDomainsOf } from './native-field-view-domains.js'
+import { nativeFieldViewDomainsOf, nativeFieldViewOpenWriteHomesOf, nativeFieldViewPlansByTargetOf } from './native-field-view-domains.js'
 
 const text: Representation = { kind: 'string' }
 const number: Representation = { kind: 'scalar', domain: 'number' }
@@ -286,4 +286,30 @@ test('a key no live descriptor names reads each original allocation expando, nev
   // A named key keeps its exact descriptor routes; an uninstalled carrier has no live view to answer for.
   assert.equal(domain.absentRoutesOf(target, 'shown'), null)
   assert.equal(domain.absentRoutesOf(record('uninstalled', text), 'missing'), null)
+})
+
+test('an open-key store lands in the plain allocation and each original source behind its views, or is refused', () => {
+  const source = record('actual', number)
+  const target = record('public', text)
+  const plans = nativeFieldViewPlansByTargetOf([route(source, target, number)])
+  const open = nativeFieldViewOpenWriteHomesOf(target, plans, null)
+  assert.deepEqual(open?.homes, [target, source])
+  assert.deepEqual([...(open?.named ?? [])], ['shown'])
+  assert.deepEqual(nativeFieldViewOpenWriteHomesOf({ kind: 'optional', payload: target, absence: 'undefined' }, plans, null)?.homes, [
+    target,
+    source
+  ])
+  // No installed view, a by-value carrier, or a union is no home this proof covers.
+  assert.equal(nativeFieldViewOpenWriteHomesOf(source, plans, null), null)
+  assert.equal(nativeFieldViewOpenWriteHomesOf({ ...target, ownership: 'owned' }, plans, null), null)
+  const indexed = { ...record('indexed', text), kind: 'record-with-index' as const, indexes: [{ key: 'string' as const, value: text }] }
+  const indexedSource = { ...record('indexed-source', number), kind: 'record-with-index' as const, indexes: [] }
+  const behindIndexed = nativeFieldViewPlansByTargetOf([route(indexedSource as never, target, number)])
+  // A view whose source keeps undeclared keys in an index sidecar has no certified home.
+  assert.equal(nativeFieldViewOpenWriteHomesOf(target, behindIndexed, null), null)
+  // An indexed receiver is admitted only behind Document views; its own sidecar is no expando home.
+  assert.equal(
+    nativeFieldViewOpenWriteHomesOf(indexed as never, nativeFieldViewPlansByTargetOf([route(source, indexed as never, number)]), null),
+    null
+  )
 })

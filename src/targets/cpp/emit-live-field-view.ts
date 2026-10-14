@@ -36,7 +36,13 @@ export const liveFieldViewText = (plan: NativeFieldViewPlan, text: string, acces
       `return gea_read.assign<${policy}>(${access.read.text}); }`
     )
   })
+  const nativeExtensions = plan.source.kind === 'record' || (plan.source.kind === 'native-record-ref' && plan.source.native === null)
   const writeArms = accesses.map((access) => {
+    // A forwarded key the record source does not declare is created on that
+    // source by a write naming its carrier (`nativeLiveViewForwardedWrite`),
+    // as its read already answers from the source's expando.
+    if (access.write === null && access.descriptorForward && nativeExtensions)
+      return `if (gea_key.text() == ${cppStringLiteral(access.key)}) return gea::nativeLiveViewForwardedWrite(gea_live_source, gea_key, gea_write);`
     if (access.write === null) return `if (gea_key.text() == ${cppStringLiteral(access.key)}) return false;`
     const type = cppTypeOf(access.write.value)
     const policy = nativeFieldPolicyType(access.write.value)
@@ -47,7 +53,6 @@ export const liveFieldViewText = (plan: NativeFieldViewPlan, text: string, acces
   })
   const sourceType = cppTypeOf(plan.source)
   const source = `const auto gea_live_source = gea_immediate.staticCast<typename ${sourceType}::element_type>();`
-  const nativeExtensions = plan.source.kind === 'record' || (plan.source.kind === 'native-record-ref' && plan.source.native === null)
   const ordinaryRead = `return gea::nativeLiveViewSourceRead<${nativeExtensions}>(gea_live_source, gea_key, gea_read);`
   const ordinaryWrite = 'return gea::nativeLiveViewSourceWrite(gea_live_source, gea_key, gea_write);'
   const read =
