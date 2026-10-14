@@ -1170,6 +1170,26 @@ test('a native call result keeps its native receiver provenance, awaited or not'
   }
 })
 
+test('a scalar host-native parameter exposes only what its primitive reaches, not the cell it was read from', () => {
+  // `bag[ 1 ]` is read out of a cell that also holds a Map, so its alias
+  // component carries Map.prototype. Handed to an `any` parameter the native
+  // may receive that Map; handed to a `number` parameter it receives a scalar,
+  // which reaches its own wrapper chain and nothing of the Map's.
+  const auditFor = (parameter: string): GlobalHostMutationAudit =>
+    globalHostMutationAuditOf(`
+      interface Process {}
+      declare var hostProcess: Process
+      declare function hostDraw(x: ${parameter}): void
+      const bag: any[] = [new Map<string, number>(), 1]
+      hostDraw(bag[1])
+    `)
+  const opaque = new Set(auditFor('any').taint)
+  const scalar = new Set(auditFor('number').taint)
+  assert.equal(scalar.has('*'), false, [...scalar].join(','))
+  for (const declaration of scalar) assert.ok(opaque.has(declaration), `${String(declaration)} only under the scalar parameter`)
+  assert.ok(scalar.size < opaque.size, `scalar ${[...scalar].join(',')} vs opaque ${[...opaque].join(',')}`)
+})
+
 test('a host overload merged onto a library symbol publishes the result the call resolved to', () => {
   // `fetch` is lib.dom's symbol too; the host's `declare global` overload is
   // the one this call resolves to (`HostInit` shares no property with

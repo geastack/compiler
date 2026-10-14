@@ -676,7 +676,15 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
       // A literal that spells every key it has proves the absence of every
       // key it does not. This is asked while walking the literal's OWN uses,
       // so a store that added an unspelled key is a refusal in the same walk.
-      if (literalSpelledKeys(root) === null || descriptorOf(root, key) || hasUnnamedWrite(root)) return false
+      // A key the literal DOES spell is not absent, whether or not
+      // `descriptorOf` can describe it: `{ get baking() { ... } }` spells
+      // `baking` as an accessor, which `descriptorOf` (data entries only)
+      // answers false for. Reading it as absent claimed the read falls through
+      // to `Object.prototype` -- a read that runs the getter, modelled as one
+      // that yields `undefined` -- and raised an `Object.prototype`
+      // obligation for a key the object itself has.
+      const spelled = literalSpelledKeys(root)
+      if (spelled === null || spelled.includes(key) || descriptorOf(root, key) || hasUnnamedWrite(root)) return false
     } else if (ts.isNewExpression(root)) {
       const fact = construction(root)
       if (!fact || fact.alternatives.length === 0) return false
@@ -3213,9 +3221,16 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
             // select, and the receiver walk would otherwise end at `new Map()`
             // as an opaque construction. The stores themselves continue at
             // these reads (`visitUse` below), so the two are one graph.
+            // A key no `set` stored completes `undefined` (Map.prototype.get
+            // step 5): nothing here proves the key present, so that value is
+            // always one of the completions. Without it, the `!list` of
+            // `let list = map.get( k ); if ( !list ) { ...install... }` was
+            // proved object-truthy and the install branch pruned.
             const stored = collectionStoredValuesOf(checker, flow, query.node, nativeProtocolClosed)
             if (stored !== null) {
               for (const candidate of stored) add(carry(value(candidate)))
+              facts.add(undefinedValue)
+              seeded = true
               break
             }
           }

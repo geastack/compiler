@@ -1540,6 +1540,27 @@ test('native own slot owners distinguish abrupt nullish lookup from stored undef
   }
 })
 
+test('a literal accessor key is the literal own key, never an absence from Object.prototype', () => {
+  // `{ get busy() }` spells `busy`. Reading it runs the getter: it is not a
+  // key absent from the literal that falls through to Object.prototype, so it
+  // owes no Object.prototype obligation for `busy`.
+  const checked = inspect(`
+    const state = { get busy() { return false }, count: 1 }
+    function tick() { if (state.busy) return 0; return state.count }
+    tick()
+  `)
+  const statement = checked.file.statements.find(ts.isVariableStatement)!
+  const literal = statement.declarationList.declarations[0]!.initializer!
+  const captured = checked.ledger.capture(() => checked.session.closedValuesOf(literal))
+  assert.equal(
+    captured.requirements.some((one) => one.intrinsic === 'Object' && one.prototypeKeys?.names?.includes('busy')),
+    false,
+    JSON.stringify(captured.requirements.map((one) => [one.intrinsic, one.prototypeKeys?.names]))
+  )
+  // An accessor read is a use this graph does not model, so the closure is not proven.
+  assert.equal(captured.value, null)
+})
+
 test('canonical intrinsic own data replacements publish the installed source frame', () => {
   const checked = inspect(`
     Object.freeze = (value: any) => value;

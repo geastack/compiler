@@ -769,6 +769,36 @@ export const censusGlobalHostMutations = (
    * have reached that cell through `any`; its ordinary value-flow edges remain
    * authoritative and an opaque source still fails closed.
    */
+  /**
+   * The argument positions of a call into a bodiless ambient function -- a
+   * host native -- whose declared parameter type is primitive, with that type.
+   *
+   * Such a native receives its arguments across the host boundary as the
+   * declared types: a `number` parameter is a scalar there, whatever cell the
+   * argument was read out of, because the call converts it (or refuses) on
+   * the way in. What the native can reach through that argument is what a
+   * primitive of that type reaches -- its own wrapper's prototype chain, which
+   * `prototypeNamesOf` already models -- not the alias component of the cell
+   * it was read from. Charging the component instead stamped `every` onto each
+   * intrinsic prototype the component had been merged with, `Map.prototype`
+   * among them, for every `x` and `width` handed to a `readPixels`-style
+   * native, and refused obligations no native could touch.
+   */
+  const NO_SCALAR_POSITIONS: ReadonlyMap<number, ts.Type> = new Map()
+  const hostNativeScalarParametersOf = (call: ts.CallExpression): ReadonlyMap<number, ts.Type> => {
+    if (call.arguments.some(ts.isSpreadElement)) return NO_SCALAR_POSITIONS
+    const signature = checker.getResolvedSignature(call)
+    const declaration = signature?.declaration
+    if (!signature || !declaration || !isBodilessAmbientFunction(declaration)) return NO_SCALAR_POSITIONS
+    const positions = new Map<number, ts.Type>()
+    signature.parameters.forEach((parameter, position) => {
+      const declared = parameter.valueDeclaration
+      if (!declared || !ts.isParameter(declared) || declared.dotDotDotToken) return
+      const type = checker.getTypeOfSymbolAtLocation(parameter, call)
+      if (primitiveResult(type)) positions.set(position, type)
+    })
+    return positions
+  }
   const primitiveResult = (type: ts.Type): boolean => {
     if (type.isUnion()) return type.types.every(primitiveResult)
     const primitive =
@@ -3305,6 +3335,20 @@ export const censusGlobalHostMutations = (
       terms.push(term)
     }
     return terms
+  }
+  /** The intrinsic prototypes (and their constructors) a value of primitive `type` reaches. */
+  const primitivePrototypeReachOf = (type: ts.Type, at: ts.Node): ReadonlySet<DeclarationId> => {
+    const reach = new Set<DeclarationId>()
+    for (const name of prototypeNamesOf(type)) {
+      const constructor = checker.resolveName(name, undefined, ts.SymbolFlags.Value, false)
+      if (!constructor || !hasStandardLibraryDeclaration(constructor)) continue
+      const prototype = checker.getPropertyOfType(checker.getTypeOfSymbolAtLocation(constructor, at), 'prototype')
+      const declaration = prototype && hasStandardLibraryDeclaration(prototype) ? identities.symbolDeclarationId(prototype) : null
+      if (declaration !== null) reach.add(declaration)
+      const constructorId = identities.symbolValueDeclarationId(constructor, at)
+      if (constructorId !== null) reach.add(constructorId)
+    }
+    return reach
   }
   const prototypeTerms = new Map<DeclarationId, AliasTerm>()
   const globalTerm: AliasTerm = { kind: 'GLOBAL_TRUE' }
@@ -6259,10 +6303,19 @@ export const censusGlobalHostMutations = (
       // mutation. This is intentionally conservative: a missed write would
       // retain a native singleton after JavaScript replaced it.
       if (callAsksContainsGlobal(node)) {
-        for (const argument of node.arguments) {
+        const scalarParameters = hostNativeScalarParametersOf(node)
+        for (const [position, argument] of node.arguments.entries()) {
           const current = unwrapErasedExpression(argument)
           const target = containsRequests.get(current)
-          const facts = target ? factsByComponent.get(componentOf.get(target)!) : undefined
+          const component = target ? factsByComponent.get(componentOf.get(target)!) : undefined
+          // A scalar host parameter reaches what its primitive reaches, and
+          // nothing else of the cell's component (`hostNativeScalarParametersOf`).
+          const scalar = scalarParameters.get(position)
+          const reach = scalar === undefined ? null : primitivePrototypeReachOf(scalar, current)
+          const facts =
+            component === undefined || reach === null
+              ? component
+              : { ...component, prototypes: new Set([...component.prototypes].filter((declaration) => reach.has(declaration))) }
           if (process.env['GEA_DEBUG_GLOBAL_MUTATION'] && facts && facts.prototypes.size > 0)
             debugSite(argument, `opaque argument exposes ${facts.prototypes.size} intrinsic objects [${[...facts.prototypes].join(' ')}]`)
           // A fully-settled argument (a known intrinsic like `Math`, a plain
