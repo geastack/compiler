@@ -286,6 +286,23 @@ const computeNativeCallableFlow = (
     if (trace && reason !== undefined) cell.escapeReason ??= reason
   }
   const absorbEscape = (cell: OriginCell, target: OriginCell): void => {
+    // The absorbed sources are read for one thing: `callablePublications`,
+    // the publications of the FUNCTIONS a cell holds. A cell holding none needs
+    // only the flag. Copying every escaped target's whole source list into
+    // every aliasing cell regardless kept a set of publication sites per cell
+    // per program -- gigabytes on a large program, and its out-of-memory. A
+    // cell that later gains a function is `changed` (`addFunction`), so it is
+    // processed again and absorbs from the start (`escapeAbsorbed` is only
+    // recorded below, once it has).
+    if (cell.functions.size === 0) {
+      if (!cell.escaped) {
+        cell.escaped = true
+        changed(cell)
+        for (const incoming of cell.incoming) schedule(incoming)
+      }
+      if (trace && target.escapeReason !== undefined) cell.escapeReason ??= target.escapeReason
+      return
+    }
     const list = target.escapeSourceList
     const from = cell.escapeAbsorbed?.get(target) ?? 0
     if (from === list.length && cell.escaped) {
