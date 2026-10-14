@@ -544,6 +544,10 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
   }
 
   const arrayLengths = new Map<ts.ArrayLiteralExpression, ts.NumericLiteral>()
+  // A callable's own `name` and `length`, one literal per (callable, key) for the same
+  // reason as `arrayLengths`: the solver compares facts by identity, so a literal minted
+  // per evaluation is a new fact every time and its slot never settles.
+  const callableOwnData = new Map<ObjectRoot, Map<string, ts.StringLiteral | ts.NumericLiteral>>()
   const keyValues = new Map<ObjectRoot, Map<string, ts.StringLiteral>>()
   const keyValue = (root: ObjectRoot, key: string): ts.StringLiteral => {
     let keys = keyValues.get(root)
@@ -3322,11 +3326,18 @@ const createSession = (checker: ts.TypeChecker, flow: ValueFlowIndex): SourceVal
               )
               const named =
                 (ts.isArrowFunction(root) ? undefined : root.name) ?? (ts.isVariableDeclaration(root.parent) ? root.parent.name : undefined)
-              facts.add(
-                key === 'name'
-                  ? ts.factory.createStringLiteral(named && ts.isIdentifier(named) ? named.text : '')
-                  : ts.factory.createNumericLiteral(firstDefault < 0 ? parameters.length : firstDefault)
-              )
+              let ownData = callableOwnData.get(root)
+              if (!ownData) callableOwnData.set(root, (ownData = new Map()))
+              let literal = ownData.get(key)
+              if (!literal)
+                ownData.set(
+                  key,
+                  (literal =
+                    key === 'name'
+                      ? ts.factory.createStringLiteral(named && ts.isIdentifier(named) ? named.text : '')
+                      : ts.factory.createNumericLiteral(firstDefault < 0 ? parameters.length : firstDefault))
+                )
+              facts.add(literal)
               seeded = true
             } else {
               const installed = sourceCallableOwnDataWriteOf(checker, flow, root, key)
