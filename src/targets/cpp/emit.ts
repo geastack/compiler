@@ -11,6 +11,7 @@ import type { NativeSelectionHelper } from './native-selection-helpers.js'
 import { stableBorrowActualsOf } from '../../ir/borrowed-call-arguments.js'
 import { lazySplitsOf } from '../../ir/lazy-splits.js'
 import { borrowedArmProjectionsOf } from './borrowed-arm-projections.js'
+import { redundantPureConversionsOf } from '../../ir/pure-conversion-reuse.js'
 import { owningConversionInputText } from './owning-conversion-input.js'
 import type { StableBorrowEntry } from './borrowed-call-entry.js'
 import { boxedValueText } from './emit-dynamic-properties.js'
@@ -73,6 +74,7 @@ import {
   createEmitContext,
   defineValue,
   defineValueAlias,
+  nameOfValue,
   directCalleesOf,
   directCallableValuesOf,
   integerWideningsOf,
@@ -1406,6 +1408,13 @@ const emitConvert = (ctx: EmitContext, lines: string[], operation: ConvertOperat
     defineValueAlias(ctx, operation.result, '(void)0')
     return
   }
+  // A repeat of a dominating pure conversion of the same value names that
+  // conversion's storage instead of converting again (`ir/pure-conversion-reuse.ts`).
+  const repeated = ctx.repeatedConversions.get(operation.result.id)
+  if (repeated !== undefined) {
+    defineValueAlias(ctx, operation.result, nameOfValue(ctx, repeated))
+    return
+  }
   // A string arm of a borrowed union formal: name it where it is read instead of copying it out (`borrowed-arm-projections.ts`).
   const projection = ctx.borrowedArmProjections.get(operation.result.id)
   if (projection !== undefined && projection.arm !== null) {
@@ -1506,7 +1515,16 @@ const emitConvert = (ctx: EmitContext, lines: string[], operation: ConvertOperat
       return
     }
   }
-  lines.push(`${defineValue(ctx, operation.result)} = ${consumed};`)
+  // A conversion that renders as its source's own name is a copy of one local
+  // into another of the same physical carrier, and a dying source can hand its
+  // storage over instead: `const u = uniforms['ambientLightColor']` widened its
+  // optional uniform record into the binding's identical carrier with a retain
+  // here and a release at the end of the scope, per light uniform per refresh.
+  const handedOver =
+    consumed === text && (text === plain || text === `(${plain})`)
+      ? movedValueText(ctx, operation.source, operation.result.representation, plain)
+      : consumed
+  lines.push(`${defineValue(ctx, operation.result)} = ${handedOver};`)
 }
 
 /**
@@ -2872,6 +2890,28 @@ export const emitBody = (
   const borrowedArmProjections = borrowedArmProjectionsOf(body, stableBorrowEntries.get(cppBodyName(body.sourceOwner)), conversions)
   // Each such view is a reference into a borrowed formal, so it is as stable an actual as the formal.
   const stableWithProjections = new Set([...stableBorrowActuals, ...borrowedArmProjections.keys()])
+  // A pure conversion repeated under a dominating one of the same value names
+  // the earlier one's storage (`ir/pure-conversion-reuse.ts`). That storage
+  // then answers both results' uses, so neither may be moved from or withheld.
+  const repeatedConversions = new Map(
+    conversions === null
+      ? []
+      : [
+          ...redundantPureConversionsOf(body, conversions, (declaration) => {
+            const placement = placements.get(declaration)
+            return placement?.storage.kind === 'local' && placement.storage.owner === body.sourceOwner && !captures.isBoxed(declaration)
+          })
+        ].filter(([later, earlier]) => !borrowedArmProjections.has(later) && !borrowedArmProjections.has(earlier))
+  )
+  const pinnedConversions = new Set([...repeatedConversions.keys(), ...repeatedConversions.values()])
+  const pinnedOut = <T extends IrValueId>(values: Iterable<T>): T[] => [...values].filter((value) => !pinnedConversions.has(value))
+  const bodyDyingArguments = (() => {
+    if (![...pinnedConversions].some((value) => dyingArguments.has(value))) return dyingArguments
+    const kept = new DyingArgumentSet()
+    for (const value of dyingArguments) if (!pinnedConversions.has(value)) kept.add(value)
+    if (dyingArguments instanceof DyingArgumentSet) for (const [value, store] of dyingArguments.sunkStores) kept.sunkStores.set(value, store)
+    return kept
+  })()
   // A read has to know what the REST of the body does to the cell it reads.
   // `emit-bindings.ts` lets a host object's read name its cell rather than
   // copy out of it, and that identity only holds while the cell keeps
@@ -2897,8 +2937,8 @@ export const emitBody = (
     ? { layout: owningClass, derived: constructedBaseOf(owningClass) !== null || owningClass.nativeBase !== null, callsSuper }
     : null
   const formalInputs = ownedFormalInputsOf(body)
-  const ownedDyingValues = new Set<IrValueId>([...ownedDyingValuesOf(body), ...ownedDyingMergeInputsOf(body), ...formalInputs.arguments])
-  const transferDyingValues = new Set<IrValueId>([...ownedDyingValues, ...dyingTransferUsesOf(body)])
+  const ownedDyingValues = new Set<IrValueId>(pinnedOut([...ownedDyingValuesOf(body), ...ownedDyingMergeInputsOf(body), ...formalInputs.arguments]))
+  const transferDyingValues = new Set<IrValueId>(pinnedOut([...ownedDyingValues, ...dyingTransferUsesOf(body)]))
   const layoutKeys = new Map<string, readonly string[] | null>()
   const origins = bodyValueOriginsOf(body, (representation) => {
     if (representation.kind !== 'native-record-ref' || representation.native !== null) return null
@@ -2930,7 +2970,7 @@ export const emitBody = (
       stableReceiversOf(body, receiverValues, borrowedFormals, bindingWriteCounts, (declaration) => captures.isBoxed(declaration)),
       constructionOnlyFields,
       nativeIntegrityRestricted,
-      dyingArguments
+      bodyDyingArguments
     ),
     constructorOf,
     ownedDyingValues,
@@ -2940,6 +2980,7 @@ export const emitBody = (
     classTableRoots: classTableRootsOf(body),
     stableBorrowActuals: stableWithProjections,
     borrowedArmProjections,
+    repeatedConversions,
     computeOrigins: origins.computeOrigins,
     propertyReadOrigins: origins.propertyReadOrigins,
     bindingReadDeclarations: origins.bindingReadDeclarations,
@@ -2993,7 +3034,7 @@ export const emitBody = (
     virtualDispatch,
     narrowedFormals,
     repeatedConstructors,
-    dyingArguments,
+    bodyDyingArguments,
     instantiation,
     abiOfCallable,
     functionFacts,
@@ -3339,6 +3380,8 @@ export const emitBody = (
   // The hoists and the length reuse each claim a value out of the deferral set
   // after the storage step above took its copy, so drop what they claimed.
   for (const value of prepass.deferrable) if (!census.deferrable.has(value)) prepass.deferrable.delete(value)
+  // A repeated conversion's storage answers several results (`repeatedConversions`).
+  for (const value of pinnedConversions) prepass.deferrable.delete(value)
   const hoists = census.hoists
   // After the hoists: a fill loop's bound is as often a relocated invariant
   // (`n * n`, re-read from its cells in the loop's own test) as a plain cell.
