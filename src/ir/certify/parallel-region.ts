@@ -3,10 +3,10 @@ import { operationOfResult } from '../../identity/ids.js'
 import type { BindingPlacement } from '../../projection/bindings.js'
 import type { ClassLayout } from '../../projection/classes.js'
 import { classFamilyOverridesOf } from '../../projection/dispatch.js'
-import { classMemberOf } from '../../projection/fields.js'
+import { classMemberOf, classPrototypeMethodFamilyMutableOf } from '../../projection/fields.js'
 import type { Representation } from '../../representation/model.js'
 import type { SemanticGraph } from '../../semantics/model/graph.js'
-import type { SemanticTargetProof } from '../../semantics/model/operations.js'
+import type { SemanticRuntimeTarget, SemanticTargetProof } from '../../semantics/model/operations.js'
 import { allOperationsOf, type CallOperation, type IrBody, type IrOperand, type IrOperation } from '../model.js'
 
 /**
@@ -49,8 +49,395 @@ const shared: AbstractObject = 'SHARED'
 const allFields = '#'
 const unknownField = '*'
 
+interface PointsToSolver {
+  of(node: string): ReadonlySet<AbstractObject>
+  add(node: string, object: AbstractObject): void
+  copy(from: string, to: string): void
+  /**
+   * `field` marks a watcher that only routes stores and loads through the
+   * objects it sees (see `PointsTo`'s hub): such a watcher's effect for an
+   * escaped object is already the effect it has for `TOP`.
+   */
+  on(node: string, watcher: (object: AbstractObject) => void, kind?: 'field'): void
+  readonly busy: boolean
+  solve(): void
+}
+
+/**
+ * The same monotone set-constraint solver, scaled to a whole program.
+ *
+ * The answer is the least fixed point of the constraints `add`, `copy` and
+ * `on` state, and that does not depend on the order facts propagate in, so
+ * everything here is about cost. The straightforward solver (kept below as
+ * `NaivePointsTo`, behind `GEA_PARALLEL_NAIVE_POINTS_TO=1`) queued one entry
+ * per (node, object) insertion and gave every node its own full set. On a
+ * large program the whole-program pass copies the escaped set `ESC` into
+ * every value that reads an unknown object -- tens of thousands of nodes, each
+ * holding the same couple of thousand objects: a hundred million set entries,
+ * a worklist past the engine's maximum array length, and a heap over 20 GB.
+ *
+ * - The hub. A copy FROM the hub node (`ESC`) does not copy its objects: the
+ *   target subscribes to it instead. A subscribed node's set is its own
+ *   objects plus the hub's, read as a union (`of`); its watchers see every hub
+ *   object, the ones the hub already holds when it subscribes and every one it
+ *   gains later; and whatever it copies to subscribes too, since a superset of
+ *   a superset of the hub is one. Every observable answer -- `of`, and each
+ *   watcher call -- is the one the materialised copy gave.
+ * - Difference propagation: a node is queued once, with the objects it gained
+ *   since it was last processed, and those go along its edges and to its
+ *   watchers together.
+ * - Cycle collapse: every node of a strongly connected copy component holds
+ *   the same set at the fixed point, so the component is merged into one node
+ *   (union-find). Components are found periodically with an iterative Tarjan
+ *   pass over the current edges, since `on` keeps adding edges while the
+ *   solve runs. The hub has no copy edges out of it, so it is in no cycle.
+ *
+ * A merge keeps every obligation of both nodes: each node's watchers see the
+ * other's objects (the hub's too, when only one was subscribed), each node's
+ * targets receive the other's objects, and a delta still pending on the
+ * absorbed node is delivered again from the merged one. Watchers and edges are
+ * idempotent, so a repeated delivery changes nothing.
+ */
+class PointsTo implements PointsToSolver {
+  private readonly ids = new Map<string, number>()
+  private readonly parent: number[] = []
+  private readonly sets: Set<AbstractObject>[] = []
+  private readonly edges: Set<number>[] = []
+  private readonly watchers: ((object: AbstractObject) => void)[][] = []
+  private readonly pending: (AbstractObject[] | null)[] = []
+  private readonly queued: boolean[] = []
+  private readonly subscribed: boolean[] = []
+  private readonly subscribers = new Set<number>()
+  private readonly fieldWatchers = new WeakSet<(object: AbstractObject) => void>()
+  /** The subscribers with a watcher: the only ones a hub delta has to visit. */
+  private readonly watchedSubscribers = new Set<number>()
+  private queue: number[] = []
+  private head = 0
+  private sinceCollapse = 0
+  private insertions = 0
+  private merges = 0
+  private readonly hub: number | null
+  private static readonly EMPTY: ReadonlySet<AbstractObject> = new Set()
+  private static readonly statsEnabled = process.env['GEA_PARALLEL_STATS'] !== undefined
+
+  constructor(hubName: string | null = null) {
+    this.hub = hubName === null ? null : this.idOf(hubName)
+  }
+
+  /** `GEA_PARALLEL_STATS=1`: where the solve's sets and edges are. */
+  private report(label: string): void {
+    let reps = 0
+    let entries = 0
+    let edges = 0
+    let topHolders = 0
+    const largest: [number, string][] = []
+    const names = new Map<number, string>()
+    for (const [name, id] of this.ids) if (!names.has(id)) names.set(id, name)
+    for (let id = 0; id < this.parent.length; id++) {
+      if (this.parent[id] !== id) continue
+      reps++
+      const size = this.sets[id]!.size
+      entries += size
+      edges += this.edges[id]!.size
+      if (this.sets[id]!.has(top)) topHolders++
+      largest.push([size, names.get(id) ?? String(id)])
+    }
+    largest.sort((a, b) => b[0] - a[0])
+    process.stderr.write(
+      `[POINTS-TO ${label}] nodes=${this.parent.length} reps=${reps} entries=${entries} edges=${edges} topHolders=${topHolders} ` +
+        `subscribers=${this.subscribers.size} insertions=${this.insertions} merges=${this.merges} largest=${largest
+          .slice(0, 6)
+          .map(([size, name]) => `${name.slice(0, 40)}:${size}`)
+          .join(' ')}\n`
+    )
+  }
+
+  private idOf(node: string): number {
+    let id = this.ids.get(node)
+    if (id === undefined) {
+      id = this.parent.length
+      this.ids.set(node, id)
+      this.parent.push(id)
+      this.sets.push(new Set())
+      this.edges.push(new Set())
+      this.watchers.push([])
+      this.pending.push(null)
+      this.queued.push(false)
+      this.subscribed.push(false)
+    }
+    return id
+  }
+
+  private find(id: number): number {
+    let root = id
+    while (this.parent[root] !== root) root = this.parent[root]!
+    while (this.parent[id] !== root) {
+      const next = this.parent[id]!
+      this.parent[id] = root
+      id = next
+    }
+    return root
+  }
+
+  /**
+   * Hand hub objects to a watcher of a subscribed node. A field watcher gets
+   * only `TOP`: a subscribed node holds `TOP` and every escaped object, and a
+   * store or load through an escaped object is subsumed by the same store or
+   * load through `TOP` (see the class comment), so expanding it per escaped
+   * object only builds field nodes the answer never reads.
+   */
+  private deliverHub(watcher: (object: AbstractObject) => void, objects: Iterable<AbstractObject>): void {
+    if (this.fieldWatchers.has(watcher)) {
+      for (const object of objects)
+        if (object === top) {
+          watcher(object)
+          return
+        }
+      return
+    }
+    for (const object of objects) watcher(object)
+  }
+
+  private enqueue(id: number): void {
+    if (this.queued[id]) return
+    this.queued[id] = true
+    this.queue.push(id)
+  }
+
+  private addTo(id: number, object: AbstractObject): void {
+    const set = this.sets[id]!
+    if (set.has(object)) return
+    // Already in a subscribed node through the hub, and its watchers saw it there.
+    if (this.subscribed[id] && this.sets[this.hub!]!.has(object)) return
+    set.add(object)
+    const delta = this.pending[id]
+    if (delta) delta.push(object)
+    else this.pending[id] = [object]
+    this.sinceCollapse++
+    this.insertions++
+    if (PointsTo.statsEnabled && this.insertions % 2_000_000 === 0) this.report('progress')
+    this.enqueue(id)
+  }
+
+  /** Subscribe `start` and everything it copies to: each is a superset of the hub. */
+  private subscribe(start: number): void {
+    const work = [start]
+    while (work.length > 0) {
+      const id = this.find(work.pop()!)
+      if (this.subscribed[id]) continue
+      this.subscribed[id] = true
+      this.subscribers.add(id)
+      if (this.watchers[id]!.length > 0) this.watchedSubscribers.add(id)
+      const hubObjects = [...this.sets[this.hub!]!]
+      const watching = this.watchers[id]!
+      for (let index = 0; index < watching.length; index++) this.deliverHub(watching[index]!, hubObjects)
+      for (const target of this.edges[id]!) work.push(target)
+    }
+  }
+
+  of(node: string): ReadonlySet<AbstractObject> {
+    const id = this.ids.get(node)
+    if (id === undefined) return PointsTo.EMPTY
+    const rep = this.find(id)
+    if (!this.subscribed[rep]) return this.sets[rep]!
+    const union = new Set(this.sets[this.hub!]!)
+    for (const object of this.sets[rep]!) union.add(object)
+    return union
+  }
+
+  add(node: string, object: AbstractObject): void {
+    this.addTo(this.find(this.idOf(node)), object)
+  }
+
+  copy(from: string, to: string): void {
+    const source = this.find(this.idOf(from))
+    const target = this.find(this.idOf(to))
+    if (source === target) return
+    if (source === this.hub) {
+      this.subscribe(target)
+      return
+    }
+    const targets = this.edges[source]!
+    if (targets.has(target)) return
+    targets.add(target)
+    for (const object of this.sets[source]!) this.addTo(target, object)
+    if (this.subscribed[source]) this.subscribe(target)
+  }
+
+  on(node: string, watcher: (object: AbstractObject) => void, kind?: 'field'): void {
+    const id = this.find(this.idOf(node))
+    if (kind === 'field') this.fieldWatchers.add(watcher)
+    this.watchers[id]!.push(watcher)
+    if (this.subscribed[id]) this.watchedSubscribers.add(id)
+    const own = [...this.sets[id]!]
+    const hubObjects = this.subscribed[id] ? [...this.sets[this.hub!]!] : []
+    for (const object of own) watcher(object)
+    this.deliverHub(watcher, hubObjects)
+  }
+
+  get busy(): boolean {
+    return this.head < this.queue.length
+  }
+
+  solve(): void {
+    while (this.head < this.queue.length) {
+      const id = this.queue[this.head++]!
+      this.queued[id] = false
+      if (this.head > 65536 && this.head * 2 > this.queue.length) {
+        this.queue = this.queue.slice(this.head)
+        this.head = 0
+      }
+      if (this.parent[id] !== id) continue
+      const delta = this.pending[id]
+      if (!delta) continue
+      this.pending[id] = null
+      for (const raw of [...this.edges[id]!]) {
+        const target = this.find(raw)
+        if (target === id) continue
+        for (const object of delta) this.addTo(target, object)
+      }
+      const watching = this.watchers[id]!
+      for (let index = 0; index < watching.length; index++) for (const object of delta) watching[index]!(object)
+      // What the hub gains, every subscriber holds: its watchers see it.
+      if (id === this.hub)
+        for (const subscriber of [...this.watchedSubscribers]) {
+          if (this.parent[subscriber] !== subscriber) continue
+          const subscribedWatchers = this.watchers[subscriber]!
+          for (let index = 0; index < subscribedWatchers.length; index++) this.deliverHub(subscribedWatchers[index]!, delta)
+        }
+      if (this.sinceCollapse > 4_000_000) {
+        this.sinceCollapse = 0
+        this.collapseCycles()
+      }
+    }
+    if (PointsTo.statsEnabled) this.report('solved')
+  }
+
+  /** Merge every strongly connected copy component into one node (iterative Tarjan). */
+  private collapseCycles(): void {
+    const count = this.parent.length
+    const index = new Int32Array(count).fill(-1)
+    const low = new Int32Array(count)
+    const onStack = new Uint8Array(count)
+    const stack: number[] = []
+    let next = 0
+    const successors = (id: number): number[] => {
+      const canonical = new Set<number>()
+      for (const raw of this.edges[id]!) {
+        const target = this.find(raw)
+        if (target !== id) canonical.add(target)
+      }
+      // Canonicalize the edge set while walking it: merged targets collapse.
+      this.edges[id] = canonical
+      return [...canonical]
+    }
+    for (let start = 0; start < count; start++) {
+      if (this.parent[start] !== start || index[start] !== -1 || this.edges[start]!.size === 0) continue
+      const frames: { id: number; out: number[]; at: number }[] = []
+      const open = (id: number): void => {
+        index[id] = low[id] = next++
+        stack.push(id)
+        onStack[id] = 1
+        frames.push({ id, out: successors(id), at: 0 })
+      }
+      open(start)
+      while (frames.length > 0) {
+        const frame = frames[frames.length - 1]!
+        if (frame.at < frame.out.length) {
+          const target = frame.out[frame.at++]!
+          if (index[target] === -1) open(target)
+          else if (onStack[target]) low[frame.id] = Math.min(low[frame.id]!, index[target]!)
+          continue
+        }
+        frames.pop()
+        if (frames.length > 0) {
+          const caller = frames[frames.length - 1]!
+          low[caller.id] = Math.min(low[caller.id]!, low[frame.id]!)
+        }
+        if (low[frame.id] !== index[frame.id]) continue
+        const members: number[] = []
+        let member: number
+        do {
+          member = stack.pop()!
+          onStack[member] = 0
+          members.push(member)
+        } while (member !== frame.id)
+        if (members.length > 1) this.mergeAll(members)
+      }
+    }
+  }
+
+  private mergeAll(members: readonly number[]): void {
+    // The hub is never absorbed; otherwise the member holding the largest set
+    // absorbs the rest: the fewest copies.
+    let into = members[0]!
+    for (const member of members) if (this.sets[member]!.size > this.sets[into]!.size) into = member
+    if (this.hub !== null && members.includes(this.hub)) into = this.hub
+    for (const member of members) if (member !== into) this.merge(member, into)
+  }
+
+  private merge(from: number, into: number): void {
+    this.merges++
+    const absorbed = this.sets[from]!
+    const kept = this.sets[into]!
+    const hubObjects = this.hub === null ? PointsTo.EMPTY : this.sets[this.hub]!
+    // `from`'s watchers have seen `from`'s objects; they owe `into`'s others,
+    // and the hub's when only `into` was subscribed.
+    const owedToAbsorbed = [...kept].filter((object) => !absorbed.has(object))
+    const hubSnapshot = [...hubObjects]
+    for (const watcher of this.watchers[from]!) {
+      for (const object of owedToAbsorbed) watcher(object)
+      if (this.subscribed[into] && !this.subscribed[from]) this.deliverHub(watcher, hubSnapshot)
+    }
+    // Likewise `into`'s watchers owe the hub when only `from` was subscribed.
+    if (this.subscribed[from] && !this.subscribed[into])
+      for (const watcher of this.watchers[into]!) this.deliverHub(watcher, hubSnapshot)
+    const subscribed = this.subscribed[from]! || this.subscribed[into]!
+    // `from`'s targets have `from`'s objects; they owe `into`'s too.
+    for (const raw of this.edges[from]!) {
+      const target = this.find(raw)
+      if (target === from || target === into) continue
+      if (!this.edges[into]!.has(target)) for (const object of kept) this.addTo(target, object)
+      this.edges[into]!.add(target)
+    }
+    this.parent[from] = into
+    this.subscribed[from] = false
+    this.subscribers.delete(from)
+    this.watchedSubscribers.delete(from)
+    if (subscribed && !this.subscribed[into]) {
+      this.subscribed[into] = true
+      this.subscribers.add(into)
+    }
+    // `into`'s targets and watchers owe `from`'s objects: new to `into`, they
+    // propagate as its delta. `from`'s undelivered delta is delivered again
+    // from `into`, to `from`'s former targets and watchers among the rest.
+    for (const object of absorbed) this.addTo(into, object)
+    const undelivered = this.pending[from]
+    if (undelivered) {
+      let delta = this.pending[into]
+      if (!delta) this.pending[into] = delta = []
+      for (const object of undelivered) delta.push(object)
+      this.enqueue(into)
+    }
+    for (const watcher of this.watchers[from]!) this.watchers[into]!.push(watcher)
+    if (subscribed && this.watchers[into]!.length > 0) this.watchedSubscribers.add(into)
+    this.edges[into]!.delete(into)
+    this.edges[into]!.delete(from)
+    this.sets[from] = new Set()
+    this.edges[from] = new Set()
+    this.watchers[from] = []
+    this.pending[from] = null
+    // A subscribed node's targets are subscribed, the merged ones included.
+    if (subscribed) for (const target of [...this.edges[into]!]) this.subscribe(target)
+  }
+}
+
+/** `GEA_PARALLEL_NAIVE_POINTS_TO=1` runs the original solver, to compare verdicts. */
+const newPointsTo = (hub: string | null = null): PointsToSolver =>
+  process.env['GEA_PARALLEL_NAIVE_POINTS_TO'] === '1' ? new NaivePointsTo() : new PointsTo(hub)
+
 /** Monotone set-constraint solver: nodes hold sets of abstract objects; edges and watchers propagate. */
-class PointsTo {
+class NaivePointsTo implements PointsToSolver {
   private readonly sets = new Map<string, Set<AbstractObject>>()
   private readonly edges = new Map<string, Set<string>>()
   private readonly watchers = new Map<string, ((object: AbstractObject) => void)[]>()
@@ -77,7 +464,7 @@ class PointsTo {
     for (const object of this.of(from)) this.add(to, object)
   }
 
-  on(node: string, watcher: (object: AbstractObject) => void): void {
+  on(node: string, watcher: (object: AbstractObject) => void, _kind?: 'field'): void {
     let list = this.watchers.get(node)
     if (!list) this.watchers.set(node, (list = []))
     list.push(watcher)
@@ -106,6 +493,16 @@ const returnNode = (functionId: FunctionId): string => `r|${functionId}`
 const fieldNode = (object: AbstractObject, key: string): string => `f|${object}|${key}`
 const functionObject = (functionId: FunctionId): AbstractObject => `F|${functionId}`
 const functionOf = (object: AbstractObject): FunctionId | null => (object.startsWith('F|') ? (object.slice(2) as FunctionId) : null)
+/**
+ * In a region run, a program function's own object (a prototype method read
+ * off a class instance) existed before the region exactly as `SHARED` did: it
+ * is named so the call can enter it, and is shared for every other purpose.
+ */
+const preexisting = (object: AbstractObject): boolean => object === shared || object.startsWith('F|')
+const holdsPreexisting = (objects: ReadonlySet<AbstractObject>): boolean => {
+  for (const object of objects) if (preexisting(object)) return true
+  return false
+}
 
 /** The carrier under any presence or borrow wrapper: what a member read on the value dispatches on. */
 const carrierOf = (representation: Representation): Representation =>
@@ -227,9 +624,81 @@ interface Program {
   readonly constructionOf: (operation: Extract<IrOperation, { kind: 'construct' }>) => Construction | null
   /** The constructor `super(...)` in this constructor body enters, or `null` when it cannot be named. */
   readonly superConstructorOf: (body: IrBody) => readonly FunctionId[] | null
-  /** `new Error(...)` and its native siblings: the runtime's own error record, which reads its arguments and nothing else. */
-  readonly constructsHostError: (operation: Extract<IrOperation, { kind: 'construct' }>) => boolean
+  /**
+   * A host construction whose whole effect is a new object built from its
+   * arguments: `new Error(...)` and its native siblings, a host constructor
+   * with a selected overload frame (`new Map()`, typed arrays), and the
+   * buffer constructors. `null` for anything else. `aliasing` lists the
+   * arguments the new object is a view OF rather than a copy of
+   * (`new Float32Array(buffer)`): a write through the view writes them.
+   */
+  readonly hostConstructionOf: (operation: Extract<IrOperation, { kind: 'construct' }>) => { readonly aliasing: readonly IrValueId[] } | null
+  /**
+   * The prototype method a constant-key `get` on a class instance reads when
+   * the instance has no own property of that key, for a get the IR's own
+   * dispatch census left unnamed (an own-property shadow may exist). The
+   * caller still unions in whatever the points-to sets say the own property
+   * holds; `null` when the key is not a method every receiver shares.
+   */
+  readonly prototypeMethodsOf: (operation: Extract<IrOperation, { kind: 'get' }>) => PrototypeMethods | null
 }
+
+/**
+ * The prototype method a class-instance read names. `complete`: no instance
+ * of a related class can hold a function in an own property of that key, so
+ * the read can only call the method -- the call's callee is stated.
+ */
+interface PrototypeMethods {
+  readonly functions: readonly FunctionId[]
+  readonly complete: boolean
+}
+
+/** A class id without its specialization suffix (`373@0` is a copy of `373`). */
+const genericRootOf = (declaration: DeclarationId): DeclarationId => {
+  const at = declaration.indexOf('@')
+  return at === -1 ? declaration : (declaration.slice(0, at) as DeclarationId)
+}
+
+/** The classes a carrier may hold an instance of, through presence, borrow and union wrappers (as `projection/classes.ts` marks them). */
+const classRefsOf = (representation: Representation, into = new Set<DeclarationId>()): Set<DeclarationId> => {
+  if (representation.kind === 'optional') return classRefsOf(representation.payload, into)
+  if (representation.kind === 'borrowed-ref') return classRefsOf(representation.referent, into)
+  if (representation.kind === 'tagged-union') for (const arm of representation.arms) classRefsOf(arm.value, into)
+  else if (representation.kind === 'class-ref') into.add(genericRootOf(representation.declaration))
+  return into
+}
+
+/** Carriers that never hold a callable: primitives and objects with no [[Call]]. Everything else may. */
+const nonCallableKinds = new Set<Representation['kind']>([
+  'scalar',
+  'string',
+  'null',
+  'undefined',
+  'void',
+  'symbol',
+  'array-object',
+  'typed-array',
+  'array-buffer',
+  'shared-array-buffer',
+  'data-view',
+  'dense-buffer',
+  'keyed-collection',
+  'record',
+  'record-with-index',
+  'class-ref',
+  'native-record-ref',
+  'native-sequence',
+  'iterator',
+  'promise'
+])
+const neverCallable = (representation: Representation): boolean =>
+  representation.kind === 'optional'
+    ? neverCallable(representation.payload)
+    : representation.kind === 'borrowed-ref'
+      ? neverCallable(representation.referent)
+      : representation.kind === 'tagged-union'
+        ? representation.arms.every((arm) => neverCallable(arm.value))
+        : nonCallableKinds.has(representation.kind)
 
 /**
  * Everything `new C(...)` runs on the new object: every field initializer
@@ -252,6 +721,12 @@ const hostNameOf = (placement: BindingPlacement | undefined): string | null => {
 
 const errorProtocol = (protocol: string): boolean => /^[A-Za-z]*ErrorConstructor$/.test(protocol)
 const hostErrorClasses = /^(Eval|Range|Reference|Syntax|Type|URI)?Error$/
+/** Host constructors whose result is a new buffer: they read a length (and an options record) and nothing else. */
+const bufferConstructors = /^(Shared)?ArrayBufferConstructor$/
+/** Host constructors whose result is a view: of a buffer argument, or of a fresh buffer copied from or sized by the argument. */
+const viewConstructors = /^((Int|Uint)(8|16|32)|Uint8Clamped|Float(16|32|64)|Big(Int|Uint)64)ArrayConstructor$|^DataViewConstructor$/
+/** The argument carriers a view constructor copies its elements out of, or reads as a length, rather than viewing. */
+const copiedViewSources = new Set<Representation['kind']>(['scalar', 'array-object', 'typed-array'])
 
 /**
  * Operations that only move a value: a boxed one passes through them without
@@ -273,6 +748,7 @@ const programOf = (input: ParallelRegionInput): Program => {
   const definitions = new Map<IrValueId, IrOperation>()
   const owners = new Map<IrValueId, IrBody>()
   const writers = new Map<DeclarationId, Set<IrBody>>()
+  const writtenValues = new Map<DeclarationId, IrValueId[]>()
   for (const body of input.bodies.values()) {
     const list = byFunction.get(body.sourceOwner) ?? []
     list.push(body)
@@ -286,6 +762,9 @@ const programOf = (input: ParallelRegionInput): Program => {
         const set = writers.get(operation.declaration) ?? new Set<IrBody>()
         set.add(body)
         writers.set(operation.declaration, set)
+        const values = writtenValues.get(operation.declaration) ?? []
+        values.push(operation.value.value)
+        writtenValues.set(operation.declaration, values)
       }
     }
   }
@@ -353,9 +832,35 @@ const programOf = (input: ParallelRegionInput): Program => {
     const explicit = chain.find((layout) => layout.constructor !== null)
     return explicit?.constructor ? [explicit.constructor] : []
   }
+  /**
+   * The class `new` constructs when normalization published no target proof
+   * but the callee is a read of the class's own binding: `new T.Vector3()`
+   * through a module namespace import, which the IR resolves to the class
+   * declaration's cell while the proof only follows bare identifiers and
+   * source namespaces. The binding is the proof here: every write to it
+   * anywhere in the program stores that class's constructor (its own
+   * declaration evaluating), so the read can only be that constructor, and
+   * `new.target` is the same value.
+   */
+  const classNamedByCallee = (operation: Extract<IrOperation, { kind: 'construct' }>): DeclarationId | null => {
+    if (operation.newTarget.value !== operation.callee.value) return null
+    const callee = definitions.get(operation.callee.value)
+    if (callee?.kind !== 'binding-read' || !input.classes.has(callee.declaration)) return null
+    if (hostNameOf(input.placements.get(callee.declaration)) !== null) return null
+    for (const value of writtenValues.get(callee.declaration) ?? []) {
+      const written = definitions.get(value)
+      if (written?.kind !== 'allocate-constructor' || written.declaration !== callee.declaration) return null
+    }
+    return callee.declaration
+  }
   const constructionOf = (operation: Extract<IrOperation, { kind: 'construct' }>): Construction | null => {
-    if (operation.target.kind === 'open') return null
-    const targets = operation.target.kind === 'exact' ? [operation.target.target] : operation.target.targets
+    if (operation.target.kind === 'open') {
+      const named = classNamedByCallee(operation)
+      return named === null ? null : constructionOfTargets([{ kind: 'implicit-source-constructor', classDeclaration: named }])
+    }
+    return constructionOfTargets(operation.target.kind === 'exact' ? [operation.target.target] : operation.target.targets)
+  }
+  const constructionOfTargets = (targets: readonly SemanticRuntimeTarget[]): Construction | null => {
     const constructors: FunctionId[] = []
     const initializers: { key: string; functionId: FunctionId }[] = []
     for (const target of targets) {
@@ -386,10 +891,127 @@ const programOf = (input: ParallelRegionInput): Program => {
     const storage = callee?.kind === 'binding-read' ? input.placements.get(callee.declaration)?.storage : undefined
     return storage?.kind === 'host-class' && hostErrorClasses.test(storage.linkageName)
   }
+  const hostConstructionOf = (operation: Extract<IrOperation, { kind: 'construct' }>): { aliasing: IrValueId[] } | null => {
+    const callee = carrierOf(operation.callee.representation)
+    const protocols = callee.kind === 'native-handle' ? [callee.protocol, callee.native ?? ''] : []
+    const view = protocols.some((protocol) => viewConstructors.test(protocol))
+    const definition = definitions.get(operation.callee.value)
+    // A buffer or view constructor read straight from its host binding: a
+    // program value typed as one may be a subclass whose constructor is code.
+    const freshHost =
+      operation.newTarget.value === operation.callee.value &&
+      definition !== undefined &&
+      externalOf(definition) !== null &&
+      protocols.some((protocol) => bufferConstructors.test(protocol) || viewConstructors.test(protocol))
+    if (!operation.hostFrame && !constructsHostError(operation) && !freshHost) return null
+    // A view over a buffer shares the buffer's storage. Only a scalar
+    // (a length), an array or another typed array is copied rather than viewed.
+    const aliasing = operation.arguments
+      .filter((argument) => {
+        const kind = carrierOf(argument.representation).kind
+        return kind === 'array-buffer' || kind === 'shared-array-buffer' || (view && !copiedViewSources.has(kind))
+      })
+      .map((argument) => argument.value)
+    return { aliasing }
+  }
+  /** `declaration`, its bases, and every class extending it: the classes whose instances a receiver of it may share an own property with. */
+  const relatives = new Map<DeclarationId, ReadonlySet<DeclarationId>>()
+  const relativesOf = (declaration: DeclarationId): ReadonlySet<DeclarationId> => {
+    const known = relatives.get(declaration)
+    if (known) return known
+    const chainOf = (start: DeclarationId): DeclarationId[] => {
+      const chain: DeclarationId[] = []
+      for (let current: DeclarationId | null = start; current !== null && !chain.includes(current); current = input.classes.get(current)?.base ?? null)
+        chain.push(current)
+      return chain
+    }
+    const root = genericRootOf(declaration)
+    const related = new Set<DeclarationId>(chainOf(declaration).map(genericRootOf))
+    for (const candidate of input.classes.keys())
+      if (chainOf(candidate).some((member) => genericRootOf(member) === root)) related.add(genericRootOf(candidate))
+    relatives.set(declaration, related)
+    return related
+  }
+  /**
+   * Every operation that may give a class instance an own property, the way
+   * `projection/classes.ts` finds the writes that shadow a prototype method:
+   * a property write or definition on a class-typed receiver, an object
+   * literal laid out as a class, a spread into one, and the intrinsic
+   * mutations (`Object.assign`, `Reflect.set`, ...) on a class-typed target.
+   * `key` is `null` when the write may name any key; `callable` whether the
+   * value written may be a function.
+   */
+  let ownWrites: { classes: ReadonlySet<DeclarationId>; key: string | null; callable: boolean }[] | null = null
+  const ownWritesOf = (): typeof ownWrites & object => {
+    if (ownWrites) return ownWrites
+    const writes: { classes: ReadonlySet<DeclarationId>; key: string | null; callable: boolean }[] = []
+    const constantKey = (key: IrOperand): string | null => {
+      const definition = definitions.get(key.value)
+      return definition?.kind === 'constant' && (definition.literal === 'string' || definition.literal === 'number') ? definition.text : null
+    }
+    for (const body of input.bodies.values())
+      for (const operation of operationsOf(body)) {
+        if (operation.kind === 'set' || operation.kind === 'define-own-property') {
+          const classes = classRefsOf(operation.receiver.representation)
+          if (classes.size > 0)
+            writes.push({ classes, key: constantKey(operation.key), callable: !neverCallable(operation.value.representation) })
+        } else if (operation.kind === 'allocate-record') {
+          const classes = classRefsOf(operation.result.representation)
+          if (classes.size > 0)
+            for (const field of operation.fields)
+              writes.push({ classes, key: field.key, callable: !neverCallable(field.value.representation) })
+        } else if (operation.kind === 'spread-copy') {
+          const classes = classRefsOf(operation.receiver.representation)
+          if (classes.size > 0) writes.push({ classes, key: null, callable: true })
+        } else if (operation.kind === 'call' && operation.lineage !== null) {
+          const semantic = input.graph.operations.get(operationOfResult(operation.lineage))
+          const target = operation.arguments[0]
+          if (semantic?.family === 'invocation' && semantic.intrinsicMutation && target) {
+            const classes = classRefsOf(target.representation)
+            if (classes.size > 0) writes.push({ classes, key: null, callable: true })
+          }
+        }
+      }
+    ownWrites = writes
+    return writes
+  }
+  const prototypeMethods = new Map<IrOperation, PrototypeMethods | null>()
+  const prototypeMethodsOf = (operation: Extract<IrOperation, { kind: 'get' }>): PrototypeMethods | null => {
+    const known = prototypeMethods.get(operation)
+    if (known !== undefined) return known
+    const answer = ((): PrototypeMethods | null => {
+      // The IR's dispatch census already named this read: its sealed fact wins.
+      if (operation.closedCallable) return null
+      const key = definitions.get(operation.key.value)
+      if (key?.kind !== 'constant' || key.literal !== 'string') return null
+      const receiver = carrierOf(operation.receiver.representation)
+      if (receiver.kind !== 'class-ref') return null
+      const site = classMemberOf(input.classes, receiver.declaration, key.text)
+      if (site?.kind !== 'method' || site.method.callable === null) return null
+      // A subclass override, a replaced prototype method, or a prototype the
+      // program uses outside the typed method protocol: the prototype a
+      // receiver reaches is not this one method.
+      if (classFamilyOverridesOf(input.classes, receiver.declaration, key.text).length > 0) return null
+      if (classPrototypeMethodFamilyMutableOf(input.classes, receiver.declaration, key.text)) return null
+      const related = relativesOf(receiver.declaration)
+      for (const declaration of input.classes.keys())
+        if (related.has(genericRootOf(declaration)) && (input.classes.get(declaration)?.prototypeUnsupportedUses?.length ?? 0) > 0) return null
+      // Complete when no own property of this key on any related instance can
+      // be a function: then calling the read can only run the method (or
+      // throw on a non-callable shadow, which runs nothing).
+      const complete = !ownWritesOf().some(
+        (write) => write.callable && (write.key === null || write.key === key.text) && [...write.classes].some((declaration) => related.has(declaration))
+      )
+      return { functions: [site.method.callable.replace(/@[^|]*$/, '') as FunctionId], complete }
+    })()
+    prototypeMethods.set(operation, answer)
+    return answer
+  }
   return {
     constructionOf,
     superConstructorOf,
-    constructsHostError,
+    hostConstructionOf,
+    prototypeMethodsOf,
     bodiesOf,
     definitionOf: (value) => definitions.get(value),
     bodyOfValue: (value) => owners.get(value),
@@ -421,6 +1043,12 @@ const statedCallees = (call: CallOperation, program: Program): FunctionId[] => {
   if (call.target?.kind === 'direct') named.add(call.target.functionId)
   for (const member of call.family ?? []) named.add(member.functionId)
   for (const id of proofFunctions(program.targetProofOf(call))) named.add(id)
+  // `v.method()` where no instance can hold a callable own `method`.
+  const callee = program.definitionOf(call.callee.value)
+  if (callee?.kind === 'get') {
+    const methods = program.prototypeMethodsOf(callee)
+    if (methods?.complete) for (const id of methods.functions) named.add(id)
+  }
   return [...named]
 }
 
@@ -437,25 +1065,35 @@ const fieldKeyOf = (program: Program, key: IrOperand): string => {
  * everything handed to code it cannot see escapes, which makes `TOP` stand for
  * the escaped set too.
  */
-const globalPointsTo = (input: ParallelRegionInput, program: Program): PointsTo => {
-  const solver = new PointsTo()
+const globalPointsTo = (input: ParallelRegionInput, program: Program): PointsToSolver => {
   const escaped = 'ESC'
+  const solver = newPointsTo(escaped)
+  // `field` watchers: through an escaped object they do what they do through
+  // `TOP` (see `PointsTo`), so a node holding both needs only the `TOP` call.
   const store = (receiver: string, key: string, value: string): void =>
-    solver.on(receiver, (object) => {
-      if (object === top) return solver.copy(value, escaped)
-      solver.copy(value, fieldNode(object, key))
-      solver.copy(value, fieldNode(object, allFields))
-    })
+    solver.on(
+      receiver,
+      (object) => {
+        if (object === top) return solver.copy(value, escaped)
+        solver.copy(value, fieldNode(object, key))
+        solver.copy(value, fieldNode(object, allFields))
+      },
+      'field'
+    )
   const load = (receiver: string, key: string, result: string): void =>
-    solver.on(receiver, (object) => {
-      if (object === top) {
-        solver.add(result, top)
-        return solver.copy(escaped, result)
-      }
-      if (key === allFields) return solver.copy(fieldNode(object, allFields), result)
-      solver.copy(fieldNode(object, key), result)
-      solver.copy(fieldNode(object, unknownField), result)
-    })
+    solver.on(
+      receiver,
+      (object) => {
+        if (object === top) {
+          solver.add(result, top)
+          return solver.copy(escaped, result)
+        }
+        if (key === allFields) return solver.copy(fieldNode(object, allFields), result)
+        solver.copy(fieldNode(object, key), result)
+        solver.copy(fieldNode(object, unknownField), result)
+      },
+      'field'
+    )
   const enter = (
     functionId: FunctionId,
     call: { args: readonly string[]; receiver: string | null; spread: boolean; result: string | null }
@@ -477,6 +1115,14 @@ const globalPointsTo = (input: ParallelRegionInput, program: Program): PointsTo 
     solver.add(fieldNode(object, unknownField), top)
     solver.copy(escaped, fieldNode(object, unknownField))
     solver.copy(fieldNode(object, allFields), escaped)
+    // An escaped object's unknown-key field is readable by the code it escaped
+    // to, so what it holds escapes too. Every ordinary store files its value
+    // under `#` as well, which the line above already covers; but an iterator
+    // (`get-iterator`) and a builtin method's result are filled straight into
+    // `*`, and without this an escaped iterator handed out the elements it
+    // walks while they stayed unescaped -- and a read of one of them through
+    // an unknown value could not see a race on it.
+    solver.copy(fieldNode(object, unknownField), escaped)
   })
 
   for (const body of input.bodies.values()) {
@@ -553,6 +1199,8 @@ const globalPointsTo = (input: ParallelRegionInput, program: Program): PointsTo 
               ? [operation.closedCallable.functionId]
               : operation.closedCallable.functionIds)
               solver.add(out!, functionObject(id))
+          // The prototype method, beside whatever own property the load found.
+          for (const id of program.prototypeMethodsOf(operation)?.functions ?? []) solver.add(out!, functionObject(id))
           break
         case 'set':
         case 'define-own-property':
@@ -586,7 +1234,8 @@ const globalPointsTo = (input: ParallelRegionInput, program: Program): PointsTo 
         case 'construct': {
           const args = operation.arguments.map((argument) => valueNode(argument.value))
           const targets = proofFunctions(operation.target)
-          if (operation.target.kind === 'open' || operation.hostFrame) {
+          const construction = program.constructionOf(operation)
+          if ((operation.target.kind === 'open' && !construction) || operation.hostFrame) {
             for (const argument of args) solver.copy(argument, escaped)
             fresh()
             if (operation.target.kind === 'open') {
@@ -596,7 +1245,6 @@ const globalPointsTo = (input: ParallelRegionInput, program: Program): PointsTo 
             break
           }
           fresh()
-          const construction = program.constructionOf(operation)
           if (!construction) {
             for (const argument of args) solver.copy(argument, escaped)
             for (const id of targets)
@@ -761,11 +1409,11 @@ interface RegionRun {
 const runRegion = (
   input: ParallelRegionInput,
   program: Program,
-  global: PointsTo,
+  global: PointsToSolver,
   entry: IrBody,
   localCaptures: ReadonlyMap<FunctionId, ReadonlySet<DeclarationId>>
 ): RegionRun => {
-  const solver = new PointsTo()
+  const solver = newPointsTo()
   const refusals: ParallelRegionRefusal[] = []
   const refused = new Set<string>()
   const entries = new Map<FunctionId, Entry[]>()
@@ -783,13 +1431,13 @@ const runRegion = (
   }
   const store = (receiver: string, key: string, value: string): void =>
     solver.on(receiver, (object) => {
-      if (object === shared) return
+      if (preexisting(object)) return
       solver.copy(value, fieldNode(object, key))
       solver.copy(value, fieldNode(object, allFields))
     })
   const load = (receiver: string, key: string, result: string): void =>
     solver.on(receiver, (object) => {
-      if (object === shared) return solver.add(result, shared)
+      if (preexisting(object)) return solver.add(result, shared)
       if (key === allFields) return solver.copy(fieldNode(object, allFields), result)
       solver.copy(fieldNode(object, key), result)
       solver.copy(fieldNode(object, unknownField), result)
@@ -854,6 +1502,8 @@ const runRegion = (
     solver.on(valueNode(callee), (object) => {
       const site = closureSites.get(object)
       if (site) return enter(site.functionId, { kind: 'closure', allocator: site.allocator }, call)
+      const functionId = functionOf(object)
+      if (functionId) return enter(functionId, { kind: 'outside' }, call)
       if (object !== shared) return
       const resolved = globalFunctions(callee)
       if (resolved.unknown) return refuse(body, operation, 'calls a function value the compiler cannot trace to its definitions')
@@ -978,6 +1628,9 @@ const runRegion = (
         case 'get': {
           const key = fieldKeyOf(program, operation.key)
           load(valueNode(operation.receiver.value), key === unknownField ? allFields : key, out!)
+          // No own property of the key means the prototype method: the load
+          // above holds every own property the region could have stored.
+          for (const id of program.prototypeMethodsOf(operation)?.functions ?? []) solver.add(out!, functionObject(id))
           if (key !== 'length') contentReads.push({ body, operation, operand: operation.receiver.value })
           if (key !== unknownField) {
             const accessor = accessorOf(input, operation.receiver.representation, key, 'get')
@@ -1049,13 +1702,17 @@ const runRegion = (
         case 'construct': {
           const args = operation.arguments.map((argument) => valueNode(argument.value))
           fresh()
-          if (operation.hostFrame || program.constructsHostError(operation)) {
+          const host = program.hostConstructionOf(operation)
+          if (host) {
             for (const argument of operation.arguments) contentReads.push({ body, operation, operand: argument.value })
             const fields = fieldNode(`L|${result}`, unknownField)
             for (const argument of args) {
               solver.copy(argument, fields)
               load(argument, allFields, fields)
             }
+            // A view IS its buffer for every write through it: a view of a
+            // buffer from before the region writes that buffer.
+            for (const value of host.aliasing) solver.copy(valueNode(value), out!)
             break
           }
           const construction = program.constructionOf(operation)
@@ -1148,7 +1805,8 @@ const runRegion = (
         callChecks.push({ body, operation, value: argument.value, what: `passes ${builtin.member} a callback the compiler cannot name` })
         solver.on(valueNode(argument.value), (object) => {
           const site = closureSites.get(object)
-          const functions = site ? [site.functionId] : object === shared ? globalFunctions(argument.value).functions : []
+          const named = functionOf(object)
+          const functions = site ? [site.functionId] : named ? [named] : object === shared ? globalFunctions(argument.value).functions : []
           if (object === shared && globalFunctions(argument.value).unknown)
             return refuse(body, operation, `passes ${builtin.member} a callback the compiler cannot trace to its definitions`)
           const how: Entry = site ? { kind: 'closure', allocator: site.allocator } : { kind: 'outside' }
@@ -1193,12 +1851,13 @@ const runRegion = (
   for (const check of writeChecks) {
     const objects = solver.of(valueNode(check.value))
     if (objects.size === 0) refuse(check.body, check.operation, `${check.what} an object the compiler cannot trace`)
-    else if (objects.has(shared)) refuse(check.body, check.operation, `${check.what} an object that existed before the parallel region`)
+    else if (holdsPreexisting(objects))
+      refuse(check.body, check.operation, `${check.what} an object that existed before the parallel region`)
   }
   for (const check of callChecks) if (solver.of(valueNode(check.value)).size === 0) refuse(check.body, check.operation, check.what)
   for (const check of enumerations) {
     const objects = solver.of(valueNode(check.value))
-    if (objects.size === 0 || objects.has(shared))
+    if (objects.size === 0 || holdsPreexisting(objects))
       refuse(check.body, check.operation, 'enumerates the keys of an object that existed before the parallel region')
   }
 
@@ -1216,7 +1875,7 @@ const runRegion = (
   if (targets.size > 0)
     for (const read of contentReads) {
       const region = solver.of(valueNode(read.operand))
-      if (writeReceivers.has(read.operand) || (region.size > 0 && !region.has(shared))) continue
+      if (writeReceivers.has(read.operand) || (region.size > 0 && !holdsPreexisting(region))) continue
       const objects = global.of(valueNode(read.operand))
       // `TOP` is an object only code the analysis cannot see holds, and such
       // code can only have been handed an escaped one.
@@ -1317,7 +1976,7 @@ export const parallelRegionRefusalsOf = (input: ParallelRegionInput): readonly P
  * that changes nothing is the answer. A run that never settles falls back to
  * the pessimistic one.
  */
-const certifyRegion = (input: ParallelRegionInput, program: Program, global: PointsTo, entry: IrBody): readonly ParallelRegionRefusal[] => {
+const certifyRegion = (input: ParallelRegionInput, program: Program, global: PointsToSolver, entry: IrBody): readonly ParallelRegionRefusal[] => {
   const pessimistic = runRegion(input, program, global, entry, new Map())
   let assumption = new Map<FunctionId, ReadonlySet<DeclarationId>>()
   let run = pessimistic
