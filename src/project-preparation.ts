@@ -242,10 +242,33 @@ const fetchAttestations = async (url: string): Promise<Manifest> => {
   if (!response.ok) throw new Error(`Provenance request failed (${response.status})`)
   return object(await response.json())
 }
-const checkout = (identity: SourceIdentity, destination: string): void => {
+// Git for Windows refuses paths over MAX_PATH unless asked per command; a
+// package's sources sit deep under node_modules/.cache, and some repositories
+// have long paths of their own.
+const longPaths = process.platform === 'win32' ? ['-c', 'core.longpaths=true'] : []
+/** Whether `destination` holds a finished checkout of `commit`. */
+const checkedOut = (destination: string, commit: string): boolean => {
+  if (!existsSync(join(destination, '.git'))) return false
+  try {
+    return (
+      run('git', [...longPaths, 'rev-parse', 'HEAD'], destination) === commit &&
+      run('git', [...longPaths, 'status', '--porcelain'], destination) === ''
+    )
+  } catch {
+    return false
+  }
+}
+export const checkout = (identity: SourceIdentity, destination: string): void => {
+  // A finished checkout of this commit (another package of the same
+  // repository) is reused. Anything else in the destination is what an
+  // interrupted attempt left -- files a fresh checkout would refuse to
+  // overwrite ("untracked working tree files would be overwritten") -- so the
+  // attempt starts from an empty directory.
+  if (checkedOut(destination, identity.commit)) return
+  rmSync(destination, { recursive: true, force: true })
   mkdirSync(destination, { recursive: true })
   run('git', ['init', '--quiet', destination], destination)
-  const args = ['-c', 'core.hooksPath=/dev/null', '-c', 'protocol.file.allow=never', '-c', 'protocol.ext.allow=never']
+  const args = ['-c', 'core.hooksPath=/dev/null', '-c', 'protocol.file.allow=never', '-c', 'protocol.ext.allow=never', ...longPaths]
   run('git', [...args, 'fetch', '--quiet', '--depth=1', '--no-tags', identity.url, identity.commit], destination)
   // This is a newly created compiler-owned cache, never a user checkout.
   run('git', [...args, 'checkout', '--quiet', '--detach', identity.commit], destination)

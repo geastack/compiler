@@ -2,12 +2,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import ts from 'typescript'
 import { resolve, dirname, join, sep } from 'node:path'
-import { existsSync, readFileSync, mkdirSync, realpathSync, lstatSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, mkdtempSync, realpathSync, lstatSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { discoverNodeProject, startEntry } from '../dist/semantics/node-project.js'
 import { createModuleResolver } from '../dist/semantics/module-resolution.js'
-import { sourceIdentity } from '../dist/project-preparation.js'
+import { checkout, sourceIdentity } from '../dist/project-preparation.js'
 import { defaultCompilerOptions } from '../dist/semantics/program.js'
 import { nodeCompatRoot } from './corpus-roots.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
@@ -219,6 +220,25 @@ test('a registry manifest is read from npm 11 and npm 12 `npm view --json` outpu
   // Two versions is no answer for one exact version, and neither is a scalar.
   assert.deepEqual(registryManifest(JSON.stringify([manifest, { ...manifest, version: '4.7.5' }])), {})
   assert.deepEqual(registryManifest('"4.7.4"'), {})
+})
+
+test('a source checkout reuses a finished one and starts over from an interrupted one', () => {
+  const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
+  // A finished checkout of the commit: reused as is, nothing is fetched (the URL could not be).
+  const finished = mkdtempSync(join(tmpdir(), 'geatsc-checkout-'))
+  git(finished, 'init', '--quiet')
+  writeFileSync(join(finished, 'index.js'), 'export {}\n')
+  git(finished, 'add', 'index.js')
+  git(finished, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--quiet', '-m', 'source')
+  const commit = git(finished, 'rev-parse', 'HEAD')
+  checkout({ url: 'https://invalid.invalid/never-fetched.git', commit }, finished)
+  assert.equal(git(finished, 'rev-parse', 'HEAD'), commit)
+  // What an interrupted attempt left is cleared before the fresh one, which
+  // fails here only because its URL cannot be fetched.
+  const interrupted = mkdtempSync(join(tmpdir(), 'geatsc-checkout-'))
+  writeFileSync(join(interrupted, 'partial.js'), 'half')
+  assert.throws(() => checkout({ url: 'https://invalid.invalid/never-fetched.git', commit }, interrupted))
+  assert.equal(existsSync(join(interrupted, 'partial.js')), false)
 })
 
 test('source metadata requires a pinned commit and a contained repository directory', () => {
