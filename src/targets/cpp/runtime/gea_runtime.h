@@ -33140,6 +33140,90 @@ inline bool Value::sameValue(const Value& left, const Value& right) {
  * file's own citations); every other String.prototype/Array.prototype member
  * is refused by name at the `[[Get]]`, never boxed and never guessed at.
  */
+/**
+ * The code unit `std::regex` matches a RegExp in, its string, and its regex.
+ *
+ * The standard libraries supply ECMAScript regex traits for `wchar_t`, not
+ * `char16_t` or `char32_t`. Where `wchar_t` is 32 bits (Linux, macOS) it holds
+ * every UTF-16 code unit and every Unicode scalar alike, so it is the unit.
+ * Windows' `wchar_t` is 16 bits, which would leave a Unicode-mode pattern no
+ * unit for U+10000 and above. The MSVC STL's `std::basic_regex` takes any
+ * traits class, so there the unit is `char32_t` with `RegexUnitTraits`, which
+ * answers the Basic Multilingual Plane exactly as `std::regex_traits<wchar_t>`
+ * does and gives a scalar above it no character class, no case mapping and no
+ * digit value: ECMAScript's `\d`, `\w` and `\s` name only BMP characters, and
+ * a Unicode-mode pattern with `i` is refused before it reaches a matcher.
+ * libstdc++'s regex reads the locale's ctype facet of its unit type, which
+ * exists for `wchar_t` only, so the xtensa ESP toolchains (16-bit `wchar_t`)
+ * keep `wchar_t` and refuse an astral scalar (`unicodeMatcherUnit`).
+ */
+namespace gea::runtime {
+#if WCHAR_MAX < 0x10FFFF && defined(_MSVC_STL_VERSION)
+struct RegexUnitTraits {
+  using char_type = char32_t;
+  using _Uelem = char32_t;  // the MSVC STL's matcher reads it from its traits
+  using string_type = std::u32string;
+  using locale_type = std::locale;
+  using char_class_type = std::regex_traits<wchar_t>::char_class_type;
+
+  std::regex_traits<wchar_t> wide;
+
+  static std::size_t length(const char_type *text) { return std::char_traits<char32_t>::length(text); }
+  static bool basicPlane(char_type unit) { return unit <= 0xFFFF; }
+  template <class It>
+  static std::wstring basicPlaneText(It first, It last) {
+    std::wstring out;
+    for (; first != last; ++first) out.push_back(basicPlane(*first) ? static_cast<wchar_t>(*first) : L'\xFFFF');
+    return out;
+  }
+  char_type translate(char_type unit) const { return unit; }
+  char_type translate_nocase(char_type unit) const {
+    return basicPlane(unit) ? static_cast<char_type>(wide.translate_nocase(static_cast<wchar_t>(unit))) : unit;
+  }
+  template <class It>
+  string_type transform(It first, It last) const {
+    return string_type(first, last);
+  }
+  template <class It>
+  string_type transform_primary(It first, It last) const {
+    string_type out;
+    for (; first != last; ++first) out.push_back(translate_nocase(*first));
+    return out;
+  }
+  template <class It>
+  string_type lookup_collatename(It first, It last) const {
+    const std::wstring name = basicPlaneText(first, last);
+    const std::wstring found = wide.lookup_collatename(name.begin(), name.end());
+    return string_type(found.begin(), found.end());
+  }
+  template <class It>
+  char_class_type lookup_classname(It first, It last, bool icase = false) const {
+    const std::wstring name = basicPlaneText(first, last);
+    return wide.lookup_classname(name.begin(), name.end(), icase);
+  }
+  bool isctype(char_type unit, char_class_type mask) const {
+    return basicPlane(unit) && wide.isctype(static_cast<wchar_t>(unit), mask);
+  }
+  int value(char_type unit, int radix) const { return basicPlane(unit) ? wide.value(static_cast<wchar_t>(unit), radix) : -1; }
+  locale_type imbue(locale_type locale) { return wide.imbue(locale); }
+  locale_type getloc() const { return wide.getloc(); }
+};
+using RegexUnit = char32_t;
+using RegexMatcher = std::basic_regex<RegexUnit, RegexUnitTraits>;
+#else
+using RegexUnit = wchar_t;
+using RegexMatcher = std::wregex;
+#endif
+using RegexUnits = std::basic_string<RegexUnit>;
+
+/** An ASCII pattern fragment in matcher units. */
+inline RegexUnits asciiRegexUnits(const char *text) {
+  RegexUnits out;
+  for (; *text; ++text) out.push_back(static_cast<RegexUnit>(static_cast<unsigned char>(*text)));
+  return out;
+}
+}  // namespace gea::runtime
+
 namespace gea::runtime::string {
 
 /**
@@ -33256,19 +33340,19 @@ inline std::string stringFromUtf16CodeUnits(const std::u16string &units) {
   return out;
 }
 
-/** libc++ supplies ECMAScript regex traits for wchar_t, not char16_t. */
-inline std::wstring utf16RegexUnits(const std::string &s) {
+/** UTF-16 code units as matcher units (see `RegexUnit`). */
+inline RegexUnits utf16RegexUnits(const std::string &s) {
   const std::u16string units = utf16CodeUnits(s);
-  std::wstring out;
+  RegexUnits out;
   out.reserve(units.size());
-  for (const char16_t unit : units) out.push_back(static_cast<wchar_t>(unit));
+  for (const char16_t unit : units) out.push_back(static_cast<RegexUnit>(unit));
   return out;
 }
 
-inline std::string stringFromUtf16RegexUnits(const std::wstring &units) {
+inline std::string stringFromUtf16RegexUnits(const RegexUnits &units) {
   std::u16string utf16;
   utf16.reserve(units.size());
-  for (const wchar_t unit : units) {
+  for (const RegexUnit unit : units) {
     // Every string/pattern reaches this projection from UTF-16. A matcher
     // cannot manufacture a scalar outside that domain; reject instead of
     // truncating one if a platform regex implementation violates it.
@@ -35474,11 +35558,11 @@ struct LegacyAnchorRewrite {
   bool needed = false;
   bool anchoredStart = false;
   bool startCapture = false;
-  std::wstring atStart;
-  std::wstring later;
+  RegexUnits atStart;
+  RegexUnits later;
 };
 
-inline LegacyAnchorRewrite rewriteLegacyAnchors(const std::wstring &source) {
+inline LegacyAnchorRewrite rewriteLegacyAnchors(const RegexUnits &source) {
   struct Anchor {
     std::size_t at;
     bool leading;
@@ -35500,13 +35584,13 @@ inline LegacyAnchorRewrite rewriteLegacyAnchors(const std::wstring &source) {
   bool topAlternativeStart = true;
   bool everyAlternativeAnchored = true;
   for (std::size_t i = 0; i < source.size();) {
-    const wchar_t c = source[i];
+    const RegexUnit c = source[i];
     if (frames.empty() && topAlternativeStart) {
       topAlternativeStart = false;
       if (c != L'^' || quantifierAt(i + 1)) everyAlternativeAnchored = false;
     }
     if (c == L'\\') {
-      const wchar_t escape = i + 1 < source.size() ? source[i + 1] : L'\0';
+      const RegexUnit escape = i + 1 < source.size() ? source[i + 1] : L'\0';
       i += 2;
       if (escape == L'b' || escape == L'B') continue;
       while (escape >= L'1' && escape <= L'9' && i < source.size() && source[i] >= L'0' && source[i] <= L'9') ++i;
@@ -35567,17 +35651,17 @@ inline LegacyAnchorRewrite rewriteLegacyAnchors(const std::wstring &source) {
   }
   out.atStart.reserve(source.size() + 32);
   out.later.reserve(source.size() + 32);
-  if (out.startCapture) out.atStart += L"(?=([\\s\\S]*))";
+  if (out.startCapture) out.atStart += asciiRegexUnits("(?=([\\s\\S]*))");
   std::size_t nextAnchor = 0;
   bool inClass = false;
   for (std::size_t i = 0; i < source.size();) {
-    const wchar_t c = source[i];
+    const RegexUnit c = source[i];
     if (c == L'\\' && i + 1 < source.size()) {
       std::size_t end = i + 2;
       if (!inClass && out.startCapture && source[i + 1] >= L'1' && source[i + 1] <= L'9') {
         while (end < source.size() && source[end] >= L'0' && source[end] <= L'9') ++end;
         // Decimal increment on the digits themselves, so no width can overflow.
-        std::wstring reference(source, i + 1, end - i - 1);
+        RegexUnits reference(source, i + 1, end - i - 1);
         std::size_t digit = reference.size();
         while (digit > 0 && reference[digit - 1] == L'9') reference[--digit] = L'0';
         if (digit == 0) reference.insert(reference.begin(), L'1');
@@ -35598,11 +35682,11 @@ inline LegacyAnchorRewrite rewriteLegacyAnchors(const std::wstring &source) {
     } else if (nextAnchor < anchors.size() && anchors[nextAnchor].at == i) {
       const Anchor &anchor = anchors[nextAnchor++];
       if (c == L'$') {
-        out.atStart += L"(?![\\s\\S])";
-        out.later += L"(?![\\s\\S])";
+        out.atStart += asciiRegexUnits("(?![\\s\\S])");
+        out.later += asciiRegexUnits("(?![\\s\\S])");
       } else {
-        out.atStart += anchor.leading ? L"^" : L"(?=\\1)";
-        out.later += L"[^\\s\\S]";
+        out.atStart += anchor.leading ? asciiRegexUnits("^") : asciiRegexUnits("(?=\\1)");
+        out.later += asciiRegexUnits("[^\\s\\S]");
       }
       ++i;
       continue;
@@ -35622,7 +35706,7 @@ inline LegacyAnchorRewrite rewriteLegacyAnchors(const std::wstring &source) {
  *
  * Unicode mode decodes the pattern and the input to code points so dot,
  * classes and quantifiers see an astral character whole, and std::regex then
- * matches them as `wchar_t`. That is exact where `wchar_t` is 32 bits and
+ * matches them as `RegexUnit`s. That is exact where the unit is 32 bits and
  * impossible where it is 16 -- the xtensa ESP toolchain reports
  * `sizeof(wchar_t) == 2` -- because U+10000 and above do not fit, and
  * libstdc++ has no `regex_traits<char32_t>` to widen to. A `static_assert`
@@ -35632,21 +35716,21 @@ inline LegacyAnchorRewrite rewriteLegacyAnchors(const std::wstring &source) {
  * and unicodeSets refusals below are: a TypeError at the site, never a silent
  * split into surrogate halves.
  */
-inline wchar_t unicodeMatcherUnit(std::uint32_t scalar) {
-  if constexpr (sizeof(wchar_t) < 4) {
+inline RegexUnit unicodeMatcherUnit(std::uint32_t scalar) {
+  if constexpr (sizeof(RegexUnit) < 4) {
     if (scalar > 0xFFFF) {
       throwTypeError("Unicode RegExp matching of code points above U+FFFF needs a 32-bit wchar_t matcher, which this platform's toolchain does not provide");
     }
   }
-  return static_cast<wchar_t>(scalar);
+  return static_cast<RegexUnit>(scalar);
 }
 
 /** Decode into scalars while preserving one exact UTF-16 matcher boundary. */
-inline std::wstring unicodeRegexUnits(
+inline RegexUnits unicodeRegexUnits(
     const std::string &text,
     std::size_t exactBoundary = std::numeric_limits<std::size_t>::max()) {
   const std::u16string units = gea::runtime::string::utf16CodeUnits(text);
-  std::wstring out;
+  RegexUnits out;
   out.reserve(units.size());
   for (std::size_t index = 0; index < units.size(); ++index) {
     const std::uint32_t first = units[index];
@@ -35658,15 +35742,15 @@ inline std::wstring unicodeRegexUnits(
         continue;
       }
     }
-    out.push_back(static_cast<wchar_t>(first));
+    out.push_back(static_cast<RegexUnit>(first));
   }
   return out;
 }
 
-inline std::string stringFromUnicodeRegexUnits(const std::wstring &units) {
+inline std::string stringFromUnicodeRegexUnits(const RegexUnits &units) {
   std::string out;
   out.reserve(units.size() * 2);
-  for (const wchar_t unit : units) gea::runtime::string::appendUtf8CodePoint(out, static_cast<double>(unit));
+  for (const RegexUnit unit : units) gea::runtime::string::appendUtf8CodePoint(out, static_cast<double>(unit));
   return out;
 }
 
@@ -35722,7 +35806,7 @@ inline bool decodeUnicodeEscapeAt(
   return true;
 }
 
-inline void appendUnicodeRegexLiteral(std::wstring &out, std::uint32_t value) {
+inline void appendUnicodeRegexLiteral(RegexUnits &out, std::uint32_t value) {
   // A value reached through CharacterEscape is an atom, even when it happens
   // to spell a regex metacharacter. Escape it again for std::regex's parser.
   if (value <= 0x7F) {
@@ -35744,7 +35828,7 @@ inline void appendUnicodeRegexLiteral(std::wstring &out, std::uint32_t value) {
  * every raw source character is decoded to one wide scalar so dot, classes,
  * ranges and quantifiers operate on code points rather than surrogate halves.
  */
-inline bool unicodeRegexSource(const std::string &source, std::wstring &out) {
+inline bool unicodeRegexSource(const std::string &source, RegexUnits &out) {
   out.clear();
   out.reserve(source.size());
   for (std::size_t index = 0; index < source.size();) {
@@ -35776,7 +35860,7 @@ inline bool unicodeRegexSource(const std::string &source, std::wstring &out) {
     if ((escape == 'p' || escape == 'P') && index + 2 < source.size() && source[index + 2] == '{') return false;
     if (escape == 'k' && index + 2 < source.size() && source[index + 2] == '<') return false;
     out.push_back(L'\\');
-    out.push_back(static_cast<wchar_t>(static_cast<unsigned char>(escape)));
+    out.push_back(static_cast<RegexUnit>(static_cast<unsigned char>(escape)));
     index += 2;
   }
   return true;
@@ -36139,7 +36223,7 @@ inline bool validatePatternSource(const std::string &source, bool unicode = fals
   }
   if (parenDepth != 0) return false;
   if (!unicode) return true;
-  std::wstring translated;
+  RegexUnits translated;
   return unicodeRegexSource(source, translated);
 }
 
@@ -36238,7 +36322,7 @@ struct MatchSlice {
  * write -- `/^[a-z0-9._-]+(?::\d{3,4})?$/`, `/\/\.\.?(?:[/?#]|$)/` -- run on
  * the UTF-8 bytes directly.
  *
- * `std::regex` over a transcoded `std::wstring` costs a conversion and an
+ * `std::regex` over a transcoded `RegexUnits` costs a conversion and an
  * allocation per call before matching starts, which dominates a `test` on a
  * short string. This answers `test` without either.
  *
@@ -36711,7 +36795,7 @@ struct Pattern {
   // shapes the libc++/libstdc++ ECMAScript parser understands. When no
   // translation applies the two strings are identical.
   std::string compiledSource;
-  std::wstring unicodeCompiledSource;
+  RegexUnits unicodeCompiledSource;
 
   // v1: `Pattern::group_names` / `Pattern::has_named_groups`.
   //
@@ -36727,11 +36811,11 @@ struct Pattern {
 
   // The compiled `std::regex` for this pattern, resolved once. `compiledRegex`
   // used to re-transcode `compiledSource` to UTF-16 and look the result up in
-  // the process-wide cache -- a wstring key built and compared -- on EVERY
+  // the process-wide cache -- a matcher-unit key built and compared -- on EVERY
   // `test`/`exec`. The map's nodes are never erased, so the pointer is good
   // for the process. `source` and the flags are fixed at construction (there
   // is no `compile()` mutation in this runtime), so nothing invalidates it.
-  mutable const std::wregex* compiledCache = nullptr;
+  mutable const RegexMatcher* compiledCache = nullptr;
   // A pattern that is one literal string -- a `/\x00/` key check, a
   // `/,/` split -- is a substring search, not a `std::regex_search` over a
   // transcoded copy of the input: libc++'s ECMAScript matcher was 8% of a
@@ -37091,13 +37175,13 @@ struct Pattern {
    * on every evaluation of a regex literal inside a loop, so the process-wide
    * cache keyed by (flags, source) is kept.
    */
-  using Utf16Regex = std::wregex;
-  using Utf16Match = std::match_results<std::wstring::const_iterator>;
+  using Utf16Regex = RegexMatcher;
+  using Utf16Match = std::match_results<RegexUnits::const_iterator>;
 
-  static const Utf16Regex &cachedStdRegex(const std::wstring &source, std::regex::flag_type flags) {
-    using Cache = std::map<std::pair<std::wstring, unsigned>, Utf16Regex>;
+  static const Utf16Regex &cachedStdRegex(const RegexUnits &source, std::regex::flag_type flags) {
+    using Cache = std::map<std::pair<RegexUnits, unsigned>, Utf16Regex>;
     GEA_REALM_LOCAL(Cache, cache, {});
-    const std::pair<std::wstring, unsigned> key(source, static_cast<unsigned>(flags));
+    const std::pair<RegexUnits, unsigned> key(source, static_cast<unsigned>(flags));
     auto found = cache.find(key);
     if (found != cache.end()) return found->second;
     // A pattern `std::regex` cannot compile is a **SyntaxError**, not a
@@ -37118,9 +37202,9 @@ struct Pattern {
     return cachedStdRegex(gea::runtime::string::utf16RegexUnits(source), flags);
   }
 
-  const std::wstring &matcherSource() const {
+  const RegexUnits &matcherSource() const {
     if (unicode) return unicodeCompiledSource;
-    static thread_local std::wstring source;
+    static thread_local RegexUnits source;
     source = gea::runtime::string::utf16RegexUnits(compiledSource);
     return source;
   }
@@ -37145,7 +37229,7 @@ struct Pattern {
    * respect `multiline`. Positions in `match` are absolute in `input`; capture
    * group `n` is `match[n + groupOffset]`.
    */
-  bool searchMatcher(const std::wstring &input, std::size_t startUnits, Utf16Match &match, std::size_t &groupOffset) const {
+  bool searchMatcher(const RegexUnits &input, std::size_t startUnits, Utf16Match &match, std::size_t &groupOffset) const {
     groupOffset = 0;
     // The pattern as written is compiled first, so a pattern std::regex
     // rejects raises the SyntaxError it always raised.
@@ -37179,13 +37263,13 @@ struct Pattern {
   }
 #endif
 
-  std::wstring matcherInput(
+  RegexUnits matcherInput(
       const std::string &input,
       std::size_t exactBoundary = std::numeric_limits<std::size_t>::max()) const {
     return unicode ? unicodeRegexUnits(input, exactBoundary) : gea::runtime::string::utf16RegexUnits(input);
   }
 
-  std::size_t matcherIndexFromUtf16(const std::wstring &input, std::size_t units) const {
+  std::size_t matcherIndexFromUtf16(const RegexUnits &input, std::size_t units) const {
     if (!unicode) return units;
     std::size_t seen = 0;
     for (std::size_t index = 0; index < input.size(); ++index) {
@@ -37197,7 +37281,7 @@ struct Pattern {
     return input.size();
   }
 
-  std::size_t utf16IndexFromMatcher(const std::wstring &input, std::size_t index) const {
+  std::size_t utf16IndexFromMatcher(const RegexUnits &input, std::size_t index) const {
     if (!unicode) return index;
     std::size_t units = 0;
     for (std::size_t at = 0; at < std::min(index, input.size()); ++at) {
@@ -37206,7 +37290,7 @@ struct Pattern {
     return units;
   }
 
-  std::string captureFromMatcher(const std::wstring &capture) const {
+  std::string captureFromMatcher(const RegexUnits &capture) const {
     return unicode ? stringFromUnicodeRegexUnits(capture) : gea::runtime::string::stringFromUtf16RegexUnits(capture);
   }
 
@@ -37231,7 +37315,7 @@ struct Pattern {
     // Unicode mode CodePointAt sees the trailing surrogate there as a lone
     // code point; preserving this exact boundary keeps sticky/global matching
     // at that index instead of snapping backward to the pair's high surrogate.
-    const std::wstring inputUnits = matcherInput(input, stateful ? startPublicUnits : std::numeric_limits<std::size_t>::max());
+    const RegexUnits inputUnits = matcherInput(input, stateful ? startPublicUnits : std::numeric_limits<std::size_t>::max());
     const std::size_t startUnits = matcherIndexFromUtf16(inputUnits, startPublicUnits);
 #ifdef GEA_REGEX_LEGACY_ANCHORS
     Utf16Match match;
@@ -37296,7 +37380,7 @@ struct Pattern {
         if (found >= 0) return found == 1;
       }
     }
-    const std::wstring inputUnits = matcherInput(input);
+    const RegexUnits inputUnits = matcherInput(input);
 #ifdef GEA_REGEX_LEGACY_ANCHORS
     Utf16Match match;
     std::size_t groupOffset = 0;
@@ -38153,7 +38237,7 @@ inline gea::Ref<gea::ArrayObject<std::string>> splitByPattern(
 #ifndef GEA_REGEX_LEGACY_ANCHORS
   const gea::runtime::regex::Pattern::Utf16Regex &compiled = pattern.compiledRegex();
 #endif
-  const std::wstring inputUnits = pattern.matcherInput(input);
+  const RegexUnits inputUnits = pattern.matcherInput(input);
   // Step 14: an empty input either yields one empty string or nothing at all,
   // decided by whether the separator matches it.
   if (input.empty()) {

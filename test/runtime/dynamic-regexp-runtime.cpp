@@ -29,6 +29,19 @@ void typeError(Fn run) {
   namedError("TypeError", run);
 }
 
+// A Unicode-mode matcher carries a code point above U+FFFF only where its unit
+// is 32 bits. Where it is 16 (the xtensa ESP toolchains) the runtime refuses
+// that one scalar with a TypeError at the site rather than splitting it
+// (gea_runtime.h's unicodeMatcherUnit), and that refusal is what is checked.
+template <typename Fn>
+void aboveBmp(Fn run) {
+  if constexpr (sizeof(gea::runtime::RegexUnit) >= 4) {
+    run();
+  } else {
+    typeError(run);
+  }
+}
+
 int main() {
   const auto original = gea::runtime::regex::constructPatternOrThrow("ab", "g");
   assert(gea::runtime::regex::dynamicSet(
@@ -197,13 +210,19 @@ int main() {
   assert(unicodeEmptySticky->lastIndex.as<double>() == 1);
   assert(gea::runtime::string::advanceStringIndex(astral, unicodeEmptyStickyMatch.position, true) == 2);
 
-  const auto unicodeClass = gea::runtime::regex::constructPatternOrThrow("[\\u{1F600}-\\u{1F64F}]", "u");
-  assert(unicodeClass->test(astral));
-  const auto unicodeQuantifier = gea::runtime::regex::constructPatternOrThrow(".{2}", "u");
-  const auto unicodeQuantifierMatch = unicodeQuantifier->matchAt(astral + astral);
-  assert(unicodeQuantifierMatch.matched && unicodeQuantifierMatch.length == 4 && *unicodeQuantifierMatch.captures[0] == astral + astral);
-  const auto unicodeEscape = gea::runtime::regex::constructPatternOrThrow("\\u{1F600}", "u");
-  assert(unicodeEscape->test(astral));
+  aboveBmp([&] {
+    const auto unicodeClass = gea::runtime::regex::constructPatternOrThrow("[\\u{1F600}-\\u{1F64F}]", "u");
+    assert(unicodeClass->test(astral));
+  });
+  aboveBmp([&] {
+    const auto unicodeQuantifier = gea::runtime::regex::constructPatternOrThrow(".{2}", "u");
+    const auto unicodeQuantifierMatch = unicodeQuantifier->matchAt(astral + astral);
+    assert(unicodeQuantifierMatch.matched && unicodeQuantifierMatch.length == 4 && *unicodeQuantifierMatch.captures[0] == astral + astral);
+  });
+  aboveBmp([&] {
+    const auto unicodeEscape = gea::runtime::regex::constructPatternOrThrow("\\u{1F600}", "u");
+    assert(unicodeEscape->test(astral));
+  });
   syntaxError([] { gea::runtime::regex::constructPatternOrThrow("{", "u"); });
   syntaxError([] { gea::runtime::regex::constructPatternOrThrow("a{", "u"); });
   syntaxError([] { gea::runtime::regex::constructPatternOrThrow("a{,1}", "u"); });
@@ -224,11 +243,15 @@ int main() {
   syntaxError([] { gea::runtime::regex::constructPatternOrThrow("(?<=x)y", "u"); });
   const auto unicodeBackreference = gea::runtime::regex::constructPatternOrThrow("(a)\\1", "u");
   assert(unicodeBackreference->test("aa"));
-  const auto unicodeEmpty = gea::runtime::regex::constructPatternOrThrow("(?:)", "gu");
-  assert(gea::runtime::string::replaceByPattern(astral, *unicodeEmpty, "-") == "-" + astral + "-");
-  const auto unicodePieces = gea::runtime::string::splitByPattern(
-      astral, *gea::runtime::regex::constructPatternOrThrow("(?:)", "u"));
-  assert(unicodePieces->size() == 1 && unicodePieces->at(0) == astral);
+  aboveBmp([&] {
+    const auto unicodeEmpty = gea::runtime::regex::constructPatternOrThrow("(?:)", "gu");
+    assert(gea::runtime::string::replaceByPattern(astral, *unicodeEmpty, "-") == "-" + astral + "-");
+  });
+  aboveBmp([&] {
+    const auto unicodePieces = gea::runtime::string::splitByPattern(
+        astral, *gea::runtime::regex::constructPatternOrThrow("(?:)", "u"));
+    assert(unicodePieces->size() == 1 && unicodePieces->at(0) == astral);
+  });
 
   const auto sticky = gea::runtime::regex::constructPatternOrThrow(".", "y");
   assert(gea::runtime::regex::dynamicSet(sticky, PropertyKey::string("lastIndex"), Value::box(Value::Tag::Number, 1.0)));
