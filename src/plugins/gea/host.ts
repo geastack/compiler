@@ -522,7 +522,8 @@ export const geaNativeFunctionDeclarations = (options: PluginOptions): readonly 
       declarationName: name,
       inspection: {
         cppFunction,
-        headers: [resolve(packageRoot, source.header)],
+        // `#include "..."` spelling: Windows separators would read as escapes.
+        headers: [resolve(packageRoot, source.header).replaceAll('\\', '/')],
         ...(options.get('gea.native-signature-compiler') ? { compiler: options.get('gea.native-signature-compiler')! } : {})
       }
     }
