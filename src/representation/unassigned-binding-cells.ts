@@ -53,7 +53,12 @@ export const unassignedBindingAbsenceOf = (graph: SemanticGraph): UnassignedBind
     // A host-supplied or CommonJS wrapper cell is written from outside the program.
     if (operation.external || operation.commonJs) continue
     const value = resultOf(operation, 'value')
-    if (value) declared.set(operation.declaration, { owner: ownerOf(operation.caller), result: value.id })
+    // A declared type that already admits undefined (`let x: T | undefined`)
+    // states the initial absence itself: its carrier holds it, and each read's
+    // checker type is sound as published. Forcing the absence onto such a cell's
+    // reads would undo the narrowing of a guarded read, so `if (x) take(x)` would
+    // hand an optional to a position that states `T`.
+    if (value && !includesUndefined(value.type)) declared.set(operation.declaration, { owner: ownerOf(operation.caller), result: value.id })
   }
   const declarations = new Set<DeclarationId>()
   const results = new Set<SemanticResultId>()

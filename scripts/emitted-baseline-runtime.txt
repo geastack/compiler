@@ -387,7 +387,7 @@ evolving-array-push.runtime.js.cpp 7d4721a02594
 evolving-let-assigned-an-any-catch-binding-holds-the-thrown-value.runtime.ts.cpp 23759dcc3870
 evolving-let-null-initializer.runtime.ts.cpp cdc9011bdb6c
 evolving-let-object-literal-hint.runtime.ts.cpp adb76f4994bc
-evolving-let-without-initializer-keeps-flow-union.runtime.ts.cpp 3d72a698bace
+evolving-let-without-initializer-keeps-flow-union.runtime.ts.cpp f93a35c24e66
 exact-arm-projection-mismatch.ts.cpp 45bebcf41203
 exact-arm-projection.ts.cpp a3a6b3dc9e52
 explicit-never-array.ts.cpp 4239905bbc41
@@ -633,7 +633,7 @@ invocation-argument-conversions.ts.cpp 9671666d8705
 invocation-dynamic-nominal-mismatch.ts.cpp 765ec9750029
 invocation-dynamic-number-throws.ts.cpp ff182fd867f2
 isolated-inheritance.ts.cpp 555b181c910a
-issue-3-loop-binding-persistence.runtime.ts.cpp ca0cc26ce738
+issue-3-loop-binding-persistence.runtime.ts.cpp 45d18548974d
 iterate-absent-source-aborts.ts.cpp 685d1ea109e2
 iterate-absent-source.ts.cpp 8317ea11f74b
 iterator-next-method-is-captured-before-mutation.runtime.ts.cpp f150c36067ec
@@ -743,7 +743,8 @@ narrow-to-absent.ts.cpp 0d6092f18fef
 narrow-union-to-descendant-arms.ts.cpp 8c42ca313d7b
 narrowed-family-intersection.ts.cpp 406cb6fe2602
 narrowed-integer-counter-to-string.runtime.ts.cpp 3c1be4bfb5ea
-narrowed-mutable-read-after-a-call-is-not-trusted.runtime.ts.cpp 5d15f9be72c2
+narrowed-mutable-read-after-a-call-is-not-trusted.runtime.ts.cpp 5b188bff692a
+narrowed-optional-let-into-callable-union-argument.runtime.ts.cpp 2b0a26e71f9a
 narrowed-read-across-a-call-that-writes-nothing-still-folds.runtime.ts.cpp 969d0b73d4e9
 native-absent-feature.js.cpp 7aeba4fea17d
 native-accessor-descriptor-functions.runtime.ts.cpp fbd5bd527316
@@ -951,7 +952,7 @@ optional-map-property-logical-assign.ts.cpp f6d891edb296
 optional-regexp-match-array-union.ts.cpp 922df9948300
 optional-strict-equality.ts.cpp 5bebc3006fd7
 optional-string-keyed-map-and-set-use-same-value-zero.runtime.ts.cpp e12c5bc2f15d
-optional-tagged-union-narrowed-read.ts.cpp 9eeec4db905b
+optional-tagged-union-narrowed-read.ts.cpp 96f8c3640559
 optional-union-argument-into-nullable-wider-union-parameter.runtime.ts.cpp 5c535e1a4fd6
 optional-union-narrowed-to-record-beside-class-arm.runtime.ts.cpp e1934d64eccf
 optional-void-call-abi.ts.cpp 58bbc6cee319
