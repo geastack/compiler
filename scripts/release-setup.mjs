@@ -24,11 +24,13 @@
 // A directory already installed is left alone unless --reinstall is given.
 import { vcpkgInstalled, vcpkgPackages, vcpkgRoot, vcpkgTriplet } from './host-toolchain.mjs'
 import { posixShell } from './host-shell.mjs'
+import { assertLfCheckout } from './checkout-line-ends.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 const compiler = resolve(import.meta.dirname, '..')
+assertLfCheckout(compiler)
 const workspace = resolve(process.env.GEASTACK_ROOT ?? dirname(compiler))
 const reinstall = process.argv.includes('--reinstall')
 if (process.platform === 'win32') process.env.npm_config_script_shell = posixShell
@@ -62,7 +64,8 @@ for (const name of siblings) {
   const directory = join(workspace, name)
   if (existsSync(join(directory, '.git'))) continue
   if (existsSync(directory)) throw new Error(`release setup: ${directory} exists but is not a git checkout`)
-  step(workspace, ['git', 'clone', origin.replace(/compiler(\.git)?$/, `${name}$1`), name])
+  // Without Git's CRLF conversion on Windows, as the compiler itself must be (checkout-line-ends.mjs).
+  step(workspace, ['git', 'clone', '-c', 'core.autocrlf=false', origin.replace(/compiler(\.git)?$/, `${name}$1`), name])
 }
 
 // Installed, and from the lockfile now checked out: npm records what it

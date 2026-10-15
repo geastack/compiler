@@ -25,6 +25,7 @@
 // counts, and measurements/release-status.txt is rewritten on every change.
 import './host-toolchain.mjs'
 import { posixShell } from './host-shell.mjs'
+import { assertLfCheckout } from './checkout-line-ends.mjs'
 import { msvcOptimizedMiscompilePending } from './pending-ports.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import {
@@ -44,6 +45,7 @@ import { availableParallelism } from 'node:os'
 import { join, resolve } from 'node:path'
 
 const compiler = resolve(import.meta.dirname, '..')
+assertLfCheckout(compiler)
 const output = join(compiler, 'measurements')
 mkdirSync(output, { recursive: true })
 const workspace = process.env.GEASTACK_ROOT ? resolve(process.env.GEASTACK_ROOT) : ''
