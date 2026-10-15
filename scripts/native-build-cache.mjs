@@ -336,7 +336,14 @@ export function buildNative({
   // lld links a program carrying the runtime object in a third of GNU ld's time.
   // Clang names a linker it cannot find by its bare name.
   const lld = process.platform === 'linux' ? run(cxx, ['-print-prog-name=ld.lld']).trim() : ''
-  const linker = isAbsolute(lld) && existsSync(lld) ? ['-fuse-ld=lld'] : []
+  // ld64 folds functions with identical code by default, address-taken ones
+  // included, and the runtime tells callables apart by entry address
+  // (CallableObject::callWithReceiver finds a method's receiver check by it).
+  // Windows links get /OPT:NOICF from host-toolchain.mjs.
+  const linker = [
+    ...(isAbsolute(lld) && existsSync(lld) ? ['-fuse-ld=lld'] : []),
+    ...(process.platform === 'darwin' ? ['-Wl,-no_deduplicate'] : [])
+  ]
   const linkFlags = flags.filter((flag) => /^-O|^-g$|^-fsanitize/.test(flag))
   run(cxx, [...linkFlags, ...linker, ...objects, ...(runtimeObject ? [runtimeObject] : []), '-o', join(out, nativeProgramName)])
   return timing(compileMs, performance.now() - linkStarted)

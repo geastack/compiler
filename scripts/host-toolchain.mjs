@@ -110,7 +110,12 @@ export const msvcStlAsanMissing = windows && !msvcStlAsanIsInstalled()
  * does) gets `/STACK:8388608`: the 8 MiB main-thread stack Linux and macOS give
  * a program, instead of Windows' 1 MiB. The checks' recursion bounds are
  * measured against the former; a sanitized -O0 eval recursion overflowed
- * Windows' stack before its RangeError guard could answer. (A `-Wl,` flag in
+ * Windows' stack before its RangeError guard could answer. Every link also gets
+ * `/OPT:NOICF`. Without /debug, lld-link (as link.exe) folds identical functions
+ * by default, address-taken ones included, and the runtime tells callables
+ * apart by entry address: CallableObject::callWithReceiver finds a method's
+ * receiver check by it, so a folded callUnboundMethod<Writable> ran
+ * callUnboundMethod<Duplex>'s check, even at -O0. (A `-Wl,` flag in
  * CCC_OVERRIDE_OPTIONS would reach PCH builds too, as a second output.)
  */
 const windowsClangEdits = [
@@ -119,7 +124,11 @@ const windowsClangEdits = [
   '-fverify-intermediate-code',
   '-Qunused-arguments'
 ]
-if (windows && !/\/STACK:/i.test(process.env._LINK_ ?? '')) process.env._LINK_ = `${process.env._LINK_ ?? ''} /STACK:8388608`.trim()
+if (windows) {
+  const link = process.env._LINK_ ?? ''
+  const edits = [...(/\/STACK:/i.test(link) ? [] : ['/STACK:8388608']), ...(/\/OPT:NOICF/i.test(link) ? [] : ['/OPT:NOICF'])]
+  if (edits.length) process.env._LINK_ = [link, ...edits].join(' ').trim()
+}
 
 if (windows && !/use-after-return=never/.test(process.env.CCC_OVERRIDE_OPTIONS ?? '')) {
   if (msvcStlAsanMissing)
