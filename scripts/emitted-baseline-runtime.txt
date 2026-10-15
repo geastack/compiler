@@ -29,6 +29,7 @@ array-concat-array-argument.ts.cpp db9be36008ed
 array-concat-of-element-or-array-union.ts.cpp 5aef77ab01ab
 array-element-string-key.ts.cpp 546d30ec479e
 array-entries-keys-values-iterators.ts.cpp fd77442e2fff
+array-from-length-mapper-takes-element-and-index.ts.cpp 029efb947697
 array-from-optional-typed-array-union.runtime.js.cpp 5e0c328580f2
 array-from-set-and-iterable-class.ts.cpp 601b5b1a4763
 array-from-typed-array-local-carrier.runtime.js.cpp 13a754c319a4
@@ -968,7 +969,7 @@ plain-object-with-class-layout-reflects-as-object.runtime.ts.cpp cd0e6542bbe4
 plain-regex-test-and-ascii-string-search.runtime.ts.cpp 92a5592365f5
 populated-record-late-fields.js.cpp ba66f3c8919a
 primitive-field-narrowed-to-class-is-dead.runtime.ts.cpp 1529f347bb00
-printer-drift.txt a016725ad423
+printer-drift.txt 018a0c3a962b
 private-names-are-not-own-properties.ts.cpp 5d0e90d41f28
 promise-all-array-literal-settles-into-fixed-tuple.runtime.ts.cpp 0da18aec8391
 promise-all-over-a-generator.ts.cpp f8c647367527

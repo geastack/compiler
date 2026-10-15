@@ -28,6 +28,7 @@ import {
   cppTypeOf
 } from '../types.js'
 import { awaitedRepresentation, coroutineAwaitStatements } from '../prototype/emit-prototype-promise.js'
+import { elementAdaptedCallbackText } from '../prototype/emit-prototype-array.js'
 import { nativePromiseBaseOf } from '../class-ref-transport.js'
 import { jsonCallText } from '../emit-json.js'
 import { dateConstructorCallText } from '../prototype/emit-prototype-date.js'
@@ -1280,7 +1281,20 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
   const result = operation.result?.representation
   const carrier = source.representation
   const callback = operation.arguments[1]
-  const args = [operandText(ctx, source), ...(callback ? [operandText(ctx, callback)] : [])].join(', ')
+  const sourceText = operandText(ctx, source)
+  // `fromCall` invokes the mapper with exactly the C++ element its helper
+  // holds, so a mapper declared wider than that element -- `(_, i) => ...`
+  // over `{ length }`, whose `_: unknown` is a `gea::Value` -- needs the
+  // conversion rendered at this boundary, as `Array.prototype.map`'s does.
+  // The element is the one IR published for that pair
+  // (`ir/host-template-conversions.ts`'s `arrayFromElementOf`).
+  const handed = operation.conversionRecipes?.find((recipe) => recipe.role === 'prototype-callback')?.source
+  const mapper = !callback
+    ? null
+    : handed
+      ? elementAdaptedCallbackText(ctx, 'from', '23.1.2.1', handed, callback, null, undefined, /* handsArray= */ false)
+      : operandText(ctx, callback)
+  const args = [sourceText, ...(mapper === null ? [] : [mapper])].join(', ')
   // These helpers infer their own element type, so a discarded
   // `Array.from(source, mapper)` -- run for its mapper's effects -- renders
   // too; only the arms below, which build into the result's carrier, need one.
@@ -1338,7 +1352,7 @@ const arrayFromText = (ctx: EmitContext, operation: CallOperation): string => {
         '"Array.from" of a length-only ArrayLike needs a mapper to produce each element'
       )
     }
-    return `gea::runtime::array::fromLength(${arrayLikeLengthText(ctx, source)}, ${operandText(ctx, callback)})`
+    return `gea::runtime::array::fromLength(${arrayLikeLengthText(ctx, source)}, ${mapper})`
   }
   // A Map's `@@iterator` is `%MapIteratorPrototype%` over its entries
   // (ECMA-262 24.1.3.12), so `Array.from(map)` is `[...map]`: one fresh
