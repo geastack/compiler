@@ -280,7 +280,12 @@ export const createIdentityTable = (
   // key spells every name with forward slashes and an upper-case drive letter;
   // on POSIX hosts it is the name itself.
   const sortKey = (file: ts.SourceFile): string =>
-    sep === '/' ? file.fileName : file.fileName.split(sep).join('/').replace(/^[a-z](?=:\/)/, (drive) => drive.toUpperCase())
+    sep === '/'
+      ? file.fileName
+      : file.fileName
+          .split(sep)
+          .join('/')
+          .replace(/^[a-z](?=:\/)/, (drive) => drive.toUpperCase())
   const keys = new Map(program.getSourceFiles().map((file) => [file, sortKey(file)]))
   const files = program
     .getSourceFiles()
