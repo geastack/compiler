@@ -68,6 +68,8 @@
  * by every worker and suite run through one content-keyed cache.
  */
 import './host-toolchain.mjs'
+import { nativeRelease } from './native-optimization.mjs'
+import { msvcOptimizedMiscompilePending } from './pending-ports.mjs'
 import { spawn } from 'node:child_process'
 import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, resolve, dirname } from 'node:path'
@@ -189,6 +191,13 @@ const files = readdirSync(dir)
       !name.startsWith('_')
   )
   .filter((name) => (only ? only.split(',').some((part) => name.includes(part)) : true))
+  // TODO(LLVM MSVC-EH miscompile): scripts/pending-ports.mjs. Optimized builds
+  // only; a correctness build is -O0 unless GEA_NATIVE_RELEASE=1.
+  .filter((name) => {
+    if (!nativeRelease || !msvcOptimizedMiscompilePending?.programs.includes(name)) return true
+    console.log(`NOT RUN: ${name} (${msvcOptimizedMiscompilePending.reason})`)
+    return false
+  })
   .sort()
   .filter((_, index) => shardOf === null || index % shardOf.count === shardOf.index - 1)
 

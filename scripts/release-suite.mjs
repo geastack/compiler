@@ -25,6 +25,7 @@
 // counts, and measurements/release-status.txt is rewritten on every change.
 import './host-toolchain.mjs'
 import { posixShell } from './host-shell.mjs'
+import { msvcOptimizedMiscompilePending } from './pending-ports.mjs'
 import { execFileSync, spawn } from 'node:child_process'
 import {
   existsSync,
@@ -78,6 +79,9 @@ if (wanted('compiler')) {
     GEA_APPS_ROOT: examples,
     GEA_NODE_COMPAT_ROOT: nodeCompat
   })
+  // TODO(LLVM MSVC-EH miscompile): scripts/pending-ports.mjs.
+  for (const program of msvcOptimizedMiscompilePending?.programs ?? [])
+    hostOnly.push(`compiler: test/runtime/${program} (${msvcOptimizedMiscompilePending.reason})`)
 }
 
 if (wanted('mosaico')) {
@@ -423,6 +427,10 @@ const lstatOrNull = (path) => {
 // cannot build or run a fixture without one.
 const consumers = []
 if (wanted('core') || wanted('examples')) consumers.push([join(workspace, 'examples'), 'all'])
+// core's own tests also run the compiler core installs (its module-graph and
+// app-pipeline tests spawn node_modules/@geastack/compiler directly), so the
+// candidate replaces that one too: otherwise they test the last release.
+if (wanted('core')) consumers.push([join(workspace, 'core/packages/core'), []])
 for (const [lane, path] of packageLanes) if (wanted(lane)) consumers.push([join(workspace, path), []])
 if (wanted('apple')) consumers.push([join(workspace, 'apple'), []])
 if (wanted('node-compat')) consumers.push([join(workspace, 'node-compat'), []])
