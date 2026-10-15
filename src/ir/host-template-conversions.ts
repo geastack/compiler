@@ -9,6 +9,7 @@ import { declaredRecordFieldOf, nativeBaseFieldOf, recordFieldsOfShape } from '.
 import { canonicalIndexLiteral } from '../representation/array-index.js'
 import { isNativeCallableCarrier } from '../representation/callable-object.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
+import { storedCarrier } from '../representation/primitives.js'
 import { hostReceiverProtocolOf } from '../representation/host-templates.js'
 import { representationKey, type RecordField, type Representation } from '../representation/model.js'
 import { hostMemberOf, type HostSpellings } from '../targets/cpp/host/host-members.js'
@@ -114,6 +115,16 @@ export const hostTemplateConversionInputsOf = (
         const callback = operation.arguments[0]?.representation
         if (callback?.kind === 'function-value-dispatch' && callback.abi.receiver === null && callback.abi.parameters[0])
           add('prototype-callback', element, callback.abi.parameters[0].value)
+        // `map` mints its result, so each callback result enters the call's
+        // element as it is stored. A closure narrowed past the checker's `U`
+        // returns a carrier the published element does not hold.
+        if (
+          member === 'map' &&
+          result?.kind === 'array-object' &&
+          callback?.kind === 'function-value-dispatch' &&
+          callback.abi.receiver === null
+        )
+          add('prototype-result', storedCarrier(callback.abi.result), result.element)
       }
       // SortCompare hands the comparator two elements; the emitter converts
       // each into its parameter's carrier (`sortText`), so both pairs are
