@@ -340,7 +340,7 @@ export const operationConversionInputsOf = (
       for (const conversion of nativePrototypeConversionInputsOf(operation, prototypeClaims))
         add(conversion.role, conversion.source, conversion.target)
     if (definitionOf)
-      for (const conversion of hostTemplateConversionInputsOf(operation, definitionOf, deriver, classes, hosts, hostMethodAliases))
+      for (const conversion of hostTemplateConversionInputsOf(operation, definitionOf, deriver, classes, hosts, hostMethodAliases, body))
         add(conversion.role, conversion.source, conversion.target)
     if (definitionOf)
       for (const conversion of promiseReactionConversionInputsOf(operation, definitionOf, classes))

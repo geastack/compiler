@@ -29,6 +29,7 @@ array-concat-array-argument.ts.cpp db9be36008ed
 array-concat-of-element-or-array-union.ts.cpp 5aef77ab01ab
 array-element-string-key.ts.cpp 546d30ec479e
 array-entries-keys-values-iterators.ts.cpp fd77442e2fff
+array-from-length-mapper-takes-element-and-index.ts.cpp 029efb947697
 array-from-optional-typed-array-union.runtime.js.cpp 276c87555789
 array-from-set-and-iterable-class.ts.cpp 6e0221626cfd
 array-from-typed-array-local-carrier.runtime.js.cpp 13a754c319a4

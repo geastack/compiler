@@ -11,9 +11,10 @@ import { isNativeCallableCarrier } from '../representation/callable-object.js'
 import type { RepresentationDeriver } from '../representation/derive.js'
 import { storedCarrier } from '../representation/primitives.js'
 import { hostReceiverProtocolOf } from '../representation/host-templates.js'
-import { representationKey, type RecordField, type Representation } from '../representation/model.js'
+import { isCanonicalNumberPropertyKeyText, representationKey, type RecordField, type Representation } from '../representation/model.js'
 import { hostMemberOf, type HostSpellings } from '../targets/cpp/host/host-members.js'
-import type { CallOperation, IrOperand, IrOperation } from './model.js'
+import { allOperationsOf, type CallOperation, type IrBody, type IrOperand, type IrOperation } from './model.js'
+import { operandsOfIrOperation } from './queries.js'
 import { indexedRecordViewOf } from './certify/carrier-keys.js'
 import { nativePrototypeCallClaimsOf } from './native-prototype-calls.js'
 import type { HostMethodAlias } from './host-method-aliases.js'
@@ -86,6 +87,56 @@ const descriptorValueOf = (deriver: RepresentationDeriver, result: Representatio
   return payload === undefined ? null : (knownFieldsOf(deriver, payload)?.find((field) => field.key === 'value')?.value ?? null)
 }
 
+/**
+ * The `kValue` each `gea::runtime::array::from*` helper hands `Array.from`'s
+ * mapper (ECMA-262 23.1.2.1), or `null` where the mapper is passed unadapted.
+ *
+ * `fromLength` reads no element: it hands `Undefined{}` for every k, which is
+ * step 7.e.i's `Get(arrayLike, Pk)` only while the array-like holds none. The
+ * carrier cannot say so -- `ArrayLike<T>`'s index signature gives even
+ * `{ length: 8 }` an index table -- so the literal proves it. Each member
+ * definition answers the object it installed into, so the chain from the call
+ * back to the allocation is that one object; when every key on it is a
+ * non-numeric string and nothing but the next link and this call uses any of
+ * it, nothing can have stored an element before the call reads it.
+ */
+const arrayFromElementOf = (
+  call: CallOperation,
+  definitionOf: (value: IrValueId) => IrOperation | null,
+  body: IrBody | undefined
+): Representation | null => {
+  const source = call.arguments[0]
+  if (source === undefined) return null
+  const carrier = source.representation
+  if (carrier.kind === 'array-object' || carrier.kind === 'iterator') return carrier.element
+  if (carrier.kind === 'typed-array') return number
+  if (carrier.kind === 'string') return string
+  if (carrier.kind === 'keyed-collection' && carrier.family === 'set') return carrier.key
+  if (body === undefined || (carrier.kind !== 'record' && carrier.kind !== 'record-with-index' && carrier.kind !== 'native-record-ref'))
+    return null
+  const chain = new Set<IrValueId>()
+  let value = source.value
+  let definition = definitionOf(value)
+  while (definition?.kind === 'define-own-property') {
+    const key = definitionOf(definition.key.value)
+    if (key?.kind !== 'constant' || key.literal !== 'string' || isCanonicalNumberPropertyKeyText(key.text)) return null
+    chain.add(value)
+    value = definition.receiver.value
+    definition = definitionOf(value)
+  }
+  if (definition?.kind !== 'allocate-record' || definition.fields.some((field) => isCanonicalNumberPropertyKeyText(field.key))) return null
+  chain.add(value)
+  for (const block of body.blocks.values())
+    for (const operation of allOperationsOf(block)) {
+      const uses = operandsOfIrOperation(operation).filter((operand) => chain.has(operand.value))
+      if (uses.length === 0) continue
+      const isThisCall = operation.kind === 'call' && operation.lineage === call.lineage && operation.callee.value === call.callee.value
+      const isLink = operation.kind === 'define-own-property' && operation.result !== null && chain.has(operation.result.id)
+      if (uses.length > 1 || !(isThisCall || isLink)) return null
+    }
+  return undefinedValue
+}
+
 /** Internal template stores and callback arguments, independent of the ambient callable ABI. */
 export const hostTemplateConversionInputsOf = (
   operation: CallOperation,
@@ -93,7 +144,8 @@ export const hostTemplateConversionInputsOf = (
   deriver: RepresentationDeriver,
   classes: ReadonlyMap<DeclarationId, ClassLayout>,
   hosts?: Pick<HostSpellings, 'members'>,
-  aliases?: ReadonlyMap<DeclarationId, HostMethodAlias>
+  aliases?: ReadonlyMap<DeclarationId, HostMethodAlias>,
+  body?: IrBody
 ): readonly OperationConversionInput[] => {
   if (operation.nativeArrayDescriptorSnapshot || operation.nativeArrayDescriptorReinstallation) return []
   const inputs = new Map<string, OperationConversionInput>()
@@ -184,6 +236,12 @@ export const hostTemplateConversionInputsOf = (
     }
   }
   const host = hostTemplateMemberOf(operation, definitionOf, aliases)
+  if (host?.protocol === 'ArrayConstructor' && host.member === 'from') {
+    const callback = operation.arguments[1]?.representation
+    const element = callback ? arrayFromElementOf(operation, definitionOf, body) : null
+    if (element && callback?.kind === 'function-value-dispatch' && callback.abi.receiver === null && callback.abi.parameters[0])
+      add('prototype-callback', element, callback.abi.parameters[0].value)
+  }
   if (host && hosts) {
     const row = hostMemberOf(hosts.members, host.protocol, host.member)
     if (row?.kind === 'method' && row.arity === 'pass-through') {
