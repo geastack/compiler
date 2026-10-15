@@ -53,13 +53,21 @@ const ownPackageName = (): string | undefined => {
     return undefined
   }
 }
+// npm is npm.cmd on Windows, which only a shell can start: spawned directly it
+// fails with ENOENT, and every package source fetch fell back to the installed
+// JavaScript. cmd.exe takes one command line, so each argument is quoted for it
+// here rather than concatenated unescaped.
+const quoteForCmd = (value: string): string =>
+  value !== '' && !/[\s"^&|<>()!,;=]/.test(value) ? value : `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, '$1$1')}"`
 const run = (command: string, args: readonly string[], cwd: string): string => {
-  const result = spawnSync(command, [...args], {
+  const viaShell = process.platform === 'win32' && command === 'npm'
+  const result = spawnSync(viaShell ? [command, ...args].map(quoteForCmd).join(' ') : command, viaShell ? [] : [...args], {
     cwd,
     encoding: 'utf8',
     timeout: 120000,
     maxBuffer: 16 * 1024 * 1024,
-    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+    shell: viaShell
   })
   if (result.error) throw result.error
   if (result.status !== 0) throw new Error(`${command} failed (${result.status ?? result.signal}): ${result.stderr.trim()}`)
