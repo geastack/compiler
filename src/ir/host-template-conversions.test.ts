@@ -116,11 +116,24 @@ test('native Array callbacks and absent results cite only their actual internal 
     ...frame,
     abi: { ...frame.abi, parameters: [{ value: dynamic, ownership: 'owned', passing: 'by-value' }] }
   }
-  const mapped = call([callback], array(string))
+  const mapped = call([callback], array(dynamic))
   const inputs = hostTemplateConversionInputsOf(mapped, definitionFor('', 'map', array(string)), deriver, classes)
   assert.deepEqual(
     inputs.map((input) => structuralConversionKey(input.source, input.target)),
     [structuralConversionKey(string, dynamic)]
+  )
+  // A closure narrowed past the checker's `any` result still fills the `any[]` the call publishes.
+  const narrowed: Representation = { ...frame, abi: { ...frame.abi, parameters: [], result: string } }
+  const minted = hostTemplateConversionInputsOf(call([narrowed], array(dynamic)), definitionFor('', 'map', array(number)), deriver, classes)
+  assert.deepEqual(
+    minted.map((input) => [input.role, structuralConversionKey(input.source, input.target)]),
+    [['prototype-result', structuralConversionKey(string, dynamic)]]
+  )
+  const effect: Representation = { ...frame, abi: { ...frame.abi, parameters: [], result: { kind: 'void' } } }
+  assert.deepEqual(
+    hostTemplateConversionInputsOf(call([effect], array({ kind: 'undefined' })), definitionFor('', 'map', array(number)), deriver, classes),
+    [],
+    'a void callback already stores the undefined its array holds'
   )
   const popped = call([], dynamic)
   const pop = hostTemplateConversionInputsOf(popped, definitionFor('', 'pop', array(string)), deriver, classes)
