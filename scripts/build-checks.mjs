@@ -2,6 +2,7 @@
 // nothing another one writes, so they run at once: chained, they kept one core
 // busy for minutes of a release check. A check's output is printed when it
 // finishes, whole, so concurrent checks never interleave.
+import './host-toolchain.mjs'
 import { spawn } from 'node:child_process'
 
 const checks = [

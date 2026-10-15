@@ -1,3 +1,4 @@
+import { llvmRoot } from './host-toolchain.mjs'
 import { createHash, randomUUID } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
@@ -62,12 +63,13 @@ const dependencies = (text) => {
 /** The linked executable's name: Windows runs only a file with an executable suffix. */
 export const nativeProgramName = process.platform === 'win32' ? 'program.exe' : 'program'
 
-// The LLVM installer does not put clang on PATH by default on Windows.
+// The LLVM installer does not put clang on PATH by default on Windows;
+// host-toolchain.mjs finds it (LLVM_ROOT, PATH, then the install directory).
 const defaultCxx = () => {
   if (process.env.CXX) return process.env.CXX
   if (process.platform !== 'win32') return 'clang++'
-  const installed = join(process.env.ProgramFiles ?? 'C:\\Program Files', 'LLVM', 'bin', 'clang++.exe')
-  return executableOnPath('clang++.exe') ?? (existsSync(installed) ? installed : 'clang++')
+  const root = llvmRoot()
+  return root ? join(root, 'bin', 'clang++.exe') : 'clang++'
 }
 
 // Every worker, every oracle program and every suite run shares one runtime

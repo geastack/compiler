@@ -346,11 +346,15 @@ ${identityProbeTemplates}enum Identities { ${marks.join(',\n')} };
 
 /**
  * `clang++` from PATH. The Windows LLVM installer does not put itself on PATH
- * by default, so its standard location is tried there too. Not CXX: inside an
- * ESP-IDF build that is the cross g++, which has no -Xclang AST dump.
+ * by default, so there LLVM_ROOT and then the standard install location are
+ * tried too. Not CXX: inside an ESP-IDF build that is the cross g++, which has
+ * no -Xclang AST dump.
  */
 function defaultClang(): string {
-  if (process.platform === 'win32' && spawnSync('clang++', ['--version'], { stdio: 'ignore' }).error) {
+  if (process.platform !== 'win32') return 'clang++'
+  const fromRoot = process.env.LLVM_ROOT ? join(process.env.LLVM_ROOT, 'bin', 'clang++.exe') : undefined
+  if (fromRoot && existsSync(fromRoot)) return fromRoot
+  if (spawnSync('clang++', ['--version'], { stdio: 'ignore' }).error) {
     const installed = join(process.env.ProgramFiles ?? 'C:\\Program Files', 'LLVM', 'bin', 'clang++.exe')
     if (existsSync(installed)) return installed
   }

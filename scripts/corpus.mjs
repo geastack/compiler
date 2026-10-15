@@ -1,3 +1,4 @@
+import './host-toolchain.mjs'
 import { nativeHostIncludes } from './native-host-includes.mjs'
 import { readdirSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, copyFileSync, rmSync } from 'node:fs'
 import { join, resolve, relative, basename, dirname } from 'node:path'

@@ -1,3 +1,4 @@
+import './host-toolchain.mjs'
 import { nativeHostIncludes } from './native-host-includes.mjs'
 import { nativeOptimization } from './native-optimization.mjs'
 /**
