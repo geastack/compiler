@@ -262,15 +262,20 @@ const callbackMethodText =
  * parameter is not the one the runtime hands over, or when the callback is
  * variadic: a refusal at emission is the fail-closed answer the C++ error was
  * standing in for.
+ *
+ * `Array.from`'s mapper crosses the same boundary inside `fromCall`, which
+ * hands it `(kValue, k)` and no array (23.1.2.1), so `handsArray` is false
+ * there and a third parameter is refused rather than declared.
  */
-const elementAdaptedCallbackText = (
+export const elementAdaptedCallbackText = (
   ctx: EmitContext,
   member: string,
   clause: string,
   element: Representation,
   callback: IrOperand,
   result?: IrResult | null,
-  operation?: CallOperation
+  operation?: CallOperation,
+  handsArray = true
 ): string => {
   const text = operandText(ctx, callback)
   const carrier = callback.representation
@@ -285,12 +290,15 @@ const elementAdaptedCallbackText = (
   const refuse = (detail: string): never => {
     throw createCppEmitBlockedError(
       `runtime-helper:callback:${member}:${elementKey(element)}`,
-      `"Array.prototype.${member}" (ECMA-262 ${clause}) hands its callback the receiver's element "${elementKey(element)}" and the callback's ` +
-        `first parameter carries "${first ? representationKey(first.value) : 'nothing'}"; ${detail}`
+      (handsArray
+        ? `"Array.prototype.${member}" (ECMA-262 ${clause}) hands its callback the receiver's element`
+        : `"Array.${member}" (ECMA-262 ${clause}) hands its callback the source's element`) +
+        ` "${elementKey(element)}" and the callback's first parameter carries "${first ? representationKey(first.value) : 'nothing'}"; ${detail}`
     )
   }
   if (carrier.abi.restFrom !== null || beyond.length > 0)
     refuse('a callback with more parameters than element, index and array has no runtime call shape')
+  if (array && !handsArray) refuse('a callback with more parameters than element and index has no runtime call shape')
   const converted = !first
     ? null
     : adaptsElement
