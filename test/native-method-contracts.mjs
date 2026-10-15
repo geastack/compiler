@@ -1,10 +1,11 @@
+import { executableSuffix } from './executable-suffix.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
-const executable = resolve(root, 'measurements/native-method-contracts')
+const executable = resolve(root, `measurements/native-method-contracts${executableSuffix}`)
 const source = `#include "gea_runtime.h"
 #include <cassert>
 #include <iostream>

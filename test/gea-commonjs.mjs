@@ -1,3 +1,4 @@
+import { executableSuffix } from './executable-suffix.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -29,7 +30,7 @@ for (const operation of loads) {
 for (const line of result.source.split('\n').filter((line) => line.includes('gea::Value::box'))) {
   assert.match(line, /^GEA_THROW\(.*gea::runtime::Error/)
 }
-const binary = resolve(root, 'dist/test_gea_commonjs')
+const binary = resolve(root, `dist/test_gea_commonjs${executableSuffix}`)
 execFileSync(
   'clang++',
   ['-std=c++20', ...nativeOptimization('correctness'), `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary],

@@ -42,7 +42,24 @@
 #include <unordered_map>
 #include <unordered_set>
 #if defined(GEA_PROFILE_ALLOCATIONS)
+// The allocation profile's backtraces (the leak probe and the allocation-site
+// census). Windows has no <execinfo.h>; its frames come from
+// RtlCaptureStackBackTrace, declared exactly as <windows.h> declares it rather
+// than by including that header, whose `near`/`far` macros this one cannot take.
+#if defined(_WIN32)
+extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long skip, unsigned long count, void** frames,
+                                                                                    unsigned long* hash);
+inline int gea_profile_backtrace(void** frames, int size) {
+  return static_cast<int>(::RtlCaptureStackBackTrace(0, static_cast<unsigned long>(size), frames, nullptr));
+}
+inline void gea_profile_print_backtrace(void* const* frames, int count) {
+  for (int index = 0; index < count; ++index) std::fprintf(stderr, "  %p\n", frames[index]);
+}
+#else
 #include <execinfo.h>
+inline int gea_profile_backtrace(void** frames, int size) { return ::backtrace(frames, size); }
+inline void gea_profile_print_backtrace(void* const* frames, int count) { ::backtrace_symbols_fd(frames, count, 2); }
+#endif
 #endif
 #include <string>
 #include <string_view>
@@ -1470,8 +1487,8 @@ inline const void*& leakProbeTarget() {
 inline void leakProbeEvent(const char* what, const void* object, std::uint32_t strong) {
   std::fprintf(stderr, "PROBE %s %p strong=%u\n", what, object, strong);
   void* frames[16];
-  const int count = ::backtrace(frames, 16);
-  ::backtrace_symbols_fd(frames, count, 2);
+  const int count = ::gea_profile_backtrace(frames, 16);
+  ::gea_profile_print_backtrace(frames, count);
   std::fprintf(stderr, "PROBE end\n");
 }
 // Leak probe: every live element buffer (`PooledAllocator<T>::allocate`), by address.
@@ -1567,7 +1584,7 @@ inline void profileRefCreationSite() {
   }();
   if (census == nullptr) return;
   void* frames[10];
-  const int count = ::backtrace(frames, 10);
+  const int count = ::gea_profile_backtrace(frames, 10);
   AllocationSiteKey key;
   for (int index = 3; index < count && index < 9; ++index) key.frames[static_cast<std::size_t>(index - 3)] = frames[index];
   ++census->sites[key];
@@ -1814,7 +1831,14 @@ class RegionGranules {
     }
     const std::size_t bytes = span == 1 ? regionChunkBytes : span * granuleBytes;
     void* memory = nullptr;
+#if defined(_WIN32)
+    // The Windows CRT has no posix_memalign. Granules never go back to the
+    // system (see above), so no matching _aligned_free is owed.
+    memory = ::_aligned_malloc(bytes, granuleBytes);
+    if (memory == nullptr) throw std::bad_alloc();
+#else
     if (::posix_memalign(&memory, granuleBytes, bytes) != 0) throw std::bad_alloc();
+#endif
     auto* first = static_cast<RegionGranule*>(memory);
     if (span == 1) {
       std::lock_guard lock(mutex_);

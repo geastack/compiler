@@ -1,4 +1,6 @@
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
+import { sanitizerArguments, sanitizerEnvironment } from './sanitizer.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
@@ -9,7 +11,9 @@ import { cppBodyName } from '../dist/targets/cpp/types.js'
 const root = resolve(import.meta.dirname, '..')
 const entry = resolve(root, 'test/native-function-signatures.ts')
 const declarationFileName = resolve(root, 'test/native-function-signatures.d.ts')
-const header = resolve(root, 'test/native-signatures.h')
+// An include spelling never carries a backslash (native inspection refuses
+// one), so a Windows path is spelled with the forward slashes clang also takes.
+const header = resolve(root, 'test/native-signatures.h').replaceAll('\\', '/')
 const aliases = `declare const integerBrand: unique symbol;
 declare const narrowBrand: unique symbol;
 type int = number & { readonly [integerBrand]?: never };
@@ -176,7 +180,7 @@ for (const scenario of scenarios) {
     assert.match(result.source, new RegExp(`void ${cppBodyName(tick.sourceOwner)}\\(long long`))
   }
   if (scenario.name === 'ambient-inferred-callback') assert.doesNotMatch(result.source, /CallableObject<void\(double\)>/)
-  const executable = resolve(root, 'measurements', `declared-integer-contracts-${scenario.name}`)
+  const executable = resolve(root, 'measurements', `declared-integer-contracts-${scenario.name}${executableSuffix}`)
   execFileSync(
     'clang++',
     [
@@ -184,6 +188,7 @@ for (const scenario of scenarios) {
       ...nativeOptimization('correctness'),
       '-fsanitize=address,undefined',
       '-fno-sanitize-recover=all',
+      ...sanitizerArguments,
       `-I${resolve(root, 'src/targets/cpp/runtime')}`,
       '-x',
       'c++',
@@ -197,6 +202,8 @@ for (const scenario of scenarios) {
       timeout: 180_000
     }
   )
-  assert.equal(execFileSync(executable, [], { encoding: 'utf8', timeout: 30_000 }), scenario.expected, scenario.name)
+  // Windows opens a C++ program's stdout in text mode, so its `\n` arrives as `\r\n`.
+  const printed = execFileSync(executable, [], { encoding: 'utf8', timeout: 30_000, env: sanitizerEnvironment() })
+  assert.equal(printed.replaceAll('\r\n', '\n'), scenario.expected, scenario.name)
   console.log(`${scenario.name}: passed`)
 }
