@@ -95,6 +95,14 @@ export const msvcStlAsanMissing = windows && !msvcStlAsanIsInstalled()
  *   `throw 7;`), with or without the runtime detection turned on. Every other
  *   check ASan makes is kept.
  * - `-D_DISABLE_STL_ANNOTATION`, where stl_asan.lib is missing (above).
+ * - `-fverify-intermediate-code`: run LLVM's IR verifier, which clang skips by
+ *   default. clang 22 and 23 targeting MSVC can produce invalid IR at -O1 and
+ *   above for a coroutine whose catch handler assigns a local declared outside
+ *   the try (CoroSplit: "Instruction does not dominate all uses" in a catch
+ *   funclet), and without the verifier that build succeeds and runs
+ *   miscompiled. With it, the build fails with "Broken function found". About
+ *   1% of compile time; nothing at run time. An interim safety net until the
+ *   emitter avoids the trigger or LLVM is fixed.
  * - `-Qunused-arguments`, so a compile that sanitizes nothing, or a link, does
  *   not warn about the flags it has no use for.
  *
@@ -108,6 +116,7 @@ export const msvcStlAsanMissing = windows && !msvcStlAsanIsInstalled()
 const windowsClangEdits = [
   '-fsanitize-address-use-after-return=never',
   ...(msvcStlAsanMissing ? ['-D_DISABLE_STL_ANNOTATION'] : []),
+  '-fverify-intermediate-code',
   '-Qunused-arguments'
 ]
 if (windows && !/\/STACK:/i.test(process.env._LINK_ ?? '')) process.env._LINK_ = `${process.env._LINK_ ?? ''} /STACK:8388608`.trim()
