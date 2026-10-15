@@ -1,3 +1,4 @@
+import { executableSuffix } from './executable-suffix.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -6,7 +7,7 @@ import { compile } from '../dist/compiler.js'
 
 const root = resolve(import.meta.dirname, '..')
 const include = `-I${resolve(root, 'src/targets/cpp/runtime')}`
-const binary = resolve(root, 'dist/worker-realms-test')
+const binary = resolve(root, `dist/worker-realms-test${executableSuffix}`)
 const flags = [
   '-std=c++20',
   ...nativeOptimization('correctness'),

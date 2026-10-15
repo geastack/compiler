@@ -1,3 +1,4 @@
+import { executableSuffix } from './executable-suffix.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -46,7 +47,7 @@ for (const fixture of ['native-rtc', 'native-rtc-dom']) {
     /gea::Value::box/
   )
   assert.doesNotMatch(result.source, /->createDataChannel|->addTransceiver/)
-  const generatedBinary = resolve(output, `test_${fixture}_generated`)
+  const generatedBinary = resolve(output, `test_${fixture}_generated${executableSuffix}`)
   // Execute the emitted JavaScript behavior with a transport test double. The
   // real network/codec path is exercised separately; no room is opened here.
   execFileSync(
@@ -106,7 +107,7 @@ int main() {
     assert.match(generatedOutput, /DOM message hello/)
   }
 }
-const binary = resolve(output, 'test_rtc_adapter')
+const binary = resolve(output, `test_rtc_adapter${executableSuffix}`)
 execFileSync(
   'clang++',
   [...flags, resolve(root, 'test/runtime/rtc-objects-adapter.cpp'), resolve(core, 'packages/host/host/rtc.cpp'), '-o', binary],
