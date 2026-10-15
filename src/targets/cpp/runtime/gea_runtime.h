@@ -6998,16 +6998,35 @@ struct CallableObject<Result(Arguments...)> {
     static std::atomic<const ReceiverRegistration*> head{nullptr};
     return head;
   }
+  /** The receiver entry `entry` is registered with, or null. */
+  static InvokeWithReceiver registeredReceiverEntry(Invoke entry) {
+    for (auto* registered = receiverRegistrations().load(std::memory_order_acquire); registered; registered = registered->next)
+      if (registered->entry == entry) return registered->withReceiver;
+    return nullptr;
+  }
+  /**
+   * Whether `entry` is not registered yet. The same entry registered with a
+   * different receiver entry stops the program (failFoldedReceiverEntry): in
+   * the compiled instantiations that call this, nothing but a linker can make
+   * two of them share an entry.
+   */
+  static bool receiverEntryUnregistered(Invoke entry, InvokeWithReceiver withReceiver) {
+    const InvokeWithReceiver registered = registeredReceiverEntry(entry);
+    if (registered != nullptr && registered != withReceiver) failFoldedReceiverEntry();
+    return registered == nullptr;
+  }
   static void registerRuntimeReceiverEntry(Invoke entry, InvokeWithReceiver withReceiver) {
     if (entry == nullptr || withReceiver == nullptr) throw std::runtime_error("a native callable receiver adapter has no entry");
     static std::mutex mutex;
     std::lock_guard<std::mutex> lock(mutex);
-    for (auto* registered = receiverRegistrations().load(std::memory_order_acquire); registered; registered = registered->next) {
-      if (registered->entry != entry) continue;
-      if (registered->withReceiver != withReceiver)
-        throw std::runtime_error("a native callable adapter has conflicting receiver entries");
-      return;
-    }
+    // Function pointers handed in at run time can pair one adapter with two
+    // receiver adapters by mistake; that is refused as a catchable error.
+    const InvokeWithReceiver registered = registeredReceiverEntry(entry);
+    if (registered != nullptr && registered != withReceiver)
+      throw std::runtime_error(
+          "a native callable adapter has conflicting receiver entries (two adapters at one address: "
+          "identical-code folding, or one adapter paired with two receiver adapters)");
+    if (registered != nullptr) return;
     // The registry owns these metadata nodes for the process lifetime, one
     // per actual entry. They do not allocate a callable environment or retain
     // a source object, and invocation performs no registration/allocation.
@@ -7015,7 +7034,32 @@ struct CallableObject<Result(Arguments...)> {
   }
   template <Invoke Entry, InvokeWithReceiver WithReceiver>
   static void registerReceiverEntry() {
+    // Checked once per instantiation before its static node joins the
+    // registry (static storage: registering allocates nothing): two
+    // instantiations with different receiver entries at ONE entry address can
+    // only mean the linker folded their entries (failFoldedReceiverEntry).
+    static const bool checked = (receiverEntryUnregistered(Entry, WithReceiver), true);
     static const ReceiverRegistration registration{Entry, WithReceiver};
+    (void)checked;
+  }
+  /**
+   * One entry address registered with two different receiver entries.
+   *
+   * Callables are told apart by entry address: callWithReceiver finds a
+   * method's receiver check by it. Distinct functions with identical machine
+   * code -- callUnboundMethod<Writable> and callUnboundMethod<Duplex> -- share
+   * an address only when the linker folds them, which lld-link and link.exe do
+   * without /debug (identical-code folding) and ld64 does by default
+   * (deduplication). Dispatch would then run the other type's receiver check,
+   * silently. The program stops here instead, naming the link setting.
+   */
+  [[noreturn]] static void failFoldedReceiverEntry() {
+    std::fputs(
+        "gea runtime: two native callables share one entry address with different receiver entries. The linker "
+        "folded identical functions (identical-code folding): link with /OPT:NOICF (lld-link, link.exe) or "
+        "-Wl,-no_deduplicate (ld64), and without --icf=all (lld, gold).\n",
+        stderr);
+    gea::detail::abortAfterFlush();
   }
 
   /**
@@ -7162,7 +7206,10 @@ struct CallableObject<Result(Arguments...)> {
     if constexpr (std::is_pointer_v<Adapter> || std::is_pointer_v<ReceiverAdapter>)
       registerRuntimeReceiverEntry(+adapter, +receiverAdapter);
     else {
+      // Checked once per instantiation, as registerReceiverEntry is.
+      static const bool checked = (receiverEntryUnregistered(+adapter, +receiverAdapter), true);
       static const ReceiverRegistration registration{+adapter, +receiverAdapter};
+      (void)checked;
     }
     return adapted;
   }
@@ -7173,7 +7220,10 @@ struct CallableObject<Result(Arguments...)> {
     if constexpr (std::is_pointer_v<Adapter> || std::is_pointer_v<ReceiverAdapter>)
       registerRuntimeReceiverEntry(+adapter, +receiverAdapter);
     else {
+      // Checked once per instantiation, as registerReceiverEntry is.
+      static const bool checked = (receiverEntryUnregistered(+adapter, +receiverAdapter), true);
       static const ReceiverRegistration registration{+adapter, +receiverAdapter};
+      (void)checked;
     }
     return adapted;
   }
