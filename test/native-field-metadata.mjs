@@ -1,4 +1,4 @@
-import '../scripts/host-toolchain.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -17,7 +17,7 @@ assert.deepEqual(result.emissionRefusals, [])
 assert.ok(result.source.includes('NativeStringFieldMetadata<'))
 assert.ok(result.source.includes('appendNativeStringFieldKeys(*this,'))
 assert.ok(result.source.includes('appendNativeEnumerableStringFieldKeys(*this,'))
-const executable = resolve(output, 'native-field-metadata')
+const executable = resolve(output, `native-field-metadata${executableSuffix}`)
 execFileSync(
   'clang++',
   [

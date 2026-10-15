@@ -1,5 +1,5 @@
 // Compile a compiler-owned fixture; no demo build or generated demo artifact is required.
-import '../scripts/host-toolchain.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
 import fs from 'node:fs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -53,7 +53,7 @@ const code = `#include "gea_runtime.h"\n#include "ui/signal.h"\n#include <casser
  assert(reader.call()=="Origin");assert(reader.owner==owner);
  owner->slot="Updated";assert(reader.call()=="Updated");
 }`
-const binary = root + '/dist/inventory-reactive-fields-test'
+const binary = root + `/dist/inventory-reactive-fields-test${executableSuffix}`
 execFileSync(
   'clang++',
   [

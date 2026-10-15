@@ -3,7 +3,7 @@ import { appsRoot, nodeCompatRoot } from './corpus-roots.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import ts from 'typescript'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { createModuleResolver, mappedTypeScriptSource } from '../dist/semantics/module-resolution.js'
@@ -72,6 +72,9 @@ test('package checkouts map sibling runtime and declaration outputs to their sha
   assert.equal(selected(resolveIn(files, 'sample/feature/one', { packageSources })), path(`${checkout}/src/feature/one.ts`))
 })
 const selected = (result) => result.implementation?.resolvedFileName
+// A declaration is resolved by TypeScript, which spells a Windows path with
+// forward slashes; compared resolved, as the same file.
+const declared = (resolution) => (resolution?.resolvedFileName === undefined ? undefined : resolve(resolution.resolvedFileName))
 
 test('published declaration maps select original source without an installed build config', () => {
   const base = 'node_modules/sample'
@@ -110,7 +113,7 @@ test('same-package declarations and JS are resolved independently', () => {
     'node_modules/sample/public.d.ts': 'export const value: number'
   })
   assert.equal(selected(result), path('node_modules/sample/index.js'))
-  assert.equal(result.declaration?.resolvedFileName, path('node_modules/sample/public.d.ts'))
+  assert.equal(declared(result.declaration), path('node_modules/sample/public.d.ts'))
 })
 
 test('DefinitelyTyped declarations do not replace the package implementation', () => {
@@ -120,7 +123,7 @@ test('DefinitelyTyped declarations do not replace the package implementation', (
     'node_modules/@types/sample/index.d.ts': 'export const value: number'
   })
   assert.equal(selected(result), path('node_modules/sample/index.js'))
-  assert.equal(result.typeDeclaration?.resolvedFileName, path('node_modules/@types/sample/index.d.ts'))
+  assert.equal(declared(result.typeDeclaration), path('node_modules/@types/sample/index.d.ts'))
   assert.equal(result.declaration, undefined)
 })
 
@@ -186,13 +189,13 @@ test('paths aliases and explicit module graph targets remain authoritative', () 
   assert.equal(selected(resolveIn(files, 'sample', { stated: path('source.ts') })), path('source.ts'))
   const declarations = resolveIn(files, 'native', { stated: path('native.d.ts') })
   assert.equal(declarations.native, true)
-  assert.equal(declarations.declaration?.resolvedFileName, path('native.d.ts'))
+  assert.equal(declared(declarations.declaration), path('native.d.ts'))
 })
 test('native registrations select declarations even when a bundler supplied JavaScript', () => {
   const result = resolveIn(conditional, 'sample', { native: new Set(['sample']), stated: path('node_modules/sample/esm.mjs') })
   assert.equal(result.native, true)
   assert.equal(result.implementation, undefined)
-  assert.equal(result.declaration?.resolvedFileName, path('node_modules/sample/types/index.d.ts'))
+  assert.equal(declared(result.declaration), path('node_modules/sample/types/index.d.ts'))
   assert.equal(resolveIn(conditional, 'sample/feature/one', { native: new Set(['sample/*']) }).native, true)
 })
 test('typesVersions affects declarations without redirecting executable code', () => {
@@ -202,7 +205,7 @@ test('typesVersions affects declarations without redirecting executable code', (
     'node_modules/sample/types/index.d.ts': 'export const value: number'
   })
   assert.equal(selected(result), path('node_modules/sample/index.js'))
-  assert.equal(result.declaration?.resolvedFileName, path('node_modules/sample/types/index.d.ts'))
+  assert.equal(declared(result.declaration), path('node_modules/sample/types/index.d.ts'))
 })
 for (const [source, declaration] of [
   ['entry.mjs', 'entry.d.mts'],
@@ -211,7 +214,7 @@ for (const [source, declaration] of [
   test(`${declaration} never replaces ${source}`, () => {
     const result = resolveIn({ [source]: 'export const value = 1', [declaration]: 'export const value: number' }, `./${source}`)
     assert.equal(selected(result), path(source))
-    assert.equal(result.declaration?.resolvedFileName, path(declaration))
+    assert.equal(declared(result.declaration), path(declaration))
   })
 }
 test('resolution caches belong to each compilation', () => {
@@ -460,7 +463,8 @@ for (const [specifier, entry, expected] of installed) {
       const file = resolve(compiler, entry)
       assert.ok(existsSync(file), `Required installed-package test entry is missing: ${file}`)
       const result = createModuleResolver(ts.sys, options).resolve(specifier, file, ts.ModuleKind.ESNext)
-      assert.match(selected(result) ?? '', expected)
+      // The expectations are spelled with `/`; a Windows path is matched in that spelling.
+      assert.match((selected(result) ?? '').split(sep).join('/'), expected)
     }
   )
 }
@@ -480,7 +484,7 @@ for (const [specifier, entry, expected] of installed.filter(([specifier]) => ['f
         sourceOverlay: new Map([[root, `import * as library from '${specifier}'; console.log(library)`]])
       })
       assert.ok(
-        result.sourceFiles.some((file) => expected.test(file.fileName)),
+        result.sourceFiles.some((file) => expected.test(file.fileName.split(sep).join('/'))),
         `Missing ${specifier} implementation`
       )
       const js = result.sourceFiles.filter((file) => /\.(?:js|mjs|cjs)$/.test(file.fileName)).length

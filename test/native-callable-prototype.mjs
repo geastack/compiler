@@ -1,4 +1,4 @@
-import '../scripts/host-toolchain.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
 const output = resolve(root, 'measurements')
-const binary = resolve(output, 'native-callable-prototype')
+const binary = resolve(output, `native-callable-prototype${executableSuffix}`)
 const source = `#include "gea_runtime.h"
 #include <cassert>
 #include <iostream>

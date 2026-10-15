@@ -6,7 +6,7 @@ import { resolve } from 'node:path'
 import { compile } from '../dist/compiler.js'
 
 const root = resolve(import.meta.dirname, '..')
-const protocolBinary = resolve(root, 'dist/native-typed-field-protocol')
+const protocolBinary = resolve(root, `dist/native-typed-field-protocol${executableSuffix}`)
 execFileSync(
   'clang++',
   [

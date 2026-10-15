@@ -2,7 +2,7 @@ import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -10,6 +10,11 @@ import test from 'node:test'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const fixture = resolve(root, 'test/fixtures/cli-plugins')
+// `host alias.mjs` is a tracked symbolic link to host.mjs: one plugin reached
+// through a second, space-holding path. A checkout without symbolic links (the
+// Windows default) holds a text file naming the target in its place, which is
+// no module at all, so there the repeated paths are the other four spellings.
+const aliasPlugins = lstatSync(resolve(fixture, 'host alias.mjs')).isSymbolicLink() ? ['--plugin', './host alias.mjs'] : []
 const output = resolve(root, 'measurements')
 const runtime = resolve(root, 'src/targets/cpp/runtime')
 const runtimeBundle = [
@@ -117,8 +122,7 @@ for (const command of ['compile', 'compile-module-graph']) {
       apple,
       '--plugin',
       './host.mjs',
-      '--plugin',
-      './host alias.mjs',
+      ...aliasPlugins,
       '--plugin',
       resolve(fixture, 'host.mjs'),
       '--plugin',

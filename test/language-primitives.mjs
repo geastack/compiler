@@ -42,7 +42,7 @@ for (const [name, expected] of [
     assert.deepEqual(result.emissionRefusals, [])
     assert.ok(result.source)
     assertNativeOperations(result.source)
-    const binary = resolve(root, 'measurements', name)
+    const binary = resolve(root, 'measurements', `${name}${executableSuffix}`)
     execFileSync('clang++', ['-std=c++20', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary], {
       input: `${result.source}\nint main() { __gea_top_level(); }\n`,
       encoding: 'utf8'
@@ -61,7 +61,7 @@ test('a block that can complete normally falls through into the next clause', ()
   assert.deepEqual(result.loweringBlockers, [])
   assert.deepEqual(result.emissionRefusals, [])
   assert.ok(result.source)
-  const binary = resolve(root, 'measurements', 'switch-normal-completion')
+  const binary = resolve(root, 'measurements', `switch-normal-completion${executableSuffix}`)
   execFileSync('clang++', ['-std=c++20', `-I${resolve(root, 'src/targets/cpp/runtime')}`, '-x', 'c++', '-', '-o', binary], {
     input: `${result.source}\nint main() { __gea_top_level(); }\n`,
     encoding: 'utf8'

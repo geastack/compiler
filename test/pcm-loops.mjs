@@ -1,4 +1,4 @@
-import '../scripts/host-toolchain.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -63,7 +63,7 @@ capture(input, output, 0, 0, 2.5)
 console.log(output.toString())`
   ]
   const env = { ...process.env, TMPDIR: resolve(root, 'dist') }
-  const binary = resolve(root, 'dist/pcm-map-test')
+  const binary = resolve(root, `dist/pcm-map-test${executableSuffix}`)
   for (const text of cases) {
     const cpp = `${emitted(text)}\nint main() { __gea_top_level(); }\n`
     execFileSync(

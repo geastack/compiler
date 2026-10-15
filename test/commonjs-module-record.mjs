@@ -218,7 +218,7 @@ const compilePhysicalFixture = (name) =>
 
 const compileAndRun = (result, binaryName) => {
   assert.ok(result.source, JSON.stringify(result.diagnostics.diagnostics))
-  const binary = resolve(root, 'measurements', binaryName)
+  const binary = resolve(root, 'measurements', `${binaryName}${executableSuffix}`)
   execFileSync(
     'clang++',
     [

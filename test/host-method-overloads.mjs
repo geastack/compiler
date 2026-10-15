@@ -29,7 +29,7 @@ const inspect = (coverage, augment = false) => {
   host.getSourceFile = (name, version, onError, fresh) =>
     resolve(name) === resolve(file)
       ? ts.createSourceFile(name, source, version, true)
-      : name === augmentation
+      : resolve(name) === augmentation
         ? ts.createSourceFile(
             name,
             'interface Uint8Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> { toString(extra: boolean): string }',

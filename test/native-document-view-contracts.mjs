@@ -1,11 +1,11 @@
-import '../scripts/host-toolchain.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
-const executable = resolve(root, 'measurements/native-document-view-contracts')
+const executable = resolve(root, `measurements/native-document-view-contracts${executableSuffix}`)
 execFileSync(process.env.CXX ?? 'clang++', [
   '-std=c++20',
   ...nativeOptimization('correctness'),

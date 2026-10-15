@@ -211,7 +211,8 @@ test("a script that reads another script's declarations evaluates after it, what
     result.diagnostics.map((item) => ts.flattenDiagnosticMessageText(item.messageText, ' ')),
     []
   )
-  const names = (files: readonly ts.SourceFile[]) => files.map((file) => file.fileName)
+  // TypeScript spells file names with '/', on Windows too; compare host paths.
+  const names = (files: readonly ts.SourceFile[]) => files.map((file) => resolve(file.fileName))
   // File order alone would run the entry first: that is the case under test.
   assert.ok(names(result.sourceFiles).indexOf(script) < names(result.sourceFiles).indexOf(timers))
   const order = names(moduleEvaluationOrder({ checker: result.checker, files: result.sourceFiles, entries: result.entryFiles }))

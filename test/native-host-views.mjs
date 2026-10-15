@@ -1,4 +1,4 @@
-import '../scripts/host-toolchain.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { execFileSync } from 'node:child_process'
@@ -38,7 +38,7 @@ int reads = 0;
 Node nextNode() { ++reads; return {42}; }
 int main() { auto video = ${expression}; assert(video.id == 42 && reads == 1); }
 `
-  const binary = resolve('dist/native-host-views-test')
+  const binary = resolve(`dist/native-host-views-test${executableSuffix}`)
   execFileSync('clang++', ['-std=c++20', '-x', 'c++', '-', '-o', binary], { input: program })
   execFileSync(binary)
 })

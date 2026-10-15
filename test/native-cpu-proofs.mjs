@@ -1,4 +1,4 @@
-import '../scripts/host-toolchain.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import { mkdirSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -44,7 +44,7 @@ for (const name of [
   'dynamic-iterator-runtime',
   'native-record-enumeration-runtime'
 ]) {
-  const binary = resolve(root, 'measurements/cxx-native-cpu-proofs', name)
+  const binary = resolve(root, 'measurements/cxx-native-cpu-proofs', `${name}${executableSuffix}`)
   run(process.env.CXX ?? 'clang++', [
     '-std=c++20',
     ...nativeOptimization('aggressive'),

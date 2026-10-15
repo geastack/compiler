@@ -1,6 +1,7 @@
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { executableSuffix } from './executable-suffix.mjs'
 
@@ -37,6 +38,10 @@ for (const compact of [false, true]) {
 
 // A math-free program must not retain builtin thunks merely by including the
 // runtime. Compile from stdin so the probe needs no generated source file.
+// A Windows executable carries no symbol table for nm to read; the linker's
+// map lists what the link kept, under Microsoft-mangled names.
+const windows = process.platform === 'win32'
+const linkMap = `${binary}.map`
 execFileSync(
   cxx,
   [
@@ -44,7 +49,7 @@ execFileSync(
     ...nativeOptimization('size'),
     '-ffunction-sections',
     '-fdata-sections',
-    process.platform === 'darwin' ? '-Wl,-dead_strip' : '-Wl,--gc-sections',
+    ...(process.platform === 'darwin' ? ['-Wl,-dead_strip'] : windows ? ['-Wl,/opt:ref', `-Wl,/map:${linkMap}`] : ['-Wl,--gc-sections']),
     include,
     '-x',
     'c++',
@@ -55,6 +60,6 @@ execFileSync(
   { input: '#include "gea_runtime.h"\nint main() { return 0; }\n', stdio: ['pipe', 'inherit', 'inherit'] }
 )
 execFileSync(binary, { stdio: 'inherit' })
-const symbols = execFileSync('nm', ['-C', binary], { encoding: 'utf8' })
-assert.doesNotMatch(symbols, /gea::host::Math::detail::\w+_invoke/)
+if (windows) assert.doesNotMatch(readFileSync(linkMap, 'utf8'), /\?\w+_invoke@detail@Math@host@gea@@/)
+else assert.doesNotMatch(execFileSync('nm', ['-C', binary], { encoding: 'utf8' }), /gea::host::Math::detail::\w+_invoke/)
 console.log('Unused Math thunks: absent from linked program')

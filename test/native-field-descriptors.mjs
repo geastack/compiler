@@ -1,4 +1,4 @@
-import '../scripts/host-toolchain.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
@@ -10,7 +10,7 @@ import { compile } from '../dist/compiler.js'
 const root = resolve(import.meta.dirname, '..')
 const output = resolve(root, 'measurements')
 const include = `-I${resolve(root, 'src/targets/cpp/runtime')}`
-const runtimeBinary = resolve(output, 'native-field-descriptor-runtime')
+const runtimeBinary = resolve(output, `native-field-descriptor-runtime${executableSuffix}`)
 execFileSync('clang++', [
   '-std=c++20',
   ...nativeOptimization('correctness'),
@@ -40,7 +40,7 @@ assert.equal(
   false,
   'A fixed-field descriptor update must not box its current native value'
 )
-const executable = resolve(output, 'native-field-descriptor')
+const executable = resolve(output, `native-field-descriptor${executableSuffix}`)
 execFileSync('clang++', ['-std=c++20', ...nativeOptimization('correctness'), include, '-x', 'c++', '-', '-o', executable], {
   input: `${result.source}\nint main() { __gea_top_level(); }\n`,
   env: { ...process.env, TMPDIR: output }

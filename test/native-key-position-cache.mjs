@@ -1,11 +1,11 @@
-import '../scripts/host-toolchain.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
-const output = resolve(root, 'measurements/native-key-position-cache')
+const output = resolve(root, `measurements/native-key-position-cache${executableSuffix}`)
 
 execFileSync(
   'clang++',
@@ -23,7 +23,28 @@ execFileSync(
 )
 
 execFileSync(output, { stdio: 'inherit' })
-const symbols = execFileSync('nm', [output], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
+// A Windows executable carries no symbol table for nm to read. The statics are
+// counted in the object the program is compiled from instead, with LLVM's nm,
+// where each one is a data symbol under its Microsoft-mangled name.
+const objectFile = resolve(root, 'measurements/native-key-position-cache.o')
+if (process.platform === 'win32')
+  execFileSync(
+    'clang++',
+    [
+      '-std=c++20',
+      ...nativeOptimization('correctness'),
+      `-I${resolve(root, 'src/targets/cpp/runtime')}`,
+      '-c',
+      resolve(root, 'test/runtime/native-key-position-cache.cpp'),
+      '-o',
+      objectFile
+    ],
+    { env: { ...process.env, TMPDIR: resolve(root, 'measurements') } }
+  )
+const symbols =
+  process.platform === 'win32'
+    ? execFileSync('llvm-nm', [objectFile], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
+    : execFileSync('nm', [output], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 })
 // Mach-O emits a TLS descriptor, backing initializer and (for a lazy owner)
 // an initialization guard. The guard is not another position cache.
 // ELF names the TLS slot of an inline function's static a weak symbol (`W`).

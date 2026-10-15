@@ -629,6 +629,10 @@ execFileSync(
 )
 const output = execFileSync(executable, [], { encoding: 'utf8', env: { ...process.env, ASAN_OPTIONS: 'detect_leaks=0' } })
 assert.equal(output, 'Native method contracts passed\n')
+// Windows has no signals: std::abort ends the process with exit status 3, or
+// with an NTSTATUS fast-fail code, and `signal` stays null.
+const aborted = (error) =>
+  error.signal === 'SIGABRT' || (process.platform === 'win32' && (error.status === 3 || error.status >>> 0 >= 0xc0000000))
 assert.throws(
   () =>
     execFileSync(executable, ['missing-receiver-factory'], {
@@ -636,6 +640,6 @@ assert.throws(
       env: { ...process.env, ASAN_OPTIONS: 'detect_leaks=0' },
       stdio: ['pipe', 'pipe', 'pipe']
     }),
-  (error) => error.signal === 'SIGABRT' && /mismatched physical callable frame requires its published receiver factory/.test(error.stderr)
+  (error) => aborted(error) && /mismatched physical callable frame requires its published receiver factory/.test(error.stderr)
 )
 process.stdout.write(output)

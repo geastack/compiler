@@ -19,7 +19,8 @@ const proofOf = (source: string, closed = true, mutationClosed = true, provided:
   const host = ts.createCompilerHost(options)
   const getSourceFile = host.getSourceFile.bind(host)
   host.getSourceFile = (file, target, onError, create) =>
-    file === entry ? ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true) : getSourceFile(file, target, onError, create)
+    // Resolved: TypeScript asks for `C:/x/a.ts` where `entry` is `C:\x\a.ts`.
+    resolve(file) === entry ? ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true) : getSourceFile(file, target, onError, create)
   const program = ts.createProgram([entry], options, host)
   const file = program.getSourceFile(entry)
   assert.ok(file)

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import ts from 'typescript'
-import { resolve, dirname, join } from 'node:path'
+import { resolve, dirname, join, sep } from 'node:path'
 import { existsSync, readFileSync, mkdirSync, realpathSync, lstatSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { execFileSync, spawnSync } from 'node:child_process'
@@ -10,6 +10,8 @@ import { createModuleResolver } from '../dist/semantics/module-resolution.js'
 import { sourceIdentity } from '../dist/project-preparation.js'
 import { defaultCompilerOptions } from '../dist/semantics/program.js'
 import { nodeCompatRoot } from './corpus-roots.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
+import { pathToFileURL } from 'node:url'
 const compiler = resolve(import.meta.dirname, '..')
 const root = resolve(compiler, 'test/fixtures/project-discovery')
 const virtual = (files) => {
@@ -25,7 +27,7 @@ const virtual = (files) => {
     directoryExists: (dir) => dirs.has(resolve(dir)),
     realpath: (file) => resolve(file),
     readDirectory: (dir, extensions) =>
-      [...data.keys()].filter((file) => file.startsWith(`${resolve(dir)}/`) && extensions.some((ext) => file.endsWith(ext)))
+      [...data.keys()].filter((file) => file.startsWith(`${resolve(dir)}${sep}`) && extensions.some((ext) => file.endsWith(ext)))
   }
 }
 const options = { ...defaultCompilerOptions, types: [] }
@@ -283,7 +285,7 @@ for (const [directory, specifier, suffix] of sourceFixtures)
       resolve(root, 'main.ts'),
       ts.ModuleKind.ESNext
     )
-    assert.equal(realpathSync(result.implementation.resolvedFileName), `${packageRoot}${suffix}`)
+    assert.equal(realpathSync(result.implementation.resolvedFileName), join(packageRoot, suffix))
   })
 // Install the actual packed compiler: node-compat must resolve this build through
 // normal npm peer resolution, never a linked checkout or an older registry compiler.
@@ -291,9 +293,20 @@ test('bare geatsc discovers, compiles, links, and runs a Node project', () => {
   const project = resolve(compiler, 'test/fixtures/node-project')
   const packageOutput = join(project, 'dist')
   mkdirSync(packageOutput, { recursive: true })
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm'
-  const packed = JSON.parse(
-    execFileSync(npm, ['pack', '--ignore-scripts', '--json', '--pack-destination', packageOutput], {
+  // npm is npm.cmd on Windows, which only a shell can start; the joined
+  // command line quotes each argument for cmd.exe.
+  const quote = (value) => (/[\s"]/.test(value) ? `"${value}"` : value)
+  const npm = (args, options) =>
+    process.platform === 'win32'
+      ? execFileSync(['npm', ...args].map(quote).join(' '), { ...options, shell: true })
+      : execFileSync('npm', args, options)
+  // npm 11 reports an array of archives, npm 12 an object keyed by package name.
+  const archives = (json) => {
+    const packed = JSON.parse(json)
+    return Array.isArray(packed) ? packed : Object.values(packed)
+  }
+  const packed = archives(
+    npm(['pack', '--ignore-scripts', '--json', '--pack-destination', packageOutput], {
       cwd: compiler,
       encoding: 'utf8'
     })
@@ -302,15 +315,14 @@ test('bare geatsc discovers, compiles, links, and runs a Node project', () => {
   // configured, install it packed beside the compiler rather than whatever the registry last published.
   const nodeCompatCheckout = nodeCompatRoot()
   const packedNodeCompat = nodeCompatCheckout
-    ? JSON.parse(
-        execFileSync(npm, ['pack', '--ignore-scripts', '--json', '--pack-destination', packageOutput], {
+    ? archives(
+        npm(['pack', '--ignore-scripts', '--json', '--pack-destination', packageOutput], {
           cwd: nodeCompatCheckout,
           encoding: 'utf8'
         })
       )
     : []
-  execFileSync(
-    npm,
+  npm(
     [
       'install',
       '--ignore-scripts',
@@ -339,8 +351,9 @@ test('bare geatsc discovers, compiles, links, and runs a Node project', () => {
     readFileSync(join(installedCompiler, 'src/targets/cpp/runtime/gea_runtime.h'), 'utf8'),
     readFileSync(join(compiler, 'src/targets/cpp/runtime/gea_runtime.h'), 'utf8')
   )
+  // Started through node: Windows runs no script by its shebang.
   const cli = join(installedCompiler, 'dist/cli.js')
-  const defaultBuild = spawnSync(cli, [], {
+  const defaultBuild = spawnSync(process.execPath, [cli], {
     cwd: project,
     encoding: 'utf8',
     timeout: 120000,
@@ -349,7 +362,7 @@ test('bare geatsc discovers, compiles, links, and runs a Node project', () => {
   assert.equal(defaultBuild.status, 0, defaultBuild.stderr)
   assert.doesNotMatch(defaultBuild.stderr, /\[build\] .* -std=c\+\+20 /)
   const out = join(project, 'dist/.geatsc/automatic-node-project')
-  const executable = join(project, 'dist/automatic-node-project')
+  const executable = join(project, `dist/automatic-node-project${executableSuffix}`)
   const report = JSON.parse(readFileSync(join(out, 'report.json'), 'utf8'))
   const generatedProject = JSON.parse(readFileSync(join(out, 'tsconfig.json'), 'utf8'))
   assert.equal(report.linked, true)
@@ -366,7 +379,7 @@ test('bare geatsc discovers, compiles, links, and runs a Node project', () => {
   if (process.platform === 'darwin') assert.equal(existsSync(`${executable}.dSYM`), false)
   assert.equal(execFileSync(executable, { encoding: 'utf8' }).trim(), '42')
 
-  const verboseBuild = spawnSync(cli, ['--verbose'], {
+  const verboseBuild = spawnSync(process.execPath, [cli, '--verbose'], {
     cwd: project,
     encoding: 'utf8',
     timeout: 120000,
@@ -375,7 +388,7 @@ test('bare geatsc discovers, compiles, links, and runs a Node project', () => {
   assert.equal(verboseBuild.status, 0, verboseBuild.stderr)
   assert.match(verboseBuild.stderr, /\[build\] .* -std=c\+\+20 /)
 
-  const perFileBuild = spawnSync(cli, ['--translation-units', 'per-file'], {
+  const perFileBuild = spawnSync(process.execPath, [cli, '--translation-units', 'per-file'], {
     cwd: project,
     encoding: 'utf8',
     timeout: 120000,
@@ -398,7 +411,7 @@ test('bare geatsc discovers, compiles, links, and runs a Node project', () => {
   assert.ok(perFileReport.units.some((unit) => unit.role === 'program' && unit.fileName === 'automatic-node-project.cpp'))
   assert.equal(execFileSync(executable, { encoding: 'utf8' }).trim(), '42')
 
-  const singleEmit = spawnSync(cli, ['--emit-only'], {
+  const singleEmit = spawnSync(process.execPath, [cli, '--emit-only'], {
     cwd: project,
     encoding: 'utf8',
     timeout: 120000,
@@ -411,6 +424,15 @@ test('bare geatsc discovers, compiles, links, and runs a Node project', () => {
   }
 })
 
+// The preparation fixtures are POSIX paths. preparePackageSources joins and
+// resolves them with the host's path module, which on Windows spells `/app`
+// as `\app` or `C:\app`, so every path the fixture is handed is read in POSIX
+// form; on POSIX hosts that is the path itself.
+const posix = (file) =>
+  file
+    .split(sep)
+    .join('/')
+    .replace(/^[A-Za-z]:(?=\/)/, '')
 const preparationFixture = () => {
   const data = new Map([
     ['/app/package.json', JSON.stringify({ dependencies: { sample: '1.0.0' } })],
@@ -422,12 +444,12 @@ const preparationFixture = () => {
   return {
     data,
     files: {
-      exists: (file) => data.has(file),
+      exists: (file) => data.has(posix(file)),
       read: (file) => {
-        if (!data.has(file)) throw new Error(`Missing ${file}`)
-        return data.get(file)
+        if (!data.has(posix(file))) throw new Error(`Missing ${file}`)
+        return data.get(posix(file))
       },
-      write: (file, text) => data.set(file, text),
+      write: (file, text) => data.set(posix(file), text),
       realpath: (file) => file
     }
   }
@@ -447,13 +469,13 @@ test('source preparation requests the installed version, validates the checkout 
   }
   const checkout = (identity, destination) => {
     assert.equal(identity.commit, 'a'.repeat(40))
-    data.set(`${destination}/packages/sample/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' }))
+    data.set(`${posix(destination)}/packages/sample/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' }))
   }
   const options = { files, metadata, checkout, log: () => {} }
   const first = await preparePackageSources('/app', options)
   assert.equal(first.length, 1)
-  assert.equal(first[0].origin, '/app/node_modules/sample')
-  assert.ok(first[0].root.endsWith('/packages/sample'))
+  assert.equal(posix(first[0].origin), '/app/node_modules/sample')
+  assert.ok(posix(first[0].root).endsWith('/packages/sample'))
   assert.deepEqual(await preparePackageSources('/app', options), first)
   assert.deepEqual(calls, [['sample', '1.0.0']])
 })
@@ -554,7 +576,8 @@ test('a shipped src/ without build metadata is acquired; one its tsconfig maps i
     await preparePackageSources('/app', {
       files,
       metadata: metadataFor(asked),
-      checkout: (_identity, destination) => data.set(`${destination}/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' })),
+      checkout: (_identity, destination) =>
+        data.set(`${posix(destination)}/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' })),
       log: () => {}
     })
     assert.deepEqual(asked, ['sample'])
@@ -582,7 +605,8 @@ test('a shipped src/ without build metadata is acquired; one its tsconfig maps i
 test('a monorepo checkout with no stated directory is searched for the one matching manifest', async () => {
   const { preparePackageSources } = await import('../dist/project-preparation.js')
   const { data, files } = preparationFixture()
-  const directories = (directory) => {
+  const directories = (path) => {
+    const directory = posix(path)
     const names = new Set()
     for (const file of data.keys()) if (file.startsWith(`${directory}/`)) names.add(file.slice(directory.length + 1).split('/')[0])
     return [...names].filter((name) => [...data.keys()].some((file) => file.startsWith(`${directory}/${name}/`)))
@@ -591,15 +615,15 @@ test('a monorepo checkout with no stated directory is searched for the one match
     files: { ...files, directories },
     metadata: async (name, version) => ({ name, version, gitHead: 'a'.repeat(40), repository: 'https://github.com/example/tools' }),
     checkout: (_identity, destination) => {
-      data.set(`${destination}/package.json`, JSON.stringify({ name: 'tools-root', version: '0.0.0' }))
-      data.set(`${destination}/packages/other/package.json`, JSON.stringify({ name: 'other', version: '1.0.0' }))
-      data.set(`${destination}/packages/sample/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' }))
-      data.set(`${destination}/node_modules/sample/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' }))
+      data.set(`${posix(destination)}/package.json`, JSON.stringify({ name: 'tools-root', version: '0.0.0' }))
+      data.set(`${posix(destination)}/packages/other/package.json`, JSON.stringify({ name: 'other', version: '1.0.0' }))
+      data.set(`${posix(destination)}/packages/sample/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' }))
+      data.set(`${posix(destination)}/node_modules/sample/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' }))
     },
     log: () => {}
   })
   assert.equal(result.length, 1)
-  assert.ok(result[0].root.endsWith('/packages/sample'))
+  assert.ok(posix(result[0].root).endsWith('/packages/sample'))
 })
 test('a checkout gets the DefinitelyTyped declarations of its untyped runtime dependencies, beside them, once', async () => {
   const { preparePackageSources } = await import('../dist/project-preparation.js')
@@ -626,7 +650,7 @@ test('a checkout gets the DefinitelyTyped declarations of its untyped runtime de
     metadata: async (name, version) => ({ name, version, gitHead: 'a'.repeat(40), repository: 'https://github.com/example/sample' }),
     checkout: (_identity, destination) =>
       data.set(
-        `${destination}/package.json`,
+        `${posix(destination)}/package.json`,
         JSON.stringify({
           name: 'sample',
           version: '1.0.0',
@@ -635,10 +659,10 @@ test('a checkout gets the DefinitelyTyped declarations of its untyped runtime de
         })
       ),
     fetchPackage: (spec, destination) => {
-      fetched.push([spec, destination])
+      fetched.push([spec, posix(destination)])
       const name = spec.slice(0, spec.lastIndexOf('@'))
       const dependencies = name === '@types/bits' ? { '@types/pager': '*', '@types/node': '*' } : {}
-      data.set(`${destination}/package.json`, JSON.stringify({ name, version: '3.0.4', dependencies }))
+      data.set(`${posix(destination)}/package.json`, JSON.stringify({ name, version: '3.0.4', dependencies }))
     },
     log: () => {}
   }
@@ -675,13 +699,13 @@ test('every installed copy of one published version shares one checkout', async 
     },
     checkout: (_identity, destination) => {
       checkouts += 1
-      data.set(`${destination}/packages/sample/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' }))
+      data.set(`${posix(destination)}/packages/sample/package.json`, JSON.stringify({ name: 'sample', version: '1.0.0' }))
     },
     log: () => {}
   })
   assert.deepEqual(asked, ['sample@1.0.0'])
   assert.equal(checkouts, 1)
-  assert.deepEqual(result.map((source) => source.origin).sort(), [
+  assert.deepEqual(result.map((source) => posix(source.origin)).sort(), [
     '/app/node_modules/other/node_modules/sample',
     '/app/node_modules/sample'
   ])
@@ -700,8 +724,9 @@ for (const [directory, specifier, expression, expected] of [
       [
         // This hook already transpiles the selected source. Loading tsx as a second
         // async hook breaks Node's synchronous load-hook source contract.
+        // --import takes a module specifier: a URL, not a Windows path.
         '--import',
-        resolve(compiler, 'dist/semantics/node-source-hooks.js'),
+        pathToFileURL(resolve(compiler, 'dist/semantics/node-source-hooks.js')).href,
         '--input-type=module',
         '--eval',
         `${directory === 'subpath' ? 'import * as value' : 'import value'} from '${specifier}'; console.log(${expression})`

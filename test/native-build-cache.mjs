@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, writeFileSync, statSync, utimesSync, rmSync, mkdirSync, copyFileSync } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
-import { buildNative } from '../scripts/native-build-cache.mjs'
+import { buildNative, nativeProgramName } from '../scripts/native-build-cache.mjs'
 import { lockNativeOutput } from '../scripts/native-output-lock.mjs'
 
 const index = process.argv.indexOf('--out-dir')
@@ -45,8 +45,11 @@ writeFileSync(source, '#include "native-cache-test-runtime.h"\nint main() { std:
 // previous run would make every "built" below "reused".
 const cacheDirectory = join(out, 'native-cache-test-runtime')
 rmSync(cacheDirectory, { recursive: true, force: true })
-const options = { out, units: [source], includes: [`-I${out}`], runtimeHeader: header, cacheDirectory }
-const printed = () => execFileSync(join(out, 'program'), { encoding: 'utf8' }).trim()
+// The PCH machinery is what this tests, so it is on whatever the host's default
+// (off on Windows, for the real runtime's sake: see nativePch); this header has
+// nothing that default guards against.
+const options = { out, units: [source], includes: [`-I${out}`], runtimeHeader: header, cacheDirectory, pch: true }
+const printed = () => execFileSync(join(out, nativeProgramName), { encoding: 'utf8' }).trim()
 const cold = buildNative(options)
 assert.equal(cold.pch, 'built')
 assert.equal(printed(), '17')
@@ -69,7 +72,7 @@ const shared = buildNative({
   runtimeHeader: join(sibling, basename(header))
 })
 assert.equal(shared.pch, 'reused')
-assert.equal(execFileSync(join(sibling, 'program'), { encoding: 'utf8' }).trim(), '17')
+assert.equal(execFileSync(join(sibling, nativeProgramName), { encoding: 'utf8' }).trim(), '17')
 rmSync(sibling, { recursive: true, force: true })
 console.log('PASS output directories share one runtime artifact')
 

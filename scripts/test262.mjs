@@ -1,3 +1,4 @@
+import { executableSuffix } from '../test/executable-suffix.mjs'
 import './host-toolchain.mjs'
 import { nativeHostIncludes } from './native-host-includes.mjs'
 import { nativeOptimization } from './native-optimization.mjs'
@@ -714,7 +715,7 @@ const runWorker = async () => {
     for (const write of result.artifacts) write(caseDir)
     const shim = join(caseDir, 'main_shim.cpp')
     writeFileSync(shim, 'extern void __gea_top_level();\nint main() { __gea_top_level(); return 0; }\n')
-    const binary = join(caseDir, 'program')
+    const binary = join(caseDir, `program${executableSuffix}`)
     const built = spawnSync(
       'clang++',
       ['-std=c++20', ...nativeOptimization('correctness'), ...pchArguments, `-I${caseDir}`, ...includes, '-o', binary, ...units, shim],
