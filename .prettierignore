@@ -1,3 +1,6 @@
 dist
 node_modules
 bench
+# A symbolic link to CLAUDE.md, which is checked itself. A checkout without
+# symbolic links (Windows) holds the bare target name here instead.
+AGENTS.md
