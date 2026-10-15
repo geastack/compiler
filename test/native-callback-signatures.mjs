@@ -1,5 +1,7 @@
 import '../scripts/host-toolchain.mjs'
 import { nativeOptimization } from '../scripts/native-optimization.mjs'
+import { executableSuffix } from './executable-suffix.mjs'
+import { sanitizerArguments, sanitizerEnvironment } from './sanitizer.mjs'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -14,7 +16,9 @@ const root = resolve(import.meta.dirname, '..')
 const output = resolve(root, 'measurements')
 const entry = resolve(root, 'test/native-function-signatures.ts')
 const declarationFileName = resolve(root, 'test/native-function-signatures.d.ts')
-const header = resolve(root, 'test/native-signatures.h')
+// An include spelling never carries a backslash (native inspection refuses
+// one), so a Windows path is spelled with the forward slashes clang also takes.
+const header = resolve(root, 'test/native-signatures.h').replaceAll('\\', '/')
 const identity = () =>
   createHash('sha256')
     .update(readFileSync(resolve(root, 'dist/compiler.js')))
@@ -93,7 +97,7 @@ for (const scenario of scenarios) {
     assert.match(result.source, signature, `${scenario.name}: ${functionName} must keep the authenticated parameter carrier`)
     if (scenario.integer) assert.ok(!result.source.includes(`${name}_integral`), `${functionName} retained a duplicate integral body`)
   }
-  const executable = resolve(output, `native-callback-signatures-${scenario.name}`)
+  const executable = resolve(output, `native-callback-signatures-${scenario.name}${executableSuffix}`)
   execFileSync(
     'clang++',
     [
@@ -101,6 +105,7 @@ for (const scenario of scenarios) {
       ...nativeOptimization('correctness'),
       '-fsanitize=address,undefined',
       '-fno-sanitize-recover=all',
+      ...sanitizerArguments,
       `-I${resolve(root, 'src/targets/cpp/runtime')}`,
       '-x',
       'c++',
@@ -110,7 +115,8 @@ for (const scenario of scenarios) {
     ],
     { input: `${result.source}\n${nativeHosts}`, env: { ...process.env, TMPDIR: output }, timeout: 180_000 }
   )
-  const native = execFileSync(executable, { encoding: 'utf8', timeout: 60_000 })
+  // Windows opens a C++ program's stdout in text mode, so its `\n` arrives as `\r\n`.
+  const native = execFileSync(executable, { encoding: 'utf8', timeout: 60_000, env: sanitizerEnvironment() }).replaceAll('\r\n', '\n')
   const javascript = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
   const reference = execFileSync(process.execPath, ['--input-type=module'], {
     input: referenceHosts + javascript,
