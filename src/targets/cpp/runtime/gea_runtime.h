@@ -45961,6 +45961,10 @@ bool isDocumentLevelEvent(const Node& node, const std::string& name) {
   return lowered != "input";
 }
 
+inline bool isNonBubblingEvent(const std::string& name) {
+  return name == "scroll";
+}
+
 /**
  * Register `invoke` for `name` on behalf of `node`: the one place both engine
  * `addNodeListener` overloads bind through.
@@ -45970,6 +45974,13 @@ bool isDocumentLevelEvent(const Node& node, const std::string& name) {
  * no target to contain. The chain has no per-listener removal, so the handler
  * is gated on the node's live token instead -- a rebuilt subtree leaves an
  * inert closure behind rather than a second generation of the handler.
+ *
+ * A non-bubbling event is bound on the node itself. The engine stops a
+ * non-bubbling dispatch at its target, so a body-delegated `onScroll` never
+ * ran at all. An app that also tracked touches kept up under a finger, but a
+ * <virtual-list> scrolled by the watch Crown or hardware Up/Down buttons left
+ * its recycled rows where the last touch put them. The target is the scroller
+ * itself, never a hit-tested child, so the reason for delegating does not apply.
  *
  * Everything else is delegated to the BODY and gated by `containsNode`; see
  * the no-argument `addNodeListener` for why, and `recordNodeSubscription` for
@@ -45998,6 +46009,11 @@ void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
         if (!*alive) return;
         run(event);
       });
+    return;
+  }
+  if (isNonBubblingEvent(name)) {
+    const auto listenerId = target.addEventListener(name.c_str(), run);
+    recordNodeSubscription(target.id(), [target, name, listenerId]() { target.removeEventListener(name.c_str(), listenerId); });
     return;
   }
 #if defined(GEA_JSX_NODE_LISTENER_HOOK)
