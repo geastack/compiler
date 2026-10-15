@@ -11,11 +11,18 @@
 //     (node-compat's apps carry their own), and a plain
 //     install where a package locks nothing (parallel);
 //   - builds @geastack/windows, which the Windows plugin's tests import, and
-//     this compiler's dist/ when there is none.
+//     this compiler's dist/ when there is none;
+//   - on Windows, installs the native libraries the checks link (libopus and
+//     libvpx for core's RTC and VP8 checks, zlib for node-compat) and pkgconf
+//     through vcpkg, when VCPKG_ROOT names a vcpkg checkout. The suite finds
+//     them there, or under C:\vcpkg, without a PATH change (host-toolchain.mjs).
+//     Linux and macOS take them from the system:
+//     `apt install libopus-dev libvpx-dev zlib1g-dev pkg-config`, or
+//     `brew install opus libvpx pkgconf`.
 //
 // GEASTACK_ROOT names the workspace; it defaults to this checkout's parent.
 // A directory already installed is left alone unless --reinstall is given.
-import './host-toolchain.mjs'
+import { vcpkgInstalled, vcpkgPackages, vcpkgRoot, vcpkgTriplet } from './host-toolchain.mjs'
 import { posixShell } from './host-shell.mjs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
@@ -83,4 +90,16 @@ for (const repository of [compiler, ...siblings.map((name) => join(workspace, na
 const windowsPackage = join(workspace, 'windows/packages/geastack-windows')
 if (reinstall || !existsSync(join(windowsPackage, 'dist/index.js'))) step(windowsPackage, ['npm', 'run', 'build'])
 if (!existsSync(join(compiler, 'dist/cli.js'))) step(compiler, ['npm', 'run', 'build'])
+
+if (process.platform === 'win32') {
+  const vcpkg = vcpkgInstalled()
+  const missing = !vcpkg.pkgConfig || ['opus', 'vpx', 'zlib'].some((name) => !existsSync(join(vcpkg.pkgconfig ?? '', `${name}.pc`)))
+  if (missing && process.env.VCPKG_ROOT && vcpkgRoot())
+    step(vcpkgRoot(), [join(vcpkgRoot(), 'vcpkg.exe'), 'install', ...vcpkgPackages, '--triplet', vcpkgTriplet])
+  else if (missing)
+    console.log(
+      `release setup: the native checks need ${vcpkgPackages.join(', ')} from vcpkg (${vcpkgTriplet}); ` +
+        `set VCPKG_ROOT to a vcpkg checkout and rerun this to install them`
+    )
+}
 console.log(`release setup: ${workspace} is ready; run GEASTACK_ROOT=${workspace} node scripts/release-suite.mjs`)
