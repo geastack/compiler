@@ -404,12 +404,23 @@ const checkoutPackageRoot = (destination: string, directory: string, manifest: M
   throw new Error('Checkout package identity does not match the installed package')
 }
 
+/**
+ * The manifest `npm view <name>@<version> --json` printed. npm 11 prints the
+ * one matching version's manifest as an object; npm 12 prints an array of the
+ * matching versions' manifests, which for an exact version holds one. Anything
+ * else is no manifest (`{}`), which the version check below refuses.
+ */
+export const registryManifest = (json: string): Manifest => {
+  const parsed: unknown = JSON.parse(json)
+  return object(Array.isArray(parsed) && parsed.length === 1 ? parsed[0] : parsed)
+}
+
 /** Acquire missing typed sources at the installed version; plain JS remains usable. */
 export const preparePackageSources = async (root: string, options: PreparationOptions = {}): Promise<readonly PackageSource[]> => {
   const files = options.files ?? disk
   const log = options.log ?? console.error
   const metadata =
-    options.metadata ?? (async (name, version, cwd) => object(JSON.parse(run('npm', ['view', `${name}@${version}`, '--json'], cwd))))
+    options.metadata ?? (async (name, version, cwd) => registryManifest(run('npm', ['view', `${name}@${version}`, '--json'], cwd)))
   const attestations = options.attestations ?? (async (url) => fetchAttestations(url))
   const sources: PackageSource[] = []
   const visited = new Set<string>()

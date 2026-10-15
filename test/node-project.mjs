@@ -209,6 +209,16 @@ test('source checkouts retain nested installed dependency versions', () => {
     resolve(root, 'app/node_modules/parent/node_modules/dep/index.js')
   )
 })
+test('a registry manifest is read from npm 11 and npm 12 `npm view --json` output', async () => {
+  const { registryManifest } = await import('../dist/project-preparation.js')
+  const manifest = { name: 'example-package', version: '4.7.4' }
+  assert.deepEqual(registryManifest(JSON.stringify(manifest)), manifest)
+  assert.deepEqual(registryManifest(JSON.stringify([manifest])), manifest)
+  // Two versions is no answer for one exact version, and neither is a scalar.
+  assert.deepEqual(registryManifest(JSON.stringify([manifest, { ...manifest, version: '4.7.5' }])), {})
+  assert.deepEqual(registryManifest('"4.7.4"'), {})
+})
+
 test('source metadata requires a pinned commit and a contained repository directory', () => {
   const base = { gitHead: 'a'.repeat(40), repository: { url: 'git+https://github.com/example/library.git', directory: 'packages/library' } }
   assert.deepEqual(sourceIdentity(base), {
