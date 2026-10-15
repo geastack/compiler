@@ -91,20 +91,33 @@ if (wanted('mosaico')) {
   const cli = checkout('cli', 'bin/gea.mjs')
   // Build a real camera/worker app with ESP-IDF's GCC, not the desktop Clang
   // harness. Runtime headers can fail on this toolchain without moving emitted C++.
+  // The build must also leave the targets checkout as it found it: the
+  // component manager once rewrote the board's tracked dependencies.lock.
+  const targets = join(workspace, 'targets')
+  const build = [
+    join(cli, 'bin/gea.mjs'),
+    'build',
+    '--board',
+    'mosaico',
+    '--app',
+    'axel',
+    '--boards-config',
+    join(compiler, 'test/fixtures/mosaico-gcc-boards.json')
+  ]
   add(
     'mosaico',
     'Axel ESP32-S31 GCC firmware',
     join(demos, 'apps/axel'),
     [
       'node',
-      join(cli, 'bin/gea.mjs'),
-      'build',
-      '--board',
-      'mosaico',
-      '--app',
-      'axel',
-      '--boards-config',
-      join(compiler, 'test/fixtures/mosaico-gcc-boards.json')
+      '-e',
+      [
+        `const { spawnSync, execFileSync } = require('node:child_process')`,
+        `const before = execFileSync('git', ['status', '--porcelain'], { cwd: ${JSON.stringify(targets)}, encoding: 'utf8' })`,
+        `if (spawnSync(process.execPath, ${JSON.stringify(build)}, { stdio: 'inherit' }).status !== 0) process.exit(1)`,
+        `const after = execFileSync('git', ['status', '--porcelain'], { cwd: ${JSON.stringify(targets)}, encoding: 'utf8' })`,
+        `if (after !== before) { console.error('the build changed the targets checkout:', after); process.exit(1) }`
+      ].join('\n')
     ],
     {
       IDF_TOOLCHAIN: 'gcc',
@@ -213,6 +226,40 @@ for (const [lane, path, scripts, env] of packageLanes) {
   for (const script of scripts) {
     if (!declared[script]) throw new Error(`release suite: ${path} declares no "${script}" script`)
     add(lane, `${path} ${script}`, directory, ['npm', 'run', script], env)
+  }
+}
+
+// One real app built and run with the Windows plugin: its own checks never
+// compile an app, and an app build is where core headers meet clang-cl's
+// Microsoft include rules (a quoted include once resolved to a host header of
+// the same name). examples' counter-jsx is built, started, screenshotted after
+// its first frames and closed; it must exit 0 having drawn the screenshot.
+if (wanted('windows')) {
+  if (process.platform !== 'win32') hostOnly.push('windows: counter-jsx app build and run (needs Windows)')
+  else {
+    const examples = checkout('examples', 'apps/counter-jsx/package.json')
+    const driver = join(
+      checkout('windows', 'packages/geastack-windows/package.json'),
+      'packages/geastack-windows/targets/win32/build-windows.mjs'
+    )
+    const appOutput = join(output, 'windows-app')
+    const binary = join(appOutput, 'counter-jsx', 'Counter.exe')
+    const screenshot = join(appOutput, 'counter-jsx.png')
+    add('windows', 'counter-jsx app build + run', examples, [
+      'node',
+      '-e',
+      [
+        `const { rmSync, existsSync, statSync } = require('node:fs')`,
+        `const { spawnSync } = require('node:child_process')`,
+        `rmSync(${JSON.stringify(appOutput)}, { recursive: true, force: true })`,
+        `const env = { ...process.env, GEA_CLI_BIN: ${JSON.stringify(join(workspace, 'cli/bin/gea.mjs'))}, ` +
+          `GEA_GEATSC_BIN: ${JSON.stringify(join(compiler, 'dist/cli.js'))}, GEA_WINDOWS_OUTPUT_DIR: ${JSON.stringify(appOutput)} }`,
+        `if (spawnSync(process.execPath, [${JSON.stringify(driver)}, 'counter-jsx'], { stdio: 'inherit', env }).status !== 0) process.exit(1)`,
+        `const run = spawnSync(${JSON.stringify(binary)}, [], { stdio: 'inherit', timeout: 60000, env: { ...env, GEA_WINDOWS_SCREENSHOT: ${JSON.stringify(screenshot)}, GEA_WINDOWS_EXIT_AFTER_MS: '4000' } })`,
+        `if (run.status !== 0) { console.error('counter-jsx exited with', run.status, run.error?.message ?? ''); process.exit(1) }`,
+        `if (!existsSync(${JSON.stringify(screenshot)}) || statSync(${JSON.stringify(screenshot)}).size === 0) { console.error('counter-jsx drew no screenshot'); process.exit(1) }`
+      ].join('\n')
+    ])
   }
 }
 // The cli's and debugger's integration tests drive a connected device or a
@@ -428,7 +475,9 @@ const lstatOrNull = (path) => {
 // the compiler for parallel, which declares it only as an optional peer and
 // cannot build or run a fixture without one.
 const consumers = []
-if (wanted('core') || wanted('examples')) consumers.push([join(workspace, 'examples'), 'all'])
+// The Windows lane's app build (above) builds an examples app, too.
+if (wanted('core') || wanted('examples') || (wanted('windows') && process.platform === 'win32'))
+  consumers.push([join(workspace, 'examples'), 'all'])
 // core's own tests also run the compiler core installs (its module-graph and
 // app-pipeline tests spawn node_modules/@geastack/compiler directly), so the
 // candidate replaces that one too: otherwise they test the last release.
