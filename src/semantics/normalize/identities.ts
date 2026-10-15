@@ -1,3 +1,4 @@
+import { sep } from 'node:path'
 import ts from 'typescript'
 import { declarationId, functionId, nodeId, type DeclarationId, type FunctionId, type NodeId } from '../../identity/ids.js'
 import { isAmbientDeclaration } from '../ambient.js'
@@ -271,10 +272,24 @@ export const createIdentityTable = (
   // `Record` -- and a declaration the compiler can reach must have an identity
   // wherever it was declared. Excluding them makes `declarationIdOf` throw the
   // first time any real program mentions a library type.
+  //
+  // The order is the same on every host. TypeScript names the files it found
+  // `C:/x/a.ts` on Windows but keeps a root file as given -- `C:\x\a.ts` -- and
+  // a backslash sorts after every letter, so the root's index, and every
+  // identity minted in a later file, differed from a POSIX host's. The sort
+  // key spells every name with forward slashes and an upper-case drive letter;
+  // on POSIX hosts it is the name itself.
+  const sortKey = (file: ts.SourceFile): string =>
+    sep === '/' ? file.fileName : file.fileName.split(sep).join('/').replace(/^[a-z](?=:\/)/, (drive) => drive.toUpperCase())
+  const keys = new Map(program.getSourceFiles().map((file) => [file, sortKey(file)]))
   const files = program
     .getSourceFiles()
     .slice()
-    .sort((left, right) => (left.fileName < right.fileName ? -1 : left.fileName > right.fileName ? 1 : 0))
+    .sort((left, right) => {
+      const leftKey = keys.get(left) ?? left.fileName
+      const rightKey = keys.get(right) ?? right.fileName
+      return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0
+    })
   const fileIndex = new Map<ts.SourceFile, string>()
   files.forEach((file, index) => fileIndex.set(file, `f${index}`))
 
