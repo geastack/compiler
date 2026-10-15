@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 
 export interface NativeFunctionInspection {
   cppFunction: string
@@ -342,6 +344,19 @@ ${identityProbeTemplates}enum Identities { ${marks.join(',\n')} };
   return { verdicts, probe: identityProbe, ast: inspected.stdout }
 }
 
+/**
+ * `clang++` from PATH. The Windows LLVM installer does not put itself on PATH
+ * by default, so its standard location is tried there too. Not CXX: inside an
+ * ESP-IDF build that is the cross g++, which has no -Xclang AST dump.
+ */
+function defaultClang(): string {
+  if (process.platform === 'win32' && spawnSync('clang++', ['--version'], { stdio: 'ignore' }).error) {
+    const installed = join(process.env.ProgramFiles ?? 'C:\\Program Files', 'LLVM', 'bin', 'clang++.exe')
+    if (existsSync(installed)) return installed
+  }
+  return 'clang++'
+}
+
 /** Native facts come from Clang's resolved type graph; callers authenticate their declaration-to-host binding separately. */
 export function inspectNativeFunctionSignature(input: NativeFunctionInspection): InspectedNativeSignature {
   if (!/^(?:::)?[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(input.cppFunction))
@@ -358,7 +373,7 @@ using Function = decltype(&${input.cppFunction});
 enum Bounds { ${widths.join(',\n')} };
 }
 `
-  const compiler = input.compiler ?? 'clang++'
+  const compiler = input.compiler ?? defaultClang()
   const args = [
     '-std=c++17',
     ...(input.compilerArguments ?? []),
