@@ -586,6 +586,7 @@ instance-constructor-name-names-the-allocating-class.runtime.ts.cpp 4749ad3250c3
 instance-reparented-onto-field-less-subclass.ts.cpp b1f89c52e05d
 instance-reparented-onto-mixin-subclass.ts.cpp b9ebb4bb514e
 instanceof-a-generic-class.ts.cpp 7a02b4b10e53
+instanceof-arm-of-unconstructed-class-into-interface-view.runtime.ts.cpp a02b825d227d
 instanceof-chain-tests-the-unnarrowed-value.runtime.ts.cpp d26a3ebd69be
 instanceof-class-record-string-union.ts.cpp a049d39729ff
 instanceof-class-union-through-nested-record-views.runtime.ts.cpp 951b90aeff21

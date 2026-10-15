@@ -62,7 +62,8 @@ import { allOperationsOf } from '../../ir/model.js'
 import { operandsOfIrOperation, resultOfIrOperation } from '../../ir/queries.js'
 import { namesMoreThanOnce } from './evaluated-once.js'
 import type { CallableAbi, Representation } from '../../representation/model.js'
-import { isOpenDocument, representationKey } from '../../representation/model.js'
+import { carriesNativeUndefined, isOpenDocument, representationKey } from '../../representation/model.js'
+import { classFamilyMayAllocate } from '../../projection/dispatch.js'
 import type { RepresentationDeriver } from '../../representation/derive.js'
 import type { CppArtifact, CppFacts, CppSectionOwner } from './document.js'
 import type { HostSpellings } from './host/host-members.js'
@@ -1360,6 +1361,30 @@ const emitTest = (ctx: EmitContext, lines: string[], operation: TestOperation): 
 }
 
 /**
+ * A class instance recast into a record view whose class family the
+ * allocation census (`classFamilyMayAllocate`) proves never has an instance.
+ *
+ * A live view of a class is installed per allocated family member, so such a
+ * family has none and its view renders nothing. The conversion still sits on a
+ * path the program cannot take with an object -- node-compat's
+ * `if (destination instanceof Duplex) streams[index].pipe(destination)` in a
+ * program that constructs no `Duplex` -- so the handle can only be nullish
+ * there. Nullish maps to the target's own nullish lanes, exactly as the view's
+ * render does (`certifiedRecordViewText`); an object traps, at the published
+ * carrier, as an abstract member read of such a family does.
+ */
+const unallocatedClassViewText = (ctx: EmitContext, source: Representation, target: Representation, text: string): string | null => {
+  if (source.kind !== 'class-ref' || classFamilyMayAllocate(ctx.classes, source.declaration)) return null
+  if (!carriesNativeUndefined(source) || !carriesNativeUndefined(target)) return null
+  const targetType = cppTypeOf(target)
+  const failure = `std::fprintf(stderr, "gea: no instance of class ${String(source.declaration)}'s family exists to view\\n"); std::abort();`
+  return (
+    `([&](const auto& gea_unallocated) -> ${targetType} { if (gea_unallocated.isUndefined()) return ${targetType}::undefined(); ` +
+    `if (!gea_unallocated) return ${targetType}(); ${failure} })(${text})`
+  )
+}
+
+/**
  * A conversion the graph made explicit, rendered by the one authority on what
  * a narrowing loads.
  *
@@ -1486,7 +1511,9 @@ const emitConvert = (ctx: EmitContext, lines: string[], operation: ConvertOperat
   // An instruction cites one recipe, including contextual reads and native
   // method views; re-looking up its pair would discard that authority.
   const named = ctx.conversions.nodeById(operation.conversionUse)
-  const text = named === null ? null : namedConversionText(ctx, 'emit.ts:conversion', named, sourceText)
+  const text =
+    (named === null ? null : namedConversionText(ctx, 'emit.ts:conversion', named, sourceText)) ??
+    unallocatedClassViewText(ctx, operation.source.representation, operation.result.representation, sourceText)
   if (text === null) {
     throw createCppEmitBlockedError(
       `conversion:${representationKey(operation.source.representation)}->${representationKey(operation.result.representation)}`,
