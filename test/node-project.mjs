@@ -420,7 +420,9 @@ test('bare geatsc discovers, compiles, links, and runs a Node project', () => {
   assert.deepEqual(
     perFileReport.units
       .filter((unit) => unit.role === 'module')
-      .map((unit) => unit.sourceFile)
+      // In the host's spelling: the report names a module as TypeScript did
+      // (`C:/x/a.ts` on Windows) or as Node resolved it (`C:\x\a.ts`).
+      .map((unit) => resolve(unit.sourceFile))
       .sort(),
     // Exactly the application's two modules and the one builtin it imports.
     // node-compat roots `whatwg-streams.ts` and `abort-events.ts` in every
