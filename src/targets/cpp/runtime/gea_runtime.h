@@ -46918,9 +46918,13 @@ void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
     gea::embedded::ui::Document::instance().addEventListener(name.c_str(), std::move(run));
     return;
   }
-  if (name == "keydown" || name == "keyup") {
+  if (name == "keydown" || name == "keyup" || name == "scroll") {
     // The native root dispatcher now walks the real allocation-bound node
     // path. Document delegation bypassed that path and outlived raw removal.
+    // Scroll never reached the body at all: the engine stops a non-bubbling
+    // dispatch at its target, so a <virtual-list> scrolled by the watch Crown
+    // or hardware Up/Down buttons left its recycled rows where the last touch
+    // put them.
     const auto listenerId = target.addEventListener(name.c_str(), std::move(run));
     recordNodeSubscription(target.id(), [target, name, listenerId]() {
       target.removeEventListener(name.c_str(), listenerId);
@@ -46958,8 +46962,8 @@ void bindNodeListener(Node& node, const std::string& name, Invoke invoke) {
 
 template <typename Node, typename Result>
 void addNodeListener(Node& node, const std::string& type, const gea::CallableObject<Result()>& handler) {
-  // Keys are owned by the real node and follow the native root's ancestor
-  // path. Pointer handlers retain the existing body-delegation compatibility
+  // Keys and scroll are owned by the real node and follow the native root's
+  // ancestor path. Pointer handlers retain the existing body-delegation compatibility
   // path, gated by containment. Both record early JSX disposal; native node
   // removal additionally releases the node-owned keyboard listener itself.
   const gea::CallableObject<Result()> held = handler;
