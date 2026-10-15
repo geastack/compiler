@@ -1,5 +1,5 @@
 import ts from 'typescript'
-import { dirname, resolve, relative } from 'node:path'
+import { dirname, resolve, relative, sep } from 'node:path'
 
 export interface PackageSource {
   readonly root: string
@@ -245,7 +245,8 @@ export const createPackageSourceHost = (host: ts.ModuleResolutionHost = ts.sys, 
         const suffix = relative(outDir, absolute).replace(/\.d\.(?:ts|mts|cts)$/, '')
         const suffixCandidates = inputs.filter((input) => {
           const source = relative(root, input).replace(/\.(?:ts|tsx|mts|cts)$/, '')
-          return source === suffix || source.endsWith(`/${suffix}`)
+          // relative() answers in the host's separators.
+          return source === suffix || source.endsWith(`${sep}${suffix}`)
         })
         if (suffixCandidates.length === 1) return suffixCandidates[0]
       }

@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, mkdirSync, writeFileSync, realpathSync, readdirSync, rmSync } from 'node:fs'
-import { dirname, resolve, isAbsolute, join } from 'node:path'
+import { dirname, resolve, isAbsolute, join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
@@ -323,7 +323,8 @@ const provideDevelopmentTypes = (
     seen.add(typesName)
     const described = describedPackageOf(typesName)
     const installed = installedPackage(described, origin, files)
-    if (!installed || !installed.endsWith(`/node_modules/${described}`)) continue
+    // In the host's separators: `\node_modules\@scope\name` on Windows.
+    if (!installed || !installed.endsWith(`${sep}${join('node_modules', described)}`)) continue
     if (shipsDeclarations(installed, manifestAt(installed, files), files)) continue
     let destination = installedPackage(typesName, installed, files)
     if (!destination) {

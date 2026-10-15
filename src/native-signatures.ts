@@ -362,7 +362,12 @@ function defaultClang(): string {
 }
 
 /** Native facts come from Clang's resolved type graph; callers authenticate their declaration-to-host binding separately. */
-export function inspectNativeFunctionSignature(input: NativeFunctionInspection): InspectedNativeSignature {
+export function inspectNativeFunctionSignature(requested: NativeFunctionInspection): InspectedNativeSignature {
+  // A Windows header path arrives as Node spells it, `C:\x\a.h`. An include
+  // spelling never carries a backslash (it would escape the closing quote), and
+  // clang takes the same path with forward slashes, so that is how it is spelled.
+  const input: NativeFunctionInspection =
+    process.platform === 'win32' ? { ...requested, headers: requested.headers.map((header) => header.split('\\').join('/')) } : requested
   if (!/^(?:::)?[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$/.test(input.cppFunction))
     throw new Error('Native function must be a qualified C++ identifier')
   if (!input.headers.length || input.headers.some((header) => /[\r\n"\\]/.test(header)))

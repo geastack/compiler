@@ -10,6 +10,7 @@ import type { Diagnostic } from './diagnostics/model.js'
 import { preflightReportLines } from './preflight/report.js'
 import { structuralShapeKey } from './semantics/model/structural-types.js'
 import { closeSync, openSync, writeSync } from 'node:fs'
+import { dirname } from 'node:path'
 
 /**
  * The command line.
@@ -40,7 +41,7 @@ const parseArguments = (argv: readonly string[]): ParsedArguments => {
   const named = flagIndex >= 0 ? (argv[flagIndex + 1] ?? null) : null
   const rootFileNames = named ? positional.filter((argument) => argument !== named) : positional
   const first = rootFileNames[0]
-  const discovered = first ? findProjectFile(first.slice(0, Math.max(0, first.lastIndexOf('/'))) || '.') : null
+  const discovered = first ? findProjectFile(dirname(first)) : null
   return {
     rootFileNames,
     preflight: argv.includes('--preflight'),

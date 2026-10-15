@@ -240,8 +240,7 @@ export const runEmit = async (argv: readonly string[], moduleGraph = false): Pro
   // A named project wins over discovery, and over the bundle rule above: a
   // caller that states which project an input belongs to has answered the
   // question this command would otherwise guess at.
-  const projectFileName =
-    parsed.projectFileName ?? (bundled ? null : findProjectFile(input.slice(0, Math.max(0, input.lastIndexOf('/'))) || '.'))
+  const projectFileName = parsed.projectFileName ?? (bundled ? null : findProjectFile(dirname(input)))
   const result = compile({
     rootFileNames: [input],
     projectFileName,

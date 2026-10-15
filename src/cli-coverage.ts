@@ -1,4 +1,4 @@
-import { relative, resolve } from 'node:path'
+import { dirname, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { compile } from './compiler.js'
 import type { CompilationResult } from './compiler.js'
@@ -404,10 +404,7 @@ export const runCoverage = async (argv: readonly string[]): Promise<number> => {
     process.stderr.write(`coverage: ${parsed.plugin} does not export a compiler plugin factory\n`)
     return 1
   }
-  const projectFileName =
-    parsed.projectFileName === 'discover'
-      ? findProjectFile(entry.slice(0, Math.max(0, entry.lastIndexOf('/'))) || '.')
-      : parsed.projectFileName
+  const projectFileName = parsed.projectFileName === 'discover' ? findProjectFile(dirname(entry)) : parsed.projectFileName
   const result = compile({
     rootFileNames: [entry],
     projectFileName,

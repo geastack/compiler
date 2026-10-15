@@ -157,7 +157,9 @@ export const resolveHostMethod = (
       claimed.some((claim) =>
         claim.inheritedDeclarations?.some(
           (coverage) =>
-            coverage.declarationFileName === declaration.declarationFileName &&
+            // Resolved on both sides: a host names the file as Node resolved it
+            // (`C:\...` on Windows), TypeScript as `C:/...`.
+            resolve(coverage.declarationFileName) === resolve(declaration.declarationFileName) &&
             coverage.owner === declaration.owner &&
             coverage.member === declaration.member
         )

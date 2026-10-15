@@ -152,7 +152,7 @@ export const readModuleGraph = (manifestPath: string, stage: string, statedEntry
     const resolved = new Map<string, string>()
     for (const one of module.imports ?? []) {
       if (!one.resolvedId) continue
-      const linked = byId.get(one.resolvedId) ?? (one.resolvedId.startsWith('/') ? resolve(one.resolvedId) : null)
+      const linked = byId.get(one.resolvedId) ?? (isAbsolute(one.resolvedId) ? resolve(one.resolvedId) : null)
       if (!linked) continue
       // A dependency the bundler resolved to its BUILD, redirected to the
       // source the package publishes for it -- see `packageSourceFor`. Only
